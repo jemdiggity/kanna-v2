@@ -1,5 +1,6 @@
 use super::super::definitions::{
-    AgentDefinition, PipelineDefinition, PipelineStageTransition, RepoDefinitions,
+    AgentDefinition, DefinitionVisibility, PipelineDefinition, PipelineStageTransition,
+    RepoDefinitions,
 };
 use super::super::provider::{
     resolve_agent_provider_with, validate_effort_shape, validate_model_shape,
@@ -446,6 +447,7 @@ fn provider_resolution_cases_match_shared_contract() {
             effort: None,
             permission_mode: None,
             allowed_tools: Vec::new(),
+            visibility: DefinitionVisibility::Public,
         });
         let available = case.available.clone();
         let result = resolve_agent_provider_with(
@@ -688,6 +690,7 @@ fn provider_resolution_prefers_explicit_then_stage_then_repo_then_agent_then_fal
         effort: None,
         permission_mode: None,
         allowed_tools: Vec::new(),
+        visibility: DefinitionVisibility::Public,
     };
     let stage = vec!["copilot".to_string()];
     let repo = vec!["codex".to_string()];
@@ -798,6 +801,7 @@ fn model_resolution_prefers_explicit_then_repo_then_layered_agent_definition() {
         effort: Some("agent-effort".to_string()),
         permission_mode: None,
         allowed_tools: Vec::new(),
+        visibility: DefinitionVisibility::Public,
     };
     let preference = super::super::definitions::AgentProviderPreference {
         providers: vec!["codex".to_string()],
@@ -1739,39 +1743,268 @@ fn internal_builtin_pipelines_resolve_without_being_offered_as_a_choice() {
 }
 
 #[test]
-fn an_internal_builtin_pipeline_stays_unlisted_when_the_repo_ships_its_own_file() {
-    // Unlike a retired alias — where the repo file is the only definition, so
-    // the name becomes a real choice — an internal built-in has a definition
-    // and a role of its own. A repo file at that path customizes what the
-    // dispatcher's children run; it does not promote the name to a choice.
-    let repo_root = init_git_repo_without_provider_fixtures("definitions-internal-repo-authored");
-    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
-    std::fs::write(
-        repo_root.join(".kanna/pipelines/specialty-review.json"),
-        serde_json::json!({
+fn a_repo_file_shadowing_an_internal_builtin_pipeline_declares_its_own_visibility() {
+    // Visibility comes from the effective definition, and a repo file wins
+    // over the bundled one — visibility included. A repo that re-declares
+    // `"visibility": "internal"` customizes what the dispatcher's children run
+    // without promoting the name; a repo that omits the field has deliberately
+    // made the name a public choice.
+    for (label, visibility, expect_listed) in [
+        ("re-declared internal", Some("internal"), false),
+        ("omitted (deliberate promotion)", None, true),
+    ] {
+        let repo_root = init_git_repo_without_provider_fixtures(&format!(
+            "definitions-internal-shadow-{}",
+            if expect_listed { "public" } else { "internal" }
+        ));
+        std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+        let mut definition = serde_json::json!({
             "name": "specialty-review",
             "stages": [{
                 "name": "review",
                 "prompt": "REPO_SPECIALTY_REVIEW",
                 "policy": {"transition": "manual"}
             }]
+        });
+        if let Some(visibility) = visibility {
+            definition["visibility"] = serde_json::json!(visibility);
+        }
+        std::fs::write(
+            repo_root.join(".kanna/pipelines/specialty-review.json"),
+            definition.to_string(),
+        )
+        .unwrap();
+        publish_origin_main(&repo_root, "publish repo-authored specialty review");
+
+        let definitions = RepoDefinitions::resolve(&definition_repo(&repo_root, "main")).unwrap();
+
+        let names = definitions.pipeline_names().unwrap();
+        assert_eq!(
+            names.contains(&"specialty-review".to_string()),
+            expect_listed,
+            "{label}: got {names:?}"
+        );
+        let resolved = definitions.pipeline("specialty-review").unwrap();
+        assert_eq!(
+            resolved.stages[0].prompt.as_deref(),
+            Some("REPO_SPECIALTY_REVIEW"),
+            "{label}: the repo's own definition must still win over the bundled one"
+        );
+
+        let _ = std::fs::remove_dir_all(repo_root);
+    }
+}
+
+#[test]
+fn a_repo_authored_pipeline_declaring_internal_visibility_is_unlisted_but_resolvable() {
+    // The mechanism is not reserved for built-ins: a repo pipeline bound by
+    // the repo's own orchestration can keep itself out of the picker.
+    let repo_root = init_git_repo_without_provider_fixtures("definitions-repo-internal-pipeline");
+    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/pipelines/orchestrated-child.json"),
+        serde_json::json!({
+            "name": "orchestrated-child",
+            "visibility": "internal",
+            "stages": [{
+                "name": "review",
+                "prompt": "REPO_CHILD_REVIEW",
+                "policy": {"transition": "manual"}
+            }]
         })
         .to_string(),
     )
     .unwrap();
-    publish_origin_main(&repo_root, "publish repo-authored specialty review");
+    publish_origin_main(&repo_root, "publish repo-internal pipeline");
 
     let definitions = RepoDefinitions::resolve(&definition_repo(&repo_root, "main")).unwrap();
 
-    assert_eq!(
-        definitions.pipeline_names().unwrap(),
-        vec!["no-review", "single-reviewer", "specialized-reviewers"]
+    let names = definitions.pipeline_names().unwrap();
+    assert!(
+        !names.contains(&"orchestrated-child".to_string()),
+        "internal repo pipeline must not be offered; got {names:?}"
     );
-    let resolved = definitions.pipeline("specialty-review").unwrap();
+    let resolved = definitions.pipeline("orchestrated-child").unwrap();
     assert_eq!(
         resolved.stages[0].prompt.as_deref(),
-        Some("REPO_SPECIALTY_REVIEW"),
-        "the repo's own definition must still win over the bundled one"
+        Some("REPO_CHILD_REVIEW")
+    );
+    assert_eq!(resolved.visibility, DefinitionVisibility::Internal);
+
+    let _ = std::fs::remove_dir_all(repo_root);
+}
+
+#[test]
+fn internal_builtin_agents_are_unlisted_but_resolve_by_name() {
+    // Kanna binds `commit` and `approve` itself as stage posts; their
+    // AGENT.md frontmatter declares `visibility: internal`, so `agents()`
+    // omits them while stage posts (and explicit `agent` overrides) keep
+    // resolving them by name.
+    let repo_root = init_git_repo_without_provider_fixtures("definitions-internal-agents");
+    publish_origin_main(&repo_root, "publish repo without agents");
+
+    let definitions = RepoDefinitions::resolve(&definition_repo(&repo_root, "main")).unwrap();
+
+    let listed = definitions.agents().unwrap();
+    let listed_names = listed
+        .iter()
+        .map(|agent| agent.name.as_str())
+        .collect::<Vec<_>>();
+    for internal in ["commit", "approve"] {
+        assert!(
+            !listed_names.contains(&internal),
+            "`{internal}` must not be offered as a choice; got {listed_names:?}"
+        );
+        let resolved = definitions
+            .agent(internal)
+            .unwrap_or_else(|error| panic!("`{internal}` must still resolve by name: {error}"));
+        assert_eq!(resolved.name, internal);
+        assert_eq!(resolved.visibility, DefinitionVisibility::Internal);
+    }
+    // The specialty reviewers are genuinely dual-use and stay public.
+    for public in ["implement", "review", "review-security"] {
+        assert!(
+            listed_names.contains(&public),
+            "`{public}` must stay listed; got {listed_names:?}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(repo_root);
+}
+
+#[test]
+fn extension_layering_keeps_or_overrides_the_base_agent_visibility() {
+    // EXTEND.md follows the same replace-when-present rule as every other
+    // frontmatter field: an extension that says nothing about visibility
+    // customizes the internal built-in without promoting it, and one that
+    // declares `visibility: public` deliberately puts the name on offer.
+    for (label, frontmatter, expect_listed) in [
+        ("silent extension keeps internal", "", false),
+        (
+            "extension promotes to public",
+            "---\nvisibility: public\n---\n",
+            true,
+        ),
+    ] {
+        let repo_root = init_git_repo_without_provider_fixtures(&format!(
+            "definitions-extend-visibility-{expect_listed}"
+        ));
+        let agent_dir = repo_root.join(".kanna/agents/commit");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(
+            agent_dir.join("EXTEND.md"),
+            format!("{frontmatter}Repo commit extension body."),
+        )
+        .unwrap();
+        publish_origin_main(&repo_root, "publish commit extension");
+
+        let definitions = RepoDefinitions::resolve(&definition_repo(&repo_root, "main")).unwrap();
+
+        let listed = definitions
+            .agents()
+            .unwrap()
+            .iter()
+            .any(|agent| agent.name == "commit");
+        assert_eq!(listed, expect_listed, "{label}");
+        let resolved = definitions.agent("commit").unwrap();
+        assert!(
+            resolved.prompt.ends_with("Repo commit extension body."),
+            "{label}: the extension body must still layer on"
+        );
+
+        let _ = std::fs::remove_dir_all(repo_root);
+    }
+}
+
+#[test]
+fn a_repo_agent_declaring_internal_visibility_is_unlisted_but_resolvable() {
+    // A repo override replaces the built-in wholesale, visibility included —
+    // so a repo commit override that omits the field is a public choice, and
+    // a repo-authored agent can keep itself out of the listing entirely.
+    let repo_root = init_git_repo_without_provider_fixtures("definitions-repo-internal-agent");
+    for (name, visibility) in [("commit", None), ("repo-orchestrator", Some("internal"))] {
+        let agent_dir = repo_root.join(format!(".kanna/agents/{name}"));
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let visibility_line = visibility
+            .map(|visibility| format!("visibility: {visibility}\n"))
+            .unwrap_or_default();
+        std::fs::write(
+            agent_dir.join("AGENT.md"),
+            format!("---\nname: {name}\ndescription: Repo {name}\n{visibility_line}---\nBody."),
+        )
+        .unwrap();
+    }
+    publish_origin_main(&repo_root, "publish repo agents");
+
+    let definitions = RepoDefinitions::resolve(&definition_repo(&repo_root, "main")).unwrap();
+
+    let listed_names = definitions
+        .agents()
+        .unwrap()
+        .into_iter()
+        .map(|agent| agent.name)
+        .collect::<Vec<_>>();
+    assert!(
+        listed_names.contains(&"commit".to_string()),
+        "a repo override omitting visibility is a deliberate public choice; got {listed_names:?}"
+    );
+    assert!(
+        !listed_names.contains(&"repo-orchestrator".to_string()),
+        "a repo-authored internal agent must stay unlisted; got {listed_names:?}"
+    );
+    let resolved = definitions.agent("repo-orchestrator").unwrap();
+    assert_eq!(resolved.visibility, DefinitionVisibility::Internal);
+
+    let _ = std::fs::remove_dir_all(repo_root);
+}
+
+#[test]
+fn agent_frontmatter_rejects_an_unknown_visibility_value() {
+    let repo_root = init_git_repo_without_provider_fixtures("definitions-bad-visibility");
+    let agent_dir = repo_root.join(".kanna/agents/oddball");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("AGENT.md"),
+        "---\nname: oddball\ndescription: Bad visibility\nvisibility: hidden\n---\nBody.",
+    )
+    .unwrap();
+    publish_origin_main(&repo_root, "publish agent with bad visibility");
+
+    let error = resolve_test_agent_definition(&repo_root, "oddball").unwrap_err();
+    assert!(
+        error.contains("visibility must be one of: public, internal"),
+        "{error}"
+    );
+
+    let _ = std::fs::remove_dir_all(repo_root);
+}
+
+#[test]
+fn a_malformed_repo_pipeline_file_stays_listed_instead_of_erroring_the_listing() {
+    // Reading visibility means parsing every file, but the listing must not
+    // fail — or silently drop a name — because one repo pipeline is broken.
+    // The name stays listed with the public default, and the parse error
+    // surfaces on that pipeline's own resolution.
+    let repo_root = init_git_repo_without_provider_fixtures("definitions-malformed-pipeline");
+    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/pipelines/broken.json"),
+        "{ this is not json",
+    )
+    .unwrap();
+    publish_origin_main(&repo_root, "publish malformed pipeline");
+
+    let definitions = RepoDefinitions::resolve(&definition_repo(&repo_root, "main")).unwrap();
+
+    let names = definitions.pipeline_names().unwrap();
+    assert!(
+        names.contains(&"broken".to_string()),
+        "malformed pipeline must stay listed; got {names:?}"
+    );
+    let error = definitions.pipeline("broken").unwrap_err();
+    assert!(
+        error.contains("invalid pipeline definition"),
+        "the parse error belongs to the pipeline's own resolution: {error}"
     );
 
     let _ = std::fs::remove_dir_all(repo_root);

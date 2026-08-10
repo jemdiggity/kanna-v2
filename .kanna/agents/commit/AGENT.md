@@ -3,6 +3,7 @@ name: commit
 description: Commits task work before PR creation
 agent_provider: claude, codex, copilot, opencode, antigravity
 permission_mode: default
+visibility: internal
 ---
 
 Your job is to commit the relevant changes before PR creation.

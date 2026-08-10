@@ -19,8 +19,9 @@ const requiredBuiltInAgents = ["setup"];
 
 // The user-facing pipeline lineup, in increasing review depth. `no-review` is
 // the fallback the server resolves when a repo names no pipeline, so its name
-// is load-bearing. `specialty-review` is excluded: it is the internal
-// single-stage pipeline qa-dispatcher gives its child tasks, not a choice.
+// is load-bearing. `specialty-review` is excluded: it is the single-stage
+// pipeline qa-dispatcher gives its child tasks, and its definition declares
+// `"visibility": "internal"` so the server never offers it as a choice.
 const BUILTIN_PIPELINES = ["no-review", "single-reviewer", "specialized-reviewers"];
 
 function read(path: string): string {
@@ -197,6 +198,30 @@ describe("bundled agent flavor contracts", () => {
     // The rule set must be closed, so an unlisted combination is a question
     // for the user rather than an invented fourth shape.
     expect(setupAgent).toContain("This list is closed");
+  });
+
+  it("declares the choice lineup through definition visibility, not code", () => {
+    // The server offers exactly the definitions that do not declare
+    // `visibility: internal`, so the lineup constant above is only truthful
+    // while the bundled files agree with it.
+    const specialty = JSON.parse(
+      read(join(repoRoot, ".kanna", "pipelines", "specialty-review.json")),
+    ) as { visibility?: unknown };
+    expect(specialty.visibility).toBe("internal");
+
+    for (const name of BUILTIN_PIPELINES) {
+      const pipeline = JSON.parse(
+        read(join(repoRoot, ".kanna", "pipelines", `${name}.json`)),
+      ) as { visibility?: unknown };
+      expect(pipeline.visibility, `${name} stays a public choice`).toBeUndefined();
+    }
+
+    // Kanna binds the commit and approve stage posts itself; their AGENT.md
+    // frontmatter keeps them out of the agent listing the same way.
+    for (const role of ["commit", "approve"]) {
+      const frontmatter = read(join(agentsRoot, role, "AGENT.md"));
+      expect(frontmatter, `${role} is internal`).toContain("visibility: internal");
+    }
   });
 
   it("ships the three built-in pipelines the setup interview offers", () => {

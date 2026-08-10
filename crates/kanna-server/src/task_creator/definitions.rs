@@ -154,6 +154,31 @@ pub(super) struct RepoWorkspacePathConfig {
     pub(super) append: Option<Vec<String>>,
 }
 
+/// Whether a definition is offered as a *choice*. Declared by the definition
+/// itself — a top-level `visibility` field in a pipeline JSON, a `visibility`
+/// key in AGENT.md frontmatter — and defaulting to public when absent.
+///
+/// `internal` keeps the name out of every listing (`pipeline_names()`,
+/// `agents()`, and everything built on them: the repo manifest, the desktop's
+/// new-task picker, `kanna_list_agents`) because Kanna binds the definition
+/// itself and offering it only invites picking it by mistake. Visibility is
+/// not access control: resolution by explicit name never consults it, so the
+/// dispatcher naming `specialty-review` on create and a stage post binding
+/// `commit` keep working unchanged.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum DefinitionVisibility {
+    #[default]
+    Public,
+    Internal,
+}
+
+impl DefinitionVisibility {
+    fn is_public(&self) -> bool {
+        matches!(self, Self::Public)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(super) struct PipelineDefinition {
     #[allow(dead_code)]
@@ -171,6 +196,10 @@ pub(super) struct PipelineDefinition {
     /// inherit the default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) revision_limit: Option<i64>,
+    /// Listing-only: `internal` keeps this pipeline out of `pipeline_names()`.
+    /// Resolution never consults it. See `DefinitionVisibility`.
+    #[serde(default, skip_serializing_if = "DefinitionVisibility::is_public")]
+    pub(super) visibility: DefinitionVisibility,
 }
 
 /// Rounds of agent-requested revision a task gets before the engine stops
@@ -320,6 +349,8 @@ struct RawPipelineDefinition {
     stages: Vec<RawPipelineStage>,
     environments: Option<HashMap<String, PipelineEnvironment>>,
     revision_limit: Option<i64>,
+    #[serde(default)]
+    visibility: DefinitionVisibility,
 }
 
 #[derive(Deserialize)]
@@ -384,6 +415,7 @@ struct AgentFrontmatter {
     effort: Option<String>,
     permission_mode: Option<String>,
     allowed_tools: Option<Vec<String>>,
+    visibility: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -401,6 +433,10 @@ pub(super) struct AgentDefinition {
     pub(super) permission_mode: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(super) allowed_tools: Vec<String>,
+    /// Listing-only: `internal` keeps this agent out of `agents()`. Resolution
+    /// by explicit name never consults it. See `DefinitionVisibility`.
+    #[serde(skip_serializing_if = "DefinitionVisibility::is_public")]
+    pub(super) visibility: DefinitionVisibility,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -430,6 +466,7 @@ struct AgentExtension {
     effort: Option<String>,
     permission_mode: Option<String>,
     allowed_tools: Option<Vec<String>>,
+    visibility: Option<DefinitionVisibility>,
 }
 
 pub(super) struct RepoDefinitions {
@@ -549,37 +586,68 @@ impl RepoDefinitions {
     /// Every pipeline name this repo offers as a *choice* — what the desktop's
     /// new-task picker lists and what a caller may name on task creation.
     ///
-    /// Internal built-ins are excluded even when the repo ships a file under
-    /// that name: such a file customizes the internal pipeline's definition
-    /// (and `pipeline_optional` honors it), it does not promote the name to a
-    /// choice. This repo is itself the source of the bundled definitions, so
-    /// without that rule every Kanna checkout would list its own internals.
+    /// A definition opts out of being offered by declaring
+    /// `"visibility": "internal"` (see `DefinitionVisibility`). The effective
+    /// definition decides: a repo file shadowing an internal built-in speaks
+    /// for itself, so omitting `visibility` deliberately promotes the name to
+    /// a public choice, and re-declaring `internal` keeps the customization
+    /// unlisted. A repo file that cannot be read or parsed stays listed —
+    /// listing must not fail, or silently shrink, because one file is
+    /// malformed; the parse error stays with that pipeline's own endpoint.
     pub(super) fn pipeline_names(&self) -> Result<Vec<String>, String> {
         let path = ".kanna/pipelines";
         let entries = self
             .snapshot
             .list_direct_entries(path)
             .map_err(|error| definition_error(&self.snapshot, path, error))?;
-        let mut names = BUILTIN_PIPELINES
-            .iter()
-            .filter(|pipeline| pipeline.selectable)
-            .map(|pipeline| pipeline.name.to_string())
-            .collect::<BTreeSet<String>>();
+        let mut repo_names = BTreeSet::new();
         for entry in entries {
             let Some(name) = entry.strip_suffix(".json") else {
                 continue;
             };
-            if name.is_empty() || name == "schema" || is_internal_builtin_pipeline(name) {
+            if name.is_empty() || name == "schema" {
                 continue;
             }
-            names.insert(name.to_string());
+            repo_names.insert(name.to_string());
+        }
+
+        let mut names = BTreeSet::new();
+        for (name, definition) in BUILTIN_PIPELINES {
+            // A repo file under this name shadows the bundled definition,
+            // visibility included; the repo loop below judges it instead.
+            if repo_names.contains(*name) {
+                continue;
+            }
+            if declared_pipeline_visibility(definition).is_public() {
+                names.insert((*name).to_string());
+            }
+        }
+        for name in repo_names {
+            let file_path = format!(".kanna/pipelines/{name}.json");
+            let visible = match self.snapshot.read_optional_utf8(&file_path) {
+                Ok(Some(content)) => declared_pipeline_visibility(&content).is_public(),
+                // A listed entry should always read back; one that does not
+                // cannot have declared itself internal.
+                Ok(None) => true,
+                Err(error) => {
+                    log::warn!(
+                        "listing pipeline `{file_path}` without reading its visibility: {error}"
+                    );
+                    true
+                }
+            };
+            if visible {
+                names.insert(name);
+            }
         }
         Ok(names.into_iter().collect())
     }
 
     /// Every named agent selector that can be passed to task creation, after
     /// applying the same repo override, configured-flavor, and EXTEND.md
-    /// resolution as `agent()`.
+    /// resolution as `agent()`. Definitions whose resolved `visibility` is
+    /// `internal` (see `DefinitionVisibility`) are omitted: Kanna binds those
+    /// itself, but they still resolve when named explicitly.
     pub(super) fn agents(&self) -> Result<Vec<ResolvedAgentDefinition>, String> {
         let mut names = builtin_agent_names();
         let entries = self
@@ -594,37 +662,38 @@ impl RepoDefinitions {
             }
         }
 
-        names
-            .into_iter()
-            .map(|name| {
-                let repo_agent_path = format!(".kanna/agents/{name}/AGENT.md");
-                let repo_has_agent =
-                    read_snapshot_utf8(&self.snapshot, &repo_agent_path)?.is_some();
-                let repo_extension_path = format!(".kanna/agents/{name}/EXTEND.md");
-                let repo_has_extension =
-                    read_snapshot_utf8(&self.snapshot, &repo_extension_path)?.is_some();
-                let builtin = is_builtin_agent_name(&name);
-                let source = match (repo_has_agent, repo_has_extension, builtin) {
-                    (true, _, true) | (false, true, true) => AgentDefinitionSource::RepoOverride,
-                    (false, false, true) => AgentDefinitionSource::BuiltIn,
-                    (true, _, false) => AgentDefinitionSource::RepoAuthored,
-                    (false, _, false) => {
-                        return Err(format!(
-                            "agent `{name}` disappeared while resolving repository definitions"
-                        ));
-                    }
-                };
-                let definition = self.agent(&name)?;
-                Ok(ResolvedAgentDefinition {
-                    name,
-                    description: definition.description,
-                    default_provider: definition.agent_providers.into_iter().next(),
-                    default_model: definition.model,
-                    default_effort: definition.effort,
-                    source,
-                })
-            })
-            .collect()
+        let mut resolved = Vec::new();
+        for name in names {
+            let repo_agent_path = format!(".kanna/agents/{name}/AGENT.md");
+            let repo_has_agent = read_snapshot_utf8(&self.snapshot, &repo_agent_path)?.is_some();
+            let repo_extension_path = format!(".kanna/agents/{name}/EXTEND.md");
+            let repo_has_extension =
+                read_snapshot_utf8(&self.snapshot, &repo_extension_path)?.is_some();
+            let builtin = is_builtin_agent_name(&name);
+            let source = match (repo_has_agent, repo_has_extension, builtin) {
+                (true, _, true) | (false, true, true) => AgentDefinitionSource::RepoOverride,
+                (false, false, true) => AgentDefinitionSource::BuiltIn,
+                (true, _, false) => AgentDefinitionSource::RepoAuthored,
+                (false, _, false) => {
+                    return Err(format!(
+                        "agent `{name}` disappeared while resolving repository definitions"
+                    ));
+                }
+            };
+            let definition = self.agent(&name)?;
+            if !definition.visibility.is_public() {
+                continue;
+            }
+            resolved.push(ResolvedAgentDefinition {
+                name,
+                description: definition.description,
+                default_provider: definition.agent_providers.into_iter().next(),
+                default_model: definition.model,
+                default_effort: definition.effort,
+                source,
+            });
+        }
+        Ok(resolved)
     }
 }
 
@@ -1128,53 +1197,46 @@ pub(super) fn canonical_builtin_pipeline_name(name: &str) -> &str {
         .unwrap_or(name)
 }
 
-/// A pipeline Kanna ships, and whether its name is a choice.
-///
-/// `selectable: false` marks an *internal* built-in: Kanna binds it itself
-/// rather than offering it, so the name must still resolve, but listing it as
-/// an option only invites picking it by mistake. `specialty-review` is the
-/// only one today — the single-stage pipeline `qa-dispatcher` gives each child
-/// task it fans out, one character away from the `specialized-reviewers`
-/// pipeline an operator actually chooses.
-struct BuiltinPipeline {
-    name: &'static str,
-    definition: &'static str,
-    selectable: bool,
-}
-
-/// Single source of truth for the built-in pipelines: both `pipeline_names()`
-/// and the compiled-resource fallback read this table, so a built-in can never
-/// be offered without shipping a definition, or ship one whose visibility is
-/// declared in two places that can drift apart.
-const BUILTIN_PIPELINES: &[BuiltinPipeline] = &[
-    BuiltinPipeline {
-        name: "no-review",
-        definition: include_str!("../../../../.kanna/pipelines/no-review.json"),
-        selectable: true,
-    },
-    BuiltinPipeline {
-        name: "single-reviewer",
-        definition: include_str!("../../../../.kanna/pipelines/single-reviewer.json"),
-        selectable: true,
-    },
-    BuiltinPipeline {
-        name: "specialized-reviewers",
-        definition: include_str!("../../../../.kanna/pipelines/specialized-reviewers.json"),
-        selectable: true,
-    },
-    BuiltinPipeline {
-        name: "specialty-review",
-        definition: include_str!("../../../../.kanna/pipelines/specialty-review.json"),
-        selectable: false,
-    },
+/// Single source of truth for the built-in pipelines, mapping each name to its
+/// bundled definition: both `pipeline_names()` and the compiled-resource
+/// fallback read this table, so a built-in can never be offered without
+/// shipping a definition. Whether a name is offered as a choice is declared by
+/// the definition itself, through its `visibility` field: `specialty-review`
+/// declares `"visibility": "internal"` because it is the single-stage pipeline
+/// `qa-dispatcher` gives each child task it fans out — one character away from
+/// the `specialized-reviewers` pipeline an operator actually chooses.
+const BUILTIN_PIPELINES: &[(&str, &str)] = &[
+    (
+        "no-review",
+        include_str!("../../../../.kanna/pipelines/no-review.json"),
+    ),
+    (
+        "single-reviewer",
+        include_str!("../../../../.kanna/pipelines/single-reviewer.json"),
+    ),
+    (
+        "specialized-reviewers",
+        include_str!("../../../../.kanna/pipelines/specialized-reviewers.json"),
+    ),
+    (
+        "specialty-review",
+        include_str!("../../../../.kanna/pipelines/specialty-review.json"),
+    ),
 ];
 
-/// Whether `name` is a built-in Kanna binds itself rather than a choice a
-/// human or an agent makes. See `BuiltinPipeline`.
-pub(super) fn is_internal_builtin_pipeline(name: &str) -> bool {
-    BUILTIN_PIPELINES
-        .iter()
-        .any(|pipeline| pipeline.name == name && !pipeline.selectable)
+/// The `visibility` a pipeline definition file declares, probed tolerantly for
+/// listing: `pipeline_names()` must not fail — or silently drop a name —
+/// because one repo file is malformed, so anything that is not a well-formed
+/// top-level `"visibility"` declaration counts as the public default. The
+/// file's real parse error stays with its own endpoint, where
+/// `pipeline_optional()` reports it strictly.
+fn declared_pipeline_visibility(content: &str) -> DefinitionVisibility {
+    serde_json::from_str::<serde_json::Value>(content)
+        .ok()
+        .and_then(|value| {
+            serde_json::from_value::<DefinitionVisibility>(value.get("visibility")?.clone()).ok()
+        })
+        .unwrap_or_default()
 }
 
 fn compiled_builtin_resource(relative_path: &str) -> Option<&'static str> {
@@ -1195,7 +1257,7 @@ fn compiled_builtin_resource(relative_path: &str) -> Option<&'static str> {
         .and_then(|name| {
             BUILTIN_PIPELINES
                 .iter()
-                .find_map(|pipeline| (pipeline.name == name).then_some(pipeline.definition))
+                .find_map(|(builtin, definition)| (*builtin == name).then_some(*definition))
         });
     pipeline.or_else(|| {
         BUILTIN_AGENT_RESOURCES
@@ -1236,6 +1298,13 @@ fn apply_agent_extension(definition: &mut AgentDefinition, content: &str) -> Res
     if let Some(allowed_tools) = extension.allowed_tools {
         definition.allowed_tools = allowed_tools;
     }
+    // Like every other frontmatter field: declared, it replaces the base's —
+    // so an extension can deliberately promote an internal built-in into the
+    // listing (or demote a public one) — and absent, the base's visibility
+    // survives the extension.
+    if let Some(visibility) = extension.visibility {
+        definition.visibility = visibility;
+    }
 
     validate_agent_definition(definition)
         .map_err(|error| format!("invalid extended agent: {error}"))
@@ -1259,6 +1328,7 @@ fn parse_agent_definition(content: &str) -> Result<AgentDefinition, String> {
         effort: fm.effort,
         permission_mode: validate_permission_mode(fm.permission_mode)?,
         allowed_tools: fm.allowed_tools.unwrap_or_default(),
+        visibility: validate_visibility(fm.visibility)?.unwrap_or_default(),
     };
     validate_agent_definition(&definition).map_err(|error| format!("invalid AGENT.md: {error}"))?;
     Ok(definition)
@@ -1286,6 +1356,7 @@ fn parse_agent_extension(content: &str) -> Result<AgentExtension, String> {
         effort: fm.effort,
         permission_mode: validate_permission_mode(fm.permission_mode)?,
         allowed_tools: fm.allowed_tools,
+        visibility: validate_visibility(fm.visibility)?,
     })
 }
 
@@ -1302,6 +1373,19 @@ fn validate_permission_mode(permission_mode: Option<String>) -> Result<Option<St
         Err(format!(
             "permission_mode must be one of: default, acceptEdits, dontAsk (got \"{permission_mode}\")"
         ))
+    }
+}
+
+fn validate_visibility(visibility: Option<String>) -> Result<Option<DefinitionVisibility>, String> {
+    let Some(visibility) = visibility else {
+        return Ok(None);
+    };
+    match visibility.as_str() {
+        "public" => Ok(Some(DefinitionVisibility::Public)),
+        "internal" => Ok(Some(DefinitionVisibility::Internal)),
+        _ => Err(format!(
+            "visibility must be one of: public, internal (got \"{visibility}\")"
+        )),
     }
 }
 
@@ -1472,6 +1556,7 @@ fn normalize_pipeline_definition(raw: RawPipelineDefinition) -> Result<PipelineD
         stages,
         environments: raw.environments,
         revision_limit: raw.revision_limit,
+        visibility: raw.visibility,
     })
 }
 

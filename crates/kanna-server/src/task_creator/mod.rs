@@ -1783,6 +1783,9 @@ pub(crate) fn prepare_singleton_agent_task_for_api(
         }],
         environments: None,
         revision_limit: None,
+        // Kanna binds this synthetic pipeline itself; it is never a listed
+        // choice, and visibility is never consulted on resolution anyway.
+        visibility: definitions::DefinitionVisibility::Internal,
     };
     let pipeline_def =
         serde_json::to_string(&pipeline).map_err(|e| format!("serialize error: {}", e))?;
@@ -1889,6 +1892,9 @@ completion with status success so Kanna can run the commit post and close this i
         }],
         environments: None,
         revision_limit: None,
+        // Kanna binds this synthetic pipeline itself; it is never a listed
+        // choice, and visibility is never consulted on resolution anyway.
+        visibility: definitions::DefinitionVisibility::Internal,
     };
     let pipeline_def =
         serde_json::to_string(&pipeline).map_err(|e| format!("serialize error: {}", e))?;

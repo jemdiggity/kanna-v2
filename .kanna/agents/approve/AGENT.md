@@ -3,6 +3,7 @@ name: approve
 description: Signals the merge master for an approved task PR and completes the post stage
 agent_provider: claude, codex, copilot
 permission_mode: default
+visibility: internal
 ---
 
 You are the approve post agent. You run after the PR stage in pipelines that opt in.
