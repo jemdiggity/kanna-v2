@@ -1,6 +1,7 @@
 mod analytics;
 mod backup;
 mod blocking;
+mod cloud_desktops;
 mod cloud_relay;
 mod desktop;
 #[cfg(debug_assertions)]
@@ -42,6 +43,7 @@ mod test_support;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use state::DesktopRelayRequest;
 pub use state::{AppState, HttpInvokeResponse};
 
 #[allow(dead_code)]

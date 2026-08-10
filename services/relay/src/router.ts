@@ -1,5 +1,6 @@
 import type { RawData, WebSocket } from "ws";
 import { randomUUID } from "node:crypto";
+import type { ServerAuthProof } from "./auth.js";
 
 interface ConnectionPair {
   clients: Set<WebSocket>;
@@ -393,6 +394,11 @@ export function setServerConnection(
     const current = connections.get(userId);
     if (current?.desktops.get(desktopId) === ws) {
       current.desktops.delete(desktopId);
+      for (const [id, requester] of current.pendingResponses.entries()) {
+        if (requester === ws) {
+          current.pendingResponses.delete(id);
+        }
+      }
       for (const [tunnelId, tunnel] of current.pendingTunnels.entries()) {
         if (tunnel.desktopId === desktopId) {
           tunnel.client.close(1011, "Desktop disconnected before tunnel opened");
@@ -556,14 +562,17 @@ export function attachDesktopTunnel(
  * Route a message from one side to the other.
  *
  * - If phone sends to an offline server: parse JSON and return an error response.
- * - If server sends to an offline phone: silently drop the message.
+ * - An authenticated desktop may address another desktop owned by the same
+ *   user. Responses return only to the requesting socket.
+ * - If server sends an unsolicited event with no phone: silently drop it.
  */
 export function routeMessage(
   userId: string,
   from: "phone" | "server",
   data: string,
   source?: WebSocket,
-  sourceDesktopId?: string | null
+  sourceDesktopId?: string | null,
+  serverAuthProof?: ServerAuthProof | null,
 ): void {
   const pair = connections.get(userId);
   if (!pair) return;
@@ -690,6 +699,41 @@ export function routeMessage(
         target.send(data);
       }
       if (hadPendingResponse) return;
+    }
+
+    if (parsed?.type === "invoke") {
+      // A legacy device token proves only account membership. Desktop-to-desktop
+      // routing requires the desktop-scoped credential that bound this socket
+      // to its claimed desktop ID.
+      if (serverAuthProof?.kind !== "desktop") {
+        sendErrorResponse(source, parsed.id, "desktop-secret authentication is required");
+        return;
+      }
+      if (parsed.command === "list_active_desktops") {
+        sendDataResponse(source, parsed.id, {
+          desktopIds: Array.from(pair.desktops.entries())
+            .filter(([, ws]) => ws.readyState === 1)
+            .map(([desktopId]) => desktopId),
+        });
+        return;
+      }
+
+      const desktopId =
+        typeof parsed.desktopId === "string" ? parsed.desktopId : undefined;
+      if (!desktopId) {
+        sendErrorResponse(source, parsed.id, "desktopId required for desktop-to-desktop request");
+        return;
+      }
+      const target = pair.desktops.get(desktopId);
+      if (!target || target.readyState !== 1) {
+        sendErrorResponse(source, parsed.id, "Desktop offline");
+        return;
+      }
+      if (idKey && source) {
+        pair.pendingResponses.set(idKey, source);
+      }
+      target.send(data);
+      return;
     }
 
     const sessionId = getSessionIdFromMessage(parsed);

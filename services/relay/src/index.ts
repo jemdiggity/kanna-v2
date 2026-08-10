@@ -361,6 +361,9 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
             mobileNotifications: {
               version: 1,
             },
+            desktopRouting: {
+              version: 1,
+            },
           } : {}),
         },
       }));
@@ -493,7 +496,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         return;
       }
     }
-    routeMessage(userId!, role!, data, ws, desktopId);
+    routeMessage(userId!, role!, data, ws, desktopId, serverAuthProof);
   });
 
   ws.on("close", (code: number, reason: Buffer) => {

@@ -4,7 +4,7 @@ use kanna_agent_protocol::{ServerFrame, StateChangeScope};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Notify};
 
@@ -33,6 +33,10 @@ pub struct AppState {
     pub(super) repo_definitions: Arc<crate::task_creator::RepoDefinitionsCache>,
     requested_task_operations: Arc<RequestedTaskOperations>,
     relay_reconnect: Arc<Notify>,
+    relay_desktop_routing_available: Arc<AtomicBool>,
+    relay_desktop_routing_generation: Arc<AtomicU64>,
+    desktop_relay_tx: mpsc::Sender<DesktopRelayRequest>,
+    desktop_relay_rx: Arc<StdMutex<Option<mpsc::Receiver<DesktopRelayRequest>>>>,
     relay_mobile_notifications_available: Arc<AtomicBool>,
     mobile_notification_tx: mpsc::Sender<MobileNotificationRequest>,
     mobile_notification_rx: Arc<StdMutex<Option<mpsc::Receiver<MobileNotificationRequest>>>>,
@@ -61,6 +65,21 @@ pub struct AppState {
 pub(crate) struct MobileNotificationRequest {
     pub notification: crate::relay_client::MobileNotificationPayload,
     pub response: oneshot::Sender<Result<crate::relay_client::MobileNotificationDelivery, String>>,
+}
+
+pub(crate) enum DesktopRelayRequest {
+    ListActive {
+        generation: u64,
+        response: oneshot::Sender<Result<Vec<String>, String>>,
+    },
+    Invoke {
+        generation: u64,
+        desktop_id: String,
+        method: String,
+        path: String,
+        body: serde_json::Value,
+        response: oneshot::Sender<Result<HttpInvokeResponse, String>>,
+    },
 }
 
 #[derive(Default)]
@@ -235,6 +254,7 @@ impl AppState {
         }
 
         let (mobile_notification_tx, mobile_notification_rx) = mpsc::channel(16);
+        let (desktop_relay_tx, desktop_relay_rx) = mpsc::channel(32);
         let transfer_work =
             crate::transfer_engine::queue::TransferWorkQueue::new(config.db_path.clone());
         let transfer_sidecar = Arc::new(crate::transfer_sidecar::TransferSidecarSupervisor::new(
@@ -255,6 +275,10 @@ impl AppState {
             repo_definitions: Arc::new(crate::task_creator::RepoDefinitionsCache::default()),
             requested_task_operations: Arc::new(RequestedTaskOperations::default()),
             relay_reconnect: Arc::new(Notify::new()),
+            relay_desktop_routing_available: Arc::new(AtomicBool::new(false)),
+            relay_desktop_routing_generation: Arc::new(AtomicU64::new(0)),
+            desktop_relay_tx,
+            desktop_relay_rx: Arc::new(StdMutex::new(Some(desktop_relay_rx))),
             relay_mobile_notifications_available: Arc::new(AtomicBool::new(false)),
             mobile_notification_tx,
             mobile_notification_rx: Arc::new(StdMutex::new(Some(mobile_notification_rx))),
@@ -299,6 +323,90 @@ impl AppState {
 
     pub async fn wait_for_cloud_relay_reconnect(&self) {
         self.relay_reconnect.notified().await;
+    }
+
+    pub(crate) fn set_desktop_routing_available(&self, available: bool) -> u64 {
+        let generation = if available {
+            self.relay_desktop_routing_generation
+                .fetch_add(1, Ordering::AcqRel)
+                .wrapping_add(1)
+        } else {
+            self.relay_desktop_routing_generation
+                .load(Ordering::Acquire)
+        };
+        self.relay_desktop_routing_available
+            .store(available, Ordering::Release);
+        generation
+    }
+
+    pub(crate) fn desktop_routing_available(&self) -> bool {
+        self.relay_desktop_routing_available.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn take_desktop_relay_requests(
+        &self,
+    ) -> Result<mpsc::Receiver<DesktopRelayRequest>, String> {
+        self.desktop_relay_rx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .ok_or_else(|| "desktop relay request receiver already taken".to_string())
+    }
+
+    async fn send_desktop_relay_request(&self, request: DesktopRelayRequest) -> Result<(), String> {
+        if !self.desktop_routing_available() {
+            return Err("desktop relay routing is unavailable".to_string());
+        }
+        self.desktop_relay_tx
+            .send(request)
+            .await
+            .map_err(|_| "desktop relay routing is unavailable".to_string())
+    }
+
+    pub(crate) async fn list_active_relay_desktops(&self) -> Result<Vec<String>, String> {
+        let (response, result) = oneshot::channel();
+        let generation = self
+            .relay_desktop_routing_generation
+            .load(Ordering::Acquire);
+        self.send_desktop_relay_request(DesktopRelayRequest::ListActive {
+            generation,
+            response,
+        })
+        .await?;
+        tokio::time::timeout(std::time::Duration::from_secs(10), result)
+            .await
+            .map_err(|_| "desktop relay listing timed out".to_string())?
+            .map_err(|_| "desktop relay disconnected".to_string())?
+    }
+
+    pub(crate) async fn invoke_relay_desktop(
+        &self,
+        desktop_id: String,
+        method: String,
+        path: String,
+        body: serde_json::Value,
+    ) -> Result<HttpInvokeResponse, String> {
+        let (response, result) = oneshot::channel();
+        let generation = self
+            .relay_desktop_routing_generation
+            .load(Ordering::Acquire);
+        self.send_desktop_relay_request(DesktopRelayRequest::Invoke {
+            generation,
+            desktop_id,
+            method,
+            path,
+            body,
+            response,
+        })
+        .await?;
+        // Remote task-event waits may legitimately occupy almost the MCP
+        // client's entire 240-second wait window. Leave enough room for the
+        // remote server to finish that request while still failing before the
+        // MCP client's 300-second tools/call deadline.
+        tokio::time::timeout(std::time::Duration::from_secs(270), result)
+            .await
+            .map_err(|_| "desktop relay invocation timed out".to_string())?
+            .map_err(|_| "desktop relay disconnected".to_string())?
     }
 
     pub(crate) fn set_mobile_notifications_available(&self, available: bool) {

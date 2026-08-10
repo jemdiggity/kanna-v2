@@ -77,7 +77,7 @@ async fn relay_http_invoke_dispatch_is_concurrent_and_off_the_runtime() {
         .expect("connect ws");
     let (sink, _read) = ws.split();
     let sink = Arc::new(tokio::sync::Mutex::new(sink));
-    let permits = Arc::new(tokio::sync::Semaphore::new(2));
+    let permits = Arc::new(crate::relay::RelayHttpInvokePermits::new(2));
 
     // First invoke: resolves repository definitions and blocks in the loader.
     crate::relay::dispatch_relay_http_invoke(
@@ -177,8 +177,9 @@ async fn relay_http_invoke_dispatch_rejects_when_saturated() {
     let (sink, _read) = ws.split();
     let sink = Arc::new(tokio::sync::Mutex::new(sink));
 
-    let permits = Arc::new(tokio::sync::Semaphore::new(1));
-    let held = Arc::clone(&permits)
+    let permits = Arc::new(crate::relay::RelayHttpInvokePermits::new(1));
+    let held = permits
+        .for_path("/v1/status")
         .try_acquire_owned()
         .expect("hold the only permit");
 
@@ -204,6 +205,101 @@ async fn relay_http_invoke_dispatch_rejects_when_saturated() {
     assert_eq!(response["id"], "rejected-invoke");
     assert_eq!(response["status"], 503);
     drop(held);
+
+    sink.lock().await.close().await.expect("close ws");
+    relay_server.abort();
+}
+
+/// A task-event long poll has its own concurrency budget, so it cannot make a
+/// concurrent mobile-style REST invoke fail with the short-pool saturation 503.
+#[tokio::test(flavor = "current_thread")]
+async fn relay_http_long_poll_does_not_saturate_short_invokes() {
+    let state = super::test_state_with_seed("desktop-relay-wait", "Studio Mac", |db| {
+        db.insert_test_repo("repo-relay-wait", "Relay Wait Repo")
+            .expect("insert repo");
+        db.insert_test_pipeline_item(
+            "task-relay-wait",
+            "repo-relay-wait",
+            "wait for task events",
+            Some("Wait for task events"),
+            "in progress",
+            "2026-08-10 00:00:00",
+        )
+        .expect("insert task");
+    });
+
+    let tcp = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind relay stand-in");
+    let addr = tcp.local_addr().expect("local addr");
+    let (frames_tx, mut frames_rx) = tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
+    let relay_server = tokio::spawn(async move {
+        let (stream, _) = tcp.accept().await.expect("accept ws");
+        let mut ws =
+            tokio_tungstenite::accept_async(tokio_tungstenite::MaybeTlsStream::Plain(stream))
+                .await
+                .expect("ws handshake");
+        while let Some(Ok(message)) = ws.next().await {
+            if let TungsteniteMessage::Text(text) = message {
+                let frame: serde_json::Value =
+                    serde_json::from_str(&text).expect("parse relay frame");
+                if frames_tx.send(frame).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+    let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
+        .await
+        .expect("connect ws");
+    let (sink, _read) = ws.split();
+    let sink = Arc::new(tokio::sync::Mutex::new(sink));
+    let permits = Arc::new(crate::relay::RelayHttpInvokePermits::new(1));
+
+    crate::relay::dispatch_relay_http_invoke(
+        Arc::clone(&state),
+        Arc::clone(&sink),
+        Arc::clone(&permits),
+        crate::relay::RelayHttpInvokeRequest {
+            id: crate::relay_client::RelayId::String("long-poll".to_string()),
+            method: "GET".to_string(),
+            path: "/v1/task-events?taskIds=task-relay-wait&cursor=0&timeoutSecs=1".to_string(),
+            body: serde_json::Value::Null,
+            authenticated_user_id: None,
+        },
+    )
+    .await
+    .expect("dispatch long poll");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    crate::relay::dispatch_relay_http_invoke(
+        Arc::clone(&state),
+        Arc::clone(&sink),
+        Arc::clone(&permits),
+        crate::relay::RelayHttpInvokeRequest {
+            id: crate::relay_client::RelayId::String("short-invoke".to_string()),
+            method: "GET".to_string(),
+            path: "/v1/status".to_string(),
+            body: serde_json::Value::Null,
+            authenticated_user_id: None,
+        },
+    )
+    .await
+    .expect("dispatch short invoke");
+
+    let first_response = tokio::time::timeout(Duration::from_secs(2), frames_rx.recv())
+        .await
+        .expect("short invoke should complete during the long poll")
+        .expect("relay frame channel closed");
+    assert_eq!(first_response["id"], "short-invoke");
+    assert_eq!(first_response["status"], 200);
+
+    let long_poll_response = tokio::time::timeout(Duration::from_secs(2), frames_rx.recv())
+        .await
+        .expect("long poll should eventually time out")
+        .expect("relay frame channel closed");
+    assert_eq!(long_poll_response["id"], "long-poll");
+    assert_eq!(long_poll_response["status"], 200);
 
     sink.lock().await.close().await.expect("close ws");
     relay_server.abort();

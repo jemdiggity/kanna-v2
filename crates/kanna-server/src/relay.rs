@@ -17,6 +17,15 @@ const RELAY_PING_INTERVAL: Duration = Duration::from_secs(30);
 const RELAY_PONG_TIMEOUT: Duration = Duration::from_secs(75);
 const TASK_SNAPSHOT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
+enum PendingDesktopRequest {
+    ListActive {
+        response: tokio::sync::oneshot::Sender<Result<Vec<String>, String>>,
+    },
+    Invoke {
+        response: tokio::sync::oneshot::Sender<Result<crate::http_api::HttpInvokeResponse, String>>,
+    },
+}
+
 fn cloud_task_publication_enabled(desktop_secret: Option<&str>) -> bool {
     desktop_secret.is_some_and(|secret| !secret.is_empty())
 }
@@ -62,10 +71,13 @@ pub(crate) async fn run_relay_loop(
 ) -> Result<(), String> {
     let mut publisher = PublisherState::new();
     let mut mobile_notification_requests = http_state.take_mobile_notification_requests()?;
+    let mut desktop_relay_requests = http_state.take_desktop_relay_requests()?;
     let mut next_mobile_notification_id = 1_u64;
+    let mut next_desktop_request_id = 1_u64;
 
     // Reconnection loop
     loop {
+        http_state.set_desktop_routing_available(false);
         http_state.set_mobile_notifications_available(false);
         log::info!("Connecting to relay at {}...", config.relay_url);
 
@@ -87,10 +99,11 @@ pub(crate) async fn run_relay_loop(
         // Track observer tasks per session_id
         let mut observe_tasks: HashMap<String, JoinHandle<()>> = HashMap::new();
         let mut pending_mobile_notifications = HashMap::new();
+        let mut pending_desktop_requests = HashMap::new();
         // HTTP invokes dispatch off the read loop; this caps how many run at
         // once so a burst cannot exhaust the blocking pool. Mirrors the KSP
         // request worker's CPU-aware concurrency.
-        let invoke_permits = Arc::new(tokio::sync::Semaphore::new(
+        let invoke_permits = Arc::new(RelayHttpInvokePermits::new(
             crate::ksp::request_concurrency(),
         ));
         let mut keepalive = RelayKeepalive::new();
@@ -101,6 +114,7 @@ pub(crate) async fn run_relay_loop(
         publication_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let publication_enabled = cloud_task_publication_enabled(config.desktop_secret.as_deref());
         let mut authenticated_user_id: Option<String> = None;
+        let mut routing_generation = 0;
 
         // Message processing loop
         loop {
@@ -168,6 +182,63 @@ pub(crate) async fn run_relay_loop(
                     }
                     continue;
                 }
+                request = desktop_relay_requests.recv() => {
+                    let Some(request) = request else {
+                        return Err("desktop relay request channel closed".to_string());
+                    };
+                    let id = format!(
+                        "desktop-request:{}:{}",
+                        config.desktop_id, next_desktop_request_id
+                    );
+                    next_desktop_request_id = next_desktop_request_id.wrapping_add(1).max(1);
+                    let (request_generation, message, pending) = match request {
+                        http_api::DesktopRelayRequest::ListActive { generation, response } => (
+                            generation,
+                            RelayMessage::Invoke {
+                                id: RelayId::String(id.clone()),
+                                desktop_id: None,
+                                request: RelayInvoke::Command {
+                                    command: "list_active_desktops".to_string(),
+                                    args: serde_json::json!({}),
+                                },
+                            },
+                            PendingDesktopRequest::ListActive { response },
+                        ),
+                        http_api::DesktopRelayRequest::Invoke {
+                            generation,
+                            desktop_id,
+                            method,
+                            path,
+                            body,
+                            response,
+                        } => (
+                            generation,
+                            RelayMessage::Invoke {
+                                id: RelayId::String(id.clone()),
+                                desktop_id: Some(desktop_id),
+                                request: RelayInvoke::Http { method, path, body },
+                            },
+                            PendingDesktopRequest::Invoke { response },
+                        ),
+                    };
+                    if request_generation != routing_generation {
+                        fail_pending_desktop_request(
+                            pending,
+                            "desktop relay connection changed before the request was sent"
+                                .to_string(),
+                        );
+                        continue;
+                    }
+                    pending_desktop_requests.insert(id.clone(), pending);
+                    if let Err(error) = send_relay_response_message(&sink, message).await {
+                        if let Some(request) = pending_desktop_requests.remove(&id) {
+                            fail_pending_desktop_request(request, error.clone());
+                        }
+                        log::error!("Failed to send desktop relay request: {error}");
+                        break;
+                    }
+                    continue;
+                }
                 _ = ping_interval.tick() => {
                     match keepalive.on_ping_tick(Instant::now()) {
                         RelayKeepaliveAction::SendPing => {
@@ -210,7 +281,7 @@ pub(crate) async fn run_relay_loop(
                     };
 
                     match parsed {
-                        RelayMessage::Invoke { id, request } => match request {
+                        RelayMessage::Invoke { id, request, .. } => match request {
                             RelayInvoke::Command { command, args } => {
                                 log::info!("Invoke #{}: {}", id, command);
 
@@ -435,6 +506,15 @@ pub(crate) async fn run_relay_loop(
                         } => {
                             log::info!("Relay authenticated as user {}", user_id);
                             authenticated_user_id = Some(user_id.clone());
+                            if capabilities
+                                .desktop_routing
+                                .as_ref()
+                                .is_some_and(|capability| capability.version >= 1)
+                            {
+                                routing_generation = http_state.set_desktop_routing_available(true);
+                            } else {
+                                http_state.set_desktop_routing_available(false);
+                            }
                             publisher.on_authenticated(
                                 capabilities
                                     .task_snapshot_publication
@@ -481,6 +561,20 @@ pub(crate) async fn run_relay_loop(
                                 }))
                             };
                             let _ = response.send(result);
+                        }
+                        RelayMessage::Response {
+                            id,
+                            data,
+                            error,
+                            status,
+                            body,
+                        } => {
+                            let id = id.to_string();
+                            let Some(request) = pending_desktop_requests.remove(&id) else {
+                                log::warn!("Ignoring relay response for unknown request {id}");
+                                continue;
+                            };
+                            resolve_pending_desktop_request(request, data, error, status, body);
                         }
                         RelayMessage::TunnelEstablish {
                             desktop_id,
@@ -583,10 +677,14 @@ pub(crate) async fn run_relay_loop(
         }
 
         // Clean up all observer tasks on disconnect
+        http_state.set_desktop_routing_available(false);
         http_state.set_mobile_notifications_available(false);
         publisher.on_disconnected();
         for (_, response) in pending_mobile_notifications.drain() {
             let _ = response.send(Err("mobile notification relay disconnected".to_string()));
+        }
+        for (_, request) in pending_desktop_requests.drain() {
+            fail_pending_desktop_request(request, "desktop relay disconnected".to_string());
         }
         for (session_id, handle) in observe_tasks.drain() {
             log::info!(
@@ -629,6 +727,49 @@ async fn send_response(
     }
 }
 
+fn fail_pending_desktop_request(request: PendingDesktopRequest, error: String) {
+    match request {
+        PendingDesktopRequest::ListActive { response } => {
+            let _ = response.send(Err(error));
+        }
+        PendingDesktopRequest::Invoke { response } => {
+            let _ = response.send(Err(error));
+        }
+    }
+}
+
+fn resolve_pending_desktop_request(
+    request: PendingDesktopRequest,
+    data: Option<serde_json::Value>,
+    error: Option<String>,
+    status: Option<u16>,
+    body: Option<serde_json::Value>,
+) {
+    match request {
+        PendingDesktopRequest::ListActive { response } => {
+            let result = match error {
+                Some(error) => Err(error),
+                None => data
+                    .and_then(|value| value.get("desktopIds").cloned())
+                    .ok_or_else(|| "relay returned an invalid active-desktop response".to_string())
+                    .and_then(|value| {
+                        serde_json::from_value::<Vec<String>>(value)
+                            .map_err(|error| format!("relay returned invalid desktop ids: {error}"))
+                    }),
+            };
+            let _ = response.send(result);
+        }
+        PendingDesktopRequest::Invoke { response } => {
+            let status = status.unwrap_or_else(|| if error.is_some() { 502 } else { 200 });
+            let _ = response.send(Ok(crate::http_api::HttpInvokeResponse {
+                status,
+                body: body.or(data),
+                error,
+            }));
+        }
+    }
+}
+
 /// Dispatch a relay HTTP invoke off the read loop, driven from the blocking
 /// pool: invoke handlers can run synchronous git/SQLite work (task lifecycle
 /// preparation), which must not occupy a runtime worker or stall relay
@@ -643,10 +784,34 @@ pub(crate) struct RelayHttpInvokeRequest {
     pub(crate) authenticated_user_id: Option<String>,
 }
 
+/// Separate budgets keep long-poll task event watches from consuming every
+/// permit needed by the mobile client's short REST requests.
+pub(crate) struct RelayHttpInvokePermits {
+    short: Arc<tokio::sync::Semaphore>,
+    long_poll: Arc<tokio::sync::Semaphore>,
+}
+
+impl RelayHttpInvokePermits {
+    pub(crate) fn new(concurrency: usize) -> Self {
+        Self {
+            short: Arc::new(tokio::sync::Semaphore::new(concurrency)),
+            long_poll: Arc::new(tokio::sync::Semaphore::new(concurrency)),
+        }
+    }
+
+    pub(crate) fn for_path(&self, path: &str) -> Arc<tokio::sync::Semaphore> {
+        if path.split('?').next() == Some("/v1/task-events") {
+            Arc::clone(&self.long_poll)
+        } else {
+            Arc::clone(&self.short)
+        }
+    }
+}
+
 pub(crate) async fn dispatch_relay_http_invoke(
     http_state: Arc<http_api::AppState>,
     sink: Arc<Mutex<relay_client::WsSink>>,
-    invoke_permits: Arc<tokio::sync::Semaphore>,
+    invoke_permits: Arc<RelayHttpInvokePermits>,
     request: RelayHttpInvokeRequest,
 ) -> Result<(), String> {
     let RelayHttpInvokeRequest {
@@ -656,7 +821,7 @@ pub(crate) async fn dispatch_relay_http_invoke(
         body,
         authenticated_user_id,
     } = request;
-    let permit = match Arc::clone(&invoke_permits).try_acquire_owned() {
+    let permit = match invoke_permits.for_path(&path).try_acquire_owned() {
         Ok(permit) => permit,
         Err(_) => {
             let response = RelayMessage::Response {
@@ -1069,6 +1234,136 @@ mod tests {
                 "acceptedCount": 2,
                 "failedCount": 0
             }))
+        );
+
+        relay_server.await.expect("relay server");
+        let _ = std::fs::remove_file(database_path);
+    }
+
+    #[tokio::test]
+    async fn desktop_relay_request_round_trips_an_http_invoke_over_the_relay_loop() {
+        use tokio::time::timeout;
+        use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
+
+        let relay_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind relay stand-in");
+        let relay_address = relay_listener.local_addr().expect("relay address");
+        let unique = format!(
+            "relay-desktop-invoke-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        );
+        let database_path = crate::db::Db::test_db_path(&unique);
+        let config = Config {
+            relay_url: format!("ws://{relay_address}"),
+            device_token: "device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
+            daemon_dir: format!("/tmp/{unique}-daemon"),
+            db_path: database_path.clone(),
+            kanna_cli_path: None,
+            desktop_id: "desktop-source".to_string(),
+            desktop_secret: Some("desktop-secret".to_string()),
+            desktop_name: "Source Mac".to_string(),
+            version: "test-version".to_string(),
+            environment: "development".to_string(),
+            lan_host: "127.0.0.1".to_string(),
+            lan_port: 48120,
+            transfer_port: 4455,
+            pairing_store_path: format!("/tmp/{unique}-pairings.json"),
+        };
+        let database = crate::db::Db::open_for_tests(&database_path).expect("open test db");
+        let state = Arc::new(http_api::AppState::new(config.clone()));
+
+        let relay_server = tokio::spawn(async move {
+            let (stream, _) = relay_listener.accept().await.expect("accept relay");
+            let mut socket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("accept websocket");
+            let _auth = socket
+                .next()
+                .await
+                .expect("auth message")
+                .expect("auth frame");
+            socket
+                .send(TungsteniteMessage::Text(
+                    serde_json::json!({
+                        "type": "auth_ok",
+                        "userId": "operator-1",
+                        "capabilities": {
+                            "desktopRouting": { "version": 1 }
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .expect("send auth ack");
+
+            while let Some(message) = socket.next().await {
+                let TungsteniteMessage::Text(text) = message.expect("relay frame") else {
+                    continue;
+                };
+                let value: serde_json::Value =
+                    serde_json::from_str(&text).expect("parse relay message");
+                if value["type"] != "invoke" {
+                    continue;
+                }
+                assert_eq!(value["desktopId"], "desktop-target");
+                assert_eq!(value["method"], "GET");
+                assert_eq!(value["path"], "/v1/tasks/recent");
+                socket
+                    .send(TungsteniteMessage::Text(
+                        serde_json::json!({
+                            "type": "response",
+                            "id": value["id"],
+                            "status": 200,
+                            "body": [{ "id": "task-on-target" }]
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .expect("send desktop response");
+                return;
+            }
+            panic!("relay disconnected before desktop invoke");
+        });
+
+        let relay_loop = run_relay_loop(config, database, Arc::clone(&state));
+        tokio::pin!(relay_loop);
+        let endpoint_request = async {
+            timeout(Duration::from_secs(2), async {
+                while !state.desktop_routing_available() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("desktop relay routing did not become available");
+            state
+                .invoke_relay_desktop(
+                    "desktop-target".to_string(),
+                    "GET".to_string(),
+                    "/v1/tasks/recent".to_string(),
+                    serde_json::Value::Null,
+                )
+                .await
+        };
+        tokio::pin!(endpoint_request);
+        let response = tokio::select! {
+            response = &mut endpoint_request => response,
+            result = &mut relay_loop => panic!("relay loop exited early: {result:?}"),
+        };
+        let response = response.expect("desktop relay response");
+        assert_eq!(response.status, 200, "{response:?}");
+        assert_eq!(
+            response.body,
+            Some(serde_json::json!([{ "id": "task-on-target" }]))
         );
 
         relay_server.await.expect("relay server");

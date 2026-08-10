@@ -1,5 +1,6 @@
 use super::analytics::get_repo_analytics;
 use super::backup::create_backup;
+use super::cloud_desktops::{invoke_cloud_desktop, list_cloud_desktops};
 use super::cloud_relay::reconnect_cloud_relay;
 use super::desktop::list_desktops;
 #[cfg(debug_assertions)]
@@ -74,6 +75,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/cloud/relay/actions/reconnect",
             post(reconnect_cloud_relay),
+        )
+        .route("/v1/cloud/desktops", get(list_cloud_desktops))
+        .route(
+            "/v1/cloud/desktops/{desktop_id}/invoke",
+            post(invoke_cloud_desktop),
         )
         .route(
             "/v1/settings/cloud-transfer-identity",

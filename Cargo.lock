@@ -2959,6 +2959,7 @@ dependencies = [
 name = "kanna-mcp"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "clap",
  "kanna-tool-catalog",
  "reqwest 0.12.28",

@@ -273,7 +273,7 @@ async function writeCanonicalCredentialAs(input: {
  */
 function connectAndAuth(
   authPayload: Record<string, unknown>
-): Promise<{ ws: WebSocket; userId: string }> {
+): Promise<{ ws: WebSocket; userId: string; capabilities: Record<string, unknown> }> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(relayUrl());
     const timeout = setTimeout(() => {
@@ -289,7 +289,11 @@ function connectAndAuth(
       if (msg.type === "auth_ok") {
         clearTimeout(timeout);
         ws.off("message", handler);
-        resolve({ ws, userId: msg.userId });
+        resolve({
+          ws,
+          userId: msg.userId,
+          capabilities: msg.capabilities as Record<string, unknown>,
+        });
       }
     };
     ws.on("message", handler);
@@ -691,9 +695,12 @@ describe("Relay integration", () => {
     );
     await testFirestore.recursiveDelete(pushDevicesRef);
 
-    const { ws: desktopServer } = await connectAndAuth({
+    const { ws: desktopServer, capabilities } = await connectAndAuth({
       desktop_id: SECRET_DESKTOP_ID,
       desktop_secret: SECRET_DESKTOP_SECRET,
+    });
+    expect(capabilities).toMatchObject({
+      desktopRouting: { version: 1 },
     });
     const desktopAck = waitForMessage(desktopServer, (message) =>
       message.type === "mobile_notification_ack" && message.id === "notify-desktop");

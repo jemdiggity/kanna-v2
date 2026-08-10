@@ -107,6 +107,115 @@ fn start_http_fixture(
     (base_url, handle)
 }
 
+fn write_json_response(stream: &mut TcpStream, status: &str, body: &Value) {
+    let body = body.to_string();
+    let response = format!(
+        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    stream
+        .write_all(response.as_bytes())
+        .expect("write response");
+}
+
+fn start_multi_machine_event_fixture() -> (String, thread::JoinHandle<Vec<ObservedRequest>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture server");
+    let base_url = format!("http://{}", listener.local_addr().expect("local addr"));
+    let handle = thread::spawn(move || {
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let mut handlers = Vec::new();
+        for _ in 0..7 {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            let observed = Arc::clone(&observed);
+            handlers.push(thread::spawn(move || {
+                let request = read_http_request(&mut stream);
+                if request.method == "GET"
+                    && request
+                        .path
+                        .starts_with("/v1/task-events?taskIds=task-local")
+                {
+                    thread::sleep(Duration::from_millis(100));
+                }
+                let (status, response_body) = match (request.method.as_str(), request.path.as_str())
+                {
+                    ("GET", "/v1/status") => ("200 OK", json!({ "desktopId": "desktop-local" })),
+                    ("GET", "/v1/cloud/desktops") => (
+                        "200 OK",
+                        json!({
+                            "currentMachineId": "desktop-local",
+                            "relayAvailable": true,
+                            "machines": [
+                                { "id": "desktop-local", "name": "Local", "isLocal": true },
+                                { "id": "desktop-studio", "name": null, "isLocal": false }
+                            ]
+                        }),
+                    ),
+                    ("GET", "/v1/tasks/task-local") => (
+                        "200 OK",
+                        json!({ "id": "task-local", "activity": "working" }),
+                    ),
+                    ("GET", "/v1/tasks/task-remote") => {
+                        ("404 Not Found", json!({ "error": "task not found" }))
+                    }
+                    ("GET", path) if path.starts_with("/v1/task-events?taskIds=task-local") => (
+                        "200 OK",
+                        json!({
+                            "waitOutcome": "timeout",
+                            "cursor": "11",
+                            "events": [],
+                            "hasMore": false
+                        }),
+                    ),
+                    ("POST", "/v1/cloud/desktops/desktop-studio/invoke") => {
+                        let body = request.body.as_ref().expect("proxy request body");
+                        match body["path"].as_str().expect("proxy path") {
+                            "/v1/tasks/task-remote" => (
+                                "200 OK",
+                                json!({
+                                    "status": 200,
+                                    "body": { "id": "task-remote", "activity": "working" },
+                                    "error": null
+                                }),
+                            ),
+                            path if path.starts_with("/v1/task-events?taskIds=task-remote") => (
+                                "200 OK",
+                                json!({
+                                    "status": 200,
+                                    "body": {
+                                        "waitOutcome": "events",
+                                        "cursor": "29",
+                                        "events": [{
+                                            "seq": 29,
+                                            "taskId": "task-remote",
+                                            "type": "run.finished",
+                                            "payload": { "status": "succeeded" }
+                                        }],
+                                        "hasMore": false
+                                    },
+                                    "error": null
+                                }),
+                            ),
+                            other => panic!("unexpected proxy path: {other}"),
+                        }
+                    }
+                    other => panic!("unexpected request: {other:?}"),
+                };
+                write_json_response(&mut stream, status, &response_body);
+                observed.lock().expect("observed lock").push(request);
+            }));
+        }
+        for handler in handlers {
+            handler.join().expect("fixture request handler");
+        }
+        Arc::try_unwrap(observed)
+            .expect("fixture observations still shared")
+            .into_inner()
+            .expect("observed lock")
+    });
+    (base_url, handle)
+}
+
 fn run_kanna_mcp(base_url: &str, messages: &[Value]) -> Vec<Value> {
     run_kanna_mcp_with_env(base_url, messages, &[])
 }
@@ -736,6 +845,298 @@ fn serve_infers_create_task_repo_from_current_task_context() {
             "agentType": "pty"
         })
     );
+}
+
+#[test]
+fn serve_routes_task_listing_and_creation_to_an_explicit_machine() {
+    let proxy_path = "/v1/cloud/desktops/desktop-studio/invoke";
+    let (base_url, server) = start_http_fixture(vec![
+        ExpectedRequest {
+            method: "POST",
+            path: proxy_path,
+            body: Some(json!({
+                "method": "GET",
+                "path": "/v1/tasks/recent",
+                "body": null
+            })),
+            response_status: "200 OK",
+            response_body: json!({
+                "status": 200,
+                "body": [{
+                    "id": "task-remote",
+                    "repoId": "repo-remote",
+                    "title": "Remote task",
+                    "stage": "in progress",
+                    "activity": "working"
+                }],
+                "error": null
+            }),
+        },
+        ExpectedRequest {
+            method: "POST",
+            path: proxy_path,
+            body: Some(json!({
+                "method": "POST",
+                "path": "/v1/tasks",
+                "body": {
+                    "repoId": "repo-remote",
+                    "prompt": "Run this on the Studio",
+                    "agentType": "pty"
+                }
+            })),
+            response_status: "200 OK",
+            response_body: json!({
+                "status": 200,
+                "body": {
+                    "taskId": "task-created-remote",
+                    "repoId": "repo-remote",
+                    "title": "Run this on the Studio",
+                    "stage": "in progress",
+                    "agentType": "pty"
+                },
+                "error": null
+            }),
+        },
+    ]);
+
+    let responses = run_kanna_mcp(
+        &base_url,
+        &[
+            json!({
+                "jsonrpc": "2.0",
+                "id": 30,
+                "method": "tools/call",
+                "params": {
+                    "name": "kanna_list_recent_tasks",
+                    "arguments": { "machine_id": "desktop-studio" }
+                }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 31,
+                "method": "tools/call",
+                "params": {
+                    "name": "kanna_create_task",
+                    "arguments": {
+                        "machine_id": "desktop-studio",
+                        "repo_id": "repo-remote",
+                        "prompt": "Run this on the Studio"
+                    }
+                }
+            }),
+        ],
+    );
+
+    server.join().expect("fixture server");
+    assert_eq!(tool_text(&responses[0])[0]["id"], "task-remote");
+    assert_eq!(tool_text(&responses[1])["taskId"], "task-created-remote");
+}
+
+#[test]
+fn tools_list_advertises_machine_routing_on_operational_tools() {
+    let responses = run_kanna_mcp(
+        "http://127.0.0.1:9",
+        &[json!({
+            "jsonrpc": "2.0",
+            "id": 32,
+            "method": "tools/list"
+        })],
+    );
+    let tools = responses[0]["result"]["tools"].as_array().unwrap();
+    let list_machines = tools
+        .iter()
+        .find(|tool| tool["name"] == "kanna_list_machines")
+        .expect("machine discovery tool");
+    assert!(list_machines["inputSchema"]["properties"]["machine_id"].is_null());
+    let list_tasks = tools
+        .iter()
+        .find(|tool| tool["name"] == "kanna_list_recent_tasks")
+        .expect("task listing tool");
+    assert_eq!(
+        list_tasks["inputSchema"]["properties"]["machine_id"]["type"],
+        "string"
+    );
+}
+
+#[test]
+fn complete_stage_rejects_remote_machine_without_issuing_http() {
+    let (base_url_tx, base_url_rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture server");
+        base_url_tx
+            .send(format!(
+                "http://{}",
+                listener.local_addr().expect("local addr")
+            ))
+            .expect("send base url");
+        listener
+            .set_nonblocking(true)
+            .expect("set nonblocking listener");
+        thread::sleep(Duration::from_millis(200));
+        assert!(
+            listener.accept().is_err(),
+            "remote stage completion should not issue HTTP requests"
+        );
+    });
+    let base_url = base_url_rx.recv().expect("base url");
+
+    let responses = run_kanna_mcp(
+        &base_url,
+        &[json!({
+            "jsonrpc": "2.0",
+            "id": 33,
+            "method": "tools/call",
+            "params": {
+                "name": "kanna_complete_stage",
+                "arguments": {
+                    "machine_id": "desktop-studio",
+                    "task_id": "task-remote",
+                    "status": "success",
+                    "summary": "should stay local"
+                }
+            }
+        })],
+    );
+
+    server.join().expect("fixture server");
+    assert_eq!(responses.len(), 1);
+    assert_eq!(responses[0]["id"], json!(33));
+    assert_eq!(
+        tool_error_text(&responses[0]),
+        "kanna_complete_stage cannot target another machine; an agent can only complete its own local stage"
+    );
+}
+
+#[test]
+fn serve_lists_machines_through_the_local_server() {
+    let (base_url, server) = start_http_fixture(vec![ExpectedRequest {
+        method: "GET",
+        path: "/v1/cloud/desktops",
+        body: None,
+        response_status: "200 OK",
+        response_body: json!({
+            "currentMachineId": "desktop-local",
+            "relayAvailable": true,
+            "machines": [
+                { "id": "desktop-local", "name": "Local Mac", "isLocal": true },
+                { "id": "desktop-studio", "name": null, "isLocal": false }
+            ]
+        }),
+    }]);
+    let responses = run_kanna_mcp(
+        &base_url,
+        &[json!({
+            "jsonrpc": "2.0",
+            "id": 33,
+            "method": "tools/call",
+            "params": { "name": "kanna_list_machines", "arguments": {} }
+        })],
+    );
+
+    server.join().expect("fixture server");
+    let result = tool_text(&responses[0]);
+    assert_eq!(result["currentMachineId"], "desktop-local");
+    assert_eq!(result["machines"][1]["id"], "desktop-studio");
+}
+
+#[test]
+fn wait_events_discovers_task_owners_and_waits_across_machines() {
+    let (base_url, server) = start_multi_machine_event_fixture();
+    let responses = run_kanna_mcp(
+        &base_url,
+        &[json!({
+            "jsonrpc": "2.0",
+            "id": 34,
+            "method": "tools/call",
+            "params": {
+                "name": "kanna_wait_events",
+                "arguments": {
+                    "task_ids": ["task-local", "task-remote"],
+                    "timeout_secs": 5
+                }
+            }
+        })],
+    );
+
+    let observed = server.join().expect("fixture server");
+    let result = tool_text(&responses[0]);
+    assert_eq!(result["waitOutcome"], "events", "{result}");
+    assert_eq!(result["events"][0]["taskId"], "task-remote");
+    assert_eq!(result["events"][0]["machineId"], "desktop-studio");
+    assert!(result["cursor"]
+        .as_str()
+        .is_some_and(|cursor| cursor.starts_with("km1.")));
+    assert_eq!(result["machineErrors"], json!([]));
+
+    assert!(observed.iter().any(|request| {
+        request.method == "GET"
+            && request
+                .path
+                .starts_with("/v1/task-events?taskIds=task-local")
+    }));
+    assert!(observed.iter().any(|request| {
+        request.method == "POST"
+            && request.path == "/v1/cloud/desktops/desktop-studio/invoke"
+            && request.body.as_ref().is_some_and(|body| {
+                body["path"]
+                    .as_str()
+                    .is_some_and(|path| path.starts_with("/v1/task-events?taskIds=task-remote"))
+            })
+    }));
+}
+
+#[test]
+fn all_local_event_wait_does_not_require_relay_discovery() {
+    let (base_url, server) = start_http_fixture(vec![
+        ExpectedRequest {
+            method: "GET",
+            path: "/v1/status",
+            body: None,
+            response_status: "200 OK",
+            response_body: json!({ "desktopId": "desktop-local" }),
+        },
+        ExpectedRequest {
+            method: "GET",
+            path: "/v1/tasks/task-local",
+            body: None,
+            response_status: "200 OK",
+            response_body: json!({ "id": "task-local", "activity": "working" }),
+        },
+        ExpectedRequest {
+            method: "GET",
+            path: "/v1/task-events?taskIds=task-local&timeoutSecs=5",
+            body: None,
+            response_status: "200 OK",
+            response_body: json!({
+                "waitOutcome": "events",
+                "cursor": "12",
+                "events": [{
+                    "seq": 12,
+                    "taskId": "task-local",
+                    "type": "stage.changed",
+                    "payload": {}
+                }],
+                "hasMore": false
+            }),
+        },
+    ]);
+    let responses = run_kanna_mcp(
+        &base_url,
+        &[json!({
+            "jsonrpc": "2.0",
+            "id": 35,
+            "method": "tools/call",
+            "params": {
+                "name": "kanna_wait_events",
+                "arguments": { "task_ids": ["task-local"], "timeout_secs": 5 }
+            }
+        })],
+    );
+
+    server.join().expect("fixture server");
+    let result = tool_text(&responses[0]);
+    assert_eq!(result["waitOutcome"], "events", "{result}");
+    assert_eq!(result["events"][0]["machineId"], "desktop-local");
 }
 
 /// Serves `GET /v1/tasks/{id}` from a mutable body for as many polls as a wait

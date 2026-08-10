@@ -36,6 +36,56 @@ The desktop frontend itself is planned to become a `kanna-server` client as well
 - `POST /v1/tasks/{task_id}/actions/set-notify`
 - `POST /v1/pairing/sessions`
 
+## Multi-machine MCP Routing
+
+`kanna-mcp` remains a client of the machine-local `kanna-server`; agent
+processes never receive Firebase credentials and do not connect to the cloud
+relay themselves. Its MCP-only `kanna_list_machines` tool calls
+`GET /v1/cloud/desktops` and every other MCP tool advertises an optional
+`machine_id`. Omitting it preserves the local behavior. Supplying an id wraps
+the catalog-resolved HTTP request through
+`POST /v1/cloud/desktops/{desktop_id}/invoke`.
+
+Those two bridge routes require a real desktop-loopback request
+(`DesktopLocalAccess`). A paired LAN client or an inbound relay request cannot
+use one trusted desktop as a proxy into the rest of the account. The local
+server submits the request through its existing desktop-authenticated relay
+socket; the relay resolves that credential to one user and routes only to a
+desktop socket registered under the same user. No raw server URL, device
+secret, desktop secret, or Firebase token enters the MCP arguments.
+
+The relay connection is also the availability boundary. Machine discovery
+always returns the current machine and reports `relayAvailable` plus an error
+when sibling discovery is unavailable. Remote calls fail closed when the
+target is offline or the relay disconnects. The server enables the bridge only
+after `auth_ok` advertises `desktopRouting` capability version 1, so deploying
+the desktop ahead of the relay fails fast instead of hanging. Outstanding and
+queued requests are bound to that relay-connection generation and fail instead
+of being replayed after reconnect. Task waits retain the normal 240-second MCP
+window, with the server-side relay handoff bounded below the MCP client's
+300-second tool-call deadline.
+
+`kanna_wait_events` has one additional MCP-side fan-in behavior. When its
+explicit `task_ids` belong to several reachable machines and `machine_id` is
+omitted, MCP discovers each task's owner, starts one native cursor wait per
+owner, and returns as soon as any owner has events. Every returned event gains
+`machineId`. Its `km1.` aggregate cursor records the immutable task-to-machine
+grouping plus each server's opaque native cursor; callers pass it back exactly
+like a local cursor. The MCP process retains the other in-flight long polls and
+reuses them on the next call, rather than cancelling them, abandoning relay
+work, or replacing the server event feed with client polling. If MCP restarts,
+the aggregate cursor contains enough state to recreate those waits without
+losing events. Machine failures are returned in `machineErrors` without
+advancing that machine's cursor or discarding events received elsewhere.
+
+This automatic fan-in applies only to `task_ids`, whose ownership can be
+resolved exactly. `parent_task_id` and `repo_id` remain scopes on one machine:
+they use the local machine by default or the explicit `machine_id`. Passing
+`machine_id` with `task_ids` likewise pins the whole wait to that machine.
+There is no global ordering between independent SQLite sequence spaces;
+ordering remains exact within each machine and `machineId` identifies the
+sequence space for every aggregated event.
+
 ## Task Transfer Transport
 
 `kanna-server` owns the `kanna-task-transfer` sidecar: it spawns the process,
