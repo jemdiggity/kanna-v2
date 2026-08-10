@@ -22,6 +22,7 @@ function mountMarkdownModalHarness(options: {
     options.savePreference ?? (async () => {}),
   );
   const store = reactive({
+    repos: [],
     selectedRepo: { id: "repo-1", path: "/repo" },
     currentItem: { id: "task-a", branch: "task-a" },
     markdownPreviewMode: options.markdownPreviewMode ?? "rendered",
@@ -49,6 +50,23 @@ function mountMarkdownModalHarness(options: {
 }
 
 describe("useAppModals", () => {
+  it("rechecks agent CLIs when the setup shell closes", () => {
+    const { modals, wrapper } = mountMarkdownModalHarness();
+    const recheckClis = vi.fn(async () => {});
+    modals.mainPanelRef.value = {
+      recheckClis,
+    } as unknown as NonNullable<typeof modals.mainPanelRef.value>;
+    modals.showShellModal.value = true;
+    modals.maximizedModal.value = "shell";
+
+    modals.onShellClose();
+
+    expect(modals.showShellModal.value).toBe(false);
+    expect(modals.maximizedModal.value).toBe(null);
+    expect(recheckClis).toHaveBeenCalledOnce();
+    wrapper.unmount();
+  });
+
   it("uses and persists one Markdown mode across task preview flows", async () => {
     const { modals, savePreference, store, wrapper } = mountMarkdownModalHarness();
 
