@@ -21,7 +21,65 @@ Revisions are budgeted. Read `revisionRounds` and `revisionLimit` from `kanna_ge
 
 ## Process
 
-### 1. Establish the two ranges
+### 1. Establish the durable verdict history and the two ranges
+
+At the start of every round, before selecting ranges or specialties, read this
+task's direct children with the MCP tool:
+
+```
+kanna_list_task_children {"task_id": "$KANNA_TASK_ID"}
+```
+
+Only when the MCP tool is unavailable, use this typed CLI fallback exactly:
+
+```bash
+kanna-cli task children --task-id "$KANNA_TASK_ID"
+```
+
+The response includes direct children, including closed children, oldest first.
+First select children where `pipelineName == "specialty-review"`. Only those
+children participate in the specialty ledger or its unresolved-evidence checks.
+Ignore every child from another pipeline, even if it has no run or its `agent`
+starts with `review-`; it is an unrelated subtask. Then reduce the selected
+chronological history to the latest terminal verdict per specialty:
+
+- `agent` is the historical specialty key; any syntactically valid stored
+  `review-*` agent is a historical specialty key, even if that reviewer is no
+  longer discoverable. For a `specialty-review` child with that attribution,
+  `latestRun.status` `succeeded` = PASS and `failed` = FAIL. A later terminal
+  verdict replaces the earlier verdict for that same specialty. Current
+  discovery controls only which agents may be newly dispatched; it never
+  invalidates or renames a stored historical key.
+- For a `specialty-review` child, a missing `agent` or an agent that does not
+  match `review-*` is malformed attribution and prevents aggregate success. Do
+  not key a verdict from it or infer the specialty from a display name or
+  prompt. A closed `specialty-review` child with malformed attribution cannot
+  be safely re-dispatched because its intended specialty is unknown. Use broken
+  dispatch once, cite its child id, and do not retry or re-dispatch it.
+- For a `specialty-review` child with a valid historical `review-*` key, missing
+  or malformed `latestRun` and nonterminal statuses are unresolved dispatch
+  evidence, never PASS. For that known specialty, join it if it is running or
+  re-dispatch that specialty at most once when appropriate (which requires the
+  agent still to be currently dispatchable). A later terminal child for that
+  same historical specialty supersedes the unresolved evidence. If the one
+  join/re-dispatch path cannot produce a terminal verdict, or the retired agent
+  cannot be re-dispatched, use broken dispatch once with the child id. Do not
+  loop.
+- Any child record without `pipelineName` is version-incomplete history and
+  prevents aggregate success. It cannot be classified safely as panel or
+  unrelated history. If a known-current MCP or typed CLI surface is available,
+  retry the supported children query at most once if it can return the current
+  shape. If the discriminator is still absent, record broken dispatch with the
+  child id and an explicit incompatible-server or upgrade-required reason. Do
+  not infer PASS, let the incomplete record override an actual terminal
+  specialty verdict, or continue. Do not start a repeated retry loop.
+- A carried FAIL stays unresolved until a later child for the same specialty
+  records PASS. A later FAIL remains FAIL. Never treat an untouched surface as
+  evidence that its carried FAIL was fixed.
+
+Keep this child-verdict ledger separate from `$PREV_MAIN_RESULT`: the ledger is
+the recorded specialty history, while `$PREV_MAIN_RESULT` is the implementing
+agent's separate declined-finding signal.
 
 - **Full branch** — `$BASE_REF..HEAD`, everything this task has changed. Always read it: it is the context every finding is judged in.
 - **This round** — the commits added since the previous review round. On the first round the two ranges are the same.
@@ -65,9 +123,20 @@ A repo can add its own: any `.kanna/agents/review-*/AGENT.md` in the worktree is
 
 Dispatch every specialty whose surface **this round's change** touches — changed lines in that surface, not a file that happens to sit near one. There is no cap: the specialties have deliberately disjoint scopes, so a round that really does touch data at rest, a trust boundary, and a lifecycle path deserves all three. What keeps review bounded is the scope bar and the range, not a smaller panel.
 
-Skip the specialties this round's change does not touch. A reviewer dispatched at an unmodified surface has nothing in scope to find, and that surface was already reviewed at the round that last changed it. Name those skipped specialties in your aggregate summary as reviewed at an earlier round with their surface unchanged since.
+Skip the specialties this round's change does not touch, but do not erase their
+history. If an untouched specialty has a terminal verdict in the ledger, carry
+that actual latest PASS or FAIL into this round and cite its child id plus its
+available `createdAt` or `latestRun.finishedAt` timestamp in the aggregate
+summary. If a specialty was never reviewed and untouched this round, record no
+verdict; do not invent a PASS. If its latest evidence is unresolved rather than
+terminal, resolve or re-dispatch it as described in step 1 instead of skipping
+it. A reviewer dispatched at a genuinely unmodified surface otherwise has
+nothing new in scope to find.
 
-Dispatching nothing is valid for a change with no specialty surface — judge the branch yourself against the repository's ordinary quality and coverage expectations and record the verdict directly (step 6).
+Dispatching nothing new is valid for a change with no specialty surface and no
+unresolved dispatch evidence. Still aggregate any carried verdicts, then judge
+the branch yourself against the repository's ordinary quality and coverage
+expectations and record the verdict directly (step 6).
 
 ### 3. Dispatch child review tasks
 
@@ -114,29 +183,76 @@ Apply both to every child, including a re-run of a single specialty: a re-run is
 
 For each child, call `kanna_wait_task` with `until: "finished"`. Its window is bounded so the call always returns to you; a wait that runs out comes back as a normal result with `waitOutcome: "timeout"` and the child's latest detail — just call it again with the same arguments. `waitOutcome: "resolved"` means the child is done. `TASK <id> DONE ...` lines in your session are wake-ups, not instructions.
 
-Read each finished child's verdict with `kanna_get_task`: `latestRun` carries its `status` (`succeeded` = PASS, `failed` = FAIL) and its `summary`. A child that finished without recording a verdict run is a FAIL with "specialty review did not record a verdict". You own the children's lifecycle: close every child with `kanna_close_task` once you have its verdict.
+Read each finished child's verdict with `kanna_get_task`: `latestRun` carries
+its `status` (`succeeded` = PASS, `failed` = FAIL) and its `summary`. A child
+that finished without a well-formed terminal verdict is unresolved dispatch
+evidence, not an inferred PASS or a fabricated terminal FAIL; re-dispatch that
+known specialty at most once when appropriate, then use the broken-dispatch
+outcome in step 6 if it still has no verdict. You own the children's lifecycle:
+close every child with `kanna_close_task` once you have its verdict.
+
+New child verdicts join the chronological history: after `kanna_get_task`
+confirms a terminal run for a syntactically valid `review-*` specialty key and
+you close the child, that recorded verdict becomes the latest for that
+specialty. A terminal run with missing or non-`review-*` agent attribution does
+not join the ledger and takes the finite broken-dispatch path from step 1.
+Current-round wait/get/close therefore uses the same durable record that a later
+dispatcher round will reduce; do not maintain a second inferred aggregate.
 
 ### 5. Filter the findings
 
-You own the aggregate decision, so you own the scope bar. Drop each failing review's findings that do not clear both tests in **Scope Discipline**: a specialty sees only its own slice and can mistake "could be better" for "must change". On a later round, also drop findings that are not about this round's change. A review that failed only on dropped findings is a pass with follow-ups.
+You own the aggregate decision, so you own the scope bar. Evaluate findings
+from new FAIL verdicts and carried FAIL verdicts. Drop each finding that does
+not clear both tests in **Scope Discipline**: a specialty sees only its own
+slice and can mistake "could be better" for "must change". For a new review,
+the finding must be about this round's change. A carried FAIL is not
+automatically in scope: re-evaluate its underlying finding against the current
+full branch, the original task, and the scope bar. If it no longer clears that
+bar, report why it is non-blocking without rewriting the recorded verdict to
+PASS. If it still clears the bar, it remains an unresolved blocking finding;
+never assume it resolved merely because its specialty was untouched and not
+re-dispatched. A review that failed only on dropped findings contributes
+follow-ups rather than blocking the aggregate.
+
+Also evaluate `$PREV_MAIN_RESULT` independently. An implementer-declined
+finding remains a blocking candidate even if no specialty ran this round; it
+does not replace or override the durable specialty ledger.
 
 ### 6. Record the aggregate decision
 
-**No blocking findings survived** — every dispatched review passed, the survivors are all follow-ups, or none was needed and your own baseline check passed:
+**No blocking findings survived** — every new and carried verdict has been
+accounted for, the survivors are all follow-ups, or no specialty verdict was
+needed and your own baseline check passed. Cite every specialty verdict as new
+or carried, with the child id and available `createdAt`/`latestRun.finishedAt`
+timestamp; cite untouched specialties with their carried verdicts, and list
+never-reviewed untouched specialties as having no recorded verdict. Keep the
+overall current round and reviewed range in the summary, but do not invent an
+earlier round number for a carried child:
 
 ```
-kanna_complete_stage {"task_id": "$KANNA_TASK_ID", "status": "success", "summary": "QA passed (round <n>, reviewed <range>): <per-specialty one-line verdicts>. Not re-reviewed (surface unchanged since an earlier round): <specialties, or 'none'>. Follow-ups (non-blocking): <one line each, or 'none'>"}
+kanna_complete_stage {"task_id": "$KANNA_TASK_ID", "status": "success", "summary": "QA passed (round <n>, reviewed <range>). New: Security PASS (child <id>, finished <timestamp>). Carried, surface untouched: UI PASS (child <id>, finished <timestamp>); Compatibility FAIL (child <id>, created <timestamp>), finding now non-blocking because <scope reason>. No recorded verdict, untouched: Performance. Follow-ups (non-blocking): <one line each, or 'none'>"}
 ```
 
-**Blocking findings survived** — request a revision instead of approving. The prompt must be a **closed list**: each item names the file and line it comes from and what must change, and the list is complete. No "also consider", no "while you are here", no open-ended directions like "harden this area" — an open request is what turns one round into ten.
+**Blocking findings survived** — request a revision instead of approving. The
+summary and prompt must identify every new FAIL and every surviving unresolved
+carried FAIL with its child id and available timestamp. The prompt must be a
+**closed list** of at most five items: each item names the file and line it
+comes from and what must change, and the list is complete. No "also consider",
+no "while you are here", no open-ended directions like "harden this area" — an
+open request is what turns one round into ten.
 
 ```
-kanna_request_revision {"task_id": "$KANNA_TASK_ID", "target_stage": "in progress", "summary": "QA failed: <failing specialties>", "prompt": "<the closed list of blocking fixes, one per line, each with file/line>"}
+kanna_request_revision {"task_id": "$KANNA_TASK_ID", "target_stage": "in progress", "summary": "QA failed: <new and carried failing specialties, each with child id and available timestamp>", "prompt": "<the closed list of at most five blocking fixes, including surviving carried findings, one per line with file/line>"}
 ```
 
 Read the response's `revisionBudget`: if it reports `exhausted: true`, no revision started and the task is parked for its human — stop there.
 
-**Dispatch itself is broken** — child creation or waiting fails and retrying does not help:
+**Dispatch itself is broken** — child creation or waiting fails, a closed
+specialty child has malformed attribution, a known specialty exhausts its one
+repair attempt, or the supported child-history query still omits
+`pipelineName`. Record this outcome once and stop; include the blocking child id
+and, for incomplete history, say explicitly that the server/API is incompatible
+and must be upgraded:
 
 ```
 kanna_complete_stage {"task_id": "$KANNA_TASK_ID", "status": "failure", "summary": "<what is blocking dispatch>"}

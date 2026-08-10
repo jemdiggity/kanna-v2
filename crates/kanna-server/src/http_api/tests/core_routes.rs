@@ -2532,6 +2532,243 @@ async fn get_task_route_returns_full_task_detail_by_id() {
 }
 
 #[tokio::test]
+async fn list_task_children_route_returns_open_and_closed_direct_children_with_verdicts() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        for (id, created_at) in [
+            ("task-parent", "2026-08-06 08:00:00"),
+            ("task-child-security", "2026-08-06 09:00:00"),
+            ("task-child-compat", "2026-08-06 10:00:00"),
+            ("task-child-no-run", "2026-08-06 10:30:00"),
+            ("task-child-default-no-run", "2026-08-06 10:45:00"),
+            ("task-grandchild", "2026-08-06 11:00:00"),
+            ("task-unrelated", "2026-08-06 12:00:00"),
+        ] {
+            db.insert_test_pipeline_item(
+                id,
+                "repo-1",
+                "specialty review",
+                None,
+                "review",
+                created_at,
+            )
+            .unwrap();
+        }
+        db.update_pipeline_item_parent("task-child-security", Some("task-parent"))
+            .unwrap();
+        db.update_pipeline_item_parent("task-child-compat", Some("task-parent"))
+            .unwrap();
+        db.update_pipeline_item_parent("task-child-no-run", Some("task-parent"))
+            .unwrap();
+        db.update_pipeline_item_parent("task-child-default-no-run", Some("task-parent"))
+            .unwrap();
+        db.update_pipeline_item_parent("task-grandchild", Some("task-child-security"))
+            .unwrap();
+        db.update_test_pipeline_item_stage_context(
+            "task-parent",
+            "task-parent-2",
+            "specialized-reviewers",
+            None,
+            "claude",
+        )
+        .unwrap();
+        db.update_test_pipeline_item_stage_context(
+            "task-child-no-run",
+            "branch-task-child-no-run",
+            "specialty-review",
+            None,
+            "claude",
+        )
+        .unwrap();
+        db.set_test_pipeline_item_closed_at("task-child-compat", "2026-08-06 10:30:00")
+            .unwrap();
+        db.insert_stage_run(crate::db::NewStageRun {
+            id: "run-security-stale",
+            task_id: "task-child-security",
+            stage: "review",
+            kind: "main",
+            agent: Some("review-security-stale"),
+            agent_provider: Some("claude"),
+            model: None,
+            effort: None,
+            status: "failed",
+            result: Some(
+                r#"{"status":"failure","summary":"STALE: superseded security verdict","metadata":null}"#,
+            ),
+            feedback: None,
+            session_id: Some("task-child-security"),
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: None,
+        })
+        .unwrap();
+        db.insert_stage_run(crate::db::NewStageRun {
+            id: "run-security",
+            task_id: "task-child-security",
+            stage: "review",
+            kind: "main",
+            agent: Some("review-security"),
+            agent_provider: Some("claude"),
+            model: None,
+            effort: None,
+            status: "succeeded",
+            result: Some(
+                r#"{"status":"success","summary":"PASS: no security findings","metadata":null}"#,
+            ),
+            feedback: None,
+            session_id: Some("task-child-security"),
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: None,
+        })
+        .unwrap();
+        db.insert_stage_run(crate::db::NewStageRun {
+            id: "run-compat",
+            task_id: "task-child-compat",
+            stage: "review",
+            kind: "main",
+            agent: Some("review-compat"),
+            agent_provider: Some("claude"),
+            model: None,
+            effort: None,
+            status: "failed",
+            result: Some(
+                r#"{"status":"failure","summary":"FAIL: mobile contract changed","metadata":null}"#,
+            ),
+            feedback: None,
+            session_id: Some("task-child-compat"),
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: None,
+        })
+        .unwrap();
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/tasks/task-parent/children")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let children: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(
+        children,
+        serde_json::json!([
+            {
+                "id": "task-child-security",
+                "agent": "review-security",
+                "pipelineName": "default",
+                "createdAt": "2026-08-06 09:00:00",
+                "closedAt": null,
+                "latestRun": {
+                    "id": "run-security",
+                    "stage": "review",
+                    "kind": "main",
+                    "status": "succeeded",
+                    "summary": "PASS: no security findings",
+                    "resumedFromRunId": null,
+                    "resumeFallbackReason": null,
+                    "finishedAt": null
+                }
+            },
+            {
+                "id": "task-child-compat",
+                "agent": "review-compat",
+                "pipelineName": "default",
+                "createdAt": "2026-08-06 10:00:00",
+                "closedAt": "2026-08-06 10:30:00",
+                "latestRun": {
+                    "id": "run-compat",
+                    "stage": "review",
+                    "kind": "main",
+                    "status": "failed",
+                    "summary": "FAIL: mobile contract changed",
+                    "resumedFromRunId": null,
+                    "resumeFallbackReason": null,
+                    "finishedAt": null
+                }
+            },
+            {
+                "id": "task-child-no-run",
+                "agent": null,
+                "pipelineName": "specialty-review",
+                "createdAt": "2026-08-06 10:30:00",
+                "closedAt": null,
+                "latestRun": null
+            },
+            {
+                "id": "task-child-default-no-run",
+                "agent": null,
+                "pipelineName": "default",
+                "createdAt": "2026-08-06 10:45:00",
+                "closedAt": null,
+                "latestRun": null
+            }
+        ])
+    );
+
+    // A dispatcher resumes in a later stage's workspace, so it may only know
+    // the task by one of its branch names; the tool's contract promises that
+    // resolves to the same history.
+    let by_branch = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/tasks/task-parent-2/children")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(by_branch.status(), StatusCode::OK);
+    let by_branch_body = axum::body::to_bytes(by_branch.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        from_slice::<serde_json::Value>(&by_branch_body).unwrap(),
+        children
+    );
+
+    // An existing task that dispatched nothing is an empty list, never a 404.
+    // That is what lets the dispatcher tell "no children were ever created"
+    // from "I asked about the wrong task".
+    let childless = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/tasks/task-unrelated/children")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(childless.status(), StatusCode::OK);
+    let childless_body = axum::body::to_bytes(childless.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        from_slice::<serde_json::Value>(&childless_body).unwrap(),
+        serde_json::json!([])
+    );
+
+    let missing_parent = app
+        .oneshot(
+            Request::get("/v1/tasks/task-missing/children")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing_parent.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn update_task_route_persists_display_name_and_get_list_return_new_title() {
     let state = super::test_state_with_seed("desktop-1", "Studio Mac", |db| {
         db.insert_test_repo("repo-1", "Repo One").unwrap();

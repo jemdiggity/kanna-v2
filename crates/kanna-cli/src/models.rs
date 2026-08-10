@@ -122,6 +122,38 @@ pub(crate) struct TaskDetail {
 pub(crate) struct TaskLatestRun {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) stage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) resumed_from_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) resume_fallback_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) finished_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TaskChild {
+    pub(crate) id: String,
+    pub(crate) agent: Option<String>,
+    /// Absence is contract-bearing here, unlike the other fields: a server new
+    /// enough to serve this route always sends a `pipeline` (the column is NOT
+    /// NULL), so a missing `pipelineName` means the responding server predates
+    /// the discriminator. Skipping `None` keeps that signal intact through the
+    /// typed fallback instead of laundering an old server's omission into an
+    /// explicit `null` the dispatcher would have to classify differently.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pipeline_name: Option<String>,
+    pub(crate) created_at: Option<String>,
+    pub(crate) closed_at: Option<String>,
+    pub(crate) latest_run: Option<TaskLatestRun>,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]

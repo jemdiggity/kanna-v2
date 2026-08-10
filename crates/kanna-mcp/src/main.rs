@@ -1567,6 +1567,7 @@ mod tests {
                 "kanna_add_repo",
                 "kanna_list_recent_tasks",
                 "kanna_get_task",
+                "kanna_list_task_children",
                 "kanna_wait_task",
                 "kanna_wait_events",
                 "kanna_notify_mobile",

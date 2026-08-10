@@ -11,7 +11,8 @@ use crate::models::{
     MobileNotificationResponse, RepoDetail, RepoSummary, RequestRevisionRequest,
     ResolvedAgentDefinition, SetTaskNotifyRequest, SetTaskParentRequest, SetTaskPipelineRequest,
     SetTaskPipelineResponse, SignalAgentRequest, SignalAgentResponse, TaskActionResponse,
-    TaskDetail, TaskInputRequest, TaskInputResponse, TaskRenameRequest, TaskSummary, WaitUntil,
+    TaskChild, TaskDetail, TaskInputRequest, TaskInputResponse, TaskRenameRequest, TaskSummary,
+    WaitUntil,
 };
 
 pub(crate) fn join_server_url(base_url: &str, path: &str) -> String {
@@ -56,6 +57,10 @@ pub(crate) fn task_search_path(query: &str) -> String {
 
 pub(crate) fn task_get_path(task_id: &str) -> String {
     format!("/v1/tasks/{}", encode_path_segment(task_id))
+}
+
+pub(crate) fn task_children_path(task_id: &str) -> String {
+    format!("{}/children", task_get_path(task_id))
 }
 
 pub(crate) fn dependent_tasks_exist_path(task_id: &str) -> String {
@@ -304,6 +309,13 @@ pub(crate) async fn search_tasks_via_api(
 
 pub(crate) async fn get_task_via_api(base_url: &str, task_id: &str) -> Result<TaskDetail, String> {
     get_json(base_url, &task_get_path(task_id)).await
+}
+
+pub(crate) async fn list_task_children_via_api(
+    base_url: &str,
+    task_id: &str,
+) -> Result<Vec<TaskChild>, String> {
+    get_json(base_url, &task_children_path(task_id)).await
 }
 
 pub(crate) async fn dependent_tasks_exist_via_api(
