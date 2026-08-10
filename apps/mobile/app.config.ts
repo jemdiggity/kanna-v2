@@ -211,7 +211,7 @@ export function createExpoConfig(
     platforms: ["ios", "android"],
     ios: {
       bundleIdentifier: appEnvironment.iosBundleId,
-      appleTeamId: "GY3LFAA59P",
+      appleTeamId: "EA4J68749Z",
       // Dev has no matching Firebase Apple app. Keep the production and
       // staging plist wiring intact without copying either plist into dev.
       ...(appEnvironment.name === "dev"

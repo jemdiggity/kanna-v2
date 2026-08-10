@@ -108,7 +108,7 @@ describe("resolveRequiredMobileE2eEnv", () => {
         KANNA_IOS_E2E_TARGET: "device"
       })
     ).toMatchObject({
-      xcodeOrgId: "GY3LFAA59P",
+      xcodeOrgId: "EA4J68749Z",
       xcodeSigningId: "Apple Development",
       updatedWdaBundleId: "build.kanna.app.dev.webdriveragentrunner"
     });

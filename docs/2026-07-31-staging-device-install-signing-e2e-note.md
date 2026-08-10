@@ -42,7 +42,7 @@ repository cannot own.
 ## What makes it testable
 
 A human signs into Xcode → Settings → Accounts with an Apple ID that is a
-member of team `GY3LFAA59P` (a role allowed to register App IDs and enable the
+member of team `EA4J68749Z` (a role allowed to register App IDs and enable the
 Push Notifications capability), then reruns:
 
 ```

@@ -56,7 +56,7 @@ describe("mobile app config", () => {
     expect(config.version).toBe("1.2.3");
     expect(config.ios?.buildNumber).toBe("45");
     expect(config.ios?.bundleIdentifier).toBe("build.kanna.app");
-    expect(config.ios?.appleTeamId).toBe("GY3LFAA59P");
+    expect(config.ios?.appleTeamId).toBe("EA4J68749Z");
   });
 
   it("produces the dev identity from KANNA_APP_ENV", () => {

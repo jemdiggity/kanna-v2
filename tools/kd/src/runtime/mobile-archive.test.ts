@@ -81,7 +81,7 @@ describe("kd mobile archive", () => {
       appEnv: "prod",
       bundleId: "build.kanna.app",
       displayName: "Kanna",
-      teamId: "GY3LFAA59P",
+      teamId: "EA4J68749Z",
       version: "1.2.3",
       buildNumber: "45",
       archivePath: join(repoRoot, ".build/mobile-release/Kanna.xcarchive"),
