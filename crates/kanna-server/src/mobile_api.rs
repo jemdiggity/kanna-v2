@@ -593,6 +593,10 @@ impl MobileApi {
         )))
     }
 
+    /// The parent's direct children, oldest first, with each child's latest
+    /// recorded stage run. `Ok(None)` means the parent itself does not exist;
+    /// an existing parent with no children is an empty list, which is what
+    /// lets a fan-out owner tell "nothing was dispatched" from "wrong id".
     pub fn list_task_children(
         &self,
         task_or_branch_id: &str,
@@ -604,32 +608,24 @@ impl MobileApi {
         else {
             return Ok(None);
         };
-        if self
-            ._db
-            .get_pipeline_item(&task_id)
-            .map_err(|e| format!("db error: {}", e))?
-            .is_none()
-        {
-            return Ok(None);
-        }
         let children = self
             ._db
             .list_pipeline_item_children(&task_id)
             .map_err(|e| format!("db error: {}", e))?;
         children
             .into_iter()
-            .map(|(id, pipeline_name, created_at, closed_at)| {
+            .map(|child| {
                 let latest_run = self
                     ._db
-                    .latest_stage_run(&id)
+                    .latest_stage_run(&child.id)
                     .map_err(|e| format!("db error: {}", e))?;
                 let agent = latest_run.as_ref().and_then(|run| run.agent.clone());
                 Ok(TaskChild {
-                    id,
+                    id: child.id,
                     agent,
-                    pipeline_name,
-                    created_at,
-                    closed_at,
+                    pipeline_name: child.pipeline,
+                    created_at: child.created_at,
+                    closed_at: child.closed_at,
                     latest_run: latest_run.map(map_task_latest_run),
                 })
             })

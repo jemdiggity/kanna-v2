@@ -1,5 +1,5 @@
 use super::{
-    CloudTaskIdentityWrite, Db, NewPipelineItem, OpenAgentTask, PipelineItem,
+    CloudTaskIdentityWrite, Db, NewPipelineItem, OpenAgentTask, PipelineItem, PipelineItemChild,
     ReopenPipelineItemError, TaskEventKind, TaskStageSource,
 };
 use rusqlite::{params, OptionalExtension};
@@ -213,18 +213,30 @@ impl Db {
         rows.collect()
     }
 
+    /// Direct children of `parent_id`, oldest first, with the lifecycle and
+    /// pipeline identity a fan-out owner joins its children by. This is the
+    /// single child query; [`Db::list_child_task_ids`] is its id projection,
+    /// so both surfaces always agree on membership and ordering.
+    ///
+    /// Deliberately **includes closed children** — see `list_child_task_ids`
+    /// for why parentage outlives closure.
     pub fn list_pipeline_item_children(
         &self,
         parent_id: &str,
-    ) -> Result<Vec<(String, Option<String>, Option<String>, Option<String>)>, rusqlite::Error>
-    {
+    ) -> Result<Vec<PipelineItemChild>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, pipeline, created_at, closed_at \
-             FROM pipeline_item WHERE parent_task_id = ? \
-             ORDER BY datetime(created_at) ASC, id ASC",
+            "SELECT id, pipeline, created_at, closed_at
+             FROM pipeline_item
+             WHERE parent_task_id = ?
+             ORDER BY created_at ASC, id ASC",
         )?;
         let rows = stmt.query_map([parent_id], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            Ok(PipelineItemChild {
+                id: row.get(0)?,
+                pipeline: row.get(1)?,
+                created_at: row.get(2)?,
+                closed_at: row.get(3)?,
+            })
         })?;
         rows.collect()
     }
@@ -651,13 +663,11 @@ impl Db {
     /// Grandchildren are not included; this is the direct-child set, so it
     /// matches the `parent_task_id` scope of the task-event feed exactly.
     pub fn list_child_task_ids(&self, parent_id: &str) -> Result<Vec<String>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id FROM pipeline_item
-             WHERE parent_task_id = ?
-             ORDER BY created_at ASC, id ASC",
-        )?;
-        let rows = stmt.query_map([parent_id], |row| row.get(0))?;
-        rows.collect()
+        Ok(self
+            .list_pipeline_item_children(parent_id)?
+            .into_iter()
+            .map(|child| child.id)
+            .collect())
     }
 
     pub fn pipeline_item_parent(&self, id: &str) -> Result<Option<String>, rusqlite::Error> {

@@ -135,6 +135,17 @@ pub struct PipelineItem {
     pub revision_rounds: i64,
 }
 
+/// One direct child of a parent task, as the fan-out history surfaces read it:
+/// its identity, the pipeline that classifies it, and its lifecycle timestamps.
+/// The verdict itself lives on the child's latest `stage_run`.
+#[derive(Debug, Serialize)]
+pub struct PipelineItemChild {
+    pub id: String,
+    pub pipeline: Option<String>,
+    pub created_at: Option<String>,
+    pub closed_at: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct Repo {
     pub id: String,
