@@ -259,6 +259,8 @@ const mockWindowWorkspace = {
   persistSelection: vi.fn(async () => {}),
   persistSidebarHidden: vi.fn(async () => {}),
   persistSidebarWidth: vi.fn(async () => {}),
+  restoreCurrentWindowGeometry: vi.fn(async () => {}),
+  startGeometryTracking: vi.fn(async () => vi.fn()),
   invalidateSharedData: vi.fn(async () => {}),
   restoreAdditionalWindows: vi.fn(async () => {}),
   onSharedInvalidation: vi.fn(async () => vi.fn()),
@@ -1067,6 +1069,9 @@ describe("App", () => {
     mockWindowWorkspace.persistSelection.mockClear();
     mockWindowWorkspace.persistSidebarHidden.mockClear();
     mockWindowWorkspace.persistSidebarWidth.mockClear();
+    mockWindowWorkspace.restoreCurrentWindowGeometry.mockClear();
+    mockWindowWorkspace.startGeometryTracking.mockReset();
+    mockWindowWorkspace.startGeometryTracking.mockResolvedValue(vi.fn());
     mockWindowWorkspace.invalidateSharedData.mockClear();
     mockWindowWorkspace.restoreAdditionalWindows.mockClear();
     mockWindowWorkspace.bootstrap.windowId = "main";
@@ -1189,6 +1194,22 @@ describe("App", () => {
     expect(scheduleStartupBackupMock).not.toHaveBeenCalled();
 
     wrapper.unmount();
+  });
+
+  it("tracks native geometry after workspace initialization and disposes on unmount", async () => {
+    const disposeGeometryTracking = vi.fn();
+    mockWindowWorkspace.startGeometryTracking.mockResolvedValueOnce(disposeGeometryTracking);
+
+    const wrapper = await mountApp(SidebarWithRepoStub);
+
+    expect(mockWindowWorkspace.initialize).toHaveBeenCalledTimes(1);
+    expect(mockWindowWorkspace.startGeometryTracking).toHaveBeenCalledTimes(1);
+    expect(mockWindowWorkspace.initialize.mock.invocationCallOrder[0]).toBeLessThan(
+      mockWindowWorkspace.startGeometryTracking.mock.invocationCallOrder[0] ?? 0,
+    );
+
+    wrapper.unmount();
+    expect(disposeGeometryTracking).toHaveBeenCalledTimes(1);
   });
 
   it("associates the desktop credential on sign-in without renderer task publication", async () => {

@@ -3,9 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   applyWindowWorkspaceMutation,
   createWindowWorkspace,
+  normalizeWindowGeometry,
   removeWindowFromWorkspaceSnapshot,
   parseWindowBootstrap,
   reconcileWorkspaceSnapshot,
+  resolveRestorableWindowGeometry,
   resolveWindowBootstrap,
   WINDOW_WORKSPACE_SETTINGS_KEY,
   type WorkspaceSnapshot,
@@ -63,6 +65,108 @@ describe("windowWorkspace", () => {
       windowId: "win-2",
       selectedRepoId: "repo-1",
       selectedItemId: "task-9",
+    });
+  });
+
+  it("normalizes only usable finite window geometry", () => {
+    expect(normalizeWindowGeometry({ x: 120.4, y: -90.6, width: 980.2, height: 720.8 })).toEqual({
+      x: 120,
+      y: -91,
+      width: 980,
+      height: 721,
+    });
+    expect(normalizeWindowGeometry({ x: Number.NaN, y: 90, width: 980, height: 720 })).toBeNull();
+    expect(normalizeWindowGeometry({ x: 120, y: 90, width: 799, height: 720 })).toBeNull();
+    expect(normalizeWindowGeometry({ x: 120, y: 90, width: 980, height: 599 })).toBeNull();
+  });
+
+  it("loads legacy workspace rows without geometry as a defaultable null value", async () => {
+    settingStore.set(
+      WINDOW_WORKSPACE_SETTINGS_KEY,
+      JSON.stringify({
+        windows: [{
+          windowId: "main",
+          selectedRepoId: "repo-1",
+          selectedItemId: "task-1",
+          order: 0,
+          sidebarHidden: false,
+          sidebarWidth: 260,
+        }],
+      } satisfies WorkspaceSnapshot),
+    );
+    const workspace = createWindowWorkspace({
+      db: {} as never,
+      bootstrap: { windowId: "main", selectedRepoId: null, selectedItemId: null },
+    });
+
+    await expect(workspace.loadSnapshot({ authoritative: true })).resolves.toEqual({
+      windows: [{
+        windowId: "main",
+        selectedRepoId: "repo-1",
+        selectedItemId: "task-1",
+        order: 0,
+        sidebarHidden: false,
+        sidebarWidth: 260,
+        geometry: null,
+      }],
+    });
+  });
+
+  it("updates geometry only for an existing workspace window", () => {
+    const snapshot: WorkspaceSnapshot = {
+      windows: [{
+        windowId: "main",
+        selectedRepoId: null,
+        selectedItemId: null,
+        order: 0,
+        sidebarHidden: false,
+        sidebarWidth: 260,
+        geometry: null,
+      }],
+    };
+
+    const updated = applyWindowWorkspaceMutation(snapshot, {
+      operation: "updateGeometry",
+      windowId: "main",
+      geometry: { x: 120, y: 90, width: 980, height: 720 },
+    });
+    expect(updated.windows[0]?.geometry).toEqual({ x: 120, y: 90, width: 980, height: 720 });
+
+    expect(applyWindowWorkspaceMutation(updated, {
+      operation: "updateGeometry",
+      windowId: "missing",
+      geometry: { x: 0, y: 0, width: 1200, height: 800 },
+    })).toEqual(updated);
+  });
+
+  it("keeps saved geometry that intersects an available monitor", () => {
+    const geometry = { x: 120, y: 90, width: 980, height: 720 };
+    const monitors = [{
+      workArea: {
+        position: { x: 0, y: 25 },
+        size: { width: 1512, height: 957 },
+      },
+    }];
+
+    expect(resolveRestorableWindowGeometry(geometry, monitors)).toEqual(geometry);
+  });
+
+  it("moves fully off-screen geometry into the primary work area", () => {
+    const monitors = [{
+      workArea: {
+        position: { x: 0, y: 25 },
+        size: { width: 1512, height: 957 },
+      },
+    }];
+
+    expect(resolveRestorableWindowGeometry(
+      { x: 4000, y: 200, width: 1800, height: 1200 },
+      monitors,
+    )).toEqual({
+      x: 0,
+      y: 25,
+      width: 1512,
+      height: 957,
     });
   });
 
@@ -476,6 +580,7 @@ describe("windowWorkspace", () => {
       order: 0,
       sidebarHidden: true,
       sidebarWidth: 347,
+      geometry: null,
     };
     settingStore.set(
       WINDOW_WORKSPACE_SETTINGS_KEY,

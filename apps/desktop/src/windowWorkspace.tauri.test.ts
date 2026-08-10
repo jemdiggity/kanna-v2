@@ -18,6 +18,25 @@ const webviewCreatedHarness = vi.hoisted(() => ({
   handler: null as null | ((label: string) => Promise<void>),
 }));
 const disposeCompanionBridgesMock = vi.hoisted(() => vi.fn(async () => {}));
+const workspaceMutations = vi.hoisted(() => [] as Array<{ operation: string; [key: string]: unknown }>);
+const currentWindowHarness = vi.hoisted(() => ({
+  setPosition: vi.fn(async () => {}),
+  setSize: vi.fn(async () => {}),
+  outerPosition: vi.fn(async () => ({ x: 200, y: 120 })),
+  outerSize: vi.fn(async () => ({ width: 1000, height: 740 })),
+  movedHandler: null as null | (() => void),
+  resizedHandler: null as null | (() => void),
+  unlistenMoved: vi.fn(),
+  unlistenResized: vi.fn(),
+}));
+const createdWindows = vi.hoisted(() => [] as Array<{
+  label: string;
+  options: Record<string, unknown>;
+  setPosition: ReturnType<typeof vi.fn>;
+  setSize: ReturnType<typeof vi.fn>;
+  show: ReturnType<typeof vi.fn>;
+  setFocus: ReturnType<typeof vi.fn>;
+}>);
 
 vi.mock("./tauri-mock", () => ({
   isTauri: true,
@@ -27,7 +46,37 @@ vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({
     close: closeMock,
     destroy: destroyMock,
+    setPosition: currentWindowHarness.setPosition,
+    setSize: currentWindowHarness.setSize,
+    outerPosition: currentWindowHarness.outerPosition,
+    outerSize: currentWindowHarness.outerSize,
+    onMoved: vi.fn(async (handler: () => void) => {
+      currentWindowHarness.movedHandler = handler;
+      return currentWindowHarness.unlistenMoved;
+    }),
+    onResized: vi.fn(async (handler: () => void) => {
+      currentWindowHarness.resizedHandler = handler;
+      return currentWindowHarness.unlistenResized;
+    }),
   }),
+  availableMonitors: vi.fn(async () => [{
+    workArea: {
+      position: { x: 0, y: 25 },
+      size: { width: 1512, height: 957 },
+    },
+  }]),
+  primaryMonitor: vi.fn(async () => ({
+    workArea: {
+      position: { x: 0, y: 25 },
+      size: { width: 1512, height: 957 },
+    },
+  })),
+  PhysicalPosition: class {
+    constructor(public x: number, public y: number) {}
+  },
+  PhysicalSize: class {
+    constructor(public width: number, public height: number) {}
+  },
 }));
 
 vi.mock("./services/desktopCompanionBridge", () => ({
@@ -46,9 +95,17 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
   WebviewWindow: class {
     label: string;
 
-    constructor(label: string) {
+    options: Record<string, unknown>;
+    setPosition = vi.fn(async () => {});
+    setSize = vi.fn(async () => {});
+    show = vi.fn(async () => {});
+    setFocus = vi.fn(async () => {});
+
+    constructor(label: string, options: Record<string, unknown> = {}) {
       this.label = label;
+      this.options = options;
       openWebviewLabels.push(label);
+      createdWindows.push(this);
     }
 
     async once(event: string, handler: (event: { payload: unknown }) => void) {
@@ -82,6 +139,7 @@ describe("windowWorkspace in Tauri", () => {
         return { key, value };
       },
       mutateWindowWorkspace: async (mutation) => {
+        workspaceMutations.push(mutation);
         if (mutation.operation === "ensure" && mutation.window.windowId !== "main") {
           ensuredWindowWasLive.push(
             openWebviewLabels.includes(`window-${mutation.window.windowId}`),
@@ -104,6 +162,234 @@ describe("windowWorkspace in Tauri", () => {
     emitMock.mockResolvedValue(undefined);
     ensuredWindowWasLive.splice(0);
     webviewCreatedHarness.handler = null;
+    workspaceMutations.splice(0);
+    createdWindows.splice(0);
+    currentWindowHarness.setPosition.mockClear();
+    currentWindowHarness.setSize.mockClear();
+    currentWindowHarness.outerPosition.mockClear();
+    currentWindowHarness.outerSize.mockClear();
+    currentWindowHarness.movedHandler = null;
+    currentWindowHarness.resizedHandler = null;
+    currentWindowHarness.unlistenMoved.mockClear();
+    currentWindowHarness.unlistenResized.mockClear();
+  });
+
+  it("restores saved geometry for the current native window", async () => {
+    settingStore.set(
+      WINDOW_WORKSPACE_SETTINGS_KEY,
+      JSON.stringify({
+        windows: [{
+          windowId: "main",
+          selectedRepoId: null,
+          selectedItemId: null,
+          order: 0,
+          sidebarHidden: false,
+          sidebarWidth: 260,
+          geometry: { x: 120, y: 90, width: 980, height: 720 },
+        }],
+      } satisfies WorkspaceSnapshot),
+    );
+    const workspace = createWindowWorkspace({
+      db: {} as never,
+      bootstrap: { windowId: "main", selectedRepoId: null, selectedItemId: null },
+    });
+
+    await workspace.restoreCurrentWindowGeometry();
+
+    expect(currentWindowHarness.setSize).toHaveBeenCalledWith(
+      expect.objectContaining({ width: 980, height: 720 }),
+    );
+    expect(currentWindowHarness.setPosition).toHaveBeenCalledWith(
+      expect.objectContaining({ x: 120, y: 90 }),
+    );
+  });
+
+  it("restores a secondary window before revealing it", async () => {
+    settingStore.set(
+      WINDOW_WORKSPACE_SETTINGS_KEY,
+      JSON.stringify({
+        windows: [
+          {
+            windowId: "main",
+            selectedRepoId: null,
+            selectedItemId: null,
+            order: 0,
+            sidebarHidden: false,
+            sidebarWidth: 260,
+          },
+          {
+            windowId: "win-2",
+            selectedRepoId: "repo-1",
+            selectedItemId: "task-1",
+            order: 1,
+            sidebarHidden: false,
+            sidebarWidth: 260,
+            geometry: { x: 180, y: 110, width: 1024, height: 768 },
+          },
+        ],
+      } satisfies WorkspaceSnapshot),
+    );
+    const workspace = createWindowWorkspace({
+      db: {} as never,
+      bootstrap: { windowId: "main", selectedRepoId: null, selectedItemId: null },
+    });
+
+    await workspace.restoreAdditionalWindows();
+
+    const restored = createdWindows[0];
+    expect(restored?.options.visible).toBe(false);
+    expect(restored?.setSize).toHaveBeenCalledWith(
+      expect.objectContaining({ width: 1024, height: 768 }),
+    );
+    expect(restored?.setPosition).toHaveBeenCalledWith(
+      expect.objectContaining({ x: 180, y: 110 }),
+    );
+    expect(restored?.show).toHaveBeenCalledTimes(1);
+    expect(restored?.setPosition.mock.invocationCallOrder[0]).toBeLessThan(
+      restored?.show.mock.invocationCallOrder[0] ?? 0,
+    );
+  });
+
+  it("reveals a secondary window when applying its saved geometry fails", async () => {
+    const geometryError = new Error("geometry restore failed");
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    settingStore.set(
+      WINDOW_WORKSPACE_SETTINGS_KEY,
+      JSON.stringify({
+        windows: [
+          {
+            windowId: "main",
+            selectedRepoId: null,
+            selectedItemId: null,
+            order: 0,
+            sidebarHidden: false,
+            sidebarWidth: 260,
+          },
+          {
+            windowId: "win-2",
+            selectedRepoId: "repo-1",
+            selectedItemId: "task-1",
+            order: 1,
+            sidebarHidden: false,
+            sidebarWidth: 260,
+            geometry: { x: 180, y: 110, width: 1024, height: 768 },
+          },
+        ],
+      } satisfies WorkspaceSnapshot),
+    );
+    webviewCreatedHarness.handler = async (label) => {
+      const restored = createdWindows.find((entry) => entry.label === label);
+      restored?.setSize.mockRejectedValueOnce(geometryError);
+    };
+    const workspace = createWindowWorkspace({
+      db: {} as never,
+      bootstrap: { windowId: "main", selectedRepoId: null, selectedItemId: null },
+    });
+
+    await expect(workspace.restoreAdditionalWindows()).resolves.toBeUndefined();
+
+    const restored = createdWindows[0];
+    expect(restored?.show).toHaveBeenCalledTimes(1);
+    expect(restored?.setFocus).toHaveBeenCalledTimes(1);
+    expect(warnSpy).toHaveBeenCalledWith(
+      "[windowWorkspace] failed to apply saved window geometry:",
+      geometryError,
+    );
+    warnSpy.mockRestore();
+  });
+
+  it("continues restoring saved windows after one spawn fails", async () => {
+    const focusError = new Error("focus failed");
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    settingStore.set(
+      WINDOW_WORKSPACE_SETTINGS_KEY,
+      JSON.stringify({
+        windows: [
+          {
+            windowId: "main",
+            selectedRepoId: null,
+            selectedItemId: null,
+            order: 0,
+            sidebarHidden: false,
+            sidebarWidth: 260,
+          },
+          ...["win-2", "win-3"].map((windowId, index) => ({
+            windowId,
+            selectedRepoId: "repo-1",
+            selectedItemId: `task-${index + 1}`,
+            order: index + 1,
+            sidebarHidden: false,
+            sidebarWidth: 260,
+            geometry: {
+              x: 180 + index * 40,
+              y: 110 + index * 40,
+              width: 1024,
+              height: 768,
+            },
+          })),
+        ],
+      } satisfies WorkspaceSnapshot),
+    );
+    webviewCreatedHarness.handler = async (label) => {
+      if (label === "window-win-2") {
+        createdWindows.find((entry) => entry.label === label)
+          ?.setFocus.mockRejectedValueOnce(focusError);
+      }
+    };
+    const workspace = createWindowWorkspace({
+      db: {} as never,
+      bootstrap: { windowId: "main", selectedRepoId: null, selectedItemId: null },
+    });
+
+    await expect(workspace.restoreAdditionalWindows()).resolves.toBeUndefined();
+
+    expect(createdWindows.map((entry) => entry.label)).toEqual([
+      "window-win-2",
+      "window-win-3",
+    ]);
+    expect(createdWindows[1]?.show).toHaveBeenCalledTimes(1);
+    expect(errorSpy).toHaveBeenCalledWith(
+      "[windowWorkspace] failed to restore window win-2:",
+      focusError,
+    );
+    errorSpy.mockRestore();
+  });
+
+  it("coalesces native move and resize events into one geometry mutation", async () => {
+    vi.useFakeTimers();
+    settingStore.set(
+      WINDOW_WORKSPACE_SETTINGS_KEY,
+      JSON.stringify({
+        windows: [{
+          windowId: "main",
+          selectedRepoId: null,
+          selectedItemId: null,
+          order: 0,
+          sidebarHidden: false,
+          sidebarWidth: 260,
+        }],
+      } satisfies WorkspaceSnapshot),
+    );
+    const workspace = createWindowWorkspace({
+      db: {} as never,
+      bootstrap: { windowId: "main", selectedRepoId: null, selectedItemId: null },
+    });
+    const dispose = await workspace.startGeometryTracking();
+
+    currentWindowHarness.movedHandler?.();
+    currentWindowHarness.resizedHandler?.();
+    await vi.advanceTimersByTimeAsync(150);
+
+    expect(workspaceMutations.filter((mutation) => mutation.operation === "updateGeometry")).toEqual([{
+      operation: "updateGeometry",
+      windowId: "main",
+      geometry: { x: 200, y: 120, width: 1000, height: 740 },
+    }]);
+
+    dispose();
+    expect(currentWindowHarness.unlistenMoved).toHaveBeenCalledTimes(1);
+    expect(currentWindowHarness.unlistenResized).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
   });
 
   it("destroys the native window only after its membership is removed", async () => {
@@ -192,6 +478,7 @@ describe("windowWorkspace in Tauri", () => {
       order: 0,
       sidebarHidden: true,
       sidebarWidth: 347,
+      geometry: null,
     };
     settingStore.set(
       WINDOW_WORKSPACE_SETTINGS_KEY,

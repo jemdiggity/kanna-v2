@@ -12,8 +12,25 @@ const WINDOW_WORKSPACE_SETTINGS_KEY: &str = "window_workspace_v1";
 const DEFAULT_SIDEBAR_WIDTH: i64 = 260;
 const MIN_SIDEBAR_WIDTH: i64 = 220;
 const MAX_SIDEBAR_WIDTH: i64 = 420;
+const MIN_WINDOW_WIDTH: u32 = 800;
+const MIN_WINDOW_HEIGHT: u32 = 600;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceWindowGeometry {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+impl WorkspaceWindowGeometry {
+    fn is_usable(&self) -> bool {
+        self.width >= MIN_WINDOW_WIDTH && self.height >= MIN_WINDOW_HEIGHT
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WorkspaceWindowState {
     window_id: String,
@@ -27,9 +44,11 @@ struct WorkspaceWindowState {
     sidebar_width: i64,
     #[serde(default)]
     order: i64,
+    #[serde(default)]
+    geometry: Option<WorkspaceWindowGeometry>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct WorkspaceSnapshot {
     #[serde(default)]
@@ -52,6 +71,8 @@ pub(super) struct WorkspaceMutationRequest {
     sidebar_hidden: Option<bool>,
     #[serde(default)]
     sidebar_width: Option<i64>,
+    #[serde(default)]
+    geometry: Option<WorkspaceWindowGeometry>,
     #[serde(default)]
     observed_window_ids: Option<Vec<String>>,
     #[serde(default)]
@@ -105,6 +126,7 @@ fn validate_mutation(payload: &WorkspaceMutationRequest) -> Result<(), String> {
         "updateSidebarWidth" if payload.window_id.is_some() && payload.sidebar_width.is_some() => {
             Ok(())
         }
+        "updateGeometry" if payload.window_id.is_some() && payload.geometry.is_some() => Ok(()),
         "remove" if payload.window_id.is_some() => Ok(()),
         operation => Err(format!("invalid window workspace mutation: {operation}")),
     }
@@ -160,6 +182,11 @@ fn apply_mutation(
                 window.sidebar_width = payload.sidebar_width.expect("validated width");
             }
         }
+        "updateGeometry" => {
+            if let Some(window) = find_window_mut(&mut snapshot, payload.window_id.as_deref()) {
+                window.geometry = payload.geometry;
+            }
+        }
         "remove" => {
             let removed_id = payload.window_id.expect("validated window id");
             if let (Some(observed), Some(live)) =
@@ -202,6 +229,13 @@ fn normalize_snapshot(mut snapshot: WorkspaceSnapshot) -> WorkspaceSnapshot {
         if !(MIN_SIDEBAR_WIDTH..=MAX_SIDEBAR_WIDTH).contains(&window.sidebar_width) {
             window.sidebar_width = DEFAULT_SIDEBAR_WIDTH;
         }
+        if window
+            .geometry
+            .as_ref()
+            .is_some_and(|geometry| !geometry.is_usable())
+        {
+            window.geometry = None;
+        }
     }
     snapshot
 }
@@ -218,6 +252,66 @@ mod tests {
     use super::*;
 
     #[test]
+    fn updating_window_geometry_does_not_recreate_missing_windows() {
+        let snapshot = WorkspaceSnapshot {
+            windows: vec![WorkspaceWindowState {
+                window_id: "main".to_string(),
+                selected_repo_id: None,
+                selected_item_id: None,
+                sidebar_hidden: false,
+                sidebar_width: DEFAULT_SIDEBAR_WIDTH,
+                order: 0,
+                geometry: None,
+            }],
+        };
+        let geometry = WorkspaceWindowGeometry {
+            x: 120,
+            y: 90,
+            width: 980,
+            height: 720,
+        };
+
+        let updated = apply_mutation(
+            snapshot,
+            WorkspaceMutationRequest {
+                operation: "updateGeometry".to_string(),
+                window_id: Some("main".to_string()),
+                window: None,
+                selected_repo_id: None,
+                selected_item_id: None,
+                sidebar_hidden: None,
+                sidebar_width: None,
+                geometry: Some(geometry.clone()),
+                observed_window_ids: None,
+                live_window_ids: None,
+            },
+        );
+        assert_eq!(updated.windows[0].geometry.as_ref(), Some(&geometry));
+
+        let replayed = apply_mutation(
+            updated.clone(),
+            WorkspaceMutationRequest {
+                operation: "updateGeometry".to_string(),
+                window_id: Some("missing".to_string()),
+                window: None,
+                selected_repo_id: None,
+                selected_item_id: None,
+                sidebar_hidden: None,
+                sidebar_width: None,
+                geometry: Some(WorkspaceWindowGeometry {
+                    x: 0,
+                    y: 0,
+                    width: 1200,
+                    height: 800,
+                }),
+                observed_window_ids: None,
+                live_window_ids: None,
+            },
+        );
+        assert_eq!(replayed, updated);
+    }
+
+    #[test]
     fn updating_a_missing_window_does_not_recreate_it() {
         let snapshot = WorkspaceSnapshot {
             windows: vec![WorkspaceWindowState {
@@ -227,6 +321,7 @@ mod tests {
                 sidebar_hidden: false,
                 sidebar_width: DEFAULT_SIDEBAR_WIDTH,
                 order: 0,
+                geometry: None,
             }],
         };
 
@@ -240,6 +335,7 @@ mod tests {
                 selected_item_id: None,
                 sidebar_hidden: None,
                 sidebar_width: None,
+                geometry: None,
                 observed_window_ids: None,
                 live_window_ids: None,
             },
@@ -259,6 +355,7 @@ mod tests {
                 sidebar_hidden: false,
                 sidebar_width: DEFAULT_SIDEBAR_WIDTH,
                 order: 0,
+                geometry: None,
             }],
         };
 
@@ -272,11 +369,13 @@ mod tests {
                 sidebar_hidden: true,
                 sidebar_width: 347,
                 order: 0,
+                geometry: None,
             }),
             selected_repo_id: None,
             selected_item_id: None,
             sidebar_hidden: None,
             sidebar_width: None,
+            geometry: None,
             observed_window_ids: None,
             live_window_ids: None,
         };
@@ -310,11 +409,13 @@ mod tests {
                     sidebar_hidden: false,
                     sidebar_width: DEFAULT_SIDEBAR_WIDTH,
                     order: 0,
+                    geometry: None,
                 }),
                 selected_repo_id: None,
                 selected_item_id: None,
                 sidebar_hidden: None,
                 sidebar_width: None,
+                geometry: None,
                 observed_window_ids: None,
                 live_window_ids: None,
             },
@@ -334,6 +435,7 @@ mod tests {
             sidebar_hidden: false,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             order,
+            geometry: None,
         };
         let snapshot = WorkspaceSnapshot {
             windows: vec![
@@ -353,6 +455,7 @@ mod tests {
                 selected_item_id: None,
                 sidebar_hidden: None,
                 sidebar_width: None,
+                geometry: None,
                 observed_window_ids: Some(vec!["main".to_string(), "window-2".to_string()]),
                 live_window_ids: Some(vec!["main".to_string(), "window-2".to_string()]),
             },

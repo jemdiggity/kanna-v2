@@ -273,6 +273,11 @@ export function useAppLifecycle({
       finishWindowMembershipInitialization();
     }
     if (currentWindowClosePhase !== "open") return;
+    try {
+      appUnlisteners.push(await windowWorkspace.startGeometryTracking());
+    } catch (error: unknown) {
+      console.warn("[App] native window geometry tracking unavailable:", error);
+    }
 
     appUpdate.start();
     window.addEventListener("dragenter", suppressFileDropNavigation);
