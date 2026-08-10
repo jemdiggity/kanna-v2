@@ -231,6 +231,7 @@ class BurstTerminal {
   options: { fontSize: number; smoothScrollDuration?: number; wordSeparator?: string };
   resets = 0;
   writes: unknown[] = [];
+  private readonly deferredWriteCallbacks: Array<() => void> = [];
   dimensions = {
     css: { cell: { width: 9, height: 18 } }
   };
@@ -254,11 +255,14 @@ class BurstTerminal {
     alternate: this.alternateBuffer
   };
 
-  constructor(options: {
-    cols: number;
-    fontSize: number;
-    smoothScrollDuration?: number;
-  }) {
+  constructor(
+    options: {
+      cols: number;
+      fontSize: number;
+      smoothScrollDuration?: number;
+    },
+    private readonly deferWrites = false
+  ) {
     this.cols = options.cols;
     this.options = {
       fontSize: options.fontSize,
@@ -344,7 +348,15 @@ class BurstTerminal {
     this.normalBuffer.length += Math.max(1, addedLines);
     this.normalBuffer.baseY = Math.max(0, this.normalBuffer.length - this.rows);
     this.normalBuffer.viewportY = this.normalBuffer.baseY;
-    done?.();
+    if (done && this.deferWrites) {
+      this.deferredWriteCallbacks.push(done);
+    } else {
+      done?.();
+    }
+  }
+
+  flushNextWrite(): void {
+    this.deferredWriteCallbacks.shift()?.();
   }
 
   reset(): void {
@@ -365,7 +377,9 @@ function extractTerminalScript(html: string): string {
   return scripts.at(-1) ?? "";
 }
 
-function createBurstTerminalDocument(): {
+function createBurstTerminalDocument(
+  documentOptions: { deferWrites?: boolean } = {}
+): {
   terminal: BurstTerminal;
   window: Window & typeof globalThis;
 } {
@@ -393,7 +407,7 @@ function createBurstTerminalDocument(): {
       fontSize: number;
       smoothScrollDuration?: number;
     }) {
-      super(options);
+      super(options, documentOptions.deferWrites ?? false);
       terminal = this;
     }
   };
@@ -1517,6 +1531,41 @@ describe("TerminalWebView", () => {
     expect(bridge.terminal.resets).toBe(1);
     expect(bridge.terminal.writes).toHaveLength(writesAtReady + frameCount);
     expect(terminalOutputSource.subscribe).toHaveBeenCalledOnce();
+  });
+
+  it("finishes snapshot replay before writing live output that arrives during it", () => {
+    const bridge = createBurstTerminalDocument({ deferWrites: true });
+    const snapshot = [
+      Buffer.from("SNAPSHOT_START\r\n").toString("base64"),
+      Buffer.from("SNAPSHOT_END\r\n").toString("base64")
+    ].join("\n");
+    const liveOutput = `${Buffer.from(
+      "USER_INPUT\r\nAGENT_RESPONSE\r\n"
+    ).toString("base64")}\n`;
+
+    bridge.window.eval(
+      buildTerminalReplaceScript({
+        contentRevision: 1,
+        output: snapshot,
+        status: "live"
+      })
+    );
+    bridge.window.eval(buildTerminalAppendScript(liveOutput));
+
+    expect(bridge.terminal.writes).toHaveLength(1);
+    expect(burstTerminalText(bridge.terminal)).toBe("SNAPSHOT_START\r\n");
+
+    bridge.terminal.flushNextWrite();
+    expect(bridge.terminal.writes).toHaveLength(2);
+    expect(burstTerminalText(bridge.terminal)).toBe(
+      "SNAPSHOT_START\r\nSNAPSHOT_END\r\n"
+    );
+
+    bridge.terminal.flushNextWrite();
+    expect(bridge.terminal.writes).toHaveLength(3);
+    expect(burstTerminalText(bridge.terminal)).toBe(
+      "SNAPSHOT_START\r\nSNAPSHOT_END\r\nUSER_INPUT\r\nAGENT_RESPONSE\r\n"
+    );
   });
 
   it("does not roll back a direct source frame when stale prop effects run", async () => {
