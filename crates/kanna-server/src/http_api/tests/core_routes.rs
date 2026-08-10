@@ -102,6 +102,29 @@ async fn privileged_settings_and_reconnect_reject_real_unauthenticated_non_loopb
                 .unwrap(),
             reqwest::StatusCode::UNAUTHORIZED,
         ),
+        (
+            client
+                .get(format!("{base_url}/v1/cloud/desktops"))
+                .send()
+                .await
+                .unwrap(),
+            reqwest::StatusCode::UNAUTHORIZED,
+        ),
+        (
+            client
+                .post(format!(
+                    "{base_url}/v1/cloud/desktops/desktop-target/invoke"
+                ))
+                .json(&serde_json::json!({
+                    "method": "GET",
+                    "path": "/v1/tasks/recent",
+                    "body": null
+                }))
+                .send()
+                .await
+                .unwrap(),
+            reqwest::StatusCode::UNAUTHORIZED,
+        ),
     ] {
         assert_eq!(response.status(), expected);
     }
@@ -346,6 +369,90 @@ async fn list_desktops_route_returns_configured_desktop() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn cloud_desktop_listing_keeps_local_machine_when_relay_is_unavailable() {
+    let app = super::test_router("desktop-local-only", "Local Mac");
+    let mut request = Request::get("/v1/cloud/desktops")
+        .body(Body::empty())
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            49152,
+        ))));
+    let response = app.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let listing: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(listing["currentMachineId"], "desktop-local-only");
+    assert_eq!(listing["relayAvailable"], false);
+    assert_eq!(listing["machines"][0]["id"], "desktop-local-only");
+    assert_eq!(listing["machines"][0]["isLocal"], true);
+}
+
+#[tokio::test]
+async fn cloud_desktop_invoke_crosses_the_server_relay_queue() {
+    let state = super::test_state_with_seed("desktop-source", "Source Mac", |_| {});
+    let mut requests = state.take_desktop_relay_requests().unwrap();
+    state.set_desktop_routing_available(true);
+    let responder = tokio::spawn(async move {
+        let request = requests.recv().await.expect("desktop relay request");
+        let super::super::state::DesktopRelayRequest::Invoke {
+            generation: _,
+            desktop_id,
+            method,
+            path,
+            body,
+            response,
+        } = request
+        else {
+            panic!("expected invoke request");
+        };
+        assert_eq!(desktop_id, "desktop-target");
+        assert_eq!(method, "GET");
+        assert_eq!(path, "/v1/tasks/recent");
+        assert!(body.is_null());
+        response
+            .send(Ok(crate::http_api::HttpInvokeResponse {
+                status: 200,
+                body: Some(serde_json::json!([{ "id": "remote-task" }])),
+                error: None,
+            }))
+            .unwrap();
+    });
+    let app = crate::http_api::router(state);
+    let mut request = Request::post("/v1/cloud/desktops/desktop-target/invoke")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "method": "GET",
+                "path": "/v1/tasks/recent",
+                "body": null,
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            49152,
+        ))));
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let invoked: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(invoked["status"], 200);
+    assert_eq!(invoked["body"][0]["id"], "remote-task");
+    responder.await.unwrap();
 }
 
 #[tokio::test]

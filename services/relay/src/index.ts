@@ -361,6 +361,9 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
             mobileNotifications: {
               version: 1,
             },
+            desktopRouting: {
+              version: 1,
+            },
           } : {}),
         },
       }));

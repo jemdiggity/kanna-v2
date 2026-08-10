@@ -57,6 +57,8 @@ pub struct RelayCapabilities {
     pub task_snapshot_publication: Option<TaskSnapshotPublicationCapability>,
     #[serde(default)]
     pub mobile_notifications: Option<MobileNotificationsCapability>,
+    #[serde(default)]
+    pub desktop_routing: Option<DesktopRoutingCapability>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -66,6 +68,11 @@ pub struct TaskSnapshotPublicationCapability {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MobileNotificationsCapability {
+    pub version: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DesktopRoutingCapability {
     pub version: u64,
 }
 
@@ -102,6 +109,8 @@ pub enum RelayMessage {
     #[serde(rename = "invoke")]
     Invoke {
         id: RelayId,
+        #[serde(rename = "desktopId", skip_serializing_if = "Option::is_none")]
+        desktop_id: Option<String>,
         #[serde(flatten)]
         request: RelayInvoke,
     },
@@ -399,7 +408,7 @@ mod tests {
         }))
         .expect("HTTP-style relay invoke should deserialize");
 
-        let super::RelayMessage::Invoke { id, request } = invoke else {
+        let super::RelayMessage::Invoke { id, request, .. } = invoke else {
             panic!("expected invoke message");
         };
         let super::RelayInvoke::Http { method, path, body } = request else {

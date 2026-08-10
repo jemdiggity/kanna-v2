@@ -1,11 +1,13 @@
+use base64::Engine;
 use clap::{Parser, Subcommand};
 use kanna_tool_catalog::{
     clamp_wait_timeout_secs, encode_path_segment, load_catalog, resolve_request,
     runtime_info_snapshot, wait_resolved_result, wait_timeout_result, Catalog, Method,
-    ResolvedRequest, ResponseKind, RuntimeAdapterIdentity, WaitUntil,
+    ResolvedRequest, ResponseKind, RuntimeAdapterIdentity, WaitUntil, DEFAULT_WAIT_TIMEOUT_SECS,
 };
-use serde::de::DeserializeOwned;
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::env;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -15,6 +17,37 @@ use std::time::{Duration, SystemTime};
 
 const DEFAULT_SERVER_BASE_URL: &str = "http://127.0.0.1:48120";
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
+const MACHINE_ID_ARG: &str = "machine_id";
+const MULTI_MACHINE_CURSOR_PREFIX: &str = "km1.";
+const MAX_MULTI_MACHINE_CURSOR_LEN: usize = 64 * 1024;
+const MULTI_MACHINE_WAIT_SESSION_TTL: Duration = Duration::from_secs(10 * 60);
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MultiMachineCursor {
+    local_machine_id: String,
+    task_ids_by_machine: BTreeMap<String, Vec<String>>,
+    cursors_by_machine: BTreeMap<String, String>,
+}
+
+struct MachineWaitCompletion {
+    machine_id: String,
+    result: Result<Value, String>,
+}
+
+struct MultiMachineWaitSession {
+    cursor: MultiMachineCursor,
+    pending: tokio::task::JoinSet<MachineWaitCompletion>,
+    pending_machines: HashSet<String>,
+    last_touched: tokio::time::Instant,
+}
+
+#[derive(Default)]
+struct MultiMachineWaitRegistry {
+    sessions: HashMap<String, MultiMachineWaitSession>,
+}
+
+type SharedMultiMachineWaits = Arc<Mutex<MultiMachineWaitRegistry>>;
 
 #[derive(Parser)]
 #[command(name = "kanna-mcp")]
@@ -87,7 +120,54 @@ fn mcp_tool_error_result(id: Value, message: String) -> Value {
 
 type SharedCatalog = Arc<RwLock<Catalog>>;
 
-async fn handle_mcp_request(message: Value, base_url: &str, catalog: &SharedCatalog) -> Value {
+fn mcp_tools_list_value(catalog: &Catalog) -> Value {
+    let mut tools = catalog.tools_list_value();
+    let Some(entries) = tools.as_array_mut() else {
+        return tools;
+    };
+    for entry in entries.iter_mut() {
+        if let Some(properties) = entry
+            .get_mut("inputSchema")
+            .and_then(|schema| schema.get_mut("properties"))
+            .and_then(Value::as_object_mut)
+        {
+            properties.insert(
+                MACHINE_ID_ARG.to_string(),
+                serde_json::json!({
+                    "type": "string",
+                    "description": "Machine id from kanna_list_machines. Omit to use the local machine connected to this MCP process."
+                }),
+            );
+        }
+        if entry.get("name").and_then(Value::as_str) == Some("kanna_wait_events") {
+            entry["inputSchema"]["properties"][MACHINE_ID_ARG]["description"] = Value::String(
+                "Pin the entire wait to one machine. Omit with task_ids to discover and wait across every owning machine; parent_task_id and repo_id use the local machine when omitted."
+                    .to_string(),
+            );
+            entry["description"] = Value::String(format!(
+                "{} When task_ids is supplied without machine_id, those tasks may live on different currently reachable machines: kanna-mcp discovers each owner, waits on all owners concurrently, tags every event with machineId, and returns one aggregate opaque cursor. Pass that cursor back unchanged. A machine_id pins the entire wait to one machine. parent_task_id and repo_id remain machine-scoped and use the local machine unless machine_id is supplied.",
+                entry.get("description").and_then(Value::as_str).unwrap_or_default()
+            ));
+        }
+    }
+    entries.insert(
+        1.min(entries.len()),
+        serde_json::json!({
+            "name": "kanna_list_machines",
+            "description": "List the current Kanna machine and every sibling machine currently reachable through the signed-in account's relay connection. Use the returned machine id as machine_id on another MCP tool to read or mutate that machine. The local machine is always returned; relayAvailable and error explain whether remote discovery is currently available.",
+            "inputSchema": { "type": "object", "properties": {} },
+            "annotations": { "readOnlyHint": true }
+        }),
+    );
+    tools
+}
+
+async fn handle_mcp_request(
+    message: Value,
+    base_url: &str,
+    catalog: &SharedCatalog,
+    multi_machine_waits: &SharedMultiMachineWaits,
+) -> Value {
     let id = message.get("id").cloned().unwrap_or(Value::Null);
     let Some(method) = message.get("method").and_then(Value::as_str) else {
         return mcp_error(id, -32600, "missing method");
@@ -109,7 +189,7 @@ async fn handle_mcp_request(message: Value, base_url: &str, catalog: &SharedCata
         "tools/list" => match catalog.read() {
             Ok(catalog) => mcp_response(
                 id,
-                serde_json::json!({ "tools": catalog.tools_list_value() }),
+                serde_json::json!({ "tools": mcp_tools_list_value(&catalog) }),
             ),
             Err(_) => mcp_error(id, -32603, "catalog lock poisoned"),
         },
@@ -125,7 +205,7 @@ async fn handle_mcp_request(message: Value, base_url: &str, catalog: &SharedCata
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!({}));
-            match handle_mcp_tool_call(base_url, catalog, name, args).await {
+            match handle_mcp_tool_call(base_url, catalog, multi_machine_waits, name, args).await {
                 Ok(value) => mcp_response(
                     id,
                     serde_json::json!({
@@ -229,19 +309,22 @@ async fn confirm_stopped_activity(
     base_url: &str,
     path: &str,
     value: Value,
+    machine_id: Option<&str>,
 ) -> Result<Value, String> {
     if !response_looks_stopped(&value) {
         return Ok(value);
     }
     tokio::time::sleep(ACTIVITY_CONFIRM_DELAY).await;
-    get_json::<Value>(base_url, path).await.map_err(|error| {
-        format!(
+    get_routed_json(base_url, path, machine_id)
+        .await
+        .map_err(|error| {
+            format!(
             "a task read as stopped and the confirming re-read of {path} failed, so it was not \
              reported: {error}. kanna-mcp never reports a stop it could not confirm, because the \
              daemon's per-frame classifier can report a working agent as idle for one frame. \
              Call the tool again."
         )
-    })
+        })
 }
 
 fn task_matches_wait_until(task: &Value, until: WaitUntil) -> bool {
@@ -330,6 +413,104 @@ async fn get_runtime_status(base_url: &str, path: &str) -> Result<Value, String>
         .map_err(|error| format!("GET {path} returned invalid JSON: {}", error.without_url()))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MachineInvokeResponse {
+    status: u16,
+    body: Option<Value>,
+    error: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MachineListResponse {
+    current_machine_id: String,
+    relay_available: bool,
+    machines: Vec<MachineDescriptor>,
+    error: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct MachineDescriptor {
+    id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalMachineIdentity {
+    desktop_id: String,
+}
+
+fn method_name(method: Method) -> &'static str {
+    match method {
+        Method::Get => "GET",
+        Method::Post => "POST",
+        Method::Patch => "PATCH",
+    }
+}
+
+async fn invoke_machine(
+    base_url: &str,
+    machine_id: &str,
+    method: Method,
+    path: &str,
+    body: &Value,
+) -> Result<Value, String> {
+    let response = invoke_machine_response(base_url, machine_id, method, path, body).await?;
+    if !(200..300).contains(&response.status) {
+        return Err(format!(
+            "{} {} on machine {} failed with status {}: {}",
+            method_name(method),
+            path,
+            machine_id,
+            response.status,
+            response.error.unwrap_or_else(|| response
+                .body
+                .as_ref()
+                .map(Value::to_string)
+                .unwrap_or_default())
+        ));
+    }
+    Ok(response.body.unwrap_or(Value::Null))
+}
+
+async fn invoke_machine_response(
+    base_url: &str,
+    machine_id: &str,
+    method: Method,
+    path: &str,
+    body: &Value,
+) -> Result<MachineInvokeResponse, String> {
+    let proxy_path = format!(
+        "/v1/cloud/desktops/{}/invoke",
+        encode_path_segment(machine_id)
+    );
+    let response: MachineInvokeResponse = post_json(
+        base_url,
+        &proxy_path,
+        &serde_json::json!({
+            "method": method_name(method),
+            "path": path,
+            "body": body,
+        }),
+    )
+    .await?;
+    Ok(response)
+}
+
+async fn get_routed_json(
+    base_url: &str,
+    path: &str,
+    machine_id: Option<&str>,
+) -> Result<Value, String> {
+    match machine_id {
+        Some(machine_id) => {
+            invoke_machine(base_url, machine_id, Method::Get, path, &Value::Null).await
+        }
+        None => get_json(base_url, path).await,
+    }
+}
+
 /// Waits are bounded by `clamp_wait_timeout_secs` and hand back the task's
 /// latest detail when the window elapses, so the answer always reaches the
 /// agent inside its client's tools/call budget instead of being killed there.
@@ -339,13 +520,14 @@ async fn wait_task(
     timeout_secs: u64,
     poll_secs: u64,
     until: WaitUntil,
+    machine_id: Option<&str>,
 ) -> Result<Value, String> {
     let timeout_secs = clamp_wait_timeout_secs(timeout_secs);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
     let poll_interval = Duration::from_secs(poll_secs.max(1));
     let path = format!("/v1/tasks/{}", encode_path_segment(task_id));
     loop {
-        let task: Value = get_json(base_url, &path).await?;
+        let task = get_routed_json(base_url, &path, machine_id).await?;
         // A `Finished` match is read off `activity`, which the daemon writes per
         // frame, so it is confirmed exactly like a task read before the caller
         // is told its child stopped. A `Closed` match is a database fact and is
@@ -354,7 +536,7 @@ async fn wait_task(
         // at all, the `?` fails the call rather than resolving the wait on an
         // unconfirmed stop.
         let task = if task_matches_wait_until(&task, until) {
-            let task = confirm_stopped_activity(base_url, &path, task).await?;
+            let task = confirm_stopped_activity(base_url, &path, task, machine_id).await?;
             if task_matches_wait_until(&task, until) {
                 return Ok(wait_resolved_result(task));
             }
@@ -394,20 +576,591 @@ async fn post_json<T: DeserializeOwned>(
         .map_err(|e| format!("POST {path} returned invalid JSON: {e}"))
 }
 
+async fn patch_json<T: DeserializeOwned>(
+    base_url: &str,
+    path: &str,
+    body: &Value,
+) -> Result<T, String> {
+    let response = reqwest::Client::new()
+        .patch(join_server_url(base_url, path))
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| format!("PATCH {path} failed: {e}"))?;
+    let response = require_success("PATCH", path, response).await?;
+    response
+        .json::<T>()
+        .await
+        .map_err(|e| format!("PATCH {path} returned invalid JSON: {e}"))
+}
+
+fn encode_multi_machine_cursor(cursor: &MultiMachineCursor) -> Result<String, String> {
+    let bytes = serde_json::to_vec(cursor)
+        .map_err(|error| format!("failed to encode multi-machine event cursor: {error}"))?;
+    let encoded = format!(
+        "{MULTI_MACHINE_CURSOR_PREFIX}{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+    );
+    if encoded.len() > MAX_MULTI_MACHINE_CURSOR_LEN {
+        return Err("multi-machine event cursor exceeds the 64 KiB safety limit".to_string());
+    }
+    Ok(encoded)
+}
+
+fn decode_multi_machine_cursor(value: &str) -> Result<Option<MultiMachineCursor>, String> {
+    let Some(encoded) = value.strip_prefix(MULTI_MACHINE_CURSOR_PREFIX) else {
+        return Ok(None);
+    };
+    if value.len() > MAX_MULTI_MACHINE_CURSOR_LEN {
+        return Err("multi-machine event cursor is too large".to_string());
+    }
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|_| "cursor is not a valid multi-machine event cursor".to_string())?;
+    let cursor: MultiMachineCursor = serde_json::from_slice(&bytes)
+        .map_err(|_| "cursor is not a valid multi-machine event cursor".to_string())?;
+    if cursor.local_machine_id.trim().is_empty()
+        || cursor.task_ids_by_machine.is_empty()
+        || cursor
+            .task_ids_by_machine
+            .iter()
+            .any(|(machine_id, task_ids)| machine_id.trim().is_empty() || task_ids.is_empty())
+        || cursor
+            .cursors_by_machine
+            .keys()
+            .any(|machine_id| !cursor.task_ids_by_machine.contains_key(machine_id))
+        || cursor
+            .task_ids_by_machine
+            .values()
+            .map(Vec::len)
+            .sum::<usize>()
+            != cursor_task_ids(&cursor).len()
+    {
+        return Err("cursor is not a valid multi-machine event cursor".to_string());
+    }
+    Ok(Some(cursor))
+}
+
+fn normalized_task_ids(args: &Value) -> Result<Vec<String>, String> {
+    let values = args
+        .get("task_ids")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "task_ids must be an array of strings".to_string())?;
+    let mut task_ids = BTreeSet::new();
+    for value in values {
+        let task_id = value
+            .as_str()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "task_ids must contain only non-empty strings".to_string())?;
+        task_ids.insert(task_id.to_string());
+    }
+    if task_ids.is_empty() {
+        return Err("task_ids must contain at least one task id".to_string());
+    }
+    Ok(task_ids.into_iter().collect())
+}
+
+fn cursor_task_ids(cursor: &MultiMachineCursor) -> Vec<String> {
+    cursor
+        .task_ids_by_machine
+        .values()
+        .flatten()
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+async fn probe_task_on_machine(
+    base_url: &str,
+    machine_id: &str,
+    local_machine_id: &str,
+    task_id: &str,
+) -> Result<bool, String> {
+    let path = format!("/v1/tasks/{}", encode_path_segment(task_id));
+    if machine_id != local_machine_id {
+        let response =
+            invoke_machine_response(base_url, machine_id, Method::Get, &path, &Value::Null).await?;
+        return match response.status {
+            200..=299 => Ok(true),
+            404 => Ok(false),
+            status => Err(format!(
+                "GET {path} on machine {machine_id} failed with status {status}: {}",
+                response.error.unwrap_or_else(|| response
+                    .body
+                    .map(|body| body.to_string())
+                    .unwrap_or_default())
+            )),
+        };
+    }
+
+    let response = reqwest::Client::new()
+        .get(join_server_url(base_url, &path))
+        .send()
+        .await
+        .map_err(|error| format!("GET {path} failed: {error}"))?;
+    match response.status().as_u16() {
+        200..=299 => Ok(true),
+        404 => Ok(false),
+        status => {
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|error| format!("failed to read error body: {error}"));
+            Err(format!("GET {path} failed with status {status}: {body}"))
+        }
+    }
+}
+
+async fn discover_task_owners(
+    base_url: &str,
+    task_ids: &[String],
+) -> Result<MultiMachineCursor, String> {
+    // Resolve and probe the local server without touching the relay. An
+    // all-local fan-out should stay just as cheap and reliable as it was before
+    // cross-machine fan-in existed; sibling discovery is needed only for ids
+    // that the local database does not own.
+    let identity: LocalMachineIdentity = get_json(base_url, "/v1/status").await?;
+    let local_machine_id = identity.desktop_id;
+    let mut task_ids_by_machine: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut missing = Vec::new();
+
+    let mut local_probes = tokio::task::JoinSet::new();
+    for task_id in task_ids {
+        let base_url = base_url.to_string();
+        let machine_id = local_machine_id.clone();
+        let task_id = task_id.clone();
+        local_probes.spawn(async move {
+            let result = probe_task_on_machine(&base_url, &machine_id, &machine_id, &task_id).await;
+            (task_id, result)
+        });
+    }
+    while let Some(probe) = local_probes.join_next().await {
+        let (task_id, found) = probe.map_err(|error| format!("task probe failed: {error}"))?;
+        if found? {
+            task_ids_by_machine
+                .entry(local_machine_id.clone())
+                .or_default()
+                .push(task_id);
+        } else {
+            missing.push(task_id);
+        }
+    }
+
+    if !missing.is_empty() {
+        let machines: MachineListResponse = get_json(base_url, "/v1/cloud/desktops").await?;
+        if machines.current_machine_id != local_machine_id {
+            return Err(format!(
+                "local machine identity changed during task discovery ({} became {})",
+                local_machine_id, machines.current_machine_id
+            ));
+        }
+        let remote_machine_ids = machines
+            .machines
+            .into_iter()
+            .map(|machine| machine.id)
+            .filter(|machine_id| machine_id != &local_machine_id)
+            .collect::<Vec<_>>();
+        if remote_machine_ids.is_empty() {
+            let relay_detail = if machines.relay_available {
+                "no sibling machines are currently reachable".to_string()
+            } else {
+                machines
+                    .error
+                    .map(|error| format!("relay discovery is unavailable: {error}"))
+                    .unwrap_or_else(|| "relay discovery is unavailable".to_string())
+            };
+            return Err(format!(
+                "could not find task ids on the local machine and {relay_detail}: {}",
+                missing.join(", ")
+            ));
+        }
+
+        let mut remote_probes = tokio::task::JoinSet::new();
+        for machine_id in &remote_machine_ids {
+            let base_url = base_url.to_string();
+            let local_machine_id = local_machine_id.clone();
+            let machine_id = machine_id.clone();
+            let task_ids = missing.clone();
+            remote_probes.spawn(async move {
+                let mut results = Vec::new();
+                for task_id in task_ids {
+                    let result =
+                        probe_task_on_machine(&base_url, &machine_id, &local_machine_id, &task_id)
+                            .await;
+                    results.push((task_id, result));
+                }
+                (machine_id, results)
+            });
+        }
+
+        let mut owners: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut probe_errors = Vec::new();
+        while let Some(probe) = remote_probes.join_next().await {
+            let (machine_id, results) =
+                probe.map_err(|error| format!("task probe failed: {error}"))?;
+            for (task_id, found) in results {
+                match found {
+                    Ok(true) => owners.entry(task_id).or_default().push(machine_id.clone()),
+                    Ok(false) => {}
+                    Err(error) => probe_errors.push(error),
+                }
+            }
+        }
+
+        let unresolved = missing
+            .iter()
+            .filter(|task_id| !owners.contains_key(*task_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !unresolved.is_empty() {
+            let errors = if probe_errors.is_empty() {
+                String::new()
+            } else {
+                format!(" Machine probe errors: {}", probe_errors.join("; "))
+            };
+            return Err(format!(
+                "could not find task ids on any currently reachable machine: {}.{errors}",
+                unresolved.join(", ")
+            ));
+        }
+        for (task_id, machine_owners) in owners {
+            if machine_owners.len() != 1 {
+                return Err(format!(
+                    "task id {task_id} exists on multiple reachable machines: {}",
+                    machine_owners.join(", ")
+                ));
+            }
+            task_ids_by_machine
+                .entry(machine_owners[0].clone())
+                .or_default()
+                .push(task_id);
+        }
+    }
+
+    for grouped_ids in task_ids_by_machine.values_mut() {
+        grouped_ids.sort();
+    }
+    Ok(MultiMachineCursor {
+        local_machine_id,
+        task_ids_by_machine,
+        cursors_by_machine: BTreeMap::new(),
+    })
+}
+
+fn spawn_machine_event_wait(
+    session: &mut MultiMachineWaitSession,
+    base_url: &str,
+    catalog: &SharedCatalog,
+    args: &Value,
+    machine_id: &str,
+    timeout_secs: u64,
+) -> Result<(), String> {
+    let task_ids = session
+        .cursor
+        .task_ids_by_machine
+        .get(machine_id)
+        .ok_or_else(|| format!("missing task scope for machine {machine_id}"))?;
+    let mut machine_args = args
+        .as_object()
+        .cloned()
+        .ok_or_else(|| "tool arguments must be a JSON object".to_string())?;
+    machine_args.insert(
+        "task_ids".to_string(),
+        Value::Array(task_ids.iter().cloned().map(Value::String).collect()),
+    );
+    machine_args.insert("timeout_secs".to_string(), Value::from(timeout_secs));
+    match session.cursor.cursors_by_machine.get(machine_id) {
+        Some(cursor) => {
+            machine_args.insert("cursor".to_string(), Value::String(cursor.clone()));
+        }
+        None => {
+            machine_args.remove("cursor");
+        }
+    }
+    let request = {
+        let catalog = catalog
+            .read()
+            .map_err(|_| "catalog lock poisoned".to_string())?;
+        resolve_request(&catalog, "kanna_wait_events", &Value::Object(machine_args))?
+    };
+    let base_url = base_url.to_string();
+    let routed_machine_id =
+        (machine_id != session.cursor.local_machine_id).then(|| machine_id.to_string());
+    let completed_machine_id = machine_id.to_string();
+    session.pending.spawn(async move {
+        let result = get_routed_json(&base_url, &request.path, routed_machine_id.as_deref()).await;
+        MachineWaitCompletion {
+            machine_id: completed_machine_id,
+            result,
+        }
+    });
+    session.pending_machines.insert(machine_id.to_string());
+    Ok(())
+}
+
+fn apply_machine_wait_completion(
+    session: &mut MultiMachineWaitSession,
+    completion: MachineWaitCompletion,
+    events: &mut Vec<Value>,
+    errors: &mut Vec<Value>,
+    failed_machines: &mut HashSet<String>,
+    completed_machines: &mut HashSet<String>,
+    has_more: &mut bool,
+) -> Result<(), String> {
+    session.pending_machines.remove(&completion.machine_id);
+    completed_machines.insert(completion.machine_id.clone());
+    let response = match completion.result {
+        Ok(response) => response,
+        Err(error) => {
+            failed_machines.insert(completion.machine_id.clone());
+            errors.push(serde_json::json!({
+                "machineId": completion.machine_id,
+                "error": error,
+            }));
+            return Ok(());
+        }
+    };
+    let cursor = response
+        .get("cursor")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            format!(
+                "machine {} returned a task-event response without a cursor",
+                completion.machine_id
+            )
+        })?;
+    session
+        .cursor
+        .cursors_by_machine
+        .insert(completion.machine_id.clone(), cursor.to_string());
+    *has_more |= response
+        .get("hasMore")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let machine_events = response
+        .get("events")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            format!(
+                "machine {} returned a task-event response without an events array",
+                completion.machine_id
+            )
+        })?;
+    for event in machine_events {
+        let mut event = event.as_object().cloned().ok_or_else(|| {
+            format!(
+                "machine {} returned an invalid event",
+                completion.machine_id
+            )
+        })?;
+        event.insert(
+            "machineId".to_string(),
+            Value::String(completion.machine_id.clone()),
+        );
+        events.push(Value::Object(event));
+    }
+    Ok(())
+}
+
+async fn wait_events_across_machines(
+    base_url: &str,
+    catalog: &SharedCatalog,
+    registry: &SharedMultiMachineWaits,
+    args: Value,
+) -> Result<Value, String> {
+    {
+        let catalog = catalog
+            .read()
+            .map_err(|_| "catalog lock poisoned".to_string())?;
+        resolve_request(&catalog, "kanna_wait_events", &args)?;
+    }
+    let task_ids = normalized_task_ids(&args)?;
+    let supplied_cursor = args.get("cursor").and_then(Value::as_str);
+    let decoded_cursor = match supplied_cursor {
+        Some(cursor) => decode_multi_machine_cursor(cursor)?,
+        None => None,
+    };
+    let mut cursor = match decoded_cursor {
+        Some(cursor) => {
+            if cursor_task_ids(&cursor) != task_ids {
+                return Err("cursor belongs to a different task_ids scope".to_string());
+            }
+            cursor
+        }
+        None => discover_task_owners(base_url, &task_ids).await?,
+    };
+    if let Some(native_cursor) = supplied_cursor.filter(|_| {
+        !args
+            .get("cursor")
+            .and_then(Value::as_str)
+            .is_some_and(|cursor| cursor.starts_with(MULTI_MACHINE_CURSOR_PREFIX))
+    }) {
+        if cursor
+            .task_ids_by_machine
+            .contains_key(&cursor.local_machine_id)
+        {
+            cursor
+                .cursors_by_machine
+                .insert(cursor.local_machine_id.clone(), native_cursor.to_string());
+        }
+    }
+    let input_cursor_key = encode_multi_machine_cursor(&cursor)?;
+    let mut session = {
+        let mut registry = registry
+            .lock()
+            .map_err(|_| "multi-machine wait registry lock poisoned".to_string())?;
+        let now = tokio::time::Instant::now();
+        registry.sessions.retain(|_, session| {
+            now.duration_since(session.last_touched) <= MULTI_MACHINE_WAIT_SESSION_TTL
+        });
+        registry
+            .sessions
+            .remove(&input_cursor_key)
+            .unwrap_or_else(|| MultiMachineWaitSession {
+                cursor,
+                pending: tokio::task::JoinSet::new(),
+                pending_machines: HashSet::new(),
+                last_touched: now,
+            })
+    };
+    let inherited_pending = !session.pending_machines.is_empty();
+
+    let timeout_secs = clamp_wait_timeout_secs(
+        args.get("timeout_secs")
+            .and_then(Value::as_u64)
+            .unwrap_or(DEFAULT_WAIT_TIMEOUT_SECS),
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+    let mut events = Vec::new();
+    let mut errors = Vec::new();
+    let mut failed_machines = HashSet::new();
+    let mut completed_machines = HashSet::new();
+    let mut has_more = false;
+
+    loop {
+        let remaining_secs = if timeout_secs == 0 {
+            0
+        } else {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            remaining
+                .as_secs()
+                .saturating_add(u64::from(remaining.subsec_nanos() > 0))
+                .max(1)
+        };
+        let machines_to_start = session
+            .cursor
+            .task_ids_by_machine
+            .keys()
+            .filter(|machine_id| {
+                !(session.pending_machines.contains(*machine_id)
+                    || failed_machines.contains(*machine_id)
+                    || timeout_secs == 0 && completed_machines.contains(*machine_id))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for machine_id in machines_to_start {
+            spawn_machine_event_wait(
+                &mut session,
+                base_url,
+                catalog,
+                &args,
+                &machine_id,
+                remaining_secs,
+            )?;
+        }
+
+        let joined = if timeout_secs == 0 && inherited_pending {
+            session.pending.try_join_next()
+        } else if timeout_secs == 0 {
+            session.pending.join_next().await
+        } else {
+            tokio::time::timeout_at(deadline, session.pending.join_next())
+                .await
+                .unwrap_or_default()
+        };
+        let Some(joined) = joined else {
+            break;
+        };
+        let completion = joined.map_err(|error| format!("machine wait task failed: {error}"))?;
+        apply_machine_wait_completion(
+            &mut session,
+            completion,
+            &mut events,
+            &mut errors,
+            &mut failed_machines,
+            &mut completed_machines,
+            &mut has_more,
+        )?;
+
+        if !events.is_empty() || has_more {
+            break;
+        }
+        if (timeout_secs == 0 && session.pending_machines.is_empty())
+            || (timeout_secs > 0 && tokio::time::Instant::now() >= deadline)
+        {
+            break;
+        }
+        if !errors.is_empty() && session.pending_machines.is_empty() {
+            break;
+        }
+    }
+
+    session.last_touched = tokio::time::Instant::now();
+    let output_cursor = encode_multi_machine_cursor(&session.cursor)?;
+    {
+        let mut registry = registry
+            .lock()
+            .map_err(|_| "multi-machine wait registry lock poisoned".to_string())?;
+        registry.sessions.insert(output_cursor.clone(), session);
+    }
+    let wait_outcome = if !events.is_empty() || has_more {
+        "events"
+    } else if !errors.is_empty() {
+        "partial"
+    } else {
+        "timeout"
+    };
+    Ok(serde_json::json!({
+        "waitOutcome": wait_outcome,
+        "cursor": output_cursor,
+        "events": events,
+        "hasMore": has_more,
+        "machineErrors": errors,
+        "waitTimeoutSecs": timeout_secs,
+        "waitHint": if wait_outcome == "events" {
+            Value::Null
+        } else {
+            Value::String("Pass the aggregate cursor back unchanged to keep watching every machine; machine failures are retried on the next call without advancing that machine's cursor.".to_string())
+        },
+    }))
+}
+
 async fn handle_mcp_tool_call(
     base_url: &str,
     catalog: &SharedCatalog,
+    multi_machine_waits: &SharedMultiMachineWaits,
     name: &str,
     args: Value,
 ) -> Result<Value, String> {
-    let args = maybe_augment_create_task_args(base_url, name, args).await?;
+    let (args, machine_id) = extract_machine_id(args)?;
+    if name == "kanna_list_machines" {
+        if machine_id.is_some() || args.as_object().is_some_and(|args| !args.is_empty()) {
+            return Err("kanna_list_machines accepts no arguments".to_string());
+        }
+        return get_json(base_url, "/v1/cloud/desktops").await;
+    }
+    if name == "kanna_wait_events" && machine_id.is_none() && args.get("task_ids").is_some() {
+        return wait_events_across_machines(base_url, catalog, multi_machine_waits, args).await;
+    }
+    let args = maybe_augment_create_task_args(base_url, name, args, machine_id.as_deref()).await?;
     let mut request = {
         let catalog = catalog
             .read()
             .map_err(|_| "catalog lock poisoned".to_string())?;
         resolve_request(&catalog, name, &args)?
     };
-    if name == "kanna_complete_stage" {
+    if name == "kanna_complete_stage" && machine_id.is_none() {
         bind_request_to_spawned_run(base_url, &mut request).await?;
     }
     let task_id = env::var("KANNA_TASK_ID")
@@ -422,6 +1175,7 @@ async fn handle_mcp_tool_call(
             mcp_protocol_version: Some(MCP_PROTOCOL_VERSION),
             task_id: task_id.as_deref(),
         },
+        machine_id.as_deref(),
     )
     .await;
     result
@@ -466,9 +1220,16 @@ async fn maybe_augment_create_task_args(
     base_url: &str,
     name: &str,
     args: Value,
+    machine_id: Option<&str>,
 ) -> Result<Value, String> {
     if name != "kanna_create_task" || args.get("repo_id").is_some() {
         return Ok(args);
+    }
+
+    if let Some(machine_id) = machine_id {
+        return Err(format!(
+            "repo_id is required when creating a task on machine {machine_id}; call kanna_list_repos with the same machine_id first"
+        ));
     }
 
     let task_id = env::var("KANNA_TASK_ID")
@@ -480,6 +1241,19 @@ async fn maybe_augment_create_task_args(
         .await
         .map_err(|e| format!("failed to infer repo_id from KANNA_TASK_ID={task_id}: {e}"))?;
     augment_create_task_args(args, Some(&current_task))
+}
+
+fn extract_machine_id(args: Value) -> Result<(Value, Option<String>), String> {
+    let Some(mut object) = args.as_object().cloned() else {
+        return Ok((args, None));
+    };
+    let machine_id = match object.remove(MACHINE_ID_ARG) {
+        Some(Value::String(value)) if !value.trim().is_empty() => Some(value),
+        Some(Value::String(_)) => return Err("machine_id must not be empty".to_string()),
+        Some(_) => return Err("machine_id must be a string".to_string()),
+        None => None,
+    };
+    Ok((Value::Object(object), machine_id))
 }
 
 fn augment_create_task_args(args: Value, current_task: Option<&Value>) -> Result<Value, String> {
@@ -504,18 +1278,42 @@ async fn execute_resolved_request(
     base_url: &str,
     request: ResolvedRequest,
     adapter: RuntimeAdapterIdentity<'_>,
+    machine_id: Option<&str>,
 ) -> Result<Value, String> {
     match (request.method, request.kind) {
         (Method::Get, ResponseKind::Json) => {
-            let value: Value = get_json(base_url, &request.path).await?;
-            confirm_stopped_activity(base_url, &request.path, value).await
+            let value = get_routed_json(base_url, &request.path, machine_id).await?;
+            confirm_stopped_activity(base_url, &request.path, value, machine_id).await
         }
-        (Method::Get, ResponseKind::Text) => {
-            get_text(base_url, &request.path).await.map(Value::String)
-        }
-        (Method::Post, ResponseKind::Json) => {
-            post_json(base_url, &request.path, &request.body).await
-        }
+        (Method::Get, ResponseKind::Text) => match machine_id {
+            Some(machine_id) => {
+                invoke_machine(
+                    base_url,
+                    machine_id,
+                    Method::Get,
+                    &request.path,
+                    &Value::Null,
+                )
+                .await
+            }
+            None => get_text(base_url, &request.path).await.map(Value::String),
+        },
+        (Method::Post | Method::Patch, ResponseKind::Json) => match machine_id {
+            Some(machine_id) => {
+                invoke_machine(
+                    base_url,
+                    machine_id,
+                    request.method,
+                    &request.path,
+                    &request.body,
+                )
+                .await
+            }
+            None if request.method == Method::Post => {
+                post_json(base_url, &request.path, &request.body).await
+            }
+            None => patch_json(base_url, &request.path, &request.body).await,
+        },
         (_, ResponseKind::Wait) => {
             let wait = request
                 .wait
@@ -526,14 +1324,31 @@ async fn execute_resolved_request(
                 wait.timeout_secs,
                 wait.poll_secs,
                 wait.until,
+                machine_id,
             )
             .await
         }
-        (Method::Get, ResponseKind::RuntimeInfo) => Ok(runtime_info_snapshot(
-            base_url,
-            adapter,
-            get_runtime_status(base_url, &request.path).await,
-        )),
+        (Method::Get, ResponseKind::RuntimeInfo) => {
+            let (effective_url, status) = match machine_id {
+                Some(machine_id) => (
+                    format!("kanna+relay://{machine_id}"),
+                    get_routed_json(base_url, &request.path, Some(machine_id)).await,
+                ),
+                None => (
+                    base_url.to_string(),
+                    get_runtime_status(base_url, &request.path).await,
+                ),
+            };
+            let mut snapshot = runtime_info_snapshot(&effective_url, adapter, status);
+            if let Some(machine_id) = machine_id {
+                snapshot["connection"]["routing"] = serde_json::json!({
+                    "kind": "accountRelay",
+                    "machineId": machine_id,
+                    "viaBaseUrl": base_url,
+                });
+            }
+            Ok(snapshot)
+        }
         _ => Err(format!(
             "unsupported tool request: {:?} {:?}",
             request.method, request.kind
@@ -643,6 +1458,7 @@ async fn handle_mcp_line(
     line: &str,
     base_url: &str,
     catalog: &SharedCatalog,
+    multi_machine_waits: &SharedMultiMachineWaits,
 ) -> Result<Option<String>, String> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
@@ -650,7 +1466,7 @@ async fn handle_mcp_line(
     }
     let message: Value = serde_json::from_str(trimmed)
         .map_err(|e| format!("failed to parse MCP JSON-RPC message: {e}"))?;
-    let response = handle_mcp_request(message, base_url, catalog).await;
+    let response = handle_mcp_request(message, base_url, catalog, multi_machine_waits).await;
     if response.is_null() {
         return Ok(None);
     }
@@ -665,12 +1481,15 @@ async fn serve_mcp(base_url: &str, cwd: &Path) -> Result<(), String> {
         eprintln!("Warning: {warning}");
     }
     let catalog = Arc::new(RwLock::new(loaded.catalog));
+    let multi_machine_waits = Arc::new(Mutex::new(MultiMachineWaitRegistry::default()));
     let stdin = std::io::stdin();
     let stdout = Arc::new(Mutex::new(std::io::stdout()));
     let _watcher = spawn_catalog_watcher(cwd.to_path_buf(), catalog.clone(), stdout.clone());
     for line in stdin.lock().lines() {
         let line = line.map_err(|e| format!("failed to read stdin: {e}"))?;
-        if let Some(mut rendered) = handle_mcp_line(&line, base_url, &catalog).await? {
+        if let Some(mut rendered) =
+            handle_mcp_line(&line, base_url, &catalog, &multi_machine_waits).await?
+        {
             rendered.push('\n');
             write_line(&stdout, &rendered)?;
         }
@@ -725,7 +1544,7 @@ mod tests {
 
     #[test]
     fn tool_list_contains_prefixed_kanna_tools() {
-        let tools = kanna_tool_catalog::bundled_catalog().tools_list_value();
+        let tools = mcp_tools_list_value(&kanna_tool_catalog::bundled_catalog());
         let names = tools
             .as_array()
             .expect("tools array")
@@ -737,6 +1556,7 @@ mod tests {
             names,
             vec![
                 "kanna_info",
+                "kanna_list_machines",
                 "kanna_list_repos",
                 "kanna_add_repo",
                 "kanna_list_recent_tasks",
@@ -769,9 +1589,48 @@ mod tests {
         );
     }
 
+    #[test]
+    fn wait_events_schema_documents_automatic_cross_machine_fan_in() {
+        let tools = mcp_tools_list_value(&kanna_tool_catalog::bundled_catalog());
+        let wait_events = tools
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .find(|tool| tool["name"] == "kanna_wait_events")
+            .expect("wait events tool");
+        let description = wait_events["description"].as_str().expect("description");
+
+        assert!(description.contains("different currently reachable machines"));
+        assert!(description.contains("aggregate opaque cursor"));
+        assert!(description.contains("tags every event with machineId"));
+    }
+
+    #[test]
+    fn multi_machine_cursor_round_trips_ownership_and_native_cursors() {
+        let cursor = MultiMachineCursor {
+            local_machine_id: "desktop-local".to_string(),
+            task_ids_by_machine: BTreeMap::from([
+                ("desktop-local".to_string(), vec!["task-a".to_string()]),
+                ("desktop-studio".to_string(), vec!["task-b".to_string()]),
+            ]),
+            cursors_by_machine: BTreeMap::from([
+                ("desktop-local".to_string(), "17".to_string()),
+                ("desktop-studio".to_string(), "p3.opaque".to_string()),
+            ]),
+        };
+
+        let encoded = encode_multi_machine_cursor(&cursor).expect("encode cursor");
+        assert!(encoded.starts_with(MULTI_MACHINE_CURSOR_PREFIX));
+        assert_eq!(
+            decode_multi_machine_cursor(&encoded).expect("decode cursor"),
+            Some(cursor)
+        );
+    }
+
     #[tokio::test]
     async fn initialize_advertises_kanna_mcp_server_info() {
         let catalog = shared_bundled_catalog();
+        let waits = Arc::new(Mutex::new(MultiMachineWaitRegistry::default()));
         let response = handle_mcp_request(
             json!({
                 "jsonrpc": "2.0",
@@ -780,6 +1639,7 @@ mod tests {
             }),
             "http://127.0.0.1:48120",
             &catalog,
+            &waits,
         )
         .await;
 
@@ -793,6 +1653,7 @@ mod tests {
     #[tokio::test]
     async fn missing_tool_name_returns_invalid_params() {
         let catalog = shared_bundled_catalog();
+        let waits = Arc::new(Mutex::new(MultiMachineWaitRegistry::default()));
         let response = handle_mcp_request(
             json!({
                 "jsonrpc": "2.0",
@@ -802,6 +1663,7 @@ mod tests {
             }),
             "http://127.0.0.1:48120",
             &catalog,
+            &waits,
         )
         .await;
 
@@ -812,6 +1674,7 @@ mod tests {
     #[tokio::test]
     async fn unknown_tool_returns_protocol_error_listing_available_tools() {
         let catalog = shared_bundled_catalog();
+        let waits = Arc::new(Mutex::new(MultiMachineWaitRegistry::default()));
         let response = handle_mcp_request(
             json!({
                 "jsonrpc": "2.0",
@@ -821,6 +1684,7 @@ mod tests {
             }),
             "http://127.0.0.1:48120",
             &catalog,
+            &waits,
         )
         .await;
 
@@ -833,6 +1697,7 @@ mod tests {
     #[tokio::test]
     async fn tool_argument_errors_are_is_error_tool_results() {
         let catalog = shared_bundled_catalog();
+        let waits = Arc::new(Mutex::new(MultiMachineWaitRegistry::default()));
         let response = handle_mcp_request(
             json!({
                 "jsonrpc": "2.0",
@@ -842,6 +1707,7 @@ mod tests {
             }),
             "http://127.0.0.1:48120",
             &catalog,
+            &waits,
         )
         .await;
 
@@ -1019,7 +1885,8 @@ mod activity_debounce_tests {
             "params": { "name": name, "arguments": arguments }
         })
         .to_string();
-        let rendered = handle_mcp_line(&line, base_url, catalog)
+        let waits = Arc::new(Mutex::new(MultiMachineWaitRegistry::default()));
+        let rendered = handle_mcp_line(&line, base_url, catalog, &waits)
             .await
             .expect("tool call handled")
             .expect("tool call response line");
@@ -1390,7 +2257,8 @@ mod wait_tests {
     }
 
     async fn call_wait(base_url: &str, catalog: &SharedCatalog, arguments: Value) -> Value {
-        let line = handle_mcp_line(&wait_call_line(arguments), base_url, catalog)
+        let waits = Arc::new(Mutex::new(MultiMachineWaitRegistry::default()));
+        let line = handle_mcp_line(&wait_call_line(arguments), base_url, catalog, &waits)
             .await
             .expect("wait call handled")
             .expect("wait call response line");
@@ -1490,10 +2358,12 @@ mod stdio_tests {
     #[tokio::test]
     async fn initialized_notification_produces_no_output_line() {
         let catalog = shared_bundled_catalog();
+        let waits = Arc::new(Mutex::new(MultiMachineWaitRegistry::default()));
         let output = handle_mcp_line(
             r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
             "http://127.0.0.1:48120",
             &catalog,
+            &waits,
         )
         .await
         .unwrap();
@@ -1504,10 +2374,12 @@ mod stdio_tests {
     #[tokio::test]
     async fn initialize_line_produces_json_response_line() {
         let catalog = shared_bundled_catalog();
+        let waits = Arc::new(Mutex::new(MultiMachineWaitRegistry::default()));
         let output = handle_mcp_line(
             r#"{"jsonrpc":"2.0","id":7,"method":"initialize"}"#,
             "http://127.0.0.1:48120",
             &catalog,
+            &waits,
         )
         .await
         .unwrap()

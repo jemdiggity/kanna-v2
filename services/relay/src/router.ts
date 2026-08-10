@@ -393,6 +393,11 @@ export function setServerConnection(
     const current = connections.get(userId);
     if (current?.desktops.get(desktopId) === ws) {
       current.desktops.delete(desktopId);
+      for (const [id, requester] of current.pendingResponses.entries()) {
+        if (requester === ws) {
+          current.pendingResponses.delete(id);
+        }
+      }
       for (const [tunnelId, tunnel] of current.pendingTunnels.entries()) {
         if (tunnel.desktopId === desktopId) {
           tunnel.client.close(1011, "Desktop disconnected before tunnel opened");
@@ -556,7 +561,9 @@ export function attachDesktopTunnel(
  * Route a message from one side to the other.
  *
  * - If phone sends to an offline server: parse JSON and return an error response.
- * - If server sends to an offline phone: silently drop the message.
+ * - An authenticated desktop may address another desktop owned by the same
+ *   user. Responses return only to the requesting socket.
+ * - If server sends an unsolicited event with no phone: silently drop it.
  */
 export function routeMessage(
   userId: string,
@@ -690,6 +697,38 @@ export function routeMessage(
         target.send(data);
       }
       if (hadPendingResponse) return;
+    }
+
+    // The desktop credential already resolved this socket to `userId`, so a
+    // desktop can use the same account-scoped routing boundary as mobile. This
+    // is what lets a local MCP reach a sibling machine without copying Firebase
+    // credentials into the agent process or exposing that sibling's LAN API.
+    if (parsed?.type === "invoke") {
+      if (parsed.command === "list_active_desktops") {
+        sendDataResponse(source, parsed.id, {
+          desktopIds: Array.from(pair.desktops.entries())
+            .filter(([, ws]) => ws.readyState === 1)
+            .map(([desktopId]) => desktopId),
+        });
+        return;
+      }
+
+      const desktopId =
+        typeof parsed.desktopId === "string" ? parsed.desktopId : undefined;
+      if (!desktopId) {
+        sendErrorResponse(source, parsed.id, "desktopId required for desktop-to-desktop request");
+        return;
+      }
+      const target = pair.desktops.get(desktopId);
+      if (!target || target.readyState !== 1) {
+        sendErrorResponse(source, parsed.id, "Desktop offline");
+        return;
+      }
+      if (idKey && source) {
+        pair.pendingResponses.set(idKey, source);
+      }
+      target.send(data);
+      return;
     }
 
     const sessionId = getSessionIdFromMessage(parsed);
