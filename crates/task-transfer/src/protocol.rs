@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+pub const CURRENT_PROTOCOL_VERSION: u32 = 2;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ControlRequest {
@@ -334,6 +336,23 @@ pub enum PeerTerminalEvent {
     Error {
         session_id: String,
         message: String,
+    },
+}
+
+/// Commands sent back to the owner over an authenticated terminal observation
+/// stream. Release protocol v2 makes that stream duplex so interactive input
+/// does not pay for a new peer connection and trust check per keystroke.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PeerTerminalControl {
+    Input {
+        session_id: String,
+        data: Vec<u8>,
+    },
+    Resize {
+        session_id: String,
+        cols: u16,
+        rows: u16,
     },
 }
 

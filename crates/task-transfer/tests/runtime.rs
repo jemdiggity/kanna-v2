@@ -2,6 +2,9 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use kanna_task_transfer::crypto::{public_key_to_string, TransferIdentity};
 use kanna_task_transfer::peer_store::{PeerRecord, PeerStore};
+use kanna_task_transfer::protocol::{
+    PeerRequest, PeerResponse, PeerTerminalControl, PeerTerminalEvent,
+};
 use kanna_task_transfer::registry::{PeerRegistry, PeerRegistryEntry};
 use kanna_task_transfer::runtime::{
     DiscoveryMode, PairingResult, RuntimeConfig, RuntimeEvent, TransferRuntime,
@@ -243,6 +246,124 @@ async fn observe_peer_session_reports_empty_peer_response_with_peer_context() {
     );
 
     server.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn protocol_v2_terminal_input_uses_the_observer_stream() {
+    let temp = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let target_identity = TransferIdentity::generate();
+    let target_public_key = public_key_to_string(&target_identity.public_key);
+    PeerRegistry::new(temp.path().to_path_buf())
+        .write_entry(&PeerRegistryEntry {
+            peer_id: "peer-target".into(),
+            display_name: "Target".into(),
+            endpoint: format!("127.0.0.1:{port}"),
+            pid: std::process::id(),
+            public_key: target_public_key.clone(),
+            protocol_version: 2,
+            accepting_transfers: true,
+        })
+        .unwrap();
+    PeerStore::new(trusted_peer_store_path(temp.path(), "peer-primary"))
+        .upsert(PeerRecord {
+            peer_id: "peer-target".into(),
+            display_name: "Target".into(),
+            public_key: target_public_key,
+            capabilities_json: "{\"protocolVersion\":2}".into(),
+            paired_at: "2026-08-11T00:00:00Z".into(),
+            last_seen_at: None,
+            revoked_at: None,
+        })
+        .unwrap();
+
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).await.unwrap();
+        let request: PeerRequest = serde_json::from_str(request_line.trim()).unwrap();
+        let PeerRequest::ObserveSession {
+            request_id,
+            session_id,
+            ..
+        } = request
+        else {
+            panic!("expected observe session request");
+        };
+        let response = PeerResponse::ObserveSession {
+            request_id,
+            session_id: session_id.clone(),
+        };
+        writer
+            .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+            .await
+            .unwrap();
+        let snapshot = PeerTerminalEvent::Snapshot {
+            session_id,
+            snapshot: json!({ "vt": "READY", "cols": 80, "rows": 24 }),
+        };
+        writer
+            .write_all(format!("{}\n", serde_json::to_string(&snapshot).unwrap()).as_bytes())
+            .await
+            .unwrap();
+
+        let mut control_line = String::new();
+        reader.read_line(&mut control_line).await.unwrap();
+        let control: PeerTerminalControl = serde_json::from_str(control_line.trim()).unwrap();
+        let opened_another_connection =
+            tokio::time::timeout(Duration::from_millis(200), listener.accept())
+                .await
+                .is_ok();
+        (control, opened_another_connection)
+    });
+
+    let primary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-primary",
+        "Primary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    primary
+        .observe_peer_session("peer-target", "task-1")
+        .await
+        .unwrap();
+    let ready = tokio::time::timeout(Duration::from_secs(1), primary.next_event())
+        .await
+        .expect("timed out waiting for terminal snapshot")
+        .unwrap();
+    assert!(matches!(
+        ready,
+        RuntimeEvent::TerminalEvent {
+            event: PeerTerminalEvent::Snapshot { .. },
+            ..
+        }
+    ));
+
+    tokio::time::timeout(
+        Duration::from_millis(250),
+        primary.send_peer_session_input("peer-target", "task-1", b"typed\x7f".to_vec()),
+    )
+    .await
+    .expect("duplex terminal input waited for a remote acknowledgement")
+    .unwrap();
+
+    let (control, opened_another_connection) = server.await.unwrap();
+    assert_eq!(
+        control,
+        PeerTerminalControl::Input {
+            session_id: "task-1".into(),
+            data: b"typed\x7f".to_vec(),
+        }
+    );
+    assert!(
+        !opened_another_connection,
+        "terminal input opened a per-keystroke request instead of using the observer stream"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -3,6 +3,7 @@ use crate::discovery::{
     encode_txt_record, hostname_for_peer, resolved_service_to_peer_entry, SERVICE_TYPE,
 };
 use crate::protocol::PeerRegistryEntry;
+use crate::protocol::CURRENT_PROTOCOL_VERSION;
 use crate::registry::PeerRegistry;
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use std::collections::HashMap;
@@ -56,7 +57,13 @@ impl MdnsDiscovery {
     ) -> Result<Self, RuntimeError> {
         let daemon =
             ServiceDaemon::new().map_err(|error| RuntimeError::Discovery(error.to_string()))?;
-        let txt = encode_txt_record(peer_id, display_name, public_key, 1, true)
+        let txt = encode_txt_record(
+            peer_id,
+            display_name,
+            public_key,
+            CURRENT_PROTOCOL_VERSION,
+            true,
+        )
             .map_err(|error| RuntimeError::InvalidConfig(error.to_string()))?;
         let properties = txt
             .iter()

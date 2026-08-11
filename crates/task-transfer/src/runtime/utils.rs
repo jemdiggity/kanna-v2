@@ -14,7 +14,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
-use tokio::net::TcpStream;
+
+pub(super) use crate::protocol::CURRENT_PROTOCOL_VERSION;
+pub(super) const DUPLEX_TERMINAL_PROTOCOL_VERSION: u32 = 2;
 
 pub(super) fn parse_peer_response_line(
     peer_id: &str,
@@ -79,11 +81,9 @@ pub(super) fn extract_request_id(line: &str) -> String {
         .unwrap_or_default()
 }
 
-pub(super) async fn write_json_line<T>(
-    stream: &mut TcpStream,
-    value: &T,
-) -> Result<(), RuntimeError>
+pub(super) async fn write_json_line<W, T>(stream: &mut W, value: &T) -> Result<(), RuntimeError>
 where
+    W: tokio::io::AsyncWrite + Unpin,
     T: serde::Serialize,
 {
     let encoded = serde_json::to_vec(value)?;
@@ -135,10 +135,14 @@ pub(super) fn load_or_create_identity(
 
 pub(super) fn local_capabilities_json() -> String {
     serde_json::json!({
-        "protocolVersion": 1,
+        "protocolVersion": CURRENT_PROTOCOL_VERSION,
         "transferCapabilityVersion": 1,
     })
     .to_string()
+}
+
+pub(super) fn supports_duplex_terminal(protocol_version: u32) -> bool {
+    protocol_version >= DUPLEX_TERMINAL_PROTOCOL_VERSION
 }
 
 pub(super) fn ensure_peer_is_trusted_for(
@@ -234,5 +238,16 @@ pub(super) fn sanitize_artifact_filename(filename: &str) -> String {
         "artifact".to_string()
     } else {
         sanitized
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duplex_terminal_controls_start_at_release_protocol_v2() {
+        assert!(!supports_duplex_terminal(1));
+        assert!(supports_duplex_terminal(2));
     }
 }
