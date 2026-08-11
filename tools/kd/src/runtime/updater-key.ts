@@ -89,26 +89,13 @@ function lookupError(output: string): Error {
 /**
  * Resolve the updater signing key material.
  *
- * The Keychain is the intended home. TAURI_PRIVATE_KEY_PATH still works as a
- * fallback so a machine that has not run setup-updater-key can still ship, and
- * so CI can supply the key its own way. The returned material is secret: pass
- * it to the signer through the environment, never through argv, a log, or disk.
+ * The Keychain is the only source. There is deliberately no key-file fallback:
+ * a fallback lets a ship succeed against whatever key happens to be lying on
+ * disk, which is exactly the case that should fail loudly instead. The returned
+ * material is secret: pass it to the signer through the environment, never
+ * through argv, a log, or disk.
  */
 export async function resolveUpdaterSigningKey(input: UpdaterKeyRuntimeInput): Promise<string> {
-  const configured = input.env[UPDATER_KEYCHAIN_SERVICE_ENV]?.trim();
-  if (!configured) {
-    const privateKeyPath = input.env.TAURI_PRIVATE_KEY_PATH?.trim();
-    if (!privateKeyPath) {
-      throw new Error(
-        "No updater signing key configured. Run ./kd release setup-updater-key, or set TAURI_PRIVATE_KEY_PATH."
-      );
-    }
-    if (!existsSync(privateKeyPath)) {
-      throw new Error(`Tauri updater private key not found: ${privateKeyPath}.`);
-    }
-    return readFileSync(privateKeyPath, "utf8").trim();
-  }
-
   const selection = resolveUpdaterKeySelection(input.env);
   assertKeychainFile(selection.keychainPath);
   const result = await input.runner.run(

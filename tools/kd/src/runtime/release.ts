@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CommandRunner } from "./process";
 import {
+  resolveUpdaterKeySelection,
   resolveUpdaterSigningKey,
   TAURI_SIGNING_KEY_ENV,
   TAURI_SIGNING_PASSWORD_ENV
@@ -611,11 +612,12 @@ export async function createUpdaterBundle(input: ReleaseShipInput, bundleSource:
   });
   // Both values go through the environment, never argv: the key is secret, and an
   // unset password makes `tauri signer` fall through to a TTY prompt that hangs
-  // (then fails) every non-interactive ship. Empty is the correct default here.
+  // (then fails) every non-interactive ship. The key is protected by the Keychain
+  // rather than a passphrase, so the password is always empty.
   const signerEnv: NodeJS.ProcessEnv = {
     ...input.env,
     [TAURI_SIGNING_KEY_ENV]: signingKey,
-    [TAURI_SIGNING_PASSWORD_ENV]: input.env.TAURI_PRIVATE_KEY_PASSWORD ?? ""
+    [TAURI_SIGNING_PASSWORD_ENV]: ""
   };
   const signerArgs = ["--dir", join(input.repoRoot, "apps", "desktop"), "exec", "tauri", "signer", "sign", bundlePath];
   await mustRun(input.runner, "pnpm", signerArgs, input.repoRoot, signerEnv);
@@ -639,8 +641,9 @@ export async function shipRelease(input: ReleaseShipInput): Promise<ReleaseShipR
     throw new Error("updater releases must include both arm64 and x86_64 artifacts");
   }
   if (!input.env.KANNA_UPDATER_PUBKEY) throw new Error("Missing KANNA_UPDATER_PUBKEY.");
-  if (!input.env.TAURI_PRIVATE_KEY_PATH) throw new Error("Missing TAURI_PRIVATE_KEY_PATH.");
-  if (!existsSync(input.env.TAURI_PRIVATE_KEY_PATH)) throw new Error(`Tauri updater private key not found: ${input.env.TAURI_PRIVATE_KEY_PATH}`);
+  // Validate the Keychain selectors up front rather than the key file: the key's
+  // home is the Keychain, and the on-disk copy is expected to be gone.
+  resolveUpdaterKeySelection(input.env);
   await assertCleanGitWorktree(input.repoRoot, input.runner, input.env);
 
   let version: string;

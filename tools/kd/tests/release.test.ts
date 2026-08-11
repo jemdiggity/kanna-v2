@@ -44,10 +44,15 @@ function createReleaseRepo(root: string): { repoRoot: string; privateKeyPath: st
   return { repoRoot, privateKeyPath };
 }
 
+// The signing key lives in the Keychain, so ships need its selectors rather than
+// a key path. The fixture's key file doubles as the Keychain-path selector: it is
+// an absolute file that exists, and the runner mocks intercept `security` anyway.
 function releaseEnv(privateKeyPath: string): NodeJS.ProcessEnv {
   return {
     KANNA_UPDATER_PUBKEY: "pubkey",
-    TAURI_PRIVATE_KEY_PATH: privateKeyPath,
+    KANNA_UPDATER_KEYCHAIN_SERVICE: "test.kanna.updater-key",
+    KANNA_UPDATER_KEYCHAIN_ACCOUNT: "tauri-updater-signing-key",
+    KANNA_UPDATER_KEYCHAIN_PATH: privateKeyPath,
     PATH: process.env.PATH
   };
 }
@@ -120,6 +125,7 @@ describe("release updater bundling", () => {
       const runner: CommandRunner = {
         async run(command, args, options) {
           calls.push({ command, args, options });
+          if (command === "security") return { exitCode: 0, stdout: "private key\n", stderr: "" };
 
           if (command === "pnpm") {
             const signedBundlePath = args.at(-1);
@@ -137,12 +143,7 @@ describe("release updater bundling", () => {
         archLabels: ["arm64"],
         release: false,
         dryRun: true,
-        env: {
-          KANNA_UPDATER_PUBKEY: "pubkey",
-          TAURI_PRIVATE_KEY_PATH: privateKeyPath,
-          TAURI_PRIVATE_KEY_PASSWORD: "password",
-          PATH: process.env.PATH
-        },
+        env: releaseEnv(privateKeyPath),
         runner
       };
 
@@ -166,13 +167,13 @@ describe("release updater bundling", () => {
       expect(signerCall?.args).not.toContain("private key");
       expect(signerCall?.args).not.toContain("password");
       expect(signerCall?.options?.env?.TAURI_SIGNING_PRIVATE_KEY).toBe("private key");
-      expect(signerCall?.options?.env?.TAURI_SIGNING_PRIVATE_KEY_PASSWORD).toBe("password");
+      expect(signerCall?.options?.env?.TAURI_SIGNING_PRIVATE_KEY_PASSWORD).toBe("");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
   });
 
-  it("always passes an explicit password so signing cannot fall through to a TTY prompt", async () => {
+  it("ignores an ambient key password and always passes an explicit empty one", async () => {
     const root = await mkdtemp(join(tmpdir(), "kd-release-"));
     try {
       const repoRoot = join(root, "repo");
@@ -190,6 +191,7 @@ describe("release updater bundling", () => {
       const runner: CommandRunner = {
         async run(command, args, options) {
           calls.push({ command, args, options });
+          if (command === "security") return { exitCode: 0, stdout: "private key\n", stderr: "" };
           if (command === "pnpm") {
             writeFileSync(`${args.at(-1)}.sig`, "signed bundle\n");
             return { exitCode: 0, stdout: "", stderr: "" };
@@ -205,14 +207,11 @@ describe("release updater bundling", () => {
           archLabels: ["arm64"],
           release: false,
           dryRun: true,
-          // No TAURI_PRIVATE_KEY_PASSWORD: an unset password used to leave the
-          // signer prompting on a TTY, which failed every non-interactive ship
-          // only after the whole build had already completed.
-          env: {
-            KANNA_UPDATER_PUBKEY: "pubkey",
-            TAURI_PRIVATE_KEY_PATH: privateKeyPath,
-            PATH: process.env.PATH
-          },
+          // The Keychain protects the key, so it carries no passphrase. An
+          // ambient TAURI_PRIVATE_KEY_PASSWORD must not reach the signer, and an
+          // absent one must not leave it prompting on a TTY -- that prompt used
+          // to kill non-interactive ships after the whole build had completed.
+          env: { ...releaseEnv(privateKeyPath), TAURI_PRIVATE_KEY_PASSWORD: "stale ambient value" },
           runner
         },
         bundleSource,
@@ -239,6 +238,7 @@ describe("release shipping", () => {
       const runner: CommandRunner = {
         async run(command, args, options) {
           calls.push({ command, args, options });
+          if (command === "security") return { exitCode: 0, stdout: "private key\n", stderr: "" };
           if (command === "git" && args.join(" ") === "status --porcelain") {
             return { exitCode: 0, stdout: "", stderr: "" };
           }
@@ -325,6 +325,7 @@ describe("release shipping", () => {
       const runner: CommandRunner = {
         async run(command, args, options) {
           calls.push({ command, args, options });
+          if (command === "security") return { exitCode: 0, stdout: "private key\n", stderr: "" };
           const key = `${command} ${args.join(" ")}`;
           if (key === "git status --porcelain") {
             return { exitCode: 0, stdout: "", stderr: "" };
@@ -398,6 +399,7 @@ describe("release shipping", () => {
       const runner: CommandRunner = {
         async run(command, args, options) {
           calls.push({ command, args, options });
+          if (command === "security") return { exitCode: 0, stdout: "private key\n", stderr: "" };
           const key = `${command} ${args.join(" ")}`;
           if (key === "git status --porcelain") {
             return { exitCode: 0, stdout: "", stderr: "" };
@@ -472,6 +474,7 @@ describe("release shipping", () => {
       const runner: CommandRunner = {
         async run(command, args, options) {
           calls.push({ command, args, options });
+          if (command === "security") return { exitCode: 0, stdout: "private key\n", stderr: "" };
           const key = `${command} ${args.join(" ")}`;
           if (key === "git status --porcelain") {
             return { exitCode: 0, stdout: "", stderr: "" };
@@ -517,6 +520,7 @@ describe("release shipping", () => {
       const runner: CommandRunner = {
         async run(command, args, options) {
           calls.push({ command, args, options });
+          if (command === "security") return { exitCode: 0, stdout: "private key\n", stderr: "" };
           if (command === "git" && args.join(" ") === "status --porcelain") {
             return { exitCode: 0, stdout: "", stderr: "" };
           }
@@ -668,6 +672,7 @@ describe("release shipping", () => {
       const runner: CommandRunner = {
         async run(command, args, options) {
           calls.push({ command, args, options });
+          if (command === "security") return { exitCode: 0, stdout: "private key\n", stderr: "" };
           if (command === "git" && args.join(" ") === "status --porcelain") return { exitCode: 0, stdout: "", stderr: "" };
           if (command === "git" && args.join(" ") === "remote get-url origin") return { exitCode: 0, stdout: "git@github.com:jemdiggity/kanna.git\n", stderr: "" };
           if (command === "git" && args.join(" ") === "rev-parse --abbrev-ref HEAD") {
@@ -754,6 +759,7 @@ describe("release shipping", () => {
       const runner: CommandRunner = {
         async run(command, args, options) {
           calls.push({ command, args, options });
+          if (command === "security") return { exitCode: 0, stdout: "private key\n", stderr: "" };
           if (command === "git" && args.join(" ") === "status --porcelain") return { exitCode: 0, stdout: "", stderr: "" };
           if (command === "git" && args.join(" ") === "remote get-url origin") return { exitCode: 0, stdout: "git@github.com:jemdiggity/kanna.git\n", stderr: "" };
           if (command === "gh" && args.join(" ") === "release view v1.2.4-staging.3 --repo jemdiggity/kanna") return { exitCode: 0, stdout: "", stderr: "" };
@@ -852,6 +858,7 @@ describe("release shipping", () => {
       const runner: CommandRunner = {
         async run(command, args, options) {
           calls.push({ command, args, options });
+          if (command === "security") return { exitCode: 0, stdout: "private key\n", stderr: "" };
           if (command === "git" && args.join(" ") === "status --porcelain") {
             return { exitCode: 0, stdout: " M VERSION\n", stderr: "" };
           }
@@ -933,6 +940,7 @@ describe("release shipping", () => {
       const runner: CommandRunner = {
         async run(command, args, options) {
           calls.push({ command, args, options });
+          if (command === "security") return { exitCode: 0, stdout: "private key\n", stderr: "" };
           if (command === "git" && args.join(" ") === "status --porcelain") {
             return { exitCode: 0, stdout: "", stderr: "" };
           }
@@ -1001,6 +1009,7 @@ describe("release shipping", () => {
       const runner: CommandRunner = {
         async run(command, args, options) {
           calls.push({ command, args, options });
+          if (command === "security") return { exitCode: 0, stdout: "private key\n", stderr: "" };
           if (command === "git" && args.join(" ") === "status --porcelain") {
             return { exitCode: 0, stdout: "", stderr: "" };
           }
@@ -1069,6 +1078,7 @@ describe("release shipping", () => {
       const runner: CommandRunner = {
         async run(command, args, options) {
           calls.push({ command, args, options });
+          if (command === "security") return { exitCode: 0, stdout: "private key\n", stderr: "" };
           if (command === "git" && args.join(" ") === "status --porcelain") {
             return { exitCode: 0, stdout: "", stderr: "" };
           }
@@ -1140,6 +1150,7 @@ describe("release promotion", () => {
     return {
       async run(command, args, options) {
         calls.push({ command, args, options });
+        if (command === "security") return { exitCode: 0, stdout: "private key\n", stderr: "" };
         const key = `${command} ${args.join(" ")}`;
         for (const [prefix, result] of Object.entries(overrides)) {
           if (key.startsWith(prefix) && result) return result;
@@ -1512,6 +1523,7 @@ describe("release cut", () => {
       const runner: CommandRunner = {
         async run(command, args, options) {
           calls.push({ command, args, options });
+          if (command === "security") return { exitCode: 0, stdout: "private key\n", stderr: "" };
           const key = `${command} ${args.join(" ")}`;
           if (key === "git fetch origin main") {
             return { exitCode: 0, stdout: "", stderr: "" };
@@ -1655,6 +1667,7 @@ describe("release status", () => {
       const runner: CommandRunner = {
         async run(command, args, options) {
           calls.push({ command, args, options });
+          if (command === "security") return { exitCode: 0, stdout: "private key\n", stderr: "" };
           const key = `${command} ${args.join(" ")}`;
           if (key === "git remote get-url origin") {
             return { exitCode: 0, stdout: "git@github.com:jemdiggity/kanna.git\n", stderr: "" };
