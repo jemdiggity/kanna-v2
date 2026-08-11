@@ -17,6 +17,73 @@ fn pairing_create_request(peer: [u8; 4]) -> Request<Body> {
 }
 
 #[tokio::test]
+async fn status_advertises_lan_availability_only_to_paired_devices_and_authenticated_relay() {
+    let state = super::test_state_with_seed("desktop-status-auth", "Status Auth Mac", |_| {});
+    let pairing_path = std::path::PathBuf::from(&state.config().pairing_store_path);
+    let mut pairing_store = crate::pairing::PairingStore::default();
+    pairing_store.add_trusted_device(
+        &state.config().desktop_id,
+        "phone-1",
+        "Kanna Mobile",
+        &crate::pairing::hash_device_secret("lan-secret"),
+    );
+    pairing_store.save(&pairing_path).unwrap();
+    let app = crate::http_api::router(Arc::clone(&state));
+
+    for headers in [
+        None,
+        Some(("phone-stale", "old-secret")),
+        Some(("phone-1", "wrong-secret")),
+    ] {
+        let mut request = direct_lan_request(axum::http::Method::GET, "/v1/status");
+        if let Some((device_id, device_secret)) = headers {
+            request.headers_mut().insert(
+                "x-kanna-device-id",
+                axum::http::HeaderValue::from_str(device_id).unwrap(),
+            );
+            request.headers_mut().insert(
+                "x-kanna-device-secret",
+                axum::http::HeaderValue::from_str(device_secret).unwrap(),
+            );
+        }
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let status: MobileServerStatus = from_slice(&body).unwrap();
+        assert_eq!(status.state, "pairing_required");
+    }
+
+    let mut paired = direct_lan_request(axum::http::Method::GET, "/v1/status");
+    paired.headers_mut().insert(
+        "x-kanna-device-id",
+        axum::http::HeaderValue::from_static("phone-1"),
+    );
+    paired.headers_mut().insert(
+        "x-kanna-device-secret",
+        axum::http::HeaderValue::from_static("lan-secret"),
+    );
+    let paired_response = app.oneshot(paired).await.unwrap();
+    let body = axum::body::to_bytes(paired_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let paired_status: MobileServerStatus = from_slice(&body).unwrap();
+    assert_eq!(paired_status.state, "running");
+
+    let relay_response = crate::http_api::dispatch_authenticated_http_invoke(
+        state,
+        "GET",
+        "/v1/status",
+        serde_json::Value::Null,
+    )
+    .await;
+    assert_eq!(relay_response.status, StatusCode::OK.as_u16());
+    assert_eq!(relay_response.body.as_ref().unwrap()["state"], "running");
+    let _ = std::fs::remove_file(pairing_path);
+}
+
+#[tokio::test]
 async fn list_desktops_route_returns_configured_desktop() {
     let app = super::test_router("desktop-1", "Studio Mac");
     let response = app
