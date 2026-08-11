@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { Terminal } from "@xterm/xterm";
-import { findVisibleTerminalTextCell } from "./e2eTerminalBuffers";
+import {
+  findVisibleTerminalTextCell,
+  selectTerminalText,
+} from "./e2eTerminalBuffers";
 
 function terminalWithLines(input: {
   lines: string[];
@@ -8,6 +11,7 @@ function terminalWithLines(input: {
   rows: number;
   cols?: number;
 }): Terminal {
+  let selection = "";
   return {
     cols: input.cols ?? 80,
     rows: input.rows,
@@ -22,6 +26,10 @@ function terminalWithLines(input: {
             : { translateToString: () => line };
         },
       },
+    },
+    getSelection: () => selection,
+    select: (column: number, row: number, length: number) => {
+      selection = input.lines[row]?.slice(column, column + length) ?? "";
     },
   } as unknown as Terminal;
 }
@@ -59,5 +67,17 @@ describe("E2E terminal buffer", () => {
     });
 
     expect(findVisibleTerminalTextCell(terminal, uri)).toBeNull();
+  });
+
+  it("selects the last matching text for a clipboard E2E assertion", () => {
+    const marker = "copy this output";
+    const terminal = terminalWithLines({
+      lines: [marker, "middle", `prefix ${marker} suffix`],
+      viewportY: 0,
+      rows: 3,
+    });
+
+    expect(selectTerminalText(terminal, marker)).toBe(marker);
+    expect(selectTerminalText(terminal, "missing")).toBeNull();
   });
 });

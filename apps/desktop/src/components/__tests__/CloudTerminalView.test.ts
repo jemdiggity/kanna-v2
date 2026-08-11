@@ -14,16 +14,18 @@ const testState = vi.hoisted(() => {
     options: Record<string, unknown>;
     dataHandler: ((data: string) => void) | null = null;
     keyHandler: ((event: KeyboardEvent) => boolean) | null = null;
+    selection = "";
     loadedAddons: unknown[] = [];
+    attachCustomKeyEventHandler = vi.fn((handler: (event: KeyboardEvent) => boolean) => {
+      this.keyHandler = handler;
+    });
     dispose = vi.fn();
+    getSelection = vi.fn(() => this.selection);
     loadAddon = vi.fn((addon: unknown) => {
       this.loadedAddons.push(addon);
     });
     onData = vi.fn((handler: (data: string) => void) => {
       this.dataHandler = handler;
-    });
-    attachCustomKeyEventHandler = vi.fn((handler: (event: KeyboardEvent) => boolean) => {
-      this.keyHandler = handler;
     });
     open = vi.fn();
     reset = vi.fn();
@@ -51,6 +53,7 @@ const testState = vi.hoisted(() => {
     openUrl: vi.fn(),
     toastInfo: vi.fn(),
     toastError: vi.fn(),
+    clipboardWriteText: vi.fn(),
     terminalBufferUnregister: vi.fn(),
     ownershipRelease: vi.fn(),
     terminals: [] as FakeTerminal[],
@@ -223,6 +226,11 @@ describe("CloudTerminalView remote visual companion links", () => {
       bridgeId: "bridge-1",
     });
     mocks.openUrl.mockResolvedValue(undefined);
+    mocks.clipboardWriteText.mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: mocks.clipboardWriteText },
+    });
     globalThis.ResizeObserver = class ResizeObserver {
       constructor(callback: ResizeObserverCallback) {
         testState.resizeCallbacks.push(callback);
@@ -230,6 +238,68 @@ describe("CloudTerminalView remote visual companion links", () => {
       observe = vi.fn();
       disconnect = vi.fn();
     } as unknown as typeof ResizeObserver;
+  });
+
+  it("copies the selected remote terminal text with Command+C", async () => {
+    const client = createClient();
+    mocks.relayFactory.mockResolvedValue(client);
+    const wrapper = mount(CloudTerminalView, {
+      props: {
+        ownerDesktopId: "desktop-1",
+        ownerTaskId: "task-1",
+      },
+    });
+    await flushAsync();
+
+    const terminal = testState.terminals[0];
+    if (!terminal?.keyHandler) throw new Error("terminal key handler was not registered");
+    terminal.selection = "selected remote output";
+    const event = {
+      type: "keydown",
+      key: "c",
+      metaKey: true,
+      altKey: false,
+      ctrlKey: false,
+      preventDefault: vi.fn(),
+    } as unknown as KeyboardEvent;
+
+    expect(terminal.keyHandler(event)).toBe(false);
+    await flushAsync();
+
+    expect(event.preventDefault).toHaveBeenCalledTimes(1);
+    expect(mocks.clipboardWriteText).toHaveBeenCalledExactlyOnceWith(
+      "selected remote output",
+    );
+    expect(client.sendInput).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("leaves Command+C to xterm when there is no selection", async () => {
+    const client = createClient();
+    mocks.relayFactory.mockResolvedValue(client);
+    const wrapper = mount(CloudTerminalView, {
+      props: {
+        ownerDesktopId: "desktop-1",
+        ownerTaskId: "task-1",
+      },
+    });
+    await flushAsync();
+
+    const terminal = testState.terminals[0];
+    if (!terminal?.keyHandler) throw new Error("terminal key handler was not registered");
+    const event = {
+      type: "keydown",
+      key: "c",
+      metaKey: true,
+      altKey: false,
+      ctrlKey: false,
+      preventDefault: vi.fn(),
+    } as unknown as KeyboardEvent;
+
+    expect(terminal.keyHandler(event)).toBe(true);
+    expect(event.preventDefault).not.toHaveBeenCalled();
+    expect(mocks.clipboardWriteText).not.toHaveBeenCalled();
+    wrapper.unmount();
   });
 
   afterEach(() => {
