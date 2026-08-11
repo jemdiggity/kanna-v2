@@ -160,6 +160,12 @@ never the Firebase CLI directly.
 | `tools/bazel/`, `BUILD.bazel`, `MODULE.bazel` | Bazel release build graph (see [Release](release.md)) |
 | `tests/` | Cross-cutting suites: CLI contract, PTY test util, remote E2E, TUI fidelity |
 
+Direct LAN terminal observation is duplex from task-transfer protocol v4: once
+the authenticated observation stream is live, ordered input and resize controls
+travel back over that same socket. This avoids a fresh authenticated peer
+request for every keystroke. A viewer connected to a protocol-v3 or older peer
+keeps using the request-per-control path for rolling-upgrade compatibility.
+
 ## Core data flow
 
 Task creation and terminal streaming, end to end:

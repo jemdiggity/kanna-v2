@@ -1,7 +1,7 @@
 use kanna_agent_protocol::{CompanionEvent, ServerFrame};
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_PROTOCOL_VERSION: u32 = 3;
+pub const CURRENT_PROTOCOL_VERSION: u32 = 4;
 pub const COMPANION_PROTOCOL_VERSION: u32 = 2;
 
 /// Maximum peer request line. Large repository/session artifacts are staged
@@ -588,6 +588,23 @@ pub enum PeerTerminalEvent {
     Error {
         session_id: String,
         message: String,
+    },
+}
+
+/// Commands sent back to the owner over an authenticated terminal observation
+/// stream. Protocol v4 makes that stream duplex so interactive input does not
+/// pay for a new peer connection and authentication exchange per keystroke.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PeerTerminalControl {
+    Input {
+        session_id: String,
+        data: Vec<u8>,
+    },
+    Resize {
+        session_id: String,
+        cols: u16,
+        rows: u16,
     },
 }
 

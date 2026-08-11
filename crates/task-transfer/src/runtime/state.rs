@@ -96,6 +96,7 @@ pub(super) struct TerminalObserverSlot {
     pub(super) closed: bool,
     pub(super) closed_at: Option<Instant>,
     pub(super) handle: Option<JoinHandle<()>>,
+    pub(super) control_sender: Option<mpsc::Sender<crate::protocol::PeerTerminalControl>>,
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -4,7 +4,7 @@ use super::companion::{
     MAX_COMPANION_INBOUND_DECODE_BYTES, MAX_CONCURRENT_COMPANION_INBOUND_DECODES,
 };
 use super::config::{DiscoveryMode, RuntimeConfig};
-use super::daemon::stream_peer_session;
+use super::daemon::{stream_peer_session, PeerSessionBridge};
 use super::discovery::{MdnsDiscovery, PeerDiscovery};
 use super::events::{RuntimeError, RuntimeEvent};
 use super::external_peers;
@@ -17,7 +17,8 @@ use super::state::{
 };
 use super::utils::{
     load_or_create_identity, registry_entry_path, remove_managed_artifact_root,
-    terminal_observer_key, unexpected_peer_response, CURRENT_PROTOCOL_VERSION,
+    supports_duplex_terminal, terminal_observer_key, unexpected_peer_response,
+    CURRENT_PROTOCOL_VERSION,
 };
 use crate::crypto::{parse_public_key, public_key_to_string, seal_json};
 use crate::discovery::encode_txt_record;
@@ -26,7 +27,9 @@ use crate::protocol::{
     DiscoveredPeer, LocalTransferIdentity, PeerTaskSnapshot, PeerTaskSnapshotIssue,
     PeerTaskSnapshotListing,
 };
-use crate::protocol::{PeerRegistryEntry, PeerRequest, PeerResponse, PeerTerminalEvent};
+use crate::protocol::{
+    PeerRegistryEntry, PeerRequest, PeerResponse, PeerTerminalControl, PeerTerminalEvent,
+};
 use crate::registry::PeerRegistry;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -678,6 +681,7 @@ impl TransferRuntime {
                 closed: false,
                 closed_at: None,
                 handle: None,
+                control_sender: None,
             },
         );
         drop(observers);
@@ -735,6 +739,13 @@ impl TransferRuntime {
         let peer_id_for_error = target_peer.peer_id.clone();
         let session_id_for_error = session_id.clone();
         let observer_lease_id_for_task = lease_id.clone();
+        let (control_sender, control_receiver) =
+            if supports_duplex_terminal(target_peer.protocol_version) {
+                let (sender, receiver) = mpsc::channel(256);
+                (Some(sender), Some(receiver))
+            } else {
+                (None, None)
+            };
         let mut observers = self.terminal_observers.lock().await;
         let Some(slot) = observers
             .get_mut(&observer_lease_key)
@@ -742,6 +753,7 @@ impl TransferRuntime {
         else {
             return Ok(());
         };
+        slot.control_sender = control_sender;
         let handle = tokio::spawn(async move {
             if let Err(error) = stream_peer_session(
                 peer_for_task,
@@ -749,8 +761,11 @@ impl TransferRuntime {
                 self_peer_id,
                 session_id.clone(),
                 sealed_payload,
-                observer_lease_id_for_task.clone(),
-                incoming_sender.clone(),
+                PeerSessionBridge {
+                    observer_lease_id: observer_lease_id_for_task.clone(),
+                    incoming_sender: incoming_sender.clone(),
+                    control_receiver,
+                },
             )
             .await
             {
@@ -789,6 +804,7 @@ impl TransferRuntime {
             Some(slot) => {
                 slot.closed = true;
                 slot.closed_at = Some(std::time::Instant::now());
+                slot.control_sender = None;
                 if let Some(handle) = slot.handle.take() {
                     handle.abort();
                 }
@@ -800,6 +816,7 @@ impl TransferRuntime {
                         closed: true,
                         closed_at: Some(std::time::Instant::now()),
                         handle: None,
+                        control_sender: None,
                     },
                 );
             }
@@ -1310,12 +1327,48 @@ impl TransferRuntime {
         result
     }
 
+    async fn send_observed_terminal_control(
+        &self,
+        target_peer_id: &str,
+        session_id: &str,
+        control: PeerTerminalControl,
+    ) -> bool {
+        let observer_key = terminal_observer_key(target_peer_id, session_id);
+        let sender = self
+            .terminal_observers
+            .lock()
+            .await
+            .iter()
+            .find_map(|((key, _), slot)| {
+                (key == &observer_key && !slot.closed)
+                    .then(|| slot.control_sender.clone())
+                    .flatten()
+            });
+        let Some(sender) = sender else {
+            return false;
+        };
+        sender.send(control).await.is_ok()
+    }
+
     pub async fn send_peer_session_input(
         &self,
         target_peer_id: &str,
         session_id: &str,
         data: Vec<u8>,
     ) -> Result<(), RuntimeError> {
+        if self
+            .send_observed_terminal_control(
+                target_peer_id,
+                session_id,
+                PeerTerminalControl::Input {
+                    session_id: session_id.to_owned(),
+                    data: data.clone(),
+                },
+            )
+            .await
+        {
+            return Ok(());
+        }
         let target_peer = self.find_peer(target_peer_id).await?;
         self.ensure_peer_is_durably_trusted(&target_peer.peer_id, &target_peer.public_key)?;
         let request_id = self.next_request_id("send-input");
@@ -1358,6 +1411,20 @@ impl TransferRuntime {
         cols: u16,
         rows: u16,
     ) -> Result<(), RuntimeError> {
+        if self
+            .send_observed_terminal_control(
+                target_peer_id,
+                session_id,
+                PeerTerminalControl::Resize {
+                    session_id: session_id.to_owned(),
+                    cols,
+                    rows,
+                },
+            )
+            .await
+        {
+            return Ok(());
+        }
         let target_peer = self.find_peer(target_peer_id).await?;
         self.ensure_peer_is_durably_trusted(&target_peer.peer_id, &target_peer.public_key)?;
         let request_id = self.next_request_id("resize-session");
