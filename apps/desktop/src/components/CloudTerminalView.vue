@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref, watch } from "vue";
+import { nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
@@ -14,11 +14,14 @@ import { useThemeRuntime } from "../theme/runtime";
 import { registerE2ETerminalBuffer } from "../e2eTerminalBuffers";
 import { isShiftEnter, SHIFT_ENTER_CSI_U } from "../composables/terminalKeyboard";
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
+  active?: boolean;
   ownerDesktopId: string;
   ownerTaskId: string;
   transport?: "cloud" | "lan";
-}>();
+}>(), {
+  active: true,
+});
 
 const containerRef = ref<HTMLElement | null>(null);
 const status = ref<"connecting" | "live" | "closed" | "error">("connecting");
@@ -38,6 +41,7 @@ function writeRemoteTerminalError(message: string) {
 }
 
 function fitAndResizeRemote() {
+  if (!props.active) return;
   fitAddon?.fit();
   if (!terminal || !relayClient || status.value !== "live") return;
   void relayClient.resize({
@@ -171,6 +175,16 @@ watch(
   () => {
     registerTerminalBufferForE2E();
     void start();
+  },
+);
+
+watch(
+  () => props.active,
+  async (active) => {
+    if (!active) return;
+    await nextTick();
+    if (!terminal || !props.active) return;
+    fitAndResizeRemote();
   },
 );
 
