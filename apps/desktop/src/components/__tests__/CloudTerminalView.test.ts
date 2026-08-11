@@ -13,6 +13,7 @@ const testState = vi.hoisted(() => {
     rows = 24;
     options: Record<string, unknown>;
     dataHandler: ((data: string) => void) | null = null;
+    keyHandler: ((event: KeyboardEvent) => boolean) | null = null;
     loadedAddons: unknown[] = [];
     dispose = vi.fn();
     loadAddon = vi.fn((addon: unknown) => {
@@ -20,6 +21,9 @@ const testState = vi.hoisted(() => {
     });
     onData = vi.fn((handler: (data: string) => void) => {
       this.dataHandler = handler;
+    });
+    attachCustomKeyEventHandler = vi.fn((handler: (event: KeyboardEvent) => boolean) => {
+      this.keyHandler = handler;
     });
     open = vi.fn();
     reset = vi.fn();

@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const harness = vi.hoisted(() => ({
   clientFactory: vi.fn(),
   dataListener: null as ((data: string) => void) | null,
+  keyHandler: null as ((event: KeyboardEvent) => boolean) | null,
   sendInput: vi.fn(),
   subscriptionListener: null as ((event: Record<string, unknown>) => void) | null,
 }));
@@ -18,6 +19,9 @@ vi.mock("@xterm/xterm", () => ({
     onData(listener: (data: string) => void) {
       harness.dataListener = listener;
       return { dispose() {} };
+    }
+    attachCustomKeyEventHandler(listener: (event: KeyboardEvent) => boolean) {
+      harness.keyHandler = listener;
     }
     loadAddon() {}
     open() {}
@@ -119,6 +123,7 @@ describe("CloudTerminalView", () => {
   beforeEach(() => {
     harness.clientFactory.mockReset();
     harness.dataListener = null;
+    harness.keyHandler = null;
     harness.subscriptionListener = null;
     harness.sendInput.mockReset();
     harness.clientFactory.mockImplementation(async () => terminalClient());
@@ -162,6 +167,40 @@ describe("CloudTerminalView", () => {
     ).toBe("abc");
 
     second.resolve();
+    wrapper.unmount();
+  });
+
+  it("sends Shift+Enter as kitty CSI-u modified Enter through the remote transport", async () => {
+    harness.sendInput.mockResolvedValue(undefined);
+    const { default: CloudTerminalView } = await import("../CloudTerminalView.vue");
+    const wrapper = mount(CloudTerminalView, {
+      props: {
+        ownerDesktopId: "desktop-1",
+        ownerTaskId: "task-1",
+        transport: "cloud",
+      },
+    });
+    await flushPromises();
+    const keyboardEvent = {
+      type: "keydown",
+      key: "Enter",
+      shiftKey: true,
+      metaKey: false,
+      altKey: false,
+      ctrlKey: false,
+      preventDefault: vi.fn(),
+    } as unknown as KeyboardEvent;
+
+    const allowed = harness.keyHandler?.(keyboardEvent);
+    await flushPromises();
+
+    expect(allowed).toBe(false);
+    expect(keyboardEvent.preventDefault).toHaveBeenCalledOnce();
+    expect(harness.sendInput).toHaveBeenCalledWith({
+      desktopId: "desktop-1",
+      taskId: "task-1",
+      data: "\x1b[13;2u",
+    });
     wrapper.unmount();
   });
 
