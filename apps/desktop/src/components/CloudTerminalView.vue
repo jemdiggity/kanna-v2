@@ -107,6 +107,19 @@ function registerTerminalBufferForE2E() {
     : null;
 }
 
+function sendRemoteInput(data: string) {
+  const client = relayClient;
+  if (!client || status.value !== "live") return;
+  void client.sendInput({
+    desktopId: props.ownerDesktopId,
+    taskId: props.ownerTaskId,
+    data,
+  }).catch((error: unknown) => {
+    const message = error instanceof Error ? error.message : "Failed to send remote input.";
+    writeRemoteTerminalError(message);
+  });
+}
+
 onMounted(() => {
   terminal = new Terminal({
     allowProposedApi: true,
@@ -120,41 +133,27 @@ onMounted(() => {
   terminal.attachCustomKeyEventHandler((event: KeyboardEvent) => {
     if (isShiftEnter(event)) {
       event.preventDefault();
-      enqueueRemoteInput(SHIFT_ENTER_CSI_U);
+      sendRemoteInput(SHIFT_ENTER_CSI_U);
       return false;
     }
-    return true;
-  });
-  terminal.attachCustomKeyEventHandler((event: KeyboardEvent) => {
-    if (isShiftEnter(event)) {
+    if (
+      event.type === "keydown"
+      && event.metaKey
+      && !event.altKey
+      && !event.ctrlKey
+      && event.key.toLowerCase() === "c"
+    ) {
+      const selection = terminal?.getSelection() ?? "";
+      if (!selection) return true;
+      void navigator.clipboard.writeText(selection).catch(() => {
+        console.error("[cloud-terminal] Failed to copy terminal selection.");
+      });
       event.preventDefault();
-      const client = relayClient;
-      if (client && status.value === "live") {
-        void client.sendInput({
-          desktopId: props.ownerDesktopId,
-          taskId: props.ownerTaskId,
-          data: SHIFT_ENTER_CSI_U,
-        }).catch((error: unknown) => {
-          const message = error instanceof Error ? error.message : "Failed to send remote input.";
-          writeRemoteTerminalError(message);
-        });
-      }
       return false;
     }
     return true;
   });
-  terminal.onData((data) => {
-    const client = relayClient;
-    if (!client || status.value !== "live") return;
-    void client.sendInput({
-      desktopId: props.ownerDesktopId,
-      taskId: props.ownerTaskId,
-      data,
-    }).catch((error: unknown) => {
-      const message = error instanceof Error ? error.message : "Failed to send remote input.";
-      writeRemoteTerminalError(message);
-    });
-  });
+  terminal.onData(sendRemoteInput);
   fitAddon = new FitAddon();
   terminal.loadAddon(fitAddon);
   if (containerRef.value) {

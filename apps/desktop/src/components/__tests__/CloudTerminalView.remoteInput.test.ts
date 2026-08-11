@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const harness = vi.hoisted(() => ({
   clientFactory: vi.fn(),
   keyHandler: null as ((event: KeyboardEvent) => boolean) | null,
+  selection: "",
   sendInput: vi.fn(),
 }));
 
@@ -14,6 +15,10 @@ vi.mock("@xterm/xterm", () => ({
     cols = 80;
     rows = 24;
     options = {};
+    getSelection() {
+      return harness.selection;
+    }
+    onData() { return { dispose() {} }; }
     attachCustomKeyEventHandler(listener: (event: KeyboardEvent) => boolean) {
       harness.keyHandler = listener;
     }
@@ -71,6 +76,7 @@ describe("CloudTerminalView remote input", () => {
   beforeEach(() => {
     harness.clientFactory.mockReset();
     harness.keyHandler = null;
+    harness.selection = "";
     harness.sendInput.mockReset();
     harness.sendInput.mockResolvedValue(undefined);
     harness.clientFactory.mockResolvedValue(terminalClient());
@@ -110,6 +116,62 @@ describe("CloudTerminalView remote input", () => {
       taskId: "task-1",
       data: "\x1b[13;2u",
     });
+    wrapper.unmount();
+  });
+
+  it("copies selected text with Command+C", async () => {
+    const clipboardWriteText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: clipboardWriteText },
+    });
+    harness.selection = "selected remote output";
+    const { default: CloudTerminalView } = await import("../CloudTerminalView.vue");
+    const wrapper = mount(CloudTerminalView, {
+      props: { ownerDesktopId: "desktop-1", ownerTaskId: "task-1" },
+    });
+    await flushPromises();
+    const event = {
+      type: "keydown",
+      key: "c",
+      metaKey: true,
+      altKey: false,
+      ctrlKey: false,
+      preventDefault: vi.fn(),
+    } as unknown as KeyboardEvent;
+
+    expect(harness.keyHandler?.(event)).toBe(false);
+    await flushPromises();
+
+    expect(event.preventDefault).toHaveBeenCalledOnce();
+    expect(clipboardWriteText).toHaveBeenCalledExactlyOnceWith("selected remote output");
+    expect(harness.sendInput).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("leaves Command+C to xterm when there is no selection", async () => {
+    const clipboardWriteText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: clipboardWriteText },
+    });
+    const { default: CloudTerminalView } = await import("../CloudTerminalView.vue");
+    const wrapper = mount(CloudTerminalView, {
+      props: { ownerDesktopId: "desktop-1", ownerTaskId: "task-1" },
+    });
+    await flushPromises();
+    const event = {
+      type: "keydown",
+      key: "c",
+      metaKey: true,
+      altKey: false,
+      ctrlKey: false,
+      preventDefault: vi.fn(),
+    } as unknown as KeyboardEvent;
+
+    expect(harness.keyHandler?.(event)).toBe(true);
+    expect(event.preventDefault).not.toHaveBeenCalled();
+    expect(clipboardWriteText).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 });
