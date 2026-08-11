@@ -563,6 +563,68 @@ describe("CloudTerminalView remote visual companion links", () => {
     wrapper.unmount();
   });
 
+  it("does not fit or resize while hidden and refits on reactivation without reconnecting", async () => {
+    const client = createClient();
+    let terminalListener:
+      | ((event: { type: "ready"; taskId: string }) => void)
+      | undefined;
+    client.observeTerminal.mockImplementation((options) => {
+      terminalListener = options.listener;
+      return { close: client.terminalClose };
+    });
+    mocks.lanFactory.mockResolvedValue(client);
+
+    const wrapper = mount(CloudTerminalView, {
+      props: {
+        active: true,
+        ownerDesktopId: "peer-1",
+        ownerTaskId: "task-2",
+        transport: "lan",
+      },
+    });
+    await flushAsync();
+    terminalListener?.({ type: "ready", taskId: "task-2" });
+    await flushAsync();
+
+    const terminal = testState.terminals[0];
+    const fitAddon = terminal?.loadedAddons.find(
+      (addon) => addon instanceof testState.FakeFitAddon,
+    ) as InstanceType<typeof testState.FakeFitAddon> | undefined;
+    if (!terminal || !fitAddon) {
+      throw new Error("terminal and fit addon should be initialized");
+    }
+    client.resize.mockClear();
+    fitAddon.fit.mockClear();
+
+    await wrapper.setProps({ active: false });
+    terminal.cols = 2;
+    terminal.rows = 1;
+    testState.resizeCallbacks[0]?.([], {} as ResizeObserver);
+    await flushAsync();
+
+    expect(fitAddon.fit).not.toHaveBeenCalled();
+    expect(client.resize).not.toHaveBeenCalled();
+
+    fitAddon.fit.mockImplementation(() => {
+      terminal.cols = 132;
+      terminal.rows = 41;
+    });
+    await wrapper.setProps({ active: true });
+    await flushAsync();
+
+    expect(fitAddon.fit).toHaveBeenCalledTimes(1);
+    expect(client.resize).toHaveBeenCalledExactlyOnceWith({
+      desktopId: "peer-1",
+      taskId: "task-2",
+      cols: 132,
+      rows: 41,
+    });
+    expect(mocks.lanFactory).toHaveBeenCalledTimes(1);
+    expect(client.observeTerminal).toHaveBeenCalledTimes(1);
+    expect(client.terminalClose).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
   it("closes a stale pre-adoption client without replacing the current prop generation", async () => {
     const staleClient = createClient();
     const currentClient = createClient();

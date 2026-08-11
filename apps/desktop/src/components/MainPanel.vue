@@ -12,7 +12,9 @@ import { isBlockerResolved } from "../utils/blockerResolution";
 import { invoke } from "../invoke";
 import TaskHeader from "./TaskHeader.vue";
 import TerminalTabs from "./TerminalTabs.vue";
-import CloudTerminalView from "./CloudTerminalView.vue";
+import CloudTerminalCache, {
+  type CloudTerminalCacheEntry,
+} from "./CloudTerminalCache.vue";
 
 const props = defineProps<{
   uiSlot: TaskUiSlot | null;
@@ -60,6 +62,32 @@ const isBlocked = computed(() => {
   if (props.blocked !== undefined) return props.blocked;
   if (!props.blockers || props.blockers.length === 0) return false;
   return props.blockers.some(b => !isBlockerResolved(b));
+});
+
+const activeCloudTerminal = computed<CloudTerminalCacheEntry | null>(() => {
+  const task = item.value;
+  const terminalRef = props.cloudTerminalRef;
+  if (
+    !task
+    || props.uiSlot?.state !== "ready"
+    || !props.cloudTask
+    || isBlocked.value
+    || !terminalRef
+  ) {
+    return null;
+  }
+  return {
+    key: task.id,
+    ownerDesktopId: terminalRef.ownerDesktopId,
+    ownerTaskId: terminalRef.ownerLocalTaskId,
+    transport: terminalRef.transport,
+  };
+});
+
+const discardedCloudTerminalKey = computed(() => {
+  const task = item.value;
+  if (!task || props.uiSlot?.state !== "ready" || !props.cloudTask) return null;
+  return isBlocked.value || !props.cloudTerminalRef ? task.id : null;
 });
 
 const commandHintDismissed = ref(readCommandHintDismissed());
@@ -336,6 +364,10 @@ function dismissCommandHint() {
           {{ $t('mainPanel.revise') }}
         </button>
       </section>
+      <CloudTerminalCache
+        :active-terminal="activeCloudTerminal"
+        :discard-key="discardedCloudTerminalKey"
+      />
       <template v-if="uiSlot.state !== 'ready' || !item">
         <div class="setup-placeholder">
           <p class="setup-title">{{ $t('mainPanel.taskSettingUp') }}</p>
@@ -365,13 +397,7 @@ function dismissCommandHint() {
         </div>
       </template>
       <template v-else-if="cloudTask">
-        <CloudTerminalView
-          v-if="cloudTerminalRef"
-          :owner-desktop-id="cloudTerminalRef.ownerDesktopId"
-          :owner-task-id="cloudTerminalRef.ownerLocalTaskId"
-          :transport="cloudTerminalRef.transport"
-        />
-        <div v-else class="cloud-task-placeholder">
+        <div v-if="!cloudTerminalRef" class="cloud-task-placeholder">
           <p class="cloud-task-title">Task is running on another machine</p>
           <p class="cloud-task-hint">Cloud sync is showing the task here, but terminal routing information is unavailable.</p>
         </div>

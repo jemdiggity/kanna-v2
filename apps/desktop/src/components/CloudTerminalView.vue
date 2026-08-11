@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref, watch } from "vue";
+import { nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
@@ -29,11 +29,14 @@ import { registerE2ETerminalBuffer } from "../e2eTerminalBuffers";
 import { useToast } from "../composables/useToast";
 import { isShiftEnter, SHIFT_ENTER_CSI_U } from "../composables/terminalKeyboard";
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
+  active?: boolean;
   ownerDesktopId: string;
   ownerTaskId: string;
   transport?: "cloud" | "lan";
-}>();
+}>(), {
+  active: true,
+});
 
 const containerRef = ref<HTMLElement | null>(null);
 const status = ref<"connecting" | "live" | "closed" | "error">("connecting");
@@ -151,6 +154,7 @@ function enqueueRemoteInput(data: string) {
 }
 
 function fitAndResizeRemote() {
+  if (!props.active) return;
   fitAddon?.fit();
   if (
     !terminal ||
@@ -407,6 +411,16 @@ watch(
   () => {
     registerTerminalBufferForE2E();
     void start();
+  },
+);
+
+watch(
+  () => props.active,
+  async (active) => {
+    if (!active) return;
+    await nextTick();
+    if (unmounted || !props.active) return;
+    fitAndResizeRemote();
   },
 );
 
