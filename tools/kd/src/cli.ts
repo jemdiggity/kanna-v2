@@ -565,6 +565,9 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   if (group === "release" && command === "setup-notarization") {
     return { taskId: "release.setup-notarization", input: parseFlagInput(rest, {}) };
   }
+  if (group === "release" && command === "setup-updater-key") {
+    return { taskId: "release.setup-updater-key", input: parseFlagInput(rest, {}) };
+  }
   if (group === "release" && command === "cut") {
     return { taskId: "release.cut", input: parseFlagInput(rest, {}) };
   }
@@ -695,6 +698,7 @@ const helpTopics: Record<string, string[]> = {
     "  release ship [--staging|--production] [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64] [--rollback-to <version>] [--branch main|release/X.Y]",
     "  release promote <staging-version> [--dry-run] [--arm64|--x86_64]",
     "  release setup-notarization [--profile <name>] [--keychain <absolute-path>]",
+    "  release setup-updater-key [--service <name>] [--account <name>] [--keychain <absolute-path>]",
     "  release cut [--major|--minor|--patch]",
     "  release status",
     "  cloud deploy --staging|--production [--relay]",
@@ -1019,6 +1023,7 @@ const helpTopics: Record<string, string[]> = {
     "Commands:",
     "  release ship [--staging|--production] [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64] [--rollback-to <version>] [--branch main|release/X.Y]",
     "  release promote <staging-version> [--dry-run] [--arm64|--x86_64]",
+    "  release setup-updater-key [--service <name>] [--account <name>] [--keychain <absolute-path>]",
     "  release setup-notarization [--profile <name>] [--keychain <absolute-path>]",
     "  release cut [--major|--minor|--patch]",
     "  release status"
@@ -1042,6 +1047,14 @@ const helpTopics: Record<string, string[]> = {
     "Securely prompt for Apple notarization credentials, validate them, and store the named profile in an explicit file-based Keychain.",
     "Defaults to profile kanna-notarization and the current user's default login Keychain. Writes only the profile name and Keychain path to ~/.kanna/.env.release.local.",
     "That owner-only machine-global file is the sole release-environment file kd reads; repository and worktree .env.release.local files are ignored."
+  ],
+  "release setup-updater-key": [
+    "Usage: kd release setup-updater-key [--service <name>] [--account <name>] [--keychain <absolute-path>]",
+    "",
+    "Import the Tauri updater signing key from TAURI_PRIVATE_KEY_PATH into an explicit file-based Keychain, then verify the stored copy reads back intact.",
+    "The Keychain becomes the key's home: its encryption and ACL are the protection, so the key does not also need an rsign passphrase.",
+    "Writes only the service, account, and Keychain path to ~/.kanna/.env.release.local; the key material itself never lands in configuration.",
+    "Once stored, back up the original key file somewhere durable and offline before removing it -- losing this key means no existing install can ever be updated again."
   ],
   "release cut": [
     "Usage: kd release cut [--major|--minor|--patch]",

@@ -2,6 +2,11 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, r
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CommandRunner } from "./process";
+import {
+  resolveUpdaterSigningKey,
+  TAURI_SIGNING_KEY_ENV,
+  TAURI_SIGNING_PASSWORD_ENV
+} from "./updater-key";
 
 export type ReleaseBump = "major" | "minor" | "patch";
 export type ReleaseArchLabel = "arm64" | "x86_64";
@@ -599,12 +604,21 @@ function writeLatestJson(path: string, version: string, notes: string, pubDate: 
 export async function createUpdaterBundle(input: ReleaseShipInput, bundleSource: string, bundlePath: string, signaturePath: string): Promise<void> {
   rmSync(bundlePath, { force: true });
   cpSync(bundleSource, bundlePath);
-  const signerArgs = ["--dir", join(input.repoRoot, "apps", "desktop"), "exec", "tauri", "signer", "sign", "--private-key-path", input.env.TAURI_PRIVATE_KEY_PATH ?? ""];
-  if ("TAURI_PRIVATE_KEY_PASSWORD" in input.env) {
-    signerArgs.push("--password", input.env.TAURI_PRIVATE_KEY_PASSWORD ?? "");
-  }
-  signerArgs.push(bundlePath);
-  await mustRun(input.runner, "pnpm", signerArgs, input.repoRoot, input.env);
+  const signingKey = await resolveUpdaterSigningKey({
+    cwd: input.repoRoot,
+    env: input.env,
+    runner: input.runner
+  });
+  // Both values go through the environment, never argv: the key is secret, and an
+  // unset password makes `tauri signer` fall through to a TTY prompt that hangs
+  // (then fails) every non-interactive ship. Empty is the correct default here.
+  const signerEnv: NodeJS.ProcessEnv = {
+    ...input.env,
+    [TAURI_SIGNING_KEY_ENV]: signingKey,
+    [TAURI_SIGNING_PASSWORD_ENV]: input.env.TAURI_PRIVATE_KEY_PASSWORD ?? ""
+  };
+  const signerArgs = ["--dir", join(input.repoRoot, "apps", "desktop"), "exec", "tauri", "signer", "sign", bundlePath];
+  await mustRun(input.runner, "pnpm", signerArgs, input.repoRoot, signerEnv);
   const generatedSig = `${bundlePath}.sig`;
   if (!existsSync(generatedSig)) throw new Error(`Expected updater signature not found: ${generatedSig}`);
   if (generatedSig !== signaturePath) {

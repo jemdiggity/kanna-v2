@@ -7,10 +7,18 @@ import { stripRustCacheEnvironment } from "./rust-cache-policy";
 export const RELEASE_ENV_FILE = ".env.release.local";
 export const NOTARIZATION_PROFILE_ENV = "APPLE_KEYCHAIN_PROFILE";
 export const NOTARIZATION_KEYCHAIN_ENV = "APPLE_KEYCHAIN_PATH";
+export const UPDATER_KEYCHAIN_SERVICE_ENV = "KANNA_UPDATER_KEYCHAIN_SERVICE";
+export const UPDATER_KEYCHAIN_ACCOUNT_ENV = "KANNA_UPDATER_KEYCHAIN_ACCOUNT";
+export const UPDATER_KEYCHAIN_PATH_ENV = "KANNA_UPDATER_KEYCHAIN_PATH";
 
 const NOTARIZATION_SELECTOR_KEYS = new Set([
   NOTARIZATION_PROFILE_ENV,
   NOTARIZATION_KEYCHAIN_ENV
+]);
+const UPDATER_KEY_SELECTOR_KEYS = new Set([
+  UPDATER_KEYCHAIN_SERVICE_ENV,
+  UPDATER_KEYCHAIN_ACCOUNT_ENV,
+  UPDATER_KEYCHAIN_PATH_ENV
 ]);
 const UNSAFE_PLAINTEXT_RELEASE_KEYS = new Set([
   "APPLE_ID",
@@ -177,10 +185,16 @@ function validateReleaseEnvironmentFile(
   }
 }
 
-export function writeMachineNotarizationSelectors(input: {
+/**
+ * Replace one family of machine-local selectors in ~/.kanna/.env.release.local,
+ * leaving every other line untouched. Only non-secret selectors belong here;
+ * the secrets they point at stay in the Keychain.
+ */
+function writeMachineSelectors(input: {
   homeDir: string;
-  profile: string;
-  keychainPath: string;
+  selectorKeys: Set<string>;
+  selectorLabel: string;
+  assignments: [string, string][];
   /** @internal Test-only synchronization for deterministic filesystem races. */
   testSynchronization?: ReleaseEnvironmentTestSynchronization;
 }): string {
@@ -207,9 +221,9 @@ export function writeMachineNotarizationSelectors(input: {
   validateDotenv(source, envPath);
   const parsed = definedEnvironment(parseEnv(source));
   validateReleaseEnvironmentFile(parsed, envPath);
-  for (const key of NOTARIZATION_SELECTOR_KEYS) {
+  for (const key of input.selectorKeys) {
     if (parsed[key]?.includes("\n") || parsed[key]?.includes("\r")) {
-      throw new Error(`Invalid multiline notarization selector ${key} in ${envPath}.`);
+      throw new Error(`Invalid multiline ${input.selectorLabel} selector ${key} in ${envPath}.`);
     }
   }
 
@@ -217,13 +231,12 @@ export function writeMachineNotarizationSelectors(input: {
     .split(/\r?\n/)
     .filter((line) => {
       const assignment = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/.exec(line);
-      return !assignment?.[1] || !NOTARIZATION_SELECTOR_KEYS.has(assignment[1]);
+      return !assignment?.[1] || !input.selectorKeys.has(assignment[1]);
     });
   while (retainedLines.at(-1) === "") retainedLines.pop();
   const updated = [
     ...retainedLines,
-    `${NOTARIZATION_PROFILE_ENV}=${JSON.stringify(input.profile)}`,
-    `${NOTARIZATION_KEYCHAIN_ENV}=${JSON.stringify(input.keychainPath)}`,
+    ...input.assignments.map(([key, value]) => `${key}=${JSON.stringify(value)}`),
     ""
   ].join("\n");
 
@@ -237,6 +250,46 @@ export function writeMachineNotarizationSelectors(input: {
     testSynchronization: input.testSynchronization
   });
   return envPath;
+}
+
+export function writeMachineNotarizationSelectors(input: {
+  homeDir: string;
+  profile: string;
+  keychainPath: string;
+  /** @internal Test-only synchronization for deterministic filesystem races. */
+  testSynchronization?: ReleaseEnvironmentTestSynchronization;
+}): string {
+  return writeMachineSelectors({
+    homeDir: input.homeDir,
+    selectorKeys: NOTARIZATION_SELECTOR_KEYS,
+    selectorLabel: "notarization",
+    assignments: [
+      [NOTARIZATION_PROFILE_ENV, input.profile],
+      [NOTARIZATION_KEYCHAIN_ENV, input.keychainPath]
+    ],
+    testSynchronization: input.testSynchronization
+  });
+}
+
+export function writeMachineUpdaterKeySelectors(input: {
+  homeDir: string;
+  service: string;
+  account: string;
+  keychainPath: string;
+  /** @internal Test-only synchronization for deterministic filesystem races. */
+  testSynchronization?: ReleaseEnvironmentTestSynchronization;
+}): string {
+  return writeMachineSelectors({
+    homeDir: input.homeDir,
+    selectorKeys: UPDATER_KEY_SELECTOR_KEYS,
+    selectorLabel: "updater key",
+    assignments: [
+      [UPDATER_KEYCHAIN_SERVICE_ENV, input.service],
+      [UPDATER_KEYCHAIN_ACCOUNT_ENV, input.account],
+      [UPDATER_KEYCHAIN_PATH_ENV, input.keychainPath]
+    ],
+    testSynchronization: input.testSynchronization
+  });
 }
 
 function machineConfigAncestry(
