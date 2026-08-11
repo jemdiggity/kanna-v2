@@ -41,6 +41,7 @@ export type DisplayTaskRoute =
 
 export interface CloudLanClientOptions {
   isLanEnabled(): boolean;
+  canUseLanTaskStreams?(desktopId: string): boolean;
   lanClientForDesktop?(desktopId: string): KannaClient | null;
   optionalLanWaitMs?: number;
   onDesktopSourceWarnings?(warnings: DesktopSourceWarnings): void;
@@ -875,6 +876,22 @@ export function createCloudLanClient(
     };
   };
 
+  const routeForTaskStream = (taskId: string): ResolvedTaskRoute => {
+    const route = routeForTask(taskId);
+    if (
+      route.source === "lan" &&
+      route.cloudFallbackTaskId &&
+      options.canUseLanTaskStreams?.(route.desktopId) === false
+    ) {
+      return {
+        source: "cloud",
+        taskId: route.cloudFallbackTaskId,
+        client: cloud
+      };
+    }
+    return route;
+  };
+
   const invokeTaskRoute = <T>(
     taskId: string,
     invoke: (client: KannaClient, routedTaskId: string) => Promise<T>
@@ -1246,7 +1263,7 @@ export function createCloudLanClient(
 
   return {
     getTaskRouteIdentity(taskId: string): string {
-      const route = routeForTask(taskId);
+      const route = routeForTaskStream(taskId);
       if (route.source === "cloud") {
         return route.client.getTaskRouteIdentity?.(route.taskId) ??
           JSON.stringify(["cloud", route.taskId]);
@@ -1430,7 +1447,7 @@ export function createCloudLanClient(
       taskId: string,
       listener: (event: TaskTerminalStreamEvent) => void
     ): TaskTerminalSubscription {
-      const route = routeForTask(taskId);
+      const route = routeForTaskStream(taskId);
       if (route.source === "unavailable") {
         listener({ type: "error", taskId, message: route.message });
         return { close() {} };
@@ -1441,7 +1458,7 @@ export function createCloudLanClient(
       taskId: string,
       listener: (event: TaskAgentStreamEvent) => void
     ): TaskAgentSubscription {
-      const route = routeForTask(taskId);
+      const route = routeForTaskStream(taskId);
       if (route.source === "unavailable") {
         listener({ type: "error", taskId, message: route.message });
         return {
@@ -1457,7 +1474,7 @@ export function createCloudLanClient(
       taskId: string,
       listener: (event: TaskCompanionStreamEvent) => void
     ): TaskCompanionSubscription {
-      const route = routeForTask(taskId);
+      const route = routeForTaskStream(taskId);
       if (route.source === "unavailable") {
         listener({
           type: "error",

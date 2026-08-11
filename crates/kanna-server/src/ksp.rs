@@ -9676,6 +9676,64 @@ mod tests {
         let _ = task.await;
     }
 
+    #[tokio::test]
+    async fn direct_lan_stream_rejects_stale_invalid_and_malformed_device_credentials() {
+        let config = test_config("ksp-lan-auth-bad", "KSP LAN Auth Bad");
+        let pairing_path = std::path::PathBuf::from(&config.pairing_store_path);
+        let mut pairing_store = crate::pairing::PairingStore::default();
+        pairing_store.add_trusted_device(
+            &config.desktop_id,
+            "phone-1",
+            "Kanna Mobile",
+            &crate::pairing::hash_device_secret("lan-secret"),
+        );
+        pairing_store.save(&pairing_path).unwrap();
+
+        for credential in [
+            serde_json::json!({
+                "deviceId": "phone-stale",
+                "deviceSecret": "old-secret",
+            })
+            .to_string(),
+            serde_json::json!({
+                "deviceId": "phone-1",
+                "deviceSecret": "wrong-secret",
+            })
+            .to_string(),
+            r#"{"deviceId":"phone-1"}"#.to_string(),
+        ] {
+            let state = Arc::new(crate::http_api::AppState::new(config.clone()));
+            let (incoming_tx, incoming_rx) = mpsc::channel(8);
+            let (frame_tx, companion_tx, mut outbound_rx) = outbound_frame_channel(8);
+            let task = tokio::spawn(handle_stream_channels(
+                incoming_rx,
+                frame_tx,
+                companion_tx,
+                state,
+                AuthMode::RequirePairedDevice,
+                false,
+            ));
+
+            incoming_tx
+                .send(
+                    serde_json::to_string(&ClientFrame::Auth {
+                        credential: Some(credential),
+                        capabilities: vec![],
+                    })
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                outbound_rx.recv().await,
+                Some(ServerFrame::Error { code, .. }) if code == "unauthorized"
+            ));
+            drop(incoming_tx);
+            task.await.unwrap();
+        }
+        let _ = std::fs::remove_file(pairing_path);
+    }
+
     async fn serve_non_loopback_test_router(
         desktop_id: &str,
     ) -> (String, tokio::task::JoinHandle<()>) {

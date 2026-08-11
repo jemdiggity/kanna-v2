@@ -4343,6 +4343,93 @@ describe("createAppModel cloud routing", () => {
     expect(taskIndex.listDesktops).toHaveBeenCalledWith("user-1");
   });
 
+  it("keeps an unpaired account task stream on relay when its LAN projection is available", async () => {
+    const accountTask = cloudTask({
+      id: "cloud:desktop-lan:repo-lan:local-task",
+      ownerDesktopId: "desktop-lan",
+      ownerLocalRepoId: "repo-lan",
+      ownerLocalTaskId: "local-task",
+      agentType: "pty"
+    });
+    let pushCloudTasks: ((tasks: CloudTaskSummary[]) => void) | null = null;
+    const taskIndex: CloudTaskIndex = {
+      listDesktops: vi.fn().mockResolvedValue([
+        {
+          desktopId: "desktop-lan",
+          displayName: "LAN Mac",
+          updatedAt: "2026-07-20T00:00:00.000Z"
+        }
+      ]),
+      listRecentTasks: vi.fn().mockResolvedValue([accountTask]),
+      subscribeRecentTasks: vi.fn((_uid, onUpdate) => {
+        pushCloudTasks = onUpdate;
+        return vi.fn();
+      })
+    };
+    const lan = createLanFixture(async () => [
+      {
+        id: "local-task",
+        repoId: "repo-lan",
+        title: "LAN task",
+        stage: "in progress",
+        agentType: "pty"
+      }
+    ]);
+    const { authSession } = createMutableAuthSession(signedInState());
+    const relayClient = createRelayClientMock(
+      vi.fn().mockResolvedValue(new Set(["desktop-lan"]))
+    );
+    const socketUrls: string[] = [];
+    class TestWebSocket {
+      close = vi.fn();
+      onclose: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      onopen: (() => void) | null = null;
+      send = vi.fn();
+
+      constructor(url: string) {
+        socketUrls.push(url);
+      }
+    }
+    vi.stubGlobal("WebSocket", TestWebSocket);
+    const app = createAppModel({
+      authSession,
+      fetchImpl: lan.fetchImpl,
+      persistence: {
+        load: vi.fn().mockResolvedValue({
+          selectedDesktopId: "desktop-lan",
+          trustedDesktops: [],
+          repoCreationProfiles: []
+        }),
+        save: vi.fn().mockResolvedValue(undefined)
+      },
+      options: {
+        forceCloud: false,
+        relayUrl: "wss://relay.test",
+        taskIndex,
+        bonjourBrowser: lan.bonjourBrowser,
+        createRelayClient: () => relayClient
+      }
+    });
+
+    try {
+      await app.initialize();
+      pushCloudTasks?.([accountTask]);
+      await flushAsyncWork(40);
+
+      app.controller.openTask(accountTask.id);
+
+      expect(relayClient.observeTaskTerminal).toHaveBeenCalledWith(
+        { desktopId: "desktop-lan", taskId: "local-task" },
+        expect.any(Function)
+      );
+      expect(socketUrls).toEqual([]);
+    } finally {
+      app.controller.dispose();
+    }
+  });
+
   it("migrates an open account task to relay when LAN validation times out", async () => {
     vi.useFakeTimers();
     const accountTask = cloudTask({
@@ -4415,7 +4502,21 @@ describe("createAppModel cloud routing", () => {
       persistence: {
         load: vi.fn().mockResolvedValue({
           selectedDesktopId: "desktop-lan",
-          trustedDesktops: [],
+          mobileDeviceId: "mobile-paired",
+          trustedDesktops: [
+            {
+              desktopId: "desktop-lan",
+              displayName: "LAN Mac",
+              lanEndpoints: [
+                {
+                  baseUrl: "http://desktop.lan:48120",
+                  lastSeenAt: "2026-07-20T00:00:00.000Z"
+                }
+              ],
+              lastSeenAt: "2026-07-20T00:00:00.000Z",
+              deviceSecret: "paired-device-secret"
+            }
+          ],
           repoCreationProfiles: []
         }),
         save: vi.fn().mockResolvedValue(undefined)
