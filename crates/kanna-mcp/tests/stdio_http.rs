@@ -232,14 +232,9 @@ fn run_kanna_mcp_with_env(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        // These tests are themselves often run by an agent inside a Kanna stage,
-        // whose environment carries a live run identity. Inheriting it makes
-        // `kanna-mcp` bind complete-stage calls to *that* run and changes the
-        // request bodies under test, so drop it before applying what the test
-        // asks for — every test that needs one of these sets it explicitly.
-        .env_remove("KANNA_TASK_ID")
-        .env_remove(kanna_tool_catalog::KANNA_STAGE_RUN_ID_ENV)
-        .env_remove(kanna_tool_catalog::KANNA_COMPLETION_CONTEXT_ENV)
+        // The spawned binary must only see environment configured by the test.
+        // Ambient Kanna context changes tool behavior and catalog resolution.
+        .env_clear()
         .envs(env_pairs.iter().copied())
         .spawn()
         .expect("spawn kanna-mcp");
@@ -275,6 +270,7 @@ fn spawn_kanna_mcp_for_reload(cwd: &std::path::Path) -> std::process::Child {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .env_clear()
         .spawn()
         .expect("spawn kanna-mcp")
 }
