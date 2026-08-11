@@ -1329,6 +1329,72 @@ describe("createCloudLanClient", () => {
     expect(cloud.getTask).toHaveBeenCalledWith("cloud-only");
   });
 
+  it("keeps cloud-backed streams on cloud when the LAN route cannot authenticate them", async () => {
+    const duplicate = task({
+      id: "cloud-duplicate",
+      ownerDesktopId: "desktop-lan",
+      ownerLocalTaskId: "local-duplicate"
+    });
+    const localDuplicate = task({ id: "local-duplicate" });
+    const cloudTerminalSubscription: TaskTerminalSubscription = {
+      close: vi.fn()
+    };
+    const cloudAgentSubscription = agentSubscription();
+    const cloudCompanionSubscription = companionSubscription();
+    const cloud = createClientMock({
+      listRecentTasks: vi.fn().mockResolvedValue([duplicate]),
+      observeTaskTerminal: vi.fn(() => cloudTerminalSubscription),
+      observeTaskAgent: vi.fn(() => cloudAgentSubscription),
+      observeTaskCompanion: vi.fn(() => cloudCompanionSubscription)
+    });
+    const lan = createClientMock({
+      listRecentTasks: vi.fn().mockResolvedValue([localDuplicate])
+    });
+    const client = createCloudLanClient(cloud, lan, {
+      isLanEnabled: () => true,
+      canUseLanTaskStreams: () => false
+    });
+    const agentListener = vi.fn();
+    const terminalListener = vi.fn();
+    const companionListener = vi.fn();
+
+    await client.listRecentTasks();
+
+    expect(client.getTaskRouteIdentity?.("cloud-duplicate")).toBe(
+      JSON.stringify(["cloud", "cloud-duplicate"])
+    );
+    expect(client.observeTaskAgent("cloud-duplicate", agentListener)).toBe(
+      cloudAgentSubscription
+    );
+    expect(
+      client.observeTaskTerminal("cloud-duplicate", terminalListener)
+    ).toBe(cloudTerminalSubscription);
+    expect(
+      client.observeTaskCompanion("cloud-duplicate", companionListener)
+    ).toBe(cloudCompanionSubscription);
+    await client.sendTaskInput("cloud-duplicate", "continue");
+
+    expect(cloud.observeTaskAgent).toHaveBeenCalledWith(
+      "cloud-duplicate",
+      agentListener
+    );
+    expect(cloud.observeTaskTerminal).toHaveBeenCalledWith(
+      "cloud-duplicate",
+      terminalListener
+    );
+    expect(cloud.observeTaskCompanion).toHaveBeenCalledWith(
+      "cloud-duplicate",
+      expect.any(Function)
+    );
+    expect(lan.observeTaskAgent).not.toHaveBeenCalled();
+    expect(lan.observeTaskTerminal).not.toHaveBeenCalled();
+    expect(lan.observeTaskCompanion).not.toHaveBeenCalled();
+    expect(lan.sendTaskInput).toHaveBeenCalledWith(
+      "local-duplicate",
+      "continue"
+    );
+  });
+
   it("uses the authenticated cloud route for file content even when a LAN projection is selected", async () => {
     let lanEnabled = true;
     const cloud = createClientMock({
