@@ -27,6 +27,7 @@ import { getTerminalTheme } from "../theme/theme";
 import { useThemeRuntime } from "../theme/runtime";
 import { registerE2ETerminalBuffer } from "../e2eTerminalBuffers";
 import { useToast } from "../composables/useToast";
+import { isShiftEnter, SHIFT_ENTER_CSI_U } from "../composables/terminalKeyboard";
 
 const props = defineProps<{
   ownerDesktopId: string;
@@ -354,6 +355,14 @@ onMounted(() => {
     fontFamily: 'Menlo, Monaco, "Courier New", monospace',
     fontSize: 12,
     theme: getTerminalTheme(effectiveCodeTheme.value),
+  });
+  terminal.attachCustomKeyEventHandler((event: KeyboardEvent) => {
+    if (isShiftEnter(event)) {
+      event.preventDefault();
+      enqueueRemoteInput(SHIFT_ENTER_CSI_U);
+      return false;
+    }
+    return true;
   });
   terminal.onData((data) => {
     if (unmounted || !relayClient || status.value !== "live") return;

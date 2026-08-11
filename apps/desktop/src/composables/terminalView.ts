@@ -13,6 +13,7 @@ import type { TerminalOptions } from "./terminalTypes"
 import { createTerminalFileLinkProvider, type TerminalFileLinkProvider } from "./terminalFileLinks"
 import { registerTerminalFileLinkProvider } from "./terminalFileLinkRegistry"
 import { createTerminalDropBridge, type TerminalDropBridge } from "./terminalDropBridge"
+import { isShiftEnter, SHIFT_ENTER_CSI_U } from "./terminalKeyboard"
 
 export interface InitializedTerminalView {
   term: Terminal
@@ -115,15 +116,10 @@ export function initializeTerminalView(params: {
   term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
     if (
       params.options?.agentTerminal &&
-      e.type === "keydown" &&
-      e.key === "Enter" &&
-      e.shiftKey &&
-      !e.metaKey &&
-      !e.altKey &&
-      !e.ctrlKey
+      isShiftEnter(e)
     ) {
       e.preventDefault()
-      void params.sendInputBytes(new TextEncoder().encode("\x1b[13;2u"), { immediate: true })
+      void params.sendInputBytes(new TextEncoder().encode(SHIFT_ENTER_CSI_U), { immediate: true })
       return false
     }
     if (e.key === "Escape") {
