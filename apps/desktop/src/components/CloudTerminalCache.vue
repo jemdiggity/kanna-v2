@@ -115,6 +115,7 @@ onBeforeUnmount(() => {
       :data-terminal-cache-key="entry.key"
     >
       <CloudTerminalView
+        :active="entry.key === activeKey"
         :owner-desktop-id="entry.ownerDesktopId"
         :owner-task-id="entry.ownerTaskId"
         :transport="entry.transport"

@@ -25,6 +25,10 @@ function mountCache(
   const CloudTerminalViewStub = defineComponent({
     name: "CloudTerminalView",
     props: {
+      active: {
+        type: Boolean,
+        required: true,
+      },
       ownerTaskId: {
         type: String,
         required: true,
@@ -63,10 +67,16 @@ describe("CloudTerminalCache", () => {
     await wrapper.setProps({ activeTerminal: terminal("task-b") });
     expect(wrapper.findAll(".cloud-terminal-view-stub")).toHaveLength(2);
     expect(wrapper.get('[data-terminal-cache-key="task-a"]').attributes("style")).toContain("display: none");
+    const cachedViews = wrapper.findAllComponents({ name: "CloudTerminalView" });
+    expect(cachedViews.find((view) => view.props("ownerTaskId") === "owner-task-a")?.props("active")).toBe(false);
+    expect(cachedViews.find((view) => view.props("ownerTaskId") === "owner-task-b")?.props("active")).toBe(true);
 
     await wrapper.setProps({ activeTerminal: terminal("task-a") });
 
     expect(wrapper.get('[data-terminal-cache-key="task-a"]').element).toBe(firstTerminal.element);
+    expect(wrapper.findAllComponents({ name: "CloudTerminalView" })
+      .find((view) => view.props("ownerTaskId") === "owner-task-a")
+      ?.props("active")).toBe(true);
     expect(lifecycle.mock.calls).toEqual([
       ["mounted", "owner-task-a"],
       ["mounted", "owner-task-b"],

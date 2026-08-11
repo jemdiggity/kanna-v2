@@ -35,6 +35,11 @@ let sharedOwnerTask: {
   worktreePath: string;
 } | null = null;
 
+interface TerminalDimensions {
+  cols: number;
+  rows: number;
+}
+
 async function activateVisibleCompanionControl(
   client: WebDriverClient,
   key: "Enter" | "Space",
@@ -287,6 +292,42 @@ async function latestTaskTerminalHeartbeat(
     }
     return latest;
   `);
+}
+
+async function visibleRemoteTerminalDimensions(
+  ownerTaskId: string,
+  sourceUrl: string,
+): Promise<TerminalDimensions> {
+  const dimensions = await secondary.executeSync<TerminalDimensions | null>(`
+    const cell = window.__KANNA_E2E__?.terminalBuffers?.findTextCell(
+      ${JSON.stringify(ownerTaskId)},
+      ${JSON.stringify(sourceUrl)}
+    );
+    return cell ? { cols: cell.columns, rows: cell.rows } : null;
+  `);
+  if (!dimensions) {
+    throw new Error(`remote terminal dimensions unavailable for ${ownerTaskId}`);
+  }
+  return dimensions;
+}
+
+async function ownerTerminalDimensions(
+  ownerTaskId: string,
+): Promise<TerminalDimensions> {
+  const snapshot = await tauriInvoke(
+    primary,
+    "get_session_recovery_state",
+    { sessionId: ownerTaskId },
+  ) as { cols?: unknown; rows?: unknown } | null;
+  if (
+    typeof snapshot?.cols !== "number"
+    || typeof snapshot.rows !== "number"
+  ) {
+    throw new Error(
+      `owner terminal dimensions unavailable for ${ownerTaskId}: ${JSON.stringify(snapshot)}`,
+    );
+  }
+  return { cols: snapshot.cols, rows: snapshot.rows };
 }
 
 async function waitForRemoteTask(input: {
@@ -860,6 +901,16 @@ describe("remote desktop visual companion", () => {
         remoteA.owner.ownerTaskId,
         taskA.fixture.sourceUrl,
       );
+      const visibleDimensionsA = await visibleRemoteTerminalDimensions(
+        remoteA.owner.ownerTaskId,
+        taskA.fixture.sourceUrl,
+      );
+      expect(visibleDimensionsA.cols).toBeGreaterThan(2);
+      expect(visibleDimensionsA.rows).toBeGreaterThan(1);
+      await expect.poll(
+        () => ownerTerminalDimensions(remoteA.owner.ownerTaskId),
+        { timeout: 10_000, interval: 100 },
+      ).toEqual(visibleDimensionsA);
       const initialA = await activateRemoteCompanionLink(
         secondary,
         remoteA.owner,
@@ -890,6 +941,10 @@ describe("remote desktop visual companion", () => {
         ),
         { timeout: 10_000, interval: 250 },
       ).toBeGreaterThan(hiddenHeartbeatA);
+      await sleep(1_000);
+      expect(await ownerTerminalDimensions(remoteA.owner.ownerTaskId)).toEqual(
+        visibleDimensionsA,
+      );
       await captureNextRemoteCompanionOpen(secondary, remoteB.owner);
       await activateVisibleCompanionControl(secondary, "Enter");
       const initialB = await waitForRemoteCompanionSnapshot(
@@ -963,6 +1018,20 @@ describe("remote desktop visual companion", () => {
         prompt: "Concurrent visual companion A",
         transport: "lan",
       });
+      await waitForTerminalSource(
+        remoteA.owner.ownerTaskId,
+        taskA.fixture.sourceUrl,
+      );
+      const restoredDimensionsA = await visibleRemoteTerminalDimensions(
+        remoteA.owner.ownerTaskId,
+        taskA.fixture.sourceUrl,
+      );
+      expect(restoredDimensionsA.cols).toBeGreaterThan(2);
+      expect(restoredDimensionsA.rows).toBeGreaterThan(1);
+      await expect.poll(
+        () => ownerTerminalDimensions(remoteA.owner.ownerTaskId),
+        { timeout: 10_000, interval: 100 },
+      ).toEqual(restoredDimensionsA);
       await waitForRemoteCompanionSnapshot(
         secondary,
         remoteA.owner,
