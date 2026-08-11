@@ -16,6 +16,9 @@ vi.mock("@xterm/xterm", () => ({
     cols = 80;
     rows = 24;
     options = {};
+    getSelection() {
+      return "";
+    }
     onData(listener: (data: string) => void) {
       harness.dataListener = listener;
       return { dispose() {} };

@@ -362,6 +362,21 @@ onMounted(() => {
       enqueueRemoteInput(SHIFT_ENTER_CSI_U);
       return false;
     }
+    if (
+      event.type === "keydown"
+      && event.metaKey
+      && !event.altKey
+      && !event.ctrlKey
+      && event.key.toLowerCase() === "c"
+    ) {
+      const selection = terminal?.getSelection() ?? "";
+      if (!selection) return true;
+      void navigator.clipboard.writeText(selection).catch(() => {
+        console.error("[cloud-terminal] Failed to copy terminal selection.");
+      });
+      event.preventDefault();
+      return false;
+    }
     return true;
   });
   terminal.onData((data) => {

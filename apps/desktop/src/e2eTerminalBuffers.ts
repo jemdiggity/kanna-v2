@@ -31,6 +31,7 @@ export function registerE2ETerminalBuffer(sessionId: string, terminal: Terminal)
     write: writeTerminalBuffer,
     input: inputTerminalBuffer,
     findTextCell: findTerminalTextCell,
+    selectText: selectTerminalBufferText,
   };
 
   return () => {
@@ -39,6 +40,28 @@ export function registerE2ETerminalBuffer(sessionId: string, terminal: Terminal)
       terminals.delete(sessionId);
     }
   };
+}
+
+function selectTerminalBufferText(sessionId: string, text: string): string | null {
+  const terminal = terminals.get(sessionId);
+  if (!terminal) {
+    throw new Error(`terminal buffer not registered for session ${sessionId}`);
+  }
+  return selectTerminalText(terminal, text);
+}
+
+export function selectTerminalText(terminal: Terminal, text: string): string | null {
+  if (!text) return null;
+
+  const activeBuffer = terminal.buffer.active;
+  for (let lineIndex = activeBuffer.length - 1; lineIndex >= 0; lineIndex -= 1) {
+    const line = activeBuffer.getLine(lineIndex)?.translateToString(true) ?? "";
+    const column = line.lastIndexOf(text);
+    if (column < 0) continue;
+    terminal.select(column, lineIndex, text.length);
+    return terminal.getSelection();
+  }
+  return null;
 }
 
 function findTerminalTextCell(

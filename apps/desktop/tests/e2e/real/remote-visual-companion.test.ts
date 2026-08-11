@@ -441,6 +441,52 @@ async function waitForTerminalSource(
   ).toBe(true);
 }
 
+async function setSystemClipboardText(value: string): Promise<void> {
+  const script = [
+    'ObjC.import("AppKit")',
+    "const pasteboard = $.NSPasteboard.generalPasteboard",
+    "pasteboard.clearContents",
+    `pasteboard.setStringForType(${JSON.stringify(value)}, $.NSPasteboardTypeString)`,
+  ].join(";");
+  await execFileAsync("/usr/bin/osascript", ["-l", "JavaScript", "-e", script]);
+}
+
+async function readSystemClipboardText(): Promise<string> {
+  const { stdout } = await execFileAsync("/usr/bin/pbpaste", []);
+  return stdout;
+}
+
+async function assertRemoteTerminalCopy(
+  ownerTaskId: string,
+  expectedText: string,
+): Promise<void> {
+  const originalClipboard = await readSystemClipboardText();
+  try {
+    await setSystemClipboardText("kanna-remote-terminal-copy-sentinel");
+    const selection = await secondary.executeSync<string | null>(`
+      const buffers = window.__KANNA_E2E__?.terminalBuffers;
+      const selection = buffers?.selectText(
+        ${JSON.stringify(ownerTaskId)},
+        ${JSON.stringify(expectedText)}
+      ) ?? null;
+      const input = document.querySelector(
+        ".main-panel .cloud-terminal-shell .xterm-helper-textarea"
+      );
+      if (input instanceof HTMLElement) input.focus();
+      return selection;
+    `);
+    expect(selection).toBe(expectedText);
+
+    await secondary.pressShortcut(["Meta", "c"]);
+    await expect.poll(
+      readSystemClipboardText,
+      { timeout: 5_000, interval: 100 },
+    ).toBe(expectedText);
+  } finally {
+    await setSystemClipboardText(originalClipboard);
+  }
+}
+
 async function waitForChoice(
   fixture: RemoteCompanionFixture,
   choice: string,
@@ -510,6 +556,10 @@ async function runCompanionJourney(input: {
   interruptRoute: "relay" | "lan" | null;
 }): Promise<void> {
   await waitForTerminalSource(
+    input.owner.ownerTaskId,
+    input.fixture.sourceUrl,
+  );
+  await assertRemoteTerminalCopy(
     input.owner.ownerTaskId,
     input.fixture.sourceUrl,
   );

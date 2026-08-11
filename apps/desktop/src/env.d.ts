@@ -27,6 +27,7 @@ interface KannaTerminalBuffersE2EApi {
     sessionId: string,
     text: string,
   ) => { column: number; row: number; columns: number; rows: number } | null;
+  selectText: (sessionId: string, text: string) => string | null;
 }
 
 interface KannaAppMetricsSnapshot {
