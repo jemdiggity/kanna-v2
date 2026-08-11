@@ -693,6 +693,122 @@ describe("pty session (real CLI)", () => {
     expect(container).toBeTruthy();
   });
 
+  it("uses the live daemon provider when a one-window terminal reconnects", async () => {
+    const sessionId = trackSessionId(
+      deterministicSessionIds,
+      `pty-runtime-provider-${randomUUID()}`,
+    );
+    const otherSessionId = trackSessionId(
+      deterministicSessionIds,
+      `pty-runtime-provider-other-${randomUUID()}`,
+    );
+    const readyMarker = `KPROVIDER_${randomUUID().replaceAll("-", "")}`;
+    const otherReadyMarker = `KPROVIDER_OTHER_${randomUUID().replaceAll("-", "")}`;
+    const staleMarker = `KSTALE_${randomUUID().replaceAll("-", "")}`;
+
+    await execDb(
+      client,
+      `INSERT INTO pipeline_item
+         (id, repo_id, prompt, pipeline, stage, branch, agent_type, agent_provider, activity)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        sessionId,
+        repoId,
+        "Stage provider terminal fixture",
+        "single-reviewer",
+        "pr",
+        `task-${sessionId}`,
+        "pty",
+        "codex",
+        "idle",
+      ],
+    );
+    await execDb(
+      client,
+      `INSERT INTO pipeline_item
+         (id, repo_id, prompt, pipeline, stage, branch, agent_type, agent_provider, activity)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        otherSessionId,
+        repoId,
+        "Provider reconnect switch target",
+        "single-reviewer",
+        "pr",
+        `task-${otherSessionId}`,
+        "pty",
+        "codex",
+        "idle",
+      ],
+    );
+    await invokeOrThrow(client, "spawn_session", {
+      sessionId,
+      cwd: testRepoPath,
+      executable: "/bin/zsh",
+      args: [
+        "-f",
+        "-c",
+        `printf '${readyMarker}\\n'; while IFS= read -r line; do :; done`,
+      ],
+      env: { TERM: "xterm-256color" },
+      cols: 80,
+      rows: 24,
+      // Deliberately disagree with the task row above. The daemon's live
+      // session metadata is authoritative for reconnect snapshot behavior.
+      agentProvider: "claude",
+    });
+    await invokeOrThrow(client, "spawn_session", {
+      sessionId: otherSessionId,
+      cwd: testRepoPath,
+      executable: "/bin/zsh",
+      args: [
+        "-f",
+        "-c",
+        `printf '${otherReadyMarker}\\n'; while IFS= read -r line; do :; done`,
+      ],
+      env: { TERM: "xterm-256color" },
+      cols: 80,
+      rows: 24,
+      agentProvider: "codex",
+    });
+
+    await callVueMethod(client, "loadItems", repoId);
+    await setSelectedItem(client, sessionId);
+    await waitForCurrentItemId(client, sessionId);
+    await waitForTerminalBufferText(client, sessionId, readyMarker, 15_000);
+
+    const currentItem = await getVueState(client, "mainPanelItem") as {
+      agent_provider?: string | null;
+    } | null;
+    expect(currentItem?.agent_provider).toBe("codex");
+
+    await client.executeAsync<string>(
+      `const cb = arguments[arguments.length - 1];
+       window.__KANNA_E2E__.terminalBuffers.write(
+         ${JSON.stringify(sessionId)},
+         ${JSON.stringify(`\r\n${staleMarker}\r\n`)},
+         function() { cb("written"); }
+       );`,
+    );
+    expect(
+      (await getTerminalBufferTextStats(client, sessionId, staleMarker)).matchingLineCount,
+    ).toBe(1);
+
+    await setSelectedItem(client, otherSessionId);
+    await waitForCurrentItemId(client, otherSessionId);
+    await waitForTerminalBufferText(client, otherSessionId, otherReadyMarker, 15_000);
+    await setSelectedItem(client, sessionId);
+    await waitForCurrentItemId(client, sessionId);
+
+    const deadline = Date.now() + 15_000;
+    let staleStats = await getTerminalBufferTextStats(client, sessionId, staleMarker);
+    while (staleStats.matchingLineCount > 0 && Date.now() < deadline) {
+      await sleep(200);
+      staleStats = await getTerminalBufferTextStats(client, sessionId, staleMarker);
+    }
+    expect(staleStats.matchingLineCount).toBe(0);
+    await waitForTerminalBufferText(client, sessionId, readyMarker, 15_000);
+  });
+
   it("renders PTY echo within 500ms while same-WebSocket CPU work is active", async () => {
     const sessionId = `pty-latency-${randomUUID()}`;
     deterministicSessionIds.push(sessionId);

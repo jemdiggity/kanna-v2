@@ -8,6 +8,7 @@
 
 import type {
   AgentEvent,
+  AgentProvider,
   ClientFrame,
   CompanionDocumentKind,
   CompanionEvent,
@@ -61,7 +62,12 @@ export interface AgentStreamHandlers {
 }
 
 export interface TerminalStreamHandlers {
-  onSnapshot?(cols: number, rows: number, dataB64: string): void;
+  onSnapshot?(
+    cols: number,
+    rows: number,
+    dataB64: string,
+    agentProvider?: AgentProvider | null,
+  ): void;
   onOutput(dataB64: string, metadata: TerminalOutputMetadata): void;
   onStatus?(status: string): void;
   onSessionExit?(code: number): void;
@@ -704,6 +710,7 @@ export class StreamClient {
           frame.cols,
           frame.rows,
           frame.data_b64,
+          frame.agent_provider,
         );
         return;
       }

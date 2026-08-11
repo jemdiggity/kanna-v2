@@ -23,7 +23,12 @@ const streamClientMock = vi.hoisted(() => ({
 }));
 const eventListeners = new Map<string, ((event: any) => void)[]>();
 interface TerminalStreamHandlers {
-  onSnapshot?: (cols: number, rows: number, dataB64: string) => void;
+  onSnapshot?: (
+    cols: number,
+    rows: number,
+    dataB64: string,
+    agentProvider?: "claude" | "codex" | "copilot" | "opencode" | "antigravity" | null,
+  ) => void;
   onOutput: (dataB64: string, metadata?: { receivedAtMs: number }) => void;
   onStatus?: (status: string) => void;
   onSessionExit?: (code: number) => void;
@@ -511,10 +516,10 @@ describe("useTerminal", () => {
     wrapper.unmount();
   });
 
-  it("applies the initial task snapshot from the ordered stream without a resume step", async () => {
+  it("uses the daemon-reported provider for snapshot reset behavior", async () => {
     const client = installKspStreamClient({
       onAttach: (_taskId, handlers) => {
-        handlers.onSnapshot?.(80, 24, btoa("restored scrollback"));
+        handlers.onSnapshot?.(80, 24, btoa("restored scrollback"), "claude");
       },
     });
     const { useTerminal } = await import("./useTerminal");
@@ -529,7 +534,9 @@ describe("useTerminal", () => {
             spawnFn: async () => {},
           },
           {
-            agentProvider: "claude",
+            // Deliberately stale task configuration: the live daemon session
+            // is Claude and must own reconnect behavior.
+            agentProvider: "codex",
             worktreePath: "/tmp/task",
           },
         );
@@ -558,9 +565,8 @@ describe("useTerminal", () => {
       onSnapshot: expect.any(Function),
       onOutput: expect.any(Function),
     }));
-    expect(client.sendTermResize).toHaveBeenCalledTimes(2);
-    expect(client.sendTermResize).toHaveBeenNthCalledWith(1, "session-1", 79, 24);
-    expect(client.sendTermResize).toHaveBeenNthCalledWith(2, "session-1", 80, 24);
+    expect(client.sendTermResize).toHaveBeenCalledOnce();
+    expect(client.sendTermResize).toHaveBeenCalledWith("session-1", 80, 24);
     expect(invokeMock).not.toHaveBeenCalledWith("attach_session_with_snapshot", expect.anything());
     expect(invokeMock).not.toHaveBeenCalledWith("resume_session_stream", expect.anything());
     expect(terminal.reset).toHaveBeenCalledTimes(1);
@@ -569,7 +575,12 @@ describe("useTerminal", () => {
 
   it("preserves Codex scrollback when applying daemon snapshots", async () => {
     let terminalHandlers: {
-      onSnapshot?: (cols: number, rows: number, dataB64: string) => void;
+      onSnapshot?: (
+        cols: number,
+        rows: number,
+        dataB64: string,
+        agentProvider?: "claude" | "codex" | null,
+      ) => void;
       onOutput: (dataB64: string) => void;
       onSessionExit?: (code: number) => void;
     } | null = null;
@@ -619,7 +630,7 @@ describe("useTerminal", () => {
     expect(terminal).toBeDefined();
     terminal.reset.mockClear();
 
-    terminalHandlers?.onSnapshot?.(80, 24, btoa("codex partial redraw"));
+    terminalHandlers?.onSnapshot?.(80, 24, btoa("codex partial redraw"), "codex");
 
     expect(terminal.reset).not.toHaveBeenCalled();
     expect(terminal.write).toHaveBeenCalledWith("codex partial redraw");

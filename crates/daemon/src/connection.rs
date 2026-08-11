@@ -254,6 +254,7 @@ pub(crate) async fn handle_connection(
                     &[Event::Snapshot {
                         session_id: session_id.clone(),
                         snapshot,
+                        agent_provider: session.agent_provider().await,
                     }],
                 );
                 drop(fanout_state);
@@ -970,6 +971,7 @@ pub(crate) async fn handle_command(
                 Event::Snapshot {
                     session_id: session_id.clone(),
                     snapshot,
+                    agent_provider: session.agent_provider().await,
                 },
                 Event::StatusChanged {
                     session_id: session_id.clone(),
@@ -1284,12 +1286,15 @@ pub(crate) async fn handle_command(
 
             let live_snapshot = {
                 match session_handle(&sessions, &session_id).await {
-                    Some(session) => Some(session.snapshot(&session_id).await),
+                    Some(session) => Some((
+                        session.snapshot(&session_id).await,
+                        session.agent_provider().await,
+                    )),
                     None => None,
                 }
             };
             let evt = match live_snapshot {
-                Some(Ok(snapshot)) => {
+                Some((Ok(snapshot), agent_provider)) => {
                     log::info!(
                         "[snapshot] session={} served from live headless terminal rows={} cols={} cursor=({}, {}) visible={} vt_len={}",
                         session_id,
@@ -1303,9 +1308,10 @@ pub(crate) async fn handle_command(
                     Event::Snapshot {
                         session_id,
                         snapshot,
+                        agent_provider,
                     }
                 }
-                Some(Err(error)) => error_event(
+                Some((Err(error), _)) => error_event(
                     None,
                     format!("failed to snapshot live session {}: {}", session_id, error),
                 ),
@@ -1324,6 +1330,7 @@ pub(crate) async fn handle_command(
                         Event::Snapshot {
                             session_id,
                             snapshot: recovery_snapshot_to_terminal_snapshot(snapshot),
+                            agent_provider: None,
                         }
                     }
                     Ok(None) => error_event(

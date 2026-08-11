@@ -159,6 +159,7 @@ async fn spawn_rejected_resume_fake_daemon(
                 sequence: 0,
                 vt: snapshot_vt,
             },
+            agent_provider: None,
         };
         snapshot_write
             .write_all(format!("{}\n", serde_json::to_string(&event).unwrap()).as_bytes())

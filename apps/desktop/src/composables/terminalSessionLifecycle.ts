@@ -129,11 +129,14 @@ export function createTerminalSessionLifecycle(params: {
 
       if (!params.state.terminalStreamAttached) {
         client.attachTerminal(params.sessionId, {
-          onSnapshot: (_cols, _rows, dataB64) => {
+          onSnapshot: (_cols, _rows, dataB64, agentProvider) => {
             const liveTerminal = getLiveTerminal()
             if (!liveTerminal) return
             const vt = new TextDecoder().decode(base64ToBytes(dataB64))
-            if (!params.state.preserveRecoveredScrollbackForNextSnapshot && shouldResetTerminalOnReconnect(params.options)) {
+            if (
+              !params.state.preserveRecoveredScrollbackForNextSnapshot &&
+              shouldResetTerminalOnReconnect({ agentProvider: agentProvider ?? undefined })
+            ) {
               liveTerminal.reset()
             }
             params.state.preserveRecoveredScrollbackForNextSnapshot = false
