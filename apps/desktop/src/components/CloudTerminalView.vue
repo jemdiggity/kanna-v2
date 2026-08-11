@@ -12,6 +12,7 @@ import { createConfiguredDesktopLanTerminalClient } from "../services/desktopLan
 import { getTerminalTheme } from "../theme/theme";
 import { useThemeRuntime } from "../theme/runtime";
 import { registerE2ETerminalBuffer } from "../e2eTerminalBuffers";
+import { isShiftEnter, SHIFT_ENTER_CSI_U } from "../composables/terminalKeyboard";
 
 const props = defineProps<{
   ownerDesktopId: string;
@@ -115,6 +116,32 @@ onMounted(() => {
     fontFamily: 'Menlo, Monaco, "Courier New", monospace',
     fontSize: 12,
     theme: getTerminalTheme(effectiveCodeTheme.value),
+  });
+  terminal.attachCustomKeyEventHandler((event: KeyboardEvent) => {
+    if (isShiftEnter(event)) {
+      event.preventDefault();
+      enqueueRemoteInput(SHIFT_ENTER_CSI_U);
+      return false;
+    }
+    return true;
+  });
+  terminal.attachCustomKeyEventHandler((event: KeyboardEvent) => {
+    if (isShiftEnter(event)) {
+      event.preventDefault();
+      const client = relayClient;
+      if (client && status.value === "live") {
+        void client.sendInput({
+          desktopId: props.ownerDesktopId,
+          taskId: props.ownerTaskId,
+          data: SHIFT_ENTER_CSI_U,
+        }).catch((error: unknown) => {
+          const message = error instanceof Error ? error.message : "Failed to send remote input.";
+          writeRemoteTerminalError(message);
+        });
+      }
+      return false;
+    }
+    return true;
   });
   terminal.onData((data) => {
     const client = relayClient;

@@ -6,6 +6,7 @@ import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/rese
 import { createPrimaryAndSecondaryClients } from "../helpers/twoInstance";
 import { callVueMethod, execDb, queryDb, tauriInvoke } from "../helpers/vue";
 import { buildGlobalKeydownScript } from "../helpers/keyboard";
+import { pressShiftEnterInActiveTerminal } from "../helpers/terminalInput";
 
 const { primary, secondary } = createPrimaryAndSecondaryClients();
 let testRepoPath = "";
@@ -978,7 +979,7 @@ describe("cloud task sync", () => {
       args: [
         "--login",
         "-c",
-        "printf 'Cloud terminal ready from primary\\n'; read line; printf 'Cloud terminal input:%s\\n' \"$line\"; sleep 60",
+        "printf 'Cloud terminal ready from primary\\n'; read line; printf 'Cloud terminal input:%s\\n' \"$line\"; stty raw -echo; shifted=$(dd bs=1 count=7 2>/dev/null | od -An -tx1 | tr -d ' \\n'); stty sane; printf '\\r\\nCloud terminal shift enter:%s\\r\\n' \"$shifted\"; sleep 60",
       ],
       env: {},
       cols: 80,
@@ -1002,6 +1003,8 @@ describe("cloud task sync", () => {
     const terminalTextarea = await secondary.waitForElement(".xterm-helper-textarea");
     await secondary.sendKeys(terminalTextarea, "hello through cloud\n");
     await waitForBodyText(secondary, "Cloud terminal input:hello through cloud");
+    await pressShiftEnterInActiveTerminal(secondary);
+    await waitForBodyText(secondary, "Cloud terminal shift enter:1b5b31333b3275");
 
     const closeResult = await callVueMethod(secondary, "closeSelectedWorkspaceTask");
     if (closeResult && typeof closeResult === "object" && "__error" in closeResult) {
