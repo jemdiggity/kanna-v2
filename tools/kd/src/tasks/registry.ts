@@ -2212,10 +2212,13 @@ export const taskDefinitions = [
     execute: async (_context, input) => {
       const parsed = releaseSetupUpdaterKeyInputSchema.parse(input);
       const context = await resolveDefaultContext(process.env);
+      // TAURI_PRIVATE_KEY_PATH lives in ~/.kanna/.env.release.local, which the
+      // default context does not load.
+      const releaseEnv = await loadReleaseTaskEnvironment(context);
       const result = await setupUpdaterKeyCredentials({
         cwd: context.repoRoot,
         homeDir: context.homeDir,
-        env: context.env,
+        env: releaseEnv,
         runner: nodeCommandRunner,
         service: parsed.service,
         account: parsed.account,
