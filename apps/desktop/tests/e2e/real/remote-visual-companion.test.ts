@@ -269,6 +269,26 @@ async function latestTerminalHeartbeat(sourceUrl: string): Promise<number> {
   `);
 }
 
+async function latestTaskTerminalHeartbeat(
+  ownerTaskId: string,
+  sourceUrl: string,
+): Promise<number> {
+  return await secondary.executeSync<number>(`
+    const buffers = window.__KANNA_E2E__?.terminalBuffers;
+    const ownerTaskId = ${JSON.stringify(ownerTaskId)};
+    if (!buffers || !buffers.sessionIds().includes(ownerTaskId)) return -1;
+    const prefix = ${JSON.stringify(`${sourceUrl} companion-heartbeat:`)};
+    let latest = -1;
+    for (const line of buffers.lines(ownerTaskId)) {
+      const index = line.indexOf(prefix);
+      if (index < 0) continue;
+      const value = Number.parseInt(line.slice(index + prefix.length), 10);
+      if (Number.isFinite(value)) latest = Math.max(latest, value);
+    }
+    return latest;
+  `);
+}
+
 async function waitForRemoteTask(input: {
   prompt: string;
   transport: "cloud" | "lan";
@@ -799,7 +819,7 @@ describe("remote desktop visual companion", () => {
     });
   }, 180_000);
 
-  it("keeps two released and selected LAN companions concurrently interactive and isolated", async () => {
+  it("keeps two recently selected LAN terminals and companions concurrently interactive and isolated", async () => {
     const taskA = await createOwnerTask({
       prompt: "Concurrent visual companion A",
       sessionId: "desktop-concurrent-companion-a",
@@ -848,8 +868,7 @@ describe("remote desktop visual companion", () => {
       browserA = await RemoteCompanionBrowser.open(initialA.entryUrl!);
       await browserA.waitForText("Initial concurrent companion A");
 
-      // Selecting B releases A's CloudTerminalView ownership while its
-      // external browser keeps the manager lease alive.
+      // Selecting B hides A without releasing its terminal subscription.
       await selectRemoteTask({
         ...remoteB,
         prompt: "Concurrent visual companion B",
@@ -859,6 +878,18 @@ describe("remote desktop visual companion", () => {
         remoteB.owner.ownerTaskId,
         taskB.fixture.sourceUrl,
       );
+      const hiddenHeartbeatA = await latestTaskTerminalHeartbeat(
+        remoteA.owner.ownerTaskId,
+        taskA.fixture.sourceUrl,
+      );
+      expect(hiddenHeartbeatA).toBeGreaterThanOrEqual(0);
+      await expect.poll(
+        () => latestTaskTerminalHeartbeat(
+          remoteA.owner.ownerTaskId,
+          taskA.fixture.sourceUrl,
+        ),
+        { timeout: 10_000, interval: 250 },
+      ).toBeGreaterThan(hiddenHeartbeatA);
       await captureNextRemoteCompanionOpen(secondary, remoteB.owner);
       await activateVisibleCompanionControl(secondary, "Enter");
       const initialB = await waitForRemoteCompanionSnapshot(
