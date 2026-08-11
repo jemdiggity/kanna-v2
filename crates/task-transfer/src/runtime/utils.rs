@@ -17,6 +17,7 @@ pub(super) use crate::protocol::CURRENT_PROTOCOL_VERSION;
 pub(super) const AUTHENTICATED_TASK_REQUEST_PROTOCOL_VERSION: u32 = 2;
 pub(super) const AUTHENTICATED_TASK_REQUEST_VERSION: u32 = 1;
 pub(super) const STREAMED_ARTIFACT_PROTOCOL_VERSION: u32 = 3;
+pub(super) const DUPLEX_TERMINAL_PROTOCOL_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ArtifactFraming {
@@ -122,11 +123,9 @@ pub(super) fn extract_request_id(line: &str) -> String {
         .unwrap_or_default()
 }
 
-pub(super) async fn write_json_line<T>(
-    stream: &mut TcpStream,
-    value: &T,
-) -> Result<(), RuntimeError>
+pub(super) async fn write_json_line<W, T>(stream: &mut W, value: &T) -> Result<(), RuntimeError>
 where
+    W: tokio::io::AsyncWrite + Unpin,
     T: serde::Serialize,
 {
     let encoded = serde_json::to_vec(value)?;
@@ -806,6 +805,10 @@ pub(super) fn supports_streamed_artifacts(protocol_version: u32) -> bool {
     protocol_version >= STREAMED_ARTIFACT_PROTOCOL_VERSION
 }
 
+pub(super) fn supports_duplex_terminal(protocol_version: u32) -> bool {
+    protocol_version >= DUPLEX_TERMINAL_PROTOCOL_VERSION
+}
+
 pub(super) fn ensure_peer_is_trusted_for(
     root: &Path,
     self_peer_id: &str,
@@ -1013,6 +1016,12 @@ fn truncate_on_char_boundary(value: &str, budget: usize) -> &str {
 mod tests {
     use super::*;
     use tokio::io::{AsyncWriteExt, BufReader};
+
+    #[test]
+    fn duplex_terminal_controls_start_at_protocol_v4() {
+        assert!(!supports_duplex_terminal(3));
+        assert!(supports_duplex_terminal(4));
+    }
 
     #[tokio::test]
     async fn bounded_line_accepts_exact_limit_and_rejects_one_byte_over() {
