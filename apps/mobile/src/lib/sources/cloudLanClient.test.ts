@@ -1395,6 +1395,47 @@ describe("createCloudLanClient", () => {
     );
   });
 
+  it("keeps a pre-capability-routing account client on relay when LAN status requires pairing", async () => {
+    const cloudTask = task({
+      id: "cloud-duplicate",
+      ownerDesktopId: "desktop-lan",
+      ownerLocalTaskId: "local-duplicate"
+    });
+    const cloudSubscription: TaskTerminalSubscription = { close: vi.fn() };
+    const cloud = createClientMock({
+      listRecentTasks: vi.fn().mockResolvedValue([cloudTask]),
+      observeTaskTerminal: vi.fn(() => cloudSubscription)
+    });
+    const lan = createClientMock({
+      getStatus: vi.fn().mockResolvedValue({
+        ...runningStatus(),
+        state: "pairing_required",
+        kspStreamVersion: undefined
+      }),
+      listRecentTasks: vi.fn().mockResolvedValue([
+        task({ id: "local-duplicate" })
+      ])
+    });
+    // Omitting canUseLanTaskStreams models the signed-in mobile bundle that
+    // predates client-side stream-route capability checks.
+    const client = createCloudLanClient(cloud, lan, {
+      isLanEnabled: () => true
+    });
+    const listener = vi.fn();
+
+    await expect(client.listRecentTasks()).resolves.toEqual([cloudTask]);
+
+    expect(client.observeTaskTerminal("cloud-duplicate", listener)).toBe(
+      cloudSubscription
+    );
+    expect(cloud.observeTaskTerminal).toHaveBeenCalledWith(
+      "cloud-duplicate",
+      listener
+    );
+    expect(lan.listRecentTasks).not.toHaveBeenCalled();
+    expect(lan.observeTaskTerminal).not.toHaveBeenCalled();
+  });
+
   it("uses the authenticated cloud route for file content even when a LAN projection is selected", async () => {
     let lanEnabled = true;
     const cloud = createClientMock({
