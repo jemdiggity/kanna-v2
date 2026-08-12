@@ -2,8 +2,16 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { CommandRunner } from "../src/runtime/process";
+
+vi.mock("../src/runtime/updater-key", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/runtime/updater-key")>();
+  return {
+    ...actual,
+    assertUpdaterSigningKeyMatchesPublicKey: vi.fn(async () => {})
+  };
+});
 import {
   bazelTargetForLabel,
   createUpdaterBundle,
@@ -229,6 +237,51 @@ describe("release updater bundling", () => {
 });
 
 describe("release shipping", () => {
+  it.each([
+    ["dry-run", { dryRun: true, release: false, environment: "production" as const }],
+    ["staging", { dryRun: false, release: false, environment: "staging" as const }],
+    ["production", { dryRun: false, release: true, environment: "production" as const }],
+    ["promotion", {
+      dryRun: false,
+      release: true,
+      environment: "production" as const,
+      promoteFrom: "1.2.4-staging.3"
+    }]
+  ])("preflights the selected Keychain item before mutations for %s", async (_label, mode) => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot, privateKeyPath } = createReleaseRepo(root);
+      const originalFiles = readVersionFiles(repoRoot);
+      const calls: CommandCall[] = [];
+      const runner: CommandRunner = {
+        async run(command, args, options) {
+          calls.push({ command, args, options });
+          if (command === "git" && args.join(" ") === "status --porcelain") {
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (command === "security") {
+            return { exitCode: 44, stdout: "", stderr: "User interaction is not allowed." };
+          }
+          return { exitCode: 1, stdout: "", stderr: "must not run after failed preflight" };
+        }
+      };
+
+      await expect(shipRelease({
+        repoRoot,
+        bump: "patch",
+        archLabels: mode.release ? ["arm64", "x86_64"] : ["arm64"],
+        ...mode,
+        env: releaseEnv(privateKeyPath),
+        runner
+      })).rejects.toThrow(/locked or denied access/);
+      expect(calls.map((call) => call.command)).toEqual(["git", "security"]);
+      expect(readVersionFiles(repoRoot)).toEqual(originalFiles);
+      expect(existsSync(join(repoRoot, ".build", "release"))).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("uses staging artifact names and Bazel targets when shipping staging", async () => {
     const root = await mkdtemp(join(tmpdir(), "kd-release-"));
     try {
@@ -898,6 +951,9 @@ describe("release shipping", () => {
       const originalFiles = readVersionFiles(repoRoot);
       const runner: CommandRunner = {
         async run(command, args) {
+          if (command === "security") {
+            return { exitCode: 0, stdout: "private key\n", stderr: "" };
+          }
           if (command === "git" && args.join(" ") === "status --porcelain") {
             return { exitCode: 0, stdout: "", stderr: "" };
           }

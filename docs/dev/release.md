@@ -93,11 +93,10 @@ Keychain is locked, unlock it normally and retry; never put its password in an
 environment file.
 
 The updater private key also has a one-time migration step. Put its public key
-and the path to the existing private key in the machine-global release file:
+in the machine-global release file:
 
 ```dotenv
 KANNA_UPDATER_PUBKEY="<public key>"
-TAURI_PRIVATE_KEY_PATH="/Users/example/.tauri/kanna-updater.key"
 ```
 
 Then import the private key into the user's default file-based Keychain:
@@ -106,10 +105,15 @@ Then import the private key into the user's default file-based Keychain:
 ./kd release setup-updater-key
 ```
 
-Use `--service <name>`, `--account <name>`, or `--keychain <absolute-path>` to
-select a different generic-password item or Keychain. Setup loads
-`~/.kanna/.env.release.local`, stores or updates the item, reads it back to
-verify the exact material, and records only these selectors in that file:
+Use `--service <name>` or `--account <name>` to select a different
+generic-password item. Setup loads `~/.kanna/.env.release.local` and delegates
+secret entry directly to `security`'s native terminal prompt; paste the
+single-line Tauri private key there. kd never reads a source key file or passes
+the entered material in argv, stdin, logs, or its result. Prompt mode works only
+with the user's current default file-based Keychain, so `--keychain` must name
+that same file; kd fails rather than changing the global default. After the
+prompt, setup reads the exact selected item back, proves it matches
+`KANNA_UPDATER_PUBKEY`, and records only these selectors in that file:
 
 ```dotenv
 KANNA_UPDATER_KEYCHAIN_SERVICE="build.kanna.updater-key"
@@ -117,12 +121,15 @@ KANNA_UPDATER_KEYCHAIN_ACCOUNT="tauri-updater-signing-key"
 KANNA_UPDATER_KEYCHAIN_PATH="/Users/example/Library/Keychains/login.keychain-db"
 ```
 
-Back up the original private key somewhere durable and offline before removing
-the key file and its `TAURI_PRIVATE_KEY_PATH` setup entry. Losing this key makes
-existing installations impossible to update. Normal `kd release ship` runs read
+Back up the original private key somewhere durable and offline. Losing this key
+makes existing installations impossible to update. Normal `kd release ship` runs read
 the private key only from the configured Keychain item and pass it to the Tauri
 signer through its child-process environment; key material and passwords never
-belong in release config or command output.
+belong in process arguments, release config, or command output. Setup is
+machine-serialized, never overwrites an existing valid item, and removes a
+newly prompted item if validation or selector publication fails. Ships resolve
+the actual Keychain item and verify it against the public key before changing
+version files or starting Bazel.
 
 `~/.kanna/.env.release.local` is kd's sole release-environment file for every
 repository and worktree, and kd requires it to be owner-only (`0600`). A primary

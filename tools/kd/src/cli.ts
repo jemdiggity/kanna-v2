@@ -1069,7 +1069,8 @@ const helpTopics: Record<string, string[]> = {
   "release setup-updater-key": [
     "Usage: kd release setup-updater-key [--service <name>] [--account <name>] [--keychain <absolute-path>]",
     "",
-    "Import the Tauri updater signing key from TAURI_PRIVATE_KEY_PATH into an explicit file-based Keychain, then verify the stored copy reads back intact.",
+    "Store the Tauri updater signing key through security's native terminal prompt, then verify the stored item matches KANNA_UPDATER_PUBKEY.",
+    "Prompt mode targets only the user's current default file-based Keychain; --keychain may name that same file but cannot redirect the prompt to a custom Keychain.",
     "The Keychain becomes the key's home: its encryption and ACL are the protection, so the key does not also need an rsign passphrase.",
     "Writes only the service, account, and Keychain path to ~/.kanna/.env.release.local; the key material itself never lands in configuration.",
     "Once stored, back up the original key file somewhere durable and offline before removing it -- losing this key means no existing install can ever be updated again."

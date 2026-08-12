@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { lstatSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { parseEnv } from "node:util";
@@ -51,7 +52,7 @@ interface DirectoryAncestryEntry extends DirectoryIdentity {
 }
 
 interface ReleaseEnvironmentTestSynchronization {
-  event: "after-release-file-read" | "after-temp-created";
+  event: "after-release-file-read" | "after-temp-created" | "before-release-file-rename";
   readyPath: string;
   continuePath: string;
 }
@@ -294,6 +295,38 @@ export function writeMachineUpdaterKeySelectors(input: {
   });
 }
 
+/** Serialize updater Keychain and selector publication as one machine-local transaction. */
+export async function withMachineUpdaterKeySetupLock<T>(
+  homeDir: string,
+  operation: () => Promise<T>
+): Promise<T> {
+  const kannaDir = join(homeDir, ".kanna");
+  const ancestry = machineConfigAncestry(homeDir, true);
+  if (ancestry === undefined) {
+    throw new Error(`Unable to create machine-local release directory ${kannaDir}.`);
+  }
+  const lockName = ".updater-key-setup.lock";
+  const lockToken = randomUUID();
+  runPinnedDirectoryWorker(kannaDir, {
+    operation: "acquire-lock",
+    ancestry,
+    lockName,
+    lockToken,
+    ownerPid: process.pid,
+    repairDirectoryMode: true
+  });
+  try {
+    return await operation();
+  } finally {
+    runPinnedDirectoryWorker(kannaDir, {
+      operation: "release-lock",
+      ancestry,
+      lockName,
+      lockToken
+    });
+  }
+}
+
 function machineConfigAncestry(
   homeDir: string,
   createKannaDirectory: boolean,
@@ -501,6 +534,87 @@ function pinnedDirectoryWorker(): void {
       fs.closeSync(descriptor);
     }
   };
+  const readLockOwner = (lockName: string): { pid: number; token: string } | undefined => {
+    let descriptor: number;
+    try {
+      descriptor = fs.openSync(
+        `${lockName}/owner.json`,
+        fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK
+      );
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }
+    try {
+      const opened = fs.fstatSync(descriptor);
+      if (!opened.isFile()) return undefined;
+      const parsed: unknown = JSON.parse(fs.readFileSync(descriptor, "utf8"));
+      if (
+        typeof parsed !== "object" ||
+        parsed === null ||
+        typeof (parsed as { pid?: unknown }).pid !== "number" ||
+        typeof (parsed as { token?: unknown }).token !== "string"
+      ) {
+        return undefined;
+      }
+      return parsed as { pid: number; token: string };
+    } catch {
+      return undefined;
+    } finally {
+      fs.closeSync(descriptor);
+    }
+  };
+  const createLock = (lockName: string, token: string, ownerPid: number): void => {
+    fs.mkdirSync(lockName, { mode: 0o700 });
+    try {
+      fs.writeFileSync(
+        `${lockName}/owner.json`,
+        JSON.stringify({ pid: ownerPid, token }),
+        { encoding: "utf8", flag: "wx", mode: 0o600 }
+      );
+    } catch (error) {
+      fs.rmdirSync(lockName);
+      throw error;
+    }
+  };
+  const acquireLock = (lockName: string, token: string, ownerPid: number): void => {
+    if (!/^\.[a-z0-9-]+\.lock$/.test(lockName)) {
+      throw new Error("Invalid machine-local release lock name.");
+    }
+    try {
+      createLock(lockName, token, ownerPid);
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+    const lockStats = fs.lstatSync(lockName);
+    if (lockStats.isSymbolicLink() || !lockStats.isDirectory()) {
+      throw new Error("Machine-local release lock is not a regular directory.");
+    }
+    const owner = readLockOwner(lockName);
+    if (owner !== undefined) {
+      try {
+        process.kill(owner.pid, 0);
+        throw new Error("Another machine-local release setup is already in progress; retry after it finishes.");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      }
+      fs.unlinkSync(`${lockName}/owner.json`);
+      fs.rmdirSync(lockName);
+      createLock(lockName, token, ownerPid);
+      return;
+    }
+    throw new Error("Another machine-local release setup is already in progress; retry after it finishes.");
+  };
+  const releaseLock = (lockName: string, token: string): void => {
+    const lockStats = fs.lstatSync(lockName);
+    const owner = readLockOwner(lockName);
+    if (lockStats.isSymbolicLink() || !lockStats.isDirectory() || owner?.token !== token) {
+      throw new Error("Machine-local release setup lock ownership changed unexpectedly.");
+    }
+    fs.unlinkSync(`${lockName}/owner.json`);
+    fs.rmdirSync(lockName);
+  };
 
   try {
     assertPinnedAncestry();
@@ -542,6 +656,22 @@ function pinnedDirectoryWorker(): void {
     if (request.repairDirectoryMode === true) {
       fs.chmodSync(".", 0o700);
     }
+    if (operation === "acquire-lock" || operation === "release-lock") {
+      const lockName = String(request.lockName);
+      const lockToken = String(request.lockToken);
+      if (operation === "acquire-lock") {
+        const ownerPid = request.ownerPid;
+        if (typeof ownerPid !== "number" || !Number.isSafeInteger(ownerPid) || ownerPid <= 0) {
+          throw new Error("Machine-local release lock owner is invalid.");
+        }
+        acquireLock(lockName, lockToken, ownerPid);
+      } else {
+        releaseLock(lockName, lockToken);
+      }
+      assertPinnedAncestry();
+      respond({ ok: true });
+      return;
+    }
     const fileName = String(request.fileName);
     if (operation === "read") {
       const result = readReleaseFile(fileName, request.requireOwnerOnly === true);
@@ -551,48 +681,56 @@ function pinnedDirectoryWorker(): void {
       return;
     }
     if (operation === "write") {
-      const current = readReleaseFile(fileName, false);
-      const expectedSource = request.expectedSource;
-      if (
-        (current.missing && expectedSource !== undefined) ||
-        (!current.missing && current.source !== expectedSource)
-      ) {
-        throw new Error("Machine-local release environment changed while selectors were being written; retry setup.");
-      }
-      const source = request.source;
-      if (typeof source !== "string") {
-        throw new Error("Machine-local release environment replacement content is missing.");
-      }
-      const tempName = `${fileName}.tmp-${process.pid}-${crypto.randomUUID()}`;
-      let descriptor: number | undefined;
+      const writeLockName = ".release-environment-write.lock";
+      const writeLockToken = crypto.randomUUID();
+      acquireLock(writeLockName, writeLockToken, process.pid);
       try {
-        descriptor = fs.openSync(
-          tempName,
-          fs.constants.O_WRONLY |
-            fs.constants.O_CREAT |
-            fs.constants.O_EXCL |
-            fs.constants.O_NOFOLLOW,
-          0o600
-        );
-        synchronizeTest("after-temp-created");
-        fs.writeFileSync(descriptor, source, "utf8");
-        fs.fchmodSync(descriptor, 0o600);
-        fs.fsyncSync(descriptor);
-        fs.closeSync(descriptor);
-        descriptor = undefined;
-        assertPinnedAncestry();
-        const publishSource = readReleaseFile(fileName, false);
+        const current = readReleaseFile(fileName, false);
+        const expectedSource = request.expectedSource;
         if (
-          (publishSource.missing && expectedSource !== undefined) ||
-          (!publishSource.missing && publishSource.source !== expectedSource)
+          (current.missing && expectedSource !== undefined) ||
+          (!current.missing && current.source !== expectedSource)
         ) {
           throw new Error("Machine-local release environment changed while selectors were being written; retry setup.");
         }
-        fs.renameSync(tempName, fileName);
-        assertPinnedAncestry();
+        const source = request.source;
+        if (typeof source !== "string") {
+          throw new Error("Machine-local release environment replacement content is missing.");
+        }
+        const tempName = `${fileName}.tmp-${process.pid}-${crypto.randomUUID()}`;
+        let descriptor: number | undefined;
+        try {
+          descriptor = fs.openSync(
+            tempName,
+            fs.constants.O_WRONLY |
+              fs.constants.O_CREAT |
+              fs.constants.O_EXCL |
+              fs.constants.O_NOFOLLOW,
+            0o600
+          );
+          synchronizeTest("after-temp-created");
+          fs.writeFileSync(descriptor, source, "utf8");
+          fs.fchmodSync(descriptor, 0o600);
+          fs.fsyncSync(descriptor);
+          fs.closeSync(descriptor);
+          descriptor = undefined;
+          assertPinnedAncestry();
+          const publishSource = readReleaseFile(fileName, false);
+          if (
+            (publishSource.missing && expectedSource !== undefined) ||
+            (!publishSource.missing && publishSource.source !== expectedSource)
+          ) {
+            throw new Error("Machine-local release environment changed while selectors were being written; retry setup.");
+          }
+          synchronizeTest("before-release-file-rename");
+          fs.renameSync(tempName, fileName);
+          assertPinnedAncestry();
+        } finally {
+          if (descriptor !== undefined) fs.closeSync(descriptor);
+          fs.rmSync(tempName, { force: true });
+        }
       } finally {
-        if (descriptor !== undefined) fs.closeSync(descriptor);
-        fs.rmSync(tempName, { force: true });
+        releaseLock(writeLockName, writeLockToken);
       }
       respond({ ok: true });
       return;

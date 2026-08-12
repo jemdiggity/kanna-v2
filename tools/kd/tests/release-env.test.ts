@@ -39,7 +39,7 @@ async function writePrivateFile(path: string, contents: string): Promise<void> {
 interface SynchronizedMutation {
   done: Promise<void>;
   synchronization: {
-    event: "after-release-file-read" | "after-temp-created";
+    event: "after-release-file-read" | "after-temp-created" | "before-release-file-rename";
     readyPath: string;
     continuePath: string;
   };
@@ -47,7 +47,7 @@ interface SynchronizedMutation {
 
 function startSynchronizedMutation(input: {
   root: string;
-  event: "after-release-file-read" | "after-temp-created";
+  event: "after-release-file-read" | "after-temp-created" | "before-release-file-rename";
   mutation:
     | {
         kind: "replace-home";
@@ -116,6 +116,64 @@ fs.writeFileSync(input.continuePath, "continue", { flag: "wx" });`,
   return {
     done,
     synchronization: { event: input.event, readyPath, continuePath }
+  };
+}
+
+function startConcurrentSelectorWrite(input: {
+  root: string;
+  home: string;
+}): SynchronizedMutation {
+  const readyPath = join(input.root, `worker-ready-${randomUUID()}`);
+  const continuePath = join(input.root, `worker-continue-${randomUUID()}`);
+  const moduleUrl = new URL("../src/runtime/release-env.ts", import.meta.url).href;
+  const child = spawn(
+    process.execPath,
+    [
+      "--import",
+      "tsx",
+      "--input-type=module",
+      "-e",
+      `import fs from "node:fs";
+const input = JSON.parse(process.argv[1]);
+const waitArray = new Int32Array(new SharedArrayBuffer(4));
+const deadline = Date.now() + 10000;
+while (!fs.existsSync(input.readyPath)) {
+  if (Date.now() >= deadline) throw new Error("Timed out waiting for first selector writer");
+  Atomics.wait(waitArray, 0, 0, 10);
+}
+try {
+  const module = await import(input.moduleUrl);
+  module.writeMachineUpdaterKeySelectors({
+    homeDir: input.home,
+    service: "concurrent-service",
+    account: "concurrent-account",
+    keychainPath: "/concurrent.keychain-db"
+  });
+  throw new Error("Concurrent selector writer unexpectedly succeeded");
+} catch (error) {
+  if (!String(error).includes("already in progress")) throw error;
+} finally {
+  fs.writeFileSync(input.continuePath, "continue", { flag: "wx" });
+}`,
+      JSON.stringify({ ...input, readyPath, continuePath, moduleUrl })
+    ],
+    { stdio: ["ignore", "ignore", "pipe"] }
+  );
+  const done = new Promise<void>((resolve, reject) => {
+    let stderr = "";
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    child.once("error", reject);
+    child.once("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`Concurrent selector write failed (${code ?? "signal"}): ${stderr.trim()}`));
+    });
+  });
+  return {
+    done,
+    synchronization: { event: "before-release-file-rename", readyPath, continuePath }
   };
 }
 
@@ -311,6 +369,36 @@ describe("release environment", () => {
       ""
     ].join("\n"));
     expect((await stat(globalEnvPath)).mode & 0o777).toBe(0o600);
+  });
+
+  it("serializes the final selector check and rename across concurrent kd writers", async () => {
+    const { root, home, globalEnvPath } = await createFixture();
+    await writePrivateFile(globalEnvPath, [
+      "APPLE_KEYCHAIN_PROFILE=old-notary",
+      "APPLE_KEYCHAIN_PATH=/old-notary.keychain-db",
+      "KANNA_UPDATER_KEYCHAIN_SERVICE=old-updater",
+      "KANNA_UPDATER_KEYCHAIN_ACCOUNT=old-account",
+      "KANNA_UPDATER_KEYCHAIN_PATH=/old-updater.keychain-db",
+      ""
+    ].join("\n"));
+    const concurrent = startConcurrentSelectorWrite({ root, home });
+
+    writeMachineNotarizationSelectors({
+      homeDir: home,
+      profile: "new-notary",
+      keychainPath: "/new-notary.keychain-db",
+      testSynchronization: concurrent.synchronization
+    });
+    await concurrent.done;
+
+    expect(await readFile(globalEnvPath, "utf8")).toBe([
+      "KANNA_UPDATER_KEYCHAIN_SERVICE=old-updater",
+      "KANNA_UPDATER_KEYCHAIN_ACCOUNT=old-account",
+      "KANNA_UPDATER_KEYCHAIN_PATH=/old-updater.keychain-db",
+      'APPLE_KEYCHAIN_PROFILE="new-notary"',
+      'APPLE_KEYCHAIN_PATH="/new-notary.keychain-db"',
+      ""
+    ].join("\n"));
   });
 
   it("rejects setup through a symlinked ~/.kanna directory without modifying its target", async () => {
