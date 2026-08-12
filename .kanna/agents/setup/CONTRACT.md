@@ -7,6 +7,7 @@ Required behavior:
 - It must inspect the repository before asking questions, including git remote URL, available GitHub auth through `gh auth status`, existing CI configuration, and existing `.kanna/` files.
 - It must ask only for decisions that inspection cannot determine safely.
 - It must write `.kanna/config.json` selections, and repo-local `EXTEND.md` files only for behavior that does not match stock flavors.
+- It must install the machine-local config bootstrap: ignore `.kanna/config.local.json`, add a committed portable script that creates a schema-only skeleton in the primary checkout and copies it into each worktree, and invoke that script from `.kanna/config.json` setup without replacing existing setup commands. The copy direction is primary checkout to worktree only.
 - It must not write copied stock `AGENT.md` files for roles such as `pr` or `merge`.
 - For the stock GitHub flow, it must select a built-in pipeline (`no-review`, `single-reviewer`, or `specialized-reviewers`) plus `merge@github`, not author a pipeline file of its own. A pipeline file is written only for stages the built-ins do not offer.
 - The stock GitHub flow must not select `pr@draft-pr`. `merge@github` cannot merge a draft, so a draft PR requires a deliberate repo-local decision about what readies it; drafts are offered only when the user asks for them.
@@ -14,5 +15,5 @@ Required behavior:
   - `pr@push-only` creates no PR, so it must never be paired with a built-in pipeline. It implies manual merge plus a repo-local pipeline matching the chosen review depth with the `approve` post omitted.
   - Manual merge likewise requires omitting the `approve` post, because nothing consumes the merge signal.
   - `pr@draft-pr` with a merge agent must also write a repo-local `.kanna/agents/approve/EXTEND.md` that readies the draft before signaling.
-- It must validate changed JSON files before reporting success.
+- It must validate changed JSON files and the local-config sync script, and verify the local config stays ignored, before reporting success.
 - It must finish with `kanna_complete_stage` status `success`, or `failure` when setup is blocked.
