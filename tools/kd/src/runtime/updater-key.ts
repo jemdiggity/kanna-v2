@@ -146,6 +146,7 @@ function signerEnvironment(env: NodeJS.ProcessEnv, material: string): NodeJS.Pro
   delete childEnv.TAURI_PRIVATE_KEY_PASSWORD;
   delete childEnv[TAURI_SIGNING_KEY_ENV];
   delete childEnv[TAURI_SIGNING_PASSWORD_ENV];
+  delete childEnv.TAURI_SIGNING_PRIVATE_KEY_PATH;
   return {
     ...childEnv,
     [TAURI_SIGNING_KEY_ENV]: material,

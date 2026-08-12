@@ -178,9 +178,11 @@ describe("updater signing key compatibility", () => {
       PATH: "/usr/bin",
       TAURI_PRIVATE_KEY_PASSWORD: "ambient password",
       TAURI_SIGNING_PRIVATE_KEY: "ambient key",
-      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: "ambient signing password"
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: "ambient signing password",
+      TAURI_SIGNING_PRIVATE_KEY_PATH: "/tmp/ambient-updater.key"
     }, "validated key");
 
+    expect(env.TAURI_SIGNING_PRIVATE_KEY_PATH).toBeUndefined();
     expect(env).toEqual({
       PATH: "/usr/bin",
       TAURI_SIGNING_PRIVATE_KEY: "validated key",
