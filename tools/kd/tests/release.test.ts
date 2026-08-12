@@ -111,6 +111,28 @@ function writeStagingReleaseBuildOutputs(repoRoot: string, labels: ReleaseArchLa
   return outputs;
 }
 
+/**
+ * `readStagingChannel` asks for the pointer release's asset list before it will
+ * trust (or distrust) the channel, so fixtures have to answer that query
+ * explicitly. `null` models a channel that does not exist at all — a genuine
+ * 404, which is the only shape that reads as "uninitialized".
+ */
+function stagingChannelAssetsResponse(assets: string[] | null): { exitCode: number; stdout: string; stderr: string } {
+  if (assets === null) return { exitCode: 1, stdout: "", stderr: "release not found\n" };
+  return { exitCode: 0, stdout: JSON.stringify({ assets: assets.map((name) => ({ name })) }), stderr: "" };
+}
+
+function isStagingChannelAssetsQuery(command: string, args: string[]): boolean {
+  return (
+    command === "gh" &&
+    args[0] === "release" &&
+    args[1] === "view" &&
+    args[2] === "desktop-staging" &&
+    args.includes("--json") &&
+    args.includes("assets")
+  );
+}
+
 describe("release updater bundling", () => {
   // A regular full kd release ship -> updater install E2E would need signed release
   // artifacts, both macOS architectures, GitHub release metadata/assets, and a
@@ -338,6 +360,7 @@ describe("release shipping", () => {
       const runner: CommandRunner = {
         async run(command, args, options) {
           calls.push({ command, args, options });
+          if (isStagingChannelAssetsQuery(command, args)) return stagingChannelAssetsResponse(null);
           if (command === "git" && args.join(" ") === "status --porcelain") {
             return { exitCode: 0, stdout: "", stderr: "" };
           }
@@ -427,6 +450,7 @@ describe("release shipping", () => {
       const runner: CommandRunner = {
         async run(command, args, options) {
           calls.push({ command, args, options });
+          if (isStagingChannelAssetsQuery(command, args)) return stagingChannelAssetsResponse(null);
           const key = `${command} ${args.join(" ")}`;
           if (key === "git status --porcelain") {
             return { exitCode: 0, stdout: "", stderr: "" };
@@ -500,6 +524,7 @@ describe("release shipping", () => {
       const runner: CommandRunner = {
         async run(command, args, options) {
           calls.push({ command, args, options });
+          if (isStagingChannelAssetsQuery(command, args)) return stagingChannelAssetsResponse(null);
           const key = `${command} ${args.join(" ")}`;
           if (key === "git status --porcelain") {
             return { exitCode: 0, stdout: "", stderr: "" };
@@ -574,6 +599,7 @@ describe("release shipping", () => {
       const runner: CommandRunner = {
         async run(command, args, options) {
           calls.push({ command, args, options });
+          if (isStagingChannelAssetsQuery(command, args)) return stagingChannelAssetsResponse(null);
           const key = `${command} ${args.join(" ")}`;
           if (key === "git status --porcelain") {
             return { exitCode: 0, stdout: "", stderr: "" };
@@ -617,10 +643,40 @@ describe("release shipping", () => {
       const { repoRoot, privateKeyPath } = createReleaseRepo(root);
       const originalFiles = readVersionFiles(repoRoot);
       const outputs = writeStagingReleaseBuildOutputs(repoRoot, ["arm64", "x86_64"]);
+      const ACTIVE_VERSION = "1.2.4-staging.4";
+      const ACTIVE_COMMIT = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
       const calls: CommandCall[] = [];
       const runner: CommandRunner = {
         async run(command, args, options) {
           calls.push({ command, args, options });
+          // The channel already serves a candidate; this publish is the normal
+          // forward move from it, so the lineage gate has something to compare.
+          if (command === "gh" && args[0] === "release" && args[1] === "download" && args[2] === "desktop-staging") {
+            const dirIndex = args.indexOf("--dir");
+            writeFileSync(join(args[dirIndex + 1] ?? "", "latest-staging.json"), `{"version":"${ACTIVE_VERSION}"}\n`);
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (command === "gh" && args[0] === "release" && args[1] === "view" && args[2] === `v${ACTIVE_VERSION}`) {
+            return {
+              exitCode: 0,
+              stdout: JSON.stringify({
+                targetCommitish: ACTIVE_COMMIT,
+                publishedAt: "2026-07-06T00:00:00Z",
+                body: "Staging updater manifest\n\nSource-Branch: main"
+              }),
+              stderr: ""
+            };
+          }
+          if (command === "git" && args.join(" ") === "fetch --tags origin") {
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (command === "git" && args[0] === "merge-base") {
+            return {
+              exitCode: args[2] === ACTIVE_COMMIT && args[3] === "1234567890abcdef" ? 0 : 1,
+              stdout: "",
+              stderr: ""
+            };
+          }
           if (command === "git" && args.join(" ") === "status --porcelain") {
             return { exitCode: 0, stdout: "", stderr: "" };
           }
@@ -768,10 +824,40 @@ describe("release shipping", () => {
     try {
       const { repoRoot, privateKeyPath } = createReleaseRepo(root);
       const outputs = writeStagingReleaseBuildOutputs(repoRoot, ["arm64", "x86_64"]);
+      const ACTIVE_VERSION = "1.2.4-staging.6";
+      const ACTIVE_COMMIT = "ffffffffffffffffffffffffffffffffffffffff";
       const calls: CommandCall[] = [];
       const runner: CommandRunner = {
         async run(command, args, options) {
           calls.push({ command, args, options });
+          // The channel already serves a candidate; this publish is the normal
+          // forward move from it, so the lineage gate has something to compare.
+          if (command === "gh" && args[0] === "release" && args[1] === "download" && args[2] === "desktop-staging") {
+            const dirIndex = args.indexOf("--dir");
+            writeFileSync(join(args[dirIndex + 1] ?? "", "latest-staging.json"), `{"version":"${ACTIVE_VERSION}"}\n`);
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (command === "gh" && args[0] === "release" && args[1] === "view" && args[2] === `v${ACTIVE_VERSION}`) {
+            return {
+              exitCode: 0,
+              stdout: JSON.stringify({
+                targetCommitish: ACTIVE_COMMIT,
+                publishedAt: "2026-07-06T00:00:00Z",
+                body: "Staging updater manifest\n\nSource-Branch: main"
+              }),
+              stderr: ""
+            };
+          }
+          if (command === "git" && args.join(" ") === "fetch --tags origin") {
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (command === "git" && args[0] === "merge-base") {
+            return {
+              exitCode: args[2] === ACTIVE_COMMIT && args[3] === "1234567890abcdef" ? 0 : 1,
+              stdout: "",
+              stderr: ""
+            };
+          }
           if (command === "git" && args.join(" ") === "status --porcelain") return { exitCode: 0, stdout: "", stderr: "" };
           if (command === "git" && args.join(" ") === "remote get-url origin") return { exitCode: 0, stdout: "git@github.com:jemdiggity/kanna.git\n", stderr: "" };
           if (command === "git" && args.join(" ") === "rev-parse --abbrev-ref HEAD") {
@@ -1717,6 +1803,13 @@ describe("release cut", () => {
     releaseBranches?: Record<string, string>;
     /** Production tags present on origin, without the leading v. */
     productionTags?: string[];
+    /**
+     * Staging prereleases present on origin, without the leading v. Real
+     * `ls-remote --tags origin 'vX.Y.*'` returns these alongside production
+     * tags: it expands the pattern with a leading wildcard-and-slash, and that
+     * wildcard crosses path separators.
+     */
+    stagingTags?: string[];
     /** Series already carrying an abandonment tag, as `X.Y` -> tag message. */
     abandonedSeries?: Record<string, string>;
     activeStagingVersion?: string | null;
@@ -1754,8 +1847,15 @@ describe("release cut", () => {
           }
           const seriesMatch = /^v(\d+\.\d+)\.\*$/.exec(pattern);
           if (seriesMatch) {
-            const released = (fixture.productionTags ?? []).some((tag) => tag.startsWith(`${seriesMatch[1]}.`));
-            return { exitCode: 0, stdout: released ? `sha\trefs/tags/v${seriesMatch[1]}.0\n` : "", stderr: "" };
+            const series = seriesMatch[1] ?? "";
+            const matched = [...(fixture.productionTags ?? []), ...(fixture.stagingTags ?? [])].filter((tag) =>
+              tag.startsWith(`${series}.`)
+            );
+            return {
+              exitCode: 0,
+              stdout: matched.map((tag) => `sha\trefs/tags/v${tag}`).join("\n"),
+              stderr: ""
+            };
           }
           return { exitCode: 0, stdout: "", stderr: "" };
         }
@@ -1764,8 +1864,11 @@ describe("release cut", () => {
           const series = /abandoned\/release\/(\d+\.\d+)$/.exec(ref)?.[1] ?? "";
           return { exitCode: 0, stdout: fixture.abandonedSeries?.[series] ?? "", stderr: "" };
         }
+        if (isStagingChannelAssetsQuery(command, args)) {
+          return stagingChannelAssetsResponse(fixture.activeStagingVersion ? ["latest-staging.json"] : null);
+        }
         if (command === "gh" && args[0] === "release" && args[1] === "download") {
-          if (!fixture.activeStagingVersion) return { exitCode: 1, stdout: "", stderr: "not found" };
+          if (!fixture.activeStagingVersion) return { exitCode: 1, stdout: "", stderr: "release not found" };
           const dirIndex = args.indexOf("--dir");
           writeFileSync(
             join(args[dirIndex + 1] ?? "", "latest-staging.json"),
@@ -1858,6 +1961,10 @@ describe("release cut", () => {
   const recoveryFixture: CutFixture = {
     trunkVersion: "0.0.68",
     releaseBranches: { "release/0.1": RELEASE_01_SHA },
+    // The series being abandoned has shipped RCs — every real one has — and
+    // those prereleases come back from the same ls-remote glob that looks for
+    // production tags. Only a vX.Y.Z tag means the series actually released.
+    stagingTags: ["0.1.0-staging.7", "0.1.0-staging.8"],
     activeStagingVersion: "0.1.0-staging.8",
     activeStagingSourceBranch: "release/0.1",
     channelBody: [
@@ -1981,6 +2088,39 @@ describe("release cut", () => {
     }
   });
 
+  it("refuses to abandon a series while the channel cannot be read", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot } = createReleaseRepo(root);
+      const calls: CommandCall[] = [];
+      const runner: CommandRunner = {
+        async run(command, args, options) {
+          if (isStagingChannelAssetsQuery(command, args)) {
+            calls.push({ command, args, options });
+            return { exitCode: 1, stdout: "", stderr: "HTTP 503: Service unavailable" };
+          }
+          return cutRunner(recoveryFixture, calls).run(command, args, options);
+        }
+      };
+
+      await expect(
+        cutReleaseBranch({
+          repoRoot,
+          bump: "minor",
+          version: "0.2.0",
+          abandonSeries: ["0.1"],
+          reason: "0.1 diverged",
+          env: {},
+          runner
+        })
+      ).rejects.toThrow(/Cannot tell whether desktop-staging still serves the series being abandoned/);
+      expect(calls.some((call) => call.command === "git" && call.args[0] === "push")).toBe(false);
+      expect(calls.some((call) => call.command === "git" && call.args[0] === "tag")).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("does not require re-abandoning a series that already carries the record", async () => {
     const root = await mkdtemp(join(tmpdir(), "kd-release-"));
     try {
@@ -2096,6 +2236,9 @@ describe("active staging marketing version", () => {
               stderr: ""
             };
           }
+          if (isStagingChannelAssetsQuery(command, args)) {
+            return stagingChannelAssetsResponse(["latest-staging.json"]);
+          }
           const dirIndex = args.indexOf("--dir");
           writeFileSync(
             join(args[dirIndex + 1] ?? "", "latest-staging.json"),
@@ -2143,6 +2286,9 @@ describe("active staging marketing version", () => {
               stderr: ""
             };
           }
+          if (isStagingChannelAssetsQuery(command, args)) {
+            return stagingChannelAssetsResponse(["latest-staging.json"]);
+          }
           const dirIndex = args.indexOf("--dir");
           writeFileSync(
             join(args[dirIndex + 1] ?? "", "latest-staging.json"),
@@ -2183,6 +2329,10 @@ describe("release status", () => {
     /** Production tags that exist on origin, without the leading v. */
     existingProductionTags?: string[];
     channelBody?: string;
+    /** Simulates a transient GitHub failure reading the channel. */
+    channelUnreadable?: boolean;
+    /** Raw latest-staging.json contents, for malformed-manifest cases. */
+    manifestBody?: string;
     abandonedSeries?: Record<string, string>;
     cherry?: string;
     behindMain?: number;
@@ -2219,10 +2369,17 @@ describe("release status", () => {
             stderr: ""
           };
         }
+        if (isStagingChannelAssetsQuery(command, args)) {
+          if (fixture.channelUnreadable) return { exitCode: 1, stdout: "", stderr: "HTTP 503: Service unavailable" };
+          return stagingChannelAssetsResponse(fixture.activeVersion ? ["latest-staging.json"] : null);
+        }
         if (command === "gh" && args[0] === "release" && args[1] === "download") {
-          if (!fixture.activeVersion) return { exitCode: 1, stdout: "", stderr: "not found" };
+          if (!fixture.activeVersion) return { exitCode: 1, stdout: "", stderr: "release not found" };
           const dirIndex = args.indexOf("--dir");
-          writeFileSync(join(args[dirIndex + 1] ?? "", "latest-staging.json"), `{"version":"${fixture.activeVersion}"}\n`);
+          writeFileSync(
+            join(args[dirIndex + 1] ?? "", "latest-staging.json"),
+            fixture.manifestBody ?? `{"version":"${fixture.activeVersion}"}\n`
+          );
           return { exitCode: 0, stdout: "", stderr: "" };
         }
         if (fixture.activeVersion && key.startsWith(`gh release view v${fixture.activeVersion} `)) {
@@ -2641,6 +2798,28 @@ describe("release status", () => {
     }
   });
 
+  it("reports an unreadable channel as an error, not as an empty one", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const runner = statusRunner({
+        activeVersion: "1.2.4-staging.3",
+        channelUnreadable: true,
+        productionTag: "v1.2.3"
+      });
+
+      const result = await releaseStatus({ repoRoot: root, env: {}, runner, now: NOW });
+
+      expect(result.staging).toBeNull();
+      expect(result.promotion.allowed).toBe(false);
+      expect(result.promotion.blockers).toEqual([
+        expect.stringContaining("desktop-staging channel could not be read")
+      ]);
+      expect(result.promotion.blockers[0]).not.toMatch(/No staging release candidate is active/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("returns empty channels when no releases exist yet", async () => {
     const root = await mkdtemp(join(tmpdir(), "kd-release-"));
     try {
@@ -2687,6 +2866,12 @@ describe("staging publish lineage gates", () => {
     releaseBranchSha?: string;
     /** Series carrying an abandonment tag, as `X.Y` -> annotated tag message. */
     abandonedSeries?: Record<string, string>;
+    /** Simulates a transient GitHub failure reading the channel itself. */
+    channelUnreadable?: boolean;
+    /** Simulates the manifest asset existing but failing to download. */
+    manifestDownloadFails?: boolean;
+    /** Raw latest-staging.json contents, for malformed-manifest cases. */
+    manifestBody?: string;
   }
 
   function shipGateRunner(fixture: ShipGateFixture, repoRoot: string, outputs: Map<string, string>, calls: CommandCall[]): CommandRunner {
@@ -2709,10 +2894,18 @@ describe("staging publish lineage gates", () => {
           return { exitCode: 0, stdout: sha ? `${sha}\t${args[2]}\n` : "", stderr: "" };
         }
         if (command === "git" && args[0] === "fetch") return { exitCode: 0, stdout: "", stderr: "" };
+        if (isStagingChannelAssetsQuery(command, args)) {
+          if (fixture.channelUnreadable) return { exitCode: 1, stdout: "", stderr: "HTTP 503: Service unavailable" };
+          return stagingChannelAssetsResponse(activeVersion ? ["latest-staging.json"] : null);
+        }
         if (command === "gh" && args[0] === "release" && args[1] === "download") {
-          if (!activeVersion) return { exitCode: 1, stdout: "", stderr: "not found" };
+          if (!activeVersion) return { exitCode: 1, stdout: "", stderr: "release not found" };
+          if (fixture.manifestDownloadFails) return { exitCode: 1, stdout: "", stderr: "HTTP 502: Bad gateway" };
           const dirIndex = args.indexOf("--dir");
-          writeFileSync(join(args[dirIndex + 1] ?? "", "latest-staging.json"), `{"version":"${activeVersion}"}\n`);
+          writeFileSync(
+            join(args[dirIndex + 1] ?? "", "latest-staging.json"),
+            fixture.manifestBody ?? `{"version":"${activeVersion}"}\n`
+          );
           return { exitCode: 0, stdout: "", stderr: "" };
         }
         if (activeVersion && key.startsWith(`gh release view v${activeVersion} `)) {
@@ -2970,7 +3163,12 @@ describe("staging publish lineage gates", () => {
     }
   });
 
-  it("publishes onto an empty channel without a lineage to compare", async () => {
+  // An uninitialized channel is the ONLY shape that may skip the lineage
+  // comparison, and it has to be positive evidence: the pointer release does
+  // not exist. A failed read looks identical from a single exit code, so these
+  // cases are kept apart deliberately — conflating them is what would let a
+  // rate limit or a 5xx wave a publish through with nothing verified.
+  it("publishes onto an uninitialized channel without a lineage to compare", async () => {
     const root = await mkdtemp(join(tmpdir(), "kd-release-"));
     try {
       const { repoRoot, privateKeyPath } = createReleaseRepo(root);
@@ -2981,6 +3179,69 @@ describe("staging publish lineage gates", () => {
       const result = await shipRelease(shipGateInput(repoRoot, privateKeyPath, runner));
 
       expect(result.version).toBe("1.2.4-staging.1");
+      // Positive evidence of emptiness: the channel release itself 404s.
+      const channelRead = calls.find(
+        (call) => call.command === "gh" && call.args[1] === "view" && call.args[2] === "desktop-staging"
+      );
+      expect(channelRead).toBeDefined();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses when the channel exists but its manifest cannot be read", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot, privateKeyPath } = createReleaseRepo(root);
+      const calls: CommandCall[] = [];
+      const runner = shipGateRunner(
+        { head: DESCENDANT_COMMIT, manifestDownloadFails: true },
+        repoRoot,
+        new Map(),
+        calls
+      );
+
+      await expect(shipRelease(shipGateInput(repoRoot, privateKeyPath, runner))).rejects.toThrow(
+        /Cannot verify staging lineage.*Bad gateway/s
+      );
+      expect(calls.some((call) => call.command === "bazel")).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses when the channel itself cannot be reached", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot, privateKeyPath } = createReleaseRepo(root);
+      const calls: CommandCall[] = [];
+      const runner = shipGateRunner({ head: DESCENDANT_COMMIT, channelUnreadable: true }, repoRoot, new Map(), calls);
+
+      await expect(shipRelease(shipGateInput(repoRoot, privateKeyPath, runner))).rejects.toThrow(
+        /Cannot verify staging lineage.*Service unavailable/s
+      );
+      expect(calls.some((call) => call.command === "bazel")).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses when the channel manifest is present but unparseable", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot, privateKeyPath } = createReleaseRepo(root);
+      const calls: CommandCall[] = [];
+      const runner = shipGateRunner(
+        { head: DESCENDANT_COMMIT, manifestBody: "{ not json\n" },
+        repoRoot,
+        new Map(),
+        calls
+      );
+
+      await expect(shipRelease(shipGateInput(repoRoot, privateKeyPath, runner))).rejects.toThrow(
+        /Cannot verify staging lineage.*has no valid version/s
+      );
+      expect(calls.some((call) => call.command === "bazel")).toBe(false);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -3114,6 +3375,9 @@ describe("staging lineage reset", () => {
         const key = `${command} ${args.join(" ")}`;
         if (key === "git remote get-url origin") {
           return { exitCode: 0, stdout: "git@github.com:jemdiggity/kanna.git\n", stderr: "" };
+        }
+        if (isStagingChannelAssetsQuery(command, args)) {
+          return stagingChannelAssetsResponse(activeVersion ? ["latest-staging.json"] : null);
         }
         if (command === "gh" && args[0] === "release" && args[1] === "download") {
           if (!activeVersion) return { exitCode: 1, stdout: "", stderr: "not found" };

@@ -15,7 +15,7 @@ import {
   type LineageResetRecord,
   type StagingCandidate
 } from "../src/runtime/release-lineage";
-import { parseUnmergedReleaseCommits } from "../src/runtime/release";
+import { hasProductionTagForSeries, parseUnmergedReleaseCommits } from "../src/runtime/release";
 import { DEFAULT_RELEASE_POLICY, parseReleasePolicy, readReleasePolicy } from "../src/runtime/release-policy";
 
 const ACTIVE: StagingCandidate = {
@@ -269,6 +269,33 @@ describe("release-only commit detection", () => {
   it("returns nothing for a fully backported branch", () => {
     expect(parseUnmergedReleaseCommits("")).toEqual([]);
     expect(parseUnmergedReleaseCommits("\n  \n")).toEqual([]);
+  });
+});
+
+describe("released-series detection", () => {
+  // `git ls-remote --tags origin 'v0.1.*'` expands the pattern with a leading
+  // wildcard that crosses path separators, so it returns every staging
+  // prerelease in the series as well. Treating non-empty output as "released"
+  // would classify every series worth abandoning as already shipped.
+  const stagingOnly = [
+    "aaaa\trefs/tags/v0.1.0-staging.7",
+    "bbbb\trefs/tags/v0.1.0-staging.8",
+    "cccc\trefs/tags/v0.1.0-staging.8^{}"
+  ].join("\n");
+
+  it("does not treat staging prereleases as a released series", () => {
+    expect(stagingOnly.trim().length).toBeGreaterThan(0);
+    expect(hasProductionTagForSeries(stagingOnly, { major: 0, minor: 1 })).toBe(false);
+  });
+
+  it("recognizes a real production tag, including its peeled ref", () => {
+    expect(hasProductionTagForSeries(`${stagingOnly}\ndddd\trefs/tags/v0.1.0`, { major: 0, minor: 1 })).toBe(true);
+    expect(hasProductionTagForSeries("dddd\trefs/tags/v0.1.3^{}", { major: 0, minor: 1 })).toBe(true);
+  });
+
+  it("ignores tags from other series and empty output", () => {
+    expect(hasProductionTagForSeries("dddd\trefs/tags/v0.2.0", { major: 0, minor: 1 })).toBe(false);
+    expect(hasProductionTagForSeries("", { major: 0, minor: 1 })).toBe(false);
   });
 });
 

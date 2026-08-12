@@ -140,6 +140,23 @@ const RESET_HINT = "kd release reset-staging --to <main|release/X.Y> --reason \"
 
 export function evaluateStagingPublishGate(input: StagingPublishGateInput): StagingPublishGateDecision {
   const active = input.active;
+
+  // First, and before the empty-channel allowance: nothing below can be trusted
+  // if the channel could not be read. A missing candidate with an error is a
+  // channel we failed to read, not an empty one, and must never fall through to
+  // "no active candidate, publish away".
+  if (input.activeMetadataError) {
+    return {
+      allowed: false,
+      waivedByReset: false,
+      frozenBy: null,
+      reason:
+        `Cannot verify staging lineage: ${active ? `the active candidate ${active.tag}` : "the staging channel"} ` +
+        `could not be read (${input.activeMetadataError}). Refusing to move the channel blind. ` +
+        `Retry once GitHub is reachable, restore the missing metadata, or abandon the lineage explicitly: ${RESET_HINT}.`
+    };
+  }
+
   if (!active) {
     return { allowed: true, reason: null, waivedByReset: false, frozenBy: null };
   }
@@ -166,17 +183,6 @@ export function evaluateStagingPublishGate(input: StagingPublishGateInput): Stag
         `A main staging publish would repoint the single staging channel away from the RC mid-soak. ` +
         `Promote it (kd release promote ${active.version}), ship the next RC from ${active.sourceBranch}, ` +
         `or abandon the soak explicitly: ${RESET_HINT}.`
-    };
-  }
-
-  if (input.activeMetadataError) {
-    return {
-      allowed: false,
-      waivedByReset: false,
-      frozenBy: null,
-      reason:
-        `Cannot verify staging lineage: the active candidate ${active.tag} could not be read (${input.activeMetadataError}). ` +
-        `Refusing to move the channel blind. Restore the prerelease metadata, or abandon the lineage explicitly: ${RESET_HINT}.`
     };
   }
 

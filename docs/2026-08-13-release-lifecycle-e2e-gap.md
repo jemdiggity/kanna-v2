@@ -59,7 +59,9 @@ itself is built on, plus pure unit tests for the decision functions:
   `status` as mechanically promotable but lineage-invalid; same-branch
   fast-forward RCs; the main → release-branch freeze transition; a main publish
   refused during a soak and resumed after promotion; rollback refusals;
-  unreadable channel metadata failing closed; branch-tip-exact RC provenance;
+  unreadable channel metadata failing closed, with an uninitialized channel kept
+  distinct from an unreachable one, a manifest that fails to download, and one
+  that does not parse; branch-tip-exact RC provenance;
   soak timing, the explicit override, and dry-run parity with the real
   promotion; the reset operation's provenance record and validation; and the
   full series-transition recovery case (explicit `0.2.0` cut with trunk at

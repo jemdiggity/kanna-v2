@@ -264,6 +264,19 @@ export function parseReleaseBranchSeries(branchName: string): ReleaseSeries | nu
   return { major, minor };
 }
 
+/**
+ * Whether `git ls-remote --tags origin 'vX.Y.*'` output contains a real
+ * production tag for the series. The glob matches prereleases too, so the
+ * decision has to come from the ref names, not from the output being non-empty.
+ */
+export function hasProductionTagForSeries(tagsOutput: string, series: ReleaseSeries): boolean {
+  const pattern = new RegExp(`^(?:refs/tags/)?v${series.major}\\.${series.minor}\\.(\\d+)(?:\\^\\{\\})?$`);
+  return tagsOutput.split(/\r?\n/).some((line) => {
+    const ref = line.trim().split(/\s+/).at(-1) ?? "";
+    return pattern.test(ref);
+  });
+}
+
 export function nextSeriesPatchVersion(tagsOutput: string, series: ReleaseSeries): string {
   const pattern = new RegExp(`^(?:refs/tags/)?v${series.major}\\.${series.minor}\\.(\\d+)(?:\\^\\{\\})?$`);
   const patches: number[] = [];
@@ -455,18 +468,20 @@ async function readStagingCandidate(
 }
 
 /**
- * The candidate `desktop-staging` currently serves. A channel with no manifest
- * at all is an uninitialized channel, not an error: the first publish creates
- * it. A manifest that names a candidate whose metadata cannot be read is an
- * error, because moving the pointer would then be unverifiable.
+ * The candidate `desktop-staging` currently serves. An uninitialized channel is
+ * not an error: the first publish creates it, and the lookup reports no
+ * candidate and no error. A channel we merely failed to read, or one whose
+ * candidate's metadata cannot be resolved, reports an error — moving the
+ * pointer would then be unverifiable, and every caller refuses on it.
  */
 async function resolveActiveStagingCandidate(
   context: ReleaseCommandContext,
   repoSlug: string
 ): Promise<CandidateLookup> {
-  const active = await readActiveStagingVersion(context, repoSlug);
-  if (!active.version) return { candidate: null, error: null };
-  return readStagingCandidate(context, repoSlug, active.version);
+  const channel = await readStagingChannel(context, repoSlug);
+  if (channel.state === "absent") return { candidate: null, error: null };
+  if (channel.state === "unreadable") return { candidate: null, error: channel.error };
+  return readStagingCandidate(context, repoSlug, channel.version);
 }
 
 async function commitRelationship(
@@ -592,18 +607,24 @@ async function assertStagingPublishAllowed(
   const remoteUrl = await mustRun(input.runner, "git", ["remote", "get-url", "origin"], input.repoRoot, input.env);
   const repoSlug = releaseRepoSlug(remoteUrl);
   const active = await resolveActiveStagingCandidate(input, repoSlug);
-  if (!active.candidate) return;
+  // A candidate we could not read still has to reach the gate: only a channel
+  // positively known to be empty skips the comparison.
+  if (!active.candidate && !active.error) return;
 
-  await fetchStagingHistory(input);
-  const relationship = await commitRelationship(input, active.candidate.commit, proposed.commit);
+  if (active.candidate) await fetchStagingHistory(input);
+  const relationship = active.candidate
+    ? await commitRelationship(input, active.candidate.commit, proposed.commit)
+    : "unknown";
   const decision = evaluateStagingPublishGate({
     proposedSourceBranch: proposed.sourceBranch,
     proposedCommit: proposed.commit,
     active: active.candidate,
     relationship,
-    activeProductionTagExists: await activeProductionTagExists(input, active.candidate.version),
+    activeProductionTagExists: active.candidate
+      ? await activeProductionTagExists(input, active.candidate.version)
+      : false,
     activeMetadataError: active.error,
-    reset: await readLineageReset(input, repoSlug)
+    reset: active.candidate ? await readLineageReset(input, repoSlug) : null
   });
   if (!decision.allowed) {
     throw new Error(decision.reason ?? `Refusing to repoint ${STAGING_CHANNEL_TAG}.`);
@@ -1290,15 +1311,20 @@ export async function cutReleaseBranch(input: ReleaseCutInput): Promise<ReleaseC
   const unnamed: string[] = [];
   for (const candidate of steppedOver) {
     const seriesLabel = `${candidate.series.major}.${candidate.series.minor}`;
-    const releasedTags = await mustRun(
+    const seriesTags = await mustRun(
       input.runner,
       "git",
       ["ls-remote", "--tags", "origin", `v${seriesLabel}.*`],
       input.repoRoot,
       input.env
     );
-    // A series that already shipped is history, not something to abandon.
-    if (releasedTags.trim().length > 0) continue;
+    // A series that already shipped is history, not something to abandon — but
+    // only production tags count. `ls-remote` expands the pattern to `*/v0.1.*`
+    // and its `*` crosses `/`, so this glob also returns every
+    // `v0.1.0-staging.N` prerelease. Since any series worth abandoning has
+    // published RCs by definition, matching the raw output here would classify
+    // every abandonment candidate as "already released" and silently skip it.
+    if (hasProductionTagForSeries(seriesTags, candidate.series)) continue;
     const existing = await readAbandonedSeries(input, candidate.branch);
     if (existing) {
       pending.push({ candidate, existing });
@@ -1344,6 +1370,12 @@ export async function cutReleaseBranch(input: ReleaseCutInput): Promise<ReleaseC
     const remoteUrl = await mustRun(input.runner, "git", ["remote", "get-url", "origin"], input.repoRoot, input.env);
     const repoSlug = releaseRepoSlug(remoteUrl);
     const active = await resolveActiveStagingCandidate(input, repoSlug);
+    if (active.error) {
+      throw new Error(
+        `Cannot tell whether ${STAGING_CHANNEL_TAG} still serves the series being abandoned (${active.error}). ` +
+          "Refusing to abandon a series against an unreadable channel; retry once GitHub is reachable."
+      );
+    }
     const activeBranch = active.candidate?.sourceBranch ?? null;
     if (active.candidate && abandoning.some((entry) => entry.candidate.branch === activeBranch)) {
       const reset = await readLineageReset(input, repoSlug);
@@ -1590,10 +1622,67 @@ function parseManifestVersion(raw: string): string | null {
   }
 }
 
-async function readActiveStagingVersion(
-  input: ReleaseCommandContext,
-  repoSlug: string
-): Promise<{ version: string | null; error: string | null }> {
+/**
+ * What the `desktop-staging` pointer says, as three genuinely different
+ * outcomes rather than "version or not".
+ *
+ * `absent` and `unreadable` look identical from a single failed command, and
+ * conflating them is what makes a release tool fail open: a rate limit, an
+ * expired token, or a GitHub 5xx would otherwise read as "no channel yet" and
+ * skip every gate on the way to repointing a live channel. Only positive
+ * evidence that the channel has no candidate — the release does not exist, or
+ * it exists and carries no manifest asset — counts as `absent`. Everything else
+ * that stops us reading the pointer is `unreadable`, and refuses.
+ */
+export type StagingChannelRead =
+  | { state: "absent"; detail: string }
+  | { state: "unreadable"; error: string }
+  | { state: "active"; version: string };
+
+// gh's 404 wording. Anything else that fails is treated as a real error, so an
+// unrecognized failure fails closed rather than reading as an empty channel.
+const CHANNEL_NOT_FOUND_PATTERN = /release not found|404|could not find release/i;
+
+function parseChannelAssetNames(raw: string): string[] | null {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== "object" || parsed === null) return null;
+    const assets = (parsed as { assets?: unknown }).assets;
+    if (!Array.isArray(assets)) return null;
+    return assets.flatMap((asset) =>
+      typeof asset === "object" && asset !== null && typeof (asset as { name?: unknown }).name === "string"
+        ? [(asset as { name: string }).name]
+        : []
+    );
+  } catch {
+    return null;
+  }
+}
+
+async function readStagingChannel(input: ReleaseCommandContext, repoSlug: string): Promise<StagingChannelRead> {
+  // Asset presence is data, not an error string: ask for the asset list first
+  // so "the channel has no manifest" is a positive answer rather than a guess
+  // about why a download failed.
+  const view = await input.runner.run(
+    "gh",
+    ["release", "view", STAGING_CHANNEL_TAG, "--repo", repoSlug, "--json", "assets"],
+    { cwd: input.repoRoot, env: input.env }
+  );
+  if (view.exitCode !== 0) {
+    const message = view.stderr.trim() || view.stdout.trim() || "gh release view failed.";
+    if (CHANNEL_NOT_FOUND_PATTERN.test(message)) {
+      return { state: "absent", detail: `${STAGING_CHANNEL_TAG} does not exist yet.` };
+    }
+    return { state: "unreadable", error: `could not read ${STAGING_CHANNEL_TAG}: ${message}` };
+  }
+  const assetNames = parseChannelAssetNames(view.stdout);
+  if (!assetNames) {
+    return { state: "unreadable", error: `could not parse the ${STAGING_CHANNEL_TAG} asset list from gh.` };
+  }
+  if (!assetNames.includes(STAGING_MANIFEST_NAME)) {
+    return { state: "absent", detail: `${STAGING_CHANNEL_TAG} carries no ${STAGING_MANIFEST_NAME} yet.` };
+  }
+
   const manifestDir = mkdtempSync(join(tmpdir(), "kanna-release-status-"));
   try {
     const download = await input.runner.run(
@@ -1614,18 +1703,18 @@ async function readActiveStagingVersion(
     );
     if (download.exitCode !== 0) {
       return {
-        version: null,
-        error: download.stderr.trim() || download.stdout.trim() || "GitHub release download failed."
+        state: "unreadable",
+        error: `could not download ${STAGING_MANIFEST_NAME}: ${download.stderr.trim() || download.stdout.trim() || "GitHub release download failed."}`
       };
     }
     const manifestPath = join(manifestDir, STAGING_MANIFEST_NAME);
     if (!existsSync(manifestPath)) {
-      return { version: null, error: `${STAGING_MANIFEST_NAME} was not downloaded.` };
+      return { state: "unreadable", error: `${STAGING_MANIFEST_NAME} was not downloaded.` };
     }
     const version = parseManifestVersion(readFileSync(manifestPath, "utf8"));
     return version
-      ? { version, error: null }
-      : { version: null, error: `${STAGING_MANIFEST_NAME} has no valid version.` };
+      ? { state: "active", version }
+      : { state: "unreadable", error: `${STAGING_MANIFEST_NAME} has no valid version.` };
   } finally {
     rmSync(manifestDir, { recursive: true, force: true });
   }
@@ -1652,13 +1741,14 @@ export async function resolveActiveStagingMarketingVersion(
     input.env
   );
   const repoSlug = releaseRepoSlug(remoteUrl);
-  const active = await readActiveStagingVersion(input, repoSlug);
-  if (!active.version) {
+  const channel = await readStagingChannel(input, repoSlug);
+  if (channel.state !== "active") {
     throw new Error(
-      `Could not resolve the active staging version from ${STAGING_CHANNEL_TAG}/${STAGING_MANIFEST_NAME}: ${active.error}`
+      `Could not resolve the active staging version from ${STAGING_CHANNEL_TAG}/${STAGING_MANIFEST_NAME}: ` +
+        (channel.state === "absent" ? channel.detail : channel.error)
     );
   }
-  return stagingMarketingVersion(active.version);
+  return stagingMarketingVersion(channel.version);
 }
 
 async function countCommits(input: ReleaseCommandContext, range: string): Promise<number | null> {
@@ -1736,8 +1826,11 @@ export async function releaseStatus(input: ReleaseStatusInput): Promise<ReleaseS
 
   let staging: ReleaseStatusStaging | null = null;
   let activeCandidate: StagingCandidate | null = null;
-  const activeStaging = await readActiveStagingVersion(input, repoSlug);
-  const version = activeStaging.version;
+  const channel = await readStagingChannel(input, repoSlug);
+  // An unreadable channel must never be reported as an empty one: "no candidate
+  // is active" reads as a calm all-clear, and the operator would act on it.
+  const channelError = channel.state === "unreadable" ? channel.error : null;
+  const version = channel.state === "active" ? channel.version : null;
   if (version) {
     const lookup = await readStagingCandidate(input, repoSlug, version);
     activeCandidate = lookup.candidate;
@@ -1786,7 +1879,11 @@ export async function releaseStatus(input: ReleaseStatusInput): Promise<ReleaseS
     mechanicalReason: null,
     soak: evaluateSoak({ requiredHours: policy.productionSoakHours, publishedAt: null, nowMs }),
     allowed: false,
-    blockers: ["No staging release candidate is active on the channel."]
+    blockers: [
+      channelError
+        ? `The ${STAGING_CHANNEL_TAG} channel could not be read (${channelError}), so no promotion decision can be made.`
+        : "No staging release candidate is active on the channel."
+    ]
   };
 
   if (staging && activeCandidate) {

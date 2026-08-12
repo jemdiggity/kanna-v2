@@ -71,11 +71,23 @@ the commit about to be built:
 | ancestor (a rollback) | refused — use `--rollback-to` or a reset |
 | diverged (the incident) | refused — ship a descendant, or record a reset |
 | unresolvable / active candidate metadata unreadable | refused — fail closed |
-| no active candidate (empty channel) | allowed — channel initialization |
+| channel unreadable (network, rate limit, 5xx, bad manifest) | refused — fail closed |
+| no active candidate (channel uninitialized) | allowed — channel initialization |
 
-An empty channel is initialization, not an error. Unreadable metadata for a
-candidate the channel *is* serving is an error, because moving the pointer would
-then be unverifiable.
+The last two rows are the same failed command from the outside, and telling them
+apart is the difference between a safe tool and one that fails open. "Empty" is
+therefore only ever a *positive* answer: either the `desktop-staging` release
+does not exist (a real 404), or it exists and its asset list does not contain
+`latest-staging.json`. The asset list is queried first for exactly this reason —
+asset presence is data, not an inference from why a download failed. Anything
+else that stops kd reading the pointer — an unrecognized `gh` failure, a
+download error against a manifest that *is* listed, a manifest that does not
+parse, or a candidate whose prerelease metadata cannot be resolved — is an
+error, because moving the pointer would then be unverifiable. The same
+distinction governs `kd release status`, which reports an unreadable channel as
+a blocker rather than the calm "no candidate is active", and
+`kd release cut --abandon-series`, which refuses to abandon a series when it
+cannot confirm whether the channel still serves it.
 
 The gate runs for `--dry-run` too: a rehearsal exists to surface the blocker
 before a signed build, not after one.
@@ -325,7 +337,10 @@ What `cut` enforces:
   the bump flags — a cut is inferred or named, never half of each.
 - **Nothing is skipped silently.** Every `release/X.Y` on origin whose series
   sits between trunk's series and the target must be either already released (a
-  `vX.Y.*` tag exists), already abandoned, or named in `--abandon-series` with a
+  production `vX.Y.Z` tag exists — prereleases do not count, and
+  `ls-remote --tags origin 'vX.Y.*'` returns those too, so the check reads ref
+  names rather than treating non-empty output as a release), already abandoned,
+  or named in `--abandon-series` with a
   `--reason`. Otherwise the cut refuses and prints the exact command to run.
 - **`--abandon-series` must name a series this cut actually steps over.** It
   cannot be used to abandon an unrelated or newer series.
@@ -497,7 +512,10 @@ Together they cover: the .7 → .8 divergent-history incident refused before any
 build and reported by status as mechanically promotable but lineage-invalid;
 same-branch fast-forward RCs; the main → release-branch freeze transition; a main
 publish refused during a release soak and resumed after promotion; rollback
-refusals; unreadable channel metadata failing closed; soak timing, the explicit
+refusals; unreadable channel metadata failing closed — separately for an
+uninitialized channel, an unreachable one, a manifest that fails to download,
+and one that does not parse; the released-vs-prerelease series check that
+makes an abandonment actually record; soak timing, the explicit
 override, and dry-run parity with the real promotion; the reset operation's
 provenance record, audit trail, confirmation and argument validation, and its
 single-use authorization (including that it does not license a different
