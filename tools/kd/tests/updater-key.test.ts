@@ -1,9 +1,10 @@
 import { createHash, generateKeyPairSync, sign as signDigest } from "node:crypto";
-import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 import type { CommandRunner } from "../src/runtime/process";
+import { withMachineUpdaterKeySetupLock } from "../src/runtime/release-env";
 import {
   assertUpdaterSigningKeyMatchesPublicKey,
   resolveUpdaterKeySelection,
@@ -199,11 +200,12 @@ describe("updater signing key setup", () => {
         "build.kanna.updater-key",
         "-a",
         "tauri-updater-signing-key",
-        keychainPath,
         "-w"
       ],
       interactive: true
     });
+    expect(promptCall?.args.at(-1)).toBe("-w");
+    expect(promptCall?.args).not.toContain(keychainPath);
     expect(calls.flatMap((call) => call.args)).not.toContain("secret updater key");
     const config = await readFile(result.configPath, "utf8");
     expect(config).toContain("APPLE_KEYCHAIN_PROFILE=notary");
@@ -326,15 +328,69 @@ describe("updater signing key setup", () => {
       }
     };
 
-    await expect(setupUpdaterKeyCredentials({
-      cwd: root,
-      homeDir,
-      env: { KANNA_UPDATER_PUBKEY: testUpdaterPublicKey() },
-      runner,
-      keychainPath
-    })).rejects.toThrow(/Plaintext release credentials/);
+    let message = "";
+    try {
+      await setupUpdaterKeyCredentials({
+        cwd: root,
+        homeDir,
+        env: { KANNA_UPDATER_PUBKEY: testUpdaterPublicKey() },
+        runner,
+        keychainPath
+      });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toMatch(/Plaintext release credentials/);
+    expect(message).toMatch(/Keychain item was retained/);
+    expect(message).toContain('service "build.kanna.updater-key"');
+    expect(message).toContain('account "tauri-updater-signing-key"');
+    expect(message).toContain(`Keychain ${JSON.stringify(keychainPath)}`);
     expect(calls).not.toContain("delete-generic-password");
     expect(await readFile(configPath, "utf8")).toBe("GH_TOKEN=plaintext-is-rejected\n");
+  });
+
+  it("identifies a retained newly prompted item when validation fails", async () => {
+    const { root, homeDir, keychainPath } = await setupFixture();
+    let lookupCount = 0;
+    const runner: CommandRunner = {
+      async run(command, args) {
+        if (args[0] === "default-keychain") {
+          return { exitCode: 0, stdout: `"${keychainPath}"\n`, stderr: "" };
+        }
+        if (args[0] === "find-generic-password") {
+          lookupCount += 1;
+          return lookupCount === 1
+            ? { exitCode: 44, stdout: "", stderr: "item could not be found" }
+            : { exitCode: 0, stdout: "new mismatched key\n", stderr: "" };
+        }
+        if (command === "pnpm") {
+          const challengePath = args.at(-1);
+          if (!challengePath) throw new Error("missing challenge path");
+          await writeTestSignature(challengePath);
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+    const otherKeyPair = generateKeyPairSync("ed25519");
+
+    let message = "";
+    try {
+      await setupUpdaterKeyCredentials({
+        cwd: root,
+        homeDir,
+        env: { KANNA_UPDATER_PUBKEY: testUpdaterPublicKey(otherKeyPair.publicKey) },
+        runner,
+        keychainPath
+      });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toMatch(/does not match KANNA_UPDATER_PUBKEY/);
+    expect(message).toMatch(/Keychain item was retained/);
+    expect(message).toContain('service "build.kanna.updater-key"');
+    expect(message).toContain('account "tauri-updater-signing-key"');
+    expect(message).toContain(`Keychain ${JSON.stringify(keychainPath)}`);
+    expect(message).not.toMatch(/Refusing to store/);
   });
 
   it("lets only one of two contenders proceed past the same malformed legacy lock", async () => {
@@ -418,6 +474,66 @@ describe("updater signing key setup", () => {
     releaseFirstLookup?.();
     await expect(firstSetup).resolves.toEqual(expect.objectContaining({ keychainPath }));
   });
+
+  it("repairs owner-only lock modes and reacquires persistent updater lock files", async () => {
+    const { homeDir } = await setupFixture();
+    const kannaDir = join(homeDir, ".kanna");
+    const setupLock = join(kannaDir, ".updater-key-setup.lockf");
+    const namespaceLock = join(homeDir, ".kanna-updater-key-setup.lockf");
+    await mkdir(kannaDir);
+    await chmod(kannaDir, 0o755);
+    await writeFile(setupLock, "stale lock inode\n", { mode: 0o644 });
+    await chmod(setupLock, 0o644);
+    await writeFile(namespaceLock, "stale namespace lock inode\n", { mode: 0o644 });
+    await chmod(namespaceLock, 0o644);
+    let entries = 0;
+
+    await withMachineUpdaterKeySetupLock(homeDir, async () => {
+      entries += 1;
+    });
+    await withMachineUpdaterKeySetupLock(homeDir, async () => {
+      entries += 1;
+    });
+
+    expect(entries).toBe(2);
+    expect((await stat(kannaDir)).mode & 0o777).toBe(0o700);
+    expect((await stat(setupLock)).mode & 0o777).toBe(0o600);
+    expect((await stat(namespaceLock)).mode & 0o777).toBe(0o600);
+  });
+
+  it("keeps a replacement ~/.kanna namespace serialized until the holder exits", async () => {
+    const { root, homeDir } = await setupFixture();
+    const kannaDir = join(homeDir, ".kanna");
+    const detachedKannaDir = join(root, "detached-kanna");
+    await mkdir(kannaDir);
+    let releaseFirst: (() => void) | undefined;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let markFirstEntered: (() => void) | undefined;
+    const firstEntered = new Promise<void>((resolve) => {
+      markFirstEntered = resolve;
+    });
+    let firstMutated = false;
+    const first = withMachineUpdaterKeySetupLock(homeDir, async (assertPinned) => {
+      markFirstEntered?.();
+      await firstGate;
+      assertPinned();
+      firstMutated = true;
+    });
+    await firstEntered;
+    await rename(kannaDir, detachedKannaDir);
+    await mkdir(kannaDir, { mode: 0o700 });
+    let secondEntered = false;
+
+    await expect(withMachineUpdaterKeySetupLock(homeDir, async () => {
+      secondEntered = true;
+    })).rejects.toThrow(/already in progress/);
+    expect(secondEntered).toBe(false);
+    releaseFirst?.();
+    await expect(first).rejects.toThrow(/canonical path changed during access/);
+    expect(firstMutated).toBe(false);
+  });
 });
 
 describe("updater signing key compatibility", () => {
@@ -444,5 +560,33 @@ describe("updater signing key compatibility", () => {
     expect(calls[0]?.args).not.toContain("secret updater key");
     expect(calls[0]?.env?.TAURI_SIGNING_PRIVATE_KEY).toBe("secret updater key");
     expect(calls[0]?.env?.TAURI_SIGNING_PRIVATE_KEY_PASSWORD).toBe("");
+  });
+
+  it("describes a public-key mismatch without falsely claiming nothing was stored", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kanna-updater-key-verify-"));
+    const runner: CommandRunner = {
+      async run(_command, args) {
+        const challengePath = args.at(-1);
+        if (!challengePath) throw new Error("missing challenge path");
+        await writeTestSignature(challengePath);
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+    const otherKeyPair = generateKeyPairSync("ed25519");
+
+    let message = "";
+    try {
+      await assertUpdaterSigningKeyMatchesPublicKey({
+        cwd: root,
+        env: {},
+        runner,
+        material: "secret updater key",
+        publicKey: testUpdaterPublicKey(otherKeyPair.publicKey)
+      });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toMatch(/does not match KANNA_UPDATER_PUBKEY/);
+    expect(message).not.toMatch(/Refusing to store/);
   });
 });

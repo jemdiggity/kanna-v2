@@ -207,7 +207,7 @@ export async function assertUpdaterSigningKeyMatchesPublicKey(input: UpdaterKeyR
       )
     ) {
       throw new Error(
-        "The updater private key does not match KANNA_UPDATER_PUBKEY. Refusing to store or use a key that existing installations cannot verify."
+        "The updater private key does not match KANNA_UPDATER_PUBKEY. kd cannot use a key that existing installations cannot verify."
       );
     }
   } finally {
@@ -219,6 +219,10 @@ async function storeUpdaterSigningKey(
   input: UpdaterKeyRuntimeInput,
   selection: UpdaterKeySelection
 ): Promise<boolean> {
+  // security(1) can either accept a positional Keychain after every option or
+  // prompt when terminal -w has no value; it cannot do both. Setup has already
+  // verified by device/inode that selection.keychainPath is the current default,
+  // so omitting the positional path still targets that exact selected Keychain.
   const stored = await input.runner.run(
     "security",
     [
@@ -227,7 +231,6 @@ async function storeUpdaterSigningKey(
       selection.service,
       "-a",
       selection.account,
-      selection.keychainPath,
       "-w"
     ],
     { cwd: input.cwd, env: input.env, interactive: true }
@@ -271,7 +274,7 @@ export async function setupUpdaterKeyCredentials(
   const publicKey = validSelector(input.env.KANNA_UPDATER_PUBKEY, "KANNA_UPDATER_PUBKEY");
   const service = validSelector(input.service ?? DEFAULT_SERVICE, "updater key Keychain service");
   const account = validSelector(input.account ?? DEFAULT_ACCOUNT, "updater key Keychain account");
-  return withMachineUpdaterKeySetupLock(input.homeDir, async () => {
+  return withMachineUpdaterKeySetupLock(input.homeDir, async (assertSetupDirectoryPinned) => {
     const defaultKeychain = await input.runner.run("security", ["default-keychain", "-d", "user"], {
       cwd: input.cwd,
       env: input.env
@@ -311,6 +314,7 @@ export async function setupUpdaterKeyCredentials(
           "The existing updater key item does not match KANNA_UPDATER_PUBKEY. It was not overwritten; choose a fresh --service or --account to stage and validate the intended key safely."
         );
       }
+      assertSetupDirectoryPinned();
       const configPath = writeMachineUpdaterKeySelectors({
         homeDir: input.homeDir,
         service: selection.service,
@@ -320,24 +324,33 @@ export async function setupUpdaterKeyCredentials(
       return { ...selection, configPath };
     }
 
+    assertSetupDirectoryPinned();
     if (!await storeUpdaterSigningKey(runtimeInput, selection)) {
       throw new Error(
         "security did not store the updater signing key. No Keychain item or machine-local selector configuration was changed."
       );
     }
-    const storedMaterial = await readUpdaterSigningKey(runtimeInput, selection);
-    await assertUpdaterSigningKeyMatchesPublicKey({
-      ...runtimeInput,
-      material: storedMaterial,
-      publicKey
-    });
+    try {
+      const storedMaterial = await readUpdaterSigningKey(runtimeInput, selection);
+      await assertUpdaterSigningKeyMatchesPublicKey({
+        ...runtimeInput,
+        material: storedMaterial,
+        publicKey
+      });
 
-    const configPath = writeMachineUpdaterKeySelectors({
-      homeDir: input.homeDir,
-      service: selection.service,
-      account: selection.account,
-      keychainPath: selection.keychainPath
-    });
-    return { ...selection, configPath };
+      assertSetupDirectoryPinned();
+      const configPath = writeMachineUpdaterKeySelectors({
+        homeDir: input.homeDir,
+        service: selection.service,
+        account: selection.account,
+        keychainPath: selection.keychainPath
+      });
+      return { ...selection, configPath };
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `The updater signing key was stored, but setup could not complete: ${reason} The Keychain item was retained; inspect service ${JSON.stringify(selection.service)}, account ${JSON.stringify(selection.account)}, in Keychain ${JSON.stringify(selection.keychainPath)} before retrying.`
+      );
+    }
   });
 }

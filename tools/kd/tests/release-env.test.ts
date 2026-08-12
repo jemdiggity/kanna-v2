@@ -422,6 +422,32 @@ describe("release environment", () => {
     );
   });
 
+  it("reacquires an abandoned lockf inode and persists owner-only modes", async () => {
+    const { home, globalEnvPath } = await createFixture();
+    const kannaDir = join(home, ".kanna");
+    const lockPath = join(kannaDir, ".release-environment-write.lockf");
+    await chmod(kannaDir, 0o755);
+    await writeFile(lockPath, "stale lock inode\n", { mode: 0o644 });
+    await chmod(lockPath, 0o644);
+
+    expect(writeMachineNotarizationSelectors({
+      homeDir: home,
+      profile: "first-reacquisition",
+      keychainPath: "/first-reacquisition.keychain-db"
+    })).toBe(globalEnvPath);
+    expect(writeMachineNotarizationSelectors({
+      homeDir: home,
+      profile: "second-reacquisition",
+      keychainPath: "/second-reacquisition.keychain-db"
+    })).toBe(globalEnvPath);
+
+    expect(await readFile(globalEnvPath, "utf8")).toContain(
+      'APPLE_KEYCHAIN_PROFILE="second-reacquisition"'
+    );
+    expect((await stat(kannaDir)).mode & 0o777).toBe(0o700);
+    expect((await stat(lockPath)).mode & 0o777).toBe(0o600);
+  });
+
   it("rejects setup through a symlinked ~/.kanna directory without modifying its target", async () => {
     const { root, home } = await createFixture();
     const repositoryConfigDir = join(root, "repo", "machine-config");

@@ -298,22 +298,50 @@ export function writeMachineUpdaterKeySelectors(input: {
 /** Serialize updater Keychain and selector publication as one machine-local transaction. */
 export async function withMachineUpdaterKeySetupLock<T>(
   homeDir: string,
-  operation: () => Promise<T>
+  operation: (assertPinned: () => void) => Promise<T>
 ): Promise<T> {
   const kannaDir = join(homeDir, ".kanna");
-  const ancestry = machineConfigAncestry(homeDir, true);
-  if (ancestry === undefined) {
+  const initialAncestry = machineConfigAncestry(homeDir, true);
+  if (initialAncestry === undefined) {
     throw new Error(`Unable to create machine-local release directory ${kannaDir}.`);
   }
-  const lock = await acquirePinnedDirectoryLock(
-    kannaDir,
-    ancestry,
-    ".updater-key-setup.lockf"
+  const homeEntry = initialAncestry[0];
+  if (homeEntry === undefined) {
+    throw new Error(`Unable to pin machine-local home directory ${homeDir}.`);
+  }
+  // The transaction lock inside .kanna cannot by itself serialize two kd
+  // processes if that directory is renamed and replaced after lockf opens it.
+  // Hold a namespace guard in the pinned home directory so every cooperating
+  // contender remains serialized across a .kanna pathname replacement.
+  const namespaceLock = await acquirePinnedDirectoryLock(
+    homeDir,
+    [homeEntry],
+    ".kanna-updater-key-setup.lockf",
+    false
   );
   try {
-    return await operation();
+    const ancestry = machineConfigAncestry(homeDir, true);
+    if (ancestry === undefined) {
+      throw new Error(`Unable to create machine-local release directory ${kannaDir}.`);
+    }
+    const lock = await acquirePinnedDirectoryLock(
+      kannaDir,
+      ancestry,
+      ".updater-key-setup.lockf",
+      true
+    );
+    try {
+      return await operation(() => {
+        runPinnedDirectoryWorker(kannaDir, {
+          operation: "assert-directory",
+          ancestry
+        });
+      });
+    } finally {
+      await lock.release();
+    }
   } finally {
-    await lock.release();
+    await namespaceLock.release();
   }
 }
 
@@ -324,11 +352,13 @@ interface HeldMachineLock {
 async function acquirePinnedDirectoryLock(
   cwd: string,
   ancestry: DirectoryAncestryEntry[],
-  lockName: string
+  lockName: string,
+  repairDirectoryMode: boolean
 ): Promise<HeldMachineLock> {
   if (!/^\.[a-z0-9-]+\.lockf$/.test(lockName)) {
     throw new Error("Invalid machine-local release lock name.");
   }
+  preparePinnedDirectoryLock(cwd, ancestry, lockName, repairDirectoryMode);
   const child = spawn(
     "/usr/bin/lockf",
     [
@@ -390,6 +420,20 @@ async function acquirePinnedDirectoryLock(
       }
     }
   };
+}
+
+function preparePinnedDirectoryLock(
+  cwd: string,
+  ancestry: DirectoryAncestryEntry[],
+  lockName: string,
+  repairDirectoryMode: boolean
+): void {
+  runPinnedDirectoryWorker(cwd, {
+    operation: "ensure-lock-file",
+    ancestry,
+    fileName: lockName,
+    repairDirectoryMode
+  });
 }
 
 function machineConfigAncestry(
@@ -456,6 +500,15 @@ function runPinnedDirectoryWorker(
     `const __require = require; const __name = (target) => target;\n(${pinnedDirectoryWorker.toString()})()`
   ];
   const serializeWrite = request.operation === "write";
+  if (serializeWrite) {
+    const ancestry = request.ancestry as DirectoryAncestryEntry[];
+    preparePinnedDirectoryLock(
+      cwd,
+      ancestry,
+      ".release-environment-write.lockf",
+      request.repairDirectoryMode === true
+    );
+  }
   const result = spawnSync(
     serializeWrite ? "/usr/bin/lockf" : process.execPath,
     serializeWrite
@@ -708,10 +761,52 @@ function pinnedDirectoryWorker(): void {
       return;
     }
 
+    if (operation === "assert-directory") {
+      assertPinnedAncestry();
+      respond({ ok: true });
+      return;
+    }
+
     if (request.repairDirectoryMode === true) {
       fs.chmodSync(".", 0o700);
     }
     const fileName = String(request.fileName);
+    if (operation === "ensure-lock-file") {
+      if (!/^\.[a-z0-9-]+\.lockf$/.test(fileName)) {
+        throw new Error("Invalid machine-local release lock name.");
+      }
+      const descriptor = fs.openSync(
+        fileName,
+        fs.constants.O_RDWR |
+          fs.constants.O_CREAT |
+          fs.constants.O_NOFOLLOW,
+        0o600
+      );
+      try {
+        const opened = fs.fstatSync(descriptor);
+        if (!opened.isFile()) {
+          throw new Error("Machine-local release lock must be a regular file.");
+        }
+        if (typeof process.getuid === "function" && opened.uid !== process.getuid()) {
+          throw new Error("Machine-local release lock must be owned by the current user.");
+        }
+        fs.fchmodSync(descriptor, 0o600);
+        const configured = fs.lstatSync(fileName);
+        if (
+          configured.isSymbolicLink() ||
+          !configured.isFile() ||
+          configured.dev !== opened.dev ||
+          configured.ino !== opened.ino
+        ) {
+          throw new Error("Machine-local release lock must remain the same regular, non-symlinked file while it is prepared.");
+        }
+      } finally {
+        fs.closeSync(descriptor);
+      }
+      assertPinnedAncestry();
+      respond({ ok: true });
+      return;
+    }
     if (operation === "read") {
       const result = readReleaseFile(fileName, request.requireOwnerOnly === true);
       synchronizeTest("after-release-file-read");

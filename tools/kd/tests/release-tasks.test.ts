@@ -350,7 +350,6 @@ describe("release task environment integration", () => {
         "build.kanna.updater-key",
         "-a",
         "tauri-updater-signing-key",
-        fixture.keychain,
         "-w"
       ],
       expect.objectContaining({
