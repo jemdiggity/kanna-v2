@@ -27,6 +27,8 @@ const UNSAFE_PLAINTEXT_RELEASE_KEYS = new Set([
   "APPLE_API_KEY",
   "APPLE_API_PRIVATE_KEY",
   "TAURI_PRIVATE_KEY_PASSWORD",
+  "TAURI_SIGNING_PRIVATE_KEY",
+  "TAURI_SIGNING_PRIVATE_KEY_PASSWORD",
   "KANNA_GITHUB_TOKEN",
   "GH_TOKEN",
   "GITHUB_TOKEN"
@@ -180,7 +182,7 @@ function validateReleaseEnvironmentFile(
   );
   if (unsafeKeys.length > 0) {
     throw new Error(
-      `Plaintext release credentials are not allowed in ${envPath}: ${unsafeKeys.join(", ")}. Store notarization credentials with ./kd release setup-notarization and keep other secrets in their supported secure stores.`
+      `Plaintext release credentials are not allowed in ${envPath}: ${unsafeKeys.join(", ")}. Store notarization credentials with ./kd release setup-notarization, updater signing material with ./kd release setup-updater-key, and keep other secrets in their supported secure stores.`
     );
   }
 }

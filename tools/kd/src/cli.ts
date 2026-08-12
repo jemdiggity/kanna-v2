@@ -386,6 +386,24 @@ function parseFlagInput(
       index += 1;
       continue;
     }
+    if (arg === "--service") {
+      const value = rest[index + 1];
+      if (!value) {
+        throw new Error("--service requires a value");
+      }
+      input.service = value;
+      index += 1;
+      continue;
+    }
+    if (arg === "--account") {
+      const value = rest[index + 1];
+      if (!value) {
+        throw new Error("--account requires a value");
+      }
+      input.account = value;
+      index += 1;
+      continue;
+    }
     if (arg === "--keychain") {
       const value = rest[index + 1];
       if (!value) {

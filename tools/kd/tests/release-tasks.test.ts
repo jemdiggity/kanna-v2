@@ -54,13 +54,22 @@ async function createFixture(): Promise<Fixture> {
 
 function mockGitContext(
   fixture: Fixture,
-  notaryResult?: { exitCode: number; stdout: string; stderr: string }
+  notaryResult?: { exitCode: number; stdout: string; stderr: string },
+  updaterKeyMaterial?: string
 ): void {
   vi.stubEnv("HOME", fixture.home);
   vi.spyOn(nodeCommandRunner, "run").mockImplementation(async (command, args) => {
     if (command === "xcrun" && args[0] === "notarytool") {
       if (!notaryResult) throw new Error("unexpected notarytool preflight");
       return notaryResult;
+    }
+    if (command === "security" && args[0] === "add-generic-password") {
+      if (!updaterKeyMaterial) throw new Error("unexpected updater key setup");
+      return { exitCode: 0, stdout: "", stderr: "" };
+    }
+    if (command === "security" && args[0] === "find-generic-password") {
+      if (!updaterKeyMaterial) throw new Error("unexpected updater key lookup");
+      return { exitCode: 0, stdout: `${updaterKeyMaterial}\n`, stderr: "" };
     }
     if (command !== "git") throw new Error(`unexpected command: ${command} ${args.join(" ")}`);
     const key = args.join(" ");
@@ -103,6 +112,20 @@ describe("release task environment integration", () => {
 
   it("passes merged release defaults to the ship task", async () => {
     const fixture = await createFixture();
+    const releaseEnvPath = join(fixture.home, ".kanna", ".env.release.local");
+    await writeFile(
+      releaseEnvPath,
+      [
+        "RELEASE_DEFAULT=file",
+        "KANNA_UPDATER_PUBKEY=file-pubkey",
+        "KANNA_UPDATER_KEYCHAIN_SERVICE=file-service",
+        "KANNA_UPDATER_KEYCHAIN_ACCOUNT=file-account",
+        `KANNA_UPDATER_KEYCHAIN_PATH=${JSON.stringify(fixture.keychain)}`,
+        ""
+      ].join("\n"),
+      { mode: 0o600 }
+    );
+    await chmod(releaseEnvPath, 0o600);
     mockGitContext(fixture);
 
     await getTaskDefinition("release.ship").execute(
@@ -115,7 +138,11 @@ describe("release task environment integration", () => {
       expect.objectContaining({
         env: expect.objectContaining({
           APPLE_KEYCHAIN_PROFILE: "shell-profile",
-          RELEASE_DEFAULT: "file"
+          RELEASE_DEFAULT: "file",
+          KANNA_UPDATER_PUBKEY: "file-pubkey",
+          KANNA_UPDATER_KEYCHAIN_SERVICE: "file-service",
+          KANNA_UPDATER_KEYCHAIN_ACCOUNT: "file-account",
+          KANNA_UPDATER_KEYCHAIN_PATH: fixture.keychain
         })
       })
     );
@@ -253,5 +280,49 @@ describe("release task environment integration", () => {
       ],
       expect.objectContaining({ cwd: fixture.worktree })
     );
+  });
+
+  it("loads the machine-global source key path before updater-key setup", async () => {
+    const fixture = await createFixture();
+    const privateKeyPath = join(fixture.home, "updater-private.key");
+    await writeFile(privateKeyPath, "secret updater key\n");
+    const releaseEnvPath = join(fixture.home, ".kanna", ".env.release.local");
+    await writeFile(
+      releaseEnvPath,
+      `RELEASE_DEFAULT=file\nTAURI_PRIVATE_KEY_PATH=${JSON.stringify(privateKeyPath)}\n`,
+      { mode: 0o600 }
+    );
+    await chmod(releaseEnvPath, 0o600);
+    mockGitContext(fixture, undefined, "secret updater key");
+
+    await getTaskDefinition("release.setup-updater-key").execute(
+      { cwd: fixture.worktree, env: {} },
+      { keychain: fixture.keychain }
+    );
+
+    expect(nodeCommandRunner.run).toHaveBeenCalledWith(
+      "security",
+      expect.arrayContaining([
+        "add-generic-password",
+        "-w",
+        "secret updater key",
+        fixture.keychain
+      ]),
+      expect.objectContaining({
+        cwd: fixture.worktree,
+        env: expect.objectContaining({
+          TAURI_PRIVATE_KEY_PATH: privateKeyPath,
+          RELEASE_DEFAULT: "file"
+        })
+      })
+    );
+    const loaded = loadReleaseEnvironment({ homeDir: fixture.home, env: {} });
+    expect(loaded).toEqual(expect.objectContaining({
+      KANNA_UPDATER_KEYCHAIN_SERVICE: "build.kanna.updater-key",
+      KANNA_UPDATER_KEYCHAIN_ACCOUNT: "tauri-updater-signing-key",
+      KANNA_UPDATER_KEYCHAIN_PATH: fixture.keychain,
+      TAURI_PRIVATE_KEY_PATH: privateKeyPath
+    }));
+    expect(await readFile(releaseEnvPath, "utf8")).not.toContain("secret updater key");
   });
 });

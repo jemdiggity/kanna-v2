@@ -1136,6 +1136,23 @@ describe("kd CLI", () => {
         keychain: "/Users/test/Library/Keychains/login.keychain-db"
       }
     });
+    expect(parseCliArgs([
+      "release",
+      "setup-updater-key",
+      "--service",
+      "build.kanna.updater-key",
+      "--account",
+      "tauri-updater-signing-key",
+      "--keychain",
+      "/Users/test/Library/Keychains/login.keychain-db"
+    ])).toEqual({
+      taskId: "release.setup-updater-key",
+      input: {
+        service: "build.kanna.updater-key",
+        account: "tauri-updater-signing-key",
+        keychain: "/Users/test/Library/Keychains/login.keychain-db"
+      }
+    });
     expect(() => parseCliArgs(["release", "promote", "--dry-run"])).toThrow(/requires a staging version/);
     expect(parseCliArgs(["release", "cut", "--minor"])).toEqual({
       taskId: "release.cut",

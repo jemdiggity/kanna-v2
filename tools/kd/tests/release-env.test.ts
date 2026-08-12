@@ -15,7 +15,8 @@ import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 import {
   loadReleaseEnvironment,
-  writeMachineNotarizationSelectors
+  writeMachineNotarizationSelectors,
+  writeMachineUpdaterKeySelectors
 } from "../src/runtime/release-env";
 
 async function createFixture(): Promise<{
@@ -231,7 +232,13 @@ describe("release environment", () => {
     expect(env.APPLE_KEYCHAIN_PATH).toBe(join(root, "shell.keychain-db"));
   });
 
-  it.each(["APPLE_PASSWORD", "TAURI_PRIVATE_KEY_PASSWORD", "GH_TOKEN"])(
+  it.each([
+    "APPLE_PASSWORD",
+    "TAURI_PRIVATE_KEY_PASSWORD",
+    "TAURI_SIGNING_PRIVATE_KEY",
+    "TAURI_SIGNING_PRIVATE_KEY_PASSWORD",
+    "GH_TOKEN"
+  ])(
     "rejects plaintext release credential %s from machine-global config",
     async (credentialKey) => {
       const { home, globalEnvPath } = await createFixture();
@@ -268,6 +275,41 @@ describe("release environment", () => {
     expect(await readFile(globalEnvPath, "utf8")).toBe(
       'RELEASE_DEFAULT=keep\nAPPLE_KEYCHAIN_PROFILE="new-profile"\nAPPLE_KEYCHAIN_PATH="/Users/test/Library/Keychains/login.keychain-db"\n'
     );
+    expect((await stat(globalEnvPath)).mode & 0o777).toBe(0o600);
+  });
+
+  it("updates updater selectors without disturbing notarization selectors or other defaults", async () => {
+    const { home, globalEnvPath } = await createFixture();
+    await writeFile(
+      globalEnvPath,
+      [
+        "RELEASE_DEFAULT=keep",
+        "APPLE_KEYCHAIN_PROFILE=notary-profile",
+        "APPLE_KEYCHAIN_PATH=/Users/test/Library/Keychains/notary.keychain-db",
+        "KANNA_UPDATER_KEYCHAIN_SERVICE=old-service",
+        "KANNA_UPDATER_KEYCHAIN_ACCOUNT=old-account",
+        "KANNA_UPDATER_KEYCHAIN_PATH=/old/updater.keychain-db",
+        ""
+      ].join("\n"),
+      { mode: 0o644 }
+    );
+
+    expect(writeMachineUpdaterKeySelectors({
+      homeDir: home,
+      service: "build.kanna.updater-key",
+      account: "tauri-updater-signing-key",
+      keychainPath: "/Users/test/Library/Keychains/login.keychain-db"
+    })).toBe(globalEnvPath);
+
+    expect(await readFile(globalEnvPath, "utf8")).toBe([
+      "RELEASE_DEFAULT=keep",
+      "APPLE_KEYCHAIN_PROFILE=notary-profile",
+      "APPLE_KEYCHAIN_PATH=/Users/test/Library/Keychains/notary.keychain-db",
+      'KANNA_UPDATER_KEYCHAIN_SERVICE="build.kanna.updater-key"',
+      'KANNA_UPDATER_KEYCHAIN_ACCOUNT="tauri-updater-signing-key"',
+      'KANNA_UPDATER_KEYCHAIN_PATH="/Users/test/Library/Keychains/login.keychain-db"',
+      ""
+    ].join("\n"));
     expect((await stat(globalEnvPath)).mode & 0o777).toBe(0o600);
   });
 

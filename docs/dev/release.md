@@ -61,8 +61,8 @@ on the `desktop-staging` pointer release. Roll back by repointing:
 
 ### Local release environment
 
-Notarization uses a named credential stored in an explicitly selected,
-file-based macOS Keychain. Run the one-time machine setup command:
+Notarization and updater signing use credentials stored in explicitly selected,
+file-based macOS Keychains. Run the notarization setup once per release machine:
 
 ```sh
 ./kd release setup-notarization
@@ -92,16 +92,49 @@ credentials rejected by Apple produce distinct safe diagnostics. If the login
 Keychain is locked, unlock it normally and retry; never put its password in an
 environment file.
 
+The updater private key also has a one-time migration step. Put its public key
+and the path to the existing private key in the machine-global release file:
+
+```dotenv
+KANNA_UPDATER_PUBKEY="<public key>"
+TAURI_PRIVATE_KEY_PATH="/Users/example/.tauri/kanna-updater.key"
+```
+
+Then import the private key into the user's default file-based Keychain:
+
+```sh
+./kd release setup-updater-key
+```
+
+Use `--service <name>`, `--account <name>`, or `--keychain <absolute-path>` to
+select a different generic-password item or Keychain. Setup loads
+`~/.kanna/.env.release.local`, stores or updates the item, reads it back to
+verify the exact material, and records only these selectors in that file:
+
+```dotenv
+KANNA_UPDATER_KEYCHAIN_SERVICE="build.kanna.updater-key"
+KANNA_UPDATER_KEYCHAIN_ACCOUNT="tauri-updater-signing-key"
+KANNA_UPDATER_KEYCHAIN_PATH="/Users/example/Library/Keychains/login.keychain-db"
+```
+
+Back up the original private key somewhere durable and offline before removing
+the key file and its `TAURI_PRIVATE_KEY_PATH` setup entry. Losing this key makes
+existing installations impossible to update. Normal `kd release ship` runs read
+the private key only from the configured Keychain item and pass it to the Tauri
+signer through its child-process environment; key material and passwords never
+belong in release config or command output.
+
 `~/.kanna/.env.release.local` is kd's sole release-environment file for every
 repository and worktree, and kd requires it to be owner-only (`0600`). A primary
 checkout or worktree `.env.release.local` is never read; move any non-secret
 release defaults needed by kd into the machine-global file, then remove the
 obsolete repository file. Explicitly exported process values, including the two
-selectors, override values from `~/.kanna`; use this only for deliberate
+notarization selectors and the three updater selectors, override values from
+`~/.kanna`; use this only for deliberate
 per-invocation non-secret overrides. Apple IDs, app-specific passwords, API
-private keys, and other secrets must never be stored in plaintext release
-config. The release path does not forward direct Apple credential variables
-into Bazel.
+private keys, updater private key material or passwords, and other secrets must
+never be stored in plaintext release config. The release path does not forward
+direct Apple credential variables into Bazel.
 
 ## Cloud services
 
