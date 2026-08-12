@@ -65,6 +65,7 @@ import {
   type TaskQuickReply
 } from "./taskQuickReplies";
 import { buildTaskWorkspaceModel } from "./taskWorkspace";
+import { resolveMobileTerminalGeometry } from "../mobileTerminalGeometry";
 import {
   getTerminalBottomInset,
   getTerminalSelectionToolbarTop
@@ -84,8 +85,6 @@ interface TaskScreenProps {
   terminalOutputStart: number;
   terminalOutputSource?: TaskTerminalOutputSource;
   terminalStatus: TaskTerminalStatus;
-  terminalCols: number | null;
-  terminalRows: number | null;
   terminalErrorMessage: string | null;
   agentEvents: FrameAgentEvent[];
   agentStatus: TaskTerminalStatus;
@@ -110,6 +109,7 @@ interface TaskScreenProps {
   onReadTaskDiff(request: TaskDiffRequest): Promise<TaskDiffContent>;
   onSendInput(input: string): void;
   onSendTerminalInput?(dataB64: string): void;
+  onResizeTerminal?(cols: number, rows: number): void;
   onStopAgent(): void;
   onResolveAgentPermission(requestId: string, decision: PermissionDecision): void;
   onRecoverTaskCreation(): void;
@@ -134,8 +134,6 @@ export function TaskScreen({
   terminalOutputStart,
   terminalOutputSource,
   terminalStatus,
-  terminalCols,
-  terminalRows,
   terminalErrorMessage,
   agentEvents,
   agentStatus,
@@ -158,6 +156,7 @@ export function TaskScreen({
   onReadTaskDiff,
   onSendInput,
   onSendTerminalInput,
+  onResizeTerminal,
   onStopAgent,
   onResolveAgentPermission,
   onRecoverTaskCreation,
@@ -176,7 +175,10 @@ export function TaskScreen({
   );
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [isBackPending, setIsBackPending] = useState(false);
-  const [screenHeight, setScreenHeight] = useState(0);
+  const [screenViewport, setScreenViewport] = useState<{
+    width: number;
+    height: number;
+  } | null>(null);
   const [composerTop, setComposerTop] = useState<number | null>(null);
   const [topChromeBottom, setTopChromeBottom] = useState<number | null>(null);
   const [selectedFile, setSelectedFile] = useState<{
@@ -215,7 +217,7 @@ export function TaskScreen({
   if (companionLifecycleRef.current.taskId === task.id) {
     companionLifecycleRef.current.onOpenChange = onCompanionOpenChange;
   }
-  const { height: windowHeight } = useWindowDimensions();
+  const { height: windowHeight, width: windowWidth } = useWindowDimensions();
   const isAgentTask = task.agentType === "agent";
   const isBlocked = isTaskBlocked(task);
   // Callers pass resolved blocker summaries; fall back to bare ids so the
@@ -303,7 +305,13 @@ export function TaskScreen({
     taskCreationPhase === "idle" &&
     !isAgentTask &&
     (terminalStatus === "idle" || terminalStatus === "connecting");
-  const terminalBottomInset = getTerminalBottomInset(screenHeight, composerTop);
+  const terminalViewport =
+    screenViewport ?? { width: windowWidth, height: windowHeight };
+  const terminalGeometry = resolveMobileTerminalGeometry(terminalViewport);
+  const terminalBottomInset = getTerminalBottomInset(
+    screenViewport?.height ?? 0,
+    composerTop
+  );
   const terminalSelectionToolbarTop =
     getTerminalSelectionToolbarTop(topChromeBottom);
   const composerSnapshotRef = useRef({
@@ -461,11 +469,36 @@ export function TaskScreen({
     };
   }, []);
 
+  useEffect(() => {
+    if (
+      task.agentType !== "agent" &&
+      taskCreationPhase === "idle" &&
+      !isBlocked
+    ) {
+      onResizeTerminal?.(terminalGeometry.cols, terminalGeometry.rows);
+    }
+  }, [
+    isBlocked,
+    onResizeTerminal,
+    task.agentType,
+    task.id,
+    taskCreationPhase,
+    terminalGeometry.cols,
+    terminalGeometry.rows
+  ]);
+
   return (
     <View
       style={styles.screen}
       testID={MOBILE_E2E_IDS.taskDetailScreen}
-      onLayout={(event) => setScreenHeight(event.nativeEvent.layout.height)}
+      onLayout={(event) => {
+        const { width, height } = event.nativeEvent.layout;
+        setScreenViewport((current) =>
+          current?.width === width && current.height === height
+            ? current
+            : { width, height }
+        );
+      }}
     >
       {e2eTaskSnapshotMarker ? (
         <Text
@@ -563,8 +596,8 @@ export function TaskScreen({
             outputStart={terminalOutputStart}
             terminalOutputSource={terminalOutputSource}
             status={terminalStatus}
-            cols={terminalCols}
-            rows={terminalRows}
+            cols={terminalGeometry.cols}
+            rows={terminalGeometry.rows}
             taskId={task.id}
             bottomInset={terminalBottomInset}
             selectionToolbarTop={terminalSelectionToolbarTop}

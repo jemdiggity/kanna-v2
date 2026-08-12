@@ -252,6 +252,9 @@ export function createLanTransport(
         },
         sendInput(dataB64: string) {
           client.sendTermInput(taskId, dataB64);
+        },
+        resize(cols: number, rows: number) {
+          client.sendTermResize(taskId, cols, rows);
         }
       } satisfies TaskTerminalSubscription;
     },

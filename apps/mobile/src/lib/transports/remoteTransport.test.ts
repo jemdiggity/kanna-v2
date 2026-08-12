@@ -2058,7 +2058,11 @@ describe("remote transport", () => {
   });
 
   it("resolves a cloud task route before observing an uncached terminal", async () => {
-    const subscription = { close: vi.fn() };
+    const subscription = {
+      close: vi.fn(),
+      resize: vi.fn(),
+      sendInput: vi.fn()
+    };
     const observeTaskTerminal = vi.fn<RemoteTaskTerminalObserver>(() => subscription);
     const transport = createRemoteTransport({
       listDesktopRecords: async () => [],
@@ -2080,6 +2084,8 @@ describe("remote transport", () => {
     const listener = vi.fn();
 
     const returnedSubscription = transport.observeTaskTerminal("cloud-task-1", listener);
+    returnedSubscription.resize?.(80, 48);
+    returnedSubscription.sendInput?.("aGVsbG8=");
     await vi.waitFor(() => {
       expect(observeTaskTerminal).toHaveBeenCalledWith(
         {
@@ -2089,6 +2095,8 @@ describe("remote transport", () => {
         listener
       );
     });
+    expect(subscription.resize).toHaveBeenCalledWith(80, 48);
+    expect(subscription.sendInput).toHaveBeenCalledWith("aGVsbG8=");
 
     returnedSubscription.close();
     expect(subscription.close).toHaveBeenCalled();

@@ -182,7 +182,6 @@ interface RenderTaskScreenOptions {
     blockerTaskId: string;
     task: { id: string; repoId: string; title: string; stage: string } | null;
   }>;
-  terminalDims?: { cols: number | null; rows: number | null };
   terminalOutputEpoch?: number;
   terminalOutputStart?: number;
   e2eTaskSnapshotMarker?: string;
@@ -196,6 +195,7 @@ interface RenderTaskScreenOptions {
   onBack?: () => boolean;
   agentStatus?: TaskTerminalStatus;
   onSendTerminalInput?: (dataB64: string) => void;
+  onResizeTerminal?: (cols: number, rows: number) => void;
   onResolveTaskFileMentions?: (
     mentions: readonly { path: string; line?: number }[]
   ) => Promise<{
@@ -246,7 +246,6 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     agentType = "pty",
     blockedByTaskIds,
     blockerTasks,
-    terminalDims = { cols: null, rows: null },
     terminalOutputEpoch = 1,
     terminalOutputStart = 0,
     e2eTaskSnapshotMarker,
@@ -260,6 +259,7 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     onBack = componentMocks.onBack,
     agentStatus = "live",
     onSendTerminalInput,
+    onResizeTerminal,
     onResolveTaskFileMentions = vi.fn().mockResolvedValue({
       mentions: []
     }),
@@ -311,8 +311,6 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     terminalOutputEpoch,
     terminalOutputStart,
     terminalStatus,
-    terminalCols: terminalDims.cols,
-    terminalRows: terminalDims.rows,
     terminalErrorMessage: null,
     taskCreationPhase,
     taskCreationErrorMessage,
@@ -333,6 +331,7 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     onCloseTask: componentMocks.onCloseTask,
     onSendInput: componentMocks.onSendInput,
     onSendTerminalInput,
+    onResizeTerminal,
     onStopAgent: vi.fn(),
     onResolveAgentPermission: vi.fn(),
     onRecoverTaskCreation,
@@ -1072,17 +1071,35 @@ describe("TaskScreen", () => {
     expect(onSendTerminalInput).toHaveBeenCalledWith("G1s8NjU7MTsxTQ==");
   });
 
-  it("passes desktop PTY dimensions to the terminal WebView", () => {
-    const tree = renderTaskScreen({
-      agentType: "pty",
-      terminalDims: { cols: 132, rows: 43 }
-    });
+  it("uses the mobile viewport geometry instead of a never-rendered PTY snapshot", () => {
+    const onResizeTerminal = vi.fn();
+    const tree = renderTaskScreen({ agentType: "pty", onResizeTerminal });
     const terminal = findByType(tree, "TerminalWebView");
 
     expect(terminal?.props).toMatchObject({
-      cols: 132,
-      rows: 43
+      cols: 80,
+      rows: 48
     });
+    expect(onResizeTerminal).toHaveBeenCalledWith(80, 48);
+  });
+
+  it("resizes xterm and the PTY from a measured tablet layout", () => {
+    const onResizeTerminal = vi.fn();
+    let tree = renderTaskScreen({ agentType: "pty", onResizeTerminal });
+
+    invokeLayout(findByTestId(tree, MOBILE_E2E_IDS.taskDetailScreen), {
+      height: 1366,
+      width: 1024,
+      x: 0,
+      y: 0
+    });
+    tree = renderTaskScreen({ agentType: "pty", onResizeTerminal });
+
+    expect(findByType(tree, "TerminalWebView")?.props).toMatchObject({
+      cols: 128,
+      rows: 72
+    });
+    expect(onResizeTerminal).toHaveBeenLastCalledWith(128, 72);
   });
 
   it("passes retained terminal stream coordinates to the terminal WebView", () => {

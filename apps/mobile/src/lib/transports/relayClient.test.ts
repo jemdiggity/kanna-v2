@@ -378,12 +378,14 @@ describe("createRelayDesktopClient", () => {
     ]);
 
     subscription.sendInput?.("G1s8NjU7MTsxTQ==");
+    subscription.resize?.(80, 48);
     await flushPromises();
     expect(socket.send).toHaveBeenLastCalledWith(
       JSON.stringify({
-        type: "term_input",
+        type: "term_resize",
         task_id: "task-1",
-        data_b64: "G1s8NjU7MTsxTQ=="
+        cols: 80,
+        rows: 48
       })
     );
 

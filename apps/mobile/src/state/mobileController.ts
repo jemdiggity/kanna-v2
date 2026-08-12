@@ -78,6 +78,7 @@ export interface MobileController {
   readTaskDiff(taskId: string, request?: TaskDiffRequest): Promise<TaskDiffContent>;
   sendTaskInput(taskId: string, input: string): Promise<void>;
   sendTaskTerminalInput(taskId: string, dataB64: string): void;
+  resizeTaskTerminal(taskId: string, cols: number, rows: number): void;
   sendTaskAgentPermission(taskId: string, requestId: string, decision: Parameters<TaskAgentSubscription["sendPermission"]>[1]): void;
   interruptTaskAgent(taskId: string): void;
   setTaskCompanionOpen(taskId: string, isOpen: boolean): void;
@@ -182,6 +183,9 @@ export function createMobileController(
         subscription: TaskTerminalSubscription;
         retagTaskId(taskId: string): void;
       }
+    | null = null;
+  let requestedTaskTerminalGeometry:
+    | (MobileTerminalGeometry & { taskId: string })
     | null = null;
   let activeTaskAgent:
     | {
@@ -864,7 +868,22 @@ export function createMobileController(
 
     try {
       let streamTaskId = taskId;
-      const subscription = client.observeTaskTerminal(taskId, (event) => {
+      let subscription: TaskTerminalSubscription | null = null;
+      const resizeToRequestedGeometry = (snapshot?: {
+        cols: number;
+        rows: number;
+      }) => {
+        const geometry = requestedTaskTerminalGeometry;
+        if (
+          !subscription?.resize ||
+          geometry?.taskId !== streamTaskId ||
+          (snapshot?.cols === geometry.cols && snapshot.rows === geometry.rows)
+        ) {
+          return;
+        }
+        subscription.resize(geometry.cols, geometry.rows);
+      };
+      subscription = client.observeTaskTerminal(taskId, (event) => {
         if (generation !== taskTerminalGeneration) {
           return;
         }
@@ -876,6 +895,10 @@ export function createMobileController(
               event.cols,
               event.rows
             );
+            // Every reconnect produces a fresh daemon snapshot. Reassert the
+            // mounted mobile viewport if another client changed the shared PTY
+            // while this stream was disconnected.
+            resizeToRequestedGeometry(event);
             break;
           case "output":
             store.appendTaskTerminal(streamTaskId, `${event.dataB64}\n`);
@@ -901,6 +924,11 @@ export function createMobileController(
           streamTaskId = nextTaskId;
         }
       };
+      // The task-detail layout can be known before route resolution or stream
+      // authentication completes. The transport queues this control frame
+      // behind attach, so the initial daemon snapshot cannot strand the PTY at
+      // its never-rendered 80x24 default.
+      resizeToRequestedGeometry();
     } catch (error) {
       if (generation !== taskTerminalGeneration) {
         return;
@@ -2336,6 +2364,28 @@ export function createMobileController(
         return;
       }
       activeTaskTerminal.subscription.sendInput?.(dataB64);
+    },
+
+    resizeTaskTerminal(taskId, cols, rows) {
+      if (
+        !Number.isInteger(cols) ||
+        cols <= 0 ||
+        !Number.isInteger(rows) ||
+        rows <= 0
+      ) {
+        return;
+      }
+      if (
+        requestedTaskTerminalGeometry?.taskId === taskId &&
+        requestedTaskTerminalGeometry.cols === cols &&
+        requestedTaskTerminalGeometry.rows === rows
+      ) {
+        return;
+      }
+      requestedTaskTerminalGeometry = { taskId, cols, rows };
+      if (activeTaskTerminal?.taskId === taskId) {
+        activeTaskTerminal.subscription.resize?.(cols, rows);
+      }
     },
 
     sendTaskAgentPermission(taskId, requestId, decision) {

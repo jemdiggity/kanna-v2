@@ -671,11 +671,13 @@ describe("createLanTransport", () => {
     socket.onopen?.();
     socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" } satisfies ServerFrame) });
     subscription.sendInput?.("G1s8NjU7MTsxTQ==");
+    subscription.resize?.(80, 48);
 
     expect(sent).toEqual([
       { type: "auth", capabilities: ["companion_event_epoch"] },
       { type: "attach", task_id: "task-1", kind: "terminal", from_seq: 0 },
-      { type: "term_input", task_id: "task-1", data_b64: "G1s8NjU7MTsxTQ==" }
+      { type: "term_input", task_id: "task-1", data_b64: "G1s8NjU7MTsxTQ==" },
+      { type: "term_resize", task_id: "task-1", cols: 80, rows: 48 }
     ]);
   });
 

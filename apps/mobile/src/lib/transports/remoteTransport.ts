@@ -845,6 +845,18 @@ export function createRemoteTransport({
       if (listCloudTasks) {
         let closed = false;
         let activeSubscription: TaskTerminalSubscription | null = null;
+        const pendingCommands: Array<
+          (subscription: TaskTerminalSubscription) => void
+        > = [];
+        const withSubscription = (
+          command: (subscription: TaskTerminalSubscription) => void
+        ) => {
+          if (activeSubscription) {
+            command(activeSubscription);
+          } else if (!closed) {
+            pendingCommands.push(command);
+          }
+        };
 
         void resolveCloudTaskRoute(taskId)
           .then((resolvedRoute) => {
@@ -864,6 +876,9 @@ export function createRemoteTransport({
               },
               listener
             );
+            for (const command of pendingCommands.splice(0)) {
+              command(activeSubscription);
+            }
             if (closed) {
               activeSubscription.close();
             }
@@ -882,7 +897,18 @@ export function createRemoteTransport({
         return {
           close() {
             closed = true;
+            pendingCommands.length = 0;
             activeSubscription?.close();
+          },
+          sendInput(dataB64: string) {
+            withSubscription((subscription) =>
+              subscription.sendInput?.(dataB64)
+            );
+          },
+          resize(cols: number, rows: number) {
+            withSubscription((subscription) =>
+              subscription.resize?.(cols, rows)
+            );
           }
         };
       }
