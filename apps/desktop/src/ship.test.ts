@@ -450,10 +450,15 @@ describe("updater release assets", () => {
       resolve(repoRoot, "tools/kd/src/runtime/release.ts"),
       "utf8",
     );
+    const updaterKeyRuntime = readFileSync(
+      resolve(repoRoot, "tools/kd/src/runtime/updater-key.ts"),
+      "utf8",
+    );
 
-    expect(releaseRuntime).toContain("KANNA_UPDATER_PUBKEY");
-    expect(releaseRuntime).toContain("TAURI_PRIVATE_KEY_PATH");
-    expect(releaseRuntime).toContain("TAURI_PRIVATE_KEY_PASSWORD");
+    expect(releaseRuntime).toContain("preflightUpdaterSigningKey");
+    expect(updaterKeyRuntime).toContain("KANNA_UPDATER_PUBKEY");
+    expect(updaterKeyRuntime).toContain("TAURI_PRIVATE_KEY_PATH");
+    expect(updaterKeyRuntime).toContain("TAURI_PRIVATE_KEY_PASSWORD");
   });
 
   it("creates architecture-specific updater tarballs and signatures", () => {
