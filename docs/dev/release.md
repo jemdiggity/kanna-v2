@@ -96,6 +96,12 @@ release-branch commits not retained on main, whether the candidate is
 and the full list of blockers to production promotion. The promote command is
 printed only when every gate passes.
 
+Candidate identity is verified independently of branch topology: the selected
+GitHub object must be the exact named prerelease, its notes and versioned
+`latest-staging.json` must agree on the version, and the remote tag plus a fresh
+fetch must both resolve to the full commit SHA recorded by the release. Status
+reports any mismatch as a promotion blocker before a build starts.
+
 **Soak gate.** Production promotion requires the candidate to have been
 published for at least `productionSoakHours` from `release-policy.json` at the
 repository root (default 24; `0` disables it), validated by

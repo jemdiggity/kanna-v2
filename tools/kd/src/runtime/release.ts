@@ -381,6 +381,96 @@ export function parsePromotionVersions(promoteFrom: string): PromotionVersions {
   return { stagingVersion, stagingTag: `v${stagingVersion}`, productionVersion };
 }
 
+interface StagingReleaseMetadata {
+  tagName: string;
+  targetCommitish: string;
+  body: string;
+  publishedAt: string | null;
+  isPrerelease: boolean;
+}
+
+function parseStagingReleaseMetadata(raw: string): StagingReleaseMetadata {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== "object" || parsed === null) throw new Error("not an object");
+    const record = parsed as {
+      tagName?: unknown;
+      targetCommitish?: unknown;
+      body?: unknown;
+      publishedAt?: unknown;
+      isPrerelease?: unknown;
+    };
+    if (
+      typeof record.tagName !== "string" ||
+      typeof record.targetCommitish !== "string" ||
+      typeof record.body !== "string" ||
+      typeof record.isPrerelease !== "boolean"
+    ) {
+      throw new Error("missing required fields");
+    }
+    return {
+      tagName: record.tagName,
+      targetCommitish: record.targetCommitish,
+      body: record.body,
+      publishedAt: typeof record.publishedAt === "string" ? record.publishedAt : null,
+      isPrerelease: record.isPrerelease
+    };
+  } catch {
+    throw new Error(`Could not read immutable staging release metadata from gh output: ${raw}`);
+  }
+}
+
+function validateStagingReleaseMetadata(raw: string, stagingVersion: string): StagingCandidate {
+  const tag = stagingTag(stagingVersion);
+  const productionVersion = parsePromotionVersions(stagingVersion).productionVersion;
+  const metadata = parseStagingReleaseMetadata(raw);
+  if (metadata.tagName !== tag) {
+    throw new Error(`Staging release metadata tag ${metadata.tagName} does not match selected tag ${tag}.`);
+  }
+  if (!metadata.isPrerelease) {
+    throw new Error(`${tag} is not marked as a GitHub prerelease.`);
+  }
+  if (!/^[0-9a-f]{40}$/i.test(metadata.targetCommitish)) {
+    throw new Error(`${tag} targetCommitish is not an immutable full commit SHA: ${metadata.targetCommitish}`);
+  }
+  const expectedNotesPrefix = `Staging updater manifest for v${stagingVersion}`;
+  if (
+    metadata.body !== expectedNotesPrefix &&
+    !metadata.body.startsWith(`${expectedNotesPrefix}\n`) &&
+    !metadata.body.startsWith(`${expectedNotesPrefix}\r\n`)
+  ) {
+    throw new Error(`${tag} release notes do not identify the expected staging version ${stagingVersion}.`);
+  }
+  const sourceBranch = parseSourceBranch(raw);
+  const expectedReleaseBranch = releaseSeriesBranch(releaseSeriesFromVersion(productionVersion));
+  if (sourceBranch !== "main" && sourceBranch !== expectedReleaseBranch) {
+    throw new Error(
+      `${tag} has invalid or missing Source-Branch metadata; expected main or ${expectedReleaseBranch}.`
+    );
+  }
+  return {
+    version: stagingVersion,
+    tag,
+    commit: metadata.targetCommitish.toLowerCase(),
+    sourceBranch,
+    publishedAt: metadata.publishedAt
+  };
+}
+
+function parseRemoteTagCommit(raw: string, tag: string): string | null {
+  const directRef = `refs/tags/${tag}`;
+  const peeledRef = `${directRef}^{}`;
+  let direct: string | null = null;
+  let peeled: string | null = null;
+  for (const line of raw.split(/\r?\n/)) {
+    const [sha, ref] = line.trim().split(/\s+/, 2);
+    if (!sha || !/^[0-9a-f]{40}$/i.test(sha)) continue;
+    if (ref === directRef) direct = sha;
+    if (ref === peeledRef) peeled = sha;
+  }
+  return peeled ?? direct;
+}
+
 function parseTargetCommitish(raw: string): string {
   try {
     const parsed = JSON.parse(raw) as unknown;
@@ -465,6 +555,111 @@ async function readStagingCandidate(
     },
     error: commit ? null : `prerelease ${tag} records no target commit`
   };
+}
+
+async function readVerifiedStagingCandidate(
+  context: ReleaseCommandContext,
+  repoSlug: string,
+  version: string
+): Promise<CandidateLookup> {
+  const tag = stagingTag(version);
+  const view = await context.runner.run(
+    "gh",
+    ["release", "view", tag, "--repo", repoSlug, "--json", "tagName,targetCommitish,body,publishedAt,isPrerelease"],
+    { cwd: context.repoRoot, env: context.env }
+  );
+  if (view.exitCode !== 0) {
+    return {
+      candidate: { version, tag, commit: null, sourceBranch: null, publishedAt: null },
+      error: `Staging prerelease not found: ${tag}`
+    };
+  }
+  try {
+    return { candidate: validateStagingReleaseMetadata(view.stdout, version), error: null };
+  } catch (error) {
+    let commit: string | null = null;
+    try {
+      commit = parseTargetCommitish(view.stdout);
+    } catch {
+      commit = null;
+    }
+    return {
+      candidate: {
+        version,
+        tag,
+        commit,
+        sourceBranch: parseSourceBranch(view.stdout),
+        publishedAt: parsePublishedAt(view.stdout)
+      },
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+async function readVersionedStagingManifestVersion(
+  context: ReleaseCommandContext,
+  repoSlug: string,
+  tag: string
+): Promise<string> {
+  const manifestDir = mkdtempSync(join(tmpdir(), "kanna-release-candidate-"));
+  try {
+    const download = await context.runner.run(
+      "gh",
+      ["release", "download", tag, "--repo", repoSlug, "--pattern", STAGING_MANIFEST_NAME, "--dir", manifestDir, "--clobber"],
+      { cwd: context.repoRoot, env: context.env }
+    );
+    if (download.exitCode !== 0) {
+      throw new Error(
+        `Staging manifest asset not found on ${tag}: ${download.stderr.trim() || download.stdout.trim() || STAGING_MANIFEST_NAME}`
+      );
+    }
+    const manifestPath = join(manifestDir, STAGING_MANIFEST_NAME);
+    if (!existsSync(manifestPath)) {
+      throw new Error(`Staging manifest asset not found on ${tag}: ${STAGING_MANIFEST_NAME}`);
+    }
+    const version = parseManifestVersion(readFileSync(manifestPath, "utf8"));
+    if (!version) throw new Error(`${tag}/${STAGING_MANIFEST_NAME} has no valid version.`);
+    return version;
+  } finally {
+    rmSync(manifestDir, { recursive: true, force: true });
+  }
+}
+
+async function verifyImmutableStagingCandidate(
+  context: ReleaseCommandContext,
+  repoSlug: string,
+  candidate: StagingCandidate
+): Promise<void> {
+  if (!candidate.commit) {
+    throw new Error(`${candidate.tag} records no target commit, so its immutable identity cannot be verified.`);
+  }
+  const manifestVersion = await readVersionedStagingManifestVersion(context, repoSlug, candidate.tag);
+  if (manifestVersion !== candidate.version) {
+    throw new Error(
+      `${candidate.tag}/${STAGING_MANIFEST_NAME} version ${manifestVersion} does not match selected version ${candidate.version}.`
+    );
+  }
+  const tagRefs = await mustRun(
+    context.runner,
+    "git",
+    ["ls-remote", "--tags", "origin", `refs/tags/${candidate.tag}`, `refs/tags/${candidate.tag}^{}`],
+    context.repoRoot,
+    context.env
+  );
+  const remoteCommit = parseRemoteTagCommit(tagRefs, candidate.tag);
+  if (!remoteCommit) throw new Error(`Immutable staging tag not found on origin: ${candidate.tag}`);
+  if (remoteCommit.toLowerCase() !== candidate.commit.toLowerCase()) {
+    throw new Error(
+      `${candidate.tag} tag resolves to ${remoteCommit}, but its GitHub release metadata records ${candidate.commit}.`
+    );
+  }
+  await mustRun(context.runner, "git", ["fetch", "--no-tags", "origin", `refs/tags/${candidate.tag}`], context.repoRoot, context.env);
+  const fetchedCommit = await mustRun(context.runner, "git", ["rev-parse", "FETCH_HEAD^{commit}"], context.repoRoot, context.env);
+  if (fetchedCommit.toLowerCase() !== candidate.commit.toLowerCase()) {
+    throw new Error(
+      `Fetched ${candidate.tag} resolves to ${fetchedCommit}, but its verified immutable commit is ${candidate.commit}.`
+    );
+  }
 }
 
 /**
@@ -690,16 +885,15 @@ async function resolvePromotion(input: ReleaseShipInput, promoteFrom: string): P
   const { stagingVersion, stagingTag, productionVersion } = parsePromotionVersions(promoteFrom);
   const remoteUrl = await mustRun(input.runner, "git", ["remote", "get-url", "origin"], input.repoRoot, input.env);
   const repoSlug = releaseRepoSlug(remoteUrl);
-  const view = await input.runner.run("gh", ["release", "view", stagingTag, "--repo", repoSlug, "--json", "targetCommitish,body,publishedAt"], {
-    cwd: input.repoRoot,
-    env: input.env
-  });
-  if (view.exitCode !== 0) {
-    throw new Error(`Staging prerelease not found: ${stagingTag}`);
+  const lookup = await readVerifiedStagingCandidate(input, repoSlug, stagingVersion);
+  if (!lookup.candidate || lookup.error) {
+    throw new Error(lookup.error ?? `Staging prerelease not found: ${stagingTag}`);
   }
-  const commit = parseTargetCommitish(view.stdout);
-  const sourceBranch = parseSourceBranch(view.stdout);
-  const publishedAt = parsePublishedAt(view.stdout);
+  await verifyImmutableStagingCandidate(input, repoSlug, lookup.candidate);
+  const { commit, sourceBranch, publishedAt } = lookup.candidate;
+  if (!commit || !sourceBranch) {
+    throw new Error(`${stagingTag} has incomplete immutable release metadata.`);
+  }
 
   const existingTags = await mustRun(input.runner, "git", ["ls-remote", "--tags", "origin", `v${productionVersion}`], input.repoRoot, input.env);
   if (existingTags.trim().length > 0) {
@@ -1830,10 +2024,19 @@ export async function releaseStatus(input: ReleaseStatusInput): Promise<ReleaseS
   // An unreadable channel must never be reported as an empty one: "no candidate
   // is active" reads as a calm all-clear, and the operator would act on it.
   const channelError = channel.state === "unreadable" ? channel.error : null;
+  let candidateIntegrityError: string | null = channelError;
   const version = channel.state === "active" ? channel.version : null;
   if (version) {
-    const lookup = await readStagingCandidate(input, repoSlug, version);
+    const lookup = await readVerifiedStagingCandidate(input, repoSlug, version);
     activeCandidate = lookup.candidate;
+    candidateIntegrityError = lookup.error;
+    if (activeCandidate && !candidateIntegrityError) {
+      try {
+        await verifyImmutableStagingCandidate(input, repoSlug, activeCandidate);
+      } catch (error) {
+        candidateIntegrityError = error instanceof Error ? error.message : String(error);
+      }
+    }
     const publishedAt = activeCandidate?.publishedAt ?? null;
     const publishedMs = publishedAt ? Date.parse(publishedAt) : Number.NaN;
     staging = {
@@ -1882,6 +2085,8 @@ export async function releaseStatus(input: ReleaseStatusInput): Promise<ReleaseS
     blockers: [
       channelError
         ? `The ${STAGING_CHANNEL_TAG} channel could not be read (${channelError}), so no promotion decision can be made.`
+        : candidateIntegrityError
+        ? `The active staging candidate failed immutable identity verification: ${candidateIntegrityError}`
         : "No staging release candidate is active on the channel."
     ]
   };
@@ -1932,6 +2137,13 @@ export async function releaseStatus(input: ReleaseStatusInput): Promise<ReleaseS
     promotion.soak = soak;
     promotion.allowed = gate.allowed;
     promotion.blockers = gate.blockers;
+    if (candidateIntegrityError) {
+      promotion.allowed = false;
+      promotion.blockers = [
+        `The active staging candidate failed immutable identity verification: ${candidateIntegrityError}`,
+        ...promotion.blockers
+      ];
+    }
   }
 
   return {

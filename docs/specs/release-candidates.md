@@ -164,8 +164,12 @@ record says who decided and why.
 
 `kd release promote <staging-version>` refuses to run unless all of these hold:
 
-1. `<staging-version>` matches `X.Y.Z-staging.N` and the prerelease
-   `vX.Y.Z-staging.N` exists on GitHub.
+1. `<staging-version>` matches `X.Y.Z-staging.N`, and GitHub identifies the
+   selected object as that exact prerelease. Its release notes and versioned
+   `latest-staging.json` must name the same version, its `targetCommitish` must
+   be a full commit SHA, and both the remote tag and a freshly fetched tag must
+   resolve to that SHA. The `Source-Branch:` trailer must be `main` or the
+   matching `release/X.Y` branch.
 2. The production tag `vX.Y.Z` does not already exist (a candidate line is
    promoted at most once).
 3. `HEAD` equals the prerelease's recorded `targetCommitish` (you release what
@@ -197,7 +201,8 @@ the operator everything standing between the candidate and production.
 publishing, for rehearsing a promotion. Status, dry-run, and the real promotion
 call the same decision functions (`evaluateStagingPublishGate`,
 `evaluateCandidateLineage`, `evaluateSoak`, `evaluatePromotionGate` in
-`tools/kd/src/runtime/release-lineage.ts`), so they cannot disagree.
+`tools/kd/src/runtime/release-lineage.ts`), and both paths run the same immutable
+candidate identity checks, so they cannot disagree.
 
 When main has advanced past a main RC, the error offers the standard escape:
 cut `release/X.Y` at the RC commit and promote again — the branch, not main,

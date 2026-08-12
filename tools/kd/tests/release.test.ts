@@ -1347,9 +1347,20 @@ describe("release promotion", () => {
         if (command === "gh" && args.join(" ").startsWith("release view v1.2.4-staging.3")) {
           return {
             exitCode: 0,
-            stdout: `{"targetCommitish":"${STAGING_COMMIT}","publishedAt":"${RC_PUBLISHED_AT}"}\n`,
+            stdout: JSON.stringify({
+              tagName: "v1.2.4-staging.3",
+              targetCommitish: STAGING_COMMIT,
+              body: "Staging updater manifest for v1.2.4-staging.3\n\nSource-Branch: main",
+              publishedAt: RC_PUBLISHED_AT,
+              isPrerelease: true
+            }),
             stderr: ""
           };
+        }
+        if (command === "gh" && args.join(" ").startsWith("release download v1.2.4-staging.3")) {
+          const dirIndex = args.indexOf("--dir");
+          writeFileSync(join(args[dirIndex + 1] ?? "", "latest-staging.json"), '{"version":"1.2.4-staging.3"}\n');
+          return { exitCode: 0, stdout: "", stderr: "" };
         }
         // Lineage: the RC being promoted descends from the candidate it replaced.
         if (command === "gh" && args[0] === "release" && args[1] === "list") {
@@ -1365,7 +1376,13 @@ describe("release promotion", () => {
         if (command === "gh" && args.join(" ").startsWith("release view v1.2.4-staging.2")) {
           return {
             exitCode: 0,
-            stdout: `{"targetCommitish":"${PREVIOUS_RC_COMMIT}","publishedAt":"2026-06-28T00:00:00Z"}\n`,
+            stdout: JSON.stringify({
+              tagName: "v1.2.4-staging.2",
+              targetCommitish: PREVIOUS_RC_COMMIT,
+              body: "Staging updater manifest for v1.2.4-staging.2\n\nSource-Branch: main",
+              publishedAt: "2026-06-28T00:00:00Z",
+              isPrerelease: true
+            }),
             stderr: ""
           };
         }
@@ -1380,6 +1397,15 @@ describe("release promotion", () => {
         }
         if (command === "git" && args.join(" ") === "ls-remote --tags origin v1.2.4") {
           return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (command === "git" && args.join(" ").startsWith("ls-remote --tags origin refs/tags/v1.2.4-staging.3")) {
+          return { exitCode: 0, stdout: `${STAGING_COMMIT}\trefs/tags/v1.2.4-staging.3\n`, stderr: "" };
+        }
+        if (command === "git" && args.join(" ") === "fetch --no-tags origin refs/tags/v1.2.4-staging.3") {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (command === "git" && args.join(" ") === "rev-parse FETCH_HEAD^{commit}") {
+          return { exitCode: 0, stdout: `${STAGING_COMMIT}\n`, stderr: "" };
         }
         if (command === "git" && args.join(" ") === "rev-parse HEAD") {
           return { exitCode: 0, stdout: `${STAGING_COMMIT}\n`, stderr: "" };
@@ -1493,6 +1519,120 @@ describe("release promotion", () => {
     }
   });
 
+  it("rejects staging release metadata that does not name the selected prerelease", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot, privateKeyPath } = createReleaseRepo(root);
+      const calls: CommandCall[] = [];
+      const runner = promoteRunner({
+        "gh release view v1.2.4-staging.3": {
+          exitCode: 0,
+          stdout: JSON.stringify({
+            tagName: "v1.2.4-staging.30",
+            targetCommitish: STAGING_COMMIT,
+            body: "Staging updater manifest for v1.2.4-staging.3\n\nSource-Branch: main",
+            publishedAt: RC_PUBLISHED_AT,
+            isPrerelease: true
+          }),
+          stderr: ""
+        }
+      }, repoRoot, new Map(), calls);
+
+      await expect(shipRelease(promoteInput(repoRoot, privateKeyPath, runner))).rejects.toThrow(
+        /metadata tag v1\.2\.4-staging\.30 does not match selected tag v1\.2\.4-staging\.3/
+      );
+      expect(calls.some((call) => call.command === "bazel")).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a GitHub release that is not a prerelease", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot, privateKeyPath } = createReleaseRepo(root);
+      const calls: CommandCall[] = [];
+      const runner = promoteRunner({
+        "gh release view v1.2.4-staging.3": {
+          exitCode: 0,
+          stdout: JSON.stringify({
+            tagName: "v1.2.4-staging.3",
+            targetCommitish: STAGING_COMMIT,
+            body: "Staging updater manifest for v1.2.4-staging.3\n\nSource-Branch: main",
+            publishedAt: RC_PUBLISHED_AT,
+            isPrerelease: false
+          }),
+          stderr: ""
+        }
+      }, repoRoot, new Map(), calls);
+
+      await expect(shipRelease(promoteInput(repoRoot, privateKeyPath, runner))).rejects.toThrow(/is not marked as a GitHub prerelease/);
+      expect(calls.some((call) => call.command === "bazel")).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a candidate whose versioned staging manifest cannot be verified", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot, privateKeyPath } = createReleaseRepo(root);
+      const calls: CommandCall[] = [];
+      const runner = promoteRunner({
+        "gh release download v1.2.4-staging.3": { exitCode: 1, stdout: "", stderr: "manifest unavailable" }
+      }, repoRoot, new Map(), calls);
+
+      await expect(shipRelease(promoteInput(repoRoot, privateKeyPath, runner))).rejects.toThrow(
+        /Staging manifest asset not found.*manifest unavailable/
+      );
+      expect(calls.some((call) => call.command === "bazel")).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a staging tag whose remote commit disagrees with release metadata", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot, privateKeyPath } = createReleaseRepo(root);
+      const calls: CommandCall[] = [];
+      const mismatchedCommit = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+      const runner = promoteRunner({
+        "git ls-remote --tags origin refs/tags/v1.2.4-staging.3": {
+          exitCode: 0,
+          stdout: `${mismatchedCommit}\trefs/tags/v1.2.4-staging.3\n`,
+          stderr: ""
+        }
+      }, repoRoot, new Map(), calls);
+
+      await expect(shipRelease(promoteInput(repoRoot, privateKeyPath, runner))).rejects.toThrow(
+        new RegExp(`tag resolves to ${mismatchedCommit}.*records ${STAGING_COMMIT}`)
+      );
+      expect(calls.some((call) => call.command === "bazel")).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rechecks the fetched staging tag before building", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot, privateKeyPath } = createReleaseRepo(root);
+      const calls: CommandCall[] = [];
+      const fetchedCommit = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+      const runner = promoteRunner({
+        "git rev-parse FETCH_HEAD^{commit}": { exitCode: 0, stdout: `${fetchedCommit}\n`, stderr: "" }
+      }, repoRoot, new Map(), calls);
+
+      await expect(shipRelease(promoteInput(repoRoot, privateKeyPath, runner))).rejects.toThrow(
+        new RegExp(`Fetched v1\\.2\\.4-staging\\.3 resolves to ${fetchedCommit}.*verified immutable commit is ${STAGING_COMMIT}`)
+      );
+      expect(calls.some((call) => call.command === "bazel")).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("refuses to promote a version whose production tag already exists", async () => {
     const root = await mkdtemp(join(tmpdir(), "kd-release-"));
     try {
@@ -1577,7 +1717,7 @@ describe("release promotion", () => {
       const runner = promoteRunner({
         "gh release view v1.2.4-staging.3": {
           exitCode: 0,
-          stdout: `{"targetCommitish":"${STAGING_COMMIT}","publishedAt":"${RC_PUBLISHED_AT}","body":"Staging updater manifest for v1.2.4-staging.3\\n\\nSource-Branch: release/1.2"}\n`,
+          stdout: `{"tagName":"v1.2.4-staging.3","targetCommitish":"${STAGING_COMMIT}","publishedAt":"${RC_PUBLISHED_AT}","body":"Staging updater manifest for v1.2.4-staging.3\\n\\nSource-Branch: release/1.2","isPrerelease":true}\n`,
           stderr: ""
         },
         "git ls-remote origin refs/heads/release/1.2": {
@@ -1604,7 +1744,7 @@ describe("release promotion", () => {
       const runner = promoteRunner({
         "gh release view v1.2.4-staging.3": {
           exitCode: 0,
-          stdout: `{"targetCommitish":"${STAGING_COMMIT}","publishedAt":"${RC_PUBLISHED_AT}","body":"Staging updater manifest for v1.2.4-staging.3\\n\\nSource-Branch: main"}\n`,
+          stdout: `{"tagName":"v1.2.4-staging.3","targetCommitish":"${STAGING_COMMIT}","publishedAt":"${RC_PUBLISHED_AT}","body":"Staging updater manifest for v1.2.4-staging.3\\n\\nSource-Branch: main","isPrerelease":true}\n`,
           stderr: ""
         },
         "git ls-remote origin refs/heads/release/1.2": {
@@ -1633,7 +1773,7 @@ describe("release promotion", () => {
       const runner = promoteRunner({
         "gh release view v1.2.4-staging.3": {
           exitCode: 0,
-          stdout: `{"targetCommitish":"${STAGING_COMMIT}","publishedAt":"${RC_PUBLISHED_AT}","body":"Staging updater manifest for v1.2.4-staging.3\\n\\nSource-Branch: release/1.2"}\n`,
+          stdout: `{"tagName":"v1.2.4-staging.3","targetCommitish":"${STAGING_COMMIT}","publishedAt":"${RC_PUBLISHED_AT}","body":"Staging updater manifest for v1.2.4-staging.3\\n\\nSource-Branch: release/1.2","isPrerelease":true}\n`,
           stderr: ""
         }
       }, repoRoot, new Map(), calls);
@@ -2316,6 +2456,9 @@ describe("release status", () => {
     activeCommit?: string | null;
     activeSourceBranch?: string | null;
     activePublishedAt?: string | null;
+    activeTagName?: string;
+    activeIsPrerelease?: boolean;
+    activeTagCommit?: string;
     productionTag?: string | null;
     productionPublishedAt?: string;
     /** Ordered newest-first list of staging prereleases on the repo. */
@@ -2333,6 +2476,8 @@ describe("release status", () => {
     channelUnreadable?: boolean;
     /** Raw latest-staging.json contents, for malformed-manifest cases. */
     manifestBody?: string;
+    /** Raw manifest on the immutable versioned prerelease. */
+    versionedManifestBody?: string;
     abandonedSeries?: Record<string, string>;
     cherry?: string;
     behindMain?: number;
@@ -2376,9 +2521,12 @@ describe("release status", () => {
         if (command === "gh" && args[0] === "release" && args[1] === "download") {
           if (!fixture.activeVersion) return { exitCode: 1, stdout: "", stderr: "release not found" };
           const dirIndex = args.indexOf("--dir");
+          const manifestBody = args[2] === "desktop-staging"
+            ? fixture.manifestBody
+            : fixture.versionedManifestBody;
           writeFileSync(
             join(args[dirIndex + 1] ?? "", "latest-staging.json"),
-            fixture.manifestBody ?? `{"version":"${fixture.activeVersion}"}\n`
+            manifestBody ?? `{"version":"${fixture.activeVersion}"}\n`
           );
           return { exitCode: 0, stdout: "", stderr: "" };
         }
@@ -2387,11 +2535,13 @@ describe("release status", () => {
           return {
             exitCode: 0,
             stdout: JSON.stringify({
+              tagName: fixture.activeTagName ?? `v${fixture.activeVersion}`,
               targetCommitish: activeCommit,
               publishedAt: fixture.activePublishedAt === undefined ? "2026-07-06T00:00:00Z" : fixture.activePublishedAt,
               body: fixture.activeSourceBranch
-                ? `Staging updater manifest\n\nSource-Branch: ${fixture.activeSourceBranch}`
-                : "Staging updater manifest"
+                ? `Staging updater manifest for v${fixture.activeVersion}\n\nSource-Branch: ${fixture.activeSourceBranch}`
+                : `Staging updater manifest for v${fixture.activeVersion}`,
+              isPrerelease: fixture.activeIsPrerelease ?? true
             }),
             stderr: ""
           };
@@ -2415,7 +2565,13 @@ describe("release status", () => {
           if (previousCommit === null) return { exitCode: 1, stdout: "", stderr: "release not found" };
           return {
             exitCode: 0,
-            stdout: JSON.stringify({ targetCommitish: previousCommit, publishedAt: "2026-07-02T00:00:00Z" }),
+            stdout: JSON.stringify({
+              tagName: args[2],
+              targetCommitish: previousCommit,
+              body: `Staging updater manifest for ${args[2]}\n\nSource-Branch: main`,
+              publishedAt: "2026-07-02T00:00:00Z",
+              isPrerelease: true
+            }),
             stderr: ""
           };
         }
@@ -2435,6 +2591,14 @@ describe("release status", () => {
         }
         if (command === "git" && args[0] === "ls-remote" && args[1] === "--tags") {
           const pattern = args[3] ?? "";
+          if (fixture.activeVersion && pattern === `refs/tags/v${fixture.activeVersion}`) {
+            const tagCommit = fixture.activeTagCommit ?? activeCommit ?? "";
+            return {
+              exitCode: 0,
+              stdout: tagCommit ? `${tagCommit}\t${pattern}\n` : "",
+              stderr: ""
+            };
+          }
           const abandoned = /^refs\/tags\/abandoned\/release\/(\d+\.\d+)$/.exec(pattern);
           if (abandoned) {
             const has = Boolean(fixture.abandonedSeries?.[abandoned[1] ?? ""]);
@@ -2450,6 +2614,9 @@ describe("release status", () => {
         }
         if (command === "git" && args[0] === "fetch") {
           return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (key === "git rev-parse FETCH_HEAD^{commit}") {
+          return { exitCode: 0, stdout: `${fixture.activeTagCommit ?? activeCommit ?? ""}\n`, stderr: "" };
         }
         if (command === "git" && args[0] === "log") {
           expect(args).toContain("--no-merges");
@@ -2503,6 +2670,49 @@ describe("release status", () => {
       expect(result.promotion.allowed).toBe(true);
       expect(result.promotion.blockers).toEqual([]);
       expect(result.promoteCommand).toBe("kd release promote 1.2.4-staging.3");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports immutable tag identity failures as promotion blockers", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const runner = statusRunner({
+        activeVersion: "1.2.4-staging.3",
+        activeSourceBranch: "main",
+        activeTagCommit: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        productionTag: "v1.2.3"
+      });
+
+      const result = await releaseStatus({ repoRoot: root, env: {}, runner, now: NOW });
+
+      expect(result.promotion.mechanicallyPromotable).toBe(true);
+      expect(result.promotion.allowed).toBe(false);
+      expect(result.promotion.blockers.join(" ")).toMatch(/failed immutable identity verification.*tag resolves to/);
+      expect(result.promoteCommand).toBeNull();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports a versioned manifest mismatch as a promotion blocker", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const runner = statusRunner({
+        activeVersion: "1.2.4-staging.3",
+        activeSourceBranch: "main",
+        versionedManifestBody: '{"version":"1.2.4-staging.30"}\n',
+        productionTag: "v1.2.3"
+      });
+
+      const result = await releaseStatus({ repoRoot: root, env: {}, runner, now: NOW });
+
+      expect(result.promotion.allowed).toBe(false);
+      expect(result.promotion.blockers.join(" ")).toMatch(
+        /latest-staging\.json version 1\.2\.4-staging\.30 does not match selected version 1\.2\.4-staging\.3/
+      );
+      expect(result.promoteCommand).toBeNull();
     } finally {
       await rm(root, { recursive: true, force: true });
     }
