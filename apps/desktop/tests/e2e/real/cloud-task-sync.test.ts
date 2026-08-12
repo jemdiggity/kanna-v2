@@ -1,12 +1,16 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
 import { createPrimaryAndSecondaryClients } from "../helpers/twoInstance";
 import { callVueMethod, execDb, queryDb, tauriInvoke } from "../helpers/vue";
 import { buildGlobalKeydownScript } from "../helpers/keyboard";
-import { pressShiftEnterInActiveTerminal } from "../helpers/terminalInput";
+import { pressShiftEnterInActiveTerminal, typeTextToFocusedTerminalWindow } from "../helpers/terminalInput";
+
+const execFileAsync = promisify(execFile);
 
 const { primary, secondary } = createPrimaryAndSecondaryClients();
 let testRepoPath = "";
@@ -158,6 +162,52 @@ async function waitForBodyText(client: typeof primary, text: string, timeoutMs =
     await sleep(200);
   }
   throw new Error(`timed out waiting for body text: ${text}; diagnostics=${JSON.stringify(lastDiagnostics)}`);
+}
+
+interface RemoteTerminalBufferStats {
+  sessionId: string;
+  instanceId: number;
+  cols: number;
+  rows: number;
+  lineCount: number;
+}
+
+async function terminalBufferStats(
+  client: typeof primary,
+  sessionId: string,
+): Promise<RemoteTerminalBufferStats> {
+  return await client.executeSync(
+    `return window.__KANNA_E2E__.terminalBuffers.stats(${JSON.stringify(sessionId)});`,
+  );
+}
+
+async function waitForTerminalBufferText(
+  client: typeof primary,
+  sessionId: string,
+  text: string,
+): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    const found = await client.executeSync<boolean>(
+      `return window.__KANNA_E2E__.terminalBuffers
+        .lines(${JSON.stringify(sessionId)}).join("\\n")
+        .includes(${JSON.stringify(text)});`,
+    );
+    if (found) return;
+    await sleep(200);
+  }
+  throw new Error(`timed out waiting for terminal ${sessionId} buffer text: ${text}`);
+}
+
+async function waitForSystemClipboard(text: string): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  let lastClipboard = "";
+  while (Date.now() < deadline) {
+    lastClipboard = (await execFileAsync("/usr/bin/pbpaste")).stdout;
+    if (lastClipboard === text) return;
+    await sleep(100);
+  }
+  throw new Error(`system clipboard did not contain selected terminal text; got ${JSON.stringify(lastClipboard)}`);
 }
 
 async function countLocalTasks(client: typeof primary): Promise<number> {
@@ -979,7 +1029,7 @@ describe("cloud task sync", () => {
       args: [
         "--login",
         "-c",
-        "printf 'Cloud terminal ready from primary\\n'; read line; printf 'Cloud terminal input:%s\\n' \"$line\"; stty raw -echo; shifted=$(dd bs=1 count=7 2>/dev/null | od -An -tx1 | tr -d ' \\n'); stty sane; printf '\\r\\nCloud terminal shift enter:%s\\r\\n' \"$shifted\"; sleep 60",
+        "printf 'Cloud terminal ready from primary\\n'; read line; printf 'Cloud terminal input:%s\\n' \"$line\"; stty raw -echo; shifted=$(dd bs=1 count=7 2>/dev/null | od -An -tx1 | tr -d ' \\n'); stty sane; printf '\\r\\nCloud terminal shift enter:%s\\r\\n' \"$shifted\"; read warmline; printf 'Cloud terminal warm output:%s\\n' \"$warmline\"; read resumed; printf 'Cloud terminal resumed:%s size:%s\\n' \"$resumed\" \"$(stty size)\"; sleep 60",
       ],
       env: {},
       cols: 80,
@@ -1006,12 +1056,95 @@ describe("cloud task sync", () => {
     await pressShiftEnterInActiveTerminal(secondary);
     await waitForBodyText(secondary, "Cloud terminal shift enter:1b5b31333b3275");
 
+    const firstStatsBeforeSwitch = await terminalBufferStats(secondary, result);
+    expect(firstStatsBeforeSwitch.cols).toBeGreaterThan(0);
+    expect(firstStatsBeforeSwitch.rows).toBeGreaterThan(0);
+
+    const warmPrompt = "Cloud warm cache second task";
+    const warmResult = await callVueMethod(
+      primary,
+      "store.createItem",
+      primaryRepoId,
+      testRepoPath,
+      warmPrompt,
+      "sdk",
+      { agentProvider: "codex", baseRef: "origin/main" },
+    );
+    if (warmResult && typeof warmResult === "object" && "__error" in warmResult) {
+      throw new Error(String((warmResult as { __error: string }).__error));
+    }
+    if (typeof warmResult !== "string") {
+      throw new Error(`expected warm-cache task id, got ${JSON.stringify(warmResult)}`);
+    }
+    const warmSynced = await waitForCloudTaskSnapshot(secondary, warmPrompt);
+    await tauriInvoke(primary, "spawn_session", {
+      sessionId: warmResult,
+      cwd: testRepoPath,
+      executable: "/bin/zsh",
+      args: [
+        "--login",
+        "-c",
+        "printf 'Second cloud terminal ready\\n'; read line; printf 'Second cloud terminal input:%s\\n' \"$line\"; sleep 60",
+      ],
+      env: {},
+      cols: 80,
+      rows: 24,
+      agentProvider: "codex",
+    });
+
+    await callVueMethod(secondary, "handleSelectItem", warmSynced.item.id);
+    await waitForBodyText(secondary, "Second cloud terminal ready");
+    await typeTextToFocusedTerminalWindow(secondary, "selected-second-terminal\n");
+    await waitForBodyText(secondary, "Second cloud terminal input:selected-second-terminal");
+    expect(await secondary.executeSync<string[]>(
+      "return window.__KANNA_E2E__.terminalBuffers.sessionIds();",
+    )).toEqual(expect.arrayContaining([result, warmResult]));
+
+    await tauriInvoke(primary, "send_input", {
+      sessionId: result,
+      data: Array.from(new TextEncoder().encode("while-hidden\n")),
+    });
+    await waitForTerminalBufferText(secondary, result, "Cloud terminal warm output:while-hidden");
+    const hiddenStats = await terminalBufferStats(secondary, result);
+    expect(hiddenStats.instanceId).toBe(firstStatsBeforeSwitch.instanceId);
+    expect(hiddenStats.lineCount).toBeGreaterThanOrEqual(firstStatsBeforeSwitch.lineCount);
+
+    const originalWindowRect = await secondary.getWindowRect();
+    await secondary.setWindowRect({
+      width: Math.max(700, originalWindowRect.width - 240),
+      height: originalWindowRect.height,
+    });
+    await callVueMethod(secondary, "handleSelectItem", synced.item.id);
+    await typeTextToFocusedTerminalWindow(secondary, "after-reactivation\n");
+    await waitForBodyText(secondary, "Cloud terminal resumed:after-reactivation size:");
+    const reactivatedStats = await terminalBufferStats(secondary, result);
+    expect(reactivatedStats.instanceId).toBe(firstStatsBeforeSwitch.instanceId);
+    expect(reactivatedStats.cols).toBeGreaterThan(0);
+    expect(reactivatedStats.cols).not.toBe(firstStatsBeforeSwitch.cols);
+    expect(reactivatedStats.lineCount).toBeGreaterThanOrEqual(hiddenStats.lineCount);
+
+    const copiedText = "Cloud terminal warm output:while-hidden";
+    expect(await secondary.executeSync<string | null>(
+      `return window.__KANNA_E2E__.terminalBuffers.selectText(${JSON.stringify(result)}, ${JSON.stringify(copiedText)});`,
+    )).toBe(copiedText);
+    await secondary.pressShortcut(["Meta", "c"]);
+    await waitForSystemClipboard(copiedText);
+    await secondary.setWindowRect(originalWindowRect);
+
     const closeResult = await callVueMethod(secondary, "closeSelectedWorkspaceTask");
     if (closeResult && typeof closeResult === "object" && "__error" in closeResult) {
       throw new Error(String((closeResult as { __error: string }).__error));
     }
     await waitForSidebarTaskToDisappear(secondary, "Cloud sync visible task");
     await waitForCloudTaskToStayGoneAfterRefresh(secondary, "Cloud sync visible task");
+
+    await callVueMethod(secondary, "handleSelectItem", warmSynced.item.id);
+    const closeWarmResult = await callVueMethod(secondary, "closeSelectedWorkspaceTask");
+    if (closeWarmResult && typeof closeWarmResult === "object" && "__error" in closeWarmResult) {
+      throw new Error(String((closeWarmResult as { __error: string }).__error));
+    }
+    await waitForSidebarTaskToDisappear(secondary, warmPrompt);
+    await waitForCloudTaskToStayGoneAfterRefresh(secondary, warmPrompt);
   });
   it("streams live terminal output from the owning desktop through the relay", async () => {
     const prompt = "Relay live stream task";

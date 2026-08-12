@@ -6,6 +6,7 @@ use super::utils::{
 };
 use crate::protocol::{
     PeerRegistryEntry, PeerRequest, PeerResponse, PeerTerminalControl, PeerTerminalEvent,
+    MAX_DUPLEX_TERMINAL_INPUT_BYTES,
 };
 use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
 use std::path::Path;
@@ -422,7 +423,6 @@ pub(super) async fn stream_daemon_session(
     initial_snapshot: kanna_daemon::protocol::TerminalSnapshot,
 ) -> Result<(), RuntimeError> {
     const MAX_TERMINAL_CONTROL_LINE_BYTES: usize = 64 * 1024;
-    const MAX_TERMINAL_INPUT_BYTES: usize = 4 * 1024;
     let (peer_read_half, mut peer_write_half) = stream.into_split();
     let mut peer_lines = CancellableBoundedLineReader::new(BufReader::new(peer_read_half));
     let mut daemon_lines = daemon.reader.lines();
@@ -466,7 +466,7 @@ pub(super) async fn stream_daemon_session(
                     &mut daemon_writer,
                     &session_id,
                     control,
-                    MAX_TERMINAL_INPUT_BYTES,
+                    MAX_DUPLEX_TERMINAL_INPUT_BYTES,
                 ).await?;
             }
         }
@@ -690,19 +690,27 @@ mod tests {
                 .await
                 .expect("write snapshot");
 
-            let input_line = lines
-                .next_line()
-                .await
-                .expect("read input result")
-                .expect("input command");
-            let input: DaemonCommand = serde_json::from_str(&input_line).expect("parse input");
-            match input {
-                DaemonCommand::InputNoReply { session_id, data } => {
-                    assert_eq!(session_id, "sess-duplex");
-                    assert_eq!(data, b"abc\x7f");
+            let expected_input: Vec<u8> = (0..MAX_DUPLEX_TERMINAL_INPUT_BYTES + 19)
+                .map(|index| (index % 251) as u8)
+                .collect();
+            let mut received_input = Vec::new();
+            while received_input.len() < expected_input.len() {
+                let input_line = lines
+                    .next_line()
+                    .await
+                    .expect("read input result")
+                    .expect("input command");
+                let input: DaemonCommand = serde_json::from_str(&input_line).expect("parse input");
+                match input {
+                    DaemonCommand::InputNoReply { session_id, data } => {
+                        assert_eq!(session_id, "sess-duplex");
+                        assert!(data.len() <= MAX_DUPLEX_TERMINAL_INPUT_BYTES);
+                        received_input.extend(data);
+                    }
+                    other => panic!("expected InputNoReply, got {other:?}"),
                 }
-                other => panic!("expected InputNoReply, got {other:?}"),
             }
+            assert_eq!(received_input, expected_input);
 
             let resize_line = lines
                 .next_line()
@@ -762,10 +770,17 @@ mod tests {
             assert_eq!(snapshot["type"], "snapshot");
             assert_eq!(snapshot["snapshot"]["vt"], "READY");
 
+            let input: Vec<u8> = (0..MAX_DUPLEX_TERMINAL_INPUT_BYTES + 19)
+                .map(|index| (index % 251) as u8)
+                .collect();
             for control in [
                 PeerTerminalControl::Input {
                     session_id: "sess-duplex".to_string(),
-                    data: b"abc\x7f".to_vec(),
+                    data: input[..MAX_DUPLEX_TERMINAL_INPUT_BYTES].to_vec(),
+                },
+                PeerTerminalControl::Input {
+                    session_id: "sess-duplex".to_string(),
+                    data: input[MAX_DUPLEX_TERMINAL_INPUT_BYTES..].to_vec(),
                 },
                 PeerTerminalControl::Resize {
                     session_id: "sess-duplex".to_string(),

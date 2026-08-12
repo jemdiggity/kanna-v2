@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+/// Keep duplex terminal input controls below the receiver's bounded command
+/// size. Larger writes (notably xterm paste payloads) are split in FIFO order.
+pub const MAX_DUPLEX_TERMINAL_INPUT_BYTES: usize = 4 * 1024;
+
 pub const CURRENT_PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

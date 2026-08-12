@@ -33,6 +33,7 @@ let resizeObserver: ResizeObserver | null = null;
 let relayClient: DesktopRelayTerminalClient | null = null;
 let subscription: DesktopRelayTerminalSubscription | null = null;
 let unregisterE2ETerminalBuffer: (() => void) | null = null;
+let focusRafId = 0;
 
 function writeRemoteTerminalError(message: string) {
   status.value = "error";
@@ -51,6 +52,17 @@ function fitAndResizeRemote() {
     rows: terminal.rows,
   }).catch((error) => {
     console.debug("[cloud-terminal] failed to resize remote terminal:", error);
+  });
+}
+
+async function focusWhenActive() {
+  if (!props.active || !terminal) return;
+  await nextTick();
+  if (focusRafId) cancelAnimationFrame(focusRafId);
+  focusRafId = requestAnimationFrame(() => {
+    focusRafId = 0;
+    if (!props.active || !terminal || document.querySelector(".modal-overlay")) return;
+    terminal.focus();
   });
 }
 
@@ -168,6 +180,7 @@ onMounted(() => {
     resizeObserver.observe(containerRef.value);
   }
   void start();
+  void focusWhenActive();
 });
 
 watch(
@@ -184,7 +197,12 @@ watch(
     if (!active) return;
     await nextTick();
     if (!terminal || !props.active) return;
+    if (status.value === "closed" || status.value === "error") {
+      await start();
+      if (!props.active) return;
+    }
     fitAndResizeRemote();
+    await focusWhenActive();
   },
 );
 
@@ -195,6 +213,7 @@ watch(effectiveCodeTheme, (theme) => {
 });
 
 onUnmounted(() => {
+  if (focusRafId) cancelAnimationFrame(focusRafId);
   stopSubscription();
   unregisterE2ETerminalBuffer?.();
   unregisterE2ETerminalBuffer = null;

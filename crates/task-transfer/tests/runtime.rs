@@ -4,6 +4,7 @@ use kanna_task_transfer::crypto::{public_key_to_string, TransferIdentity};
 use kanna_task_transfer::peer_store::{PeerRecord, PeerStore};
 use kanna_task_transfer::protocol::{
     PeerRequest, PeerResponse, PeerTerminalControl, PeerTerminalEvent,
+    MAX_DUPLEX_TERMINAL_INPUT_BYTES,
 };
 use kanna_task_transfer::registry::{PeerRegistry, PeerRegistryEntry};
 use kanna_task_transfer::runtime::{
@@ -310,14 +311,33 @@ async fn protocol_v2_terminal_input_uses_the_observer_stream() {
             .await
             .unwrap();
 
-        let mut control_line = String::new();
-        reader.read_line(&mut control_line).await.unwrap();
-        let control: PeerTerminalControl = serde_json::from_str(control_line.trim()).unwrap();
+        let expected_len = MAX_DUPLEX_TERMINAL_INPUT_BYTES + 37;
+        let mut received = Vec::new();
+        let mut chunk_lengths = Vec::new();
+        while received.len() < expected_len {
+            let mut control_line = String::new();
+            reader.read_line(&mut control_line).await.unwrap();
+            let control: PeerTerminalControl = serde_json::from_str(control_line.trim()).unwrap();
+            let PeerTerminalControl::Input { session_id, data } = control else {
+                panic!("expected input control");
+            };
+            assert_eq!(session_id, "task-1");
+            chunk_lengths.push(data.len());
+            received.extend(data);
+        }
+        let output = PeerTerminalEvent::Output {
+            session_id: "task-1".into(),
+            data: b"observer-still-live".to_vec(),
+        };
+        writer
+            .write_all(format!("{}\n", serde_json::to_string(&output).unwrap()).as_bytes())
+            .await
+            .unwrap();
         let opened_another_connection =
             tokio::time::timeout(Duration::from_millis(200), listener.accept())
                 .await
                 .is_ok();
-        (control, opened_another_connection)
+        (received, chunk_lengths, opened_another_connection)
     });
 
     let primary = TransferRuntime::spawn(RuntimeConfig::for_tests(
@@ -344,21 +364,35 @@ async fn protocol_v2_terminal_input_uses_the_observer_stream() {
         }
     ));
 
+    let input: Vec<u8> = (0..MAX_DUPLEX_TERMINAL_INPUT_BYTES + 37)
+        .map(|index| (index % 251) as u8)
+        .collect();
     tokio::time::timeout(
         Duration::from_millis(250),
-        primary.send_peer_session_input("peer-target", "task-1", b"typed\x7f".to_vec()),
+        primary.send_peer_session_input("peer-target", "task-1", input.clone()),
     )
     .await
     .expect("duplex terminal input waited for a remote acknowledgement")
     .unwrap();
 
-    let (control, opened_another_connection) = server.await.unwrap();
+    let event = tokio::time::timeout(Duration::from_secs(1), primary.next_event())
+        .await
+        .expect("observer stream stopped after oversized input")
+        .unwrap();
+    assert!(matches!(
+        event,
+        RuntimeEvent::TerminalEvent {
+            event: PeerTerminalEvent::Output { ref data, .. },
+            ..
+        } if data == b"observer-still-live"
+    ));
+
+    let (received, chunk_lengths, opened_another_connection) = server.await.unwrap();
+    assert_eq!(received, input);
     assert_eq!(
-        control,
-        PeerTerminalControl::Input {
-            session_id: "task-1".into(),
-            data: b"typed\x7f".to_vec(),
-        }
+        chunk_lengths,
+        [MAX_DUPLEX_TERMINAL_INPUT_BYTES, 37],
+        "oversized input was not chunked at the duplex receiver boundary"
     );
     assert!(
         !opened_another_connection,

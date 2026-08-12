@@ -13,6 +13,7 @@ use crate::discovery::encode_txt_record;
 use crate::protocol::{DiscoveredPeer, PeerTaskSnapshot};
 use crate::protocol::{
     PeerRegistryEntry, PeerRequest, PeerResponse, PeerTerminalControl, PeerTerminalEvent,
+    MAX_DUPLEX_TERMINAL_INPUT_BYTES,
 };
 use crate::registry::PeerRegistry;
 use serde_json::Value;
@@ -291,15 +292,8 @@ impl TransferRuntime {
         data: Vec<u8>,
     ) -> Result<(), RuntimeError> {
         if self
-            .send_observed_terminal_control(
-                target_peer_id,
-                session_id,
-                PeerTerminalControl::Input {
-                    session_id: session_id.to_owned(),
-                    data: data.clone(),
-                },
-            )
-            .await
+            .send_observed_terminal_input(target_peer_id, session_id, &data)
+            .await?
         {
             return Ok(());
         }
@@ -324,6 +318,50 @@ impl TransferRuntime {
             PeerResponse::Error { message, .. } => Err(RuntimeError::Protocol(message)),
             other => Err(unexpected_peer_response("send-session-input", &other)),
         }
+    }
+
+    async fn send_observed_terminal_input(
+        &self,
+        target_peer_id: &str,
+        session_id: &str,
+        data: &[u8],
+    ) -> Result<bool, RuntimeError> {
+        let observer_key = terminal_observer_key(target_peer_id, session_id);
+        let sender = self
+            .terminal_observers
+            .lock()
+            .await
+            .get(&observer_key)
+            .and_then(|slot| slot.control_sender.clone());
+        let Some(sender) = sender else {
+            return Ok(false);
+        };
+
+        let mut chunks = data.chunks(MAX_DUPLEX_TERMINAL_INPUT_BYTES).peekable();
+        if chunks.peek().is_none() {
+            sender
+                .send(PeerTerminalControl::Input {
+                    session_id: session_id.to_owned(),
+                    data: Vec::new(),
+                })
+                .await
+                .map_err(|_| {
+                    RuntimeError::Protocol("terminal observer input stream closed".into())
+                })?;
+            return Ok(true);
+        }
+        for chunk in chunks {
+            sender
+                .send(PeerTerminalControl::Input {
+                    session_id: session_id.to_owned(),
+                    data: chunk.to_vec(),
+                })
+                .await
+                .map_err(|_| {
+                    RuntimeError::Protocol("terminal observer input stream closed".into())
+                })?;
+        }
+        Ok(true)
     }
 
     pub async fn resize_peer_session(
