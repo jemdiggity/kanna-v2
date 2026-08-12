@@ -826,10 +826,23 @@ describe("pty session (real CLI)", () => {
 
     await setSelectedItem(client, sessionId);
     await waitForCurrentItemId(client, sessionId);
+    const readyMarkerCountBeforeReattach = (
+      await getTerminalBufferTextStats(client, otherSessionId, otherReadyMarker)
+    ).matchingLineCount;
+    await detachTerminalStream(client, otherSessionId);
     await setSelectedItem(client, otherSessionId);
     await waitForCurrentItemId(client, otherSessionId);
-    await waitForTerminalBufferText(client, otherSessionId, otherReadyMarker, 15_000);
-    await sleep(1_000);
+
+    const snapshotDeadline = Date.now() + 15_000;
+    let readyStats = await getTerminalBufferTextStats(client, otherSessionId, otherReadyMarker);
+    while (
+      readyStats.matchingLineCount <= readyMarkerCountBeforeReattach &&
+      Date.now() < snapshotDeadline
+    ) {
+      await sleep(200);
+      readyStats = await getTerminalBufferTextStats(client, otherSessionId, otherReadyMarker);
+    }
+    expect(readyStats.matchingLineCount).toBeGreaterThan(readyMarkerCountBeforeReattach);
 
     expect(
       (await getTerminalBufferTextStats(client, otherSessionId, preservedMarker)).matchingLineCount,
