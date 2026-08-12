@@ -16,7 +16,9 @@ The task prompt selects the mode:
 
 A staging publish, staging rollback, release cut, or push of a backport branch must be explicitly requested in the task prompt or, in interactive mode, by the human in this session. A staging publish requires unmistakable intent such as “publish” or “ship for real”; quote the exact authorizing sentence in the final report.
 
-Production is never your decision. Refuse `--production`, `./kd release promote`, and production mobile OTA actions unless the request explicitly identifies a named human and says that person requested **production**. This applies in both modes. Even when authorized, restate the exact version, channel, and operation immediately before running it. Never infer production authorization from a version, an RC being promotable, a request to “ship,” or prior staging approval.
+Production is never your decision. Refuse `--production`, `./kd release promote`, and production mobile OTA actions unless the request explicitly identifies a named human and says that person requested **production**. This applies in both modes. Even when authorized, restate the exact version, channel, and operation immediately before running it. Never infer production authorization from a version, an RC being mechanically promotable, a request to “ship,” or prior staging approval.
+
+Three operations discard release state and need the same named-human authorization as production, even though they publish nothing: `./kd release promote --override-soak` (waiving the soak window), `./kd release reset-staging` (abandoning the staging lineage), and `./kd release cut --abandon-series` (abandoning a release series). Never reach for any of them to get past a refusal you hit while doing something else — report the refusal instead, and quote the authorizing sentence if one exists.
 
 ## Operations
 
@@ -24,13 +26,15 @@ After `./kd release status`, select only the authorized operation:
 
 - **Staging RC:** `./kd release ship --staging --release [--major|--minor|--patch] [--branch main|release/X.Y]`.
 - **Direct production:** after fetching tags and selecting the bump, compute `X.Y.Z`, run `git branch -m release-vX.Y.Z` and `git push -u origin release-vX.Y.Z` from a Kanna worktree, then run `./kd release ship --production --release [--major|--minor|--patch]`.
-- **Cut a release series:** `./kd release cut [--major|--minor|--patch]` (default `--minor`).
-- **Backport RC fixes:** land fixes on main first, then update `release/X.Y`, cherry-pick only the named merged fixes with `git cherry-pick -x`, run `pnpm test` and `./kd test rust`, push the branch, and ship a fresh branch RC. Ask which fixes only in interactive mode; otherwise stop on ambiguity.
+- **Cut a release series:** `./kd release cut [--major|--minor|--patch]` (default `--minor`), or `./kd release cut --version X.Y.0` when the intended series must be named because an earlier series is being abandoned.
+- **Backport RC fixes:** land fixes on main first, then update `release/X.Y`, cherry-pick only the named merged fixes with `git cherry-pick -x`, run `pnpm test` and `./kd test rust`, push the branch, and ship a fresh branch RC from a checkout of the pushed tip. Ask which fixes only in interactive mode; otherwise stop on ambiguity.
 - **Promote a soaked RC:** `./kd release promote X.Y.Z-staging.N`; the RC fixes the production version, so do not ask for a bump.
 - **Roll back staging:** `./kd release ship --staging --rollback-to X.Y.Z-staging.N`; this repoints the channel without building.
-- **Rehearse:** use `--dry-run` instead of `--release`; a dry-run builds and signs but does not notarize or publish.
+- **Abandon a staging lineage:** `./kd release reset-staging --to main|release/X.Y --reason "<why>" --confirm-abandon <active-staging-version>`; read the active version from `./kd release status` and never guess it.
+- **Abandon a release series:** `./kd release cut --version X.Y.0 --abandon-series <X.Y> --reason "<why>"`, after releasing the channel with `reset-staging` if it still serves that series.
+- **Rehearse:** use `--dry-run` instead of `--release`; a dry-run builds and signs but does not notarize or publish, and it runs the same lineage, freeze, and soak gates as the real operation.
 
-For plain ships, choose `--major`, `--minor`, or `--patch` (default `--patch`). Release-branch RCs derive their version from `release/X.Y`, ignore bump flags, and require `--branch release/X.Y` from a Kanna `task-*` worktree.
+For plain ships, choose `--major`, `--minor`, or `--patch` (default `--patch`). Release-branch RCs derive their version from `release/X.Y`, ignore bump flags, and require `--branch release/X.Y` from a Kanna `task-*` worktree whose `HEAD` is exactly the branch's remote tip.
 
 ## Preflight
 
@@ -45,9 +49,13 @@ Do not work around a failed `kd` preflight or publish with lower-level commands,
 
 ## RC Contract
 
-Each staging publish increments `N` from remote tags, creates an immutable `vX.Y.Z-staging.N` prerelease for one commit with DMGs, updater bundles, signatures, and `latest-staging.json`, restores temporary version-file changes, and repoints the manifest-only `desktop-staging` channel. On `release/X.Y`, the branch series determines `X.Y.Z`, the branch tip must be contained in HEAD, and provenance is recorded for promotion. While that branch is soaking, do not repoint staging from main.
+Each staging publish increments `N` from remote tags, creates an immutable `vX.Y.Z-staging.N` prerelease for one commit with DMGs, updater bundles, signatures, and `latest-staging.json`, restores temporary version-file changes, and repoints the manifest-only `desktop-staging` channel. On `release/X.Y`, the branch series determines `X.Y.Z`, `HEAD` must equal the branch's remote tip exactly, and provenance is recorded for promotion.
 
-Promotion is production: it must rebuild the exact soaked commit with production identity and refuses unless HEAD and the recorded promotion base still match, the tree is clean, and `vX.Y.Z` does not exist. After branch promotion, report that `release/X.Y` must be merged back to main through the normal PR flow. See `docs/specs/release-candidates.md`.
+`kd` enforces the channel's lineage, so read a refusal as information rather than an obstacle. A staging publish must descend from the candidate the channel already serves; divergence, rollback, an unpromoted release-branch soak blocking a main publish, and unreadable channel metadata are all refused before any build. Report the refusal and stop; do not work around it with a rollback, a reset, or a different branch unless that exact operation was authorized.
+
+`./kd release status` separates *mechanical* promotability (the RC still matches its promotion branch tip) from whether promotion is allowed. Never describe a candidate as promotable or ready on the mechanical field alone — report `promotion.allowed` and, when it is false, every entry in `promotion.blockers`, including lineage validity, the soak window (`promotion.soak`), an abandoned series, and any active freeze.
+
+Promotion is production: it must rebuild the exact soaked commit with production identity and refuses unless HEAD and the recorded promotion base still match, the candidate's lineage is valid, its series is not abandoned, the policy soak window has elapsed, the tree is clean, and `vX.Y.Z` does not exist. After branch promotion, report that `release/X.Y` must be merged back to main through the normal PR flow. See `docs/specs/release-candidates.md`.
 
 ## Report And Complete
 

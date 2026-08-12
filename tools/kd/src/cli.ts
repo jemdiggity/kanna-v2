@@ -368,6 +368,51 @@ function parseFlagInput(
       index += 1;
       continue;
     }
+    if (arg === "--to") {
+      const value = rest[index + 1];
+      if (!value) {
+        throw new Error("--to requires a value");
+      }
+      input.to = value;
+      index += 1;
+      continue;
+    }
+    if (arg === "--reason") {
+      const value = rest[index + 1];
+      if (!value) {
+        throw new Error("--reason requires a value");
+      }
+      input.reason = value;
+      index += 1;
+      continue;
+    }
+    if (arg === "--abandon-series") {
+      const value = rest[index + 1];
+      if (!value) {
+        throw new Error("--abandon-series requires a value");
+      }
+      input.abandonSeries = value;
+      index += 1;
+      continue;
+    }
+    if (arg === "--confirm-abandon") {
+      const value = rest[index + 1];
+      if (!value) {
+        throw new Error("--confirm-abandon requires a value");
+      }
+      input.confirmAbandon = value;
+      index += 1;
+      continue;
+    }
+    if (arg === "--override-soak") {
+      const value = rest[index + 1];
+      if (!value) {
+        throw new Error("--override-soak requires a reason value");
+      }
+      input.overrideSoak = value;
+      index += 1;
+      continue;
+    }
     if (arg === "--key-path") {
       const value = rest[index + 1];
       if (!value) {
@@ -580,6 +625,9 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
     }
     return { taskId: "release.promote", input: { version, ...parseFlagInput(flags, {}) } };
   }
+  if (group === "release" && command === "reset-staging") {
+    return { taskId: "release.reset-staging", input: parseFlagInput(rest, {}) };
+  }
   if (group === "release" && command === "setup-notarization") {
     return { taskId: "release.setup-notarization", input: parseFlagInput(rest, {}) };
   }
@@ -711,9 +759,10 @@ const helpTopics: Record<string, string[]> = {
     "  build sidecars",
     "  rust-cache install|status",
     "  release ship [--staging|--production] [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64] [--rollback-to <version>] [--branch main|release/X.Y]",
-    "  release promote <staging-version> [--dry-run] [--arm64|--x86_64]",
+    "  release promote <staging-version> [--dry-run] [--arm64|--x86_64] [--override-soak <reason>]",
     "  release setup-notarization [--profile <name>] [--keychain <absolute-path>]",
-    "  release cut [--major|--minor|--patch]",
+    "  release cut [--major|--minor|--patch] [--version X.Y.0] [--abandon-series X.Y[,X.Y]] [--reason <why>]",
+    "  release reset-staging --to main|release/X.Y --reason <why> --confirm-abandon <staging-version> [--dry-run]",
     "  release status",
     "  cloud deploy --staging|--production [--relay]",
     "  cloud relay-provision --staging|--production",
@@ -1036,23 +1085,35 @@ const helpTopics: Record<string, string[]> = {
     "",
     "Commands:",
     "  release ship [--staging|--production] [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64] [--rollback-to <version>] [--branch main|release/X.Y]",
-    "  release promote <staging-version> [--dry-run] [--arm64|--x86_64]",
+    "  release promote <staging-version> [--dry-run] [--arm64|--x86_64] [--override-soak <reason>]",
     "  release setup-notarization [--profile <name>] [--keychain <absolute-path>]",
-    "  release cut [--major|--minor|--patch]",
+    "  release cut [--major|--minor|--patch] [--version X.Y.0] [--abandon-series X.Y[,X.Y]] [--reason <why>]",
+    "  release reset-staging --to main|release/X.Y --reason <why> --confirm-abandon <staging-version> [--dry-run]",
     "  release status"
   ],
   "release ship": [
     "Usage: kd release ship [--staging|--production] [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64] [--rollback-to <version>] [--branch main|release/X.Y]",
     "",
     "Build, sign, notarize, and optionally publish a Kanna release.",
+    "A staging publish must be a descendant of the candidate the channel already serves, and a release/X.Y RC must build that branch's remote tip exactly.",
+    "While an unpromoted release/X.Y candidate is soaking, main staging publishes are refused; promote it or run kd release reset-staging.",
     "Use --staging --rollback-to <version> to repoint the staging channel manifest without building."
   ],
   "release promote": [
-    "Usage: kd release promote <staging-version> [--dry-run] [--arm64|--x86_64]",
+    "Usage: kd release promote <staging-version> [--dry-run] [--arm64|--x86_64] [--override-soak <reason>]",
     "",
     "Promote a soaked staging prerelease (e.g. 1.2.4-staging.3) into the production release of the same commit.",
     "Rebuilds that exact commit with production identity, then tags, publishes, and repoints the updater manifest.",
-    "Requires the checkout and origin/main to still be at the staging build's commit. --dry-run rehearses without publishing."
+    "Requires the checkout and origin/main to still be at the staging build's commit, a valid staging lineage, and the",
+    "release-policy.json soak window (default 24h) to have elapsed. --dry-run rehearses without publishing and runs the same gates.",
+    "--override-soak <reason> is the explicit human override for the soak window only; it never waives lineage or base checks."
+  ],
+  "release reset-staging": [
+    "Usage: kd release reset-staging --to main|release/X.Y --reason <why> --confirm-abandon <staging-version> [--dry-run]",
+    "",
+    "Abandon the active staging lineage so the next publish may move the channel non-linearly (a stale release soak, a hand-back to main, an older series hotfix).",
+    "Builds nothing, publishes nothing, and leaves the channel pointer where it is: it records old/new provenance on the desktop-staging release.",
+    "--confirm-abandon must name the exact active staging version (kd release status prints it), and the record authorizes only the next publish from --to."
   ],
   "release setup-notarization": [
     "Usage: kd release setup-notarization [--profile <name>] [--keychain <absolute-path>]",
@@ -1062,16 +1123,24 @@ const helpTopics: Record<string, string[]> = {
     "That owner-only machine-global file is the sole release-environment file kd reads; repository and worktree .env.release.local files are ignored."
   ],
   "release cut": [
-    "Usage: kd release cut [--major|--minor|--patch]",
+    "Usage: kd release cut [--major|--minor|--patch] [--version X.Y.0] [--abandon-series X.Y[,X.Y]] [--reason <why>]",
     "",
     "Cut a release/X.Y stabilization branch from origin/main for the next version series (default: --minor).",
-    "The branch takes bugfix cherry-picks only; staging RCs shipped from it version themselves as X.Y.Z-staging.N."
+    "The branch takes bugfix cherry-picks only; staging RCs shipped from it version themselves as X.Y.Z-staging.N.",
+    "Bump flags infer the series from origin/main's VERSION, which only advances when a production release commits it.",
+    "--version X.Y.0 names the intended series directly, which is the only way to skip a series that is being abandoned",
+    "rather than released. Every unreleased release/X.Y the cut steps over must be named with --abandon-series and",
+    "explained with --reason; each is recorded as an annotated abandoned/release/X.Y tag at that branch's tip.",
+    "The abandoned branch is kept, never deleted or reused, and ship/promote then refuse that series."
   ],
   "release status": [
     "Usage: kd release status",
     "",
     "Show the latest production release, the staging channel pointer, its release branch (if cut), and lag vs origin/main.",
-    "Reports the promote command when the staging build is at its promotion base and ready to release."
+    "Separates mechanical promotability (the RC still matches its promotion branch tip) from safety state: the candidate's",
+    "lineage relationship to the previous candidate, whether that lineage is valid, soak age against the policy window,",
+    "any active release-branch freeze, release-branch commits not retained on main, and every blocker to production promotion.",
+    "Prints the promote command only when all of those gates pass."
   ],
   cloud: [
     "Usage: kd cloud <command>",

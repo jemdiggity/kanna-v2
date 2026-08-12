@@ -1141,10 +1141,45 @@ describe("kd CLI", () => {
       taskId: "release.cut",
       input: { minor: true }
     });
+    expect(parseCliArgs([
+      "release",
+      "cut",
+      "--version",
+      "0.2.0",
+      "--abandon-series",
+      "0.1",
+      "--reason",
+      "0.1 diverged from main"
+    ])).toEqual({
+      taskId: "release.cut",
+      input: { version: "0.2.0", abandonSeries: "0.1", reason: "0.1 diverged from main" }
+    });
+    expect(() => parseCliArgs(["release", "cut", "--abandon-series"])).toThrow(/--abandon-series requires a value/);
     expect(parseCliArgs(["release", "ship", "--staging", "--release", "--branch", "release/1.3"])).toEqual({
       taskId: "release.ship",
       input: { staging: true, release: true, branch: "release/1.3" }
     });
+    expect(parseCliArgs(["release", "promote", "1.2.4-staging.3", "--override-soak", "named human asked"])).toEqual({
+      taskId: "release.promote",
+      input: { version: "1.2.4-staging.3", overrideSoak: "named human asked" }
+    });
+    expect(parseCliArgs([
+      "release",
+      "reset-staging",
+      "--to",
+      "main",
+      "--reason",
+      "0.1 soak abandoned",
+      "--confirm-abandon",
+      "0.1.0-staging.8"
+    ])).toEqual({
+      taskId: "release.reset-staging",
+      input: { to: "main", reason: "0.1 soak abandoned", confirmAbandon: "0.1.0-staging.8" }
+    });
+    expect(() => parseCliArgs(["release", "reset-staging", "--to"])).toThrow(/--to requires a value/);
+    expect(() => parseCliArgs(["release", "promote", "1.2.4-staging.3", "--override-soak"])).toThrow(
+      /--override-soak requires a reason value/
+    );
     expect(parseCliArgs(["release", "status"])).toEqual({
       taskId: "release.status",
       input: {}

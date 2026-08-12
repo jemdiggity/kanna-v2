@@ -3,6 +3,22 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CommandRunner } from "./process";
 import {
+  composeStagingChannelBody,
+  evaluateCandidateLineage,
+  evaluatePromotionGate,
+  evaluateSoak,
+  evaluateStagingPublishGate,
+  isReleaseBranchName,
+  normalizeStagingVersion,
+  parseLineageResetRecord,
+  type CandidateLineage,
+  type LineageResetRecord,
+  type SoakEvaluation,
+  type StagingCandidate,
+  type StagingLineageRelationship
+} from "./release-lineage";
+import { readReleasePolicy, type ReleasePolicy } from "./release-policy";
+import {
   preflightUpdaterSigningKey,
   resolveUpdaterSigningKey,
   updaterSignerEnvironment
@@ -11,6 +27,17 @@ import {
 export type ReleaseBump = "major" | "minor" | "patch";
 export type ReleaseArchLabel = "arm64" | "x86_64";
 export type ReleaseEnvironment = "production" | "staging";
+
+/**
+ * The git/GitHub facts every release command needs. `ReleaseShipInput`,
+ * `ReleaseStatusInput`, and `ReleaseResetStagingInput` all satisfy it, so the
+ * lineage and soak helpers run identically from ship, status, and promote.
+ */
+export interface ReleaseCommandContext {
+  repoRoot: string;
+  env: NodeJS.ProcessEnv;
+  runner: CommandRunner;
+}
 
 export interface ReleaseShipInput {
   repoRoot: string;
@@ -22,6 +49,10 @@ export interface ReleaseShipInput {
   rollbackTo?: string;
   promoteFrom?: string;
   sourceBranch?: string;
+  /** Explicit human reason for promoting before the policy soak window elapses. */
+  soakOverrideReason?: string;
+  /** Fixed clock for soak arithmetic; defaults to `Date.now()`. */
+  now?: number;
   env: NodeJS.ProcessEnv;
   runner: CommandRunner;
 }
@@ -165,7 +196,7 @@ async function assertCleanGitWorktree(repoRoot: string, runner: CommandRunner, e
   }
 }
 
-async function ensureStagingGithubRelease(input: ReleaseShipInput, repoSlug: string): Promise<void> {
+async function ensureStagingGithubRelease(input: ReleaseCommandContext, repoSlug: string): Promise<void> {
   const view = await input.runner.run("gh", ["release", "view", STAGING_CHANNEL_TAG, "--repo", repoSlug], {
     cwd: input.repoRoot,
     env: input.env
@@ -250,6 +281,7 @@ export function nextSeriesPatchVersion(tagsOutput: string, series: ReleaseSeries
 interface StagingContext {
   baseVersion: string;
   sourceBranch: string;
+  commit: string;
 }
 
 async function resolveStagingContext(input: ReleaseShipInput): Promise<StagingContext> {
@@ -265,9 +297,11 @@ async function resolveStagingContext(input: ReleaseShipInput): Promise<StagingCo
     branchName = parseReleaseBranchSeries(currentBranch) ? currentBranch : "main";
   }
 
+  const head = await mustRun(input.runner, "git", ["rev-parse", "HEAD"], input.repoRoot, input.env);
+
   if (branchName === "main") {
     const sourceVersion = readCurrentVersion(input.repoRoot);
-    return { baseVersion: bumpVersion(sourceVersion, input.bump), sourceBranch: "main" };
+    return { baseVersion: bumpVersion(sourceVersion, input.bump), sourceBranch: "main", commit: head };
   }
 
   const series = parseReleaseBranchSeries(branchName);
@@ -279,18 +313,28 @@ async function resolveStagingContext(input: ReleaseShipInput): Promise<StagingCo
   if (!branchSha) {
     throw new Error(`${branchName} does not exist on origin. Cut it first (kd release cut).`);
   }
-  await mustRun(input.runner, "git", ["fetch", "origin", branchName], input.repoRoot, input.env);
-  const contained = await input.runner.run("git", ["merge-base", "--is-ancestor", branchSha, "HEAD"], {
-    cwd: input.repoRoot,
-    env: input.env
-  });
-  if (contained.exitCode !== 0) {
+  const abandoned = await readAbandonedSeries(input, branchName);
+  if (abandoned) {
     throw new Error(
-      `${branchName} tip (${branchSha}) is not contained in HEAD. Merge or rebase the branch into this worktree before shipping its RC.`
+      `${branchName} was abandoned${abandoned.abandonedAt ? ` on ${abandoned.abandonedAt}` : ""}` +
+        `${abandoned.reason ? `: ${abandoned.reason}` : "."} No release candidate ships from an abandoned series. ` +
+        `Ship from the current series branch instead, or cut one (kd release cut --version X.Y.0).`
+    );
+  }
+  await mustRun(input.runner, "git", ["fetch", "origin", branchName], input.repoRoot, input.env);
+  // Exact provenance, not containment: a branch RC must be a build of the
+  // remote branch tip itself. Containment let a worktree ship an RC carrying
+  // commits that were never on the branch it claims as its promotion base, so
+  // the recorded Source-Branch and the artifact could disagree.
+  if (branchSha !== head) {
+    throw new Error(
+      `${branchName} tip (${branchSha}) is not HEAD (${head}). A release-branch RC must build the branch tip exactly. ` +
+        `Push backports to ${branchName} first, then check this worktree out at that commit ` +
+        `(git fetch origin ${branchName} && git checkout --detach FETCH_HEAD).`
     );
   }
   const tags = await mustRun(input.runner, "git", ["ls-remote", "--tags", "origin", `v${series.major}.${series.minor}.*`], input.repoRoot, input.env);
-  return { baseVersion: nextSeriesPatchVersion(tags, series), sourceBranch: branchName };
+  return { baseVersion: nextSeriesPatchVersion(tags, series), sourceBranch: branchName, commit: head };
 }
 
 const SOURCE_BRANCH_TRAILER = "Source-Branch:";
@@ -335,6 +379,235 @@ function parseTargetCommitish(raw: string): string {
     // Fall through to the shared error below for unparseable gh output.
   }
   throw new Error(`Could not read targetCommitish from gh release view output: ${raw}`);
+}
+
+function parsePublishedAt(raw: string): string | null {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== "object" || parsed === null) return null;
+    const record = parsed as { publishedAt?: unknown; createdAt?: unknown };
+    if (typeof record.publishedAt === "string" && record.publishedAt.trim().length > 0) return record.publishedAt.trim();
+    if (typeof record.createdAt === "string" && record.createdAt.trim().length > 0) return record.createdAt.trim();
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function readStagingChannelBody(context: ReleaseCommandContext, repoSlug: string): Promise<string> {
+  const view = await context.runner.run(
+    "gh",
+    ["release", "view", STAGING_CHANNEL_TAG, "--repo", repoSlug, "--json", "body"],
+    { cwd: context.repoRoot, env: context.env }
+  );
+  if (view.exitCode !== 0) return "";
+  try {
+    const parsed = JSON.parse(view.stdout) as unknown;
+    const body = typeof parsed === "object" && parsed !== null ? (parsed as { body?: unknown }).body : undefined;
+    return typeof body === "string" ? body : "";
+  } catch {
+    return "";
+  }
+}
+
+async function readLineageReset(context: ReleaseCommandContext, repoSlug: string): Promise<LineageResetRecord | null> {
+  return parseLineageResetRecord(await readStagingChannelBody(context, repoSlug));
+}
+
+interface CandidateLookup {
+  candidate: StagingCandidate | null;
+  error: string | null;
+}
+
+async function readStagingCandidate(
+  context: ReleaseCommandContext,
+  repoSlug: string,
+  version: string
+): Promise<CandidateLookup> {
+  const tag = stagingTag(version);
+  const view = await context.runner.run(
+    "gh",
+    ["release", "view", tag, "--repo", repoSlug, "--json", "targetCommitish,body,publishedAt"],
+    { cwd: context.repoRoot, env: context.env }
+  );
+  if (view.exitCode !== 0) {
+    return {
+      candidate: { version, tag, commit: null, sourceBranch: null, publishedAt: null },
+      error: `prerelease ${tag} could not be read from GitHub`
+    };
+  }
+  let commit: string | null = null;
+  try {
+    commit = parseTargetCommitish(view.stdout);
+  } catch {
+    commit = null;
+  }
+  return {
+    candidate: {
+      version,
+      tag,
+      commit,
+      sourceBranch: parseSourceBranch(view.stdout),
+      publishedAt: parsePublishedAt(view.stdout)
+    },
+    error: commit ? null : `prerelease ${tag} records no target commit`
+  };
+}
+
+/**
+ * The candidate `desktop-staging` currently serves. A channel with no manifest
+ * at all is an uninitialized channel, not an error: the first publish creates
+ * it. A manifest that names a candidate whose metadata cannot be read is an
+ * error, because moving the pointer would then be unverifiable.
+ */
+async function resolveActiveStagingCandidate(
+  context: ReleaseCommandContext,
+  repoSlug: string
+): Promise<CandidateLookup> {
+  const active = await readActiveStagingVersion(context, repoSlug);
+  if (!active.version) return { candidate: null, error: null };
+  return readStagingCandidate(context, repoSlug, active.version);
+}
+
+async function commitRelationship(
+  context: ReleaseCommandContext,
+  base: string | null,
+  candidate: string | null
+): Promise<StagingLineageRelationship> {
+  if (!base || !candidate) return "unknown";
+  if (base === candidate) return "same-commit";
+  const forward = await context.runner.run("git", ["merge-base", "--is-ancestor", base, candidate], {
+    cwd: context.repoRoot,
+    env: context.env
+  });
+  if (forward.exitCode === 0) return "descendant";
+  // git exits 1 for "not an ancestor" and something else (128) when a commit is
+  // missing locally; only the former is a real answer.
+  if (forward.exitCode !== 1) return "unknown";
+  const backward = await context.runner.run("git", ["merge-base", "--is-ancestor", candidate, base], {
+    cwd: context.repoRoot,
+    env: context.env
+  });
+  if (backward.exitCode === 0) return "behind";
+  if (backward.exitCode !== 1) return "unknown";
+  return "diverged";
+}
+
+async function fetchStagingHistory(context: ReleaseCommandContext): Promise<void> {
+  // Best effort: lineage comparison needs the RC commits locally, and every RC
+  // is tagged. A failure here degrades a relationship to "unknown", which the
+  // gates already treat as a refusal rather than a pass.
+  await context.runner.run("git", ["fetch", "--tags", "origin"], { cwd: context.repoRoot, env: context.env });
+}
+
+async function productionTagExists(context: ReleaseCommandContext, productionVersion: string): Promise<boolean> {
+  const result = await context.runner.run("git", ["ls-remote", "--tags", "origin", `v${productionVersion}`], {
+    cwd: context.repoRoot,
+    env: context.env
+  });
+  if (result.exitCode !== 0) return false;
+  return result.stdout.trim().length > 0;
+}
+
+/**
+ * Whether the production release a staging candidate is a candidate *for*
+ * already exists. A malformed channel version has no production line to check,
+ * and is reported as unpromoted so the freeze rule stays conservative.
+ */
+async function activeProductionTagExists(context: ReleaseCommandContext, stagingVersion: string): Promise<boolean> {
+  const match = /^(\d+\.\d+\.\d+)-staging\.\d+$/.exec(stagingVersion.trim().replace(/^v/, ""));
+  const productionVersion = match?.[1];
+  if (!productionVersion) return false;
+  return productionTagExists(context, productionVersion);
+}
+
+async function listStagingCandidateTags(context: ReleaseCommandContext, repoSlug: string): Promise<string[]> {
+  const list = await context.runner.run(
+    "gh",
+    ["release", "list", "--repo", repoSlug, "--limit", "100", "--json", "tagName,createdAt"],
+    { cwd: context.repoRoot, env: context.env }
+  );
+  if (list.exitCode !== 0) return [];
+  return parseStagingReleaseList(list.stdout).sort(compareStagingReleasesDesc).map((release) => release.tag);
+}
+
+/**
+ * The candidate published immediately before `tag` on the same channel. This is
+ * what makes a divergence visible: the incident's v0.1.0-staging.8 was
+ * mechanically aligned to its branch while sharing only an ancient merge base
+ * with v0.1.0-staging.7.
+ */
+async function resolvePreviousCandidate(
+  context: ReleaseCommandContext,
+  repoSlug: string,
+  tag: string
+): Promise<{ previous: StagingCandidate | null; found: boolean }> {
+  const tags = await listStagingCandidateTags(context, repoSlug);
+  const index = tags.indexOf(tag);
+  if (index < 0) return { previous: null, found: false };
+  const previousTag = tags[index + 1];
+  if (!previousTag) return { previous: null, found: true };
+  const lookup = await readStagingCandidate(context, repoSlug, previousTag.replace(/^v/, ""));
+  return { previous: lookup.candidate, found: true };
+}
+
+async function resolveCandidateLineage(
+  context: ReleaseCommandContext,
+  repoSlug: string,
+  candidate: StagingCandidate,
+  reset: LineageResetRecord | null
+): Promise<CandidateLineage> {
+  const { previous, found } = await resolvePreviousCandidate(context, repoSlug, candidate.tag);
+  if (!found) {
+    return {
+      relationship: "unknown",
+      previous: null,
+      valid: false,
+      authorizedByReset: false,
+      reset,
+      detail: `${candidate.tag} is not listed among this repository's staging prereleases, so its lineage cannot be established.`
+    };
+  }
+  if (!previous) {
+    return evaluateCandidateLineage({ candidate, previous: null, relationship: "initial", reset });
+  }
+  const relationship = await commitRelationship(context, previous.commit, candidate.commit);
+  return evaluateCandidateLineage({
+    candidate,
+    previous: { version: previous.version, tag: previous.tag, commit: previous.commit },
+    relationship,
+    reset
+  });
+}
+
+/**
+ * Refuses a staging publish that would move the channel non-linearly, freeze an
+ * active release soak, or ship against unverifiable channel metadata. Runs
+ * before any build so a refusal costs seconds, not a signed build.
+ */
+async function assertStagingPublishAllowed(
+  input: ReleaseShipInput,
+  proposed: { sourceBranch: string; commit: string }
+): Promise<void> {
+  const remoteUrl = await mustRun(input.runner, "git", ["remote", "get-url", "origin"], input.repoRoot, input.env);
+  const repoSlug = releaseRepoSlug(remoteUrl);
+  const active = await resolveActiveStagingCandidate(input, repoSlug);
+  if (!active.candidate) return;
+
+  await fetchStagingHistory(input);
+  const relationship = await commitRelationship(input, active.candidate.commit, proposed.commit);
+  const decision = evaluateStagingPublishGate({
+    proposedSourceBranch: proposed.sourceBranch,
+    proposedCommit: proposed.commit,
+    active: active.candidate,
+    relationship,
+    activeProductionTagExists: await activeProductionTagExists(input, active.candidate.version),
+    activeMetadataError: active.error,
+    reset: await readLineageReset(input, repoSlug)
+  });
+  if (!decision.allowed) {
+    throw new Error(decision.reason ?? `Refusing to repoint ${STAGING_CHANNEL_TAG}.`);
+  }
 }
 
 interface ResolvedPromotion {
@@ -393,10 +666,10 @@ export function decidePromotionBase(args: {
 }
 
 async function resolvePromotion(input: ReleaseShipInput, promoteFrom: string): Promise<ResolvedPromotion> {
-  const { stagingTag, productionVersion } = parsePromotionVersions(promoteFrom);
+  const { stagingVersion, stagingTag, productionVersion } = parsePromotionVersions(promoteFrom);
   const remoteUrl = await mustRun(input.runner, "git", ["remote", "get-url", "origin"], input.repoRoot, input.env);
   const repoSlug = releaseRepoSlug(remoteUrl);
-  const view = await input.runner.run("gh", ["release", "view", stagingTag, "--repo", repoSlug, "--json", "targetCommitish,body"], {
+  const view = await input.runner.run("gh", ["release", "view", stagingTag, "--repo", repoSlug, "--json", "targetCommitish,body,publishedAt"], {
     cwd: input.repoRoot,
     env: input.env
   });
@@ -405,6 +678,7 @@ async function resolvePromotion(input: ReleaseShipInput, promoteFrom: string): P
   }
   const commit = parseTargetCommitish(view.stdout);
   const sourceBranch = parseSourceBranch(view.stdout);
+  const publishedAt = parsePublishedAt(view.stdout);
 
   const existingTags = await mustRun(input.runner, "git", ["ls-remote", "--tags", "origin", `v${productionVersion}`], input.repoRoot, input.env);
   if (existingTags.trim().length > 0) {
@@ -429,6 +703,39 @@ async function resolvePromotion(input: ReleaseShipInput, promoteFrom: string): P
   }
 
   const decision = decidePromotionBase({ rcLabel: stagingTag, seriesBranch, branchSha, sourceBranch, commit, originMain });
+
+  // Mechanical alignment is only one of the gates. Lineage validity and the
+  // soak window are evaluated here — the same code `kd release status` reports
+  // from — so a dry-run rehearsal, a status check, and the real promotion can
+  // never disagree about whether a candidate may ship.
+  await fetchStagingHistory(input);
+  const reset = await readLineageReset(input, repoSlug);
+  const lineage = await resolveCandidateLineage(
+    input,
+    repoSlug,
+    { version: stagingVersion, tag: stagingTag, commit, sourceBranch, publishedAt },
+    reset
+  );
+  const soak = evaluateSoak({
+    requiredHours: readReleasePolicy(input.repoRoot).productionSoakHours,
+    publishedAt,
+    nowMs: input.now ?? Date.now(),
+    overrideReason: input.soakOverrideReason ?? null
+  });
+  const abandonedRecord = await readAbandonedSeries(input, seriesBranch);
+  const gate = evaluatePromotionGate({
+    rcTag: stagingTag,
+    rcVersion: stagingVersion,
+    mechanical: { pushBranch: decision.pushBranch, reason: decision.reason },
+    lineage,
+    soak,
+    abandonedSeries: abandonedRecord ? { branch: seriesBranch, ...abandonedRecord } : null
+  });
+  if (!gate.allowed) {
+    throw new Error(`Cannot promote ${stagingTag}:\n- ${gate.blockers.join("\n- ")}`);
+  }
+  // A passing gate already implies a resolved base; this narrows the type and
+  // keeps the promotion from proceeding if the two ever disagree.
   if (!decision.pushBranch) {
     throw new Error(decision.reason ?? `Cannot promote ${stagingTag}.`);
   }
@@ -680,6 +987,10 @@ export async function shipRelease(input: ReleaseShipInput): Promise<ReleaseShipR
   } else if (environment === "staging") {
     const stagingContext = await resolveStagingContext(input);
     stagingSourceBranch = stagingContext.sourceBranch;
+    await assertStagingPublishAllowed(input, {
+      sourceBranch: stagingContext.sourceBranch,
+      commit: stagingContext.commit
+    });
     version = await resolveNextStagingVersion(input, stagingContext.baseVersion);
   } else {
     const sourceVersion = readCurrentVersion(input.repoRoot);
@@ -782,45 +1093,477 @@ export async function shipRelease(input: ReleaseShipInput): Promise<ReleaseShipR
 export interface ReleaseCutInput {
   repoRoot: string;
   bump: ReleaseBump;
+  /**
+   * Explicit target series version `X.Y.0`. Overrides bump inference, which
+   * cannot express "skip the series we are abandoning" — the only way to reach
+   * 0.2 from a trunk still recording 0.0.68 without first releasing 0.1.
+   */
+  version?: string;
+  /** Series (`X.Y`) this cut deliberately skips over. Never inferred. */
+  abandonSeries?: string[];
+  /** Why those series are being abandoned. Required whenever any is named. */
+  reason?: string;
+  now?: number;
   env: NodeJS.ProcessEnv;
   runner: CommandRunner;
+}
+
+export interface AbandonedSeries {
+  series: string;
+  branch: string;
+  commit: string;
+  tag: string;
+  reason: string;
+  abandonedAt: string;
+  /** True when the series already carried an abandonment tag before this cut. */
+  alreadyAbandoned: boolean;
 }
 
 export interface ReleaseCutResult {
   branch: string;
   version: string;
   commit: string;
+  /** The `VERSION` recorded at `origin/main` when the branch was cut. */
+  trunkVersion: string;
+  abandoned: AbandonedSeries[];
 }
 
+export function abandonedSeriesTag(branch: string): string {
+  return `abandoned/${branch}`;
+}
+
+export function compareVersions(left: string, right: string): number {
+  const parse = (value: string): number[] =>
+    value
+      .trim()
+      .replace(/^v/, "")
+      .split(/[.-]/)
+      .slice(0, 3)
+      .map((part) => Number.parseInt(part, 10));
+  const a = parse(left);
+  const b = parse(right);
+  for (let index = 0; index < 3; index += 1) {
+    const leftPart = a[index] ?? 0;
+    const rightPart = b[index] ?? 0;
+    if (Number.isNaN(leftPart) || Number.isNaN(rightPart)) {
+      throw new Error(`Cannot compare versions ${left} and ${right}.`);
+    }
+    if (leftPart !== rightPart) return leftPart < rightPart ? -1 : 1;
+  }
+  return 0;
+}
+
+function seriesOrdinal(series: ReleaseSeries): number {
+  return series.major * 1_000_000 + series.minor;
+}
+
+export interface RemoteReleaseBranch {
+  branch: string;
+  series: ReleaseSeries;
+  commit: string;
+}
+
+export function parseRemoteReleaseBranches(lsRemoteOutput: string): RemoteReleaseBranch[] {
+  const branches: RemoteReleaseBranch[] = [];
+  for (const line of lsRemoteOutput.split(/\r?\n/)) {
+    const [commit, ref] = line.trim().split(/\s+/);
+    if (!commit || !ref) continue;
+    const branch = ref.replace(/^refs\/heads\//, "");
+    const series = parseReleaseBranchSeries(branch);
+    if (!series) continue;
+    branches.push({ branch, series, commit });
+  }
+  return branches;
+}
+
+export interface AbandonedSeriesRecord {
+  abandonedAt: string | null;
+  reason: string | null;
+}
+
+export function formatAbandonedSeriesMessage(args: { branch: string; abandonedAt: string; reason: string }): string {
+  return `Abandoned ${args.branch} at ${args.abandonedAt}\n\nReason: ${args.reason}\n`;
+}
+
+export function parseAbandonedSeriesMessage(message: string): AbandonedSeriesRecord {
+  const at = /^Abandoned\s+\S+\s+at\s+(\S+)\s*$/m.exec(message);
+  const reason = /^Reason:[ \t]*(.+?)[ \t]*$/m.exec(message);
+  return { abandonedAt: at?.[1] ?? null, reason: reason?.[1] ?? null };
+}
+
+async function remoteTagExists(context: ReleaseCommandContext, tag: string): Promise<boolean> {
+  const result = await context.runner.run("git", ["ls-remote", "--tags", "origin", `refs/tags/${tag}`], {
+    cwd: context.repoRoot,
+    env: context.env
+  });
+  return result.exitCode === 0 && result.stdout.trim().length > 0;
+}
+
+/**
+ * Whether a release series has been deliberately abandoned. Recorded as an
+ * annotated `abandoned/release/X.Y` tag rather than by deleting the branch: the
+ * branch and its history stay readable, the record carries who/when/why, and
+ * both `ship` and `promote` can refuse the series without special-casing.
+ */
+export async function readAbandonedSeries(
+  context: ReleaseCommandContext,
+  branch: string
+): Promise<AbandonedSeriesRecord | null> {
+  const tag = abandonedSeriesTag(branch);
+  if (!(await remoteTagExists(context, tag))) return null;
+  await context.runner.run("git", ["fetch", "origin", `+refs/tags/${tag}:refs/tags/${tag}`], {
+    cwd: context.repoRoot,
+    env: context.env
+  });
+  const contents = await context.runner.run("git", ["for-each-ref", "--format=%(contents)", `refs/tags/${tag}`], {
+    cwd: context.repoRoot,
+    env: context.env
+  });
+  if (contents.exitCode !== 0) return { abandonedAt: null, reason: null };
+  return parseAbandonedSeriesMessage(contents.stdout);
+}
+
+/**
+ * Cuts the next stabilization branch.
+ *
+ * Bump inference reads `origin/main:VERSION`, which only advances when a
+ * production release commits it. That is correct while releases land in order,
+ * but it cannot express a series transition that skips an abandoned series: with
+ * trunk at 0.0.68 and `release/0.1` already cut, `--minor` can only aim back at
+ * the series being abandoned. `--version X.Y.0` names the intended series
+ * directly, and every series it steps over must be named and reasoned for — so
+ * skipping a version is always a decision someone wrote down, never a side
+ * effect of a flag.
+ */
 export async function cutReleaseBranch(input: ReleaseCutInput): Promise<ReleaseCutResult> {
   await mustRun(input.runner, "git", ["fetch", "origin", "main"], input.repoRoot, input.env);
   const commit = await mustRun(input.runner, "git", ["rev-parse", "origin/main"], input.repoRoot, input.env);
   // The caller's worktree can be stale (Kanna task worktrees fork from older
   // commits), so the series must come from the same commit the branch will
   // point at — origin/main — not from the local VERSION file.
-  const sourceVersion = await mustRun(input.runner, "git", ["show", "origin/main:VERSION"], input.repoRoot, input.env);
-  const targetVersion = bumpVersion(sourceVersion.trim(), input.bump);
-  const branch = releaseSeriesBranch(releaseSeriesFromVersion(targetVersion));
-  const existing = await mustRun(input.runner, "git", ["ls-remote", "origin", `refs/heads/${branch}`], input.repoRoot, input.env);
-  if (existing.trim().length > 0) {
-    throw new Error(`${branch} already exists on origin. Ship RCs from it, or cut the next series with a different bump.`);
+  const trunkVersion = (await mustRun(input.runner, "git", ["show", "origin/main:VERSION"], input.repoRoot, input.env)).trim();
+
+  const requested = input.version?.trim();
+  let targetVersion: string;
+  if (requested) {
+    const normalized = requested.replace(/^v/, "");
+    if (!/^\d+\.\d+\.0$/.test(normalized)) {
+      throw new Error(
+        `Invalid --version ${requested}. A series cut starts at patch 0, e.g. --version 0.2.0.`
+      );
+    }
+    if (compareVersions(normalized, trunkVersion) <= 0) {
+      throw new Error(
+        `--version ${normalized} is not ahead of origin/main's VERSION (${trunkVersion}). ` +
+          "A release series must be cut ahead of trunk's recorded version."
+      );
+    }
+    targetVersion = normalized;
+  } else {
+    targetVersion = bumpVersion(trunkVersion, input.bump);
   }
+
+  const targetSeries = releaseSeriesFromVersion(targetVersion);
+  const branch = releaseSeriesBranch(targetSeries);
+  const remoteBranches = parseRemoteReleaseBranches(
+    await mustRun(input.runner, "git", ["ls-remote", "--heads", "origin", "refs/heads/release/*"], input.repoRoot, input.env)
+  );
+  if (remoteBranches.some((candidate) => candidate.branch === branch)) {
+    throw new Error(
+      `${branch} already exists on origin. Ship RCs from it, or name the intended next series explicitly ` +
+        `(kd release cut --version X.Y.0), abandoning any series it steps over.`
+    );
+  }
+
+  const trunkOrdinal = seriesOrdinal(releaseSeriesFromVersion(trunkVersion));
+  const targetOrdinal = seriesOrdinal(targetSeries);
+  const steppedOver = remoteBranches.filter((candidate) => {
+    const ordinal = seriesOrdinal(candidate.series);
+    return ordinal > trunkOrdinal && ordinal < targetOrdinal;
+  });
+
+  const named = new Set((input.abandonSeries ?? []).map((series) => series.trim()).filter(Boolean));
+  const reason = input.reason?.trim() ?? "";
+  const abandonedAt = new Date(input.now ?? Date.now()).toISOString();
+
+  const pending: Array<{ candidate: RemoteReleaseBranch; existing: AbandonedSeriesRecord | null }> = [];
+  const unnamed: string[] = [];
+  for (const candidate of steppedOver) {
+    const seriesLabel = `${candidate.series.major}.${candidate.series.minor}`;
+    const releasedTags = await mustRun(
+      input.runner,
+      "git",
+      ["ls-remote", "--tags", "origin", `v${seriesLabel}.*`],
+      input.repoRoot,
+      input.env
+    );
+    // A series that already shipped is history, not something to abandon.
+    if (releasedTags.trim().length > 0) continue;
+    const existing = await readAbandonedSeries(input, candidate.branch);
+    if (existing) {
+      pending.push({ candidate, existing });
+      continue;
+    }
+    if (!named.has(seriesLabel)) {
+      unnamed.push(seriesLabel);
+      continue;
+    }
+    pending.push({ candidate, existing: null });
+  }
+
+  if (unnamed.length > 0) {
+    throw new Error(
+      `Cutting ${branch} steps over unreleased release ${unnamed.length === 1 ? "series" : "series'"} ` +
+        `${unnamed.join(", ")}, which ${unnamed.length === 1 ? "is" : "are"} neither released nor abandoned. ` +
+        `Name ${unnamed.length === 1 ? "it" : "them"} explicitly to record the decision: ` +
+        `kd release cut --version ${targetVersion} --abandon-series ${unnamed.join(",")} --reason "<why>". ` +
+        "The branch is kept and never deleted; abandoning only records that no production release will come from it."
+    );
+  }
+
+  const abandoning = pending.filter((entry) => !entry.existing);
+  const unknownNamed = [...named].filter(
+    (series) => !steppedOver.some((candidate) => `${candidate.series.major}.${candidate.series.minor}` === series)
+  );
+  if (unknownNamed.length > 0) {
+    throw new Error(
+      `--abandon-series ${unknownNamed.join(", ")} does not name a release branch this cut steps over. ` +
+        `Cutting ${branch} from a trunk at ${trunkVersion} steps over ` +
+        `${steppedOver.length > 0 ? steppedOver.map((candidate) => candidate.branch).join(", ") : "no release branches"}.`
+    );
+  }
+  if (abandoning.length > 0 && !reason) {
+    throw new Error("Abandoning a release series requires --reason \"<why no production release will come from it>\".");
+  }
+
+  // The staging channel is still serving the abandoned series' candidate until
+  // someone says otherwise. Abandoning the series without releasing the channel
+  // would leave the next publish refused by the lineage gate with no
+  // explanation, so require the reset first rather than doing it implicitly.
+  if (abandoning.length > 0) {
+    const remoteUrl = await mustRun(input.runner, "git", ["remote", "get-url", "origin"], input.repoRoot, input.env);
+    const repoSlug = releaseRepoSlug(remoteUrl);
+    const active = await resolveActiveStagingCandidate(input, repoSlug);
+    const activeBranch = active.candidate?.sourceBranch ?? null;
+    if (active.candidate && abandoning.some((entry) => entry.candidate.branch === activeBranch)) {
+      const reset = await readLineageReset(input, repoSlug);
+      if (!reset || normalizeStagingVersion(reset.fromVersion) !== normalizeStagingVersion(active.candidate.version)) {
+        throw new Error(
+          `${STAGING_CHANNEL_TAG} still serves ${active.candidate.tag} from ${activeBranch}, the series being abandoned. ` +
+            "Release the channel first so the next publish is not silently refused: " +
+            `kd release reset-staging --to ${branch} --reason "<why>" --confirm-abandon ${active.candidate.version}.`
+        );
+      }
+    }
+  }
+
+  // Abandonments are recorded before the skip becomes real: a cut that fails
+  // after this point leaves an audited, idempotent record and no missing one.
+  for (const entry of abandoning) {
+    const tag = abandonedSeriesTag(entry.candidate.branch);
+    await mustRun(input.runner, "git", ["fetch", "origin", entry.candidate.branch], input.repoRoot, input.env);
+    await mustRun(
+      input.runner,
+      "git",
+      [
+        "tag",
+        "-f",
+        "-a",
+        tag,
+        entry.candidate.commit,
+        "-m",
+        formatAbandonedSeriesMessage({ branch: entry.candidate.branch, abandonedAt, reason })
+      ],
+      input.repoRoot,
+      input.env
+    );
+    await mustRun(input.runner, "git", ["push", "origin", `refs/tags/${tag}`], input.repoRoot, input.env);
+  }
+
   await mustRun(input.runner, "git", ["push", "origin", `${commit}:refs/heads/${branch}`], input.repoRoot, input.env);
-  return { branch, version: targetVersion, commit };
+  return {
+    branch,
+    version: targetVersion,
+    commit,
+    trunkVersion,
+    abandoned: pending.map((entry) => ({
+      series: `${entry.candidate.series.major}.${entry.candidate.series.minor}`,
+      branch: entry.candidate.branch,
+      commit: entry.candidate.commit,
+      tag: abandonedSeriesTag(entry.candidate.branch),
+      reason: entry.existing?.reason ?? reason,
+      abandonedAt: entry.existing?.abandonedAt ?? abandonedAt,
+      alreadyAbandoned: entry.existing !== null
+    }))
+  };
+}
+
+export interface ReleaseResetStagingInput {
+  repoRoot: string;
+  /** Branch the channel is being handed to: `main` or `release/X.Y`. */
+  toBranch: string;
+  reason: string;
+  /** Must name the exact staging version being abandoned. */
+  confirmAbandon: string;
+  dryRun: boolean;
+  now?: number;
+  env: NodeJS.ProcessEnv;
+  runner: CommandRunner;
+}
+
+export interface ReleaseResetStagingResult {
+  from: { version: string; tag: string; commit: string | null; sourceBranch: string | null };
+  to: { branch: string };
+  reason: string;
+  resetAt: string;
+  applied: boolean;
+}
+
+/**
+ * The one deliberate, non-linear staging transition.
+ *
+ * Ordinary ships only ever move the channel forward. Some transitions are
+ * legitimately non-linear — abandoning a stale release soak, handing the
+ * channel to an older series for a hotfix — and the answer to those is not a
+ * weaker ship guard but a separate, loudly named operation that records what
+ * was abandoned and why. It builds nothing, publishes nothing, and does not
+ * repoint the manifest: staging users keep running the candidate they have
+ * until the next publish. It authorizes exactly the next publish that leaves
+ * this candidate for the named branch, so it cannot silently license a second
+ * divergence later.
+ */
+export async function resetStagingLineage(input: ReleaseResetStagingInput): Promise<ReleaseResetStagingResult> {
+  const toBranch = input.toBranch.trim();
+  if (toBranch !== "main" && !parseReleaseBranchSeries(toBranch)) {
+    throw new Error(`Invalid --to ${input.toBranch || "(empty)"}. Expected main or release/X.Y.`);
+  }
+  const reason = input.reason.trim();
+  if (!reason) {
+    throw new Error("release reset-staging requires --reason \"<why this lineage is being abandoned>\".");
+  }
+  const confirm = input.confirmAbandon.trim().replace(/^v/, "");
+  if (!confirm) {
+    throw new Error(
+      "release reset-staging requires --confirm-abandon <active-staging-version>. Run kd release status to read it."
+    );
+  }
+
+  const remoteUrl = await mustRun(input.runner, "git", ["remote", "get-url", "origin"], input.repoRoot, input.env);
+  const repoSlug = releaseRepoSlug(remoteUrl);
+  const active = await resolveActiveStagingCandidate(input, repoSlug);
+  if (!active.candidate) {
+    throw new Error(
+      `${STAGING_CHANNEL_TAG} has no active staging candidate, so there is no lineage to abandon. Ship a staging RC instead.`
+    );
+  }
+  if (confirm !== active.candidate.version) {
+    throw new Error(
+      `--confirm-abandon ${confirm} does not match the active staging candidate ${active.candidate.version}. ` +
+        "Run kd release status and pass the exact active version to confirm what is being abandoned."
+    );
+  }
+
+  const record: LineageResetRecord = {
+    resetAt: new Date(input.now ?? Date.now()).toISOString(),
+    fromVersion: active.candidate.version,
+    fromCommit: active.candidate.commit,
+    fromSourceBranch: active.candidate.sourceBranch,
+    toBranch,
+    reason
+  };
+
+  if (!input.dryRun) {
+    await ensureStagingGithubRelease(input, repoSlug);
+    const body = composeStagingChannelBody(await readStagingChannelBody(input, repoSlug), record);
+    await mustRun(
+      input.runner,
+      "gh",
+      ["release", "edit", STAGING_CHANNEL_TAG, "--repo", repoSlug, "--notes", body],
+      input.repoRoot,
+      input.env
+    );
+  }
+
+  return {
+    from: {
+      version: active.candidate.version,
+      tag: active.candidate.tag,
+      commit: active.candidate.commit,
+      sourceBranch: active.candidate.sourceBranch
+    },
+    to: { branch: toBranch },
+    reason,
+    resetAt: record.resetAt,
+    applied: !input.dryRun
+  };
 }
 
 export interface ReleaseStatusInput {
   repoRoot: string;
   env: NodeJS.ProcessEnv;
   runner: CommandRunner;
+  /** Fixed clock for soak arithmetic; defaults to `Date.now()`. */
+  now?: number;
+}
+
+export interface ReleaseBranchCommit {
+  sha: string;
+  subject: string;
+}
+
+export interface ReleaseStatusStaging {
+  version: string;
+  tag: string;
+  commit: string | null;
+  sourceBranch: string | null;
+  commitsBehindMain: number | null;
+  publishedAt: string | null;
+  ageHours: number | null;
+}
+
+export interface ReleaseStatusReleaseBranch {
+  name: string;
+  commit: string;
+  /** Set when the series was deliberately abandoned instead of released. */
+  abandoned: AbandonedSeriesRecord | null;
+  /**
+   * Commits on the release branch with no patch-equivalent on main. This is
+   * provable ancestry/patch-id provenance — un-backported release-only work —
+   * not a semantic claim that the branch carries only bugfixes.
+   */
+  unmergedCommits: ReleaseBranchCommit[] | null;
+  unmergedCommitCount: number | null;
+}
+
+export interface ReleaseStatusLineage {
+  relationship: StagingLineageRelationship;
+  previous: { version: string; tag: string; commit: string | null } | null;
+  valid: boolean;
+  authorizedByReset: boolean;
+  reset: LineageResetRecord | null;
+  detail: string;
+}
+
+export interface ReleaseStatusPromotion {
+  /** True when the RC commit still matches its promotion branch tip. Alignment only. */
+  mechanicallyPromotable: boolean;
+  base: string | null;
+  mechanicalReason: string | null;
+  soak: SoakEvaluation;
+  /** True only when mechanical alignment, lineage validity, and the soak gate all hold. */
+  allowed: boolean;
+  blockers: string[];
 }
 
 export interface ReleaseStatusResult {
   production: { version: string; tag: string; publishedAt: string } | null;
-  staging: { version: string; tag: string; commit: string | null; sourceBranch: string | null; commitsBehindMain: number | null } | null;
-  releaseBranch: { name: string; commit: string } | null;
+  staging: ReleaseStatusStaging | null;
+  releaseBranch: ReleaseStatusReleaseBranch | null;
   commitsOnMainSinceProduction: number | null;
-  promotable: boolean;
+  policy: ReleasePolicy;
+  lineage: ReleaseStatusLineage | null;
+  freeze: { active: boolean; branch: string | null; reason: string | null };
+  promotion: ReleaseStatusPromotion;
   promoteCommand: string | null;
 }
 
@@ -848,7 +1591,7 @@ function parseManifestVersion(raw: string): string | null {
 }
 
 async function readActiveStagingVersion(
-  input: ReleaseStatusInput,
+  input: ReleaseCommandContext,
   repoSlug: string
 ): Promise<{ version: string | null; error: string | null }> {
   const manifestDir = mkdtempSync(join(tmpdir(), "kanna-release-status-"));
@@ -918,14 +1661,62 @@ export async function resolveActiveStagingMarketingVersion(
   return stagingMarketingVersion(active.version);
 }
 
-async function countCommits(input: ReleaseStatusInput, range: string): Promise<number | null> {
+async function countCommits(input: ReleaseCommandContext, range: string): Promise<number | null> {
   const result = await input.runner.run("git", ["rev-list", "--count", range], { cwd: input.repoRoot, env: input.env });
   if (result.exitCode !== 0) return null;
   const count = Number.parseInt(result.stdout.trim(), 10);
   return Number.isNaN(count) ? null : count;
 }
 
+const UNMERGED_COMMIT_REPORT_LIMIT = 20;
+
+function roundHours(hours: number): number {
+  return Math.round(Math.max(0, hours) * 100) / 100;
+}
+
+export function parseUnmergedReleaseCommits(logOutput: string): ReleaseBranchCommit[] {
+  const commits: ReleaseBranchCommit[] = [];
+  for (const line of logOutput.split(/\r?\n/)) {
+    const match = /^([0-9a-f]{7,40})(?:\s+(.*))?$/.exec(line.trim());
+    if (!match?.[1]) continue;
+    commits.push({ sha: match[1], subject: (match[2] ?? "").trim() });
+  }
+  return commits;
+}
+
+/**
+ * Release-branch hygiene kd can actually prove: commits on the branch with no
+ * patch-equivalent on main. `--cherry-pick` compares by patch id, so a fix
+ * cherry-picked onto the branch from main does not show up, while a fix that
+ * only ever landed on the branch does — that is the regression the "fix on main
+ * first, then backport" rule exists to prevent. Merges are excluded: a merge
+ * carries no patch of its own, so it can be neither backported nor missing.
+ * This says nothing about whether the remaining commits are bugfixes; only a
+ * human review can claim that.
+ */
+async function resolveUnmergedReleaseCommits(
+  input: ReleaseCommandContext,
+  branchName: string
+): Promise<{ commits: ReleaseBranchCommit[] | null; count: number | null }> {
+  const fetched = await input.runner.run(
+    "git",
+    ["fetch", "origin", `+refs/heads/${branchName}:refs/remotes/origin/${branchName}`],
+    { cwd: input.repoRoot, env: input.env }
+  );
+  if (fetched.exitCode !== 0) return { commits: null, count: null };
+  const log = await input.runner.run(
+    "git",
+    ["log", "--no-merges", "--cherry-pick", "--right-only", "--format=%H %s", `origin/main...origin/${branchName}`],
+    { cwd: input.repoRoot, env: input.env }
+  );
+  if (log.exitCode !== 0) return { commits: null, count: null };
+  const commits = parseUnmergedReleaseCommits(log.stdout);
+  return { commits: commits.slice(0, UNMERGED_COMMIT_REPORT_LIMIT), count: commits.length };
+}
+
 export async function releaseStatus(input: ReleaseStatusInput): Promise<ReleaseStatusResult> {
+  const nowMs = input.now ?? Date.now();
+  const policy = readReleasePolicy(input.repoRoot);
   const remoteUrl = await mustRun(input.runner, "git", ["remote", "get-url", "origin"], input.repoRoot, input.env);
   const repoSlug = releaseRepoSlug(remoteUrl);
   await mustRun(input.runner, "git", ["fetch", "--tags", "origin", "main"], input.repoRoot, input.env);
@@ -943,39 +1734,29 @@ export async function releaseStatus(input: ReleaseStatusInput): Promise<ReleaseS
     }
   }
 
-  let staging: ReleaseStatusResult["staging"] = null;
+  let staging: ReleaseStatusStaging | null = null;
+  let activeCandidate: StagingCandidate | null = null;
   const activeStaging = await readActiveStagingVersion(input, repoSlug);
   const version = activeStaging.version;
   if (version) {
-    const tag = stagingTag(version);
-    let commit: string | null = null;
-    let sourceBranch: string | null = null;
-    const stagingView = await input.runner.run(
-      "gh",
-      ["release", "view", tag, "--repo", repoSlug, "--json", "targetCommitish,body"],
-      {
-        cwd: input.repoRoot,
-        env: input.env
-      }
-    );
-    if (stagingView.exitCode === 0) {
-      try {
-        commit = parseTargetCommitish(stagingView.stdout);
-      } catch {
-        commit = null;
-      }
-      sourceBranch = parseSourceBranch(stagingView.stdout);
-    }
+    const lookup = await readStagingCandidate(input, repoSlug, version);
+    activeCandidate = lookup.candidate;
+    const publishedAt = activeCandidate?.publishedAt ?? null;
+    const publishedMs = publishedAt ? Date.parse(publishedAt) : Number.NaN;
     staging = {
       version,
-      tag,
-      commit,
-      sourceBranch,
-      commitsBehindMain: commit ? await countCommits(input, `${commit}..origin/main`) : null
+      tag: stagingTag(version),
+      commit: activeCandidate?.commit ?? null,
+      sourceBranch: activeCandidate?.sourceBranch ?? null,
+      commitsBehindMain: activeCandidate?.commit
+        ? await countCommits(input, `${activeCandidate.commit}..origin/main`)
+        : null,
+      publishedAt,
+      ageHours: Number.isNaN(publishedMs) ? null : roundHours((nowMs - publishedMs) / 3_600_000)
     };
   }
 
-  let releaseBranch: ReleaseStatusResult["releaseBranch"] = null;
+  let releaseBranch: ReleaseStatusReleaseBranch | null = null;
   if (staging) {
     const branchName = releaseSeriesBranch(releaseSeriesFromVersion(staging.version));
     const branchRefs = await input.runner.run("git", ["ls-remote", "origin", `refs/heads/${branchName}`], {
@@ -983,28 +1764,89 @@ export async function releaseStatus(input: ReleaseStatusInput): Promise<ReleaseS
       env: input.env
     });
     const branchSha = branchRefs.exitCode === 0 ? branchRefs.stdout.trim().split(/\s+/)[0] ?? "" : "";
-    if (branchSha) releaseBranch = { name: branchName, commit: branchSha };
+    if (branchSha) {
+      const unmerged = await resolveUnmergedReleaseCommits(input, branchName);
+      releaseBranch = {
+        name: branchName,
+        commit: branchSha,
+        abandoned: await readAbandonedSeries(input, branchName),
+        unmergedCommits: unmerged.commits,
+        unmergedCommitCount: unmerged.count
+      };
+    }
   }
 
   const commitsOnMainSinceProduction = production ? await countCommits(input, `${production.tag}..origin/main`) : null;
-  let promotable = false;
-  if (staging?.commit) {
+
+  let lineage: ReleaseStatusLineage | null = null;
+  let freeze: ReleaseStatusResult["freeze"] = { active: false, branch: null, reason: null };
+  const promotion: ReleaseStatusPromotion = {
+    mechanicallyPromotable: false,
+    base: null,
+    mechanicalReason: null,
+    soak: evaluateSoak({ requiredHours: policy.productionSoakHours, publishedAt: null, nowMs }),
+    allowed: false,
+    blockers: ["No staging release candidate is active on the channel."]
+  };
+
+  if (staging && activeCandidate) {
+    await fetchStagingHistory(input);
+    const reset = await readLineageReset(input, repoSlug);
+    lineage = await resolveCandidateLineage(input, repoSlug, activeCandidate, reset);
+
+    if (isReleaseBranchName(staging.sourceBranch)) {
+      const promoted = await activeProductionTagExists(input, staging.version);
+      if (!promoted) {
+        freeze = {
+          active: true,
+          branch: staging.sourceBranch,
+          reason:
+            `${staging.tag} is an unpromoted ${staging.sourceBranch} release candidate; ` +
+            "main staging publishes are frozen until it is promoted or the soak is explicitly abandoned."
+        };
+      }
+    }
+
     const decision = decidePromotionBase({
       rcLabel: staging.tag,
       seriesBranch: releaseSeriesBranch(releaseSeriesFromVersion(staging.version)),
       branchSha: releaseBranch?.commit ?? null,
       sourceBranch: staging.sourceBranch,
-      commit: staging.commit,
+      commit: staging.commit ?? "",
       originMain
     });
-    promotable = decision.pushBranch !== null;
+    const soak = evaluateSoak({
+      requiredHours: policy.productionSoakHours,
+      publishedAt: staging.publishedAt,
+      nowMs
+    });
+    const seriesBranchName = releaseSeriesBranch(releaseSeriesFromVersion(staging.version));
+    const gate = evaluatePromotionGate({
+      rcTag: staging.tag,
+      rcVersion: staging.version,
+      mechanical: { pushBranch: staging.commit ? decision.pushBranch : null, reason: staging.commit ? decision.reason : `${staging.tag} records no target commit, so its promotion base cannot be resolved.` },
+      lineage,
+      soak,
+      abandonedSeries: releaseBranch?.abandoned ? { branch: seriesBranchName, ...releaseBranch.abandoned } : null
+    });
+    promotion.mechanicallyPromotable = Boolean(staging.commit) && decision.pushBranch !== null;
+    promotion.base = promotion.mechanicallyPromotable ? decision.pushBranch : null;
+    promotion.mechanicalReason = promotion.mechanicallyPromotable ? null : decision.reason;
+    promotion.soak = soak;
+    promotion.allowed = gate.allowed;
+    promotion.blockers = gate.blockers;
   }
+
   return {
     production,
     staging,
     releaseBranch,
     commitsOnMainSinceProduction,
-    promotable,
-    promoteCommand: promotable && staging ? `kd release promote ${staging.version}` : null
+    policy,
+    lineage,
+    freeze,
+    promotion,
+    promoteCommand: promotion.allowed && staging ? `kd release promote ${staging.version}` : null
   };
 }
+

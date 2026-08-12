@@ -68,6 +68,7 @@ import {
 import {
   cutReleaseBranch,
   releaseStatus,
+  resetStagingLineage,
   resolveActiveStagingMarketingVersion,
   shipRelease
 } from "../runtime/release";
@@ -287,13 +288,41 @@ const releasePromoteInputSchema = z.object({
   version: z.string(),
   arm64: z.boolean().default(false),
   x86_64: z.boolean().default(false),
+  dryRun: z.boolean().default(false),
+  overrideSoak: z
+    .string()
+    .describe(
+      "Explicit human reason for promoting before the release-policy soak window elapses. Waives only the soak gate."
+    )
+    .optional()
+});
+
+const releaseResetStagingInputSchema = z.object({
+  to: z.string().describe("Branch the staging channel is handed to next: main or release/X.Y."),
+  reason: z.string().describe("Why this staging lineage is being abandoned. Recorded on the desktop-staging release."),
+  confirmAbandon: z
+    .string()
+    .describe("The exact active staging version being abandoned, as reported by kd release status."),
   dryRun: z.boolean().default(false)
 });
 
 const releaseCutInputSchema = z.object({
   major: z.boolean().default(false),
   minor: z.boolean().default(false),
-  patch: z.boolean().default(false)
+  patch: z.boolean().default(false),
+  version: z
+    .string()
+    .describe(
+      "Explicit target series version X.Y.0. Names the intended next series directly instead of inferring it from origin/main's VERSION — the only way to skip a series that is being abandoned rather than released."
+    )
+    .optional(),
+  abandonSeries: z
+    .string()
+    .describe(
+      "Comma-separated release series (X.Y) this cut deliberately steps over. Each is recorded as an annotated abandoned/release/X.Y tag; the branch is kept, never deleted."
+    )
+    .optional(),
+  reason: z.string().describe("Why no production release will come from the abandoned series.").optional()
 });
 
 const releaseStatusInputSchema = z.object({});
@@ -2170,7 +2199,28 @@ export const taskDefinitions = [
         release: !parsed.dryRun,
         dryRun: parsed.dryRun,
         promoteFrom: parsed.version,
+        soakOverrideReason: parsed.overrideSoak,
         env: releaseEnv,
+        runner: nodeCommandRunner
+      });
+      return { ok: true, message: formatJsonResult(result), data: result };
+    }
+  },
+  {
+    id: "release.reset-staging",
+    description:
+      "Abandon the active staging lineage so the next publish may move the channel non-linearly. Records old/new provenance; never runs implicitly.",
+    inputSchema: releaseResetStagingInputSchema,
+    execute: async (_context, input) => {
+      const parsed = releaseResetStagingInputSchema.parse(input);
+      const context = await resolveDefaultContext(process.env);
+      const result = await resetStagingLineage({
+        repoRoot: context.repoRoot,
+        toBranch: parsed.to,
+        reason: parsed.reason,
+        confirmAbandon: parsed.confirmAbandon,
+        dryRun: parsed.dryRun,
+        env: context.env,
         runner: nodeCommandRunner
       });
       return { ok: true, message: formatJsonResult(result), data: result };
@@ -2200,15 +2250,29 @@ export const taskDefinitions = [
   },
   {
     id: "release.cut",
-    description: "Cut a release/X.Y stabilization branch from origin/main for the next version series.",
+    description:
+      "Cut a release/X.Y stabilization branch from origin/main, optionally naming an explicit target series and recording the unreleased series it abandons.",
     inputSchema: releaseCutInputSchema,
     execute: async (_context, input) => {
       const parsed = releaseCutInputSchema.parse(input);
+      if (parsed.version && (parsed.major || parsed.minor || parsed.patch)) {
+        return { ok: false, message: "release cut accepts --version or a bump flag, not both." };
+      }
       const bump = parsed.major ? "major" : parsed.patch ? "patch" : "minor";
+      const abandonSeries = (parsed.abandonSeries ?? "")
+        .split(",")
+        .map((series) => series.trim())
+        .filter(Boolean);
+      if (parsed.reason && abandonSeries.length === 0) {
+        return { ok: false, message: "release cut --reason only applies with --abandon-series." };
+      }
       const context = await resolveDefaultContext(process.env);
       const result = await cutReleaseBranch({
         repoRoot: context.repoRoot,
         bump,
+        version: parsed.version,
+        abandonSeries,
+        reason: parsed.reason,
         env: context.env,
         runner: nodeCommandRunner
       });
@@ -2217,7 +2281,8 @@ export const taskDefinitions = [
   },
   {
     id: "release.status",
-    description: "Show the production release, the staging channel pointer, and whether staging is promotable.",
+    description:
+      "Show the production release and the staging channel pointer, separating mechanical promotability from lineage validity, soak age, release freeze, and promotion blockers.",
     inputSchema: releaseStatusInputSchema,
     execute: async (_context, input) => {
       releaseStatusInputSchema.parse(input);
