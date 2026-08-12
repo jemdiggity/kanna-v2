@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 import {
   loadReleaseEnvironment,
+  releaseEnvironmentWriteLockCommand,
   writeMachineNotarizationSelectors
 } from "../src/runtime/release-env";
 
@@ -176,6 +177,31 @@ try {
 }
 
 describe("release environment", () => {
+  it("uses the native nonblocking file lock on macOS and Linux", () => {
+    expect(releaseEnvironmentWriteLockCommand("darwin")).toEqual({
+      executable: "/usr/bin/lockf",
+      arguments: [
+        "-s",
+        "-t",
+        "0",
+        "-k",
+        ".release-environment-write.lockf"
+      ],
+      contentionExitStatus: 75
+    });
+    expect(releaseEnvironmentWriteLockCommand("linux")).toEqual({
+      executable: "/usr/bin/flock",
+      arguments: [
+        "--exclusive",
+        "--nonblock",
+        "--conflict-exit-code",
+        "75",
+        ".release-environment-write.lockf"
+      ],
+      contentionExitStatus: 75
+    });
+  });
+
   it("loads a valid 0600 regular machine-global release environment", async () => {
     const { root, home, globalEnvPath } = await createFixture();
     await writePrivateFile(

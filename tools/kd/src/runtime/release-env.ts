@@ -63,6 +63,12 @@ interface PinnedWorkerResponse {
   directory?: DirectoryIdentity;
 }
 
+interface ReleaseEnvironmentWriteLockCommand {
+  executable: string;
+  arguments: string[];
+  contentionExitStatus: number;
+}
+
 type DotenvQuote = "'" | '"' | "`";
 
 function validateDotenv(source: string, envPath: string): void {
@@ -376,15 +382,14 @@ function runPinnedDirectoryWorker(
       request.repairDirectoryMode === true
     );
   }
+  const lockCommand = serializeWrite
+    ? releaseEnvironmentWriteLockCommand(process.platform)
+    : undefined;
   const result = spawnSync(
-    serializeWrite ? "/usr/bin/lockf" : process.execPath,
+    lockCommand?.executable ?? process.execPath,
     serializeWrite
       ? [
-          "-s",
-          "-t",
-          "0",
-          "-k",
-          ".release-environment-write.lockf",
+          ...lockCommand!.arguments,
           process.execPath,
           ...workerArguments
         ]
@@ -399,7 +404,7 @@ function runPinnedDirectoryWorker(
   if (result.error) {
     throw new Error(`Unable to pin machine-local release directory ${cwd}: ${result.error.message}`);
   }
-  if (serializeWrite && result.status === 75) {
+  if (lockCommand && result.status === lockCommand.contentionExitStatus) {
     throw new Error(
       "Another machine-local release setup is already in progress; retry after it finishes."
     );
@@ -423,6 +428,41 @@ function runPinnedDirectoryWorker(
     throw new Error(typedResponse.error ?? `Unable to access pinned directory ${cwd}.`);
   }
   return typedResponse;
+}
+
+/** @internal Exported only to keep platform-specific lock selection covered. */
+export function releaseEnvironmentWriteLockCommand(
+  platform: NodeJS.Platform
+): ReleaseEnvironmentWriteLockCommand {
+  if (platform === "darwin") {
+    return {
+      executable: "/usr/bin/lockf",
+      arguments: [
+        "-s",
+        "-t",
+        "0",
+        "-k",
+        ".release-environment-write.lockf"
+      ],
+      contentionExitStatus: 75
+    };
+  }
+  if (platform === "linux") {
+    return {
+      executable: "/usr/bin/flock",
+      arguments: [
+        "--exclusive",
+        "--nonblock",
+        "--conflict-exit-code",
+        "75",
+        ".release-environment-write.lockf"
+      ],
+      contentionExitStatus: 75
+    };
+  }
+  throw new Error(
+    `Machine-local release selector writes are not supported on ${platform}.`
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
