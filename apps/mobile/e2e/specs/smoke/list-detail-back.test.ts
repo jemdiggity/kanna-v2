@@ -182,7 +182,7 @@ describe("PTY fixture selection", () => {
           taskId: "task-agent",
           sentinel: "Kanna PTY sentinel",
           expectedCols: 80,
-          expectedRows: 24,
+          expectedRows: 48,
           minDecodedBytes: PTY_SNAPSHOT_MIN_DECODED_BYTES
         },
         fetchImpl
@@ -211,7 +211,7 @@ describe("PTY fixture selection", () => {
           taskId: "task-pty",
           sentinel: "Kanna PTY sentinel",
           expectedCols: 80,
-          expectedRows: 24,
+          expectedRows: 48,
           minDecodedBytes: PTY_SNAPSHOT_MIN_DECODED_BYTES
         },
         fetchImpl

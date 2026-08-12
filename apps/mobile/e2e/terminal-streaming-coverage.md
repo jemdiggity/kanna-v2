@@ -94,14 +94,14 @@ PTY fixture:
 - The task ID is the complete durable ID expected in the expanded identity panel
   and in the clipboard after the native Copy action.
 - `KANNA_E2E_PTY_EXPECTED_COLS` and `KANNA_E2E_PTY_EXPECTED_ROWS` optionally
-  override the default fixture size of `80x24`.
+  override the expected mobile viewport grid.
 - `KANNA_E2E_PTY_MIN_DECODED_BYTES` optionally overrides the default minimum of
   `16384` decoded bytes.
 
 The smoke validates the fixture through the desktop mobile API, opens the exact
 task row by id, switches Appium into the WebView, and checks that decoded
 terminal bytes reached xterm, the rendered text is nonblank and contains the
-sentinel, and the terminal root received the expected desktop PTY dimensions
+sentinel, and the terminal root received the expected mobile viewport dimensions
 through `data-kanna-cols` and `data-kanna-rows`. The 16 KiB decoded-byte default
 is intentionally above the old 12,000-character base64 cap failure mode, which
 could only decode to about 9 KiB and could leave the rendered terminal blank.
@@ -112,6 +112,16 @@ existing `waitForTaskTerminalLive` boundary no longer treats snapshot receipt as
 render readiness: with the scripted agent's deliberate 10,050-line history, it
 waits for xterm application and a paint opportunity before inspecting the
 sentinel.
+
+The authenticated relay lane additionally starts from a scripted PTY snapshot
+whose grid was chosen before the mobile terminal mounted. On first open and
+again after leaving and revisiting the task, it requires xterm to render at the
+mobile viewport's `80x48` grid. It then opens a second terminal observer through
+the ordinary relay owner route and requires the daemon's fresh snapshot to
+report that same grid. This proves that the initial native layout drives both
+the WebView and the PTY; an activity/unread transition or a locally resized
+xterm cannot satisfy the assertion by itself.
+
 The native journey also taps the selected task's title, verifies the canonical
 prompt through its end sentinel, verifies the complete task ID, long-presses the
 ID for 1.5 seconds, requires the native iOS `Copy` action, and compares the

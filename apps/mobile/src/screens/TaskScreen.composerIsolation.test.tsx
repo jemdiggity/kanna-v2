@@ -177,8 +177,6 @@ function taskScreenElement(options: RenderOptions) {
       terminalOutputStart={options.outputStart}
       terminalOutputSource={options.terminalOutputSource}
       terminalStatus="live"
-      terminalCols={80}
-      terminalRows={24}
       terminalErrorMessage={null}
       agentEvents={[]}
       agentStatus="live"

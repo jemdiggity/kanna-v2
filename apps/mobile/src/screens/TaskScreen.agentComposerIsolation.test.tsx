@@ -120,8 +120,6 @@ function taskScreenElement(options: RenderOptions) {
       terminalOutputEpoch={0}
       terminalOutputStart={0}
       terminalStatus="idle"
-      terminalCols={null}
-      terminalRows={null}
       terminalErrorMessage={null}
       agentEvents={options.agentEvents}
       agentStatus="live"

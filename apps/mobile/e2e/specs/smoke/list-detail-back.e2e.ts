@@ -1,12 +1,11 @@
 import type { Browser } from "webdriverio";
 import { selectors } from "../../helpers/selectors";
+import { DEFAULT_MOBILE_TERMINAL_GEOMETRY } from "../../../src/mobileTerminalGeometry";
 
 const SCREEN_TIMEOUT_MS = 30_000;
 const POLL_INTERVAL_MS = 250;
 const BACK_NAVIGATION_SETTLE_MS = 500;
 const TEXT_SELECTION_LONG_PRESS_MS = 1_500;
-const DEFAULT_PTY_COLS = 80;
-const DEFAULT_PTY_ROWS = 24;
 
 // The old regression sliced a large base64 snapshot at 12,000 encoded chars,
 // which can decode to at most about 9 KiB. Requiring 16 KiB decoded proves the
@@ -278,12 +277,12 @@ export function resolveRequiredPtyTerminalFixture(
     expectedCols: parsePositiveInteger(
       env.KANNA_E2E_PTY_EXPECTED_COLS,
       "KANNA_E2E_PTY_EXPECTED_COLS",
-      DEFAULT_PTY_COLS
+      DEFAULT_MOBILE_TERMINAL_GEOMETRY.cols
     ),
     expectedRows: parsePositiveInteger(
       env.KANNA_E2E_PTY_EXPECTED_ROWS,
       "KANNA_E2E_PTY_EXPECTED_ROWS",
-      DEFAULT_PTY_ROWS
+      DEFAULT_MOBILE_TERMINAL_GEOMETRY.rows
     ),
     minDecodedBytes: parsePositiveInteger(
       env.KANNA_E2E_PTY_MIN_DECODED_BYTES,

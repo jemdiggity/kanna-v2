@@ -54,6 +54,7 @@ interface RelayTaskFlowOptions {
   taskRow: RelayTaskRowExpectation;
   taskOrdering: RelayTaskOrderingFixture;
   waitForLocalTaskActivity(activity: TaskActivity): Promise<void>;
+  waitForMobileTerminalGeometry(): Promise<void>;
   waitForQuickReplyInput(): Promise<void>;
 }
 
@@ -1544,6 +1545,7 @@ export async function runRelayTaskFlow(
       async waitForRenderedTerminal() {
         await waitForTaskTerminalLive(ui);
         await waitForRenderedPtyTerminal(ui, options.fixture);
+        await options.waitForMobileTerminalGeometry();
       },
       closeTask: () => returnToTaskListShell(ui),
     }),

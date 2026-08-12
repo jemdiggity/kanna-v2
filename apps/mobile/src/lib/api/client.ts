@@ -44,6 +44,9 @@ export interface TaskTerminalSubscription {
    * sequences replayed from the mobile terminal view. Optional because some
    * transports are read-only. */
   sendInput?(dataB64: string): void;
+  /** Resize both the observer's xterm grid and the owning PTY. The transport
+   * keeps this scoped to the attached task session. */
+  resize?(cols: number, rows: number): void;
 }
 
 export type TaskAgentStreamEvent =

@@ -56,6 +56,7 @@ function createTerminalSubscriptionMock(): {
     subscription: {
       close: vi.fn(),
       sendInput: vi.fn(),
+      resize: vi.fn(),
       setListener(nextListener) {
         listener = nextListener;
       }
@@ -5270,6 +5271,43 @@ describe("createMobileController", () => {
     expect(terminalText(store)).toContain("Rmlyc3QgbGluZQo=");
     expect(terminalText(store)).toContain("U2Vjb25kIGxpbmU=");
     expect(terminalText(store)).not.toContain("First line");
+  });
+
+  it("applies the measured mobile grid on first attach and reasserts it after reconnect", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+    const resize = client.__terminalStream.subscription.resize;
+
+    await controller.bootstrap();
+    controller.resizeTaskTerminal("task-1", 80, 48);
+    controller.openTask("task-1");
+
+    expect(resize).toHaveBeenCalledTimes(1);
+    expect(resize).toHaveBeenLastCalledWith(80, 48);
+
+    client.__terminalStream.emit({
+      type: "snapshot",
+      taskId: "task-1",
+      cols: 80,
+      rows: 24,
+      dataB64: ""
+    });
+    expect(resize).toHaveBeenCalledTimes(2);
+    expect(resize).toHaveBeenLastCalledWith(80, 48);
+
+    client.__terminalStream.emit({
+      type: "snapshot",
+      taskId: "task-1",
+      cols: 80,
+      rows: 48,
+      dataB64: ""
+    });
+    expect(resize).toHaveBeenCalledTimes(2);
+
+    controller.resizeTaskTerminal("task-1", 128, 72);
+    expect(resize).toHaveBeenCalledTimes(3);
+    expect(resize).toHaveBeenLastCalledWith(128, 72);
   });
 
   it("replaces stale replay output with an authoritative reconnect snapshot", async () => {
