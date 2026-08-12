@@ -671,6 +671,20 @@ describe("kd CLI", () => {
       taskId: "release.promote",
       input: { version: "1.2.4-staging.3", dryRun: true }
     });
+    expect(parseCliArgs([
+      "release",
+      "setup-notarization",
+      "--profile",
+      "custom-profile",
+      "--keychain",
+      "/Users/test/Library/Keychains/login.keychain-db"
+    ])).toEqual({
+      taskId: "release.setup-notarization",
+      input: {
+        profile: "custom-profile",
+        keychain: "/Users/test/Library/Keychains/login.keychain-db"
+      }
+    });
     expect(() => parseCliArgs(["release", "promote", "--dry-run"])).toThrow(/requires a staging version/);
     expect(parseCliArgs(["release", "cut", "--minor"])).toEqual({
       taskId: "release.cut",

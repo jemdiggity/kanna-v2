@@ -2,6 +2,11 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, r
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CommandRunner } from "./process";
+import {
+  preflightUpdaterSigningKey,
+  resolveUpdaterSigningKey,
+  updaterSignerEnvironment
+} from "./updater-key";
 
 export type ReleaseBump = "major" | "minor" | "patch";
 export type ReleaseArchLabel = "arm64" | "x86_64";
@@ -596,15 +601,46 @@ function writeLatestJson(path: string, version: string, notes: string, pubDate: 
   writeFileSync(path, JSON.stringify({ version, notes, pub_date: pubDate, platforms }, null, 2) + "\n");
 }
 
-export async function createUpdaterBundle(input: ReleaseShipInput, bundleSource: string, bundlePath: string, signaturePath: string): Promise<void> {
+export async function createUpdaterBundle(
+  input: ReleaseShipInput,
+  bundleSource: string,
+  bundlePath: string,
+  signaturePath: string
+): Promise<void> {
+  const signingKey = await resolveUpdaterSigningKey({
+    env: input.env
+  });
+  await createUpdaterBundleWithSigningKey(
+    input,
+    bundleSource,
+    bundlePath,
+    signaturePath,
+    signingKey
+  );
+}
+
+async function createUpdaterBundleWithSigningKey(
+  input: ReleaseShipInput,
+  bundleSource: string,
+  bundlePath: string,
+  signaturePath: string,
+  signingKey: string
+): Promise<void> {
   rmSync(bundlePath, { force: true });
   cpSync(bundleSource, bundlePath);
-  const signerArgs = ["--dir", join(input.repoRoot, "apps", "desktop"), "exec", "tauri", "signer", "sign", "--private-key-path", input.env.TAURI_PRIVATE_KEY_PATH ?? ""];
-  if ("TAURI_PRIVATE_KEY_PASSWORD" in input.env) {
-    signerArgs.push("--password", input.env.TAURI_PRIVATE_KEY_PASSWORD ?? "");
+  // The validated file content goes through the signer environment, never argv.
+  // An explicit empty password prevents `tauri signer` from prompting during a
+  // non-interactive ship; updater signing keys used by kd must be unencrypted.
+  const signerEnv = updaterSignerEnvironment(input.env, signingKey);
+  const signerArgs = ["--dir", join(input.repoRoot, "apps", "desktop"), "exec", "tauri", "signer", "sign", bundlePath];
+  const signer = await input.runner.run("pnpm", signerArgs, {
+    cwd: input.repoRoot,
+    env: signerEnv
+  });
+  if (signer.exitCode !== 0) {
+    // Never surface signer output: a broken signer could echo its secret env.
+    throw new Error(`Tauri updater signing failed for ${bundlePath}.`);
   }
-  signerArgs.push(bundlePath);
-  await mustRun(input.runner, "pnpm", signerArgs, input.repoRoot, input.env);
   const generatedSig = `${bundlePath}.sig`;
   if (!existsSync(generatedSig)) throw new Error(`Expected updater signature not found: ${generatedSig}`);
   if (generatedSig !== signaturePath) {
@@ -624,9 +660,14 @@ export async function shipRelease(input: ReleaseShipInput): Promise<ReleaseShipR
   if (input.release && input.archLabels.length !== 2) {
     throw new Error("updater releases must include both arm64 and x86_64 artifacts");
   }
-  if (!input.env.KANNA_UPDATER_PUBKEY) throw new Error("Missing KANNA_UPDATER_PUBKEY.");
-  if (!input.env.TAURI_PRIVATE_KEY_PATH) throw new Error("Missing TAURI_PRIVATE_KEY_PATH.");
-  if (!existsSync(input.env.TAURI_PRIVATE_KEY_PATH)) throw new Error(`Tauri updater private key not found: ${input.env.TAURI_PRIVATE_KEY_PATH}`);
+  // Open, validate, read, and prove the exact selected file before version files
+  // or build outputs can change. Retain that material for both architectures so
+  // a later pathname change cannot turn into a late or inconsistent failure.
+  const updaterSigningKey = await preflightUpdaterSigningKey({
+    cwd: input.repoRoot,
+    env: input.env,
+    runner: input.runner
+  });
   await assertCleanGitWorktree(input.repoRoot, input.runner, input.env);
 
   let version: string;
@@ -680,7 +721,13 @@ export async function shipRelease(input: ReleaseShipInput): Promise<ReleaseShipR
     const bundleSource = await resolveBazelOutput(input, updaterBundleTargetForLabel(label, environment));
     const bundlePath = join(releaseDir, updaterAssetName(version, label, environment));
     const sigPath = join(releaseDir, updaterSignatureName(version, label, environment));
-    await createUpdaterBundle(input, bundleSource, bundlePath, sigPath);
+    await createUpdaterBundleWithSigningKey(
+      input,
+      bundleSource,
+      bundlePath,
+      sigPath,
+      updaterSigningKey
+    );
     updaterPaths.push(bundlePath, sigPath);
     platforms[updaterPlatformKey(label)] = {
       url: `${downloadBase}/${updaterAssetName(version, label, environment)}`,
