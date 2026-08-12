@@ -59,6 +59,75 @@ prerelease tagged `vX.Y.Z-staging.N`, and repoints only `latest-staging.json`
 on the `desktop-staging` pointer release. Roll back by repointing:
 `./kd release ship --staging --rollback-to <version>`.
 
+### The release lifecycle
+
+Every staging build is a release candidate, and `desktop-staging` is a single
+pointer, so the channel has state beyond "which build is on it". `kd` enforces
+that state; the full model, the rules, and the incident that motivated them are
+in [`docs/specs/release-candidates.md`](../specs/release-candidates.md). In
+short:
+
+- A staging publish must be a **descendant** of (or a rebuild of) the candidate
+  the channel already serves. Divergence, rollback, and unverifiable channel
+  metadata are refused **before** anything is built — including under
+  `--dry-run`.
+- A `release/X.Y` RC must build that branch's **remote tip exactly**. Push
+  backports to the branch first, then build from a checkout of the pushed tip.
+- While an **unpromoted** `release/X.Y` candidate is soaking, main staging
+  publishes are refused. Main resumes after promotion, or after an explicit
+  reset.
+- Only `--rollback-to` and `kd release reset-staging` may move the channel
+  non-linearly.
+
+```sh
+./kd release status                                   # channel state and every promotion blocker
+./kd release cut --minor                              # cut release/X.Y at origin/main
+./kd release promote 1.2.4-staging.3                  # promote a soaked candidate
+./kd release reset-staging --to main \
+  --reason "<why>" --confirm-abandon 1.3.0-staging.2   # abandon a lineage (audited, never implicit)
+```
+
+`kd release status` deliberately does not print one "promotable" flag. It
+reports the active candidate and its source branch and commit, its lineage
+relationship to the previous candidate and whether that lineage is valid, its
+publication time and soak age, whether a release-branch freeze is active, any
+release-branch commits not retained on main, whether the candidate is
+*mechanically* promotable (its commit still matches its promotion branch tip),
+and the full list of blockers to production promotion. The promote command is
+printed only when every gate passes.
+
+**Soak gate.** Production promotion requires the candidate to have been
+published for at least `productionSoakHours` from `release-policy.json` at the
+repository root (default 24; `0` disables it), validated by
+`release-policy.schema.json`. A missing file uses the default; a malformed file
+or an unknown key is an error naming the file. Status, `--dry-run`, and the real
+promotion run the same decision code. The only override is explicit and
+reasoned, and it waives the soak window and nothing else:
+
+```sh
+./kd release promote 1.2.4-staging.3 --override-soak "Grace asked for the crash fix today"
+```
+
+**Abandoning a series.** `origin/main`'s `VERSION` only advances when a
+production release commits it, so bump inference cannot express "skip the series
+we are abandoning". Name the intended series instead, and record what it steps
+over — the abandoned branch is kept, never deleted or reused, and no production
+tag is invented to advance `VERSION`:
+
+```sh
+./kd release reset-staging --to release/0.2 \
+  --reason "0.1 diverged from main" --confirm-abandon 0.1.0-staging.8
+./kd release cut --version 0.2.0 \
+  --abandon-series 0.1 --reason "0.1 diverged from main; it will never ship"
+```
+
+Each abandonment is recorded as an annotated `abandoned/release/X.Y` tag, after
+which `ship` and `promote` refuse that series and `status` reports it.
+
+Direct production ships (`./kd release ship --production --release`) are not
+promotions: they build whatever the checkout points at and never touched the
+staging channel, so no soak applies. They remain a human-authorized operation.
+
 ### Local release environment
 
 Notarization uses credentials stored in an explicitly selected, file-based

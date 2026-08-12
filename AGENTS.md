@@ -173,7 +173,15 @@ acknowledging transferred descriptors.
   never bare `expo start` — it won't start the desktop-side `kanna-server`).
   If a `kd` workflow is broken, fix `kd` rather than working around it.
 - Production promotions and production mobile OTA publishes require an explicit
-  human request. Staging is free for agents.
+  human request. Staging is free for agents — but the staging *channel* is a
+  lineage, not a scratch pad: `kd` refuses a staging publish that diverges from
+  or rolls back the candidate `desktop-staging` already serves, refuses main
+  publishes while an unpromoted `release/X.Y` candidate soaks, and gates
+  promotion on lineage validity plus the `release-policy.json` soak window
+  (default 24h). The three operations that discard that state —
+  `kd release reset-staging`, `kd release cut --abandon-series`, and
+  `kd release promote --override-soak` — need a named human request like
+  production does. See `docs/specs/release-candidates.md`.
 - Use `apps/desktop/src/utils/fuzzyMatch.ts` instead of writing a new fuzzy
   search.
 - `.kanna/` is per-repo config: `config.json` (`setup`, `teardown`, `test`,

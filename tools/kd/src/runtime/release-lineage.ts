@@ -1,0 +1,397 @@
+/**
+ * The staging channel's lineage state machine.
+ *
+ * `desktop-staging` is a single pointer, so every staging publish moves one
+ * shared channel. Mechanical alignment (the RC commit matches its promotion
+ * branch tip) says nothing about whether the channel got there by moving
+ * forward: v0.1.0-staging.8 was mechanically aligned to `release/0.1` while its
+ * history had diverged from v0.1.0-staging.7 by ~640 commits, and the tooling
+ * still called it promotable.
+ *
+ * Everything in this module is pure: callers resolve git/GitHub facts and pass
+ * them in, so the same decisions run in `release status`, in `release ship
+ * --staging` (including `--dry-run`), and in `release promote`.
+ */
+
+export type StagingLineageRelationship =
+  | "initial"
+  | "same-commit"
+  | "descendant"
+  | "behind"
+  | "diverged"
+  | "unknown";
+
+export interface StagingCandidate {
+  version: string;
+  tag: string;
+  commit: string | null;
+  sourceBranch: string | null;
+  publishedAt: string | null;
+}
+
+/**
+ * A recorded, deliberate abandonment of the current staging lineage. Written to
+ * the `desktop-staging` pointer release body by `kd release reset-staging`, and
+ * consumed by the next staging publish that matches it.
+ */
+export interface LineageResetRecord {
+  resetAt: string;
+  fromVersion: string;
+  fromCommit: string | null;
+  fromSourceBranch: string | null;
+  toBranch: string;
+  reason: string;
+}
+
+export const LINEAGE_RESET_MARKER = "Lineage-Reset:";
+export const STAGING_CHANNEL_BODY_HEADER = "Pointer-only desktop staging updater channel.";
+
+export function isReleaseBranchName(branch: string | null | undefined): boolean {
+  return typeof branch === "string" && /^release\/\d+\.\d+$/.test(branch.trim());
+}
+
+export function normalizeStagingVersion(version: string): string {
+  return version.trim().replace(/^v/, "");
+}
+
+export function formatLineageResetBlock(record: LineageResetRecord): string {
+  return [
+    `${LINEAGE_RESET_MARKER} ${record.resetAt}`,
+    `Reset-From: ${record.fromVersion} (${record.fromCommit ?? "unknown-commit"}) source ${record.fromSourceBranch ?? "unknown"}`,
+    `Reset-To: ${record.toBranch}`,
+    `Reset-Reason: ${record.reason}`
+  ].join("\n");
+}
+
+/**
+ * Reads the newest reset block. Blocks are prepended, so the first match is the
+ * most recent reset and older blocks stay in the body as an audit trail.
+ */
+export function parseLineageResetRecord(body: string): LineageResetRecord | null {
+  const lines = body.split(/\r?\n/);
+  const start = lines.findIndex((line) => line.trim().startsWith(LINEAGE_RESET_MARKER));
+  if (start < 0) return null;
+  const resetAt = lines[start]?.trim().slice(LINEAGE_RESET_MARKER.length).trim() ?? "";
+  const block = lines.slice(start + 1, start + 5).join("\n");
+  const from = /^Reset-From:[ \t]*(\S+)[ \t]*\(([^)]*)\)[ \t]*source[ \t]*(\S+)[ \t]*$/m.exec(block);
+  const to = /^Reset-To:[ \t]*(\S+)[ \t]*$/m.exec(block);
+  const reason = /^Reset-Reason:[ \t]*(.+?)[ \t]*$/m.exec(block);
+  if (!from || !to || !resetAt) return null;
+  const fromCommit = (from[2] ?? "").trim();
+  const fromSourceBranch = (from[3] ?? "").trim();
+  return {
+    resetAt,
+    fromVersion: normalizeStagingVersion(from[1] ?? ""),
+    fromCommit: fromCommit && fromCommit !== "unknown-commit" ? fromCommit : null,
+    fromSourceBranch: fromSourceBranch && fromSourceBranch !== "unknown" ? fromSourceBranch : null,
+    toBranch: (to[1] ?? "").trim(),
+    reason: reason?.[1]?.trim() ?? ""
+  };
+}
+
+export function composeStagingChannelBody(existingBody: string, record: LineageResetRecord): string {
+  const trimmed = existingBody.trim();
+  const history = trimmed.length > 0 && trimmed !== STAGING_CHANNEL_BODY_HEADER
+    ? trimmed.replace(new RegExp(`^${STAGING_CHANNEL_BODY_HEADER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*`), "").trim()
+    : "";
+  return [STAGING_CHANNEL_BODY_HEADER, "", formatLineageResetBlock(record), ...(history ? ["", history] : [])]
+    .join("\n")
+    .trimEnd() + "\n";
+}
+
+/**
+ * A reset authorizes exactly one non-linear move: the publish that leaves the
+ * candidate it was recorded against, onto the branch it named. Once that
+ * publish lands, the active candidate changes and the record stops matching, so
+ * the authorization is single-use by construction rather than by bookkeeping.
+ */
+export function resetAuthorizes(
+  reset: LineageResetRecord | null,
+  args: { fromVersion: string; toBranch: string }
+): boolean {
+  if (!reset) return false;
+  if (normalizeStagingVersion(reset.fromVersion) !== normalizeStagingVersion(args.fromVersion)) return false;
+  return reset.toBranch === args.toBranch;
+}
+
+export interface StagingPublishGateInput {
+  /** `main` or `release/X.Y` — the branch the proposed RC is being built from. */
+  proposedSourceBranch: string;
+  proposedCommit: string;
+  /** The candidate `desktop-staging` currently points at, or null for an empty channel. */
+  active: StagingCandidate | null;
+  /** How `proposedCommit` relates to `active.commit`, resolved by the caller from git. */
+  relationship: StagingLineageRelationship;
+  /** Whether the active candidate's production version has already been released. */
+  activeProductionTagExists: boolean;
+  /** Whether the active candidate's metadata could be resolved at all. */
+  activeMetadataError: string | null;
+  reset: LineageResetRecord | null;
+}
+
+export interface StagingPublishGateDecision {
+  allowed: boolean;
+  reason: string | null;
+  waivedByReset: boolean;
+  frozenBy: string | null;
+}
+
+const RESET_HINT = "kd release reset-staging --to <main|release/X.Y> --reason \"<why>\" --confirm-abandon <active-staging-version>";
+
+export function evaluateStagingPublishGate(input: StagingPublishGateInput): StagingPublishGateDecision {
+  const active = input.active;
+
+  // First, and before the empty-channel allowance: nothing below can be trusted
+  // if the channel could not be read. A missing candidate with an error is a
+  // channel we failed to read, not an empty one, and must never fall through to
+  // "no active candidate, publish away".
+  if (input.activeMetadataError) {
+    return {
+      allowed: false,
+      waivedByReset: false,
+      frozenBy: null,
+      reason:
+        `Cannot verify staging lineage: ${active ? `the active candidate ${active.tag}` : "the staging channel"} ` +
+        `could not be read (${input.activeMetadataError}). Refusing to move the channel blind. ` +
+        `Retry once GitHub is reachable, restore the missing metadata, or abandon the lineage explicitly: ${RESET_HINT}.`
+    };
+  }
+
+  if (!active) {
+    return { allowed: true, reason: null, waivedByReset: false, frozenBy: null };
+  }
+
+  const waived = resetAuthorizes(input.reset, {
+    fromVersion: active.version,
+    toBranch: input.proposedSourceBranch
+  });
+  if (waived) {
+    return { allowed: true, reason: null, waivedByReset: true, frozenBy: null };
+  }
+
+  if (
+    isReleaseBranchName(active.sourceBranch) &&
+    !input.activeProductionTagExists &&
+    input.proposedSourceBranch === "main"
+  ) {
+    return {
+      allowed: false,
+      waivedByReset: false,
+      frozenBy: active.sourceBranch,
+      reason:
+        `${active.tag} is an unpromoted ${active.sourceBranch} release candidate, so staging is frozen to that branch. ` +
+        `A main staging publish would repoint the single staging channel away from the RC mid-soak. ` +
+        `Promote it (kd release promote ${active.version}), ship the next RC from ${active.sourceBranch}, ` +
+        `or abandon the soak explicitly: ${RESET_HINT}.`
+    };
+  }
+
+  switch (input.relationship) {
+    case "same-commit":
+    case "descendant":
+      return { allowed: true, reason: null, waivedByReset: false, frozenBy: null };
+    case "behind":
+      return {
+        allowed: false,
+        waivedByReset: false,
+        frozenBy: null,
+        reason:
+          `Refusing to roll the staging channel back. ${input.proposedCommit} is an ancestor of the active candidate ` +
+          `${active.tag} (${active.commit ?? "unknown"}), so publishing it would move staging users backwards. ` +
+          `Ship from a commit that contains ${active.tag}, repoint deliberately with ` +
+          `kd release ship --staging --rollback-to <version>, or abandon the lineage: ${RESET_HINT}.`
+      };
+    case "diverged":
+      return {
+        allowed: false,
+        waivedByReset: false,
+        frozenBy: null,
+        reason:
+          `Refusing to publish a staging candidate whose history diverged from the active channel. ` +
+          `${input.proposedCommit} (${input.proposedSourceBranch}) and the active candidate ${active.tag} ` +
+          `(${active.commit ?? "unknown"}, source ${active.sourceBranch ?? "unknown"}) share only an older merge base, ` +
+          `so this build both adds and drops commits relative to what staging is running. ` +
+          `Ship from a descendant of ${active.tag}, or abandon the lineage explicitly: ${RESET_HINT}.`
+      };
+    case "initial":
+    case "unknown":
+    default:
+      return {
+        allowed: false,
+        waivedByReset: false,
+        frozenBy: null,
+        reason:
+          `Cannot compare ${input.proposedCommit} with the active candidate ${active.tag} ` +
+          `(${active.commit ?? "unknown"}); git could not resolve one of the commits. ` +
+          `Fetch the missing objects (git fetch --tags origin) and retry, or abandon the lineage: ${RESET_HINT}.`
+      };
+  }
+}
+
+export interface CandidateLineage {
+  relationship: StagingLineageRelationship;
+  previous: { version: string; tag: string; commit: string | null } | null;
+  valid: boolean;
+  authorizedByReset: boolean;
+  reset: LineageResetRecord | null;
+  detail: string;
+}
+
+/**
+ * Whether a candidate reached the channel by a legal move. A divergence is only
+ * valid when a recorded reset authorized exactly that move.
+ */
+export function evaluateCandidateLineage(args: {
+  candidate: StagingCandidate;
+  previous: { version: string; tag: string; commit: string | null } | null;
+  relationship: StagingLineageRelationship;
+  reset: LineageResetRecord | null;
+}): CandidateLineage {
+  const { candidate, previous, relationship, reset } = args;
+  if (!previous) {
+    return {
+      relationship: "initial",
+      previous: null,
+      valid: true,
+      authorizedByReset: false,
+      reset,
+      detail: `${candidate.tag} is the first staging candidate on this channel; there is no prior lineage to compare.`
+    };
+  }
+
+  const authorizedByReset =
+    (relationship === "diverged" || relationship === "behind") &&
+    resetAuthorizes(reset, { fromVersion: previous.version, toBranch: candidate.sourceBranch ?? "" });
+
+  switch (relationship) {
+    case "same-commit":
+      return {
+        relationship,
+        previous,
+        valid: true,
+        authorizedByReset: false,
+        reset,
+        detail: `${candidate.tag} rebuilt the same commit as ${previous.tag}.`
+      };
+    case "descendant":
+      return {
+        relationship,
+        previous,
+        valid: true,
+        authorizedByReset: false,
+        reset,
+        detail: `${candidate.tag} (${candidate.commit ?? "unknown"}) is a descendant of ${previous.tag} (${previous.commit ?? "unknown"}).`
+      };
+    case "behind":
+      return {
+        relationship,
+        previous,
+        valid: authorizedByReset,
+        authorizedByReset,
+        reset,
+        detail: authorizedByReset
+          ? `${candidate.tag} moved the channel backwards from ${previous.tag}, authorized by the recorded lineage reset of ${reset?.resetAt}.`
+          : `${candidate.tag} (${candidate.commit ?? "unknown"}) is an ancestor of ${previous.tag} (${previous.commit ?? "unknown"}): the channel moved backwards with no recorded reset.`
+      };
+    case "diverged":
+      return {
+        relationship,
+        previous,
+        valid: authorizedByReset,
+        authorizedByReset,
+        reset,
+        detail: authorizedByReset
+          ? `${candidate.tag} diverged from ${previous.tag}, authorized by the recorded lineage reset of ${reset?.resetAt}.`
+          : `${candidate.tag} (${candidate.commit ?? "unknown"}) and ${previous.tag} (${previous.commit ?? "unknown"}) share only an older merge base: the channel moved non-linearly with no recorded reset.`
+      };
+    case "initial":
+    case "unknown":
+    default:
+      return {
+        relationship: "unknown",
+        previous,
+        valid: false,
+        authorizedByReset: false,
+        reset,
+        detail: `Could not compare ${candidate.tag} with ${previous.tag}; one of the commits is unavailable locally.`
+      };
+  }
+}
+
+export interface SoakEvaluation {
+  requiredHours: number;
+  elapsedHours: number | null;
+  publishedAt: string | null;
+  satisfied: boolean;
+  overridden: boolean;
+  overrideReason: string | null;
+}
+
+export function evaluateSoak(args: {
+  requiredHours: number;
+  publishedAt: string | null;
+  nowMs: number;
+  overrideReason?: string | null;
+}): SoakEvaluation {
+  const overrideReason = args.overrideReason?.trim() ? args.overrideReason.trim() : null;
+  const publishedMs = args.publishedAt ? Date.parse(args.publishedAt) : Number.NaN;
+  const elapsedHours = Number.isNaN(publishedMs)
+    ? null
+    : Math.round(Math.max(0, (args.nowMs - publishedMs) / 3_600_000) * 100) / 100;
+  const met = args.requiredHours <= 0 ? true : elapsedHours !== null && elapsedHours >= args.requiredHours;
+  return {
+    requiredHours: args.requiredHours,
+    elapsedHours,
+    publishedAt: args.publishedAt,
+    satisfied: met || overrideReason !== null,
+    overridden: !met && overrideReason !== null,
+    overrideReason
+  };
+}
+
+export interface PromotionGateInput {
+  rcTag: string;
+  rcVersion: string;
+  mechanical: { pushBranch: string | null; reason: string | null };
+  lineage: CandidateLineage;
+  soak: SoakEvaluation;
+  /** Set when the candidate's series was deliberately abandoned. */
+  abandonedSeries?: { branch: string; abandonedAt: string | null; reason: string | null } | null;
+}
+
+export interface PromotionGateDecision {
+  allowed: boolean;
+  blockers: string[];
+}
+
+export function evaluatePromotionGate(input: PromotionGateInput): PromotionGateDecision {
+  const blockers: string[] = [];
+  if (input.abandonedSeries) {
+    blockers.push(
+      `${input.abandonedSeries.branch} was abandoned` +
+        `${input.abandonedSeries.abandonedAt ? ` on ${input.abandonedSeries.abandonedAt}` : ""}` +
+        `${input.abandonedSeries.reason ? `: ${input.abandonedSeries.reason}` : "."} ` +
+        "An abandoned series produces no production release; ship and promote the current series instead."
+    );
+  }
+  if (!input.mechanical.pushBranch) {
+    blockers.push(input.mechanical.reason ?? `${input.rcTag} is not at its promotion base.`);
+  }
+  if (!input.lineage.valid) {
+    blockers.push(
+      `${input.lineage.detail} Promoting it would ship a build that regresses the staging channel's own history. ` +
+        `If that move was intended, record it with kd release reset-staging before shipping the candidate.`
+    );
+  }
+  if (!input.soak.satisfied) {
+    const elapsed = input.soak.elapsedHours;
+    blockers.push(
+      elapsed === null
+        ? `${input.rcTag} has no readable publication time, so its ${input.soak.requiredHours}h soak cannot be verified. ` +
+          `Override deliberately with kd release promote ${input.rcVersion} --override-soak "<reason>".`
+        : `${input.rcTag} has soaked ${elapsed.toFixed(1)}h of the required ${input.soak.requiredHours}h. ` +
+          `Wait, or override deliberately with kd release promote ${input.rcVersion} --override-soak "<reason>".`
+    );
+  }
+  return { allowed: blockers.length === 0, blockers };
+}

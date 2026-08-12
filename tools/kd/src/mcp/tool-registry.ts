@@ -21,6 +21,7 @@ const exposedTools = [
   ["release_ship", "release.ship"],
   ["release_promote", "release.promote"],
   ["release_cut", "release.cut"],
+  ["release_reset_staging", "release.reset-staging"],
   ["release_status", "release.status"],
   ["cloud_deploy", "cloud.deploy"],
   ["cloud_relay_provision", "cloud.relay-provision"],

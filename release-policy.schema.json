@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.kanna.build/release-policy.schema.json",
+  "title": "Kanna release policy",
+  "description": "Tunable safety policy for the kd desktop release lifecycle. Read by `kd release status` and `kd release promote` from the repository root. A missing file means the documented defaults apply; an unparseable or unknown key is an error, never a silent fallback.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "productionSoakHours": {
+      "type": "number",
+      "minimum": 0,
+      "default": 24,
+      "description": "Hours a staging release candidate must have been published before `kd release promote` will ship it to production. Measured from the prerelease's GitHub publication time. 0 disables the gate. A promotion may exceed the gate only through the explicit `--override-soak <reason>` human override, which waives this window and nothing else."
+    }
+  }
+}

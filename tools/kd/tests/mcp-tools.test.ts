@@ -16,6 +16,7 @@ describe("MCP tool registry", () => {
       "release_ship",
       "release_promote",
       "release_cut",
+      "release_reset_staging",
       "release_status",
       "cloud_deploy",
       "cloud_relay_provision",
@@ -34,5 +35,24 @@ describe("MCP tool registry", () => {
       "doctor_remote",
       "doctor"
     ]);
+  });
+
+  it("requires an explicit destination, reason, and confirmation to reset the staging lineage", () => {
+    const tool = buildMcpToolDefinitions().find((definition) => definition.name === "release_reset_staging");
+    expect(tool?.description).toMatch(/never runs implicitly/);
+    expect(() => tool?.schema.parse({ to: "main", reason: "abandoned soak" })).toThrow();
+    expect(() => tool?.schema.parse({ to: "main", confirmAbandon: "1.3.0-staging.2" })).toThrow();
+    expect(tool?.schema.parse({ to: "main", reason: "abandoned soak", confirmAbandon: "1.3.0-staging.2" })).toEqual({
+      to: "main",
+      reason: "abandoned soak",
+      confirmAbandon: "1.3.0-staging.2",
+      dryRun: false
+    });
+  });
+
+  it("keeps the soak override an explicit opt-in on promotion", () => {
+    const tool = buildMcpToolDefinitions().find((definition) => definition.name === "release_promote");
+    const parsed = tool?.schema.parse({ version: "1.2.4-staging.3" }) as { overrideSoak?: string };
+    expect(parsed.overrideSoak).toBeUndefined();
   });
 });

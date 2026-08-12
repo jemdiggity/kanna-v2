@@ -177,6 +177,42 @@ describe("release task environment integration", () => {
     );
   });
 
+  it("passes an explicit target series and its abandonments through to the cut", async () => {
+    const fixture = await createFixture();
+    mockGitContext(fixture);
+
+    await getTaskDefinition("release.cut").execute(
+      { cwd: fixture.worktree, env: {} },
+      { version: "0.2.0", abandonSeries: "0.1, 0.15", reason: "0.1 diverged from main" }
+    );
+
+    expect(releaseMocks.cutReleaseBranch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        version: "0.2.0",
+        abandonSeries: ["0.1", "0.15"],
+        reason: "0.1 diverged from main"
+      })
+    );
+  });
+
+  it("refuses to mix an explicit target series with bump inference", async () => {
+    const fixture = await createFixture();
+    mockGitContext(fixture);
+
+    const conflict = await getTaskDefinition("release.cut").execute(
+      { cwd: fixture.worktree, env: {} },
+      { version: "0.2.0", minor: true }
+    );
+    expect(conflict).toEqual({ ok: false, message: "release cut accepts --version or a bump flag, not both." });
+
+    const strayReason = await getTaskDefinition("release.cut").execute(
+      { cwd: fixture.worktree, env: {} },
+      { version: "0.2.0", reason: "why" }
+    );
+    expect(strayReason).toEqual({ ok: false, message: "release cut --reason only applies with --abandon-series." });
+    expect(releaseMocks.cutReleaseBranch).not.toHaveBeenCalled();
+  });
+
   it("stops before the ship/build/publish boundary when the selected profile is missing", async () => {
     const fixture = await createFixture();
     vi.stubEnv("APPLE_KEYCHAIN_PATH", fixture.keychain);

@@ -1,0 +1,4 @@
+{
+  "$schema": "./release-policy.schema.json",
+  "productionSoakHours": 24
+}
