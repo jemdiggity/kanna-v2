@@ -227,30 +227,12 @@ async function storeUpdaterSigningKey(
       selection.service,
       "-a",
       selection.account,
+      selection.keychainPath,
       "-w"
     ],
     { cwd: input.cwd, env: input.env, interactive: true }
   );
   return stored.exitCode === 0;
-}
-
-async function deleteUpdaterSigningKey(
-  input: UpdaterKeyRuntimeInput,
-  selection: UpdaterKeySelection
-): Promise<boolean> {
-  const deleted = await input.runner.run(
-    "security",
-    [
-      "delete-generic-password",
-      "-s",
-      selection.service,
-      "-a",
-      selection.account,
-      selection.keychainPath
-    ],
-    { cwd: input.cwd, env: input.env }
-  );
-  return deleted.exitCode === 0;
 }
 
 async function readExistingUpdaterSigningKey(
@@ -338,37 +320,24 @@ export async function setupUpdaterKeyCredentials(
       return { ...selection, configPath };
     }
 
-    let itemCreated = false;
-    try {
-      if (!await storeUpdaterSigningKey(runtimeInput, selection)) {
-        throw new Error(
-          "security did not store the updater signing key. No Keychain item or machine-local selector configuration was changed."
-        );
-      }
-      itemCreated = true;
-      const storedMaterial = await readUpdaterSigningKey(runtimeInput, selection);
-      await assertUpdaterSigningKeyMatchesPublicKey({
-        ...runtimeInput,
-        material: storedMaterial,
-        publicKey
-      });
-
-      const configPath = writeMachineUpdaterKeySelectors({
-        homeDir: input.homeDir,
-        service: selection.service,
-        account: selection.account,
-        keychainPath: selection.keychainPath
-      });
-      return { ...selection, configPath };
-    } catch (error) {
-      if (itemCreated) {
-        if (!await deleteUpdaterSigningKey(runtimeInput, selection)) {
-          throw new Error(
-            "Updater key setup failed validation and kd could not remove the newly created Keychain item. Inspect that item before retrying; machine-local selector publication did not complete."
-          );
-        }
-      }
-      throw error;
+    if (!await storeUpdaterSigningKey(runtimeInput, selection)) {
+      throw new Error(
+        "security did not store the updater signing key. No Keychain item or machine-local selector configuration was changed."
+      );
     }
+    const storedMaterial = await readUpdaterSigningKey(runtimeInput, selection);
+    await assertUpdaterSigningKeyMatchesPublicKey({
+      ...runtimeInput,
+      material: storedMaterial,
+      publicKey
+    });
+
+    const configPath = writeMachineUpdaterKeySelectors({
+      homeDir: input.homeDir,
+      service: selection.service,
+      account: selection.account,
+      keychainPath: selection.keychainPath
+    });
+    return { ...selection, configPath };
   });
 }

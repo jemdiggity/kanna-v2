@@ -401,6 +401,27 @@ describe("release environment", () => {
     ].join("\n"));
   });
 
+  it.each([
+    ["ownerless", undefined],
+    ["malformed", "{not valid json"]
+  ])("ignores an abandoned %s legacy selector lock", async (_label, ownerSource) => {
+    const { home, globalEnvPath } = await createFixture();
+    const legacyLock = join(home, ".kanna", ".release-environment-write.lock");
+    await mkdir(legacyLock);
+    if (ownerSource !== undefined) {
+      await writeFile(join(legacyLock, "owner.json"), ownerSource, { mode: 0o600 });
+    }
+
+    expect(writeMachineNotarizationSelectors({
+      homeDir: home,
+      profile: "recovered-notary",
+      keychainPath: "/recovered-notary.keychain-db"
+    })).toBe(globalEnvPath);
+    expect(await readFile(globalEnvPath, "utf8")).toContain(
+      'APPLE_KEYCHAIN_PROFILE="recovered-notary"'
+    );
+  });
+
   it("rejects setup through a symlinked ~/.kanna directory without modifying its target", async () => {
     const { root, home } = await createFixture();
     const repositoryConfigDir = join(root, "repo", "machine-config");

@@ -126,10 +126,13 @@ makes existing installations impossible to update. Normal `kd release ship` runs
 the private key only from the configured Keychain item and pass it to the Tauri
 signer through its child-process environment; key material and passwords never
 belong in process arguments, release config, or command output. Setup is
-machine-serialized, never overwrites an existing valid item, and removes a
-newly prompted item if validation or selector publication fails. Ships resolve
-the actual Keychain item and verify it against the public key before changing
-version files or starting Bazel.
+machine-serialized with a kernel-backed macOS file lock and never overwrites an
+existing valid item. If validation or selector publication fails after the
+native prompt, kd retains the new item rather than risk deleting a concurrent
+replacement; retry with the same selector after a publication failure, or use a
+fresh service/account after a key mismatch. Ships resolve the actual Keychain
+item and verify it against the public key before changing version files or
+starting Bazel.
 
 `~/.kanna/.env.release.local` is kd's sole release-environment file for every
 repository and worktree, and kd requires it to be owner-only (`0600`). A primary

@@ -149,6 +149,7 @@ describe("updater signing key setup", () => {
   it("prompts natively, validates the stored item, and publishes owner-only selectors", async () => {
     const { root, homeDir, keychainPath } = await setupFixture();
     await mkdir(join(homeDir, ".kanna"));
+    await mkdir(join(homeDir, ".kanna", ".updater-key-setup.lock"));
     await writeFile(
       join(homeDir, ".kanna", ".env.release.local"),
       "APPLE_KEYCHAIN_PROFILE=notary\nAPPLE_KEYCHAIN_PATH=/notary.keychain-db\n",
@@ -198,6 +199,7 @@ describe("updater signing key setup", () => {
         "build.kanna.updater-key",
         "-a",
         "tauri-updater-signing-key",
+        keychainPath,
         "-w"
       ],
       interactive: true
@@ -296,7 +298,7 @@ describe("updater signing key setup", () => {
     expect(calls).not.toContain("delete-generic-password");
   });
 
-  it("removes a newly prompted item when selector publication fails", async () => {
+  it("never deletes a newly prompted item when later selector publication fails", async () => {
     const { root, homeDir, keychainPath } = await setupFixture();
     const configPath = join(homeDir, ".kanna", ".env.release.local");
     await mkdir(join(homeDir, ".kanna"));
@@ -331,15 +333,22 @@ describe("updater signing key setup", () => {
       runner,
       keychainPath
     })).rejects.toThrow(/Plaintext release credentials/);
-    expect(calls).toContain("delete-generic-password");
+    expect(calls).not.toContain("delete-generic-password");
     expect(await readFile(configPath, "utf8")).toBe("GH_TOKEN=plaintext-is-rejected\n");
   });
 
-  it("rejects a concurrent setup before either invocation can stale-read and overwrite", async () => {
+  it("lets only one of two contenders proceed past the same malformed legacy lock", async () => {
     const root = await mkdtemp(join(tmpdir(), "kanna-updater-key-setup-"));
     const homeDir = join(root, "home");
     const keychainPath = join(root, "login.keychain-db");
     await mkdir(homeDir);
+    await mkdir(join(homeDir, ".kanna"));
+    await mkdir(join(homeDir, ".kanna", ".updater-key-setup.lock"));
+    await writeFile(
+      join(homeDir, ".kanna", ".updater-key-setup.lock", "owner.json"),
+      "{not valid json",
+      { mode: 0o600 }
+    );
     await writeFile(keychainPath, "keychain fixture\n");
     let releaseFirstLookup: (() => void) | undefined;
     const firstLookupGate = new Promise<void>((resolve) => {
