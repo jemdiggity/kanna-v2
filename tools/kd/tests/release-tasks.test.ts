@@ -103,6 +103,18 @@ describe("release task environment integration", () => {
 
   it("passes merged release defaults to the ship task", async () => {
     const fixture = await createFixture();
+    const releaseEnvPath = join(fixture.home, ".kanna", ".env.release.local");
+    await writeFile(
+      releaseEnvPath,
+      [
+        "RELEASE_DEFAULT=file",
+        "KANNA_UPDATER_PUBKEY=file-pubkey",
+        `TAURI_PRIVATE_KEY_PATH=${JSON.stringify(fixture.keychain)}`,
+        ""
+      ].join("\n"),
+      { mode: 0o600 }
+    );
+    await chmod(releaseEnvPath, 0o600);
     mockGitContext(fixture);
 
     await getTaskDefinition("release.ship").execute(
@@ -115,7 +127,9 @@ describe("release task environment integration", () => {
       expect.objectContaining({
         env: expect.objectContaining({
           APPLE_KEYCHAIN_PROFILE: "shell-profile",
-          RELEASE_DEFAULT: "file"
+          RELEASE_DEFAULT: "file",
+          KANNA_UPDATER_PUBKEY: "file-pubkey",
+          TAURI_PRIVATE_KEY_PATH: fixture.keychain
         })
       })
     );
@@ -254,4 +268,5 @@ describe("release task environment integration", () => {
       expect.objectContaining({ cwd: fixture.worktree })
     );
   });
+
 });

@@ -38,7 +38,7 @@ async function writePrivateFile(path: string, contents: string): Promise<void> {
 interface SynchronizedMutation {
   done: Promise<void>;
   synchronization: {
-    event: "after-release-file-read" | "after-temp-created";
+    event: "after-release-file-read" | "after-temp-created" | "before-release-file-rename";
     readyPath: string;
     continuePath: string;
   };
@@ -46,7 +46,7 @@ interface SynchronizedMutation {
 
 function startSynchronizedMutation(input: {
   root: string;
-  event: "after-release-file-read" | "after-temp-created";
+  event: "after-release-file-read" | "after-temp-created" | "before-release-file-rename";
   mutation:
     | {
         kind: "replace-home";
@@ -115,6 +115,63 @@ fs.writeFileSync(input.continuePath, "continue", { flag: "wx" });`,
   return {
     done,
     synchronization: { event: input.event, readyPath, continuePath }
+  };
+}
+
+function startConcurrentNotarizationWrite(input: {
+  root: string;
+  home: string;
+}): SynchronizedMutation {
+  const readyPath = join(input.root, `worker-ready-${randomUUID()}`);
+  const continuePath = join(input.root, `worker-continue-${randomUUID()}`);
+  const moduleUrl = new URL("../src/runtime/release-env.ts", import.meta.url).href;
+  const child = spawn(
+    process.execPath,
+    [
+      "--import",
+      "tsx",
+      "--input-type=module",
+      "-e",
+      `import fs from "node:fs";
+const input = JSON.parse(process.argv[1]);
+const waitArray = new Int32Array(new SharedArrayBuffer(4));
+const deadline = Date.now() + 10000;
+while (!fs.existsSync(input.readyPath)) {
+  if (Date.now() >= deadline) throw new Error("Timed out waiting for first selector writer");
+  Atomics.wait(waitArray, 0, 0, 10);
+}
+try {
+  const module = await import(input.moduleUrl);
+  module.writeMachineNotarizationSelectors({
+    homeDir: input.home,
+    profile: "concurrent-notary",
+    keychainPath: "/concurrent-notary.keychain-db"
+  });
+  throw new Error("Concurrent selector writer unexpectedly succeeded");
+} catch (error) {
+  if (!String(error).includes("already in progress")) throw error;
+} finally {
+  fs.writeFileSync(input.continuePath, "continue", { flag: "wx" });
+}`,
+      JSON.stringify({ ...input, readyPath, continuePath, moduleUrl })
+    ],
+    { stdio: ["ignore", "ignore", "pipe"] }
+  );
+  const done = new Promise<void>((resolve, reject) => {
+    let stderr = "";
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    child.once("error", reject);
+    child.once("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`Concurrent selector write failed (${code ?? "signal"}): ${stderr.trim()}`));
+    });
+  });
+  return {
+    done,
+    synchronization: { event: "before-release-file-rename", readyPath, continuePath }
   };
 }
 
@@ -231,7 +288,13 @@ describe("release environment", () => {
     expect(env.APPLE_KEYCHAIN_PATH).toBe(join(root, "shell.keychain-db"));
   });
 
-  it.each(["APPLE_PASSWORD", "TAURI_PRIVATE_KEY_PASSWORD", "GH_TOKEN"])(
+  it.each([
+    "APPLE_PASSWORD",
+    "TAURI_PRIVATE_KEY_PASSWORD",
+    "TAURI_SIGNING_PRIVATE_KEY",
+    "TAURI_SIGNING_PRIVATE_KEY_PASSWORD",
+    "GH_TOKEN"
+  ])(
     "rejects plaintext release credential %s from machine-global config",
     async (credentialKey) => {
       const { home, globalEnvPath } = await createFixture();
@@ -269,6 +332,96 @@ describe("release environment", () => {
       'RELEASE_DEFAULT=keep\nAPPLE_KEYCHAIN_PROFILE="new-profile"\nAPPLE_KEYCHAIN_PATH="/Users/test/Library/Keychains/login.keychain-db"\n'
     );
     expect((await stat(globalEnvPath)).mode & 0o777).toBe(0o600);
+  });
+
+  it("serializes the final check and rename across notarization writers", async () => {
+    const { root, home, globalEnvPath } = await createFixture();
+    await writePrivateFile(globalEnvPath, "RELEASE_DEFAULT=keep\n");
+    const concurrent = startConcurrentNotarizationWrite({ root, home });
+
+    writeMachineNotarizationSelectors({
+      homeDir: home,
+      profile: "primary-notary",
+      keychainPath: "/primary-notary.keychain-db",
+      testSynchronization: concurrent.synchronization
+    });
+    await concurrent.done;
+
+    expect(await readFile(globalEnvPath, "utf8")).toBe([
+      "RELEASE_DEFAULT=keep",
+      'APPLE_KEYCHAIN_PROFILE="primary-notary"',
+      'APPLE_KEYCHAIN_PATH="/primary-notary.keychain-db"',
+      ""
+    ].join("\n"));
+  });
+
+  it.each([
+    ["ownerless", undefined],
+    ["malformed", "{not valid json"]
+  ])("ignores an abandoned %s legacy selector lock", async (_label, ownerSource) => {
+    const { home, globalEnvPath } = await createFixture();
+    const legacyLock = join(home, ".kanna", ".release-environment-write.lock");
+    await mkdir(legacyLock);
+    if (ownerSource !== undefined) {
+      await writeFile(join(legacyLock, "owner.json"), ownerSource, { mode: 0o600 });
+    }
+
+    expect(writeMachineNotarizationSelectors({
+      homeDir: home,
+      profile: "recovered-notary",
+      keychainPath: "/recovered-notary.keychain-db"
+    })).toBe(globalEnvPath);
+    expect(await readFile(globalEnvPath, "utf8")).toContain(
+      'APPLE_KEYCHAIN_PROFILE="recovered-notary"'
+    );
+  });
+
+  it("reacquires an abandoned lockf inode and persists owner-only modes", async () => {
+    const { home, globalEnvPath } = await createFixture();
+    const kannaDir = join(home, ".kanna");
+    const lockPath = join(kannaDir, ".release-environment-write.lockf");
+    await chmod(kannaDir, 0o755);
+    await writeFile(lockPath, "stale lock inode\n", { mode: 0o644 });
+    await chmod(lockPath, 0o644);
+
+    expect(writeMachineNotarizationSelectors({
+      homeDir: home,
+      profile: "first-reacquisition",
+      keychainPath: "/first-reacquisition.keychain-db"
+    })).toBe(globalEnvPath);
+    expect(writeMachineNotarizationSelectors({
+      homeDir: home,
+      profile: "second-reacquisition",
+      keychainPath: "/second-reacquisition.keychain-db"
+    })).toBe(globalEnvPath);
+
+    expect(await readFile(globalEnvPath, "utf8")).toContain(
+      'APPLE_KEYCHAIN_PROFILE="second-reacquisition"'
+    );
+    expect((await stat(kannaDir)).mode & 0o777).toBe(0o700);
+    expect((await stat(lockPath)).mode & 0o777).toBe(0o600);
+  });
+
+  it("repairs the shared writer lock before existing config validation fails", async () => {
+    const { home, globalEnvPath } = await createFixture();
+    const kannaDir = join(home, ".kanna");
+    const lockPath = join(kannaDir, ".release-environment-write.lockf");
+    await chmod(kannaDir, 0o755);
+    await writeFile(lockPath, "stale lock inode\n", { mode: 0o644 });
+    await chmod(lockPath, 0o644);
+    await writePrivateFile(globalEnvPath, "GH_TOKEN=plaintext-is-rejected\n");
+
+    expect(() => writeMachineNotarizationSelectors({
+      homeDir: home,
+      profile: "must-not-write",
+      keychainPath: "/must-not-write.keychain-db"
+    })).toThrow(/Plaintext release credentials/);
+
+    expect((await stat(kannaDir)).mode & 0o777).toBe(0o700);
+    expect((await stat(lockPath)).mode & 0o777).toBe(0o600);
+    expect(await readFile(globalEnvPath, "utf8")).toBe(
+      "GH_TOKEN=plaintext-is-rejected\n"
+    );
   });
 
   it("rejects setup through a symlinked ~/.kanna directory without modifying its target", async () => {

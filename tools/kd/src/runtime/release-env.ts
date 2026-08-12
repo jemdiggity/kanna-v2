@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { lstatSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { parseEnv } from "node:util";
@@ -19,6 +20,8 @@ const UNSAFE_PLAINTEXT_RELEASE_KEYS = new Set([
   "APPLE_API_KEY",
   "APPLE_API_PRIVATE_KEY",
   "TAURI_PRIVATE_KEY_PASSWORD",
+  "TAURI_SIGNING_PRIVATE_KEY",
+  "TAURI_SIGNING_PRIVATE_KEY_PASSWORD",
   "KANNA_GITHUB_TOKEN",
   "GH_TOKEN",
   "GITHUB_TOKEN"
@@ -41,7 +44,7 @@ interface DirectoryAncestryEntry extends DirectoryIdentity {
 }
 
 interface ReleaseEnvironmentTestSynchronization {
-  event: "after-release-file-read" | "after-temp-created";
+  event: "after-release-file-read" | "after-temp-created" | "before-release-file-rename";
   readyPath: string;
   continuePath: string;
 }
@@ -172,15 +175,21 @@ function validateReleaseEnvironmentFile(
   );
   if (unsafeKeys.length > 0) {
     throw new Error(
-      `Plaintext release credentials are not allowed in ${envPath}: ${unsafeKeys.join(", ")}. Store notarization credentials with ./kd release setup-notarization and keep other secrets in their supported secure stores.`
+      `Plaintext release credentials are not allowed in ${envPath}: ${unsafeKeys.join(", ")}. Store notarization credentials with ./kd release setup-notarization, keep updater signing material in the owner-only file selected by TAURI_PRIVATE_KEY_PATH, and keep other secrets in their supported secure stores.`
     );
   }
 }
 
-export function writeMachineNotarizationSelectors(input: {
+/**
+ * Replace one family of machine-local selectors in ~/.kanna/.env.release.local,
+ * leaving every other line untouched. Only non-secret selectors belong here;
+ * the secrets they point at stay in the Keychain.
+ */
+function writeMachineSelectors(input: {
   homeDir: string;
-  profile: string;
-  keychainPath: string;
+  selectorKeys: Set<string>;
+  selectorLabel: string;
+  assignments: [string, string][];
   /** @internal Test-only synchronization for deterministic filesystem races. */
   testSynchronization?: ReleaseEnvironmentTestSynchronization;
 }): string {
@@ -194,6 +203,14 @@ export function writeMachineNotarizationSelectors(input: {
   if (ancestry === undefined) {
     throw new Error(`Unable to create machine-local release directory ${kannaDir}.`);
   }
+  // Repair and pin the persistent writer lock before parsing existing config,
+  // so even a validation failure leaves the shared writer invariant healthy.
+  preparePinnedDirectoryLock(
+    kannaDir,
+    ancestry,
+    ".release-environment-write.lockf",
+    true
+  );
 
   const readResponse = runPinnedDirectoryWorker(kannaDir, {
     operation: "read",
@@ -207,9 +224,9 @@ export function writeMachineNotarizationSelectors(input: {
   validateDotenv(source, envPath);
   const parsed = definedEnvironment(parseEnv(source));
   validateReleaseEnvironmentFile(parsed, envPath);
-  for (const key of NOTARIZATION_SELECTOR_KEYS) {
+  for (const key of input.selectorKeys) {
     if (parsed[key]?.includes("\n") || parsed[key]?.includes("\r")) {
-      throw new Error(`Invalid multiline notarization selector ${key} in ${envPath}.`);
+      throw new Error(`Invalid multiline ${input.selectorLabel} selector ${key} in ${envPath}.`);
     }
   }
 
@@ -217,13 +234,12 @@ export function writeMachineNotarizationSelectors(input: {
     .split(/\r?\n/)
     .filter((line) => {
       const assignment = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/.exec(line);
-      return !assignment?.[1] || !NOTARIZATION_SELECTOR_KEYS.has(assignment[1]);
+      return !assignment?.[1] || !input.selectorKeys.has(assignment[1]);
     });
   while (retainedLines.at(-1) === "") retainedLines.pop();
   const updated = [
     ...retainedLines,
-    `${NOTARIZATION_PROFILE_ENV}=${JSON.stringify(input.profile)}`,
-    `${NOTARIZATION_KEYCHAIN_ENV}=${JSON.stringify(input.keychainPath)}`,
+    ...input.assignments.map(([key, value]) => `${key}=${JSON.stringify(value)}`),
     ""
   ].join("\n");
 
@@ -237,6 +253,39 @@ export function writeMachineNotarizationSelectors(input: {
     testSynchronization: input.testSynchronization
   });
   return envPath;
+}
+
+export function writeMachineNotarizationSelectors(input: {
+  homeDir: string;
+  profile: string;
+  keychainPath: string;
+  /** @internal Test-only synchronization for deterministic filesystem races. */
+  testSynchronization?: ReleaseEnvironmentTestSynchronization;
+}): string {
+  return writeMachineSelectors({
+    homeDir: input.homeDir,
+    selectorKeys: NOTARIZATION_SELECTOR_KEYS,
+    selectorLabel: "notarization",
+    assignments: [
+      [NOTARIZATION_PROFILE_ENV, input.profile],
+      [NOTARIZATION_KEYCHAIN_ENV, input.keychainPath]
+    ],
+    testSynchronization: input.testSynchronization
+  });
+}
+
+function preparePinnedDirectoryLock(
+  cwd: string,
+  ancestry: DirectoryAncestryEntry[],
+  lockName: string,
+  repairDirectoryMode: boolean
+): void {
+  runPinnedDirectoryWorker(cwd, {
+    operation: "ensure-lock-file",
+    ancestry,
+    fileName: lockName,
+    repairDirectoryMode
+  });
 }
 
 function machineConfigAncestry(
@@ -295,12 +344,36 @@ function runPinnedDirectoryWorker(
   cwd: string,
   request: Record<string, unknown>
 ): PinnedWorkerResponse {
-  const result = spawnSync(
-    process.execPath,
+  const workerArguments = [
+    "-e",
     // tsup rewrites require() inside Function#toString to __require(); define
     // the same local in the standalone process so source and bundled kd share
     // exactly one worker implementation.
-    ["-e", `const __require = require;\n(${pinnedDirectoryWorker.toString()})()`],
+    `const __require = require; const __name = (target) => target;\n(${pinnedDirectoryWorker.toString()})()`
+  ];
+  const serializeWrite = request.operation === "write";
+  if (serializeWrite) {
+    const ancestry = request.ancestry as DirectoryAncestryEntry[];
+    preparePinnedDirectoryLock(
+      cwd,
+      ancestry,
+      ".release-environment-write.lockf",
+      request.repairDirectoryMode === true
+    );
+  }
+  const result = spawnSync(
+    serializeWrite ? "/usr/bin/lockf" : process.execPath,
+    serializeWrite
+      ? [
+          "-s",
+          "-t",
+          "0",
+          "-k",
+          ".release-environment-write.lockf",
+          process.execPath,
+          ...workerArguments
+        ]
+      : workerArguments,
     {
       cwd,
       encoding: "utf8",
@@ -310,6 +383,11 @@ function runPinnedDirectoryWorker(
   );
   if (result.error) {
     throw new Error(`Unable to pin machine-local release directory ${cwd}: ${result.error.message}`);
+  }
+  if (serializeWrite && result.status === 75) {
+    throw new Error(
+      "Another machine-local release setup is already in progress; retry after it finishes."
+    );
   }
   if (result.status !== 0) {
     throw new Error(
@@ -446,7 +524,6 @@ function pinnedDirectoryWorker(): void {
       fs.closeSync(descriptor);
     }
   };
-
   try {
     assertPinnedAncestry();
     const operation = request.operation;
@@ -484,10 +561,52 @@ function pinnedDirectoryWorker(): void {
       return;
     }
 
+    if (operation === "assert-directory") {
+      assertPinnedAncestry();
+      respond({ ok: true });
+      return;
+    }
+
     if (request.repairDirectoryMode === true) {
       fs.chmodSync(".", 0o700);
     }
     const fileName = String(request.fileName);
+    if (operation === "ensure-lock-file") {
+      if (!/^\.[a-z0-9-]+\.lockf$/.test(fileName)) {
+        throw new Error("Invalid machine-local release lock name.");
+      }
+      const descriptor = fs.openSync(
+        fileName,
+        fs.constants.O_RDWR |
+          fs.constants.O_CREAT |
+          fs.constants.O_NOFOLLOW,
+        0o600
+      );
+      try {
+        const opened = fs.fstatSync(descriptor);
+        if (!opened.isFile()) {
+          throw new Error("Machine-local release lock must be a regular file.");
+        }
+        if (typeof process.getuid === "function" && opened.uid !== process.getuid()) {
+          throw new Error("Machine-local release lock must be owned by the current user.");
+        }
+        fs.fchmodSync(descriptor, 0o600);
+        const configured = fs.lstatSync(fileName);
+        if (
+          configured.isSymbolicLink() ||
+          !configured.isFile() ||
+          configured.dev !== opened.dev ||
+          configured.ino !== opened.ino
+        ) {
+          throw new Error("Machine-local release lock must remain the same regular, non-symlinked file while it is prepared.");
+        }
+      } finally {
+        fs.closeSync(descriptor);
+      }
+      assertPinnedAncestry();
+      respond({ ok: true });
+      return;
+    }
     if (operation === "read") {
       const result = readReleaseFile(fileName, request.requireOwnerOnly === true);
       synchronizeTest("after-release-file-read");
@@ -533,6 +652,7 @@ function pinnedDirectoryWorker(): void {
         ) {
           throw new Error("Machine-local release environment changed while selectors were being written; retry setup.");
         }
+        synchronizeTest("before-release-file-rename");
         fs.renameSync(tempName, fileName);
         assertPinnedAncestry();
       } finally {
