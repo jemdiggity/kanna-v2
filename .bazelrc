@@ -4,7 +4,5 @@ build --disk_cache=~/Library/Caches/kanna-bazel/disk-cache
 build --repository_cache=~/Library/Caches/kanna-bazel/repository-cache
 
 build --action_env=KANNA_UPDATER_PUBKEY
-build:notarize --action_env=APPLE_ID
-build:notarize --action_env=APPLE_PASSWORD
-build:notarize --action_env=APPLE_TEAM_ID
 build:notarize --action_env=APPLE_KEYCHAIN_PROFILE
+build:notarize --action_env=APPLE_KEYCHAIN_PATH

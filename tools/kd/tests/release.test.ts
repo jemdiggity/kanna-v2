@@ -1,9 +1,25 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { CommandRunner } from "../src/runtime/process";
+
+vi.mock("../src/runtime/updater-key", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/runtime/updater-key")>();
+  return {
+    ...actual,
+    preflightUpdaterSigningKey: vi.fn(async (input: { env: NodeJS.ProcessEnv }) => {
+      const keyPath = input.env.TAURI_PRIVATE_KEY_PATH;
+      if (!keyPath) throw new Error("Missing TAURI_PRIVATE_KEY_PATH.");
+      const permissions = statSync(keyPath).mode & 0o777;
+      if (permissions !== 0o400 && permissions !== 0o600) {
+        throw new Error("Tauri updater private key must have owner-only read permissions.");
+      }
+      return readFileSync(keyPath, "utf8").trim();
+    })
+  };
+});
 import {
   bazelTargetForLabel,
   createUpdaterBundle,
@@ -38,7 +54,7 @@ function createReleaseRepo(root: string): { repoRoot: string; privateKeyPath: st
   writeFileSync(join(tauriDir, "Cargo.toml"), '[package]\nname = "kanna"\nversion = "1.2.3"\n');
   writeFileSync(join(tauriDir, "Cargo.lock"), "# lock\n");
   const privateKeyPath = join(root, "updater-private.key");
-  writeFileSync(privateKeyPath, "private key\n");
+  writeFileSync(privateKeyPath, "private key\n", { mode: 0o600 });
   return { repoRoot, privateKeyPath };
 }
 
@@ -112,13 +128,12 @@ describe("release updater bundling", () => {
       mkdirSync(join(repoRoot, "bazel-out", "release"), { recursive: true });
       mkdirSync(join(repoRoot, ".build", "release"), { recursive: true });
       writeFileSync(bundleSource, "bazel updater archive\n");
-      writeFileSync(privateKeyPath, "private key\n");
+      writeFileSync(privateKeyPath, "private key\n", { mode: 0o600 });
 
       const calls: CommandCall[] = [];
       const runner: CommandRunner = {
         async run(command, args, options) {
           calls.push({ command, args, options });
-
           if (command === "pnpm") {
             const signedBundlePath = args.at(-1);
             expect(signedBundlePath).toBe(bundlePath);
@@ -135,12 +150,7 @@ describe("release updater bundling", () => {
         archLabels: ["arm64"],
         release: false,
         dryRun: true,
-        env: {
-          KANNA_UPDATER_PUBKEY: "pubkey",
-          TAURI_PRIVATE_KEY_PATH: privateKeyPath,
-          TAURI_PRIVATE_KEY_PASSWORD: "password",
-          PATH: process.env.PATH
-        },
+        env: releaseEnv(privateKeyPath),
         runner
       };
 
@@ -149,19 +159,122 @@ describe("release updater bundling", () => {
       expect(readFileSync(bundlePath, "utf8")).toBe("bazel updater archive\n");
       expect(readFileSync(signaturePath, "utf8")).toBe("signed bundle\n");
       expect(calls.some((call) => call.command === "tar")).toBe(false);
-      expect(calls.find((call) => call.command === "pnpm")?.args).toEqual([
+      const signerCall = calls.find((call) => call.command === "pnpm");
+      expect(signerCall?.args).toEqual([
         "--dir",
         join(repoRoot, "apps", "desktop"),
         "exec",
         "tauri",
         "signer",
         "sign",
-        "--private-key-path",
-        privateKeyPath,
-        "--password",
-        "password",
         bundlePath
       ]);
+      // The key and its password travel through the signer's environment, never
+      // argv, so neither is visible to other processes via ps.
+      expect(signerCall?.args).not.toContain("private key");
+      expect(signerCall?.args).not.toContain("password");
+      expect(signerCall?.options?.env?.TAURI_SIGNING_PRIVATE_KEY).toBe("private key");
+      expect(signerCall?.options?.env?.TAURI_SIGNING_PRIVATE_KEY_PASSWORD).toBe("");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores an ambient key password and always passes an explicit empty one", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const repoRoot = join(root, "repo");
+      const bundleSource = join(repoRoot, "bazel-out", "release", "Kanna.app.tar.gz");
+      const bundlePath = join(repoRoot, ".build", "release", "Kanna.app.tar.gz");
+      const signaturePath = `${bundlePath}.sig`;
+      const privateKeyPath = join(root, "updater-private.key");
+
+      mkdirSync(join(repoRoot, "bazel-out", "release"), { recursive: true });
+      mkdirSync(join(repoRoot, ".build", "release"), { recursive: true });
+      writeFileSync(bundleSource, "bazel updater archive\n");
+      writeFileSync(privateKeyPath, "private key\n", { mode: 0o600 });
+
+      const calls: CommandCall[] = [];
+      const runner: CommandRunner = {
+        async run(command, args, options) {
+          calls.push({ command, args, options });
+          if (command === "pnpm") {
+            writeFileSync(`${args.at(-1)}.sig`, "signed bundle\n");
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          return { exitCode: 1, stdout: "", stderr: `unexpected command ${command}` };
+        }
+      };
+
+      await createUpdaterBundle(
+        {
+          repoRoot,
+          bump: "patch",
+          archLabels: ["arm64"],
+          release: false,
+          dryRun: true,
+          // Updater keys used by kd are unencrypted. An ambient
+          // TAURI_PRIVATE_KEY_PASSWORD must not reach the signer, and an
+          // absent one must not leave it prompting on a TTY -- that prompt used
+          // to kill non-interactive ships after the whole build had completed.
+          env: { ...releaseEnv(privateKeyPath), TAURI_PRIVATE_KEY_PASSWORD: "stale ambient value" },
+          runner
+        },
+        bundleSource,
+        bundlePath,
+        signaturePath
+      );
+
+      const signerEnv = calls.find((call) => call.command === "pnpm")?.options?.env;
+      expect(signerEnv?.TAURI_SIGNING_PRIVATE_KEY).toBe("private key");
+      expect(signerEnv?.TAURI_SIGNING_PRIVATE_KEY_PASSWORD).toBe("");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not expose signer output when signing fails", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const repoRoot = join(root, "repo");
+      const bundleSource = join(repoRoot, "bundle.app.tar.gz");
+      const bundlePath = join(repoRoot, "signed.app.tar.gz");
+      const privateKeyPath = join(root, "updater-private.key");
+      mkdirSync(repoRoot, { recursive: true });
+      writeFileSync(bundleSource, "bundle\n");
+      writeFileSync(privateKeyPath, "secret updater key\n", { mode: 0o600 });
+      const runner: CommandRunner = {
+        async run() {
+          return {
+            exitCode: 1,
+            stdout: "secret updater key",
+            stderr: "TAURI_SIGNING_PRIVATE_KEY=secret updater key"
+          };
+        }
+      };
+
+      let message = "";
+      try {
+        await createUpdaterBundle(
+          {
+            repoRoot,
+            bump: "patch",
+            archLabels: ["arm64"],
+            release: false,
+            dryRun: true,
+            env: releaseEnv(privateKeyPath),
+            runner
+          },
+          bundleSource,
+          bundlePath,
+          `${bundlePath}.sig`
+        );
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+      expect(message).toMatch(/Tauri updater signing failed/);
+      expect(message).not.toContain("secret updater key");
+      expect(message).not.toContain("TAURI_SIGNING_PRIVATE_KEY");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -169,6 +282,49 @@ describe("release updater bundling", () => {
 });
 
 describe("release shipping", () => {
+  it.each([
+    ["dry-run", { dryRun: true, release: false, environment: "production" as const }],
+    ["staging", { dryRun: false, release: false, environment: "staging" as const }],
+    ["production", { dryRun: false, release: true, environment: "production" as const }],
+    ["promotion", {
+      dryRun: false,
+      release: true,
+      environment: "production" as const,
+      promoteFrom: "1.2.4-staging.3"
+    }]
+  ])("preflights the selected key file before mutations for %s", async (_label, mode) => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot, privateKeyPath } = createReleaseRepo(root);
+      chmodSync(privateKeyPath, 0o644);
+      const originalFiles = readVersionFiles(repoRoot);
+      const calls: CommandCall[] = [];
+      const runner: CommandRunner = {
+        async run(command, args, options) {
+          calls.push({ command, args, options });
+          if (command === "git" && args.join(" ") === "status --porcelain") {
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          return { exitCode: 1, stdout: "", stderr: "must not run after failed preflight" };
+        }
+      };
+
+      await expect(shipRelease({
+        repoRoot,
+        bump: "patch",
+        archLabels: mode.release ? ["arm64", "x86_64"] : ["arm64"],
+        ...mode,
+        env: releaseEnv(privateKeyPath),
+        runner
+      })).rejects.toThrow(/owner-only read permissions/);
+      expect(calls).toEqual([]);
+      expect(readVersionFiles(repoRoot)).toEqual(originalFiles);
+      expect(existsSync(join(repoRoot, ".build", "release"))).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("uses staging artifact names and Bazel targets when shipping staging", async () => {
     const root = await mkdtemp(join(tmpdir(), "kd-release-"));
     try {
