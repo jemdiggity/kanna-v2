@@ -1180,6 +1180,21 @@ describe("kd CLI", () => {
     expect(() => parseCliArgs(["release", "promote", "1.2.4-staging.3", "--override-soak"])).toThrow(
       /--override-soak requires a reason value/
     );
+    expect(() =>
+      parseCliArgs(["release", "promote", "1.2.4-staging.3", "--override-soak", "--dry-run"])
+    ).toThrow(/--override-soak requires a reason value/);
+    expect(() =>
+      parseCliArgs([
+        "release",
+        "reset-staging",
+        "--to",
+        "main",
+        "--reason",
+        "--dry-run",
+        "--confirm-abandon",
+        "1.2.4-staging.3"
+      ])
+    ).toThrow(/--reason requires a value/);
     expect(parseCliArgs(["release", "status"])).toEqual({
       taskId: "release.status",
       input: {}

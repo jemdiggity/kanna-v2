@@ -1946,4 +1946,3 @@ export async function releaseStatus(input: ReleaseStatusInput): Promise<ReleaseS
     promoteCommand: promotion.allowed && staging ? `kd release promote ${staging.version}` : null
   };
 }
-

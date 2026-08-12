@@ -343,7 +343,7 @@ function parseFlagInput(
     }
     if (arg === "--version") {
       const value = rest[index + 1];
-      if (!value) {
+      if (!value || value.startsWith("--")) {
         throw new Error("--version requires a value");
       }
       input.version = value;
@@ -352,7 +352,7 @@ function parseFlagInput(
     }
     if (arg === "--rollback-to") {
       const value = rest[index + 1];
-      if (!value) {
+      if (!value || value.startsWith("--")) {
         throw new Error("--rollback-to requires a value");
       }
       input.rollbackTo = value;
@@ -361,7 +361,7 @@ function parseFlagInput(
     }
     if (arg === "--branch") {
       const value = rest[index + 1];
-      if (!value) {
+      if (!value || value.startsWith("--")) {
         throw new Error("--branch requires a value");
       }
       input.branch = value;
@@ -370,7 +370,7 @@ function parseFlagInput(
     }
     if (arg === "--to") {
       const value = rest[index + 1];
-      if (!value) {
+      if (!value || value.startsWith("--")) {
         throw new Error("--to requires a value");
       }
       input.to = value;
@@ -379,7 +379,7 @@ function parseFlagInput(
     }
     if (arg === "--reason") {
       const value = rest[index + 1];
-      if (!value) {
+      if (!value || value.startsWith("--")) {
         throw new Error("--reason requires a value");
       }
       input.reason = value;
@@ -388,7 +388,7 @@ function parseFlagInput(
     }
     if (arg === "--abandon-series") {
       const value = rest[index + 1];
-      if (!value) {
+      if (!value || value.startsWith("--")) {
         throw new Error("--abandon-series requires a value");
       }
       input.abandonSeries = value;
@@ -397,7 +397,7 @@ function parseFlagInput(
     }
     if (arg === "--confirm-abandon") {
       const value = rest[index + 1];
-      if (!value) {
+      if (!value || value.startsWith("--")) {
         throw new Error("--confirm-abandon requires a value");
       }
       input.confirmAbandon = value;
@@ -406,7 +406,7 @@ function parseFlagInput(
     }
     if (arg === "--override-soak") {
       const value = rest[index + 1];
-      if (!value) {
+      if (!value || value.startsWith("--")) {
         throw new Error("--override-soak requires a reason value");
       }
       input.overrideSoak = value;
