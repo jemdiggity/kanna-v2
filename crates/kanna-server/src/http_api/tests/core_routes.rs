@@ -16,6 +16,21 @@ fn pairing_create_request(peer: [u8; 4]) -> Request<Body> {
     request
 }
 
+fn direct_lan_request(method: axum::http::Method, path: &str) -> Request<Body> {
+    let mut request = Request::builder()
+        .method(method)
+        .uri(path)
+        .body(Body::empty())
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [192, 168, 1, 20],
+            49152,
+        ))));
+    request
+}
+
 #[tokio::test]
 async fn status_advertises_lan_availability_only_to_paired_devices_and_authenticated_relay() {
     let state = super::test_state_with_seed("desktop-status-auth", "Status Auth Mac", |_| {});
@@ -1542,6 +1557,25 @@ async fn get_task_route_returns_full_task_detail_by_id() {
             "in progress",
             "2026-04-18 10:00:00",
         )
+        .unwrap();
+        db.update_pipeline_item_agent_binding("task-1", "codex", "pty")
+            .unwrap();
+        db.insert_stage_run(crate::db::NewStageRun {
+            id: "run-task-1",
+            task_id: "task-1",
+            stage: "in progress",
+            kind: "main",
+            agent: Some("implement"),
+            agent_provider: Some("claude"),
+            model: None,
+            status: "running",
+            result: None,
+            feedback: None,
+            session_id: Some("task-1"),
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: None,
+        })
         .unwrap();
     });
 

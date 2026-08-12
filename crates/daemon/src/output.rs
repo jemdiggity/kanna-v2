@@ -534,6 +534,7 @@ async fn resync_drained_subscribers(
         Event::Snapshot {
             session_id: session_id.to_string(),
             snapshot,
+            agent_provider: session.agent_provider().await,
         },
         Event::StatusChanged {
             session_id: session_id.to_string(),

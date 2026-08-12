@@ -56,7 +56,18 @@ impl Db {
                     pipeline_item.issue_title, pipeline_item.prompt, pipeline_item.pipeline,
                     pipeline_item.pipeline_def, pipeline_item.stage, pipeline_item.pr_number,
                     pipeline_item.pr_url, pipeline_item.branch, pipeline_item.closed_at,
-                    pipeline_item.agent_type, pipeline_item.agent_provider,
+                    pipeline_item.agent_type,
+                    COALESCE(
+                      (
+                        SELECT stage_run.agent_provider
+                        FROM stage_run
+                        WHERE stage_run.task_id = pipeline_item.id
+                          AND stage_run.agent_provider IS NOT NULL
+                        ORDER BY stage_run.rowid DESC
+                        LIMIT 1
+                      ),
+                      pipeline_item.agent_provider
+                    ) AS agent_provider,
                     pipeline_item.activity, pipeline_item.activity_changed_at,
                     pipeline_item.unread_at, pipeline_item.port_offset,
                     pipeline_item.display_name, pipeline_item.last_output_preview,

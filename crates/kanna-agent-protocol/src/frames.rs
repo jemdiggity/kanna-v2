@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::events::{AgentEvent, PermissionDecision};
+use crate::AgentProvider;
 
 /// Which stream of a task to attach.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -177,6 +178,8 @@ pub enum ServerFrame {
         cols: u16,
         rows: u16,
         data_b64: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_provider: Option<AgentProvider>,
     },
     TermOutput {
         task_id: String,

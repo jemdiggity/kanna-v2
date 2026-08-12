@@ -18,7 +18,6 @@ vi.mock("@xterm/xterm", () => ({
     getSelection() {
       return harness.selection;
     }
-    onData() { return { dispose() {} }; }
     attachCustomKeyEventHandler(listener: (event: KeyboardEvent) => boolean) {
       harness.keyHandler = listener;
     }

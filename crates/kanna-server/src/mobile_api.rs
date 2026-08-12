@@ -516,6 +516,14 @@ fn map_task_detail(
             .flatten()
         });
     let waiting_prompt_snippet = item.last_output_preview.clone();
+    // `pipeline_item.agent_provider` retains the task-level provider fallback
+    // used when resolving later stages. A stage-level agent can run under a
+    // different provider, so terminal consumers must follow the provider the
+    // latest durable run actually spawned.
+    let active_agent_provider = latest_run
+        .as_ref()
+        .and_then(|run| run.agent_provider.clone())
+        .or(item.agent_provider.clone());
     TaskDetail {
         id: item.id,
         repo_id: item.repo_id,
@@ -528,7 +536,7 @@ fn map_task_detail(
         snippet: waiting_prompt_snippet.clone(),
         waiting_prompt_snippet,
         agent_type: item.agent_type,
-        agent_provider: item.agent_provider,
+        agent_provider: active_agent_provider,
         branch: item.branch,
         pr_url: item.pr_url,
         closed_at: item.closed_at,

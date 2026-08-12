@@ -232,7 +232,8 @@ describe("StreamClient", () => {
     const events: string[] = [];
 
     client.attachTerminal("task-pty", {
-      onSnapshot: (_cols, _rows, dataB64) => events.push(`snapshot:${dataB64}`),
+      onSnapshot: (_cols, _rows, dataB64, agentProvider) =>
+        events.push(`snapshot:${dataB64}:${agentProvider}`),
       onOutput: (dataB64) => events.push(`output:${dataB64}`),
     });
     expect(socket.sent.at(-1)).toEqual({
@@ -248,6 +249,7 @@ describe("StreamClient", () => {
       cols: 80,
       rows: 24,
       data_b64: "c25hcA==",
+      agent_provider: "claude",
     });
     socket.receive({
       type: "term_output",
@@ -255,7 +257,7 @@ describe("StreamClient", () => {
       data_b64: "bGl2ZQ==",
     });
 
-    expect(events).toEqual(["snapshot:c25hcA==", "output:bGl2ZQ=="]);
+    expect(events).toEqual(["snapshot:c25hcA==:claude", "output:bGl2ZQ=="]);
 
     socket.drop();
     vi.advanceTimersByTime(250);

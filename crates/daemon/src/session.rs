@@ -234,6 +234,10 @@ impl SessionHandle {
         self.state.lock().await.status
     }
 
+    pub async fn agent_provider(&self) -> Option<AgentProvider> {
+        self.state.lock().await.agent_provider
+    }
+
     pub async fn snapshot(
         &self,
         session_id: &str,
