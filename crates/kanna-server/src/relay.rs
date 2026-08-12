@@ -1002,6 +1002,7 @@ async fn observer_loop(
             Ok(DaemonEvent::Snapshot {
                 session_id: sid,
                 snapshot,
+                ..
             }) => Action::Send {
                 event: relay_snapshot_event(&sid, snapshot),
             },
@@ -1429,6 +1430,7 @@ mod tests {
                 DaemonEvent::Snapshot {
                     session_id: "sess-observer".to_string(),
                     snapshot: terminal_snapshot("INITIAL"),
+                    agent_provider: None,
                 },
                 DaemonEvent::Output {
                     session_id: "sess-observer".to_string(),
@@ -1437,6 +1439,7 @@ mod tests {
                 DaemonEvent::Snapshot {
                     session_id: "sess-observer".to_string(),
                     snapshot: terminal_snapshot("RESYNCED"),
+                    agent_provider: None,
                 },
                 DaemonEvent::Output {
                     session_id: "sess-observer".to_string(),

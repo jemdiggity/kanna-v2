@@ -196,6 +196,7 @@ async fn observe_session_snapshot(
         DaemonEvent::Snapshot {
             session_id: event_session_id,
             snapshot,
+            ..
         } if event_session_id == session_id => Ok(snapshot),
         DaemonEvent::Error { message, .. } => Err(RuntimeError::Protocol(message)),
         other => Err(RuntimeError::Protocol(format!(
@@ -559,6 +560,7 @@ where
         DaemonEvent::Snapshot {
             session_id: event_session_id,
             snapshot,
+            ..
         } if event_session_id == session_id => (
             Some(PeerTerminalEvent::Snapshot {
                 session_id: event_session_id,
@@ -756,6 +758,7 @@ mod tests {
             let snapshot = DaemonEvent::Snapshot {
                 session_id: "sess-duplex".to_string(),
                 snapshot: terminal_snapshot("READY"),
+                agent_provider: None,
             };
             write_half
                 .write_all(format!("{}\n", serde_json::to_string(&snapshot).unwrap()).as_bytes())

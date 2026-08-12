@@ -158,6 +158,7 @@ fn emit_fixture_with_snapshot_at(
         cols: snapshot.snapshot.cols,
         rows: snapshot.snapshot.rows,
         data_b64: b64(snapshot.snapshot.vt.as_bytes()),
+        agent_provider: None,
     }];
     let first_output_end = resnapshot_at.unwrap_or(bytes.len());
     for chunk in split_chunks(&bytes[snapshot_at..first_output_end], pattern) {
@@ -175,6 +176,7 @@ fn emit_fixture_with_snapshot_at(
             cols: resnapshot.snapshot.cols,
             rows: resnapshot.snapshot.rows,
             data_b64: b64(resnapshot.snapshot.vt.as_bytes()),
+            agent_provider: None,
         });
         for chunk in split_chunks(&bytes[resnapshot_at..], pattern) {
             frames.push(ServerFrame::TermOutput {

@@ -535,6 +535,57 @@ fn snapshot_selects_latest_relevant_transfer_for_open_task() {
     let _ = std::fs::remove_file(path);
 }
 
+#[test]
+fn snapshot_reports_the_latest_stage_run_provider_for_terminal_rendering() {
+    let path = Db::test_db_path("snapshot-active-stage-provider");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Kanna").expect("insert repo");
+    db.insert_test_pipeline_item(
+        "task-provider",
+        "repo-1",
+        "Provider changes by stage",
+        None,
+        "pr",
+        "2026-08-12 00:00:00",
+    )
+    .expect("insert task");
+    db.update_pipeline_item_agent_binding("task-provider", "codex", "pty")
+        .expect("retain task provider fallback");
+    db.insert_stage_run(NewStageRun {
+        id: "run-pr",
+        task_id: "task-provider",
+        stage: "pr",
+        kind: "main",
+        agent: Some("pr"),
+        agent_provider: Some("claude"),
+        model: None,
+        effort: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("task-provider"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
+    })
+    .expect("insert active stage run");
+
+    let snapshot = db.ui_snapshot().expect("load snapshot");
+    let item = &snapshot.entries[0].items[0];
+    assert_eq!(item.agent_provider, "claude");
+    assert_eq!(
+        db.get_pipeline_item("task-provider")
+            .expect("load task")
+            .expect("task exists")
+            .agent_provider
+            .as_deref(),
+        Some("codex"),
+        "the task-level provider fallback remains unchanged",
+    );
+
+    let _ = std::fs::remove_file(path);
+}
+
 // A transfer that broke used to vanish from the snapshot along with the ones
 // that succeeded, so the sidebar could not tell an operator their task never
 // made it. A failure is reported until something newer is in flight.
