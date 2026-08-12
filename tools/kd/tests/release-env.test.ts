@@ -15,8 +15,7 @@ import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 import {
   loadReleaseEnvironment,
-  writeMachineNotarizationSelectors,
-  writeMachineUpdaterKeySelectors
+  writeMachineNotarizationSelectors
 } from "../src/runtime/release-env";
 
 async function createFixture(): Promise<{
@@ -119,7 +118,7 @@ fs.writeFileSync(input.continuePath, "continue", { flag: "wx" });`,
   };
 }
 
-function startConcurrentSelectorWrite(input: {
+function startConcurrentNotarizationWrite(input: {
   root: string;
   home: string;
 }): SynchronizedMutation {
@@ -143,11 +142,10 @@ while (!fs.existsSync(input.readyPath)) {
 }
 try {
   const module = await import(input.moduleUrl);
-  module.writeMachineUpdaterKeySelectors({
+  module.writeMachineNotarizationSelectors({
     homeDir: input.home,
-    service: "concurrent-service",
-    account: "concurrent-account",
-    keychainPath: "/concurrent.keychain-db"
+    profile: "concurrent-notary",
+    keychainPath: "/concurrent-notary.keychain-db"
   });
   throw new Error("Concurrent selector writer unexpectedly succeeded");
 } catch (error) {
@@ -336,67 +334,23 @@ describe("release environment", () => {
     expect((await stat(globalEnvPath)).mode & 0o777).toBe(0o600);
   });
 
-  it("updates updater selectors without disturbing notarization selectors or other defaults", async () => {
-    const { home, globalEnvPath } = await createFixture();
-    await writeFile(
-      globalEnvPath,
-      [
-        "RELEASE_DEFAULT=keep",
-        "APPLE_KEYCHAIN_PROFILE=notary-profile",
-        "APPLE_KEYCHAIN_PATH=/Users/test/Library/Keychains/notary.keychain-db",
-        "KANNA_UPDATER_KEYCHAIN_SERVICE=old-service",
-        "KANNA_UPDATER_KEYCHAIN_ACCOUNT=old-account",
-        "KANNA_UPDATER_KEYCHAIN_PATH=/old/updater.keychain-db",
-        ""
-      ].join("\n"),
-      { mode: 0o644 }
-    );
-
-    expect(writeMachineUpdaterKeySelectors({
-      homeDir: home,
-      service: "build.kanna.updater-key",
-      account: "tauri-updater-signing-key",
-      keychainPath: "/Users/test/Library/Keychains/login.keychain-db"
-    })).toBe(globalEnvPath);
-
-    expect(await readFile(globalEnvPath, "utf8")).toBe([
-      "RELEASE_DEFAULT=keep",
-      "APPLE_KEYCHAIN_PROFILE=notary-profile",
-      "APPLE_KEYCHAIN_PATH=/Users/test/Library/Keychains/notary.keychain-db",
-      'KANNA_UPDATER_KEYCHAIN_SERVICE="build.kanna.updater-key"',
-      'KANNA_UPDATER_KEYCHAIN_ACCOUNT="tauri-updater-signing-key"',
-      'KANNA_UPDATER_KEYCHAIN_PATH="/Users/test/Library/Keychains/login.keychain-db"',
-      ""
-    ].join("\n"));
-    expect((await stat(globalEnvPath)).mode & 0o777).toBe(0o600);
-  });
-
-  it("serializes the final selector check and rename across concurrent kd writers", async () => {
+  it("serializes the final check and rename across notarization writers", async () => {
     const { root, home, globalEnvPath } = await createFixture();
-    await writePrivateFile(globalEnvPath, [
-      "APPLE_KEYCHAIN_PROFILE=old-notary",
-      "APPLE_KEYCHAIN_PATH=/old-notary.keychain-db",
-      "KANNA_UPDATER_KEYCHAIN_SERVICE=old-updater",
-      "KANNA_UPDATER_KEYCHAIN_ACCOUNT=old-account",
-      "KANNA_UPDATER_KEYCHAIN_PATH=/old-updater.keychain-db",
-      ""
-    ].join("\n"));
-    const concurrent = startConcurrentSelectorWrite({ root, home });
+    await writePrivateFile(globalEnvPath, "RELEASE_DEFAULT=keep\n");
+    const concurrent = startConcurrentNotarizationWrite({ root, home });
 
     writeMachineNotarizationSelectors({
       homeDir: home,
-      profile: "new-notary",
-      keychainPath: "/new-notary.keychain-db",
+      profile: "primary-notary",
+      keychainPath: "/primary-notary.keychain-db",
       testSynchronization: concurrent.synchronization
     });
     await concurrent.done;
 
     expect(await readFile(globalEnvPath, "utf8")).toBe([
-      "KANNA_UPDATER_KEYCHAIN_SERVICE=old-updater",
-      "KANNA_UPDATER_KEYCHAIN_ACCOUNT=old-account",
-      "KANNA_UPDATER_KEYCHAIN_PATH=/old-updater.keychain-db",
-      'APPLE_KEYCHAIN_PROFILE="new-notary"',
-      'APPLE_KEYCHAIN_PATH="/new-notary.keychain-db"',
+      "RELEASE_DEFAULT=keep",
+      'APPLE_KEYCHAIN_PROFILE="primary-notary"',
+      'APPLE_KEYCHAIN_PATH="/primary-notary.keychain-db"',
       ""
     ].join("\n"));
   });
@@ -446,6 +400,28 @@ describe("release environment", () => {
     );
     expect((await stat(kannaDir)).mode & 0o777).toBe(0o700);
     expect((await stat(lockPath)).mode & 0o777).toBe(0o600);
+  });
+
+  it("repairs the shared writer lock before existing config validation fails", async () => {
+    const { home, globalEnvPath } = await createFixture();
+    const kannaDir = join(home, ".kanna");
+    const lockPath = join(kannaDir, ".release-environment-write.lockf");
+    await chmod(kannaDir, 0o755);
+    await writeFile(lockPath, "stale lock inode\n", { mode: 0o644 });
+    await chmod(lockPath, 0o644);
+    await writePrivateFile(globalEnvPath, "GH_TOKEN=plaintext-is-rejected\n");
+
+    expect(() => writeMachineNotarizationSelectors({
+      homeDir: home,
+      profile: "must-not-write",
+      keychainPath: "/must-not-write.keychain-db"
+    })).toThrow(/Plaintext release credentials/);
+
+    expect((await stat(kannaDir)).mode & 0o777).toBe(0o700);
+    expect((await stat(lockPath)).mode & 0o777).toBe(0o600);
+    expect(await readFile(globalEnvPath, "utf8")).toBe(
+      "GH_TOKEN=plaintext-is-rejected\n"
+    );
   });
 
   it("rejects setup through a symlinked ~/.kanna directory without modifying its target", async () => {

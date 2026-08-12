@@ -1,28 +1,23 @@
 import { createHash, randomBytes, timingSafeEqual, verify } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  existsSync,
+  fstatSync,
+  lstatSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  rmSync,
+  writeFileSync
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import type { CommandRunner } from "./process";
-import {
-  UPDATER_KEYCHAIN_ACCOUNT_ENV,
-  UPDATER_KEYCHAIN_PATH_ENV,
-  UPDATER_KEYCHAIN_SERVICE_ENV,
-  withMachineUpdaterKeySetupLock,
-  writeMachineUpdaterKeySelectors
-} from "./release-env";
 
-/** Tauri's own env names for the signer. kd sets these only for the signer child process. */
+/** Tauri's own env names for the signer. kd sets these only for signer children. */
 export const TAURI_SIGNING_KEY_ENV = "TAURI_SIGNING_PRIVATE_KEY";
 export const TAURI_SIGNING_PASSWORD_ENV = "TAURI_SIGNING_PRIVATE_KEY_PASSWORD";
-
-const DEFAULT_SERVICE = "build.kanna.updater-key";
-const DEFAULT_ACCOUNT = "tauri-updater-signing-key";
-
-export interface UpdaterKeySelection {
-  service: string;
-  account: string;
-  keychainPath: string;
-}
 
 interface UpdaterKeyRuntimeInput {
   cwd: string;
@@ -30,107 +25,97 @@ interface UpdaterKeyRuntimeInput {
   runner: CommandRunner;
 }
 
-interface SetupUpdaterKeyInput extends UpdaterKeyRuntimeInput {
-  homeDir: string;
-  service?: string;
-  account?: string;
-  keychainPath?: string;
-}
-
-function validSelector(value: string | undefined, label: string): string {
-  const normalized = value?.trim();
-  if (!normalized) {
+function updaterPrivateKeyPath(env: NodeJS.ProcessEnv): string {
+  const keyPath = env.TAURI_PRIVATE_KEY_PATH?.trim();
+  if (!keyPath) {
     throw new Error(
-      `Missing ${label}. Run ./kd release setup-updater-key to store the updater signing key in a Keychain and record its selectors.`
+      "Missing TAURI_PRIVATE_KEY_PATH in the machine-global release environment."
     );
   }
-  if (normalized.includes("\n") || normalized.includes("\r") || normalized.includes("\0")) {
-    throw new Error(`Invalid ${label}: line breaks and NUL bytes are not allowed.`);
+  if (keyPath.includes("\n") || keyPath.includes("\r") || keyPath.includes("\0")) {
+    throw new Error("Invalid TAURI_PRIVATE_KEY_PATH: line breaks and NUL bytes are not allowed.");
   }
-  return normalized;
+  if (!isAbsolute(keyPath)) {
+    throw new Error("Invalid TAURI_PRIVATE_KEY_PATH: use an absolute path.");
+  }
+  return keyPath;
 }
 
-export function resolveUpdaterKeySelection(env: NodeJS.ProcessEnv): UpdaterKeySelection {
-  const service = validSelector(env[UPDATER_KEYCHAIN_SERVICE_ENV], UPDATER_KEYCHAIN_SERVICE_ENV);
-  const account = validSelector(env[UPDATER_KEYCHAIN_ACCOUNT_ENV], UPDATER_KEYCHAIN_ACCOUNT_ENV);
-  const keychainPath = validSelector(env[UPDATER_KEYCHAIN_PATH_ENV], UPDATER_KEYCHAIN_PATH_ENV);
-  if (!isAbsolute(keychainPath)) {
-    throw new Error(
-      `Invalid ${UPDATER_KEYCHAIN_PATH_ENV}: use an absolute Keychain path so every kd invocation selects the same file.`
+function openUpdaterPrivateKey(keyPath: string): number {
+  try {
+    return openSync(
+      keyPath,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
     );
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      throw new Error(`Tauri updater private key not found: ${keyPath}`);
+    }
+    if (code === "ELOOP") {
+      throw new Error(`Tauri updater private key must not be a symbolic link: ${keyPath}`);
+    }
+    if (code === "EACCES" || code === "EPERM") {
+      throw new Error(`Tauri updater private key is not readable: ${keyPath}`);
+    }
+    throw new Error(`Unable to open the Tauri updater private key ${keyPath}: ${code ?? "unknown error"}`);
   }
-  return { service, account, keychainPath };
-}
-
-function assertKeychainFile(keychainPath: string): void {
-  if (!existsSync(keychainPath)) {
-    throw new Error(
-      `Configured updater key Keychain does not exist: ${keychainPath}. Run ./kd release setup-updater-key.`
-    );
-  }
-  if (!statSync(keychainPath).isFile()) {
-    throw new Error(`Configured updater key Keychain is not a file: ${keychainPath}.`);
-  }
-}
-
-function lookupError(output: string): Error {
-  if (/could not be found|SecKeychainSearchCopyNext/i.test(output)) {
-    return new Error(
-      "The updater signing key is not stored in the configured Keychain. Run ./kd release setup-updater-key to store it."
-    );
-  }
-  if (/interaction.*not allowed|keychain.*locked|unable to unlock|user canceled|User interaction/i.test(output)) {
-    return new Error(
-      "The configured updater key Keychain is locked or denied access. Unlock it and allow kd to read the item, then retry."
-    );
-  }
-  return new Error(
-    "Unable to read the updater signing key from the configured Keychain. Check Keychain access, then retry ./kd release setup-updater-key if needed."
-  );
 }
 
 /**
- * Resolve the updater signing key material.
+ * Read the exact updater key file selected by the machine-global release env.
  *
- * The Keychain is the only source. There is deliberately no key-file fallback:
- * a fallback lets a ship succeed against whatever key happens to be lying on
- * disk, which is exactly the case that should fail loudly instead. The returned
- * material is secret: pass it to the signer through the environment, never
- * through argv, a log, or disk.
+ * Opening with O_NOFOLLOW and validating the descriptor keeps a symlink or
+ * pathname swap from redirecting release signing to a different file. The
+ * returned material is secret and must only be passed to a signer child env.
  */
-export async function resolveUpdaterSigningKey(input: UpdaterKeyRuntimeInput): Promise<string> {
-  const selection = resolveUpdaterKeySelection(input.env);
-  assertKeychainFile(selection.keychainPath);
-  return readUpdaterSigningKey(input, selection);
-}
-
-async function readUpdaterSigningKey(
-  input: UpdaterKeyRuntimeInput,
-  selection: UpdaterKeySelection
+export async function resolveUpdaterSigningKey(
+  input: Pick<UpdaterKeyRuntimeInput, "env">
 ): Promise<string> {
-  const result = await input.runner.run(
-    "security",
-    [
-      "find-generic-password",
-      "-s",
-      selection.service,
-      "-a",
-      selection.account,
-      "-w",
-      selection.keychainPath
-    ],
-    { cwd: input.cwd, env: input.env }
-  );
-  if (result.exitCode !== 0) {
-    throw lookupError(`${result.stderr}\n${result.stdout}`);
+  const keyPath = updaterPrivateKeyPath(input.env);
+  const descriptor = openUpdaterPrivateKey(keyPath);
+  try {
+    const opened = fstatSync(descriptor);
+    if (!opened.isFile()) {
+      throw new Error(`Tauri updater private key must be a regular file: ${keyPath}`);
+    }
+    if (typeof process.getuid !== "function") {
+      throw new Error("Unable to verify ownership of the Tauri updater private key.");
+    }
+    if (opened.uid !== process.getuid()) {
+      throw new Error(`Tauri updater private key must be owned by the current user: ${keyPath}`);
+    }
+    const permissions = opened.mode & 0o777;
+    if (permissions !== 0o400 && permissions !== 0o600) {
+      throw new Error(
+        `Tauri updater private key must have owner-only read permissions (0400 or 0600), but is mode ${permissions.toString(8).padStart(4, "0")}: ${keyPath}`
+      );
+    }
+
+    let material: string;
+    try {
+      material = readFileSync(descriptor, "utf8").trim();
+    } catch {
+      throw new Error(`Tauri updater private key is not readable: ${keyPath}`);
+    }
+    const configured = lstatSync(keyPath);
+    if (
+      configured.isSymbolicLink() ||
+      !configured.isFile() ||
+      configured.dev !== opened.dev ||
+      configured.ino !== opened.ino
+    ) {
+      throw new Error(
+        `TAURI_PRIVATE_KEY_PATH changed while the updater private key was being read: ${keyPath}`
+      );
+    }
+    if (!material) {
+      throw new Error(`Tauri updater private key is empty: ${keyPath}`);
+    }
+    return material;
+  } finally {
+    closeSync(descriptor);
   }
-  const material = result.stdout.replace(/\r?\n$/, "").trim();
-  if (!material) {
-    throw new Error(
-      "The updater signing key stored in the configured Keychain is empty. Re-run ./kd release setup-updater-key."
-    );
-  }
-  return material;
 }
 
 function decodeBase64(value: string, label: string): Buffer {
@@ -154,6 +139,40 @@ function minisignPayload(value: string, label: string): Buffer {
   return decodeBase64(payload, label);
 }
 
+function signerEnvironment(env: NodeJS.ProcessEnv, material: string): NodeJS.ProcessEnv {
+  const childEnv = { ...env };
+  // Ignore all ambient Tauri secret inputs. The validated file content and an
+  // explicit empty password are the only signing inputs kd supplies.
+  delete childEnv.TAURI_PRIVATE_KEY_PASSWORD;
+  delete childEnv[TAURI_SIGNING_KEY_ENV];
+  delete childEnv[TAURI_SIGNING_PASSWORD_ENV];
+  return {
+    ...childEnv,
+    [TAURI_SIGNING_KEY_ENV]: material,
+    [TAURI_SIGNING_PASSWORD_ENV]: ""
+  };
+}
+
+export function updaterSignerEnvironment(
+  env: NodeJS.ProcessEnv,
+  material: string
+): NodeJS.ProcessEnv {
+  return signerEnvironment(env, material);
+}
+
+/** Read and prove the configured updater key before a release can mutate state. */
+export async function preflightUpdaterSigningKey(
+  input: UpdaterKeyRuntimeInput
+): Promise<string> {
+  const publicKey = input.env.KANNA_UPDATER_PUBKEY?.trim();
+  if (!publicKey) {
+    throw new Error("Missing KANNA_UPDATER_PUBKEY in the machine-global release environment.");
+  }
+  const material = await resolveUpdaterSigningKey({ env: input.env });
+  await assertUpdaterSigningKeyMatchesPublicKey({ ...input, material, publicKey });
+  return material;
+}
+
 /** Prove a private key can create a signature accepted by KANNA_UPDATER_PUBKEY. */
 export async function assertUpdaterSigningKeyMatchesPublicKey(input: UpdaterKeyRuntimeInput & {
   material: string;
@@ -174,11 +193,7 @@ export async function assertUpdaterSigningKeyMatchesPublicKey(input: UpdaterKeyR
       ["--dir", join(input.cwd, "apps", "desktop"), "exec", "tauri", "signer", "sign", challengePath],
       {
         cwd: input.cwd,
-        env: {
-          ...input.env,
-          [TAURI_SIGNING_KEY_ENV]: input.material,
-          [TAURI_SIGNING_PASSWORD_ENV]: ""
-        }
+        env: signerEnvironment(input.env, input.material)
       }
     );
     if (signer.exitCode !== 0 || !existsSync(signaturePath)) {
@@ -213,144 +228,4 @@ export async function assertUpdaterSigningKeyMatchesPublicKey(input: UpdaterKeyR
   } finally {
     rmSync(verificationDir, { recursive: true, force: true });
   }
-}
-
-async function storeUpdaterSigningKey(
-  input: UpdaterKeyRuntimeInput,
-  selection: UpdaterKeySelection
-): Promise<boolean> {
-  // security(1) can either accept a positional Keychain after every option or
-  // prompt when terminal -w has no value; it cannot do both. Setup has already
-  // verified by device/inode that selection.keychainPath is the current default,
-  // so omitting the positional path still targets that exact selected Keychain.
-  const stored = await input.runner.run(
-    "security",
-    [
-      "add-generic-password",
-      "-s",
-      selection.service,
-      "-a",
-      selection.account,
-      "-w"
-    ],
-    { cwd: input.cwd, env: input.env, interactive: true }
-  );
-  return stored.exitCode === 0;
-}
-
-async function readExistingUpdaterSigningKey(
-  input: UpdaterKeyRuntimeInput,
-  selection: UpdaterKeySelection
-): Promise<string | undefined> {
-  try {
-    return await readUpdaterSigningKey(input, selection);
-  } catch (error) {
-    if (error instanceof Error && /not stored in the configured Keychain/.test(error.message)) {
-      return undefined;
-    }
-    throw error;
-  }
-}
-
-function parseDefaultKeychainPath(output: string): string {
-  const path = output.trim().replace(/^"|"$/g, "");
-  if (!path || !isAbsolute(path)) {
-    throw new Error("Unable to resolve the user's default file-based Keychain.");
-  }
-  return path;
-}
-
-/**
- * Delegate updater signing-key entry to the native Keychain prompt, verify the
- * stored item can sign for KANNA_UPDATER_PUBKEY, and only then record the
- * machine-local selectors.
- *
- * The Keychain becomes the key's home: its encryption and ACL are the
- * protection, which is why kd does not also require an rsign passphrase.
- */
-export async function setupUpdaterKeyCredentials(
-  input: SetupUpdaterKeyInput
-): Promise<{ service: string; account: string; keychainPath: string; configPath: string }> {
-  const publicKey = validSelector(input.env.KANNA_UPDATER_PUBKEY, "KANNA_UPDATER_PUBKEY");
-  const service = validSelector(input.service ?? DEFAULT_SERVICE, "updater key Keychain service");
-  const account = validSelector(input.account ?? DEFAULT_ACCOUNT, "updater key Keychain account");
-  return withMachineUpdaterKeySetupLock(input.homeDir, async (assertSetupDirectoryPinned) => {
-    const defaultKeychain = await input.runner.run("security", ["default-keychain", "-d", "user"], {
-      cwd: input.cwd,
-      env: input.env
-    });
-    if (defaultKeychain.exitCode !== 0) {
-      throw new Error("Unable to resolve the user's default file-based Keychain.");
-    }
-    const defaultKeychainPath = parseDefaultKeychainPath(defaultKeychain.stdout);
-    let keychainPath = input.keychainPath?.trim();
-    if (!keychainPath) {
-      keychainPath = defaultKeychainPath;
-    }
-    const selection = resolveUpdaterKeySelection({
-      [UPDATER_KEYCHAIN_SERVICE_ENV]: service,
-      [UPDATER_KEYCHAIN_ACCOUNT_ENV]: account,
-      [UPDATER_KEYCHAIN_PATH_ENV]: keychainPath
-    });
-    assertKeychainFile(selection.keychainPath);
-    const selectedStats = statSync(selection.keychainPath);
-    const defaultStats = statSync(defaultKeychainPath);
-    if (selectedStats.dev !== defaultStats.dev || selectedStats.ino !== defaultStats.ino) {
-      throw new Error(
-        "Updater key setup can securely prompt only into the user's current default file-based Keychain. Omit --keychain or make the selected Keychain the user default before retrying; kd will not change the global default."
-      );
-    }
-    const runtimeInput = { cwd: input.cwd, env: input.env, runner: input.runner };
-    const existingMaterial = await readExistingUpdaterSigningKey(runtimeInput, selection);
-    if (existingMaterial !== undefined) {
-      try {
-        await assertUpdaterSigningKeyMatchesPublicKey({
-          ...runtimeInput,
-          material: existingMaterial,
-          publicKey
-        });
-      } catch {
-        throw new Error(
-          "The existing updater key item does not match KANNA_UPDATER_PUBKEY. It was not overwritten; choose a fresh --service or --account to stage and validate the intended key safely."
-        );
-      }
-      assertSetupDirectoryPinned();
-      const configPath = writeMachineUpdaterKeySelectors({
-        homeDir: input.homeDir,
-        service: selection.service,
-        account: selection.account,
-        keychainPath: selection.keychainPath
-      });
-      return { ...selection, configPath };
-    }
-
-    assertSetupDirectoryPinned();
-    if (!await storeUpdaterSigningKey(runtimeInput, selection)) {
-      throw new Error(
-        "security did not store the updater signing key. No Keychain item or machine-local selector configuration was changed."
-      );
-    }
-    try {
-      const storedMaterial = await readUpdaterSigningKey(runtimeInput, selection);
-      await assertUpdaterSigningKeyMatchesPublicKey({
-        ...runtimeInput,
-        material: storedMaterial,
-        publicKey
-      });
-
-      assertSetupDirectoryPinned();
-      const configPath = writeMachineUpdaterKeySelectors({
-        homeDir: input.homeDir,
-        service: selection.service,
-        account: selection.account,
-        keychainPath: selection.keychainPath
-      });
-      return { ...selection, configPath };
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      throw new Error(
-        `The updater signing key was stored, but setup could not complete: ${reason} The Keychain item was retained; inspect service ${JSON.stringify(selection.service)}, account ${JSON.stringify(selection.account)}, in Keychain ${JSON.stringify(selection.keychainPath)} before retrying.`
-      );
-    }
-  });
 }

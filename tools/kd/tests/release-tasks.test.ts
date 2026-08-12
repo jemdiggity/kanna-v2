@@ -23,18 +23,6 @@ import { nodeCommandRunner } from "../src/runtime/process";
 import { loadReleaseEnvironment } from "../src/runtime/release-env";
 import { getTaskDefinition } from "../src/tasks/registry";
 
-const updaterTestKeyPair = generateKeyPairSync("ed25519");
-const updaterTestKeyId = Buffer.from("0102030405060708", "hex");
-const updaterPublicDer = updaterTestKeyPair.publicKey.export({ format: "der", type: "spki" });
-const updaterPublicPayload = Buffer.concat([
-  Buffer.from("Ed"),
-  updaterTestKeyId,
-  updaterPublicDer.subarray(-32)
-]);
-const updaterTestPublicKey = Buffer.from(
-  `untrusted comment: minisign public key\n${updaterPublicPayload.toString("base64")}\n`
-).toString("base64");
-
 interface Fixture {
   primary: string;
   worktree: string;
@@ -66,53 +54,13 @@ async function createFixture(): Promise<Fixture> {
 
 function mockGitContext(
   fixture: Fixture,
-  notaryResult?: { exitCode: number; stdout: string; stderr: string },
-  updaterKeyMaterial?: string
+  notaryResult?: { exitCode: number; stdout: string; stderr: string }
 ): void {
-  let updaterLookupCount = 0;
   vi.stubEnv("HOME", fixture.home);
   vi.spyOn(nodeCommandRunner, "run").mockImplementation(async (command, args) => {
     if (command === "xcrun" && args[0] === "notarytool") {
       if (!notaryResult) throw new Error("unexpected notarytool preflight");
       return notaryResult;
-    }
-    if (command === "security" && args[0] === "default-keychain") {
-      if (!updaterKeyMaterial) throw new Error("unexpected updater key setup");
-      return { exitCode: 0, stdout: `"${fixture.keychain}"\n`, stderr: "" };
-    }
-    if (command === "security" && args[0] === "add-generic-password") {
-      if (!updaterKeyMaterial) throw new Error("unexpected updater key prompt");
-      return { exitCode: 0, stdout: "", stderr: "" };
-    }
-    if (command === "security" && args[0] === "find-generic-password") {
-      if (!updaterKeyMaterial) throw new Error("unexpected updater key lookup");
-      updaterLookupCount += 1;
-      if (updaterLookupCount === 1) {
-        return {
-          exitCode: 44,
-          stdout: "",
-          stderr: "SecKeychainSearchCopyNext: The specified item could not be found."
-        };
-      }
-      return { exitCode: 0, stdout: `${updaterKeyMaterial}\n`, stderr: "" };
-    }
-    if (command === "pnpm" && args.includes("signer")) {
-      const challengePath = args.at(-1);
-      if (!challengePath) throw new Error("missing updater verification challenge");
-      const challenge = await readFile(challengePath);
-      const signature = signDigest(
-        null,
-        createHash("blake2b512").update(challenge).digest(),
-        updaterTestKeyPair.privateKey
-      );
-      const signaturePayload = Buffer.concat([
-        Buffer.from("ED"),
-        updaterTestKeyId,
-        signature
-      ]);
-      const envelope = `untrusted comment: test signature\n${signaturePayload.toString("base64")}\n`;
-      await writeFile(`${challengePath}.sig`, Buffer.from(envelope).toString("base64"));
-      return { exitCode: 0, stdout: "", stderr: "" };
     }
     if (command !== "git") throw new Error(`unexpected command: ${command} ${args.join(" ")}`);
     const key = args.join(" ");
@@ -161,9 +109,7 @@ describe("release task environment integration", () => {
       [
         "RELEASE_DEFAULT=file",
         "KANNA_UPDATER_PUBKEY=file-pubkey",
-        "KANNA_UPDATER_KEYCHAIN_SERVICE=file-service",
-        "KANNA_UPDATER_KEYCHAIN_ACCOUNT=file-account",
-        `KANNA_UPDATER_KEYCHAIN_PATH=${JSON.stringify(fixture.keychain)}`,
+        `TAURI_PRIVATE_KEY_PATH=${JSON.stringify(fixture.keychain)}`,
         ""
       ].join("\n"),
       { mode: 0o600 }
@@ -183,9 +129,7 @@ describe("release task environment integration", () => {
           APPLE_KEYCHAIN_PROFILE: "shell-profile",
           RELEASE_DEFAULT: "file",
           KANNA_UPDATER_PUBKEY: "file-pubkey",
-          KANNA_UPDATER_KEYCHAIN_SERVICE: "file-service",
-          KANNA_UPDATER_KEYCHAIN_ACCOUNT: "file-account",
-          KANNA_UPDATER_KEYCHAIN_PATH: fixture.keychain
+          TAURI_PRIVATE_KEY_PATH: fixture.keychain
         })
       })
     );
@@ -325,51 +269,4 @@ describe("release task environment integration", () => {
     );
   });
 
-  it("loads machine-global updater config but leaves secret entry to the native prompt", async () => {
-    const fixture = await createFixture();
-    const privateKeyPath = join(fixture.home, "updater-private.key");
-    const releaseEnvPath = join(fixture.home, ".kanna", ".env.release.local");
-    await writeFile(
-      releaseEnvPath,
-      `RELEASE_DEFAULT=file\nKANNA_UPDATER_PUBKEY=${updaterTestPublicKey}\nTAURI_PRIVATE_KEY_PATH=${JSON.stringify(privateKeyPath)}\n`,
-      { mode: 0o600 }
-    );
-    await chmod(releaseEnvPath, 0o600);
-    mockGitContext(fixture, undefined, "secret updater key");
-
-    await getTaskDefinition("release.setup-updater-key").execute(
-      { cwd: fixture.worktree, env: {} },
-      { keychain: fixture.keychain }
-    );
-
-    expect(nodeCommandRunner.run).toHaveBeenCalledWith(
-      "security",
-      [
-        "add-generic-password",
-        "-s",
-        "build.kanna.updater-key",
-        "-a",
-        "tauri-updater-signing-key",
-        "-w"
-      ],
-      expect.objectContaining({
-        cwd: fixture.worktree,
-        interactive: true,
-        env: expect.objectContaining({
-          TAURI_PRIVATE_KEY_PATH: privateKeyPath,
-          KANNA_UPDATER_PUBKEY: updaterTestPublicKey,
-          RELEASE_DEFAULT: "file"
-        })
-      })
-    );
-    const loaded = loadReleaseEnvironment({ homeDir: fixture.home, env: {} });
-    expect(loaded).toEqual(expect.objectContaining({
-      KANNA_UPDATER_KEYCHAIN_SERVICE: "build.kanna.updater-key",
-      KANNA_UPDATER_KEYCHAIN_ACCOUNT: "tauri-updater-signing-key",
-      KANNA_UPDATER_KEYCHAIN_PATH: fixture.keychain,
-      TAURI_PRIVATE_KEY_PATH: privateKeyPath
-    }));
-    expect(await readFile(releaseEnvPath, "utf8")).not.toContain("secret updater key");
-  });
 });
-import { createHash, generateKeyPairSync, sign as signDigest } from "node:crypto";

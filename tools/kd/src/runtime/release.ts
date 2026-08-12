@@ -3,10 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CommandRunner } from "./process";
 import {
-  assertUpdaterSigningKeyMatchesPublicKey,
+  preflightUpdaterSigningKey,
   resolveUpdaterSigningKey,
-  TAURI_SIGNING_KEY_ENV,
-  TAURI_SIGNING_PASSWORD_ENV
+  updaterSignerEnvironment
 } from "./updater-key";
 
 export type ReleaseBump = "major" | "minor" | "patch";
@@ -609,9 +608,7 @@ export async function createUpdaterBundle(
   signaturePath: string
 ): Promise<void> {
   const signingKey = await resolveUpdaterSigningKey({
-    cwd: input.repoRoot,
-    env: input.env,
-    runner: input.runner
+    env: input.env
   });
   await createUpdaterBundleWithSigningKey(
     input,
@@ -631,17 +628,19 @@ async function createUpdaterBundleWithSigningKey(
 ): Promise<void> {
   rmSync(bundlePath, { force: true });
   cpSync(bundleSource, bundlePath);
-  // Both values go through the environment, never argv: the key is secret, and an
-  // unset password makes `tauri signer` fall through to a TTY prompt that hangs
-  // (then fails) every non-interactive ship. The key is protected by the Keychain
-  // rather than a passphrase, so the password is always empty.
-  const signerEnv: NodeJS.ProcessEnv = {
-    ...input.env,
-    [TAURI_SIGNING_KEY_ENV]: signingKey,
-    [TAURI_SIGNING_PASSWORD_ENV]: ""
-  };
+  // The validated file content goes through the signer environment, never argv.
+  // An explicit empty password prevents `tauri signer` from prompting during a
+  // non-interactive ship; updater signing keys used by kd must be unencrypted.
+  const signerEnv = updaterSignerEnvironment(input.env, signingKey);
   const signerArgs = ["--dir", join(input.repoRoot, "apps", "desktop"), "exec", "tauri", "signer", "sign", bundlePath];
-  await mustRun(input.runner, "pnpm", signerArgs, input.repoRoot, signerEnv);
+  const signer = await input.runner.run("pnpm", signerArgs, {
+    cwd: input.repoRoot,
+    env: signerEnv
+  });
+  if (signer.exitCode !== 0) {
+    // Never surface signer output: a broken signer could echo its secret env.
+    throw new Error(`Tauri updater signing failed for ${bundlePath}.`);
+  }
   const generatedSig = `${bundlePath}.sig`;
   if (!existsSync(generatedSig)) throw new Error(`Expected updater signature not found: ${generatedSig}`);
   if (generatedSig !== signaturePath) {
@@ -661,24 +660,15 @@ export async function shipRelease(input: ReleaseShipInput): Promise<ReleaseShipR
   if (input.release && input.archLabels.length !== 2) {
     throw new Error("updater releases must include both arm64 and x86_64 artifacts");
   }
-  const updaterPublicKey = input.env.KANNA_UPDATER_PUBKEY?.trim();
-  if (!updaterPublicKey) throw new Error("Missing KANNA_UPDATER_PUBKEY.");
-  await assertCleanGitWorktree(input.repoRoot, input.runner, input.env);
-  // Resolve and prove the exact selected item before version files or build
-  // outputs can change. The same material is retained for both architecture
-  // signatures, so a later Keychain lock cannot turn this into a late failure.
-  const updaterSigningKey = await resolveUpdaterSigningKey({
+  // Open, validate, read, and prove the exact selected file before version files
+  // or build outputs can change. Retain that material for both architectures so
+  // a later pathname change cannot turn into a late or inconsistent failure.
+  const updaterSigningKey = await preflightUpdaterSigningKey({
     cwd: input.repoRoot,
     env: input.env,
     runner: input.runner
   });
-  await assertUpdaterSigningKeyMatchesPublicKey({
-    cwd: input.repoRoot,
-    env: input.env,
-    runner: input.runner,
-    material: updaterSigningKey,
-    publicKey: updaterPublicKey
-  });
+  await assertCleanGitWorktree(input.repoRoot, input.runner, input.env);
 
   let version: string;
   let pushBranch = "main";

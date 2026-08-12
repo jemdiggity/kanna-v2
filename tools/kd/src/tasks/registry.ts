@@ -76,7 +76,6 @@ import {
   preflightNotarizationCredentials,
   setupNotarizationCredentials
 } from "../runtime/notarization";
-import { setupUpdaterKeyCredentials } from "../runtime/updater-key";
 import {
   applyRustCacheEnvironment,
   getRustCacheStatus,
@@ -301,12 +300,6 @@ const releaseStatusInputSchema = z.object({});
 
 const releaseSetupNotarizationInputSchema = z.object({
   profile: z.string().optional(),
-  keychain: z.string().optional()
-});
-
-const releaseSetupUpdaterKeyInputSchema = z.object({
-  service: z.string().optional(),
-  account: z.string().optional(),
   keychain: z.string().optional()
 });
 
@@ -2201,32 +2194,6 @@ export const taskDefinitions = [
       return {
         ok: true,
         message: `Stored notarization profile ${result.profile} in ${result.keychainPath}; selectors written to ${result.configPath} with mode 0600.`,
-        data: result
-      };
-    }
-  },
-  {
-    id: "release.setup-updater-key",
-    description: "Import the Tauri updater signing key into an explicit file-based Keychain.",
-    inputSchema: releaseSetupUpdaterKeyInputSchema,
-    execute: async (_context, input) => {
-      const parsed = releaseSetupUpdaterKeyInputSchema.parse(input);
-      const context = await resolveDefaultContext(process.env);
-      // TAURI_PRIVATE_KEY_PATH lives in ~/.kanna/.env.release.local, which the
-      // default context does not load.
-      const releaseEnv = await loadReleaseTaskEnvironment(context);
-      const result = await setupUpdaterKeyCredentials({
-        cwd: context.repoRoot,
-        homeDir: context.homeDir,
-        env: releaseEnv,
-        runner: nodeCommandRunner,
-        service: parsed.service,
-        account: parsed.account,
-        keychainPath: parsed.keychain
-      });
-      return {
-        ok: true,
-        message: `Stored the updater signing key as ${result.service}/${result.account} in ${result.keychainPath}; selectors written to ${result.configPath} with mode 0600. Back up the original key file offline before removing it.`,
         data: result
       };
     }

@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { lstatSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
@@ -8,18 +8,10 @@ import { stripRustCacheEnvironment } from "./rust-cache-policy";
 export const RELEASE_ENV_FILE = ".env.release.local";
 export const NOTARIZATION_PROFILE_ENV = "APPLE_KEYCHAIN_PROFILE";
 export const NOTARIZATION_KEYCHAIN_ENV = "APPLE_KEYCHAIN_PATH";
-export const UPDATER_KEYCHAIN_SERVICE_ENV = "KANNA_UPDATER_KEYCHAIN_SERVICE";
-export const UPDATER_KEYCHAIN_ACCOUNT_ENV = "KANNA_UPDATER_KEYCHAIN_ACCOUNT";
-export const UPDATER_KEYCHAIN_PATH_ENV = "KANNA_UPDATER_KEYCHAIN_PATH";
 
 const NOTARIZATION_SELECTOR_KEYS = new Set([
   NOTARIZATION_PROFILE_ENV,
   NOTARIZATION_KEYCHAIN_ENV
-]);
-const UPDATER_KEY_SELECTOR_KEYS = new Set([
-  UPDATER_KEYCHAIN_SERVICE_ENV,
-  UPDATER_KEYCHAIN_ACCOUNT_ENV,
-  UPDATER_KEYCHAIN_PATH_ENV
 ]);
 const UNSAFE_PLAINTEXT_RELEASE_KEYS = new Set([
   "APPLE_ID",
@@ -183,7 +175,7 @@ function validateReleaseEnvironmentFile(
   );
   if (unsafeKeys.length > 0) {
     throw new Error(
-      `Plaintext release credentials are not allowed in ${envPath}: ${unsafeKeys.join(", ")}. Store notarization credentials with ./kd release setup-notarization, updater signing material with ./kd release setup-updater-key, and keep other secrets in their supported secure stores.`
+      `Plaintext release credentials are not allowed in ${envPath}: ${unsafeKeys.join(", ")}. Store notarization credentials with ./kd release setup-notarization, keep updater signing material in the owner-only file selected by TAURI_PRIVATE_KEY_PATH, and keep other secrets in their supported secure stores.`
     );
   }
 }
@@ -211,6 +203,14 @@ function writeMachineSelectors(input: {
   if (ancestry === undefined) {
     throw new Error(`Unable to create machine-local release directory ${kannaDir}.`);
   }
+  // Repair and pin the persistent writer lock before parsing existing config,
+  // so even a validation failure leaves the shared writer invariant healthy.
+  preparePinnedDirectoryLock(
+    kannaDir,
+    ancestry,
+    ".release-environment-write.lockf",
+    true
+  );
 
   const readResponse = runPinnedDirectoryWorker(kannaDir, {
     operation: "read",
@@ -272,154 +272,6 @@ export function writeMachineNotarizationSelectors(input: {
     ],
     testSynchronization: input.testSynchronization
   });
-}
-
-export function writeMachineUpdaterKeySelectors(input: {
-  homeDir: string;
-  service: string;
-  account: string;
-  keychainPath: string;
-  /** @internal Test-only synchronization for deterministic filesystem races. */
-  testSynchronization?: ReleaseEnvironmentTestSynchronization;
-}): string {
-  return writeMachineSelectors({
-    homeDir: input.homeDir,
-    selectorKeys: UPDATER_KEY_SELECTOR_KEYS,
-    selectorLabel: "updater key",
-    assignments: [
-      [UPDATER_KEYCHAIN_SERVICE_ENV, input.service],
-      [UPDATER_KEYCHAIN_ACCOUNT_ENV, input.account],
-      [UPDATER_KEYCHAIN_PATH_ENV, input.keychainPath]
-    ],
-    testSynchronization: input.testSynchronization
-  });
-}
-
-/** Serialize updater Keychain and selector publication as one machine-local transaction. */
-export async function withMachineUpdaterKeySetupLock<T>(
-  homeDir: string,
-  operation: (assertPinned: () => void) => Promise<T>
-): Promise<T> {
-  const kannaDir = join(homeDir, ".kanna");
-  const initialAncestry = machineConfigAncestry(homeDir, true);
-  if (initialAncestry === undefined) {
-    throw new Error(`Unable to create machine-local release directory ${kannaDir}.`);
-  }
-  const homeEntry = initialAncestry[0];
-  if (homeEntry === undefined) {
-    throw new Error(`Unable to pin machine-local home directory ${homeDir}.`);
-  }
-  // The transaction lock inside .kanna cannot by itself serialize two kd
-  // processes if that directory is renamed and replaced after lockf opens it.
-  // Hold a namespace guard in the pinned home directory so every cooperating
-  // contender remains serialized across a .kanna pathname replacement.
-  const namespaceLock = await acquirePinnedDirectoryLock(
-    homeDir,
-    [homeEntry],
-    ".kanna-updater-key-setup.lockf",
-    false
-  );
-  try {
-    const ancestry = machineConfigAncestry(homeDir, true);
-    if (ancestry === undefined) {
-      throw new Error(`Unable to create machine-local release directory ${kannaDir}.`);
-    }
-    const lock = await acquirePinnedDirectoryLock(
-      kannaDir,
-      ancestry,
-      ".updater-key-setup.lockf",
-      true
-    );
-    try {
-      return await operation(() => {
-        runPinnedDirectoryWorker(kannaDir, {
-          operation: "assert-directory",
-          ancestry
-        });
-      });
-    } finally {
-      await lock.release();
-    }
-  } finally {
-    await namespaceLock.release();
-  }
-}
-
-interface HeldMachineLock {
-  release(): Promise<void>;
-}
-
-async function acquirePinnedDirectoryLock(
-  cwd: string,
-  ancestry: DirectoryAncestryEntry[],
-  lockName: string,
-  repairDirectoryMode: boolean
-): Promise<HeldMachineLock> {
-  if (!/^\.[a-z0-9-]+\.lockf$/.test(lockName)) {
-    throw new Error("Invalid machine-local release lock name.");
-  }
-  preparePinnedDirectoryLock(cwd, ancestry, lockName, repairDirectoryMode);
-  const child = spawn(
-    "/usr/bin/lockf",
-    [
-      "-s",
-      "-t",
-      "0",
-      "-k",
-      lockName,
-      process.execPath,
-      "-e",
-      `const __require = require; const __name = (target) => target;\n(${pinnedDirectoryLockHolder.toString()})()`,
-      JSON.stringify({ ancestry })
-    ],
-    { cwd, stdio: ["pipe", "pipe", "pipe"] }
-  );
-  child.stdout.setEncoding("utf8");
-  child.stderr.setEncoding("utf8");
-  let stdout = "";
-  let stderr = "";
-  child.stdout.on("data", (chunk: string) => {
-    stdout += chunk;
-  });
-  child.stderr.on("data", (chunk: string) => {
-    stderr += chunk;
-  });
-  const closed = new Promise<number | null>((resolve, reject) => {
-    child.once("error", reject);
-    child.once("close", resolve);
-  });
-  const ready = await Promise.race([
-    new Promise<"ready">((resolve) => {
-      child.stdout.once("data", () => resolve("ready"));
-    }),
-    closed.then(() => "closed" as const)
-  ]);
-  if (ready !== "ready" || stdout.trim() !== "ready") {
-    const code = await closed;
-    if (code === 75) {
-      throw new Error(
-        "Another machine-local release setup is already in progress; retry after it finishes."
-      );
-    }
-    throw new Error(
-      `Unable to acquire machine-local release setup lock: ${stderr.trim() || `lockf exited ${code ?? "without a status"}`}`
-    );
-  }
-
-  let released = false;
-  return {
-    async release(): Promise<void> {
-      if (released) return;
-      released = true;
-      child.stdin.end();
-      const code = await closed;
-      if (code !== 0) {
-        throw new Error(
-          `Unable to release machine-local release setup lock: ${stderr.trim() || `lockf exited ${code ?? "without a status"}`}`
-        );
-      }
-    }
-  };
 }
 
 function preparePinnedDirectoryLock(
@@ -560,58 +412,6 @@ function runPinnedDirectoryWorker(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
-}
-
-// Runs beneath /usr/bin/lockf. The kernel owns the lock lifetime, so process
-// death cannot leave a stale lock and no PID or owner-record reclamation is
-// needed. The holder validates that lockf entered the already-pinned directory
-// before allowing the parent to touch Keychain or selector state.
-function pinnedDirectoryLockHolder(): void {
-  const fs: typeof import("node:fs") = require("node:fs");
-  const request = JSON.parse(process.argv[1] ?? "{}") as Record<string, unknown>;
-  const ancestry = request.ancestry as DirectoryAncestryEntry[];
-  const identity = (path: string): DirectoryIdentity => {
-    const stats = fs.lstatSync(path, { bigint: true });
-    if (stats.isSymbolicLink() || !stats.isDirectory()) {
-      throw new Error(
-        `Machine-local release configuration directory is not a regular directory: ${path}`
-      );
-    }
-    return { dev: stats.dev.toString(), ino: stats.ino.toString() };
-  };
-  const sameIdentity = (left: DirectoryIdentity, right: DirectoryIdentity): boolean =>
-    left.dev === right.dev && left.ino === right.ino;
-  const assertPinnedAncestry = (): void => {
-    if (!Array.isArray(ancestry) || ancestry.length === 0) {
-      throw new Error("Machine-local release configuration ancestry is missing.");
-    }
-    const last = ancestry.length - 1;
-    for (let index = last; index >= 0; index -= 1) {
-      const upward = "../".repeat(last - index);
-      const currentPath = upward || ".";
-      if (!sameIdentity(identity(currentPath), ancestry[index])) {
-        throw new Error("Machine-local release configuration ancestry changed during access.");
-      }
-      if (!sameIdentity(identity(ancestry[index].canonicalPath), ancestry[index])) {
-        throw new Error(
-          "Machine-local release configuration canonical path changed during access."
-        );
-      }
-      if (index > 0) {
-        const entryPath = `${upward}../${ancestry[index].name}`;
-        if (!sameIdentity(identity(entryPath), ancestry[index])) {
-          throw new Error("Machine-local release configuration ancestry changed during access.");
-        }
-      }
-    }
-  };
-
-  assertPinnedAncestry();
-  process.stdout.write("ready");
-  process.stdin.resume();
-  process.stdin.once("end", () => {
-    assertPinnedAncestry();
-  });
 }
 
 // This function is serialized into a fresh Node process whose cwd is selected

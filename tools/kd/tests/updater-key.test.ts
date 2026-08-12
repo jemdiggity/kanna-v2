@@ -1,15 +1,15 @@
 import { createHash, generateKeyPairSync, sign as signDigest } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, rename, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { chmod, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { CommandRunner } from "../src/runtime/process";
-import { withMachineUpdaterKeySetupLock } from "../src/runtime/release-env";
+import { shipRelease } from "../src/runtime/release";
 import {
   assertUpdaterSigningKeyMatchesPublicKey,
-  resolveUpdaterKeySelection,
+  preflightUpdaterSigningKey,
   resolveUpdaterSigningKey,
-  setupUpdaterKeyCredentials
+  updaterSignerEnvironment
 } from "../src/runtime/updater-key";
 
 const testKeyPair = generateKeyPairSync("ed25519");
@@ -34,510 +34,85 @@ async function writeTestSignature(challengePath: string): Promise<void> {
   await writeFile(`${challengePath}.sig`, Buffer.from(envelope).toString("base64"));
 }
 
-function updaterEnvironment(keychainPath: string): NodeJS.ProcessEnv {
-  return {
-    KANNA_UPDATER_KEYCHAIN_SERVICE: "build.kanna.updater-key",
-    KANNA_UPDATER_KEYCHAIN_ACCOUNT: "tauri-updater-signing-key",
-    KANNA_UPDATER_KEYCHAIN_PATH: keychainPath
-  };
+async function privateKeyFixture(
+  contents = "secret updater key\n",
+  mode = 0o600
+): Promise<{ root: string; keyPath: string }> {
+  const root = await mkdtemp(join(tmpdir(), "kanna-updater-key-"));
+  const keyPath = join(root, "updater-private.key");
+  await writeFile(keyPath, contents, { mode });
+  await chmod(keyPath, mode);
+  return { root, keyPath };
 }
 
-describe("updater signing key selection", () => {
-  it("requires a complete selector set and an absolute Keychain path", () => {
-    expect(() => resolveUpdaterKeySelection({})).toThrow(
-      /Missing KANNA_UPDATER_KEYCHAIN_SERVICE/
-    );
-    expect(() => resolveUpdaterKeySelection({
-      KANNA_UPDATER_KEYCHAIN_SERVICE: "service"
-    })).toThrow(/Missing KANNA_UPDATER_KEYCHAIN_ACCOUNT/);
-    expect(() => resolveUpdaterKeySelection({
-      KANNA_UPDATER_KEYCHAIN_SERVICE: "service",
-      KANNA_UPDATER_KEYCHAIN_ACCOUNT: "account",
-      KANNA_UPDATER_KEYCHAIN_PATH: "relative.keychain-db"
-    })).toThrow(/absolute Keychain path/);
-  });
-
-  it("reads only the exact generic-password item selected in the configured Keychain", async () => {
-    const root = await mkdtemp(join(tmpdir(), "kanna-updater-key-"));
-    const keychainPath = join(root, "login.keychain-db");
-    await writeFile(keychainPath, "keychain fixture\n");
-    const calls: Array<{ command: string; args: string[] }> = [];
-    const runner: CommandRunner = {
-      async run(command, args) {
-        calls.push({ command, args });
-        return { exitCode: 0, stdout: "secret updater key\n", stderr: "" };
-      }
-    };
+describe("updater private key file", () => {
+  it.each([0o400, 0o600])("reads an owner-only regular file with mode %s", async (mode) => {
+    const { keyPath } = await privateKeyFixture("secret updater key\n", mode);
 
     await expect(resolveUpdaterSigningKey({
-      cwd: root,
-      env: {
-        ...updaterEnvironment(keychainPath),
-        TAURI_PRIVATE_KEY_PATH: "/must/not/be/read"
-      },
-      runner
+      env: { TAURI_PRIVATE_KEY_PATH: keyPath }
     })).resolves.toBe("secret updater key");
-    expect(calls).toEqual([{
-      command: "security",
-      args: [
-        "find-generic-password",
-        "-s",
-        "build.kanna.updater-key",
-        "-a",
-        "tauri-updater-signing-key",
-        "-w",
-        keychainPath
-      ]
-    }]);
   });
 
-  it.each([
-    ["missing item", "SecKeychainSearchCopyNext: The specified item could not be found.", /not stored/],
-    ["locked Keychain", "User interaction is not allowed.", /locked or denied access/],
-    ["unexpected failure", "failure containing secret updater key", /Unable to read/]
-  ])("classifies %s without echoing command output", async (_label, stderr, expected) => {
-    const root = await mkdtemp(join(tmpdir(), "kanna-updater-key-"));
-    const keychainPath = join(root, "login.keychain-db");
-    await writeFile(keychainPath, "keychain fixture\n");
-    const runner: CommandRunner = {
-      async run() {
-        return { exitCode: 44, stdout: "", stderr };
-      }
-    };
-
-    let message = "";
-    try {
-      await resolveUpdaterSigningKey({
-        cwd: root,
-        env: updaterEnvironment(keychainPath),
-        runner
-      });
-    } catch (error) {
-      message = error instanceof Error ? error.message : String(error);
-    }
-    expect(message).toMatch(expected);
-    expect(message).not.toContain("secret updater key");
+  it("requires TAURI_PRIVATE_KEY_PATH to be present and absolute", async () => {
+    await expect(resolveUpdaterSigningKey({ env: {} }))
+      .rejects.toThrow(/Missing TAURI_PRIVATE_KEY_PATH/);
+    await expect(resolveUpdaterSigningKey({
+      env: { TAURI_PRIVATE_KEY_PATH: "relative/updater.key" }
+    })).rejects.toThrow(/absolute path/);
   });
 
-  it("rejects an empty item from the exact selected Keychain", async () => {
+  it("rejects a missing path and a directory", async () => {
     const root = await mkdtemp(join(tmpdir(), "kanna-updater-key-"));
-    const keychainPath = join(root, "login.keychain-db");
-    await writeFile(keychainPath, "keychain fixture\n");
-    const runner: CommandRunner = {
-      async run() {
-        return { exitCode: 0, stdout: "\n", stderr: "" };
-      }
-    };
+    await expect(resolveUpdaterSigningKey({
+      env: { TAURI_PRIVATE_KEY_PATH: join(root, "missing.key") }
+    })).rejects.toThrow(/not found/);
+    await expect(resolveUpdaterSigningKey({
+      env: { TAURI_PRIVATE_KEY_PATH: root }
+    })).rejects.toThrow(/regular file/);
+  });
+
+  it("rejects a symlink without reading its owner-only target", async () => {
+    const { root, keyPath } = await privateKeyFixture();
+    const linkPath = join(root, "updater-private-link.key");
+    await symlink(keyPath, linkPath);
 
     await expect(resolveUpdaterSigningKey({
-      cwd: root,
-      env: updaterEnvironment(keychainPath),
-      runner
-    })).rejects.toThrow(/stored.*is empty/);
-  });
-});
-
-describe("updater signing key setup", () => {
-  async function setupFixture(): Promise<{ root: string; homeDir: string; keychainPath: string }> {
-    const root = await mkdtemp(join(tmpdir(), "kanna-updater-key-setup-"));
-    const homeDir = join(root, "home");
-    const keychainPath = join(root, "login.keychain-db");
-    await mkdir(homeDir);
-    await writeFile(keychainPath, "keychain fixture\n");
-    return { root, homeDir, keychainPath };
-  }
-
-  it("prompts natively, validates the stored item, and publishes owner-only selectors", async () => {
-    const { root, homeDir, keychainPath } = await setupFixture();
-    await mkdir(join(homeDir, ".kanna"));
-    await mkdir(join(homeDir, ".kanna", ".updater-key-setup.lock"));
-    await writeFile(
-      join(homeDir, ".kanna", ".env.release.local"),
-      "APPLE_KEYCHAIN_PROFILE=notary\nAPPLE_KEYCHAIN_PATH=/notary.keychain-db\n",
-      { mode: 0o600 }
-    );
-    const calls: Array<{ command: string; args: string[]; interactive?: boolean }> = [];
-    let lookupCount = 0;
-    const runner: CommandRunner = {
-      async run(command, args, options) {
-        calls.push({ command, args, interactive: options?.interactive });
-        if (args[0] === "default-keychain") {
-          return { exitCode: 0, stdout: `"${keychainPath}"\n`, stderr: "" };
-        }
-        if (args[0] === "find-generic-password") {
-          lookupCount += 1;
-          return lookupCount === 1
-            ? { exitCode: 44, stdout: "", stderr: "SecKeychainSearchCopyNext: item could not be found" }
-            : { exitCode: 0, stdout: "secret updater key\n", stderr: "" };
-        }
-        if (command === "pnpm") {
-          const challengePath = args.at(-1);
-          if (!challengePath) throw new Error("missing challenge path");
-          await writeTestSignature(challengePath);
-        }
-        return { exitCode: 0, stdout: "", stderr: "" };
-      }
-    };
-
-    const result = await setupUpdaterKeyCredentials({
-      cwd: root,
-      homeDir,
-      env: {
-        KANNA_UPDATER_PUBKEY: testUpdaterPublicKey(),
-        TAURI_PRIVATE_KEY_PATH: "/must/not/be/read"
-      },
-      runner,
-      keychainPath
-    });
-
-    expect(result).toEqual(expect.objectContaining({ keychainPath }));
-    const promptCall = calls.find((call) => call.args[0] === "add-generic-password");
-    expect(promptCall).toEqual({
-      command: "security",
-      args: [
-        "add-generic-password",
-        "-s",
-        "build.kanna.updater-key",
-        "-a",
-        "tauri-updater-signing-key",
-        "-w"
-      ],
-      interactive: true
-    });
-    expect(promptCall?.args.at(-1)).toBe("-w");
-    expect(promptCall?.args).not.toContain(keychainPath);
-    expect(calls.flatMap((call) => call.args)).not.toContain("secret updater key");
-    const config = await readFile(result.configPath, "utf8");
-    expect(config).toContain("APPLE_KEYCHAIN_PROFILE=notary");
-    expect(config).toContain('KANNA_UPDATER_KEYCHAIN_SERVICE="build.kanna.updater-key"');
-    expect(config).not.toContain("secret updater key");
-    expect((await stat(result.configPath)).mode & 0o777).toBe(0o600);
+      env: { TAURI_PRIVATE_KEY_PATH: linkPath }
+    })).rejects.toThrow(/must not be a symbolic link/);
   });
 
-  it("keeps an existing valid item without invoking the destructive update form", async () => {
-    const { root, homeDir, keychainPath } = await setupFixture();
-    const calls: Array<{ command: string; args: string[] }> = [];
-    const runner: CommandRunner = {
-      async run(command, args) {
-        calls.push({ command, args });
-        if (args[0] === "default-keychain") {
-          return { exitCode: 0, stdout: `"${keychainPath}"\n`, stderr: "" };
-        }
-        if (args[0] === "find-generic-password") {
-          return { exitCode: 0, stdout: "secret updater key\n", stderr: "" };
-        }
-        if (command === "pnpm") {
-          const challengePath = args.at(-1);
-          if (!challengePath) throw new Error("missing challenge path");
-          await writeTestSignature(challengePath);
-          return { exitCode: 0, stdout: "", stderr: "" };
-        }
-        return { exitCode: 1, stdout: "", stderr: "unexpected command" };
-      }
-    };
+  it.each([0o000, 0o200, 0o700, 0o640, 0o604])(
+    "rejects unsafe or unreadable mode %s",
+    async (mode) => {
+      const { keyPath } = await privateKeyFixture("secret updater key\n", mode);
 
-    await expect(setupUpdaterKeyCredentials({
-      cwd: root,
-      homeDir,
-      env: { KANNA_UPDATER_PUBKEY: testUpdaterPublicKey() },
-      runner,
-      keychainPath
-    })).resolves.toEqual(expect.objectContaining({ keychainPath }));
-    expect(calls.some((call) => call.args[0] === "add-generic-password")).toBe(false);
-    expect(calls.some((call) => call.args[0] === "delete-generic-password")).toBe(false);
-  });
-
-  it("rejects a non-default target before reading or changing any item", async () => {
-    const { root, homeDir, keychainPath } = await setupFixture();
-    const defaultKeychainPath = join(root, "default.keychain-db");
-    await writeFile(defaultKeychainPath, "different keychain fixture\n");
-    const calls: string[] = [];
-    const runner: CommandRunner = {
-      async run(_command, args) {
-        calls.push(args[0] ?? "");
-        return { exitCode: 0, stdout: `"${defaultKeychainPath}"\n`, stderr: "" };
-      }
-    };
-
-    await expect(setupUpdaterKeyCredentials({
-      cwd: root,
-      homeDir,
-      env: { KANNA_UPDATER_PUBKEY: testUpdaterPublicKey() },
-      runner,
-      keychainPath
-    })).rejects.toThrow(/current default file-based Keychain/);
-    expect(calls).toEqual(["default-keychain"]);
-  });
-
-  it("preserves an existing mismatched item and requires a fresh selector", async () => {
-    const { root, homeDir, keychainPath } = await setupFixture();
-    const otherKeyPair = generateKeyPairSync("ed25519");
-    const calls: string[] = [];
-    const runner: CommandRunner = {
-      async run(command, args) {
-        calls.push(args[0] ?? command);
-        if (args[0] === "default-keychain") {
-          return { exitCode: 0, stdout: `"${keychainPath}"\n`, stderr: "" };
-        }
-        if (args[0] === "find-generic-password") {
-          return { exitCode: 0, stdout: "existing key\n", stderr: "" };
-        }
-        const challengePath = args.at(-1);
-        if (!challengePath) throw new Error("missing challenge path");
-        await writeTestSignature(challengePath);
-        return { exitCode: 0, stdout: "", stderr: "" };
-      }
-    };
-
-    await expect(setupUpdaterKeyCredentials({
-      cwd: root,
-      homeDir,
-      env: { KANNA_UPDATER_PUBKEY: testUpdaterPublicKey(otherKeyPair.publicKey) },
-      runner,
-      keychainPath
-    })).rejects.toThrow(/was not overwritten.*fresh --service or --account/);
-    expect(calls).not.toContain("add-generic-password");
-    expect(calls).not.toContain("delete-generic-password");
-  });
-
-  it("never deletes a newly prompted item when later selector publication fails", async () => {
-    const { root, homeDir, keychainPath } = await setupFixture();
-    const configPath = join(homeDir, ".kanna", ".env.release.local");
-    await mkdir(join(homeDir, ".kanna"));
-    await writeFile(configPath, "GH_TOKEN=plaintext-is-rejected\n", { mode: 0o600 });
-    let lookupCount = 0;
-    const calls: string[] = [];
-    const runner: CommandRunner = {
-      async run(command, args) {
-        calls.push(args[0] ?? command);
-        if (args[0] === "default-keychain") {
-          return { exitCode: 0, stdout: `"${keychainPath}"\n`, stderr: "" };
-        }
-        if (args[0] === "find-generic-password") {
-          lookupCount += 1;
-          return lookupCount === 1
-            ? { exitCode: 44, stdout: "", stderr: "item could not be found" }
-            : { exitCode: 0, stdout: "new key\n", stderr: "" };
-        }
-        if (command === "pnpm") {
-          const challengePath = args.at(-1);
-          if (!challengePath) throw new Error("missing challenge path");
-          await writeTestSignature(challengePath);
-        }
-        return { exitCode: 0, stdout: "", stderr: "" };
-      }
-    };
-
-    let message = "";
-    try {
-      await setupUpdaterKeyCredentials({
-        cwd: root,
-        homeDir,
-        env: { KANNA_UPDATER_PUBKEY: testUpdaterPublicKey() },
-        runner,
-        keychainPath
-      });
-    } catch (error) {
-      message = error instanceof Error ? error.message : String(error);
+      await expect(resolveUpdaterSigningKey({
+        env: { TAURI_PRIVATE_KEY_PATH: keyPath }
+      })).rejects.toThrow(/not readable|owner-only read permissions \(0400 or 0600\)/);
     }
-    expect(message).toMatch(/Plaintext release credentials/);
-    expect(message).toMatch(/Keychain item was retained/);
-    expect(message).toContain('service "build.kanna.updater-key"');
-    expect(message).toContain('account "tauri-updater-signing-key"');
-    expect(message).toContain(`Keychain ${JSON.stringify(keychainPath)}`);
-    expect(calls).not.toContain("delete-generic-password");
-    expect(await readFile(configPath, "utf8")).toBe("GH_TOKEN=plaintext-is-rejected\n");
-  });
+  );
 
-  it("identifies a retained newly prompted item when validation fails", async () => {
-    const { root, homeDir, keychainPath } = await setupFixture();
-    let lookupCount = 0;
-    const runner: CommandRunner = {
-      async run(command, args) {
-        if (args[0] === "default-keychain") {
-          return { exitCode: 0, stdout: `"${keychainPath}"\n`, stderr: "" };
-        }
-        if (args[0] === "find-generic-password") {
-          lookupCount += 1;
-          return lookupCount === 1
-            ? { exitCode: 44, stdout: "", stderr: "item could not be found" }
-            : { exitCode: 0, stdout: "new mismatched key\n", stderr: "" };
-        }
-        if (command === "pnpm") {
-          const challengePath = args.at(-1);
-          if (!challengePath) throw new Error("missing challenge path");
-          await writeTestSignature(challengePath);
-        }
-        return { exitCode: 0, stdout: "", stderr: "" };
-      }
-    };
-    const otherKeyPair = generateKeyPairSync("ed25519");
-
-    let message = "";
-    try {
-      await setupUpdaterKeyCredentials({
-        cwd: root,
-        homeDir,
-        env: { KANNA_UPDATER_PUBKEY: testUpdaterPublicKey(otherKeyPair.publicKey) },
-        runner,
-        keychainPath
-      });
-    } catch (error) {
-      message = error instanceof Error ? error.message : String(error);
+  it.skipIf(typeof process.getuid !== "function" || process.getuid() === 0)(
+    "rejects a real regular file owned by another user",
+    async () => {
+      await expect(resolveUpdaterSigningKey({
+        env: { TAURI_PRIVATE_KEY_PATH: "/etc/hosts" }
+      })).rejects.toThrow(/owned by the current user/);
     }
-    expect(message).toMatch(/does not match KANNA_UPDATER_PUBKEY/);
-    expect(message).toMatch(/Keychain item was retained/);
-    expect(message).toContain('service "build.kanna.updater-key"');
-    expect(message).toContain('account "tauri-updater-signing-key"');
-    expect(message).toContain(`Keychain ${JSON.stringify(keychainPath)}`);
-    expect(message).not.toMatch(/Refusing to store/);
-  });
+  );
 
-  it("lets only one of two contenders proceed past the same malformed legacy lock", async () => {
-    const root = await mkdtemp(join(tmpdir(), "kanna-updater-key-setup-"));
-    const homeDir = join(root, "home");
-    const keychainPath = join(root, "login.keychain-db");
-    await mkdir(homeDir);
-    await mkdir(join(homeDir, ".kanna"));
-    await mkdir(join(homeDir, ".kanna", ".updater-key-setup.lock"));
-    await writeFile(
-      join(homeDir, ".kanna", ".updater-key-setup.lock", "owner.json"),
-      "{not valid json",
-      { mode: 0o600 }
-    );
-    await writeFile(keychainPath, "keychain fixture\n");
-    let releaseFirstLookup: (() => void) | undefined;
-    const firstLookupGate = new Promise<void>((resolve) => {
-      releaseFirstLookup = resolve;
-    });
-    let firstLookupStarted: (() => void) | undefined;
-    const firstLookupReady = new Promise<void>((resolve) => {
-      firstLookupStarted = resolve;
-    });
-    let firstLookup = true;
-    const firstRunner: CommandRunner = {
-      async run(command, args) {
-        if (args[0] === "default-keychain") {
-          return { exitCode: 0, stdout: `"${keychainPath}"\n`, stderr: "" };
-        }
-        if (command === "pnpm") {
-          const challengePath = args.at(-1);
-          if (!challengePath) throw new Error("missing challenge path");
-          await writeTestSignature(challengePath);
-          return { exitCode: 0, stdout: "", stderr: "" };
-        }
-        if (args[0] === "find-generic-password" && firstLookup) {
-          firstLookup = false;
-          firstLookupStarted?.();
-          await firstLookupGate;
-          return {
-            exitCode: 44,
-            stdout: "",
-            stderr: "SecKeychainSearchCopyNext: The specified item could not be found."
-          };
-        }
-        if (args[0] === "find-generic-password") {
-          return { exitCode: 0, stdout: "secret updater key\n", stderr: "" };
-        }
-        return { exitCode: 0, stdout: "", stderr: "" };
-      }
-    };
-    const secondSecurityCalls: string[] = [];
-    const secondRunner: CommandRunner = {
-      async run(command, args) {
-        if (command === "pnpm") {
-          const challengePath = args.at(-1);
-          if (!challengePath) throw new Error("missing challenge path");
-          await writeTestSignature(challengePath);
-          return { exitCode: 0, stdout: "", stderr: "" };
-        }
-        secondSecurityCalls.push(args[0] ?? command);
-        return { exitCode: 0, stdout: "", stderr: "" };
-      }
-    };
-    const setupInput = {
-      cwd: root,
-      homeDir,
-      env: {
-        KANNA_UPDATER_PUBKEY: testUpdaterPublicKey()
-      },
-      keychainPath
-    };
+  it("rejects an empty key file", async () => {
+    const { keyPath } = await privateKeyFixture("\n");
 
-    const firstSetup = setupUpdaterKeyCredentials({ ...setupInput, runner: firstRunner });
-    await firstLookupReady;
-    await expect(setupUpdaterKeyCredentials({
-      ...setupInput,
-      runner: secondRunner
-    })).rejects.toThrow(/already in progress/);
-    expect(secondSecurityCalls).toEqual([]);
-    releaseFirstLookup?.();
-    await expect(firstSetup).resolves.toEqual(expect.objectContaining({ keychainPath }));
-  });
-
-  it("repairs owner-only lock modes and reacquires persistent updater lock files", async () => {
-    const { homeDir } = await setupFixture();
-    const kannaDir = join(homeDir, ".kanna");
-    const setupLock = join(kannaDir, ".updater-key-setup.lockf");
-    const namespaceLock = join(homeDir, ".kanna-updater-key-setup.lockf");
-    await mkdir(kannaDir);
-    await chmod(kannaDir, 0o755);
-    await writeFile(setupLock, "stale lock inode\n", { mode: 0o644 });
-    await chmod(setupLock, 0o644);
-    await writeFile(namespaceLock, "stale namespace lock inode\n", { mode: 0o644 });
-    await chmod(namespaceLock, 0o644);
-    let entries = 0;
-
-    await withMachineUpdaterKeySetupLock(homeDir, async () => {
-      entries += 1;
-    });
-    await withMachineUpdaterKeySetupLock(homeDir, async () => {
-      entries += 1;
-    });
-
-    expect(entries).toBe(2);
-    expect((await stat(kannaDir)).mode & 0o777).toBe(0o700);
-    expect((await stat(setupLock)).mode & 0o777).toBe(0o600);
-    expect((await stat(namespaceLock)).mode & 0o777).toBe(0o600);
-  });
-
-  it("keeps a replacement ~/.kanna namespace serialized until the holder exits", async () => {
-    const { root, homeDir } = await setupFixture();
-    const kannaDir = join(homeDir, ".kanna");
-    const detachedKannaDir = join(root, "detached-kanna");
-    await mkdir(kannaDir);
-    let releaseFirst: (() => void) | undefined;
-    const firstGate = new Promise<void>((resolve) => {
-      releaseFirst = resolve;
-    });
-    let markFirstEntered: (() => void) | undefined;
-    const firstEntered = new Promise<void>((resolve) => {
-      markFirstEntered = resolve;
-    });
-    let firstMutated = false;
-    const first = withMachineUpdaterKeySetupLock(homeDir, async (assertPinned) => {
-      markFirstEntered?.();
-      await firstGate;
-      assertPinned();
-      firstMutated = true;
-    });
-    await firstEntered;
-    await rename(kannaDir, detachedKannaDir);
-    await mkdir(kannaDir, { mode: 0o700 });
-    let secondEntered = false;
-
-    await expect(withMachineUpdaterKeySetupLock(homeDir, async () => {
-      secondEntered = true;
-    })).rejects.toThrow(/already in progress/);
-    expect(secondEntered).toBe(false);
-    releaseFirst?.();
-    await expect(first).rejects.toThrow(/canonical path changed during access/);
-    expect(firstMutated).toBe(false);
+    await expect(resolveUpdaterSigningKey({
+      env: { TAURI_PRIVATE_KEY_PATH: keyPath }
+    })).rejects.toThrow(/private key is empty/);
   });
 });
 
 describe("updater signing key compatibility", () => {
-  it("verifies a Tauri minisign challenge without returning or logging key material", async () => {
+  it("passes material only through the signer child environment", async () => {
     const root = await mkdtemp(join(tmpdir(), "kanna-updater-key-verify-"));
     const calls: Array<{ args: string[]; env?: NodeJS.ProcessEnv }> = [];
     const runner: CommandRunner = {
@@ -552,18 +127,25 @@ describe("updater signing key compatibility", () => {
 
     await expect(assertUpdaterSigningKeyMatchesPublicKey({
       cwd: root,
-      env: {},
+      env: {
+        TAURI_PRIVATE_KEY_PASSWORD: "ambient password",
+        TAURI_SIGNING_PRIVATE_KEY: "ambient key",
+        TAURI_SIGNING_PRIVATE_KEY_PASSWORD: "ambient signing password"
+      },
       runner,
       material: "secret updater key",
       publicKey: testUpdaterPublicKey()
     })).resolves.toBeUndefined();
+
     expect(calls[0]?.args).not.toContain("secret updater key");
+    expect(calls[0]?.args).not.toContain("ambient password");
+    expect(calls[0]?.env?.TAURI_PRIVATE_KEY_PASSWORD).toBeUndefined();
     expect(calls[0]?.env?.TAURI_SIGNING_PRIVATE_KEY).toBe("secret updater key");
     expect(calls[0]?.env?.TAURI_SIGNING_PRIVATE_KEY_PASSWORD).toBe("");
   });
 
-  it("describes a public-key mismatch without falsely claiming nothing was stored", async () => {
-    const root = await mkdtemp(join(tmpdir(), "kanna-updater-key-verify-"));
+  it("fails a wrong-public-key preflight without exposing private material", async () => {
+    const { root, keyPath } = await privateKeyFixture();
     const runner: CommandRunner = {
       async run(_command, args) {
         const challengePath = args.at(-1);
@@ -576,17 +158,115 @@ describe("updater signing key compatibility", () => {
 
     let message = "";
     try {
-      await assertUpdaterSigningKeyMatchesPublicKey({
+      await preflightUpdaterSigningKey({
         cwd: root,
-        env: {},
+        env: {
+          KANNA_UPDATER_PUBKEY: testUpdaterPublicKey(otherKeyPair.publicKey),
+          TAURI_PRIVATE_KEY_PATH: keyPath
+        },
         runner,
-        material: "secret updater key",
-        publicKey: testUpdaterPublicKey(otherKeyPair.publicKey)
       });
     } catch (error) {
       message = error instanceof Error ? error.message : String(error);
     }
     expect(message).toMatch(/does not match KANNA_UPDATER_PUBKEY/);
-    expect(message).not.toMatch(/Refusing to store/);
+    expect(message).not.toContain("secret updater key");
+  });
+
+  it("sanitizes ambient signing secrets for bundle signer children", () => {
+    const env = updaterSignerEnvironment({
+      PATH: "/usr/bin",
+      TAURI_PRIVATE_KEY_PASSWORD: "ambient password",
+      TAURI_SIGNING_PRIVATE_KEY: "ambient key",
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: "ambient signing password"
+    }, "validated key");
+
+    expect(env).toEqual({
+      PATH: "/usr/bin",
+      TAURI_SIGNING_PRIVATE_KEY: "validated key",
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+    });
+  });
+});
+
+describe("release updater preflight wiring", () => {
+  async function releaseFixture(): Promise<{
+    root: string;
+    repoRoot: string;
+    keyPath: string;
+  }> {
+    const root = await mkdtemp(join(tmpdir(), "kanna-updater-preflight-"));
+    const repoRoot = join(root, "repo");
+    const tauriDir = join(repoRoot, "apps", "desktop", "src-tauri");
+    const keyPath = join(root, "updater-private.key");
+    await mkdir(tauriDir, { recursive: true });
+    await writeFile(join(repoRoot, "VERSION"), "1.2.3\n");
+    await writeFile(join(tauriDir, "tauri.conf.json"), '{"version":"1.2.3"}\n');
+    await writeFile(join(tauriDir, "Cargo.toml"), 'version = "1.2.3"\n');
+    await writeFile(keyPath, "secret updater key\n", { mode: 0o600 });
+    await chmod(keyPath, 0o600);
+    return { root, repoRoot, keyPath };
+  }
+
+  it("stops an unsafe file before any release command or version mutation", async () => {
+    const { repoRoot, keyPath } = await releaseFixture();
+    await chmod(keyPath, 0o644);
+    const calls: string[] = [];
+    const runner: CommandRunner = {
+      async run(command) {
+        calls.push(command);
+        return { exitCode: 1, stdout: "", stderr: "must not run" };
+      }
+    };
+
+    await expect(shipRelease({
+      repoRoot,
+      bump: "patch",
+      archLabels: ["arm64"],
+      release: false,
+      dryRun: true,
+      env: {
+        KANNA_UPDATER_PUBKEY: testUpdaterPublicKey(),
+        TAURI_PRIVATE_KEY_PATH: keyPath
+      },
+      runner
+    })).rejects.toThrow(/owner-only read permissions/);
+
+    expect(calls).toEqual([]);
+    expect(await readFile(join(repoRoot, "VERSION"), "utf8")).toBe("1.2.3\n");
+  });
+
+  it("stops a wrong public key before git, Bazel, bundling, or version mutation", async () => {
+    const { repoRoot, keyPath } = await releaseFixture();
+    const calls: string[] = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push(command);
+        if (command !== "pnpm") {
+          return { exitCode: 1, stdout: "", stderr: "must not run" };
+        }
+        const challengePath = args.at(-1);
+        if (!challengePath) throw new Error("missing challenge path");
+        await writeTestSignature(challengePath);
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+    const otherKeyPair = generateKeyPairSync("ed25519");
+
+    await expect(shipRelease({
+      repoRoot,
+      bump: "patch",
+      archLabels: ["arm64"],
+      release: false,
+      dryRun: true,
+      env: {
+        KANNA_UPDATER_PUBKEY: testUpdaterPublicKey(otherKeyPair.publicKey),
+        TAURI_PRIVATE_KEY_PATH: keyPath
+      },
+      runner
+    })).rejects.toThrow(/does not match KANNA_UPDATER_PUBKEY/);
+
+    expect(calls).toEqual(["pnpm"]);
+    expect(await readFile(join(repoRoot, "VERSION"), "utf8")).toBe("1.2.3\n");
   });
 });

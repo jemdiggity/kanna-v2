@@ -82,19 +82,17 @@ the release Bazel targets directly:
 
 ```sh
 ./kd release setup-notarization  # one-time machine setup
-./kd release setup-updater-key   # one-time updater-key import
 ./kd release ship --dry-run      # build and sign without notarizing/publishing
 ./kd release ship --release      # preflight, build, notarize, and publish
 ```
 
-The setup commands store notarization credentials and updater private signing
-material in the user's explicit file-based Keychain. Only non-secret Keychain
-selectors are written to `~/.kanna/.env.release.local`; Apple IDs, passwords,
-private keys, and API private keys never belong in plaintext release config.
+Notarization credentials live in the user's explicit file-based Keychain. The
+updater private key stays in a separate owner-only file whose absolute path,
+along with the public key, is configured in `~/.kanna/.env.release.local`.
 This owner-only machine-global file is the only release-environment file kd
 reads; repository and worktree `.env.release.local` files are ignored. See
-[`docs/dev/release.md`](docs/dev/release.md) for the one-time updater-key import
-and offline-backup procedure.
+[`docs/dev/release.md`](docs/dev/release.md) for the updater-key validation and
+offline-backup requirements.
 
 The checked-in `.bazelrc` enables shared caches so Bazel work is reused across
 worktrees without sharing `output_base`:
