@@ -206,8 +206,21 @@ async fn e2e_mobile_controls_gate_direct_lan_but_preserve_tunneled_transport() {
     .await;
     assert_eq!(tunneled.status, StatusCode::OK.as_u16());
     assert_eq!(tunneled.error, None);
+    // This test is about LAN gating, not about which tools the catalog holds:
+    // that list is asserted in `crates/kanna-tool-catalog/tests/catalog.rs`, so
+    // pinning all of it here too would only make every catalog change edit this
+    // assertion. Its presence is what matters, and that is checked first.
+    let mut tunneled_body = tunneled.body;
+    let advertised = tunneled_body
+        .as_mut()
+        .and_then(|body| body.as_object_mut())
+        .and_then(|body| body.remove("agentApiTools"));
+    assert!(
+        advertised.is_some_and(|tools| tools.as_array().is_some_and(|tools| !tools.is_empty())),
+        "status must advertise the agent-API surface so clients can detect version skew"
+    );
     assert_eq!(
-        tunneled.body,
+        tunneled_body,
         Some(json!({
             "state": "running",
             "desktopId": "desktop-e2e-lan-gate",

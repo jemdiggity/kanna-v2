@@ -74,7 +74,7 @@
     },
     {
       "name": "kanna_wait_task",
-      "description": "Block until a Kanna task finishes (agent stopped, activity 'unread') or closes, polling its detail. Returns the task detail plus waitOutcome 'resolved'. If the wait window elapses first it returns the latest detail with waitOutcome 'timeout' instead of failing — that is a normal result, so call it again in a loop to keep waiting.",
+      "description": "Block until a Kanna task finishes or closes, polling its detail. A task counts as finished once its latest stage run reaches a terminal status (succeeded or failed) — the recorded verdict, not the agent's live terminal state — so a task whose agent stopped and settled to activity 'idle' resolves exactly like one that settled to 'unread'. Returns the task detail plus waitOutcome 'resolved'; read the verdict from latestRun. If the wait window elapses first it returns the latest detail with waitOutcome 'timeout' instead of failing — that is a normal result, so call it again in a loop to keep waiting.",
       "method": "GET",
       "path": "/v1/tasks/{task_id}",
       "response": "wait",

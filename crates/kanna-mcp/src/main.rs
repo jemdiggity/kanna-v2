@@ -2,8 +2,9 @@ use base64::Engine;
 use clap::{Parser, Subcommand};
 use kanna_tool_catalog::{
     clamp_wait_timeout_secs, encode_path_segment, load_catalog, resolve_request,
-    runtime_info_snapshot, wait_resolved_result, wait_timeout_result, Catalog, Method,
-    ResolvedRequest, ResponseKind, RuntimeAdapterIdentity, WaitUntil, DEFAULT_WAIT_TIMEOUT_SECS,
+    runtime_info_snapshot, task_value_matches_wait_until, wait_match_is_database_fact,
+    wait_resolved_result, wait_timeout_result, Catalog, Method, ResolvedRequest, ResponseKind,
+    RuntimeAdapterIdentity, WaitUntil, DEFAULT_WAIT_TIMEOUT_SECS,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
@@ -288,14 +289,12 @@ async fn confirm_stopped_activity(
         })
 }
 
+/// The wait predicate lives in `kanna-tool-catalog` so this adapter, the typed
+/// `kanna-cli` wait, and the catalog-driven `kanna-cli` wait cannot drift apart
+/// again. See `task_state_matches_wait_until` for why a terminal `stage_run`,
+/// not `activity`, decides `Finished`.
 fn task_matches_wait_until(task: &Value, until: WaitUntil) -> bool {
-    let closed = task.get("closedAt").is_some_and(|value| !value.is_null());
-    match until {
-        WaitUntil::Finished => {
-            closed || task.get("activity").and_then(Value::as_str) == Some("unread")
-        }
-        WaitUntil::Closed => closed,
-    }
+    task_value_matches_wait_until(task, until)
 }
 
 fn join_server_url(base_url: &str, path: &str) -> String {
@@ -317,6 +316,21 @@ async fn require_success(
         .text()
         .await
         .unwrap_or_else(|e| format!("failed to read error body: {e}"));
+    // A 404 with no body is axum's "no such route", not the server's "no such
+    // task" — the latter always carries a message. That distinction is the only
+    // thing separating "this server is too old to serve this tool" from an
+    // ordinary not-found, and an agent whose instructions mandate the tool has
+    // to be able to tell them apart: silently reading a route-level 404 as an
+    // empty answer is how a fan-out records "no children" for a server it could
+    // not ask.
+    if status == reqwest::StatusCode::NOT_FOUND && body.trim().is_empty() {
+        return Err(format!(
+            "{method} {path} returned 404 with no body, which means this server does not serve \
+             that route at all — it is older than the tool catalog this client exposes. This is \
+             NOT an empty result: do not record it as one. Call kanna_info and read agentApi for \
+             the tools this server is missing."
+        ));
+    }
     Err(format!(
         "{method} {path} failed with status {status}: {body}"
     ))
@@ -500,14 +514,19 @@ async fn wait_task(
     let path = format!("/v1/tasks/{}", encode_path_segment(task_id));
     loop {
         let task = get_routed_json(base_url, &path, machine_id).await?;
-        // A `Finished` match is read off `activity`, which the daemon writes per
-        // frame, so it is confirmed exactly like a task read before the caller
-        // is told its child stopped. A `Closed` match is a database fact and is
-        // exempt inside `confirm_stopped_activity`. If the stop does not hold,
-        // the fresher sample keeps the wait running; if it cannot be confirmed
-        // at all, the `?` fails the call rather than resolving the wait on an
-        // unconfirmed stop.
+        // A match resting on a database fact — the task is closed, or its latest
+        // `stage_run` reached a terminal status — resolves immediately: there is
+        // no per-frame verdict to misread, and making it depend on a confirming
+        // re-read would let a transient GET failure fail a wait whose answer was
+        // already recorded. A match read off `activity` alone is still confirmed
+        // exactly like a task read before the caller is told its child stopped:
+        // if the stop does not hold, the fresher sample keeps the wait running;
+        // if it cannot be confirmed at all, the `?` fails the call rather than
+        // resolving the wait on an unconfirmed stop.
         let task = if task_matches_wait_until(&task, until) {
+            if wait_match_is_database_fact(&task) {
+                return Ok(wait_resolved_result(task));
+            }
             let task = confirm_stopped_activity(base_url, &path, task, machine_id).await?;
             if task_matches_wait_until(&task, until) {
                 return Ok(wait_resolved_result(task));
@@ -1152,6 +1171,18 @@ async fn handle_mcp_tool_call(
     let task_id = env::var("KANNA_TASK_ID")
         .ok()
         .filter(|value| !value.trim().is_empty());
+    // The tools this adapter actually advertises — including any override
+    // catalog — are what a skew report has to be measured against.
+    let client_tool_names = {
+        let catalog = catalog
+            .read()
+            .map_err(|_| "catalog lock poisoned".to_string())?;
+        catalog
+            .tools
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<Vec<_>>()
+    };
     let result = execute_resolved_request(
         base_url,
         request,
@@ -1162,6 +1193,7 @@ async fn handle_mcp_tool_call(
             task_id: task_id.as_deref(),
         },
         machine_id.as_deref(),
+        &client_tool_names,
     )
     .await;
     result
@@ -1252,6 +1284,7 @@ async fn execute_resolved_request(
     request: ResolvedRequest,
     adapter: RuntimeAdapterIdentity<'_>,
     machine_id: Option<&str>,
+    client_tool_names: &[String],
 ) -> Result<Value, String> {
     match (request.method, request.kind) {
         (Method::Get, ResponseKind::Json) => {
@@ -1312,7 +1345,8 @@ async fn execute_resolved_request(
                     get_runtime_status(base_url, &request.path).await,
                 ),
             };
-            let mut snapshot = runtime_info_snapshot(&effective_url, adapter, status);
+            let mut snapshot =
+                runtime_info_snapshot(&effective_url, adapter, status, client_tool_names);
             if let Some(machine_id) = machine_id {
                 snapshot["connection"]["routing"] = serde_json::json!({
                     "kind": "accountRelay",

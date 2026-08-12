@@ -430,7 +430,16 @@ mod tests {
         let body = axum::body::to_bytes(status_response.into_body(), usize::MAX)
             .await
             .unwrap();
-        let status_body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let mut status_body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // This test pins the relay envelope, not the catalog's contents — that
+        // list is asserted in `crates/kanna-tool-catalog/tests/catalog.rs`.
+        let advertised = status_body
+            .as_object_mut()
+            .and_then(|body| body.remove("agentApiTools"));
+        assert!(
+            advertised.is_some_and(|tools| tools.as_array().is_some_and(|tools| !tools.is_empty())),
+            "status must advertise the agent-API surface so clients can detect version skew"
+        );
 
         let response = super::RelayMessage::Response {
             id,

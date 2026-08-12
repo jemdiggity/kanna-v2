@@ -36,6 +36,19 @@ Only when the MCP tool is unavailable, use this typed CLI fallback exactly:
 kanna-cli task children --task-id "$KANNA_TASK_ID"
 ```
 
+If neither surface exists — the tool is absent from the MCP tool list, the call
+returns a route-level 404, or the CLI rejects the subcommand — you are attached
+to a server older than these instructions, and you **cannot ask** what the
+children are. That is not the same answer as "there are none", and the
+difference is not recoverable by inspecting worktrees or branches: from round 2
+on, workspace topology proves nothing, because a revision resumes the
+implementer in its existing worktree and closed children are invisible to
+`kanna_list_recent_tasks`. Confirm with `kanna_info` and read its `agentApi`
+block, which names the tools the connected server cannot serve. Then record
+broken dispatch with an explicit upgrade-required reason and stop. Do not infer
+an empty ledger, do not fall back to reading git state, and do not review
+anything on the strength of a history you could not read.
+
 The response includes direct children, including closed children, oldest first.
 First select children where `pipelineName == "specialty-review"`. Only those
 children participate in the specialty ledger or its unresolved-evidence checks.
