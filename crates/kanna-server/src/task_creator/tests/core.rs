@@ -2794,6 +2794,10 @@ fn read_agent_definition_loads_builtin_setup_agent() {
     assert!(definition
         .prompt
         .contains("Do not author new agents from scratch"));
+    assert!(definition.prompt.contains("Machine-Local Config Bootstrap"));
+    assert!(definition.prompt.contains(".kanna/config.local.json"));
+    assert!(definition.prompt.contains(".kanna/sync-local-config.sh"));
+    assert!(definition.prompt.contains("primary checkout → worktree"));
     assert!(definition.prompt.contains("kanna_complete_stage"));
 
     let _ = std::fs::remove_dir_all(&repo_root);
