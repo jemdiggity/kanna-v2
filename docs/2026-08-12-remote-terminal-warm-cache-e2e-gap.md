@@ -23,13 +23,21 @@ failure of the new focus, clipboard, cache, resize, or reconnect assertions.
 
 ## Enabling condition
 
-The real journey becomes runnable when the two-instance cloud-sync fixture can
-deterministically select the remote projection after `store.createItem` starts
-the owning task. In particular, `handleSelectItem(cloudItemId)` must leave the
-secondary with `mainPanelIsCloudTask=true`, a non-null cloud terminal ref, and
-the remote task's xterm buffer rather than a local `create:*` draft. Once that
-baseline selection race/regression is repaired, the committed journey exercises
-the OS clipboard and warm-cache behavior without further test-only transport
+The remaining code prerequisite is deterministic remote-projection selection
+after `store.createItem` starts the owning task. In particular,
+`handleSelectItem(cloudItemId)` must leave the secondary with
+`mainPanelIsCloudTask=true`, a non-null cloud terminal ref, and the remote
+task's xterm buffer rather than a local `create:*` draft. The warm-cache input
+helper now resolves `.xterm-helper-textarea:focus`, so a hidden earlier cache
+entry cannot receive the WebDriver keys and is no longer an enabling gap.
+
+The only host prerequisite specific to the final clipboard assertion is a
+macOS GUI session with `/usr/bin/pbpaste` and the system clipboard available.
+The E2E runner itself provisions the other journey prerequisites: two isolated
+WebDriver app instances, the Firebase Auth and Firestore emulators with the
+fixture account, the local relay, and their assigned ports. Once the selection
+race/regression is repaired on such a host, the committed journey exercises the
+OS clipboard and warm-cache behavior without further test-only transport
 mocking.
 
 ## Narrower coverage

@@ -18,7 +18,10 @@ interface FakeClient {
   pressKey(value: string): Promise<void>;
 }
 
-function createFakeClient(): FakeClient {
+function createFakeClient(options: {
+  terminalInputId?: string;
+  focusedTerminalInputId?: string;
+} = {}): FakeClient {
   return {
     executeCalls: [],
     waitCalls: [],
@@ -34,7 +37,12 @@ function createFakeClient(): FakeClient {
     async waitForElement(css: string, timeoutMs = 10_000): Promise<string> {
       this.waitCalls.push({ css, timeoutMs });
       if (css === ".terminal-container") return "terminal";
-      if (css === ".main-panel .xterm-helper-textarea") return "terminal-input";
+      if (css === ".main-panel .xterm-helper-textarea") {
+        return options.terminalInputId ?? "terminal-input";
+      }
+      if (css === ".main-panel .xterm-helper-textarea:focus") {
+        return options.focusedTerminalInputId ?? "focused-terminal-input";
+      }
       throw new Error(`unexpected selector ${css}`);
     },
     async sendKeys(elementId: string, text: string): Promise<void> {
@@ -71,16 +79,27 @@ describe("nudgeTerminalTrustPrompt", () => {
 });
 
 describe("typeTextToFocusedTerminalWindow", () => {
-  it("waits for xterm to own DOM focus before sending text to the focused terminal", async () => {
-    const client = createFakeClient();
+  it("sends text to the focused xterm when a hidden terminal appears first in the DOM", async () => {
+    const client = createFakeClient({
+      terminalInputId: "hidden-first-terminal-input",
+      focusedTerminalInputId: "focused-second-terminal-input",
+    });
 
     await typeTextToFocusedTerminalWindow(client, "ab\n");
 
     expect(client.waitCalls).toContainEqual({ css: ".terminal-container", timeoutMs: 15_000 });
     expect(client.executeCalls[0]).toContain("document.activeElement");
-    expect(client.waitCalls).toContainEqual({ css: ".main-panel .xterm-helper-textarea", timeoutMs: 5_000 });
+    expect(client.executeCalls[0]).toContain('el.matches(".main-panel .xterm-helper-textarea")');
+    expect(client.waitCalls).toContainEqual({
+      css: ".main-panel .xterm-helper-textarea:focus",
+      timeoutMs: 5_000,
+    });
+    expect(client.waitCalls).not.toContainEqual({
+      css: ".main-panel .xterm-helper-textarea",
+      timeoutMs: 5_000,
+    });
     expect(client.pressKeyCalls).toEqual([]);
-    expect(client.sendKeyCalls).toEqual([{ elementId: "terminal-input", text: "ab\n" }]);
+    expect(client.sendKeyCalls).toEqual([{ elementId: "focused-second-terminal-input", text: "ab\n" }]);
   });
 });
 
