@@ -65,6 +65,7 @@ pub(crate) async fn execute_catalog_request(
     request: ResolvedRequest,
     adapter: RuntimeAdapterIdentity<'_>,
     machine_id: Option<&str>,
+    client_tool_names: &[String],
 ) -> Result<Value, String> {
     match (request.method, request.kind) {
         (CatalogMethod::Get, ResponseKind::Json) => {
@@ -138,7 +139,8 @@ pub(crate) async fn execute_catalog_request(
                     get_runtime_status(base_url, &request.path).await,
                 ),
             };
-            let mut snapshot = runtime_info_snapshot(&effective_url, adapter, status);
+            let mut snapshot =
+                runtime_info_snapshot(&effective_url, adapter, status, client_tool_names);
             if let Some(machine_id) = machine_id {
                 snapshot["connection"]["routing"] = serde_json::json!({
                     "kind": "accountRelay",
@@ -183,6 +185,13 @@ pub(crate) async fn call_catalog_tool(
     let task_id = env::var("KANNA_TASK_ID")
         .ok()
         .filter(|value| !value.trim().is_empty());
+    // The tools this client advertises — including any override catalog — are
+    // what a skew report has to be measured against.
+    let client_tool_names = catalog
+        .tools
+        .iter()
+        .map(|tool| tool.name.clone())
+        .collect::<Vec<_>>();
     let value = execute_catalog_request(
         base_url,
         request,
@@ -193,6 +202,7 @@ pub(crate) async fn call_catalog_tool(
             task_id: task_id.as_deref(),
         },
         machine_id.as_deref(),
+        &client_tool_names,
     )
     .await?;
     Ok((kind, value))

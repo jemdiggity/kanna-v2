@@ -1,6 +1,7 @@
 use kanna_tool_catalog::{
     bundled_catalog, clamp_wait_timeout_secs, resolve_request, runtime_info_snapshot,
-    wait_resolved_result, wait_timeout_result, Catalog, Method, ParamLoc, ParamType, ResponseKind,
+    task_value_matches_wait_until, wait_match_is_database_fact, wait_resolved_result,
+    wait_timeout_result, Catalog, Method, ParamLoc, ParamType, ResponseKind,
     RuntimeAdapterIdentity, WaitUntil, CLIENT_TOOL_CALL_BUDGET_SECS, DEFAULT_WAIT_TIMEOUT_SECS,
     MAX_WAIT_TIMEOUT_SECS,
 };
@@ -197,6 +198,7 @@ fn runtime_info_snapshot_allow_lists_status_and_keeps_identity_boundaries_separa
             "authToken": "AUTH-SECRET",
             "databasePath": "/private/kanna.db"
         })),
+        &["kanna_info".to_string()],
     );
 
     assert_eq!(
@@ -1405,4 +1407,171 @@ fn every_declared_parameter_round_trips_a_cli_spelling() {
         )
         .unwrap_or_else(|e| panic!("{} rejected its own CLI spelling: {e}", tool.name));
     }
+}
+
+/// The wait predicate that `kanna_wait_task` resolves on. Its `Finished` arm
+/// used to read `activity == "unread"` and nothing else, so a task whose agent
+/// finished and settled to `idle` never resolved and every wait on it ran out
+/// its window reporting a timeout.
+#[test]
+fn finished_is_decided_by_the_terminal_stage_run_not_the_activity_flag() {
+    let finished_but_idle = json!({
+        "activity": "idle",
+        "closedAt": null,
+        "latestRun": { "status": "failed" },
+    });
+    assert!(
+        task_value_matches_wait_until(&finished_but_idle, WaitUntil::Finished),
+        "a terminal stage run means finished whatever activity settled to"
+    );
+    assert!(
+        !task_value_matches_wait_until(&finished_but_idle, WaitUntil::Closed),
+        "finished is not closed"
+    );
+
+    // `idle` on its own is also what a task that has not started its first run
+    // looks like, so it must not resolve by itself — that is precisely why the
+    // fix keys on the run rather than widening the activity set.
+    let never_started = json!({ "activity": "idle", "closedAt": null, "latestRun": null });
+    assert!(!task_value_matches_wait_until(
+        &never_started,
+        WaitUntil::Finished
+    ));
+
+    let still_running = json!({
+        "activity": "working",
+        "closedAt": null,
+        "latestRun": { "status": "running" },
+    });
+    assert!(!task_value_matches_wait_until(
+        &still_running,
+        WaitUntil::Finished
+    ));
+
+    // `cancelled` is the transient state a rerun, resume, or close passes
+    // through on the way to a replacement run, so it is not terminal.
+    let cancelled = json!({
+        "activity": "idle",
+        "closedAt": null,
+        "latestRun": { "status": "cancelled" },
+    });
+    assert!(!task_value_matches_wait_until(
+        &cancelled,
+        WaitUntil::Finished
+    ));
+
+    // The settling path that always worked keeps working.
+    let unread = json!({ "activity": "unread", "closedAt": null, "latestRun": null });
+    assert!(task_value_matches_wait_until(&unread, WaitUntil::Finished));
+
+    let closed = json!({ "activity": "idle", "closedAt": "2026-08-13T22:00:00Z" });
+    assert!(task_value_matches_wait_until(&closed, WaitUntil::Finished));
+    assert!(task_value_matches_wait_until(&closed, WaitUntil::Closed));
+}
+
+/// Only an `activity`-driven match needs the confirming re-read; a database
+/// fact has no frame to misread, and making it depend on a second GET would let
+/// a transient failure fail a wait whose answer was already recorded.
+#[test]
+fn a_database_fact_match_is_exempt_from_the_activity_confirmation() {
+    assert!(wait_match_is_database_fact(&json!({
+        "activity": "idle",
+        "latestRun": { "status": "succeeded" },
+    })));
+    assert!(wait_match_is_database_fact(&json!({
+        "closedAt": "2026-08-13T22:00:00Z",
+    })));
+    assert!(!wait_match_is_database_fact(&json!({
+        "activity": "unread",
+        "closedAt": null,
+        "latestRun": null,
+    })));
+}
+
+fn skew_info(server_status: serde_json::Value, client_tools: &[String]) -> serde_json::Value {
+    runtime_info_snapshot(
+        "http://127.0.0.1:49199",
+        RuntimeAdapterIdentity {
+            name: "kanna-mcp",
+            version: "0.1.0",
+            mcp_protocol_version: None,
+            task_id: None,
+        },
+        Ok(server_status),
+        client_tools,
+    )
+}
+
+fn status_with(agent_api_tools: serde_json::Value) -> serde_json::Value {
+    let mut status = json!({
+        "state": "running",
+        "desktopId": "desktop-1",
+        "desktopName": "Mac",
+        "version": "0.1.0",
+        "environment": "development",
+        "lanHost": "127.0.0.1",
+        "lanPort": 48120,
+    });
+    if !agent_api_tools.is_null() {
+        status["agentApiTools"] = agent_api_tools;
+    }
+    status
+}
+
+/// An agent whose instructions mandate a tool has to be able to tell "the
+/// server says there are none" from "this server cannot be asked". Without
+/// this, that difference only shows up as a 404, which is indistinguishable
+/// from an ordinary not-found.
+#[test]
+fn kanna_info_reports_tools_the_connected_server_cannot_serve() {
+    let client_tools = [
+        "kanna_info".to_string(),
+        "kanna_get_task".to_string(),
+        "kanna_list_task_children".to_string(),
+    ];
+
+    let current = skew_info(
+        status_with(json!([
+            "kanna_info",
+            "kanna_get_task",
+            "kanna_list_task_children"
+        ])),
+        &client_tools,
+    );
+    assert_eq!(current["agentApi"]["status"], "current");
+    assert_eq!(current["agentApi"]["unavailableTools"], json!([]));
+
+    // The observed skew: a released app that predates `kanna_list_task_children`.
+    let behind = skew_info(
+        status_with(json!(["kanna_info", "kanna_get_task"])),
+        &client_tools,
+    );
+    assert_eq!(behind["agentApi"]["status"], "server_behind");
+    assert_eq!(
+        behind["agentApi"]["unavailableTools"],
+        json!(["kanna_list_task_children"])
+    );
+
+    // A server old enough not to advertise at all is itself the signal.
+    let unknown = skew_info(status_with(json!(null)), &client_tools);
+    assert_eq!(unknown["agentApi"]["status"], "unknown");
+    assert_eq!(
+        unknown["agentApi"]["serverAdvertisesCapabilities"],
+        json!(false)
+    );
+
+    // An unreachable server reports `unknown` rather than omitting the block,
+    // which would read as "no skew".
+    let unreachable = runtime_info_snapshot(
+        "http://127.0.0.1:49199",
+        RuntimeAdapterIdentity {
+            name: "kanna-mcp",
+            version: "0.1.0",
+            mcp_protocol_version: None,
+            task_id: None,
+        },
+        Err("connection refused".to_string()),
+        &client_tools,
+    );
+    assert_eq!(unreachable["agentApi"]["status"], "unknown");
 }

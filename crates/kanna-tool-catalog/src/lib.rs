@@ -293,6 +293,8 @@ struct SafeServerStatus {
     #[serde(default)]
     ksp_stream_version: Option<u8>,
     #[serde(default)]
+    agent_api_tools: Option<Vec<String>>,
+    #[serde(default)]
     write_path_health: Option<SafeWritePathHealth>,
 }
 
@@ -338,6 +340,84 @@ pub struct WaitSpec {
     pub timeout_secs: u64,
     pub poll_secs: u64,
     pub until: WaitUntil,
+}
+
+/// `stage_run.status` values that mean the run is over as a matter of record.
+///
+/// `cancelled` is deliberately absent: it is the transient state a rerun,
+/// resume, or close passes through on the way to starting a replacement run,
+/// so treating it as finished would resolve a wait on a task Kanna is about to
+/// restart.
+pub fn run_status_is_terminal(status: &str) -> bool {
+    matches!(status, "succeeded" | "failed")
+}
+
+/// The three facts a wait predicate needs out of a task detail.
+///
+/// It exists so every client surface that answers "has this task finished?" —
+/// `kanna-mcp`, the typed `kanna-cli` wait, and the catalog-driven `kanna-cli`
+/// wait — reads the same fields the same way. The three used to carry their own
+/// copy of the predicate, which is how they drifted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WaitTaskState<'a> {
+    pub closed: bool,
+    pub activity: Option<&'a str>,
+    pub latest_run_status: Option<&'a str>,
+}
+
+/// Whether a task has reached the state a wait was asked to block for.
+///
+/// `Finished` is decided by the task's **terminal `stage_run`** first, because
+/// that is a database fact written when the run recorded its verdict. The
+/// `activity` flag is a per-frame daemon classification and is only a secondary
+/// signal here: an agent that finishes and settles to `idle` never flips to
+/// `unread`, so keying `Finished` on `unread` alone left an already-finished
+/// task waiting out its entire window and then reporting a timeout — for a task
+/// that had carried a terminal run for minutes. A caller looping on that
+/// predicate waits forever and cannot tell "still working" from "finished".
+///
+/// `idle` on its own deliberately still does not resolve: a task that has not
+/// started its first run yet is also `idle`, and resolving on that would report
+/// a task as finished before its agent ever ran. The terminal run is exactly
+/// what separates the two, which is why it — not a widened activity set — is
+/// the authority.
+pub fn task_state_matches_wait_until(state: WaitTaskState<'_>, until: WaitUntil) -> bool {
+    match until {
+        WaitUntil::Closed => state.closed,
+        WaitUntil::Finished => {
+            state.closed
+                || state.latest_run_status.is_some_and(run_status_is_terminal)
+                || state.activity == Some("unread")
+        }
+    }
+}
+
+/// Read a `WaitTaskState` out of a raw task-detail JSON body.
+pub fn wait_task_state(task: &Value) -> WaitTaskState<'_> {
+    WaitTaskState {
+        closed: task.get("closedAt").is_some_and(|value| !value.is_null()),
+        activity: task.get("activity").and_then(Value::as_str),
+        latest_run_status: task
+            .get("latestRun")
+            .and_then(|run| run.get("status"))
+            .and_then(Value::as_str),
+    }
+}
+
+/// `task_state_matches_wait_until` for a raw task-detail JSON body.
+pub fn task_value_matches_wait_until(task: &Value, until: WaitUntil) -> bool {
+    task_state_matches_wait_until(wait_task_state(task), until)
+}
+
+/// Whether a wait match rests on a database fact — the task is closed, or its
+/// latest `stage_run` reached a terminal status — rather than on the daemon's
+/// per-frame `activity` verdict.
+///
+/// Only an activity-driven match needs the confirming re-read that guards
+/// against a mid-redraw misread; a database fact has no frame to misread.
+pub fn wait_match_is_database_fact(task: &Value) -> bool {
+    let state = wait_task_state(task);
+    state.closed || state.latest_run_status.is_some_and(run_status_is_terminal)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -400,6 +480,7 @@ pub fn runtime_info_snapshot(
     effective_base_url: &str,
     adapter: RuntimeAdapterIdentity<'_>,
     status_result: Result<Value, String>,
+    client_tool_names: &[String],
 ) -> Value {
     let task_context = adapter
         .task_id
@@ -417,13 +498,15 @@ pub fn runtime_info_snapshot(
         "mcpProtocolVersion": adapter.mcp_protocol_version,
     });
 
-    let (server_status, lan_advertised_endpoint) = match status_result {
+    let (server_status, lan_advertised_endpoint, agent_api) = match status_result {
         Ok(raw_status) => match serde_json::from_value::<SafeServerStatus>(raw_status) {
             Ok(status) => {
                 let lan_endpoint = serde_json::json!({
                     "host": status.lan_host,
                     "port": status.lan_port,
                 });
+                let agent_api =
+                    agent_api_skew(client_tool_names, status.agent_api_tools.as_deref());
                 let server_status = serde_json::json!({
                     "available": true,
                     "state": status.state,
@@ -438,7 +521,7 @@ pub fn runtime_info_snapshot(
                     },
                     "writePathHealth": status.write_path_health,
                 });
-                (server_status, lan_endpoint)
+                (server_status, lan_endpoint, agent_api)
             }
             Err(error) => (
                 serde_json::json!({
@@ -446,6 +529,7 @@ pub fn runtime_info_snapshot(
                     "error": format!("GET /v1/status returned an invalid identity payload: {error}"),
                 }),
                 Value::Null,
+                agent_api_unreadable(client_tool_names),
             ),
         },
         Err(error) => (
@@ -454,6 +538,7 @@ pub fn runtime_info_snapshot(
                 "error": error,
             }),
             Value::Null,
+            agent_api_unreadable(client_tool_names),
         ),
     };
 
@@ -462,7 +547,82 @@ pub fn runtime_info_snapshot(
         "connection": connection,
         "serverStatus": server_status,
         "lanAdvertisedEndpoint": lan_advertised_endpoint,
+        "agentApi": agent_api,
         "taskContext": task_context,
+    })
+}
+
+/// Hint text shared by every skew verdict that cannot confirm a tool is
+/// routable, so an agent reads the same instruction whichever way the check
+/// came up short.
+const AGENT_API_UNVERIFIED_HINT: &str =
+    "Treat any tool your instructions mandate as unverified: a \
+     404 from it means this server does not serve the route, which is not the same as the route \
+     answering \"none\". Do not record an empty result as fact — say the surface was unavailable.";
+
+/// Compare the tools this client advertises against the tools the connected
+/// server says it can serve.
+///
+/// The two are separate binaries with separate lifecycles, and a released app
+/// can lag a working-tree client by hundreds of commits. Without this an agent
+/// whose instructions mandate a tool discovers its absence only when the call
+/// 404s, and a 404 cannot be told apart from a legitimate empty answer — so a
+/// fan-out orchestrator can silently record "no children" for a server that
+/// simply cannot be asked.
+fn agent_api_skew(client_tool_names: &[String], server_tools: Option<&[String]>) -> Value {
+    let Some(server_tools) = server_tools else {
+        return serde_json::json!({
+            "status": "unknown",
+            "serverAdvertisesCapabilities": false,
+            "clientToolCount": client_tool_names.len(),
+            "note": format!(
+                "This server predates agent-API capability advertisement, so which of the {} tools \
+                 this client exposes are actually routable cannot be determined. It is therefore \
+                 older than this client, and tools added since its build will 404. {}",
+                client_tool_names.len(),
+                AGENT_API_UNVERIFIED_HINT
+            ),
+        });
+    };
+    let unavailable = client_tool_names
+        .iter()
+        .filter(|name| !server_tools.iter().any(|served| served == *name))
+        .cloned()
+        .collect::<Vec<_>>();
+    if unavailable.is_empty() {
+        return serde_json::json!({
+            "status": "current",
+            "serverAdvertisesCapabilities": true,
+            "clientToolCount": client_tool_names.len(),
+            "unavailableTools": Vec::<String>::new(),
+        });
+    }
+    serde_json::json!({
+        "status": "server_behind",
+        "serverAdvertisesCapabilities": true,
+        "clientToolCount": client_tool_names.len(),
+        "unavailableTools": unavailable,
+        "note": format!(
+            "The connected server does not serve {} of the tools this client exposes, so it is \
+             older than this client. {}",
+            unavailable.len(),
+            AGENT_API_UNVERIFIED_HINT
+        ),
+    })
+}
+
+/// The status read failed or was unparseable, so nothing is known about the
+/// server's surface. Reported as `unknown` rather than omitted: a missing block
+/// would read as "no skew".
+fn agent_api_unreadable(client_tool_names: &[String]) -> Value {
+    serde_json::json!({
+        "status": "unknown",
+        "serverAdvertisesCapabilities": false,
+        "clientToolCount": client_tool_names.len(),
+        "note": format!(
+            "The server's status could not be read, so its agent-API surface is unknown. {}",
+            AGENT_API_UNVERIFIED_HINT
+        ),
     })
 }
 

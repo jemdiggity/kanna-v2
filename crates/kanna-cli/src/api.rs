@@ -1,6 +1,6 @@
 use kanna_tool_catalog::{
-    clamp_wait_timeout_secs, wait_resolved_result, wait_timeout_result,
-    WaitUntil as CatalogWaitUntil,
+    clamp_wait_timeout_secs, task_state_matches_wait_until, task_value_matches_wait_until,
+    wait_resolved_result, wait_timeout_result, WaitTaskState, WaitUntil as CatalogWaitUntil,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
@@ -341,13 +341,23 @@ pub(crate) fn parse_wait_until(value: &str) -> Result<WaitUntil, String> {
     }
 }
 
+/// Shares `kanna-tool-catalog`'s predicate rather than restating it: a terminal
+/// `stage_run`, not the per-frame `activity` flag, decides `Finished`.
 pub(crate) fn task_matches_wait_until(task: &TaskDetail, until: WaitUntil) -> bool {
-    match until {
-        WaitUntil::Finished => {
-            task.closed_at.is_some() || task.activity.as_deref() == Some("unread")
-        }
-        WaitUntil::Closed => task.closed_at.is_some(),
-    }
+    task_state_matches_wait_until(
+        WaitTaskState {
+            closed: task.closed_at.is_some(),
+            activity: task.activity.as_deref(),
+            latest_run_status: task
+                .latest_run
+                .as_ref()
+                .and_then(|run| run.status.as_deref()),
+        },
+        match until {
+            WaitUntil::Finished => CatalogWaitUntil::Finished,
+            WaitUntil::Closed => CatalogWaitUntil::Closed,
+        },
+    )
 }
 
 /// The typed CLI mirrors the MCP tool: a wait that runs out its (bounded)
@@ -382,13 +392,7 @@ pub(crate) async fn wait_task_via_api(
 }
 
 pub(crate) fn catalog_task_matches_wait_until(task: &Value, until: CatalogWaitUntil) -> bool {
-    let closed = task.get("closedAt").is_some_and(|value| !value.is_null());
-    match until {
-        CatalogWaitUntil::Finished => {
-            closed || task.get("activity").and_then(Value::as_str) == Some("unread")
-        }
-        CatalogWaitUntil::Closed => closed,
-    }
+    task_value_matches_wait_until(task, until)
 }
 
 pub(crate) async fn wait_catalog_task_via_api(

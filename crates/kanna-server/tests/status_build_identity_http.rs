@@ -240,6 +240,25 @@ async fn production_and_staging_processes_report_exact_build_identity_over_http(
         wait_for_status(&mut staging),
     );
 
+    // This test pins per-environment build identity, not the catalog's
+    // contents — that list is asserted in
+    // `crates/kanna-tool-catalog/tests/catalog.rs`. Both environments must
+    // still advertise the surface, since a client detects version skew from it.
+    let mut production_status = production_status;
+    let mut staging_status = staging_status;
+    for (label, status) in [
+        ("production", &mut production_status),
+        ("staging", &mut staging_status),
+    ] {
+        let advertised = status
+            .as_object_mut()
+            .and_then(|status| status.remove("agentApiTools"));
+        assert!(
+            advertised.is_some_and(|tools| tools.as_array().is_some_and(|tools| !tools.is_empty())),
+            "{label} status must advertise the agent-API surface"
+        );
+    }
+
     assert_eq!(
         production_status,
         json!({

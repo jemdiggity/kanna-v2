@@ -52,6 +52,19 @@ pub struct MobileServerStatus {
     pub pairing_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ksp_stream_version: Option<u8>,
+    /// Agent-facing tool names this build serves, read from the bundled
+    /// `kanna-tool-catalog` it was compiled against.
+    ///
+    /// A client's catalog and the server it talks to are separate binaries with
+    /// separate lifecycles — a released app can be hundreds of commits behind a
+    /// client built from the working tree — so a client cannot assume a tool it
+    /// advertises is actually routable. Diffing this list against its own
+    /// catalog turns that skew into something an agent can read up front
+    /// instead of discovering through a 404, which is indistinguishable from an
+    /// ordinary "not found". Absent on builds older than this field, which is
+    /// itself the signal that the server predates capability advertisement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_api_tools: Option<Vec<String>>,
     pub write_path_health: crate::workspace_commands::WritePathHealth,
 }
 
@@ -1059,6 +1072,13 @@ pub fn build_mobile_server_status(
         lan_port: config.lan_port,
         pairing_code,
         ksp_stream_version: Some(2),
+        agent_api_tools: Some(
+            kanna_tool_catalog::bundled_catalog()
+                .tools
+                .into_iter()
+                .map(|tool| tool.name)
+                .collect(),
+        ),
         write_path_health: crate::workspace_commands::write_path_health(),
     }
 }
