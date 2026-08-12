@@ -1854,13 +1854,18 @@ async fn stream_terminal_once(
         .await
         .map_err(|error| error.to_string());
     match attach_reply {
-        Ok(DaemonEvent::Snapshot { snapshot, .. }) => {
+        Ok(DaemonEvent::Snapshot {
+            snapshot,
+            agent_provider,
+            ..
+        }) => {
             *attached_once = true;
             let frame = ServerFrame::TermSnapshot {
                 task_id: task_id.to_string(),
                 cols: snapshot.cols,
                 rows: snapshot.rows,
                 data_b64: b64(snapshot.vt.as_bytes()),
+                agent_provider,
             };
             if send_terminal_frame(
                 frame_tx.clone(),
@@ -1922,12 +1927,14 @@ async fn stream_terminal_once(
             Ok(DaemonEvent::Snapshot {
                 session_id: event_session,
                 snapshot,
+                agent_provider,
             }) if event_session == session_id => {
                 let frame = ServerFrame::TermSnapshot {
                     task_id: task_id.to_string(),
                     cols: snapshot.cols,
                     rows: snapshot.rows,
                     data_b64: b64(snapshot.vt.as_bytes()),
+                    agent_provider,
                 };
                 if send_terminal_frame(
                     frame_tx.clone(),
@@ -2991,6 +2998,7 @@ mod tests {
                     sequence: 0,
                     vt: String::new(),
                 },
+                agent_provider: None,
             };
             let output = DaemonEvent::Output {
                 session_id: "daemon-terminal-1".into(),
@@ -3953,6 +3961,7 @@ mod tests {
                         sequence: 0,
                         vt: String::new(),
                     },
+                    agent_provider: None,
                 },
                 DaemonEvent::StatusChanged {
                     session_id: session_id.to_string(),
@@ -4067,6 +4076,7 @@ mod tests {
                         sequence: 0,
                         vt: "busy snapshot".to_string(),
                     },
+                    agent_provider: None,
                 },
                 // AttachSnapshot registers the subscriber with both the
                 // authoritative snapshot and this initial status event.
@@ -4196,6 +4206,7 @@ mod tests {
                     sequence: 0,
                     vt: "╭─界─╮\n".to_string(),
                 },
+                agent_provider: Some(kanna_daemon::protocol::AgentProvider::Claude),
             };
             let initial_status = DaemonEvent::StatusChanged {
                 session_id: "daemon-terminal-1".to_string(),
@@ -4225,6 +4236,7 @@ mod tests {
                     sequence: 0,
                     vt: "RESYNCED\n".to_string(),
                 },
+                agent_provider: Some(kanna_daemon::protocol::AgentProvider::Claude),
             };
             let resync_status = DaemonEvent::StatusChanged {
                 session_id: "daemon-terminal-1".to_string(),
@@ -4308,11 +4320,16 @@ mod tests {
                 cols,
                 rows,
                 data_b64,
+                agent_provider,
             } => {
                 assert_eq!(task_id, "task-1");
                 assert_eq!(cols, 80);
                 assert_eq!(rows, 24);
                 assert_eq!(decode(data_b64), "╭─界─╮\n".as_bytes());
+                assert_eq!(
+                    agent_provider,
+                    Some(kanna_agent_protocol::AgentProvider::Claude)
+                );
             }
             other => panic!("expected terminal snapshot, got {other:?}"),
         }
@@ -4427,6 +4444,7 @@ mod tests {
                             sequence: 0,
                             vt: vt.to_string(),
                         },
+                        agent_provider: None,
                     },
                     DaemonEvent::StatusChanged {
                         session_id: "shell-wt-reattach-1".to_string(),
@@ -4725,6 +4743,7 @@ mod tests {
                     sequence: 0,
                     vt: "shell prompt".to_string(),
                 },
+                agent_provider: None,
             },
         )
         .await;
@@ -4750,6 +4769,7 @@ mod tests {
                 cols,
                 rows,
                 data_b64,
+                ..
             } => {
                 assert_eq!(task_id, "shell-wt-task-1");
                 assert_eq!(cols, 80);

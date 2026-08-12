@@ -827,6 +827,12 @@ function createClientForMode({
       {
         isLanEnabled: () =>
           !forceCloud && getTrustedDesktopIds().length > 0,
+        canUseLanTaskStreams: (desktopId) =>
+          lanDeviceCredentialsForDesktop(
+            getTrustedDesktops,
+            getMobileDeviceId,
+            desktopId
+          ) !== null,
         lanClientForDesktop: trustedLanClient.clientForDesktop,
         initialDesktopSources: getMachineSourceDesktops(),
         onDesktopSourceWarnings: onMachineSourceWarnings,

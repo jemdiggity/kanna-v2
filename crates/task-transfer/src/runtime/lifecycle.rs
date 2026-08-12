@@ -1,16 +1,20 @@
 use super::config::{DiscoveryMode, RuntimeConfig};
-use super::daemon::stream_peer_session;
+use super::daemon::{stream_peer_session, PeerSessionBridge};
 use super::discovery::{MdnsDiscovery, PeerDiscovery};
 use super::events::{RuntimeError, RuntimeEvent};
 use super::listener::run_listener;
-use super::state::{ListenerContext, TransferRuntime};
+use super::state::{ListenerContext, TerminalObserverSlot, TransferRuntime};
 use super::utils::{
-    load_or_create_identity, registry_entry_path, terminal_observer_key, unexpected_peer_response,
+    load_or_create_identity, registry_entry_path, supports_duplex_terminal, terminal_observer_key,
+    unexpected_peer_response, CURRENT_PROTOCOL_VERSION,
 };
 use crate::crypto::public_key_to_string;
 use crate::discovery::encode_txt_record;
 use crate::protocol::{DiscoveredPeer, PeerTaskSnapshot};
-use crate::protocol::{PeerRegistryEntry, PeerRequest, PeerResponse, PeerTerminalEvent};
+use crate::protocol::{
+    PeerRegistryEntry, PeerRequest, PeerResponse, PeerTerminalControl, PeerTerminalEvent,
+    MAX_DUPLEX_TERMINAL_INPUT_BYTES,
+};
 use crate::registry::PeerRegistry;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -26,8 +30,14 @@ impl TransferRuntime {
         config.listen_port = listener.local_addr()?.port();
         let identity = load_or_create_identity(&config.registry_dir, &config.peer_id)?;
         let public_key = public_key_to_string(&identity.public_key);
-        let _ = encode_txt_record(&config.peer_id, &config.display_name, &public_key, 1, true)
-            .map_err(|error| RuntimeError::InvalidConfig(error.to_string()))?;
+        let _ = encode_txt_record(
+            &config.peer_id,
+            &config.display_name,
+            &public_key,
+            CURRENT_PROTOCOL_VERSION,
+            true,
+        )
+        .map_err(|error| RuntimeError::InvalidConfig(error.to_string()))?;
 
         let (discovery, registry_entry_path) = match config.discovery_mode {
             DiscoveryMode::Registry => {
@@ -38,7 +48,7 @@ impl TransferRuntime {
                     endpoint: config.endpoint(),
                     pid: process::id(),
                     public_key: public_key.clone(),
-                    protocol_version: 1,
+                    protocol_version: CURRENT_PROTOCOL_VERSION,
                     accepting_transfers: true,
                 };
                 registry.write_entry(&registry_entry)?;
@@ -196,8 +206,8 @@ impl TransferRuntime {
         let target_peer = self.find_peer(target_peer_id).await?;
         self.ensure_peer_is_trusted(&target_peer.peer_id, &target_peer.public_key)?;
         let observer_key = terminal_observer_key(target_peer_id, session_id);
-        if let Some(handle) = self.terminal_observers.lock().await.remove(&observer_key) {
-            handle.abort();
+        if let Some(observer) = self.terminal_observers.lock().await.remove(&observer_key) {
+            observer.handle.abort();
         }
 
         let request_id = self.next_request_id("observe-session");
@@ -207,13 +217,23 @@ impl TransferRuntime {
         let peer_for_task = target_peer.clone();
         let peer_id_for_error = target_peer.peer_id.clone();
         let session_id_for_error = session_id.clone();
+        let (control_sender, control_receiver) =
+            if supports_duplex_terminal(target_peer.protocol_version) {
+                let (sender, receiver) = mpsc::channel(256);
+                (Some(sender), Some(receiver))
+            } else {
+                (None, None)
+            };
         let handle = tokio::spawn(async move {
             if let Err(error) = stream_peer_session(
                 peer_for_task,
                 request_id,
                 self_peer_id,
                 session_id.clone(),
-                incoming_sender.clone(),
+                PeerSessionBridge {
+                    incoming_sender: incoming_sender.clone(),
+                    control_receiver,
+                },
             )
             .await
             {
@@ -230,7 +250,7 @@ impl TransferRuntime {
         self.terminal_observers
             .lock()
             .await
-            .insert(observer_key, handle);
+            .insert(observer_key, TerminalObserverSlot { handle, control_sender });
         Ok(())
     }
 
@@ -240,10 +260,29 @@ impl TransferRuntime {
         session_id: &str,
     ) -> Result<(), RuntimeError> {
         let observer_key = terminal_observer_key(target_peer_id, session_id);
-        if let Some(handle) = self.terminal_observers.lock().await.remove(&observer_key) {
-            handle.abort();
+        if let Some(observer) = self.terminal_observers.lock().await.remove(&observer_key) {
+            observer.handle.abort();
         }
         Ok(())
+    }
+
+    async fn send_observed_terminal_control(
+        &self,
+        target_peer_id: &str,
+        session_id: &str,
+        control: PeerTerminalControl,
+    ) -> bool {
+        let observer_key = terminal_observer_key(target_peer_id, session_id);
+        let sender = self
+            .terminal_observers
+            .lock()
+            .await
+            .get(&observer_key)
+            .and_then(|slot| slot.control_sender.clone());
+        let Some(sender) = sender else {
+            return false;
+        };
+        sender.send(control).await.is_ok()
     }
 
     pub async fn send_peer_session_input(
@@ -252,6 +291,12 @@ impl TransferRuntime {
         session_id: &str,
         data: Vec<u8>,
     ) -> Result<(), RuntimeError> {
+        if self
+            .send_observed_terminal_input(target_peer_id, session_id, &data)
+            .await?
+        {
+            return Ok(());
+        }
         let target_peer = self.find_peer(target_peer_id).await?;
         self.ensure_peer_is_trusted(&target_peer.peer_id, &target_peer.public_key)?;
         let request_id = self.next_request_id("send-input");
@@ -275,6 +320,50 @@ impl TransferRuntime {
         }
     }
 
+    async fn send_observed_terminal_input(
+        &self,
+        target_peer_id: &str,
+        session_id: &str,
+        data: &[u8],
+    ) -> Result<bool, RuntimeError> {
+        let observer_key = terminal_observer_key(target_peer_id, session_id);
+        let sender = self
+            .terminal_observers
+            .lock()
+            .await
+            .get(&observer_key)
+            .and_then(|slot| slot.control_sender.clone());
+        let Some(sender) = sender else {
+            return Ok(false);
+        };
+
+        let mut chunks = data.chunks(MAX_DUPLEX_TERMINAL_INPUT_BYTES).peekable();
+        if chunks.peek().is_none() {
+            sender
+                .send(PeerTerminalControl::Input {
+                    session_id: session_id.to_owned(),
+                    data: Vec::new(),
+                })
+                .await
+                .map_err(|_| {
+                    RuntimeError::Protocol("terminal observer input stream closed".into())
+                })?;
+            return Ok(true);
+        }
+        for chunk in chunks {
+            sender
+                .send(PeerTerminalControl::Input {
+                    session_id: session_id.to_owned(),
+                    data: chunk.to_vec(),
+                })
+                .await
+                .map_err(|_| {
+                    RuntimeError::Protocol("terminal observer input stream closed".into())
+                })?;
+        }
+        Ok(true)
+    }
+
     pub async fn resize_peer_session(
         &self,
         target_peer_id: &str,
@@ -282,6 +371,20 @@ impl TransferRuntime {
         cols: u16,
         rows: u16,
     ) -> Result<(), RuntimeError> {
+        if self
+            .send_observed_terminal_control(
+                target_peer_id,
+                session_id,
+                PeerTerminalControl::Resize {
+                    session_id: session_id.to_owned(),
+                    cols,
+                    rows,
+                },
+            )
+            .await
+        {
+            return Ok(());
+        }
         let target_peer = self.find_peer(target_peer_id).await?;
         self.ensure_peer_is_trusted(&target_peer.peer_id, &target_peer.public_key)?;
         let request_id = self.next_request_id("resize-session");
@@ -384,8 +487,8 @@ impl Drop for TransferRuntime {
             *task_snapshot = Value::Null;
         }
         if let Ok(mut observers) = self.terminal_observers.try_lock() {
-            for (_, handle) in observers.drain() {
-                handle.abort();
+            for (_, observer) in observers.drain() {
+                observer.handle.abort();
             }
         }
     }

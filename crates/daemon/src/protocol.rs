@@ -285,6 +285,11 @@ pub enum Event {
     Snapshot {
         session_id: String,
         snapshot: TerminalSnapshot,
+        /// Provider that owns the live terminal session. Reconnect clients
+        /// use this runtime fact rather than task configuration when applying
+        /// provider-specific snapshot behavior.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_provider: Option<AgentProvider>,
     },
     HandoffReady {
         sessions: Vec<HandoffSession>,
@@ -634,6 +639,7 @@ mod tests {
                 sequence: 7,
                 vt: "hello".to_string(),
             },
+            agent_provider: Some(AgentProvider::Claude),
         };
         let json = serde_json::to_string(&evt).unwrap();
         let decoded: Event = serde_json::from_str(&json).unwrap();
@@ -641,12 +647,14 @@ mod tests {
             Event::Snapshot {
                 session_id,
                 snapshot,
+                agent_provider,
             } => {
                 assert_eq!(session_id, "sess-1");
                 assert_eq!(snapshot.version, 1);
                 assert_eq!(snapshot.vt, "hello");
                 assert_eq!(snapshot.saved_at, 123);
                 assert_eq!(snapshot.sequence, 7);
+                assert_eq!(agent_provider, Some(AgentProvider::Claude));
             }
             other => panic!("wrong variant: {:?}", other),
         }
@@ -694,6 +702,7 @@ mod tests {
                 sequence: 0,
                 vt: "hello".to_string(),
             },
+            agent_provider: None,
         };
 
         let value = serde_json::to_value(&evt).unwrap();

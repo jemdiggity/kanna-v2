@@ -555,6 +555,7 @@ mod tests {
                 sequence: 0,
                 vt: "S".repeat(vt_bytes),
             },
+            agent_provider: None,
         }
     }
 

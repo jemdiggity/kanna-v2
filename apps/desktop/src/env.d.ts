@@ -8,6 +8,9 @@ interface KannaTaskSwitchPerfE2EApi {
 
 interface KannaTerminalBufferStats {
   sessionId: string;
+  instanceId: number;
+  cols: number;
+  rows: number;
   lineCount: number;
   baseY: number;
   viewportY: number;
@@ -23,6 +26,7 @@ interface KannaTerminalBuffersE2EApi {
   sessionIds: () => string[];
   write: (sessionId: string, data: string, callback?: () => void) => void;
   input: (sessionId: string, data: string) => void;
+  selectText: (sessionId: string, text: string) => string | null;
 }
 
 interface KannaAppMetricsSnapshot {

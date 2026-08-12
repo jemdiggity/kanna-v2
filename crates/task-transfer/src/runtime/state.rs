@@ -36,6 +36,11 @@ pub(super) struct TransferArtifactRecord {
     pub(super) created_at: Instant,
 }
 
+pub(super) struct TerminalObserverSlot {
+    pub(super) handle: JoinHandle<()>,
+    pub(super) control_sender: Option<mpsc::Sender<crate::protocol::PeerTerminalControl>>,
+}
+
 pub(super) type PendingOutgoingTransferFinalizations =
     Arc<Mutex<HashMap<String, oneshot::Sender<Result<FinalizedOutgoingTransfer, RuntimeError>>>>>;
 
@@ -85,7 +90,7 @@ pub struct TransferRuntime {
     pub(super) transfer_artifacts:
         Arc<Mutex<HashMap<String, HashMap<String, TransferArtifactRecord>>>>,
     pub(super) task_snapshot: Arc<Mutex<Value>>,
-    pub(super) terminal_observers: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
+    pub(super) terminal_observers: Arc<Mutex<HashMap<String, TerminalObserverSlot>>>,
     pub(super) incoming_sender: mpsc::UnboundedSender<RuntimeEvent>,
     pub(super) incoming_events: Mutex<mpsc::UnboundedReceiver<RuntimeEvent>>,
     pub(super) request_counter: Arc<AtomicU64>,

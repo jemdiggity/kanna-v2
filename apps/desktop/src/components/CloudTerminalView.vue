@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref, watch } from "vue";
+import { nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
@@ -12,12 +12,16 @@ import { createConfiguredDesktopLanTerminalClient } from "../services/desktopLan
 import { getTerminalTheme } from "../theme/theme";
 import { useThemeRuntime } from "../theme/runtime";
 import { registerE2ETerminalBuffer } from "../e2eTerminalBuffers";
+import { isShiftEnter, SHIFT_ENTER_CSI_U } from "../composables/terminalKeyboard";
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
+  active?: boolean;
   ownerDesktopId: string;
   ownerTaskId: string;
   transport?: "cloud" | "lan";
-}>();
+}>(), {
+  active: true,
+});
 
 const containerRef = ref<HTMLElement | null>(null);
 const status = ref<"connecting" | "live" | "closed" | "error">("connecting");
@@ -29,6 +33,7 @@ let resizeObserver: ResizeObserver | null = null;
 let relayClient: DesktopRelayTerminalClient | null = null;
 let subscription: DesktopRelayTerminalSubscription | null = null;
 let unregisterE2ETerminalBuffer: (() => void) | null = null;
+let focusRafId = 0;
 
 function writeRemoteTerminalError(message: string) {
   status.value = "error";
@@ -37,6 +42,7 @@ function writeRemoteTerminalError(message: string) {
 }
 
 function fitAndResizeRemote() {
+  if (!props.active) return;
   fitAddon?.fit();
   if (!terminal || !relayClient || status.value !== "live") return;
   void relayClient.resize({
@@ -46,6 +52,17 @@ function fitAndResizeRemote() {
     rows: terminal.rows,
   }).catch((error) => {
     console.debug("[cloud-terminal] failed to resize remote terminal:", error);
+  });
+}
+
+async function focusWhenActive() {
+  if (!props.active || !terminal) return;
+  await nextTick();
+  if (focusRafId) cancelAnimationFrame(focusRafId);
+  focusRafId = requestAnimationFrame(() => {
+    focusRafId = 0;
+    if (!props.active || !terminal || document.querySelector(".modal-overlay")) return;
+    terminal.focus();
   });
 }
 
@@ -106,6 +123,19 @@ function registerTerminalBufferForE2E() {
     : null;
 }
 
+function sendRemoteInput(data: string) {
+  const client = relayClient;
+  if (!client || status.value !== "live") return;
+  void client.sendInput({
+    desktopId: props.ownerDesktopId,
+    taskId: props.ownerTaskId,
+    data,
+  }).catch((error: unknown) => {
+    const message = error instanceof Error ? error.message : "Failed to send remote input.";
+    writeRemoteTerminalError(message);
+  });
+}
+
 onMounted(() => {
   terminal = new Terminal({
     allowProposedApi: true,
@@ -116,18 +146,30 @@ onMounted(() => {
     fontSize: 12,
     theme: getTerminalTheme(effectiveCodeTheme.value),
   });
-  terminal.onData((data) => {
-    const client = relayClient;
-    if (!client || status.value !== "live") return;
-    void client.sendInput({
-      desktopId: props.ownerDesktopId,
-      taskId: props.ownerTaskId,
-      data,
-    }).catch((error: unknown) => {
-      const message = error instanceof Error ? error.message : "Failed to send remote input.";
-      writeRemoteTerminalError(message);
-    });
+  terminal.attachCustomKeyEventHandler((event: KeyboardEvent) => {
+    if (isShiftEnter(event)) {
+      event.preventDefault();
+      sendRemoteInput(SHIFT_ENTER_CSI_U);
+      return false;
+    }
+    if (
+      event.type === "keydown"
+      && event.metaKey
+      && !event.altKey
+      && !event.ctrlKey
+      && event.key.toLowerCase() === "c"
+    ) {
+      const selection = terminal?.getSelection() ?? "";
+      if (!selection) return true;
+      void navigator.clipboard.writeText(selection).catch(() => {
+        console.error("[cloud-terminal] Failed to copy terminal selection.");
+      });
+      event.preventDefault();
+      return false;
+    }
+    return true;
   });
+  terminal.onData(sendRemoteInput);
   fitAddon = new FitAddon();
   terminal.loadAddon(fitAddon);
   if (containerRef.value) {
@@ -138,6 +180,7 @@ onMounted(() => {
     resizeObserver.observe(containerRef.value);
   }
   void start();
+  void focusWhenActive();
 });
 
 watch(
@@ -148,6 +191,21 @@ watch(
   },
 );
 
+watch(
+  () => props.active,
+  async (active) => {
+    if (!active) return;
+    await nextTick();
+    if (!terminal || !props.active) return;
+    if (status.value === "closed" || status.value === "error") {
+      await start();
+      if (!props.active) return;
+    }
+    fitAndResizeRemote();
+    await focusWhenActive();
+  },
+);
+
 watch(effectiveCodeTheme, (theme) => {
   if (terminal) {
     terminal.options.theme = getTerminalTheme(theme);
@@ -155,6 +213,7 @@ watch(effectiveCodeTheme, (theme) => {
 });
 
 onUnmounted(() => {
+  if (focusRafId) cancelAnimationFrame(focusRafId);
   stopSubscription();
   unregisterE2ETerminalBuffer?.();
   unregisterE2ETerminalBuffer = null;

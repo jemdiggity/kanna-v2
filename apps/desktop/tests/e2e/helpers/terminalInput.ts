@@ -16,6 +16,7 @@ export interface TerminalInputOptions {
 
 const TERMINAL_CONTAINER_SELECTOR = ".terminal-container";
 const TERMINAL_INPUT_SELECTOR = ".main-panel .xterm-helper-textarea";
+const FOCUSED_TERMINAL_INPUT_SELECTOR = `${TERMINAL_INPUT_SELECTOR}:focus`;
 const ENTER_KEY = "\uE007";
 
 export async function sendKeysToActiveTerminal(
@@ -89,7 +90,7 @@ export async function typeTextToFocusedTerminalWindow(
 
   await waitForTerminalDomFocus(client, options.timeoutMs ?? 5_000);
 
-  const input = await client.waitForElement(TERMINAL_INPUT_SELECTOR, 5_000);
+  const input = await client.waitForElement(FOCUSED_TERMINAL_INPUT_SELECTOR, 5_000);
   await client.sendKeys(input, text);
 }
 
@@ -131,8 +132,8 @@ async function waitForTerminalDomFocus(
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const focused = await client.executeSync<boolean>(
-      `const el = document.querySelector(${JSON.stringify(TERMINAL_INPUT_SELECTOR)});
-       return el instanceof HTMLElement && document.activeElement === el;`,
+      `const el = document.activeElement;
+       return el instanceof HTMLElement && el.matches(${JSON.stringify(TERMINAL_INPUT_SELECTOR)});`,
     );
     if (focused) return;
     await sleep(100);

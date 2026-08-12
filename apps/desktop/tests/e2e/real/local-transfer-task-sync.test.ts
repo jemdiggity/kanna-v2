@@ -20,6 +20,7 @@ interface VueCallError {
 }
 
 const { primary, secondary } = createPrimaryAndSecondaryClients();
+const WEBDRIVER_BACKSPACE = "\uE003";
 let testRepoPath = "";
 let secondaryRepoId = "";
 const pipelineName = "lan-advance-stage-e2e";
@@ -472,7 +473,9 @@ describe("local transfer task sync", () => {
 
     await waitForBodyText("LAN terminal ready from primary");
     const terminalTextarea = await secondary.waitForElement(".xterm-helper-textarea");
-    await secondary.sendKeys(terminalTextarea, "hello from secondary\n");
+    await secondary.sendKeys(terminalTextarea, "hello from secondx");
+    await secondary.pressKey(WEBDRIVER_BACKSPACE);
+    await secondary.sendKeys(terminalTextarea, "ary\n");
     await waitForBodyText("LAN terminal input:hello from secondary");
 
     const closeResult = await callVueMethod(secondary, "closeSelectedWorkspaceTask");
