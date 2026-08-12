@@ -693,7 +693,7 @@ describe("pty session (real CLI)", () => {
     expect(container).toBeTruthy();
   });
 
-  it("uses the live daemon provider when a one-window terminal reconnects", async () => {
+  it("uses the live daemon provider in both directions when a one-window terminal reconnects", async () => {
     const sessionId = trackSessionId(
       deterministicSessionIds,
       `pty-runtime-provider-${randomUUID()}`,
@@ -705,6 +705,7 @@ describe("pty session (real CLI)", () => {
     const readyMarker = `KPROVIDER_${randomUUID().replaceAll("-", "")}`;
     const otherReadyMarker = `KPROVIDER_OTHER_${randomUUID().replaceAll("-", "")}`;
     const staleMarker = `KSTALE_${randomUUID().replaceAll("-", "")}`;
+    const preservedMarker = `KPRESERVED_${randomUUID().replaceAll("-", "")}`;
 
     await execDb(
       client,
@@ -736,7 +737,7 @@ describe("pty session (real CLI)", () => {
         "pr",
         `task-${otherSessionId}`,
         "pty",
-        "codex",
+        "claude",
         "idle",
       ],
     );
@@ -807,6 +808,32 @@ describe("pty session (real CLI)", () => {
     }
     expect(staleStats.matchingLineCount).toBe(0);
     await waitForTerminalBufferText(client, sessionId, readyMarker, 15_000);
+
+    await setSelectedItem(client, otherSessionId);
+    await waitForCurrentItemId(client, otherSessionId);
+    await waitForTerminalBufferText(client, otherSessionId, otherReadyMarker, 15_000);
+    await client.executeAsync<string>(
+      `const cb = arguments[arguments.length - 1];
+       window.__KANNA_E2E__.terminalBuffers.write(
+         ${JSON.stringify(otherSessionId)},
+         ${JSON.stringify(`\r\n${preservedMarker}\r\n`)},
+         function() { cb("written"); }
+       );`,
+    );
+    expect(
+      (await getTerminalBufferTextStats(client, otherSessionId, preservedMarker)).matchingLineCount,
+    ).toBe(1);
+
+    await setSelectedItem(client, sessionId);
+    await waitForCurrentItemId(client, sessionId);
+    await setSelectedItem(client, otherSessionId);
+    await waitForCurrentItemId(client, otherSessionId);
+    await waitForTerminalBufferText(client, otherSessionId, otherReadyMarker, 15_000);
+    await sleep(1_000);
+
+    expect(
+      (await getTerminalBufferTextStats(client, otherSessionId, preservedMarker)).matchingLineCount,
+    ).toBe(1);
   });
 
   it("renders PTY echo within 500ms while same-WebSocket CPU work is active", async () => {

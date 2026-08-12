@@ -135,7 +135,9 @@ export function createTerminalSessionLifecycle(params: {
             const vt = new TextDecoder().decode(base64ToBytes(dataB64))
             if (
               !params.state.preserveRecoveredScrollbackForNextSnapshot &&
-              shouldResetTerminalOnReconnect({ agentProvider: agentProvider ?? undefined })
+              shouldResetTerminalOnReconnect({
+                agentProvider: agentProvider ?? params.options?.agentProvider,
+              })
             ) {
               liveTerminal.reset()
             }
