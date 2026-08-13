@@ -522,6 +522,9 @@ describe("kd CLI", () => {
     await expect(runCli(["mobile", "run", "--help"])).resolves.toBe(0);
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd mobile run --device"));
 
+    await expect(runCli(["mobile", "uninstall", "--help"])).resolves.toBe(0);
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd mobile uninstall --device"));
+
     await expect(runCli(["mobile", "qa", "--help"])).resolves.toBe(0);
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd mobile qa --production"));
 
@@ -906,6 +909,25 @@ describe("kd CLI", () => {
     expect(() => parseCliArgs(["mobile", "doctor", "--device", "--install"])).toThrow(
       "mobile doctor only accepts --device, --production, or --staging"
     );
+    expect(() =>
+      parseCliArgs([
+        "mobile",
+        "run",
+        "--device",
+        "--staging",
+        "--confirm-bundle",
+        "build.kanna.app.staging"
+      ])
+    ).toThrow("Unknown flag: --confirm-bundle");
+    expect(() =>
+      parseCliArgs([
+        "mobile",
+        "doctor",
+        "--device",
+        "--confirm-bundle",
+        "build.kanna.app.staging"
+      ])
+    ).toThrow("Unknown flag: --confirm-bundle");
     expect(parseCliArgs(["mobile", "run", "--device", "--production"])).toEqual({
       taskId: "mobile.run",
       input: { device: true, production: true, staging: false }
@@ -920,6 +942,71 @@ describe("kd CLI", () => {
       taskId: "mobile.doctor",
       input: { device: true, production: false, staging: false }
     });
+  });
+
+  it("parses only explicitly confirmed physical-device mobile uninstall commands", () => {
+    expect(
+      parseCliArgs([
+        "mobile",
+        "uninstall",
+        "--device",
+        "--staging",
+        "--confirm-bundle",
+        "build.kanna.app.staging"
+      ])
+    ).toEqual({
+      taskId: "mobile.uninstall",
+      input: {
+        device: true,
+        production: false,
+        staging: true,
+        confirmBundle: "build.kanna.app.staging",
+        confirmProduction: false
+      }
+    });
+    expect(
+      parseCliArgs([
+        "mobile",
+        "uninstall",
+        "--device",
+        "--production",
+        "--confirm-bundle",
+        "build.kanna.app",
+        "--confirm-production"
+      ])
+    ).toEqual({
+      taskId: "mobile.uninstall",
+      input: {
+        device: true,
+        production: true,
+        staging: false,
+        confirmBundle: "build.kanna.app",
+        confirmProduction: true
+      }
+    });
+    expect(() =>
+      parseCliArgs([
+        "mobile",
+        "uninstall",
+        "--device",
+        "--confirm-bundle",
+        "build.kanna.app.staging"
+      ])
+    ).toThrow("mobile uninstall requires exactly one of --staging or --production");
+    expect(() =>
+      parseCliArgs([
+        "mobile",
+        "uninstall",
+        "--device",
+        "--staging",
+        "--production",
+        "--confirm-bundle",
+        "build.kanna.app.staging"
+      ])
+    ).toThrow("mobile uninstall requires exactly one of --staging or --production");
+    expect(() =>
+      parseCliArgs(["mobile", "uninstall", "--device", "--staging"])
+    ).toThrow("mobile uninstall requires --confirm-bundle <bundle-id>");
   });
 
   it("parses production mobile QA gate commands", () => {

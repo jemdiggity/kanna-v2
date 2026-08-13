@@ -152,6 +152,64 @@ function parseMobileRunInput(rest: string[]): ParsedCliCommand {
   };
 }
 
+function parseMobileUninstallInput(rest: string[]): ParsedCliCommand {
+  let confirmBundle: string | undefined;
+  const remainingArgs: string[] = [];
+  for (let index = 0; index < rest.length; index += 1) {
+    const arg = rest[index];
+    if (arg !== "--confirm-bundle") {
+      remainingArgs.push(arg);
+      continue;
+    }
+    const value = rest[index + 1];
+    if (!value) {
+      throw new Error("--confirm-bundle requires a value");
+    }
+    confirmBundle = value;
+    index += 1;
+  }
+  const input = parseFlagInput(
+    remainingArgs,
+    { device: false, production: false, staging: false, confirmProduction: false },
+    { "--confirm-production": "confirmProduction" }
+  );
+  if (confirmBundle !== undefined) {
+    input.confirmBundle = confirmBundle;
+  }
+  const allowedKeys = new Set([
+    "device",
+    "production",
+    "staging",
+    "confirmBundle",
+    "confirmProduction"
+  ]);
+  const unsupportedKeys = Object.keys(input).filter((key) => !allowedKeys.has(key));
+  if (unsupportedKeys.length > 0) {
+    throw new Error(
+      "mobile uninstall only accepts --device, exactly one of --staging or --production, --confirm-bundle, and --confirm-production"
+    );
+  }
+  if (input.device !== true) {
+    throw new Error("mobile uninstall requires --device");
+  }
+  if (input.production === input.staging) {
+    throw new Error("mobile uninstall requires exactly one of --staging or --production");
+  }
+  if (typeof input.confirmBundle !== "string") {
+    throw new Error("mobile uninstall requires --confirm-bundle <bundle-id>");
+  }
+  return {
+    taskId: "mobile.uninstall",
+    input: {
+      device: true,
+      production: input.production === true,
+      staging: input.staging === true,
+      confirmBundle: input.confirmBundle,
+      confirmProduction: input.confirmProduction === true
+    }
+  };
+}
+
 function parseMobileDoctorInput(rest: string[]): ParsedCliCommand {
   const input = parseFlagInput(
     rest,
@@ -523,6 +581,9 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   if (group === "mobile" && command === "run") {
     return parseMobileRunInput(rest);
   }
+  if (group === "mobile" && command === "uninstall") {
+    return parseMobileUninstallInput(rest);
+  }
   if (group === "mobile" && command === "qa") {
     return parseMobileQaInput(rest);
   }
@@ -739,6 +800,7 @@ const helpTopics: Record<string, string[]> = {
     "  daemon kill",
     "  mobile up [--production|--staging] [--with-credentials]",
     "  mobile run --device [--production|--staging] [--install] [--with-credentials]",
+    "  mobile uninstall --device --staging|--production --confirm-bundle <bundle-id> [--confirm-production]",
     "  mobile archive --production --build-number <number> [--version <version>] [--out-dir <dir>] [--upload] [--dry-run]",
     "  mobile doctor --device",
     "  mobile qa --production [--ota]",
@@ -873,6 +935,7 @@ const helpTopics: Record<string, string[]> = {
     "Commands:",
     "  mobile up [--production|--staging] [--with-credentials]",
     "  mobile run --device [--production|--staging] [--install] [--with-credentials]",
+    "  mobile uninstall --device --staging|--production --confirm-bundle <bundle-id> [--confirm-production]",
     "  mobile archive --production --build-number <number> [--version <version>] [--out-dir <dir>] [--upload] [--dry-run]",
     "  mobile doctor --device",
     "  mobile qa --production [--ota]",
@@ -899,6 +962,18 @@ const helpTopics: Record<string, string[]> = {
     "  --production        Launch against production settings.",
     "  --staging           Launch against installed staging desktop settings.",
     "  --install           Build and install a bundled Release app; skips Metro and dev-client hot loading."
+  ],
+  "mobile uninstall": [
+    "Usage: kd mobile uninstall --device --staging|--production --confirm-bundle <bundle-id> [--confirm-production]",
+    "",
+    "Uninstall exactly one resolved Kanna mobile bundle from a physical iOS device.",
+    "",
+    "Options:",
+    "  --device                       Required. Target a physical iOS device.",
+    "  --staging                      Target the staging mobile identity.",
+    "  --production                   Target the production mobile identity.",
+    "  --confirm-bundle <bundle-id>   Required. Must exactly match the resolved environment bundle id.",
+    "  --confirm-production           Additionally required before uninstalling production."
   ],
   "mobile archive": [
     "Usage: kd mobile archive --production --build-number <number> [--version <version>] [--out-dir <dir>] [--upload] [--dry-run]",

@@ -365,6 +365,38 @@ export function buildMobileDeviceInstallAppCommand(input: {
   };
 }
 
+export function buildMobileDeviceListAppsCommand(input: {
+  deviceUdid: string;
+}): Omit<MobileDeviceRunCommand, "cwd" | "env"> {
+  return {
+    command: "xcrun",
+    args: ["devicectl", "device", "info", "apps", "--device", input.deviceUdid]
+  };
+}
+
+export function buildMobileDeviceUninstallAppCommand(input: {
+  bundleId: string;
+  deviceUdid: string;
+}): Omit<MobileDeviceRunCommand, "cwd" | "env"> {
+  return {
+    command: "xcrun",
+    args: [
+      "devicectl",
+      "device",
+      "uninstall",
+      "app",
+      "--device",
+      input.deviceUdid,
+      input.bundleId
+    ]
+  };
+}
+
+export function isMobileDeviceAppInstalled(stdout: string, bundleId: string): boolean {
+  const escapedBundleId = bundleId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|[^A-Za-z0-9.-])${escapedBundleId}($|[^A-Za-z0-9.-])`, "m").test(stdout);
+}
+
 export function buildMobileDeviceLaunchAppCommand(input: {
   bundleId: string;
   deviceUdid: string;
@@ -479,16 +511,10 @@ export async function checkPhysicalDeviceRunPreflight(
         }
   );
 
-  const apps = await runner.run("xcrun", [
-    "devicectl",
-    "device",
-    "info",
-    "apps",
-    "--device",
-    input.device.udid
-  ]);
+  const listAppsCommand = buildMobileDeviceListAppsCommand({ deviceUdid: input.device.udid });
+  const apps = await runner.run(listAppsCommand.command, listAppsCommand.args);
   checks.push(
-    apps.exitCode === 0 && apps.stdout.includes(input.bundleId)
+    apps.exitCode === 0 && isMobileDeviceAppInstalled(apps.stdout, input.bundleId)
       ? {
           name: "app-installed",
           ok: true,

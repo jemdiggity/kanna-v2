@@ -9,6 +9,7 @@ import {
   executeDevStatus,
   executeMobileDeviceDoctorWithContext,
   executeMobileDeviceRunWithContext,
+  executeMobileDeviceUninstallWithContext,
   executeProductionMobileUpWithContext,
   listStagingRelayActiveDesktopIds
 } from "../src/tasks/registry";
@@ -724,6 +725,295 @@ describe("task executors", () => {
       message: "Component restart for backend is not supported yet. Backend processes are owned by the desktop window; restart desktop instead.",
       data: { component: "backend" }
     });
+  });
+
+  it("uninstalls only the confirmed staging bundle and verifies its removal", async () => {
+    const events: string[] = [];
+    let appInspections = 0;
+    const runner: CommandRunner = {
+      async run(command, args) {
+        events.push(`run:${command} ${args.join(" ")}`);
+        if (command === "xcrun" && args.join(" ") === "xcdevice list") {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify([
+              {
+                available: true,
+                identifier: "00008130-001015CA1091401C",
+                name: "Jerome's iPhone 15",
+                operatingSystemVersion: "17.5 (21F79)",
+                platform: "com.apple.platform.iphoneos",
+                simulator: false
+              }
+            ]),
+            stderr: ""
+          };
+        }
+        if (args.includes("info") && args.includes("apps")) {
+          appInspections += 1;
+          return {
+            exitCode: 0,
+            stdout:
+              appInspections === 1
+                ? "Kanna build.kanna.app\nKanna Staging build.kanna.app.staging\n"
+                : "Kanna build.kanna.app\n",
+            stderr: ""
+          };
+        }
+        if (args.includes("uninstall")) {
+          return { exitCode: 0, stdout: "App uninstalled.\n", stderr: "" };
+        }
+        return { exitCode: 1, stdout: "", stderr: "unexpected command" };
+      }
+    };
+
+    const result = await executeMobileDeviceUninstallWithContext(
+      {
+        device: true,
+        production: false,
+        staging: true,
+        confirmBundle: "build.kanna.app.staging",
+        confirmProduction: false
+      },
+      {
+        runner,
+        context: {
+          repoRoot: "/repo",
+          tmux: { server: "kanna-task-abc", session: "kanna-task-abc" },
+          ports: {},
+          env: { KANNA_IOS_DEVICE_UDID: "00008130-001015CA1091401C" }
+        }
+      },
+      { writeOutput: (message) => events.push(`output:${message}`) }
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      data: {
+        bundleId: "build.kanna.app.staging",
+        present: true,
+        removed: true
+      }
+    });
+    expect(result.message).toContain("was present and removed");
+    const outputIndex = events.findIndex((event) => event.startsWith("output:"));
+    const uninstallIndex = events.findIndex((event) => event.includes("device uninstall app"));
+    expect(events[outputIndex]).toContain("Target device: Jerome's iPhone 15 (00008130-001015CA1091401C)");
+    expect(events[outputIndex]).toContain("Target bundle: build.kanna.app.staging");
+    expect(outputIndex).toBeGreaterThan(-1);
+    expect(outputIndex).toBeLessThan(uninstallIndex);
+    expect(events.filter((event) => event.includes("device uninstall app"))).toEqual([
+      "run:xcrun devicectl device uninstall app --device 00008130-001015CA1091401C build.kanna.app.staging"
+    ]);
+    expect(events.some((event) => event.includes("device uninstall app") && event.includes("build.kanna.app "))).toBe(false);
+  });
+
+  it("reports when the confirmed staging bundle is not present without mutating the device", async () => {
+    const calls: string[] = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push(`${command} ${args.join(" ")}`);
+        if (args.join(" ") === "xcdevice list") {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify([
+              {
+                available: true,
+                identifier: "device-1",
+                name: "Test iPhone",
+                platform: "com.apple.platform.iphoneos",
+                simulator: false
+              }
+            ]),
+            stderr: ""
+          };
+        }
+        return { exitCode: 0, stdout: "Kanna build.kanna.app\n", stderr: "" };
+      }
+    };
+
+    const result = await executeMobileDeviceUninstallWithContext(
+      {
+        device: true,
+        production: false,
+        staging: true,
+        confirmBundle: "build.kanna.app.staging",
+        confirmProduction: false
+      },
+      {
+        runner,
+        context: {
+          repoRoot: "/repo",
+          tmux: { server: "test", session: "test" },
+          ports: {},
+          env: {}
+        }
+      },
+      { writeOutput: () => undefined }
+    );
+
+    expect(result).toMatchObject({ ok: true, data: { present: false, removed: false } });
+    expect(result.message).toContain("was not present");
+    expect(calls.some((call) => call.includes("uninstall"))).toBe(false);
+  });
+
+  it("rejects wrong confirmation, wrong environment, and unconfirmed production before device access", async () => {
+    const calls: string[] = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push(`${command} ${args.join(" ")}`);
+        return { exitCode: 0, stdout: "[]", stderr: "" };
+      }
+    };
+    const executor = {
+      runner,
+      context: {
+        repoRoot: "/repo",
+        tmux: { server: "test", session: "test" },
+        ports: {},
+        env: {}
+      }
+    };
+
+    await expect(
+      executeMobileDeviceUninstallWithContext(
+        {
+          device: true,
+          production: false,
+          staging: true,
+          confirmBundle: "build.kanna.app",
+          confirmProduction: false
+        },
+        executor
+      )
+    ).rejects.toThrow("expected --confirm-bundle build.kanna.app.staging");
+    await expect(
+      executeMobileDeviceUninstallWithContext(
+        {
+          device: true,
+          production: false,
+          staging: false,
+          confirmBundle: "build.kanna.app.staging",
+          confirmProduction: false
+        },
+        executor
+      )
+    ).rejects.toThrow("requires exactly one of --staging or --production");
+    await expect(
+      executeMobileDeviceUninstallWithContext(
+        {
+          device: true,
+          production: true,
+          staging: false,
+          confirmBundle: "build.kanna.app",
+          confirmProduction: false
+        },
+        executor
+      )
+    ).rejects.toThrow("refuses production without the separate --confirm-production flag");
+    expect(calls).toEqual([]);
+  });
+
+  it("refuses ambiguous physical-device selection for mobile uninstall", async () => {
+    const runner: CommandRunner = {
+      async run() {
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify([
+            {
+              available: true,
+              identifier: "device-1",
+              name: "First iPhone",
+              platform: "com.apple.platform.iphoneos",
+              simulator: false
+            },
+            {
+              available: true,
+              identifier: "device-2",
+              name: "Second iPhone",
+              platform: "com.apple.platform.iphoneos",
+              simulator: false
+            }
+          ]),
+          stderr: ""
+        };
+      }
+    };
+
+    await expect(
+      executeMobileDeviceUninstallWithContext(
+        {
+          device: true,
+          production: false,
+          staging: true,
+          confirmBundle: "build.kanna.app.staging",
+          confirmProduction: false
+        },
+        {
+          runner,
+          context: {
+            repoRoot: "/repo",
+            tmux: { server: "test", session: "test" },
+            ports: {},
+            env: {}
+          }
+        }
+      )
+    ).rejects.toThrow("Multiple attached iPhone devices were found");
+  });
+
+  it("reports a device uninstall command failure without claiming removal", async () => {
+    const calls: string[] = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push(`${command} ${args.join(" ")}`);
+        if (args.join(" ") === "xcdevice list") {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify([
+              {
+                available: true,
+                identifier: "device-1",
+                name: "Test iPhone",
+                platform: "com.apple.platform.iphoneos",
+                simulator: false
+              }
+            ]),
+            stderr: ""
+          };
+        }
+        if (args.includes("info")) {
+          return { exitCode: 0, stdout: "Kanna Staging build.kanna.app.staging\n", stderr: "" };
+        }
+        return { exitCode: 17, stdout: "", stderr: "CoreDevice refused the command" };
+      }
+    };
+
+    const result = await executeMobileDeviceUninstallWithContext(
+      {
+        device: true,
+        production: false,
+        staging: true,
+        confirmBundle: "build.kanna.app.staging",
+        confirmProduction: false
+      },
+      {
+        runner,
+        context: {
+          repoRoot: "/repo",
+          tmux: { server: "test", session: "test" },
+          ports: {},
+          env: {}
+        }
+      },
+      { writeOutput: () => undefined }
+    );
+
+    expect(result).toMatchObject({ ok: false, data: { present: true, removed: false } });
+    expect(result.message).toContain("Failed to uninstall build.kanna.app.staging");
+    expect(result.message).toContain("Exit code: 17");
+    expect(result.message).toContain("CoreDevice refused the command");
+    expect(calls.filter((call) => call.includes("info apps"))).toHaveLength(1);
   });
 
   it("starts dev mobile with emulators before building and launching on a physical device", async () => {
