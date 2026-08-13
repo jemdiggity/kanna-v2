@@ -909,6 +909,25 @@ describe("kd CLI", () => {
     expect(() => parseCliArgs(["mobile", "doctor", "--device", "--install"])).toThrow(
       "mobile doctor only accepts --device, --production, or --staging"
     );
+    expect(() =>
+      parseCliArgs([
+        "mobile",
+        "run",
+        "--device",
+        "--staging",
+        "--confirm-bundle",
+        "build.kanna.app.staging"
+      ])
+    ).toThrow("Unknown flag: --confirm-bundle");
+    expect(() =>
+      parseCliArgs([
+        "mobile",
+        "doctor",
+        "--device",
+        "--confirm-bundle",
+        "build.kanna.app.staging"
+      ])
+    ).toThrow("Unknown flag: --confirm-bundle");
     expect(parseCliArgs(["mobile", "run", "--device", "--production"])).toEqual({
       taskId: "mobile.run",
       input: { device: true, production: true, staging: false }

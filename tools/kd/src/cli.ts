@@ -153,11 +153,29 @@ function parseMobileRunInput(rest: string[]): ParsedCliCommand {
 }
 
 function parseMobileUninstallInput(rest: string[]): ParsedCliCommand {
+  let confirmBundle: string | undefined;
+  const remainingArgs: string[] = [];
+  for (let index = 0; index < rest.length; index += 1) {
+    const arg = rest[index];
+    if (arg !== "--confirm-bundle") {
+      remainingArgs.push(arg);
+      continue;
+    }
+    const value = rest[index + 1];
+    if (!value) {
+      throw new Error("--confirm-bundle requires a value");
+    }
+    confirmBundle = value;
+    index += 1;
+  }
   const input = parseFlagInput(
-    rest,
+    remainingArgs,
     { device: false, production: false, staging: false, confirmProduction: false },
     { "--confirm-production": "confirmProduction" }
   );
+  if (confirmBundle !== undefined) {
+    input.confirmBundle = confirmBundle;
+  }
   const allowedKeys = new Set([
     "device",
     "production",
@@ -378,15 +396,6 @@ function parseFlagInput(
         throw new Error("--build-number requires a value");
       }
       input.buildNumber = value;
-      index += 1;
-      continue;
-    }
-    if (arg === "--confirm-bundle") {
-      const value = rest[index + 1];
-      if (!value) {
-        throw new Error("--confirm-bundle requires a value");
-      }
-      input.confirmBundle = value;
       index += 1;
       continue;
     }
