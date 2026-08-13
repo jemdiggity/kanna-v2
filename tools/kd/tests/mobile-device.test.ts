@@ -5,12 +5,15 @@ import { describe, expect, it } from "vitest";
 import {
   buildMobileDeviceInstallAppCommand,
   buildMobileDeviceLaunchAppCommand,
+  buildMobileDeviceListAppsCommand,
   buildMobileDevicePrebuildCommand,
   buildMobileDeviceRelaunchCommand,
   buildMobileDeviceReleaseBuildCommand,
   buildMobileDeviceRunCommand,
+  buildMobileDeviceUninstallAppCommand,
   checkPhysicalDeviceRunPreflight,
   mobileDeviceDerivedDataPath,
+  isMobileDeviceAppInstalled,
   resolveMobileIosWorkspace,
   resolveMobileReleaseAppPath,
   waitForPhysicalDeviceMetroReadiness,
@@ -359,6 +362,49 @@ describe("physical-device mobile runtime", () => {
         "build.kanna.app.staging"
       ]
     });
+  });
+
+  it("builds devicectl installed-app inspection and single-bundle uninstall commands", () => {
+    expect(
+      buildMobileDeviceListAppsCommand({ deviceUdid: "00008130-001015CA1091401C" })
+    ).toEqual({
+      command: "xcrun",
+      args: [
+        "devicectl",
+        "device",
+        "info",
+        "apps",
+        "--device",
+        "00008130-001015CA1091401C"
+      ]
+    });
+    expect(
+      buildMobileDeviceUninstallAppCommand({
+        bundleId: "build.kanna.app.staging",
+        deviceUdid: "00008130-001015CA1091401C"
+      })
+    ).toEqual({
+      command: "xcrun",
+      args: [
+        "devicectl",
+        "device",
+        "uninstall",
+        "app",
+        "--device",
+        "00008130-001015CA1091401C",
+        "build.kanna.app.staging"
+      ]
+    });
+  });
+
+  it("matches installed bundle ids exactly", () => {
+    const installedApps = [
+      "Kanna Staging    build.kanna.app.staging",
+      "Kanna Dev        build.kanna.app.dev"
+    ].join("\n");
+
+    expect(isMobileDeviceAppInstalled(installedApps, "build.kanna.app.staging")).toBe(true);
+    expect(isMobileDeviceAppInstalled(installedApps, "build.kanna.app")).toBe(false);
   });
 
   it("builds a direct installed-app relaunch command for the resolved device and bundle id", () => {

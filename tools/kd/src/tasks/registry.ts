@@ -30,11 +30,14 @@ import { executeMobileIosArchiveWithContext } from "../runtime/mobile-archive";
 import {
   buildMobileDeviceInstallAppCommand,
   buildMobileDeviceLaunchAppCommand,
+  buildMobileDeviceListAppsCommand,
   buildMobileDevicePrebuildCommand,
   buildMobileDeviceReleaseBuildCommand,
   buildMobileDeviceRelaunchCommand,
   buildMobileDeviceRunCommand,
+  buildMobileDeviceUninstallAppCommand,
   checkPhysicalDeviceRunPreflight,
+  isMobileDeviceAppInstalled,
   mobileDeviceDerivedDataPath,
   resolveMobileIosWorkspace,
   resolveMobileNativeIdentity,
@@ -137,6 +140,14 @@ export interface MobileRunInput {
   withCredentials?: boolean;
 }
 
+export interface MobileUninstallInput {
+  device: boolean;
+  production: boolean;
+  staging: boolean;
+  confirmBundle: string;
+  confirmProduction: boolean;
+}
+
 export interface MobileQaInput {
   production: boolean;
   ota: boolean;
@@ -181,6 +192,14 @@ const mobileRunInputSchema = z.object({
   staging: z.boolean().default(false),
   install: z.boolean().default(false),
   withCredentials: z.boolean().default(false)
+});
+
+const mobileUninstallInputSchema = z.object({
+  device: z.boolean().default(false),
+  production: z.boolean().default(false),
+  staging: z.boolean().default(false),
+  confirmBundle: z.string(),
+  confirmProduction: z.boolean().default(false)
 });
 
 const mobileQaInputSchema = z.object({
@@ -363,6 +382,10 @@ export interface MobileDeviceRunExecutionOptions {
   metroReadiness?: Pick<PhysicalDeviceMetroReadinessInput, "attempts" | "delayMs">;
   readInstalledStagingDesktopStatus?: (runner: CommandRunner) => Promise<ProductionDesktopStatus | null>;
   listStagingRelayActiveDesktopIds?: (input: StagingRelayActiveDesktopIdsInput) => Promise<Set<string> | null>;
+}
+
+export interface MobileDeviceUninstallExecutionOptions {
+  writeOutput?: (message: string) => void;
 }
 
 async function readGitValue(args: string[], cwd?: string): Promise<string> {
@@ -1487,6 +1510,134 @@ function prepareMobileDeviceLaunch(
   };
 }
 
+function formatMobileDeviceCommandFailure(input: {
+  action: string;
+  bundleId: string;
+  deviceName: string;
+  result: CommandResult;
+}): string {
+  const output = [input.result.stderr.trim(), input.result.stdout.trim()].filter(Boolean).join("\n");
+  return [
+    `Failed to ${input.action} ${input.bundleId} on ${input.deviceName}.`,
+    `Exit code: ${input.result.exitCode}`,
+    output ? `Command output:\n${output}` : "Command output: <empty>"
+  ].join("\n");
+}
+
+export async function executeMobileDeviceUninstallWithContext(
+  input: MobileUninstallInput,
+  executor: ExecutorInput,
+  options: MobileDeviceUninstallExecutionOptions = {}
+): Promise<TaskResult> {
+  if (!input.device) {
+    throw new Error("mobile.uninstall requires --device.");
+  }
+  if (input.production === input.staging) {
+    throw new Error("mobile.uninstall requires exactly one of --staging or --production.");
+  }
+
+  const environment = input.staging ? "staging" : "prod";
+  const nativeIdentity = resolveMobileNativeIdentity({ KANNA_APP_ENV: environment });
+  if (input.confirmBundle !== nativeIdentity.bundleId) {
+    throw new Error(
+      `mobile.uninstall confirmation mismatch: expected --confirm-bundle ${nativeIdentity.bundleId}.`
+    );
+  }
+  if (input.production && !input.confirmProduction) {
+    throw new Error(
+      "mobile.uninstall refuses production without the separate --confirm-production flag."
+    );
+  }
+
+  const device = await resolvePhysicalDevice(executor.runner, {
+    requestedUdid: executor.context.env.KANNA_IOS_DEVICE_UDID?.trim() || undefined,
+    requestedName: executor.context.env.KANNA_IOS_PHYSICAL_DEVICE_NAME?.trim() || undefined
+  });
+  const writeOutput = options.writeOutput ?? ((message: string) => process.stderr.write(message));
+  writeOutput(
+    [
+      `Target device: ${device.name} (${device.udid})`,
+      `Target bundle: ${nativeIdentity.bundleId}`,
+      "Operation: uninstall only this bundle."
+    ].join("\n") + "\n"
+  );
+
+  const listAppsCommand = buildMobileDeviceListAppsCommand({ deviceUdid: device.udid });
+  const before = await executor.runner.run(listAppsCommand.command, listAppsCommand.args);
+  if (before.exitCode !== 0) {
+    return {
+      ok: false,
+      message: formatMobileDeviceCommandFailure({
+        action: "inspect installed apps before uninstalling",
+        bundleId: nativeIdentity.bundleId,
+        deviceName: device.name,
+        result: before
+      }),
+      data: { bundleId: nativeIdentity.bundleId, device, present: undefined, removed: false }
+    };
+  }
+
+  if (!isMobileDeviceAppInstalled(before.stdout, nativeIdentity.bundleId)) {
+    return {
+      ok: true,
+      message:
+        `${nativeIdentity.bundleId} was not present on ${device.name} (${device.udid}). ` +
+        "No app was removed.",
+      data: { bundleId: nativeIdentity.bundleId, device, present: false, removed: false }
+    };
+  }
+
+  const uninstallCommand = buildMobileDeviceUninstallAppCommand({
+    bundleId: nativeIdentity.bundleId,
+    deviceUdid: device.udid
+  });
+  const uninstall = await executor.runner.run(uninstallCommand.command, uninstallCommand.args, {
+    streamOutput: true
+  });
+  if (uninstall.exitCode !== 0) {
+    return {
+      ok: false,
+      message: formatMobileDeviceCommandFailure({
+        action: "uninstall",
+        bundleId: nativeIdentity.bundleId,
+        deviceName: device.name,
+        result: uninstall
+      }),
+      data: { bundleId: nativeIdentity.bundleId, device, present: true, removed: false }
+    };
+  }
+
+  const after = await executor.runner.run(listAppsCommand.command, listAppsCommand.args);
+  if (after.exitCode !== 0) {
+    return {
+      ok: false,
+      message: formatMobileDeviceCommandFailure({
+        action: "verify removal of",
+        bundleId: nativeIdentity.bundleId,
+        deviceName: device.name,
+        result: after
+      }),
+      data: { bundleId: nativeIdentity.bundleId, device, present: true, removed: undefined }
+    };
+  }
+  if (isMobileDeviceAppInstalled(after.stdout, nativeIdentity.bundleId)) {
+    return {
+      ok: false,
+      message:
+        `${nativeIdentity.bundleId} was present on ${device.name} (${device.udid}), ` +
+        "but it is still reported as installed after the uninstall command.",
+      data: { bundleId: nativeIdentity.bundleId, device, present: true, removed: false }
+    };
+  }
+
+  return {
+    ok: true,
+    message:
+      `${nativeIdentity.bundleId} was present and removed from ${device.name} (${device.udid}).`,
+    data: { bundleId: nativeIdentity.bundleId, device, present: true, removed: true }
+  };
+}
+
 export async function executeMobileDeviceDoctorWithContext(
   input: MobileRunInput,
   executor: ExecutorInput,
@@ -1533,6 +1684,19 @@ async function executeMobileDeviceRun(input: MobileRunInput): Promise<TaskResult
   const dbTarget = devDbTarget(context);
   assertNotProductionDb(dbTarget);
   return executeMobileDeviceRunWithContext(input, {
+    runner: nodeCommandRunner,
+    context: {
+      repoRoot: context.repoRoot,
+      tmux: context.tmux,
+      ports: context.ports,
+      env: context.env
+    }
+  });
+}
+
+async function executeMobileDeviceUninstall(input: MobileUninstallInput): Promise<TaskResult> {
+  const context = await resolveDefaultContext(process.env);
+  return executeMobileDeviceUninstallWithContext(input, {
     runner: nodeCommandRunner,
     context: {
       repoRoot: context.repoRoot,
@@ -1797,6 +1961,13 @@ export const taskDefinitions = [
     description: "Build, install, and launch Kanna mobile on a physical iOS device.",
     inputSchema: mobileRunInputSchema,
     execute: async (_context, input) => executeMobileDeviceRun(mobileRunInputSchema.parse(input))
+  },
+  {
+    id: "mobile.uninstall",
+    description: "Uninstall exactly one confirmed Kanna mobile bundle from a physical iOS device.",
+    inputSchema: mobileUninstallInputSchema,
+    execute: async (_context, input) =>
+      executeMobileDeviceUninstall(mobileUninstallInputSchema.parse(input))
   },
   {
     id: "mobile.archive",
