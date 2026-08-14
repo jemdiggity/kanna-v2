@@ -2056,7 +2056,7 @@ mod tests {
             .json(&serde_json::json!({
                 "repoId": "repo-1",
                 "prompt": "Create through the replacement server using the intended DB default provider",
-                "pipelineName": TEST_DEFAULT_PROVIDER_PIPELINE
+                "workflowName": TEST_DEFAULT_PROVIDER_WORKFLOW
             }))
             .send()
             .await
@@ -2715,13 +2715,13 @@ mod tests {
         kanna_runtime_defaults::socket_path(daemon_dir)
     }
 
-    const TEST_DEFAULT_PROVIDER_PIPELINE: &str = "test-default-provider";
+    const TEST_DEFAULT_PROVIDER_WORKFLOW: &str = "test-default-provider";
 
     fn init_test_git_repo(repo_root: &std::path::Path) {
         let _ = std::fs::remove_dir_all(repo_root);
-        let pipeline_dir = repo_root.join(".kanna/pipelines");
+        let workflow_dir = repo_root.join(".kanna/workflows");
         let fixture_bin = repo_root.join(".kanna/fixture-bin");
-        std::fs::create_dir_all(&pipeline_dir).expect("pipeline directory should be created");
+        std::fs::create_dir_all(&workflow_dir).expect("workflow directory should be created");
         std::fs::create_dir_all(&fixture_bin).expect("fixture bin directory should be created");
         std::fs::write(repo_root.join("README.md"), "test repo")
             .expect("repo seed file should be written");
@@ -2738,9 +2738,9 @@ mod tests {
         )
         .expect("repo config should be written");
         std::fs::write(
-            pipeline_dir.join(format!("{TEST_DEFAULT_PROVIDER_PIPELINE}.json")),
+            workflow_dir.join(format!("{TEST_DEFAULT_PROVIDER_WORKFLOW}.json")),
             serde_json::json!({
-                "name": TEST_DEFAULT_PROVIDER_PIPELINE,
+                "name": TEST_DEFAULT_PROVIDER_WORKFLOW,
                 "stages": [{
                     "name": "in progress",
                     "prompt": "$TASK_PROMPT",
@@ -2749,7 +2749,7 @@ mod tests {
             })
             .to_string(),
         )
-        .expect("test pipeline should be written");
+        .expect("test workflow should be written");
         let copilot_fixture = fixture_bin.join("copilot");
         std::fs::write(&copilot_fixture, "#!/bin/sh\nexit 0\n")
             .expect("copilot fixture should be written");

@@ -2,72 +2,72 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Auto-select `superpowers:subagent-driven-development` or `superpowers:executing-plans` based on task coupling, subagent availability, and whether execution should stay in the current session. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make pipeline destination stages control whether Kanna follows the spawned next-stage task or keeps focus on the next visible sidebar item.
+**Goal:** Make workflow destination stages control whether Kanna follows the spawned next-stage task or keeps focus on the next visible sidebar item.
 
-**Architecture:** Extend the pipeline stage schema with an optional `follow_task` flag, thread that flag through `advanceStage()`, and give task creation an explicit `selectOnCreate` switch so stage handoff can suppress auto-selection without special-casing PR logic. Keep the selection target stable by computing it before closing the source task and reusing that captured id after the new task is inserted.
+**Architecture:** Extend the workflow stage schema with an optional `follow_task` flag, thread that flag through `advanceStage()`, and give task creation an explicit `selectOnCreate` switch so stage handoff can suppress auto-selection without special-casing PR logic. Keep the selection target stable by computing it before closing the source task and reusing that captured id after the new task is inserted.
 
-**Tech Stack:** TypeScript, Pinia store modules, Vitest, JSON pipeline resources
+**Tech Stack:** TypeScript, Pinia store modules, Vitest, JSON workflow resources
 
 ---
 
 ## File Structure
 
-- Modify: `packages/core/src/pipeline/pipeline-types.ts`
-  Add `follow_task?: boolean` to `PipelineStage`.
-- Modify: `packages/core/src/pipeline/pipeline-loader.ts`
+- Modify: `packages/core/src/workflow/workflow-types.ts`
+  Add `follow_task?: boolean` to `WorkflowStage`.
+- Modify: `packages/core/src/workflow/workflow-loader.ts`
   Parse `follow_task` when it is a boolean and ignore non-boolean values.
-- Modify: `packages/core/src/pipeline/pipeline-loader.test.ts`
+- Modify: `packages/core/src/workflow/workflow-loader.test.ts`
   Cover parsing for omitted, `true`, `false`, and invalid `follow_task`.
 - Modify: `apps/desktop/src/stores/state.ts`
   Add `selectOnCreate?: boolean` to `CreateItemOptions`.
 - Modify: `apps/desktop/src/stores/tasks.ts`
   Respect `selectOnCreate` inside the async setup path that currently always calls `selectItem(id)`.
-- Modify: `apps/desktop/src/stores/pipeline.ts`
+- Modify: `apps/desktop/src/stores/workflow.ts`
   Read `nextStage.follow_task`, capture the pre-close selection target, create the next task with `selectOnCreate: false` when needed, and restore selection afterward.
-- Modify: `.kanna/pipelines/default.json`
+- Modify: `.kanna/workflows/default.json`
   Set `"follow_task": false` on the built-in `pr` stage.
 - Modify: `apps/desktop/src/stores/kanna.taskBaseBranch.test.ts`
   Add stage-advance selection coverage in the existing store integration harness.
 
-### Task 1: Add Pipeline Stage Follow Config
+### Task 1: Add Workflow Stage Follow Config
 
 **Files:**
-- Modify: `packages/core/src/pipeline/pipeline-types.ts`
-- Modify: `packages/core/src/pipeline/pipeline-loader.ts`
-- Test: `packages/core/src/pipeline/pipeline-loader.test.ts`
+- Modify: `packages/core/src/workflow/workflow-types.ts`
+- Modify: `packages/core/src/workflow/workflow-loader.ts`
+- Test: `packages/core/src/workflow/workflow-loader.test.ts`
 
 - [ ] **Step 1: Write the failing parser tests**
 
 ```ts
 it("parses follow_task when explicitly false", () => {
   const json = JSON.stringify({
-    name: "My Pipeline",
+    name: "My Workflow",
     stages: [{ name: "PR", transition: "manual", follow_task: false }],
   });
 
-  const result = parsePipelineJson(json);
+  const result = parseWorkflowJson(json);
 
   expect(result.stages[0].follow_task).toBe(false);
 });
 
 it("parses follow_task when explicitly true", () => {
   const json = JSON.stringify({
-    name: "My Pipeline",
+    name: "My Workflow",
     stages: [{ name: "Stage 1", transition: "manual", follow_task: true }],
   });
 
-  const result = parsePipelineJson(json);
+  const result = parseWorkflowJson(json);
 
   expect(result.stages[0].follow_task).toBe(true);
 });
 
 it("ignores non-boolean follow_task values", () => {
   const json = JSON.stringify({
-    name: "My Pipeline",
+    name: "My Workflow",
     stages: [{ name: "Stage 1", transition: "manual", follow_task: "nope" }],
   });
 
-  const result = parsePipelineJson(json);
+  const result = parseWorkflowJson(json);
 
   expect(result.stages[0].follow_task).toBeUndefined();
 });
@@ -78,7 +78,7 @@ it("ignores non-boolean follow_task values", () => {
 Run:
 
 ```bash
-pnpm exec vitest run packages/core/src/pipeline/pipeline-loader.test.ts
+pnpm exec vitest run packages/core/src/workflow/workflow-loader.test.ts
 ```
 
 Expected: FAIL with assertions showing `follow_task` is missing from parsed stages.
@@ -86,7 +86,7 @@ Expected: FAIL with assertions showing `follow_task` is missing from parsed stag
 - [ ] **Step 3: Add the stage type and parser support**
 
 ```ts
-export interface PipelineStage {
+export interface WorkflowStage {
   name: string;
   description?: string;
   agent?: string;
@@ -99,7 +99,7 @@ export interface PipelineStage {
 ```
 
 ```ts
-function extractStages(obj: Record<string, unknown>): PipelineStage[] {
+function extractStages(obj: Record<string, unknown>): WorkflowStage[] {
   if (!Array.isArray(obj["stages"])) {
     return [];
   }
@@ -110,7 +110,7 @@ function extractStages(obj: Record<string, unknown>): PipelineStage[] {
     }
     const s = item as Record<string, unknown>;
 
-    const stage: PipelineStage = {
+    const stage: WorkflowStage = {
       name: typeof s["name"] === "string" ? s["name"] : "",
       transition: (s["transition"] as "manual" | "auto") ?? "",
     };
@@ -144,18 +144,18 @@ function extractStages(obj: Record<string, unknown>): PipelineStage[] {
 Run:
 
 ```bash
-pnpm exec vitest run packages/core/src/pipeline/pipeline-loader.test.ts
+pnpm exec vitest run packages/core/src/workflow/workflow-loader.test.ts
 ```
 
-Expected: PASS for the new `follow_task` cases and the existing pipeline loader suite.
+Expected: PASS for the new `follow_task` cases and the existing workflow loader suite.
 
 - [ ] **Step 5: Commit the parser change**
 
 ```bash
-git add packages/core/src/pipeline/pipeline-types.ts \
-  packages/core/src/pipeline/pipeline-loader.ts \
-  packages/core/src/pipeline/pipeline-loader.test.ts
-git commit -m "feat: add pipeline stage follow-task config"
+git add packages/core/src/workflow/workflow-types.ts \
+  packages/core/src/workflow/workflow-loader.ts \
+  packages/core/src/workflow/workflow-loader.test.ts
+git commit -m "feat: add workflow stage follow-task config"
 ```
 
 ### Task 2: Add Task-Creation Selection Control
@@ -169,7 +169,7 @@ git commit -m "feat: add pipeline stage follow-task config"
 
 ```ts
 it("does not auto-select a created task when selectOnCreate is false", async () => {
-  mockState.pipelineItems = [
+  mockState.workflowItems = [
     mockState.makeItem({
       id: "item-active",
       branch: "task-item-active",
@@ -210,7 +210,7 @@ Expected: FAIL because `createItem()` currently selects the new task uncondition
 export interface CreateItemOptions {
   baseBranch?: string;
   tags?: string[];
-  pipelineName?: string;
+  workflowName?: string;
   stage?: string;
   customTask?: import("@kanna/core").CustomTaskConfig;
   agentProvider?: AgentProvider;
@@ -228,7 +228,7 @@ async function setupWorktreeAndSpawn(
   worktreePath: string,
   branch: string,
   portEnv: Record<string, string>,
-  pipelinePrompt: string,
+  workflowPrompt: string,
   agentType: "pty" | "sdk",
   agentProvider: AgentProvider,
   opts?: CreateItemOptions,
@@ -263,22 +263,22 @@ git commit -m "feat: allow task creation without selection handoff"
 ### Task 3: Apply Stage-Level Follow Policy To Stage Advance
 
 **Files:**
-- Modify: `apps/desktop/src/stores/pipeline.ts`
-- Modify: `.kanna/pipelines/default.json`
+- Modify: `apps/desktop/src/stores/workflow.ts`
+- Modify: `.kanna/workflows/default.json`
 - Test: `apps/desktop/src/stores/kanna.taskBaseBranch.test.ts`
 
 - [ ] **Step 1: Write the failing stage-advance tests**
 
 ```ts
 it("keeps selection on the next visible item when the destination stage sets follow_task to false", async () => {
-  mockState.pipelineDefinition = {
+  mockState.workflowDefinition = {
     name: "default",
     stages: [
       { name: "in progress", transition: "manual" },
       { name: "pr", transition: "manual", follow_task: false },
     ],
   };
-  mockState.pipelineItems = [
+  mockState.workflowItems = [
     mockState.makeItem({
       id: "item-source",
       branch: "task-source",
@@ -306,14 +306,14 @@ it("keeps selection on the next visible item when the destination stage sets fol
 });
 
 it("still follows the spawned task when follow_task is omitted", async () => {
-  mockState.pipelineDefinition = {
+  mockState.workflowDefinition = {
     name: "default",
     stages: [
       { name: "in progress", transition: "manual" },
       { name: "review", transition: "manual" },
     ],
   };
-  mockState.pipelineItems = [
+  mockState.workflowItems = [
     mockState.makeItem({
       id: "item-source",
       branch: "task-source",
@@ -336,20 +336,20 @@ it("still follows the spawned task when follow_task is omitted", async () => {
 
   await vi.waitFor(() => {
     expect(
-      mockState.pipelineItems.some((item) => item.id === store.selectedItemId && item.stage === "review")
+      mockState.workflowItems.some((item) => item.id === store.selectedItemId && item.stage === "review")
     ).toBe(true);
   });
 });
 
 it("leaves selection unset when follow_task is false and there is no next visible item", async () => {
-  mockState.pipelineDefinition = {
+  mockState.workflowDefinition = {
     name: "default",
     stages: [
       { name: "in progress", transition: "manual" },
       { name: "pr", transition: "manual", follow_task: false },
     ],
   };
-  mockState.pipelineItems = [
+  mockState.workflowItems = [
     mockState.makeItem({
       id: "item-source",
       branch: "task-source",
@@ -387,9 +387,9 @@ async function advanceStage(taskId: string): Promise<void> {
   const item = context.state.items.value.find((candidate) => candidate.id === taskId);
   if (!item?.branch) return;
 
-  // existing repo and pipeline lookup
+  // existing repo and workflow lookup
 
-  const nextStage = getNextStage(pipeline, item.stage);
+  const nextStage = getNextStage(workflow, item.stage);
   if (!nextStage) {
     context.toast.warning(context.tt("toasts.taskAtFinalStage"));
     return;
@@ -407,7 +407,7 @@ async function advanceStage(taskId: string): Promise<void> {
   await requireService(context.services.closeTask, "closeTask")(item.id, { selectNext: false });
   await requireService(context.services.createItem, "createItem")(repo.id, repo.path, stagePrompt, "pty", {
     baseBranch: item.branch,
-    pipelineName: item.pipeline,
+    workflowName: item.workflow,
     stage: nextStage.name,
     selectOnCreate: shouldFollowTask,
     ...agentOpts,
@@ -440,7 +440,7 @@ async function advanceStage(taskId: string): Promise<void> {
 Run:
 
 ```bash
-pnpm exec vitest run packages/core/src/pipeline/pipeline-loader.test.ts apps/desktop/src/stores/kanna.taskBaseBranch.test.ts
+pnpm exec vitest run packages/core/src/workflow/workflow-loader.test.ts apps/desktop/src/stores/kanna.taskBaseBranch.test.ts
 ```
 
 Expected: PASS for parser coverage, `selectOnCreate` coverage, and stage-advance selection coverage.
@@ -458,8 +458,8 @@ Expected: PASS with no TypeScript errors.
 - [ ] **Step 7: Commit the stage-follow behavior**
 
 ```bash
-git add apps/desktop/src/stores/pipeline.ts \
+git add apps/desktop/src/stores/workflow.ts \
   apps/desktop/src/stores/kanna.taskBaseBranch.test.ts \
-  .kanna/pipelines/default.json
+  .kanna/workflows/default.json
 git commit -m "feat: make stage handoff selection configurable"
 ```

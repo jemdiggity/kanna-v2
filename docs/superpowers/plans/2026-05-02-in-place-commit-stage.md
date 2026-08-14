@@ -2,59 +2,59 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a visible `commit` pipeline stage that continues the current task/session in place, then hands committed work to a PR-only stage.
+**Goal:** Add a visible `commit` workflow stage that continues the current task/session in place, then hands committed work to a PR-only stage.
 
-**Architecture:** Pipeline stages gain an optional `mode` field. The existing promotion path remains the default `new_task` mode, while `continue` mode updates the current `pipeline_item`, clears stale completion data, and sends the next stage prompt to the existing PTY session. Built-in pipelines use `commit` as an auto `continue` stage before PR creation.
+**Architecture:** Workflow stages gain an optional `mode` field. The existing promotion path remains the default `new_task` mode, while `continue` mode updates the current `pipeline_item`, clears stale completion data, and sends the next stage prompt to the existing PTY session. Built-in workflows use `commit` as an auto `continue` stage before PR creation.
 
-**Tech Stack:** TypeScript, Vue/Pinia store modules, Vitest, Kanna pipeline JSON resources, Markdown agent definitions.
+**Tech Stack:** TypeScript, Vue/Pinia store modules, Vitest, Kanna workflow JSON resources, Markdown agent definitions.
 
 ---
 
-### Task 1: Parse Pipeline Stage Mode
+### Task 1: Parse Workflow Stage Mode
 
 **Files:**
-- Modify: `packages/core/src/pipeline/pipeline-types.ts`
-- Modify: `packages/core/src/pipeline/pipeline-loader.ts`
-- Test: `packages/core/src/pipeline/pipeline-loader.test.ts`
+- Modify: `packages/core/src/workflow/workflow-types.ts`
+- Modify: `packages/core/src/workflow/workflow-loader.ts`
+- Test: `packages/core/src/workflow/workflow-loader.test.ts`
 
 - [ ] **Step 1: Write failing parser tests**
 
-Add these tests inside `describe("parsePipelineJson", ...)` in `packages/core/src/pipeline/pipeline-loader.test.ts`:
+Add these tests inside `describe("parseWorkflowJson", ...)` in `packages/core/src/workflow/workflow-loader.test.ts`:
 
 ```ts
   it("parses continue mode when explicitly set", () => {
     const json = JSON.stringify({
-      name: "My Pipeline",
+      name: "My Workflow",
       stages: [{ name: "Commit", transition: "auto", mode: "continue" }],
     });
 
-    const result = parsePipelineJson(json);
+    const result = parseWorkflowJson(json);
 
     expect(result.stages[0].mode).toBe("continue");
   });
 
   it("ignores non-string mode values", () => {
     const json = JSON.stringify({
-      name: "My Pipeline",
+      name: "My Workflow",
       stages: [{ name: "Commit", transition: "auto", mode: true }],
     });
 
-    const result = parsePipelineJson(json);
+    const result = parseWorkflowJson(json);
 
     expect(result.stages[0].mode).toBeUndefined();
   });
 ```
 
-Add this test inside `describe("validatePipeline", ...)`:
+Add this test inside `describe("validateWorkflow", ...)`:
 
 ```ts
   it("returns error for invalid mode", () => {
-    const pipeline = {
-      name: "Pipeline",
+    const workflow = {
+      name: "Workflow",
       stages: [{ name: "Commit", transition: "auto" as const, mode: "sideways" as "continue" }],
     };
 
-    const errors = validatePipeline(pipeline);
+    const errors = validateWorkflow(workflow);
 
     expect(errors.some((error) => error.includes("mode"))).toBe(true);
   });
@@ -65,20 +65,20 @@ Add this test inside `describe("validatePipeline", ...)`:
 Run:
 
 ```bash
-pnpm --dir packages/core exec vitest run src/pipeline/pipeline-loader.test.ts
+pnpm --dir packages/core exec vitest run src/workflow/workflow-loader.test.ts
 ```
 
-Expected: FAIL because `PipelineStage` has no `mode` property and/or `validatePipeline` does not reject invalid mode.
+Expected: FAIL because `WorkflowStage` has no `mode` property and/or `validateWorkflow` does not reject invalid mode.
 
 - [ ] **Step 3: Implement minimal parser support**
 
-In `packages/core/src/pipeline/pipeline-types.ts`, add a mode union to `PipelineStage`:
+In `packages/core/src/workflow/workflow-types.ts`, add a mode union to `WorkflowStage`:
 
 ```ts
   mode?: "new_task" | "continue";
 ```
 
-In `packages/core/src/pipeline/pipeline-loader.ts`, add validation after the transition check:
+In `packages/core/src/workflow/workflow-loader.ts`, add validation after the transition check:
 
 ```ts
     if (
@@ -96,7 +96,7 @@ In `extractStages`, preserve string modes:
 
 ```ts
     if (typeof s["mode"] === "string") {
-      stage.mode = s["mode"] as PipelineStage["mode"];
+      stage.mode = s["mode"] as WorkflowStage["mode"];
     }
 ```
 
@@ -105,7 +105,7 @@ In `extractStages`, preserve string modes:
 Run:
 
 ```bash
-pnpm --dir packages/core exec vitest run src/pipeline/pipeline-loader.test.ts
+pnpm --dir packages/core exec vitest run src/workflow/workflow-loader.test.ts
 ```
 
 Expected: PASS.
@@ -113,14 +113,14 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add packages/core/src/pipeline/pipeline-types.ts packages/core/src/pipeline/pipeline-loader.ts packages/core/src/pipeline/pipeline-loader.test.ts
-git commit -m "feat: parse pipeline stage mode"
+git add packages/core/src/workflow/workflow-types.ts packages/core/src/workflow/workflow-loader.ts packages/core/src/workflow/workflow-loader.test.ts
+git commit -m "feat: parse workflow stage mode"
 ```
 
 ### Task 2: Continue Stage In Place
 
 **Files:**
-- Modify: `apps/desktop/src/stores/pipeline.ts`
+- Modify: `apps/desktop/src/stores/workflow.ts`
 - Test: `apps/desktop/src/stores/kanna.taskBaseBranch.test.ts`
 
 - [ ] **Step 1: Write failing store tests**
@@ -129,7 +129,7 @@ Add tests near the existing `advanceStage` tests in `apps/desktop/src/stores/kan
 
 ```ts
   it("continues the same task and sends the next stage prompt when stage mode is continue", async () => {
-    mockState.pipelineDefinition = {
+    mockState.workflowDefinition = {
       name: "default",
       stages: [
         { name: "in progress", transition: "manual" },
@@ -137,7 +137,7 @@ Add tests near the existing `advanceStage` tests in `apps/desktop/src/stores/kan
         { name: "pr", transition: "manual" },
       ],
     };
-    mockState.pipelineItems = [
+    mockState.workflowItems = [
       mockState.makeItem({
         id: "item-source",
         branch: "task-source",
@@ -168,14 +168,14 @@ Add tests near the existing `advanceStage` tests in `apps/desktop/src/stores/kan
   });
 
   it("clears stale stage result before sending a continue stage prompt", async () => {
-    mockState.pipelineDefinition = {
+    mockState.workflowDefinition = {
       name: "default",
       stages: [
         { name: "in progress", transition: "manual" },
         { name: "commit", transition: "auto", mode: "continue", agent: "commit" },
       ],
     };
-    mockState.pipelineItems = [
+    mockState.workflowItems = [
       mockState.makeItem({
         id: "item-source",
         branch: "task-source",
@@ -210,13 +210,13 @@ Expected: FAIL because `advanceStage` always closes and creates a new task.
 
 - [ ] **Step 3: Implement continue-stage path**
 
-In `apps/desktop/src/stores/pipeline.ts`, import `updatePipelineItemStage`:
+In `apps/desktop/src/stores/workflow.ts`, import `updatePipelineItemStage`:
 
 ```ts
 import { clearPipelineItemStageResult, getRepo, updatePipelineItemStage } from "@kanna/db";
 ```
 
-Add this helper inside `createPipelineApi`, near the selection helpers:
+Add this helper inside `createWorkflowApi`, near the selection helpers:
 
 ```ts
   async function continueStageInPlace(taskId: string, nextStageName: string, stagePrompt: string): Promise<void> {
@@ -264,15 +264,15 @@ Expected: PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add apps/desktop/src/stores/pipeline.ts apps/desktop/src/stores/kanna.taskBaseBranch.test.ts
-git commit -m "feat: continue pipeline stage in place"
+git add apps/desktop/src/stores/workflow.ts apps/desktop/src/stores/kanna.taskBaseBranch.test.ts
+git commit -m "feat: continue workflow stage in place"
 ```
 
 ### Task 3: Add Commit Stage Resources
 
 **Files:**
-- Modify: `.kanna/pipelines/default.json`
-- Modify: `.kanna/pipelines/qa.json`
+- Modify: `.kanna/workflows/default.json`
+- Modify: `.kanna/workflows/qa.json`
 - Create: `.kanna/agents/commit/AGENT.md`
 - Modify: `.kanna/agents/pr/AGENT.md`
 
@@ -281,14 +281,14 @@ git commit -m "feat: continue pipeline stage in place"
 Run this command before editing to prove the current resources do not yet satisfy the new contract:
 
 ```bash
-test -f .kanna/agents/commit/AGENT.md && rg -n '"name": "commit"|mode": "continue"' .kanna/pipelines/default.json .kanna/pipelines/qa.json
+test -f .kanna/agents/commit/AGENT.md && rg -n '"name": "commit"|mode": "continue"' .kanna/workflows/default.json .kanna/workflows/qa.json
 ```
 
-Expected: FAIL because `.kanna/agents/commit/AGENT.md` does not exist and the pipelines do not include the commit stage.
+Expected: FAIL because `.kanna/agents/commit/AGENT.md` does not exist and the workflows do not include the commit stage.
 
-- [ ] **Step 2: Update default pipeline**
+- [ ] **Step 2: Update default workflow**
 
-Change `.kanna/pipelines/default.json` to:
+Change `.kanna/workflows/default.json` to:
 
 ```json
 {
@@ -322,9 +322,9 @@ Change `.kanna/pipelines/default.json` to:
 }
 ```
 
-- [ ] **Step 3: Update QA pipeline**
+- [ ] **Step 3: Update QA workflow**
 
-Change `.kanna/pipelines/qa.json` to use `in progress -> commit -> review -> pr`:
+Change `.kanna/workflows/qa.json` to use `in progress -> commit -> review -> pr`:
 
 ```json
 {
@@ -417,9 +417,9 @@ Edit `.kanna/agents/pr/AGENT.md` so the process starts with rebasing committed w
 Run:
 
 ```bash
-pnpm --dir packages/core exec vitest run src/pipeline/pipeline-loader.test.ts
+pnpm --dir packages/core exec vitest run src/workflow/workflow-loader.test.ts
 test -f .kanna/agents/commit/AGENT.md
-rg -n '"name": "commit"|mode": "continue"' .kanna/pipelines/default.json .kanna/pipelines/qa.json
+rg -n '"name": "commit"|mode": "continue"' .kanna/workflows/default.json .kanna/workflows/qa.json
 ! rg -n "commit them:|git -C \\$SOURCE_WORKTREE add|git -C \\$SOURCE_WORKTREE commit" .kanna/agents/pr/AGENT.md
 ```
 
@@ -428,7 +428,7 @@ Expected: all commands PASS.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add .kanna/pipelines/default.json .kanna/pipelines/qa.json .kanna/agents/commit/AGENT.md .kanna/agents/pr/AGENT.md
+git add .kanna/workflows/default.json .kanna/workflows/qa.json .kanna/agents/commit/AGENT.md .kanna/agents/pr/AGENT.md
 git commit -m "feat: add in-place commit stage"
 ```
 
@@ -452,7 +452,7 @@ Expected: PASS.
 Run:
 
 ```bash
-pnpm --dir packages/core exec vitest run src/pipeline/pipeline-loader.test.ts
+pnpm --dir packages/core exec vitest run src/workflow/workflow-loader.test.ts
 pnpm --dir apps/desktop exec vitest run src/stores/kanna.taskBaseBranch.test.ts
 ```
 

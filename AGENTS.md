@@ -2,7 +2,7 @@
 
 Kanna is a distributed system, not a single program. It runs coding agent tasks
 in parallel — each task gets its own git worktree, branch, agent session, and
-pipeline stage — across parts that start, crash, upgrade, and ship
+workflow stage — across parts that start, crash, upgrade, and ship
 independently:
 
 - a **macOS desktop app** (Tauri v2, Vue 3 + Rust) — the operator's UI
@@ -45,7 +45,7 @@ a reference below.
 | Feature specs (merge master, task graph, QA dispatch, RCs) | `docs/specs/` |
 | Every DB table and migration | `crates/kanna-server/src/db/mod.rs` |
 | Agent provider registry | `crates/kanna-agent-protocol/src/providers.rs` |
-| Built-in pipelines and agents | `.kanna/pipelines/*.json`, `.kanna/agents/*/AGENT.md` |
+| Built-in workflows and agents | `.kanna/workflows/*.json`, `.kanna/agents/*/AGENT.md` |
 
 Tests are executable specs — prefer reading them over prose: `tools/kd/tests/`
 for release and dev-CLI behavior, `crates/daemon/tests/` for handoff and
@@ -55,10 +55,10 @@ reconnect, `tests/cli-contract/` for agent CLI compatibility.
 
 - **Task** — a unit of work: a prompt, a git worktree, an agent session, and a
   lifecycle stage. One task = one branch = one PR.
-- **Pipeline** — an ordered list of stages, each with an agent, an optional
+- **Workflow** — an ordered list of stages, each with an agent, an optional
   environment, a stage policy, and an optional `post`. Every built-in runs
   `in progress` (post: `commit`) → … → `pr` (post: `approve`); what varies is
-  the review stage between them (see "Built-in pipelines" below).
+  the review stage between them (see "Built-in workflows" below).
 - **Workspace** — the ephemeral manifestation of a task. Tasks are durable
   (same id, run history, blockers), but **every stage transition forks a fresh
   workspace**: a new branch + worktree `task-{id}-{n}` cut from the previous
@@ -75,15 +75,15 @@ Advancing past the final stage closes the task. Close snapshots dirty state
 into local WIP commits, removes the task's worktrees, and **keeps the
 branches** — close never deletes a branch.
 
-Built-in pipelines, by review depth: `no-review` (no review stage — the
+Built-in workflows, by review depth: `no-review` (no review stage — the
 fallback when a repo names none), `single-reviewer` (one `review` agent), and
 `specialized-reviewers` (a dispatched specialty panel). `specialty-review` is
-not a choice: it is the single-stage pipeline the dispatcher gives its child
+not a choice: it is the single-stage workflow the dispatcher gives its child
 tasks, and its definition declares `"visibility": "internal"`, so it resolves
 by name but never reaches the repo manifest, the new-task picker, or the tool
 catalog's advertised lineup. Visibility is declared by the definition itself —
 a top-level `visibility` field (`public` | `internal`, default `public`) in a
-pipeline JSON, or the same key in AGENT.md frontmatter (the `commit` and
+workflow JSON, or the same key in AGENT.md frontmatter (the `commit` and
 `approve` stage posts declare `internal`; EXTEND.md may override it) — and it
 governs listing only, never resolution: an internal name always works when
 passed explicitly. The effective definition decides, so a repo file shadowing
@@ -185,8 +185,8 @@ acknowledging transferred descriptors.
 - Use `apps/desktop/src/utils/fuzzyMatch.ts` instead of writing a new fuzzy
   search.
 - `.kanna/` is per-repo config: `config.json` (`setup`, `teardown`, `test`,
-  `ports`, `pipeline`, and `agentProviders`, whose exact agent names or `*`
-  globs select a provider plus an optional model), `pipelines/{name}.json`,
+  `ports`, `workflow`, and `agentProviders`, whose exact agent names or `*`
+  globs select a provider plus an optional model), `workflows/{name}.json`,
   `agents/{name}/AGENT.md` (repo files override built-ins by name),
   `agents/{name}/EXTEND.md` (layers onto the resolved agent without rewriting
   it — read only from the open repo, never from bundled resources), and
@@ -209,7 +209,7 @@ acknowledging transferred descriptors.
   wedged provider is reordered on one machine in seconds instead of through a
   merge to `origin/main`. It occupies the `agentProviders` slot in the
   precedence chain above, so an explicit task or stage override still wins.
-  Only `agentProviders`, `pipeline`, `ports`, `setup`, `teardown`, and `test`
+  Only `agentProviders`, `workflow`, `ports`, `setup`, `teardown`, and `test`
   may be set; `vars`, `flavors`, `workspace`, `stage_order`, and the
   `reserved_port*` keys are deliberately excluded, because they change what a
   task *means* rather than how one machine runs it. `agentProviders` and
@@ -220,7 +220,7 @@ acknowledging transferred descriptors.
   reported: the server logs the file and its keys at resolution, the repo
   manifest carries them as `config.localOverride`, and every PTY spawn prints
   them before setup runs. See `docs/dev/dev-workflow.md`.
-- Built-in agent/pipeline definitions must ship as Tauri bundled resources,
+- Built-in agent/workflow definitions must ship as Tauri bundled resources,
   **not** as TypeScript string constants.
 
 ## Database
@@ -264,9 +264,9 @@ The status word is a **closed three-word vocabulary** derived from the
 `TaskCompletionTrigger` plus the task's terminating `stage_run` — never from the
 daemon `Exit` alone, which cannot tell an agent erroring from a task advancing
 past its final stage from a human closing the task, because all three end the
-same PTY. `success` = ended cleanly (pipeline finished, or session ended with no
+same PTY. `success` = ended cleanly (workflow finished, or session ended with no
 failing verdict); `failure` = the terminating run reported failure, or the agent
-process died non-zero; `closed` = closed before finishing its pipeline, which is
+process died non-zero; `closed` = closed before finishing its workflow, which is
 not a failure. Receiving agents match these words exactly and act without
 re-reading task state, so any new ending must map onto one of the three rather
 than widen the payload. See `docs/kanna-server-boundary.md`.
@@ -346,7 +346,7 @@ added meanwhile.
 - The event bridge auto-reconnects to daemon with exponential backoff — don't add manual retry logic on top.
 - KeepAlive is used for ShellModal to preserve xterm buffer across task switches — use `v-show` not `v-if` for terminal-containing components.
 - `agent_next_message` uses a polling pattern — frontend calls it repeatedly to drain the buffered message queue from the background drainer task.
-- Revision rounds are budgeted: a pipeline's top-level `revision_limit` (default 3; `0` = unlimited) caps how many *agent-requested* revisions a task may spend, counted in `pipeline_item.revision_rounds`. Once the budget is spent, `request_revision` starts nothing — it records the review verdict (keeping the requested changes as the run's `feedback`), marks the task `unread` at its current stage, and returns `revisionBudget.exhausted: true`, so a review agent cannot drive a scoped task through endless revise/review rounds. `RequestRevisionRequest.origin` (`agent` default / `human`) is deliberately absent from the tool catalog: the desktop's revision action sends `origin: "human"`, which is never refused and resets the count. Each budgeted revision prompt (and resume message) opens with `Revision round N of M` plus the scope rules. `kanna_get_task` exposes `revisionRounds`/`revisionLimit`. See `docs/specs/qa-dispatch-review.md`.
+- Revision rounds are budgeted: a workflow's top-level `revision_limit` (default 3; `0` = unlimited) caps how many *agent-requested* revisions a task may spend, counted in `pipeline_item.revision_rounds`. Once the budget is spent, `request_revision` starts nothing — it records the review verdict (keeping the requested changes as the run's `feedback`), marks the task `unread` at its current stage, and returns `revisionBudget.exhausted: true`, so a review agent cannot drive a scoped task through endless revise/review rounds. `RequestRevisionRequest.origin` (`agent` default / `human`) is deliberately absent from the tool catalog: the desktop's revision action sends `origin: "human"`, which is never refused and resets the count. Each budgeted revision prompt (and resume message) opens with `Revision round N of M` plus the scope rules. `kanna_get_task` exposes `revisionRounds`/`revisionLimit`. See `docs/specs/qa-dispatch-review.md`.
 - Revisions resume by default: `request_revision` reopens the target stage's previous Claude agent session (`--resume <stage_run.provider_session_id>`) inside that run's own worktree — Claude CLI transcripts are keyed by working directory — and moves `pipeline_item.branch` back to it. Kanna composes the message from the original task prompt plus the reviewer's feedback. Any failed precondition (non-Claude provider, missing transcript, worktree gone, or its tip diverged from the committed one) falls back to the fresh fork below; resumed runs record `stage_run.resumed_from_run_id`. Claude PTY spawns assign the session id upfront (`--session-id`), recorded on `stage_run.provider_session_id`/`cwd` and mirrored to `pipeline_item.agent_session_id`.
-- Stage advance is durable on the task but forks the workspace. If the current stage declares a `post`, advancing (⌘S or an auto main-run success) injects the post prompt into the running agent session (`stage_run` row with `kind: "post"`; the task's stage and workspace do not change); when that post run completes with success, the engine performs the transition. A transition kills the task's daemon session (and the stale worktree shell), forks a new branch + worktree from the current branch's committed tip, respawns the same session id with the next stage's agent there, and moves `pipeline_item.stage`/`branch` — no new task is ever created; advancing past the final stage closes the task. Reruns keep the current workspace; a dead-session post falls back to spawning its `agent` binding in the current workspace. Legacy `post_action` and `policy.execution: "continue"` pipeline JSON (including pinned `pipeline_def` snapshots) compiles into stage posts at load time. `$BRANCH` in a stage prompt resolves to the freshly forked branch; `$SOURCE_WORKTREE` points at the previous stage's worktree. `$PREV_RESULT` resolves to the latest finished run's result of any kind — after a stage with a post, that is the post's result (e.g. the commit agent's) — while `$PREV_MAIN_RESULT` skips posts and resolves to the previous stage agent's own run result, which is what a stage needs when it must read what the previous stage agent reported (including work it declined).
-- Built-in agent/pipeline definitions must ship as Tauri bundled resources, not as TypeScript string constants. Definitions live in `.kanna/` files — the app reads them at runtime via the resource directory fallback.
+- Stage advance is durable on the task but forks the workspace. If the current stage declares a `post`, advancing (⌘S or an auto main-run success) injects the post prompt into the running agent session (`stage_run` row with `kind: "post"`; the task's stage and workspace do not change); when that post run completes with success, the engine performs the transition. A transition kills the task's daemon session (and the stale worktree shell), forks a new branch + worktree from the current branch's committed tip, respawns the same session id with the next stage's agent there, and moves `pipeline_item.stage`/`branch` — no new task is ever created; advancing past the final stage closes the task. Reruns keep the current workspace; a dead-session post falls back to spawning its `agent` binding in the current workspace. Legacy `post_action` and `policy.execution: "continue"` workflow JSON (including pinned `pipeline_def` snapshots) compiles into stage posts at load time. `$BRANCH` in a stage prompt resolves to the freshly forked branch; `$SOURCE_WORKTREE` points at the previous stage's worktree. `$PREV_RESULT` resolves to the latest finished run's result of any kind — after a stage with a post, that is the post's result (e.g. the commit agent's) — while `$PREV_MAIN_RESULT` skips posts and resolves to the previous stage agent's own run result, which is what a stage needs when it must read what the previous stage agent reported (including work it declined).
+- Built-in agent/workflow definitions must ship as Tauri bundled resources, not as TypeScript string constants. Definitions live in `.kanna/` files — the app reads them at runtime via the resource directory fallback.

@@ -87,7 +87,7 @@ fn unique_test_suffix() -> String {
     )
 }
 
-fn pipeline_socket_path_for_daemon_dir(daemon_dir: &str) -> String {
+fn workflow_socket_path_for_daemon_dir(daemon_dir: &str) -> String {
     let dir = PathBuf::from(daemon_dir).join("pipeline");
     kanna_runtime_defaults::socket_path(&dir)
         .to_string_lossy()
@@ -117,15 +117,15 @@ fn ensure_test_sidecar(name: &str) -> (PathBuf, bool) {
     (sidecar_path, true)
 }
 
-const TEST_PROVIDER_NEUTRAL_PIPELINE: &str = "test-provider-neutral";
+const TEST_PROVIDER_NEUTRAL_WORKFLOW: &str = "test-provider-neutral";
 
 fn init_test_git_repo(repo_root: &Path) {
     use std::os::unix::fs::PermissionsExt;
 
     let _ = std::fs::remove_dir_all(repo_root);
-    let pipeline_dir = repo_root.join(".kanna/pipelines");
+    let workflow_dir = repo_root.join(".kanna/workflows");
     let provider_bin_dir = repo_root.join(".kanna/test-provider-bin");
-    std::fs::create_dir_all(&pipeline_dir).unwrap();
+    std::fs::create_dir_all(&workflow_dir).unwrap();
     std::fs::create_dir_all(&provider_bin_dir).unwrap();
     std::fs::write(repo_root.join("README.md"), "test repo").unwrap();
     std::fs::write(
@@ -141,9 +141,9 @@ fn init_test_git_repo(repo_root: &Path) {
     )
     .unwrap();
     std::fs::write(
-        pipeline_dir.join(format!("{TEST_PROVIDER_NEUTRAL_PIPELINE}.json")),
+        workflow_dir.join(format!("{TEST_PROVIDER_NEUTRAL_WORKFLOW}.json")),
         serde_json::json!({
-            "name": TEST_PROVIDER_NEUTRAL_PIPELINE,
+            "name": TEST_PROVIDER_NEUTRAL_WORKFLOW,
             "stages": [{
                 "name": "in progress",
                 "prompt": "$TASK_PROMPT",
@@ -265,11 +265,11 @@ mod core_routes;
 mod create_task;
 mod e2e_sql_routes;
 mod input;
-mod pipeline_switch;
-mod recent_pipelines;
+mod recent_workflows;
 mod relay_dispatch;
 mod repo_commands;
 mod repo_definitions;
 mod revision_status;
 mod task_events;
 mod transfers;
+mod workflow_switch;

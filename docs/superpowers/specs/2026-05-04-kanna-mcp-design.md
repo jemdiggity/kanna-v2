@@ -139,7 +139,7 @@ Input:
 
 - `repo_id` string
 - `prompt` string
-- optional `pipeline_name` string
+- optional `workflow_name` string
 - optional `base_ref` string
 - optional `stage` string
 - optional `agent_provider` string
@@ -224,7 +224,7 @@ Diagnostics should go to stderr so MCP clients can parse stdout reliably.
 ## Packaging
 
 `kanna-mcp` should be staged as a sidecar alongside existing desktop sidecars.
-The build pipeline should preserve shared Rust intermediates where possible while keeping final sidecar binaries and staged Tauri `externalBin` inputs private to the current build.
+The build workflow should preserve shared Rust intermediates where possible while keeping final sidecar binaries and staged Tauri `externalBin` inputs private to the current build.
 
 Expected integration points:
 

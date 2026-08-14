@@ -927,7 +927,7 @@ impl Db {
                 .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
             if current.2.as_deref() != Some(expected_stage) {
                 return Err(rusqlite::Error::InvalidParameterName(format!(
-                    "task stage changed while setting pipeline: expected {expected_stage}, found {}",
+                    "task stage changed while setting workflow: expected {expected_stage}, found {}",
                     current.2.as_deref().unwrap_or("<none>")
                 )));
             }
@@ -948,8 +948,10 @@ impl Db {
             }
             db.append_task_event(
                 id,
-                TaskEventKind::PipelineChanged,
+                TaskEventKind::WorkflowChanged,
                 json!({
+                    "fromWorkflow": current.0.clone(),
+                    "toWorkflow": pipeline,
                     "fromPipeline": current.0,
                     "toPipeline": pipeline,
                     "stage": expected_stage,

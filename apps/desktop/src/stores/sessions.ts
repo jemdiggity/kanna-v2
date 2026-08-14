@@ -1,6 +1,6 @@
 import type { AgentProvider, PipelineItem } from "../types/kanna";
 import { AGENT_PROVIDERS, getAgentProviderSpec } from "@kanna/agent-protocol";
-import { buildKannaRuntimeSystemPrompt, buildKannaRuntimeUserPrompt } from "../../../../packages/core/src/pipeline/prompt-builder";
+import { buildKannaRuntimeSystemPrompt, buildKannaRuntimeUserPrompt } from "../../../../packages/core/src/workflow/prompt-builder";
 import { invoke } from "../invoke";
 import { buildTaskShellCommand, getShellTerminalEnv, getTaskTerminalEnv } from "../composables/terminalSessionRecovery";
 import { resolveCurrentKannaServerBaseUrl } from "../services/kannaServerBaseUrl";
@@ -194,7 +194,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
     if (shellTaskId) {
       try {
         const [socketPath, serverBaseUrl] = await Promise.all([
-          invoke<string>("get_pipeline_socket_path"),
+          invoke<string>("get_workflow_socket_path"),
           resolveCurrentKannaServerBaseUrl("building shell env"),
         ]);
         Object.assign(env, buildTaskRuntimeEnv({
@@ -298,7 +298,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
       ...agentBaseEnv,
       ...buildTaskRuntimeEnv({
         taskId: sessionId,
-        socketPath: await invoke<string>("get_pipeline_socket_path"),
+        socketPath: await invoke<string>("get_workflow_socket_path"),
         serverBaseUrl: await resolveCurrentKannaServerBaseUrl("recovering SDK task env"),
         kannaCliPath: await whichBinaryOptional("kanna-cli"),
         path: agentBaseEnv.PATH ?? inheritedPath,
@@ -367,7 +367,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
 
     try {
       const [socketPath] = await Promise.all([
-        invoke<string>("get_pipeline_socket_path"),
+        invoke<string>("get_workflow_socket_path"),
       ]);
       Object.assign(env, buildTaskRuntimeEnv({
         taskId: sessionId,
@@ -496,7 +496,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
         systemPrompt: buildKannaRuntimeSystemPrompt({
           taskId: sessionId,
           stage: item.stage,
-          pipeline: item.pipeline,
+          workflow: item.pipeline,
           provider: agentProvider,
           mcpConfigured: !!mcpConfigPath,
         }),

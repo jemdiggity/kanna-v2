@@ -2,7 +2,7 @@
 
 ## Summary
 
-Refactor `apps/desktop/src/stores/kanna.ts` from a 2,300+ line monolith into a thin composition root plus focused store modules. The goal is not just to reduce line count, but to give each file one clear responsibility so task creation, session management, pipeline transitions, selection logic, and startup wiring can be reasoned about independently.
+Refactor `apps/desktop/src/stores/kanna.ts` from a 2,300+ line monolith into a thin composition root plus focused store modules. The goal is not just to reduce line count, but to give each file one clear responsibility so task creation, session management, workflow transitions, selection logic, and startup wiring can be reasoned about independently.
 
 The public API may change. The preferred shape is still a single top-level `useKannaStore()` entry point for the app, but its implementation should be assembled from smaller modules rather than owning every concern directly.
 
@@ -10,7 +10,7 @@ The public API may change. The preferred shape is still a single top-level `useK
 
 - Reduce `apps/desktop/src/stores/kanna.ts` to roughly 300-500 lines.
 - Split the current store by responsibility, not by arbitrary technical layer.
-- Keep behavior unchanged for task creation, task closing, blocked-task startup, pipeline advancement, session spawning, and startup event handling.
+- Keep behavior unchanged for task creation, task closing, blocked-task startup, workflow advancement, session spawning, and startup event handling.
 - Make each extracted file small enough to understand in one pass.
 - Preserve or improve existing test coverage around the most failure-prone paths.
 
@@ -31,7 +31,7 @@ The public API may change. The preferred shape is still a single top-level `useK
 - task creation and worktree bootstrap
 - PTY command assembly and shell prewarming
 - runtime status sync and daemon event handling
-- pipeline definition loading and stage advancement
+- workflow definition loading and stage advancement
 - blocked-task orchestration
 - preference loading and persistence
 - startup initialization
@@ -70,7 +70,7 @@ Responsibilities:
 
 - refs such as `selectedRepoId`, `selectedItemId`, `pendingSetupIds`, preferences, and refresh triggers
 - computed async reads for `repos` and `items`
-- shared caches for pipelines, agents, stage order, pending visibility, and runtime timers
+- shared caches for workflows, agents, stage order, pending visibility, and runtime timers
 - utility types that describe the shared store context
 
 This file is the source of truth for shared mutable state.
@@ -119,18 +119,18 @@ Responsibilities:
 
 This is the behavioral core for task lifecycle mutations.
 
-### `apps/desktop/src/stores/pipeline.ts`
+### `apps/desktop/src/stores/workflow.ts`
 
-Pipeline and agent definition behavior.
+Workflow and agent definition behavior.
 
 Responsibilities:
 
-- load pipeline definitions
+- load workflow definitions
 - load agent definitions
 - resolve stage order from repo config
 - `advanceStage()`
 - `rerunStage()`
-- pipeline-specific prompt building
+- workflow-specific prompt building
 
 ### `apps/desktop/src/stores/init.ts`
 
@@ -236,7 +236,7 @@ At the end of this phase, `kanna.ts` should still behave the same but consume a 
 Move the most self-contained logic next:
 
 - `ports.ts`
-- `pipeline.ts`
+- `workflow.ts`
 - `selection.ts`
 
 These have relatively clear seams and reduce pressure on the main store quickly.
@@ -286,7 +286,7 @@ The most important verification points are:
 - task creation and base-branch behavior
 - task close and teardown behavior
 - blocked-task startup behavior
-- pipeline advance and rerun behavior
+- workflow advance and rerun behavior
 
 Expected test work:
 
@@ -308,7 +308,7 @@ If the refactor touches Rust or command boundaries indirectly, run the smallest 
 - `apps/desktop/src/stores/selection.ts`
 - `apps/desktop/src/stores/sessions.ts`
 - `apps/desktop/src/stores/tasks.ts`
-- `apps/desktop/src/stores/pipeline.ts`
+- `apps/desktop/src/stores/workflow.ts`
 - `apps/desktop/src/stores/init.ts`
 - `apps/desktop/src/stores/ports.ts`
 - existing touched tests such as:

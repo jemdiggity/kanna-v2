@@ -45,7 +45,7 @@ and assert the new identity defaults to the local UUID:
 fn migration_backfills_cloud_task_identity_from_local_task_id() {
     let db = migrated_test_db("cloud-task-id");
     db.connection().execute(
-        "INSERT INTO pipeline_item (id, repo_id, pipeline, stage) VALUES ('task-1', 'repo-1', 'default', 'in progress')",
+        "INSERT INTO pipeline_item (id, repo_id, workflow, stage) VALUES ('task-1', 'repo-1', 'default', 'in progress')",
         [],
     ).unwrap();
     let cloud_task_id: String = db.connection().query_row(

@@ -1,6 +1,6 @@
 import { isAgentProvider, type AgentProvider } from "@kanna/agent-protocol";
 import type { RepoConfig } from "@kanna/core";
-import type { AgentDefinition, PipelineDefinition } from "../../../../packages/core/src/pipeline/pipeline-types";
+import type { AgentDefinition, WorkflowDefinition } from "../../../../packages/core/src/workflow/workflow-types";
 import type { BlockerTaskStates, PipelineItem, Repo, TaskBlocker } from "../types/kanna";
 import type { SessionRecoveryState } from "../composables/sessionRecoveryState";
 import type { TransferImportSummary } from "../stores/transferImportSummary";
@@ -52,16 +52,16 @@ export interface DesktopServerClientHandlersForTests {
   unblockTask?: (taskId: string) => MaybePromise<void>;
   addRepo?: (input: AddDesktopRepoInput) => MaybePromise<DesktopRepoResponse>;
   fetchRepoKannaDefinitions?: (repoId: string) => MaybePromise<DesktopRepoKannaDefinitions>;
-  fetchRepoPipelineDefinition?: (
+  fetchRepoWorkflowDefinition?: (
     repoId: string,
-    pipelineName: string,
-  ) => MaybePromise<DesktopRepoPipelineDefinition>;
+    workflowName: string,
+  ) => MaybePromise<DesktopRepoWorkflowDefinition>;
   fetchRepoAgentDefinition?: (
     repoId: string,
     agentSelector: string,
   ) => MaybePromise<DesktopRepoAgentDefinition>;
   fetchRepoAgentProviders?: (repoId: string) => MaybePromise<AgentProvider[]>;
-  fetchRepoRecentPipelines?: (repoId: string) => MaybePromise<string[]>;
+  fetchRepoRecentWorkflows?: (repoId: string) => MaybePromise<string[]>;
   fetchRepoCommands?: (repoId: string) => MaybePromise<DesktopRepoCommandCatalog>;
   runRepoCommand?: (
     repoId: string,
@@ -74,10 +74,10 @@ export interface DesktopServerClientHandlersForTests {
   fetchTaskDetail?: (taskId: string) => MaybePromise<DesktopTaskDetail>;
   patchTask?: (taskId: string, input: PatchDesktopTaskInput) => MaybePromise<void>;
   setTaskParent?: (taskId: string, parentTaskId: string | null) => MaybePromise<void>;
-  setTaskPipeline?: (
+  setTaskWorkflow?: (
     taskId: string,
-    pipelineName: string,
-  ) => MaybePromise<SetDesktopTaskPipelineResponse>;
+    workflowName: string,
+  ) => MaybePromise<SetDesktopTaskWorkflowResponse>;
   pinTask?: (taskId: string, position: number) => MaybePromise<void>;
   unpinTask?: (taskId: string) => MaybePromise<void>;
   reorderPinnedTasks?: (repoId: string, orderedIds: string[]) => MaybePromise<void>;
@@ -267,7 +267,7 @@ export interface CreateDesktopTaskRequest {
   repoId: string;
   prompt: string;
   displayName?: string | null;
-  pipelineName?: string;
+  workflowName?: string;
   stage?: string;
   baseRef?: string | null;
   agent?: string;
@@ -321,13 +321,13 @@ export interface DesktopRepoKannaDefinitions {
   revision: string | null;
   refName: string;
   config: RepoConfig;
-  defaultPipeline: string;
-  pipelines: string[];
+  defaultWorkflow: string;
+  workflows: string[];
 }
 
-export interface DesktopRepoPipelineDefinition {
+export interface DesktopRepoWorkflowDefinition {
   revision: string | null;
-  definition: PipelineDefinition;
+  definition: WorkflowDefinition;
 }
 
 export interface DesktopRepoAgentDefinition {
@@ -389,15 +389,15 @@ export async function fetchDesktopRepoKannaDefinitions(
   );
 }
 
-export async function fetchDesktopRepoPipelineDefinition(
+export async function fetchDesktopRepoWorkflowDefinition(
   repoId: string,
-  pipelineName: string,
-): Promise<DesktopRepoPipelineDefinition> {
-  if (clientHandlersForTests?.fetchRepoPipelineDefinition) {
-    return await clientHandlersForTests.fetchRepoPipelineDefinition(repoId, pipelineName);
+  workflowName: string,
+): Promise<DesktopRepoWorkflowDefinition> {
+  if (clientHandlersForTests?.fetchRepoWorkflowDefinition) {
+    return await clientHandlersForTests.fetchRepoWorkflowDefinition(repoId, workflowName);
   }
-  return await requestJson<DesktopRepoPipelineDefinition>(
-    `/v1/repos/${encodeURIComponent(repoId)}/kanna-definitions/pipelines/${encodeURIComponent(pipelineName)}`,
+  return await requestJson<DesktopRepoWorkflowDefinition>(
+    `/v1/repos/${encodeURIComponent(repoId)}/kanna-definitions/workflows/${encodeURIComponent(workflowName)}`,
   );
 }
 
@@ -423,23 +423,23 @@ export async function fetchDesktopRepoAgentProviders(repoId: string): Promise<Ag
   return response.providers.map(({ id }) => id).filter(isAgentProvider);
 }
 
-interface DesktopRepoRecentPipelinesResponse {
-  pipelines: string[];
+interface DesktopRepoRecentWorkflowsResponse {
+  workflows: string[];
 }
 
 /**
- * Pipelines this repo's tasks were most recently created with, newest first.
+ * Workflows this repo's tasks were most recently created with, newest first.
  * Derived from durable task rows, so it survives closed tasks, lost create
  * responses, and restarts, and reads the same in every window.
  */
-export async function fetchDesktopRepoRecentPipelines(repoId: string): Promise<string[]> {
-  if (clientHandlersForTests?.fetchRepoRecentPipelines) {
-    return await clientHandlersForTests.fetchRepoRecentPipelines(repoId);
+export async function fetchDesktopRepoRecentWorkflows(repoId: string): Promise<string[]> {
+  if (clientHandlersForTests?.fetchRepoRecentWorkflows) {
+    return await clientHandlersForTests.fetchRepoRecentWorkflows(repoId);
   }
-  const response = await requestJson<DesktopRepoRecentPipelinesResponse>(
-    `/v1/repos/${encodeURIComponent(repoId)}/recent-pipelines`,
+  const response = await requestJson<DesktopRepoRecentWorkflowsResponse>(
+    `/v1/repos/${encodeURIComponent(repoId)}/recent-workflows`,
   );
-  return response.pipelines;
+  return response.workflows;
 }
 
 export interface DesktopSettingResponse {
@@ -559,7 +559,7 @@ export type DesktopOperatorEventType = "task_selected" | "app_blur" | "app_focus
 
 export interface DesktopOperatorEventInput {
   eventType: DesktopOperatorEventType;
-  pipelineItemId?: string | null;
+  workflowItemId?: string | null;
   repoId?: string | null;
 }
 
@@ -880,26 +880,26 @@ export async function setDesktopTaskParent(taskId: string, parentTaskId: string 
   );
 }
 
-export interface SetDesktopTaskPipelineResponse {
+export interface SetDesktopTaskWorkflowResponse {
   taskId: string;
-  pipelineName: string;
+  workflowName: string;
   stage: string;
   revisionRounds: number;
   revisionLimit: number;
 }
 
-export async function setDesktopTaskPipeline(
+export async function setDesktopTaskWorkflow(
   taskId: string,
-  pipelineName: string,
-): Promise<SetDesktopTaskPipelineResponse> {
-  if (clientHandlersForTests?.setTaskPipeline) {
-    return await clientHandlersForTests.setTaskPipeline(taskId, pipelineName);
+  workflowName: string,
+): Promise<SetDesktopTaskWorkflowResponse> {
+  if (clientHandlersForTests?.setTaskWorkflow) {
+    return await clientHandlersForTests.setTaskWorkflow(taskId, workflowName);
   }
-  return await requestJson<SetDesktopTaskPipelineResponse>(
-    `/v1/tasks/${encodeURIComponent(taskId)}/actions/set-pipeline`,
+  return await requestJson<SetDesktopTaskWorkflowResponse>(
+    `/v1/tasks/${encodeURIComponent(taskId)}/actions/set-workflow`,
     {
       method: "POST",
-      body: { pipelineName },
+      body: { workflowName },
     },
   );
 }

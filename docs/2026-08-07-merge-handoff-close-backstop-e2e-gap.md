@@ -9,7 +9,7 @@ Related: [specs/merge-master.md](specs/merge-master.md),
 ## The incident this fixes
 
 On 2026-08-07 five tasks in one shepherded session reached the `pr` stage of a
-review-bearing pipeline (`single-reviewer` / `specialized-reviewers`). In every
+review-bearing workflow (`single-reviewer` / `specialized-reviewers`). In every
 one of them the pr stage's **main** run finished in 1–2 seconds with a `NULL`
 result and the approve **post** ran immediately afterwards:
 
@@ -51,8 +51,8 @@ engine does not control the state of, so the handoff had to move to the engine.
 - If such a stage finishes with no `pr_url` at all, the close is **refused**:
   the task stays open at its final stage, goes `unread`, and emits
   `task.merge_handoff_missing`. A promised handoff with nothing to hand off is a
-  failed approval, not a finished pipeline.
-- Pipelines whose final stage declares no `approve` post promise no merge side
+  failed approval, not a finished workflow.
+- Workflows whose final stage declares no `approve` post promise no merge side
   effect and are untouched — the same predicate the desktop's approval UI uses
   (`pinnedApproveMergePost`).
 
@@ -64,14 +64,14 @@ engine does not control the state of, so the handoff had to move to the engine.
 a resident merge singleton — not the derivation in isolation:
 
 - `engine_signals_the_merge_master_when_the_approve_post_did_not` — the
-  incident, reproduced: review-bearing pinned pipeline, approve post reports
+  incident, reproduced: review-bearing pinned workflow, approve post reports
   `Created PR …` and signals nothing. The merge session receives exactly one
   `MERGE … [TASK …] [PR …]` line, the task closes, and the event records
   `source: engine`.
 - `a_post_that_signalled_for_itself_is_not_signalled_again` — the `no-review`
   control: the post signals through the route first, and closing sends nothing
   further. One line total, `source: agent`.
-- `a_pipeline_without_the_approve_post_closes_without_signalling` — a final
+- `a_workflow_without_the_approve_post_closes_without_signalling` — a final
   stage with no post closes silently, with `merge_signaled_at` still null.
 - `a_promised_handoff_with_no_pr_refuses_to_close_the_task` — the task stays
   open at `pr`, `unread`, with `task.merge_handoff_missing` on the feed and no
@@ -79,7 +79,7 @@ a resident merge singleton — not the derivation in isolation:
 
 ## What is not covered, and why
 
-**A live pipeline walking implement → review → pr → approve with real agent
+**A live workflow walking implement → review → pr → approve with real agent
 CLIs.** The failure needed a real agent to be mid-turn when the post arrived,
 which is a property of the agent process, not of anything the harness can
 schedule. The desktop E2E suites (`apps/desktop/tests/e2e/{mock,real}`) can seed

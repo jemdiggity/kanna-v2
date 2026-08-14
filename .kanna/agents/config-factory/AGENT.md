@@ -14,7 +14,7 @@ If `.kanna/config.schema.json` exists in this checkout, read it first and treat 
 - `teardown` — shell commands run when a task leaves a workspace
 - `test` — shell commands agents and merge workflows can run for verification
 - `ports` — environment variable names mapped to base port numbers
-- `pipeline` — default pipeline name
+- `workflow` — default workflow name
 - `stage_order` — ordered stage names for sidebar/display behavior
 - `workspace` — workspace metadata used by Kanna integrations
 

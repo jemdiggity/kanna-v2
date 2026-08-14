@@ -79,7 +79,7 @@ export function createSelectionApi(context: StoreContext): SelectionApi {
     const item = context.state.items.value.find((candidate) => candidate.id === itemId);
     postDesktopOperatorEvent({
       eventType: "task_selected",
-      pipelineItemId: itemId,
+      workflowItemId: itemId,
       repoId: item?.repo_id ?? null,
     }).catch((error) =>
       console.error("[store] operator event failed:", error),

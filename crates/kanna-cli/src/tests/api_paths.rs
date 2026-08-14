@@ -115,7 +115,7 @@ fn parses_task_detail_response_shape() {
         "repoId": "repo-1",
         "title": "Add status command",
         "stage": "in progress",
-        "pipelineName": "default",
+        "workflowName": "default",
         "stageTransition": "manual",
         "activity": "working",
         "snippet": "working...",
@@ -143,7 +143,7 @@ fn parses_task_detail_response_shape() {
 
     assert_eq!(task.id, "task-1");
     assert_eq!(task.activity.as_deref(), Some("working"));
-    assert_eq!(task.pipeline_name.as_deref(), Some("default"));
+    assert_eq!(task.workflow_name.as_deref(), Some("default"));
     assert_eq!(task.stage_transition.as_deref(), Some("manual"));
     assert_eq!(task.agent_provider.as_deref(), Some("claude"));
     assert_eq!(task.branch.as_deref(), Some("task-task-1"));

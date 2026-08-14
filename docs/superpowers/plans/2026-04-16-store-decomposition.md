@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Auto-select `superpowers:subagent-driven-development` or `superpowers:executing-plans` based on task coupling, subagent availability, and whether execution should stay in the current session. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Refactor `apps/desktop/src/stores/kanna.ts` into a thin composition root backed by focused store modules without changing task, session, pipeline, or startup behavior.
+**Goal:** Refactor `apps/desktop/src/stores/kanna.ts` into a thin composition root backed by focused store modules without changing task, session, workflow, or startup behavior.
 
-**Architecture:** Keep one top-level `useKannaStore()` Pinia store, but move its domain logic into plain TypeScript modules with explicit boundaries. Extract shared reactive state first, then move isolated ownership areas (`ports`, `pipeline`, `selection`), then move the coupled session/task logic, and finally move startup wiring into `init.ts` so `kanna.ts` becomes assembly code rather than a monolith.
+**Architecture:** Keep one top-level `useKannaStore()` Pinia store, but move its domain logic into plain TypeScript modules with explicit boundaries. Extract shared reactive state first, then move isolated ownership areas (`ports`, `workflow`, `selection`), then move the coupled session/task logic, and finally move startup wiring into `init.ts` so `kanna.ts` becomes assembly code rather than a monolith.
 
 **Tech Stack:** Vue 3, Pinia, TypeScript, VueUse `computedAsync`/`watchDebounced`, Vitest, existing `@kanna/db` query helpers, existing Tauri invoke/listen bridges
 
@@ -18,14 +18,14 @@
   Purpose: shared refs, computed async DB reads, caches, helper types, and the store context factory.
 - `apps/desktop/src/stores/ports.ts`
   Purpose: independent domain store for `task_port` reservation, release, and close-with-release behavior.
-- `apps/desktop/src/stores/pipeline.ts`
-  Purpose: pipeline/agent loading, stage-order lookup, `advanceStage()`, and `rerunStage()`.
+- `apps/desktop/src/stores/workflow.ts`
+  Purpose: workflow/agent loading, stage-order lookup, `advanceStage()`, and `rerunStage()`.
 - `apps/desktop/src/stores/selection.ts`
   Purpose: selection state, history, hidden-item rules, sidebar sorting, and persisted selection helpers.
 - `apps/desktop/src/stores/sessions.ts`
   Purpose: PTY/shell session preparation, spawn, prewarm, runtime status sync, and session-exit waiters.
 - `apps/desktop/src/stores/tasks.ts`
-  Purpose: repo actions, task lifecycle actions, blocked-task actions, and orchestration across sessions/pipeline/ports.
+  Purpose: repo actions, task lifecycle actions, blocked-task actions, and orchestration across sessions/workflow/ports.
 - `apps/desktop/src/stores/init.ts`
   Purpose: startup behavior and Tauri event registration.
 
@@ -36,7 +36,7 @@
 - `apps/desktop/src/stores/kanna.runtimeStatusSync.test.ts`
   Purpose: keep runtime-status coverage aligned with the extracted session/init wiring.
 - `apps/desktop/src/stores/kanna.taskBaseBranch.test.ts`
-  Purpose: keep task creation/base-branch coverage aligned with the extracted task/pipeline/ports flow.
+  Purpose: keep task creation/base-branch coverage aligned with the extracted task/workflow/ports flow.
 
 ### Optional New Tests If Extraction Creates a Clean Seam
 
@@ -87,7 +87,7 @@ export interface StoreState {
   devLingerTerminals: Ref<boolean>;
   lastHiddenRepoId: Ref<string | null>;
   lastSelectedItemByRepo: Ref<Record<string, string>>;
-  pipelineCache: Map<string, PipelineDefinition>;
+  workflowCache: Map<string, WorkflowDefinition>;
   agentCache: Map<string, AgentDefinition>;
   stageOrderCache: Map<string, string[]>;
 }
@@ -131,11 +131,11 @@ git add apps/desktop/src/stores/state.ts apps/desktop/src/stores/kanna.ts apps/d
 git commit -m "refactor: extract shared kanna store state"
 ```
 
-## Task 2: Extract Port And Pipeline Domain Logic
+## Task 2: Extract Port And Workflow Domain Logic
 
 **Files:**
 - Create: `apps/desktop/src/stores/ports.ts`
-- Create: `apps/desktop/src/stores/pipeline.ts`
+- Create: `apps/desktop/src/stores/workflow.ts`
 - Modify: `apps/desktop/src/stores/kanna.ts`
 - Modify: `apps/desktop/src/stores/kanna.taskBaseBranch.test.ts`
 - Test: `apps/desktop/src/stores/kanna.taskBaseBranch.test.ts`
@@ -179,33 +179,33 @@ export function createPortsStore(db: DbHandle): PortsStore {
 }
 ```
 
-- [ ] **Step 4: Move pipeline/agent loading and stage actions into `pipeline.ts`**
+- [ ] **Step 4: Move workflow/agent loading and stage actions into `workflow.ts`**
 
-Keep repo-config-backed stage order and pipeline caches in one place.
+Keep repo-config-backed stage order and workflow caches in one place.
 
 ```ts
-export interface PipelineApi {
+export interface WorkflowApi {
   getStageOrder(repoId: string): readonly string[];
-  loadPipeline(repoPath: string, pipelineName: string): Promise<PipelineDefinition>;
+  loadWorkflow(repoPath: string, workflowName: string): Promise<WorkflowDefinition>;
   loadAgent(repoPath: string, agentName: string): Promise<AgentDefinition>;
   advanceStage(taskId: string): Promise<void>;
   rerunStage(taskId: string): Promise<void>;
 }
 ```
 
-- [ ] **Step 5: Rewire `kanna.ts` and remaining task code to call `ports` and `pipeline`**
+- [ ] **Step 5: Rewire `kanna.ts` and remaining task code to call `ports` and `workflow`**
 
 The main store should compose these modules instead of owning their logic directly.
 
 ```ts
 const ports = createPortsStore(_db);
-const pipeline = createPipelineApi(context);
+const workflow = createWorkflowApi(context);
 
 return {
-  loadPipeline: pipeline.loadPipeline,
-  loadAgent: pipeline.loadAgent,
-  advanceStage: pipeline.advanceStage,
-  rerunStage: pipeline.rerunStage,
+  loadWorkflow: workflow.loadWorkflow,
+  loadAgent: workflow.loadAgent,
+  advanceStage: workflow.advanceStage,
+  rerunStage: workflow.rerunStage,
 };
 ```
 
@@ -220,7 +220,7 @@ Expected: PASS. If `ports.test.ts` is not added, the first command remains requi
 - [ ] **Step 7: Commit the domain extraction**
 
 ```bash
-git add apps/desktop/src/stores/ports.ts apps/desktop/src/stores/pipeline.ts apps/desktop/src/stores/kanna.ts apps/desktop/src/stores/kanna.taskBaseBranch.test.ts apps/desktop/src/stores/ports.test.ts
+git add apps/desktop/src/stores/ports.ts apps/desktop/src/stores/workflow.ts apps/desktop/src/stores/kanna.ts apps/desktop/src/stores/kanna.taskBaseBranch.test.ts apps/desktop/src/stores/ports.test.ts
 git commit -m "refactor: extract store domain modules"
 ```
 
@@ -244,7 +244,7 @@ await store.init(db);
 mockState.emit("daemon_ready", {});
 await nextTick();
 
-expect(mockState.pipelineItems[0]?.activity).toBe("working");
+expect(mockState.workflowItems[0]?.activity).toBe("working");
 ```
 
 - [ ] **Step 2: Run the runtime-status test before extraction**
@@ -364,7 +364,7 @@ Expected: PASS before moving the orchestration code.
 
 - [ ] **Step 3: Move repo/task/blocker lifecycle actions into `tasks.ts`**
 
-This module owns the mutation-heavy flows and composes the already-extracted `ports`, `pipeline`, `selection`, and `sessions` APIs.
+This module owns the mutation-heavy flows and composes the already-extracted `ports`, `workflow`, `selection`, and `sessions` APIs.
 
 ```ts
 export interface TasksApi {
@@ -411,7 +411,7 @@ export const useKannaStore = defineStore("kanna", () => {
   const ports = createPortsStore(_db);
   const selection = createSelectionApi(context);
   const sessions = createSessionsApi(context);
-  const pipeline = createPipelineApi(context);
+  const workflow = createWorkflowApi(context);
   const tasks = createTasksApi(context);
   const initApi = createInitApi(context);
 
@@ -419,7 +419,7 @@ export const useKannaStore = defineStore("kanna", () => {
     ...state.publicState,
     ...selection,
     ...sessions,
-    ...pipeline,
+    ...workflow,
     ...tasks,
     init: initApi.init,
   };
@@ -449,7 +449,7 @@ git commit -m "refactor: decompose kanna store"
 - Modify: `apps/desktop/src/stores/selection.ts`
 - Modify: `apps/desktop/src/stores/sessions.ts`
 - Modify: `apps/desktop/src/stores/tasks.ts`
-- Modify: `apps/desktop/src/stores/pipeline.ts`
+- Modify: `apps/desktop/src/stores/workflow.ts`
 - Modify: `apps/desktop/src/stores/init.ts`
 - Modify: `apps/desktop/src/stores/ports.ts`
 - Test: `apps/desktop/src/stores/kanna.runtimeStatusSync.test.ts`
@@ -482,6 +482,6 @@ Expected: `kanna.ts` shrinks materially and the new modules each own one coheren
 - [ ] **Step 5: Commit the verification cleanup**
 
 ```bash
-git add apps/desktop/src/stores/kanna.ts apps/desktop/src/stores/state.ts apps/desktop/src/stores/selection.ts apps/desktop/src/stores/sessions.ts apps/desktop/src/stores/tasks.ts apps/desktop/src/stores/pipeline.ts apps/desktop/src/stores/init.ts apps/desktop/src/stores/ports.ts apps/desktop/src/stores/kanna.runtimeStatusSync.test.ts apps/desktop/src/stores/kanna.taskBaseBranch.test.ts
+git add apps/desktop/src/stores/kanna.ts apps/desktop/src/stores/state.ts apps/desktop/src/stores/selection.ts apps/desktop/src/stores/sessions.ts apps/desktop/src/stores/tasks.ts apps/desktop/src/stores/workflow.ts apps/desktop/src/stores/init.ts apps/desktop/src/stores/ports.ts apps/desktop/src/stores/kanna.runtimeStatusSync.test.ts apps/desktop/src/stores/kanna.taskBaseBranch.test.ts
 git commit -m "test: verify store decomposition"
 ```

@@ -390,9 +390,10 @@ pub(super) async fn insert_task_transfer_provenance(
     let db = open_db(&state)?;
     db.insert_task_transfer_provenance(&payload.provenance)
         .map_err(db_error)?;
-    Ok(Json(
-        serde_json::json!({ "pipelineItemId": payload.provenance.pipeline_item_id }),
-    ))
+    Ok(Json(serde_json::json!({
+        "workflowItemId": payload.provenance.pipeline_item_id,
+        "pipelineItemId": payload.provenance.pipeline_item_id,
+    })))
 }
 
 pub(super) async fn claim_pending_incoming_transfer(

@@ -9,7 +9,7 @@ function item(id: string, displayName: string | null): PipelineItem {
     id,
     repo_id: "cloud:repo-1",
     prompt: `Prompt for ${id}`,
-    pipeline: "cloud",
+    workflow: "cloud",
     pipeline_def: null,
     stage: "in progress",
     pr_number: null,

@@ -107,7 +107,7 @@ function item(
     issue_number: null,
     issue_title: null,
     prompt: null,
-    pipeline: "default",
+    workflow: "default",
     stage: "in progress",
     stage_result: null,
     active_post_action: null,
@@ -279,9 +279,9 @@ describe("Sidebar", () => {
       }),
     ], slotId);
 
-    const creatingRow = wrapper.get<HTMLElement>(`.pipeline-item[data-slot-id="${slotId}"]`);
+    const creatingRow = wrapper.get<HTMLElement>(`.workflow-item[data-slot-id="${slotId}"]`);
     const originalElement = creatingRow.element;
-    expect(wrapper.findAll(".pipeline-item")).toHaveLength(1);
+    expect(wrapper.findAll(".workflow-item")).toHaveLength(1);
     expect(wrapper.get(".repo-count").text()).toBe("1");
     expect(creatingRow.classes()).toContain("selected");
     expect(creatingRow.classes()).toContain("initializing-item");
@@ -296,8 +296,8 @@ describe("Sidebar", () => {
     });
     await nextTick();
 
-    const readyRow = wrapper.get<HTMLElement>(`.pipeline-item[data-slot-id="${slotId}"]`);
-    expect(wrapper.findAll(".pipeline-item")).toHaveLength(1);
+    const readyRow = wrapper.get<HTMLElement>(`.workflow-item[data-slot-id="${slotId}"]`);
+    expect(wrapper.findAll(".workflow-item")).toHaveLength(1);
     expect(wrapper.get(".repo-count").text()).toBe("1");
     expect(readyRow.element).toBe(originalElement);
     expect(readyRow.classes()).toContain("selected");
@@ -481,7 +481,7 @@ describe("Sidebar", () => {
       }),
     ]);
 
-    const title = wrapper.get(".pipeline-item .item-title");
+    const title = wrapper.get(".workflow-item .item-title");
     expect(title.text()).toBe("... Commit generated changes");
     expect(title.attributes("title")).toBe("... Commit generated changes");
   });
@@ -509,7 +509,7 @@ describe("Sidebar", () => {
       }),
     ]);
 
-    const title = wrapper.get(".pinned-zone .pipeline-item .item-title");
+    const title = wrapper.get(".pinned-zone .workflow-item .item-title");
     expect(title.text()).toBe("... Pinned post task");
     expect(title.attributes("title")).toBe("... Pinned post task");
   });
@@ -525,7 +525,7 @@ describe("Sidebar", () => {
       }),
     ]);
 
-    const rows = wrapper.findAll(".pipeline-item");
+    const rows = wrapper.findAll(".workflow-item");
     expect(rows.map((row) => row.get(".item-title").text())).toEqual([
       "Parent task",
       "Child task",
@@ -558,7 +558,7 @@ describe("Sidebar", () => {
     ]);
 
     expect(wrapper.find(".repo-count").text()).toBe("2");
-    expect(wrapper.findAll(".pipeline-item").map((row) => row.get(".item-title").text())).toEqual([
+    expect(wrapper.findAll(".workflow-item").map((row) => row.get(".item-title").text())).toEqual([
       "Cycle task A",
       "Cycle task B",
     ]);
@@ -691,7 +691,7 @@ describe("Sidebar", () => {
       }),
     ]);
 
-    expect(wrapper.get(".pipeline-item .item-title").text()).toBe(longTitle);
+    expect(wrapper.get(".workflow-item .item-title").text()).toBe(longTitle);
   });
 
   it("uses the rendered task title as the sidebar title tooltip", () => {
@@ -703,7 +703,7 @@ describe("Sidebar", () => {
       }),
     ]);
 
-    const title = wrapper.get(".pipeline-item .item-title");
+    const title = wrapper.get(".workflow-item .item-title");
     expect(title.text()).toBe("Tooltip task titles");
     expect(title.attributes("title")).toBe("Tooltip task titles");
   });
@@ -721,7 +721,7 @@ describe("Sidebar", () => {
       }),
     ], null);
 
-    const titles = wrapper.findAll(".pipeline-item .item-title");
+    const titles = wrapper.findAll(".workflow-item .item-title");
     expect(titles).toHaveLength(2);
     expect(titles[0]?.text()).toBe("< LAN visible task");
     expect(titles[0]?.attributes("title")).toBe("LAN visible task");
@@ -763,7 +763,7 @@ describe("Sidebar", () => {
       }),
     ], null);
 
-    const rows = wrapper.findAll(".pipeline-item");
+    const rows = wrapper.findAll(".workflow-item");
     const stateByTaskId = new Map(
       rows.map((row) => [row.attributes("data-task-id"), row.attributes("data-transfer-state")]),
     );
@@ -798,7 +798,7 @@ describe("Sidebar", () => {
   });
 
   it("switches the sidebar into a filtered visual state and shows filtered repo counts", async () => {
-    const pipelineItems = [
+    const workflowItems = [
       item("task-1", {
         prompt: "Fix sidebar search visibility",
         display_name: "Sidebar visibility fix",
@@ -818,7 +818,7 @@ describe("Sidebar", () => {
       }),
     ];
 
-    const wrapper = mountSidebar(pipelineItems);
+    const wrapper = mountSidebar(workflowItems);
 
     await wrapper.get(".search-input").setValue("visibility");
 
@@ -856,14 +856,14 @@ describe("Sidebar", () => {
 
     expect((wrapper.get(".search-input").element as HTMLInputElement).value).toBe("");
     expect(wrapper.find('[data-testid="sidebar-search-clear"]').exists()).toBe(false);
-    expect(wrapper.findAll(".pipeline-item .item-title").map((el) => el.text()).sort()).toEqual([
+    expect(wrapper.findAll(".workflow-item .item-title").map((el) => el.text()).sort()).toEqual([
       "Merge queue polish",
       "Sidebar visibility fix",
     ]);
   });
 
   it("excludes closed tasks from filtered repo count totals", async () => {
-    const pipelineItems = [
+    const workflowItems = [
       item("task-open", {
         prompt: "Fix sidebar search visibility",
         display_name: "Sidebar visibility fix",
@@ -878,18 +878,18 @@ describe("Sidebar", () => {
       }),
     ];
 
-    const wrapper = mountSidebar(pipelineItems);
+    const wrapper = mountSidebar(workflowItems);
 
     await wrapper.get(".search-input").setValue("visibility");
 
     expect(wrapper.get(".repo-count").text()).toBe("1/1");
-    expect(wrapper.findAll(".pipeline-item .item-title").map((el) => el.text())).toEqual([
+    expect(wrapper.findAll(".workflow-item .item-title").map((el) => el.text())).toEqual([
       "Sidebar visibility fix",
     ]);
   });
 
   it("shows a search-aware empty state when no tasks match the search query", async () => {
-    const pipelineItems = [
+    const workflowItems = [
       item("task-1", {
         prompt: "Fix sidebar search visibility",
         display_name: "Sidebar visibility fix",
@@ -903,7 +903,7 @@ describe("Sidebar", () => {
       }),
     ];
 
-    const wrapper = mountSidebar(pipelineItems);
+    const wrapper = mountSidebar(workflowItems);
 
     await wrapper.get(".search-input").setValue("does-not-match");
 
@@ -912,7 +912,7 @@ describe("Sidebar", () => {
   });
 
   it("keeps created_at ordering when search is empty and uses search score ordering when query exists", async () => {
-    const pipelineItems = [
+    const workflowItems = [
       item("task-1", {
         display_name: "Task checklist",
         created_at: "2026-01-01T11:00:00.000Z",
@@ -927,7 +927,7 @@ describe("Sidebar", () => {
       }),
     ];
 
-    const wrapper = mountSidebar(pipelineItems, null);
+    const wrapper = mountSidebar(workflowItems, null);
 
     await flushPromises();
     await flushPromises();
@@ -936,7 +936,7 @@ describe("Sidebar", () => {
       matchesSearch(item: PipelineItem): boolean;
     };
 
-    expect(wrapper.findAll(".pipeline-item .item-title").map((el) => el.text())).toEqual([
+    expect(wrapper.findAll(".workflow-item .item-title").map((el) => el.text())).toEqual([
       "Task checklist",
       "task",
       "Other note",
@@ -945,13 +945,13 @@ describe("Sidebar", () => {
     await wrapper.get(".search-input").setValue("task");
     await nextTick();
 
-    expect(wrapper.findAll(".pipeline-item .item-title").map((el) => el.text())).toEqual([
+    expect(wrapper.findAll(".workflow-item .item-title").map((el) => el.text())).toEqual([
       "task",
       "Task checklist",
     ]);
-    expect(vm.matchesSearch(pipelineItems[0])).toBe(true);
-    expect(vm.matchesSearch(pipelineItems[2])).toBe(true);
-    expect(vm.matchesSearch(pipelineItems[1])).toBe(false);
+    expect(vm.matchesSearch(workflowItems[0])).toBe(true);
+    expect(vm.matchesSearch(workflowItems[2])).toBe(true);
+    expect(vm.matchesSearch(workflowItems[1])).toBe(false);
   });
 
   it("scrolls the selected task row into view after selection changes", async () => {
@@ -980,7 +980,7 @@ describe("Sidebar", () => {
       await wrapper.setProps({ selectedSlotId: "slot:task-2" });
       await flushPromises();
 
-      const selected = wrapper.get(".pipeline-item.selected");
+      const selected = wrapper.get(".workflow-item.selected");
       expect(selected.text()).toContain("Second task");
       expect(scrollIntoView).toHaveBeenCalledTimes(1);
       expect(scrollIntoView.mock.contexts[0]).toBe(selected.element);
@@ -1005,7 +1005,7 @@ describe("Sidebar", () => {
         created_at: "2026-01-02T00:00:00.000Z",
       },
     ];
-    const pipelineItems = [
+    const workflowItems = [
       item("task-1", {
         repo_id: repo.id,
         display_name: "First repo task",
@@ -1016,7 +1016,7 @@ describe("Sidebar", () => {
       }),
     ];
 
-    const wrapper = mountSidebarWithRepos(repos, pipelineItems, "slot:task-2");
+    const wrapper = mountSidebarWithRepos(repos, workflowItems, "slot:task-2");
 
     const headers = wrapper.findAll(".repo-header");
     expect(headers[0]?.classes()).not.toContain("contains-selected-task");
@@ -1034,14 +1034,14 @@ describe("Sidebar", () => {
         created_at: "2026-01-02T00:00:00.000Z",
       },
     ];
-    const pipelineItems = [
+    const workflowItems = [
       item("task-1", {
         repo_id: repo.id,
         display_name: "First repo task",
       }),
     ];
 
-    const wrapper = mountSidebarWithRepos(repos, pipelineItems, "slot:task-1", "repo-2");
+    const wrapper = mountSidebarWithRepos(repos, workflowItems, "slot:task-1", "repo-2");
 
     const highlightedHeaders = wrapper.findAll(".repo-header").filter((header) =>
       header.classes().includes("selected") || header.classes().includes("contains-selected-task")
@@ -1077,8 +1077,8 @@ describe("Sidebar", () => {
   it("uses blue accent for selected task and task drop-target outlines by default", () => {
     const source = readFileSync(join(process.cwd(), "src/components/Sidebar.vue"), "utf8");
 
-    const selectedTaskRule = source.match(/\.pipeline-item\.selected\s*\{(?<body>[^}]*)\}/);
-    const dropTargetRule = source.match(/\.pipeline-item\.drop-target\s*\{(?<body>[^}]*)\}/);
+    const selectedTaskRule = source.match(/\.workflow-item\.selected\s*\{(?<body>[^}]*)\}/);
+    const dropTargetRule = source.match(/\.workflow-item\.drop-target\s*\{(?<body>[^}]*)\}/);
 
     expect(selectedTaskRule?.groups?.body).toContain("outline: 1px solid var(--kn-accent)");
     expect(dropTargetRule?.groups?.body).toContain("outline: 1px dashed var(--kn-accent)");
@@ -1103,8 +1103,8 @@ describe("Sidebar", () => {
 
     const selectedRepoRule = source.match(/\.sidebar\.is-filtering \.repo-header\.selected\s*\{(?<body>[^}]*)\}/);
     const selectedTaskRepoRule = source.match(/\.sidebar\.is-filtering \.repo-header\.contains-selected-task\s*\{(?<body>[^}]*)\}/);
-    const selectedTaskRule = source.match(/\.sidebar\.is-filtering \.pipeline-item\.selected\s*\{(?<body>[^}]*)\}/);
-    const dropTargetRule = source.match(/\.sidebar\.is-filtering \.pipeline-item\.drop-target\s*\{(?<body>[^}]*)\}/);
+    const selectedTaskRule = source.match(/\.sidebar\.is-filtering \.workflow-item\.selected\s*\{(?<body>[^}]*)\}/);
+    const dropTargetRule = source.match(/\.sidebar\.is-filtering \.workflow-item\.drop-target\s*\{(?<body>[^}]*)\}/);
 
     expect(selectedRepoRule?.groups?.body).toContain("inset 0 1px 0 var(--kn-warning)");
     expect(selectedTaskRepoRule?.groups?.body).toContain("inset 0 -1px 0 var(--kn-warning)");
@@ -1149,7 +1149,7 @@ describe("Sidebar", () => {
       });
       await flushPromises();
 
-      const selected = wrapper.get(".pipeline-item.selected");
+      const selected = wrapper.get(".workflow-item.selected");
       expect(selected.text()).toContain("Closed task");
       expect(scrollIntoView.mock.contexts[0]).toBe(selected.element);
     } finally {
@@ -1161,8 +1161,8 @@ describe("Sidebar", () => {
     }
   });
 
-  it("keeps a tearing-down task in its pipeline stage section with strikethrough styling", async () => {
-    const pipelineItems = [
+  it("keeps a tearing-down task in its workflow stage section with strikethrough styling", async () => {
+    const workflowItems = [
       item("task-1", {
         display_name: "PR task cleanup",
         stage: "pr",
@@ -1170,19 +1170,19 @@ describe("Sidebar", () => {
       }),
     ];
 
-    const wrapper = mountSidebar(pipelineItems, null);
+    const wrapper = mountSidebar(workflowItems, null);
 
     await flushPromises();
 
     expect(wrapper.findAll(".section-label").map((label) => label.text())).toEqual(["pr"]);
     expect(wrapper.text()).not.toContain("teardown");
-    const title = wrapper.get(".pipeline-item .item-title");
+    const title = wrapper.get(".workflow-item .item-title");
     expect(title.attributes("style")).toContain("text-decoration: line-through");
     expect(title.attributes("style")).toContain("opacity: 0.5");
   });
 
   it("disables pinned drag interactions while search is active", async () => {
-    const pipelineItems = [
+    const workflowItems = [
       item("task-1", {
         display_name: "Task checklist",
         pinned: 1,
@@ -1197,7 +1197,7 @@ describe("Sidebar", () => {
       }),
     ];
 
-    const wrapper = mountSidebar(pipelineItems, null);
+    const wrapper = mountSidebar(workflowItems, null);
 
     await flushPromises();
     await flushPromises();

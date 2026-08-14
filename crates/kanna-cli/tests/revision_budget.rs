@@ -38,8 +38,8 @@ fn serve_once(body: &'static str) -> (std::net::SocketAddr, std::thread::JoinHan
     (address, handle)
 }
 
-/// A dead pipeline socket, so `request-revision` does not warn about it.
-fn dead_pipeline_socket(label: &str) -> std::path::PathBuf {
+/// A dead workflow socket, so `request-revision` does not warn about it.
+fn dead_workflow_socket(label: &str) -> std::path::PathBuf {
     // Kept short deliberately: a unix socket path has to fit in SUN_LEN, and
     // the macOS temp dir already spends most of it.
     let socket_path = std::env::temp_dir().join(format!(
@@ -132,7 +132,7 @@ fn request_revision_prints_a_started_revision_budget() {
         r#"{"taskId":"task-1","revisionBudget":{"rounds":2,"limit":3,"exhausted":false,
             "message":"Revision round 2 of 3 started."}}"#,
     );
-    let socket_path = dead_pipeline_socket("started");
+    let socket_path = dead_workflow_socket("started");
 
     let output = Command::new(env!("CARGO_BIN_EXE_kanna-cli"))
         .args([
@@ -183,7 +183,7 @@ fn request_revision_prints_an_exhausted_revision_budget() {
         r#"{"taskId":"task-1","revisionBudget":{"rounds":3,"limit":3,"exhausted":true,
             "message":"No revision was started: this task has already used its 3 automatic revision round(s)."}}"#,
     );
-    let socket_path = dead_pipeline_socket("exhausted");
+    let socket_path = dead_workflow_socket("exhausted");
 
     let output = Command::new(env!("CARGO_BIN_EXE_kanna-cli"))
         .args([

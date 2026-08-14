@@ -210,7 +210,7 @@ export async function insertPipelineItem(
   item: Omit<PipelineItem, "created_at" | "updated_at" | "activity_changed_at" | "unread_at" | "pinned" | "pin_order" | "display_name" | "closed_at" | "pipeline" | "stage" | "base_ref" | "agent_session_id" | "teardown_started_at" | "last_output_preview" | "agent_spawn_options" | "parent_task_id" | "notify_task_id" | "notified_at" | "pipeline_def"> & { pipeline?: string; stage?: string; activity?: PipelineItem["activity"]; display_name?: string | null; base_ref?: string | null; agent_spawn_options?: string | null; parent_task_id?: string | null; pipeline_def?: string | null }
 ): Promise<void> {
   if (!item.agent_provider) {
-    throw new Error("No agent provider configured for pipeline item insertion.");
+    throw new Error("No agent provider configured for task insertion.");
   }
   await db.execute(
     `INSERT INTO pipeline_item

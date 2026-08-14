@@ -28,7 +28,7 @@ This change must fix the current architectural mismatch where `baseBranch` is so
 The data model already has `pipeline_item.base_ref`, and `createItem()` already accepts an optional `baseBranch`. The missing pieces are in the UI and in the worktree bootstrap path:
 
 - `NewTaskModal.vue` does not expose any base-branch selection.
-- `App.vue` only forwards prompt, provider, and pipeline name.
+- `App.vue` only forwards prompt, provider, and workflow name.
 - `createItem()` computes `base_ref` from the repository default branch even when a caller supplied `baseBranch`.
 - `createWorktree()` treats `baseBranch` as the name of an existing Kanna worktree directory by changing the `git worktree add` working directory to `{repoPath}/.kanna-worktrees/{baseBranch}` and then using `HEAD` as the start point.
 
@@ -77,7 +77,7 @@ The modal can still open and submit successfully in that state.
 
 ## 2. Modal UI
 
-`NewTaskModal.vue` gets a new "Base branch" row below the pipeline row.
+`NewTaskModal.vue` gets a new "Base branch" row below the workflow row.
 
 The row is lightweight by default:
 
@@ -114,19 +114,19 @@ This keeps branch search behavior consistent with the rest of the app and avoids
 
 ## 4. App handoff
 
-`App.vue` loads branch candidates when opening the new-task modal for the selected repo. It already loads pipeline names and repo config there, so this is the correct integration point for repo-scoped modal data.
+`App.vue` loads branch candidates when opening the new-task modal for the selected repo. It already loads workflow names and repo config there, so this is the correct integration point for repo-scoped modal data.
 
 `handleNewTaskSubmit()` expands from:
 
 - `prompt`
 - `agentProvider`
-- `pipelineName`
+- `workflowName`
 
 to:
 
 - `prompt`
 - `agentProvider`
-- `pipelineName`
+- `workflowName`
 - `baseBranch`
 
 That value is forwarded to `store.createItem()`.

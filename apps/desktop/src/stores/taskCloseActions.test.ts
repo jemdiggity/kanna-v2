@@ -40,7 +40,7 @@ function item(id = "task-durable"): PipelineItem {
     issue_number: null,
     issue_title: null,
     prompt: "Close durable task",
-    pipeline: "default",
+    workflow: "default",
     pipeline_def: null,
     stage: "in progress",
     pr_number: null,

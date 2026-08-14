@@ -47,7 +47,7 @@ interface TaskUiSlot {
     repoId: string;
     prompt: string;
     displayName: string | null;
-    pipeline: string;
+    workflow: string;
     stage: string;
     agentType: AgentExecutionType;
     agentProvider: AgentProvider;

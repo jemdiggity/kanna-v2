@@ -13,7 +13,7 @@ interface BuildCreatingTaskUiSlotOptions {
   repoId: string;
   prompt: string;
   displayName?: string | null;
-  pipelineName?: string;
+  workflowName?: string;
   stage?: string;
   agentType: AgentExecutionType;
   requestedAgentProviders?: AgentProvider | AgentProvider[];
@@ -35,7 +35,7 @@ export function buildCreatingTaskUiSlot(
       repo_id: options.repoId,
       prompt: options.prompt,
       display_name: options.displayName ?? null,
-      pipeline: options.pipelineName ?? "no-review",
+      workflow: options.workflowName ?? "no-review",
       stage: options.stage ?? "in progress",
       agent_type: options.agentType,
       agent_provider: providers[0] ?? "claude",
@@ -142,7 +142,7 @@ export function reconcileTaskUiSlots(
         repo_id: task.repo_id,
         prompt: task.prompt ?? "",
         display_name: task.display_name,
-        pipeline: task.pipeline,
+        workflow: task.pipeline,
         stage: task.stage,
         agent_type: normalizeAgentExecutionType(task.agent_type),
         agent_provider: task.agent_provider,
@@ -169,7 +169,7 @@ export function taskUiSlotToSidebarItem(slot: TaskUiSlot): SidebarTaskItem {
     issue_number: null,
     issue_title: null,
     prompt: slot.draft.prompt,
-    pipeline: slot.draft.pipeline,
+    pipeline: slot.draft.workflow,
     pipeline_def: null,
     stage: slot.draft.stage,
     pr_number: null,

@@ -380,4 +380,4 @@ git status --short
 ```
 
 Expected: no whitespace errors; only this revision's intended files are
-uncommitted for the manual pipeline transition.
+uncommitted for the manual workflow transition.

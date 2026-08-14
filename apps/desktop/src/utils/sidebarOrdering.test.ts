@@ -23,7 +23,7 @@ function item(overrides: Partial<PipelineItem>): PipelineItem {
     issue_number: null,
     issue_title: null,
     prompt: "Task",
-    pipeline: "default",
+    workflow: "default",
     stage: "in progress",
     pr_number: null,
     pr_url: null,

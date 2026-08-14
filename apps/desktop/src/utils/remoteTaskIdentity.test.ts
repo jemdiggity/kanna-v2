@@ -7,7 +7,7 @@ function item(overrides: Partial<PipelineItem> = {}): PipelineItem {
     id: "cloud:repo-remote:task-1",
     repo_id: "repo-local",
     prompt: "Remote task",
-    pipeline: "cloud",
+    workflow: "cloud",
     stage: "in progress",
     tags: "[\"in progress\"]",
     pr_number: null,

@@ -34,7 +34,7 @@ async function clickSidebarItemByTitle(
       `const title = ${JSON.stringify(title)};
        const titles = Array.from(document.querySelectorAll(".sidebar .item-title"));
        const match = titles.find((element) => element.textContent?.includes(title));
-       const item = match?.closest(".pipeline-item");
+       const item = match?.closest(".workflow-item");
        if (!item) return false;
        item.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
        return true;`,

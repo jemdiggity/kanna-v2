@@ -87,7 +87,7 @@ New queries in `packages/db/src/queries.ts`:
 
 ## Composable Changes
 
-`usePipeline.ts` gains three methods:
+`useWorkflow.ts` gains three methods:
 - `pinItem(itemId, position)` — calls `pinPipelineItem`, updates reactive state
 - `unpinItem(itemId)` — calls `unpinPipelineItem`, updates reactive state
 - `reorderPinned(repoId, orderedIds)` — calls `reorderPinnedItems`, updates reactive state
@@ -109,6 +109,6 @@ Keyboard navigation (Cmd+Opt+Up/Down) follows the same order: pinned tasks first
 | `apps/desktop/src/components/Sidebar.vue` | Add drag-and-drop handlers, divider rendering, update `itemsForRepo()` |
 | `packages/db/src/schema.ts` | Add `pinned` and `pin_order` to `PipelineItem` |
 | `packages/db/src/queries.ts` | Add pin/unpin/reorder queries, update `insertPipelineItem` param type to omit `pinned`/`pin_order` (rely on DB defaults) |
-| `apps/desktop/src/composables/usePipeline.ts` | Add `pinItem`, `unpinItem`, `reorderPinned` |
+| `apps/desktop/src/composables/useWorkflow.ts` | Add `pinItem`, `unpinItem`, `reorderPinned` |
 | `apps/desktop/src/tauri-mock.ts` | Update mock DB to handle pin/unpin/reorder queries for browser-mode dev |
 | `PRD.md` | Add Pinned Tasks section |

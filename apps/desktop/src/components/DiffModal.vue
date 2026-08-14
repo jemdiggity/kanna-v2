@@ -52,7 +52,7 @@ const reviewEnabled = computed(() =>
 );
 // "Approve & Merge" is only truthful when the task's pinned current stage
 // declares the merge-signaling approve post (approveSignalsMerge comes from
-// the pinned pipeline_def). Pre-change snapshots and custom pipelines whose
+// the pinned pipeline_def). Pre-change snapshots and custom workflows whose
 // final stage has no such post get the generic "Approve".
 const approveMergesTask = computed(() => props.approveSignalsMerge === true);
 // Approval is single-flight for the full post lifetime: the local flag

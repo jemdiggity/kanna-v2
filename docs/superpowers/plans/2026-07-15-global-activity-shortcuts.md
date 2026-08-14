@@ -15,7 +15,7 @@
 - Work only in the current Kanna worktree and branch.
 - Use `pnpm` for every test and build command.
 - Follow red-green-refactor: each production change follows a focused failing test run.
-- Do not commit during this stage; Kanna's later pipeline stage owns the commit.
+- Do not commit during this stage; Kanna's later workflow stage owns the commit.
 - Do not remove `selectTaskByActivity`'s generic `"newest"` mode. It is harmless, independently tested utility behavior and is outside this shortcut change.
 
 ## File Map
@@ -507,7 +507,7 @@ git status --short
 git diff --stat
 ```
 
-Expected: `git diff --check` exits 0; status lists only the approved design/plan and implementation files; no unrelated files appear. Leave all changes uncommitted for the Kanna pipeline.
+Expected: `git diff --check` exits 0; status lists only the approved design/plan and implementation files; no unrelated files appear. Leave all changes uncommitted for the Kanna workflow.
 
 ### Task 4: Final-Review Remediation
 

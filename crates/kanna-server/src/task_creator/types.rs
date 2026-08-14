@@ -1,4 +1,4 @@
-use super::definitions::PipelineStageTransition;
+use super::definitions::WorkflowStageTransition;
 use super::provider::AgentProvider;
 use kanna_daemon::protocol::AgentProvider as DaemonAgentProvider;
 use std::collections::HashMap;
@@ -10,8 +10,8 @@ pub(super) struct TaskCreationRequest {
     pub(super) create_intent_json: Option<String>,
     pub(super) task_prompt: String,
     pub(super) display_name: Option<String>,
-    pub(super) pipeline_name: Option<String>,
-    pub(super) pipeline_def: Option<String>,
+    pub(super) workflow_name: Option<String>,
+    pub(super) workflow_def: Option<String>,
     pub(super) base_ref: Option<String>,
     pub(super) stored_base_ref: Option<String>,
     pub(super) stage_override: Option<String>,
@@ -97,7 +97,7 @@ pub(crate) struct PreparedTaskSpawn {
     pub(super) agent_provider: String,
     pub(super) model: Option<String>,
     pub(super) effort: Option<String>,
-    pub(super) completion_transition: PipelineStageTransition,
+    pub(super) completion_transition: WorkflowStageTransition,
     /// The agent CLI's own session id assigned at spawn (Claude or Copilot
     /// PTY); recorded on the stage run so a later recovery can resume it.
     pub(super) provider_session_id: Option<String>,
@@ -140,7 +140,7 @@ pub(crate) enum PreparedSessionSpawn {
     },
 }
 
-/// Stage transitions are durable: an in-pipeline hop starts a new stage run on
+/// Stage transitions are durable: an in-workflow hop starts a new stage run on
 /// the SAME task (`Run`), a stage with pending tail work dispatches its post
 /// into the running session (`Post`), and advancing past the final stage
 /// closes the task (`Close`). No transition ever creates a new task or
@@ -180,7 +180,7 @@ pub(crate) struct PreparedStageRerun {
     pub(super) agent_provider: String,
     pub(super) model: Option<String>,
     pub(super) effort: Option<String>,
-    pub(super) completion_transition: PipelineStageTransition,
+    pub(super) completion_transition: WorkflowStageTransition,
     pub(super) provider_session_id: Option<String>,
     pub(super) cwd: String,
     pub(super) env: HashMap<String, String>,
@@ -259,7 +259,7 @@ pub(crate) struct PreparedStageRunSpawn {
     pub(super) agent_provider: String,
     pub(super) model: Option<String>,
     pub(super) effort: Option<String>,
-    pub(super) completion_transition: PipelineStageTransition,
+    pub(super) completion_transition: WorkflowStageTransition,
     pub(super) feedback: Option<String>,
     /// The agent CLI's own session id this run starts (fresh assign) or
     /// continues (resume); recorded on the stage run.
@@ -287,7 +287,7 @@ pub(super) struct DeferredStageSetup {
     pub(super) commands: Vec<String>,
     pub(super) provider_candidates: Vec<AgentProvider>,
     pub(super) source_agent_type: Option<String>,
-    pub(super) pipeline_name: String,
+    pub(super) workflow_name: String,
     pub(super) final_prompt: String,
     pub(super) model: Option<String>,
     pub(super) effort: Option<String>,

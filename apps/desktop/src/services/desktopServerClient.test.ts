@@ -6,7 +6,7 @@ import {
   fetchDesktopRepoAgentDefinition,
   fetchDesktopRepoAgentProviders,
   fetchDesktopRepoKannaDefinitions,
-  fetchDesktopRepoPipelineDefinition,
+  fetchDesktopRepoWorkflowDefinition,
   fetchDesktopRepoCommands,
   runDesktopRepoCommand,
   fetchDesktopSnapshot,
@@ -16,7 +16,7 @@ import {
   mutateDesktopWindowWorkspace,
   putDesktopCloudTransferIdentity,
   setDesktopTaskCloudIdentity,
-  setDesktopTaskPipeline,
+  setDesktopTaskWorkflow,
   approveIncomingTaskTransfer,
   pushTaskToPeer,
   rejectIncomingTaskTransfer,
@@ -367,12 +367,12 @@ describe("desktopServerClient", () => {
       revision: "abc123",
       refName: "origin/main",
       config: {
-        pipeline: "qa",
+        workflow: "qa",
         reserved_port_offsets: [0, 2],
         stage_order: ["review", "pr"],
       },
-      defaultPipeline: "qa",
-      pipelines: ["default", "qa"],
+      defaultWorkflow: "qa",
+      workflows: ["default", "qa"],
     };
     const fetchMock = vi.fn(async () => new Response(JSON.stringify(response), {
       status: 200,
@@ -392,12 +392,12 @@ describe("desktopServerClient", () => {
     );
   });
 
-  it("fetches a revisioned pipeline definition with each path segment encoded independently", async () => {
+  it("fetches a revisioned workflow definition with each path segment encoded independently", async () => {
     const response = {
       revision: "def456",
       definition: {
         name: "qa candidate",
-        description: "Quality assurance pipeline",
+        description: "Quality assurance workflow",
         environments: {
           test: {
             setup: ["pnpm install"],
@@ -425,11 +425,11 @@ describe("desktopServerClient", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(
-      fetchDesktopRepoPipelineDefinition("repo/one", "qa candidate"),
+      fetchDesktopRepoWorkflowDefinition("repo/one", "qa candidate"),
     ).resolves.toEqual(response);
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "http://127.0.0.1:48121/v1/repos/repo%2Fone/kanna-definitions/pipelines/qa%20candidate",
+      "http://127.0.0.1:48121/v1/repos/repo%2Fone/kanna-definitions/workflows/qa%20candidate",
       {
         method: "GET",
         headers: undefined,
@@ -476,10 +476,10 @@ describe("desktopServerClient", () => {
       revision: "abc123",
       refName: "origin/main",
       config: {},
-      defaultPipeline: "default",
-      pipelines: ["default"],
+      defaultWorkflow: "default",
+      workflows: ["default"],
     };
-    const pipeline = {
+    const workflow = {
       revision: "abc123",
       definition: {
         name: "default",
@@ -495,7 +495,7 @@ describe("desktopServerClient", () => {
       },
     };
     const fetchRepoKannaDefinitions = vi.fn(async () => manifest);
-    const fetchRepoPipelineDefinition = vi.fn(async () => pipeline);
+    const fetchRepoWorkflowDefinition = vi.fn(async () => workflow);
     const fetchRepoAgentDefinition = vi.fn(async () => agent);
     const fetchMock = vi.fn(() => {
       throw new Error("unexpected fetch");
@@ -503,15 +503,15 @@ describe("desktopServerClient", () => {
     vi.stubGlobal("fetch", fetchMock);
     setDesktopServerClientHandlersForTests({
       fetchRepoKannaDefinitions,
-      fetchRepoPipelineDefinition,
+      fetchRepoWorkflowDefinition,
       fetchRepoAgentDefinition,
     });
 
     await expect(fetchDesktopRepoKannaDefinitions("repo-1")).resolves.toBe(manifest);
-    await expect(fetchDesktopRepoPipelineDefinition("repo-1", "default")).resolves.toBe(pipeline);
+    await expect(fetchDesktopRepoWorkflowDefinition("repo-1", "default")).resolves.toBe(workflow);
     await expect(fetchDesktopRepoAgentDefinition("repo-1", "implement")).resolves.toBe(agent);
     expect(fetchRepoKannaDefinitions).toHaveBeenCalledWith("repo-1");
-    expect(fetchRepoPipelineDefinition).toHaveBeenCalledWith("repo-1", "default");
+    expect(fetchRepoWorkflowDefinition).toHaveBeenCalledWith("repo-1", "default");
     expect(fetchRepoAgentDefinition).toHaveBeenCalledWith("repo-1", "implement");
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -608,10 +608,10 @@ describe("desktopServerClient", () => {
     );
   });
 
-  it("changes a task pipeline through the encoded local task endpoint", async () => {
+  it("changes a task workflow through the encoded local task endpoint", async () => {
     const response = {
       taskId: "task/with space",
-      pipelineName: "single-reviewer",
+      workflowName: "single-reviewer",
       stage: "in progress",
       revisionRounds: 2,
       revisionLimit: 3,
@@ -625,15 +625,15 @@ describe("desktopServerClient", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(
-      setDesktopTaskPipeline("task/with space", "single-reviewer"),
+      setDesktopTaskWorkflow("task/with space", "single-reviewer"),
     ).resolves.toEqual(response);
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "http://127.0.0.1:48121/v1/tasks/task%2Fwith%20space/actions/set-pipeline",
+      "http://127.0.0.1:48121/v1/tasks/task%2Fwith%20space/actions/set-workflow",
       {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ pipelineName: "single-reviewer" }),
+        body: JSON.stringify({ workflowName: "single-reviewer" }),
       },
     );
   });

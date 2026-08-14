@@ -147,7 +147,7 @@ async fn assert_created_task_overrides_reach_daemon_spawn(
     let mut request = serde_json::json!({
         "repoId": "repo-1",
         "prompt": format!("Run {} with explicit overrides", provider.as_str()),
-        "pipelineName": TEST_PROVIDER_NEUTRAL_PIPELINE,
+        "workflowName": TEST_PROVIDER_NEUTRAL_WORKFLOW,
         "agentProvider": provider.as_str(),
     });
     if let Some((model, _)) = model {
@@ -629,7 +629,7 @@ async fn create_task_route_replays_requested_task_id_without_preparing_or_spawni
         "repoId": "repo-1",
         "prompt": "Ship idempotently",
         "displayName": "Idempotent task",
-        "pipelineName": TEST_PROVIDER_NEUTRAL_PIPELINE,
+        "workflowName": TEST_PROVIDER_NEUTRAL_WORKFLOW,
         "agentProvider": "claude",
         "recoverySnapshot": {
             "serialized": "RECOVERY\u{001b}[31m",
@@ -748,7 +748,7 @@ async fn requested_task_retry_repairs_prepare_before_daemon_spawn() {
         "repoId": "repo-1",
         "prompt": "Repair the interrupted spawn",
         "displayName": "Prepared intent repair",
-        "pipelineName": TEST_PROVIDER_NEUTRAL_PIPELINE,
+        "workflowName": TEST_PROVIDER_NEUTRAL_WORKFLOW,
         "agentProvider": "claude",
         "agentType": "pty",
         "terminalCols": 132,
@@ -852,10 +852,10 @@ async fn requested_task_retry_repairs_prepare_before_daemon_spawn() {
     assert_eq!(db.count_test_worktrees_for_repo("repo-1").unwrap(), 0);
     std::fs::write(
         repo_root
-            .join(".kanna/pipelines")
-            .join(format!("{TEST_PROVIDER_NEUTRAL_PIPELINE}.json")),
+            .join(".kanna/workflows")
+            .join(format!("{TEST_PROVIDER_NEUTRAL_WORKFLOW}.json")),
         serde_json::json!({
-            "name": TEST_PROVIDER_NEUTRAL_PIPELINE,
+            "name": TEST_PROVIDER_NEUTRAL_WORKFLOW,
             "stages": [{
                 "name": "in progress",
                 "prompt": "MUTATED-DEFINITION-$TASK_PROMPT",
@@ -1207,7 +1207,7 @@ async fn create_task_route_uses_saved_default_agent_provider_when_payload_omits_
                     serde_json::json!({
                         "repoId": "repo-1",
                         "prompt": "Use the saved default provider",
-                        "pipelineName": TEST_PROVIDER_NEUTRAL_PIPELINE
+                        "workflowName": TEST_PROVIDER_NEUTRAL_WORKFLOW
                     })
                     .to_string(),
                 ))
@@ -1323,7 +1323,7 @@ async fn create_task_route_runs_a_non_review_builtin_agent_in_the_first_stage() 
                     serde_json::json!({
                         "repoId": "repo-1",
                         "prompt": "Commit this task through the named agent",
-                        "pipelineName": TEST_PROVIDER_NEUTRAL_PIPELINE,
+                        "workflowName": TEST_PROVIDER_NEUTRAL_WORKFLOW,
                         "agent": "commit"
                     })
                     .to_string(),
@@ -1521,9 +1521,9 @@ async fn create_task_route_preserves_stage_override_for_transferred_tasks() {
     );
     let repo_root = std::env::temp_dir().join(format!("kanna-http-create-stage-override-{unique}"));
     init_test_git_repo(&repo_root);
-    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::write(
-        repo_root.join(".kanna/pipelines/qa.json"),
+        repo_root.join(".kanna/workflows/qa.json"),
         serde_json::json!({
             "stages": [
                 {
@@ -1550,7 +1550,7 @@ async fn create_task_route_preserves_stage_override_for_transferred_tasks() {
         .unwrap()
         .success());
     assert!(Command::new("git")
-        .args(["commit", "-m", "add qa pipeline"])
+        .args(["commit", "-m", "add qa workflow"])
         .current_dir(&repo_root)
         .status()
         .unwrap()
@@ -1623,7 +1623,7 @@ async fn create_task_route_preserves_stage_override_for_transferred_tasks() {
                     serde_json::json!({
                         "repoId": "repo-1",
                         "prompt": "Ship safely",
-                        "pipelineName": "single-reviewer",
+                        "workflowName": "single-reviewer",
                         "stage": "pr",
                         "agentProvider": "claude",
                         "agentType": "agent"
@@ -1683,7 +1683,7 @@ async fn create_task_route_sends_kanna_cli_runtime_env_to_daemon_spawn() {
     let daemon_dir = std::env::temp_dir().join(format!("kanna-http-create-env-daemon-{unique}"));
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
-    let pipeline_socket_path = pipeline_socket_path_for_daemon_dir(&daemon_dir.to_string_lossy());
+    let pipeline_socket_path = workflow_socket_path_for_daemon_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
 
     // Full desktop E2E would require launching the Tauri app plus staged sidecars
@@ -2233,7 +2233,7 @@ async fn create_task_route_with_only_closed_blockers_spawns_immediately() {
                     serde_json::json!({
                         "repoId": "repo-1",
                         "prompt": "All blockers are already closed",
-                        "pipelineName": TEST_PROVIDER_NEUTRAL_PIPELINE,
+                        "workflowName": TEST_PROVIDER_NEUTRAL_WORKFLOW,
                         "agentProvider": "claude",
                         "agentType": "pty",
                         "blockerTaskIds": ["blocker-1"]

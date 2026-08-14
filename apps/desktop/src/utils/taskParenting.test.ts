@@ -10,7 +10,7 @@ function item(overrides: Partial<PipelineItem>): PipelineItem {
     issue_number: null,
     issue_title: null,
     prompt: null,
-    pipeline: "default",
+    workflow: "default",
     stage: "in progress",
     stage_result: null,
     active_post_action: null,

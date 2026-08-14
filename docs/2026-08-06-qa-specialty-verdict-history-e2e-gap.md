@@ -49,12 +49,12 @@ new-versus-carried aggregate without external credentials or model variance.
   `list_task_children_route_returns_open_and_closed_direct_children_with_verdicts`
   covers direct-only ordering, closed and runless children, unrelated tasks,
   exclusion of grandchildren, latest-run verdict data, and the
-  `pipelineName` discriminator.
+  `workflowName` discriminator.
 - Tool-catalog tests cover the MCP tool's path mapping and input schema;
   typed CLI tests cover `task children --task-id`, API path construction, and
   request/response serialization of the child and latest-run shapes.
-- `packages/core/src/pipeline/qa-assets.test.ts` pins the shipped dispatcher
-  prompt contract: MCP-first lookup, pipeline discrimination, fail-closed
+- `packages/core/src/workflow/qa-assets.test.ts` pins the shipped dispatcher
+  prompt contract: MCP-first lookup, workflow discrimination, fail-closed
   malformed/version-incomplete records, finite repair behavior, chronological
   verdict reduction, and carried-failure handling.
 - Existing server tests cover the individual wait/get/close operations and

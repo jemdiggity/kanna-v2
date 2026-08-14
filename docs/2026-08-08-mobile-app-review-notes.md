@@ -42,7 +42,7 @@ Review flow
 1. Launch Kanna. The Tasks screen and the account badge in the upper-right corner are visible. If iOS presents the Local Network permission prompt, it is safe to allow it; LAN discovery will not find the remote review iMac, which is expected.
 2. Tap the account badge, enter the review credentials above, and tap Sign In. The badge changes to the review account with a green status dot, and the seeded task data becomes available.
 3. Tap the account badge again, then Machines. The review iMac appears in Available with the Account badge and the status “Available through your account.” This confirms the remote relay path is connected. Tap Back.
-4. Open Activity and select one of the existing demo tasks. The list shows the repository name, task title, and pipeline stage; selecting a task opens its detail view.
+4. Open Activity and select one of the existing demo tasks. The list shows the repository name, task title, and workflow stage; selecting a task opens its detail view.
 5. Observe the task detail view. Its title and stage remain at the top while the coding agent's terminal or structured agent output is rendered below.
 6. In the Reply field, send exactly: App Review smoke test: reply “Received” only. Do not run commands or modify files. The submitted input and the agent's acknowledgement become visible in the task output.
 

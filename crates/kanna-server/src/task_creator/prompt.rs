@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 
-use super::definitions::{PipelineStage, PipelineStageTransition, RepoDefinitions};
+use super::definitions::{RepoDefinitions, WorkflowStage, WorkflowStageTransition};
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_target_stage_prompt(
     definitions: &RepoDefinitions,
     repo_path: &str,
-    stage: &PipelineStage,
+    stage: &WorkflowStage,
     task_prompt: &str,
     prev_result: Option<&str>,
     prev_main_result: Option<&str>,
@@ -32,7 +32,7 @@ pub(super) fn build_target_stage_prompt(
 pub(super) fn build_target_stage_prompt_with_instructions(
     definitions: &RepoDefinitions,
     repo_path: &str,
-    stage: &PipelineStage,
+    stage: &WorkflowStage,
     task_prompt: &str,
     prev_result: Option<&str>,
     prev_main_result: Option<&str>,
@@ -205,7 +205,7 @@ fn build_prompt_section(
     Some(format!("{heading}\n\n{body}"))
 }
 
-/// Which capped revision round a run is, when the pipeline caps them. Told to
+/// Which capped revision round a run is, when the workflow caps them. Told to
 /// the revising agent so it knows the loop is bounded and that widening the
 /// task is not an option. Human-requested revisions carry no round: they are
 /// the human's call, and they hand the budget back.
@@ -267,14 +267,14 @@ pub(super) fn build_revision_resume_message(
     original_task_prompt: &str,
     feedback: &str,
     task_id: &str,
-    transition: PipelineStageTransition,
+    transition: WorkflowStageTransition,
     round: Option<RevisionRound>,
 ) -> String {
     let completion = match transition {
-        PipelineStageTransition::Auto => format!(
-            "Address the feedback in this worktree, then record stage completion: call MCP `kanna_complete_stage {{\"task_id\": \"{task_id}\", \"status\": \"success\", \"summary\": \"...\"}}`; only if MCP tools are unavailable, fall back to `kanna-cli stage-complete --task-id \"{task_id}\" --status success --summary \"...\"`. Kanna will then advance this task's pipeline."
+        WorkflowStageTransition::Auto => format!(
+            "Address the feedback in this worktree, then record stage completion: call MCP `kanna_complete_stage {{\"task_id\": \"{task_id}\", \"status\": \"success\", \"summary\": \"...\"}}`; only if MCP tools are unavailable, fall back to `kanna-cli stage-complete --task-id \"{task_id}\" --status success --summary \"...\"`. Kanna will then advance this task's workflow."
         ),
-        PipelineStageTransition::Manual => format!(
+        WorkflowStageTransition::Manual => format!(
             "Address the feedback in this worktree, then finish with a clear summary of what you changed — do not record stage completion; this stage advances manually, so the user reviews the revision and advances the task themselves. If you cannot address the feedback, record failure instead of stopping silently: call MCP `kanna_complete_stage {{\"task_id\": \"{task_id}\", \"status\": \"failure\", \"summary\": \"...\"}}`; only if MCP tools are unavailable, fall back to `kanna-cli stage-complete --task-id \"{task_id}\" --status failure --summary \"...\"`."
         ),
     };

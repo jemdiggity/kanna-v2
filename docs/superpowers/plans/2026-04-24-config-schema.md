@@ -54,7 +54,7 @@ if (schema.type !== "object") {
   throw new Error(`expected object schema, got ${schema.type}`);
 }
 
-for (const key of ["$schema", "pipeline", "setup", "teardown", "test", "ports", "stage_order", "workspace"]) {
+for (const key of ["$schema", "workflow", "setup", "teardown", "test", "ports", "stage_order", "workspace"]) {
   if (!schema.properties || !(key in schema.properties)) {
     throw new Error(`missing top-level schema property: ${key}`);
   }
@@ -86,7 +86,7 @@ Create `.kanna/config.schema.json` with:
   "additionalProperties": false,
   "properties": {
     "$schema": { "type": "string", "format": "uri" },
-    "pipeline": { "type": "string" },
+    "workflow": { "type": "string" },
     "setup": { "type": "array", "items": { "type": "string" } },
     "teardown": { "type": "array", "items": { "type": "string" } },
     "test": { "type": "array", "items": { "type": "string" } },

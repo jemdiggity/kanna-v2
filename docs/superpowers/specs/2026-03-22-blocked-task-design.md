@@ -6,7 +6,7 @@ Sometimes a new task depends on a task that is currently in progress. There's no
 
 ## Overview
 
-- New `blocked` pipeline stage for tasks waiting on other tasks
+- New `blocked` workflow stage for tasks waiting on other tasks
 - New `task_blocker` junction table for many-to-many dependency tracking
 - Two command palette commands: "Block Task" and "Edit Blocked Task"
 - Auto-unblock logic triggers when any task leaves `in_progress`
@@ -172,7 +172,7 @@ All changes target the post-refactor branch (`task-8a29c9c0`).
 
 | File | Changes |
 |------|---------|
-| `packages/core/src/pipeline/types.ts` | Add `blocked` to Stage, add `blocked → in_progress` and `blocked → done` transitions |
+| `packages/core/src/workflow/types.ts` | Add `blocked` to Stage, add `blocked → in_progress` and `blocked → done` transitions |
 | `packages/db/src/schema.ts` | Add `TaskBlocker` interface |
 | `packages/db/src/queries.ts` | Add blocker CRUD + `getUnblockedItems()` |
 | `apps/desktop/src/stores/db.ts` | Add `task_blocker` table migration |

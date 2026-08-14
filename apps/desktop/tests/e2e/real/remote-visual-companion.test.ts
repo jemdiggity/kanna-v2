@@ -352,7 +352,7 @@ async function waitForRemoteTask(input: {
           (ref.transport || ${JSON.stringify(input.transport)}) === ${JSON.stringify(input.transport)}
       );
       const renderedIds = new Set(Array.from(
-        document.querySelectorAll(".sidebar .pipeline-item[data-task-id]")
+        document.querySelectorAll(".sidebar .workflow-item[data-task-id]")
       ).filter((row) => row.isConnected && row.getClientRects().length > 0)
         .map((row) => row.dataset.taskId));
       const canonical = matches.filter(([id]) =>
@@ -427,7 +427,7 @@ async function selectRemoteTask(input: {
       latest = await secondary.executeSync(`
         const itemId = ${JSON.stringify(input.itemId)};
         const rows = Array.from(
-          document.querySelectorAll(".sidebar .pipeline-item[data-task-id]")
+          document.querySelectorAll(".sidebar .workflow-item[data-task-id]")
         ).filter((candidate) =>
           candidate.dataset.taskId === itemId &&
           candidate.isConnected &&

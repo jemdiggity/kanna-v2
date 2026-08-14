@@ -26,7 +26,7 @@
   - Ensure history/selection validity is based on currently visible items from the snapshot-backed selectors.
 - Modify: `apps/desktop/src/stores/sessions.ts`
   - Reconcile runtime status changes through the single snapshot reload path.
-- Modify: `apps/desktop/src/stores/pipeline.ts`
+- Modify: `apps/desktop/src/stores/workflow.ts`
   - Reconcile stage reruns through the single snapshot reload path.
 - Create: `apps/desktop/src/stores/kanna.querySnapshot.test.ts`
   - Regression coverage for repo visibility invalidation and hidden-repo navigation.
@@ -70,7 +70,7 @@ const mockState = vi.hoisted(() => {
       issue_number: null,
       issue_title: null,
       prompt: "Ship it",
-      pipeline: "default",
+      workflow: "default",
       stage: "in progress",
       stage_result: null,
       tags: "[]",
@@ -98,7 +98,7 @@ const mockState = vi.hoisted(() => {
   }
 
   let repos = [makeRepo(), makeRepo({ id: "repo-2", path: "/tmp/repo-2", name: "repo-2" })];
-  let pipelineItems = [
+  let workflowItems = [
     makeItem(),
     makeItem({ id: "item-2", repo_id: "repo-2", branch: "task-item-2" }),
   ];
@@ -106,13 +106,13 @@ const mockState = vi.hoisted(() => {
   return {
     get repos() { return repos; },
     set repos(value: Repo[]) { repos = value; },
-    get pipelineItems() { return pipelineItems; },
-    set pipelineItems(value: PipelineItem[]) { pipelineItems = value; },
+    get workflowItems() { return workflowItems; },
+    set workflowItems(value: PipelineItem[]) { workflowItems = value; },
     makeRepo,
     makeItem,
     reset() {
       repos = [makeRepo(), makeRepo({ id: "repo-2", path: "/tmp/repo-2", name: "repo-2" })];
-      pipelineItems = [
+      workflowItems = [
         makeItem(),
         makeItem({ id: "item-2", repo_id: "repo-2", branch: "task-item-2" }),
       ];
@@ -137,11 +137,11 @@ it("removes a hidden repo and its tasks from the visible store state together", 
 it("restores an unhidden repo with its tasks from the same snapshot refresh", async () => {
   const store = useKannaStore();
   mockState.repos = [mockState.makeRepo()];
-  mockState.pipelineItems = [mockState.makeItem()];
+  mockState.workflowItems = [mockState.makeItem()];
   await store.init();
 
   mockState.repos = [mockState.makeRepo(), mockState.makeRepo({ id: "repo-2", path: "/tmp/repo-2", name: "repo-2" })];
-  mockState.pipelineItems = [
+  mockState.workflowItems = [
     mockState.makeItem(),
     mockState.makeItem({ id: "item-2", repo_id: "repo-2", branch: "task-item-2" }),
   ];
@@ -203,7 +203,7 @@ git commit -m "test: add query snapshot regression coverage"
 - Modify: `apps/desktop/src/stores/init.ts`
 - Modify: `apps/desktop/src/stores/selection.ts`
 - Modify: `apps/desktop/src/stores/sessions.ts`
-- Modify: `apps/desktop/src/stores/pipeline.ts`
+- Modify: `apps/desktop/src/stores/workflow.ts`
 - Test: `apps/desktop/src/stores/kanna.querySnapshot.test.ts`
 
 - [ ] **Step 1: Replace split query state with a canonical snapshot in `queries.ts`**
@@ -331,7 +331,7 @@ Use that in:
 - `tasks.ts`
 - `init.ts`
 - `sessions.ts`
-- `pipeline.ts`
+- `workflow.ts`
 - `selection.ts`
 
 The key rule is that repo visibility changes and task mutations reconcile through the same reload path.
@@ -384,7 +384,7 @@ Expected: PASS
 - [ ] **Step 10: Commit the snapshot refactor**
 
 ```bash
-git add apps/desktop/src/stores/queries.ts apps/desktop/src/stores/state.ts apps/desktop/src/stores/kanna.ts apps/desktop/src/stores/tasks.ts apps/desktop/src/stores/init.ts apps/desktop/src/stores/selection.ts apps/desktop/src/stores/sessions.ts apps/desktop/src/stores/pipeline.ts apps/desktop/src/stores/kanna.querySnapshot.test.ts
+git add apps/desktop/src/stores/queries.ts apps/desktop/src/stores/state.ts apps/desktop/src/stores/kanna.ts apps/desktop/src/stores/tasks.ts apps/desktop/src/stores/init.ts apps/desktop/src/stores/selection.ts apps/desktop/src/stores/sessions.ts apps/desktop/src/stores/workflow.ts apps/desktop/src/stores/kanna.querySnapshot.test.ts
 git commit -m "refactor: unify store query snapshot"
 ```
 

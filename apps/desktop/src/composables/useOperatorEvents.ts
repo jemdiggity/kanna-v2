@@ -6,7 +6,7 @@ export function useOperatorEvents(db: Ref<DbHandle | null>): () => void {
   function handleVisibilityChange() {
     if (!db.value) return;
     const eventType = document.hidden ? "app_blur" : "app_focus";
-    postDesktopOperatorEvent({ eventType, pipelineItemId: null, repoId: null }).catch((e) =>
+    postDesktopOperatorEvent({ eventType, workflowItemId: null, repoId: null }).catch((e) =>
       console.error("[operator-events] failed:", e)
     );
   }

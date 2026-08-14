@@ -480,30 +480,30 @@ pub(super) fn build_teardown_shell_command(teardown_cmds: &[String]) -> String {
 }
 
 /// Canonical Kanna runtime guidance shared with the desktop frontend.
-/// `packages/core/src/pipeline/prompt-builder.ts` mirrors this file as a TS
+/// `packages/core/src/workflow/prompt-builder.ts` mirrors this file as a TS
 /// constant; a sync test there keeps both sides byte-identical.
 const KANNA_TASK_ENVIRONMENT_TEMPLATE: &str =
-    include_str!("../../../../packages/core/src/pipeline/kanna-task-environment.md");
+    include_str!("../../../../packages/core/src/workflow/kanna-task-environment.md");
 
 // Completion guidance depends on the stage's transition policy: only `auto`
 // stages advance when the agent records a successful result; `manual` stages
 // wait for the user to review and advance. Mirrors COMPLETION_GUIDANCE in
 // prompt-builder.ts — keep the texts in sync.
-const COMPLETION_AUTO: &str = "This stage's transition is `auto`: when this stage's goal is achieved, record completion so Kanna can advance the pipeline: call MCP `kanna_complete_stage {\"task_id\": \"$KANNA_TASK_ID\", \"status\": \"success\", \"summary\": \"...\"}` (`task_id` is the value of the `KANNA_TASK_ID` env var); only if MCP tools are unavailable, fall back to `kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\" --status success --summary \"...\"`. If you are blocked or the goal cannot be met, record status `failure` with the reason instead of stopping silently.";
-const COMPLETION_MANUAL: &str = "This stage's transition is `manual`: recording a successful result does not advance the pipeline — the user reviews your work and advances the stage themselves. When this stage's goal is achieved, finish with a clear summary of what you did; record completion only if this stage's prompt asks for it. If you are blocked or the goal cannot be met, record status `failure` with the reason instead of stopping silently: call MCP `kanna_complete_stage {\"task_id\": \"$KANNA_TASK_ID\", \"status\": \"failure\", \"summary\": \"...\"}` (`task_id` is the value of the `KANNA_TASK_ID` env var); only if MCP tools are unavailable, fall back to `kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\" --status failure --summary \"...\"`.";
+const COMPLETION_AUTO: &str = "This stage's transition is `auto`: when this stage's goal is achieved, record completion so Kanna can advance the workflow: call MCP `kanna_complete_stage {\"task_id\": \"$KANNA_TASK_ID\", \"status\": \"success\", \"summary\": \"...\"}` (`task_id` is the value of the `KANNA_TASK_ID` env var); only if MCP tools are unavailable, fall back to `kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\" --status success --summary \"...\"`. If you are blocked or the goal cannot be met, record status `failure` with the reason instead of stopping silently.";
+const COMPLETION_MANUAL: &str = "This stage's transition is `manual`: recording a successful result does not advance the workflow — the user reviews your work and advances the stage themselves. When this stage's goal is achieved, finish with a clear summary of what you did; record completion only if this stage's prompt asks for it. If you are blocked or the goal cannot be met, record status `failure` with the reason instead of stopping silently: call MCP `kanna_complete_stage {\"task_id\": \"$KANNA_TASK_ID\", \"status\": \"failure\", \"summary\": \"...\"}` (`task_id` is the value of the `KANNA_TASK_ID` env var); only if MCP tools are unavailable, fall back to `kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\" --status failure --summary \"...\"`.";
 
 pub(super) fn build_kanna_preamble(
     provider: &AgentProvider,
     task_id: &str,
     stage_name: &str,
-    pipeline_name: &str,
+    workflow_name: &str,
     transition: Option<&str>,
     mcp_config_path: Option<&str>,
 ) -> String {
     let transition = transition.unwrap_or("manual");
     // Mirrors buildKannaTaskContextLine in prompt-builder.ts — keep in sync.
     let task_context = format!(
-        "This session was launched by Kanna as task `{task_id}`, stage `{stage_name}` of pipeline `{pipeline_name}` (transition: `{transition}`)."
+        "This session was launched by Kanna as task `{task_id}`, stage `{stage_name}` of workflow `{workflow_name}` (transition: `{transition}`)."
     );
     let completion = if transition == "auto" {
         COMPLETION_AUTO

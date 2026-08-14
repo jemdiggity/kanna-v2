@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust, Tokio, kanna-server task creator, kanna-daemon PTY test utility, Cargo tests
 
-**Stage constraint:** Do not commit during this implementation stage; Kanna's later pipeline stage owns commits.
+**Stage constraint:** Do not commit during this implementation stage; Kanna's later workflow stage owns commits.
 
 ---
 

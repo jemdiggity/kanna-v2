@@ -6,10 +6,10 @@ mod daemon_lifecycle;
 mod dev_url;
 mod macos;
 mod menu;
-mod pipeline_listener;
 mod subprocess_env;
 mod transfer_identity;
 mod transfer_sidecar;
+mod workflow_listener;
 
 use commands::daemon::{
     ActiveAttachedStream, ActiveAttachedStreams, AttachedSessions, DaemonState, WindowSessionSizes,
@@ -20,15 +20,15 @@ use menu::{
     MENU_ID_NAVIGATE_REPO_UP, MENU_ID_NAVIGATE_TASK_DOWN, MENU_ID_NAVIGATE_TASK_UP,
     MENU_ID_NEW_WINDOW,
 };
-use pipeline_listener::spawn_pipeline_listener;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use tauri::menu::{AboutMetadataBuilder, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
+use workflow_listener::spawn_workflow_listener;
 
-/// Managed state holding the pipeline socket path so the frontend can read it.
-pub type PipelineSocketState = Arc<Mutex<Option<String>>>;
+/// Managed state holding the workflow completion socket path.
+pub type WorkflowSocketState = Arc<Mutex<Option<String>>>;
 pub(crate) const KANNA_VERSION: &str = env!("KANNA_VERSION");
 pub(crate) const KANNA_BUILD_BRANCH: &str = env!("KANNA_BUILD_BRANCH");
 pub(crate) const KANNA_BUILD_COMMIT: &str = env!("KANNA_BUILD_COMMIT");
@@ -113,7 +113,7 @@ pub fn run() {
             String,
             std::collections::HashMap<String, (u16, u16)>,
         >::new())) as WindowSessionSizes)
-        .manage(Arc::new(Mutex::new(None)) as PipelineSocketState)
+        .manage(Arc::new(Mutex::new(None)) as WorkflowSocketState)
         .on_window_event(|window, event| {
             if !matches!(event, tauri::WindowEvent::Destroyed) {
                 return;
@@ -262,9 +262,9 @@ pub fn run() {
                 });
             }
 
-            // Start pipeline socket listener (kanna.sock) — must run before
+            // Start the workflow socket listener (kanna.sock) — must run before
             // agents are spawned so KANNA_SOCKET_PATH is available.
-            spawn_pipeline_listener(app.handle());
+            spawn_workflow_listener(app.handle());
 
             let handle = app.handle().clone();
             let daemon_state: DaemonState = app.handle().state::<DaemonState>().inner().clone();
@@ -327,6 +327,7 @@ pub fn run() {
             commands::fs::append_log,
             commands::fs::get_app_data_dir,
             commands::fs::get_app_build_info,
+            commands::fs::get_workflow_socket_path,
             commands::fs::get_pipeline_socket_path,
             commands::fs::copy_file,
             commands::fs::remove_file,

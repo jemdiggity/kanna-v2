@@ -8,7 +8,7 @@ import type {
   Repo,
   TaskBlocker,
 } from "../types/kanna";
-import type { PipelineDefinition, AgentDefinition } from "../../../../packages/core/src/pipeline/pipeline-types";
+import type { WorkflowDefinition, AgentDefinition } from "../../../../packages/core/src/workflow/workflow-types";
 import type { SessionRecoveryState } from "../composables/sessionRecoveryState";
 import i18n from "../i18n";
 import { useToast } from "../composables/useToast";
@@ -25,7 +25,7 @@ import {
   DEFAULT_MARKDOWN_PREVIEW_MODE,
   type MarkdownPreviewMode,
 } from "./markdownPreviewMode";
-import type { AdvanceStageResult, RequestRevisionOptions } from "./pipeline";
+import type { AdvanceStageResult, RequestRevisionOptions } from "./workflow";
 import type { TaskUiSlot } from "../types/taskUi";
 
 export type AgentMessageAppearance = "chat" | "log" | "terminal";
@@ -108,7 +108,7 @@ export interface CreateItemOptions {
   requestedTaskId?: string;
   baseBranch?: string;
   baseRef?: string | null;
-  pipelineName?: string;
+  workflowName?: string;
   stage?: string;
   customTask?: import("@kanna/core").CustomTaskConfig;
   agentProvider?: AgentProvider;
@@ -149,7 +149,7 @@ export interface StoreState {
   agentMessageAppearance: Ref<AgentMessageAppearance>;
   markdownPreviewMode: Ref<MarkdownPreviewMode>;
   lastHiddenRepoId: Ref<string | null>;
-  pipelineCache: Map<string, RevisionedDefinitionCacheEntry<PipelineDefinition>>;
+  workflowCache: Map<string, RevisionedDefinitionCacheEntry<WorkflowDefinition>>;
   agentCache: Map<string, RevisionedDefinitionCacheEntry<AgentDefinition>>;
   stageOrderCache: Map<string, RevisionedStageOrderCacheEntry>;
   pendingCreateVisibility: Map<string, { bumpAt: number }>;
@@ -195,7 +195,7 @@ export interface StoreServices {
   restoreSelection?: (itemId: string) => void;
   goBack?: () => void;
   goForward?: () => void;
-  loadPipeline?: (repoId: string, pipelineName: string) => Promise<PipelineDefinition>;
+  loadWorkflow?: (repoId: string, workflowName: string) => Promise<WorkflowDefinition>;
   loadAgent?: (repoId: string, agentName: string) => Promise<AgentDefinition>;
   advanceStage?: (taskId: string, options?: AdvanceStageOptions) => Promise<AdvanceStageResult>;
   requestRevision?: (taskId: string, options: RequestRevisionOptions) => Promise<boolean>;
@@ -297,7 +297,7 @@ export function createStoreState(): StoreState {
   const markdownPreviewMode = ref<MarkdownPreviewMode>(DEFAULT_MARKDOWN_PREVIEW_MODE);
   const lastHiddenRepoId = ref<string | null>(null);
   const pendingCreateVisibility = new Map<string, { bumpAt: number }>();
-  const pipelineCache = new Map<string, RevisionedDefinitionCacheEntry<PipelineDefinition>>();
+  const workflowCache = new Map<string, RevisionedDefinitionCacheEntry<WorkflowDefinition>>();
   const agentCache = new Map<string, RevisionedDefinitionCacheEntry<AgentDefinition>>();
   const stageOrderCache = new Map<string, RevisionedStageOrderCacheEntry>();
 
@@ -325,7 +325,7 @@ export function createStoreState(): StoreState {
     agentMessageAppearance,
     markdownPreviewMode,
     lastHiddenRepoId,
-    pipelineCache,
+    workflowCache,
     agentCache,
     stageOrderCache,
     pendingCreateVisibility,

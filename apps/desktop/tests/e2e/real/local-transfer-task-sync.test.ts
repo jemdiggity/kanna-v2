@@ -25,7 +25,7 @@ const { primary, secondary } = createPrimaryAndSecondaryClients();
 const WEBDRIVER_BACKSPACE = "\uE003";
 let testRepoPath = "";
 let secondaryRepoId = "";
-const pipelineName = "lan-advance-stage-e2e";
+const workflowName = "lan-advance-stage-e2e";
 
 function isVueCallError(value: unknown): value is VueCallError {
   return Boolean(
@@ -141,12 +141,12 @@ async function selectSidebarTaskByTitle(client: typeof primary, title: string): 
   while (Date.now() < deadline) {
     const result = await client.executeSync<{ clicked: boolean; titles: string[] }>(`
       const title = ${JSON.stringify(title)};
-      const titles = Array.from(document.querySelectorAll(".pipeline-item .item-title"))
+      const titles = Array.from(document.querySelectorAll(".workflow-item .item-title"))
         .map((candidate) => (candidate.textContent || "").trim())
         .filter(Boolean);
-      const element = Array.from(document.querySelectorAll(".pipeline-item .item-title"))
+      const element = Array.from(document.querySelectorAll(".workflow-item .item-title"))
         .find((candidate) => (candidate.textContent || "").includes(title));
-      element?.closest(".pipeline-item")?.click();
+      element?.closest(".workflow-item")?.click();
       return { clicked: Boolean(element), titles };
     `);
     visibleTitles = result.titles;
@@ -242,7 +242,7 @@ async function remoteDiagnosticsForPrompt(
 
 async function sidebarTitleTextsForPrompt(client: typeof primary, prompt: string): Promise<string[]> {
   return await client.executeSync(`
-    return Array.from(document.querySelectorAll(".sidebar .pipeline-item .item-title"))
+    return Array.from(document.querySelectorAll(".sidebar .workflow-item .item-title"))
       .map((element) => element.textContent?.trim() ?? "")
       .filter((text) => text.includes(${JSON.stringify(prompt)}));
   `);
@@ -488,9 +488,9 @@ describe("local transfer task sync", () => {
     await resetDatabase(secondary);
     testRepoPath = await createFixtureRepo("local-transfer-task-sync");
     const kannaDir = join(testRepoPath, ".kanna");
-    await mkdir(join(kannaDir, "pipelines"), { recursive: true });
+    await mkdir(join(kannaDir, "workflows"), { recursive: true });
     await writeFile(
-      join(kannaDir, "pipelines", `${pipelineName}.json`),
+      join(kannaDir, "workflows", `${workflowName}.json`),
       JSON.stringify({
         name: "LAN Advance Stage E2E",
         stages: [
@@ -505,10 +505,10 @@ describe("local transfer task sync", () => {
       }),
     );
     // Repo definitions are resolved from origin/<default_branch>, so the
-    // pipeline must be committed and pushed to the fixture origin.
+    // workflow must be committed and pushed to the fixture origin.
     for (const args of [
       ["add", ".kanna"],
-      ["commit", "-m", "test: add LAN advance stage pipeline"],
+      ["commit", "-m", "test: add LAN advance stage workflow"],
       ["push", "origin", "main"],
     ]) {
       const result = spawnSync("git", args, { cwd: testRepoPath, encoding: "utf8" });
@@ -666,7 +666,7 @@ describe("local transfer task sync", () => {
       {
         agentProvider: "codex",
         baseRef: "origin/main",
-        pipelineName,
+        workflowName,
       },
     );
     if (isVueCallError(createResult)) {

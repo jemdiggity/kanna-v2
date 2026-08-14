@@ -253,7 +253,7 @@ Calls `tauriInvoke(client, "git_worktree_list", { repoPath })`, filters to test-
 
 ### diff-view.test.ts
 - Import repo, create task (to get a worktree)
-- Wait for task to appear, get its branch name via `getVueState("selectedItem")` (returns the pipeline item with branch field)
+- Wait for task to appear, get its branch name via `getVueState("selectedItem")` (returns the workflow item with branch field)
 - Write a file into the worktree via `tauriInvoke(client, "run_script", { script: "echo test > test-file.txt", cwd: worktreePath, env: {} })`
 - Click Diff tab
 - Wait for diff content to appear (not "No changes")

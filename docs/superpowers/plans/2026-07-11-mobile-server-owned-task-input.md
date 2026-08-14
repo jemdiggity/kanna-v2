@@ -10,7 +10,7 @@
 
 ---
 
-This Kanna stage advances manually and later pipeline stages own commits, so the
+This Kanna stage advances manually and later workflow stages own commits, so the
 steps below intentionally leave the verified changes uncommitted.
 
 ### Task 1: Stop Encoding PTY Composer Text as Terminal Controls
@@ -304,7 +304,7 @@ git diff -- \
 
 Expected: no whitespace errors; only the approved input-boundary changes and
 their tests are present. The design and plan documents remain uncommitted for
-the later Kanna pipeline stage.
+the later Kanna workflow stage.
 
 - [ ] **Step 5: Assess the existing relay Appium lane without running physical-device automation**
 

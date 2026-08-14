@@ -862,7 +862,7 @@ async fn close_pr_task_sends_blocker_close_instruction_with_renamed_branch_to_ru
                 (0, DaemonCommand::Input { session_id, data }) => {
                     assert_eq!(session_id, "task-b-session");
                     let message = String::from_utf8(data).unwrap();
-                    assert!(message.contains("has finished its pipeline and closed"));
+                    assert!(message.contains("has finished its workflow and closed"));
                     assert!(message.contains("Blocker PR"));
                     assert!(
                         message.contains("`feat/blocker-renamed`"),
@@ -1309,7 +1309,7 @@ async fn close_task_route_tears_down_current_stage_environment_before_repo_teard
     );
     let repo_root = std::env::temp_dir().join(format!("kanna-http-close-env-teardown-{unique}"));
     let _ = std::fs::remove_dir_all(&repo_root);
-    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::write(repo_root.join("README.md"), "test repo").unwrap();
     std::fs::write(
         repo_root.join(".kanna/config.json"),
@@ -1320,7 +1320,7 @@ async fn close_task_route_tears_down_current_stage_environment_before_repo_teard
     )
     .unwrap();
     std::fs::write(
-        repo_root.join(".kanna/pipelines/default.json"),
+        repo_root.join(".kanna/workflows/default.json"),
         serde_json::json!({
             "environments": {
                 "dev": {
@@ -1886,7 +1886,7 @@ async fn pr_completion_starts_dormant_dependent_from_current_branch_optimistical
                     serde_json::json!({
                         "repoId": "repo-1",
                         "prompt": "Build on task A",
-                        "pipelineName": TEST_PROVIDER_NEUTRAL_PIPELINE,
+                        "workflowName": TEST_PROVIDER_NEUTRAL_WORKFLOW,
                         "agentProvider": "claude",
                         "blockerTaskIds": ["task-a"],
                         "recoverySnapshot": {
@@ -2328,7 +2328,7 @@ async fn close_last_blocker_starts_dormant_dependent_from_blocker_branch() {
                     serde_json::json!({
                         "repoId": "repo-1",
                         "prompt": "Build on task A",
-                        "pipelineName": TEST_PROVIDER_NEUTRAL_PIPELINE,
+                        "workflowName": TEST_PROVIDER_NEUTRAL_WORKFLOW,
                         "agentProvider": "claude",
                         "blockerTaskIds": ["task-a"]
                     })
@@ -2618,7 +2618,7 @@ async fn close_with_a_dead_notify_target_still_starts_dependents() {
                     serde_json::json!({
                         "repoId": "repo-1",
                         "prompt": "Build on task A",
-                        "pipelineName": TEST_PROVIDER_NEUTRAL_PIPELINE,
+                        "workflowName": TEST_PROVIDER_NEUTRAL_WORKFLOW,
                         "agentProvider": "claude",
                         "blockerTaskIds": ["task-a"]
                     })
@@ -2728,7 +2728,7 @@ async fn unblock_starts_a_dependent_whose_blocker_never_created_its_branch() {
                     serde_json::json!({
                         "repoId": "repo-1",
                         "prompt": "Build on task A",
-                        "pipelineName": TEST_PROVIDER_NEUTRAL_PIPELINE,
+                        "workflowName": TEST_PROVIDER_NEUTRAL_WORKFLOW,
                         "agentProvider": "claude",
                         "blockerTaskIds": ["task-a"]
                     })
@@ -4247,10 +4247,10 @@ async fn advance_stage_route_records_stage_run_for_spawned_next_task() {
     );
     let repo_root = std::env::temp_dir().join(format!("kanna-http-advance-stage-{unique}"));
     init_test_git_repo(&repo_root);
-    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::create_dir_all(repo_root.join(".kanna/agents/reviewer")).unwrap();
     std::fs::write(
-        repo_root.join(".kanna/pipelines/default.json"),
+        repo_root.join(".kanna/workflows/default.json"),
         r#"{
   "stages": [
     { "name": "in progress", "transition": "manual" },
@@ -4287,7 +4287,7 @@ async fn advance_stage_route_records_stage_run_for_spawned_next_task() {
         .unwrap()
         .success());
     assert!(Command::new("git")
-        .args(["commit", "-m", "add pipeline"])
+        .args(["commit", "-m", "add workflow"])
         .current_dir(&repo_root)
         .status()
         .unwrap()
@@ -4483,10 +4483,10 @@ async fn advance_stage_route_notifies_after_detached_setup_failure_is_persisted(
     );
     let repo_root = std::env::temp_dir().join(format!("kanna-http-advance-failure-{unique}"));
     init_test_git_repo(&repo_root);
-    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::create_dir_all(repo_root.join(".kanna/agents/reviewer")).unwrap();
     std::fs::write(
-        repo_root.join(".kanna/pipelines/default.json"),
+        repo_root.join(".kanna/workflows/default.json"),
         r#"{
   "stages": [
     { "name": "in progress", "transition": "manual" },
@@ -4662,9 +4662,9 @@ async fn advance_stage_detached_transition_aborts_when_task_closes_before_stage_
     );
     let repo_root = std::env::temp_dir().join(format!("kanna-http-advance-close-race-{unique}"));
     init_test_git_repo(&repo_root);
-    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::write(
-        repo_root.join(".kanna/pipelines/default.json"),
+        repo_root.join(".kanna/workflows/default.json"),
         r#"{
   "stages": [
     { "name": "in progress", "transition": "manual" },
@@ -4680,7 +4680,7 @@ async fn advance_stage_detached_transition_aborts_when_task_closes_before_stage_
         .unwrap()
         .success());
     assert!(Command::new("git")
-        .args(["commit", "-m", "add pipeline"])
+        .args(["commit", "-m", "add workflow"])
         .current_dir(&repo_root)
         .status()
         .unwrap()
@@ -4940,7 +4940,7 @@ async fn advance_stage_route_closes_final_stage_and_tears_down_environment_befor
     );
     let repo_root = std::env::temp_dir().join(format!("kanna-http-final-close-{unique}"));
     init_test_git_repo(&repo_root);
-    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::write(
         repo_root.join(".kanna/config.json"),
         serde_json::json!({
@@ -4950,7 +4950,7 @@ async fn advance_stage_route_closes_final_stage_and_tears_down_environment_befor
     )
     .unwrap();
     std::fs::write(
-        repo_root.join(".kanna/pipelines/default.json"),
+        repo_root.join(".kanna/workflows/default.json"),
         serde_json::json!({
             "environments": {
                 "dev": {
@@ -5795,10 +5795,10 @@ async fn complete_stage_success_after_failed_post_refinishes_run_and_transitions
     );
     let repo_root = std::env::temp_dir().join(format!("kanna-http-post-refinish-{unique}"));
     init_test_git_repo(&repo_root);
-    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::create_dir_all(repo_root.join(".kanna/agents/reviewer")).unwrap();
     std::fs::write(
-        repo_root.join(".kanna/pipelines/default.json"),
+        repo_root.join(".kanna/workflows/default.json"),
         r#"{
   "stages": [
     { "name": "in progress", "transition": "manual",
@@ -5820,7 +5820,7 @@ async fn complete_stage_success_after_failed_post_refinishes_run_and_transitions
         .unwrap()
         .success());
     assert!(Command::new("git")
-        .args(["commit", "-m", "add pipeline"])
+        .args(["commit", "-m", "add workflow"])
         .current_dir(&repo_root)
         .status()
         .unwrap()
@@ -6095,10 +6095,10 @@ async fn advance_stage_route_stays_responsive_while_prepare_blocks_on_git() {
     );
     let repo_root = std::env::temp_dir().join(format!("kanna-http-advance-block-{unique}"));
     init_test_git_repo(&repo_root);
-    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::create_dir_all(repo_root.join(".kanna/agents/reviewer")).unwrap();
     std::fs::write(
-        repo_root.join(".kanna/pipelines/default.json"),
+        repo_root.join(".kanna/workflows/default.json"),
         r#"{
   "stages": [
     { "name": "in progress", "transition": "manual" },
@@ -6119,7 +6119,7 @@ async fn advance_stage_route_stays_responsive_while_prepare_blocks_on_git() {
         .unwrap()
         .success());
     assert!(Command::new("git")
-        .args(["commit", "-m", "add pipeline"])
+        .args(["commit", "-m", "add workflow"])
         .current_dir(&repo_root)
         .status()
         .unwrap()
@@ -6364,7 +6364,7 @@ async fn close_last_blocker_stays_responsive_while_dependent_prepare_blocks() {
                     serde_json::json!({
                         "repoId": "repo-1",
                         "prompt": "Build on task A",
-                        "pipelineName": TEST_PROVIDER_NEUTRAL_PIPELINE,
+                        "workflowName": TEST_PROVIDER_NEUTRAL_WORKFLOW,
                         "agentProvider": "claude",
                         "blockerTaskIds": ["task-a"]
                     })
@@ -6591,7 +6591,7 @@ async fn complete_pr_stage_stays_responsive_while_dependent_prepare_blocks() {
                     serde_json::json!({
                         "repoId": "repo-1",
                         "prompt": "Build on task A",
-                        "pipelineName": TEST_PROVIDER_NEUTRAL_PIPELINE,
+                        "workflowName": TEST_PROVIDER_NEUTRAL_WORKFLOW,
                         "agentProvider": "claude",
                         "blockerTaskIds": ["task-a"]
                     })

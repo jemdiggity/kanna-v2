@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Auto-select `superpowers:subagent-driven-development` or `superpowers:executing-plans` based on task coupling, subagent availability, and whether execution should stay in the current session. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Put an ordered, replayable `Stage advanced: old → new` separator into PTY terminal history whenever a durable task advances to another pipeline stage.
+**Goal:** Put an ordered, replayable `Stage advanced: old → new` separator into PTY terminal history whenever a durable task advances to another workflow stage.
 
 **Architecture:** `kanna-server` formats and sanitizes the stage transition, stores it on the prepared stage swap, and sends it as an optional byte prelude in the daemon `Spawn` command. `kanna-daemon` mirrors that prelude through its normal terminal-output path before starting the PTY reader, so the marker precedes child output and is retained in attach and recovery snapshots. Non-transition spawns pass no prelude, and SDK/headless agent sessions remain unchanged because they do not expose a terminal snapshot.
 
@@ -227,7 +227,7 @@ pub(super) fn format_stage_transition_marker(from: &str, to: &str) -> Vec<u8> {
 
 Register `mod terminal_marker;`, add `pub(super) terminal_prelude: Option<Vec<u8>>` to `PreparedStageRunSpawn`, and initialize it to `None` in `prepare_stage_run_spawn`.
 
-In `prepare_swap_to_index`, mutate only the `Run` result produced for the next pipeline stage:
+In `prepare_swap_to_index`, mutate only the `Run` result produced for the next workflow stage:
 
 ```rust
 let from_stage = context.source_task.stage.as_deref().ok_or_else(|| {

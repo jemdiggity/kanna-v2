@@ -283,7 +283,7 @@ git commit -m "feat: add dependent task check CLI command"
 
 **Files:**
 - Modify: `.kanna/agents/merge/AGENT.md`
-- Test: `packages/core/src/pipeline/qa-assets.test.ts`
+- Test: `packages/core/src/workflow/qa-assets.test.ts`
 
 - [ ] **Step 1: Tighten the documentation contract**
 
@@ -301,7 +301,7 @@ expect(mergeAgent).not.toContain("If MCP is unavailable, use `curl ");
 Run:
 
 ```bash
-pnpm --dir packages/core exec vitest run src/pipeline/qa-assets.test.ts
+pnpm --dir packages/core exec vitest run src/workflow/qa-assets.test.ts
 ```
 
 Expected: FAIL because the merge agent still recommends raw `curl`.
@@ -328,6 +328,6 @@ git diff --check
 Expected: all targeted tests and whitespace checks pass.
 
 ```bash
-git add .kanna/agents/merge/AGENT.md packages/core/src/pipeline/qa-assets.test.ts
+git add .kanna/agents/merge/AGENT.md packages/core/src/workflow/qa-assets.test.ts
 git commit -m "docs: use typed CLI for dependent task checks"
 ```

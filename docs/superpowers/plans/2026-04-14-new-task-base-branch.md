@@ -307,8 +307,8 @@ it("emits the selected base branch on submit", async () => {
   const wrapper = mount(NewTaskModal, {
     props: {
       defaultAgentProvider: "claude",
-      pipelines: ["default"],
-      defaultPipeline: "default",
+      workflows: ["default"],
+      defaultWorkflow: "default",
       baseBranches: ["origin/main", "main", "feature/task-base-branch"],
       defaultBaseBranch: "origin/main",
       defaultBranchName: "main",
@@ -402,13 +402,13 @@ Update the submit handler signature:
 async function handleNewTaskSubmit(
   prompt: string,
   agentProvider: AgentProvider,
-  pipelineName?: string,
+  workflowName?: string,
   baseBranch?: string,
 ) {
   // ...
   await store.createItem(store.selectedRepoId, repo.path, prompt, "pty", {
     agentProvider,
-    pipelineName,
+    workflowName,
     baseBranch,
   });
 }
@@ -420,12 +420,12 @@ Pass the new props into the modal:
 <NewTaskModal
   v-if="showNewTaskModal"
   :default-agent-provider="preferences.defaultAgentProvider"
-  :pipelines="availablePipelines"
-  :default-pipeline="defaultPipelineName"
+  :workflows="availableWorkflows"
+  :default-workflow="defaultWorkflowName"
   :base-branches="availableBaseBranches"
   :default-base-branch="defaultBaseBranchName"
   :default-branch-name="repoDefaultBranchName"
-  @submit="(prompt, agentProvider, pipelineName, baseBranch) => handleNewTaskSubmit(prompt, agentProvider, pipelineName, baseBranch)"
+  @submit="(prompt, agentProvider, workflowName, baseBranch) => handleNewTaskSubmit(prompt, agentProvider, workflowName, baseBranch)"
   @cancel="showNewTaskModal = false"
 />
 ```
@@ -440,15 +440,15 @@ import { filterBaseBranchCandidates, getDefaultBaseBranch } from "../utils/baseB
 
 const props = defineProps<{
   defaultAgentProvider?: AgentProvider;
-  pipelines?: string[];
-  defaultPipeline?: string;
+  workflows?: string[];
+  defaultWorkflow?: string;
   baseBranches?: string[];
   defaultBaseBranch?: string;
   defaultBranchName?: string;
 }>();
 
 const emit = defineEmits<{
-  submit: [prompt: string, agentProvider: AgentProvider, pipelineName: string, baseBranch: string];
+  submit: [prompt: string, agentProvider: AgentProvider, workflowName: string, baseBranch: string];
   cancel: [];
 }>();
 ```
@@ -484,14 +484,14 @@ const visibleBaseBranches = computed(() =>
 Update submit:
 
 ```ts
-emit("submit", text, agentProvider.value, selectedPipeline.value, selectedBaseBranch.value);
+emit("submit", text, agentProvider.value, selectedWorkflow.value, selectedBaseBranch.value);
 ```
 
 Add the new row in the template using the import-repo dialog’s lightweight link style:
 
 ```vue
-<div class="pipeline-row">
-  <label class="pipeline-label">{{ $t("tasks.baseBranch") }}</label>
+<div class="workflow-row">
+  <label class="workflow-label">{{ $t("tasks.baseBranch") }}</label>
   <div class="base-branch-row">
     <span class="base-branch-value" data-testid="base-branch-value">{{ selectedBaseBranch }}</span>
     <button

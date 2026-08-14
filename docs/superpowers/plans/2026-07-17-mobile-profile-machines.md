@@ -14,7 +14,7 @@
 
 The desktop pairing surface, server claim contract, mobile trust store, inventory UI, and automatic router are coupled parts of one user flow. Splitting them into separately shipped plans would leave intermediate states where QR codes cannot be claimed or machines appear but cannot route, so this plan delivers them together behind existing app boundaries.
 
-This Kanna stage leaves commits to the later pipeline post. The checkpoints below verify focused slices with `git diff` and targeted tests; do not create local commits while executing this plan.
+This Kanna stage leaves commits to the later workflow post. The checkpoints below verify focused slices with `git diff` and targeted tests; do not create local commits while executing this plan.
 
 ## File Structure
 
@@ -1391,7 +1391,7 @@ Expected: camera plugin and `2.1.0` runtime are present; QR generation is a bund
 
 Confirm all success criteria from `docs/superpowers/specs/2026-07-17-mobile-profile-machines-design.md` are represented by passing tests: identity-only Profile, Machines available signed in/out, one row per `desktopId`, QR/code manual pairing, automatic account LAN fallback, manual-only removal, and partial-source preservation.
 
-- [ ] **Step 8: Leave the worktree uncommitted for the Kanna pipeline**
+- [ ] **Step 8: Leave the worktree uncommitted for the Kanna workflow**
 
 Run: `git status --short`
 

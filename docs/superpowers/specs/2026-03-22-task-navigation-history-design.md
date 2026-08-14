@@ -114,7 +114,7 @@ The existing `ShortcutDef` interface only has `meta`, `shift`, and `alt` modifie
 
 ### Edge Cases
 
-- **Task deleted while in history:** If `goBack`/`goForward` returns a task ID that no longer exists in the pipeline, skip it and try the next entry. This handles tasks that were closed or removed.
+- **Task deleted while in history:** If `goBack`/`goForward` returns a task ID that no longer exists in the workflow, skip it and try the next entry. This handles tasks that were closed or removed.
 - **No current task:** If `selectedItemId` is null when navigating, don't push null onto any stack.
 - **App startup:** History starts empty. The initially loaded task (restored from settings DB) is not a navigation event.
 

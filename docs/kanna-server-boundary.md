@@ -19,8 +19,8 @@ The desktop frontend itself is planned to become a `kanna-server` client as well
 - `GET /v1/repos`
 - `GET /v1/repos/{repo_id}/tasks`
 - `GET /v1/repos/{repo_id}/agents` (resolved named agent definitions available to task creation)
-- `GET /v1/repos/{repo_id}/recent-pipelines` (pipeline names the repo's tasks were most recently created with, newest first)
-- `POST /v1/tasks/{task_id}/actions/set-pipeline` (re-pin an open task to a compatible pipeline definition)
+- `GET /v1/repos/{repo_id}/recent-workflows` (workflow names the repo's tasks were most recently created with, newest first)
+- `POST /v1/tasks/{task_id}/actions/set-workflow` (re-pin an open task to a compatible workflow definition)
 - `GET /v1/tasks/recent`
 - `GET /v1/tasks/search?query=...`
 - `GET /v1/tasks/{task_id}/children` (durable direct-child fan-out history; includes closed children)
@@ -389,9 +389,9 @@ finished". This is deliberately unlike `GET /v1/tasks/search` and
 
 `GET /v1/tasks/{task_id}/children` is the richer join surface for that same
 parentage edge. It returns direct children only, includes closed children, and
-orders them oldest first. Each item contains `id`, optional `pipelineName`,
+orders them oldest first. Each item contains `id`, optional `workflowName`,
 optional `agent`, `createdAt`, optional `closedAt`, and optional `latestRun`
-(`stage`, `kind`, `status`, `summary`, and `finishedAt`). The pipeline
+(`stage`, `kind`, `status`, `summary`, and `finishedAt`). The workflow
 identity and latest run let a fan-out owner reconstruct durable child verdicts
 after notifications, context compaction, or a fresh agent session; a closed
 child remains part of that history because closure is lifecycle cleanup, not
@@ -444,10 +444,10 @@ the state they describe, and suppressing one would drop it rather than delay it.
 `kanna-cli` does not confirm either — it is the shell interface, where a human
 reads the value in context.
 
-## Dynamic Pipeline Changes
+## Dynamic Workflow Changes
 
-`POST /v1/tasks/{task_id}/actions/set-pipeline` and
-`kanna_set_task_pipeline` replace an open task's current pipeline name and
+`POST /v1/tasks/{task_id}/actions/set-workflow` and
+`kanna_set_task_workflow` replace an open task's current workflow name and
 `pipeline_def` snapshot atomically. Resolution and serialization use the same
 pinning path as task creation, including repo overrides, legacy snapshot
 normalization, and retired built-in aliases (`default` resolves to
@@ -456,7 +456,7 @@ normalization, and retired built-in aliases (`default` resolves to
 Stage mapping is deliberately strict: the new definition must contain a stage
 whose name exactly matches the task's current stage. The task stays at that
 stage. If it is absent, the request returns `409 Conflict`, names the
-incompatible stage and pipeline, and changes nothing. Kanna does not guess a
+incompatible stage and workflow, and changes nothing. Kanna does not guess a
 nearest stage because that could silently skip or repeat work.
 
 A running `stage_run`, terminal session, branch, and worktree are not replaced
@@ -464,16 +464,16 @@ or killed. The live run finishes normally, and the new snapshot governs its
 next transition. `revision_rounds` also remains unchanged; switching to a
 higher `revision_limit` can therefore make more rounds available, while
 switching to an equal or lower limit cannot reset spent rounds. A successful
-change emits `task.pipeline_changed` with the old and new names, current stage,
+change emits `task.workflow_changed` with the old and new names, current stage,
 spent rounds, and new limit.
 
-## Sticky Pipeline Selection
+## Sticky Workflow Selection
 
-`GET /v1/repos/{repo_id}/recent-pipelines` backs the New Task modal's default
-pipeline: a repo's most recently used pipeline outranks the one its
+`GET /v1/repos/{repo_id}/recent-workflows` backs the New Task modal's default
+workflow: a repo's most recently used workflow outranks the one its
 `.kanna/config.json` configures. The caller keeps the first returned name its
 repo still offers and otherwise falls back to the configured default, so a
-renamed or deleted pipeline degrades instead of sticking.
+renamed or deleted workflow degrades instead of sticking.
 
 It is a projection of the durable `pipeline_item.initial_pipeline` values, not
 a mutable preference. That column captures the successfully created task's
@@ -490,7 +490,7 @@ choice and is intentionally not changed by dynamic re-pipelining:
   desktop, LAN/mobile, relay — updates it without being instrumented, and all
   windows and restarts read the same rows.
 - **Child tasks are excluded** (`parent_task_id IS NULL`). A specialty review a
-  review stage dispatched is not a pipeline the operator picked.
+  review stage dispatched is not a workflow the operator picked.
 
 ## Task Completion Notification
 
@@ -505,12 +505,12 @@ The status vocabulary is closed — three words, matched exactly. The receiving
 agent is expected to act on the payload without re-reading task state, which is
 the entire point of `notify_task_id`, so the word has to carry the real outcome:
 
-- `success` — the task ended cleanly: it advanced past its final pipeline stage,
+- `success` — the task ended cleanly: it advanced past its final workflow stage,
   or its session ended with no failing verdict recorded against it.
 - `failure` — its terminating `stage_run` reported failure, or the agent process
   itself died (non-zero exit). A verdict of failure wins even when the PTY then
   exits 0, because an agent that reports failure and quits still failed.
-- `closed` — the task was closed before finishing its pipeline (sidebar ⇧⌘⌫ or
+- `closed` — the task was closed before finishing its workflow (sidebar ⇧⌘⌫ or
   `POST /v1/tasks/{task_id}/actions/close`). No verdict was ever reached; this is
   not a failure and must not be diagnosed as one.
 
@@ -550,7 +550,7 @@ then closed leaving an open PR the merge master had never heard of.
 So delivery is recorded, not assumed. `signal-merge-handoff` stamps
 `pipeline_item.merge_signaled_at` *after* the request reaches the merge agent
 and appends `task.merge_signaled` (`payload.source`: `agent`). Before closing a
-task past a final stage whose pinned pipeline declares the merge-signaling
+task past a final stage whose pinned workflow declares the merge-signaling
 `approve` post, the engine checks that stamp and, if the task still owes a
 request, composes and delivers the identical line itself from the recorded
 `pr_url` (`payload.source`: `engine`). The head branch comes from the
@@ -563,9 +563,9 @@ If such a stage finishes with no `pr_url` at all there is nothing to hand off,
 which means the approve post reported success without producing the PR it
 exists to approve. The engine refuses the close: the task stays open at its
 final stage, goes `unread`, and emits `task.merge_handoff_missing`. A watcher
-must read that as a failed approval, never as a finished pipeline.
+must read that as a failed approval, never as a finished workflow.
 
-A pipeline whose final stage declares no `approve` post promised no merge side
+A workflow whose final stage declares no `approve` post promised no merge side
 effect, and nothing is enforced on its behalf — the same rule the desktop's
 approval UI uses (`pinnedApproveMergePost`).
 

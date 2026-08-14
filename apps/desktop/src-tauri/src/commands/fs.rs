@@ -69,14 +69,21 @@ pub fn get_app_build_info() -> AppBuildInfo {
 }
 
 #[tauri::command]
-pub async fn get_pipeline_socket_path(
-    state: tauri::State<'_, crate::PipelineSocketState>,
+pub async fn get_workflow_socket_path(
+    state: tauri::State<'_, crate::WorkflowSocketState>,
 ) -> Result<String, String> {
     state
         .lock()
         .await
         .clone()
-        .ok_or_else(|| "pipeline socket path not initialized".to_string())
+        .ok_or_else(|| "workflow socket path not initialized".to_string())
+}
+
+#[tauri::command]
+pub async fn get_pipeline_socket_path(
+    state: tauri::State<'_, crate::WorkflowSocketState>,
+) -> Result<String, String> {
+    get_workflow_socket_path(state).await
 }
 
 /// Resolve the built-in resources directory.
@@ -123,7 +130,7 @@ fn resolve_builtin_resource_path(base: &Path, relative_path: &str) -> Result<Pat
 }
 
 /// Read a file from the app's bundled resources directory.
-/// `relative_path` is relative to the resources root (e.g., ".kanna/pipelines/no-review.json").
+/// `relative_path` is relative to the resources root (e.g., ".kanna/workflows/no-review.json").
 #[tauri::command]
 pub fn read_builtin_resource(app: AppHandle, relative_path: String) -> Result<String, String> {
     let base = builtin_resource_dir(&app)?;
@@ -492,12 +499,12 @@ mod tests {
     fn builtin_resource_path_accepts_normal_relative_paths() {
         let base = Path::new("/repo/resources");
 
-        let resolved = resolve_builtin_resource_path(base, ".kanna/pipelines/no-review.json")
+        let resolved = resolve_builtin_resource_path(base, ".kanna/workflows/no-review.json")
             .expect("normal relative resource path should resolve");
 
         assert_eq!(
             resolved,
-            Path::new("/repo/resources/.kanna/pipelines/no-review.json")
+            Path::new("/repo/resources/.kanna/workflows/no-review.json")
         );
     }
 

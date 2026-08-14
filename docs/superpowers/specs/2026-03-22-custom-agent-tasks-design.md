@@ -82,7 +82,7 @@ Always run tests before pushing.
 | `max_budget_usd` | number\|null | null (unlimited) | Maximum dollar spend |
 | `setup` | string[] | `[]` | Commands run before the agent (after repo-level setup) |
 | `teardown` | string[] | `[]` | Commands run on task close (before repo-level teardown) |
-| `stage` | Stage | `in_progress` | Initial pipeline stage (`in_progress`, `pr`, `merge`, `done`). Invalid values fall back to `in_progress` |
+| `stage` | Stage | `in_progress` | Initial workflow stage (`in_progress`, `pr`, `merge`, `done`). Invalid values fall back to `in_progress` |
 
 ## Discovery & Scanning
 
@@ -132,7 +132,7 @@ New module: `packages/core/src/config/custom-tasks.ts`
 
 ### Selecting a custom task
 
-1. Calls the existing `createItem` flow from `usePipeline`
+1. Calls the existing `createItem` flow from `useWorkflow`
 2. Prompt pre-filled from the `agent.md` markdown body
 3. Config options (model, permission_mode, allowed_tools, etc.) passed to agent spawn
 4. No user prompt dialog — task launches immediately
@@ -207,7 +207,7 @@ Overlay custom task config values onto the defaults:
 - `setup` → appended after repo-level setup commands (custom runs second)
 - `teardown` → prepended before repo-level teardown commands (custom runs first)
 - `execution_mode` → routes to PTY or SDK spawn path
-- `stage` → sets initial pipeline stage on the `pipeline_item` row
+- `stage` → sets initial workflow stage on the `pipeline_item` row
 
 ### SDK mode path
 

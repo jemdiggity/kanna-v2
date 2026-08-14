@@ -2,21 +2,21 @@
 
 ## Summary
 
-Pipeline stages should control whether Kanna follows the spawned next-stage task after a manual stage advance. This behavior belongs on the destination stage, not on a global app preference or a source-to-destination transition table.
+Workflow stages should control whether Kanna follows the spawned next-stage task after a manual stage advance. This behavior belongs on the destination stage, not on a global app preference or a source-to-destination transition table.
 
 The stage config adds an optional `follow_task` boolean:
 
 - `true`: select the spawned next-stage task after it is created
 - `false`: do not follow the spawned next-stage task; instead keep focus on the next visible item in the sidebar ordering
-- omitted: default to `true` to preserve current behavior and avoid breaking existing pipeline definitions
+- omitted: default to `true` to preserve current behavior and avoid breaking existing workflow definitions
 
 This supports "fire and forget" stages like `pr` while keeping the existing follow behavior for implementation-style stages.
 
 ## Goals
 
-- Make next-task selection behavior configurable per pipeline stage.
-- Preserve current behavior for existing pipelines that do not set the new field.
-- Keep the behavior attached to the destination stage so pipeline JSON stays simple and readable.
+- Make next-task selection behavior configurable per workflow stage.
+- Preserve current behavior for existing workflows that do not set the new field.
+- Keep the behavior attached to the destination stage so workflow JSON stays simple and readable.
 - Let PR-style stages opt out of automatic focus stealing.
 
 ## Non-Goals
@@ -28,10 +28,10 @@ This supports "fire and forget" stages like `pr` while keeping the existing foll
 
 ## Configuration Shape
 
-Extend `PipelineStage` with:
+Extend `WorkflowStage` with:
 
 ```ts
-interface PipelineStage {
+interface WorkflowStage {
   name: string;
   description?: string;
   agent?: string;
@@ -81,13 +81,13 @@ Required behavior:
 4. Restore or preserve selection on the previously computed sidebar neighbor if that item still exists and is still visible.
 5. If there is no valid next visible item, leave selection unset and allow existing current-item fallback behavior to resolve naturally.
 
-The important distinction is that `follow_task: false` suppresses only the selection handoff. It does not change task creation, worktree creation, session startup, or pipeline semantics.
+The important distinction is that `follow_task: false` suppresses only the selection handoff. It does not change task creation, worktree creation, session startup, or workflow semantics.
 
 ## Architectural Changes
 
-### Pipeline Schema
+### Workflow Schema
 
-Update the pipeline type and parser in `packages/core/src/pipeline/` to recognize `follow_task?: boolean`.
+Update the workflow type and parser in `packages/core/src/workflow/` to recognize `follow_task?: boolean`.
 
 Validation rules:
 
@@ -123,7 +123,7 @@ Selection should not be recomputed after creating the new task because inserting
 
 For `follow_task: false`, the intended flow is:
 
-1. Read current task and pipeline.
+1. Read current task and workflow.
 2. Resolve destination stage.
 3. Compute pre-close next visible item id from current sidebar order.
 4. Close source task with `selectNext: false`.
@@ -146,10 +146,10 @@ For `follow_task: true` or omitted, the flow remains:
 
 ## Tests
 
-Add or update tests in the store and pipeline layers to cover:
+Add or update tests in the store and workflow layers to cover:
 
-- Pipeline parser accepts `follow_task: false`.
-- Pipeline parser preserves omitted `follow_task`.
+- Workflow parser accepts `follow_task: false`.
+- Workflow parser preserves omitted `follow_task`.
 - `advanceStage()` follows the spawned task by default.
 - `advanceStage()` follows the spawned task when `follow_task: true`.
 - `advanceStage()` keeps selection on the precomputed next visible item when `follow_task: false`.
@@ -162,7 +162,7 @@ The most important regression test is the PR case:
 
 ## Rollout
 
-- Add `follow_task: false` to the built-in `pr` stage in the default pipeline resource.
+- Add `follow_task: false` to the built-in `pr` stage in the default workflow resource.
 - Leave all other built-in stages on the default follow behavior unless there is an explicit product reason to opt them out.
 
 ## Open Decisions Resolved

@@ -14,14 +14,14 @@ That test needs a deterministic live-agent harness that can:
 - drive the setup agent's interactive questions without brittle terminal text
   matching;
 - assert generated `.kanna/` files after the agent records completion —
-  including that the stock answer *selects* a built-in pipeline
+  including that the stock answer *selects* a built-in workflow
   (`no-review`, `single-reviewer`, or `specialized-reviewers`) plus
-  `flavors.merge` rather than authoring a pipeline file;
+  `flavors.merge` rather than authoring a workflow file;
 - continue through the ordinary `pr` stage, in-app review approval, `approve`,
   and `merge@github` without touching a real production repository;
 - exercise the incompatible-flavor guards, where the answers stop being
   independent: `pr@push-only` publishes no PR and so must drop the `approve`
-  post onto a repo-local pipeline instead of selecting a built-in, manual
+  post onto a repo-local workflow instead of selecting a built-in, manual
   merge drops the post too, and `pr@draft-pr` with a merge agent needs the
   repo-local `approve` extension that readies the draft — `approve` fails on
   a missing PR and `merge@github` cannot merge a draft, so each of these
@@ -31,5 +31,5 @@ Until that harness exists, coverage is split across contract tests for bundled
 flavors and for the setup composition rules above
 (`tests/cli-contract/tests/offline/agent-flavor-contracts.test.ts`), unit tests
 for setup task launching, a mock App import flow test, and server-side built-in
-resolution tests — including that the retired `qa` / `qa-dispatch` pipeline
+resolution tests — including that the retired `qa` / `qa-dispatch` workflow
 names still resolve for repos whose committed config selects them.

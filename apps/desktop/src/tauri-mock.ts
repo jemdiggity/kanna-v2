@@ -128,7 +128,7 @@ const invokeHandlers: Record<string, (...args: any[]) => any> = {
         prompt: "Mock transfer",
         stage: "in progress",
         branch: "task-mock",
-        pipeline: "default",
+        workflow: "default",
         display_name: null,
         base_ref: "main",
         agent_type: "pty",

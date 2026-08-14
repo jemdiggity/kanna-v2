@@ -125,7 +125,7 @@ Keep:
 
 - selection refs
 - preferences refs
-- caches such as pipeline/agent/stage-order
+- caches such as workflow/agent/stage-order
 - pending runtime timers and similar non-canonical state
 
 Remove:
@@ -280,7 +280,7 @@ This module should stop mutating `items.value` directly. Task creation placehold
 
 Runtime status updates should write activity to the DB, then request query-layer reconciliation rather than invalidating global store state.
 
-### `pipeline.ts`
+### `workflow.ts`
 
 Stage transitions should rely on query-layer refresh after DB mutations that affect task rows.
 
@@ -315,7 +315,7 @@ Recommended targeted tests:
 - `apps/desktop/src/stores/queries.ts`
 - `apps/desktop/src/stores/tasks.ts`
 - `apps/desktop/src/stores/sessions.ts`
-- `apps/desktop/src/stores/pipeline.ts`
+- `apps/desktop/src/stores/workflow.ts`
 - `apps/desktop/src/stores/init.ts`
 - touched store tests under `apps/desktop/src/stores/`
 

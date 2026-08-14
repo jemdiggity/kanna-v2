@@ -103,7 +103,7 @@ Run the focused test and expect PASS. Then set the mock platform to Android, cal
 
 - [x] **Step 5: Check the checkpoint**
 
-Run `git diff --check` and `git status --short`. Do not commit; this Kanna stage leaves commits to the later pipeline step.
+Run `git diff --check` and `git status --short`. Do not commit; this Kanna stage leaves commits to the later workflow step.
 
 ### Task 2: TaskScreen Menu Dispatch
 
@@ -252,7 +252,7 @@ Expected: the mobile Vitest suite passes. Preserve the focused green evidence an
 
 - [x] **Step 6: Final hygiene and scope review**
 
-Run `git diff --check`, `git status --short`, and review the diff for the two new helper files, four modified mobile files, the design spec, and this plan. Confirm there is no request-revision UI, merge-agent action, global More change, physical-device action, commit, push, or pipeline transition.
+Run `git diff --check`, `git status --short`, and review the diff for the two new helper files, four modified mobile files, the design spec, and this plan. Confirm there is no request-revision UI, merge-agent action, global More change, physical-device action, commit, push, or workflow transition.
 
 ### Task 4: Relay Appium Task-Action Journey
 

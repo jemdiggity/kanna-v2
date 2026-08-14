@@ -81,7 +81,7 @@ async function insertTransferTask(
 
 async function sidebarRows(): Promise<SidebarRow[]> {
   return client.executeSync<SidebarRow[]>(
-    `return Array.from(document.querySelectorAll(".sidebar .pipeline-item")).map((row) => ({
+    `return Array.from(document.querySelectorAll(".sidebar .workflow-item")).map((row) => ({
        taskId: row.getAttribute("data-task-id") || "",
        transferState: row.getAttribute("data-transfer-state"),
        title: row.querySelector(".item-title")?.textContent?.trim() || "",

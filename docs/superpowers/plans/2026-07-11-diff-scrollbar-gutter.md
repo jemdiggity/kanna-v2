@@ -143,4 +143,4 @@ git diff --check
 git status --short
 ```
 
-Expected: no whitespace errors. Only the approved design/plan documentation, the diff-view E2E test, and `DiffContentPane.vue` are changed. Do not commit; Kanna's later pipeline post owns the commit.
+Expected: no whitespace errors. Only the approved design/plan documentation, the diff-view E2E test, and `DiffContentPane.vue` are changed. Do not commit; Kanna's later workflow post owns the commit.

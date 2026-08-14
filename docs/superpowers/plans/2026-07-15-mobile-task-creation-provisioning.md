@@ -402,4 +402,4 @@ git status --short
 ```
 
 Expected: the spec, plan, implementation, and tests remain uncommitted for
-Kanna's later pipeline stages.
+Kanna's later workflow stages.

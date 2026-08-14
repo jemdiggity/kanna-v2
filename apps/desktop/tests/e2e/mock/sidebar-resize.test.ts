@@ -42,11 +42,11 @@ async function getSidebarWidth(client: WebDriverClient): Promise<number> {
 async function getTaskTitleLayout(client: WebDriverClient): Promise<TitleLayoutSnapshot> {
   const result = await client.executeSync<TitleLayoutSnapshot | { __error: string }>(
     `const expectedTitle = ${JSON.stringify(LONG_TASK_TITLE)};
-     const title = Array.from(document.querySelectorAll(".sidebar .pipeline-item .item-title"))
+     const title = Array.from(document.querySelectorAll(".sidebar .workflow-item .item-title"))
        .find((candidate) => (candidate.textContent || "") === expectedTitle);
      if (!title) return { __error: "sidebar task title not found" };
-     const item = title.closest(".pipeline-item");
-     if (!item) return { __error: "sidebar pipeline item not found" };
+     const item = title.closest(".workflow-item");
+     if (!item) return { __error: "sidebar task item not found" };
      const style = getComputedStyle(title);
      return {
        text: title.textContent || "",

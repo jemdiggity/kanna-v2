@@ -71,7 +71,7 @@ deferred setup solve the incident without that broader subsystem.
 
 ### Chosen: pending prepared stage session
 
-Transition preparation continues to resolve the task, pipeline, prompt, fork,
+Transition preparation continues to resolve the task, workflow, prompt, fork,
 environment, and setup command list. When setup is nonempty it returns a
 pending stage session instead of running the commands or resolving the final
 provider executable. The detached transition worker finishes setup, performs

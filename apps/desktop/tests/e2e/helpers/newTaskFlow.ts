@@ -19,7 +19,7 @@ const NEW_TASK_MODAL_SELECTOR = ".modal-overlay";
 const NEW_TASK_TEXTAREA_SELECTOR = ".modal-overlay textarea";
 const NEW_TASK_MODAL_INNER_SELECTOR = ".modal";
 // The Create button renders immediately but stays disabled until the modal has
-// loaded its options (base branches, pipelines, agent choices) and Vue has seen
+// loaded its options (base branches, workflows, agent choices) and Vue has seen
 // the typed prompt. Clicking it before then is a silent no-op, so wait for the
 // enabled button rather than the button.
 const NEW_TASK_SUBMIT_BUTTON_SELECTOR = ".modal-overlay .btn-primary:not(:disabled)";

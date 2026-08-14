@@ -52,7 +52,7 @@ User-triggered mutations (each bumps `refreshKey` at the end):
 - `savePreference(key, value)`
 - `importRepo(path, name, defaultBranch)`
 
-Note: `transition(itemId, toStage)` from usePipeline is dead code (exported but never imported) — dropped.
+Note: `transition(itemId, toStage)` from useWorkflow is dead code (exported but never imported) — dropped.
 
 Event handlers (set up by `init()`, called by daemon event listeners):
 - `handleHookEvent(payload)` — processes Stop/StopFailure/WaitingForInput/PostToolUse
@@ -100,7 +100,7 @@ Shrinks from ~710 lines to ~200 lines. Retains:
 Removed from App.vue:
 - `db` ref and all raw SQL queries
 - `runMigrations()`
-- All composable imports and calls (`useRepo`, `usePipeline`, `usePreferences`)
+- All composable imports and calls (`useRepo`, `useWorkflow`, `usePreferences`)
 - `refreshItems()` and all call sites
 - `sortedItemsForCurrentRepo()` function
 - `handleSelectRepo`, `handleSelectItem`, `handleCloseTask`, `handlePinItem`, `handleUnpinItem`, `handleReorderPinned`, `handleRenameItem`, `handleImportRepo` — either moved to store or bound directly
@@ -112,7 +112,7 @@ Removed from App.vue:
 ## Deleted Files
 
 - `apps/desktop/src/composables/useRepo.ts` — absorbed by store
-- `apps/desktop/src/composables/usePipeline.ts` — absorbed by store
+- `apps/desktop/src/composables/useWorkflow.ts` — absorbed by store
 - `apps/desktop/src/composables/usePreferences.ts` — absorbed by store
 
 ## Unchanged Files

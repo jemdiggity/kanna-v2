@@ -109,7 +109,7 @@ git diff --check
 git diff -- apps/mobile/e2e/helpers/env.ts apps/mobile/e2e/helpers/env.test.ts
 ```
 
-Expected: only the development fallback and its regression expectations change. Do not commit in this manual Kanna stage; the pipeline handles committing after user review.
+Expected: only the development fallback and its regression expectations change. Do not commit in this manual Kanna stage; the workflow handles committing after user review.
 
 ### Task 2: Route the Selected Development Client to Workspace Metro
 

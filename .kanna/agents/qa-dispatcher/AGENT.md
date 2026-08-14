@@ -50,9 +50,9 @@ an empty ledger, do not fall back to reading git state, and do not review
 anything on the strength of a history you could not read.
 
 The response includes direct children, including closed children, oldest first.
-First select children where `pipelineName == "specialty-review"`. Only those
+First select children where `workflowName == "specialty-review"`. Only those
 children participate in the specialty ledger or its unresolved-evidence checks.
-Ignore every child from another pipeline, even if it has no run or its `agent`
+Ignore every child from another workflow, even if it has no run or its `agent`
 starts with `review-`; it is an unrelated subtask. Then reduce the selected
 chronological history to the latest terminal verdict per specialty:
 
@@ -78,7 +78,7 @@ chronological history to the latest terminal verdict per specialty:
   join/re-dispatch path cannot produce a terminal verdict, or the retired agent
   cannot be re-dispatched, use broken dispatch once with the child id. Do not
   loop.
-- Any child record without `pipelineName` is version-incomplete history and
+- Any child record without `workflowName` is version-incomplete history and
   prevents aggregate success. It cannot be classified safely as panel or
   unrelated history. If a known-current MCP or typed CLI surface is available,
   retry the supported children query at most once if it can return the current
@@ -159,7 +159,7 @@ Record your current branch (`git rev-parse --abbrev-ref HEAD`); child tasks fork
 kanna_create_task {
   "display_name": "<Specialty> review: <subject> (round <n>)",
   "prompt": "<Specialty> review (round <n>) dispatched from task $KANNA_TASK_ID.\nBranch under review: <current branch> (your worktree is already forked at its tip).\nChanges to review: <previous review point sha>..HEAD (review round <n>).\nFull branch context: $BASE_REF..HEAD.\nOriginal task: <one-paragraph summary of $TASK_PROMPT>.\nFocus: <what this specialty must scrutinize in this particular change>.",
-  "pipeline_name": "specialty-review",
+  "workflow_name": "specialty-review",
   "agent": "<specialty agent name, e.g. review-security>",
   "base_ref": "<current branch>",
   "parent_task_id": "$KANNA_TASK_ID",
@@ -173,7 +173,7 @@ Give both ranges: the child judges the changes to review but must read the full 
 
 **Every dispatched child carries an explicit `display_name`, and its prompt's first line names the same specialty and round.** This is a rule, not an example: `display_name` is optional in the tool schema and defaults to the prompt, so a child dispatched without one is titled by its prompt's first line — and every child of every round shares that line. The result is a sidebar of identical rows where a security review cannot be told from a migration review without opening it. You already know the specialty here, because you are choosing the `agent`.
 
-- **`display_name`** is `<Specialty> review: <subject> (round <n>)` — e.g. `Security review: sticky pipeline (round 2)`. Titles are read in a narrow sidebar column, so keep the whole thing under about sixty characters.
+- **`display_name`** is `<Specialty> review: <subject> (round <n>)` — e.g. `Security review: sticky workflow (round 2)`. Titles are read in a narrow sidebar column, so keep the whole thing under about sixty characters.
   - **`<Specialty>`** is the label for the agent being dispatched:
 
     | Agent | Label |
@@ -263,7 +263,7 @@ Read the response's `revisionBudget`: if it reports `exhausted: true`, no revisi
 **Dispatch itself is broken** — child creation or waiting fails, a closed
 specialty child has malformed attribution, a known specialty exhausts its one
 repair attempt, or the supported child-history query still omits
-`pipelineName`. Record this outcome once and stop; include the blocking child id
+`workflowName`. Record this outcome once and stop; include the blocking child id
 and, for incomplete history, say explicitly that the server/API is incompatible
 and must be upgraded:
 

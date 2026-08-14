@@ -1293,7 +1293,7 @@ describe("cloud task sync", () => {
       indented: boolean;
       detachable: boolean;
     }>(`
-      const row = document.querySelector('.sidebar .pipeline-item[data-task-id="cloud:hierarchy:hierarchy-child"]');
+      const row = document.querySelector('.sidebar .workflow-item[data-task-id="cloud:hierarchy:hierarchy-child"]');
       return {
         indented: Boolean(row && row.classList.contains("subtask")),
         detachable: Boolean(row && row.querySelector(".subtask-detach")),

@@ -78,7 +78,7 @@ async function countOpenBlockerEdges(client: WebDriverClient, taskId: string): P
 
 describe("real blocked task resume agent submission", () => {
   const client = new WebDriverClient();
-  const pipelineName = "real-blocked-resume-submit";
+  const workflowName = "real-blocked-resume-submit";
   let repoId = "";
   let testRepoPath = "";
   let taskId = "";
@@ -91,11 +91,11 @@ describe("real blocked task resume agent submission", () => {
 
     testRepoPath = await createFixtureRepo("blocked-resume-real-agent-test");
     const kannaDir = join(testRepoPath, ".kanna");
-    await mkdir(join(kannaDir, "pipelines"), { recursive: true });
+    await mkdir(join(kannaDir, "workflows"), { recursive: true });
     await writeFile(
-      join(kannaDir, "pipelines", `${pipelineName}.json`),
+      join(kannaDir, "workflows", `${workflowName}.json`),
       JSON.stringify({
-        name: pipelineName,
+        name: workflowName,
         stages: [
           { name: "in progress", transition: "manual" },
         ],
@@ -132,7 +132,7 @@ describe("real blocked task resume agent submission", () => {
       initialPrompt,
       "pty",
       {
-        pipelineName,
+        workflowName,
         permissionMode: "dontAsk",
         selectOnCreate: true,
       },
@@ -169,7 +169,7 @@ describe("real blocked task resume agent submission", () => {
         blockerId,
         repoId,
         "Complete dependency",
-        pipelineName,
+        workflowName,
         "in progress",
         "task-blocked-resume-blocker",
         "pty",

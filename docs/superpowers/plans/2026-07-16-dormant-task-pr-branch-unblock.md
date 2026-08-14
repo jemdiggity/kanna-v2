@@ -255,4 +255,4 @@ git diff -- crates/kanna-server/src/db/pipeline_items.rs crates/kanna-server/src
 git status --short
 ```
 
-Expected: only the approved design, plan, regression test, database branch write, and PR-resolution persistence are changed. Do not commit; this Kanna pipeline performs the commit after the user advances the task.
+Expected: only the approved design, plan, regression test, database branch write, and PR-resolution persistence are changed. Do not commit; this Kanna workflow performs the commit after the user advances the task.

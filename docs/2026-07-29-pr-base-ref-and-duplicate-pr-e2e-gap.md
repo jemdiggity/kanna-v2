@@ -44,7 +44,7 @@ updated PR's base and number.
 
 ## Coverage added meanwhile
 
-`packages/core/src/pipeline/qa-assets.test.ts` guards the instructions
+`packages/core/src/workflow/qa-assets.test.ts` guards the instructions
 themselves, across every flavor that opens a PR — the base-ref questions and the
 `--onto` retarget that keeps the dead base's commits out of the PR, the
 duplicate-PR matching signals

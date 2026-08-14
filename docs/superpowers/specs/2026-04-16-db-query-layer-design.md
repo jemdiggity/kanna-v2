@@ -4,7 +4,7 @@
 
 Remove the manual `bump()` / `refreshKey` invalidation pattern from the desktop store while keeping SQLite as the source of truth. Replace the current `computedAsync` + global refresh token approach with a focused query layer that owns reactive `repos` and `items` refs and is the only place allowed to translate DB writes into UI refreshes.
 
-The goal is not to make the Tauri SQLite plugin magically reactive. The goal is to stop scattering manual refresh triggers throughout task, session, pipeline, and init code and replace them with a normal architecture:
+The goal is not to make the Tauri SQLite plugin magically reactive. The goal is to stop scattering manual refresh triggers throughout task, session, workflow, and init code and replace them with a normal architecture:
 
 - DB is canonical
 - store actions write to the DB
@@ -119,7 +119,7 @@ Keep:
 - long-lived refs unrelated to DB query invalidation
 - preferences refs
 - selection refs
-- caches such as pipeline/agent/stage-order
+- caches such as workflow/agent/stage-order
 - pending setup / runtime timers
 
 Remove:
@@ -160,7 +160,7 @@ Responsibilities after change:
 
 - create state
 - create query layer
-- pass query layer into task/session/pipeline/init modules as needed
+- pass query layer into task/session/workflow/init modules as needed
 - stop exporting `bump()`
 
 ## Architectural Rules
@@ -231,7 +231,7 @@ Most `bump()` calls here should become `reloadItems()`. Repo creation/import flo
 
 Runtime-status updates should write activity to the DB, then reload items through the query layer rather than globally invalidating store state.
 
-### `pipeline.ts`
+### `workflow.ts`
 
 Stage reruns and stage-complete transitions should reload items after DB writes that affect canonical task state.
 
@@ -266,7 +266,7 @@ Recommended targeted tests:
 - `apps/desktop/src/stores/queries.ts`
 - `apps/desktop/src/stores/selection.ts`
 - `apps/desktop/src/stores/sessions.ts`
-- `apps/desktop/src/stores/pipeline.ts`
+- `apps/desktop/src/stores/workflow.ts`
 - `apps/desktop/src/stores/tasks.ts`
 - `apps/desktop/src/stores/init.ts`
 - touched store tests under `apps/desktop/src/stores/`

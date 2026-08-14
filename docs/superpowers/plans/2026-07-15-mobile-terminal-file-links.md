@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust, axum, SQLite, Vue-independent Kanna server APIs, React Native 0.79, React 19, react-native-webview, xterm.js, markdown-it, Vitest, cargo test.
 
-**Stage constraint:** Do not commit during this Kanna stage. The pipeline performs the commit after user review, so the usual per-task commit steps are replaced by explicit test checkpoints.
+**Stage constraint:** Do not commit during this Kanna stage. The workflow performs the commit after user review, so the usual per-task commit steps are replaced by explicit test checkpoints.
 
 ### Security-review amendment
 

@@ -49,7 +49,7 @@ async fn merge_pty_spawns_with_ordinary_input_policy() {
         agent_provider: "codex".to_string(),
         model: None,
         effort: None,
-        completion_transition: PipelineStageTransition::Manual,
+        completion_transition: WorkflowStageTransition::Manual,
         provider_session_id: None,
         recovery_snapshot: None,
         session: PreparedSessionSpawn::Pty {
@@ -124,7 +124,7 @@ async fn protected_pty_negotiation_disconnect_is_recorded_before_acknowledgement
         agent_provider: "codex".to_string(),
         model: None,
         effort: None,
-        completion_transition: PipelineStageTransition::Manual,
+        completion_transition: WorkflowStageTransition::Manual,
         provider_session_id: None,
         recovery_snapshot: None,
         session: PreparedSessionSpawn::Pty {
@@ -202,7 +202,7 @@ async fn spawn_prepared_task_sends_spawn_agent_for_agent_sessions() {
         agent_provider: "claude".to_string(),
         model: Some("sonnet".to_string()),
         effort: None,
-        completion_transition: PipelineStageTransition::Manual,
+        completion_transition: WorkflowStageTransition::Manual,
         provider_session_id: None,
         recovery_snapshot: None,
         session: PreparedSessionSpawn::Agent {
@@ -280,7 +280,7 @@ async fn spawn_prepared_task_records_running_stage_run_after_session_created() {
         agent_provider: "claude".to_string(),
         model: Some("sonnet".to_string()),
         effort: None,
-        completion_transition: PipelineStageTransition::Manual,
+        completion_transition: WorkflowStageTransition::Manual,
         provider_session_id: None,
         recovery_snapshot: None,
         session: PreparedSessionSpawn::Agent {
@@ -370,7 +370,7 @@ async fn lost_spawn_response_is_classified_after_ack_and_never_rolled_back_as_re
         agent_provider: "claude".to_string(),
         model: None,
         effort: None,
-        completion_transition: PipelineStageTransition::Manual,
+        completion_transition: WorkflowStageTransition::Manual,
         provider_session_id: None,
         recovery_snapshot: None,
         session: PreparedSessionSpawn::Agent {
@@ -486,7 +486,7 @@ async fn rejected_spawn_rolls_back_run_scoped_completion_artifacts_immediately()
         agent_provider: "claude".to_string(),
         model: None,
         effort: None,
-        completion_transition: PipelineStageTransition::Manual,
+        completion_transition: WorkflowStageTransition::Manual,
         provider_session_id: None,
         recovery_snapshot: None,
         session: PreparedSessionSpawn::Agent {
@@ -526,7 +526,7 @@ async fn rejected_spawn_rolls_back_run_scoped_completion_artifacts_immediately()
 #[tokio::test]
 async fn prepared_agent_task_spawn_includes_task_specific_kanna_context() {
     let repo_root =
-        init_git_repo_with_pipeline("agent-kanna-context", "qa", "verify", "auto", "claude");
+        init_git_repo_with_workflow("agent-kanna-context", "qa", "verify", "auto", "claude");
     let config = test_config("agent-kanna-context");
     let db = Db::open_for_tests(&config.db_path).unwrap();
     db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
@@ -538,7 +538,7 @@ async fn prepared_agent_task_spawn_includes_task_specific_kanna_context() {
             repo_id: "repo-1".to_string(),
             prompt: "Exercise Kanna context".to_string(),
             display_name: None,
-            pipeline_name: Some("qa".to_string()),
+            workflow_name: Some("qa".to_string()),
             stage: None,
             base_ref: None,
             agent: None,
@@ -607,7 +607,7 @@ async fn prepared_agent_task_spawn_includes_task_specific_kanna_context() {
             let system_prompt = params.system_prompt.expect("system prompt should be sent");
             assert!(system_prompt.contains(&format!("task `{task_id}`")));
             assert!(system_prompt.contains("stage `verify`"));
-            assert!(system_prompt.contains("pipeline `qa`"));
+            assert!(system_prompt.contains("workflow `qa`"));
             assert!(system_prompt.contains("(transition: `auto`)"));
             assert!(system_prompt.contains("## Kanna Task Environment"));
             assert!(system_prompt.contains("Prefer the `kanna_*` MCP tools"));
@@ -625,7 +625,7 @@ async fn prepared_agent_task_spawn_includes_task_specific_kanna_context() {
 
 #[tokio::test]
 async fn prepared_claude_pty_task_spawn_passes_kanna_context_as_append_system_prompt() {
-    let repo_root = init_git_repo_with_pipeline(
+    let repo_root = init_git_repo_with_workflow(
         "claude-pty-kanna-context",
         "qa",
         "implement",
@@ -643,7 +643,7 @@ async fn prepared_claude_pty_task_spawn_passes_kanna_context_as_append_system_pr
             repo_id: "repo-1".to_string(),
             prompt: "Use Claude PTY".to_string(),
             display_name: None,
-            pipeline_name: Some("qa".to_string()),
+            workflow_name: Some("qa".to_string()),
             stage: None,
             base_ref: None,
             agent: None,
@@ -693,7 +693,7 @@ async fn prepared_claude_pty_task_spawn_passes_kanna_context_as_append_system_pr
             assert!(shell_command.contains("--append-system-prompt"));
             assert!(shell_command.contains(&format!("task `{task_id}`")));
             assert!(shell_command.contains("stage `implement`"));
-            assert!(shell_command.contains("pipeline `qa`"));
+            assert!(shell_command.contains("workflow `qa`"));
             assert!(shell_command.contains("(transition: `manual`)"));
             assert!(shell_command.contains("kanna-cli stage-complete"));
             // `--mcp-config` is variadic: without a `--` separator the CLI
@@ -712,7 +712,7 @@ async fn prepared_claude_pty_task_spawn_passes_kanna_context_as_append_system_pr
 
 #[tokio::test]
 async fn prepared_non_claude_pty_task_spawn_prepends_kanna_context_to_prompt() {
-    let repo_root = init_git_repo_with_pipeline(
+    let repo_root = init_git_repo_with_workflow(
         "copilot-pty-kanna-context",
         "qa",
         "implement",
@@ -730,7 +730,7 @@ async fn prepared_non_claude_pty_task_spawn_prepends_kanna_context_to_prompt() {
             repo_id: "repo-1".to_string(),
             prompt: "Use Copilot PTY".to_string(),
             display_name: None,
-            pipeline_name: Some("qa".to_string()),
+            workflow_name: Some("qa".to_string()),
             stage: None,
             base_ref: None,
             agent: None,
@@ -789,7 +789,7 @@ async fn prepared_non_claude_pty_task_spawn_prepends_kanna_context_to_prompt() {
             assert!(task_heading_index < prompt_index);
             assert!(shell_command.contains(&format!("task `{task_id}`")));
             assert!(shell_command.contains("stage `implement`"));
-            assert!(shell_command.contains("pipeline `qa`"));
+            assert!(shell_command.contains("workflow `qa`"));
             assert!(shell_command.contains("(transition: `manual`)"));
             assert!(shell_command.contains("kanna-cli stage-complete"));
         }
@@ -801,7 +801,7 @@ async fn prepared_non_claude_pty_task_spawn_prepends_kanna_context_to_prompt() {
 
 #[tokio::test]
 async fn prepared_antigravity_pty_task_spawn_sets_up_worktree_alias() {
-    let repo_root = init_git_repo_with_pipeline(
+    let repo_root = init_git_repo_with_workflow(
         "antigravity-pty-worktree-alias",
         "qa",
         "implement",
@@ -819,7 +819,7 @@ async fn prepared_antigravity_pty_task_spawn_sets_up_worktree_alias() {
             repo_id: "repo-1".to_string(),
             prompt: "Use Antigravity PTY".to_string(),
             display_name: None,
-            pipeline_name: Some("qa".to_string()),
+            workflow_name: Some("qa".to_string()),
             stage: None,
             base_ref: None,
             agent: None,
@@ -910,7 +910,7 @@ async fn prepared_antigravity_pty_task_spawn_sets_up_worktree_alias() {
             assert!(task_heading_index < prompt_index);
             assert!(shell_command.contains(&format!("task `{task_id}`")));
             assert!(shell_command.contains("stage `implement`"));
-            assert!(shell_command.contains("pipeline `qa`"));
+            assert!(shell_command.contains("workflow `qa`"));
             assert!(shell_command.contains("(transition: `manual`)"));
         }
         other => panic!("expected Spawn, got {other:?}"),

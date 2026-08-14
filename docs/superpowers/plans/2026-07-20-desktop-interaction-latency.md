@@ -15,7 +15,7 @@
 - Create `crates/kanna-server/src/task_creator/definition_cache.rs`: bounded-freshness cache for resolved remote repository definitions.
 - Modify `crates/kanna-server/src/task_creator/mod.rs`: register the cache module and route definition loaders through a supplied cache.
 - Modify `crates/kanna-server/src/http_api/state.rs`: own one shared cache per local server process.
-- Modify `crates/kanna-server/src/http_api/repos.rs`: use the shared cache for manifest, pipeline, and agent definition routes.
+- Modify `crates/kanna-server/src/http_api/repos.rs`: use the shared cache for manifest, workflow, and agent definition routes.
 - Modify `apps/desktop/src/composables/useAppTaskCreation.ts`: render first, load options asynchronously, and discard stale loads.
 - Modify `apps/desktop/src/composables/useAppTaskCreation.test.ts`: cover immediate visibility and stale-load fencing.
 - Modify `apps/desktop/src/components/NewTaskModal.vue`: represent option loading without blocking prompt entry.
@@ -114,7 +114,7 @@ Update route handlers as follows:
 crate::task_creator::load_repo_kanna_definitions(&state.repo_definitions, &repo)
 ```
 
-Apply the same boundary to pipeline and agent definition routes. Do not route task creation or stage lifecycle resolution through this cache.
+Apply the same boundary to workflow and agent definition routes. Do not route task creation or stage lifecycle resolution through this cache.
 
 - [ ] **Step 5: Run cache and definition-route tests**
 
@@ -159,7 +159,7 @@ Resolve the deferred calls and await `openPromise` so the test cleans up.
 
 - [ ] **Step 2: Write the stale-generation failing test**
 
-Start an option load for repo A, switch to repo B, start another load, then resolve B before A. Assert B's pipelines, providers, and branches remain after A completes.
+Start an option load for repo A, switch to repo B, start another load, then resolve B before A. Assert B's workflows, providers, and branches remain after A completes.
 
 - [ ] **Step 3: Run the composable tests and verify RED**
 
@@ -197,7 +197,7 @@ Do not await `pendingNewTaskSubmit` before mounting. Keep the existing submissio
 
 - [ ] **Step 5: Add the modal loading-state failing test**
 
-Mount `NewTaskModal` with `optionsLoading: true`, enter prompt text, and assert the prompt remains editable while branch/pipeline changes and Create are disabled. Assert a `data-testid="task-options-loading"` label is present. Add a second assertion that `submissionPending: true` disables Create without disabling the prompt.
+Mount `NewTaskModal` with `optionsLoading: true`, enter prompt text, and assert the prompt remains editable while branch/workflow changes and Create are disabled. Assert a `data-testid="task-options-loading"` label is present. Add a second assertion that `submissionPending: true` disables Create without disabling the prompt.
 
 - [ ] **Step 6: Run the modal test and verify RED**
 

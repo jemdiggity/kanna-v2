@@ -9,7 +9,7 @@ The repository entrypoints `./kd` and `tools/kd/bin/kd-mcp` currently build
 mtime check avoids repeated builds within one checkout, but `dist` is ignored
 and therefore absent from every fresh Kanna worktree.
 
-Kanna creates a fresh worktree at each pipeline transition. A group of tasks
+Kanna creates a fresh worktree at each workflow transition. A group of tasks
 created from the same commit consequently runs the same `tsup` build once per
 workspace even though the `kd` inputs are identical. Besides wasting setup
 time, these concurrent builds launch native build tools and contribute to the

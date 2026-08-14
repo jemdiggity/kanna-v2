@@ -23,7 +23,7 @@ claude --dangerously-skip-permissions --settings '{"hooks":{...}}' "the user's p
 This starts Claude in interactive mode with the initial prompt. The user sees Claude's full terminal UI (status bar, thinking indicator, tool calls) and can type follow-up prompts.
 
 ### Changes
-- `usePipeline.ts`: change `spawnPtySession` to pass prompt as positional arg, not `-p`
+- `useWorkflow.ts`: change `spawnPtySession` to pass prompt as positional arg, not `-p`
 - Remove the `-p` flag entirely from PTY mode
 - No delay or keystroke injection needed — Claude reads the positional arg on startup
 
@@ -78,9 +78,9 @@ Within each repo, sort tasks by activity:
 3. Working (italic) — most recent first
 
 ### Changes
-- `usePipeline.ts` or new `useActivity.ts` composable: activity state map
+- `useWorkflow.ts` or new `useActivity.ts` composable: activity state map
 - `App.vue`: update activity on hook events. On selecting a task, mark it as read.
-- `Sidebar.vue` / pipeline item component: apply italic/bold/regular font weight
+- `Sidebar.vue` / workflow item component: apply italic/bold/regular font weight
 - Sort items by activity group then by `activityChangedAt`
 
 ## 4. Diff Viewer — Multiple Scopes
@@ -111,7 +111,7 @@ Partial set: Cmd+N, Cmd+M, Cmd+Delete, Cmd+Z, Cmd+Up/Down, Escape.
 ### Target
 Match the Swift version exactly:
 
-**Pipeline:**
+**Workflow:**
 | Shortcut | Action |
 |---|---|
 | Shift+Cmd+N | New Task |
@@ -173,8 +173,8 @@ Cmd+P fuzzy file search modal. Lists files in the worktree (respecting .gitignor
 PTY sessions survive in the daemon but the frontend doesn't reconnect. SDK sessions die with the app.
 
 ### Target
-On startup, for each `in_progress` pipeline item with `agent_type: "pty"`:
-- Try to reattach to the daemon session using the pipeline item's ID as session ID
+On startup, for each `in_progress` workflow item with `agent_type: "pty"`:
+- Try to reattach to the daemon session using the workflow item's ID as session ID
 - If attach succeeds, show the terminal with existing output
 - If attach fails (session died), show "Session ended" with option to create a new task
 
@@ -228,7 +228,7 @@ All tests pass. Add tests for new features.
 ## Out of Scope
 
 - Auto-PR on completion (deferred per user request)
-- Pipeline stage transitions (deferred)
+- Workflow stage transitions (deferred)
 - Night Shift / Reviewer / PM agents
 - `--resume` conversation-level resume
 - Delta updater plugin

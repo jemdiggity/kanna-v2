@@ -45,7 +45,7 @@ struct OverridableKey {
 
 /// The keys a machine may override, and nothing else.
 ///
-/// Everything here is *plumbing*: which CLI runs, which pipeline a new task
+/// Everything here is *plumbing*: which CLI runs, which workflow a new task
 /// starts in, which ports and shell commands this machine's workspaces use.
 /// Deliberately excluded, because they change what a task *means* rather than
 /// how this machine runs it:
@@ -68,9 +68,9 @@ const OVERRIDABLE_KEYS: &[OverridableKey] = &[
         validate: validate_agent_providers,
     },
     OverridableKey {
-        name: "pipeline",
+        name: "workflow",
         merge: LocalMerge::Replace,
-        validate: validate_pipeline,
+        validate: validate_workflow,
     },
     OverridableKey {
         name: "ports",
@@ -151,7 +151,15 @@ pub(super) fn apply_local_config_override(
         if key == "$schema" {
             continue;
         }
-        let Some(overridable) = OVERRIDABLE_KEYS.iter().find(|entry| entry.name == key) else {
+        let canonical_key = if key == "pipeline" {
+            "workflow"
+        } else {
+            key.as_str()
+        };
+        let Some(overridable) = OVERRIDABLE_KEYS
+            .iter()
+            .find(|entry| entry.name == canonical_key)
+        else {
             return Err(local_error(
                 &path,
                 format!(
@@ -165,11 +173,11 @@ pub(super) fn apply_local_config_override(
 
         match overridable.merge {
             LocalMerge::Replace => {
-                config.insert(key.clone(), value.clone());
+                config.insert(canonical_key.to_string(), value.clone());
             }
             LocalMerge::Entries => {
                 let entry = config
-                    .entry(key.clone())
+                    .entry(canonical_key.to_string())
                     .or_insert_with(|| Value::Object(Map::new()));
                 // A committed value of the wrong shape is dropped by the
                 // committed parser anyway; merging into it would keep nothing.
@@ -183,7 +191,7 @@ pub(super) fn apply_local_config_override(
                 }
             }
         }
-        keys.push(key.clone());
+        keys.push(canonical_key.to_string());
     }
 
     // A file that sets no key changes nothing, so nothing is reported as
@@ -213,12 +221,12 @@ fn local_error(path: &Path, detail: impl std::fmt::Display) -> String {
     )
 }
 
-fn validate_pipeline(value: &Value) -> Result<(), String> {
+fn validate_workflow(value: &Value) -> Result<(), String> {
     value
         .as_str()
         .filter(|name| !name.trim().is_empty())
         .map(|_| ())
-        .ok_or_else(|| "must be a non-empty pipeline name".to_string())
+        .ok_or_else(|| "must be a non-empty workflow name".to_string())
 }
 
 fn validate_string_array(value: &Value) -> Result<(), String> {
@@ -276,7 +284,7 @@ mod tests {
 
     fn committed() -> Map<String, Value> {
         json!({
-            "pipeline": "single-reviewer",
+            "workflow": "single-reviewer",
             "setup": ["pnpm install"],
             "test": ["pnpm test"],
             "ports": {"KANNA_DEV_PORT": 1420, "KANNA_MOBILE_PORT": 8081},
@@ -366,7 +374,7 @@ mod tests {
         write_local(
             temp.path(),
             &json!({
-                "pipeline": "no-review",
+                "workflow": "no-review",
                 "setup": ["./local-setup.sh"],
                 "ports": {"KANNA_DEV_PORT": 1500}
             })
@@ -378,8 +386,8 @@ mod tests {
             .unwrap()
             .expect("local file overrides three keys");
 
-        assert_eq!(applied.keys(), ["pipeline", "ports", "setup"]);
-        assert_eq!(config["pipeline"], json!("no-review"));
+        assert_eq!(applied.keys(), ["ports", "setup", "workflow"]);
+        assert_eq!(config["workflow"], json!("no-review"));
         // Replaced, never concatenated onto the committed list.
         assert_eq!(config["setup"], json!(["./local-setup.sh"]));
         assert_eq!(
@@ -410,7 +418,7 @@ mod tests {
     #[test]
     fn malformed_json_is_a_loud_error_naming_the_file() {
         let temp = tempfile::tempdir().unwrap();
-        write_local(temp.path(), "{\"pipeline\": ");
+        write_local(temp.path(), "{\"workflow\": ");
         let mut config = committed();
 
         let error = apply_local_config_override(temp.path(), &mut config).unwrap_err();
@@ -450,7 +458,7 @@ mod tests {
             "{error}"
         );
         assert!(
-            error.contains("agentProviders, pipeline, ports, setup, teardown, test"),
+            error.contains("agentProviders, workflow, ports, setup, teardown, test"),
             "{error}"
         );
         assert_eq!(config["vars"], json!({"OWNER": "kanna"}));
@@ -460,8 +468,8 @@ mod tests {
     fn malformed_values_are_rejected_per_key() {
         let cases = [
             (
-                json!({"pipeline": ""}),
-                "`pipeline` must be a non-empty pipeline name",
+                json!({"workflow": ""}),
+                "`workflow` must be a non-empty workflow name",
             ),
             (
                 json!({"setup": "pnpm install"}),

@@ -136,13 +136,13 @@ describe("test orchestration", () => {
     expect(Object.keys(coreTestTask.inputs)).toEqual(
       expect.arrayContaining([
         "../../.kanna/agents/implement/AGENT.md",
-        "../../.kanna/pipelines/schema.json",
+        "../../.kanna/workflows/schema.json",
       ]),
     );
     expect(Object.keys(cliContractTestTask.inputs)).toEqual(
       expect.arrayContaining([
         "../../.kanna/agents/implement/AGENT.md",
-        "../../.kanna/pipelines/schema.json",
+        "../../.kanna/workflows/schema.json",
         "../../packages/core/src/config/agent-providers.ts",
         "../../crates/kanna-tool-catalog/src/catalog.json",
       ]),

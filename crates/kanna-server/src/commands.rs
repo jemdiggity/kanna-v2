@@ -286,10 +286,10 @@ mod tests {
 
     fn init_test_git_repo(repo_root: &std::path::Path) {
         let _ = std::fs::remove_dir_all(repo_root);
-        std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+        std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
         std::fs::write(repo_root.join("README.md"), "test repo\n").unwrap();
         std::fs::write(
-            repo_root.join(".kanna/pipelines/default.json"),
+            repo_root.join(".kanna/workflows/default.json"),
             serde_json::json!({
                 "stages": [
                     { "name": "in progress", "transition": "manual" }

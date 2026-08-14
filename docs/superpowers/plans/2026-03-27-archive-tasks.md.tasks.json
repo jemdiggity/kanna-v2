@@ -5,7 +5,7 @@
       "id": 2,
       "subject": "Task 1: Database & Type Foundation",
       "status": "pending",
-      "description": "**Goal:** Add `claude_session_id` column and `\"archived\"` system tag.\n\n**Files:** packages/db/src/schema.ts, packages/core/src/pipeline/types.ts, packages/db/src/queries.ts, apps/desktop/src/stores/db.ts\n\n```json:metadata\n{\"files\": [\"packages/db/src/schema.ts\", \"packages/core/src/pipeline/types.ts\", \"packages/db/src/queries.ts\", \"apps/desktop/src/stores/db.ts\"], \"verifyCommand\": \"cd packages/db && bun tsc --noEmit && cd ../core && bun tsc --noEmit\", \"acceptanceCriteria\": [\"PipelineItem has claude_session_id\", \"SYSTEM_TAGS includes archived\", \"addPipelineItemTag handles archived closed_at\", \"removePipelineItemTag handles archived closed_at\", \"migration adds column\", \"updateClaudeSessionId exported\"]}\n```"
+      "description": "**Goal:** Add `claude_session_id` column and `\"archived\"` system tag.\n\n**Files:** packages/db/src/schema.ts, packages/core/src/workflow/types.ts, packages/db/src/queries.ts, apps/desktop/src/stores/db.ts\n\n```json:metadata\n{\"files\": [\"packages/db/src/schema.ts\", \"packages/core/src/workflow/types.ts\", \"packages/db/src/queries.ts\", \"apps/desktop/src/stores/db.ts\"], \"verifyCommand\": \"cd packages/db && bun tsc --noEmit && cd ../core && bun tsc --noEmit\", \"acceptanceCriteria\": [\"PipelineItem has claude_session_id\", \"SYSTEM_TAGS includes archived\", \"addPipelineItemTag handles archived closed_at\", \"removePipelineItemTag handles archived closed_at\", \"migration adds column\", \"updateClaudeSessionId exported\"]}\n```"
     },
     {
       "id": 3,
@@ -32,7 +32,7 @@
       "subject": "Task 5: Sidebar and Store Filtering — Hide Archived Tasks",
       "status": "pending",
       "blockedBy": [2],
-      "description": "**Goal:** Archived tasks hidden from sidebar and store lists.\n\n**Files:** packages/core/src/pipeline/types.ts, apps/desktop/src/components/Sidebar.vue, apps/desktop/src/stores/kanna.ts\n\n```json:metadata\n{\"files\": [\"packages/core/src/pipeline/types.ts\", \"apps/desktop/src/components/Sidebar.vue\", \"apps/desktop/src/stores/kanna.ts\"], \"verifyCommand\": \"cd apps/desktop && bun tsc --noEmit\", \"acceptanceCriteria\": [\"isHidden helper exported\", \"Sidebar filters exclude archived\", \"sortItemsForRepo excludes archived\", \"currentItem skips archived\"]}\n```"
+      "description": "**Goal:** Archived tasks hidden from sidebar and store lists.\n\n**Files:** packages/core/src/workflow/types.ts, apps/desktop/src/components/Sidebar.vue, apps/desktop/src/stores/kanna.ts\n\n```json:metadata\n{\"files\": [\"packages/core/src/workflow/types.ts\", \"apps/desktop/src/components/Sidebar.vue\", \"apps/desktop/src/stores/kanna.ts\"], \"verifyCommand\": \"cd apps/desktop && bun tsc --noEmit\", \"acceptanceCriteria\": [\"isHidden helper exported\", \"Sidebar filters exclude archived\", \"sortItemsForRepo excludes archived\", \"currentItem skips archived\"]}\n```"
     }
   ],
   "lastUpdated": "2026-03-27T00:00:00Z"

@@ -120,7 +120,7 @@ fn build_repo_command_catalog_from_definitions(
         command(
             "factory:setup-repo",
             "Set Up Repository",
-            "Configure .kanna pipeline and agent flavors",
+            "Configure .kanna workflow and agent flavors",
             RepoCommandGroup::Configure,
         ),
         command(
@@ -136,9 +136,9 @@ fn build_repo_command_catalog_from_definitions(
             RepoCommandGroup::Configure,
         ),
         command(
-            "factory:create-pipeline",
-            "Create Pipeline",
-            "Create a new pipeline definition",
+            "factory:create-workflow",
+            "Create Workflow",
+            "Create a new workflow definition",
             RepoCommandGroup::Configure,
         ),
         command(
@@ -152,7 +152,7 @@ fn build_repo_command_catalog_from_definitions(
         "factory:setup-repo",
         "factory:create-config",
         "factory:create-agent",
-        "factory:create-pipeline",
+        "factory:create-workflow",
         "factory:new-custom-task",
     ]
     .into_iter()
@@ -460,9 +460,9 @@ fn factory_launch(command_id: &str) -> Option<RepoCommandLaunch> {
             "Help me create a new agent definition for this repository.",
             None,
         ),
-        "factory:create-pipeline" => (
-            "Create Pipeline",
-            "Help me create a new pipeline definition for this repository.",
+        "factory:create-workflow" | "factory:create-pipeline" => (
+            "Create Workflow",
+            "Help me create a new workflow definition for this repository.",
             None,
         ),
         "factory:new-custom-task" => ("New Custom Task", NEW_CUSTOM_TASK_PROMPT, None),
@@ -557,7 +557,7 @@ mod tests {
                 ("factory:setup-repo", "configure"),
                 ("factory:create-config", "configure"),
                 ("factory:create-agent", "configure"),
-                ("factory:create-pipeline", "configure"),
+                ("factory:create-workflow", "configure"),
                 ("factory:new-custom-task", "configure"),
             ]
         );

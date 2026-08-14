@@ -21,7 +21,7 @@
 
 ## Execution Constraint
 
-This Kanna stage explicitly leaves commits to the later pipeline stage. Run every red/green checkpoint below, but do not create local commits while executing this plan.
+This Kanna stage explicitly leaves commits to the later workflow stage. Run every red/green checkpoint below, but do not create local commits while executing this plan.
 
 ## File Structure
 

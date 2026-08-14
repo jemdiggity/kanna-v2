@@ -2,7 +2,7 @@
 
 ## Motivation
 
-Protect against data loss from corruption, accidental deletion, or bad migrations. The database contains task metadata, repo references, settings, and pipeline state — losing it means losing the full history of managed work.
+Protect against data loss from corruption, accidental deletion, or bad migrations. The database contains task metadata, repo references, settings, and workflow state — losing it means losing the full history of managed work.
 
 ## Requirements
 
@@ -45,7 +45,7 @@ New composable: `apps/desktop/src/composables/useBackup.ts`
 
 Exports:
 - **`backupOnStartup(dbName: string)`** — called from `App.vue` before `runMigrations()`. Resolves the full DB path via `get_app_data_dir` + `dbName`. Checks if the DB file exists. If it does, copies it to `{dbPath}.backup-{timestamp}`. On failure, logs to console and continues.
-- **`startPeriodicBackup(dbName: string, db: Ref<DbHandle | null>, intervalMs: number)`** — starts a `setInterval` timer. Called after full app initialization. Accepts the reactive `db` ref (consistent with `usePipeline`, `usePreferences`, etc.) so it always reads the current handle when flushing WAL. Returns a cleanup function to clear the interval on unmount.
+- **`startPeriodicBackup(dbName: string, db: Ref<DbHandle | null>, intervalMs: number)`** — starts a `setInterval` timer. Called after full app initialization. Accepts the reactive `db` ref (consistent with `useWorkflow`, `usePreferences`, etc.) so it always reads the current handle when flushing WAL. Returns a cleanup function to clear the interval on unmount.
 
 Both use a shared `createBackup(dbName: string, db?: DbHandle | null)` function that performs the backup and triggers retention cleanup. `startPeriodicBackup` unwraps `db.value` at each interval tick, skipping the backup if the handle is null.
 

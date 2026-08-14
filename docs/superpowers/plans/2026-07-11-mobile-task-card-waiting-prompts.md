@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust, Tokio, daemon protocol, SQLite/rusqlite, Vue 3, Firebase Firestore, React Native, TypeScript, Vitest, Cargo tests.
 
-**Kanna stage constraint:** Do not create commits in this worktree. The pipeline's later post/stages own committing.
+**Kanna stage constraint:** Do not create commits in this worktree. The workflow's later post/stages own committing.
 
 ---
 

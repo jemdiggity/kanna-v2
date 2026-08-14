@@ -104,10 +104,10 @@ import {
 } from "./queries.js";
 ```
 
-Update the mock db's `execute` method to handle the new queries. Add after the existing `UPDATE PIPELINE_ITEM SET PR_NUMBER` handler:
+Update the mock db's `execute` method to handle the new queries. Add after the existing `UPDATE WORKFLOW_ITEM SET PR_NUMBER` handler:
 
 ```typescript
-} else if (q.startsWith("UPDATE PIPELINE_ITEM SET PINNED = 1")) {
+} else if (q.startsWith("UPDATE WORKFLOW_ITEM SET PINNED = 1")) {
   const [pinOrder, id] = bindValues as unknown[];
   const item = tables.pipeline_item.find((p) => p.id === id);
   if (item) {
@@ -115,7 +115,7 @@ Update the mock db's `execute` method to handle the new queries. Add after the e
     (item as any).pin_order = pinOrder as number;
     item.updated_at = new Date().toISOString();
   }
-} else if (q.startsWith("UPDATE PIPELINE_ITEM SET PINNED = 0")) {
+} else if (q.startsWith("UPDATE WORKFLOW_ITEM SET PINNED = 0")) {
   const [id] = bindValues as string[];
   const item = tables.pipeline_item.find((p) => p.id === id);
   if (item) {
@@ -123,7 +123,7 @@ Update the mock db's `execute` method to handle the new queries. Add after the e
     (item as any).pin_order = null;
     item.updated_at = new Date().toISOString();
   }
-} else if (q.startsWith("UPDATE PIPELINE_ITEM SET PIN_ORDER = CASE")) {
+} else if (q.startsWith("UPDATE WORKFLOW_ITEM SET PIN_ORDER = CASE")) {
   // Bulk reorder: bind layout is [id0, 0, id1, 1, ..., id0, id1, ...]
   // First 2n values are CASE WHEN pairs (id, order), last n are WHERE IN ids
   if (bindValues) {
@@ -141,10 +141,10 @@ Update the mock db's `execute` method to handle the new queries. Add after the e
 }
 ```
 
-Also update the `INSERT INTO PIPELINE_ITEM` mock handler to include the new fields with defaults:
+Also update the `INSERT INTO WORKFLOW_ITEM` mock handler to include the new fields with defaults:
 
 ```typescript
-} else if (q.startsWith("INSERT INTO PIPELINE_ITEM")) {
+} else if (q.startsWith("INSERT INTO WORKFLOW_ITEM")) {
   const [id, repo_id, issue_number, issue_title, prompt, stage, pr_number, pr_url, branch, agent_type, port_offset, activity] =
     bindValues as unknown[];
   tables.pipeline_item.push({
@@ -304,7 +304,7 @@ git commit -m "feat(db): add pin/unpin/reorder query functions with tests"
 ### Task 4: Composable pin methods
 
 **Files:**
-- Modify: `apps/desktop/src/composables/usePipeline.ts`
+- Modify: `apps/desktop/src/composables/useWorkflow.ts`
 
 - [ ] **Step 1: Add imports for new query functions**
 
@@ -371,8 +371,8 @@ return {
 - [ ] **Step 4: Commit**
 
 ```bash
-git add apps/desktop/src/composables/usePipeline.ts
-git commit -m "feat(pipeline): add pinItem, unpinItem, reorderPinned methods"
+git add apps/desktop/src/composables/useWorkflow.ts
+git commit -m "feat(workflow): add pinItem, unpinItem, reorderPinned methods"
 ```
 
 ---
@@ -390,7 +390,7 @@ Replace the `itemsForRepo` function (lines 30-42):
 ```typescript
 function itemsForRepo(repoId: string): PipelineItem[] {
   const order: Record<string, number> = { idle: 0, unread: 1, working: 2 };
-  return props.pipelineItems
+  return props.workflowItems
     .filter((item) => item.repo_id === repoId && item.stage !== "closed")
     .sort((a, b) => {
       // Pinned tasks always come first
@@ -554,7 +554,7 @@ function handleDropUnpinned(e: DragEvent, itemId?: string) {
   const draggedId = itemId || draggingItemId.value;
   if (!draggedId) return;
 
-  const item = props.pipelineItems.find((i) => i.id === draggedId);
+  const item = props.workflowItems.find((i) => i.id === draggedId);
   if (item?.pinned) {
     emit("unpin-item", draggedId);
   }
@@ -565,10 +565,10 @@ function handleDropUnpinned(e: DragEvent, itemId?: string) {
 
 - [ ] **Step 3: Update template for drag-and-drop and divider**
 
-Replace the `pipeline-list` section (lines 87-106) with:
+Replace the `workflow-list` section (lines 87-106) with:
 
 ```html
-<div v-if="!collapsedRepos.has(repo.id)" class="pipeline-list">
+<div v-if="!collapsedRepos.has(repo.id)" class="workflow-list">
   <!-- Pinned tasks -->
   <template v-if="pinnedItemsForRepo(repo.id).length > 0 || draggingItemId">
     <div
@@ -590,7 +590,7 @@ Replace the `pipeline-list` section (lines 87-106) with:
         @drop="handleDropPinned($event, repo.id, idx)"
       ></div>
       <div
-        class="pipeline-item"
+        class="workflow-item"
         :class="{
           selected: selectedItemId === item.id,
           dragging: draggingItemId === item.id,
@@ -637,7 +637,7 @@ Replace the `pipeline-list` section (lines 87-106) with:
     <div
       v-for="item in unpinnedItemsForRepo(repo.id)"
       :key="item.id"
-      class="pipeline-item"
+      class="workflow-item"
       :class="{
         selected: selectedItemId === item.id,
         dragging: draggingItemId === item.id,
@@ -693,7 +693,7 @@ Add to the `<style scoped>` section:
   min-height: 8px;
 }
 
-.pipeline-item.dragging {
+.workflow-item.dragging {
   opacity: 0.3;
 }
 
@@ -716,12 +716,12 @@ git commit -m "feat(sidebar): add drag-and-drop pinning with divider"
 **Files:**
 - Modify: `apps/desktop/src/App.vue`
 
-- [ ] **Step 1: Import pin methods from usePipeline**
+- [ ] **Step 1: Import pin methods from useWorkflow**
 
-The `usePipeline` composable is already instantiated in App.vue. Destructure the new methods from it. Find where `usePipeline` is called and add:
+The `useWorkflow` composable is already instantiated in App.vue. Destructure the new methods from it. Find where `useWorkflow` is called and add:
 
 ```typescript
-const { items, selectedItemId, loadItems, transition, createItem, spawnPtySession, selectedItem, pinItem, unpinItem, reorderPinned } = usePipeline(db);
+const { items, selectedItemId, loadItems, transition, createItem, spawnPtySession, selectedItem, pinItem, unpinItem, reorderPinned } = useWorkflow(db);
 ```
 
 (Or wherever the composable's return values are destructured — check existing code.)
@@ -761,7 +761,7 @@ Find the `<Sidebar>` component in the template and add the event handlers:
 
 ```bash
 git add apps/desktop/src/App.vue
-git commit -m "feat(app): wire pin/unpin/reorder events from sidebar to pipeline"
+git commit -m "feat(app): wire pin/unpin/reorder events from sidebar to workflow"
 ```
 
 ---

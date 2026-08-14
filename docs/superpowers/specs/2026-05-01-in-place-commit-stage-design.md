@@ -2,14 +2,14 @@
 
 ## Summary
 
-Kanna should make committing the task agent's responsibility before PR creation. The default pipeline will add a `commit` stage between `in progress` and `pr`, but this stage must not create a new task, worktree, branch, or agent session. It updates the current task in place and sends the existing agent a follow-up prompt so the agent that implemented the work can commit it with full context.
+Kanna should make committing the task agent's responsibility before PR creation. The default workflow will add a `commit` stage between `in progress` and `pr`, but this stage must not create a new task, worktree, branch, or agent session. It updates the current task in place and sends the existing agent a follow-up prompt so the agent that implemented the work can commit it with full context.
 
 After the commit stage completes, the PR stage can remain a separate PR-focused task. The PR agent should no longer inspect and commit uncommitted work as part of its normal process.
 
 ## Goals
 
 - Move commit ownership from the PR agent to the implementation agent context.
-- Represent commit as a real pipeline stage so users can see and customize it.
+- Represent commit as a real workflow stage so users can see and customize it.
 - Preserve the current task, branch, worktree, and agent session during the commit stage.
 - Keep existing stage advancement behavior for stages that intentionally create a new task.
 - Remove normal uncommitted-work handling from the PR agent instructions.
@@ -17,20 +17,20 @@ After the commit stage completes, the PR stage can remain a separate PR-focused 
 ## Non-Goals
 
 - Do not make every stage in-place.
-- Do not introduce hidden post-stage behavior outside the pipeline definition.
+- Do not introduce hidden post-stage behavior outside the workflow definition.
 - Do not require the PR agent to recover from a missing commit beyond surfacing the problem clearly.
 - Do not change the meaning of closed tasks or task cleanup.
 
-## Pipeline Model
+## Workflow Model
 
-Add an optional stage execution mode to pipeline stages:
+Add an optional stage execution mode to workflow stages:
 
 - `mode: "new_task"`: the existing behavior. Advancing closes the source task and creates a new task for the next stage.
 - `mode: "continue"`: advancing updates the existing task to the next stage and sends the stage prompt to the current agent session.
 
 If `mode` is omitted, stages default to `new_task` for backward compatibility.
 
-The built-in default pipeline becomes:
+The built-in default workflow becomes:
 
 ```json
 {
@@ -64,7 +64,7 @@ The built-in default pipeline becomes:
 }
 ```
 
-The built-in QA pipeline should use the same commit ownership before review:
+The built-in QA workflow should use the same commit ownership before review:
 
 ```text
 in progress -> commit -> review -> pr
@@ -109,7 +109,7 @@ The PR agent should still fail clearly if the branch cannot be rebased, pushed, 
 
 ## Data Flow
 
-Manual or automatic stage advancement calls the store's pipeline API. For `new_task` stages, the current close-and-create path remains unchanged. For `continue` stages, the pipeline API updates the existing DB row, sends the prompt to the existing PTY session, and reloads the snapshot.
+Manual or automatic stage advancement calls the store's workflow API. For `new_task` stages, the current close-and-create path remains unchanged. For `continue` stages, the workflow API updates the existing DB row, sends the prompt to the existing PTY session, and reloads the snapshot.
 
 Automatic completion remains stage-result driven. The commit agent records completion with `kanna-cli stage-complete`; the store sees a successful result on an auto stage and advances to the PR stage. Because PR uses `new_task`, that second advancement closes the committed task and creates the PR task as it does today.
 
@@ -117,15 +117,15 @@ Automatic completion remains stage-result driven. The commit agent records compl
 
 Unit tests should cover:
 
-- pipeline parsing accepts `mode: "continue"` and defaults missing mode to `new_task` behavior,
+- workflow parsing accepts `mode: "continue"` and defaults missing mode to `new_task` behavior,
 - advancing to a `continue` stage updates the same task instead of inserting a new one,
 - the existing session receives the commit stage prompt,
 - `stage_result` is cleared when entering a continue stage,
 - advancing from `commit` to `pr` still creates a new PR task,
 - the PR agent instructions no longer include the uncommitted-work commit step.
 
-E2E coverage should be added or updated if the existing mock harness can exercise pipeline advancement. If not practical in the current harness, the implementation should document why and rely on focused store and pipeline tests for this change.
+E2E coverage should be added or updated if the existing mock harness can exercise workflow advancement. If not practical in the current harness, the implementation should document why and rely on focused store and workflow tests for this change.
 
 ## Decisions
 
-Use the pipeline property name `mode` with values `"new_task"` and `"continue"`. This is explicit enough for JSON authors and leaves room for future modes without overloading `transition`, which already describes manual versus automatic advancement.
+Use the workflow property name `mode` with values `"new_task"` and `"continue"`. This is explicit enough for JSON authors and leaves room for future modes without overloading `transition`, which already describes manual versus automatic advancement.

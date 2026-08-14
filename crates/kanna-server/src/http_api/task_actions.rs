@@ -195,16 +195,16 @@ pub(super) async fn set_task_parent(
     }))
 }
 
-pub(super) async fn set_task_pipeline(
+pub(super) async fn set_task_workflow(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(task_id): axum::extract::Path<String>,
-    Json(payload): Json<crate::mobile_api::SetTaskPipelineRequest>,
-) -> Result<Json<crate::mobile_api::SetTaskPipelineResponse>, (axum::http::StatusCode, String)> {
-    let pipeline_name = payload.pipeline_name.trim().to_string();
-    if pipeline_name.is_empty() {
+    Json(payload): Json<crate::mobile_api::SetTaskWorkflowRequest>,
+) -> Result<Json<crate::mobile_api::SetTaskWorkflowResponse>, (axum::http::StatusCode, String)> {
+    let workflow_name = payload.workflow_name.trim().to_string();
+    if workflow_name.is_empty() {
         return Err((
             axum::http::StatusCode::BAD_REQUEST,
-            "pipelineName must be non-empty".to_string(),
+            "workflowName must be non-empty".to_string(),
         ));
     }
 
@@ -212,7 +212,7 @@ pub(super) async fn set_task_pipeline(
     let _task_mutation = state.begin_requested_task_mutation(&task_id).await;
     let (response, changed) = {
         let state = Arc::clone(&state);
-        super::blocking::run_handler_blocking("task pipeline update", move || {
+        super::blocking::run_handler_blocking("task workflow update", move || {
             let db = Db::open(&state.config.db_path).map_err(|error| {
                 (
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -231,14 +231,14 @@ pub(super) async fn set_task_pipeline(
             if item.closed_at.is_some() {
                 return Err((
                     axum::http::StatusCode::CONFLICT,
-                    format!("cannot change pipeline for closed task {task_id}"),
+                    format!("cannot change workflow for closed task {task_id}"),
                 ));
             }
             let stage = item.stage.clone().ok_or_else(|| {
                 (
                     axum::http::StatusCode::CONFLICT,
                     format!(
-                        "task {task_id} has no current stage to map into pipeline {pipeline_name}"
+                        "task {task_id} has no current stage to map into workflow {workflow_name}"
                     ),
                 )
             })?;
@@ -252,14 +252,14 @@ pub(super) async fn set_task_pipeline(
                     )
                 })?;
             let snapshot =
-                crate::task_creator::resolve_task_pipeline_snapshot(&repo, &pipeline_name)
+                crate::task_creator::resolve_task_workflow_snapshot(&repo, &workflow_name)
                     .map_err(|error| (axum::http::StatusCode::BAD_REQUEST, error))?;
             if !snapshot.stage_names.iter().any(|name| name == &stage) {
                 return Err((
                     axum::http::StatusCode::CONFLICT,
                     format!(
-                        "cannot change task {task_id} from pipeline {} to {pipeline_name}: \
-                         current stage '{stage}' is not present in the new pipeline (stages: {})",
+                        "cannot change task {task_id} from workflow {} to {workflow_name}: \
+                         current stage '{stage}' is not present in the new workflow (stages: {})",
                         item.pipeline.as_deref().unwrap_or("<none>"),
                         snapshot.stage_names.join(", ")
                     ),
@@ -270,16 +270,17 @@ pub(super) async fn set_task_pipeline(
                 .update_pipeline_item_pipeline(
                     &task_id,
                     &stage,
-                    &pipeline_name,
+                    &workflow_name,
                     &snapshot.definition_json,
                     item.revision_rounds,
                     snapshot.revision_limit,
                 )
                 .map_err(|error| db_write_error("db error", error))?;
             Ok((
-                crate::mobile_api::SetTaskPipelineResponse {
+                crate::mobile_api::SetTaskWorkflowResponse {
                     task_id,
-                    pipeline_name,
+                    legacy_pipeline_name: workflow_name.clone(),
+                    workflow_name,
                     stage,
                     revision_rounds: item.revision_rounds,
                     revision_limit: snapshot.revision_limit,
@@ -432,7 +433,7 @@ fn collect_blocker_resolution_instructions(
         .unwrap_or_default();
     let status_sentence = match resolution {
         BlockerResolution::Closed => {
-            format!("Blocker task \"{blocker_title}\" has finished its pipeline and closed.")
+            format!("Blocker task \"{blocker_title}\" has finished its workflow and closed.")
         }
         BlockerResolution::PrCreated => format!(
             "Blocker task \"{blocker_title}\" has completed its work and opened a PR awaiting human review."
@@ -731,17 +732,17 @@ pub(super) async fn reopen_task(
     }))
 }
 
-/// Close a task that advanced past its final pipeline stage. Shared by
+/// Close a task that advanced past its final workflow stage. Shared by
 /// `advance_stage` and `complete_stage`: hands blocker-close instructions to
 /// dependents with workspaces, kills the task's daemon sessions, closes the
-/// pipeline item, and delivers the completion notification.
+/// workflow item, and delivers the completion notification.
 async fn close_task_after_final_stage(
     state: &Arc<AppState>,
     daemon: &mut crate::daemon_client::DaemonClient,
     task_id: String,
     workspace_teardown: Option<crate::task_creator::PreparedWorkspaceTeardown>,
 ) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
-    // Before anything is torn down: a pipeline whose final stage declares the
+    // Before anything is torn down: a workflow whose final stage declares the
     // merge-signaling approve post must not close leaving an open PR the merge
     // master never heard about. An error here deliberately abandons the close
     // — the task parks at its final stage instead.
@@ -808,7 +809,7 @@ async fn close_task_after_final_stage(
         crate::worktree_cleanup::cleanup_closed_task_worktrees_by_id(&db, &task_id)
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
-    // Reaching the end of the pipeline is a normal completion: the reported
+    // Reaching the end of the workflow is a normal completion: the reported
     // status comes from the run that terminated the task, not from the fact
     // that closing it killed the session. Best-effort for the same reason as
     // the direct close: the item is already closed, and the dependents this
@@ -816,7 +817,7 @@ async fn close_task_after_final_stage(
     notify_task_completion_best_effort(
         state.as_ref(),
         &task_id,
-        TaskCompletionTrigger::PipelineCompleted,
+        TaskCompletionTrigger::WorkflowCompleted,
     )
     .await;
     start_dependents_unblocked_by_close_with_daemon(state, daemon, &task_id).await;
@@ -1877,7 +1878,7 @@ pub(super) async fn request_revision(
                     limit = budget.limit,
                 )
             } else {
-                "Revision started; this pipeline sets no revision-round limit.".to_string()
+                "Revision started; this workflow sets no revision-round limit.".to_string()
             };
             Ok(Json(crate::mobile_api::TaskActionResponse {
                 task_id: source_task_id,

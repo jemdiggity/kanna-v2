@@ -8,7 +8,7 @@
 
 **Tech Stack:** React Native 0.86, Expo SDK 57, `react-native-webview`, xterm 6.1 beta public APIs, `expo-clipboard`, Vitest/happy-dom, Playwright TUI-fidelity harness, pnpm.
 
-**Kanna stage constraint:** Do not create implementation commits while executing this plan. This task's pipeline post owns the implementation commit after human review; use test and diff checkpoints instead.
+**Kanna stage constraint:** Do not create implementation commits while executing this plan. This task's workflow post owns the implementation commit after human review; use test and diff checkpoints instead.
 
 ---
 

@@ -57,7 +57,7 @@ Frontend coverage (vitest): `isBlockerResolved` unit matrix
 (`sidebarOrdering.test.ts`), and `checkUnblocked` optimistic restore plus
 its negative (`taskBlockedActions.test.ts`).
 
-A full desktop E2E (blocker pipeline runs to PR under the packaged app →
+A full desktop E2E (blocker workflow runs to PR under the packaged app →
 dependent visibly starts) still needs deterministic agent-stage completion
 without external credentials — same gap as
 [2026-07-05-blocked-task-unblock-e2e-note.md](2026-07-05-blocked-task-unblock-e2e-note.md).

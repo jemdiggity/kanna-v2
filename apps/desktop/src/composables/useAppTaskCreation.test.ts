@@ -26,8 +26,8 @@ function deferred<T>() {
 
 function createTaskCreationHarness() {
   const showNewTaskModal = ref(false);
-  const availablePipelines = ref<string[]>([]);
-  const defaultPipelineName = ref<string | undefined>(undefined);
+  const availableWorkflows = ref<string[]>([]);
+  const defaultWorkflowName = ref<string | undefined>(undefined);
   const availableBaseBranches = ref<string[]>([]);
   const defaultBaseBranchName = ref<string | undefined>(undefined);
   const repoDefaultBranchName = ref<string | undefined>(undefined);
@@ -78,8 +78,8 @@ function createTaskCreationHarness() {
     selectedCloudRepoId,
     selectedCloudItemId,
     showNewTaskModal,
-    availablePipelines,
-    defaultPipelineName,
+    availableWorkflows,
+    defaultWorkflowName,
     availableBaseBranches,
     defaultBaseBranchName,
     repoDefaultBranchName,
@@ -93,8 +93,8 @@ function createTaskCreationHarness() {
     creation,
     store,
     showNewTaskModal,
-    availablePipelines,
-    defaultPipelineName,
+    availableWorkflows,
+    defaultWorkflowName,
     availableBaseBranches,
     defaultBaseBranchName,
     repoDefaultBranchName,
@@ -114,11 +114,11 @@ describe("useAppTaskCreation", () => {
         revision: "remote-rev",
         refName: "origin/main",
         config: {},
-        defaultPipeline: "default",
-        pipelines: ["default"],
+        defaultWorkflow: "default",
+        workflows: ["default"],
       }),
       fetchRepoAgentProviders: async () => ["claude", "copilot", "codex", "opencode", "antigravity"],
-      fetchRepoRecentPipelines: async () => [],
+      fetchRepoRecentWorkflows: async () => [],
     });
     invokeMock.mockReset();
     invokeMock.mockImplementation(async (command: string) => {
@@ -139,8 +139,8 @@ describe("useAppTaskCreation", () => {
       revision: string;
       refName: string;
       config: Record<string, never>;
-      defaultPipeline: string;
-      pipelines: string[];
+      defaultWorkflow: string;
+      workflows: string[];
     }>();
     const providers = deferred<[]>();
     const defaultBranch = deferred<string>();
@@ -165,8 +165,8 @@ describe("useAppTaskCreation", () => {
       revision: "remote-rev",
       refName: "origin/main",
       config: {},
-      defaultPipeline: "default",
-      pipelines: ["default"],
+      defaultWorkflow: "default",
+      workflows: ["default"],
     });
     providers.resolve([]);
     defaultBranch.resolve("main");
@@ -174,69 +174,69 @@ describe("useAppTaskCreation", () => {
     await openPromise;
   });
 
-  it("defaults the New Task pipeline to the repository's most recently used one", async () => {
+  it("defaults the New Task workflow to the repository's most recently used one", async () => {
     updateDesktopServerClientHandlersForTests({
       fetchRepoKannaDefinitions: async () => ({
         revision: "remote-rev",
         refName: "origin/main",
         config: {},
-        defaultPipeline: "default",
-        pipelines: ["default", "single-reviewer"],
+        defaultWorkflow: "default",
+        workflows: ["default", "single-reviewer"],
       }),
-      fetchRepoRecentPipelines: async () => ["single-reviewer", "default"],
+      fetchRepoRecentWorkflows: async () => ["single-reviewer", "default"],
     });
-    const { creation, defaultPipelineName, availablePipelines } = createTaskCreationHarness();
+    const { creation, defaultWorkflowName, availableWorkflows } = createTaskCreationHarness();
 
     await creation.openNewTaskModal();
 
-    expect(availablePipelines.value).toEqual(["default", "single-reviewer"]);
-    expect(defaultPipelineName.value).toBe("single-reviewer");
+    expect(availableWorkflows.value).toEqual(["default", "single-reviewer"]);
+    expect(defaultWorkflowName.value).toBe("single-reviewer");
     expect(creation.newTaskOptionsLoading.value).toBe(false);
   });
 
-  it("ignores recently used pipelines the repository no longer offers", async () => {
+  it("ignores recently used workflows the repository no longer offers", async () => {
     updateDesktopServerClientHandlersForTests({
       fetchRepoKannaDefinitions: async () => ({
         revision: "remote-rev",
         refName: "origin/main",
         config: {},
-        defaultPipeline: "default",
-        pipelines: ["default", "single-reviewer"],
+        defaultWorkflow: "default",
+        workflows: ["default", "single-reviewer"],
       }),
-      fetchRepoRecentPipelines: async () => ["retired-pipeline", "single-reviewer"],
+      fetchRepoRecentWorkflows: async () => ["retired-workflow", "single-reviewer"],
     });
-    const { creation, defaultPipelineName } = createTaskCreationHarness();
+    const { creation, defaultWorkflowName } = createTaskCreationHarness();
 
     await creation.openNewTaskModal();
 
-    expect(defaultPipelineName.value).toBe("single-reviewer");
+    expect(defaultWorkflowName.value).toBe("single-reviewer");
   });
 
-  it("falls back to the configured default when recently used pipelines cannot be read", async () => {
+  it("falls back to the configured default when recently used workflows cannot be read", async () => {
     updateDesktopServerClientHandlersForTests({
       fetchRepoKannaDefinitions: async () => ({
         revision: "remote-rev",
         refName: "origin/main",
         config: {},
-        defaultPipeline: "default",
-        pipelines: ["default", "single-reviewer"],
+        defaultWorkflow: "default",
+        workflows: ["default", "single-reviewer"],
       }),
-      fetchRepoRecentPipelines: async () => {
+      fetchRepoRecentWorkflows: async () => {
         throw new Error("kanna-server unreachable");
       },
     });
-    const { creation, defaultPipelineName, toast } = createTaskCreationHarness();
+    const { creation, defaultWorkflowName, toast } = createTaskCreationHarness();
 
     await creation.openNewTaskModal();
 
-    expect(defaultPipelineName.value).toBe("default");
+    expect(defaultWorkflowName.value).toBe("default");
     expect(creation.newTaskOptionsLoading.value).toBe(false);
     // A missing sticky default is not worth interrupting the operator over.
     expect(toast.error).not.toHaveBeenCalled();
   });
 
-  it("keeps each repository's sticky pipeline default to itself", async () => {
-    const recentPipelinesByRepo: Record<string, string[]> = {
+  it("keeps each repository's sticky workflow default to itself", async () => {
+    const recentWorkflowsByRepo: Record<string, string[]> = {
       "repo-1": ["single-reviewer"],
       "repo-2": [],
     };
@@ -245,24 +245,24 @@ describe("useAppTaskCreation", () => {
         revision: "remote-rev",
         refName: "origin/main",
         config: {},
-        defaultPipeline: "default",
-        pipelines: ["default", "single-reviewer"],
+        defaultWorkflow: "default",
+        workflows: ["default", "single-reviewer"],
       }),
-      fetchRepoRecentPipelines: async (repoId: string) => recentPipelinesByRepo[repoId] ?? [],
+      fetchRepoRecentWorkflows: async (repoId: string) => recentWorkflowsByRepo[repoId] ?? [],
     });
-    const { creation, store, showNewTaskModal, defaultPipelineName } = createTaskCreationHarness();
+    const { creation, store, showNewTaskModal, defaultWorkflowName } = createTaskCreationHarness();
     store.repos.push({ id: "repo-2", path: "/repo-2" });
 
     await creation.openNewTaskModal("repo-1");
-    expect(defaultPipelineName.value).toBe("single-reviewer");
+    expect(defaultWorkflowName.value).toBe("single-reviewer");
     showNewTaskModal.value = false;
 
     await creation.openNewTaskModal("repo-2");
-    expect(defaultPipelineName.value).toBe("default");
+    expect(defaultWorkflowName.value).toBe("default");
   });
 
   it("hydrates cached repository options while refreshing them on reopen", async () => {
-    const { creation, showNewTaskModal, availablePipelines, defaultPipelineName, availableBaseBranches } =
+    const { creation, showNewTaskModal, availableWorkflows, defaultWorkflowName, availableBaseBranches } =
       createTaskCreationHarness();
 
     await creation.openNewTaskModal();
@@ -272,8 +272,8 @@ describe("useAppTaskCreation", () => {
       revision: string;
       refName: string;
       config: Record<string, never>;
-      defaultPipeline: string;
-      pipelines: string[];
+      defaultWorkflow: string;
+      workflows: string[];
     }>();
     const providers = deferred<["codex"]>();
     const defaultBranch = deferred<string>();
@@ -294,16 +294,16 @@ describe("useAppTaskCreation", () => {
     expect(creation.availableAgentProviders.value).toEqual([
       "claude", "copilot", "codex", "opencode", "antigravity",
     ]);
-    expect(availablePipelines.value).toEqual(["default"]);
-    expect(defaultPipelineName.value).toBe("default");
+    expect(availableWorkflows.value).toEqual(["default"]);
+    expect(defaultWorkflowName.value).toBe("default");
     expect(availableBaseBranches.value).toEqual(["origin/main"]);
 
     definitions.resolve({
       revision: "refreshed-rev",
       refName: "origin/trunk",
       config: {},
-      defaultPipeline: "review",
-      pipelines: ["default", "review"],
+      defaultWorkflow: "review",
+      workflows: ["default", "review"],
     });
     providers.resolve(["codex"]);
     defaultBranch.resolve("trunk");
@@ -311,8 +311,8 @@ describe("useAppTaskCreation", () => {
     await reopenPromise;
 
     expect(creation.availableAgentProviders.value).toEqual(["codex"]);
-    expect(availablePipelines.value).toEqual(["default", "review"]);
-    expect(defaultPipelineName.value).toBe("review");
+    expect(availableWorkflows.value).toEqual(["default", "review"]);
+    expect(defaultWorkflowName.value).toBe("review");
     expect(availableBaseBranches.value).toEqual(["origin/trunk", "trunk"]);
     expect(creation.newTaskOptionsLoading.value).toBe(false);
   });
@@ -322,7 +322,7 @@ describe("useAppTaskCreation", () => {
       creation,
       store,
       showNewTaskModal,
-      availablePipelines,
+      availableWorkflows,
       availableBaseBranches,
     } = createTaskCreationHarness();
 
@@ -334,8 +334,8 @@ describe("useAppTaskCreation", () => {
         revision: "repo-2-rev",
         refName: "origin/trunk",
         config: {},
-        defaultPipeline: "review",
-        pipelines: ["default", "review"],
+        defaultWorkflow: "review",
+        workflows: ["default", "review"],
       }),
       fetchRepoAgentProviders: async (): Promise<["codex"]> => ["codex"],
     });
@@ -351,8 +351,8 @@ describe("useAppTaskCreation", () => {
       revision: string;
       refName: string;
       config: Record<string, never>;
-      defaultPipeline: string;
-      pipelines: string[];
+      defaultWorkflow: string;
+      workflows: string[];
     }>();
     const providers = deferred<["claude"]>();
     const defaultBranch = deferred<string>();
@@ -372,15 +372,15 @@ describe("useAppTaskCreation", () => {
     expect(creation.availableAgentProviders.value).toEqual([
       "claude", "copilot", "codex", "opencode", "antigravity",
     ]);
-    expect(availablePipelines.value).toEqual(["default"]);
+    expect(availableWorkflows.value).toEqual(["default"]);
     expect(availableBaseBranches.value).toEqual(["origin/main"]);
 
     definitions.resolve({
       revision: "repo-1-refreshed-rev",
       refName: "origin/main",
       config: {},
-      defaultPipeline: "default",
-      pipelines: ["default"],
+      defaultWorkflow: "default",
+      workflows: ["default"],
     });
     providers.resolve(["claude"]);
     defaultBranch.resolve("main");
@@ -457,15 +457,15 @@ describe("useAppTaskCreation", () => {
         revision: string;
         refName: string;
         config: Record<string, never>;
-        defaultPipeline: string;
-        pipelines: string[];
+        defaultWorkflow: string;
+        workflows: string[];
       }>(),
       "repo-2": deferred<{
         revision: string;
         refName: string;
         config: Record<string, never>;
-        defaultPipeline: string;
-        pipelines: string[];
+        defaultWorkflow: string;
+        workflows: string[];
       }>(),
     };
     const providers = {
@@ -492,8 +492,8 @@ describe("useAppTaskCreation", () => {
     const {
       creation,
       store,
-      availablePipelines,
-      defaultPipelineName,
+      availableWorkflows,
+      defaultWorkflowName,
       availableBaseBranches,
     } = createTaskCreationHarness();
     store.repos.push({ id: "repo-2", path: "/repo-2" });
@@ -505,8 +505,8 @@ describe("useAppTaskCreation", () => {
       revision: "repo-2-rev",
       refName: "origin/trunk",
       config: {},
-      defaultPipeline: "review",
-      pipelines: ["default", "review"],
+      defaultWorkflow: "review",
+      workflows: ["default", "review"],
     });
     providers["repo-2"].resolve(["codex"]);
     defaultBranches["/repo-2"].resolve("trunk");
@@ -517,16 +517,16 @@ describe("useAppTaskCreation", () => {
       revision: "repo-1-rev",
       refName: "origin/main",
       config: {},
-      defaultPipeline: "default",
-      pipelines: ["default"],
+      defaultWorkflow: "default",
+      workflows: ["default"],
     });
     providers["repo-1"].resolve([]);
     defaultBranches["/repo"].resolve("main");
     baseBranches["/repo"].resolve(["origin/main"]);
     await firstOpen;
 
-    expect(availablePipelines.value).toEqual(["default", "review"]);
-    expect(defaultPipelineName.value).toBe("review");
+    expect(availableWorkflows.value).toEqual(["default", "review"]);
+    expect(defaultWorkflowName.value).toBe("review");
     expect(availableBaseBranches.value).toEqual(["origin/trunk"]);
     expect(creation.availableAgentProviders.value).toEqual(["codex"]);
     expect(creation.newTaskOptionsLoading.value).toBe(false);
@@ -535,8 +535,8 @@ describe("useAppTaskCreation", () => {
       revision: string;
       refName: string;
       config: Record<string, never>;
-      defaultPipeline: string;
-      pipelines: string[];
+      defaultWorkflow: string;
+      workflows: string[];
     }>();
     const refreshedProviders = deferred<[]>();
     const refreshedDefaultBranch = deferred<string>();
@@ -553,15 +553,15 @@ describe("useAppTaskCreation", () => {
 
     const thirdOpen = creation.openNewTaskModal("repo-1");
 
-    expect(availablePipelines.value).toEqual([]);
+    expect(availableWorkflows.value).toEqual([]);
     expect(availableBaseBranches.value).toEqual([]);
 
     refreshedDefinitions.resolve({
       revision: "repo-1-current-rev",
       refName: "origin/main",
       config: {},
-      defaultPipeline: "default",
-      pipelines: ["default"],
+      defaultWorkflow: "default",
+      workflows: ["default"],
     });
     refreshedProviders.resolve([]);
     refreshedDefaultBranch.resolve("main");
@@ -579,8 +579,8 @@ describe("useAppTaskCreation", () => {
               revision: "repo-2-rev",
               refName: "origin/main",
               config: {},
-              defaultPipeline: "default",
-              pipelines: ["default"],
+              defaultWorkflow: "default",
+              workflows: ["default"],
             }),
     });
     const { creation, store, toast } = createTaskCreationHarness();
@@ -594,22 +594,22 @@ describe("useAppTaskCreation", () => {
     expect(toast.error).not.toHaveBeenCalled();
   });
 
-  it("loads pipeline choices and the default from the repo definitions manifest", async () => {
+  it("loads workflow choices and the default from the repo definitions manifest", async () => {
     const fetchRepoKannaDefinitions = vi.fn(async () => ({
       revision: "remote-rev",
       refName: "origin/main",
-      config: { pipeline: "remote-qa" },
-      defaultPipeline: "remote-qa",
-      pipelines: ["default", "remote-qa"],
+      config: { workflow: "remote-qa" },
+      defaultWorkflow: "remote-qa",
+      workflows: ["default", "remote-qa"],
     }));
     updateDesktopServerClientHandlersForTests({ fetchRepoKannaDefinitions });
-    const { creation, availablePipelines, defaultPipelineName } = createTaskCreationHarness();
+    const { creation, availableWorkflows, defaultWorkflowName } = createTaskCreationHarness();
 
     await creation.openNewTaskModal();
 
     expect(fetchRepoKannaDefinitions).toHaveBeenCalledWith("repo-1");
-    expect(availablePipelines.value).toEqual(["default", "remote-qa"]);
-    expect(defaultPipelineName.value).toBe("remote-qa");
+    expect(availableWorkflows.value).toEqual(["default", "remote-qa"]);
+    expect(defaultWorkflowName.value).toBe("remote-qa");
     expect(invokeMock).not.toHaveBeenCalledWith("list_dir", expect.anything());
     expect(invokeMock).not.toHaveBeenCalledWith("read_text_file", expect.anything());
   });
@@ -626,8 +626,8 @@ describe("useAppTaskCreation", () => {
     const {
       creation,
       showNewTaskModal,
-      availablePipelines,
-      defaultPipelineName,
+      availableWorkflows,
+      defaultWorkflowName,
       toast,
     } = createTaskCreationHarness();
 
@@ -637,8 +637,8 @@ describe("useAppTaskCreation", () => {
       "toasts.repoDefinitionsFailed: remote definitions unavailable",
     );
     expect(showNewTaskModal.value).toBe(true);
-    expect(availablePipelines.value).toEqual([]);
-    expect(defaultPipelineName.value).toBeUndefined();
+    expect(availableWorkflows.value).toEqual([]);
+    expect(defaultWorkflowName.value).toBeUndefined();
     expect(fetchRepoAgentProviders).toHaveBeenCalledWith("repo-1");
     expect(creation.availableAgentProviders.value).toEqual(["claude"]);
     expect(invokeMock).toHaveBeenCalledWith("git_default_branch", { repoPath: "/repo" });
@@ -754,7 +754,7 @@ describe("useAppTaskCreation", () => {
         repo_id: "repo-1",
         prompt: "Create locally",
         display_name: null,
-        pipeline: "default",
+        workflow: "default",
         stage: "in progress",
         agent_type: "pty",
         agent_provider: "claude",

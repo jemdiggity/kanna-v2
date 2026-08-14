@@ -145,7 +145,7 @@ describe("remote blocked task journey", () => {
       );
 
       const ids = taskIds(source);
-      const blockedRowSelector = `.sidebar .pipeline-item[data-task-id="${ids.blocked}"]`;
+      const blockedRowSelector = `.sidebar .workflow-item[data-task-id="${ids.blocked}"]`;
       await client.waitForElement(blockedRowSelector, 5_000);
       const blockedRowText = await client.executeSync<string>(
         `return document.querySelector(${JSON.stringify(blockedRowSelector)})?.textContent || "";`,

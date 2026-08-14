@@ -18,7 +18,7 @@ The merge agent instructions will stop hard-coding `main`. They will instead use
 
 1. User starts Merge Master for the selected repo.
 2. Store finds the selected `repo` row.
-3. Store loads `.kanna/agents/merge/AGENT.md` through the existing pipeline agent loader.
+3. Store loads `.kanna/agents/merge/AGENT.md` through the existing workflow agent loader.
 4. Store appends runtime context containing `repo.default_branch || "main"`.
 5. Store creates the merge task with the augmented prompt.
 6. Merge agent uses the provided branch as the default target and verifies it before merging.

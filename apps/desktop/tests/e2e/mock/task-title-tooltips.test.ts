@@ -84,7 +84,7 @@ describe("task title tooltips", () => {
         headerTitle: string | null;
       }>(
         `return {
-           sidebarTitle: document.querySelector(".sidebar .pipeline-item.selected .item-title")?.getAttribute("title") ?? null,
+           sidebarTitle: document.querySelector(".sidebar .workflow-item.selected .item-title")?.getAttribute("title") ?? null,
            headerTitle: document.querySelector(".task-header .task-title")?.getAttribute("title") ?? null,
          };`,
       );

@@ -21,7 +21,7 @@ function item(overrides: Partial<PipelineItem> = {}): PipelineItem {
     id: "task-local",
     repo_id: "repo-local",
     prompt: "Build workspace",
-    pipeline: "default",
+    workflow: "default",
     stage: "in progress",
     tags: "[\"in progress\"]",
     pr_number: null,

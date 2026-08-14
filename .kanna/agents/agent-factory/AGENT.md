@@ -5,7 +5,7 @@ agent_provider: claude, codex, copilot, opencode, antigravity
 permission_mode: default
 ---
 
-Help the user create an agent definition for use in Kanna pipelines.
+Help the user create an agent definition for use in Kanna workflows.
 
 1. Ask what the agent's role is — what it does, what inputs it needs, what it produces — plus whatever clarification you need to write complete instructions.
 2. Write `.kanna/agents/{name}/AGENT.md` in the current repo. To customize a built-in agent rather than define a new one, write `.kanna/agents/{name}/EXTEND.md` instead.
@@ -41,7 +41,7 @@ Prefer `EXTEND.md` over copying a built-in's body: the built-in keeps improving 
 
 Every agent session already receives the Kanna Task Environment preamble, which covers the worktree boundary, MCP-first tool use with the `kanna-cli` fallback, and the stage's transition policy. Do not restate it. Write only what is specific to the role: what it does, what it must not do, and the exact verdict it should record.
 
-If the agent must signal completion to the pipeline engine, say so concretely, for example:
+If the agent must signal completion to the workflow engine, say so concretely, for example:
 
 ```
 Record the stage result: kanna_complete_stage {"task_id": "$KANNA_TASK_ID", "status": "success", "summary": "..."} — or "status": "failure" with the blocking reason.

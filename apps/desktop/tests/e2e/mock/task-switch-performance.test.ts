@@ -151,7 +151,7 @@ describe("task switch performance", () => {
          .then(() => cb("ok"))
          .catch((error) => cb(String(error)));`,
     );
-    await client.waitForText(".pipeline-item.selected", "Perf Task A");
+    await client.waitForText(".workflow-item.selected", "Perf Task A");
 
     const switchOrder = [taskB, taskA, taskB];
     const expectedLastTaskId = switchOrder.at(-1)?.id;
@@ -163,7 +163,7 @@ describe("task switch performance", () => {
     await pauseForSlowMode("task-switch perf records cleared");
 
     for (const [index, targetTask] of switchOrder.entries()) {
-      const taskElement = await client.waitForText(".pipeline-item", targetTask.prompt);
+      const taskElement = await client.waitForText(".workflow-item", targetTask.prompt);
       await client.click(taskElement);
       await waitForCompletedTaskSwitchPerfCount(client, index + 1);
       await pauseForSlowMode(`task-switch selected ${targetTask.id}`);

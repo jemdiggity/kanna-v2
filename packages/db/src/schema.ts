@@ -22,8 +22,8 @@ export interface PipelineItem {
   issue_number: number | null;
   issue_title: string | null;
   prompt: string | null;
-  pipeline: string;             // pipeline name (e.g., "default")
-  pipeline_def: string | null;  // resolved pipeline JSON snapshot for this task
+  pipeline: string;             // workflow name (e.g., "default"); legacy storage column
+  pipeline_def: string | null;  // resolved workflow JSON snapshot; legacy storage column
   stage: string;                // current stage name (e.g., "in progress")
   pr_number: number | null;
   pr_url: string | null;
@@ -75,7 +75,7 @@ export interface TaskPort {
 
 export type StageRunStatus = "pending" | "running" | "succeeded" | "failed" | "cancelled";
 
-/** "main" runs a pipeline stage; "post" runs a stage's tail work (e.g. commit). */
+/** "main" runs a workflow stage; "post" runs a stage's tail work (e.g. commit). */
 export type StageRunKind = "main" | "post";
 
 export interface StageRun {

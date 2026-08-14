@@ -20,7 +20,7 @@ Files:
 - `.kanna/agents/pr/AGENT.md`
 - `.kanna/agents/merge/AGENT.md`
 - `.kanna/agents/agent-factory/AGENT.md`
-- `.kanna/agents/pipeline-factory/AGENT.md`
+- `.kanna/agents/workflow-factory/AGENT.md`
 
 ### Authoring Docs and Examples
 
@@ -30,7 +30,7 @@ This includes:
 
 - frontmatter examples in `.kanna/agents/agent-factory/AGENT.md`
 - provider descriptions in `.kanna/agents/agent-factory/AGENT.md`
-- pipeline stage override descriptions in `.kanna/agents/pipeline-factory/AGENT.md`
+- workflow stage override descriptions in `.kanna/agents/workflow-factory/AGENT.md`
 
 The goal is that a user asking the built-in factory agents to create or document built-in Kanna agents is no longer pointed toward Claude.
 
@@ -67,7 +67,7 @@ The tests should verify that:
 
 ## Data Flow and Behavior
 
-No runtime execution flow changes are required for pipeline stage resolution. The desktop store already resolves agent provider by stage override, then agent definition, then item default, and the PTY spawn path already supports `codex`.
+No runtime execution flow changes are required for workflow stage resolution. The desktop store already resolves agent provider by stage override, then agent definition, then item default, and the PTY spawn path already supports `codex`.
 
 This work is primarily a configuration and validation cleanup so the configured source-of-truth matches the supported runtime behavior.
 

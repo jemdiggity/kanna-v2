@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Auto-select `superpowers:subagent-driven-development` or `superpowers:executing-plans` based on task coupling, subagent availability, and whether execution should stay in the current session. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Keep the default pipeline's first implementation advance manual while automatically returning successful reviewer-requested revisions to review, with a per-stage manual/auto override.
+**Goal:** Keep the default workflow's first implementation advance manual while automatically returning successful reviewer-requested revisions to review, with a per-stage manual/auto override.
 
-**Architecture:** Add optional `policy.revision_transition` to both pipeline loaders and persist the effective completion transition on each stage run. Stage preparation chooses ordinary versus revision policy once; prompt generation and completion handling consume that persisted value, with pinned-policy fallback for legacy rows.
+**Architecture:** Add optional `policy.revision_transition` to both workflow loaders and persist the effective completion transition on each stage run. Stage preparation chooses ordinary versus revision policy once; prompt generation and completion handling consume that persisted value, with pinned-policy fallback for legacy rows.
 
 **Tech Stack:** TypeScript, Vitest, JSON Schema, Rust, Serde, rusqlite/SQLite, Tokio/Axum integration tests
 
@@ -12,14 +12,14 @@
 
 ## File map
 
-- `packages/core/src/pipeline/pipeline-types.ts` — public TypeScript stage-policy shape.
-- `packages/core/src/pipeline/pipeline-loader.ts` — TypeScript validation and normalization.
-- `packages/core/src/pipeline/pipeline-loader.test.ts` — parser compatibility and validation tests.
-- `.kanna/pipelines/schema.json` — authoring schema for pipeline files.
-- `.kanna/pipelines/default.json` — shipped default behavior.
-- `.kanna/agents/pipeline-factory/AGENT.md` — user-facing pipeline authoring guidance.
+- `packages/core/src/workflow/workflow-types.ts` — public TypeScript stage-policy shape.
+- `packages/core/src/workflow/workflow-loader.ts` — TypeScript validation and normalization.
+- `packages/core/src/workflow/workflow-loader.test.ts` — parser compatibility and validation tests.
+- `.kanna/workflows/schema.json` — authoring schema for workflow files.
+- `.kanna/workflows/default.json` — shipped default behavior.
+- `.kanna/agents/workflow-factory/AGENT.md` — user-facing workflow authoring guidance.
 - `.kanna/agents/implement/AGENT.md` — policy-neutral implementer completion instructions.
-- `packages/core/src/pipeline/qa-assets.test.ts` — shipped asset contract tests.
+- `packages/core/src/workflow/qa-assets.test.ts` — shipped asset contract tests.
 - `crates/kanna-server/src/task_creator/definitions.rs` — Rust policy parsing, normalization, serialization, and effective-policy helper.
 - `crates/kanna-server/src/task_creator/types.rs` — prepared run objects carrying effective transition.
 - `crates/kanna-server/src/task_creator/mod.rs` — initial/rerun preparation and generated task preamble input.
@@ -30,21 +30,21 @@
 - `crates/kanna-server/src/db/stage_runs.rs` — transition-aware stage-run inserts, reads, and finished-run identity.
 - `crates/kanna-server/src/db/test_support.rs` — current test schema.
 - `crates/kanna-server/src/db/tests.rs` — migration and persistence coverage.
-- `crates/kanna-server/src/task_creator/tests/core.rs` — Rust pipeline-definition coverage.
+- `crates/kanna-server/src/task_creator/tests/core.rs` — Rust workflow-definition coverage.
 - `crates/kanna-server/src/task_creator/tests/revision.rs` — fresh/resumed revision prompt and run-policy coverage.
 - `crates/kanna-server/src/task_creator/tests/stage.rs` — completion-routing coverage.
 - `crates/kanna-server/src/http_api/tests/revision_status.rs` — server-boundary revision-loop coverage.
 
-### Task 1: Add the configurable pipeline policy to the TypeScript surface and shipped assets
+### Task 1: Add the configurable workflow policy to the TypeScript surface and shipped assets
 
 **Files:**
-- Modify: `packages/core/src/pipeline/pipeline-types.ts`
-- Modify: `packages/core/src/pipeline/pipeline-loader.ts`
-- Test: `packages/core/src/pipeline/pipeline-loader.test.ts`
-- Modify: `.kanna/pipelines/schema.json`
-- Modify: `.kanna/pipelines/default.json`
-- Modify: `.kanna/agents/pipeline-factory/AGENT.md`
-- Test: `packages/core/src/pipeline/qa-assets.test.ts`
+- Modify: `packages/core/src/workflow/workflow-types.ts`
+- Modify: `packages/core/src/workflow/workflow-loader.ts`
+- Test: `packages/core/src/workflow/workflow-loader.test.ts`
+- Modify: `.kanna/workflows/schema.json`
+- Modify: `.kanna/workflows/default.json`
+- Modify: `.kanna/agents/workflow-factory/AGENT.md`
+- Test: `packages/core/src/workflow/qa-assets.test.ts`
 
 - [ ] **Step 1: Write failing TypeScript parser and asset tests**
 
@@ -52,7 +52,7 @@ Add parser cases that prove preservation, omission compatibility, and validation
 
 ```ts
 it("parses an optional revision transition", () => {
-  const result = parsePipelineJson(JSON.stringify({
+  const result = parseWorkflowJson(JSON.stringify({
     name: "Revision loop",
     stages: [{
       name: "in progress",
@@ -67,7 +67,7 @@ it("parses an optional revision transition", () => {
 });
 
 it("leaves revision transition absent for existing policies", () => {
-  const result = parsePipelineJson(JSON.stringify({
+  const result = parseWorkflowJson(JSON.stringify({
     name: "Existing",
     stages: [{ name: "in progress", policy: { transition: "manual" } }],
   }));
@@ -84,7 +84,7 @@ it("rejects an invalid revision transition", () => {
     }],
   });
 
-  expect(() => parsePipelineJson(json)).toThrow(
+  expect(() => parseWorkflowJson(json)).toThrow(
     /invalid policy\.revision_transition "sometimes"; must be "manual" or "auto"/
   );
 });
@@ -94,7 +94,7 @@ Add a shipped-asset contract:
 
 ```ts
 it("automates default implement revisions without automating the initial handoff", () => {
-  const parsed = parsePipelineJson(readRepoFile(".kanna/pipelines/default.json"));
+  const parsed = parseWorkflowJson(readRepoFile(".kanna/workflows/default.json"));
   const implement = parsed.stages.find((stage) => stage.name === "in progress");
 
   expect(implement?.policy).toEqual({
@@ -103,8 +103,8 @@ it("automates default implement revisions without automating the initial handoff
   });
 });
 
-it("publishes revision transition values in the pipeline schema", () => {
-  const schema = JSON.parse(readRepoFile(".kanna/pipelines/schema.json"));
+it("publishes revision transition values in the workflow schema", () => {
+  const schema = JSON.parse(readRepoFile(".kanna/workflows/schema.json"));
   const revisionTransition =
     schema.properties.stages.items.properties.policy
       .properties.revision_transition;
@@ -118,7 +118,7 @@ it("publishes revision transition values in the pipeline schema", () => {
 Run:
 
 ```bash
-pnpm --dir packages/core test -- src/pipeline/pipeline-loader.test.ts src/pipeline/qa-assets.test.ts
+pnpm --dir packages/core test -- src/workflow/workflow-loader.test.ts src/workflow/qa-assets.test.ts
 ```
 
 Expected: FAIL because `revision_transition` is not represented or preserved and the default asset lacks it.
@@ -128,7 +128,7 @@ Expected: FAIL because `revision_transition` is not represented or preserved and
 Extend the policy type:
 
 ```ts
-export interface PipelineStagePolicy {
+export interface WorkflowStagePolicy {
   transition: "manual" | "auto";
   revision_transition?: "manual" | "auto";
 }
@@ -178,26 +178,26 @@ Update the default implement stage:
 }
 ```
 
-Document both keys and their fallback in the pipeline factory's stage-policy field table and example.
+Document both keys and their fallback in the workflow factory's stage-policy field table and example.
 
 - [ ] **Step 4: Run focused TypeScript tests**
 
 Run:
 
 ```bash
-pnpm --dir packages/core test -- src/pipeline/pipeline-loader.test.ts src/pipeline/qa-assets.test.ts
+pnpm --dir packages/core test -- src/workflow/workflow-loader.test.ts src/workflow/qa-assets.test.ts
 ```
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit the pipeline surface**
+- [ ] **Step 5: Commit the workflow surface**
 
 ```bash
-git add packages/core/src/pipeline/pipeline-types.ts packages/core/src/pipeline/pipeline-loader.ts packages/core/src/pipeline/pipeline-loader.test.ts packages/core/src/pipeline/qa-assets.test.ts .kanna/pipelines/schema.json .kanna/pipelines/default.json .kanna/agents/pipeline-factory/AGENT.md
-git commit -m "feat(pipeline): configure revision transitions"
+git add packages/core/src/workflow/workflow-types.ts packages/core/src/workflow/workflow-loader.ts packages/core/src/workflow/workflow-loader.test.ts packages/core/src/workflow/qa-assets.test.ts .kanna/workflows/schema.json .kanna/workflows/default.json .kanna/agents/workflow-factory/AGENT.md
+git commit -m "feat(workflow): configure revision transitions"
 ```
 
-### Task 2: Parse and resolve revision policy in the Rust pipeline model
+### Task 2: Parse and resolve revision policy in the Rust workflow model
 
 **Files:**
 - Modify: `crates/kanna-server/src/task_creator/definitions.rs`
@@ -211,8 +211,8 @@ Add a test that resolves and reserializes a policy with a revision override, plu
 
 ```rust
 #[test]
-fn pipeline_stage_policy_resolves_revision_transition_with_fallback() {
-    let explicit: PipelineDefinition = serde_json::from_str(
+fn workflow_stage_policy_resolves_revision_transition_with_fallback() {
+    let explicit: WorkflowDefinition = serde_json::from_str(
         r#"{
           "stages": [{
             "name": "in progress",
@@ -222,14 +222,14 @@ fn pipeline_stage_policy_resolves_revision_transition_with_fallback() {
     )
     .unwrap();
     let explicit_policy = &explicit.stages[0].policy;
-    assert_eq!(explicit_policy.transition, PipelineStageTransition::Manual);
+    assert_eq!(explicit_policy.transition, WorkflowStageTransition::Manual);
     assert_eq!(
         explicit_policy.revision_transition(),
-        PipelineStageTransition::Auto
+        WorkflowStageTransition::Auto
     );
     assert!(serde_json::to_string(&explicit).unwrap().contains("revision_transition"));
 
-    let inherited: PipelineDefinition = serde_json::from_str(
+    let inherited: WorkflowDefinition = serde_json::from_str(
         r#"{
           "stages": [{
             "name": "in progress",
@@ -240,10 +240,10 @@ fn pipeline_stage_policy_resolves_revision_transition_with_fallback() {
     .unwrap();
     assert_eq!(
         inherited.stages[0].policy.revision_transition(),
-        PipelineStageTransition::Manual
+        WorkflowStageTransition::Manual
     );
 
-    let invalid = serde_json::from_str::<PipelineDefinition>(
+    let invalid = serde_json::from_str::<WorkflowDefinition>(
         r#"{
           "stages": [{
             "name": "in progress",
@@ -260,10 +260,10 @@ fn pipeline_stage_policy_resolves_revision_transition_with_fallback() {
 Run:
 
 ```bash
-cargo test -p kanna-server pipeline_stage_policy_resolves_revision_transition_with_fallback
+cargo test -p kanna-server workflow_stage_policy_resolves_revision_transition_with_fallback
 ```
 
-Expected: FAIL because `PipelineStagePolicy` has no revision field or resolver.
+Expected: FAIL because `WorkflowStagePolicy` has no revision field or resolver.
 
 - [ ] **Step 3: Implement the Rust policy field and helper**
 
@@ -271,27 +271,27 @@ Use an optional serialized field so pinned definitions preserve explicit customi
 
 ```rust
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub(super) struct PipelineStagePolicy {
-    pub(super) transition: PipelineStageTransition,
+pub(super) struct WorkflowStagePolicy {
+    pub(super) transition: WorkflowStageTransition,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) revision_transition: Option<PipelineStageTransition>,
+    pub(super) revision_transition: Option<WorkflowStageTransition>,
 }
 
-impl PipelineStagePolicy {
-    pub(super) fn revision_transition(&self) -> PipelineStageTransition {
+impl WorkflowStagePolicy {
+    pub(super) fn revision_transition(&self) -> WorkflowStageTransition {
         self.revision_transition.unwrap_or(self.transition)
     }
 }
 ```
 
-Add `revision_transition: Option<PipelineStageTransition>` to `RawPipelineStagePolicy`, carry it through normalization, and set `revision_transition: None` in programmatically constructed singleton, integration, and merge policies.
+Add `revision_transition: Option<WorkflowStageTransition>` to `RawWorkflowStagePolicy`, carry it through normalization, and set `revision_transition: None` in programmatically constructed singleton, integration, and merge policies.
 
 - [ ] **Step 4: Run the focused Rust definition tests**
 
 Run:
 
 ```bash
-cargo test -p kanna-server pipeline_stage_policy_resolves_revision_transition_with_fallback
+cargo test -p kanna-server workflow_stage_policy_resolves_revision_transition_with_fallback
 cargo test -p kanna-server task_creator::tests::core
 ```
 
@@ -480,7 +480,7 @@ Change the revision fixture to use an initially manual stage with an automatic r
 Assert both paths expose and persist the effective value:
 
 ```rust
-assert_eq!(prepared.completion_transition, PipelineStageTransition::Auto);
+assert_eq!(prepared.completion_transition, WorkflowStageTransition::Auto);
 match &prepared.session {
     PreparedSessionSpawn::Agent { system_prompt, .. } => {
         assert!(system_prompt.contains("(transition: `auto`)"));
@@ -507,7 +507,7 @@ Expected: FAIL because revision preparation still uses `policy.transition`.
 
 - [ ] **Step 3: Carry effective transition through prepared runs**
 
-Add `completion_transition: PipelineStageTransition` to `ResolvedTaskSpawn`, `PreparedTaskSpawn`, `PreparedStageRunSpawn`, and `PreparedStageRerun`. Add an explicit `completion_transition` argument to `prepare_stage_run_spawn` and pass its string to `build_prepared_session`:
+Add `completion_transition: WorkflowStageTransition` to `ResolvedTaskSpawn`, `PreparedTaskSpawn`, `PreparedStageRunSpawn`, and `PreparedStageRerun`. Add an explicit `completion_transition` argument to `prepare_stage_run_spawn` and pass its string to `build_prepared_session`:
 
 ```rust
 Some(completion_transition.as_str())
@@ -527,7 +527,7 @@ When recording an initial, rerun, post, or transitioned stage run, call `insert_
 Some(prepared.completion_transition.as_str())
 ```
 
-Post runs use `PipelineStageTransition::Auto` because a completed post always performs its already-approved transition.
+Post runs use `WorkflowStageTransition::Auto` because a completed post always performs its already-approved transition.
 
 - [ ] **Step 4: Run revision and spawn tests**
 
@@ -602,12 +602,12 @@ For main runs, resolve the effective value with strict persisted-value parsing a
 
 ```rust
 let transition = match completion_transition {
-    Some("manual") => PipelineStageTransition::Manual,
-    Some("auto") => PipelineStageTransition::Auto,
+    Some("manual") => WorkflowStageTransition::Manual,
+    Some("auto") => WorkflowStageTransition::Auto,
     Some(value) => return Err(format!("invalid stage run completion transition: {value}")),
     None => stage.policy.transition,
 };
-if transition != PipelineStageTransition::Auto {
+if transition != WorkflowStageTransition::Auto {
     return Ok(None);
 }
 ```
@@ -660,7 +660,7 @@ git commit -m "feat(server): auto-advance successful revisions"
 
 **Files:**
 - Modify: `.kanna/agents/implement/AGENT.md`
-- Test: `packages/core/src/pipeline/qa-assets.test.ts`
+- Test: `packages/core/src/workflow/qa-assets.test.ts`
 - Modify: `docs/superpowers/plans/2026-07-17-automatic-revision-transitions.md` (checkbox tracking only)
 
 - [ ] **Step 1: Update the asset test to reject hard-coded manual guidance**
@@ -686,7 +686,7 @@ Keep the common MCP-first failure and quoted task-id assertions.
 Run:
 
 ```bash
-pnpm --dir packages/core test -- src/pipeline/qa-assets.test.ts
+pnpm --dir packages/core test -- src/workflow/qa-assets.test.ts
 ```
 
 Expected: FAIL because the implement agent still says every run advances manually.
@@ -714,7 +714,7 @@ Only if MCP tools are unavailable, fall back to the CLI: `kanna-cli stage-comple
 Run:
 
 ```bash
-pnpm --dir packages/core test -- src/pipeline/pipeline-loader.test.ts src/pipeline/qa-assets.test.ts
+pnpm --dir packages/core test -- src/workflow/workflow-loader.test.ts src/workflow/qa-assets.test.ts
 cargo test -p kanna-server db::tests
 cargo test -p kanna-server task_creator::tests
 cargo test -p kanna-server http_api::tests::revision_status
@@ -746,6 +746,6 @@ git diff --stat HEAD~5..HEAD
 Expected: no whitespace errors; only planned files are changed.
 
 ```bash
-git add .kanna/agents/implement/AGENT.md packages/core/src/pipeline/qa-assets.test.ts docs/superpowers/plans/2026-07-17-automatic-revision-transitions.md
+git add .kanna/agents/implement/AGENT.md packages/core/src/workflow/qa-assets.test.ts docs/superpowers/plans/2026-07-17-automatic-revision-transitions.md
 git commit -m "docs(agent): follow effective transition policy"
 ```

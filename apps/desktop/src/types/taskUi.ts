@@ -5,7 +5,7 @@ export interface TaskUiDraft {
   repo_id: string;
   prompt: string;
   display_name: string | null;
-  pipeline: string;
+  workflow: string;
   stage: string;
   agent_type: AgentExecutionType;
   agent_provider: AgentProvider;

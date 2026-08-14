@@ -6,7 +6,7 @@ Related: [merge-master.md](./merge-master.md),
 [forge-independence.md](./forge-independence.md) (parked horizon)
 
 Review a task's diff in Kanna, comment on lines, and send the task back
-down the pipeline with those comments as the revision prompt — then let it
+down the workflow with those comments as the revision prompt — then let it
 climb back up to PR. Merge-master established **git ≠ gh** for merging and
 deferred line-anchored feedback; this spec is that follow-up, rescoped
 after a deliberate rethink.
@@ -49,7 +49,7 @@ prompt and delivered through the engine actions that already exist.
 4. **Approve** (`⌘S`): approval *is* the existing advance-stage action —
    no new chord, no new concept; the `advanceStage` binding's context
    just grows from `["main"]` to include `diff`. What approval *means*
-   is whatever the pipeline wired there — a `pr` stage approve post
+   is whatever the workflow wired there — a `pr` stage approve post
    signaling a GitHub merge agent, a merge-queue signal, or nothing but
    a stage swap. User-space, per merge-master.md.
 
@@ -58,7 +58,7 @@ prompt and delivered through the engine actions that already exist.
 ```
 Revision requested from review of task-8f41c409 @ 83b57a05 (branch diff vs main).
 
-apps/desktop/src/stores/pipeline.ts:118-124
+apps/desktop/src/stores/workflow.ts:118-124
 > (excerpt of the commented lines)
 This retry loop hides the real error — surface it and drop the loop.
 
@@ -105,7 +105,7 @@ All frontend; the engine needs nothing new.
     supplies its element.
 - **Verdict bar** in `DiffModal.vue`, shown when the task is parked at a
   reviewable stage: comment count, Request changes, Approve. Wired
-  through `stores/pipeline.ts::postTaskAction` to the existing
+  through `stores/workflow.ts::postTaskAction` to the existing
   `request-revision` / `advance-stage` actions.
 - **Keyboard.** The diff modal's keyscape is crowded and must be
   respected: `useLessScroll` owns `j/k/f/b/d/u/g/G/q` (and space/arrows)
@@ -142,14 +142,14 @@ All frontend; the engine needs nothing new.
 
 ## Agent polymorphism (making "what approval means" frictionless)
 
-Kanna's agent system is already duck-typed with late binding: pipelines
+Kanna's agent system is already duck-typed with late binding: workflows
 dispatch by name (`agent: merge`), resolution is repo file → built-in
 resource, `EXTEND.md` layers overrides. Three cheap additions make the
 setup path frictionless and tested:
 
 1. **Flavors.** Built-ins ship variants of a role:
    `pr@draft-pr`, `pr@push-only`, `merge@github`, `merge@git`. Selection
-   is one line (`agent: merge@github` in a pipeline stage, or a
+   is one line (`agent: merge@github` in a workflow stage, or a
    `flavors` map in `.kanna/config.json`) instead of copying AGENT.md
    files. Resolution order stays: repo override → built-in flavor →
    built-in default. Repo overrides and extensions are role-scoped:
@@ -180,15 +180,15 @@ the hot path:
 ### The setup agent
 
 A `setup` factory agent (composing the existing `agent-factory` /
-`pipeline-factory` / `config-factory`) runs at repo import or on demand:
+`workflow-factory` / `config-factory`) runs at repo import or on demand:
 inspects the repo to pre-answer what it can (remote URL, `gh auth
 status`, CI config), asks only what it must ("how much review? ordinary
 PRs, drafts, or push-only? merge yourself or a merge agent?"), then
 writes the `.kanna/` files — flavor selections, an EXTEND.md where an
-answer doesn't match a stock flavor, and a pipeline JSON only when the
+answer doesn't match a stock flavor, and a workflow JSON only when the
 built-ins do not already cover the shape. It composes tested flavors; it
 does not author agents from scratch. The stock preset is the GitHub
-flow, which *selects* a built-in pipeline (`no-review`, `single-reviewer`,
+flow, which *selects* a built-in workflow (`no-review`, `single-reviewer`,
 or `specialized-reviewers`) and attaches `merge@github`:
 `pr` → review in ⌘D → approve post → `merge@github`.
 
@@ -197,7 +197,7 @@ composition rule. Every built-in ends with a `pr` stage plus an `approve`
 post, and `approve` resolves the PR with `gh pr view` and fails when none
 exists — so direct built-in selection is valid only for the ordinary-PR
 flow. `pr@push-only` publishes no PR and therefore implies manual merge
-plus a repo-local pipeline with the `approve` post dropped; manual merge
+plus a repo-local workflow with the `approve` post dropped; manual merge
 alone drops it too; `pr@draft-pr` with a merge agent additionally needs a
 repo-local `approve` EXTEND.md that readies the draft, because
 `merge@github` cannot merge a draft.

@@ -61,8 +61,8 @@ interface UseAppModalsOptions {
 
 export function useAppModals({ isMobile, store, windowWorkspace }: UseAppModalsOptions) {
   const showNewTaskModal = ref(false);
-  const availablePipelines = ref<string[]>([]);
-  const defaultPipelineName = ref<string | undefined>(undefined);
+  const availableWorkflows = ref<string[]>([]);
+  const defaultWorkflowName = ref<string | undefined>(undefined);
   const availableBaseBranches = ref<string[]>([]);
   const defaultBaseBranchName = ref<string | undefined>(undefined);
   const repoDefaultBranchName = ref<string | undefined>(undefined);
@@ -402,8 +402,8 @@ export function useAppModals({ isMobile, store, windowWorkspace }: UseAppModalsO
 
   return {
     showNewTaskModal,
-    availablePipelines,
-    defaultPipelineName,
+    availableWorkflows,
+    defaultWorkflowName,
     availableBaseBranches,
     defaultBaseBranchName,
     repoDefaultBranchName,

@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust/Axum/Serde/SQLite/daemon task spawning, TypeScript, React Native, Vue 3, Vitest, Rust tests.
 
-**Stage constraint:** Do not create implementation commits in this Kanna stage; use verification checkpoints and leave changes for the pipeline's later commit step.
+**Stage constraint:** Do not create implementation commits in this Kanna stage; use verification checkpoints and leave changes for the workflow's later commit step.
 
 ---
 
@@ -128,7 +128,7 @@ pub enum RepoCommandGroup { Automation, Configure }
 pub fn build_repo_command_catalog(repo: &crate::db::Repo) -> Result<RepoCommandCatalog, RepoCommandError>;
 ```
 
-Use fixed factory definitions for `setup-repo`, `create-config`, `create-agent`, `create-pipeline`, and `new-custom-task`. Compile the built-in Merge Master and Ship task files with `include_str!`, overlay local `<repo>/.kanna/tasks/<slug>/agent.md` files by slug, parse the existing frontmatter fields with `serde_yaml`, and skip incomplete definitions consistently with `@kanna/core`.
+Use fixed factory definitions for `setup-repo`, `create-config`, `create-agent`, `create-workflow`, and `new-custom-task`. Compile the built-in Merge Master and Ship task files with `include_str!`, overlay local `<repo>/.kanna/tasks/<slug>/agent.md` files by slug, parse the existing frontmatter fields with `serde_yaml`, and skip incomplete definitions consistently with `@kanna/core`.
 
 Calculate a deterministic revision from sorted command IDs plus launch-relevant definition content. Use a stable standard-library hash representation or add `sha2 = "0.10"` to `crates/kanna-server/Cargo.toml`; do not use randomized `DefaultHasher` output.
 
@@ -281,7 +281,7 @@ Resolve factory commands to the exact current desktop prompts/agents:
 
 ```text
 Create Agent -> "Help me create a new agent definition for this repository."
-Create Pipeline -> "Help me create a new pipeline definition for this repository."
+Create Workflow -> "Help me create a new workflow definition for this repository."
 Set Up Repository -> agent `setup`, prompt "Set up Kanna for this repository."
 Create Config -> agent `config-factory`, prompt "Help me create or update the .kanna/config.json for this repository."
 New Custom Task -> the existing NEW_CUSTOM_TASK_PROMPT text

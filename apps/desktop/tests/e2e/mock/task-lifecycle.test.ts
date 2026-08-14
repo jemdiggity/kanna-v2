@@ -24,7 +24,7 @@ async function waitForPipelineItem<T>(
     await sleep(100);
   }
 
-  throw new Error(`Timed out waiting for pipeline item state; last row was ${JSON.stringify(lastRow)}`);
+  throw new Error(`Timed out waiting for task state; last row was ${JSON.stringify(lastRow)}`);
 }
 
 async function waitForCondition(
@@ -154,7 +154,7 @@ async function getTaskCreationE2eState(
      const unwrap = (value) => value && value.__v_isRef ? value.value : value;
      const store = ctx.store;
      const repo = document.querySelector(${JSON.stringify(`.repo-section[data-repo-id="${repoId}"]`)});
-     const rows = repo ? Array.from(repo.querySelectorAll(".pipeline-item")) : [];
+     const rows = repo ? Array.from(repo.querySelectorAll(".workflow-item")) : [];
      const row = gate?.slotId
        ? rows.find((candidate) => candidate.dataset.slotId === gate.slotId) ?? null
        : rows[0] ?? null;
@@ -223,7 +223,7 @@ describe("task lifecycle", () => {
     await waitForCondition(
       async () => client.executeSync<boolean>(
         `const repo = document.querySelector(${JSON.stringify(`.repo-section[data-repo-id="${repoId}"]`)});
-         const rows = repo ? Array.from(repo.querySelectorAll(".pipeline-item")) : [];
+         const rows = repo ? Array.from(repo.querySelectorAll(".workflow-item")) : [];
          return rows.length > 0 && rows.every((row) => row.getAttribute("aria-busy") !== "true");`,
       ),
       "repository setup task to settle before the creation handoff test",
@@ -232,7 +232,7 @@ describe("task lifecycle", () => {
     const baseline = await client.executeSync<{ rowCount: number; repoCount: string }>(
       `const repo = document.querySelector(${JSON.stringify(`.repo-section[data-repo-id="${repoId}"]`)});
        return {
-         rowCount: repo?.querySelectorAll(".pipeline-item").length ?? 0,
+         rowCount: repo?.querySelectorAll(".workflow-item").length ?? 0,
          repoCount: repo?.querySelector(".repo-count")?.textContent?.trim() ?? "",
        };`,
     );
@@ -350,7 +350,7 @@ describe("task lifecycle", () => {
            const unwrap = (value) => value && value.__v_isRef ? value.value : value;
            const selectedSlotId = unwrap(ctx.store?.selectedItemId) ?? null;
            const repo = document.querySelector(${JSON.stringify(`.repo-section[data-repo-id="${repoId}"]`)});
-           const rows = repo ? Array.from(repo.querySelectorAll(".pipeline-item")) : [];
+           const rows = repo ? Array.from(repo.querySelectorAll(".workflow-item")) : [];
            const row = rows.find((candidate) => candidate.dataset.slotId === selectedSlotId) ?? null;
            return rows.length === gate.expectedRowCount && Boolean(row?.dataset.slotId);`,
         ),
@@ -364,7 +364,7 @@ describe("task lifecycle", () => {
          const unwrap = (value) => value && value.__v_isRef ? value.value : value;
          const selectedSlotId = unwrap(ctx.store?.selectedItemId) ?? null;
          const repo = document.querySelector(${JSON.stringify(`.repo-section[data-repo-id="${repoId}"]`)});
-         const rows = repo ? Array.from(repo.querySelectorAll(".pipeline-item")) : [];
+         const rows = repo ? Array.from(repo.querySelectorAll(".workflow-item")) : [];
          const row = rows.find((candidate) => candidate.dataset.slotId === selectedSlotId) ?? null;
          if (!repo || rows.length !== gate.expectedRowCount || !row?.dataset.slotId) {
            throw new Error("expected one additional selected optimistic task slot before capturing its DOM identity");
@@ -372,7 +372,7 @@ describe("task lifecycle", () => {
          gate.slotId = row.dataset.slotId;
          gate.originalRow = row;
          gate.record = () => {
-           const currentRows = Array.from(repo.querySelectorAll(".pipeline-item"));
+           const currentRows = Array.from(repo.querySelectorAll(".workflow-item"));
            const repoCount = repo.querySelector(".repo-count")?.textContent?.trim() ?? "";
            const currentRow = currentRows.find(
              (candidate) => candidate.dataset.slotId === gate.slotId
@@ -636,7 +636,7 @@ describe("task lifecycle", () => {
     expect(sidebarText).not.toContain("teardown");
 
     const titleStyle = await client.executeSync<string>(
-      `const titles = Array.from(document.querySelectorAll(".pipeline-item .item-title"));
+      `const titles = Array.from(document.querySelectorAll(".workflow-item .item-title"));
        const title = titles.find((el) => (el.textContent || "").includes("Say OK"));
        return title ? window.getComputedStyle(title).textDecorationLine : "";`
     );
@@ -780,9 +780,9 @@ describe("task lifecycle", () => {
         header: string;
       }>(
         `const gate = window.__KANNA_OPTIMISTIC_CLOSE_GATE__;
-         const closing = document.querySelector(${JSON.stringify(`.pipeline-item[data-task-id="${closingTaskId}"]`)});
-         const replacement = document.querySelector(${JSON.stringify(`.pipeline-item[data-task-id="${replacementTaskId}"]`)});
-         const selected = document.querySelector(".pipeline-item.selected");
+         const closing = document.querySelector(${JSON.stringify(`.workflow-item[data-task-id="${closingTaskId}"]`)});
+         const replacement = document.querySelector(${JSON.stringify(`.workflow-item[data-task-id="${replacementTaskId}"]`)});
+         const selected = document.querySelector(".workflow-item.selected");
          return {
            responseReleased: gate?.responseReleased === true,
            responseCompleted: gate?.responseCompleted === true,
@@ -829,8 +829,8 @@ describe("task lifecycle", () => {
         selectedTaskId: string | null;
         header: string;
       }>(
-        `const closing = document.querySelector(${JSON.stringify(`.pipeline-item[data-task-id="${closingTaskId}"]`)});
-         const selected = document.querySelector(".pipeline-item.selected");
+        `const closing = document.querySelector(${JSON.stringify(`.workflow-item[data-task-id="${closingTaskId}"]`)});
+         const selected = document.querySelector(".workflow-item.selected");
          return {
            closingVisible: Boolean(closing),
            selectedTaskId: selected?.getAttribute("data-task-id") || null,
@@ -1057,7 +1057,7 @@ describe("task lifecycle", () => {
          const read = (value) => value && value.__v_isRef ? value.value : value;
          const currentItem = read(ctx.store.currentItem);
          const row = document.querySelector(${JSON.stringify(
-           `.repo-section[data-repo-id="${repoId}"] .pipeline-item[data-task-id="${dependentTaskId}"]`,
+           `.repo-section[data-repo-id="${repoId}"] .workflow-item[data-task-id="${dependentTaskId}"]`,
          )});
          const sectionLabel = row?.closest(".type-zone")?.previousElementSibling?.textContent?.trim() ?? null;
          return currentItem?.id === ${JSON.stringify(dependentTaskId)}
@@ -1069,7 +1069,7 @@ describe("task lifecycle", () => {
         `const ctx = window.__KANNA_E2E__.setupState;
          const read = (value) => value && value.__v_isRef ? value.value : value;
          const row = document.querySelector(${JSON.stringify(
-           `.repo-section[data-repo-id="${repoId}"] .pipeline-item[data-task-id="${dependentTaskId}"]`,
+           `.repo-section[data-repo-id="${repoId}"] .workflow-item[data-task-id="${dependentTaskId}"]`,
          )});
          return {
            selectedItemId: read(ctx.store.selectedItemId),
@@ -1095,7 +1095,7 @@ describe("task lifecycle", () => {
        const read = (value) => value && value.__v_isRef ? value.value : value;
        const currentItem = read(ctx.store.currentItem);
        const row = document.querySelector(${JSON.stringify(
-         `.repo-section[data-repo-id="${repoId}"] .pipeline-item[data-task-id="${dependentTaskId}"]`,
+         `.repo-section[data-repo-id="${repoId}"] .workflow-item[data-task-id="${dependentTaskId}"]`,
        )});
        return {
          selectedItemId: read(ctx.store.selectedItemId),
@@ -1176,13 +1176,13 @@ describe("task lifecycle", () => {
         `const ctx = window.__KANNA_E2E__.setupState;
          const read = (value) => value && value.__v_isRef ? value.value : value;
          const repoA = document.querySelector(${JSON.stringify(`.repo-section[data-repo-id="${repoAId}"]`)});
-         const repoBTask = document.querySelector(${JSON.stringify(`.repo-section[data-repo-id="${repoBId}"] .pipeline-item[data-task-id="${repoBTaskId}"]`)});
+         const repoBTask = document.querySelector(${JSON.stringify(`.repo-section[data-repo-id="${repoBId}"] .workflow-item[data-task-id="${repoBTaskId}"]`)});
          return {
            selectedRepoId: read(ctx.store.selectedRepoId) ?? null,
            selectedItemId: read(ctx.store.selectedItemId) ?? null,
            repoASelected: repoA?.querySelector(".repo-header")?.classList.contains("selected") ?? false,
            repoAEmptyText: repoA?.querySelector(".no-items")?.textContent?.trim() ?? "",
-           repoATaskCount: repoA?.querySelectorAll(".pipeline-item").length ?? -1,
+           repoATaskCount: repoA?.querySelectorAll(".workflow-item").length ?? -1,
            repoBTaskSelected: repoBTask?.classList.contains("selected") ?? false,
            mainPanelText: document.querySelector(".main-panel .empty-state")?.textContent?.trim() ?? "",
          };`,

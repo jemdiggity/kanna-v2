@@ -45,12 +45,12 @@ At the bottom of `packages/db/src/queries.ts`, before the Settings section, add:
 export async function insertOperatorEvent(
   db: DbHandle,
   eventType: "task_selected" | "app_blur" | "app_focus",
-  pipelineItemId: string | null,
+  workflowItemId: string | null,
   repoId: string | null
 ): Promise<void> {
   await db.execute(
     "INSERT INTO operator_event (event_type, pipeline_item_id, repo_id) VALUES (?, ?, ?)",
-    [eventType, pipelineItemId, repoId]
+    [eventType, workflowItemId, repoId]
   );
 }
 ```
@@ -283,16 +283,16 @@ Create `apps/desktop/src/composables/useOperatorEvents.test.ts`:
 import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
 import { ref } from "vue";
 
-let dbCalls: { eventType: string; pipelineItemId: string | null; repoId: string | null }[] = [];
+let dbCalls: { eventType: string; workflowItemId: string | null; repoId: string | null }[] = [];
 
 mock.module("@kanna/db", () => ({
   insertOperatorEvent: async (
     _db: any,
     eventType: string,
-    pipelineItemId: string | null,
+    workflowItemId: string | null,
     repoId: string | null
   ) => {
-    dbCalls.push({ eventType, pipelineItemId, repoId });
+    dbCalls.push({ eventType, workflowItemId, repoId });
   },
 }));
 
@@ -313,7 +313,7 @@ describe("useOperatorEvents", () => {
 
     expect(dbCalls).toHaveLength(1);
     expect(dbCalls[0].eventType).toBe("app_blur");
-    expect(dbCalls[0].pipelineItemId).toBeNull();
+    expect(dbCalls[0].workflowItemId).toBeNull();
     expect(dbCalls[0].repoId).toBeNull();
 
     cleanup();

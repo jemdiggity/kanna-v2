@@ -145,10 +145,10 @@ git diff --check
 Expected: only the two Bazel files and the approved design/plan documents are
 changed; `git diff --check` exits successfully.
 
-- [x] **Step 4: Defer the complete ship command until the pipeline commit exists**
+- [x] **Step 4: Defer the complete ship command until the workflow commit exists**
 
 The canonical release command rejects dirty worktrees. Do not create an
-out-of-band commit in this stage. After the pipeline commits this fix, rerun:
+out-of-band commit in this stage. After the workflow commits this fix, rerun:
 
 ```bash
 KANNA_UPDATER_PUBKEY="$(tr -d '\n' < "$HOME/.tauri/kanna-updater.key.pub")" \

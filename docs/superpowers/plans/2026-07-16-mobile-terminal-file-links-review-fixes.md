@@ -162,4 +162,4 @@ Expected: every command exits zero.
 
 Capture `git status --short`, run the Bazel build once more, and compare `git status --short` afterward.
 
-Expected: the second build introduces no additional changes. The worktree remains intentionally dirty only with this revision's source, test, plan, and regenerated lock changes because the Kanna pipeline commits later.
+Expected: the second build introduces no additional changes. The worktree remains intentionally dirty only with this revision's source, test, plan, and regenerated lock changes because the Kanna workflow commits later.

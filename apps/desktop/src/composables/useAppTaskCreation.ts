@@ -13,9 +13,9 @@ import type { DesktopCloudSnapshot } from "../services/desktopCloudTaskIndex";
 import {
   fetchDesktopRepoAgentProviders,
   fetchDesktopRepoKannaDefinitions,
-  fetchDesktopRepoRecentPipelines,
+  fetchDesktopRepoRecentWorkflows,
 } from "../services/desktopServerClient";
-import { resolveStickyPipelineDefault } from "../utils/stickyPipeline";
+import { resolveStickyWorkflowDefault } from "../utils/stickyWorkflow";
 import type { useKannaStore } from "../stores/kanna";
 import { claimLocalTaskSelectionOwnership } from "./localTaskSelectionOwnership";
 import type { useToast } from "./useToast";
@@ -36,8 +36,8 @@ interface UseAppTaskCreationOptions {
   selectedCloudRepoId: Ref<string | null>;
   selectedCloudItemId: Ref<string | null>;
   showNewTaskModal: Ref<boolean>;
-  availablePipelines: Ref<string[]>;
-  defaultPipelineName: Ref<string | undefined>;
+  availableWorkflows: Ref<string[]>;
+  defaultWorkflowName: Ref<string | undefined>;
   availableBaseBranches: Ref<string[]>;
   defaultBaseBranchName: Ref<string | undefined>;
   repoDefaultBranchName: Ref<string | undefined>;
@@ -49,8 +49,8 @@ interface UseAppTaskCreationOptions {
 
 interface NewTaskOptionsSnapshot {
   availableAgentProviders: AgentProvider[] | undefined;
-  availablePipelines: string[];
-  defaultPipelineName: string | undefined;
+  availableWorkflows: string[];
+  defaultWorkflowName: string | undefined;
   availableBaseBranches: string[];
   defaultBaseBranchName: string | undefined;
   repoDefaultBranchName: string | undefined;
@@ -66,8 +66,8 @@ export function useAppTaskCreation({
   selectedCloudRepoId,
   selectedCloudItemId,
   showNewTaskModal,
-  availablePipelines,
-  defaultPipelineName,
+  availableWorkflows,
+  defaultWorkflowName,
   availableBaseBranches,
   defaultBaseBranchName,
   repoDefaultBranchName,
@@ -86,8 +86,8 @@ export function useAppTaskCreation({
 
   function applyNewTaskOptions(snapshot: NewTaskOptionsSnapshot) {
     availableAgentProviders.value = snapshot.availableAgentProviders;
-    availablePipelines.value = snapshot.availablePipelines;
-    defaultPipelineName.value = snapshot.defaultPipelineName;
+    availableWorkflows.value = snapshot.availableWorkflows;
+    defaultWorkflowName.value = snapshot.defaultWorkflowName;
     availableBaseBranches.value = snapshot.availableBaseBranches;
     defaultBaseBranchName.value = snapshot.defaultBaseBranchName;
     repoDefaultBranchName.value = snapshot.repoDefaultBranchName;
@@ -96,8 +96,8 @@ export function useAppTaskCreation({
   function clearNewTaskOptions() {
     applyNewTaskOptions({
       availableAgentProviders: undefined,
-      availablePipelines: [],
-      defaultPipelineName: undefined,
+      availableWorkflows: [],
+      defaultWorkflowName: undefined,
       availableBaseBranches: [],
       defaultBaseBranchName: undefined,
       repoDefaultBranchName: undefined,
@@ -130,7 +130,7 @@ export function useAppTaskCreation({
     const repoPath = targetRepo?.path;
     try {
       if (repoPath) {
-        const [manifest, defaultBranch, baseBranches, repoAgentProviders, recentPipelines] = await Promise.all([
+        const [manifest, defaultBranch, baseBranches, repoAgentProviders, recentWorkflows] = await Promise.all([
           fetchDesktopRepoKannaDefinitions(targetRepo.id).catch((error: unknown) => {
             const message = error instanceof Error ? error.message : String(error);
             console.error("[App] failed to load repo definitions for new task modal:", error);
@@ -151,22 +151,22 @@ export function useAppTaskCreation({
             console.debug("[App] failed to resolve repo agent providers for new task modal:", error);
             return undefined;
           }),
-          // Sticky pipeline default. Losing it is not worth failing the modal
+          // Sticky workflow default. Losing it is not worth failing the modal
           // over — an empty history falls back to the repo's configured default.
-          fetchDesktopRepoRecentPipelines(targetRepo.id).catch((error) => {
-            console.debug("[App] failed to read recently used pipelines for new task modal:", error);
+          fetchDesktopRepoRecentWorkflows(targetRepo.id).catch((error) => {
+            console.debug("[App] failed to read recently used workflows for new task modal:", error);
             return [] as string[];
           }),
         ]);
         if (loadGeneration !== newTaskOptionsLoadGeneration || !showNewTaskModal.value) return;
-        const availablePipelineNames = manifest?.pipelines ?? [];
+        const availableWorkflowNames = manifest?.workflows ?? [];
         const snapshot: NewTaskOptionsSnapshot = {
           availableAgentProviders: repoAgentProviders,
-          availablePipelines: availablePipelineNames,
-          defaultPipelineName: resolveStickyPipelineDefault(
-            availablePipelineNames,
-            recentPipelines,
-            manifest?.defaultPipeline,
+          availableWorkflows: availableWorkflowNames,
+          defaultWorkflowName: resolveStickyWorkflowDefault(
+            availableWorkflowNames,
+            recentWorkflows,
+            manifest?.defaultWorkflow,
           ),
           availableBaseBranches: baseBranches,
           defaultBaseBranchName:
@@ -187,8 +187,8 @@ export function useAppTaskCreation({
         if (loadGeneration !== newTaskOptionsLoadGeneration || !showNewTaskModal.value) return;
         const snapshot: NewTaskOptionsSnapshot = {
           availableAgentProviders: undefined,
-          availablePipelines: [],
-          defaultPipelineName: undefined,
+          availableWorkflows: [],
+          defaultWorkflowName: undefined,
           availableBaseBranches: baseBranches,
           defaultBaseBranchName:
             getDefaultBaseBranch(baseBranches, cloudRepo?.default_branch || "main") || undefined,
@@ -215,7 +215,7 @@ export function useAppTaskCreation({
   async function handleNewTaskSubmit(
     prompt: string,
     agentProvider: AgentProvider,
-    pipelineName?: string,
+    workflowName?: string,
     baseBranch?: string,
     agentType: "pty" | "agent" = "pty",
     blockerTaskIds?: string[],
@@ -260,7 +260,7 @@ export function useAppTaskCreation({
     const submitPromise = (async () => {
       await store.createItem(store.selectedRepoId ?? repo.id, repo.path, prompt, agentType, {
         agentProvider,
-        pipelineName,
+        workflowName,
         baseBranch,
         blockerTaskIds,
       });

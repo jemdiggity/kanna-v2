@@ -21,7 +21,7 @@ const mocks = vi.hoisted(() => {
         return `/usr/bin/${args?.name ?? "binary"}`;
       case "get_app_data_dir":
         return "/tmp/kanna";
-      case "get_pipeline_socket_path":
+      case "get_workflow_socket_path":
         return "/tmp/kanna.sock";
       case "ensure_term_init":
         return "/tmp/kanna-zdotdir";
@@ -103,7 +103,7 @@ function makeItem(overrides: Partial<PipelineItem> = {}): PipelineItem {
     issue_number: null,
     issue_title: null,
     prompt: "Ship it",
-    pipeline: "default",
+    workflow: "default",
     pipeline_def: null,
     stage: "in progress",
     pr_number: null,
@@ -148,8 +148,8 @@ describe("createSessionsApi", () => {
         revision: "remote-rev",
         refName: "origin/main",
         config: {},
-        defaultPipeline: "default",
-        pipelines: ["default"],
+        defaultWorkflow: "default",
+        workflows: ["default"],
       }),
     });
   });
@@ -437,7 +437,7 @@ describe("createSessionsApi", () => {
       issue_number: null,
       issue_title: null,
       prompt: "Ship it",
-      pipeline: "default",
+      workflow: "default",
       stage: "in progress",
       stage_result: null,
       active_post_action: null,
@@ -530,8 +530,8 @@ describe("createSessionsApi", () => {
           path: { prepend: ["remote-bin"] },
         },
       },
-      defaultPipeline: "default",
-      pipelines: ["default"],
+      defaultWorkflow: "default",
+      workflows: ["default"],
     }));
     updateDesktopServerClientHandlersForTests({ fetchRepoKannaDefinitions });
     const sessions = createSessionsApi(context);
@@ -586,8 +586,8 @@ describe("createSessionsApi", () => {
           path: { prepend: ["remote-bin"] },
         },
       },
-      defaultPipeline: "default",
-      pipelines: ["default"],
+      defaultWorkflow: "default",
+      workflows: ["default"],
     }));
     updateDesktopServerClientHandlersForTests({ fetchRepoKannaDefinitions });
     const sessions = createSessionsApi(context);
@@ -654,8 +654,8 @@ describe("createSessionsApi", () => {
           path: { prepend: ["remote-bin"] },
         },
       },
-      defaultPipeline: "default",
-      pipelines: ["default"],
+      defaultWorkflow: "default",
+      workflows: ["default"],
     }));
     updateDesktopServerClientHandlersForTests({ fetchRepoKannaDefinitions });
     const sessions = createSessionsApi(context);
@@ -690,7 +690,7 @@ describe("createSessionsApi", () => {
       issue_number: null,
       issue_title: null,
       prompt: "Ship it",
-      pipeline: "default",
+      workflow: "default",
       stage: "in progress",
       stage_result: null,
       active_post_action: null,

@@ -21,7 +21,7 @@
 
 ```ts
 it("reuses the saved prompt when respawning a reopened PTY task", async () => {
-  mockState.pipelineItems = [
+  mockState.workflowItems = [
     mockState.makeItem({
       id: "item-closed",
       branch: "task-closed",

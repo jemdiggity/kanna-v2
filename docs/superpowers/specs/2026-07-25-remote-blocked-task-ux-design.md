@@ -49,7 +49,7 @@ The local UI obtains blocker state from the local database-backed store:
 - `MainPanel` receives `blocked` and a blocker list from local-only computed state;
 - remote tasks are explicitly treated as unblocked by those computations.
 
-As a result, a remote blocked task remains in its pipeline stage group and mounts
+As a result, a remote blocked task remains in its workflow stage group and mounts
 `CloudTerminalView`. Attempting to advance it reaches the owner, which correctly rejects
 the transition, but the cloud relay action helper resolves HTTP error responses instead
 of throwing them. The caller's existing error toast therefore never runs.
@@ -112,7 +112,7 @@ Sidebar ordering receives the merged blocker projection:
 - a remote task with one or more unresolved blockers is placed in **Blocked**;
 - its row shows `Blocked by <name>` using the existing local styling;
 - remote ownership markers and existing activity styling remain unchanged;
-- resolving the final blocker returns the task to its normal pipeline-stage group after
+- resolving the final blocker returns the task to its normal workflow-stage group after
   the next workspace refresh.
 
 ### Main Panel

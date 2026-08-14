@@ -29,7 +29,7 @@ Verified in the repo, not assumed:
 | Area | State | Evidence |
 |---|---|---|
 | Production identity | `Kanna` / `build.kanna.app` / team `EA4J68749Z` | `apps/mobile/src/mobileEnvironments.json`, `apps/mobile/app.config.ts` |
-| Archive + upload pipeline | `./kd mobile archive --production --build-number <n> [--upload]` — prebuild → `xcodebuild archive` → `app-store-connect` export → Transporter | `tools/kd/src/runtime/mobile-archive.ts` |
+| Archive + upload workflow | `./kd mobile archive --production --build-number <n> [--upload]` — prebuild → `xcodebuild archive` → `app-store-connect` export → Transporter | `tools/kd/src/runtime/mobile-archive.ts` |
 | Release QA gate | `./kd mobile qa --production [--ota]` | `docs/testing/mobile-production-qa-gate.md` |
 | Production backend | `https://relay.kanna.build/health` → 200 (checked 2026-08-10) | live |
 | OTA | Self-hosted, code-signed, `production` channel, runtime `2.1.4` | `docs/specs/mobile-ota-updates.md` |

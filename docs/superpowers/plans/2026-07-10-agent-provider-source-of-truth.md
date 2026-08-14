@@ -551,10 +551,10 @@ git commit -m "refactor: align Rust agent provider resolution"
 - Modify: `packages/core/package.json`
 - Modify: `packages/core/src/config/agent-providers.ts`
 - Modify: `packages/core/src/config/custom-tasks.ts`
-- Modify: `packages/core/src/pipeline/agent-loader.ts`
-- Modify: `packages/core/src/pipeline/pipeline-loader.ts`
-- Modify: `packages/core/src/pipeline/pipeline-loader.test.ts`
-- Modify: `packages/core/src/pipeline/pipeline-types.ts`
+- Modify: `packages/core/src/workflow/agent-loader.ts`
+- Modify: `packages/core/src/workflow/workflow-loader.ts`
+- Modify: `packages/core/src/workflow/workflow-loader.test.ts`
+- Modify: `packages/core/src/workflow/workflow-types.ts`
 - Modify: `packages/db/package.json`
 - Modify: `packages/db/src/schema.ts`
 - Modify: `apps/desktop/package.json`
@@ -663,7 +663,7 @@ export { isAgentProvider };
 export type KnownAgentProvider = AgentProvider;
 ```
 
-Keep `splitAgentProviderValue` unchanged. Use `AgentProvider` for `CustomTaskConfig.agentProvider`, pipeline stage/post/agent definition provider selections, `packages/db/src/schema.ts`, `apps/desktop/src/types/kanna.ts`, and mobile's `ComposerAgentProvider` alias:
+Keep `splitAgentProviderValue` unchanged. Use `AgentProvider` for `CustomTaskConfig.agentProvider`, workflow stage/post/agent definition provider selections, `packages/db/src/schema.ts`, `apps/desktop/src/types/kanna.ts`, and mobile's `ComposerAgentProvider` alias:
 
 ```ts
 export type ComposerAgentProvider = AgentProvider;
@@ -676,7 +676,7 @@ export type { AgentProvider } from "@kanna/agent-protocol";
 import type { AgentProvider } from "@kanna/agent-protocol";
 ```
 
-In `pipeline-loader.ts`, validate raw pipeline provider selections through the generated guard instead of casting arbitrary strings:
+In `workflow-loader.ts`, validate raw workflow provider selections through the generated guard instead of casting arbitrary strings:
 
 ```ts
 function parseAgentProviderSelection(
@@ -704,7 +704,7 @@ function parseAgentProviderSelection(
 }
 ```
 
-Use this helper for normal stages, posts, and folded legacy posts. Add a `pipeline-loader.test.ts` case with `agent_provider: "future-agent"` and assert the unsupported-provider error before implementing the helper. After `agent-loader.ts` has rejected invalid tokens, assign its validated list as `AgentProvider[]` rather than retaining a `string[]` cast.
+Use this helper for normal stages, posts, and folded legacy posts. Add a `workflow-loader.test.ts` case with `agent_provider: "future-agent"` and assert the unsupported-provider error before implementing the helper. After `agent-loader.ts` has rejected invalid tokens, assign its validated list as `AgentProvider[]` rather than retaining a `string[]` cast.
 
 - [ ] **Step 4: Replace availability and validation duplication**
 
@@ -872,19 +872,19 @@ git add packages/core packages/db apps/desktop apps/mobile pnpm-lock.yaml
 git commit -m "refactor: consume generated agent provider registry"
 ```
 
-### Task 4: Consolidate and Guard the Pipeline Schema
+### Task 4: Consolidate and Guard the Workflow Schema
 
 **Files:**
-- Modify: `.kanna/pipelines/schema.json`
-- Modify: `packages/core/src/pipeline/qa-assets.test.ts`
+- Modify: `.kanna/workflows/schema.json`
+- Modify: `packages/core/src/workflow/qa-assets.test.ts`
 
 - [ ] **Step 1: Add a failing schema parity test**
 
 Import `AGENT_PROVIDERS` in `qa-assets.test.ts` and add:
 
 ```ts
-it("keeps the pipeline provider schema aligned with the generated registry", () => {
-  const schema = JSON.parse(readRepoFile(".kanna/pipelines/schema.json")) as {
+it("keeps the workflow provider schema aligned with the generated registry", () => {
+  const schema = JSON.parse(readRepoFile(".kanna/workflows/schema.json")) as {
     $defs?: { agentProvider?: { enum?: string[] } };
   };
   expect(schema.$defs?.agentProvider?.enum).toEqual([...AGENT_PROVIDERS]);
@@ -894,7 +894,7 @@ it("keeps the pipeline provider schema aligned with the generated registry", () 
 - [ ] **Step 2: Verify the schema test is red**
 
 ```bash
-pnpm --dir packages/core exec vitest run src/pipeline/qa-assets.test.ts
+pnpm --dir packages/core exec vitest run src/workflow/qa-assets.test.ts
 ```
 
 Expected: FAIL because the schema has no shared `$defs.agentProvider`.
@@ -938,8 +938,8 @@ git diff --check
 Expected: schema parity, core tests, generated freshness, and whitespace checks pass.
 
 ```bash
-git add .kanna/pipelines/schema.json packages/core/src/pipeline/qa-assets.test.ts
-git commit -m "test: guard pipeline provider schema parity"
+git add .kanna/workflows/schema.json packages/core/src/workflow/qa-assets.test.ts
+git commit -m "test: guard workflow provider schema parity"
 ```
 
 ### Task 5: Verify the Cross-Language Boundary

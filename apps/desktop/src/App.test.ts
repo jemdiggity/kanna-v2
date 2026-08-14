@@ -56,21 +56,21 @@ function createDeferred<T>(): Deferred<T> {
 }
 
 function readyTaskSlot(slotId: string, task: { id: string; repo_id: string; [key: string]: unknown }): TaskUiSlot {
-  const pipelineTask = task as unknown as PipelineItem;
+  const workflowTask = task as unknown as PipelineItem;
   return {
     slot_id: slotId,
     task_id: task.id,
     state: "ready",
-    task: pipelineTask,
+    task: workflowTask,
     draft: {
       repo_id: task.repo_id,
-      prompt: pipelineTask.prompt ?? "",
-      display_name: pipelineTask.display_name ?? null,
-      pipeline: pipelineTask.pipeline ?? "default",
-      stage: pipelineTask.stage ?? "in progress",
-      agent_type: pipelineTask.agent_type === "agent" || pipelineTask.agent_type === "sdk" ? "agent" : "pty",
-      agent_provider: pipelineTask.agent_provider ?? "claude",
-      created_at: pipelineTask.created_at ?? "2026-01-01T00:00:00.000Z",
+      prompt: workflowTask.prompt ?? "",
+      display_name: workflowTask.display_name ?? null,
+      workflow: workflowTask.pipeline ?? "default",
+      stage: workflowTask.stage ?? "in progress",
+      agent_type: workflowTask.agent_type === "agent" || workflowTask.agent_type === "sdk" ? "agent" : "pty",
+      agent_provider: workflowTask.agent_provider ?? "claude",
+      created_at: workflowTask.created_at ?? "2026-01-01T00:00:00.000Z",
     },
   };
 }
@@ -176,7 +176,7 @@ const store = {
         prompt: "Fix handoff",
         stage: "in progress",
         branch: "task-source",
-        pipeline: "default",
+        workflow: "default",
         display_name: "Transferred task",
         base_ref: "main",
         agent_type: "pty",
@@ -344,8 +344,8 @@ vi.mock("vue-i18n", () => ({
     t: (key: string) => ({
       "commandPalette.createAgent": "エージェントを作成",
       "commandPalette.createAgentDesc": "新しいエージェント定義を作成",
-      "commandPalette.createPipeline": "パイプラインを作成",
-      "commandPalette.createPipelineDesc": "新しいパイプライン定義を作成",
+      "commandPalette.createWorkflow": "パイプラインを作成",
+      "commandPalette.createWorkflowDesc": "新しいパイプライン定義を作成",
       "commandPalette.createConfig": "設定を作成",
       "commandPalette.createConfigDesc": ".kanna/config.json を作成または更新",
       "commandPalette.setupRepo": "リポジトリをセットアップ",
@@ -532,7 +532,7 @@ function remoteTaskSnapshot(
       id: taskId,
       repo_id: repoId,
       prompt: "Unread remote task",
-      pipeline: "default",
+      workflow: "default",
       pipeline_def: null,
       stage: "in progress",
       pr_number: null,
@@ -665,7 +665,7 @@ function buildIncomingTransferEvent() {
           prompt: "Fix handoff",
           stage: "in progress",
           branch: "task-source",
-          pipeline: "default",
+          workflow: "default",
           display_name: "Transferred task",
           base_ref: "main",
           agent_type: "agent",
@@ -759,7 +759,7 @@ function buildRemoteBlockedWorkflowSnapshot({
     repo_id: repoId,
     issue_number: null,
     issue_title: null,
-    pipeline: "cloud",
+    workflow: "cloud",
     pipeline_def: null,
     stage: "in progress",
     stage_result: null,
@@ -1085,17 +1085,17 @@ describe("App", () => {
         revision: "remote-rev",
         refName: "origin/main",
         config: {},
-        defaultPipeline: "default",
-        pipelines: ["default"],
+        defaultWorkflow: "default",
+        workflows: ["default"],
       }),
-      fetchRepoRecentPipelines: async () => [],
+      fetchRepoRecentWorkflows: async () => [],
       fetchRepoCommands: async (repoId) => ({
         repoId,
         revision: "catalog-v1",
         commands: [
           { id: "factory:create-agent", label: "Create Agent", description: "Create a new agent definition", group: "configure" },
-          { id: "factory:create-pipeline", label: "Create Pipeline", description: "Create a new pipeline definition", group: "configure" },
-          { id: "factory:setup-repo", label: "Set Up Repository", description: "Configure .kanna pipeline and agent flavors", group: "configure" },
+          { id: "factory:create-workflow", label: "Create Workflow", description: "Create a new workflow definition", group: "configure" },
+          { id: "factory:setup-repo", label: "Set Up Repository", description: "Configure .kanna workflow and agent flavors", group: "configure" },
           { id: "factory:create-config", label: "Create Config", description: "Create or update .kanna/config.json", group: "configure" },
         ],
       }),
@@ -1716,7 +1716,7 @@ describe("App", () => {
         id: "cloud:repo-remote:task-remote",
         repo_id: "cloud:repo-remote",
         prompt: "Remote task",
-        pipeline: "cloud",
+        workflow: "cloud",
         stage: "in progress",
         tags: "[]",
         pr_number: null,
@@ -1825,7 +1825,7 @@ describe("App", () => {
         id: "cloud:repo-remote:task-remote",
         repo_id: "cloud:repo-remote",
         prompt: "Remote task",
-        pipeline: "cloud",
+        workflow: "cloud",
         stage: "in progress",
         tags: "[]",
         pr_number: null,
@@ -2510,7 +2510,7 @@ describe("App", () => {
         id: "cloud:repo-remote:task-remote",
         repo_id: "cloud:repo-remote",
         prompt: "Remote task",
-        pipeline: "cloud",
+        workflow: "cloud",
         stage: "in progress",
         tags: "[]",
         pr_number: null,
@@ -2605,7 +2605,7 @@ describe("App", () => {
       issue_number: null,
       issue_title: null,
       prompt: "Task that arrives locally",
-      pipeline: "default",
+      workflow: "default",
       pipeline_def: null,
       stage: "in progress",
       pr_number: null,
@@ -2648,7 +2648,7 @@ describe("App", () => {
       items: [{
         ...localTask,
         id: "cloud:repo-1:task-owner",
-        pipeline: "cloud",
+        workflow: "cloud",
         display_name: "Remote presentation",
       }],
       terminalRefs: {
@@ -2739,7 +2739,7 @@ describe("App", () => {
         repo_id: "repo-1",
         prompt: "Keep the local creation view stable",
         display_name: "Stable local task",
-        pipeline: "default",
+        workflow: "default",
         stage: "in progress",
         agent_type: "pty",
         agent_provider: "claude",
@@ -2756,7 +2756,7 @@ describe("App", () => {
         id: "cloud:repo-1:durable-pending",
         repo_id: "repo-1",
         prompt: creatingSlot.draft.prompt,
-        pipeline: "cloud",
+        workflow: "cloud",
         stage: "in progress",
         pipeline_def: null,
         pr_number: null,
@@ -2851,7 +2851,7 @@ describe("App", () => {
         repo_id: "repo-1",
         prompt: "Select me before acknowledgement",
         display_name: "Creating without workspace",
-        pipeline: "default",
+        workflow: "default",
         stage: "in progress",
         agent_type: "pty",
         agent_provider: "claude",
@@ -2911,7 +2911,7 @@ describe("App", () => {
         id: "cloud:repo-remote:task-remote",
         repo_id: "cloud:repo-remote",
         prompt: "Remote task",
-        pipeline: "cloud",
+        workflow: "cloud",
         stage: "in progress",
         tags: "[]",
         pr_number: null,
@@ -2992,7 +2992,7 @@ describe("App", () => {
         id: "cloud:repo-remote:task-remote",
         repo_id: "cloud:repo-remote",
         prompt: "Remote task",
-        pipeline: "cloud",
+        workflow: "cloud",
         stage: "in progress",
         tags: "[]",
         pr_number: null,
@@ -3058,7 +3058,7 @@ describe("App", () => {
       id: "task-local",
       repo_id: "repo-1",
       prompt: "Close local task",
-      pipeline: "default",
+      workflow: "default",
       stage: "in progress",
       tags: "[]",
       pr_number: null,
@@ -3101,7 +3101,7 @@ describe("App", () => {
       items: [{
         ...store.items[0],
         id: "cloud:repo-1:task-local",
-        pipeline: "cloud",
+        workflow: "cloud",
         display_name: "Remote copy",
       }],
       terminalRefs: {
@@ -3152,7 +3152,7 @@ describe("App", () => {
       id: "task-local",
       repo_id: "repo-1",
       prompt: "Local fallback",
-      pipeline: "default",
+      workflow: "default",
       stage: "in progress",
       tags: "[]",
       pr_number: null,
@@ -3201,7 +3201,7 @@ describe("App", () => {
         id: "cloud:repo-1:task-remote",
         repo_id: "repo-1",
         prompt: "Remote task",
-        pipeline: "cloud",
+        workflow: "cloud",
         stage: "in progress",
         tags: "[]",
         pr_number: null,
@@ -3743,16 +3743,16 @@ describe("App", () => {
     expect(wrapper.get('[data-testid="base-branch-value"]').text()).toBe("origin/main");
   });
 
-  it("opens New Task submit-ready on the repository's most recently used pipeline", async () => {
+  it("opens New Task submit-ready on the repository's most recently used workflow", async () => {
     updateDesktopServerClientHandlersForTests({
       fetchRepoKannaDefinitions: async () => ({
         revision: "remote-rev",
         refName: "origin/main",
         config: {},
-        defaultPipeline: "default",
-        pipelines: ["default", "single-reviewer"],
+        defaultWorkflow: "default",
+        workflows: ["default", "single-reviewer"],
       }),
-      fetchRepoRecentPipelines: async () => ["single-reviewer"],
+      fetchRepoRecentWorkflows: async () => ["single-reviewer"],
     });
 
     const wrapper = await mountApp(SidebarWithRepoStub);
@@ -3766,14 +3766,14 @@ describe("App", () => {
       );
 
       expect(wrapper.find('[data-testid="task-options-loading"]').exists()).toBe(false);
-      expect(wrapper.get('[data-testid="pipeline-value"]').text()).toBe("single-reviewer");
-      expect(wrapper.get('[data-testid="pipeline-toggle"]').attributes("disabled")).toBeUndefined();
+      expect(wrapper.get('[data-testid="workflow-value"]').text()).toBe("single-reviewer");
+      expect(wrapper.get('[data-testid="workflow-toggle"]').attributes("disabled")).toBeUndefined();
       expect(wrapper.get('[data-testid="base-branch-value"]').text()).toBe("origin/main");
       expect(wrapper.get('[data-testid="base-branch-toggle"]').attributes("disabled")).toBeUndefined();
 
       // Submit-ready: a prompt is all that stands between the operator and a
-      // create, and the create carries the sticky pipeline.
-      await wrapper.get("textarea").setValue("Ship the sticky pipeline");
+      // create, and the create carries the sticky workflow.
+      await wrapper.get("textarea").setValue("Ship the sticky workflow");
       expect(wrapper.get(".modal-overlay .btn-primary").attributes("disabled")).toBeUndefined();
       await wrapper.get(".modal-overlay .btn-primary").trigger("click");
       await flushPromises();
@@ -3781,9 +3781,9 @@ describe("App", () => {
       expect(store.createItem).toHaveBeenCalledWith(
         "repo-1",
         expect.any(String),
-        "Ship the sticky pipeline",
+        "Ship the sticky workflow",
         "pty",
-        expect.objectContaining({ pipelineName: "single-reviewer" }),
+        expect.objectContaining({ workflowName: "single-reviewer" }),
       );
     } finally {
       wrapper.unmount();
@@ -3881,7 +3881,7 @@ describe("App", () => {
         id: "cloud:repo-remote:task-remote",
         repo_id: "cloud:repo-remote",
         prompt: "Remote task",
-        pipeline: "cloud",
+        workflow: "cloud",
         stage: "in progress",
         tags: "[]",
         pr_number: null,
@@ -4047,7 +4047,7 @@ describe("App", () => {
       "pty",
       expect.objectContaining({
         agentProvider: "claude",
-        pipelineName: "default",
+        workflowName: "default",
         baseBranch: "origin/main",
       }),
     );
@@ -5465,7 +5465,7 @@ describe("App", () => {
         issue_number: null,
         issue_title: null,
         prompt: "Fix remote shell",
-        pipeline: "cloud",
+        workflow: "cloud",
         stage: "in progress",
         stage_result: null,
         active_post_action: null,
@@ -5589,9 +5589,9 @@ describe("App", () => {
 
     const createConfigButton = wrapper.get('[data-command-id="factory:create-config"]');
     expect(wrapper.get('[data-command-id="factory:create-agent"]').text()).toBe("Create Agent");
-    expect(wrapper.get('[data-command-id="factory:create-pipeline"]').text()).toBe("Create Pipeline");
+    expect(wrapper.get('[data-command-id="factory:create-workflow"]').text()).toBe("Create Workflow");
     expect(wrapper.get('[data-command-id="factory:setup-repo"]').text()).toBe("Set Up Repository");
-    expect(wrapper.get('[data-command-id="factory:setup-repo"]').attributes("data-command-description")).toBe("Configure .kanna pipeline and agent flavors");
+    expect(wrapper.get('[data-command-id="factory:setup-repo"]').attributes("data-command-description")).toBe("Configure .kanna workflow and agent flavors");
     expect(createConfigButton.text()).toBe("Create Config");
     expect(createConfigButton.attributes("data-command-description")).toBe("Create or update .kanna/config.json");
 

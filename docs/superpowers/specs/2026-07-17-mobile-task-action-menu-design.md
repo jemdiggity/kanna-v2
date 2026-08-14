@@ -8,7 +8,7 @@ Keep the mobile task detail's `+` control scoped to the visible task. Tapping it
 
 The menu contains only:
 
-- **Advance Stage** — advances the task through its pinned pipeline by using the existing mobile controller action.
+- **Advance Stage** — advances the task through its pinned workflow by using the existing mobile controller action.
 - **Close Task** — closes the task through the existing mobile controller action and is presented as destructive.
 - **Cancel** — dismisses the menu without changing the task.
 

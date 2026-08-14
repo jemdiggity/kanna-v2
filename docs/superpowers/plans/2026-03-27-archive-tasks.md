@@ -16,7 +16,7 @@
 
 **Files:**
 - Modify: `packages/db/src/schema.ts:11-34` (PipelineItem interface)
-- Modify: `packages/core/src/pipeline/types.ts:1` (SYSTEM_TAGS)
+- Modify: `packages/core/src/workflow/types.ts:1` (SYSTEM_TAGS)
 - Modify: `packages/db/src/queries.ts:106-142` (addPipelineItemTag, removePipelineItemTag)
 - Modify: `apps/desktop/src/stores/db.ts:91-105` (addColumn migrations)
 
@@ -34,7 +34,7 @@
 
 - [ ] **Step 1: Add `"archived"` to system tags**
 
-In `packages/core/src/pipeline/types.ts`:
+In `packages/core/src/workflow/types.ts`:
 ```typescript
 export const SYSTEM_TAGS = ["in progress", "done", "pr", "merge", "blocked", "teardown", "archived"] as const;
 ```
@@ -91,7 +91,7 @@ Run: `cd packages/db && bun tsc --noEmit && cd ../core && bun tsc --noEmit`
 Expected: No errors
 
 ```bash
-git add packages/db/src/schema.ts packages/db/src/queries.ts packages/core/src/pipeline/types.ts apps/desktop/src/stores/db.ts
+git add packages/db/src/schema.ts packages/db/src/queries.ts packages/core/src/workflow/types.ts apps/desktop/src/stores/db.ts
 git commit -m "feat: add claude_session_id column and archived system tag"
 ```
 
@@ -388,7 +388,7 @@ git commit -m "feat: archive tasks on close, resume on undo with --resume"
 
 - [ ] **Step 1: Create helper for "hidden" check**
 
-The pattern `!hasTag(i, "done")` appears in many places. Rather than duplicating `!hasTag(i, "done") && !hasTag(i, "archived")` everywhere, add a helper in `packages/core/src/pipeline/types.ts`:
+The pattern `!hasTag(i, "done")` appears in many places. Rather than duplicating `!hasTag(i, "done") && !hasTag(i, "archived")` everywhere, add a helper in `packages/core/src/workflow/types.ts`:
 
 ```typescript
 export function isHidden(item: { tags: string }): boolean {
@@ -405,16 +405,16 @@ In `apps/desktop/src/components/Sidebar.vue`, import `isHidden` and replace all 
 .filter((i) => i.repo_id === repoId && !isHidden(i) && i.pinned)
 
 // sortedPR (line 45)
-props.pipelineItems.filter((i) => i.repo_id === repoId && hasTag(i, "pr") && !isHidden(i) && !i.pinned)
+props.workflowItems.filter((i) => i.repo_id === repoId && hasTag(i, "pr") && !isHidden(i) && !i.pinned)
 
 // sortedMerge (line 51)
-props.pipelineItems.filter((i) => i.repo_id === repoId && hasTag(i, "merge") && !isHidden(i) && !i.pinned)
+props.workflowItems.filter((i) => i.repo_id === repoId && hasTag(i, "merge") && !isHidden(i) && !i.pinned)
 
 // sortedActive (line 57)
-props.pipelineItems.filter((i) => i.repo_id === repoId && !hasTag(i, "pr") && !hasTag(i, "merge") && !hasTag(i, "blocked") && !isHidden(i) && !i.pinned)
+props.workflowItems.filter((i) => i.repo_id === repoId && !hasTag(i, "pr") && !hasTag(i, "merge") && !hasTag(i, "blocked") && !isHidden(i) && !i.pinned)
 
 // sortedBlocked (line 63)
-props.pipelineItems.filter((i) => i.repo_id === repoId && hasTag(i, "blocked") && !isHidden(i) && !i.pinned)
+props.workflowItems.filter((i) => i.repo_id === repoId && hasTag(i, "blocked") && !isHidden(i) && !i.pinned)
 ```
 
 - [ ] **Step 3: Update store filtering**
@@ -446,7 +446,7 @@ Run: `cd apps/desktop && bun tsc --noEmit`
 Expected: No errors
 
 ```bash
-git add packages/core/src/pipeline/types.ts apps/desktop/src/components/Sidebar.vue apps/desktop/src/stores/kanna.ts
+git add packages/core/src/workflow/types.ts apps/desktop/src/components/Sidebar.vue apps/desktop/src/stores/kanna.ts
 git commit -m "feat: hide archived tasks from sidebar and store lists"
 ```
 
@@ -513,11 +513,11 @@ No code changes needed. The existing logic correctly treats "archived" as still-
 
 - [ ] **Step 1: Find and update barrel exports**
 
-Check `packages/db/src/index.ts` and `packages/core/src/index.ts` (or `packages/core/src/pipeline/index.ts`) for the re-export pattern and add the new functions.
+Check `packages/db/src/index.ts` and `packages/core/src/index.ts` (or `packages/core/src/workflow/index.ts`) for the re-export pattern and add the new functions.
 
 For `packages/db`, add `updateClaudeSessionId` to the existing re-export from `./queries.js`.
 
-For `packages/core`, add `isHidden` to the existing re-export from `./pipeline/types.js`.
+For `packages/core`, add `isHidden` to the existing re-export from `./workflow/types.js`.
 
 - [ ] **Step 2: Full type check and commit**
 

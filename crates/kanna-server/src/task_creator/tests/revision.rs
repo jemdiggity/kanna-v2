@@ -6,7 +6,7 @@ fn revision_resume_message_follows_target_stage_transition() {
         "Original prompt",
         "Add coverage.",
         "task-1",
-        PipelineStageTransition::Manual,
+        WorkflowStageTransition::Manual,
         None,
     );
     assert!(manual.contains("do not record stage completion"));
@@ -21,13 +21,13 @@ fn revision_resume_message_follows_target_stage_transition() {
         "Original prompt",
         "Add coverage.",
         "task-1",
-        PipelineStageTransition::Auto,
+        WorkflowStageTransition::Auto,
         None,
     );
     assert!(auto.contains("record stage completion"));
     assert!(auto.contains("kanna_complete_stage {\"task_id\": \"task-1\", \"status\": \"success\""));
     assert!(auto.contains("--status success"));
-    assert!(auto.contains("Kanna will then advance this task's pipeline."));
+    assert!(auto.contains("Kanna will then advance this task's workflow."));
 }
 
 #[tokio::test]
@@ -37,10 +37,10 @@ async fn prepared_revision_agent_task_spawn_sends_task_specific_kanna_context() 
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&repo_root);
-    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::write(repo_root.join("README.md"), "test repo").unwrap();
     std::fs::write(
-            repo_root.join(".kanna/pipelines/qa.json"),
+            repo_root.join(".kanna/workflows/qa.json"),
             r#"{
   "stages": [
     { "name": "in progress", "policy": { "transition": "manual", "revision_transition": "auto" }, "agent_provider": "claude", "prompt": "$TASK_PROMPT" },
@@ -117,7 +117,7 @@ async fn prepared_revision_agent_task_spawn_sends_task_specific_kanna_context() 
     );
     assert_eq!(
         prepared.completion_transition,
-        PipelineStageTransition::Auto
+        WorkflowStageTransition::Auto
     );
     let task_id = prepared.task_id.clone();
     let expected_session_id = prepared.session_id.clone();
@@ -150,7 +150,7 @@ async fn prepared_revision_agent_task_spawn_sends_task_specific_kanna_context() 
                 .expect("system prompt should be sent");
             assert!(system_prompt.contains(&format!("task `{task_id}`")));
             assert!(system_prompt.contains("stage `in progress`"));
-            assert!(system_prompt.contains("pipeline `qa`"));
+            assert!(system_prompt.contains("workflow `qa`"));
             assert!(system_prompt.contains("(transition: `auto`)"));
             assert!(system_prompt.contains("## Kanna Task Environment"));
             assert!(system_prompt.contains("Prefer the `kanna_*` MCP tools"));
@@ -172,10 +172,10 @@ async fn prepared_revision_agent_task_spawn_sends_task_specific_kanna_context() 
 #[tokio::test]
 async fn request_revision_forks_workspace_for_target_stage_run_with_feedback() {
     let repo_root = init_git_repo("revision-same-worktree-feedback");
-    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::create_dir_all(repo_root.join(".kanna/agents/implement")).unwrap();
     std::fs::write(
-        repo_root.join(".kanna/pipelines/qa.json"),
+        repo_root.join(".kanna/workflows/qa.json"),
         r#"{
   "stages": [
     { "name": "in progress", "policy": { "transition": "manual", "revision_transition": "auto" }, "agent": "implement", "prompt": "$TASK_PROMPT" },
@@ -388,10 +388,10 @@ fn prepare_revision_task_rejects_closed_source_task_even_when_stage_is_active() 
 /// requests a revision.
 fn init_resume_revision_fixture(label: &str, config: &Config) -> (std::path::PathBuf, Db) {
     let repo_root = init_git_repo(label);
-    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::create_dir_all(repo_root.join(".kanna/agents/implement")).unwrap();
     std::fs::write(
-        repo_root.join(".kanna/pipelines/qa.json"),
+        repo_root.join(".kanna/workflows/qa.json"),
         r#"{
   "stages": [
     { "name": "in progress", "policy": { "transition": "manual", "revision_transition": "auto" }, "agent": "implement", "prompt": "$TASK_PROMPT" },
@@ -538,7 +538,7 @@ async fn request_revision_resumes_previous_stage_run_session_in_its_worktree() {
     assert_eq!(prepared.next_stage, "in progress");
     assert_eq!(
         prepared.completion_transition,
-        PipelineStageTransition::Auto
+        WorkflowStageTransition::Auto
     );
     assert_eq!(
         prepared.feedback.as_deref(),
@@ -709,10 +709,10 @@ fn request_revision_keeps_the_task_provider_over_agent_def_priority() {
     // revision continues work the task already did with its own provider and
     // must not switch. Caught live: an opencode task's revision spawned codex.
     let repo_root = init_git_repo("revision-provider-inherit");
-    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::create_dir_all(repo_root.join(".kanna/agents/implement")).unwrap();
     std::fs::write(
-        repo_root.join(".kanna/pipelines/qa.json"),
+        repo_root.join(".kanna/workflows/qa.json"),
         r#"{
   "stages": [
     { "name": "in progress", "transition": "manual", "agent": "implement", "prompt": "$TASK_PROMPT" },
@@ -792,10 +792,10 @@ fn request_revision_keeps_the_task_provider_over_agent_def_priority() {
 #[test]
 fn request_revision_keeps_the_last_runs_model_and_effort_over_the_agent_def() {
     let repo_root = init_git_repo("revision-binding-inherit");
-    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::create_dir_all(repo_root.join(".kanna/agents/implement")).unwrap();
     std::fs::write(
-        repo_root.join(".kanna/pipelines/qa.json"),
+        repo_root.join(".kanna/workflows/qa.json"),
         r#"{
   "stages": [
     { "name": "in progress", "transition": "manual", "agent": "implement", "prompt": "$TASK_PROMPT" },
@@ -903,18 +903,18 @@ fn request_revision_keeps_the_last_runs_model_and_effort_over_the_agent_def() {
 }
 
 #[test]
-fn pipeline_revision_limit_defaults_and_can_be_overridden() {
+fn workflow_revision_limit_defaults_and_can_be_overridden() {
     let stored_without_limit = serde_json::json!({
         "name": "stored",
         "stages": [{ "name": "in progress", "transition": "manual" }]
     })
     .to_string();
-    let pipeline =
-        super::super::definitions::parse_stored_pipeline_definition(&stored_without_limit).unwrap();
+    let workflow =
+        super::super::definitions::parse_stored_workflow_definition(&stored_without_limit).unwrap();
     // Pinned snapshots written before the field existed inherit the default,
     // so in-flight tasks are bounded too.
     assert_eq!(
-        pipeline.revision_limit(),
+        workflow.revision_limit(),
         super::super::definitions::DEFAULT_REVISION_LIMIT
     );
 
@@ -924,9 +924,9 @@ fn pipeline_revision_limit_defaults_and_can_be_overridden() {
         "stages": [{ "name": "in progress", "transition": "manual" }]
     })
     .to_string();
-    let pipeline =
-        super::super::definitions::parse_stored_pipeline_definition(&stored_with_limit).unwrap();
-    assert_eq!(pipeline.revision_limit(), 1);
+    let workflow =
+        super::super::definitions::parse_stored_workflow_definition(&stored_with_limit).unwrap();
+    assert_eq!(workflow.revision_limit(), 1);
 
     let stored_unlimited = serde_json::json!({
         "name": "stored",
@@ -934,15 +934,15 @@ fn pipeline_revision_limit_defaults_and_can_be_overridden() {
         "stages": [{ "name": "in progress", "transition": "manual" }]
     })
     .to_string();
-    let pipeline =
-        super::super::definitions::parse_stored_pipeline_definition(&stored_unlimited).unwrap();
-    assert_eq!(pipeline.revision_limit(), 0);
+    let workflow =
+        super::super::definitions::parse_stored_workflow_definition(&stored_unlimited).unwrap();
+    assert_eq!(workflow.revision_limit(), 0);
 }
 
 #[test]
-fn negative_pipeline_revision_limit_is_a_definition_error() {
-    // Both parser entry points (repo pipeline files and pinned pipeline_def
-    // snapshots) funnel through normalize_pipeline_definition, so validating
+fn negative_workflow_revision_limit_is_a_definition_error() {
+    // Both parser entry points (repo workflow files and pinned workflow_def
+    // snapshots) funnel through normalize_workflow_definition, so validating
     // there covers both. A negative value must not be read as "unlimited":
     // silently clamping a typo to 0 would disable the very bound the field
     // configures, which is the runaway this cap exists to prevent.
@@ -953,7 +953,7 @@ fn negative_pipeline_revision_limit_is_a_definition_error() {
     })
     .to_string();
 
-    let error = super::super::definitions::parse_stored_pipeline_definition(&stored_negative)
+    let error = super::super::definitions::parse_stored_workflow_definition(&stored_negative)
         .expect_err("a negative revision_limit must be rejected");
     assert!(
         error.contains("revision_limit must be zero or greater"),
@@ -973,9 +973,9 @@ fn negative_pipeline_revision_limit_is_a_definition_error() {
             "stages": [{ "name": "in progress", "transition": "manual" }]
         })
         .to_string();
-        let pipeline = super::super::definitions::parse_stored_pipeline_definition(&stored)
+        let workflow = super::super::definitions::parse_stored_workflow_definition(&stored)
             .unwrap_or_else(|error| panic!("revision_limit {limit} must parse: {error}"));
-        assert_eq!(pipeline.revision_limit(), limit);
+        assert_eq!(workflow.revision_limit(), limit);
     }
 }
 
@@ -998,7 +998,7 @@ fn revision_budget_is_exhausted_only_at_a_positive_limit() {
         limit: 3
     }
     .exhausted());
-    // `0` opts the pipeline out of the cap entirely.
+    // `0` opts the workflow out of the cap entirely.
     assert!(!RevisionBudget {
         rounds: 80,
         limit: 0
@@ -1046,7 +1046,7 @@ fn revision_prompt_announces_the_round_and_holds_scope() {
         "Original prompt",
         "Add coverage.",
         "task-1",
-        PipelineStageTransition::Auto,
+        WorkflowStageTransition::Auto,
         Some(RevisionRound {
             number: 3,
             limit: 3,

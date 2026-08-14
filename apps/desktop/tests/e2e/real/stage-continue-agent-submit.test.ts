@@ -70,7 +70,7 @@ async function readTaskRow(
 
 describe("real post injection into a live agent session", () => {
   const client = new WebDriverClient();
-  const pipelineName = "real-continue-submit";
+  const workflowName = "real-continue-submit";
   let repoId = "";
   let testRepoPath = "";
   let taskId = "";
@@ -83,16 +83,16 @@ describe("real post injection into a live agent session", () => {
 
     testRepoPath = await createFixtureRepo("stage-continue-real-agent-test");
     const kannaDir = join(testRepoPath, ".kanna");
-    await mkdir(join(kannaDir, "pipelines"), { recursive: true });
+    await mkdir(join(kannaDir, "workflows"), { recursive: true });
     await mkdir(join(kannaDir, "agents", "commit-real"), { recursive: true });
     // The commit work is a POST of `in progress`: advancing injects this
     // prompt into the LIVE agent session (same worktree, same process)
     // rather than spawning a fresh agent. The trailing `holding` stage gives
     // the post's success somewhere to transition to.
     await writeFile(
-      join(kannaDir, "pipelines", `${pipelineName}.json`),
+      join(kannaDir, "workflows", `${workflowName}.json`),
       JSON.stringify({
-        name: pipelineName,
+        name: workflowName,
         stages: [
           {
             name: "in progress",
@@ -144,7 +144,7 @@ describe("real post injection into a live agent session", () => {
       initialPrompt,
       "pty",
       {
-        pipelineName,
+        workflowName,
         permissionMode: "dontAsk",
         selectOnCreate: true,
       },

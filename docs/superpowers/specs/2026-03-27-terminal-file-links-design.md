@@ -29,7 +29,7 @@ Requirements for a match:
 Examples that match:
 - `docs/specs/design.md`
 - `src/utils/fuzzyMatch.ts:42`
-- `packages/core/src/pipeline/types.ts`
+- `packages/core/src/workflow/types.ts`
 
 Examples that don't match:
 - `error.message` (no `/`)

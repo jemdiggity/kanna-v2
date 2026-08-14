@@ -103,7 +103,7 @@ Expected: PASS.
 
 ```bash
 git add packages/db/src/queries.ts packages/db/src/queries.test.ts
-git commit -m "test: cover pipeline item tag updates"
+git commit -m "test: cover workflow item tag updates"
 ```
 
 ### Task 2: Encode Live-Blocked Close Semantics in the Helper
@@ -209,7 +209,7 @@ In `apps/desktop/src/stores/kanna.taskBaseBranch.test.ts`, replace the replaceme
 
 ```ts
 it("marks the current task blocked in place without killing its live session", async () => {
-  mockState.pipelineItems = [
+  mockState.workflowItems = [
     mockState.makeItem({
       id: "item-active",
       branch: "task-item-active",
@@ -232,7 +232,7 @@ it("marks the current task blocked in place without killing its live session", a
   await store.blockTask(["item-blocker"]);
   await flushStore();
 
-  const active = mockState.pipelineItems.find((item) => item.id === "item-active");
+  const active = mockState.workflowItems.find((item) => item.id === "item-active");
   expect(active?.branch).toBe("task-item-active");
   expect(active?.claude_session_id).toBe("claude-item-active");
   expect(JSON.parse(active?.tags ?? "[]")).toContain("blocked");
@@ -253,7 +253,7 @@ it("unblocks a live blocked task in place and sends blocker context to the exist
     display_name: "Upstream dependency",
   });
 
-  mockState.pipelineItems = [
+  mockState.workflowItems = [
     mockState.makeItem({
       id: "item-blocked",
       branch: "task-item-blocked",
@@ -271,7 +271,7 @@ it("unblocks a live blocked task in place and sends blocker context to the exist
   await store.editBlockedTask("item-blocked", []);
   await flushStore();
 
-  const blocked = mockState.pipelineItems.find((item) => item.id === "item-blocked");
+  const blocked = mockState.workflowItems.find((item) => item.id === "item-blocked");
   expect(JSON.parse(blocked?.tags ?? "[]")).not.toContain("blocked");
   expect(mockState.invokeMock).toHaveBeenCalledWith(
     "send_input",
@@ -441,7 +441,7 @@ Add these tests to `apps/desktop/src/stores/kanna.taskBaseBranch.test.ts`:
 
 ```ts
 it("closes a blocked task with live resources through the normal cleanup path", async () => {
-  mockState.pipelineItems = [
+  mockState.workflowItems = [
     mockState.makeItem({
       id: "item-blocked",
       branch: "task-item-blocked",
@@ -468,7 +468,7 @@ it("still respawns legacy blocked tasks with no live session context", async () 
     closed_at: "2026-04-14T01:00:00.000Z",
   });
 
-  mockState.pipelineItems = [
+  mockState.workflowItems = [
     mockState.makeItem({
       id: "item-blocked",
       branch: null,

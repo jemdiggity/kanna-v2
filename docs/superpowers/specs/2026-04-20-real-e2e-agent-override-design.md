@@ -98,7 +98,7 @@ Precedence, highest to lowest:
 1. explicit `CreateItemOptions.agentProvider`
 2. explicit `CreateItemOptions.model`
 3. real-E2E env overrides
-4. existing pipeline/agent/default provider resolution
+4. existing workflow/agent/default provider resolution
 5. existing default model behavior
 
 To keep behavior simple and predictable, the initial implementation should treat explicit provider/model input as an atomic user choice:
@@ -212,7 +212,7 @@ This change does not:
 
 - change user-facing default agent preferences
 - add a preferences UI for E2E provider/model selection
-- rewrite existing pipeline or agent-definition model resolution outside the real-E2E override case
+- rewrite existing workflow or agent-definition model resolution outside the real-E2E override case
 - solve agent-specific behavior differences inside individual real tests
 
 ## Risks

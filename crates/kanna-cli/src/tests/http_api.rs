@@ -57,28 +57,28 @@ async fn rerun_stage_posts_to_task_action_path_with_empty_json_body() {
 }
 
 #[tokio::test]
-async fn set_task_pipeline_posts_camel_case_pipeline_name() {
+async fn set_task_workflow_posts_camel_case_workflow_name() {
     let response = http_json_response(
         "200 OK",
-        r#"{"taskId":"task-123","pipelineName":"single-reviewer","stage":"in progress","revisionRounds":2,"revisionLimit":3}"#,
+        r#"{"taskId":"task-123","workflowName":"single-reviewer","stage":"in progress","revisionRounds":2,"revisionLimit":3}"#,
     );
     let (base_url, handle) = serve_single_http_response(response).await;
 
-    let updated = set_task_pipeline_via_api(
+    let updated = set_task_workflow_via_api(
         &base_url,
         "task-123",
-        &SetTaskPipelineRequest {
-            pipeline_name: "single-reviewer".to_string(),
+        &SetTaskWorkflowRequest {
+            workflow_name: "single-reviewer".to_string(),
         },
     )
     .await
     .unwrap();
     let request = handle.await.unwrap();
 
-    assert_eq!(updated.pipeline_name, "single-reviewer");
+    assert_eq!(updated.workflow_name, "single-reviewer");
     assert_eq!(updated.revision_rounds, 2);
-    assert!(request.starts_with("POST /v1/tasks/task-123/actions/set-pipeline HTTP/1.1"));
-    assert!(request.ends_with(r#"{"pipelineName":"single-reviewer"}"#));
+    assert!(request.starts_with("POST /v1/tasks/task-123/actions/set-workflow HTTP/1.1"));
+    assert!(request.ends_with(r#"{"workflowName":"single-reviewer"}"#));
 }
 
 #[tokio::test]
@@ -144,7 +144,7 @@ async fn list_task_children_via_api_fetches_and_preserves_verdicts() {
         r#"[{
             "id":"child-1",
             "agent":"review-security",
-            "pipelineName":"specialty-review",
+            "workflowName":"specialty-review",
             "createdAt":"2026-08-06 09:00:00",
             "closedAt":"2026-08-06 09:30:00",
             "latestRun":{
@@ -178,9 +178,9 @@ async fn list_task_children_via_api_fetches_and_preserves_verdicts() {
     );
     let rendered = serde_json::to_value(&children).unwrap();
     assert_eq!(
-        rendered[0]["pipelineName"],
+        rendered[0]["workflowName"],
         json!("specialty-review"),
-        "the typed CLI must not drop the pipeline identity when printing JSON"
+        "the typed CLI must not drop the workflow identity when printing JSON"
     );
     assert_eq!(
         rendered[0]["latestRun"]["status"],
@@ -522,7 +522,7 @@ async fn create_task_via_api_posts_default_agent_type_without_agent_provider_whe
         repo_id: "repo-1".to_string(),
         prompt: "Use the saved default provider".to_string(),
         display_name: None,
-        pipeline_name: None,
+        workflow_name: None,
         base_ref: None,
         agent: None,
         agent_provider: None,

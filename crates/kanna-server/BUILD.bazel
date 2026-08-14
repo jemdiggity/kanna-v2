@@ -19,7 +19,7 @@ rust_binary(
     compile_data = [
         "//:VERSION",
         "//:kanna_builtin_resources",
-        "//packages/core:src/pipeline/kanna-task-environment.md",
+        "//packages/core:src/workflow/kanna-task-environment.md",
     ],
     edition = "2021",
     deps = all_crate_deps(normal = True) + [
@@ -40,7 +40,7 @@ rust_binary(
     compile_data = [
         "//:VERSION",
         "//:kanna_builtin_resources",
-        "//packages/core:src/pipeline/kanna-task-environment.md",
+        "//packages/core:src/workflow/kanna-task-environment.md",
     ],
     edition = "2021",
     deps = all_crate_deps(normal = True) + [

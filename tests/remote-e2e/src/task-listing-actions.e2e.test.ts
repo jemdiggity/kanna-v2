@@ -288,7 +288,7 @@ describe("remote task listing, creation, and actions E2E", () => {
     const advanceTask = await createScriptedTask(harness, {
       displayName: "Remote advance task"
     });
-    await setPipelineDefinition(
+    await setWorkflowDefinition(
       harness,
       advanceTask.taskId,
       "remote-linear-manual",
@@ -331,7 +331,7 @@ describe("remote task listing, creation, and actions E2E", () => {
       displayName: "Remote complete success task"
     });
     const successRun = await latestRunRow(harness, successTask.taskId);
-    await setPipelineDefinition(
+    await setWorkflowDefinition(
       harness,
       successTask.taskId,
       "remote-linear-auto",
@@ -361,7 +361,7 @@ describe("remote task listing, creation, and actions E2E", () => {
       displayName: "Remote complete failure task"
     });
     const failureRun = await latestRunRow(harness, failureTask.taskId);
-    await setPipelineDefinition(
+    await setWorkflowDefinition(
       harness,
       failureTask.taskId,
       "remote-linear-auto",
@@ -594,17 +594,17 @@ async function executeSql(harness: RemoteHarness, sql: string, params: SqlParam[
   return response.rowsAffected;
 }
 
-async function setPipelineDefinition(
+async function setWorkflowDefinition(
   harness: RemoteHarness,
   taskId: string,
-  pipelineName: string,
+  workflowName: string,
   pipelineDefinition: string,
   completionTransition: "manual" | "auto"
 ): Promise<void> {
   const taskRowsAffected = await executeSql(
     harness,
     "UPDATE pipeline_item SET pipeline = ?1, pipeline_def = ?2 WHERE id = ?3",
-    [pipelineName, pipelineDefinition, taskId]
+    [workflowName, pipelineDefinition, taskId]
   );
   expect(taskRowsAffected).toBe(1);
 

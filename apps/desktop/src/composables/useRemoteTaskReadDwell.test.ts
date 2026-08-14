@@ -11,7 +11,7 @@ function remoteWorkspaceTask(activityRevision: number | null = 7): WorkspaceTask
     issue_number: null,
     issue_title: null,
     prompt: "Remote task",
-    pipeline: "default",
+    workflow: "default",
     pipeline_def: null,
     stage: "in progress",
     pr_number: null,

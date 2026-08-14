@@ -1745,7 +1745,7 @@ mod completion_notification {
         db.update_test_pipeline_item_stage_context(
             "task-child",
             "task-child",
-            TEST_PROVIDER_NEUTRAL_PIPELINE,
+            TEST_PROVIDER_NEUTRAL_WORKFLOW,
             None,
             "claude",
         )

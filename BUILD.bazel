@@ -210,7 +210,7 @@ filegroup(
     name = "kanna_builtin_resources",
     srcs = glob([
         ".kanna/agents/**",
-        ".kanna/pipelines/**",
+        ".kanna/workflows/**",
         ".kanna/tasks/**",
     ]),
 )

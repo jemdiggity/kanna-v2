@@ -192,53 +192,58 @@ pub(super) async fn list_repo_tasks(
     Ok(Json(tasks))
 }
 
-/// How many distinct recently-used pipelines to report. The caller keeps the
+/// How many distinct recently-used workflows to report. The caller keeps the
 /// first name its repo still offers, so a handful is enough to stay useful
-/// after a pipeline is renamed or dropped from `.kanna/pipelines`.
-const RECENT_REPO_PIPELINE_LIMIT: u32 = 10;
+/// after a workflow is renamed or dropped from `.kanna/workflows`.
+const RECENT_REPO_WORKFLOW_LIMIT: u32 = 10;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct RecentRepoPipelinesResponse {
-    pipelines: Vec<String>,
+pub(super) struct RecentRepoWorkflowsResponse {
+    workflows: Vec<String>,
+    #[serde(rename = "pipelines")]
+    legacy_pipelines: Vec<String>,
 }
 
-/// Pipelines this repo's tasks were most recently created with, newest first.
+/// Workflows this repo's tasks were most recently created with, newest first.
 ///
 /// Served straight from the durable task rows, so every writer of a task row —
 /// desktop, LAN/mobile, relay — feeds it without needing to be instrumented,
 /// and every reader (any window, before or after a restart) agrees.
-pub(super) async fn list_recent_repo_pipelines(
+pub(super) async fn list_recent_repo_workflows(
     State(state): State<Arc<AppState>>,
     Path(repo_id): Path<String>,
-) -> Result<Json<RecentRepoPipelinesResponse>, HttpError> {
+) -> Result<Json<RecentRepoWorkflowsResponse>, HttpError> {
     let db = Db::open(&state.config.db_path).map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             format!("db error: {}", e),
         )
     })?;
-    let pipelines = db
-        .recent_repo_pipelines(&repo_id, RECENT_REPO_PIPELINE_LIMIT)
+    let workflows = db
+        .recent_repo_pipelines(&repo_id, RECENT_REPO_WORKFLOW_LIMIT)
         .map_err(|e| {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 format!("db error: {}", e),
             )
         })?;
-    // Durable task rows can name a retired built-in pipeline; resolve those to
+    // Durable task rows can name a retired built-in workflow; resolve those to
     // the current name so the sticky default keeps matching what the repo
     // offers. An unknown repo (or one whose definitions cannot load) serves
     // the stored names untouched.
-    let pipelines = match db.get_repo(&repo_id) {
-        Ok(Some(repo)) => crate::task_creator::canonicalize_recent_pipeline_names(
+    let workflows = match db.get_repo(&repo_id) {
+        Ok(Some(repo)) => crate::task_creator::canonicalize_recent_workflow_names(
             &state.repo_definitions,
             &repo,
-            pipelines,
+            workflows,
         ),
-        _ => pipelines,
+        _ => workflows,
     };
-    Ok(Json(RecentRepoPipelinesResponse { pipelines }))
+    Ok(Json(RecentRepoWorkflowsResponse {
+        legacy_pipelines: workflows.clone(),
+        workflows,
+    }))
 }
 
 #[derive(Debug, Serialize)]
@@ -321,16 +326,16 @@ pub(super) async fn get_repo_kanna_definitions(
     .map(Json)
 }
 
-pub(super) async fn get_repo_pipeline_definition(
+pub(super) async fn get_repo_workflow_definition(
     State(state): State<Arc<AppState>>,
-    Path((repo_id, pipeline_name)): Path<(String, String)>,
-) -> Result<Json<crate::task_creator::RevisionedPipelineDefinition>, HttpError> {
+    Path((repo_id, workflow_name)): Path<(String, String)>,
+) -> Result<Json<crate::task_creator::RevisionedWorkflowDefinition>, HttpError> {
     run_blocking_http(move || {
         let repo = get_definition_repo(&state, &repo_id)?;
-        crate::task_creator::load_repo_pipeline_definition(
+        crate::task_creator::load_repo_workflow_definition(
             &state.repo_definitions,
             &repo,
-            &pipeline_name,
+            &workflow_name,
         )
         .map_err(map_definition_lookup_error)
     })

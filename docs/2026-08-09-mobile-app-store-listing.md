@@ -64,7 +64,7 @@ Away from home, cloud access relays the connection between your phone and your M
 
 BUILT FOR PEOPLE RUNNING SEVERAL AGENTS
 
-Kanna gives every task its own git worktree, branch, and agent session, then moves it through a pipeline: implement, review, pull request. Kanna Mobile is the window into that from wherever you are — a build you kicked off before lunch, an agent stuck on a question, a review you want to read on the train.
+Kanna gives every task its own git worktree, branch, and agent session, then moves it through a workflow: implement, review, pull request. Kanna Mobile is the window into that from wherever you are — a build you kicked off before lunch, an agent stuck on a question, a review you want to read on the train.
 
 Kanna works with the coding-agent CLIs you already have installed on your Mac.
 

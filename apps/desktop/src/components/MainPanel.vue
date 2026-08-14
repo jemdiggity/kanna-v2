@@ -3,7 +3,7 @@ import { computed, nextTick, ref, watch, type Ref } from "vue";
 import { AGENT_PROVIDERS, getAgentProviderSpec } from "@kanna/agent-protocol";
 import type { AgentProvider, BlockerDisplayItem } from "../types/kanna";
 import type { TaskUiSlot } from "../types/taskUi";
-import type { RequestRevisionOptions } from "../stores/pipeline";
+import type { RequestRevisionOptions } from "../stores/workflow";
 import {
   fetchDesktopTaskDetail,
   type DesktopTaskDetail,

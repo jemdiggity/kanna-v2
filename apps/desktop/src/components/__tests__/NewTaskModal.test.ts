@@ -31,7 +31,7 @@ describe("NewTaskModal", () => {
       props: {
         optionsLoading: true,
         availableAgentProviders: ["claude"],
-        pipelines: ["default"],
+        workflows: ["default"],
         baseBranches: ["origin/main"],
         defaultBaseBranch: "origin/main",
       },
@@ -44,7 +44,7 @@ describe("NewTaskModal", () => {
     expect(wrapper.get('[data-testid="task-options-loading"]').text()).toBe("tasks.loadingOptions");
     expect(wrapper.get('[data-testid="base-branch-value"]').text()).toBe("origin/main");
     expect(wrapper.get('[data-testid="base-branch-toggle"]').attributes("disabled")).toBeDefined();
-    expect(wrapper.get('[data-testid="pipeline-toggle"]').attributes("disabled")).toBeDefined();
+    expect(wrapper.get('[data-testid="workflow-toggle"]').attributes("disabled")).toBeDefined();
     expect(wrapper.get(".btn-primary").attributes("disabled")).toBeDefined();
   });
 
@@ -53,7 +53,7 @@ describe("NewTaskModal", () => {
       props: {
         optionsLoading: true,
         availableAgentProviders: undefined,
-        pipelines: [],
+        workflows: [],
         baseBranches: [],
       },
       global: { mocks: { $t: (key: string) => key } },
@@ -64,7 +64,7 @@ describe("NewTaskModal", () => {
     expect(branchValue.classes()).not.toContain("invalid");
   });
 
-  it("uses the repository default pipeline after options load", async () => {
+  it("uses the repository default workflow after options load", async () => {
     const wrapper = mount(NewTaskModal, {
       props: {
         optionsLoading: true,
@@ -75,28 +75,28 @@ describe("NewTaskModal", () => {
       global: { mocks: { $t: (key: string) => key } },
     });
 
-    expect(wrapper.get('[data-testid="pipeline-value"]').text()).toBe("no-review");
+    expect(wrapper.get('[data-testid="workflow-value"]').text()).toBe("no-review");
 
     await wrapper.setProps({
       optionsLoading: false,
-      pipelines: ["default", "qa-review"],
-      defaultPipeline: "qa-review",
+      workflows: ["default", "qa-review"],
+      defaultWorkflow: "qa-review",
     });
     await flushPromises();
 
-    expect(wrapper.get('[data-testid="pipeline-value"]').text()).toBe("qa-review");
+    expect(wrapper.get('[data-testid="workflow-value"]').text()).toBe("qa-review");
 
-    await wrapper.get("textarea").setValue("Use the configured pipeline");
+    await wrapper.get("textarea").setValue("Use the configured workflow");
     await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });
 
     expect(wrapper.emitted("submit")?.[0]).toEqual([
-      "Use the configured pipeline", "claude", "qa-review", "origin/main", "pty", [],
+      "Use the configured workflow", "claude", "qa-review", "origin/main", "pty", [],
     ]);
   });
 
-  it("drops a default pipeline the server did not offer, so the manifest must send a selectable one", async () => {
+  it("drops a default workflow the server did not offer, so the manifest must send a selectable one", async () => {
     // The server canonicalizes retired built-in names (qa -> single-reviewer)
-    // before putting them in `defaultPipeline`, precisely because this
+    // before putting them in `defaultWorkflow`, precisely because this
     // component silently falls back when the default is not an option. If that
     // canonicalization regresses, a repo configured for review depth is
     // created on the first option instead, with no error — so pin both halves
@@ -107,20 +107,20 @@ describe("NewTaskModal", () => {
         availableAgentProviders: ["claude"],
         baseBranches: ["origin/main"],
         defaultBaseBranch: "origin/main",
-        pipelines: ["default", "single-reviewer", "specialized-reviewers"],
-        defaultPipeline: "single-reviewer",
+        workflows: ["default", "single-reviewer", "specialized-reviewers"],
+        defaultWorkflow: "single-reviewer",
       },
       global: { mocks: { $t: (key: string) => key } },
     });
     await flushPromises();
 
-    // A default that is a member of `pipelines` is preselected and submitted.
-    expect(wrapper.get('[data-testid="pipeline-value"]').text()).toBe("single-reviewer");
+    // A default that is a member of `workflows` is preselected and submitted.
+    expect(wrapper.get('[data-testid="workflow-value"]').text()).toBe("single-reviewer");
     await wrapper.get("textarea").setValue("Use the configured review depth");
     await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });
     expect(wrapper.emitted("submit")?.[0]?.[2]).toBe("single-reviewer");
 
-    // A default absent from `pipelines` — what an uncanonicalized retired
+    // A default absent from `workflows` — what an uncanonicalized retired
     // name would be — is dropped for the first option instead.
     const stale = mount(NewTaskModal, {
       props: {
@@ -128,37 +128,37 @@ describe("NewTaskModal", () => {
         availableAgentProviders: ["claude"],
         baseBranches: ["origin/main"],
         defaultBaseBranch: "origin/main",
-        pipelines: ["default", "single-reviewer", "specialized-reviewers"],
-        defaultPipeline: "qa",
+        workflows: ["default", "single-reviewer", "specialized-reviewers"],
+        defaultWorkflow: "qa",
       },
       global: { mocks: { $t: (key: string) => key } },
     });
     await flushPromises();
 
-    expect(stale.get('[data-testid="pipeline-value"]').text()).toBe("default");
-    expect(stale.get('[data-testid="pipeline-value"]').text()).not.toBe("qa");
+    expect(stale.get('[data-testid="workflow-value"]').text()).toBe("default");
+    expect(stale.get('[data-testid="workflow-value"]').text()).not.toBe("qa");
   });
 
-  it("keeps a valid user-selected pipeline when options hydrate again", async () => {
+  it("keeps a valid user-selected workflow when options hydrate again", async () => {
     const wrapper = mount(NewTaskModal, {
       props: {
-        pipelines: ["default", "qa-review"],
-        defaultPipeline: "qa-review",
+        workflows: ["default", "qa-review"],
+        defaultWorkflow: "qa-review",
       },
       global: { mocks: { $t: (key: string) => key } },
     });
 
-    await wrapper.get('[data-testid="pipeline-toggle"]').trigger("click");
-    await wrapper.get('[data-testid="pipeline-option-default"]').trigger("click");
-    expect(wrapper.get('[data-testid="pipeline-value"]').text()).toBe("default");
+    await wrapper.get('[data-testid="workflow-toggle"]').trigger("click");
+    await wrapper.get('[data-testid="workflow-option-default"]').trigger("click");
+    expect(wrapper.get('[data-testid="workflow-value"]').text()).toBe("default");
 
     await wrapper.setProps({
-      pipelines: ["default", "qa-review", "release"],
-      defaultPipeline: "release",
+      workflows: ["default", "qa-review", "release"],
+      defaultWorkflow: "release",
     });
     await flushPromises();
 
-    expect(wrapper.get('[data-testid="pipeline-value"]').text()).toBe("default");
+    expect(wrapper.get('[data-testid="workflow-value"]').text()).toBe("default");
   });
 
   it("keeps Create disabled while a previous task submission finishes", async () => {
@@ -166,7 +166,7 @@ describe("NewTaskModal", () => {
       props: {
         submissionPending: true,
         availableAgentProviders: ["claude"],
-        pipelines: ["default"],
+        workflows: ["default"],
         baseBranches: ["origin/main"],
         defaultBaseBranch: "origin/main",
       },
@@ -482,8 +482,8 @@ describe("NewTaskModal", () => {
       props: {
         defaultAgentProvider: "claude",
         availableAgentProviders: [...DEFAULT_AVAILABLE_PROVIDERS],
-        pipelines: ["default"],
-        defaultPipeline: "default",
+        workflows: ["default"],
+        defaultWorkflow: "default",
         baseBranches: ["origin/main", "main", "feature/task-base-branch"],
         defaultBaseBranch: "origin/main",
         defaultBranchName: "main",
@@ -502,11 +502,11 @@ describe("NewTaskModal", () => {
     ]);
   });
 
-  it("renders the base branch row before the pipeline row", async () => {
+  it("renders the base branch row before the workflow row", async () => {
     const wrapper = mount(NewTaskModal, {
       props: {
-        pipelines: ["default"],
-        defaultPipeline: "default",
+        workflows: ["default"],
+        defaultWorkflow: "default",
         baseBranches: ["origin/main", "main"],
         defaultBaseBranch: "origin/main",
         defaultBranchName: "main",
@@ -516,48 +516,48 @@ describe("NewTaskModal", () => {
 
     await flushPromises();
 
-    const labels = wrapper.findAll(".pipeline-row .pipeline-label").map((label) => label.text());
+    const labels = wrapper.findAll(".workflow-row .workflow-label").map((label) => label.text());
 
-    expect(labels).toEqual(["tasks.baseBranch", "Pipeline", "tasks.blockedBy"]);
+    expect(labels).toEqual(["tasks.baseBranch", "Workflow", "tasks.blockedBy"]);
   });
 
-  it("shows the selected pipeline inline before the picker is opened", async () => {
+  it("shows the selected workflow inline before the picker is opened", async () => {
     const wrapper = mount(NewTaskModal, {
       props: {
-        pipelines: ["default", "review"],
-        defaultPipeline: "review",
+        workflows: ["default", "review"],
+        defaultWorkflow: "review",
       },
       global: { mocks: { $t: (key: string) => key } },
     });
 
     await flushPromises();
 
-    expect(wrapper.get('[data-testid="pipeline-value"]').text()).toContain("review");
-    expect(wrapper.find('[data-testid="pipeline-option-default"]').exists()).toBe(false);
-    expect(wrapper.find("#pipeline-select").exists()).toBe(false);
-    expect(wrapper.get('[data-testid="pipeline-toggle"]').attributes("aria-expanded")).toBe("false");
+    expect(wrapper.get('[data-testid="workflow-value"]').text()).toContain("review");
+    expect(wrapper.find('[data-testid="workflow-option-default"]').exists()).toBe(false);
+    expect(wrapper.find("#workflow-select").exists()).toBe(false);
+    expect(wrapper.get('[data-testid="workflow-toggle"]').attributes("aria-expanded")).toBe("false");
 
-    await wrapper.get('[data-testid="pipeline-toggle"]').trigger("click");
+    await wrapper.get('[data-testid="workflow-toggle"]').trigger("click");
 
-    expect(wrapper.get('[data-testid="pipeline-option-default"]').exists()).toBe(true);
-    expect(wrapper.get('[data-testid="pipeline-toggle"]').attributes("aria-expanded")).toBe("true");
-    expect(wrapper.get('[data-testid="pipeline-option-review"]').classes()).toContain("selected");
+    expect(wrapper.get('[data-testid="workflow-option-default"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="workflow-toggle"]').attributes("aria-expanded")).toBe("true");
+    expect(wrapper.get('[data-testid="workflow-option-review"]').classes()).toContain("selected");
   });
 
-  it("opens the pipeline selector as the same compact dropdown style as base branch", async () => {
+  it("opens the workflow selector as the same compact dropdown style as base branch", async () => {
     const wrapper = mount(NewTaskModal, {
       props: {
-        pipelines: ["default", "review", "release"],
-        defaultPipeline: "review",
+        workflows: ["default", "review", "release"],
+        defaultWorkflow: "review",
       },
       global: { mocks: { $t: (key: string) => key } },
     });
 
     await flushPromises();
-    await wrapper.get('[data-testid="pipeline-toggle"]').trigger("click");
+    await wrapper.get('[data-testid="workflow-toggle"]').trigger("click");
 
-    const dropdown = wrapper.get('[data-testid="pipeline-dropdown"]');
-    const options = wrapper.get('[data-testid="pipeline-options"]');
+    const dropdown = wrapper.get('[data-testid="workflow-dropdown"]');
+    const options = wrapper.get('[data-testid="workflow-options"]');
 
     expect(dropdown.classes()).toContain("base-branch-dropdown");
     expect(options.classes()).toContain("base-branch-options");
@@ -565,12 +565,12 @@ describe("NewTaskModal", () => {
     expect(wrapper.find(".base-branch-picker").exists()).toBe(false);
   });
 
-  it("updates the selected pipeline through the inline picker before submit", async () => {
+  it("updates the selected workflow through the inline picker before submit", async () => {
     const wrapper = mount(NewTaskModal, {
       props: {
         defaultAgentProvider: "claude",
-        pipelines: ["default", "review"],
-        defaultPipeline: "default",
+        workflows: ["default", "review"],
+        defaultWorkflow: "default",
         baseBranches: ["origin/main", "main"],
         defaultBaseBranch: "origin/main",
         defaultBranchName: "main",
@@ -579,13 +579,13 @@ describe("NewTaskModal", () => {
     });
 
     await flushPromises();
-    await wrapper.get("textarea").setValue("Ship pipeline picker");
-    await wrapper.get('[data-testid="pipeline-toggle"]').trigger("click");
-    await wrapper.get('[data-testid="pipeline-option-review"]').trigger("click");
-    expect(wrapper.find('[data-testid="pipeline-option-review"]').exists()).toBe(false);
+    await wrapper.get("textarea").setValue("Ship workflow picker");
+    await wrapper.get('[data-testid="workflow-toggle"]').trigger("click");
+    await wrapper.get('[data-testid="workflow-option-review"]').trigger("click");
+    expect(wrapper.find('[data-testid="workflow-option-review"]').exists()).toBe(false);
     await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });
 
-    expect(wrapper.emitted("submit")).toEqual([["Ship pipeline picker", "claude", "review", "origin/main", "pty", []]]);
+    expect(wrapper.emitted("submit")).toEqual([["Ship workflow picker", "claude", "review", "origin/main", "pty", []]]);
   });
 
   it("uses combined chat and CLI agent choices when submitting", async () => {
@@ -593,8 +593,8 @@ describe("NewTaskModal", () => {
       props: {
         defaultAgentProvider: "claude",
         availableAgentProviders: [...DEFAULT_AVAILABLE_PROVIDERS],
-        pipelines: ["default"],
-        defaultPipeline: "default",
+        workflows: ["default"],
+        defaultWorkflow: "default",
         baseBranches: ["origin/main"],
         defaultBaseBranch: "origin/main",
       },
@@ -643,11 +643,11 @@ describe("NewTaskModal", () => {
     expect(wrapper.emitted("submit")?.at(-1)).toEqual(["Use codex chat", "codex", "default", "origin/main", "agent", []]);
   });
 
-  it("supports keyboard navigation in the pipeline picker and returns focus to the toggle", async () => {
+  it("supports keyboard navigation in the workflow picker and returns focus to the toggle", async () => {
     const wrapper = mount(NewTaskModal, {
       props: {
-        pipelines: ["default", "review"],
-        defaultPipeline: "default",
+        workflows: ["default", "review"],
+        defaultWorkflow: "default",
       },
       attachTo: document.body,
       global: { mocks: { $t: (key: string) => key } },
@@ -655,54 +655,54 @@ describe("NewTaskModal", () => {
 
     await flushPromises();
 
-    const toggle = wrapper.get('[data-testid="pipeline-toggle"]');
+    const toggle = wrapper.get('[data-testid="workflow-toggle"]');
     await toggle.trigger("focus");
 
     await toggle.trigger("keydown", { key: "ArrowDown" });
     await flushPromises();
 
-    expect(wrapper.get('[data-testid="pipeline-toggle"]').attributes("aria-expanded")).toBe("true");
-    expect(document.activeElement).toBe(wrapper.get('[data-testid="pipeline-option-default"]').element);
+    expect(wrapper.get('[data-testid="workflow-toggle"]').attributes("aria-expanded")).toBe("true");
+    expect(document.activeElement).toBe(wrapper.get('[data-testid="workflow-option-default"]').element);
 
-    await wrapper.get('[data-testid="pipeline-option-default"]').trigger("keydown", { key: "ArrowDown" });
+    await wrapper.get('[data-testid="workflow-option-default"]').trigger("keydown", { key: "ArrowDown" });
     await flushPromises();
 
-    expect(document.activeElement).toBe(wrapper.get('[data-testid="pipeline-option-review"]').element);
+    expect(document.activeElement).toBe(wrapper.get('[data-testid="workflow-option-review"]').element);
 
-    wrapper.get('[data-testid="pipeline-option-review"]').element.dispatchEvent(
+    wrapper.get('[data-testid="workflow-option-review"]').element.dispatchEvent(
       new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
     );
-    wrapper.get('[data-testid="pipeline-option-review"]').element.click();
+    wrapper.get('[data-testid="workflow-option-review"]').element.click();
     await flushPromises();
 
-    expect(wrapper.find('[data-testid="pipeline-option-review"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="workflow-option-review"]').exists()).toBe(false);
     expect(document.activeElement).toBe(toggle.element);
 
     await toggle.trigger("keydown", { key: "ArrowDown" });
     await flushPromises();
 
-    expect(document.activeElement).toBe(wrapper.get('[data-testid="pipeline-option-review"]').element);
+    expect(document.activeElement).toBe(wrapper.get('[data-testid="workflow-option-review"]').element);
 
-    await wrapper.get('[data-testid="pipeline-option-review"]').trigger("keydown", { key: "Escape" });
+    await wrapper.get('[data-testid="workflow-option-review"]').trigger("keydown", { key: "Escape" });
     await flushPromises();
 
-    expect(wrapper.find('[data-testid="pipeline-option-review"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="workflow-option-review"]').exists()).toBe(false);
     expect(document.activeElement).toBe(toggle.element);
 
     wrapper.unmount();
   });
 
-  it("uses the no-review pipeline option when no pipelines are provided", async () => {
+  it("uses the no-review workflow option when no workflows are provided", async () => {
     const wrapper = mount(NewTaskModal, {
       props: {},
       global: { mocks: { $t: (key: string) => key } },
     });
 
     await flushPromises();
-    await wrapper.get('[data-testid="pipeline-toggle"]').trigger("click");
+    await wrapper.get('[data-testid="workflow-toggle"]').trigger("click");
 
-    expect(wrapper.get('[data-testid="pipeline-value"]').text()).toContain("no-review");
-    expect(wrapper.get('[data-testid="pipeline-option-no-review"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="workflow-value"]').text()).toContain("no-review");
+    expect(wrapper.get('[data-testid="workflow-option-no-review"]').exists()).toBe(true);
   });
 
   it("filters branch options with fuzzy search", async () => {
@@ -782,8 +782,8 @@ describe("NewTaskModal", () => {
       attachTo: document.body,
       props: {
         defaultAgentProvider: "claude",
-        pipelines: ["default"],
-        defaultPipeline: "default",
+        workflows: ["default"],
+        defaultWorkflow: "default",
         baseBranches: ["origin/main", "main", "release/2026.04"],
         defaultBaseBranch: "origin/main",
         defaultBranchName: "main",
@@ -857,8 +857,8 @@ describe("NewTaskModal", () => {
     const wrapper = mount(NewTaskModal, {
       props: {
         defaultAgentProvider: "claude",
-        pipelines: ["default"],
-        defaultPipeline: "default",
+        workflows: ["default"],
+        defaultWorkflow: "default",
         baseBranches: ["feature/x"],
         defaultBranchName: "main",
       },
@@ -880,8 +880,8 @@ describe("NewTaskModal", () => {
     const wrapper = mount(NewTaskModal, {
       props: {
         defaultAgentProvider: "claude",
-        pipelines: ["default"],
-        defaultPipeline: "default",
+        workflows: ["default"],
+        defaultWorkflow: "default",
         baseBranches: ["feature/task-base-branch", "main", "origin/main"],
         defaultBaseBranch: "origin/main",
         defaultBranchName: "main",
@@ -977,8 +977,8 @@ describe("NewTaskModal", () => {
       return mount(NewTaskModal, {
         props: {
           defaultAgentProvider: "claude" as const,
-          pipelines: ["default"],
-          defaultPipeline: "default",
+          workflows: ["default"],
+          defaultWorkflow: "default",
           baseBranches: ["origin/main"],
           defaultBaseBranch: "origin/main",
           blockerCandidates: candidates,

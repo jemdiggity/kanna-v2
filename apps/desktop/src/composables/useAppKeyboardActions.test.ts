@@ -15,7 +15,7 @@ function item(id: string): PipelineItem {
     issue_number: null,
     issue_title: null,
     prompt: "Durable action",
-    pipeline: "default",
+    workflow: "default",
     pipeline_def: null,
     stage: "in progress",
     pr_number: null,

@@ -348,7 +348,7 @@ pub(crate) fn finish_deferred_stage_setup(
         agent_type,
         &prepared.task_id,
         &prepared.run_stage,
-        &prepared.pipeline_name,
+        &prepared.workflow_name,
         Some(prepared.completion_transition.as_str()),
         deferred.final_prompt,
         deferred.model,
@@ -371,7 +371,7 @@ pub(crate) fn finish_deferred_stage_setup(
 }
 ```
 
-Store `pipeline_name` on `PreparedStageRunSpawn`, and update ready-session
+Store `workflow_name` on `PreparedStageRunSpawn`, and update ready-session
 callers/tests to unwrap through focused helper methods rather than duplicating
 state checks.
 

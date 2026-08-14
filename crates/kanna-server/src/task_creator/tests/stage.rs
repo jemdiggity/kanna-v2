@@ -1,8 +1,8 @@
 use super::*;
 
 #[test]
-fn builtin_single_reviewer_pipeline_ships_approve_as_pr_stage_post() {
-    let repo_root = init_git_repo_without_provider_fixtures("builtin-qa-pipeline");
+fn builtin_single_reviewer_workflow_ships_approve_as_pr_stage_post() {
+    let repo_root = init_git_repo_without_provider_fixtures("builtin-qa-workflow");
     let repo = crate::db::Repo {
         id: "repo-builtin-qa".to_string(),
         path: repo_root.to_string_lossy().into_owned(),
@@ -14,16 +14,16 @@ fn builtin_single_reviewer_pipeline_ships_approve_as_pr_stage_post() {
         created_at: None,
         last_opened_at: None,
     };
-    let pipeline = super::super::definitions::RepoDefinitions::resolve(&repo)
+    let workflow = super::super::definitions::RepoDefinitions::resolve(&repo)
         .unwrap()
-        .pipeline("single-reviewer")
+        .workflow("single-reviewer")
         .unwrap();
 
-    let pr_stage = pipeline
+    let pr_stage = workflow
         .stages
         .iter()
         .find(|stage| stage.name == "pr")
-        .expect("single-reviewer pipeline should have a pr stage");
+        .expect("single-reviewer workflow should have a pr stage");
     let post = pr_stage.post.as_ref().expect("pr stage should have a post");
     assert_eq!(post.name, "approve");
     assert_eq!(post.agent.as_deref(), Some("approve"));
@@ -44,7 +44,7 @@ fn one_stage_operation_keeps_prompt_spawn_and_teardown_on_pinned_revision() {
 
     let write_version = |version: &str| {
         let lower = version.to_ascii_lowercase();
-        std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+        std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
         std::fs::create_dir_all(repo_root.join(".kanna/agents/reviewer")).unwrap();
         std::fs::write(
             repo_root.join(".kanna/config.json"),
@@ -66,7 +66,7 @@ fn one_stage_operation_keeps_prompt_spawn_and_teardown_on_pinned_revision() {
         )
         .unwrap();
         std::fs::write(
-            repo_root.join(".kanna/pipelines/pinned.json"),
+            repo_root.join(".kanna/workflows/pinned.json"),
             serde_json::json!({
                 "name": "pinned",
                 "stages": [{
@@ -101,7 +101,7 @@ fn one_stage_operation_keeps_prompt_spawn_and_teardown_on_pinned_revision() {
         .unwrap();
     let repo = db.get_repo("repo-1").unwrap().unwrap();
     let definitions = super::super::definitions::RepoDefinitions::resolve(&repo).unwrap();
-    let pipeline = definitions.pipeline("pinned").unwrap();
+    let workflow = definitions.workflow("pinned").unwrap();
     assert_eq!(definitions.revision(), Some(v1_revision.as_str()));
 
     write_version("V2");
@@ -139,7 +139,7 @@ fn one_stage_operation_keeps_prompt_spawn_and_teardown_on_pinned_revision() {
     )
     .unwrap();
 
-    let stage = &pipeline.stages[0];
+    let stage = &workflow.stages[0];
     let prompt = super::super::prompt::build_target_stage_prompt(
         &definitions,
         &repo.path,
@@ -163,7 +163,7 @@ fn one_stage_operation_keeps_prompt_spawn_and_teardown_on_pinned_revision() {
         &definitions,
         "task-pin",
         "pinned",
-        &pipeline,
+        &workflow,
         stage,
         "review",
         "main",
@@ -192,7 +192,7 @@ fn one_stage_operation_keeps_prompt_spawn_and_teardown_on_pinned_revision() {
         &repo,
         &definitions,
         "task-pin",
-        &pipeline,
+        &workflow,
         "review",
         branch,
     )
@@ -287,11 +287,11 @@ fn prepare_merge_agent_creates_in_progress_task() {
 #[tokio::test]
 async fn rerun_stage_uses_compiled_post_action_stage_prompt_and_stage_setup() {
     let repo_root = init_git_repo("rerun-post-action");
-    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::create_dir_all(repo_root.join(".kanna/agents/implement")).unwrap();
     std::fs::create_dir_all(repo_root.join(".kanna/agents/commit")).unwrap();
     std::fs::write(
-        repo_root.join(".kanna/pipelines/default.json"),
+        repo_root.join(".kanna/workflows/default.json"),
         serde_json::json!({
             "name": "default",
             "environments": {
@@ -469,7 +469,7 @@ async fn acknowledged_stage_survives_db_failure_restart_and_can_complete() {
         agent_provider: "codex".to_string(),
         model: None,
         effort: None,
-        completion_transition: PipelineStageTransition::Manual,
+        completion_transition: WorkflowStageTransition::Manual,
         feedback: None,
         provider_session_id: None,
         resumed_from_run_id: None,
@@ -736,16 +736,16 @@ fn rerun_reproduces_the_recorded_run_of_the_stage() {
 }
 
 #[test]
-fn prepare_advance_stage_uses_stored_pipeline_snapshot_for_existing_task() {
+fn prepare_advance_stage_uses_stored_workflow_snapshot_for_existing_task() {
     let repo_root =
         std::env::temp_dir().join(format!("kanna-stage-snapshot-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&repo_root);
-    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::create_dir_all(repo_root.join(".kanna/agents/reviewer")).unwrap();
     std::fs::create_dir_all(repo_root.join(".kanna/agents/qa")).unwrap();
     std::fs::write(repo_root.join("README.md"), "test repo").unwrap();
     std::fs::write(
-        repo_root.join(".kanna/pipelines/default.json"),
+        repo_root.join(".kanna/workflows/default.json"),
         r#"{
   "stages": [
     { "name": "in progress", "transition": "manual" },
@@ -797,7 +797,7 @@ fn prepare_advance_stage_uses_stored_pipeline_snapshot_for_existing_task() {
         .status()
         .unwrap()
         .success());
-    publish_origin_main(&repo_root, "publish stored pipeline source definitions");
+    publish_origin_main(&repo_root, "publish stored workflow source definitions");
     assert!(Command::new("git")
         .args(["branch", "task-old-branch"])
         .current_dir(&repo_root)
@@ -806,9 +806,9 @@ fn prepare_advance_stage_uses_stored_pipeline_snapshot_for_existing_task() {
         .success());
 
     let snapshot =
-        std::fs::read_to_string(repo_root.join(".kanna/pipelines/default.json")).unwrap();
+        std::fs::read_to_string(repo_root.join(".kanna/workflows/default.json")).unwrap();
     std::fs::write(
-        repo_root.join(".kanna/pipelines/default.json"),
+        repo_root.join(".kanna/workflows/default.json"),
         r#"{
   "stages": [
     { "name": "in progress", "transition": "manual" },
@@ -819,7 +819,7 @@ fn prepare_advance_stage_uses_stored_pipeline_snapshot_for_existing_task() {
     .unwrap();
     publish_origin_main(
         &repo_root,
-        "publish replacement pipeline after task snapshot",
+        "publish replacement workflow after task snapshot",
     );
 
     let config = test_config("stage-snapshot-resolution");
@@ -881,11 +881,11 @@ fn prepare_advance_stage_uses_stored_pipeline_snapshot_for_existing_task() {
 fn prepare_advance_stage_applies_repo_agent_extension() {
     let repo_root = std::env::temp_dir().join(format!("kanna-stage-extend-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&repo_root);
-    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::create_dir_all(repo_root.join(".kanna/agents/reviewer")).unwrap();
     std::fs::write(repo_root.join("README.md"), "test repo").unwrap();
     std::fs::write(
-        repo_root.join(".kanna/pipelines/default.json"),
+        repo_root.join(".kanna/workflows/default.json"),
         r#"{
   "stages": [
     { "name": "in progress", "transition": "manual" },
@@ -1003,11 +1003,11 @@ fn prepare_advance_stage_substitutes_previous_stage_run_result_before_legacy_sta
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&repo_root);
-    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::create_dir_all(repo_root.join(".kanna/agents/reviewer")).unwrap();
     std::fs::write(repo_root.join("README.md"), "test repo").unwrap();
     std::fs::write(
-        repo_root.join(".kanna/pipelines/default.json"),
+        repo_root.join(".kanna/workflows/default.json"),
         r#"{
   "stages": [
     { "name": "in progress", "transition": "manual" },
@@ -1235,10 +1235,10 @@ fn prepare_stage_completion_for_closed_task_is_idempotent_without_definitions() 
 #[tokio::test]
 async fn prepare_advance_stage_forks_workspace_for_next_run_in_same_task() {
     let repo_root = init_git_repo("advance-stage-same-task-run");
-    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::create_dir_all(repo_root.join(".kanna/agents/reviewer")).unwrap();
     std::fs::write(
-        repo_root.join(".kanna/pipelines/default.json"),
+        repo_root.join(".kanna/workflows/default.json"),
         r#"{
   "stages": [
     { "name": "in progress", "transition": "manual" },
@@ -1259,7 +1259,7 @@ async fn prepare_advance_stage_forks_workspace_for_next_run_in_same_task() {
         .unwrap()
         .success());
     assert!(Command::new("git")
-        .args(["commit", "-m", "add kanna pipeline"])
+        .args(["commit", "-m", "add kanna workflow"])
         .current_dir(&repo_root)
         .status()
         .unwrap()
@@ -1457,10 +1457,10 @@ async fn prepare_advance_stage_forks_workspace_for_next_run_in_same_task() {
 #[tokio::test]
 async fn stage_transition_rolls_back_fork_when_daemon_command_times_out() {
     let repo_root = init_git_repo("advance-stage-daemon-timeout");
-    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::create_dir_all(repo_root.join(".kanna/agents/reviewer")).unwrap();
     std::fs::write(
-        repo_root.join(".kanna/pipelines/default.json"),
+        repo_root.join(".kanna/workflows/default.json"),
         r#"{
   "stages": [
     { "name": "in progress", "transition": "manual" },
@@ -1481,7 +1481,7 @@ async fn stage_transition_rolls_back_fork_when_daemon_command_times_out() {
         .unwrap()
         .success());
     assert!(Command::new("git")
-        .args(["commit", "-m", "add kanna pipeline"])
+        .args(["commit", "-m", "add kanna workflow"])
         .current_dir(&repo_root)
         .status()
         .unwrap()
@@ -1597,9 +1597,9 @@ async fn stage_transition_rolls_back_fork_when_daemon_command_times_out() {
 #[tokio::test]
 async fn prompt_only_stage_provider_overrides_source_task_provider_in_daemon_spawn() {
     let repo_root = init_git_repo("prompt-only-stage-provider");
-    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::write(
-        repo_root.join(".kanna/pipelines/default.json"),
+        repo_root.join(".kanna/workflows/default.json"),
         serde_json::json!({
             "stages": [
                 {
@@ -1622,7 +1622,7 @@ async fn prompt_only_stage_provider_overrides_source_task_provider_in_daemon_spa
 
     let config = test_config("prompt-only-stage-provider");
     let db = Db::open_for_tests(&config.db_path).unwrap();
-    seed_post_pipeline_task(&config, &db, &repo_root);
+    seed_post_workflow_task(&config, &db, &repo_root);
 
     let run = match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
         PreparedStageTransition::Run(run) => run,
@@ -1667,7 +1667,7 @@ async fn prompt_only_stage_provider_overrides_source_task_provider_in_daemon_spa
 #[tokio::test]
 async fn stage_transition_tears_down_departed_stage_environment_before_repo_teardown() {
     let repo_root = init_git_repo("advance-stage-env-teardown");
-    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::create_dir_all(repo_root.join(".kanna/agents/reviewer")).unwrap();
     std::fs::write(
         repo_root.join(".kanna/config.json"),
@@ -1683,7 +1683,7 @@ async fn stage_transition_tears_down_departed_stage_environment_before_repo_tear
     )
     .unwrap();
     std::fs::write(
-        repo_root.join(".kanna/pipelines/default.json"),
+        repo_root.join(".kanna/workflows/default.json"),
         serde_json::json!({
             "environments": {
                 "dev": {
@@ -1840,9 +1840,9 @@ async fn stage_transition_tears_down_departed_stage_environment_before_repo_tear
 #[tokio::test]
 async fn headless_rerun_runs_environment_setup_after_killing_previous_session() {
     let repo_root = init_git_repo("headless-rerun-setup-order");
-    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::write(
-        repo_root.join(".kanna/pipelines/default.json"),
+        repo_root.join(".kanna/workflows/default.json"),
         serde_json::json!({
             "environments": {
                 "dev": {
@@ -1972,9 +1972,9 @@ async fn headless_rerun_runs_environment_setup_after_killing_previous_session() 
 #[tokio::test]
 async fn headless_rerun_setup_failure_records_durable_diagnostics_after_kill() {
     let repo_root = init_git_repo("headless-rerun-setup-failure");
-    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::write(
-        repo_root.join(".kanna/pipelines/default.json"),
+        repo_root.join(".kanna/workflows/default.json"),
         serde_json::json!({
             "environments": {
                 "dev": {
@@ -2102,7 +2102,7 @@ async fn headless_rerun_setup_failure_records_durable_diagnostics_after_kill() {
 
 #[test]
 fn prepare_advance_stage_at_final_stage_prepares_close() {
-    let repo_root = init_git_repo_with_pipeline(
+    let repo_root = init_git_repo_with_workflow(
         "advance-final-stage-close",
         "default",
         "in progress",
@@ -2139,10 +2139,10 @@ fn prepare_advance_stage_at_final_stage_prepares_close() {
 #[test]
 fn prepare_auto_stage_completion_spawns_next_run_in_same_task() {
     let repo_root = init_git_repo("auto-completion-same-task");
-    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::create_dir_all(repo_root.join(".kanna/agents/pr")).unwrap();
     std::fs::write(
-        repo_root.join(".kanna/pipelines/default.json"),
+        repo_root.join(".kanna/workflows/default.json"),
         r#"{
   "stages": [
     { "name": "in progress", "transition": "manual" },
@@ -2164,7 +2164,7 @@ fn prepare_auto_stage_completion_spawns_next_run_in_same_task() {
         .unwrap()
         .success());
     assert!(Command::new("git")
-        .args(["commit", "-m", "add kanna pipeline"])
+        .args(["commit", "-m", "add kanna workflow"])
         .current_dir(&repo_root)
         .status()
         .unwrap()
@@ -2249,7 +2249,7 @@ fn prepare_auto_stage_completion_spawns_next_run_in_same_task() {
 
 #[test]
 fn prepare_auto_stage_completion_parks_manual_stage() {
-    let repo_root = init_git_repo_with_pipeline(
+    let repo_root = init_git_repo_with_workflow(
         "auto-completion-manual-park",
         "default",
         "in progress",
@@ -2290,13 +2290,13 @@ fn prepare_auto_stage_completion_parks_manual_stage() {
     let _ = std::fs::remove_dir_all(&repo_root);
 }
 
-fn write_post_pipeline_fixtures(repo_root: &std::path::Path) {
-    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+fn write_post_workflow_fixtures(repo_root: &std::path::Path) {
+    std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::create_dir_all(repo_root.join(".kanna/agents/implement")).unwrap();
     std::fs::create_dir_all(repo_root.join(".kanna/agents/commit")).unwrap();
     std::fs::create_dir_all(repo_root.join(".kanna/agents/pr")).unwrap();
     std::fs::write(
-        repo_root.join(".kanna/pipelines/default.json"),
+        repo_root.join(".kanna/workflows/default.json"),
         serde_json::json!({
             "name": "default",
             "stages": [
@@ -2337,10 +2337,10 @@ fn write_post_pipeline_fixtures(repo_root: &std::path::Path) {
         "---\nname: pr\ndescription: Create the pull request\nagent_provider: claude\n---\nPR agent.",
     )
     .unwrap();
-    publish_origin_main(repo_root, "publish post pipeline definitions");
+    publish_origin_main(repo_root, "publish post workflow definitions");
 }
 
-fn seed_post_pipeline_task(config: &Config, db: &Db, repo_root: &std::path::Path) {
+fn seed_post_workflow_task(config: &Config, db: &Db, repo_root: &std::path::Path) {
     assert!(Command::new("git")
         .args(["branch", "task-source"])
         .current_dir(repo_root)
@@ -2377,11 +2377,11 @@ fn seed_post_pipeline_task(config: &Config, db: &Db, repo_root: &std::path::Path
 }
 
 #[test]
-fn pipeline_null_task_uses_no_review_across_lifecycle_paths_when_repo_defines_default() {
-    let repo_root = init_git_repo("pipeline-null-fallback");
-    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+fn workflow_null_task_uses_no_review_across_lifecycle_paths_when_repo_defines_default() {
+    let repo_root = init_git_repo("workflow-null-fallback");
+    std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::write(
-        repo_root.join(".kanna/pipelines/default.json"),
+        repo_root.join(".kanna/workflows/default.json"),
         serde_json::json!({
             "name": "default",
             "revision_limit": 17,
@@ -2401,11 +2401,11 @@ fn pipeline_null_task_uses_no_review_across_lifecycle_paths_when_repo_defines_de
         .to_string(),
     )
     .unwrap();
-    publish_origin_main(&repo_root, "publish shadowing default pipeline");
+    publish_origin_main(&repo_root, "publish shadowing default workflow");
 
-    let config = test_config("pipeline-null-fallback");
+    let config = test_config("workflow-null-fallback");
     let db = Db::open_for_tests(&config.db_path).unwrap();
-    seed_post_pipeline_task(&config, &db, &repo_root);
+    seed_post_workflow_task(&config, &db, &repo_root);
     Connection::open(&config.db_path)
         .unwrap()
         .execute(
@@ -2418,7 +2418,7 @@ fn pipeline_null_task_uses_no_review_across_lifecycle_paths_when_repo_defines_de
         PreparedStageTransition::Post(post) => post,
         PreparedStageTransition::Run(_) => panic!("no-review advance should dispatch its post"),
         PreparedStageTransition::Close { .. } => {
-            panic!("repo-authored default must not close a pipeline-null task")
+            panic!("repo-authored default must not close a workflow-null task")
         }
     };
     assert_eq!(post.run_stage, "commit");
@@ -2431,7 +2431,7 @@ fn pipeline_null_task_uses_no_review_across_lifecycle_paths_when_repo_defines_de
 
     assert!(
         super::super::prepare_workspace_teardown_for_close(&db, &config, "task-1").is_none(),
-        "repo-authored default teardown must not apply to a pipeline-null task"
+        "repo-authored default teardown must not apply to a workflow-null task"
     );
 
     let _ = std::fs::remove_dir_all(&repo_root);
@@ -2440,11 +2440,11 @@ fn pipeline_null_task_uses_no_review_across_lifecycle_paths_when_repo_defines_de
 #[test]
 fn prepare_advance_stage_dispatches_post_into_running_session() {
     let repo_root = init_git_repo("advance-dispatches-post");
-    write_post_pipeline_fixtures(&repo_root);
+    write_post_workflow_fixtures(&repo_root);
 
     let config = test_config("advance-dispatches-post");
     let db = Db::open_for_tests(&config.db_path).unwrap();
-    seed_post_pipeline_task(&config, &db, &repo_root);
+    seed_post_workflow_task(&config, &db, &repo_root);
     db.insert_stage_run(NewStageRun {
         id: "run-main",
         task_id: "task-1",
@@ -2531,11 +2531,11 @@ fn prepare_advance_stage_dispatches_post_into_running_session() {
 #[test]
 fn prepare_advance_stage_swaps_after_succeeded_post() {
     let repo_root = init_git_repo("advance-after-post-success");
-    write_post_pipeline_fixtures(&repo_root);
+    write_post_workflow_fixtures(&repo_root);
 
     let config = test_config("advance-after-post-success");
     let db = Db::open_for_tests(&config.db_path).unwrap();
-    seed_post_pipeline_task(&config, &db, &repo_root);
+    seed_post_workflow_task(&config, &db, &repo_root);
     db.insert_stage_run(NewStageRun {
         id: "run-post",
         task_id: "task-1",
@@ -2576,11 +2576,11 @@ fn prepare_advance_stage_swaps_after_succeeded_post() {
 #[test]
 fn prepare_advance_stage_redispatches_failed_post() {
     let repo_root = init_git_repo("advance-redispatches-failed-post");
-    write_post_pipeline_fixtures(&repo_root);
+    write_post_workflow_fixtures(&repo_root);
 
     let config = test_config("advance-redispatches-failed-post");
     let db = Db::open_for_tests(&config.db_path).unwrap();
-    seed_post_pipeline_task(&config, &db, &repo_root);
+    seed_post_workflow_task(&config, &db, &repo_root);
     db.insert_stage_run(NewStageRun {
         id: "run-post",
         task_id: "task-1",
@@ -2614,11 +2614,11 @@ fn prepare_advance_stage_redispatches_failed_post() {
 #[test]
 fn stage_completion_of_post_run_swaps_past_manual_gate() {
     let repo_root = init_git_repo("post-completion-swaps");
-    write_post_pipeline_fixtures(&repo_root);
+    write_post_workflow_fixtures(&repo_root);
 
     let config = test_config("post-completion-swaps");
     let db = Db::open_for_tests(&config.db_path).unwrap();
-    seed_post_pipeline_task(&config, &db, &repo_root);
+    seed_post_workflow_task(&config, &db, &repo_root);
 
     // A finished post always advances: the manual gate was already passed by
     // the advance that dispatched the post.
@@ -2645,11 +2645,11 @@ fn stage_completion_of_post_run_swaps_past_manual_gate() {
 #[test]
 fn stage_completion_of_main_run_on_manual_stage_with_post_parks() {
     let repo_root = init_git_repo("main-completion-parks-with-post");
-    write_post_pipeline_fixtures(&repo_root);
+    write_post_workflow_fixtures(&repo_root);
 
     let config = test_config("main-completion-parks-with-post");
     let db = Db::open_for_tests(&config.db_path).unwrap();
-    seed_post_pipeline_task(&config, &db, &repo_root);
+    seed_post_workflow_task(&config, &db, &repo_root);
 
     // The implement agent's own success verdict parks the manual stage; the
     // post is dispatched only when the human (or an auto policy) advances.
@@ -2664,11 +2664,11 @@ fn stage_completion_of_main_run_on_manual_stage_with_post_parks() {
 #[test]
 fn prepare_revision_completion_uses_run_transition() {
     let repo_root = init_git_repo("revision-completion-run-transition");
-    write_post_pipeline_fixtures(&repo_root);
+    write_post_workflow_fixtures(&repo_root);
 
     let config = test_config("revision-completion-run-transition");
     let db = Db::open_for_tests(&config.db_path).unwrap();
-    seed_post_pipeline_task(&config, &db, &repo_root);
+    seed_post_workflow_task(&config, &db, &repo_root);
 
     let automatic =
         super::prepare_stage_completion_for_api(&db, &config, "task-1", Some("main"), Some("auto"))
@@ -2691,11 +2691,11 @@ fn prepare_revision_completion_uses_run_transition() {
 #[test]
 fn legacy_task_parked_at_folded_post_stage_advances_past_owner() {
     let repo_root = init_git_repo("legacy-folded-post-advance");
-    write_post_pipeline_fixtures(&repo_root);
+    write_post_workflow_fixtures(&repo_root);
 
     let config = test_config("legacy-folded-post-advance");
     let db = Db::open_for_tests(&config.db_path).unwrap();
-    seed_post_pipeline_task(&config, &db, &repo_root);
+    seed_post_workflow_task(&config, &db, &repo_root);
     // Pinned snapshot from the first durable implementation: commit is an
     // interleaved continue stage, and the in-flight task is parked AT it.
     let snapshot = serde_json::json!({
@@ -2733,11 +2733,11 @@ fn legacy_task_parked_at_folded_post_stage_advances_past_owner() {
 #[tokio::test]
 async fn dispatch_post_injects_message_into_live_session_and_records_post_run() {
     let repo_root = init_git_repo("dispatch-post-live-session");
-    write_post_pipeline_fixtures(&repo_root);
+    write_post_workflow_fixtures(&repo_root);
 
     let config = test_config("dispatch-post-live-session");
     let db = Db::open_for_tests(&config.db_path).unwrap();
-    seed_post_pipeline_task(&config, &db, &repo_root);
+    seed_post_workflow_task(&config, &db, &repo_root);
     db.insert_stage_run(NewStageRun {
         id: "run-main",
         task_id: "task-1",
@@ -2828,12 +2828,12 @@ async fn dispatch_post_injects_message_into_live_session_and_records_post_run() 
 #[tokio::test]
 async fn dispatch_post_falls_back_to_fresh_session_when_session_is_dead() {
     let repo_root = init_git_repo("dispatch-post-dead-session");
-    write_post_pipeline_fixtures(&repo_root);
+    write_post_workflow_fixtures(&repo_root);
 
     let mut config = test_config("dispatch-post-dead-session");
     config.kanna_cli_path = Some("/tmp/kanna-cli".to_string());
     let db = Db::open_for_tests(&config.db_path).unwrap();
-    seed_post_pipeline_task(&config, &db, &repo_root);
+    seed_post_workflow_task(&config, &db, &repo_root);
 
     let post = match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
         PreparedStageTransition::Post(post) => post,
@@ -2924,9 +2924,9 @@ async fn dispatch_post_falls_back_to_fresh_session_when_session_is_dead() {
 #[tokio::test]
 async fn prompt_only_post_provider_overrides_source_task_provider_in_fallback_daemon_spawn() {
     let repo_root = init_git_repo("prompt-only-post-provider");
-    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::write(
-        repo_root.join(".kanna/pipelines/default.json"),
+        repo_root.join(".kanna/workflows/default.json"),
         serde_json::json!({
             "stages": [
                 {
@@ -2948,7 +2948,7 @@ async fn prompt_only_post_provider_overrides_source_task_provider_in_fallback_da
 
     let config = test_config("prompt-only-post-provider");
     let db = Db::open_for_tests(&config.db_path).unwrap();
-    seed_post_pipeline_task(&config, &db, &repo_root);
+    seed_post_workflow_task(&config, &db, &repo_root);
     let post = match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
         PreparedStageTransition::Post(post) => post,
         _ => panic!("expected post dispatch"),

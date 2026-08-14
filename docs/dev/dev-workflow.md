@@ -108,10 +108,10 @@ Per-repo product configuration, used by Kanna when running tasks against this
 repo (and dogfooded by this repo on itself):
 
 - `config.json` — worktree `setup` commands (here: `pnpm install`,
-  `./kd env sync`), `teardown`, `test`, base `ports`, default pipeline.
+  `./kd env sync`), `teardown`, `test`, base `ports`, default workflow.
 - `agents/{name}/AGENT.md` (+ optional `EXTEND.md`) — agent definitions and
   repo-local extensions.
-- `pipelines/{name}.json` — pipeline definitions.
+- `workflows/{name}.json` — workflow definitions.
 - `tasks/{slug}/agent.md` — custom task templates.
 - `config.local.json` — optional, gitignored, machine-local overrides for
   `config.json` (see below).
@@ -119,12 +119,12 @@ repo (and dogfooded by this repo on itself):
   `https://schemas.kanna.build/config.schema.json`. This checked-in file is the
   single maintained copy.
 
-Built-in agents/pipelines ship as Tauri bundled resources; per-repo files
+Built-in agents/workflows ship as Tauri bundled resources; per-repo files
 override them by name.
 
 ### Machine-local config: `.kanna/config.local.json`
 
-Agents, pipelines, and `config.json` are resolved from `origin/<default_branch>`
+Agents, workflows, and `config.json` are resolved from `origin/<default_branch>`
 at every spawn (`RepoDefinitionSnapshot::resolve`), which is why a task runs the
 same way on every machine — and why, when one provider CLI hit its account usage
 limit, the only way to unwedge this repo's review lane was to land a one-line
@@ -146,7 +146,7 @@ over the resolved `config.json`, with local winning:
 
 (Strict JSON — no comments, and never committed.)
 
-**What it may set.** Only `agentProviders`, `pipeline`, `ports`, `setup`,
+**What it may set.** Only `agentProviders`, `workflow`, `ports`, `setup`,
 `teardown`, and `test` — this machine's plumbing. `vars` and `flavors` are
 excluded because they feed stage prompts and agent selection: a task created
 under a local value for either has a prompt no other machine can reproduce, and
@@ -162,7 +162,7 @@ environment, and nothing about an outage needs them changed.
 | Key | Merge |
 |---|---|
 | `agentProviders`, `ports` | entry by entry: a local entry replaces the committed entry of the same name; unnamed committed entries survive. One level deep — a named entry is replaced whole, not field by field. |
-| `pipeline` | replaces. |
+| `workflow` | replaces. |
 | `setup`, `teardown`, `test` | replace. Arrays never concatenate: a local `setup` is the whole setup list. |
 
 There is no delete: to drop a committed `agentProviders` entry, replace it with
