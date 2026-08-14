@@ -77,8 +77,10 @@ describe("QA workflow assets", () => {
     expect(ordinaryPrompt).not.toContain("kanna-cli info");
     expect(ordinaryPrompt).not.toContain("authoritative server environment");
     expect(kannaAgents).toContain(
-      "Before debugging a running instance, call `kanna_info`"
+      "Before debugging or performing environment-sensitive operations against a running instance"
     );
+    expect(kannaAgents).toContain("mobile notifications, cloud deploys, mobile OTA publishes");
+    expect(kannaAgents).toContain("direct local/LAN API calls), call `kanna_info`");
     expect(kannaShipPrompt).toContain("Call `kanna_info`");
     expect(kannaShipPrompt).toContain("authoritative server environment/version");
     expect(kannaShipPrompt.match(/`kanna_info`/g)).toHaveLength(1);
