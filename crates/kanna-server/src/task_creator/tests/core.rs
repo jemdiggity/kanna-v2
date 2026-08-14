@@ -2830,6 +2830,10 @@ fn read_agent_definition_loads_builtin_ship_agent_with_codex_first() {
         .prompt
         .contains("./kd release promote X.Y.Z-staging.N"));
     assert!(definition.prompt.contains("runtimeVersion"));
+    assert!(definition.prompt.contains("Call `kanna_info`"));
+    assert!(definition
+        .prompt
+        .contains("authoritative server environment/version"));
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }
@@ -3367,9 +3371,10 @@ fn build_agent_command_adds_claude_kanna_preamble_as_system_prompt() {
     assert!(!command.contains("{{MCP_STATUS}}"));
     assert!(command.contains("Claude is launched with this config via `--mcp-config`"));
     assert!(command.contains("kanna-cli guide"));
-    assert!(command.contains("call `kanna_info`"));
-    assert!(command.contains("run `kanna-cli info`"));
-    assert!(command.contains("Never assume the default endpoint"));
+    assert!(!command.contains("kanna_info"));
+    assert!(!command.contains("kanna-cli info"));
+    assert!(!command.contains("authoritative server environment"));
+    assert!(!command.contains("staging/production"));
     assert!(command.contains("You are not running inside a Kanna sandbox"));
     let mcp_index = command
         .find("Prefer the `kanna_*` MCP tools")
@@ -4354,6 +4359,8 @@ fn prepare_task_for_api_resumes_requested_claude_session() {
             let command = args.join(" ");
             assert!(command.contains(&format!("--resume '{resume_session_id}'")));
             assert!(!command.contains("--session-id"));
+            assert!(!command.contains("kanna_info"));
+            assert!(!command.contains("kanna-cli info"));
         }
         _ => panic!("expected pty spawn"),
     }
@@ -4416,6 +4423,8 @@ fn prepare_task_for_api_prints_transfer_import_summary_before_the_agent() {
             assert!(command.contains("source machine: Primary"));
             assert!(command.contains("repository: restored from a transferred git bundle"));
             assert!(command.contains("session history: restored"));
+            assert!(!command.contains("kanna_info"));
+            assert!(!command.contains("kanna-cli info"));
             let agent_index = command
                 .find("--dangerously-skip-permissions")
                 .expect("agent command");

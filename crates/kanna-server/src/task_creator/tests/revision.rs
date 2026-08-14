@@ -159,6 +159,8 @@ async fn prepared_revision_agent_task_spawn_sends_task_specific_kanna_context() 
             assert!(system_prompt.contains("kanna-cli guide"));
             assert!(system_prompt.contains("kanna-cli stage-complete"));
             assert!(system_prompt.contains("KANNA_CLI_PATH"));
+            assert!(!system_prompt.contains("kanna_info"));
+            assert!(!system_prompt.contains("kanna-cli info"));
         }
         other => panic!("expected SpawnAgent, got {other:?}"),
     }

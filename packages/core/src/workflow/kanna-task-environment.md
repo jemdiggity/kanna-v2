@@ -15,7 +15,6 @@ Kanna task operations (inspect tasks, create subtasks, send input to other tasks
 
 - Prefer the `kanna_*` MCP tools when your agent client exposes them (for example `kanna_get_task`, `kanna_complete_stage`).
 - {{MCP_STATUS}}
-- Before environment-sensitive operations (releases, mobile notifications, or direct API diagnostics), call `kanna_info` and use its effective connection, authoritative server environment/version, and separately advertised LAN endpoint. If MCP tools are unavailable, run `kanna-cli info`. Never assume the default endpoint identifies the connected instance.
 - If MCP tools are unavailable, fall back to the `kanna-cli` binary; it is on `PATH` and its full path is exported as `KANNA_CLI_PATH`.
 - Run `kanna-cli guide` for live task state, workflow semantics, and the full tool catalog.
 - This task's id is in the `KANNA_TASK_ID` environment variable. Use it for all task operations; it is stable across stages, unlike branch and worktree names.

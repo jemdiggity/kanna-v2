@@ -1391,6 +1391,7 @@ async fn prepare_advance_stage_forks_workspace_for_next_run_in_same_task() {
             session_id,
             cwd,
             terminal_prelude,
+            args,
             ..
         }) => {
             assert_eq!(session_id, "task-1");
@@ -1405,10 +1406,16 @@ async fn prepare_advance_stage_forks_workspace_for_next_run_in_same_task() {
                     .as_slice()
                 )
             );
+            let command = args.join(" ");
+            assert!(!command.contains("kanna_info"));
+            assert!(!command.contains("kanna-cli info"));
         }
         Some(kanna_daemon::protocol::Command::SpawnAgent { session_id, params }) => {
             assert_eq!(session_id, "task-1");
             assert_eq!(params.cwd, fork_worktree);
+            let system_prompt = params.system_prompt.as_deref().unwrap_or("");
+            assert!(!system_prompt.contains("kanna_info"));
+            assert!(!system_prompt.contains("kanna-cli info"));
         }
         other => panic!("expected daemon spawn command, got {:?}", other),
     }
@@ -2524,6 +2531,8 @@ fn prepare_advance_stage_dispatches_post_into_running_session() {
         !fallback_prompt.contains("When this work is complete"),
         "fresh post fallback should rely on its auto-stage runtime guidance: {fallback_prompt}"
     );
+    assert!(!fallback_prompt.contains("kanna_info"));
+    assert!(!fallback_prompt.contains("kanna-cli info"));
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }
