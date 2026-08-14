@@ -33,6 +33,9 @@ import {
   publishMobileNotification,
   type MobileNotificationDelivery,
 } from "./mobileNotifications.js";
+import {
+  attachWebSocketMessageHandler,
+} from "./webSocketMessageLifecycle.js";
 
 const PORT = parseInt(process.env.PORT || "8080", 10);
 const AUTH_TIMEOUT_MS = 10_000;
@@ -240,7 +243,11 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
     }
   }, AUTH_TIMEOUT_MS);
 
-  ws.on("message", async (raw: RawData, isBinary: boolean) => {
+  attachWebSocketMessageHandler(ws, remoteAddr, async (
+    raw: RawData,
+    isBinary: boolean,
+    messageLifecycle,
+  ) => {
     // --- Auth handshake (first message) ---
     if (!authenticated) {
       const data = raw.toString();
@@ -422,14 +429,13 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
           delivery?: MobileNotificationDelivery,
           error?: string
         ) => {
-          if (ws.readyState !== 1) return;
-          ws.send(JSON.stringify({
+          messageLifecycle.sendMobileNotificationAck({
             type: "mobile_notification_ack",
             id,
             ok,
             ...(delivery ? { delivery } : {}),
             ...(error ? { error } : {}),
-          }));
+          });
         };
         if (serverAuthProof?.kind !== "desktop") {
           sendAck(false, undefined, "desktop-secret authentication is required");
@@ -468,13 +474,12 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
               sequence: nextPublicationSequence++,
             };
         const sendAck = (ok: boolean, error?: string) => {
-          if (ws.readyState !== 1) return;
-          ws.send(JSON.stringify({
+          messageLifecycle.sendTaskSnapshotAck({
             type: "task_snapshot_ack",
             id,
             ok,
             ...(error ? { error } : {}),
-          }));
+          });
         };
         if (serverAuthProof?.kind !== "desktop") {
           sendAck(false, "desktop-secret authentication is required for task snapshot publication");
