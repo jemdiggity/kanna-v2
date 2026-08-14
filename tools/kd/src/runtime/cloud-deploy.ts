@@ -226,7 +226,8 @@ export function buildRelayProvisionPlan(input: { environment: CloudDeployEnviron
       ...[
         "roles/datastore.user",
         "roles/artifactregistry.reader",
-        "roles/storage.objectViewer"
+        "roles/storage.objectViewer",
+        "roles/firebasecloudmessaging.admin"
       ].map((role): RelayCommandPlanStep => ({
         command: "gcloud",
         args: [

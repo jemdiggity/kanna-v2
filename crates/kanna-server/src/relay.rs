@@ -1171,8 +1171,14 @@ mod tests {
                             "id": value["id"],
                             "ok": true,
                             "delivery": {
-                                "acceptedCount": 2,
-                                "failedCount": 0
+                                "acceptedCount": 0,
+                                "failedCount": 1,
+                                "failureReasons": [{
+                                    "providerCode": "messaging/mismatched-credential",
+                                    "category": "relayPermission",
+                                    "count": 1,
+                                    "message": "The relay service account cannot send Firebase Cloud Messaging messages in this environment. Grant roles/firebasecloudmessaging.admin to the relay VM service account."
+                                }]
                             }
                         })
                         .to_string()
@@ -1231,9 +1237,15 @@ mod tests {
         assert_eq!(
             response.body,
             Some(serde_json::json!({
-                "status": "accepted",
-                "acceptedCount": 2,
-                "failedCount": 0
+                "status": "deliveryFailed",
+                "acceptedCount": 0,
+                "failedCount": 1,
+                "failureReasons": [{
+                    "providerCode": "messaging/mismatched-credential",
+                    "category": "relayPermission",
+                    "count": 1,
+                    "message": "The relay service account cannot send Firebase Cloud Messaging messages in this environment. Grant roles/firebasecloudmessaging.admin to the relay VM service account."
+                }]
             }))
         );
 

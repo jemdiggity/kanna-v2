@@ -293,6 +293,17 @@ pub(crate) struct MobileNotificationResponse {
     pub(crate) status: String,
     pub(crate) accepted_count: u64,
     pub(crate) failed_count: u64,
+    #[serde(default)]
+    pub(crate) failure_reasons: Vec<MobileNotificationFailureReason>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MobileNotificationFailureReason {
+    pub(crate) provider_code: String,
+    pub(crate) category: String,
+    pub(crate) count: u64,
+    pub(crate) message: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]

@@ -90,6 +90,17 @@ pub struct MobileNotificationPayload {
 pub struct MobileNotificationDelivery {
     pub accepted_count: u64,
     pub failed_count: u64,
+    #[serde(default)]
+    pub failure_reasons: Vec<MobileNotificationFailureReason>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileNotificationFailureReason {
+    pub provider_code: String,
+    pub category: String,
+    pub count: u64,
+    pub message: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

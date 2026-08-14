@@ -855,6 +855,7 @@ describe("Relay integration", () => {
       delivery: {
         acceptedCount: 0,
         failedCount: 0,
+        failureReasons: [],
       },
     });
     await closeAndWait(desktopServer);

@@ -27,6 +27,8 @@ gcloud projects add-iam-policy-binding "$PROJECT" \
   --member "serviceAccount:$SA" --role roles/artifactregistry.reader --condition=None >/dev/null
 gcloud projects add-iam-policy-binding "$PROJECT" \
   --member "serviceAccount:$SA" --role roles/storage.objectViewer --condition=None >/dev/null
+gcloud projects add-iam-policy-binding "$PROJECT" \
+  --member "serviceAccount:$SA" --role roles/firebasecloudmessaging.admin --condition=None >/dev/null
 
 echo "==> Static IP"
 gcloud compute addresses describe kanna-relay-ip --project "$PROJECT" --region "$REGION" >/dev/null 2>&1 \

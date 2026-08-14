@@ -35,6 +35,7 @@ The desktop frontend itself is planned to become a `kanna-server` client as well
 - `POST /v1/tasks/{task_id}/actions/rerun-stage`
 - `POST /v1/tasks/{task_id}/actions/run-merge-agent`
 - `POST /v1/tasks/{task_id}/actions/set-notify`
+- `POST /v1/mobile/notifications`
 - `POST /v1/pairing/sessions`
 
 ## Multi-machine Agent Routing
@@ -605,6 +606,27 @@ already-finished run as idempotent even after a post or replacement starts. For
 rolling upgrades, `runId` may be omitted only for a pre-upgrade run whose
 durable `completion_bound` bit is false, and new clients tolerate old task-detail
 responses that lack `latestRun.id`.
+
+## Mobile Notification Delivery
+
+`POST /v1/mobile/notifications` hands a validated notification to the
+desktop-authenticated relay connection. The relay looks up only that Firebase
+user's `pushDevices`, submits one FCM multicast, removes tokens rejected as
+invalid or unregistered, and acknowledges the request over the same WebSocket.
+The server response includes `acceptedCount`, `failedCount`, and aggregated
+`failureReasons`. Each reason has a safe provider code, category, count, and
+actionable message; it never identifies a device or includes its token, the
+Firebase provider's uncontrolled raw message, credentials, or notification
+contents. Older relay acknowledgements without `failureReasons` deserialize as
+an empty list during rolling upgrades.
+
+The diagnostic categories distinguish invalid tokens, relay IAM permission,
+Firebase-project mismatch, APNs credentials, payload validation, rate limits,
+temporary provider failures, and an unknown-provider fallback. A
+`messaging/mismatched-credential` response whose provider text specifically
+reports `cloudmessaging.messages.create` denied is classified as
+`relayPermission`; other occurrences remain `firebaseProjectMismatch`. Relay
+logs record only the desktop id and these same aggregate safe reasons.
 
 ## Local Consumer Model
 
