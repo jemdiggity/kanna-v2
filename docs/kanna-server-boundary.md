@@ -638,9 +638,12 @@ fixed, categorized `relayRejection` diagnostic and server-owned correlation
 value in the `503 Service Unavailable` body/error, so HTTP, CLI, MCP, and
 mobile consumers never receive the relay string or the provider's raw
 response, project or credential diagnostics, or token material. The
-correlation value is embedded in the relay request id and ties the rejection
-to the matching environment's server and relay logs; the relay's incident id
-is not propagated. During a rolling upgrade this boundary also sanitizes
+server logs and the `503 Service Unavailable` body carry the
+server-owned `category=relayRejection` and correlation value. Relay logs
+independently carry `category=relayDependency` and an opaque incident id; the
+server correlation and relay incident id are not shared. Operators join the
+two records using the desktop id and time window. During a rolling upgrade
+this boundary also sanitizes
 rejection acknowledgements from an older relay that still serializes raw
 provider exceptions.
 
