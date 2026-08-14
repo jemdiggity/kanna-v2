@@ -683,6 +683,61 @@ describe("RootNavigator task collection integration", () => {
     expect(visibleText()).toContain("Loaded from the desktop");
   });
 
+  it("switches repos from the all-repo cache before the repo refresh settles", async () => {
+    const repoOneTask: TaskSummary = {
+      id: "task-repo-1",
+      repoId: "repo-1",
+      title: "Repo One cached task",
+      stage: "in progress"
+    };
+    const repoTwoTask: TaskSummary = {
+      id: "task-repo-2",
+      repoId: "repo-2",
+      title: "Repo Two cached task",
+      stage: "review"
+    };
+    const repoTwoRefresh = createDeferred<TaskSummary[]>();
+    const client = createClientMock();
+    vi.mocked(client.listRepos).mockResolvedValue([
+      { id: "repo-1", name: "Repo One" },
+      { id: "repo-2", name: "Repo Two" }
+    ]);
+    vi.mocked(client.listRecentTasks).mockResolvedValue([
+      repoOneTask,
+      repoTwoTask
+    ]);
+    vi.mocked(client.listRepoTasks)
+      .mockResolvedValueOnce([repoOneTask])
+      .mockReturnValueOnce(repoTwoRefresh.promise);
+    const store = createSessionStore();
+    controller = createMobileController(client, store);
+
+    await act(async () => {
+      rendered = create(
+        <NavigatorHarness activeController={controller!} store={store} />
+      );
+      await controller!.bootstrap();
+    });
+
+    await act(async () => {
+      rendered!.root.find(
+        (node) => node.props.testID === MOBILE_E2E_IDS.tasksRepo("repo-2")
+      ).props.onPress();
+      await flushMicrotasks();
+    });
+
+    expect(vi.mocked(client.listRepoTasks)).toHaveBeenLastCalledWith("repo-2");
+    expect(store.getState().selectedRepoId).toBe("repo-2");
+    expect(visibleText()).toContain("Repo Two cached task");
+    expect(visibleText()).not.toContain("Repo One cached task");
+    expect(visibleText()).not.toContain("No tasks yet.");
+
+    repoTwoRefresh.resolve([repoTwoTask]);
+    await act(async () => {
+      await flushMicrotasks();
+    });
+  });
+
   // E2E coverage note (repo policy): the parent/child hierarchy is not yet
   // covered by an Appium simulator run. The smoke harness is local/human-only
   // (simulator + built app) and seeds from apps/desktop/tests/e2e/seed.sql,

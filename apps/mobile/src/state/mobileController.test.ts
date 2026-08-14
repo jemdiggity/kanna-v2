@@ -5037,6 +5037,46 @@ describe("createMobileController", () => {
     expect(store.getState().repoTasks.map((task) => task.id)).toEqual(["task-repo-2"]);
   });
 
+  it("shows cached all-repo tasks while a selected repo refresh is pending", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const repoOneTask: TaskSummary = {
+      id: "task-repo-1",
+      repoId: "repo-1",
+      title: "Repo One task",
+      stage: "in progress"
+    };
+    const cachedRepoTwoTask: TaskSummary = {
+      id: "task-repo-2-cached",
+      repoId: "repo-2",
+      title: "Cached Repo Two task",
+      stage: "review"
+    };
+    const refreshedRepoTwoTask: TaskSummary = {
+      ...cachedRepoTwoTask,
+      title: "Refreshed Repo Two task"
+    };
+    const repoTwoRefresh = createDeferred<TaskSummary[]>();
+    client.listRecentTasks.mockResolvedValue([repoOneTask, cachedRepoTwoTask]);
+    client.listRepoTasks
+      .mockResolvedValueOnce([repoOneTask])
+      .mockReturnValueOnce(repoTwoRefresh.promise);
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    const selection = controller.selectRepo("repo-2");
+
+    expect(store.getState()).toMatchObject({
+      selectedRepoId: "repo-2",
+      repoTasks: [cachedRepoTwoTask]
+    });
+
+    repoTwoRefresh.resolve([refreshedRepoTwoTask]);
+    await selection;
+
+    expect(store.getState().repoTasks).toEqual([refreshedRepoTwoTask]);
+  });
+
   it("selects a desktop without choosing a navigation destination", async () => {
     const store = createSessionStore();
     const client = createClientMock();
