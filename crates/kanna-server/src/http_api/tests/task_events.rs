@@ -1488,6 +1488,60 @@ async fn a_task_parked_on_a_prompt_emits_awaiting_input_once_per_block() {
     );
 }
 
+/// PTY providers do not all expose a structured "needs input" signal. Codex,
+/// for example, returns to its ordinary idle prompt after printing a design
+/// approval question. The weaker activity edge must still be observable, with
+/// the same transcript tail task detail exposes, without pretending it was a
+/// daemon-confirmed interactive prompt.
+#[tokio::test]
+async fn a_prompted_task_stopping_emits_activity_changed_for_idle_and_unread() {
+    let (router, db_path) = events_router();
+    let db = Db::open(&db_path).expect("open db");
+
+    for (task_id, activity, prompt) in [
+        ("child-a", "unread", "Does this design have your approval?"),
+        ("child-b", "idle", "Choose the deployment target."),
+    ] {
+        db.update_pipeline_item_waiting_prompt(task_id, prompt)
+            .expect("persist prompt");
+        db.update_pipeline_item_activity(task_id, "working")
+            .expect("working");
+        db.update_pipeline_item_activity(task_id, activity)
+            .expect("stopped");
+        // Repeating the stored state is not another transition.
+        db.update_pipeline_item_activity(task_id, activity)
+            .expect("same stopped state");
+    }
+
+    let body = get_json_body(
+        &router,
+        "/v1/task-events?taskIds=child-a,child-b&timeoutSecs=1",
+    )
+    .await;
+    let events = body["events"].as_array().expect("events");
+    assert_eq!(events.len(), 2);
+    assert_eq!(
+        events[0]["type"],
+        serde_json::json!("task.activity_changed")
+    );
+    assert_eq!(events[0]["payload"]["previousActivity"], "working");
+    assert_eq!(events[0]["payload"]["activity"], "unread");
+    assert_eq!(
+        events[0]["payload"]["waitingPromptSnippet"],
+        "Does this design have your approval?"
+    );
+    assert_eq!(
+        events[1]["type"],
+        serde_json::json!("task.activity_changed")
+    );
+    assert_eq!(events[1]["payload"]["previousActivity"], "working");
+    assert_eq!(events[1]["payload"]["activity"], "idle");
+    assert_eq!(
+        events[1]["payload"]["waitingPromptSnippet"],
+        "Choose the deployment target."
+    );
+}
+
 /// `notifyTaskId` used to be creation-time only, so an orchestrator could not
 /// subscribe to a task it had adopted rather than created.
 ///

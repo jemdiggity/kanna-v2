@@ -44,6 +44,12 @@ fn guide_markdown_includes_live_context_and_all_catalog_tools() {
     assert!(guide.contains("run `kanna-cli info`"));
     assert!(guide.contains("Fallback: `kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\""));
     assert!(guide.contains("Advancing follows the next stage policy"));
+    assert!(guide.contains("`task.awaiting_input` is a confirmed interactive prompt"));
+    assert!(guide.contains("`task.activity_changed` is the provider-neutral fallback"));
+    assert!(guide.contains("prompt-only changes while a task remains stopped are visible only"));
+    assert!(guide.contains("kanna-cli tool call kanna_wait_events"));
+    assert!(guide.contains("no_live_agent_session"));
+    assert!(guide.contains("delivery_uncertain"));
     for tool in kanna_tool_catalog::bundled_catalog().tools {
         assert!(
             guide.contains(&format!("`{}`", tool.name)),
@@ -155,6 +161,27 @@ async fn guide_json_fetches_env_task_id_and_includes_workflow_context_and_tools(
         .as_str()
         .unwrap()
         .contains("Prefer kanna_complete_stage"));
+    let event_supervision = guide["workflow"]["eventSupervision"]
+        .as_array()
+        .expect("event supervision guidance");
+    assert!(event_supervision.iter().any(|line| {
+        line.as_str()
+            .is_some_and(|line| line.contains("task.awaiting_input") && line.contains("confirmed"))
+    }));
+    assert!(event_supervision.iter().any(|line| {
+        line.as_str().is_some_and(|line| {
+            line.contains("no_live_agent_session") && line.contains("delivery_uncertain")
+        })
+    }));
+    assert!(event_supervision.iter().any(|line| {
+        line.as_str().is_some_and(|line| {
+            line.contains("task.activity_changed") && line.contains("waitingPromptSnippet")
+        })
+    }));
+    assert!(event_supervision.iter().any(|line| {
+        line.as_str()
+            .is_some_and(|line| line.contains("prompt-only changes") && line.contains("polling"))
+    }));
     assert!(guide["workflow"]["prBoundary"]
         .as_str()
         .unwrap()
@@ -236,6 +263,9 @@ async fn guide_json_command_fetches_env_task_id_and_prints_workflow_context_and_
         .as_str()
         .unwrap()
         .contains("stage-complete"));
+    assert!(guide["workflow"]["eventSupervision"]
+        .as_array()
+        .is_some_and(|lines| lines.len() == 3));
     let tool_names = guide["tools"]
         .as_array()
         .unwrap()

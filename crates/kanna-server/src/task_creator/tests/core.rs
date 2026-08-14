@@ -2847,6 +2847,11 @@ fn read_agent_definition_loads_builtin_task_manager_agent_with_codex_first() {
     );
     assert!(definition.prompt.contains("kanna_wait_events"));
     assert!(definition.prompt.contains("task.awaiting_input"));
+    assert!(definition.prompt.contains("task.activity_changed"));
+    assert!(definition.prompt.contains("waitingPromptSnippet"));
+    assert!(definition.prompt.contains("no_live_agent_session"));
+    assert!(definition.prompt.contains("delivery_uncertain"));
+    assert!(definition.prompt.contains("kanna_resume_task"));
     assert!(definition.prompt.contains(
         "Product work, bug fixes, investigations, releases, and other durable repository tasks"
     ));

@@ -56,6 +56,10 @@ pub enum TaskEventKind {
     /// rendered — never inferred from a session merely going quiet, so a long
     /// build is never mislabelled as blocked.
     AwaitingInput,
+    /// A provider-neutral stopped edge. This is weaker than `AwaitingInput`:
+    /// the task moved from working to idle/unread and has a transcript tail,
+    /// but the provider did not necessarily expose a structured prompt.
+    ActivityChanged,
     /// The task's merge request reached the repo's merge agent. `payload.source`
     /// says who delivered it: `agent` for the approve post's own
     /// `kanna_signal_merge_handoff`, `engine` for the backstop Kanna runs
@@ -87,6 +91,7 @@ impl TaskEventKind {
             Self::PrCreated => "task.pr_created",
             Self::RevisionRequested => "task.revision_requested",
             Self::AwaitingInput => "task.awaiting_input",
+            Self::ActivityChanged => "task.activity_changed",
             Self::MergeSignaled => "task.merge_signaled",
             Self::MergeHandoffMissing => "task.merge_handoff_missing",
             Self::TransferFinalizing => "task.transfer_finalizing",
@@ -104,6 +109,7 @@ impl TaskEventKind {
         Self::PrCreated,
         Self::RevisionRequested,
         Self::AwaitingInput,
+        Self::ActivityChanged,
         Self::MergeSignaled,
         Self::MergeHandoffMissing,
         Self::TransferFinalizing,

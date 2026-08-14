@@ -882,6 +882,7 @@ fn wait_events_documents_every_event_type_the_server_emits() {
         "task.revision_requested",
         "task.closed",
         "task.awaiting_input",
+        "task.activity_changed",
         "task.merge_signaled",
         "task.merge_handoff_missing",
         "task.transfer_finalizing",
@@ -891,6 +892,13 @@ fn wait_events_documents_every_event_type_the_server_emits() {
             "kanna_wait_events must document the {event_type} event"
         );
     }
+
+    assert!(
+        description.contains("working to idle or unread")
+            && description.contains("waitingPromptSnippet")
+            && description.contains("does not prove"),
+        "kanna_wait_events must distinguish the provider-neutral activity edge from confirmed awaiting input: {description}"
+    );
 }
 
 // The window-vs-client-budget invariant itself is a compile-time assertion in

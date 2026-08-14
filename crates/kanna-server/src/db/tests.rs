@@ -2660,6 +2660,7 @@ fn task_event_type_names_are_stable() {
             "task.pr_created",
             "task.revision_requested",
             "task.awaiting_input",
+            "task.activity_changed",
             "task.merge_signaled",
             "task.merge_handoff_missing",
             "task.transfer_finalizing",

@@ -701,15 +701,70 @@ impl Db {
         id: &str,
         activity: &str,
     ) -> Result<(), rusqlite::Error> {
+        if self.conn.is_autocommit() {
+            self.with_immediate_transaction(|db| {
+                db.update_pipeline_item_activity_in_transaction(id, activity)
+            })
+        } else {
+            self.update_pipeline_item_activity_in_transaction(id, activity)
+        }
+    }
+
+    fn update_pipeline_item_activity_in_transaction(
+        &self,
+        id: &str,
+        activity: &str,
+    ) -> Result<(), rusqlite::Error> {
+        let current = self
+            .conn
+            .query_row(
+                "SELECT activity, last_output_preview
+                 FROM pipeline_item
+                 WHERE id = ? AND closed_at IS NULL",
+                [id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((previous_activity, waiting_prompt_snippet)) = current else {
+            return Ok(());
+        };
+        if previous_activity.as_deref() == Some(activity) {
+            return Ok(());
+        }
+
         self.conn.execute(
             "UPDATE pipeline_item
              SET activity = ?, activity_changed_at = datetime('now'),
                  activity_revision = activity_revision + 1,
                  unread_at = CASE WHEN ? = 'unread' THEN datetime('now') ELSE unread_at END,
                  updated_at = datetime('now')
-             WHERE id = ? AND activity != ? AND closed_at IS NULL",
-            (activity, activity, id, activity),
+             WHERE id = ?",
+            (activity, activity, id),
         )?;
+
+        let waiting_prompt_snippet = waiting_prompt_snippet
+            .as_deref()
+            .map(str::trim)
+            .filter(|snippet| !snippet.is_empty());
+        if previous_activity.as_deref() == Some("working")
+            && matches!(activity, "idle" | "unread")
+            && waiting_prompt_snippet.is_some()
+        {
+            self.append_task_event(
+                id,
+                TaskEventKind::ActivityChanged,
+                json!({
+                    "previousActivity": "working",
+                    "activity": activity,
+                    "waitingPromptSnippet": waiting_prompt_snippet,
+                }),
+            )?;
+        }
         Ok(())
     }
 

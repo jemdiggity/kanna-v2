@@ -351,6 +351,13 @@ polling each child. It is cursor-based, not snapshot-diffed:
   is a positive match on a prompt the agent CLI rendered. It is deliberately
   never inferred from a session going quiet; see
   [2026-07-29-awaiting-input-detection-e2e-gap.md](2026-07-29-awaiting-input-detection-e2e-gap.md).
+- `task.activity_changed` is the provider-neutral fallback. It is appended on
+  a `working` → `idle`/`unread` activity edge when the task has a non-empty
+  `waitingPromptSnippet`, and carries `previousActivity`, `activity`, and that
+  snippet. It does not claim the snippet is a question: PTY providers also use
+  this edge after ordinary final output. A changed snippet while activity
+  remains stopped is task-detail state only and requires polling
+  `kanna_get_task`.
 - `task.transfer_finalizing` reports each step of a cross-machine transfer
   shutting the task's agent down (`payload.phase`: `wrap-up-sent`, `idle`,
   `quit-sent`, `exited`, `already-exited`, `degraded`). See
