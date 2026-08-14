@@ -2,7 +2,7 @@
   "tools": [
     {
       "name": "kanna_info",
-      "description": "Report which Kanna runtime this client is actually connected to. Returns the exact effective HTTP base URL and parsed host/port, client adapter identity, an allow-listed identity snapshot from the authoritative server /v1/status response, the separately advertised LAN endpoint, capability/write-path health, and an explicit serverStatus error when status cannot be fetched. Call this before environment-sensitive operations such as releases, mobile notifications, or direct API diagnostics; never infer the environment from a default port, app path, or process name.",
+      "description": "Report which Kanna runtime this client is actually connected to. Returns the exact effective HTTP base URL and parsed host/port, client adapter identity, an allow-listed identity snapshot from the authoritative server /v1/status response, the separately advertised LAN endpoint, capability/write-path health, and an explicit serverStatus error when status cannot be fetched. The connected instance cannot be inferred from a default port, app path, display name, or process name.",
       "method": "GET",
       "path": "/v1/status",
       "response": "runtime_info",

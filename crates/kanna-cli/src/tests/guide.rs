@@ -1,5 +1,22 @@
 use super::*;
 
+fn assert_no_environment_sensitive_info_instruction(rendered: &str) {
+    let normalized = rendered.replace('`', "").to_ascii_lowercase();
+
+    for line in normalized.lines() {
+        let mentions_environment_sensitive_operations =
+            line.contains("environment-sensitive operation");
+        let directs_info_lookup = line.contains("call kanna_info")
+            || line.contains("call this")
+            || line.contains("run kanna-cli info");
+
+        assert!(
+            !(mentions_environment_sensitive_operations && directs_info_lookup),
+            "rendered guide must not direct ordinary tasks to identify Kanna runtime before environment-sensitive operations: {line}"
+        );
+    }
+}
+
 #[test]
 fn guide_markdown_includes_live_context_and_all_catalog_tools() {
     let task = TaskDetail {
@@ -39,9 +56,7 @@ fn guide_markdown_includes_live_context_and_all_catalog_tools() {
             "Prefer `kanna-mcp` tools for Kanna task operations; fall back to the instance-local `kanna-cli` from the shell only when MCP tools are unavailable."
         ));
     assert!(guide.contains("Prefer `kanna_complete_stage` to record completion"));
-    assert!(!guide.contains("Before environment-sensitive operations"));
-    assert!(!guide.contains("call `kanna_info`"));
-    assert!(!guide.contains("run `kanna-cli info`"));
+    assert_no_environment_sensitive_info_instruction(&guide);
     assert!(guide.contains("Fallback: `kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\""));
     assert!(guide.contains("Advancing follows the next stage policy"));
     assert!(guide.contains("`task.awaiting_input` is a confirmed interactive prompt"));
@@ -151,12 +166,21 @@ async fn guide_json_fetches_env_task_id_and_includes_workflow_context_and_tools(
         .iter()
         .any(|operation| operation.as_str()
             == Some("prefer kanna-mcp tools for Kanna task operations")));
-    assert!(!guide["workflow"]["operations"]
+    for operation in guide["workflow"]["operations"]
         .as_array()
-        .unwrap()
-        .iter()
-        .any(|operation| operation.as_str()
-            == Some("call kanna_info before environment-sensitive operations and use its authoritative connected-server identity")));
+        .expect("workflow operations")
+    {
+        assert_no_environment_sensitive_info_instruction(
+            operation.as_str().expect("workflow operation must be text"),
+        );
+    }
+    for tool in guide["tools"].as_array().expect("catalog tools") {
+        assert_no_environment_sensitive_info_instruction(
+            tool["description"]
+                .as_str()
+                .expect("catalog tool description must be text"),
+        );
+    }
     assert!(guide["workflow"]["completeStage"]
         .as_str()
         .unwrap()
