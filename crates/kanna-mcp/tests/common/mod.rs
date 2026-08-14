@@ -370,7 +370,8 @@ fn spawn_fake_daemon(daemon_dir: &Path) -> FakeDaemon {
                 );
                 writeln!(
                     connection,
-                    "{{\"type\":\"ProtectedInputReady\",\"version\":1}}"
+                    "{{\"type\":\"ProtectedInputReady\",\"version\":{}}}",
+                    kanna_runtime_defaults::PROTECTED_INPUT_PROTOCOL_VERSION,
                 )
                 .expect("acknowledge protected-input negotiation");
                 line.clear();

@@ -57,6 +57,11 @@ enum Cmd {
         session_id: String,
         data: Vec<u8>,
     },
+    InputIfSession {
+        session_id: String,
+        expected_pid: u32,
+        data: Vec<u8>,
+    },
     InputNoReply {
         session_id: String,
         data: Vec<u8>,
@@ -141,10 +146,79 @@ enum Evt {
 #[serde(rename_all = "snake_case")]
 enum ErrorCode {
     PtySpawnFailed,
+    SessionIncarnationMismatch,
     InputUnauthorized,
     ProtectedInputProtocolRequired,
     #[serde(other)]
     Other,
+}
+
+#[test]
+fn input_if_session_rejects_a_different_observed_pid() {
+    let daemon = DaemonHandle::start();
+    let mut conn = daemon.connect();
+    let session_id = "fenced-input";
+    spawn_echo_session(&mut conn, session_id);
+
+    conn.send(&Cmd::List);
+    let pid = match conn.recv() {
+        Evt::SessionList { sessions } => sessions
+            .iter()
+            .find(|session| session["session_id"] == session_id)
+            .and_then(|session| session["pid"].as_u64())
+            .and_then(|pid| u32::try_from(pid).ok())
+            .expect("spawned session should have a pid"),
+        other => panic!("expected SessionList, got: {other:?}"),
+    };
+
+    conn.send(&Cmd::InputIfSession {
+        session_id: session_id.to_string(),
+        expected_pid: pid.saturating_add(1),
+        data: b"must not reach the PTY\r".to_vec(),
+    });
+    assert!(matches!(
+        conn.recv(),
+        Evt::Error {
+            code: Some(ErrorCode::SessionIncarnationMismatch),
+            ..
+        }
+    ));
+
+    conn.send(&Cmd::Snapshot {
+        session_id: session_id.to_string(),
+    });
+    match conn.recv() {
+        Evt::Snapshot { snapshot, .. } => {
+            assert!(!snapshot.vt.contains("must not reach the PTY"));
+        }
+        other => panic!("expected Snapshot, got: {other:?}"),
+    }
+
+    conn.send(&Cmd::InputIfSession {
+        session_id: session_id.to_string(),
+        expected_pid: pid,
+        data: b"fenced input accepted\r".to_vec(),
+    });
+    assert!(matches!(conn.recv(), Evt::Ok));
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        conn.send(&Cmd::Snapshot {
+            session_id: session_id.to_string(),
+        });
+        match conn.recv() {
+            Evt::Snapshot { snapshot, .. } if snapshot.vt.contains("fenced input accepted") => {
+                break;
+            }
+            Evt::Snapshot { .. } if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Evt::Snapshot { snapshot, .. } => {
+                panic!("fenced input never reached PTY: {:?}", snapshot.vt)
+            }
+            other => panic!("expected Snapshot, got: {other:?}"),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

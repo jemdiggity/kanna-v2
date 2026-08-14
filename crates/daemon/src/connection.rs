@@ -711,6 +711,57 @@ pub(crate) async fn handle_command(
             let _ = write_event(&mut *writer.lock().await, &evt).await;
         }
 
+        Command::InputIfSession {
+            session_id,
+            expected_pid,
+            data,
+        } => {
+            let Some(session) = session_handle(&sessions, &session_id).await else {
+                let evt = error_event(
+                    Some(protocol::ErrorCode::SessionNotFound),
+                    format!("session not found: {session_id}"),
+                );
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            };
+
+            let actual_pid = session.pty.lock().await.pid();
+            if actual_pid != expected_pid {
+                let evt = error_event(
+                    Some(protocol::ErrorCode::SessionIncarnationMismatch),
+                    format!(
+                        "session incarnation changed for {session_id}: expected pid {expected_pid}, found {actual_pid}"
+                    ),
+                );
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            }
+
+            if session.operator_input_only().await {
+                let evt = error_event(
+                    Some(protocol::ErrorCode::InputUnauthorized),
+                    format!("session requires authenticated operator input: {session_id}"),
+                );
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            }
+
+            let evt = match session.enqueue_acknowledged_input(data) {
+                Ok(written) => match written.await {
+                    Ok(()) => Event::Ok,
+                    Err(_) => error_event(
+                        Some(protocol::ErrorCode::WriteFailed),
+                        format!("input write failed for session: {session_id}"),
+                    ),
+                },
+                Err(_) => error_event(
+                    Some(protocol::ErrorCode::WriteFailed),
+                    format!("input queue closed for session: {session_id}"),
+                ),
+            };
+            let _ = write_event(&mut *writer.lock().await, &evt).await;
+        }
+
         Command::InputNoReply { session_id, data } => {
             let Some(session) = session_handle(&sessions, &session_id).await else {
                 let evt = error_event(

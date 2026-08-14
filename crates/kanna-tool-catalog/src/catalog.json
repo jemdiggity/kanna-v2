@@ -241,7 +241,7 @@
     },
     {
       "name": "kanna_send_task_input",
-      "description": "Send ordinary input text to a running Kanna task's agent terminal session; a trailing Enter is added when needed so the agent submits it. This can steer a merge singleton under its repo-defined policy.",
+      "description": "Send ordinary input text to a Kanna task's live daemon PTY session; a trailing Enter is added when needed so the agent submits it. Delivery is live-session-only, fenced to the PTY process ID observed before delivery while holding the task's lifecycle lease, and is not queued or stored for a later run or stage. If no live input-capable agent session exists, or that session is replaced before delivery, the call fails with reason no_live_agent_session and reports the latest run status and finish time when available; use kanna_resume_task to preserve provider context when possible, or kanna_rerun_stage to start fresh. A delivery_uncertain failure means some bytes may have reached the terminal and must not be retried blindly. This can steer a merge singleton under its repo-defined policy.",
       "method": "POST",
       "path": "/v1/tasks/{task_id}/input",
       "response": "json",
@@ -298,7 +298,7 @@
     },
     {
       "name": "kanna_resume_task",
-      "description": "Recover a Kanna task whose latest run is cancelled or failed and whose daemon session is dead. Kanna restarts the same stage in the same worktree and resumes the recorded provider conversation when supported. If a provider id, transcript, worktree, or other resume precondition is unavailable, Kanna starts fresh and records the exact reason in latestRun.resumeFallbackReason; latestRun.resumedFromRunId is set only for a real resume.",
+      "description": "Recover a Kanna task whose latest run is cancelled or failed and whose daemon session is dead. Kanna restarts the same stage in the same worktree and resumes the recorded provider conversation when supported. If provider resume is unsupported or a provider id, transcript, worktree, or other context precondition is unavailable, this is not an endpoint failure: Kanna starts fresh and records the exact reason in latestRun.resumeFallbackReason; latestRun.resumedFromRunId is set only for a real resume. A task-state precondition failure returns an explanatory conflict. An empty 404 means the connected Kanna server is an older server that does not provide this route; inspect kanna_info. When recovery is unavailable or a deliberately fresh conversation is acceptable, fall back to kanna_rerun_stage.",
       "method": "POST",
       "path": "/v1/tasks/{task_id}/actions/resume",
       "response": "json",

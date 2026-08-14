@@ -167,6 +167,47 @@ fn generated_schema_preserves_required_order_types_and_enums() {
 }
 
 #[test]
+fn task_input_and_resume_descriptions_document_delivery_and_recovery_contracts() {
+    let tools = bundled_catalog().tools_list_value();
+    let tools = tools.as_array().expect("tools array");
+    let description = |name: &str| {
+        tools
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .and_then(|tool| tool["description"].as_str())
+            .unwrap_or_else(|| panic!("missing description for {name}"))
+    };
+
+    let send_input = description("kanna_send_task_input");
+    for required in [
+        "live daemon PTY session",
+        "PTY process ID",
+        "not queued",
+        "no_live_agent_session",
+        "kanna_resume_task",
+        "kanna_rerun_stage",
+    ] {
+        assert!(
+            send_input.contains(required),
+            "send-task-input must document `{required}`"
+        );
+    }
+
+    let resume = description("kanna_resume_task");
+    for required in [
+        "cancelled or failed",
+        "resumeFallbackReason",
+        "older server",
+        "kanna_rerun_stage",
+    ] {
+        assert!(
+            resume.contains(required),
+            "resume-task must document `{required}`"
+        );
+    }
+}
+
+#[test]
 fn runtime_info_snapshot_allow_lists_status_and_keeps_identity_boundaries_separate() {
     let info = runtime_info_snapshot(
         "http://127.0.0.1:49199",

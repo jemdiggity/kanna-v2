@@ -20,6 +20,7 @@ pub const PROTECTED_INPUT_PROTOCOL_VERSION: u32 =
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     SessionNotFound,
+    SessionIncarnationMismatch,
     SessionAlreadyExists,
     HandoffLost,
     HandoffUnauthorized,
@@ -203,6 +204,14 @@ pub enum Command {
     /// ordering barrier before sending a later, discrete keystroke.
     Input {
         session_id: String,
+        data: Vec<u8>,
+    },
+    /// Acknowledged terminal input fenced to the PTY process ID observed
+    /// by a preceding `List`. This prevents normal task-id reuse between discovery
+    /// and delivery from redirecting input into a replacement stage or rerun.
+    InputIfSession {
+        session_id: String,
+        expected_pid: u32,
         data: Vec<u8>,
     },
     /// Latency-sensitive terminal input. Success is deliberately not
@@ -491,6 +500,29 @@ mod tests {
         match decoded {
             Command::Input { session_id, data } => {
                 assert_eq!(session_id, "s1");
+                assert_eq!(data, b"hello");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_command_input_if_session_roundtrip() {
+        let cmd = Command::InputIfSession {
+            session_id: "s1".to_string(),
+            expected_pid: 42,
+            data: b"hello".to_vec(),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        let decoded: Command = serde_json::from_str(&json).unwrap();
+        match decoded {
+            Command::InputIfSession {
+                session_id,
+                expected_pid,
+                data,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(expected_pid, 42);
                 assert_eq!(data, b"hello");
             }
             _ => panic!("wrong variant"),

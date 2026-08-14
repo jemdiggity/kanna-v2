@@ -8,6 +8,16 @@ Kanna distinguishes an explicit stage restart from recovery:
   session is dead. It starts the same stage in the same worktree and prefers
   the previous provider conversation.
 
+If the task is not in that resumable state, the action returns an explanatory
+conflict rather than treating the task as missing. Provider-context failures
+are different: an unsupported provider resume, absent provider id or
+transcript, missing worktree, or divergent tip deliberately starts a fresh
+conversation and records the reason in `latestRun.resumeFallbackReason`.
+Callers that cannot use recovery, or explicitly want a fresh conversation,
+should use `kanna_rerun_stage`. An empty 404 from the resume route means the
+connected server predates the route; `kanna_info` reports the actual server and
+its advertised agent API surface.
+
 Revision resume and death recovery share the same provider, transcript,
 worktree, and committed-tip checks. A successful resume records
 `stage_run.resumed_from_run_id`. If any check fails, Kanna starts a fresh
