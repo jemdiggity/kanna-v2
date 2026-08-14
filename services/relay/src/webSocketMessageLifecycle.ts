@@ -35,7 +35,6 @@ function createMessageLifecycle(
   ws: WebSocket,
   raw: RawData,
 ): WebSocketMessageLifecycle & { handleRejection(remoteAddr: string): void } {
-  const failure = correlatedFailure(raw);
   let acknowledgementAttempted = false;
 
   const sendAcknowledgement = (body: Record<string, unknown>): void => {
@@ -54,6 +53,7 @@ function createMessageLifecycle(
     sendMobileNotificationAck: sendAcknowledgement,
     sendTaskSnapshotAck: sendAcknowledgement,
     handleRejection(remoteAddr: string): void {
+      const failure = correlatedFailure(raw);
       console.error(
         `[ws] Message handler failed for ${remoteAddr}`
         + (failure ? ` (request=${failure.requestType})` : ""),

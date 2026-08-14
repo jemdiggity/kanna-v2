@@ -72,7 +72,7 @@ function jsonResponse(
 
 // --- HTTP server ---
 
-const server = createServer(async (req, res) => {
+export const server = createServer(async (req, res) => {
   try {
     if (
       E2E_SHUTDOWN_TOKEN &&
@@ -201,7 +201,7 @@ const server = createServer(async (req, res) => {
 
 // --- WebSocket server ---
 
-const wss = new WebSocketServer({ server });
+export const wss = new WebSocketServer({ server });
 
 wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
   const remoteAddr = req.socket.remoteAddress ?? "unknown";
