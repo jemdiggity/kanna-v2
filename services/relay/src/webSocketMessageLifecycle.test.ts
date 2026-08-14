@@ -176,9 +176,8 @@ describe("websocket message lifecycle", () => {
     }));
 
     const port = await findFreePort();
-    const previousPort = process.env.PORT;
-    process.env.PORT = String(port);
     const relay = await import("./index.js");
+    relay.startRelay(port, "127.0.0.1");
     await waitForListening(relay.server);
     const client = new WebSocket(`ws://127.0.0.1:${port}`);
 
@@ -210,8 +209,6 @@ describe("websocket message lifecycle", () => {
       await waitForClose(client);
       await closeWebSocketServer(relay.wss);
       await closeServer(relay.server);
-      if (previousPort === undefined) delete process.env.PORT;
-      else process.env.PORT = previousPort;
       logs.mockRestore();
       vi.doUnmock("./auth.js");
       vi.doUnmock("./cloudTaskPublication.js");

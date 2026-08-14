@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { pathToFileURL } from "node:url";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import {
   verifyPhoneToken,
@@ -535,12 +536,19 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
 
 // --- Start ---
 
-server.listen(PORT, () => {
-  console.log(`[relay] Listening on port ${PORT}`);
-  console.log(
-    `[relay] Firebase project=${process.env.FIREBASE_PROJECT_ID?.trim() || "(default)"}`
-  );
-});
+export function startRelay(port = PORT, host?: string): void {
+  const onListening = () => {
+    console.log(`[relay] Listening on port ${port}`);
+    console.log(
+      `[relay] Firebase project=${process.env.FIREBASE_PROJECT_ID?.trim() || "(default)"}`
+    );
+  };
+  if (host) {
+    server.listen(port, host, onListening);
+  } else {
+    server.listen(port, onListening);
+  }
+}
 
 let shuttingDown = false;
 function shutdown(signal: string): void {
@@ -560,5 +568,12 @@ function shutdown(signal: string): void {
   }, 4_000).unref();
 }
 
-process.once("SIGTERM", () => shutdown("SIGTERM"));
-process.once("SIGINT", () => shutdown("SIGINT"));
+const isEntrypoint =
+  typeof process.argv[1] === "string"
+  && pathToFileURL(process.argv[1]).href === import.meta.url;
+
+if (isEntrypoint) {
+  startRelay();
+  process.once("SIGTERM", () => shutdown("SIGTERM"));
+  process.once("SIGINT", () => shutdown("SIGINT"));
+}
