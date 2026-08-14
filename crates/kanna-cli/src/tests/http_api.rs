@@ -1,4 +1,28 @@
 use super::*;
+use crate::api::notify_mobile_via_api;
+use crate::models::MobileNotificationRequest;
+
+#[tokio::test]
+async fn notify_mobile_surfaces_the_fixed_relay_dependency_error() {
+    let safe_error = "mobile notification delivery failed (category=relayDependency, incident=incident-safe-123); retry later and inspect the matching environment's relay logs";
+    let response = http_json_response("503 Service Unavailable", safe_error);
+    let (base_url, handle) = serve_single_http_response(response).await;
+
+    let error = notify_mobile_via_api(
+        &base_url,
+        &MobileNotificationRequest {
+            title: "Provider call rejected".to_string(),
+            body: "Exercise the safe relay error.".to_string(),
+            task_id: None,
+        },
+    )
+    .await
+    .expect_err("relay dependency rejection should remain an HTTP error");
+    let request = handle.await.unwrap();
+
+    assert!(error.contains(safe_error));
+    assert!(request.starts_with("POST /v1/mobile/notifications HTTP/1.1"));
+}
 
 #[tokio::test]
 async fn advance_stage_posts_to_task_action_path_with_empty_json_body() {

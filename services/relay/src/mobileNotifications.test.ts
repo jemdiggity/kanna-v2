@@ -130,6 +130,52 @@ describe("relay mobile notification delivery", () => {
     })).toThrow("notification.title must be a non-empty string");
   });
 
+  it("never exposes whole-call provider exceptions in logs or acknowledgements", async () => {
+    const canarySecret = "ya29.distinctive-fake-provider-token-DO-NOT-LEAK";
+    const send = vi.fn(async () => {
+      throw new Error(
+        `Firebase request rejected: Authorization: Bearer ${canarySecret}; project=kanna-secret-project`
+      );
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const acknowledgements: unknown[] = [];
+    const { publishMobileNotification } = await import("./mobileNotifications.js");
+
+    await publishMobileNotification({
+      userId: "operator-1",
+      desktopId: "desktop-1",
+      notification: {
+        title: "Staging shipped",
+        body: "The staging build is ready."
+      },
+      sendAck: (ack) => acknowledgements.push({
+        type: "mobile_notification_ack",
+        id: "notify-secret-rejection",
+        ...ack
+      })
+    }, {
+      send,
+      createIncidentId: () => "incident-safe-123"
+    });
+
+    expect(warn).toHaveBeenCalledOnce();
+    expect(warn).toHaveBeenCalledWith(
+      "[push] Mobile notification delivery failed for desktop desktop-1 (category=relayDependency, incident=incident-safe-123)"
+    );
+    expect(acknowledgements).toEqual([{
+      type: "mobile_notification_ack",
+      id: "notify-secret-rejection",
+      ok: false,
+      error: "mobile notification delivery failed (category=relayDependency, incident=incident-safe-123); retry later and inspect the matching environment's relay logs"
+    }]);
+    const emittedOutput = JSON.stringify({
+      logs: warn.mock.calls,
+      responses: acknowledgements
+    });
+    expect(emittedOutput).not.toContain(canarySecret);
+    expect(emittedOutput).not.toContain("kanna-secret-project");
+  });
+
   it.each([
     ["messaging/mismatched-credential", "Sender ID mismatch.", "firebaseProjectMismatch"],
     ["messaging/third-party-auth-error", "APNs rejected the credential.", "apnsCredentials"],

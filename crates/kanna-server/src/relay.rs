@@ -1152,6 +1152,7 @@ mod tests {
                 .await
                 .expect("send auth ack");
 
+            let mut notification_count = 0;
             while let Some(message) = socket.next().await {
                 let TungsteniteMessage::Text(text) = message.expect("relay frame") else {
                     continue;
@@ -1161,32 +1162,42 @@ mod tests {
                 if value["type"] != "mobile_notification_publish" {
                     continue;
                 }
-                assert_eq!(value["notification"]["title"], "Staging shipped");
-                assert_eq!(value["notification"]["body"], "The staging build is ready.");
-                assert_eq!(value["notification"]["taskId"], "task-123");
+                let acknowledgement = if notification_count == 0 {
+                    assert_eq!(value["notification"]["title"], "Staging shipped");
+                    assert_eq!(value["notification"]["body"], "The staging build is ready.");
+                    assert_eq!(value["notification"]["taskId"], "task-123");
+                    serde_json::json!({
+                        "type": "mobile_notification_ack",
+                        "id": value["id"],
+                        "ok": true,
+                        "delivery": {
+                            "acceptedCount": 0,
+                            "failedCount": 1,
+                            "failureReasons": [{
+                                "providerCode": "messaging/mismatched-credential",
+                                "category": "relayPermission",
+                                "count": 1,
+                                "message": "The relay service account cannot send Firebase Cloud Messaging messages in this environment. Grant roles/firebasecloudmessaging.admin to the relay VM service account."
+                            }]
+                        }
+                    })
+                } else {
+                    assert_eq!(value["notification"]["title"], "Provider call rejected");
+                    serde_json::json!({
+                        "type": "mobile_notification_ack",
+                        "id": value["id"],
+                        "ok": false,
+                        "error": "mobile notification delivery failed (category=relayDependency, incident=incident-safe-123); retry later and inspect the matching environment's relay logs"
+                    })
+                };
                 socket
-                    .send(TungsteniteMessage::Text(
-                        serde_json::json!({
-                            "type": "mobile_notification_ack",
-                            "id": value["id"],
-                            "ok": true,
-                            "delivery": {
-                                "acceptedCount": 0,
-                                "failedCount": 1,
-                                "failureReasons": [{
-                                    "providerCode": "messaging/mismatched-credential",
-                                    "category": "relayPermission",
-                                    "count": 1,
-                                    "message": "The relay service account cannot send Firebase Cloud Messaging messages in this environment. Grant roles/firebasecloudmessaging.admin to the relay VM service account."
-                                }]
-                            }
-                        })
-                        .to_string()
-                        .into(),
-                    ))
+                    .send(TungsteniteMessage::Text(acknowledgement.to_string().into()))
                     .await
                     .expect("send notification ack");
-                return;
+                notification_count += 1;
+                if notification_count == 2 {
+                    return;
+                }
             }
             panic!("relay disconnected before mobile notification");
         });
@@ -1216,7 +1227,7 @@ mod tests {
                 axum::http::StatusCode::UNAUTHORIZED.as_u16()
             );
 
-            http_api::dispatch_authenticated_http_invoke(
+            let delivered = http_api::dispatch_authenticated_http_invoke(
                 Arc::clone(&state),
                 "POST",
                 "/v1/mobile/notifications",
@@ -1226,10 +1237,21 @@ mod tests {
                     "taskId": "task-123"
                 }),
             )
-            .await
+            .await;
+            let rejected = http_api::dispatch_authenticated_http_invoke(
+                Arc::clone(&state),
+                "POST",
+                "/v1/mobile/notifications",
+                serde_json::json!({
+                    "title": "Provider call rejected",
+                    "body": "This exercises the relay rejection acknowledgement."
+                }),
+            )
+            .await;
+            (delivered, rejected)
         };
         tokio::pin!(endpoint_request);
-        let response = tokio::select! {
+        let (response, rejected) = tokio::select! {
             response = &mut endpoint_request => response,
             result = &mut relay_loop => panic!("relay loop exited early: {result:?}"),
         };
@@ -1248,6 +1270,13 @@ mod tests {
                 }]
             }))
         );
+        let safe_error = "mobile notification delivery failed (category=relayDependency, incident=incident-safe-123); retry later and inspect the matching environment's relay logs";
+        assert_eq!(rejected.status, 503, "{rejected:?}");
+        assert_eq!(
+            rejected.body,
+            Some(serde_json::Value::String(safe_error.to_string()))
+        );
+        assert_eq!(rejected.error.as_deref(), Some(safe_error));
 
         relay_server.await.expect("relay server");
         let _ = std::fs::remove_file(database_path);

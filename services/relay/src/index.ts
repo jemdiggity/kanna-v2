@@ -30,7 +30,7 @@ import {
 } from "./cloudTaskPublication.js";
 import {
   parseMobileNotification,
-  sendMobileNotification,
+  publishMobileNotification,
   type MobileNotificationDelivery,
 } from "./mobileNotifications.js";
 
@@ -444,26 +444,19 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
           ws.close(4005, "Authentication revoked");
           return;
         }
+        let notification;
         try {
-          const notification = parseMobileNotification(publication.notification);
-          const delivery = await sendMobileNotification({
-            userId: userId!,
-            desktopId,
-            notification,
-          });
-          if (delivery.failedCount > 0) {
-            console.warn(
-              `[push] Mobile notification delivery failed for desktop ${desktopId}: ${JSON.stringify(delivery.failureReasons)}`
-            );
-          }
-          sendAck(true, delivery);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          console.warn(
-            `[push] Mobile notification rejected for ${userId}/${desktopId}: ${message}`
-          );
-          sendAck(false, undefined, message);
+          notification = parseMobileNotification(publication.notification);
+        } catch {
+          sendAck(false, undefined, "mobile notification is malformed or oversized");
+          return;
         }
+        await publishMobileNotification({
+          userId: userId!,
+          desktopId,
+          notification,
+          sendAck: ({ ok, delivery, error }) => sendAck(ok, delivery, error),
+        });
         return;
       }
       if (publication?.type === "task_snapshot_publish") {
