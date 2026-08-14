@@ -232,7 +232,8 @@ describe("TasksScreen", () => {
     expect(textContent(tree)).toContain("Repo One");
     expect(findPressableByText(tree, "Repo One")?.props).toMatchObject({
       accessibilityRole: "button",
-      accessibilityState: { selected: true }
+      accessibilityState: { selected: true },
+      testID: MOBILE_E2E_IDS.tasksRepo("repo-1")
     });
   });
 

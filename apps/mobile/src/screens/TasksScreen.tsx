@@ -98,6 +98,7 @@ export function TasksScreen({
                   accessibilityState={{ selected }}
                   key={repo.id}
                   style={[styles.repoChip, selected ? styles.repoChipSelected : null]}
+                  testID={MOBILE_E2E_IDS.tasksRepo(repo.id)}
                   onPress={() => onSelectRepo(repo.id)}
                 >
                   <Text

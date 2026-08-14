@@ -765,6 +765,15 @@ export function createMobileController(
       return true;
     }
 
+    // listRecentTasks is the all-open-tasks snapshot for every repo. Project
+    // the selected repo from that already-loaded snapshot before crossing the
+    // transport boundary, then let the repo-specific read refresh the slice.
+    // Without this projection, changing repos briefly renders the empty state
+    // even when the next repo's tasks are already present locally.
+    store.setRepoTasks(
+      store.getState().recentTasks.filter((task) => task.repoId === repoId)
+    );
+
     let repoTasks: TaskSummary[];
     try {
       repoTasks = await client.listRepoTasks(repoId);
