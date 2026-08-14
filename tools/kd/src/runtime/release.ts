@@ -1914,37 +1914,6 @@ async function readStagingChannel(input: ReleaseCommandContext, repoSlug: string
   }
 }
 
-export function stagingMarketingVersion(stagingVersion: string): string {
-  const match = /^(\d+\.\d+\.\d+)-staging\.\d+$/.exec(stagingVersion.trim());
-  if (!match?.[1]) {
-    throw new Error(
-      `Invalid active staging version ${JSON.stringify(stagingVersion)}; expected X.Y.Z-staging.N.`
-    );
-  }
-  return match[1];
-}
-
-export async function resolveActiveStagingMarketingVersion(
-  input: ReleaseStatusInput
-): Promise<string> {
-  const remoteUrl = await mustRun(
-    input.runner,
-    "git",
-    ["remote", "get-url", "origin"],
-    input.repoRoot,
-    input.env
-  );
-  const repoSlug = releaseRepoSlug(remoteUrl);
-  const channel = await readStagingChannel(input, repoSlug);
-  if (channel.state !== "active") {
-    throw new Error(
-      `Could not resolve the active staging version from ${STAGING_CHANNEL_TAG}/${STAGING_MANIFEST_NAME}: ` +
-        (channel.state === "absent" ? channel.detail : channel.error)
-    );
-  }
-  return stagingMarketingVersion(channel.version);
-}
-
 async function countCommits(input: ReleaseCommandContext, range: string): Promise<number | null> {
   const result = await input.runner.run("git", ["rev-list", "--count", range], { cwd: input.repoRoot, env: input.env });
   if (result.exitCode !== 0) return null;

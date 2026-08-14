@@ -112,9 +112,9 @@ describe("physical-device mobile runtime", () => {
         KANNA_APP_ENV: "staging"
       }
     });
-    // The command contributes native identity only. The task executor merges
-    // the active staging KANNA_APP_VERSION (or an explicit override) into the
-    // complete prebuild environment.
+    // The command contributes native identity only. app.config.ts resolves the
+    // independent mobile marketing version unless the caller supplied an
+    // explicit KANNA_APP_VERSION override in the complete environment.
     expect(command.env).not.toHaveProperty("KANNA_APP_VERSION");
   });
 

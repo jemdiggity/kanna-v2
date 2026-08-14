@@ -16,6 +16,7 @@ import {
   openProfileSheet,
   relaunchApp,
   removeManualMachine,
+  resolveBuildInfoSmokeExpectations,
   submitPairingCode
 } from "./profile-connection.e2e";
 
@@ -423,6 +424,22 @@ describe("Repository command journey", () => {
 });
 
 describe("About this build journey", () => {
+  it("resolves exact bundled staging expectations for physical-device E2E", () => {
+    expect(
+      resolveBuildInfoSmokeExpectations({
+        KANNA_APP_ENV: "staging",
+        KANNA_E2E_EXPECTED_NATIVE_VERSION: " 1.0.0 (1) ",
+        KANNA_E2E_EXPECTED_RUNNING_SOURCE: " Embedded bundle "
+      })
+    ).toEqual({
+      channel: "staging",
+      environment: "staging",
+      nativeVersion: "1.0.0 (1)",
+      runningSource: "Embedded bundle",
+      runtimeVersion: "2.1.4"
+    });
+  });
+
   it("expands build information and validates the real dev-client identity fields", async () => {
     const events: string[] = [];
     const moreTab = {

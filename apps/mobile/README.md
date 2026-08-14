@@ -36,15 +36,14 @@ the JavaScript packaged in the installed native binary. **Development bundle
 (Metro)** means a dev-client session is loading JavaScript from Metro rather
 than Expo Updates.
 
-Physical staging builds started with `./kd mobile run --device --staging`
-resolve the active `desktop-staging/latest-staging.json` release pointer and
-embed its marketing version after removing the `-staging.N` suffix. The build
-fails before prebuild if that authoritative pointer is unavailable or invalid;
-it does not substitute a checked-in version or a possibly stale local tag. An
-explicit `KANNA_APP_VERSION` still takes precedence. Dev builds use the
-checked-in `apps/mobile/VERSION` as their deterministic fallback, with the root
-desktop `VERSION` retained only for compatibility when the mobile file is
-absent.
+Physical-device builds in every environment, including staging and production,
+default to the checked-in `apps/mobile/VERSION`. They do not read desktop
+release status or derive a marketing version from the active desktop RC. The
+root desktop `VERSION` is retained only as a compatibility fallback when the
+mobile file is absent. `KANNA_APP_VERSION` is an explicit diagnostic/build
+override; it changes only the native marketing version and does not change the
+selected native identity, bundle id, Firebase/relay environment, OTA channel,
+runtime version, or signing behavior.
 
 ## Production iOS Archive
 

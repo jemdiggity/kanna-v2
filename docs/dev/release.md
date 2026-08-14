@@ -19,7 +19,10 @@ The mobile App Store marketing version is independent and lives in
 explicit `KANNA_APP_VERSION`, `apps/mobile/VERSION`, then the root `VERSION` as
 a compatibility fallback. An empty or malformed mobile version fails the build
 instead of silently using the desktop version. This marketing version is
-separate from the OTA `runtimeVersion` and the iOS build number.
+separate from desktop release candidates, the OTA `runtimeVersion`, and the iOS
+build number. Staging physical-device builds do not query desktop release
+status to choose it. `KANNA_APP_VERSION` is an intentional diagnostic/build
+override only; it does not select mobile identity or environment settings.
 
 ## Desktop: dev path vs. release path
 

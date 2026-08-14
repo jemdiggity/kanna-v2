@@ -961,7 +961,10 @@ const helpTopics: Record<string, string[]> = {
     "  --device            Required. Target a physical iOS device.",
     "  --production        Launch against production settings.",
     "  --staging           Launch against installed staging desktop settings.",
-    "  --install           Build and install a bundled Release app; skips Metro and dev-client hot loading."
+    "  --install           Build and install a bundled Release app; skips Metro and dev-client hot loading.",
+    "",
+    "Marketing version defaults to apps/mobile/VERSION in every environment.",
+    "KANNA_APP_VERSION is an explicit diagnostic/build override; it does not select identity, cloud, OTA, runtime, or signing settings."
   ],
   "mobile uninstall": [
     "Usage: kd mobile uninstall --device --staging|--production --confirm-bundle <bundle-id> [--confirm-production]",
@@ -983,7 +986,7 @@ const helpTopics: Record<string, string[]> = {
     "Options:",
     "  --production              Required. Use the production Kanna mobile identity.",
     "  --build-number <number>   Required. App Store Connect build number (CFBundleVersion).",
-    "  --version <version>       Marketing version (defaults to VERSION).",
+    "  --version <version>       Marketing version (defaults to apps/mobile/VERSION).",
     "  --out-dir <dir>           Archive output directory (defaults to .build/mobile/ios-production).",
     "  --upload                  Upload the exported IPA with xcrun iTMSTransporter.",
     "  --dry-run                 Print the archive/upload plan without building or uploading."

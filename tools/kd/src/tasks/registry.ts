@@ -72,7 +72,6 @@ import {
   cutReleaseBranch,
   releaseStatus,
   resetStagingLineage,
-  resolveActiveStagingMarketingVersion,
   shipRelease
 } from "../runtime/release";
 import { loadReleaseEnvironment } from "../runtime/release-env";
@@ -378,7 +377,6 @@ export interface DevDownExecutionOptions {
 
 export interface MobileDeviceRunExecutionOptions {
   resolveLanAddress?: () => string | undefined;
-  resolveStagingMarketingVersion?: () => Promise<string>;
   metroReadiness?: Pick<PhysicalDeviceMetroReadinessInput, "attempts" | "delayMs">;
   readInstalledStagingDesktopStatus?: (runner: CommandRunner) => Promise<ProductionDesktopStatus | null>;
   listStagingRelayActiveDesktopIds?: (input: StagingRelayActiveDesktopIdsInput) => Promise<Set<string> | null>;
@@ -1026,12 +1024,7 @@ export async function executeMobileDeviceRunWithContext(
     requestedUdid: executor.context.env.KANNA_IOS_DEVICE_UDID?.trim() || undefined,
     requestedName: executor.context.env.KANNA_IOS_PHYSICAL_DEVICE_NAME?.trim() || undefined
   });
-  const buildEnv = await mobileDeviceBuildEnv(
-    input,
-    executor,
-    device.udid,
-    options.resolveStagingMarketingVersion
-  );
+  const buildEnv = mobileDeviceInstallEnv(input, executor, device.udid);
   if (input.install) {
     return executeMobileDeviceReleaseInstall(input, executor, device, buildEnv);
   }
@@ -1289,29 +1282,6 @@ function mobileDeviceInstallEnv(
     KANNA_APP_ENV: executor.context.env.KANNA_APP_ENV ?? "dev",
     KANNA_IOS_DEVICE_UDID: deviceUdid
   };
-}
-
-async function mobileDeviceBuildEnv(
-  input: MobileRunInput,
-  executor: ExecutorInput,
-  deviceUdid: string,
-  resolveStagingVersion?: () => Promise<string>
-): Promise<NodeJS.ProcessEnv> {
-  const env = mobileDeviceInstallEnv(input, executor, deviceUdid);
-  if (!input.staging || env.KANNA_APP_VERSION?.trim()) {
-    return env;
-  }
-
-  const version = await (
-    resolveStagingVersion ??
-    (() =>
-      resolveActiveStagingMarketingVersion({
-        repoRoot: executor.context.repoRoot,
-        env,
-        runner: executor.runner
-      }))
-  )();
-  return { ...env, KANNA_APP_VERSION: version };
 }
 
 async function executeMobileDeviceReleaseInstall(
