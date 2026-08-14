@@ -88,6 +88,7 @@ enum TerminalParserState {
     #[default]
     Normal,
     Escape,
+    Ss3,
     Csi(Vec<u8>),
     Osc,
     OscEscape,
@@ -164,17 +165,20 @@ impl TerminalInputParser {
                 if byte == b'[' {
                     self.state = TerminalParserState::Csi(Vec::new());
                     None
+                } else if !self.bracketed_paste && byte == b'O' {
+                    self.state = TerminalParserState::Ss3;
+                    None
                 } else if !self.bracketed_paste && byte == b']' {
                     self.state = TerminalParserState::Osc;
                     None
                 } else {
                     self.state = TerminalParserState::Normal;
-                    if self.bracketed_paste || matches!(byte, b' '..=b'~' | 0x80..=0xff) {
-                        Some(OperatorAction::Printable)
-                    } else {
-                        None
-                    }
+                    self.parse_byte(byte)
                 }
+            }
+            TerminalParserState::Ss3 => {
+                self.state = TerminalParserState::Normal;
+                None
             }
             TerminalParserState::Csi(bytes) => {
                 if bytes.len() < 16 {
@@ -1182,6 +1186,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn application_cursor_protocol_bytes_do_not_open_a_draft() {
+        let daemon_dir = tempfile::tempdir().unwrap();
+        let (mut commands, daemon) = spawn_recording_daemon(daemon_dir.path());
+        let coordinator = TaskInputCoordinator::new(
+            daemon_dir.path().to_string_lossy().to_string(),
+            Db::test_db_path("input-application-cursor-protocol"),
+        );
+        let incarnation = SessionIncarnation {
+            session_id: "task-target".to_string(),
+            pid: 4242,
+        };
+        let protocol = b"\x1bOA".to_vec();
+
+        coordinator
+            .send_operator_bytes_if_session("task-target", incarnation, protocol.clone())
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            coordinator.submit_message_if_session(
+                "task-target",
+                "task-target",
+                4242,
+                TaskInputSource::Api,
+                "message",
+            ),
+        )
+        .await;
+        assert!(matches!(result, Ok(Ok(()))));
+        assert_eq!(next_input_bytes(&mut commands).await, protocol);
+        assert_eq!(next_input_bytes(&mut commands).await, b"message");
+        assert_eq!(next_input_bytes(&mut commands).await, vec![b'\r']);
+
+        drop(coordinator);
+        daemon.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn printable_operator_bytes_open_a_draft() {
         let daemon_dir = tempfile::tempdir().unwrap();
         let (mut commands, daemon) = spawn_recording_daemon(daemon_dir.path());
@@ -1267,6 +1309,90 @@ mod tests {
         assert_eq!(next_input_bytes(&mut commands).await, b"queued");
         assert_eq!(next_input_bytes(&mut commands).await, vec![b'\r']);
         assert_eq!(next_input_bytes(&mut commands).await, b"next");
+
+        coordinator
+            .send_operator_bytes_if_session("task-target", incarnation, vec![b'\x03'])
+            .await
+            .unwrap();
+        assert_eq!(next_input_bytes(&mut commands).await, vec![b'\x03']);
+        drop(coordinator);
+        daemon.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn boundary_after_cross_frame_escape_closes_draft_and_preserves_fifo() {
+        let unique = format!(
+            "kanna-escape-boundary-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = tempfile::tempdir().unwrap();
+        let (mut commands, daemon) = spawn_recording_daemon(daemon_dir.path());
+        let db_path = Db::test_db_path(&unique);
+        let db = Db::open_for_tests(&db_path).unwrap();
+        db.insert_test_repo("repo-1", "Repo").unwrap();
+        db.insert_test_pipeline_item(
+            "task-target",
+            "repo-1",
+            "Target",
+            None,
+            "in progress",
+            "2026-08-15T00:00:00Z",
+        )
+        .unwrap();
+        drop(db);
+
+        let coordinator = TaskInputCoordinator::new(
+            daemon_dir.path().to_string_lossy().to_string(),
+            db_path.clone(),
+        );
+        let incarnation = SessionIncarnation {
+            session_id: "task-target".to_string(),
+            pid: 4242,
+        };
+
+        coordinator
+            .send_operator_bytes_if_session("task-target", incarnation.clone(), b"draft".to_vec())
+            .await
+            .unwrap();
+        let (_, mut message) = coordinator
+            .queue_message_if_session(
+                "task-target",
+                "task-target",
+                4242,
+                TaskInputSource::Api,
+                "queued",
+            )
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+        coordinator
+            .send_operator_bytes_if_session("task-target", incarnation.clone(), vec![b'\x1b'])
+            .await
+            .unwrap();
+        coordinator
+            .send_operator_bytes_if_session("task-target", incarnation.clone(), b"\rnext".to_vec())
+            .await
+            .unwrap();
+
+        assert!(matches!(message.try_recv(), Ok(Ok(()))));
+        assert_eq!(next_input_bytes(&mut commands).await, b"draft");
+        assert_eq!(next_input_bytes(&mut commands).await, vec![b'\x1b']);
+        assert_eq!(next_input_bytes(&mut commands).await, vec![b'\r']);
+        assert_eq!(next_input_bytes(&mut commands).await, b"queued");
+        assert_eq!(next_input_bytes(&mut commands).await, vec![b'\r']);
+        assert_eq!(next_input_bytes(&mut commands).await, b"next");
+
+        let events = Db::open(&db_path)
+            .unwrap()
+            .list_recent_input_events("task-target", 10)
+            .unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].payload["boundary"], "terminal-enter");
+        assert_eq!(events[1].payload["boundary"], "message");
 
         coordinator
             .send_operator_bytes_if_session("task-target", incarnation, vec![b'\x03'])
