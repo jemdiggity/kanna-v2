@@ -4,6 +4,7 @@ use super::task_input::submit_task_input;
 use crate::config::Config;
 use crate::db::{Db, MergeSignalSource};
 use crate::task_creator::{PrepareTaskError, SingletonAgentOverrides};
+use crate::task_input_queue::TaskInputSource;
 use axum::extract::State;
 use axum::Json;
 use kanna_agent_protocol::StateChangeScope;
@@ -361,15 +362,14 @@ pub(super) async fn signal_agent_request(
     };
 
     if let Some(running) = running {
-        let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
-            .await
-            .map_err(|e| {
-                (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("daemon error: {}", e),
-                )
-            })?;
-        submit_task_input(&mut daemon, &running.session_id, &message).await?;
+        submit_task_input(
+            &state,
+            &running.task_id,
+            &running.session_id,
+            TaskInputSource::Api,
+            &message,
+        )
+        .await?;
         return Ok(SignalAgentResponse {
             task_id: running.task_id,
             created: false,

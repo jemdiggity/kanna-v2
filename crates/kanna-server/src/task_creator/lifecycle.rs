@@ -8,6 +8,7 @@ use crate::daemon_client::{DaemonClient, SpawnDeliveryError};
 use crate::db::{Db, NewStageRun};
 use crate::http_api::{try_submit_task_input, TaskInputError};
 use crate::session_replacements::SessionReplacements;
+use crate::task_input_queue::{TaskInputCoordinator, TaskInputSource};
 use kanna_daemon::protocol::{
     AgentSpawnParams, Command as DaemonCommand, Event as DaemonEvent, TerminalSnapshot,
 };
@@ -725,6 +726,7 @@ pub(crate) async fn dispatch_prepared_post_for_api(
     db_path: &str,
     daemon: &mut DaemonClient,
     replacements: &SessionReplacements,
+    input: &TaskInputCoordinator,
     prepared: PreparedPostDispatch,
 ) -> Result<crate::mobile_api::TaskActionResponse, String> {
     let task_id = prepared.task_id.clone();
@@ -744,7 +746,15 @@ pub(crate) async fn dispatch_prepared_post_for_api(
         return spawn_prepared_stage_run_for_api(db_path, daemon, replacements, prepared.fallback)
             .await;
     }
-    match try_submit_task_input(daemon, &prepared.session_id, &prepared.message).await {
+    match try_submit_task_input(
+        input,
+        &prepared.task_id,
+        &prepared.session_id,
+        TaskInputSource::StagePost,
+        &prepared.message,
+    )
+    .await
+    {
         Ok(()) => {
             let db = Db::open(db_path).map_err(|e| format!("db error: {}", e))?;
             // The live session keeps whatever agent is already running;

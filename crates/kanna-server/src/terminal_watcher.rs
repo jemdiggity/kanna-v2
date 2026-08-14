@@ -482,6 +482,34 @@ mod tests {
     }
 
     async fn expect_completion_notification(listener: &UnixListener) -> Vec<Vec<u8>> {
+        let (list_stream, _) = timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .expect("notification session-list connection was not opened")
+            .unwrap();
+        let (list_read, mut list_write) = list_stream.into_split();
+        let mut list_reader = BufReader::new(list_read);
+        let mut line = String::new();
+        list_reader.read_line(&mut line).await.unwrap();
+        assert!(matches!(
+            serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+            DaemonCommand::List
+        ));
+        write_event(
+            &mut list_write,
+            &DaemonEvent::SessionList {
+                sessions: vec![SessionInfo {
+                    session_id: "task-parent".to_string(),
+                    pid: 4242,
+                    cwd: "/tmp".to_string(),
+                    state: kanna_daemon::protocol::SessionState::Active,
+                    idle_seconds: 0,
+                    status: kanna_daemon::protocol::SessionStatus::Idle,
+                    kind: kanna_daemon::protocol::SessionKind::Pty,
+                }],
+            },
+        )
+        .await;
+
         let (stream, _) = timeout(Duration::from_secs(2), listener.accept())
             .await
             .expect("notification connection was not opened")
@@ -493,8 +521,13 @@ mod tests {
             let mut line = String::new();
             reader.read_line(&mut line).await.unwrap();
             match serde_json::from_str::<DaemonCommand>(line.trim()).unwrap() {
-                DaemonCommand::Input { session_id, data } => {
+                DaemonCommand::InputIfSession {
+                    session_id,
+                    expected_pid,
+                    data,
+                } => {
                     assert_eq!(session_id, "task-parent");
+                    assert_eq!(expected_pid, 4242);
                     inputs.push(data);
                 }
                 other => panic!("expected Input command, got {other:?}"),

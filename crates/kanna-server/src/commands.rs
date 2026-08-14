@@ -14,6 +14,7 @@ pub async fn handle_invoke(
     daemon: &mut DaemonClient,
     config: &Config,
     replacements: &SessionReplacements,
+    task_input: &crate::task_input_queue::TaskInputCoordinator,
 ) -> Result<Value, String> {
     let mobile_api = || {
         Db::open(&config.db_path)
@@ -87,18 +88,17 @@ pub async fn handle_invoke(
                 .get("data")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "missing required arg: data".to_string())?;
-            let event = daemon
-                .send_command(&DaemonCommand::Input {
-                    session_id: session_id.to_string(),
-                    data: data.as_bytes().to_vec(),
-                })
+            task_input
+                .send_operator_bytes(session_id, session_id, data.as_bytes().to_vec())
                 .await
-                .map_err(|e| format!("daemon error: {}", e))?;
-            match event {
-                DaemonEvent::Ok => Ok(Value::Null),
-                DaemonEvent::Error { message, .. } => Err(format!("daemon error: {}", message)),
-                other => Err(format!("unexpected daemon response: {:?}", other)),
-            }
+                .map(|_| Value::Null)
+                .map_err(|error| match error {
+                    crate::task_input_queue::TaskInputError::SessionNotFound => {
+                        format!("session not found: {session_id}")
+                    }
+                    crate::task_input_queue::TaskInputError::Other(message)
+                    | crate::task_input_queue::TaskInputError::Uncertain(message) => message,
+                })
         }
         "resize_session" => {
             let session_id = args
@@ -200,6 +200,7 @@ pub async fn handle_invoke(
                         &config.db_path,
                         daemon,
                         replacements,
+                        task_input,
                         *prepared,
                     )
                     .await?;
@@ -455,6 +456,10 @@ mod tests {
             &mut daemon,
             &config,
             &SessionReplacements::default(),
+            &crate::task_input_queue::TaskInputCoordinator::new(
+                config.daemon_dir.clone(),
+                config.db_path.clone(),
+            ),
         )
         .await
         .expect("close task invoke");
@@ -583,6 +588,10 @@ mod tests {
             &mut daemon,
             &config,
             &SessionReplacements::default(),
+            &crate::task_input_queue::TaskInputCoordinator::new(
+                config.daemon_dir.clone(),
+                config.db_path.clone(),
+            ),
         )
         .await
         .expect("advance final stage invoke");

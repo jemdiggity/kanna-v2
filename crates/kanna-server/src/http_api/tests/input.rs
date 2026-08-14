@@ -1,5 +1,17 @@
 use super::*;
 
+fn active_pty_session(session_id: &str, pid: u32) -> kanna_daemon::protocol::SessionInfo {
+    kanna_daemon::protocol::SessionInfo {
+        session_id: session_id.to_string(),
+        pid,
+        cwd: "/tmp".to_string(),
+        state: kanna_daemon::protocol::SessionState::Active,
+        idle_seconds: 0,
+        status: kanna_daemon::protocol::SessionStatus::Idle,
+        kind: kanna_daemon::protocol::SessionKind::Pty,
+    }
+}
+
 async fn expect_task_state_changed(
     rx: &mut tokio::sync::broadcast::Receiver<kanna_agent_protocol::ServerFrame>,
 ) {
@@ -51,6 +63,28 @@ async fn assert_signal_agent_reuses_open_task_with_run_status(run_status: &str, 
         .expect("failed to allocate a collision-free test daemon socket");
 
     let daemon_server = tokio::spawn(async move {
+        let (list_stream, _) = listener.accept().await.unwrap();
+        let (list_read, mut list_write) = list_stream.into_split();
+        let mut list_reader = BufReader::new(list_read);
+        assert!(matches!(
+            read_test_daemon_command(&mut list_reader, &mut list_write).await,
+            DaemonCommand::List
+        ));
+        list_write
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&DaemonEvent::SessionList {
+                        sessions: vec![active_pty_session("merge-session", 4242)]
+                    })
+                    .unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        drop(list_reader);
+        drop(list_write);
         let (stream, _) = listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
@@ -58,8 +92,13 @@ async fn assert_signal_agent_reuses_open_task_with_run_status(run_status: &str, 
         for _ in 0..2 {
             let command = read_test_daemon_command(&mut reader, &mut write_half).await;
             match command {
-                DaemonCommand::Input { session_id, data } => {
+                DaemonCommand::InputIfSession {
+                    session_id,
+                    expected_pid,
+                    data,
+                } => {
                     assert_eq!(session_id, "merge-session");
+                    assert_eq!(expected_pid, 4242);
                     inputs.push(data);
                 }
                 other => panic!("expected ordinary Input command, got {other:?}"),
@@ -247,14 +286,41 @@ async fn merge_handoff_route_sends_an_ordinary_repo_policy_request() {
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let listener = UnixListener::bind(&socket_path).unwrap();
     let daemon_server = tokio::spawn(async move {
+        let (list_stream, _) = listener.accept().await.unwrap();
+        let (list_read, mut list_write) = list_stream.into_split();
+        let mut list_reader = BufReader::new(list_read);
+        assert!(matches!(
+            read_test_daemon_command(&mut list_reader, &mut list_write).await,
+            DaemonCommand::List
+        ));
+        list_write
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&DaemonEvent::SessionList {
+                        sessions: vec![active_pty_session("merge-session", 4242)]
+                    })
+                    .unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        drop(list_reader);
+        drop(list_write);
         let (stream, _) = listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         let mut inputs = Vec::new();
         for _ in 0..2 {
             match read_test_daemon_command(&mut reader, &mut write_half).await {
-                DaemonCommand::Input { session_id, data } => {
+                DaemonCommand::InputIfSession {
+                    session_id,
+                    expected_pid,
+                    data,
+                } => {
                     assert_eq!(session_id, "merge-session");
+                    assert_eq!(expected_pid, 4242);
                     inputs.push(data);
                 }
                 other => panic!("expected ordinary Input command, got {other:?}"),
@@ -845,9 +911,10 @@ async fn send_task_input_route_uses_input_sender() {
     let app = super::test_router_with_task_input_sender(
         "desktop-1",
         "Studio Mac",
-        Arc::new(|task_id, input| {
+        Arc::new(|task_id, input, source| {
             assert_eq!(task_id, "task-1");
             assert_eq!(input, "continue");
+            assert_eq!(source, crate::task_input_queue::TaskInputSource::Api);
             Ok(())
         }),
     );
@@ -867,6 +934,70 @@ async fn send_task_input_route_uses_input_sender() {
         .await
         .unwrap();
 
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn quick_action_input_rejects_unresolved_placeholders_before_delivery() {
+    let app = super::test_router_with_task_input_sender(
+        "desktop-1",
+        "Studio Mac",
+        Arc::new(|_, _, _| panic!("invalid quick action must not reach delivery")),
+    );
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-1/input")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "input": "Implement {feature}",
+                        "source": "quick_action"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap()["reason"],
+        "invalid_task_input"
+    );
+}
+
+#[tokio::test]
+async fn quick_action_validation_does_not_blacklist_legitimate_phrases() {
+    let app = super::test_router_with_task_input_sender(
+        "desktop-1",
+        "Studio Mac",
+        Arc::new(|_, input, source| {
+            assert_eq!(input, "Explain this codebase");
+            assert_eq!(
+                source,
+                crate::task_input_queue::TaskInputSource::QuickAction
+            );
+            Ok(())
+        }),
+    );
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-1/input")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "input": "Explain this codebase",
+                        "source": "quick_action"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
 }
 
@@ -1049,6 +1180,85 @@ async fn send_task_input_rejects_a_finished_task_without_a_live_daemon_session()
 }
 
 #[tokio::test]
+async fn quick_action_is_gated_while_live_agent_awaits_a_reply() {
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+    use tokio::io::{AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let unique = format!("quick-action-waiting-{}", unique_test_suffix());
+    let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let daemon_server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        assert!(matches!(
+            read_test_daemon_command(&mut reader, &mut write_half).await,
+            DaemonCommand::List
+        ));
+        write_half
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&DaemonEvent::SessionList {
+                        sessions: vec![kanna_daemon::protocol::SessionInfo {
+                            status: kanna_daemon::protocol::SessionStatus::Waiting,
+                            ..active_pty_session("task-waiting", 42)
+                        }]
+                    })
+                    .unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+    let config = merge_test_config(&unique, &daemon_dir);
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-waiting",
+        "repo-1",
+        "Waiting task",
+        None,
+        "in progress",
+        "2026-08-15 00:00:00",
+    )
+    .unwrap();
+    drop(db);
+
+    let response = super::router(Arc::new(super::AppState::new(config.clone())))
+        .oneshot(
+            Request::post("/v1/tasks/task-waiting/input")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "input": "Run /review on my current changes",
+                        "source": "quick_action"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap()["reason"],
+        "quick_action_awaiting_reply"
+    );
+    daemon_server.await.unwrap();
+    let _ = std::fs::remove_file(socket_path);
+    let _ = std::fs::remove_dir_all(daemon_dir);
+    let _ = std::fs::remove_file(config.db_path);
+}
+
+#[tokio::test]
 async fn send_task_input_delivers_to_a_live_session_after_a_finished_run() {
     use kanna_daemon::protocol::{
         Command as DaemonCommand, Event as DaemonEvent, SessionInfo, SessionState, SessionStatus,
@@ -1062,30 +1272,47 @@ async fn send_task_input_delivers_to_a_live_session_after_a_finished_run() {
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let listener = UnixListener::bind(&socket_path).unwrap();
     let daemon_server = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let (read_half, mut write_half) = stream.into_split();
-        let mut reader = BufReader::new(read_half);
         let mut commands = Vec::new();
-        while commands.len() < 3 {
-            let command = read_test_daemon_command(&mut reader, &mut write_half).await;
-            let response = match &command {
-                DaemonCommand::List => DaemonEvent::SessionList {
-                    sessions: vec![SessionInfo {
-                        session_id: "task-live".to_string(),
-                        pid: 42,
-                        cwd: "/tmp".to_string(),
-                        state: SessionState::Active,
-                        idle_seconds: 0,
-                        status: SessionStatus::Idle,
-                        kind: Default::default(),
-                    }],
-                },
-                DaemonCommand::InputIfSession { .. } => DaemonEvent::Ok,
-                other => panic!("unexpected daemon command: {other:?}"),
-            };
+        let (list_stream, _) = listener.accept().await.unwrap();
+        let (list_read, mut list_write) = list_stream.into_split();
+        let mut list_reader = BufReader::new(list_read);
+        let list = read_test_daemon_command(&mut list_reader, &mut list_write).await;
+        assert!(matches!(list, DaemonCommand::List));
+        commands.push(list);
+        list_write
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&DaemonEvent::SessionList {
+                        sessions: vec![SessionInfo {
+                            session_id: "task-live".to_string(),
+                            pid: 42,
+                            cwd: "/tmp".to_string(),
+                            state: SessionState::Active,
+                            idle_seconds: 0,
+                            status: SessionStatus::Idle,
+                            kind: Default::default(),
+                        }],
+                    })
+                    .unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        drop(list_reader);
+        drop(list_write);
+        let (input_stream, _) = listener.accept().await.unwrap();
+        let (input_read, mut input_write) = input_stream.into_split();
+        let mut input_reader = BufReader::new(input_read);
+        for _ in 0..2 {
+            let command = read_test_daemon_command(&mut input_reader, &mut input_write).await;
+            assert!(matches!(command, DaemonCommand::InputIfSession { .. }));
             commands.push(command);
-            write_half
-                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+            input_write
+                .write_all(
+                    format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap()).as_bytes(),
+                )
                 .await
                 .unwrap();
         }
@@ -1172,36 +1399,56 @@ async fn send_task_input_reports_daemon_write_failure_as_delivery_uncertain() {
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let listener = UnixListener::bind(&socket_path).unwrap();
     let daemon_server = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let (read_half, mut write_half) = stream.into_split();
-        let mut reader = BufReader::new(read_half);
         let mut commands = Vec::new();
-        while commands.len() < 2 {
-            let command = read_test_daemon_command(&mut reader, &mut write_half).await;
-            let response = match &command {
-                DaemonCommand::List => DaemonEvent::SessionList {
-                    sessions: vec![SessionInfo {
-                        session_id: "task-write-failed".to_string(),
-                        pid: 42,
-                        cwd: "/tmp".to_string(),
-                        state: SessionState::Active,
-                        idle_seconds: 0,
-                        status: SessionStatus::Idle,
-                        kind: Default::default(),
-                    }],
-                },
-                DaemonCommand::InputIfSession { .. } => DaemonEvent::Error {
-                    code: Some(ErrorCode::WriteFailed),
-                    message: "input write failed for session: task-write-failed".to_string(),
-                },
-                other => panic!("unexpected daemon command: {other:?}"),
-            };
-            commands.push(command);
-            write_half
-                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
-                .await
-                .unwrap();
-        }
+        let (list_stream, _) = listener.accept().await.unwrap();
+        let (list_read, mut list_write) = list_stream.into_split();
+        let mut list_reader = BufReader::new(list_read);
+        let list = read_test_daemon_command(&mut list_reader, &mut list_write).await;
+        assert!(matches!(list, DaemonCommand::List));
+        commands.push(list);
+        list_write
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&DaemonEvent::SessionList {
+                        sessions: vec![SessionInfo {
+                            session_id: "task-write-failed".to_string(),
+                            pid: 42,
+                            cwd: "/tmp".to_string(),
+                            state: SessionState::Active,
+                            idle_seconds: 0,
+                            status: SessionStatus::Idle,
+                            kind: Default::default(),
+                        }],
+                    })
+                    .unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        drop(list_reader);
+        drop(list_write);
+        let (input_stream, _) = listener.accept().await.unwrap();
+        let (input_read, mut input_write) = input_stream.into_split();
+        let mut input_reader = BufReader::new(input_read);
+        let input = read_test_daemon_command(&mut input_reader, &mut input_write).await;
+        assert!(matches!(input, DaemonCommand::InputIfSession { .. }));
+        commands.push(input);
+        input_write
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&DaemonEvent::Error {
+                        code: Some(ErrorCode::WriteFailed),
+                        message: "input write failed for session: task-write-failed".to_string(),
+                    })
+                    .unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
         commands
     });
 
@@ -1289,7 +1536,7 @@ async fn submit_task_input_sends_text_then_enter_as_discrete_inputs() {
             .unwrap()
             .as_nanos()
     );
-    let daemon_dir = std::env::temp_dir().join(unique);
+    let daemon_dir = std::env::temp_dir().join(&unique);
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
@@ -1302,8 +1549,13 @@ async fn submit_task_input_sends_text_then_enter_as_discrete_inputs() {
         for _ in 0..2 {
             let command = read_test_daemon_command(&mut reader, &mut write_half).await;
             match command {
-                DaemonCommand::Input { session_id, data } => {
+                DaemonCommand::InputIfSession {
+                    session_id,
+                    expected_pid,
+                    data,
+                } => {
                     assert_eq!(session_id, "task-target");
+                    assert_eq!(expected_pid, 42);
                     inputs.push(data);
                 }
                 other => panic!("expected Input command, got {other:?}"),
@@ -1318,10 +1570,18 @@ async fn submit_task_input_sends_text_then_enter_as_discrete_inputs() {
         inputs
     });
 
-    let mut daemon = crate::daemon_client::DaemonClient::connect(&daemon_dir.to_string_lossy())
-        .await
-        .unwrap();
-    super::submit_task_input(&mut daemon, "task-target", "hello\n")
+    let coordinator = crate::task_input_queue::TaskInputCoordinator::new(
+        daemon_dir.to_string_lossy().to_string(),
+        Db::test_db_path(&format!("{unique}-audit")),
+    );
+    coordinator
+        .submit_message_if_session(
+            "task-target",
+            "task-target",
+            42,
+            crate::task_input_queue::TaskInputSource::Api,
+            "hello\n",
+        )
         .await
         .unwrap();
     let inputs = server.await.unwrap();
@@ -1352,6 +1612,28 @@ async fn terminal_state_notification_sends_once_to_notify_target() {
     let _ = std::fs::remove_file(&socket_path);
     let listener = UnixListener::bind(&socket_path).unwrap();
     let server = tokio::spawn(async move {
+        let (list_stream, _) = listener.accept().await.unwrap();
+        let (list_read, mut list_write) = list_stream.into_split();
+        let mut list_reader = BufReader::new(list_read);
+        assert!(matches!(
+            read_test_daemon_command(&mut list_reader, &mut list_write).await,
+            DaemonCommand::List
+        ));
+        list_write
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&DaemonEvent::SessionList {
+                        sessions: vec![active_pty_session("task-parent", 4343)]
+                    })
+                    .unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        drop(list_reader);
+        drop(list_write);
         let (stream, _) = listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
@@ -1359,8 +1641,13 @@ async fn terminal_state_notification_sends_once_to_notify_target() {
         for _ in 0..2 {
             let command = read_test_daemon_command(&mut reader, &mut write_half).await;
             match command {
-                DaemonCommand::Input { session_id, data } => {
+                DaemonCommand::InputIfSession {
+                    session_id,
+                    expected_pid,
+                    data,
+                } => {
                     assert_eq!(session_id, "task-parent");
+                    assert_eq!(expected_pid, 4343);
                     inputs.push(data);
                 }
                 other => panic!("expected Input command, got {other:?}"),
@@ -1524,12 +1811,14 @@ mod merge_handoff_on_close {
         .to_string()
     }
 
+    type RecordedDaemonInputs = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+
     struct Harness {
         config: Config,
         repo_root: std::path::PathBuf,
         daemon_dir: std::path::PathBuf,
         socket_path: PathBuf,
-        inputs: Arc<Mutex<Vec<(String, Vec<u8>)>>>,
+        inputs: RecordedDaemonInputs,
     }
 
     impl Harness {
@@ -1692,8 +1981,8 @@ mod merge_handoff_on_close {
     /// A daemon that answers every command and records the session input it
     /// was handed. The close path and the merge signal each open their own
     /// connection, so this accepts as many as the server makes.
-    fn spawn_recording_daemon(listener: UnixListener) -> Arc<Mutex<Vec<(String, Vec<u8>)>>> {
-        let inputs: Arc<Mutex<Vec<(String, Vec<u8>)>>> = Arc::new(Mutex::new(Vec::new()));
+    fn spawn_recording_daemon(listener: UnixListener) -> RecordedDaemonInputs {
+        let inputs: RecordedDaemonInputs = Arc::new(Mutex::new(Vec::new()));
         let recorded = Arc::clone(&inputs);
         tokio::spawn(async move {
             loop {
@@ -1708,10 +1997,15 @@ mod merge_handoff_on_close {
                         read_test_daemon_command_optional(&mut reader, &mut write_half).await
                     {
                         let response = match command {
-                            DaemonCommand::Input { session_id, data } => {
+                            DaemonCommand::InputIfSession {
+                                session_id, data, ..
+                            } => {
                                 recorded.lock().unwrap().push((session_id, data));
                                 DaemonEvent::Ok
                             }
+                            DaemonCommand::List => DaemonEvent::SessionList {
+                                sessions: vec![active_pty_session("merge-session", 4242)],
+                            },
                             DaemonCommand::Spawn { session_id, .. }
                             | DaemonCommand::SpawnAgent { session_id, .. } => {
                                 DaemonEvent::SessionCreated { session_id }
@@ -2061,6 +2355,32 @@ mod completion_notification {
     }
 
     async fn read_notification(listener: &UnixListener) -> Vec<Vec<u8>> {
+        let (list_stream, _) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept())
+                .await
+                .expect("completion notification session lookup was never attempted")
+                .unwrap();
+        let (list_read, mut list_write) = list_stream.into_split();
+        let mut list_reader = BufReader::new(list_read);
+        assert!(matches!(
+            read_test_daemon_command(&mut list_reader, &mut list_write).await,
+            DaemonCommand::List
+        ));
+        list_write
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&DaemonEvent::SessionList {
+                        sessions: vec![active_pty_session("task-parent", 4545)]
+                    })
+                    .unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        drop(list_reader);
+        drop(list_write);
         let (stream, _) =
             tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept())
                 .await
@@ -2073,8 +2393,13 @@ mod completion_notification {
             let mut line = String::new();
             reader.read_line(&mut line).await.unwrap();
             match serde_json::from_str::<DaemonCommand>(line.trim()).unwrap() {
-                DaemonCommand::Input { session_id, data } => {
+                DaemonCommand::InputIfSession {
+                    session_id,
+                    expected_pid,
+                    data,
+                } => {
                     assert_eq!(session_id, "task-parent");
+                    assert_eq!(expected_pid, 4545);
                     inputs.push(data);
                 }
                 other => panic!("expected Input command, got {other:?}"),

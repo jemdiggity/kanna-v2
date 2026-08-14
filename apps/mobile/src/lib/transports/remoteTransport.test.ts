@@ -721,7 +721,7 @@ describe("remote transport", () => {
       desktopId: "desktop-1",
       method: "POST",
       path: "/v1/tasks/task-1/input",
-      body: { input: "continue" }
+      body: { input: "continue", source: "human" }
     });
   });
 
@@ -1253,7 +1253,7 @@ describe("remote transport", () => {
       desktopId: "desktop-created-here",
       method: "POST",
       path: "/v1/tasks/task-created/input",
-      body: { input: "continue" }
+      body: { input: "continue", source: "human" }
     });
     expect(invokeDesktop).toHaveBeenCalledWith({
       desktopId: "desktop-created-here",
@@ -1834,7 +1834,7 @@ describe("remote transport", () => {
       desktopId: "desktop-owner",
       method: "POST",
       path: "/v1/tasks/local-task-1/input",
-      body: { input: "continue" }
+      body: { input: "continue", source: "human" }
     });
     expect(invokeDesktop).toHaveBeenNthCalledWith(2, {
       desktopId: "desktop-owner",
@@ -2053,7 +2053,7 @@ describe("remote transport", () => {
       desktopId: "desktop-owner",
       method: "POST",
       path: "/v1/tasks/local-task-1/input",
-      body: { input: "1" }
+      body: { input: "1", source: "human" }
     });
   });
 

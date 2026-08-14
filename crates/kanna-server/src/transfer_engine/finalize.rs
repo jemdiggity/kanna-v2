@@ -75,6 +75,7 @@
 
 use crate::db::{TaskEventKind, TransferWorkItem};
 use crate::http_api::{try_submit_task_input, AppState, TaskInputError};
+use crate::task_input_queue::TaskInputSource;
 use kanna_agent_protocol::AgentProvider;
 use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent, SessionStatus};
 use std::str::FromStr;
@@ -454,15 +455,18 @@ async fn inject(
         Injected::Failed(reason)
     };
 
-    let mut daemon =
-        match crate::daemon_client::DaemonClient::connect(&state.config().daemon_dir).await {
-            Ok(daemon) => daemon,
-            Err(error) => return release(format!("daemon error: {error}")),
-        };
     // The two-step helper every other Kanna input path uses: the text as one
     // write, then a lone CR after a pause so it registers as a discrete Enter
     // rather than a paste whose newline is folded into the buffer.
-    match try_submit_task_input(&mut daemon, task_id, message).await {
+    match try_submit_task_input(
+        &state.task_input,
+        task_id,
+        task_id,
+        TaskInputSource::System,
+        message,
+    )
+    .await
+    {
         Ok(()) => Injected::Sent,
         Err(TaskInputError::SessionNotFound) => Injected::SessionGone,
         Err(TaskInputError::Uncertain(reason)) => {
@@ -874,7 +878,7 @@ mod tests {
                         .into_iter()
                         .collect(),
                 },
-                DaemonCommand::Input { data, .. } => {
+                DaemonCommand::Input { data, .. } | DaemonCommand::InputIfSession { data, .. } => {
                     log.lock()
                         .expect("log")
                         .inputs

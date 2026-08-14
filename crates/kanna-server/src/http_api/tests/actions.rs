@@ -96,7 +96,7 @@ async fn http_invoke_dispatches_shared_mobile_post_routes_with_json_body() {
     let state = super::test_state_with_task_input_sender(
         "desktop-1",
         "Studio Mac",
-        Arc::new(move |task_id, input| {
+        Arc::new(move |task_id, input, _source| {
             received_for_sender.lock().unwrap().push((task_id, input));
             Ok(())
         }),
@@ -853,38 +853,89 @@ async fn close_pr_task_sends_blocker_close_instruction_with_renamed_branch_to_ru
 
     let daemon_listener = UnixListener::bind(&socket_path).unwrap();
     let daemon_server = tokio::spawn(async move {
-        let (stream, _) = daemon_listener.accept().await.unwrap();
-        let (read_half, mut write_half) = stream.into_split();
-        let mut reader = BufReader::new(read_half);
-        for index in 0..5 {
-            let command = read_test_daemon_command(&mut reader, &mut write_half).await;
-            match (index, command) {
-                (0, DaemonCommand::Input { session_id, data }) => {
-                    assert_eq!(session_id, "task-b-session");
-                    let message = String::from_utf8(data).unwrap();
-                    assert!(message.contains("has finished its workflow and closed"));
-                    assert!(message.contains("Blocker PR"));
-                    assert!(
-                        message.contains("`feat/blocker-renamed`"),
-                        "message must carry the renamed branch, got: {message}"
-                    );
-                    assert!(!message.contains("`task-a-branch`"));
-                    assert!(message.contains("main"));
-                }
-                (1, DaemonCommand::Input { session_id, data }) => {
-                    assert_eq!(session_id, "task-b-session");
-                    assert_eq!(data, vec![b'\r']);
-                }
-                (2..=4, DaemonCommand::Kill { .. }) => {}
-                (_, other) => panic!("unexpected daemon command at {index}: {:?}", other),
+        let (command_tx, mut command_rx) = tokio::sync::mpsc::channel(5);
+        let acceptor = tokio::spawn(async move {
+            loop {
+                let (stream, _) = daemon_listener.accept().await.unwrap();
+                let command_tx = command_tx.clone();
+                tokio::spawn(async move {
+                    let (read_half, mut write_half) = stream.into_split();
+                    let mut reader = BufReader::new(read_half);
+                    loop {
+                        let Some(command) =
+                            read_test_daemon_command_optional(&mut reader, &mut write_half).await
+                        else {
+                            return;
+                        };
+                        let (response, publish) = match command {
+                            DaemonCommand::List => (
+                                DaemonEvent::SessionList {
+                                    sessions: vec![kanna_daemon::protocol::SessionInfo {
+                                        session_id: "task-b-session".to_string(),
+                                        pid: 4242,
+                                        cwd: "/tmp".to_string(),
+                                        state: kanna_daemon::protocol::SessionState::Active,
+                                        idle_seconds: 0,
+                                        status: kanna_daemon::protocol::SessionStatus::Idle,
+                                        kind: kanna_daemon::protocol::SessionKind::Pty,
+                                    }],
+                                },
+                                None,
+                            ),
+                            DaemonCommand::InputIfSession {
+                                session_id, data, ..
+                            } => (
+                                DaemonEvent::Ok,
+                                Some(DaemonCommand::Input { session_id, data }),
+                            ),
+                            command => (DaemonEvent::Ok, Some(command)),
+                        };
+                        if let Some(command) = publish {
+                            command_tx.send(command).await.unwrap();
+                        }
+                        write_half
+                            .write_all(
+                                format!("{}\n", serde_json::to_string(&response).unwrap())
+                                    .as_bytes(),
+                            )
+                            .await
+                            .unwrap();
+                    }
+                });
             }
-            write_half
-                .write_all(
-                    format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap()).as_bytes(),
-                )
-                .await
-                .unwrap();
+        });
+        let mut commands = Vec::new();
+        for _ in 0..5 {
+            commands.push(command_rx.recv().await.unwrap());
         }
+        acceptor.abort();
+
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|command| matches!(command, DaemonCommand::Kill { .. }))
+                .count(),
+            3
+        );
+        let inputs = commands
+            .into_iter()
+            .filter_map(|command| match command {
+                DaemonCommand::Input { session_id, data } => Some((session_id, data)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0].0, "task-b-session");
+        let message = String::from_utf8(inputs[0].1.clone()).unwrap();
+        assert!(message.contains("has finished its workflow and closed"));
+        assert!(message.contains("Blocker PR"));
+        assert!(
+            message.contains("`feat/blocker-renamed`"),
+            "message must carry the renamed branch, got: {message}"
+        );
+        assert!(!message.contains("`task-a-branch`"));
+        assert!(message.contains("main"));
+        assert_eq!(inputs[1], ("task-b-session".to_string(), vec![b'\r']));
     });
 
     let app = super::router(Arc::new(super::AppState::new(config.clone())));

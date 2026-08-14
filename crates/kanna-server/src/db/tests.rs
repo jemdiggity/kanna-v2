@@ -2664,6 +2664,7 @@ fn task_event_type_names_are_stable() {
             "task.merge_signaled",
             "task.merge_handoff_missing",
             "task.transfer_finalizing",
+            "task.input",
         ]
     );
 }

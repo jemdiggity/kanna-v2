@@ -1,5 +1,4 @@
 pub(super) use super::task_files::AuthenticatedTaskFileAccess;
-pub(super) use super::task_input::{submit_task_input, task_input_message};
 pub(super) use super::test_support::{
     test_router, test_router_with_merge_agent_runner, test_router_with_revision_requester,
     test_router_with_seed, test_router_with_seed_and_task_creator, test_router_with_stage_advancer,
@@ -11,6 +10,7 @@ pub(super) use super::{dispatch_http_invoke, handle_task_terminal_state, router,
 use crate::config::Config;
 use crate::db::Db;
 use crate::mobile_api::{CreateTaskResponse, MobileServerStatus, TaskActionResponse};
+pub(super) use crate::task_input_queue::task_input_message;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use kanna_agent_protocol::{AgentEvent, AgentProvider};

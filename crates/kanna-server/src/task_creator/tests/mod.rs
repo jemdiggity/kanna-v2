@@ -273,18 +273,143 @@ async fn spawn_fake_daemon_input_ok(
     let _ = std::fs::remove_file(&socket_path);
     let listener = UnixListener::bind(&socket_path).unwrap();
     tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let (read_half, mut write_half) = stream.into_split();
-        let mut reader = BufReader::new(read_half);
+        // Post dispatch retains its lifecycle daemon client while the shared
+        // input coordinator opens a lookup connection and then its actor
+        // connection.
+        let (lifecycle_stream, _) = listener.accept().await.unwrap();
+        let lifecycle = tokio::spawn(async move {
+            let (read_half, mut write_half) = lifecycle_stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            while let Ok(Some(command)) =
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    let mut line = String::new();
+                    let read = reader.read_line(&mut line).await.ok()?;
+                    (read > 0)
+                        .then(|| serde_json::from_str(line.trim()).ok())
+                        .flatten()
+                })
+                .await
+            {
+                let response = match command {
+                    kanna_daemon::protocol::Command::Spawn { session_id, .. } => {
+                        kanna_daemon::protocol::Event::SessionCreated { session_id }
+                    }
+                    _ => kanna_daemon::protocol::Event::Ok,
+                };
+                write_half
+                    .write_all(
+                        format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        let (list_stream, _) = listener.accept().await.unwrap();
+        let (list_read, mut list_write) = list_stream.into_split();
+        let mut list_reader = BufReader::new(list_read);
+        let list = read_fake_daemon_command(&mut list_reader, &mut list_write).await;
+        assert!(matches!(list, kanna_daemon::protocol::Command::List));
+        let response = kanna_daemon::protocol::Event::SessionList {
+            sessions: vec![kanna_daemon::protocol::SessionInfo {
+                session_id: "task-1".to_string(),
+                pid: 42,
+                cwd: "/tmp".to_string(),
+                state: kanna_daemon::protocol::SessionState::Active,
+                idle_seconds: 0,
+                status: kanna_daemon::protocol::SessionStatus::Idle,
+                kind: kanna_daemon::protocol::SessionKind::Pty,
+            }],
+        };
+        list_write
+            .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+            .await
+            .unwrap();
+        drop(list_reader);
+        drop(list_write);
+        let (input_stream, _) = listener.accept().await.unwrap();
+        let (input_read, mut input_write) = input_stream.into_split();
+        let mut input_reader = BufReader::new(input_read);
         let mut commands = Vec::new();
         for _ in 0..expected_commands {
-            let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
+            let command = read_fake_daemon_command(&mut input_reader, &mut input_write).await;
             commands.push(command);
             let response = serde_json::to_string(&kanna_daemon::protocol::Event::Ok).unwrap();
-            write_half.write_all(response.as_bytes()).await.unwrap();
-            write_half.write_all(b"\n").await.unwrap();
+            input_write.write_all(response.as_bytes()).await.unwrap();
+            input_write.write_all(b"\n").await.unwrap();
         }
+        lifecycle.abort();
         commands
+    })
+}
+
+async fn spawn_fake_daemon_missing_post_session(
+    daemon_dir: String,
+) -> tokio::task::JoinHandle<Vec<kanna_daemon::protocol::Command>> {
+    let socket_path = test_daemon_socket_path(&daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    tokio::spawn(async move {
+        let (lifecycle_stream, _) = listener.accept().await.unwrap();
+        let lifecycle = tokio::spawn(async move {
+            let (read_half, mut write_half) = lifecycle_stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut commands = Vec::new();
+            loop {
+                let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
+                let response = match &command {
+                    kanna_daemon::protocol::Command::Kill { .. } => {
+                        kanna_daemon::protocol::Event::Error {
+                            code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
+                            message: "session not found".to_string(),
+                        }
+                    }
+                    kanna_daemon::protocol::Command::Spawn { session_id, .. }
+                    | kanna_daemon::protocol::Command::SpawnAgent { session_id, .. } => {
+                        kanna_daemon::protocol::Event::SessionCreated {
+                            session_id: session_id.clone(),
+                        }
+                    }
+                    other => panic!("unexpected lifecycle daemon command: {other:?}"),
+                };
+                let done = matches!(
+                    command,
+                    kanna_daemon::protocol::Command::Spawn { .. }
+                        | kanna_daemon::protocol::Command::SpawnAgent { .. }
+                );
+                commands.push(command);
+                write_half
+                    .write_all(
+                        format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                if done {
+                    return commands;
+                }
+            }
+        });
+
+        let (list_stream, _) = listener.accept().await.unwrap();
+        let (list_read, mut list_write) = list_stream.into_split();
+        let mut list_reader = BufReader::new(list_read);
+        assert!(matches!(
+            read_fake_daemon_command(&mut list_reader, &mut list_write).await,
+            kanna_daemon::protocol::Command::List
+        ));
+        list_write
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&kanna_daemon::protocol::Event::SessionList {
+                        sessions: Vec::new()
+                    })
+                    .unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        lifecycle.await.unwrap()
     })
 }
 

@@ -220,18 +220,55 @@ async fn spawn_rejected_resume_fake_daemon(
                 return commands;
             }
             // A relaunch that could not start falls back to the ordinary
-            // completion path, which opens its own connection to deliver the
-            // notification (the message, then the discrete Enter).
+            // completion path. Resolve and fence the notification target's
+            // live session before delivering the message and Enter.
             drop(write_half);
+            let (list_stream, _) = listener.accept().await.unwrap();
+            let (list_read, mut list_write) = list_stream.into_split();
+            let mut list_reader = BufReader::new(list_read);
+            assert!(matches!(
+                read_fake_daemon_command(&mut list_reader, &mut list_write).await,
+                kanna_daemon::protocol::Command::List
+            ));
+            let sessions = vec![kanna_daemon::protocol::SessionInfo {
+                session_id: "task-parent".to_string(),
+                pid: 4242,
+                cwd: "/tmp".to_string(),
+                state: kanna_daemon::protocol::SessionState::Active,
+                idle_seconds: 0,
+                status: kanna_daemon::protocol::SessionStatus::Idle,
+                kind: kanna_daemon::protocol::SessionKind::Pty,
+            }];
+            list_write
+                .write_all(
+                    format!(
+                        "{}\n",
+                        serde_json::to_string(&kanna_daemon::protocol::Event::SessionList {
+                            sessions,
+                        })
+                        .unwrap()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
             let (notify_stream, _) = listener.accept().await.unwrap();
             let (notify_read, mut notify_write) = notify_stream.into_split();
             let mut notify_reader = BufReader::new(notify_read);
             loop {
                 let command = read_fake_daemon_command(&mut notify_reader, &mut notify_write).await;
-                let enter = matches!(
-                    &command,
-                    kanna_daemon::protocol::Command::Input { data, .. } if data == b"\r"
-                );
+                let (command, enter) = match command {
+                    kanna_daemon::protocol::Command::InputIfSession {
+                        session_id, data, ..
+                    } => {
+                        let enter = data == b"\r";
+                        (
+                            kanna_daemon::protocol::Command::Input { session_id, data },
+                            enter,
+                        )
+                    }
+                    other => panic!("expected fenced notification input, got {other:?}"),
+                };
                 commands.push(command);
                 notify_write
                     .write_all(
@@ -261,6 +298,33 @@ async fn spawn_notification_only_fake_daemon(
     let _ = std::fs::remove_file(&socket_path);
     let listener = UnixListener::bind(&socket_path).unwrap();
     tokio::spawn(async move {
+        let (list_stream, _) = listener.accept().await.unwrap();
+        let (list_read, mut list_write) = list_stream.into_split();
+        let mut list_reader = BufReader::new(list_read);
+        assert!(matches!(
+            read_fake_daemon_command(&mut list_reader, &mut list_write).await,
+            kanna_daemon::protocol::Command::List
+        ));
+        let sessions = vec![kanna_daemon::protocol::SessionInfo {
+            session_id: "task-parent".to_string(),
+            pid: 4242,
+            cwd: "/tmp".to_string(),
+            state: kanna_daemon::protocol::SessionState::Active,
+            idle_seconds: 0,
+            status: kanna_daemon::protocol::SessionStatus::Idle,
+            kind: kanna_daemon::protocol::SessionKind::Pty,
+        }];
+        list_write
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&kanna_daemon::protocol::Event::SessionList { sessions })
+                        .unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
         let (stream, _) = listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
@@ -268,7 +332,7 @@ async fn spawn_notification_only_fake_daemon(
         loop {
             let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
             let enter = match &command {
-                kanna_daemon::protocol::Command::Input { data, .. } => {
+                kanna_daemon::protocol::Command::InputIfSession { data, .. } => {
                     inputs.push(data.clone());
                     data == b"\r"
                 }

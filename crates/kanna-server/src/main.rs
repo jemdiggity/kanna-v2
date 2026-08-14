@@ -20,6 +20,7 @@ mod session_replacements;
 mod task_creator;
 mod task_diff;
 mod task_files;
+mod task_input_queue;
 mod task_transfer_tunnel;
 mod terminal_attachments;
 mod terminal_watcher;

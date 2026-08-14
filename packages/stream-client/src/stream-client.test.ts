@@ -10,9 +10,24 @@ import type {
 import {
   createRelayTunnelWebSocketFactory,
   StreamClient,
+  validateTaskInput,
   type CompanionEventResult,
   type WebSocketLike,
 } from "./index";
+
+describe("task input validation", () => {
+  it("rejects unresolved quick-action placeholders", () => {
+    expect(() => validateTaskInput("quick_action", "Implement {feature}"))
+      .toThrow("unresolved template placeholder");
+  });
+
+  it("does not blacklist legitimate phrases or API text", () => {
+    expect(() => validateTaskInput("quick_action", "Explain this codebase")).not.toThrow();
+    expect(() => validateTaskInput("quick_action", "Run /review on my current changes"))
+      .not.toThrow();
+    expect(() => validateTaskInput("api", "Implement {feature}")).not.toThrow();
+  });
+});
 
 async function flushMicrotasks(): Promise<void> {
   for (let index = 0; index < 4; index += 1) {

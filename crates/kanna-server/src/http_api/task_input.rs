@@ -1,6 +1,8 @@
 use super::lan_trust::PrivilegedTaskAccess;
 use super::state::AppState;
 use crate::db::Db;
+pub(crate) use crate::task_input_queue::TaskInputError;
+use crate::task_input_queue::{validate_task_input, TaskInputSource};
 use axum::extract::State;
 use axum::Json;
 use kanna_agent_protocol::StateChangeScope;
@@ -16,6 +18,8 @@ pub(crate) const SESSION_INTERRUPTION_FEEDBACK: &str =
 #[serde(rename_all = "camelCase")]
 pub(super) struct TaskInputRequest {
     input: String,
+    #[serde(default)]
+    source: TaskInputSource,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -64,150 +68,29 @@ fn map_task_input_error((status, message): (axum::http::StatusCode, String)) -> 
     task_input_http_error(status, reason, message, None)
 }
 
-/// Delay between typing a task-input message and the synthesized Enter.
-///
-/// The agent CLI coalesces a single bulk write (message text plus a trailing
-/// carriage return) as a *paste*, where the CR is folded into the buffer as a
-/// literal newline and the message is never submitted. Writing the text and the
-/// carriage return as two acknowledged Input commands separated by a short
-/// pause makes the CR register as a discrete Enter keystroke — exactly how a
-/// human types then presses Enter. The daemon acknowledges Input only after it
-/// reaches the PTY, so this delay cannot begin while the message is still
-/// queued. 150ms was validated against the live Claude CLI.
-const SUBMIT_ENTER_DELAY_MS: u64 = 150;
-
-/// The message portion of a `/v1/tasks/{id}/input` payload: the caller's text
-/// with any trailing CR/LF stripped (callers vary — the CLI may append `\r`, the
-/// MCP appends nothing). The Enter is synthesized separately by the handler.
-pub(super) fn task_input_message(input: &str) -> &str {
-    input.trim_end_matches(['\r', '\n'])
-}
-
-/// A task-input submission failure, distinguishing "the session does not
-/// exist" (a post dispatch falls back to spawning a fresh session) from
-/// everything else.
-pub(crate) enum TaskInputError {
-    SessionNotFound,
-    Other(String),
-    /// Submission may have reached the PTY even though its response was lost.
-    /// Retrying this result could duplicate terminal bytes.
-    Uncertain(String),
-}
-
-/// Send one raw Input command to a daemon session.
-async fn send_raw_session_input(
-    daemon: &mut crate::daemon_client::DaemonClient,
-    session_id: &str,
-    expected_pid: Option<u32>,
-    data: Vec<u8>,
-) -> Result<(), TaskInputError> {
-    let command = match expected_pid {
-        Some(expected_pid) => DaemonCommand::InputIfSession {
-            session_id: session_id.to_string(),
-            expected_pid,
-            data,
-        },
-        None => DaemonCommand::Input {
-            session_id: session_id.to_string(),
-            data,
-        },
-    };
-    let event = daemon
-        .send_command(&command)
-        .await
-        .map_err(|e| TaskInputError::Uncertain(format!("daemon response lost: {e}")))?;
-    match event {
-        DaemonEvent::Ok => Ok(()),
-        DaemonEvent::Error {
-            code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
-            ..
-        } => Err(TaskInputError::SessionNotFound),
-        DaemonEvent::Error {
-            code: Some(kanna_daemon::protocol::ErrorCode::SessionIncarnationMismatch),
-            ..
-        } => Err(TaskInputError::SessionNotFound),
-        DaemonEvent::Error {
-            code: Some(kanna_daemon::protocol::ErrorCode::WriteFailed),
-            message,
-        } => Err(TaskInputError::Uncertain(message)),
-        DaemonEvent::Error { message, .. }
-            if message.to_ascii_lowercase().contains("session not found") =>
-        {
-            Err(TaskInputError::SessionNotFound)
-        }
-        DaemonEvent::Error { message, .. } => Err(TaskInputError::Other(message)),
-        other => Err(TaskInputError::Other(format!(
-            "unexpected daemon response: {:?}",
-            other
-        ))),
-    }
-}
-
-/// Submit input to a daemon session, reporting a typed error.
+/// Submit input through the server-owned per-session queue, reporting a typed
+/// error so post dispatch can fall back only on a definite missing session.
 pub(crate) async fn try_submit_task_input(
-    daemon: &mut crate::daemon_client::DaemonClient,
+    coordinator: &crate::task_input_queue::TaskInputCoordinator,
+    task_id: &str,
     session_id: &str,
+    source: TaskInputSource,
     input: &str,
 ) -> Result<(), TaskInputError> {
-    try_submit_task_input_to_session(daemon, session_id, None, input).await
-}
-
-/// Submit input to the PTY process ID observed during live-session
-/// discovery. A same-id replacement is rejected rather than receiving input
-/// intended for the old run.
-async fn try_submit_task_input_if_session(
-    daemon: &mut crate::daemon_client::DaemonClient,
-    session_id: &str,
-    expected_pid: u32,
-    input: &str,
-) -> Result<(), TaskInputError> {
-    try_submit_task_input_to_session(daemon, session_id, Some(expected_pid), input).await
-}
-
-async fn try_submit_task_input_to_session(
-    daemon: &mut crate::daemon_client::DaemonClient,
-    session_id: &str,
-    expected_pid: Option<u32>,
-    input: &str,
-) -> Result<(), TaskInputError> {
-    // Type the message, then press Enter as a discrete keystroke (see
-    // SUBMIT_ENTER_DELAY_MS). The daemon stays a raw byte pipe; this submission
-    // policy lives here so every client — kanna-cli, kanna-mcp, mobile, and
-    // server-side notifications — submits consistently.
-    let message = task_input_message(input);
-    if !message.is_empty() {
-        send_raw_session_input(
-            daemon,
-            session_id,
-            expected_pid,
-            message.as_bytes().to_vec(),
-        )
-        .await?;
-        tokio::time::sleep(std::time::Duration::from_millis(SUBMIT_ENTER_DELAY_MS)).await;
-    }
-    if let Err(error) = send_raw_session_input(daemon, session_id, expected_pid, vec![b'\r']).await
-    {
-        return Err(if message.is_empty() {
-            error
-        } else {
-            TaskInputError::Uncertain(match error {
-                TaskInputError::SessionNotFound => {
-                    format!("session disappeared after message bytes were accepted: {session_id}")
-                }
-                TaskInputError::Other(message) | TaskInputError::Uncertain(message) => message,
-            })
-        });
-    }
-    Ok(())
+    coordinator
+        .submit_message(task_id, session_id, source, input)
+        .await
 }
 
 /// Submit ordinary input to a task session and map delivery failures to HTTP.
 pub(crate) async fn submit_task_input(
-    daemon: &mut crate::daemon_client::DaemonClient,
+    state: &AppState,
+    task_id: &str,
     session_id: &str,
+    source: TaskInputSource,
     input: &str,
 ) -> Result<(), (axum::http::StatusCode, String)> {
-    try_submit_task_input(daemon, session_id, input)
+    try_submit_task_input(&state.task_input, task_id, session_id, source, input)
         .await
         .map_err(|error| match error {
             TaskInputError::SessionNotFound => (
@@ -230,9 +113,17 @@ pub(super) async fn send_task_input(
     axum::extract::Path(task_id): axum::extract::Path<String>,
     Json(payload): Json<TaskInputRequest>,
 ) -> Result<axum::http::StatusCode, TaskInputHttpError> {
+    validate_task_input(payload.source, &payload.input).map_err(|message| {
+        task_input_http_error(
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid_task_input",
+            message,
+            None,
+        )
+    })?;
     #[cfg(test)]
     if let Some(task_input_sender) = state.task_input_sender.clone() {
-        return task_input_sender(task_id, payload.input)
+        return task_input_sender(task_id, payload.input, payload.source)
             .map(|_| axum::http::StatusCode::NO_CONTENT)
             .map_err(|message| {
                 task_input_http_error(
@@ -247,7 +138,7 @@ pub(super) async fn send_task_input(
     let task_id = super::task_actions::resolve_task_id_for_mutation(&state, &task_id)
         .await
         .map_err(map_task_input_error)?;
-    let Some(_task_mutation) = state.try_begin_requested_task_mutation(&task_id) else {
+    let Some(_task_input) = state.try_begin_requested_task_input(&task_id) else {
         return Err(task_input_http_error(
             axum::http::StatusCode::CONFLICT,
             "no_live_agent_session",
@@ -289,15 +180,15 @@ pub(super) async fn send_task_input(
             ));
         }
     };
-    let live_session_pid = sessions
+    let live_session = sessions
         .iter()
         .find(|session| {
             session.session_id == task_id
                 && session.kind == SessionKind::Pty
                 && matches!(&session.state, SessionState::Active)
         })
-        .map(|session| session.pid);
-    let Some(live_session_pid) = live_session_pid else {
+        .map(|session| (session.pid, session.status));
+    let Some((live_session_pid, live_session_status)) = live_session else {
         let db_path = state.config.db_path.clone();
         let latest_run_task_id = task_id.clone();
         let latest_run =
@@ -346,7 +237,26 @@ pub(super) async fn send_task_input(
         ));
     };
 
-    try_submit_task_input_if_session(&mut daemon, &task_id, live_session_pid, &payload.input)
+    if payload.source == TaskInputSource::QuickAction
+        && live_session_status == kanna_daemon::protocol::SessionStatus::Waiting
+    {
+        return Err(task_input_http_error(
+            axum::http::StatusCode::CONFLICT,
+            "quick_action_awaiting_reply",
+            "quick actions cannot submit while the agent is awaiting an operator reply".to_string(),
+            None,
+        ));
+    }
+
+    state
+        .task_input
+        .submit_message_if_session(
+            &task_id,
+            &task_id,
+            live_session_pid,
+            payload.source,
+            &payload.input,
+        )
         .await
         .map_err(|error| {
             let (status, reason, message) = match error {
@@ -553,7 +463,7 @@ pub(super) async fn notify_task_completion_best_effort(
     }
 }
 
-pub(super) async fn notify_task_completion(
+pub(crate) async fn notify_task_completion(
     state: &AppState,
     child_id: &str,
     trigger: TaskCompletionTrigger,
@@ -573,17 +483,25 @@ pub(super) async fn notify_task_completion(
         return Ok(());
     };
     state.publish_state_changed(StateChangeScope::Tasks);
-    let config = state.config();
     let message = format!(
         "TASK {} DONE [{}]: {}",
         notification.child_id,
         status.as_str(),
         notification.title
     );
-    let mut daemon = crate::daemon_client::DaemonClient::connect(&config.daemon_dir)
+    state
+        .task_input
+        .submit_message(
+            &notification.notify_task_id,
+            &notification.notify_task_id,
+            TaskInputSource::CompletionNotification,
+            &message,
+        )
         .await
-        .map_err(|e| format!("daemon error: {}", e))?;
-    submit_task_input(&mut daemon, &notification.notify_task_id, &message)
-        .await
-        .map_err(|(_, message)| message)
+        .map_err(|error| match error {
+            TaskInputError::SessionNotFound => {
+                format!("session not found: {}", notification.notify_task_id)
+            }
+            TaskInputError::Other(message) | TaskInputError::Uncertain(message) => message,
+        })
 }

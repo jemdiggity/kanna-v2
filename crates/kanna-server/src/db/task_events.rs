@@ -77,6 +77,10 @@ pub enum TaskEventKind {
     /// legitimately take minutes, and this is what makes that latency legible
     /// as a transfer rather than as a hung task.
     TransferFinalizing,
+    /// A terminal input submission reached the task's live session, or may
+    /// have reached it when the daemon acknowledgement was lost. The payload
+    /// preserves the producer source and the logical submission boundary.
+    InputSubmitted,
 }
 
 impl TaskEventKind {
@@ -95,6 +99,7 @@ impl TaskEventKind {
             Self::MergeSignaled => "task.merge_signaled",
             Self::MergeHandoffMissing => "task.merge_handoff_missing",
             Self::TransferFinalizing => "task.transfer_finalizing",
+            Self::InputSubmitted => "task.input",
         }
     }
 
@@ -113,6 +118,7 @@ impl TaskEventKind {
         Self::MergeSignaled,
         Self::MergeHandoffMissing,
         Self::TransferFinalizing,
+        Self::InputSubmitted,
     ];
 }
 
@@ -230,6 +236,42 @@ impl Db {
         )?;
         APPENDED.notify_waiters();
         Ok(())
+    }
+
+    pub fn list_recent_input_events(
+        &self,
+        task_id: &str,
+        limit: usize,
+    ) -> Result<Vec<TaskEvent>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT seq, task_id, type, payload, created_at
+             FROM task_event
+             WHERE task_id = ?1 AND type = ?2
+             ORDER BY seq DESC
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![
+                task_id,
+                TaskEventKind::InputSubmitted.as_str(),
+                limit as i64
+            ],
+            |row| {
+                let payload: Option<String> = row.get(3)?;
+                Ok(TaskEvent {
+                    seq: row.get(0)?,
+                    task_id: row.get(1)?,
+                    event_type: row.get(2)?,
+                    payload: payload
+                        .and_then(|payload| serde_json::from_str(&payload).ok())
+                        .unwrap_or_else(|| json!({})),
+                    created_at: row.get(4)?,
+                })
+            },
+        )?;
+        let mut events = rows.collect::<Result<Vec<_>, _>>()?;
+        events.reverse();
+        Ok(events)
     }
 
     /// Highest allocated sequence number, or 0 for an empty log. Read this

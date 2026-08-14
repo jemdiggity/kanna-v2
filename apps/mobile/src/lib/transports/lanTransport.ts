@@ -191,7 +191,7 @@ export function createLanTransport(
       request<void>(`/v1/tasks/${encodeURIComponent(taskId)}/input`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ input })
+        body: JSON.stringify({ input, source: "human" })
       }),
     readTaskFile: async (_taskId: string, _path: string): Promise<TaskFileContent> => {
       throw new Error(

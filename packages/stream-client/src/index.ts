@@ -52,6 +52,23 @@ export type WebSocketFactory = (
  */
 export const AUTH_FAILURE_CLOSE_CODE = 4005;
 
+export type TaskInputSource =
+  | "human"
+  | "quick_action"
+  | "api"
+  | "completion_notification"
+  | "stage_post"
+  | "system";
+
+/** Validate a complete logical message before a UI submits it. Quick-action
+ * templates must be fully rendered; ordinary human/API text is never matched
+ * against a phrase blacklist. The server repeats this trust-boundary check. */
+export function validateTaskInput(source: TaskInputSource, input: string): void {
+  if (source === "quick_action" && /\{[A-Za-z_][A-Za-z0-9_.-]*\}/.test(input)) {
+    throw new Error("quick-action input contains an unresolved template placeholder");
+  }
+}
+
 export interface AgentStreamHandlers {
   /** Journal replay on (re)attach. `nextSeq` is where the live stream resumes. */
   onSnapshot(events: FrameAgentEvent[], nextSeq: number): void;

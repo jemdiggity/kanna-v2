@@ -724,10 +724,9 @@ async fn durable_pipeline_provider_lists_fall_back_for_reloaded_stages_and_posts
         .expect("post advance should reach kanna-server")
         .error_for_status()
         .expect("post advance should reload the durable snapshot");
-    match next_daemon_command(&mut commands).await {
-        DaemonCommand::Input { session_id, .. } => assert_eq!(session_id, task_id),
-        other => panic!("expected post input, got {other:?}"),
-    }
+    // The shared input coordinator resolves the session incarnation first.
+    // This fixture reports no live sessions, so post dispatch falls back
+    // without attempting an unfenced write.
     match next_daemon_command(&mut commands).await {
         DaemonCommand::Kill { session_id } => assert_eq!(session_id, task_id),
         other => panic!("expected post fallback kill, got {other:?}"),

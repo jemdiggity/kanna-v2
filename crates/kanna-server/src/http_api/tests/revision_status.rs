@@ -439,34 +439,64 @@ async fn automatic_revision_completion_dispatches_commit_post_through_http_route
         };
         drop(write_half);
 
-        // Successful completion must dispatch the commit post without an
-        // advance-stage request. A live session receives the post as typed
-        // input on the completion route's detached daemon connection.
-        let (stream, _) = daemon_listener.accept().await.unwrap();
-        let (read_half, mut write_half) = stream.into_split();
-        let mut reader = BufReader::new(read_half);
-        for input_index in 0..2 {
-            let command = read_test_daemon_command(&mut reader, &mut write_half).await;
-            match command {
-                DaemonCommand::Input { session_id, data } => {
-                    assert_eq!(session_id, revision_session_id);
-                    if input_index == 0 {
-                        let message = String::from_utf8(data).unwrap();
-                        assert!(message.contains("Commit changes for"));
-                        assert!(message.contains("record stage completion"));
-                    } else {
-                        assert_eq!(data, vec![b'\r']);
+        // The detached transition owns an idle lifecycle connection while the
+        // shared input coordinator resolves and writes on separate sockets.
+        let (input_tx, mut input_rx) = tokio::sync::mpsc::channel(2);
+        let session_for_acceptor = revision_session_id.clone();
+        let acceptor = tokio::spawn(async move {
+            loop {
+                let (stream, _) = daemon_listener.accept().await.unwrap();
+                let input_tx = input_tx.clone();
+                let session_id = session_for_acceptor.clone();
+                tokio::spawn(async move {
+                    let (read_half, mut write_half) = stream.into_split();
+                    let mut reader = BufReader::new(read_half);
+                    loop {
+                        let Some(command) =
+                            read_test_daemon_command_optional(&mut reader, &mut write_half).await
+                        else {
+                            return;
+                        };
+                        let response = match command {
+                            DaemonCommand::List => DaemonEvent::SessionList {
+                                sessions: vec![kanna_daemon::protocol::SessionInfo {
+                                    session_id: session_id.clone(),
+                                    pid: 4242,
+                                    cwd: "/tmp".to_string(),
+                                    state: kanna_daemon::protocol::SessionState::Active,
+                                    idle_seconds: 0,
+                                    status: kanna_daemon::protocol::SessionStatus::Idle,
+                                    kind: kanna_daemon::protocol::SessionKind::Pty,
+                                }],
+                            },
+                            DaemonCommand::InputIfSession {
+                                session_id: input_session,
+                                expected_pid,
+                                data,
+                            } => {
+                                assert_eq!(input_session, session_id);
+                                assert_eq!(expected_pid, 4242);
+                                input_tx.send(data).await.unwrap();
+                                DaemonEvent::Ok
+                            }
+                            _ => DaemonEvent::Ok,
+                        };
+                        write_half
+                            .write_all(
+                                format!("{}\n", serde_json::to_string(&response).unwrap())
+                                    .as_bytes(),
+                            )
+                            .await
+                            .unwrap();
                     }
-                }
-                other => panic!("expected commit post input, got {other:?}"),
+                });
             }
-            write_half
-                .write_all(
-                    format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap()).as_bytes(),
-                )
-                .await
-                .unwrap();
-        }
+        });
+        let message = String::from_utf8(input_rx.recv().await.unwrap()).unwrap();
+        assert!(message.contains("Commit changes for"));
+        assert!(message.contains("record stage completion"));
+        assert_eq!(input_rx.recv().await.unwrap(), vec![b'\r']);
+        acceptor.abort();
         sync_tx.send("commit dispatched").unwrap();
     });
 
@@ -593,9 +623,13 @@ async fn automatic_revision_completion_dispatches_commit_post_through_http_route
         .await
         .unwrap();
     assert_eq!(completion_response.status(), StatusCode::OK);
+    let commit_sync = tokio::time::timeout(Duration::from_secs(10), sync_rx.recv()).await;
+    if commit_sync.is_err() && daemon_server.is_finished() {
+        daemon_server.await.unwrap();
+        panic!("commit post daemon exited before synchronization");
+    }
     assert_eq!(
-        tokio::time::timeout(Duration::from_secs(10), sync_rx.recv())
-            .await
+        commit_sync
             .expect("commit post synchronization timed out")
             .as_deref(),
         Some("commit dispatched")
@@ -1404,7 +1438,20 @@ async fn review_prompt_receives_the_implementer_result_while_prev_result_keeps_t
                             recorder.lock().unwrap().push(args.join(" "));
                             DaemonEvent::SessionCreated { session_id }
                         }
-                        DaemonCommand::Input { .. } => DaemonEvent::Ok,
+                        DaemonCommand::List => DaemonEvent::SessionList {
+                            sessions: vec![kanna_daemon::protocol::SessionInfo {
+                                session_id: "prevmain-1".to_string(),
+                                pid: 4242,
+                                cwd: "/tmp".to_string(),
+                                state: kanna_daemon::protocol::SessionState::Active,
+                                idle_seconds: 0,
+                                status: kanna_daemon::protocol::SessionStatus::Idle,
+                                kind: kanna_daemon::protocol::SessionKind::Pty,
+                            }],
+                        },
+                        DaemonCommand::Input { .. } | DaemonCommand::InputIfSession { .. } => {
+                            DaemonEvent::Ok
+                        }
                         _ => DaemonEvent::Ok,
                     };
                     if write_half

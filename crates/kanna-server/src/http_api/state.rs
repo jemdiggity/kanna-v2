@@ -26,6 +26,7 @@ pub struct AppState {
     pub(super) e2e_lan_http_enabled: Arc<AtomicBool>,
     pub(super) session_replacements: crate::session_replacements::SessionReplacements,
     pub(super) terminal_attachments: crate::terminal_attachments::TerminalAttachments,
+    pub(crate) task_input: crate::task_input_queue::TaskInputCoordinator,
     transfer_sidecar: Arc<crate::transfer_sidecar::TransferSidecarSupervisor>,
     transfer_work: Arc<crate::transfer_engine::queue::TransferWorkQueue>,
     cloud_transfer_proxies: crate::cloud_transfer_proxy::CloudTransferProxyState,
@@ -97,6 +98,7 @@ enum RequestedTaskMutationKind {
 #[derive(Default)]
 struct RequestedTaskMutations {
     active: StdMutex<HashMap<String, RequestedTaskMutationKind>>,
+    inputs: StdMutex<HashMap<String, usize>>,
     changed: Notify,
 }
 
@@ -106,6 +108,11 @@ pub(super) struct RequestedTaskOperation {
 }
 
 pub(super) struct RequestedTaskMutation {
+    task_id: String,
+    mutations: Arc<RequestedTaskMutations>,
+}
+
+pub(super) struct RequestedTaskInput {
     task_id: String,
     mutations: Arc<RequestedTaskMutations>,
 }
@@ -132,6 +139,24 @@ impl Drop for RequestedTaskMutation {
     }
 }
 
+impl Drop for RequestedTaskInput {
+    fn drop(&mut self) {
+        let mut inputs = self
+            .mutations
+            .inputs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(count) = inputs.get_mut(&self.task_id) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                inputs.remove(&self.task_id);
+            }
+        }
+        drop(inputs);
+        self.mutations.changed.notify_waiters();
+    }
+}
+
 #[cfg(test)]
 pub(super) type TestTaskCreator = Arc<
     dyn Fn(
@@ -146,8 +171,11 @@ pub(super) type TestMergeAgentRunner =
     Arc<dyn Fn(String) -> Result<crate::mobile_api::TaskActionResponse, String> + Send + Sync>;
 
 #[cfg(test)]
-pub(super) type TestTaskInputSender =
-    Arc<dyn Fn(String, String) -> Result<(), String> + Send + Sync>;
+pub(super) type TestTaskInputSender = Arc<
+    dyn Fn(String, String, crate::task_input_queue::TaskInputSource) -> Result<(), String>
+        + Send
+        + Sync,
+>;
 
 #[cfg(test)]
 pub(super) type TestTaskCloser = Arc<dyn Fn(String) -> Result<(), String> + Send + Sync>;
@@ -261,8 +289,13 @@ impl AppState {
             config.clone(),
             Arc::clone(&transfer_work),
         ));
+        let task_input = crate::task_input_queue::TaskInputCoordinator::new(
+            config.daemon_dir.clone(),
+            config.db_path.clone(),
+        );
         Self {
             config,
+            task_input,
             transfer_sidecar,
             transfer_work,
             cloud_transfer_proxies: Arc::new(Mutex::new(HashMap::new())),
@@ -525,16 +558,23 @@ impl AppState {
                     .active
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let has_input = self
+                    .requested_task_mutations
+                    .inputs
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .contains_key(task_id);
                 match active.get(task_id) {
                     Some(RequestedTaskMutationKind::Advance) => return None,
                     Some(RequestedTaskMutationKind::Other) => {}
-                    None => {
+                    None if !has_input => {
                         active.insert(task_id.to_string(), RequestedTaskMutationKind::Advance);
                         return Some(RequestedTaskMutation {
                             task_id: task_id.to_string(),
                             mutations: Arc::clone(&self.requested_task_mutations),
                         });
                     }
+                    None => {}
                 }
             }
             changed.await;
@@ -568,11 +608,49 @@ impl AppState {
             .active
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if active.contains_key(task_id) {
+        if active.contains_key(task_id)
+            || self
+                .requested_task_mutations
+                .inputs
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains_key(task_id)
+        {
             return None;
         }
         active.insert(task_id.to_string(), RequestedTaskMutationKind::Other);
         Some(RequestedTaskMutation {
+            task_id: task_id.to_string(),
+            mutations: Arc::clone(&self.requested_task_mutations),
+        })
+    }
+
+    /// Admit concurrent terminal messages while excluding lifecycle mutations
+    /// that can replace the destination session. Atomicity and ordering among
+    /// inputs is owned by `TaskInputCoordinator`, so input must not be a
+    /// single-flight mutation itself.
+    pub(super) fn try_begin_requested_task_input(
+        &self,
+        task_id: &str,
+    ) -> Option<RequestedTaskInput> {
+        let active = self
+            .requested_task_mutations
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if active.contains_key(task_id) {
+            return None;
+        }
+        let mut inputs = self
+            .requested_task_mutations
+            .inputs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if active.contains_key(task_id) {
+            return None;
+        }
+        *inputs.entry(task_id.to_string()).or_default() += 1;
+        Some(RequestedTaskInput {
             task_id: task_id.to_string(),
             mutations: Arc::clone(&self.requested_task_mutations),
         })

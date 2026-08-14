@@ -793,7 +793,7 @@ export function createRemoteTransport({
         taskId,
         "POST",
         (localTaskId) => `/v1/tasks/${encodeURIComponent(localTaskId)}/input`,
-        { input }
+        { input, source: "human" }
       );
     },
     readTaskFile: (taskId: string, path: string) =>

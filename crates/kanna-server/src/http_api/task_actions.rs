@@ -7,6 +7,7 @@ use super::task_input::{
     notify_task_completion_best_effort, submit_task_input, TaskCompletionTrigger,
 };
 use crate::db::Db;
+use crate::task_input_queue::TaskInputSource;
 use axum::extract::State;
 use axum::Json;
 use kanna_agent_protocol::StateChangeScope;
@@ -567,7 +568,15 @@ pub(super) async fn close_task(
         })?;
 
     for (session_id, message) in blocker_close_instructions {
-        if let Err((_, error)) = submit_task_input(&mut daemon, &session_id, &message).await {
+        if let Err((_, error)) = submit_task_input(
+            &state,
+            &session_id,
+            &session_id,
+            TaskInputSource::System,
+            &message,
+        )
+        .await
+        {
             log::warn!(
                 "failed to deliver blocker-close instructions to dependent session {session_id}: {error}"
             );
@@ -758,7 +767,15 @@ async fn close_task_after_final_stage(
         collect_blocker_resolution_instructions(&db, &task_id, BlockerResolution::Closed)?
     };
     for (session_id, message) in blocker_close_instructions {
-        if let Err((_, error)) = submit_task_input(daemon, &session_id, &message).await {
+        if let Err((_, error)) = submit_task_input(
+            state,
+            &session_id,
+            &session_id,
+            TaskInputSource::System,
+            &message,
+        )
+        .await
+        {
             log::warn!(
                 "failed to deliver blocker-close instructions to dependent session {session_id}: {error}"
             );
@@ -960,6 +977,7 @@ async fn execute_stage_transition(
                 &state.config.db_path,
                 daemon,
                 &state.session_replacements,
+                &state.task_input,
                 *prepared,
             )
             .await
@@ -1653,7 +1671,15 @@ async fn unblock_dependents_of_pr_resolved_blocker(state: &Arc<AppState>, task_i
             }
         };
     for (session_id, message) in instructions {
-        if let Err((_, error)) = submit_task_input(&mut daemon, &session_id, &message).await {
+        if let Err((_, error)) = submit_task_input(
+            &state,
+            &session_id,
+            &session_id,
+            TaskInputSource::System,
+            &message,
+        )
+        .await
+        {
             log::warn!(
                 "failed to deliver blocker-resolution instructions to dependent session {session_id}: {error}"
             );

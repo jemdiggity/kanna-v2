@@ -2785,6 +2785,10 @@ async fn dispatch_post_injects_message_into_live_session_and_records_post_run() 
         &config.db_path,
         &mut daemon,
         &crate::session_replacements::SessionReplacements::default(),
+        &crate::task_input_queue::TaskInputCoordinator::new(
+            config.daemon_dir.clone(),
+            config.db_path.clone(),
+        ),
         *post,
     )
     .await
@@ -2793,8 +2797,13 @@ async fn dispatch_post_injects_message_into_live_session_and_records_post_run() 
 
     assert_eq!(response.task_id, "task-1");
     match &commands[0] {
-        kanna_daemon::protocol::Command::Input { session_id, data } => {
+        kanna_daemon::protocol::Command::InputIfSession {
+            session_id,
+            expected_pid,
+            data,
+        } => {
             assert_eq!(session_id, "task-1");
+            assert_eq!(*expected_pid, 42);
             let text = String::from_utf8(data.clone()).unwrap();
             assert!(text.contains("Commit agent."), "input: {text}");
             assert!(text.contains("Commit Fix it"), "input: {text}");
@@ -2802,8 +2811,13 @@ async fn dispatch_post_injects_message_into_live_session_and_records_post_run() 
         other => panic!("expected Input, got {other:?}"),
     }
     match &commands[1] {
-        kanna_daemon::protocol::Command::Input { session_id, data } => {
+        kanna_daemon::protocol::Command::InputIfSession {
+            session_id,
+            expected_pid,
+            data,
+        } => {
             assert_eq!(session_id, "task-1");
+            assert_eq!(*expected_pid, 42);
             assert_eq!(data, &vec![b'\r']);
         }
         other => panic!("expected Enter Input, got {other:?}"),
@@ -2851,48 +2865,16 @@ async fn dispatch_post_falls_back_to_fresh_session_when_session_is_dead() {
 
     // Input -> session not found; the fallback then kills (also not found)
     // and spawns the post agent as a fresh session.
-    let socket_path = test_daemon_socket_path(&config.daemon_dir);
-    let _ = std::fs::remove_file(&socket_path);
-    let listener = UnixListener::bind(&socket_path).unwrap();
-    let fake_daemon = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let (read_half, mut write_half) = stream.into_split();
-        let mut reader = BufReader::new(read_half);
-        let mut commands = Vec::new();
-        loop {
-            let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
-            let response = match &command {
-                kanna_daemon::protocol::Command::Input { .. }
-                | kanna_daemon::protocol::Command::Kill { .. } => {
-                    kanna_daemon::protocol::Event::Error {
-                        code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
-                        message: "session not found".to_string(),
-                    }
-                }
-                kanna_daemon::protocol::Command::Spawn { session_id, .. } => {
-                    kanna_daemon::protocol::Event::SessionCreated {
-                        session_id: session_id.clone(),
-                    }
-                }
-                other => panic!("unexpected daemon command: {other:?}"),
-            };
-            let done = matches!(&command, kanna_daemon::protocol::Command::Spawn { .. });
-            commands.push(command);
-            write_half
-                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
-                .await
-                .unwrap();
-            if done {
-                break;
-            }
-        }
-        commands
-    });
+    let fake_daemon = spawn_fake_daemon_missing_post_session(config.daemon_dir.clone()).await;
     let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
     let response = crate::task_creator::dispatch_prepared_post_for_api(
         &config.db_path,
         &mut daemon,
         &crate::session_replacements::SessionReplacements::default(),
+        &crate::task_input_queue::TaskInputCoordinator::new(
+            config.daemon_dir.clone(),
+            config.db_path.clone(),
+        ),
         *post,
     )
     .await
@@ -2963,53 +2945,16 @@ async fn prompt_only_post_provider_overrides_source_task_provider_in_fallback_da
         _ => panic!("expected post dispatch"),
     };
 
-    let socket_path = test_daemon_socket_path(&config.daemon_dir);
-    let _ = std::fs::remove_file(&socket_path);
-    let listener = UnixListener::bind(&socket_path).unwrap();
-    let fake_daemon = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let (read_half, mut write_half) = stream.into_split();
-        let mut reader = BufReader::new(read_half);
-        let mut commands = Vec::new();
-        loop {
-            let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
-            let response = match &command {
-                kanna_daemon::protocol::Command::Input { .. }
-                | kanna_daemon::protocol::Command::Kill { .. } => {
-                    kanna_daemon::protocol::Event::Error {
-                        code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
-                        message: "session not found".to_string(),
-                    }
-                }
-                kanna_daemon::protocol::Command::Spawn { session_id, .. }
-                | kanna_daemon::protocol::Command::SpawnAgent { session_id, .. } => {
-                    kanna_daemon::protocol::Event::SessionCreated {
-                        session_id: session_id.clone(),
-                    }
-                }
-                other => panic!("unexpected daemon command: {other:?}"),
-            };
-            let done = matches!(
-                &command,
-                kanna_daemon::protocol::Command::Spawn { .. }
-                    | kanna_daemon::protocol::Command::SpawnAgent { .. }
-            );
-            commands.push(command);
-            write_half
-                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
-                .await
-                .unwrap();
-            if done {
-                break;
-            }
-        }
-        commands
-    });
+    let fake_daemon = spawn_fake_daemon_missing_post_session(config.daemon_dir.clone()).await;
     let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
     crate::task_creator::dispatch_prepared_post_for_api(
         &config.db_path,
         &mut daemon,
         &crate::session_replacements::SessionReplacements::default(),
+        &crate::task_input_queue::TaskInputCoordinator::new(
+            config.daemon_dir.clone(),
+            config.db_path.clone(),
+        ),
         *post,
     )
     .await

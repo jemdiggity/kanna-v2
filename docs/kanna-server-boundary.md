@@ -529,8 +529,46 @@ way. Deriving it from the exit code alone is what made every clean completion �
 and every direct close — report `DONE [failure]`.
 
 Delivery is claimed once via `pipeline_item.notified_at` and goes through the
-same two-step input helper as `POST /v1/tasks/{task_id}/input`. All of it is
-server/daemon-side; it must not depend on the desktop event bridge being open.
+same server-owned input queue as `POST /v1/tasks/{task_id}/input`, attributed as
+`completion_notification`. All of it is server/daemon-side; it must not depend
+on the desktop event bridge being open.
+
+## Atomic and attributed task input
+
+Every PTY input producer converges on one `kanna-server` coordinator keyed by
+the destination session id and observed child PID. A complete logical message
+is one queue item: the coordinator writes its text, waits the CLI paste
+disambiguation delay, and writes Enter before delivering the next item. Raw
+desktop/mobile-terminal bytes open a human submission on their first chunk and
+hold that queue turn until Enter or Ctrl-C. API messages, stage posts, blocker
+instructions, and `TASK ... DONE` notifications wait behind a partial draft;
+they can never be concatenated with it or inserted between another message's
+text and Enter.
+
+FIFO order is the order the per-incarnation worker admits logical submissions.
+Every write is PID-fenced. A queued item therefore fails when that incarnation
+ends instead of moving to a replacement run. Definite pre-write failures may be
+reported normally; an acknowledgement lost after bytes may have landed is
+`delivery_uncertain` and is never replayed. The server does not make this a
+durable later-run queue, so the established live-only and exactly-once/no-blind-
+retry contract remains unchanged. Concurrent input submissions share a
+read-style lifecycle lease; a stage/session replacement waits for them, while
+multiple producers may enter the input queue together.
+
+`POST /v1/tasks/{task_id}/input` accepts an optional `source`; omission means
+`api`. The closed vocabulary is `human`, `quick_action`, `api`,
+`completion_notification`, `stage_post`, and `system`. Mobile composers send
+`human`; internal producers supply their own source directly. Quick-action
+messages containing unresolved `{identifier}` placeholders are rejected, and a
+quick action is rejected while the live session reports `Waiting`. Validation
+is structural—ordinary phrases are never blacklisted.
+
+Delivered, cancelled, and uncertain submission boundaries append `task.input`
+events with source, queue sequence, session PID, delivery state, and boundary.
+Complete logical messages include bounded exact text; raw terminal editing is
+not reconstructed because cursor movement and deletion would make that claim
+false. `GET /v1/task-events` exposes the structured record and task logs append
+a compact input-audit section.
 
 ## Merge Handoff
 
@@ -656,7 +694,7 @@ The CLI remains the shell/script interface; MCP is the structured agent-tool int
 
 ## CLI Task Actions
 
-- `kanna-cli task send-input --task-id <TASK_ID> --message <MESSAGE> [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/input`. Input is delivered only to an active daemon PTY session, fenced to the PTY process ID observed before the first byte is submitted while the server holds the task lifecycle lease, and is never queued or stored for a later run or stage. A successful acknowledged submission prints `{ "ok": true }`; an absent or concurrently replaced session returns HTTP 409 with `reason: "no_live_agent_session"`, the latest run status/finish time when available, and explicit `kanna_resume_task` / `kanna_rerun_stage` recovery guidance. If delivery becomes uncertain after any bytes were accepted, the server reports that separately so callers do not retry blindly.
+- `kanna-cli task send-input --task-id <TASK_ID> --message <MESSAGE> [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/input`. Input is delivered only to an active daemon PTY session, fenced to the PTY process ID observed before the first byte is submitted while the server holds a shared task-input lifecycle lease, and is never stored for a later run or stage. Concurrent live inputs enter the per-incarnation FIFO described above. A successful acknowledged submission prints `{ "ok": true }`; an absent or concurrently replaced session returns HTTP 409 with `reason: "no_live_agent_session"`, the latest run status/finish time when available, and explicit `kanna_resume_task` / `kanna_rerun_stage` recovery guidance. If delivery becomes uncertain after any bytes were accepted, the server reports that separately so callers do not retry blindly.
 - `kanna-cli task advance-stage --task-id <TASK_ID> [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/actions/advance-stage` and prints the action response as JSON.
 - `kanna-cli task signal-merge --task-id <TASK_ID> --branch <HEAD> --target <BASE> --summary <SUMMARY> [--pr-url <URL>] [--server-url <URL>]` sends an ordinary request to the repository's merge agent.
 - `kanna-cli task resume --task-id <TASK_ID> [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/actions/resume`. It is valid only for a latest `cancelled` or `failed` run whose daemon session is dead. It resumes the provider conversation when its durable transcript and original worktree pass the shared revision-resume checks; unsupported or missing provider context starts fresh and records `resumeFallbackReason`, while task-state precondition failures return an explanatory conflict. An empty route-level 404 identifies an older server that does not provide the action. Callers may use `rerun-stage` when recovery is unavailable or a deliberately fresh conversation is acceptable.

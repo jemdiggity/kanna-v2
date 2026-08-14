@@ -586,6 +586,41 @@ fn line_is_provider_chrome(line: &str, provider: AgentProvider) -> bool {
     }
 }
 
+/// Mark the active Codex composer in a plain-text snapshot. ANSI stripping
+/// removes Codex's dim placeholder styling, so without this structural label
+/// task logs make unsubmitted placeholder/draft text look like transcript
+/// input. Only the final prompt whose remaining rows are provider chrome is
+/// marked; identical earlier transcript text is preserved.
+// The daemon binary compiles this shared module directly as well as through
+// the library; the server-only display helper is intentionally unused there.
+#[allow(dead_code)]
+pub fn annotate_unsubmitted_composer_for_display(
+    rendered: &str,
+    provider: Option<AgentProvider>,
+) -> String {
+    if provider != Some(AgentProvider::Codex) {
+        return rendered.to_string();
+    }
+    let mut lines = rendered.lines().map(str::to_string).collect::<Vec<_>>();
+    let prompt_index = lines.iter().enumerate().rev().find_map(|(index, line)| {
+        line_starts_with_prompt(line, &[CODEX_IDLE_PROMPT]).then_some(index)
+    });
+    let Some(prompt_index) = prompt_index else {
+        return rendered.to_string();
+    };
+    if !lines[prompt_index + 1..]
+        .iter()
+        .all(|line| line_is_provider_chrome(line, AgentProvider::Codex))
+    {
+        return rendered.to_string();
+    }
+    lines[prompt_index] = format!(
+        "[current Codex composer — not submitted] {}",
+        lines[prompt_index]
+    );
+    lines.join("\n")
+}
+
 fn waiting_question_from_lines(lines: &[String]) -> Option<String> {
     let start = lines
         .iter()

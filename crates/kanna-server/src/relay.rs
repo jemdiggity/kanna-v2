@@ -458,6 +458,7 @@ pub(crate) async fn run_relay_loop(
                                             &mut daemon,
                                             &config,
                                             &http_state.session_replacements(),
+                                            &http_state.task_input,
                                         )
                                         .await
                                         {
