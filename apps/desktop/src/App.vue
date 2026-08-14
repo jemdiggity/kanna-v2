@@ -68,7 +68,7 @@ const {
   markTransferSidecarReady,
   refreshCloudTransferRoute,
   updateLanTransferPeers,
-  closeSelectedWorkspaceTask,
+  closeSelectedWorkspaceTask: closeSelectedWorkspaceTaskRaw,
   advanceSelectedRemoteWorkspaceTask,
   pinSidebarTask,
   unpinSidebarTask,
@@ -275,6 +275,11 @@ const appTaskNavigation = useAppTaskNavigation({
   openPairPeerPicker,
   pullSelectedWorkspaceTask: appTaskTransfer.pullSelectedWorkspaceTask,
 });
+function closeSelectedWorkspaceTask(): Promise<boolean> {
+  return closeSelectedWorkspaceTaskRaw(
+    appTaskNavigation.prepareReplacementAfterItemRemoval,
+  );
+}
 const {
   navigateItems,
   navigateRepos,

@@ -535,6 +535,47 @@ describe("createSelectionApi", () => {
     });
   });
 
+  it("selects the parent after removing its final child instead of an unrelated top-level task", async () => {
+    const state = createStoreState();
+    state.db.value = createDb();
+    state.repos.value = [createRepo()];
+    const parent = createItem({
+      id: "parent",
+      created_at: "2026-04-29T00:00:03.000Z",
+    });
+    const child = createItem({
+      id: "child",
+      parent_task_id: parent.id,
+      created_at: "2026-04-29T00:00:04.000Z",
+    });
+    const unrelated = createItem({
+      id: "unrelated",
+      created_at: "2026-04-29T00:00:01.000Z",
+    });
+    state.items.value = [parent, child, unrelated];
+    state.taskUiSlots.value = reconcileTaskUiSlots([], state.items.value);
+    state.selectedRepoId.value = "repo-1";
+    state.selectedItemId.value = child.id;
+
+    const context = createStoreContext(
+      state,
+      {
+        toasts: ref([]),
+        dismiss: vi.fn(),
+        info: vi.fn(),
+        warning: vi.fn(),
+        error: vi.fn(),
+      },
+      { windowWorkspace: { persistSelection: vi.fn(async () => {}) } } as never,
+    );
+
+    const replacementId = await createSelectionApi(context)
+      .selectReplacementAfterItemRemoval(child);
+
+    expect(replacementId).toBe(parent.id);
+    expect(state.selectedItemId.value).toBe(parent.id);
+  });
+
   it("keeps a creating slot reachable in Back history before hydration", async () => {
     vi.useFakeTimers();
     const state = createStoreState();

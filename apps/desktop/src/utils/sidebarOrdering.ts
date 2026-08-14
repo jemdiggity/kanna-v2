@@ -314,6 +314,62 @@ function sortItemsForRepo<T extends OrderingItem>(
   return ordered;
 }
 
+function orderedFallbackCandidates<T>(
+  rows: T[],
+  removedRowId: string,
+  identity: ItemIdentity<T>,
+): T[] {
+  const removedIndex = rows.findIndex((item) => identity.rowId(item) === removedRowId);
+  if (removedIndex < 0) {
+    return rows.filter((item) => identity.rowId(item) !== removedRowId);
+  }
+  const laterRows = rows.slice(removedIndex + 1);
+  const earlierRows = rows.slice(0, removedIndex).reverse();
+  return [...laterRows, ...earlierRows];
+}
+
+function replacementCandidatesAfterItemRemoval<T extends OrderingItem>(
+  options: OrderingOptions<T>,
+  removedItem: T,
+  identity: ItemIdentity<T>,
+): T[] {
+  const removedRowId = identity.rowId(removedItem);
+  const removedTaskId = identity.taskId(removedItem);
+  const parentTaskId = removedTaskId !== null
+    && removedItem.parent_task_id !== removedTaskId
+    ? removedItem.parent_task_id
+    : null;
+  const visibleParent = parentTaskId
+    ? options.items.find((item) =>
+        item.repo_id === options.repoId
+        && !isHidden(item)
+        && identity.taskId(item) === parentTaskId,
+      ) ?? null
+    : null;
+
+  if (visibleParent && parentTaskId) {
+    const siblings = childItems(options, parentTaskId, identity);
+    return [
+      ...orderedFallbackCandidates(siblings, removedRowId, identity),
+      visibleParent,
+    ];
+  }
+
+  const isNestedChild = makeNestedChildPredicate(options, identity);
+  const topLevelPeers = sortItemsForRepo(options, identity).filter((item) =>
+    !isNestedChild(item),
+  );
+  return orderedFallbackCandidates(topLevelPeers, removedRowId, identity);
+}
+
+function replacementAfterItemRemoval<T extends OrderingItem>(
+  options: OrderingOptions<T>,
+  removedItem: T,
+  identity: ItemIdentity<T>,
+): T | null {
+  return replacementCandidatesAfterItemRemoval(options, removedItem, identity)[0] ?? null;
+}
+
 // Durable adapters retained for snapshot/store consumers until they migrate to UI slots.
 export function sidebarChildItems(options: SidebarOrderingOptions, parentId: string): PipelineItem[] {
   return childItems(options, parentId, DURABLE_IDENTITY);
@@ -340,6 +396,13 @@ export function groupedSidebarItemsByStage(options: SidebarOrderingOptions): Sid
 
 export function sortSidebarItemsForRepo(options: SidebarOrderingOptions): PipelineItem[] {
   return sortItemsForRepo(options, DURABLE_IDENTITY);
+}
+
+export function replacementSidebarItemAfterRemoval(
+  options: SidebarOrderingOptions,
+  removedItem: PipelineItem,
+): PipelineItem | null {
+  return replacementAfterItemRemoval(options, removedItem, DURABLE_IDENTITY);
 }
 
 // Slot-aware APIs keep UI row identity separate from nullable durable task identity.
@@ -379,4 +442,18 @@ export function sortSidebarTaskItemsForRepo(
   options: SidebarTaskOrderingOptions,
 ): SidebarTaskItem[] {
   return sortItemsForRepo(options, SLOT_IDENTITY);
+}
+
+export function replacementSidebarTaskItemAfterRemoval(
+  options: SidebarTaskOrderingOptions,
+  removedItem: SidebarTaskItem,
+): SidebarTaskItem | null {
+  return replacementAfterItemRemoval(options, removedItem, SLOT_IDENTITY);
+}
+
+export function replacementSidebarTaskItemsAfterRemoval(
+  options: SidebarTaskOrderingOptions,
+  removedItem: SidebarTaskItem,
+): SidebarTaskItem[] {
+  return replacementCandidatesAfterItemRemoval(options, removedItem, SLOT_IDENTITY);
 }

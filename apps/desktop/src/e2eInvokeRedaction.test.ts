@@ -205,4 +205,21 @@ describe("E2E invoke redaction", () => {
       { cmd: "resize_pty", args },
     ]);
   });
+
+  it("scopes injected invoke successes by command and consumes them once", () => {
+    e2eInvokeHistory.succeedNext("close_transfer_peer_task", { closed: true });
+
+    expect(e2eInvokeHistory.consumeSuccess("other_command")).toEqual({
+      matched: false,
+      value: undefined,
+    });
+    expect(e2eInvokeHistory.consumeSuccess("close_transfer_peer_task")).toEqual({
+      matched: true,
+      value: { closed: true },
+    });
+    expect(e2eInvokeHistory.consumeSuccess("close_transfer_peer_task")).toEqual({
+      matched: false,
+      value: undefined,
+    });
+  });
 });

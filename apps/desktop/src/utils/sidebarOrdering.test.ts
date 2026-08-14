@@ -5,6 +5,9 @@ import type { SidebarTaskItem } from "../types/taskUi";
 import {
   groupedSidebarItemsByStage,
   groupedSidebarTaskItemsByStage,
+  replacementSidebarItemAfterRemoval,
+  replacementSidebarTaskItemAfterRemoval,
+  replacementSidebarTaskItemsAfterRemoval,
   sidebarChildItems,
   sidebarTaskChildItems,
   sidebarSubtreeRows,
@@ -315,6 +318,122 @@ describe("sidebarOrdering", () => {
     ];
     const ordered = sortSidebarItemsForRepo({ repoId: "repo-1", items, getStageOrder });
     expect(ordered.map((entry) => entry.id)).toEqual(["orphan"]);
+  });
+
+  it("selects a child's next sibling and falls back to its parent before unrelated rows", () => {
+    const parent = item({
+      id: "parent",
+      created_at: "2026-05-31T00:00:03.000Z",
+    });
+    const childA = item({
+      id: "child-a",
+      parent_task_id: parent.id,
+      created_at: "2026-05-31T00:00:04.000Z",
+    });
+    const childB = item({
+      id: "child-b",
+      parent_task_id: parent.id,
+      created_at: "2026-05-31T00:00:05.000Z",
+    });
+    const childC = item({
+      id: "child-c",
+      parent_task_id: parent.id,
+      created_at: "2026-05-31T00:00:06.000Z",
+    });
+    const unrelated = item({
+      id: "unrelated",
+      created_at: "2026-05-31T00:00:01.000Z",
+    });
+    const options = {
+      repoId: "repo-1",
+      items: [parent, childA, childB, childC, unrelated],
+      getStageOrder,
+    };
+
+    expect(replacementSidebarItemAfterRemoval(options, childA)?.id).toBe("child-b");
+    expect(replacementSidebarItemAfterRemoval(options, childC)?.id).toBe("child-b");
+    expect(replacementSidebarItemAfterRemoval({
+      ...options,
+      items: [parent, childB, unrelated],
+    }, childB)?.id).toBe("parent");
+  });
+
+  it("selects the next top-level peer and clamps to the previous peer at the end", () => {
+    const newest = item({ id: "newest", created_at: "2026-05-31T00:00:03.000Z" });
+    const middle = item({ id: "middle", created_at: "2026-05-31T00:00:02.000Z" });
+    const oldest = item({ id: "oldest", created_at: "2026-05-31T00:00:01.000Z" });
+    const options = {
+      repoId: "repo-1",
+      items: [newest, middle, oldest],
+      getStageOrder,
+    };
+
+    expect(replacementSidebarItemAfterRemoval(options, middle)?.id).toBe("oldest");
+    expect(replacementSidebarItemAfterRemoval(options, oldest)?.id).toBe("middle");
+  });
+
+  it("applies the sibling-aware replacement rule to presentation slots", () => {
+    const parent = sidebarItem({
+      slot_id: "slot-parent",
+      task_id: "parent",
+      created_at: "2026-05-31T00:00:03.000Z",
+    });
+    const child = sidebarItem({
+      slot_id: "slot-child",
+      task_id: "child",
+      parent_task_id: "parent",
+      created_at: "2026-05-31T00:00:04.000Z",
+    });
+    const unrelated = sidebarItem({
+      slot_id: "slot-unrelated",
+      task_id: "unrelated",
+      created_at: "2026-05-31T00:00:01.000Z",
+    });
+
+    expect(replacementSidebarTaskItemAfterRemoval({
+      repoId: "repo-1",
+      items: [parent, child, unrelated],
+      getStageOrder,
+    }, child)?.slot_id).toBe("slot-parent");
+  });
+
+  it("orders prepared sibling fallbacks by later rows before clamping backward to earlier rows", () => {
+    const parent = sidebarItem({ slot_id: "slot-parent", task_id: "parent" });
+    const childA = sidebarItem({
+      slot_id: "slot-a",
+      task_id: "a",
+      parent_task_id: "parent",
+      created_at: "2026-05-31T00:00:01.000Z",
+    });
+    const childB = sidebarItem({
+      slot_id: "slot-b",
+      task_id: "b",
+      parent_task_id: "parent",
+      created_at: "2026-05-31T00:00:02.000Z",
+    });
+    const childC = sidebarItem({
+      slot_id: "slot-c",
+      task_id: "c",
+      parent_task_id: "parent",
+      created_at: "2026-05-31T00:00:03.000Z",
+    });
+    const childD = sidebarItem({
+      slot_id: "slot-d",
+      task_id: "d",
+      parent_task_id: "parent",
+      created_at: "2026-05-31T00:00:04.000Z",
+    });
+
+    expect(replacementSidebarTaskItemsAfterRemoval({
+      repoId: "repo-1",
+      items: [parent, childA, childB, childC, childD],
+      getStageOrder,
+    }, childB).map((item) => item.slot_id)).toEqual([
+      "slot-c",
+      "slot-d",
+      "slot-a",
+      "slot-parent",
+    ]);
   });
 
   it("suppresses nesting during an active search so every match stays visible", () => {

@@ -575,6 +575,49 @@ function remoteTaskSnapshot(
   };
 }
 
+function remoteChildCloseSnapshot(): DesktopCloudSnapshot {
+  const snapshot = remoteTaskSnapshot("cloud", "desktop-owner", "task-parent");
+  const parent = {
+    ...snapshot.items[0],
+    id: "cloud:repo-remote:task-parent",
+    display_name: "Remote parent",
+    created_at: "2026-07-24T00:00:00.000Z",
+  };
+  const childA = {
+    ...snapshot.items[0],
+    id: "cloud:repo-remote:task-child-a",
+    display_name: "Remote child A",
+    parent_task_id: parent.id,
+    created_at: "2026-07-24T00:01:00.000Z",
+  };
+  const childB = {
+    ...snapshot.items[0],
+    id: "cloud:repo-remote:task-child-b",
+    display_name: "Remote child B",
+    parent_task_id: parent.id,
+    created_at: "2026-07-24T00:02:00.000Z",
+  };
+  const unrelated = {
+    ...snapshot.items[0],
+    id: "cloud:repo-remote:task-unrelated",
+    display_name: "Unrelated remote task",
+    created_at: "2026-07-23T23:59:00.000Z",
+  };
+  snapshot.items = [parent, childA, childB, unrelated];
+  snapshot.terminalRefs = Object.fromEntries(
+    [parent, childA, childB, unrelated].map((item) => [
+      item.id,
+      {
+        ownerDesktopId: "desktop-owner",
+        ownerLocalRepoId: "owner-repo",
+        ownerLocalTaskId: item.id.slice("cloud:repo-remote:".length),
+        transport: "cloud" as const,
+      },
+    ]),
+  );
+  return snapshot;
+}
+
 const FilePickerModalTestStub = defineComponent({
   name: "FilePickerModal",
   emits: ["close", "select"],
@@ -2595,6 +2638,270 @@ describe("App", () => {
     });
     expect(wrapper.find('[data-testid="remote-close-task"]').exists()).toBe(false);
 
+    wrapper.unmount();
+  });
+
+  it("clears a restored durable last selection when closing the repository's only remote task", async () => {
+    const snapshot = remoteTaskSnapshot("cloud", "desktop-owner", "task-owner");
+    const [remoteTask] = snapshot.items;
+    cloudTasksMock.mockResolvedValue(snapshot);
+    store.selectedRepoId = remoteTask.repo_id;
+    store.selectedRepo = null;
+    store.selectedItemId = remoteTask.id;
+    store.lastSelectedItemByRepo[remoteTask.repo_id] = remoteTask.id;
+
+    const wrapper = await mountApp(RemoteTaskSelectionStub);
+    mockWindowWorkspace.persistSelection.mockClear();
+
+    await capturedKeyboardActions?.closeTask();
+    await flushPromises();
+
+    expect(relayCloseTaskMock).toHaveBeenCalledWith({
+      desktopId: "desktop-owner",
+      taskId: "task-owner",
+    });
+    expect(store.selectedItemId).toBeNull();
+    expect(store.lastSelectedItemByRepo[remoteTask.repo_id]).toBeUndefined();
+    expect(mockWindowWorkspace.persistSelection).toHaveBeenLastCalledWith({
+      selectedRepoId: remoteTask.repo_id,
+      selectedItemId: null,
+    });
+
+    wrapper.unmount();
+  });
+
+  it("selects the next remote sibling and then the parent when closing selected children", async () => {
+    const snapshot = remoteChildCloseSnapshot();
+    const [parent, childA, childB] = snapshot.items;
+    cloudTasksMock.mockResolvedValue(snapshot);
+
+    const wrapper = await mountApp(RemoteTaskSelectionStub);
+    await wrapper.get(`[data-task-id="${childA.id}"]`).trigger("click");
+    await flushPromises();
+    mockWindowWorkspace.persistSelection.mockClear();
+
+    await capturedKeyboardActions?.closeTask();
+    await flushPromises();
+
+    expect(relayCloseTaskMock).toHaveBeenNthCalledWith(1, {
+      desktopId: "desktop-owner",
+      taskId: "task-child-a",
+    });
+    expect(mockWindowWorkspace.persistSelection).toHaveBeenLastCalledWith({
+      selectedRepoId: "cloud:repo-remote",
+      selectedItemId: childB.id,
+    });
+    expect(store.lastSelectedItemByRepo["cloud:repo-remote"]).toBe(store.selectedItemId);
+    expect(wrapper.find(`[data-task-id="${childA.id}"]`).exists()).toBe(false);
+    expect(wrapper.find(`[data-task-id="${childB.id}"]`).exists()).toBe(true);
+
+    await capturedKeyboardActions?.closeTask();
+    await flushPromises();
+
+    expect(relayCloseTaskMock).toHaveBeenNthCalledWith(2, {
+      desktopId: "desktop-owner",
+      taskId: "task-child-b",
+    });
+    expect(mockWindowWorkspace.persistSelection).toHaveBeenLastCalledWith({
+      selectedRepoId: "cloud:repo-remote",
+      selectedItemId: parent.id,
+    });
+    expect(store.lastSelectedItemByRepo["cloud:repo-remote"]).toBe(store.selectedItemId);
+    expect(wrapper.find(`[data-task-id="${childB.id}"]`).exists()).toBe(false);
+    expect(wrapper.find(`[data-task-id="${parent.id}"]`).exists()).toBe(true);
+
+    wrapper.unmount();
+  });
+
+  it("keeps the originally prepared next sibling when the closing row disappears during owner close", async () => {
+    const snapshot = remoteChildCloseSnapshot();
+    const [parent, childA, childB, unrelated] = snapshot.items;
+    const childC = {
+      ...childB,
+      id: "cloud:repo-remote:task-child-c",
+      display_name: "Remote child C",
+      created_at: "2026-07-24T00:03:00.000Z",
+    };
+    snapshot.items = [parent, childA, childB, childC, unrelated];
+    snapshot.terminalRefs[childC.id] = {
+      ownerDesktopId: "desktop-owner",
+      ownerLocalRepoId: "owner-repo",
+      ownerLocalTaskId: "task-child-c",
+      transport: "cloud",
+    };
+    cloudTasksMock.mockResolvedValue(snapshot);
+    const closeDeferred = createDeferred<void>();
+    relayCloseTaskMock.mockImplementationOnce(() => closeDeferred.promise);
+
+    const wrapper = await mountApp(RemoteTaskSelectionStub);
+    await wrapper.get(`[data-task-id="${childB.id}"]`).trigger("click");
+    await flushPromises();
+
+    const closePromise = capturedKeyboardActions?.closeTask();
+    await waitForCondition(() => relayCloseTaskMock.mock.calls.length === 1);
+    emitDesktopCloudSnapshot({
+      ...snapshot,
+      items: snapshot.items.filter((item) => item.id !== childB.id),
+      terminalRefs: Object.fromEntries(
+        Object.entries(snapshot.terminalRefs).filter(([taskId]) => taskId !== childB.id),
+      ),
+    });
+    await flushPromises();
+
+    closeDeferred.resolve();
+    await closePromise;
+    await flushPromises();
+
+    expect(mockWindowWorkspace.persistSelection).toHaveBeenLastCalledWith({
+      selectedRepoId: "cloud:repo-remote",
+      selectedItemId: childC.id,
+    });
+    expect(mockWindowWorkspace.persistSelection).not.toHaveBeenLastCalledWith({
+      selectedRepoId: "cloud:repo-remote",
+      selectedItemId: childA.id,
+    });
+    expect(store.lastSelectedItemByRepo["cloud:repo-remote"]).toBe(store.selectedItemId);
+
+    wrapper.unmount();
+  });
+
+  it("uses a prepared previous-sibling fallback when the closing row and next sibling disappear", async () => {
+    const snapshot = remoteChildCloseSnapshot();
+    const [parent, childA, childB, unrelated] = snapshot.items;
+    const childC = {
+      ...childB,
+      id: "cloud:repo-remote:task-child-c",
+      display_name: "Remote child C",
+      created_at: "2026-07-24T00:03:00.000Z",
+    };
+    snapshot.items = [parent, childA, childB, childC, unrelated];
+    snapshot.terminalRefs[childC.id] = {
+      ownerDesktopId: "desktop-owner",
+      ownerLocalRepoId: "owner-repo",
+      ownerLocalTaskId: "task-child-c",
+      transport: "cloud",
+    };
+    cloudTasksMock.mockResolvedValue(snapshot);
+    const closeDeferred = createDeferred<void>();
+    relayCloseTaskMock.mockImplementationOnce(() => closeDeferred.promise);
+
+    const wrapper = await mountApp(RemoteTaskSelectionStub);
+    await wrapper.get(`[data-task-id="${childB.id}"]`).trigger("click");
+    await flushPromises();
+
+    const closePromise = capturedKeyboardActions?.closeTask();
+    await waitForCondition(() => relayCloseTaskMock.mock.calls.length === 1);
+    const removedTaskIds = new Set([childB.id, childC.id]);
+    emitDesktopCloudSnapshot({
+      ...snapshot,
+      items: snapshot.items.filter((item) => !removedTaskIds.has(item.id)),
+      terminalRefs: Object.fromEntries(
+        Object.entries(snapshot.terminalRefs).filter(([taskId]) => !removedTaskIds.has(taskId)),
+      ),
+    });
+    await flushPromises();
+
+    closeDeferred.resolve();
+    await closePromise;
+    await flushPromises();
+
+    expect(mockWindowWorkspace.persistSelection).toHaveBeenLastCalledWith({
+      selectedRepoId: "cloud:repo-remote",
+      selectedItemId: childA.id,
+    });
+    expect(store.lastSelectedItemByRepo["cloud:repo-remote"]).toBe(store.selectedItemId);
+
+    wrapper.unmount();
+  });
+
+  it("replaces a restored durable remote selection after closing it", async () => {
+    const snapshot = remoteChildCloseSnapshot();
+    const [, childA, childB] = snapshot.items;
+    cloudTasksMock.mockResolvedValue(snapshot);
+    store.selectedRepoId = "cloud:repo-remote";
+    store.selectedRepo = null;
+    store.selectedItemId = childA.id;
+
+    const wrapper = await mountApp(RemoteTaskSelectionStub);
+    mockWindowWorkspace.persistSelection.mockClear();
+
+    await capturedKeyboardActions?.closeTask();
+    await flushPromises();
+
+    expect(relayCloseTaskMock).toHaveBeenCalledWith({
+      desktopId: "desktop-owner",
+      taskId: "task-child-a",
+    });
+    expect(mockWindowWorkspace.persistSelection).toHaveBeenLastCalledWith({
+      selectedRepoId: "cloud:repo-remote",
+      selectedItemId: childB.id,
+    });
+    expect(wrapper.find(`[data-task-id="${childA.id}"]`).exists()).toBe(false);
+    expect(wrapper.find(`[data-task-id="${childB.id}"]`).exists()).toBe(true);
+
+    wrapper.unmount();
+  });
+
+  it("preserves newer remote navigation while an owner close is pending", async () => {
+    const snapshot = remoteChildCloseSnapshot();
+    const [, childA, , unrelated] = snapshot.items;
+    cloudTasksMock.mockResolvedValue(snapshot);
+    const closeDeferred = createDeferred<void>();
+    relayCloseTaskMock.mockImplementationOnce(() => closeDeferred.promise);
+
+    const wrapper = await mountApp(RemoteTaskSelectionStub);
+    await wrapper.get(`[data-task-id="${childA.id}"]`).trigger("click");
+    await flushPromises();
+
+    const closePromise = capturedKeyboardActions?.closeTask();
+    await waitForCondition(() => relayCloseTaskMock.mock.calls.length === 1);
+    await wrapper.get(`[data-task-id="${unrelated.id}"]`).trigger("click");
+    await flushPromises();
+    const newerPresentationSlotId = store.selectedItemId;
+
+    closeDeferred.resolve();
+    await closePromise;
+    await flushPromises();
+
+    expect(store.selectedItemId).toBe(newerPresentationSlotId);
+    expect(mockWindowWorkspace.persistSelection).toHaveBeenLastCalledWith({
+      selectedRepoId: "cloud:repo-remote",
+      selectedItemId: unrelated.id,
+    });
+    expect(wrapper.find(`[data-task-id="${childA.id}"]`).exists()).toBe(false);
+    expect(wrapper.find(`[data-task-id="${unrelated.id}"]`).exists()).toBe(true);
+
+    wrapper.unmount();
+  });
+
+  it("returns success and hides the closed row when replacement persistence fails", async () => {
+    const snapshot = remoteChildCloseSnapshot();
+    const [, childA, childB] = snapshot.items;
+    cloudTasksMock.mockResolvedValue(snapshot);
+    const reconciliationError = new Error("selection persistence failed");
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const wrapper = await mountApp(RemoteTaskSelectionStub);
+    await wrapper.get(`[data-task-id="${childA.id}"]`).trigger("click");
+    await flushPromises();
+    mockWindowWorkspace.persistSelection.mockRejectedValueOnce(reconciliationError);
+
+    const closeResult = await (
+      wrapper.vm as unknown as { closeSelectedWorkspaceTask: () => Promise<boolean> }
+    ).closeSelectedWorkspaceTask();
+    await flushPromises();
+
+    expect(closeResult).toBe(true);
+    expect(consoleError).toHaveBeenCalledWith(
+      "[cloud] post-close reconciliation failed:",
+      reconciliationError,
+    );
+    expect(toastErrorMock).toHaveBeenCalledWith(reconciliationError.message);
+    expect(wrapper.find(`[data-task-id="${childA.id}"]`).exists()).toBe(false);
+    expect(wrapper.find(`[data-task-id="${childB.id}"]`).exists()).toBe(true);
+    expect(store.lastSelectedItemByRepo["cloud:repo-remote"]).toBe(store.selectedItemId);
+
+    consoleError.mockRestore();
     wrapper.unmount();
   });
 

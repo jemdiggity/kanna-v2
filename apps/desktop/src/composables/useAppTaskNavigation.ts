@@ -14,7 +14,10 @@ import {
 import Sidebar from "../components/Sidebar.vue";
 import { isBlockerResolved } from "../utils/blockerResolution";
 import { selectTaskByActivity } from "../utils/selectTaskByActivity";
-import { sortSidebarTaskItemsForRepo } from "../utils/sidebarOrdering";
+import {
+  replacementSidebarTaskItemsAfterRemoval,
+  sortSidebarTaskItemsForRepo,
+} from "../utils/sidebarOrdering";
 import { isTaskTearingDown } from "../stores/taskStages";
 import type { SidebarTaskItem } from "../types/taskUi";
 import type { WorkspaceTask } from "../workspace/types";
@@ -165,6 +168,23 @@ export function useAppTaskNavigation({
     return sortSidebarTaskItemsForRepo({ ...sortOptions, items: workspaceItems });
   }
 
+  function orderedSidebarItemsForRepo(repoId: string): SidebarTaskItem[] {
+    const workspaceItems = sidebarItems.value.filter((item) => item.repo_id === repoId);
+    const items = workspaceItems.length > 0 || repoId.startsWith("cloud:")
+      ? workspaceItems
+      : canonicalSidebarTaskItems(
+          store.sortedItemsAllRepos.filter((item) => item.repo_id === repoId),
+          repoId,
+        );
+    return sortSidebarTaskItemsForRepo({
+      repoId,
+      items,
+      blockers: effectiveTaskBlockers.value,
+      blockerTaskStates: effectiveBlockerTaskStates.value,
+      getStageOrder: store.getStageOrder,
+    });
+  }
+
   function visibleSidebarItemsAllRepos(): SidebarTaskItem[] {
     if (sidebarRepos.value.length > 0) {
       return sidebarRepos.value.flatMap((repo) => visibleSidebarItemsForRepo(repo.id));
@@ -263,6 +283,57 @@ export function useAppTaskNavigation({
     const item = sidebarItemForSelection(presentationSlotId);
     if (!item) return;
     await selectSidebarItem(item);
+  }
+
+  function prepareReplacementAfterItemRemoval(
+    removedItem: SidebarTaskItem,
+  ): () => Promise<string | null> {
+    const sameRepoSorted = orderedSidebarItemsForRepo(removedItem.repo_id);
+    const replacements = replacementSidebarTaskItemsAfterRemoval({
+      repoId: removedItem.repo_id,
+      items: sameRepoSorted,
+      blockers: effectiveTaskBlockers.value,
+      blockerTaskStates: effectiveBlockerTaskStates.value,
+      getStageOrder: store.getStageOrder,
+    }, removedItem);
+    return async () => {
+      let currentReplacement: SidebarTaskItem | null = null;
+      for (const candidate of replacements) {
+        currentReplacement = sidebarItems.value.find((item) =>
+          item.repo_id === candidate.repo_id
+          && item.slot_id === candidate.slot_id,
+        )
+          ?? (candidate.task_id
+            ? sidebarItems.value.find((item) =>
+                item.repo_id === candidate.repo_id
+                && item.task_id === candidate.task_id,
+              )
+            : null)
+          ?? null;
+        if (currentReplacement) break;
+      }
+      if (currentReplacement) {
+        await selectSidebarItem(currentReplacement, removedItem.slot_id);
+        return currentReplacement.slot_id;
+      }
+
+      beginSelectionIntent();
+      store.selectedRepoId = removedItem.repo_id;
+      selectedCloudItemId.value = null;
+      store.selectedItemId = null;
+      const lastSelectedItemId = store.lastSelectedItemByRepo[removedItem.repo_id];
+      if (
+        lastSelectedItemId === removedItem.slot_id
+        || (removedItem.task_id !== null && lastSelectedItemId === removedItem.task_id)
+      ) {
+        delete store.lastSelectedItemByRepo[removedItem.repo_id];
+      }
+      await windowWorkspace.persistSelection({
+        selectedRepoId: removedItem.repo_id,
+        selectedItemId: null,
+      });
+      return null;
+    };
   }
 
   async function navigateItems(direction: -1 | 1) {
@@ -718,6 +789,7 @@ export function useAppTaskNavigation({
     visibleSidebarItemsAllRepos,
     selectSidebarItem,
     selectSidebarItemById,
+    prepareReplacementAfterItemRemoval,
     navigateItems,
     navigateRepos,
     navigateBack,

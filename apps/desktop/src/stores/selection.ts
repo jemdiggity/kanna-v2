@@ -5,7 +5,10 @@ import type { PipelineItem, Repo } from "../types/kanna";
 import { createNavigationHistory } from "../composables/useNavigationHistory";
 import { beginTaskSwitch } from "../perf/taskSwitchPerf";
 import { markDesktopTaskRead, postDesktopOperatorEvent, putDesktopSetting } from "../services/desktopServerClient";
-import { sortSidebarItemsForRepo } from "../utils/sidebarOrdering";
+import {
+  replacementSidebarItemAfterRemoval,
+  sortSidebarItemsForRepo,
+} from "../utils/sidebarOrdering";
 import { requireService, type StoreContext } from "./state";
 import type { TaskUiSlot } from "../types/taskUi";
 import { taskUiSlotForSelection } from "./taskUiSlots";
@@ -210,16 +213,13 @@ export function createSelectionApi(context: StoreContext): SelectionApi {
   }
 
   function findReplacementAfterItemRemoval(removedItem: PipelineItem): PipelineItem | null {
-    const sameRepoSorted = sortItemsForRepo(removedItem.repo_id);
-    const sameRepoIndex = sameRepoSorted.findIndex((item) => item.id === removedItem.id);
-    const sameRepoRemaining = sameRepoSorted.filter((item) => item.id !== removedItem.id);
-    if (sameRepoRemaining.length > 0) {
-      const nextIndex = sameRepoIndex >= 0
-        ? Math.min(sameRepoIndex, sameRepoRemaining.length - 1)
-        : 0;
-      return sameRepoRemaining[nextIndex] ?? null;
-    }
-    return null;
+    return replacementSidebarItemAfterRemoval({
+      repoId: removedItem.repo_id,
+      items: context.state.items.value,
+      blockers: context.state.taskBlockers.value,
+      blockerTaskStates: context.state.blockerTaskStates.value,
+      getStageOrder,
+    }, removedItem);
   }
 
   async function selectReplacementAfterItemRemoval(removedItem: PipelineItem): Promise<string | null> {
