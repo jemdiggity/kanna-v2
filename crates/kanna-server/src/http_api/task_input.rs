@@ -4,7 +4,9 @@ use crate::db::Db;
 use axum::extract::State;
 use axum::Json;
 use kanna_agent_protocol::StateChangeScope;
-use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+use kanna_daemon::protocol::{
+    Command as DaemonCommand, Event as DaemonEvent, SessionKind, SessionState,
+};
 use std::sync::Arc;
 
 pub(crate) const SESSION_INTERRUPTION_FEEDBACK: &str =
@@ -14,6 +16,52 @@ pub(crate) const SESSION_INTERRUPTION_FEEDBACK: &str =
 #[serde(rename_all = "camelCase")]
 pub(super) struct TaskInputRequest {
     input: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct TaskInputFailure {
+    ok: bool,
+    reason: &'static str,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    latest_run: Option<TaskInputFailureRun>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct TaskInputFailureRun {
+    id: String,
+    status: String,
+    finished_at: Option<String>,
+}
+
+pub(super) type TaskInputHttpError = (axum::http::StatusCode, Json<TaskInputFailure>);
+
+fn task_input_http_error(
+    status: axum::http::StatusCode,
+    reason: &'static str,
+    message: String,
+    latest_run: Option<TaskInputFailureRun>,
+) -> TaskInputHttpError {
+    (
+        status,
+        Json(TaskInputFailure {
+            ok: false,
+            reason,
+            message,
+            latest_run,
+        }),
+    )
+}
+
+fn map_task_input_error((status, message): (axum::http::StatusCode, String)) -> TaskInputHttpError {
+    let reason = if status == axum::http::StatusCode::NOT_FOUND {
+        "task_not_found"
+    } else {
+        "task_input_unavailable"
+    };
+    task_input_http_error(status, reason, message, None)
 }
 
 /// Delay between typing a task-input message and the synthesized Enter.
@@ -50,13 +98,22 @@ pub(crate) enum TaskInputError {
 async fn send_raw_session_input(
     daemon: &mut crate::daemon_client::DaemonClient,
     session_id: &str,
+    expected_pid: Option<u32>,
     data: Vec<u8>,
 ) -> Result<(), TaskInputError> {
-    let event = daemon
-        .send_command(&DaemonCommand::Input {
+    let command = match expected_pid {
+        Some(expected_pid) => DaemonCommand::InputIfSession {
+            session_id: session_id.to_string(),
+            expected_pid,
+            data,
+        },
+        None => DaemonCommand::Input {
             session_id: session_id.to_string(),
             data,
-        })
+        },
+    };
+    let event = daemon
+        .send_command(&command)
         .await
         .map_err(|e| TaskInputError::Uncertain(format!("daemon response lost: {e}")))?;
     match event {
@@ -65,6 +122,14 @@ async fn send_raw_session_input(
             code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
             ..
         } => Err(TaskInputError::SessionNotFound),
+        DaemonEvent::Error {
+            code: Some(kanna_daemon::protocol::ErrorCode::SessionIncarnationMismatch),
+            ..
+        } => Err(TaskInputError::SessionNotFound),
+        DaemonEvent::Error {
+            code: Some(kanna_daemon::protocol::ErrorCode::WriteFailed),
+            message,
+        } => Err(TaskInputError::Uncertain(message)),
         DaemonEvent::Error { message, .. }
             if message.to_ascii_lowercase().contains("session not found") =>
         {
@@ -84,16 +149,44 @@ pub(crate) async fn try_submit_task_input(
     session_id: &str,
     input: &str,
 ) -> Result<(), TaskInputError> {
+    try_submit_task_input_to_session(daemon, session_id, None, input).await
+}
+
+/// Submit input to the PTY process ID observed during live-session
+/// discovery. A same-id replacement is rejected rather than receiving input
+/// intended for the old run.
+async fn try_submit_task_input_if_session(
+    daemon: &mut crate::daemon_client::DaemonClient,
+    session_id: &str,
+    expected_pid: u32,
+    input: &str,
+) -> Result<(), TaskInputError> {
+    try_submit_task_input_to_session(daemon, session_id, Some(expected_pid), input).await
+}
+
+async fn try_submit_task_input_to_session(
+    daemon: &mut crate::daemon_client::DaemonClient,
+    session_id: &str,
+    expected_pid: Option<u32>,
+    input: &str,
+) -> Result<(), TaskInputError> {
     // Type the message, then press Enter as a discrete keystroke (see
     // SUBMIT_ENTER_DELAY_MS). The daemon stays a raw byte pipe; this submission
     // policy lives here so every client — kanna-cli, kanna-mcp, mobile, and
     // server-side notifications — submits consistently.
     let message = task_input_message(input);
     if !message.is_empty() {
-        send_raw_session_input(daemon, session_id, message.as_bytes().to_vec()).await?;
+        send_raw_session_input(
+            daemon,
+            session_id,
+            expected_pid,
+            message.as_bytes().to_vec(),
+        )
+        .await?;
         tokio::time::sleep(std::time::Duration::from_millis(SUBMIT_ENTER_DELAY_MS)).await;
     }
-    if let Err(error) = send_raw_session_input(daemon, session_id, vec![b'\r']).await {
+    if let Err(error) = send_raw_session_input(daemon, session_id, expected_pid, vec![b'\r']).await
+    {
         return Err(if message.is_empty() {
             error
         } else {
@@ -136,25 +229,147 @@ pub(super) async fn send_task_input(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(task_id): axum::extract::Path<String>,
     Json(payload): Json<TaskInputRequest>,
-) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
+) -> Result<axum::http::StatusCode, TaskInputHttpError> {
     #[cfg(test)]
     if let Some(task_input_sender) = state.task_input_sender.clone() {
         return task_input_sender(task_id, payload.input)
             .map(|_| axum::http::StatusCode::NO_CONTENT)
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e));
+            .map_err(|message| {
+                task_input_http_error(
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    "task_input_unavailable",
+                    message,
+                    None,
+                )
+            });
     }
 
-    let task_id = super::task_actions::resolve_task_id_for_mutation(&state, &task_id).await?;
+    let task_id = super::task_actions::resolve_task_id_for_mutation(&state, &task_id)
+        .await
+        .map_err(map_task_input_error)?;
+    let Some(_task_mutation) = state.try_begin_requested_task_mutation(&task_id) else {
+        return Err(task_input_http_error(
+            axum::http::StatusCode::CONFLICT,
+            "no_live_agent_session",
+            format!(
+                "task {task_id} is changing stage or agent session; input was not delivered; inspect the current run before retrying"
+            ),
+            None,
+        ));
+    };
     let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
         .await
-        .map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("daemon error: {}", e),
+        .map_err(|error| {
+            task_input_http_error(
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "daemon_unavailable",
+                format!("could not verify a live agent session for task {task_id}: {error}"),
+                None,
             )
         })?;
 
-    submit_task_input(&mut daemon, &task_id, &payload.input).await?;
+    let sessions = match daemon.send_command(&DaemonCommand::List).await {
+        Ok(DaemonEvent::SessionList { sessions }) => sessions,
+        Ok(other) => {
+            return Err(task_input_http_error(
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "daemon_state_unknown",
+                format!(
+                    "could not verify a live agent session for task {task_id}: unexpected daemon response: {other:?}"
+                ),
+                None,
+            ));
+        }
+        Err(error) => {
+            return Err(task_input_http_error(
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "daemon_state_unknown",
+                format!("could not verify a live agent session for task {task_id}: {error}"),
+                None,
+            ));
+        }
+    };
+    let live_session_pid = sessions
+        .iter()
+        .find(|session| {
+            session.session_id == task_id
+                && session.kind == SessionKind::Pty
+                && matches!(&session.state, SessionState::Active)
+        })
+        .map(|session| session.pid);
+    let Some(live_session_pid) = live_session_pid else {
+        let db_path = state.config.db_path.clone();
+        let latest_run_task_id = task_id.clone();
+        let latest_run =
+            super::blocking::run_handler_blocking("task input latest run", move || {
+                let db = Db::open(&db_path).map_err(|error| {
+                    (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("db error: {error}"),
+                    )
+                })?;
+                db.latest_stage_run(&latest_run_task_id).map_err(|error| {
+                    (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("db error: {error}"),
+                    )
+                })
+            })
+            .await
+            .map_err(map_task_input_error)?;
+        let latest_run = latest_run.map(|run| TaskInputFailureRun {
+            id: run.id,
+            status: run.status,
+            finished_at: run.finished_at,
+        });
+        let detail = match latest_run.as_ref() {
+            Some(run) => match run.finished_at.as_deref() {
+                Some(finished_at) => format!(
+                    "latest run {} finished at {finished_at} with status {}",
+                    run.id, run.status
+                ),
+                None => format!(
+                    "latest run {} has status {} and no recorded finish time",
+                    run.id, run.status
+                ),
+            },
+            None => "the task has no recorded stage run".to_string(),
+        };
+        return Err(task_input_http_error(
+            axum::http::StatusCode::CONFLICT,
+            "no_live_agent_session",
+            format!(
+                "no live agent session for task {task_id}; {detail}; use kanna_resume_task to \
+                 preserve provider context when possible, or kanna_rerun_stage to start fresh"
+            ),
+            latest_run,
+        ));
+    };
+
+    try_submit_task_input_if_session(&mut daemon, &task_id, live_session_pid, &payload.input)
+        .await
+        .map_err(|error| {
+            let (status, reason, message) = match error {
+                TaskInputError::SessionNotFound => (
+                    axum::http::StatusCode::CONFLICT,
+                    "no_live_agent_session",
+                    format!(
+                        "the live agent session changed before input could be delivered to task {task_id}; retry only after inspecting the current run"
+                    ),
+                ),
+                TaskInputError::Uncertain(message) => (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    "delivery_uncertain",
+                    format!("terminal input delivery is uncertain: {message}"),
+                ),
+                TaskInputError::Other(message) => (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    "task_input_failed",
+                    message,
+                ),
+            };
+            task_input_http_error(status, reason, message, None)
+        })?;
 
     Ok(axum::http::StatusCode::NO_CONTENT)
 }

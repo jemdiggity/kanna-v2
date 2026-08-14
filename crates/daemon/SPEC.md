@@ -246,6 +246,7 @@ Line-delimited JSON over Unix domain socket. Each message is one JSON object + `
 | `ObserveSnapshot` | session_id | Atomically snapshot and register a passive observer; the `Snapshot` event is the reply and every later `Output` is ordered after it |
 | `Detach` | session_id | Stop receiving output |
 | `Input` | session_id, data (byte array) | Send keystrokes to PTY |
+| `InputIfSession` | session_id, expected_pid, data (byte array) | Send acknowledged keystrokes only if the id still names the PTY process ID observed by `List`; otherwise return `session_incarnation_mismatch` without writing |
 | `Resize` | session_id, cols, rows | Update terminal dimensions |
 | `Signal` | session_id, signal (string) | Send Unix signal |
 | `Kill` | session_id | Terminate and remove session |
@@ -318,11 +319,13 @@ Before serving HTTP, the authenticated server classifies inherited PTYs as
 ordinary input, including merge singletons adopted from a protected release.
 The same replay runs after daemon replacement so restart and handoff cannot
 restore the retired native-terminal-only merge policy.
-`NegotiateProtectedInput` version 1 must be acknowledged by the active daemon
-before the server exposes HTTP/relay or creates a merge PTY. The daemon records
-the exact negotiating server process and refuses server-originated PTY spawns
-from an unnegotiated process, making an old-server/new-daemon pairing fail
-closed. `ClassifyInput` shares the daemon lifecycle fence with the handoff
+`NegotiateProtectedInput` version 2 must be acknowledged by the active daemon
+before the server exposes HTTP/relay or creates a merge PTY. Version 2 includes
+the observed-PTY-process-ID `InputIfSession` fence used by task input delivery, so a
+new server paired with a previous daemon generation waits for the supporting
+successor before serving. The daemon records the exact negotiating server
+process and refuses server-originated PTY spawns from an unnegotiated process,
+making unsupported server/daemon pairings fail closed. `ClassifyInput` shares the daemon lifecycle fence with the handoff
 snapshot; a command that loses that race receives `RetryOnSuccessor`, and the
 server repeats negotiation plus the complete classification pass on every
 published daemon generation.

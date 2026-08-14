@@ -385,6 +385,73 @@ mod tests {
         let _ = std::fs::remove_dir_all(daemon_dir);
     }
 
+    #[tokio::test]
+    async fn previous_daemon_protocol_blocks_http_until_a_supporting_successor_exists() {
+        let daemon_dir = unique_path("previous-daemon-generation", "dir");
+        std::fs::create_dir_all(&daemon_dir).unwrap();
+        let socket_path = kanna_runtime_defaults::socket_path(std::path::Path::new(&daemon_dir));
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let (negotiated_tx, negotiated_rx) = tokio::sync::oneshot::channel();
+        let previous_daemon = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut reader = tokio::io::BufReader::new(read);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let command: kanna_daemon::protocol::Command =
+                serde_json::from_str(line.trim()).unwrap();
+            assert!(matches!(
+                command,
+                kanna_daemon::protocol::Command::NegotiateProtectedInput { version: 2 }
+            ));
+            negotiated_tx.send(()).unwrap();
+            let refusal = kanna_daemon::protocol::Event::Error {
+                code: Some(kanna_daemon::protocol::ErrorCode::ProtectedInputProtocolRequired),
+                message: "protected-input protocol mismatch: expected 1, got 2".to_string(),
+            };
+            write
+                .write_all(format!("{}\n", serde_json::to_string(&refusal).unwrap()).as_bytes())
+                .await
+                .unwrap();
+            // Keep the previous generation published. The server must wait
+            // for a different daemon PID instead of serving against this one.
+            std::future::pending::<()>().await
+        });
+
+        let db_path = unique_path("previous-daemon-generation", "sqlite");
+        let mut config = daemon_only_config(&daemon_dir);
+        config.db_path = db_path.clone();
+        config.lan_port = free_port().await;
+        let database = db::Db::open_for_tests(&db_path).unwrap();
+        let state = Arc::new(http_api::AppState::new(config.clone()));
+        let services = super::run_server_services(config.clone(), database, state);
+        tokio::pin!(services);
+        let assertions = async {
+            tokio::time::timeout(Duration::from_secs(2), negotiated_rx)
+                .await
+                .expect("server never negotiated with the previous daemon")
+                .unwrap();
+            let status_url = format!("http://127.0.0.1:{}/v1/status", config.lan_port);
+            let response = reqwest::Client::new().get(status_url).send().await;
+            assert!(
+                response.is_err(),
+                "HTTP must not bind while the daemon lacks fenced task input"
+            );
+        };
+        tokio::pin!(assertions);
+        tokio::select! {
+            _ = &mut services => {
+                panic!("server services exited instead of waiting for a supporting successor")
+            }
+            _ = &mut assertions => {}
+        }
+
+        previous_daemon.abort();
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+        let _ = std::fs::remove_file(db_path);
+    }
+
     fn daemon_only_config(daemon_dir: &str) -> Config {
         Config {
             relay_url: String::new(),
