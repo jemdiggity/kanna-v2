@@ -3,8 +3,9 @@ use crate::api::notify_mobile_via_api;
 use crate::models::MobileNotificationRequest;
 
 #[tokio::test]
-async fn notify_mobile_surfaces_the_fixed_relay_dependency_error() {
-    let safe_error = "mobile notification delivery failed (category=relayDependency, incident=incident-safe-123); retry later and inspect the matching environment's relay logs";
+async fn notify_mobile_surfaces_only_the_fixed_server_rejection_error() {
+    let safe_error = "mobile notification delivery failed (category=relayRejection, correlation=2); retry later and inspect the matching environment's server and relay logs";
+    let old_relay_canary = "ya29.old-relay-provider-canary-DO-NOT-LEAK";
     let response = http_json_response("503 Service Unavailable", safe_error);
     let (base_url, handle) = serve_single_http_response(response).await;
 
@@ -21,7 +22,9 @@ async fn notify_mobile_surfaces_the_fixed_relay_dependency_error() {
     let request = handle.await.unwrap();
 
     assert!(error.contains(safe_error));
+    assert!(!error.contains(old_relay_canary));
     assert!(request.starts_with("POST /v1/mobile/notifications HTTP/1.1"));
+    assert!(!request.contains(old_relay_canary));
 }
 
 #[tokio::test]

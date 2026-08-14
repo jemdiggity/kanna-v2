@@ -1364,6 +1364,48 @@ fn serve_reports_http_failures_as_tool_error_results() {
 }
 
 #[test]
+fn notify_mobile_surfaces_only_the_fixed_server_rejection_error() {
+    let safe_error = "mobile notification delivery failed (category=relayRejection, correlation=2); retry later and inspect the matching environment's server and relay logs";
+    let old_relay_canary = "ya29.old-relay-provider-canary-DO-NOT-LEAK";
+    let (base_url, server) = start_http_fixture(vec![ExpectedRequest {
+        method: "POST",
+        path: "/v1/mobile/notifications",
+        body: Some(json!({
+            "title": "Provider call rejected",
+            "body": "Exercise the server relay boundary."
+        })),
+        response_status: "503 Service Unavailable",
+        response_body: json!(safe_error),
+    }]);
+
+    let responses = run_kanna_mcp(
+        &base_url,
+        &[json!({
+            "jsonrpc": "2.0",
+            "id": 91,
+            "method": "tools/call",
+            "params": {
+                "name": "kanna_notify_mobile",
+                "arguments": {
+                    "title": "Provider call rejected",
+                    "body": "Exercise the server relay boundary."
+                }
+            }
+        })],
+    );
+
+    server.join().expect("fixture server");
+    assert_eq!(responses.len(), 1);
+    let message = tool_error_text(&responses[0]);
+    assert!(
+        message.contains(safe_error),
+        "unexpected MCP error: {message}"
+    );
+    assert!(!message.contains(old_relay_canary));
+    assert!(!responses[0].to_string().contains(old_relay_canary));
+}
+
+#[test]
 fn serve_reports_server_error_bodies_for_failed_actions() {
     let (base_url, server) = start_http_fixture(vec![ExpectedRequest {
         method: "POST",

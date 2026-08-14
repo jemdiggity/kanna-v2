@@ -16,6 +16,7 @@ use tokio_tungstenite::tungstenite::Message;
 const RELAY_PING_INTERVAL: Duration = Duration::from_secs(30);
 const RELAY_PONG_TIMEOUT: Duration = Duration::from_secs(75);
 const TASK_SNAPSHOT_POLL_INTERVAL: Duration = Duration::from_millis(500);
+const MOBILE_NOTIFICATION_REJECTION_CATEGORY: &str = "relayRejection";
 
 enum PendingDesktopRequest {
     ListActive {
@@ -24,6 +25,21 @@ enum PendingDesktopRequest {
     Invoke {
         response: tokio::sync::oneshot::Sender<Result<crate::http_api::HttpInvokeResponse, String>>,
     },
+}
+
+struct PendingMobileNotification {
+    correlation: u64,
+    response: tokio::sync::oneshot::Sender<
+        Result<crate::relay_client::MobileNotificationDelivery, String>,
+    >,
+}
+
+fn mobile_notification_rejection_error(correlation: u64) -> String {
+    format!(
+        "mobile notification delivery failed \
+         (category={MOBILE_NOTIFICATION_REJECTION_CATEGORY}, correlation={correlation}); \
+         retry later and inspect the matching environment's server and relay logs"
+    )
 }
 
 fn cloud_task_publication_enabled(desktop_secret: Option<&str>) -> bool {
@@ -162,20 +178,27 @@ pub(crate) async fn run_relay_loop(
                         continue;
                     }
 
+                    let correlation = next_mobile_notification_id;
                     let id = format!(
-                        "mobile-notification:{}:{}",
-                        config.desktop_id, next_mobile_notification_id
+                        "mobile-notification:{}:{correlation}",
+                        config.desktop_id
                     );
                     next_mobile_notification_id =
                         next_mobile_notification_id.wrapping_add(1).max(1);
-                    pending_mobile_notifications.insert(id.clone(), request.response);
+                    pending_mobile_notifications.insert(
+                        id.clone(),
+                        PendingMobileNotification {
+                            correlation,
+                            response: request.response,
+                        },
+                    );
                     let message = RelayMessage::MobileNotificationPublish {
                         id: id.clone(),
                         notification: request.notification,
                     };
                     if let Err(error) = send_relay_response_message(&sink, message).await {
-                        if let Some(response) = pending_mobile_notifications.remove(&id) {
-                            let _ = response.send(Err(error.clone()));
+                        if let Some(pending) = pending_mobile_notifications.remove(&id) {
+                            let _ = pending.response.send(Err(error.clone()));
                         }
                         log::error!("Failed to publish mobile notification: {error}");
                         break;
@@ -542,12 +565,13 @@ pub(crate) async fn run_relay_loop(
                             id,
                             ok,
                             delivery,
-                            error,
+                            error: _,
                         } => {
-                            let Some(response) = pending_mobile_notifications.remove(&id) else {
-                                log::warn!(
-                                    "Ignoring mobile notification ack for unknown request {id}"
-                                );
+                            let Some(pending) = pending_mobile_notifications.remove(&id) else {
+                                // The acknowledgement is untrusted, including its correlation
+                                // field. Only known requests have a server-owned correlation that
+                                // is safe to log or return.
+                                log::warn!("Ignoring mobile notification ack for unknown request");
                                 continue;
                             };
                             let result = if ok {
@@ -556,11 +580,12 @@ pub(crate) async fn run_relay_loop(
                                         .to_string()
                                 })
                             } else {
-                                Err(error.unwrap_or_else(|| {
-                                    "relay rejected mobile notification".to_string()
-                                }))
+                                let error =
+                                    mobile_notification_rejection_error(pending.correlation);
+                                log::warn!("{error}");
+                                Err(error)
                             };
-                            let _ = response.send(result);
+                            let _ = pending.response.send(result);
                         }
                         RelayMessage::Response {
                             id,
@@ -680,8 +705,10 @@ pub(crate) async fn run_relay_loop(
         http_state.set_desktop_routing_available(false);
         http_state.set_mobile_notifications_available(false);
         publisher.on_disconnected();
-        for (_, response) in pending_mobile_notifications.drain() {
-            let _ = response.send(Err("mobile notification relay disconnected".to_string()));
+        for (_, pending) in pending_mobile_notifications.drain() {
+            let _ = pending
+                .response
+                .send(Err("mobile notification relay disconnected".to_string()));
         }
         for (_, request) in pending_desktop_requests.drain() {
             fail_pending_desktop_request(request, "desktop relay disconnected".to_string());
@@ -1044,6 +1071,53 @@ async fn observer_loop(
 mod tests {
     use super::*;
     use kanna_daemon::protocol::TerminalSnapshot;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Mutex as StdMutex, Once};
+
+    static TEST_LOGGER: RelayTestLogger = RelayTestLogger;
+    static TEST_LOGGER_INIT: Once = Once::new();
+    static TEST_LOG_CAPTURE_ACTIVE: AtomicBool = AtomicBool::new(false);
+    static TEST_LOG_MESSAGES: StdMutex<Vec<String>> = StdMutex::new(Vec::new());
+
+    struct RelayTestLogger;
+
+    impl log::Log for RelayTestLogger {
+        fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+            TEST_LOG_CAPTURE_ACTIVE.load(Ordering::Acquire) && metadata.level() <= log::Level::Warn
+        }
+
+        fn log(&self, record: &log::Record<'_>) {
+            if self.enabled(record.metadata()) {
+                TEST_LOG_MESSAGES
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(format!("{}: {}", record.level(), record.args()));
+            }
+        }
+
+        fn flush(&self) {}
+    }
+
+    fn start_test_log_capture() {
+        TEST_LOGGER_INIT.call_once(|| {
+            log::set_logger(&TEST_LOGGER).expect("install relay test logger");
+            log::set_max_level(log::LevelFilter::Warn);
+        });
+        TEST_LOG_MESSAGES
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        TEST_LOG_CAPTURE_ACTIVE.store(true, Ordering::Release);
+    }
+
+    fn finish_test_log_capture() -> Vec<String> {
+        TEST_LOG_CAPTURE_ACTIVE.store(false, Ordering::Release);
+        std::mem::take(
+            &mut *TEST_LOG_MESSAGES
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
+    }
 
     #[test]
     fn relay_snapshot_event_preserves_terminal_snapshot_payload() {
@@ -1087,9 +1161,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mobile_notification_endpoint_hands_off_to_capable_relay() {
+    async fn mobile_notification_endpoint_preserves_delivery_and_sanitizes_old_relay_rejection() {
         use tokio::time::timeout;
         use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
+
+        const OLD_RELAY_CANARY: &str = "ya29.old-relay-provider-canary-DO-NOT-LEAK";
+        const OLD_RELAY_PROJECT: &str = "kanna-secret-project";
+        const OLD_RELAY_TOKEN_DIAGNOSTIC: &str = "raw-device-token-diagnostic";
+
+        start_test_log_capture();
 
         let relay_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -1174,10 +1254,10 @@ mod tests {
                             "acceptedCount": 0,
                             "failedCount": 1,
                             "failureReasons": [{
-                                "providerCode": "messaging/mismatched-credential",
-                                "category": "relayPermission",
+                                "providerCode": "messaging/registration-token-not-registered",
+                                "category": "invalidToken",
                                 "count": 1,
-                                "message": "The relay service account cannot send Firebase Cloud Messaging messages in this environment. Grant roles/firebasecloudmessaging.admin to the relay VM service account."
+                                "message": "The registered push token is invalid or expired and was removed. Reopen the matching mobile app environment to register a current token."
                             }]
                         }
                     })
@@ -1187,7 +1267,11 @@ mod tests {
                         "type": "mobile_notification_ack",
                         "id": value["id"],
                         "ok": false,
-                        "error": "mobile notification delivery failed (category=relayDependency, incident=incident-safe-123); retry later and inspect the matching environment's relay logs"
+                        "error": format!(
+                            "Firebase Admin request rejected: Authorization: Bearer \
+                             {OLD_RELAY_CANARY}; project={OLD_RELAY_PROJECT}; \
+                             response={{\"tokenDiagnostics\":\"{OLD_RELAY_TOKEN_DIAGNOSTIC}\"}}"
+                        )
                     })
                 };
                 socket
@@ -1263,20 +1347,40 @@ mod tests {
                 "acceptedCount": 0,
                 "failedCount": 1,
                 "failureReasons": [{
-                    "providerCode": "messaging/mismatched-credential",
-                    "category": "relayPermission",
+                    "providerCode": "messaging/registration-token-not-registered",
+                    "category": "invalidToken",
                     "count": 1,
-                    "message": "The relay service account cannot send Firebase Cloud Messaging messages in this environment. Grant roles/firebasecloudmessaging.admin to the relay VM service account."
+                    "message": "The registered push token is invalid or expired and was removed. Reopen the matching mobile app environment to register a current token."
                 }]
             }))
         );
-        let safe_error = "mobile notification delivery failed (category=relayDependency, incident=incident-safe-123); retry later and inspect the matching environment's relay logs";
+        let safe_error = mobile_notification_rejection_error(2);
         assert_eq!(rejected.status, 503, "{rejected:?}");
         assert_eq!(
             rejected.body,
-            Some(serde_json::Value::String(safe_error.to_string()))
+            Some(serde_json::Value::String(safe_error.clone()))
         );
-        assert_eq!(rejected.error.as_deref(), Some(safe_error));
+        assert_eq!(rejected.error.as_deref(), Some(safe_error.as_str()));
+
+        let logs = finish_test_log_capture();
+        assert!(logs.iter().any(|line| {
+            line.contains("category=relayRejection") && line.contains("correlation=2")
+        }));
+        let downstream_output = serde_json::json!({
+            "serverLogs": logs,
+            "httpResponse": rejected,
+        })
+        .to_string();
+        for forbidden in [
+            OLD_RELAY_CANARY,
+            OLD_RELAY_PROJECT,
+            OLD_RELAY_TOKEN_DIAGNOSTIC,
+        ] {
+            assert!(
+                !downstream_output.contains(forbidden),
+                "old-relay acknowledgement leaked {forbidden}: {downstream_output}"
+            );
+        }
 
         relay_server.await.expect("relay server");
         let _ = std::fs::remove_file(database_path);
