@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { pathToFileURL } from "node:url";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import {
   verifyPhoneToken,
@@ -33,6 +34,9 @@ import {
   publishMobileNotification,
   type MobileNotificationDelivery,
 } from "./mobileNotifications.js";
+import {
+  attachWebSocketMessageHandler,
+} from "./webSocketMessageLifecycle.js";
 
 const PORT = parseInt(process.env.PORT || "8080", 10);
 const AUTH_TIMEOUT_MS = 10_000;
@@ -69,7 +73,7 @@ function jsonResponse(
 
 // --- HTTP server ---
 
-const server = createServer(async (req, res) => {
+export const server = createServer(async (req, res) => {
   try {
     if (
       E2E_SHUTDOWN_TOKEN &&
@@ -198,7 +202,7 @@ const server = createServer(async (req, res) => {
 
 // --- WebSocket server ---
 
-const wss = new WebSocketServer({ server });
+export const wss = new WebSocketServer({ server });
 
 wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
   const remoteAddr = req.socket.remoteAddress ?? "unknown";
@@ -240,7 +244,11 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
     }
   }, AUTH_TIMEOUT_MS);
 
-  ws.on("message", async (raw: RawData, isBinary: boolean) => {
+  attachWebSocketMessageHandler(ws, remoteAddr, async (
+    raw: RawData,
+    isBinary: boolean,
+    messageLifecycle,
+  ) => {
     // --- Auth handshake (first message) ---
     if (!authenticated) {
       const data = raw.toString();
@@ -422,14 +430,13 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
           delivery?: MobileNotificationDelivery,
           error?: string
         ) => {
-          if (ws.readyState !== 1) return;
-          ws.send(JSON.stringify({
+          messageLifecycle.sendMobileNotificationAck({
             type: "mobile_notification_ack",
             id,
             ok,
             ...(delivery ? { delivery } : {}),
             ...(error ? { error } : {}),
-          }));
+          });
         };
         if (serverAuthProof?.kind !== "desktop") {
           sendAck(false, undefined, "desktop-secret authentication is required");
@@ -468,13 +475,12 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
               sequence: nextPublicationSequence++,
             };
         const sendAck = (ok: boolean, error?: string) => {
-          if (ws.readyState !== 1) return;
-          ws.send(JSON.stringify({
+          messageLifecycle.sendTaskSnapshotAck({
             type: "task_snapshot_ack",
             id,
             ok,
             ...(error ? { error } : {}),
-          }));
+          });
         };
         if (serverAuthProof?.kind !== "desktop") {
           sendAck(false, "desktop-secret authentication is required for task snapshot publication");
@@ -530,12 +536,19 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
 
 // --- Start ---
 
-server.listen(PORT, () => {
-  console.log(`[relay] Listening on port ${PORT}`);
-  console.log(
-    `[relay] Firebase project=${process.env.FIREBASE_PROJECT_ID?.trim() || "(default)"}`
-  );
-});
+export function startRelay(port = PORT, host?: string): void {
+  const onListening = () => {
+    console.log(`[relay] Listening on port ${port}`);
+    console.log(
+      `[relay] Firebase project=${process.env.FIREBASE_PROJECT_ID?.trim() || "(default)"}`
+    );
+  };
+  if (host) {
+    server.listen(port, host, onListening);
+  } else {
+    server.listen(port, onListening);
+  }
+}
 
 let shuttingDown = false;
 function shutdown(signal: string): void {
@@ -555,5 +568,12 @@ function shutdown(signal: string): void {
   }, 4_000).unref();
 }
 
-process.once("SIGTERM", () => shutdown("SIGTERM"));
-process.once("SIGINT", () => shutdown("SIGINT"));
+const isEntrypoint =
+  typeof process.argv[1] === "string"
+  && pathToFileURL(process.argv[1]).href === import.meta.url;
+
+if (isEntrypoint) {
+  startRelay();
+  process.once("SIGTERM", () => shutdown("SIGTERM"));
+  process.once("SIGINT", () => shutdown("SIGINT"));
+}
