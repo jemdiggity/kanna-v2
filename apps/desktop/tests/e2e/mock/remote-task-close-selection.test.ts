@@ -100,7 +100,7 @@ function remoteSnapshot() {
 
 async function selectedTaskId(client: WebDriverClient): Promise<string | null> {
   return client.executeSync<string | null>(
-    `return document.querySelector(".sidebar .pipeline-item.selected")
+    `return document.querySelector(".sidebar .workflow-item.selected")
       ?.getAttribute("data-task-id") ?? null;`,
   );
 }
@@ -131,9 +131,9 @@ describe("remote task close replacement selection", () => {
     );
     expect(result).toBe("ok");
 
-    const childASelector = `.sidebar .pipeline-item[data-task-id="${childATaskId}"]`;
-    const childBSelector = `.sidebar .pipeline-item[data-task-id="${childBTaskId}"]`;
-    const parentSelector = `.sidebar .pipeline-item[data-task-id="${parentTaskId}"]`;
+    const childASelector = `.sidebar .workflow-item[data-task-id="${childATaskId}"]`;
+    const childBSelector = `.sidebar .workflow-item[data-task-id="${childBTaskId}"]`;
+    const parentSelector = `.sidebar .workflow-item[data-task-id="${parentTaskId}"]`;
     try {
       await client.waitForElement(childASelector, 5_000);
       await client.executeSync(
