@@ -1,18 +1,59 @@
 use super::{discover_repo, format_git_command_failure, read_process_cwd_for_diagnostics};
 use git2::Repository;
+use serde::Serialize;
 use std::collections::BTreeSet;
 use std::process::Command;
 
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitRepositoryState {
+    default_branch: String,
+    has_commits: bool,
+}
+
 #[tauri::command]
 pub fn git_default_branch(repo_path: String) -> Result<String, String> {
-    let repo = discover_repo(&repo_path)?;
+    Ok(git_repository_state(repo_path)?.default_branch)
+}
 
+#[tauri::command]
+pub fn git_repository_state(repo_path: String) -> Result<GitRepositoryState, String> {
+    let repo = discover_repo(&repo_path)?;
+    let has_commits = repository_has_commits(&repo)?;
+
+    Ok(GitRepositoryState {
+        default_branch: resolve_default_branch(&repo, !has_commits),
+        has_commits,
+    })
+}
+
+fn repository_has_commits(repo: &Repository) -> Result<bool, String> {
+    if repo
+        .head()
+        .ok()
+        .and_then(|head| head.peel_to_commit().ok())
+        .is_some()
+    {
+        return Ok(true);
+    }
+
+    let references = repo.references().map_err(|error| error.to_string())?;
+    for reference in references {
+        let reference = reference.map_err(|error| error.to_string())?;
+        if reference.peel_to_commit().is_ok() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn resolve_default_branch(repo: &Repository, is_empty: bool) -> String {
     // Try to detect from remote HEAD reference
     if let Ok(reference) = repo.find_reference("refs/remotes/origin/HEAD") {
         if let Some(target) = reference.symbolic_target() {
-            // e.g. "refs/remotes/origin/main" -> "main"
-            let branch = target.rsplit('/').next().unwrap_or("main").to_string();
-            return Ok(branch);
+            if let Some(branch) = target.strip_prefix("refs/remotes/origin/") {
+                return branch.to_string();
+            }
         }
     }
 
@@ -20,11 +61,25 @@ pub fn git_default_branch(repo_path: String) -> Result<String, String> {
     for name in &["main", "master"] {
         let refname = format!("refs/heads/{}", name);
         if repo.find_reference(&refname).is_ok() {
-            return Ok(name.to_string());
+            return name.to_string();
         }
     }
 
-    Ok("main".to_string())
+    // An unborn HEAD has no local branch reference yet. Preserve its configured
+    // initial branch name so importing `git init --initial-branch=trunk` does
+    // not silently rewrite the repository metadata to `main`.
+    if is_empty {
+        if let Ok(head) = repo.find_reference("HEAD") {
+            if let Some(branch) = head
+                .symbolic_target()
+                .and_then(|target| target.strip_prefix("refs/heads/"))
+            {
+                return branch.to_string();
+            }
+        }
+    }
+
+    "main".to_string()
 }
 
 #[tauri::command]
@@ -212,7 +267,7 @@ pub fn git_fetch(repo_path: String, branch: Option<String>) -> Result<(), String
 mod tests {
     use super::{
         git_branch_upstream, git_current_branch, git_default_branch, git_list_base_branches,
-        parse_remote_base_branches,
+        git_repository_state, parse_remote_base_branches, GitRepositoryState,
     };
     use crate::commands::git::test_support::{create_commit, TempRepo};
     use git2::Repository;
@@ -235,6 +290,93 @@ mod tests {
             .expect("current branch lookup should succeed");
 
         assert_eq!(current, Some("feature/renamed".to_string()));
+    }
+
+    #[test]
+    fn git_repository_state_classifies_an_unborn_explicit_initial_branch() {
+        let temp_repo = TempRepo::new("empty-trunk");
+        let repo = Repository::init_opts(
+            &temp_repo.path,
+            git2::RepositoryInitOptions::new().initial_head("trunk"),
+        )
+        .expect("repo should initialize");
+        drop(repo);
+
+        let state = git_repository_state(temp_repo.path.to_string_lossy().into_owned())
+            .expect("repository state should resolve");
+
+        assert_eq!(
+            state,
+            GitRepositoryState {
+                default_branch: "trunk".to_string(),
+                has_commits: false,
+            }
+        );
+    }
+
+    #[test]
+    fn git_repository_state_keeps_detached_head_and_remote_only_repositories_non_empty() {
+        let detached_repo = TempRepo::new("detached");
+        let repo = Repository::init(&detached_repo.path).expect("repo should initialize");
+        let commit_id = create_commit(&repo, &detached_repo.path);
+        repo.set_head_detached(commit_id)
+            .expect("HEAD should detach at the commit");
+
+        let detached_state =
+            git_repository_state(detached_repo.path.to_string_lossy().into_owned())
+                .expect("detached repository state should resolve");
+        assert_eq!(
+            detached_state,
+            GitRepositoryState {
+                default_branch: "master".to_string(),
+                has_commits: true,
+            }
+        );
+
+        let remote_repo = TempRepo::new("remote-only");
+        let repo = Repository::init(&remote_repo.path).expect("repo should initialize");
+        let commit_id = create_commit(&repo, &remote_repo.path);
+        repo.reference(
+            "refs/remotes/origin/release/next",
+            commit_id,
+            true,
+            "create remote-only commit ref",
+        )
+        .expect("remote ref should exist");
+        repo.reference_symbolic(
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/release/next",
+            true,
+            "create symbolic remote HEAD",
+        )
+        .expect("remote HEAD should exist");
+        repo.find_reference("refs/heads/master")
+            .expect("initial local branch should exist")
+            .delete()
+            .expect("local branch should be removed");
+
+        let remote_state = git_repository_state(remote_repo.path.to_string_lossy().into_owned())
+            .expect("remote-only repository state should resolve");
+        assert_eq!(
+            remote_state,
+            GitRepositoryState {
+                default_branch: "release/next".to_string(),
+                has_commits: true,
+            }
+        );
+    }
+
+    #[test]
+    fn git_repository_state_rejects_non_repositories_and_missing_paths() {
+        let temp_dir = TempRepo::new("not-a-repo");
+        let non_repo_error = git_repository_state(temp_dir.path.to_string_lossy().into_owned())
+            .expect_err("a plain directory should be rejected");
+        assert!(!non_repo_error.is_empty());
+
+        let missing = temp_dir.path.join("missing");
+        let missing_error = git_repository_state(missing.to_string_lossy().into_owned())
+            .expect_err("a missing path should be rejected");
+        assert!(!missing_error.is_empty());
     }
 
     #[test]

@@ -126,6 +126,9 @@ describe("useAppTaskCreation", () => {
       if (command === "read_text_file") return "";
       if (command === "git_default_branch") return "main";
       if (command === "git_list_base_branches") return ["origin/main"];
+      if (command === "git_repository_state") {
+        return { defaultBranch: "main", hasCommits: true };
+      }
       return "";
     });
   });
@@ -808,6 +811,9 @@ describe("useAppTaskCreation", () => {
 
   it("skips the setup agent when an imported repository already has .kanna", async () => {
     invokeMock.mockImplementation(async (command: string, args?: { path?: string }) => {
+      if (command === "git_repository_state") {
+        return { defaultBranch: "main", hasCommits: true };
+      }
       if (command === "file_exists" && args?.path === "/repo/.kanna") return true;
       return "";
     });
@@ -833,6 +839,9 @@ describe("useAppTaskCreation", () => {
 
   it("launches the setup agent when an imported repository has no .kanna", async () => {
     invokeMock.mockImplementation(async (command: string, args?: { path?: string }) => {
+      if (command === "git_repository_state") {
+        return { defaultBranch: "main", hasCommits: true };
+      }
       if (command === "file_exists" && args?.path === "/repo/.kanna") return false;
       return "";
     });
@@ -859,8 +868,30 @@ describe("useAppTaskCreation", () => {
     expect(store.createItem.mock.calls[0]?.[4]).not.toHaveProperty("agentProvider");
   });
 
+  it("guides an imported zero-commit repository without attempting a setup task", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "git_repository_state") {
+        return { defaultBranch: "trunk", hasCommits: false };
+      }
+      return "";
+    });
+    const { creation, store, toast } = createTaskCreationHarness();
+
+    await creation.handleImportRepo("/repo", "repo", "trunk");
+
+    expect(store.importRepo).toHaveBeenCalledWith("/repo", "repo", "trunk");
+    expect(store.loadAgent).not.toHaveBeenCalled();
+    expect(store.createItem).not.toHaveBeenCalled();
+    expect(toast.warning).toHaveBeenCalledTimes(1);
+    expect(toast.warning).toHaveBeenCalledWith("toasts.emptyRepoNeedsInitialCommit");
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
   it("skips the setup agent when a cloned repository already has .kanna", async () => {
     invokeMock.mockImplementation(async (command: string, args?: { path?: string }) => {
+      if (command === "git_repository_state") {
+        return { defaultBranch: "main", hasCommits: true };
+      }
       if (command === "file_exists" && args?.path === "/clone/.kanna") return true;
       return "";
     });
@@ -887,26 +918,22 @@ describe("useAppTaskCreation", () => {
     expect(store.createItem).not.toHaveBeenCalled();
   });
 
-  it("still launches the setup agent for a newly created repository", async () => {
-    const { creation, store } = createTaskCreationHarness();
+  it("guides a newly created zero-commit repository instead of launching a setup task", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "git_repository_state") {
+        return { defaultBranch: "main", hasCommits: false };
+      }
+      return "";
+    });
+    const { creation, store, toast } = createTaskCreationHarness();
 
     await creation.handleCreateRepo("repo", "/repo");
 
     expect(store.createRepo).toHaveBeenCalledWith("repo", "/repo");
     expect(invokeMock).not.toHaveBeenCalledWith("file_exists", { path: "/repo/.kanna" });
-    expect(store.loadAgent).toHaveBeenCalledWith("repo-1", "setup");
-    expect(store.createItem).toHaveBeenCalledWith(
-      "repo-1",
-      "/repo",
-      "Set up Kanna for this repository.",
-      "pty",
-      expect.objectContaining({
-        customTask: expect.objectContaining({
-          name: "Set Up Repository",
-          agent: "setup",
-          prompt: "Set up Kanna for this repository.",
-        }),
-      }),
-    );
+    expect(store.loadAgent).not.toHaveBeenCalled();
+    expect(store.createItem).not.toHaveBeenCalled();
+    expect(toast.warning).toHaveBeenCalledWith("toasts.emptyRepoNeedsInitialCommit");
+    expect(toast.error).not.toHaveBeenCalled();
   });
 });

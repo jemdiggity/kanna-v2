@@ -146,6 +146,7 @@
     "prCreationFailed": "PRの作成に失敗しました",
     "repoCreationFailed": "リポジトリの作成に失敗しました",
     "repoImportFailed": "リポジトリのインポートに失敗しました",
+    "emptyRepoNeedsInitialCommit": "最初のコミットを作成してから、「リポジトリをセットアップ」を実行してください。",
     "cloneFailed": "クローンに失敗しました",
     "worktreeFailed": "ワークツリーの作成に失敗しました",
     "fetchFailed": "リモートから最新を取得できませんでした — ワークツリーは古いmainに基づいている可能性があります",

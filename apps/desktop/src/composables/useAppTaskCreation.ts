@@ -26,6 +26,11 @@ interface SidebarRepoProjection {
   id: string;
 }
 
+interface GitRepositoryState {
+  defaultBranch: string;
+  hasCommits: boolean;
+}
+
 interface UseAppTaskCreationOptions {
   store: ReturnType<typeof useKannaStore>;
   toast: ReturnType<typeof useToast>;
@@ -346,6 +351,20 @@ export function useAppTaskCreation({
     repoId: string | null | undefined,
     repoPath: string,
   ) {
+    if (!repoId) return;
+    let repositoryState: GitRepositoryState;
+    try {
+      repositoryState = await invoke<GitRepositoryState>("git_repository_state", { repoPath });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.error("[App] setup eligibility check failed:", error);
+      toast.error(`${t('toasts.taskCreationFailed')}: ${msg}`);
+      return;
+    }
+    if (!repositoryState.hasCommits) {
+      toast.warning(t("toasts.emptyRepoNeedsInitialCommit"));
+      return;
+    }
     const hasKannaConfig = await fileExistsSafe(`${repoPath}/.kanna`);
     if (hasKannaConfig) return;
     await launchSetupTask(repoId, repoPath);
@@ -356,7 +375,7 @@ export function useAppTaskCreation({
       const repoId = await store.createRepo(name, path);
       if (repoId) claimLocalTaskOwnership(repoId);
       showAddRepoModal.value = false;
-      await launchSetupTask(repoId, path);
+      await launchSetupTaskIfNeeded(repoId, path);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       toast.error(`${t('toasts.repoCreationFailed')}: ${msg}`);
