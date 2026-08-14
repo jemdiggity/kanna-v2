@@ -521,6 +521,8 @@ describe("kd CLI", () => {
 
     await expect(runCli(["mobile", "run", "--help"])).resolves.toBe(0);
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd mobile run --device"));
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("defaults to apps/mobile/VERSION"));
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("KANNA_APP_VERSION is an explicit"));
 
     await expect(runCli(["mobile", "uninstall", "--help"])).resolves.toBe(0);
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd mobile uninstall --device"));
@@ -530,6 +532,7 @@ describe("kd CLI", () => {
 
     await expect(runCli(["mobile", "archive", "--help"])).resolves.toBe(0);
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd mobile archive --production"));
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("defaults to apps/mobile/VERSION"));
 
     await expect(runCli(["mobile", "ota", "publish", "--staging", "--help"])).resolves.toBe(0);
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd mobile ota publish"));

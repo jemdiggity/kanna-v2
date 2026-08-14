@@ -481,6 +481,22 @@ export async function assertBuildInfoJourney(
   );
 }
 
+export function resolveBuildInfoSmokeExpectations(
+  env: Record<string, string | undefined>
+): Parameters<typeof assertBuildInfoJourney>[1] {
+  const environment = resolveMobileAppEnvironment(env.KANNA_APP_ENV);
+  const nativeVersion = env.KANNA_E2E_EXPECTED_NATIVE_VERSION?.trim();
+  const runningSource =
+    env.KANNA_E2E_EXPECTED_RUNNING_SOURCE?.trim() || "Development bundle (Metro)";
+  return {
+    channel: environment.otaChannel ?? "None",
+    environment: environment.name,
+    ...(nativeVersion ? { nativeVersion } : {}),
+    runningSource,
+    runtimeVersion: environment.runtimeVersion
+  };
+}
+
 export async function runBuildInfoJourney(
   driver: Browser,
   expected: Parameters<typeof assertBuildInfoJourney>[1]
@@ -643,18 +659,12 @@ async function getAccessibilityLabel(
 
 export async function runProfileConnectionSmoke(driver: Browser): Promise<void> {
   const ui = createProfileMachinesUi(driver);
-  const environment = resolveMobileAppEnvironment(process.env.KANNA_APP_ENV);
   await (await driver.$(selectors.appShell)).waitForDisplayed({
     timeout: SCREEN_TIMEOUT_MS
   });
   await assertToolbarActionPathsReachable(ui);
   await assertRepositoryCommandJourney(ui);
-  await assertBuildInfoJourney(ui, {
-    channel: environment.otaChannel ?? "None",
-    environment: environment.name,
-    runningSource: "Development bundle (Metro)",
-    runtimeVersion: environment.runtimeVersion
-  });
+  await assertBuildInfoJourney(ui, resolveBuildInfoSmokeExpectations(process.env));
   await openProfileSheet(ui);
   await assertProfileSignInControlsReachable(ui);
   await assertProfilePasswordCanRevealAndHide(ui);

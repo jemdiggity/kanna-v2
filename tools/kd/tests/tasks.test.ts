@@ -1350,7 +1350,7 @@ describe("task executors", () => {
     ).toBe(false);
   });
 
-  it("starts staging mobile, prebuilds the staging bundle, and launches it on a physical device", async () => {
+  it("starts staging mobile without deriving its marketing version from the desktop RC", async () => {
     const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-device-staging-"));
     const calls: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv; cwd?: string }> = [];
     const runner: CommandRunner = {
@@ -1381,6 +1381,9 @@ describe("task executors", () => {
         if (command === "xcrun" && args.includes("devicectl")) {
           return { exitCode: 0, stdout: "build.kanna.app.staging\n", stderr: "" };
         }
+        if (command === "gh") {
+          return { exitCode: 0, stdout: '{"version":"0.2.0-staging.1"}\n', stderr: "" };
+        }
         return { exitCode: 0, stdout: "", stderr: "" };
       }
     };
@@ -1404,8 +1407,7 @@ describe("task executors", () => {
         }
       },
       {
-        resolveLanAddress: () => "172.16.0.193",
-        resolveStagingMarketingVersion: async () => "0.1.0"
+        resolveLanAddress: () => "172.16.0.193"
       }
     );
 
@@ -1443,13 +1445,23 @@ describe("task executors", () => {
     expect(calls[tmuxMobileIndex]?.args.join(" ")).toContain("EXPO_PUBLIC_FIREBASE_PROJECT_ID='kanna-staging'");
     expect(calls[tmuxMobileIndex]?.args.join(" ")).toContain("EXPO_PUBLIC_KANNA_RELAY_URL='wss://relay-staging.kanna.build'");
     expect(calls[prebuildIndex]?.env?.KANNA_APP_ENV).toBe("staging");
-    expect(calls[prebuildIndex]?.env?.KANNA_APP_VERSION).toBe("0.1.0");
+    expect(calls[prebuildIndex]?.env?.KANNA_APP_VERSION).toBeUndefined();
     expect(calls[installIndex]?.env?.KANNA_APP_ENV).toBe("staging");
-    expect(calls[installIndex]?.env?.KANNA_APP_VERSION).toBe("0.1.0");
+    expect(calls[installIndex]?.env?.KANNA_APP_VERSION).toBeUndefined();
     expect(calls[installIndex]?.env?.REACT_NATIVE_PACKAGER_HOSTNAME).toBe("172.16.0.193");
+    expect(calls.some((call) => call.command === "gh")).toBe(false);
   });
 
-  it("installs a staging Release app on a physical device without starting Metro", async () => {
+  it.each([
+    {
+      name: "defaults a staging Release install to the mobile-owned marketing version",
+      explicitVersion: undefined
+    },
+    {
+      name: "preserves an explicit staging Release install marketing-version override",
+      explicitVersion: "9.8.7"
+    }
+  ])("$name", async ({ explicitVersion }) => {
     const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-device-staging-install-"));
     await mkdir(join(repoRoot, "apps", "mobile", "ios", "KannaStaging.xcworkspace"), {
       recursive: true
@@ -1493,6 +1505,9 @@ describe("task executors", () => {
         if (command === "tmux") {
           return { exitCode: 1, stdout: "", stderr: "install mode should not start tmux" };
         }
+        if (command === "gh") {
+          return { exitCode: 0, stdout: '{"version":"0.2.0-staging.1"}\n', stderr: "" };
+        }
         return { exitCode: 0, stdout: "Installed Kanna Staging\n", stderr: "" };
       }
     };
@@ -1513,14 +1528,9 @@ describe("task executors", () => {
             KANNA_MOBILE_PORT: "1430",
             KANNA_MOBILE_SERVER_PORT: "48120",
             KANNA_APP_ENV: "dev",
-            KANNA_APP_VERSION: "9.8.7",
+            ...(explicitVersion ? { KANNA_APP_VERSION: explicitVersion } : {}),
             KANNA_IOS_PHYSICAL_DEVICE_NAME: "Jerome's iPhone 15"
           }
-        }
-      },
-      {
-        resolveStagingMarketingVersion: async () => {
-          throw new Error("must not resolve the channel when explicitly overridden");
         }
       }
     );
@@ -1550,6 +1560,7 @@ describe("task executors", () => {
     });
     expect(calls.some((call) => call.command === "tmux")).toBe(false);
     expect(calls.some((call) => call.command === "curl")).toBe(false);
+    expect(calls.some((call) => call.command === "gh")).toBe(false);
     const prebuildIndex = calls.findIndex(
       (call) => call.command === "pnpm" && call.args.includes("prebuild")
     );
@@ -1574,7 +1585,7 @@ describe("task executors", () => {
       cwd: repoRoot
     });
     expect(calls[prebuildIndex]?.env?.KANNA_APP_ENV).toBe("staging");
-    expect(calls[prebuildIndex]?.env?.KANNA_APP_VERSION).toBe("9.8.7");
+    expect(calls[prebuildIndex]?.env?.KANNA_APP_VERSION).toBe(explicitVersion);
     expect(calls[buildIndex]).toMatchObject({
       command: "xcodebuild",
       args: [
@@ -1595,7 +1606,7 @@ describe("task executors", () => {
       cwd: repoRoot
     });
     expect(calls[buildIndex]?.env?.KANNA_APP_ENV).toBe("staging");
-    expect(calls[buildIndex]?.env?.KANNA_APP_VERSION).toBe("9.8.7");
+    expect(calls[buildIndex]?.env?.KANNA_APP_VERSION).toBe(explicitVersion);
     expect(calls[buildIndex]?.env?.REACT_NATIVE_PACKAGER_HOSTNAME).toBeUndefined();
     expect(calls[buildIndex]?.env?.RCT_METRO_PORT).toBeUndefined();
     expect(calls[installIndex]).toMatchObject({
@@ -1701,7 +1712,6 @@ describe("task executors", () => {
       },
       {
         resolveLanAddress: () => "172.16.0.193",
-        resolveStagingMarketingVersion: async () => "0.1.0",
         listStagingRelayActiveDesktopIds: async () => new Set(["desktop-worktree-staging"])
       }
     );

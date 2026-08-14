@@ -15,13 +15,12 @@ malformed mobile file fails loudly rather than invisibly coupling the build
 back to the desktop version. Dev builds therefore have a deterministic
 non-placeholder fallback without inheriting every desktop release bump.
 
-Staging is different: its active release series may be ahead of production
-`VERSION`. Before any physical staging build, kd downloads the authoritative
-`desktop-staging/latest-staging.json` channel pointer and converts a version
-such as `0.1.0-staging.2` to the native marketing version `0.1.0`. It fails
-closed before prebuild when the channel is unavailable or malformed rather
-than guessing from local tags. An explicit `KANNA_APP_VERSION` bypasses that
-lookup. The native runtime remains `2.1.4` in every environment.
+Staging now follows the same independent contract. Physical staging builds do
+not download `desktop-staging/latest-staging.json` or convert a desktop RC into
+a mobile marketing version. They leave `KANNA_APP_VERSION` unset by default so
+`app.config.ts` reads `apps/mobile/VERSION`; an explicit value remains an
+intentional diagnostic/build override. The native runtime remains `2.1.4` in
+every environment.
 
 ## Verification status
 
@@ -32,36 +31,14 @@ Automated coverage added:
   loud path-specific failures for empty or malformed mobile versions.
 - `tools/kd/src/runtime/mobile-archive.test.ts` — the same three-level archive
   precedence and path-specific empty/malformed mobile VERSION failures.
-- `tools/kd/tests/release.test.ts` — active staging channel resolution,
-  prerelease-suffix removal, invalid-manifest rejection, and network failure.
-- `tools/kd/tests/tasks.test.ts` — resolved staging versions reach dev-client
-  and Release prebuild/build environments, while explicit overrides bypass
-  channel resolution.
+- `tools/kd/tests/tasks.test.ts` — staging dev-client and bundled Release paths
+  preserve identity/environment settings, leave the default version unset for
+  `app.config.ts`, preserve an explicit override, and perform no desktop RC
+  lookup.
 - `apps/mobile/e2e/specs/smoke/profile-connection.e2e.ts` — the About-this-build
   journey fails on a placeholder or malformed Native value and can assert an
   exact expected native version/build.
 
-After rebasing onto the mobile signing/install fix, a clean canonical run was
-performed against Jerome's connected iPhone 15:
-
-```sh
-rm -rf apps/mobile/ios
-KANNA_IOS_DEVICE_UDID=00008130-001015CA1091401C \
-  ./kd mobile run --device --staging --install
-```
-
-The active channel was `0.1.0-staging.2`. Expo prebuild, CocoaPods installation,
-the Release build, signing, device installation, and launch all succeeded. The
-installed app and exact built artifact report `Kanna Staging`, bundle ID
-`build.kanna.app.staging`, native version `0.1.0` build `1`, runtime `2.1.4`,
-OTA channel `staging`, and the staging manifest URL. The independent
-`test:e2e:device:release-install` launch check also passed.
-
-The rendered About-this-build journey could not be observed automatically in
-this run. CoreDevice could inspect and launch the paired iPhone, but the Appium
-XCUITest transport reported no accessible real devices and rejected the exact
-UDID before session creation. The committed journey now supports the required
-exact assertion (`0.1.0 (1)`, runtime `2.1.4`, staging identity/channel,
-`Embedded bundle`) once the phone is visible to XCUITest. The underlying
-expo-application native-values → `BuildIdentity` → panel hop remains covered by
-`apps/mobile/src/lib/updates/buildIdentity.test.ts`.
+The previous physical-device result in this note validated the older
+desktop-coupled behavior and is superseded. Current physical verification is
+tracked in `docs/2026-08-14-staging-mobile-marketing-version-e2e-gap.md`.

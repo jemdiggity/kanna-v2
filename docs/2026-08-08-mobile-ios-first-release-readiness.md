@@ -228,9 +228,10 @@ Grouped by who does it.
 
 - **C1** — ~~Decide the marketing version.~~ **Done (#1045).** The mobile app now
   has its own `apps/mobile/VERSION`, seeded `1.0.0`. Precedence is
-  `KANNA_APP_VERSION` → `apps/mobile/VERSION` → repo `VERSION`, so the staging
-  override still wins and desktop releases no longer bump the mobile marketing
-  version. Note nothing in `kd` bumps `apps/mobile/VERSION` — it is a hand edit.
+  `KANNA_APP_VERSION` → `apps/mobile/VERSION` → repo `VERSION` in every mobile
+  environment. Desktop releases and staging RCs do not select or bump the
+  mobile marketing version. Note nothing in `kd` bumps `apps/mobile/VERSION` —
+  it is a hand edit.
 - **C2** — Run the gate: `./kd mobile qa --production --ota`. The OTA half needs
   Google Cloud credentials for `kanna-build`. Run this against the actual
   archive candidate, not just `main`.

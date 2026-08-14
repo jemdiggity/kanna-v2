@@ -115,12 +115,11 @@ function readVersionFile(candidate: string, mobile: boolean): string {
 }
 
 // The native CFBundleShortVersionString source of truth. An explicit
-// KANNA_APP_VERSION (production archives and kd staging device builds) wins.
-// Other local builds prefer apps/mobile/VERSION, with the repository VERSION
-// retained as a compatibility fallback. Kd must supply the active staging
-// marketing version because that series may be ahead of either checked-in
-// version. Keep walking upward so config loading works from the repo root or a
-// nested mobile directory.
+// KANNA_APP_VERSION diagnostic/build override wins. Every canonical mobile
+// build otherwise prefers apps/mobile/VERSION, independently of the desktop
+// release series, with the repository VERSION retained as a compatibility
+// fallback. Keep walking upward so config loading works from the repo root or
+// a nested mobile directory.
 export function readRepoVersion(startDir: string = process.cwd()): string {
   let dir = resolve(startDir);
   for (;;) {

@@ -12,6 +12,7 @@ describe("mobile app config", () => {
   it("uses production identity by default", () => {
     const config = createExpoConfig({});
 
+    expect(config.version).toBe("1.0.0");
     expect(config.name).toBe("Kanna");
     expect(config.scheme).toBe("kanna");
     expect(config.ios?.bundleIdentifier).toBe("build.kanna.app");
@@ -97,10 +98,10 @@ describe("mobile app config", () => {
 
   it("produces the staging identity from KANNA_APP_ENV", () => {
     const config = createExpoConfig({
-      KANNA_APP_ENV: "staging",
-      KANNA_APP_VERSION: "0.1.0"
+      KANNA_APP_ENV: "staging"
     });
 
+    expect(config.version).toBe("1.0.0");
     expect(config.name).toBe("Kanna Staging");
     expect(config.scheme).toBe("kanna-staging");
     expect(config.ios?.bundleIdentifier).toBe("build.kanna.app.staging");
@@ -147,7 +148,7 @@ describe("mobile app config", () => {
     expect(config.ios?.buildNumber).toBeUndefined();
   });
 
-  it("prefers an explicit staging KANNA_APP_VERSION over checked-in versions", () => {
+  it("treats KANNA_APP_VERSION as an explicit diagnostic/build override", () => {
     const config = createExpoConfig(
       {
         KANNA_APP_ENV: "staging",
