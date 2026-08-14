@@ -21,6 +21,8 @@ export async function invoke<T = unknown>(
       }
       const failure = e2eInvokeHistory.consumeFailure(cmd);
       if (failure) throw new Error(failure);
+      const success = e2eInvokeHistory.consumeSuccess(cmd);
+      if (success.matched) return success.value as T;
     }
     return await tauriInvoke<T>(cmd, args);
   } catch (error) {

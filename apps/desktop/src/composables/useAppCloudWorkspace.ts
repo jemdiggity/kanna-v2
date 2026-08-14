@@ -686,9 +686,18 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     e2eNextRemoteActionFailure = message;
   }
 
-  async function closeSelectedWorkspaceTask(): Promise<boolean> {
+  async function closeSelectedWorkspaceTask(
+    prepareReplacementAfterItemRemoval: (
+      removedItem: AppSidebarItem,
+    ) => () => Promise<string | null>,
+  ): Promise<boolean> {
     const workspaceTask = selectedWorkspaceTask.value;
     const closingPresentationSlotId = selectedCloudItemId.value ?? store.selectedItemId;
+    const closingSidebarItem = closingPresentationSlotId
+      ? sidebarItems.value.find((item) => item.slot_id === closingPresentationSlotId)
+        ?? sidebarItems.value.find((item) => item.task_id === closingPresentationSlotId)
+        ?? null
+      : null;
     if (!workspaceTask || workspaceTask.terminal.kind === "local") {
       const closed = await store.closeTask();
       if (closed && workspaceTask && !store.items.some((item) => item.id === workspaceTask.item.id)) {
@@ -703,6 +712,10 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
       return false;
     }
 
+    const applyPreparedReplacement = closingSidebarItem
+      ? prepareReplacementAfterItemRemoval(closingSidebarItem)
+      : null;
+
     const client = workspaceTask.terminal.kind === "lan"
       ? await createConfiguredDesktopLanTerminalClient()
       : await createConfiguredDesktopRelayTerminalClient();
@@ -716,33 +729,36 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
         desktopId: remoteRef.ownerDesktopId,
         taskId: remoteRef.ownerLocalTaskId,
       });
-      markWorkspaceTaskLocallyClosed(workspaceTask);
-      const pinnedOwnerTaskId = workspaceTaskOwnerTaskId(workspaceTask);
-      if (pinnedOwnerTaskId && remoteTaskPins.value.has(pinnedOwnerTaskId)) {
-        void unpinRemoteTask(pinnedOwnerTaskId).catch((error) =>
-          console.warn("[cloud] failed to drop closed remote task pin:", error),
-        );
-      }
-      const currentPresentationSlotId = selectedCloudItemId.value ?? store.selectedItemId;
-      if (closingPresentationSlotId && currentPresentationSlotId === closingPresentationSlotId) {
-        selectedCloudItemId.value = null;
-        store.selectedItemId = null;
-        if (store.lastSelectedItemByRepo[workspaceTask.repoKey] === closingPresentationSlotId) {
-          const { [workspaceTask.repoKey]: _closed, ...remainingSelections } = store.lastSelectedItemByRepo;
-          store.lastSelectedItemByRepo = remainingSelections;
-        }
-        await windowWorkspace.persistSelection({
-          selectedRepoId: store.selectedRepoId,
-          selectedItemId: null,
-        });
-      }
-      return true;
     } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error));
       return false;
     } finally {
       client.close();
     }
+
+    const pinnedOwnerTaskId = workspaceTaskOwnerTaskId(workspaceTask);
+    if (pinnedOwnerTaskId && remoteTaskPins.value.has(pinnedOwnerTaskId)) {
+      void unpinRemoteTask(pinnedOwnerTaskId).catch((error) =>
+        console.warn("[cloud] failed to drop closed remote task pin:", error),
+      );
+    }
+
+    try {
+      const currentPresentationSlotId = selectedCloudItemId.value ?? store.selectedItemId;
+      if (
+        closingSidebarItem
+        && closingPresentationSlotId
+        && currentPresentationSlotId === closingPresentationSlotId
+      ) {
+        await applyPreparedReplacement?.();
+      }
+    } catch (error) {
+      console.error("[cloud] post-close reconciliation failed:", error);
+      toast.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      markWorkspaceTaskLocallyClosed(workspaceTask);
+    }
+    return true;
   }
 
   async function advanceSelectedRemoteWorkspaceTask(

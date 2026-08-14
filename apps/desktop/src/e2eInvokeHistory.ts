@@ -7,6 +7,7 @@ export interface E2EInvokeRecord {
 
 const invokeRecords: E2EInvokeRecord[] = [];
 const invokeFailures = new Map<string, string[]>();
+const invokeSuccesses = new Map<string, unknown[]>();
 
 function cloneJson(value: unknown): unknown {
   if (value == null) return value;
@@ -23,6 +24,7 @@ export const e2eInvokeHistory = {
   clear() {
     invokeRecords.length = 0;
     invokeFailures.clear();
+    invokeSuccesses.clear();
   },
   getAll(): E2EInvokeRecord[] {
     return invokeRecords.map((record) => ({
@@ -35,10 +37,24 @@ export const e2eInvokeHistory = {
     failures.push(message);
     invokeFailures.set(cmd, failures);
   },
+  succeedNext(cmd: string, value: unknown) {
+    const successes = invokeSuccesses.get(cmd) ?? [];
+    successes.push(cloneJson(value));
+    invokeSuccesses.set(cmd, successes);
+  },
   consumeFailure(cmd: string): string | null {
     const failures = invokeFailures.get(cmd);
     const message = failures?.shift() ?? null;
     if (failures?.length === 0) invokeFailures.delete(cmd);
     return message;
+  },
+  consumeSuccess(cmd: string): { matched: boolean; value: unknown } {
+    const successes = invokeSuccesses.get(cmd);
+    if (!successes || successes.length === 0) {
+      return { matched: false, value: undefined };
+    }
+    const value = successes.shift();
+    if (successes.length === 0) invokeSuccesses.delete(cmd);
+    return { matched: true, value: cloneJson(value) };
   },
 };
