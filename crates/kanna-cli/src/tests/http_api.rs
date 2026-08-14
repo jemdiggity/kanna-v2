@@ -2,14 +2,19 @@ use super::*;
 use crate::api::notify_mobile_via_api;
 use crate::models::MobileNotificationRequest;
 
+#[path = "../../../test-support/old_relay_mobile_notification.rs"]
+mod old_relay_mobile_notification;
+
 #[tokio::test]
-async fn notify_mobile_surfaces_the_fixed_relay_dependency_error() {
-    let safe_error = "mobile notification delivery failed (category=relayDependency, incident=incident-safe-123); retry later and inspect the matching environment's relay logs";
-    let response = http_json_response("503 Service Unavailable", safe_error);
-    let (base_url, handle) = serve_single_http_response(response).await;
+async fn notify_mobile_surfaces_only_the_fixed_server_rejection_error() {
+    use old_relay_mobile_notification::{
+        OldRelayMobileNotificationServer, OLD_RELAY_CANARY, SAFE_REJECTION_ERROR,
+    };
+
+    let server = OldRelayMobileNotificationServer::start("cli").await;
 
     let error = notify_mobile_via_api(
-        &base_url,
+        &server.base_url,
         &MobileNotificationRequest {
             title: "Provider call rejected".to_string(),
             body: "Exercise the safe relay error.".to_string(),
@@ -18,10 +23,11 @@ async fn notify_mobile_surfaces_the_fixed_relay_dependency_error() {
     )
     .await
     .expect_err("relay dependency rejection should remain an HTTP error");
-    let request = handle.await.unwrap();
+    let logs = server.finish();
 
-    assert!(error.contains(safe_error));
-    assert!(request.starts_with("POST /v1/mobile/notifications HTTP/1.1"));
+    assert!(error.contains(SAFE_REJECTION_ERROR));
+    assert!(!error.contains(OLD_RELAY_CANARY));
+    assert!(!logs.contains(OLD_RELAY_CANARY));
 }
 
 #[tokio::test]
