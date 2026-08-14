@@ -616,6 +616,9 @@ async fn prepared_agent_task_spawn_includes_task_specific_kanna_context() {
             assert!(system_prompt.contains("KANNA_CLI_PATH"));
             assert!(system_prompt.contains("kanna-cli guide"));
             assert!(system_prompt.contains("kanna-cli stage-complete"));
+            assert!(!system_prompt.contains("kanna_info"));
+            assert!(!system_prompt.contains("kanna-cli info"));
+            assert!(!system_prompt.contains("authoritative server environment"));
         }
         other => panic!("expected SpawnAgent, got {other:?}"),
     }
@@ -696,6 +699,8 @@ async fn prepared_claude_pty_task_spawn_passes_kanna_context_as_append_system_pr
             assert!(shell_command.contains("workflow `qa`"));
             assert!(shell_command.contains("(transition: `manual`)"));
             assert!(shell_command.contains("kanna-cli stage-complete"));
+            assert!(!shell_command.contains("kanna_info"));
+            assert!(!shell_command.contains("kanna-cli info"));
             // `--mcp-config` is variadic: without a `--` separator the CLI
             // consumes the positional prompt as a second config file and
             // exits ("MCP config file not found: <prompt>").
@@ -791,6 +796,8 @@ async fn prepared_non_claude_pty_task_spawn_prepends_kanna_context_to_prompt() {
             assert!(shell_command.contains("stage `implement`"));
             assert!(shell_command.contains("workflow `qa`"));
             assert!(shell_command.contains("(transition: `manual`)"));
+            assert!(!shell_command.contains("kanna_info"));
+            assert!(!shell_command.contains("kanna-cli info"));
             assert!(shell_command.contains("kanna-cli stage-complete"));
         }
         other => panic!("expected Spawn, got {other:?}"),

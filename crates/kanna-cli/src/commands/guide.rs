@@ -83,7 +83,6 @@ pub(crate) fn render_guide_markdown(context: &GuideContext) -> String {
         "## Workflow Semantics".to_string(),
         String::new(),
         "- Prefer `kanna-mcp` tools for Kanna task operations; fall back to the instance-local `kanna-cli` from the shell only when MCP tools are unavailable. Kanna-spawned tasks export `KANNA_CLI_PATH` and prepend its directory to `PATH`.".to_string(),
-        "- Before environment-sensitive operations (releases, mobile notifications, or direct API diagnostics), call `kanna_info`; if MCP is unavailable, run `kanna-cli info`. Use the reported effective connection and authoritative server identity instead of assuming a default endpoint.".to_string(),
         "- Prefer `kanna_complete_stage` to record stage completion. Fallback: `kanna-cli stage-complete`. `success` can trigger an auto-transition when the current stage is configured for auto; `failure` stops advancement.".to_string(),
         "- Do not push a branch or create a pull request unless this stage's prompt explicitly tells you to do so. Auto stages finish by recording stage completion so Kanna can advance the configured workflow.".to_string(),
         "- Manual transitions wait for a user or agent to request advancement.".to_string(),
@@ -118,7 +117,6 @@ pub(crate) fn render_guide_json(context: &GuideContext) -> Result<Value, String>
             "operations": [
                 "prefer kanna-mcp tools for Kanna task operations",
                 "fall back to the instance-local kanna-cli only when MCP tools are unavailable",
-                "call kanna_info before environment-sensitive operations and use its authoritative connected-server identity",
                 "send input to running tasks",
                 "request revisions from existing task branches",
                 "block and unblock tasks"

@@ -3,6 +3,10 @@ import { resolve } from "node:path";
 import { AGENT_PROVIDERS } from "@kanna/agent-protocol";
 import { describe, expect, it } from "vitest";
 import { parseAgentDefinition } from "./agent-loader";
+import {
+  buildKannaRuntimeUserPrompt,
+  buildStagePrompt,
+} from "./prompt-builder";
 import { parseWorkflowJson } from "./workflow-loader";
 
 const repoRoot = resolve(process.cwd(), "../..");
@@ -55,6 +59,33 @@ describe("built-in agent completion protocol", () => {
 });
 
 describe("QA workflow assets", () => {
+  it("keeps Kanna runtime identity policy repo-scoped", () => {
+    const ordinaryPrompt = buildKannaRuntimeUserPrompt(
+      buildStagePrompt("Implement the task.", "$TASK_PROMPT", {
+        taskPrompt: "Fix the imported repository.",
+      })
+    );
+    const kannaAgents = readRepoPhrases("AGENTS.md");
+    const ship = parseAgentDefinition(readRepoFile(".kanna/agents/ship/AGENT.md"));
+    const kannaShipPrompt = buildKannaRuntimeUserPrompt(
+      buildStagePrompt(ship.prompt, "$TASK_PROMPT", {
+        taskPrompt: "Publish the authorized staging release.",
+      })
+    );
+
+    expect(ordinaryPrompt).not.toContain("kanna_info");
+    expect(ordinaryPrompt).not.toContain("kanna-cli info");
+    expect(ordinaryPrompt).not.toContain("authoritative server environment");
+    expect(kannaAgents).toContain(
+      "Before debugging or performing environment-sensitive operations against a running instance"
+    );
+    expect(kannaAgents).toContain("mobile notifications, cloud deploys, mobile OTA publishes");
+    expect(kannaAgents).toContain("direct local/LAN API calls), call `kanna_info`");
+    expect(kannaShipPrompt).toContain("Call `kanna_info`");
+    expect(kannaShipPrompt).toContain("authoritative server environment/version");
+    expect(kannaShipPrompt.match(/`kanna_info`/g)).toHaveLength(1);
+  });
+
   // TEMPORARY, paired with the wildcard flip in `.kanna/config.json`: the codex
   // CLI ran out of account credits on 2026-08-07, and because agent definitions
   // resolve from origin/main at every spawn, a codex-first wildcard sent every

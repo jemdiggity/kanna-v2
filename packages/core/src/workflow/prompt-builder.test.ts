@@ -254,6 +254,10 @@ describe("buildKannaRuntimeSystemPrompt", () => {
     expect(result).toContain("Only committed work crosses a stage boundary");
     expect(result).toContain("each stage transition forks a fresh workspace");
     expect(result).toContain("Start dev servers and other services on the assigned ports so parallel tasks do not collide");
+    expect(result).not.toContain("kanna_info");
+    expect(result).not.toContain("kanna-cli info");
+    expect(result).not.toContain("authoritative server environment");
+    expect(result).not.toContain("staging/production");
     expect(result).not.toContain("{{TASK_CONTEXT}}");
     expect(result).not.toContain("{{MCP_STATUS}}");
     expect(result).not.toContain("{{COMPLETION}}");
@@ -367,6 +371,8 @@ describe("buildKannaRuntimeUserPrompt", () => {
     expect(result).toContain("This session was launched by Kanna");
     expect(result).toContain("Prefer the `kanna_*` MCP tools");
     expect(result).toContain("fall back to the `kanna-cli` binary");
+    expect(result).not.toContain("kanna_info");
+    expect(result).not.toContain("kanna-cli info");
     expect(result).toMatch(/\n\n## Your Task\n\nShip the feature$/);
   });
 
