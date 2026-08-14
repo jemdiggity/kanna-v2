@@ -17,12 +17,12 @@ const requiredFlavors = [
 
 const requiredBuiltInAgents = ["setup"];
 
-// The user-facing pipeline lineup, in increasing review depth. `no-review` is
-// the fallback the server resolves when a repo names no pipeline, so its name
+// The user-facing workflow lineup, in increasing review depth. `no-review` is
+// the fallback the server resolves when a repo names no workflow, so its name
 // is load-bearing. `specialty-review` is excluded: it is the single-stage
-// pipeline qa-dispatcher gives its child tasks, and its definition declares
+// workflow qa-dispatcher gives its child tasks, and its definition declares
 // `"visibility": "internal"` so the server never offers it as a choice.
-const BUILTIN_PIPELINES = ["no-review", "single-reviewer", "specialized-reviewers"];
+const BUILTIN_WORKFLOWS = ["no-review", "single-reviewer", "specialized-reviewers"];
 
 function read(path: string): string {
   return readFileSync(path, "utf8");
@@ -136,22 +136,22 @@ describe("bundled agent flavor contracts", () => {
     });
   }
 
-  it("setup GitHub preset selects a built-in pipeline instead of authoring one", () => {
+  it("setup GitHub preset selects a built-in workflow instead of authoring one", () => {
     const setupAgent = read(join(agentsRoot, "setup", "AGENT.md"));
     const setupContract = read(join(agentsRoot, "setup", "CONTRACT.md"));
     const setupConfig = parseJsonFenceAfter(
       setupAgent,
-      "`.kanna/config.json` selects the pipeline and stock flavors",
-    ) as { pipeline?: unknown; flavors?: { pr?: unknown; merge?: unknown } };
+      "`.kanna/config.json` selects the workflow and stock flavors",
+    ) as { workflow?: unknown; flavors?: { pr?: unknown; merge?: unknown } };
 
-    // A copied pipeline file would fossilize whatever the built-ins looked
+    // A copied workflow file would fossilize whatever the built-ins looked
     // like on the day setup ran. Selecting one keeps the repo on the shipped
-    // definition, so the preset is a config selection, not a pipeline author.
-    expect(setupConfig.pipeline).toBe("no-review");
-    expect(BUILTIN_PIPELINES).toContain(setupConfig.pipeline);
+    // definition, so the preset is a config selection, not a workflow author.
+    expect(setupConfig.workflow).toBe("no-review");
+    expect(BUILTIN_WORKFLOWS).toContain(setupConfig.workflow);
     expect(setupAgent).not.toContain("github-flow.json");
-    expect(setupContract).toContain("not author a pipeline file of its own");
-    for (const name of BUILTIN_PIPELINES) {
+    expect(setupContract).toContain("not author a workflow file of its own");
+    for (const name of BUILTIN_WORKFLOWS) {
       expect(setupAgent, `offers ${name}`).toContain(`\`${name}\``);
     }
 
@@ -169,22 +169,22 @@ describe("bundled agent flavor contracts", () => {
 
     // The constraint every rule below derives from: approve resolves the PR
     // with `gh pr view` and fails when there is none, and every built-in
-    // pipeline ends with a pr stage carrying an approve post. So the flavor
-    // answers are not independent of the pipeline selection.
+    // workflow ends with a pr stage carrying an approve post. So the flavor
+    // answers are not independent of the workflow selection.
     expect(approveAgent).toContain("gh pr view");
     expect(approveAgent).toContain("complete this stage as failure");
-    for (const name of BUILTIN_PIPELINES) {
-      const pipeline = JSON.parse(
+    for (const name of BUILTIN_WORKFLOWS) {
+      const workflow = JSON.parse(
         read(join(repoRoot, ".kanna", "workflows", `${name}.json`)),
       ) as { stages?: Array<{ name?: unknown; post?: { agent?: unknown } }> };
-      const prStage = pipeline.stages?.find((stage) => stage.name === "pr");
+      const prStage = workflow.stages?.find((stage) => stage.name === "pr");
       expect(prStage?.post?.agent, `${name} pr stage post`).toBe("approve");
     }
 
     // push-only publishes no PR, so pairing it with a built-in would hand
     // approve a PR that does not exist.
-    expect(setupAgent).toContain("Never select a built-in pipeline with push-only");
-    expect(setupContract).toContain("must never be paired with a built-in pipeline");
+    expect(setupAgent).toContain("Never select a built-in workflow with push-only");
+    expect(setupContract).toContain("must never be paired with a built-in workflow");
 
     // Manual merge: nothing consumes the signal, so the post must go too.
     expect(setupContract).toContain(
@@ -209,11 +209,11 @@ describe("bundled agent flavor contracts", () => {
     ) as { visibility?: unknown };
     expect(specialty.visibility).toBe("internal");
 
-    for (const name of BUILTIN_PIPELINES) {
-      const pipeline = JSON.parse(
+    for (const name of BUILTIN_WORKFLOWS) {
+      const workflow = JSON.parse(
         read(join(repoRoot, ".kanna", "workflows", `${name}.json`)),
       ) as { visibility?: unknown };
-      expect(pipeline.visibility, `${name} stays a public choice`).toBeUndefined();
+      expect(workflow.visibility, `${name} stays a public choice`).toBeUndefined();
     }
 
     // Kanna binds the commit and approve stage posts itself; their AGENT.md
@@ -224,29 +224,29 @@ describe("bundled agent flavor contracts", () => {
     }
   });
 
-  it("ships the three built-in pipelines the setup interview offers", () => {
-    for (const name of BUILTIN_PIPELINES) {
+  it("ships the three built-in workflows the setup interview offers", () => {
+    for (const name of BUILTIN_WORKFLOWS) {
       const path = join(repoRoot, ".kanna", "workflows", `${name}.json`);
       expect(existsSync(path), `${path} must exist`).toBe(true);
 
-      const pipeline = JSON.parse(read(path)) as {
+      const workflow = JSON.parse(read(path)) as {
         name?: unknown;
         stages?: Array<{ name?: unknown; agent?: unknown }>;
       };
-      expect(pipeline.name, `${name} name matches its filename`).toBe(name);
+      expect(workflow.name, `${name} name matches its filename`).toBe(name);
 
       // Review depth is the only axis that varies: every one of them
       // implements, commits as a post, and ends at a pr stage.
-      const stageNames = pipeline.stages?.map((stage) => stage.name);
+      const stageNames = workflow.stages?.map((stage) => stage.name);
       expect(stageNames?.[0], name).toBe("in progress");
       expect(stageNames?.at(-1), name).toBe("pr");
     }
 
     const reviewAgentFor = (name: string) => {
-      const pipeline = JSON.parse(
+      const workflow = JSON.parse(
         read(join(repoRoot, ".kanna", "workflows", `${name}.json`)),
       ) as { stages?: Array<{ name?: unknown; agent?: unknown }> };
-      return pipeline.stages?.find((stage) => stage.name === "review")?.agent;
+      return workflow.stages?.find((stage) => stage.name === "review")?.agent;
     };
 
     expect(reviewAgentFor("no-review")).toBeUndefined();

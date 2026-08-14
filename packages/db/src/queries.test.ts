@@ -996,7 +996,7 @@ describe("pipeline_item queries", () => {
         port_offset: null,
         port_env: null,
       }),
-    ).rejects.toThrow("No agent provider configured for pipeline item insertion.");
+    ).rejects.toThrow("No agent provider configured for task insertion.");
   });
 
   it("updatePipelineItemPR sets pr_number and pr_url", async () => {
