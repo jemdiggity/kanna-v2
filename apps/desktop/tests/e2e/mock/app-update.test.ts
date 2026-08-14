@@ -20,12 +20,31 @@ async function injectUpdate(
   );
 }
 
+async function emitCurrentWindowEvent(
+  client: WebDriverClient,
+  event: "tauri://focus" | "tauri://blur",
+): Promise<void> {
+  const result = await client.executeAsync<string>(
+    `const cb = arguments[arguments.length - 1];
+     const label = window.__TAURI_INTERNALS__.metadata.currentWindow.label;
+     window.__TAURI_INTERNALS__.invoke("plugin:event|emit_to", {
+       target: { kind: "Window", label },
+       event: ${JSON.stringify(event)},
+       payload: null,
+     }).then(() => cb("ok")).catch((error) => cb("err:" + String(error)));`,
+  );
+  if (result !== "ok") {
+    throw new Error(`Failed to emit ${event}: ${result}`);
+  }
+}
+
 describe("app update prompt", () => {
   const client = new WebDriverClient();
 
   beforeAll(async () => {
     await client.createSession();
     await resetDatabase(client);
+    await emitCurrentWindowEvent(client, "tauri://focus");
   });
 
   afterAll(async () => {
@@ -51,6 +70,24 @@ describe("app update prompt", () => {
     await client.waitForText(".update-prompt", "Ready to restart", 2000);
 
     await client.click(await client.waitForElement('[data-testid="update-later"]', 2000));
+    await client.waitForNoElement(".update-prompt", 2000);
+  });
+
+  it("shows the update prompt only while its native window is focused", async () => {
+    await injectUpdate(client, {
+      version: "9.9.12",
+      body: "Focus-aware update",
+    });
+
+    await client.waitForText(".update-prompt", "Focus-aware update", 2000);
+
+    await emitCurrentWindowEvent(client, "tauri://blur");
+    await client.waitForNoElement(".update-prompt", 2000);
+
+    await emitCurrentWindowEvent(client, "tauri://focus");
+    await client.waitForText(".update-prompt", "Focus-aware update", 2000);
+
+    await client.click(await client.waitForElement('[data-testid="update-dismiss"]', 2000));
     await client.waitForNoElement(".update-prompt", 2000);
   });
 
