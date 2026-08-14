@@ -272,6 +272,9 @@ const invokeMock = vi.fn(async (command: string, args?: Record<string, unknown>)
   if (command === "list_dir") return ["default.json"];
   if (command === "read_text_file") return "";
   if (command === "git_default_branch") return "main";
+  if (command === "git_repository_state") {
+    return { defaultBranch: "main", hasCommits: true };
+  }
   if (command === "git_list_base_branches") return ["feature/x", "main", "origin/main"];
   if (command === "read_env_var") return "/Users/test";
   if (command === "which_binary" && (args?.name === "claude" || args?.name === "codex")) return `/usr/bin/${args.name}`;
@@ -1191,6 +1194,9 @@ describe("App", () => {
       if (command === "list_dir") return ["default.json"];
       if (command === "read_text_file") return "";
       if (command === "git_default_branch") return "main";
+      if (command === "git_repository_state") {
+        return { defaultBranch: "main", hasCommits: true };
+      }
       if (command === "git_list_base_branches") return ["feature/x", "main", "origin/main"];
       if (command === "read_env_var") return "/Users/test";
       if (command === "which_binary" && (args?.name === "claude" || args?.name === "codex")) return `/usr/bin/${args.name}`;
@@ -5920,6 +5926,9 @@ describe("App", () => {
       if (command === "list_dir") return ["default.json"];
       if (command === "read_text_file") return "";
       if (command === "git_default_branch") return "main";
+      if (command === "git_repository_state") {
+        return { defaultBranch: "main", hasCommits: true };
+      }
       if (command === "git_list_base_branches") return ["feature/x", "main", "origin/main"];
       if (command === "read_env_var") return "/Users/test";
       if (command === "which_binary" && (args?.name === "claude" || args?.name === "codex")) return `/usr/bin/${args.name}`;

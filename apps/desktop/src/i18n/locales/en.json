@@ -146,6 +146,7 @@
     "prCreationFailed": "PR creation failed",
     "repoCreationFailed": "Failed to create repo",
     "repoImportFailed": "Failed to import repo",
+    "emptyRepoNeedsInitialCommit": "Create an initial commit, then run Set Up Repository.",
     "cloneFailed": "Clone failed",
     "worktreeFailed": "Failed to create worktree",
     "fetchFailed": "Could not fetch latest from remote — worktree may be based on stale main",

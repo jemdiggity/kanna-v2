@@ -9,6 +9,11 @@ import { defaultReposHome } from "../utils/reposHome";
 import { useModalZIndex } from "../composables/useModalZIndex";
 import { macOsTextInputAttrs } from "../utils/textInput";
 
+interface GitRepositoryState {
+  defaultBranch: string;
+  hasCommits: boolean;
+}
+
 const { t } = useI18n();
 const { zIndex } = useModalZIndex();
 
@@ -271,9 +276,11 @@ async function inspectLocalPath(dirPath: string) {
     }
 
     try {
-      const branch = await invoke<string>("git_default_branch", { repoPath: canonicalDirPath });
+      const state = await invoke<GitRepositoryState>("git_repository_state", {
+        repoPath: canonicalDirPath,
+      });
       if (inspectionId !== localInspectVersion.value) return;
-      localBranch.value = branch || "main";
+      localBranch.value = state.defaultBranch || "main";
       localIsGitRepo.value = true;
       try {
         const remote = await invoke<string>("git_remote_url", { repoPath: canonicalDirPath });

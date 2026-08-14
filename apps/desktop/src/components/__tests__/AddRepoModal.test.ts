@@ -8,6 +8,8 @@ import AddRepoModal from "../AddRepoModal.vue";
 interface LocalRepoFixture {
   exists: boolean;
   branch: string;
+  hasCommits?: boolean;
+  isGitRepo?: boolean;
   remote: string;
 }
 
@@ -36,6 +38,15 @@ const localRepos = new Map<string, LocalRepoFixture>([
       remote: "git@github.com:owner/second-project.git",
     },
   ],
+  [
+    "/Users/me/code/not-a-repo",
+    {
+      exists: true,
+      branch: "main",
+      isGitRepo: false,
+      remote: "",
+    },
+  ],
 ]);
 
 const { invokeMock } = vi.hoisted(() => ({
@@ -46,8 +57,12 @@ const { invokeMock } = vi.hoisted(() => ({
     if (command === "file_exists") {
       return fixture?.exists ?? false;
     }
-    if (command === "git_default_branch" && fixture) {
-      return fixture.branch;
+    if (command === "git_repository_state" && fixture) {
+      if (fixture.isGitRepo === false) throw new Error("not a git repository");
+      return {
+        defaultBranch: fixture.branch,
+        hasCommits: fixture.hasCommits ?? true,
+      };
     }
     if (command === "git_remote_url" && fixture) {
       return fixture.remote;
@@ -120,6 +135,38 @@ describe("AddRepoModal", () => {
     expect(wrapper.emitted("import")).toEqual([
       ["/Users/me/code/project", "project", "main"],
     ]);
+  });
+
+  it("preserves an empty repository's configured initial branch", async () => {
+    localRepos.set("/Users/me/code/empty-project", {
+      exists: true,
+      branch: "trunk",
+      hasCommits: false,
+      remote: "",
+    });
+    const wrapper = mountModal();
+
+    await flushPromises();
+    await wrapper.get('input[type="text"]').setValue("/Users/me/code/empty-project");
+    await flushPromises();
+    await wrapper.get(".btn-primary").trigger("click");
+
+    expect(wrapper.emitted("import")).toEqual([
+      ["/Users/me/code/empty-project", "empty-project", "trunk"],
+    ]);
+  });
+
+  it("keeps an existing non-repository path disabled", async () => {
+    const wrapper = mountModal();
+
+    await flushPromises();
+    await wrapper.get('input[type="text"]').setValue("/Users/me/code/not-a-repo");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("addRepo.notAGitRepo");
+    expect(wrapper.get(".btn-primary").attributes("disabled")).toBeDefined();
+    await wrapper.get(".btn-primary").trigger("click");
+    expect(wrapper.emitted("import")).toBeUndefined();
   });
 
   it("creates a repo with Cmd+Enter in the name input", async () => {

@@ -2366,6 +2366,59 @@ async fn add_repo_route_honors_requested_default_branch() {
 }
 
 #[tokio::test]
+async fn add_repo_route_registers_zero_commit_repo_with_its_unborn_branch() {
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos()
+    );
+    let repo_root = std::env::temp_dir().join(format!("kanna-http-add-empty-repo-{unique}"));
+    std::fs::create_dir_all(&repo_root).unwrap();
+    assert!(Command::new("git")
+        .args(["init", "--initial-branch=trunk"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    let app = super::test_router("desktop-1", "Studio Mac");
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/repos")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "path": repo_root,
+                        "name": "Empty Repo"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let repo: crate::mobile_api::RepoDetail = from_slice(&body).unwrap();
+    assert_eq!(repo.default_branch.as_deref(), Some("trunk"));
+
+    let rev_count = Command::new("git")
+        .args(["rev-list", "--all", "--count"])
+        .current_dir(&repo_root)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&rev_count.stdout).trim(), "0");
+
+    let _ = std::fs::remove_dir_all(repo_root);
+}
+
+#[tokio::test]
 async fn add_repo_route_rejects_duplicate_path() {
     let unique = format!(
         "{}-{}",

@@ -14,6 +14,11 @@ interface CreateSeedFixtureRepoOptions {
   tempRoot?: string;
 }
 
+interface CreateEmptyFixtureRepoOptions {
+  initialBranch?: string;
+  tempRoot?: string;
+}
+
 interface CommandOptions {
   cwd?: string;
 }
@@ -225,6 +230,23 @@ export async function createFixtureRepo(
     fixtureRoot: DEFAULT_SEED_FIXTURE_ROOT,
     tempRoot: options.tempRoot ?? DEFAULT_FIXTURE_TEMP_ROOT,
   });
+}
+
+export async function createEmptyFixtureRepo(
+  name: string,
+  options: CreateEmptyFixtureRepoOptions = {},
+): Promise<string> {
+  const tempRoot = options.tempRoot ?? DEFAULT_FIXTURE_TEMP_ROOT;
+  await mkdir(tempRoot, { recursive: true });
+  const tempDir = await mkdtemp(join(tempRoot, FIXTURE_TEMP_DIR_PREFIX));
+  await registerOwnedFixtureDir(tempDir);
+  const repoPath = join(tempDir, sanitizeRepoName(name));
+  await mkdir(repoPath, { recursive: true });
+  await runCommand(
+    ["git", "init", `--initial-branch=${options.initialBranch ?? "main"}`],
+    { cwd: repoPath },
+  );
+  return repoPath;
 }
 
 export async function createSeedFixtureRepo(

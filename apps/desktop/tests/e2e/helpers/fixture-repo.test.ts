@@ -52,6 +52,32 @@ describe("fixture repo helpers", () => {
     expect(await realpath(stdout.trim())).toBe(await realpath(fixtureRepoPath));
   });
 
+  it("creates an empty repo with an explicit unborn branch", async () => {
+    const { createEmptyFixtureRepo } = await import("./fixture-repo");
+
+    const fixtureRepoPath = await createEmptyFixtureRepo("empty-fixture-repo", {
+      initialBranch: "trunk",
+    });
+    createdRepoPaths.push(fixtureRepoPath);
+
+    const { stdout: branch } = await execFileAsync("git", [
+      "-C",
+      fixtureRepoPath,
+      "symbolic-ref",
+      "--short",
+      "HEAD",
+    ]);
+    const { stdout: commitCount } = await execFileAsync("git", [
+      "-C",
+      fixtureRepoPath,
+      "rev-list",
+      "--all",
+      "--count",
+    ]);
+    expect(branch.trim()).toBe("trunk");
+    expect(commitCount.trim()).toBe("0");
+  });
+
   it("creates a disposable repo from committed seed content with a local bare origin", async () => {
     const { createSeedFixtureRepo } = await import("./fixture-repo");
 
