@@ -8,6 +8,9 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+#[path = "../../test-support/old_relay_mobile_notification.rs"]
+mod old_relay_mobile_notification;
+
 /// Mirrors `ACTIVITY_CONFIRM_DELAY` in `crates/kanna-mcp/src/main.rs`. A read
 /// that engaged the confirmation cannot come back faster than this.
 const ACTIVITY_CONFIRM_DELAY: Duration = Duration::from_millis(1_000);
@@ -1363,23 +1366,16 @@ fn serve_reports_http_failures_as_tool_error_results() {
     );
 }
 
-#[test]
-fn notify_mobile_surfaces_only_the_fixed_server_rejection_error() {
-    let safe_error = "mobile notification delivery failed (category=relayRejection, correlation=2); retry later and inspect the matching environment's server and relay logs";
-    let old_relay_canary = "ya29.old-relay-provider-canary-DO-NOT-LEAK";
-    let (base_url, server) = start_http_fixture(vec![ExpectedRequest {
-        method: "POST",
-        path: "/v1/mobile/notifications",
-        body: Some(json!({
-            "title": "Provider call rejected",
-            "body": "Exercise the server relay boundary."
-        })),
-        response_status: "503 Service Unavailable",
-        response_body: json!(safe_error),
-    }]);
+#[tokio::test]
+async fn notify_mobile_surfaces_only_the_fixed_server_rejection_error() {
+    use old_relay_mobile_notification::{
+        OldRelayMobileNotificationServer, OLD_RELAY_CANARY, SAFE_REJECTION_ERROR,
+    };
+
+    let server = OldRelayMobileNotificationServer::start("mcp").await;
 
     let responses = run_kanna_mcp(
-        &base_url,
+        &server.base_url,
         &[json!({
             "jsonrpc": "2.0",
             "id": 91,
@@ -1394,15 +1390,16 @@ fn notify_mobile_surfaces_only_the_fixed_server_rejection_error() {
         })],
     );
 
-    server.join().expect("fixture server");
+    let logs = server.finish();
     assert_eq!(responses.len(), 1);
     let message = tool_error_text(&responses[0]);
     assert!(
-        message.contains(safe_error),
+        message.contains(SAFE_REJECTION_ERROR),
         "unexpected MCP error: {message}"
     );
-    assert!(!message.contains(old_relay_canary));
-    assert!(!responses[0].to_string().contains(old_relay_canary));
+    assert!(!message.contains(OLD_RELAY_CANARY));
+    assert!(!responses[0].to_string().contains(OLD_RELAY_CANARY));
+    assert!(!logs.contains(OLD_RELAY_CANARY));
 }
 
 #[test]

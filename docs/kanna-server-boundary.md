@@ -631,11 +631,18 @@ logs record only the desktop id and these same aggregate safe reasons.
 If the Firestore lookup or Firebase Admin call rejects as a whole, there are
 no per-device results to diagnose. The relay discards the exception rather
 than serializing it: its log and WebSocket acknowledgement contain only the
-fixed `relayDependency` category and an opaque incident id. `kanna-server`
-propagates that safe acknowledgement as `503 Service Unavailable`, so HTTP,
-CLI, MCP, and mobile consumers never receive the provider's raw response,
-project or credential diagnostics, or token material. The incident id is the
-correlation key for the matching environment's relay logs.
+fixed `relayDependency` category and an opaque incident id. The
+acknowledgement's `error` field is nevertheless untrusted at the
+`kanna-server` boundary and is ignored. `kanna-server` substitutes its own
+fixed, categorized `relayRejection` diagnostic and server-owned correlation
+value in the `503 Service Unavailable` body/error, so HTTP, CLI, MCP, and
+mobile consumers never receive the relay string or the provider's raw
+response, project or credential diagnostics, or token material. The
+correlation value is embedded in the relay request id and ties the rejection
+to the matching environment's server and relay logs; the relay's incident id
+is not propagated. During a rolling upgrade this boundary also sanitizes
+rejection acknowledgements from an older relay that still serializes raw
+provider exceptions.
 
 ## Local Consumer Model
 

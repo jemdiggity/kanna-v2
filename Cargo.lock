@@ -2885,11 +2885,13 @@ name = "kanna-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "kanna-runtime-defaults",
  "kanna-tool-catalog",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tokio",
+ "tungstenite 0.26.2",
 ]
 
 [[package]]
@@ -2967,6 +2969,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tungstenite 0.26.2",
 ]
 
 [[package]]
