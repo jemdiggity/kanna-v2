@@ -21,8 +21,17 @@ explicitly prohibits installing to a phone, so that mutation was not performed.
 A human can close the gap by running the canonical staging install against an
 active desktop RC whose version differs from `apps/mobile/VERSION`. Before
 running the device smoke, use `kanna-cli info` to obtain that staging
-instance's authoritative LAN API endpoint, and provision or select a live PTY
-task from that same instance whose terminal snapshot contains a known sentinel.
+instance's authoritative LAN API endpoint, and provision or select the canonical
+known-live PTY fixture described in
+[`apps/mobile/e2e/terminal-streaming-coverage.md`](../apps/mobile/e2e/terminal-streaming-coverage.md#paired-lan-mobile-visual-companion).
+The fixture must be an open PTY task from that same instance with a non-empty
+display title and a distinct prompt of at least two lines whose final line
+contains `PROMPT_END_SENTINEL`. Its rendered terminal snapshot must contain the
+known sentinel and reach the default 16,384 decoded bytes at the default
+viewport columns and rows; otherwise set `KANNA_E2E_PTY_MIN_DECODED_BYTES`,
+`KANNA_E2E_PTY_EXPECTED_COLS`, and `KANNA_E2E_PTY_EXPECTED_ROWS` to the fixture's
+intentional values. These are prerequisites for the runner to reach the
+About-this-build assertion, not optional terminal checks.
 Export the endpoint as `KANNA_E2E_DESKTOP_SERVER_URL`, the task and sentinel as
 `KANNA_E2E_PTY_TASK_ID` and `KANNA_E2E_PTY_SENTINEL`, and an unused local
 Appium port as `KANNA_APPIUM_PORT`. Set `KANNA_IOS_DEVICE_UDID` (or
