@@ -76,22 +76,31 @@ queue item. The worker sends its normalized text as an acknowledged,
 PID-fenced daemon input, waits the existing paste-disambiguation delay, and
 sends a PID-fenced Enter before accepting the next item.
 
-The first non-control `OperatorBytes` chunk opens a human submission and
-receives its sequence number. Later chunks for that draft are part of the same
-submission, even when complete messages have since queued behind it. Enter
-closes the boundary. Ctrl-C cancels it after the byte is forwarded. While a
-draft is open, queued complete messages remain blocked; a disconnect alone
-does not release them into the partial composer. They resume only after an
-Enter/Ctrl-C for that same incarnation or fail when the incarnation exits or
-is replaced.
+The worker parses operator bytes as a terminal byte stream, rather than treating
+each KSP frame as a semantic unit. Printable input opens a human submission and
+receives its sequence number. ANSI/terminal protocol traffic (cursor keys,
+mouse reports, clipboard responses, and a lone Escape) does not open a draft.
+Bracketed-paste begin/end markers are tracked across frames; newlines inside the
+paste are content, never submission boundaries. Enter outside bracketed paste
+closes the boundary, and Ctrl-C cancels it after the byte is forwarded.
+
+While a draft is open, complete messages remain queued behind it and cannot be
+appended to the composer. A caller waits only for the same bounded delivery
+window used by daemon commands. If that window expires, dropping its response
+receiver cancels the queued message; the worker discards it instead of
+delivering it later after the caller was told delivery failed. The deferred
+queue is bounded independently of the actor mailbox. Session exit drops the
+worker, its cached socket, its draft, and all deferred requests.
 
 Terminal resize is not input and continues through the existing ordered
-terminal-control path. Input itself no longer does. KSP discovers the live
-session PID before the first operator bytes and submits them to the shared
-coordinator. The coordinator uses acknowledged PID-fenced daemon commands for
-both raw bytes and complete messages. The acknowledgement preserves the
-existing uncertainty boundary, and the daemon rejects a stale worker even if a
-session ID is reused.
+terminal-control path. KSP admits terminal input to a bounded, per-task dispatch
+worker without awaiting daemon discovery or acknowledgement in the multiplexed
+connection frame loop. That worker preserves operator-frame order while calling
+the shared coordinator; a slow destination therefore cannot block Request,
+Attach/Detach, resize, agent-control, or companion frames. The coordinator uses
+acknowledged PID-fenced daemon commands for both raw bytes and complete
+messages. The acknowledgement preserves the existing uncertainty boundary, and
+the daemon rejects a stale worker even if a session ID is reused.
 
 ### Failure and reconnect rules
 
@@ -100,13 +109,19 @@ session ID is reused.
 - Losing an acknowledgement after a write is `delivery_uncertain`. The worker
   records that fact and never replays the write.
 - If uncertainty occurs during an open human draft or between message text and
-  Enter, the incarnation worker is poisoned: queued messages fail rather than
-  risk concatenation with unknown terminal state.
-- A later input discovers the current incarnation and may create a fresh
-  worker, preserving existing daemon reconnect behavior without violating the
-  no-retargeting contract.
+  Enter, queued work on that incarnation worker fails rather than risk
+  concatenation with unknown terminal state. The cached daemon client is
+  discarded and the worker is evicted from the coordinator.
+- A later input discovers the current incarnation and creates a fresh worker
+  with a fresh daemon connection. The uncertain bytes are never replayed, but a
+  routine daemon handoff does not permanently disable subsequent input.
 - Successfully acknowledged messages remain exactly once. The coordinator
   does not add durable later-run delivery or automatic retries.
+- The daemon terminal watcher retires coordinator state for every `Exit`,
+  including orchestrated kills and replacements. Completion notification
+  delivery runs outside the shared event loop after run finalization is durable,
+  so an open draft for one task cannot stall status and exit processing for all
+  tasks.
 
 ## Attribution and audit surface
 
@@ -125,7 +140,10 @@ Raw terminal editing cannot be reconstructed reliably from bytes because
 cursor movement, deletion, and full-screen TUI commands change composer state.
 Its event records the boundary and source without claiming an inaccurate text
 transcript. Task logs append a compact input-audit section sourced from these
-events. `/v1/task-events` exposes the structured events unchanged.
+events. `/v1/task-events` exposes the structured events unchanged. The
+`kanna_wait_events` catalog description names `task.input` and its source,
+delivery, boundary, sequence, PID, and optional bounded text fields so MCP
+orchestrators can consume the additive event deliberately.
 
 Definite failures that wrote nothing are not steering events and are not added
 to the audit. Uncertain writes are included because they may have steered the
