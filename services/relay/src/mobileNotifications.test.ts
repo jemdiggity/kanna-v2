@@ -10,12 +10,22 @@ describe("relay mobile notification delivery", () => {
     const deleteStale = vi.fn(async () => ({ writeTime: null }));
     const sendEachForMulticast = vi.fn(async () => ({
       successCount: 1,
-      failureCount: 1,
+      failureCount: 2,
       responses: [
         { success: true },
         {
           success: false,
-          error: { code: "messaging/registration-token-not-registered" }
+          error: {
+            code: "messaging/registration-token-not-registered",
+            message: "Requested entity was not found."
+          }
+        },
+        {
+          success: false,
+          error: {
+            code: "messaging/mismatched-credential",
+            message: "Permission 'cloudmessaging.messages.create' denied on resource projects/kanna-staging; diagnostic-id=do-not-expose"
+          }
         }
       ]
     }));
@@ -28,6 +38,10 @@ describe("relay mobile notification delivery", () => {
         {
           data: () => ({ token: "fcm-stale" }),
           ref: { delete: deleteStale }
+        },
+        {
+          data: () => ({ token: "fcm-current-with-missing-iam" }),
+          ref: { delete: vi.fn(async () => ({ writeTime: null })) }
         }
       ]
     }));
@@ -67,12 +81,26 @@ describe("relay mobile notification delivery", () => {
       }
     })).resolves.toEqual({
       acceptedCount: 1,
-      failedCount: 1
+      failedCount: 2,
+      failureReasons: [
+        {
+          providerCode: "messaging/mismatched-credential",
+          category: "relayPermission",
+          count: 1,
+          message: "The relay service account cannot send Firebase Cloud Messaging messages in this environment. Grant roles/firebasecloudmessaging.admin to the relay VM service account."
+        },
+        {
+          providerCode: "messaging/registration-token-not-registered",
+          category: "invalidToken",
+          count: 1,
+          message: "The registered push token is invalid or expired and was removed. Reopen the matching mobile app environment to register a current token."
+        }
+      ]
     });
 
     expect(limit).toHaveBeenCalledWith(500);
     expect(sendEachForMulticast).toHaveBeenCalledWith({
-      tokens: ["fcm-current", "fcm-stale"],
+      tokens: ["fcm-current", "fcm-stale", "fcm-current-with-missing-iam"],
       notification: {
         title: "Staging shipped",
         body: "The staging build is ready."
@@ -100,5 +128,23 @@ describe("relay mobile notification delivery", () => {
       title: "",
       body: "Needs input"
     })).toThrow("notification.title must be a non-empty string");
+  });
+
+  it.each([
+    ["messaging/mismatched-credential", "Sender ID mismatch.", "firebaseProjectMismatch"],
+    ["messaging/third-party-auth-error", "APNs rejected the credential.", "apnsCredentials"],
+    ["messaging/invalid-argument", "Invalid payload.", "payload"],
+    ["messaging/quota-exceeded", "Quota exhausted.", "rateLimit"],
+    ["messaging/server-unavailable", "Backend unavailable.", "temporary"],
+    ["messaging/new-provider-code", "Provider diagnostic with token-like text.", "provider"]
+  ])("classifies %s without exposing the raw provider message", async (
+    code,
+    message,
+    category
+  ) => {
+    const { diagnoseMessagingFailure } = await import("./mobileNotifications.js");
+    const reason = diagnoseMessagingFailure({ code, message });
+    expect(reason).toMatchObject({ providerCode: code, category, count: 1 });
+    expect(reason.message).not.toContain(message);
   });
 });

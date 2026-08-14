@@ -31,6 +31,7 @@ import {
 import {
   parseMobileNotification,
   sendMobileNotification,
+  type MobileNotificationDelivery,
 } from "./mobileNotifications.js";
 
 const PORT = parseInt(process.env.PORT || "8080", 10);
@@ -418,7 +419,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         const id = typeof publication.id === "string" ? publication.id : "";
         const sendAck = (
           ok: boolean,
-          delivery?: { acceptedCount: number; failedCount: number },
+          delivery?: MobileNotificationDelivery,
           error?: string
         ) => {
           if (ws.readyState !== 1) return;
@@ -450,6 +451,11 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
             desktopId,
             notification,
           });
+          if (delivery.failedCount > 0) {
+            console.warn(
+              `[push] Mobile notification delivery failed for desktop ${desktopId}: ${JSON.stringify(delivery.failureReasons)}`
+            );
+          }
           sendAck(true, delivery);
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);

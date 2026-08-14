@@ -24,6 +24,7 @@ pub(super) struct MobileNotificationResponse {
     status: &'static str,
     accepted_count: u64,
     failed_count: u64,
+    failure_reasons: Vec<crate::relay_client::MobileNotificationFailureReason>,
 }
 
 pub(super) async fn notify_mobile(
@@ -57,6 +58,7 @@ pub(super) async fn notify_mobile(
         },
         accepted_count: delivery.accepted_count,
         failed_count: delivery.failed_count,
+        failure_reasons: delivery.failure_reasons,
     }))
 }
 
