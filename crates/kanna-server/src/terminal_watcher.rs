@@ -963,7 +963,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn watcher_applies_unattached_idle_from_working_as_unread() {
+    async fn watcher_applies_unattached_idle_from_working_and_emits_activity_event() {
         let unique = unique_name("terminal-watcher-unattached-idle");
         let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
         let config = test_config(&unique, &daemon_dir);
@@ -982,7 +982,9 @@ mod tests {
                 &DaemonEvent::StatusChanged {
                     session_id: "task-child".to_string(),
                     status: kanna_daemon::protocol::SessionStatus::Idle,
-                    waiting_prompt_snippet: None,
+                    waiting_prompt_snippet: Some(
+                        "Does this design have your approval?".to_string(),
+                    ),
                 },
             )
             .await;
@@ -1003,6 +1005,29 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(item.activity.as_deref(), Some("unread"));
+        assert_eq!(
+            item.last_output_preview.as_deref(),
+            Some("Does this design have your approval?")
+        );
+        let events = Db::open(&config.db_path)
+            .unwrap()
+            .list_task_events(
+                &crate::db::TaskEventScope::Tasks(vec!["task-child".to_string()]),
+                0,
+                i64::MAX,
+                10,
+            )
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "task.activity_changed");
+        assert_eq!(
+            events[0].payload,
+            serde_json::json!({
+                "previousActivity": "working",
+                "activity": "unread",
+                "waitingPromptSnippet": "Does this design have your approval?",
+            })
+        );
         let _ = std::fs::remove_file(socket_path);
         let _ = std::fs::remove_dir_all(daemon_dir);
     }

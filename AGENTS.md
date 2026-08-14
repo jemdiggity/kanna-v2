@@ -280,7 +280,12 @@ cursor never misses an event fired between two calls. Add a new event by
 appending it where the state already changes, not by diffing snapshots. The
 `task.awaiting_input` event is the daemon's `Waiting` status — a positive match
 on prompt chrome, never inferred from a quiet session, because mislabelling a
-long build as blocked is worse than not reporting it at all. See
+long build as blocked is worse than not reporting it at all.
+`task.activity_changed` is the provider-neutral fallback: it is appended when
+a task with a non-empty `waitingPromptSnippet` moves from `working` to `idle`
+or `unread`. That weaker edge makes unrecognized provider questions visible,
+but does not prove the snippet is a question. A prompt-only change while the
+task remains stopped is visible only by polling task detail. See
 `docs/kanna-server-boundary.md` and
 `docs/2026-07-29-awaiting-input-detection-e2e-gap.md`.
 

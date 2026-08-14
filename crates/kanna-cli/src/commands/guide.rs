@@ -24,6 +24,12 @@ struct GuideTool<'a> {
     description: &'a str,
 }
 
+const EVENT_SUPERVISION_GUIDANCE: [&str; 3] = [
+    "`task.awaiting_input` is a confirmed interactive prompt detected by the daemon; it is the strong signal that the agent needs an answer. `kanna_send_task_input` delivers only to a live session: `no_live_agent_session` requires resume or rerun recovery, while `delivery_uncertain` must not be retried blindly.",
+    "`task.activity_changed` is the provider-neutral fallback for a working task becoming idle or unread. Inspect its `waitingPromptSnippet`; this transition is not proof that the snippet is a question. Without MCP, long-poll with `kanna-cli tool call kanna_wait_events --json '<arguments>'`.",
+    "prompt-only changes while a task remains stopped are visible only by polling task detail with `kanna_get_task` (or its CLI equivalent); they do not append another event.",
+];
+
 fn guide_tools(catalog: &Catalog) -> Vec<GuideTool<'_>> {
     catalog
         .tools
@@ -83,6 +89,9 @@ pub(crate) fn render_guide_markdown(context: &GuideContext) -> String {
         "- Manual transitions wait for a user or agent to request advancement.".to_string(),
         "- Advancing follows the next stage policy: continue stages reuse the current task, worktree, branch, and agent session; other stages create a next-stage task in a new worktree and close the source task after successful spawn.".to_string(),
         "- Use create/spawn-subtask tools for follow-up work, `kanna_send_input` for feedback to a running task, `kanna_request_revision` for a new revision task from an existing branch, and blocker tools when this task depends on another task.".to_string(),
+        format!("- {}", EVENT_SUPERVISION_GUIDANCE[0]),
+        format!("- {}", EVENT_SUPERVISION_GUIDANCE[1]),
+        format!("- {}", EVENT_SUPERVISION_GUIDANCE[2]),
         String::new(),
         "## Catalog Tools".to_string(),
         String::new(),
@@ -105,6 +114,7 @@ pub(crate) fn render_guide_json(context: &GuideContext) -> Result<Value, String>
             "prBoundary": "Do not push a branch or create a pull request unless this stage's prompt explicitly tells you to do so",
             "manualTransition": "manual stages wait for explicit advancement",
             "advanceStage": "advancing follows the next stage policy: continue stages reuse the current task and session; other stages create a next-stage task and close the source task after successful spawn",
+            "eventSupervision": EVENT_SUPERVISION_GUIDANCE,
             "operations": [
                 "prefer kanna-mcp tools for Kanna task operations",
                 "fall back to the instance-local kanna-cli only when MCP tools are unavailable",
