@@ -628,6 +628,15 @@ reports `cloudmessaging.messages.create` denied is classified as
 `relayPermission`; other occurrences remain `firebaseProjectMismatch`. Relay
 logs record only the desktop id and these same aggregate safe reasons.
 
+If the Firestore lookup or Firebase Admin call rejects as a whole, there are
+no per-device results to diagnose. The relay discards the exception rather
+than serializing it: its log and WebSocket acknowledgement contain only the
+fixed `relayDependency` category and an opaque incident id. `kanna-server`
+propagates that safe acknowledgement as `503 Service Unavailable`, so HTTP,
+CLI, MCP, and mobile consumers never receive the provider's raw response,
+project or credential diagnostics, or token material. The incident id is the
+correlation key for the matching environment's relay logs.
+
 ## Local Consumer Model
 
 The desktop app starts `kanna-server` and supplies its config.

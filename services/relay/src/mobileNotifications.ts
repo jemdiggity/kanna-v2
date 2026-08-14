@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { DocumentReference } from "firebase-admin/firestore";
 import { getFirebaseServices } from "./firebase.js";
 
@@ -32,6 +33,17 @@ export interface MobileNotificationFailureReason {
     | "provider";
   count: number;
   message: string;
+}
+
+export interface MobileNotificationPublicationAck {
+  ok: boolean;
+  delivery?: MobileNotificationDelivery;
+  error?: string;
+}
+
+interface MobileNotificationPublicationDependencies {
+  send?: typeof sendMobileNotification;
+  createIncidentId?: () => string;
 }
 
 interface RegisteredPushDevice {
@@ -116,6 +128,44 @@ export async function sendMobileNotification(input: {
       response.responses.flatMap((result) => result.error ? [result.error] : [])
     ),
   };
+}
+
+export async function publishMobileNotification(input: {
+  userId: string;
+  desktopId: string;
+  notification: MobileNotification;
+  sendAck: (ack: MobileNotificationPublicationAck) => void;
+}, dependencies: MobileNotificationPublicationDependencies = {}): Promise<void> {
+  const send = dependencies.send ?? sendMobileNotification;
+
+  let delivery: MobileNotificationDelivery;
+  try {
+    delivery = await send({
+      userId: input.userId,
+      desktopId: input.desktopId,
+      notification: input.notification,
+    });
+  } catch {
+    const incidentId = (dependencies.createIncidentId ?? randomUUID)();
+    const category = "relayDependency";
+    const safeError =
+      `mobile notification delivery failed (category=${category}, incident=${incidentId}); `
+      + "retry later and inspect the matching environment's relay logs";
+    console.warn(
+      `[push] Mobile notification delivery failed for desktop ${input.desktopId} `
+      + `(category=${category}, incident=${incidentId})`
+    );
+    input.sendAck({ ok: false, error: safeError });
+    return;
+  }
+
+  if (delivery.failedCount > 0) {
+    console.warn(
+      `[push] Mobile notification delivery failed for desktop ${input.desktopId}: `
+      + JSON.stringify(delivery.failureReasons)
+    );
+  }
+  input.sendAck({ ok: true, delivery });
 }
 
 function summarizeMessagingFailures(
