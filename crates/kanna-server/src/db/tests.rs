@@ -2655,7 +2655,7 @@ fn task_event_type_names_are_stable() {
             "run.started",
             "run.finished",
             "stage.changed",
-            "task.pipeline_changed",
+            "task.workflow_changed",
             "task.closed",
             "task.pr_created",
             "task.revision_requested",

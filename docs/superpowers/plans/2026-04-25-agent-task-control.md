@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Auto-select `superpowers:subagent-driven-development` or `superpowers:executing-plans` based on task coupling, subagent availability, and whether execution should stay in the current session. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add first-class agent task control through `kanna-server`, with CLI and MCP frontends plus a QA review pipeline.
+**Goal:** Add first-class agent task control through `kanna-server`, with CLI and MCP frontends plus a QA review workflow.
 
-**Architecture:** Implement task-control operations in `kanna-server` and expose them over HTTP. Update `kanna-cli` to call those routes, and add `kanna-cli mcp serve` as a stdio JSON-RPC bridge for MCP tools. Add repo-local QA pipeline and review agent definitions.
+**Architecture:** Implement task-control operations in `kanna-server` and expose them over HTTP. Update `kanna-cli` to call those routes, and add `kanna-cli mcp serve` as a stdio JSON-RPC bridge for MCP tools. Add repo-local QA workflow and review agent definitions.
 
-**Tech Stack:** Rust, Axum, Tokio, serde, reqwest, SQLite via rusqlite, Kanna pipeline JSON, MCP-compatible JSON-RPC over stdio.
+**Tech Stack:** Rust, Axum, Tokio, serde, reqwest, SQLite via rusqlite, Kanna workflow JSON, MCP-compatible JSON-RPC over stdio.
 
 ---
 
@@ -58,15 +58,15 @@
 - [ ] Route tool calls through the same HTTP client helpers as CLI commands.
 - [ ] Run `cargo test -p kanna-cli`.
 
-### Task 5: QA Pipeline
+### Task 5: QA Workflow
 
 **Files:**
 - Create: `.kanna/agents/review/AGENT.md`
-- Create: `.kanna/pipelines/qa.json`
+- Create: `.kanna/workflows/qa.json`
 
 - [ ] Add review agent instructions for test sufficiency and E2E expectations.
-- [ ] Add QA pipeline definition.
-- [ ] Validate the pipeline JSON through existing parser tests or a focused command.
+- [ ] Add QA workflow definition.
+- [ ] Validate the workflow JSON through existing parser tests or a focused command.
 
 ### Task 6: Verification
 

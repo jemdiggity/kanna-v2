@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED: Use superpowers-extended-cc:subagent-driven-development (if subagents available) or superpowers-extended-cc:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a `blocked` pipeline stage so tasks can declare dependencies on other tasks and auto-start when all blockers leave `in_progress`.
+**Goal:** Add a `blocked` workflow stage so tasks can declare dependencies on other tasks and auto-start when all blockers leave `in_progress`.
 
 **Architecture:** New `blocked` stage + `task_blocker` junction table. Two command palette commands ("Block Task", "Edit Blocked Task") manage dependencies. Auto-unblock logic triggers on stage transitions via `checkUnblocked()`. Blocked tasks have no worktree/agent until they unblock.
 
@@ -14,15 +14,15 @@
 
 ---
 
-### Task 1: Add `blocked` stage to pipeline types and transitions
+### Task 1: Add `blocked` stage to workflow types and transitions
 
 **Files:**
-- Modify: `packages/core/src/pipeline/types.ts`
-- Modify: `packages/core/src/pipeline/transitions.test.ts`
+- Modify: `packages/core/src/workflow/types.ts`
+- Modify: `packages/core/src/workflow/transitions.test.ts`
 
 - [ ] **Step 1: Write failing tests for new transitions**
 
-Add to `packages/core/src/pipeline/transitions.test.ts`:
+Add to `packages/core/src/workflow/transitions.test.ts`:
 
 ```typescript
 it("allows blocked → in_progress", () => {
@@ -49,7 +49,7 @@ Expected: 4 FAIL — `blocked` not in Stage type
 
 - [ ] **Step 3: Update types.ts**
 
-In `packages/core/src/pipeline/types.ts`:
+In `packages/core/src/workflow/types.ts`:
 
 ```typescript
 export type Stage = "in_progress" | "pr" | "merge" | "done" | "blocked";
@@ -75,8 +75,8 @@ Expected: ALL PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add packages/core/src/pipeline/types.ts packages/core/src/pipeline/transitions.test.ts
-git commit -m "feat: add blocked stage to pipeline types and transitions"
+git add packages/core/src/workflow/types.ts packages/core/src/workflow/transitions.test.ts
+git commit -m "feat: add blocked stage to workflow types and transitions"
 ```
 
 ---
@@ -624,7 +624,7 @@ In `Sidebar.vue` `<script setup>`, after `sortedInProgress()`:
 
 ```typescript
 function sortedBlocked(repoId: string): PipelineItem[] {
-  return props.pipelineItems
+  return props.workflowItems
     .filter((i) => i.repo_id === repoId && i.stage === "blocked" && !i.pinned)
     .sort((a, b) => a.created_at.localeCompare(b.created_at));
 }
@@ -649,7 +649,7 @@ In the `<template>`, after the "In Progress" `<draggable>` block and before the 
             <div
               v-for="element in sortedBlocked(repo.id)"
               :key="element.id"
-              class="pipeline-item"
+              class="workflow-item"
               :class="{ selected: selectedItemId === element.id }"
               @click="handleSelectItem(element)"
               @dblclick.stop="startRename(element)"
@@ -905,10 +905,10 @@ const paletteExtraCommands = computed(() => {
   const cmds: Array<{ action: ActionName; label: string; group: string; shortcut: string }> = [];
   const item = store.currentItem;
   if (item?.stage === "in_progress") {
-    cmds.push({ action: "blockTask", label: "Block Task", group: "Pipeline", shortcut: "" });
+    cmds.push({ action: "blockTask", label: "Block Task", group: "Workflow", shortcut: "" });
   }
   if (item?.stage === "blocked") {
-    cmds.push({ action: "editBlockedTask", label: "Edit Blocked Task", group: "Pipeline", shortcut: "" });
+    cmds.push({ action: "editBlockedTask", label: "Edit Blocked Task", group: "Workflow", shortcut: "" });
   }
   return cmds;
 });

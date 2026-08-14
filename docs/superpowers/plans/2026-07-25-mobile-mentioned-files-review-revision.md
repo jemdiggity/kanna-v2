@@ -101,4 +101,4 @@ cargo test -p kanna-server
 
 - [x] **Step 3: Inspect the diff and complete the Kanna stage**
 
-Confirm only intended files changed, summarize fresh verification evidence, and call `kanna_complete_stage` with `status: success`. Do not commit, push, create a pull request, or advance the stage manually; Kanna's pipeline post owns the commit.
+Confirm only intended files changed, summarize fresh verification evidence, and call `kanna_complete_stage` with `status: success`. Do not commit, push, create a pull request, or advance the stage manually; Kanna's workflow post owns the commit.

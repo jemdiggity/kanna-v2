@@ -238,4 +238,4 @@ Run `git diff --check`, then inspect the diff for the four implementation files 
 
 Expected: `git diff --check` emits no output, and the diff contains only the approved Activity ordering change, its tests, and the design/plan documents.
 
-No commit step is included because this Kanna stage explicitly delegates committing to the later pipeline.
+No commit step is included because this Kanna stage explicitly delegates committing to the later workflow.

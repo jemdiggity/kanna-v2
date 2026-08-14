@@ -220,7 +220,7 @@ git status --short
 git diff --stat
 ```
 
-Expected: only the `TaskScreen` implementation/test and this task's design/plan documents are changed. Do not commit: this Kanna task's later pipeline stage owns committing.
+Expected: only the `TaskScreen` implementation/test and this task's design/plan documents are changed. Do not commit: this Kanna task's later workflow stage owns committing.
 
 ### Task 3: Prove native task-ID copy in Appium
 

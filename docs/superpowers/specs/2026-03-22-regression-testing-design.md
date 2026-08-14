@@ -6,7 +6,7 @@
 
 ## Context
 
-Kanna merges ~100 PRs/day, mostly from Claude Code agents in worktrees. There is no CI pipeline — tests exist but nothing runs them automatically. The Merge Queue agent merges PRs sequentially and can run test scripts from `.kanna/config.json` before each merge.
+Kanna merges ~100 PRs/day, mostly from Claude Code agents in worktrees. There is no CI workflow — tests exist but nothing runs them automatically. The Merge Queue agent merges PRs sequentially and can run test scripts from `.kanna/config.json` before each merge.
 
 Analysis of 8 open PRs shows the `kanna.ts` Pinia store is the hotspot — touched by 60%+ of PRs. Regressions are frontend state bugs: wrong sort order, stuck activity indicators, race conditions with `computedAsync`, broken task lifecycle transitions.
 

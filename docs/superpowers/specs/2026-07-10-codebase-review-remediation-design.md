@@ -89,12 +89,12 @@ The daemon and server will consume the shared `AgentProvider` rather than defini
 
 TypeScript core, database, desktop, and mobile code will import the generated type or registry instead of declaring provider unions and option arrays. UI labels remain localized and provider-specific behavior remains in adapters. Exhaustive `Record<AgentProvider, ...>` mappings will make missing UI or behavior entries a type error.
 
-The pipeline JSON schema will consolidate its repeated provider enums into one local `$defs.agentProvider` definition. A contract test will assert that this schema enum exactly matches the generated registry; the schema stays readable while drift becomes a deterministic test failure.
+The workflow JSON schema will consolidate its repeated provider enums into one local `$defs.agentProvider` definition. A contract test will assert that this schema enum exactly matches the generated registry; the schema stays readable while drift becomes a deterministic test failure.
 
 Provider selection will use one documented policy:
 
 1. explicit request
-2. pipeline stage
+2. workflow stage
 3. agent definition
 4. stored or user-default provider
 
@@ -114,13 +114,13 @@ Implementation follows test-first changes at each boundary:
 - verify bounded test commands under the root orchestration rather than relying only on isolated package passes
 - add Rust serialization and metadata tests for every provider
 - regenerate TypeScript protocol output and verify freshness
-- add TypeScript exhaustiveness and pipeline-schema parity tests
+- add TypeScript exhaustiveness and workflow-schema parity tests
 - add shared provider-resolution fixtures covering precedence, ordered fallback, unknown values, and no-installed-provider errors
 
 Final verification will run the canonical root JavaScript tests, focused CLI and provider tests, the split Rust workflow including serialized daemon tests, generated-file checks, formatting and type checks for changed packages, and the relevant desktop build check.
 
 ## Rollout and Failure Handling
 
-The changes are source-compatible and ship together. If generated provider output is stale, verification fails before packaging. If the pipeline schema diverges, its parity test identifies the missing or extra provider. If no configured provider is installed, task creation fails before a worktree agent spawn with an actionable candidate list. If server database migration fails, startup remains blocked with the server's migration error; there is no hidden frontend fallback.
+The changes are source-compatible and ship together. If generated provider output is stale, verification fails before packaging. If the workflow schema diverges, its parity test identifies the missing or extra provider. If no configured provider is installed, task creation fails before a worktree agent spawn with an actionable candidate list. If server database migration fails, startup remains blocked with the server's migration error; there is no hidden frontend fallback.
 
 The test split preserves explicit entry points for live agent CLI compatibility, remote E2E, and fidelity coverage, so reducing `pnpm test` to offline unit and contract semantics does not remove those suites.

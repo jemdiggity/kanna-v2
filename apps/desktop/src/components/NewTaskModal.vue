@@ -20,8 +20,8 @@ const props = defineProps<{
   defaultAgentType?: AgentExecutionType;
   recentAgentChoices?: RecentAgentChoice[];
   availableAgentProviders?: AgentProvider[];
-  pipelines?: string[];
-  defaultPipeline?: string;
+  workflows?: string[];
+  defaultWorkflow?: string;
   baseBranches?: string[];
   defaultBaseBranch?: string;
   defaultBranchName?: string;
@@ -31,31 +31,31 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  submit: [prompt: string, agentProvider: AgentProvider, pipelineName: string, baseBranch: string, agentType: AgentExecutionType, blockerTaskIds: string[]];
+  submit: [prompt: string, agentProvider: AgentProvider, workflowName: string, baseBranch: string, agentType: AgentExecutionType, blockerTaskIds: string[]];
   cancel: [];
 }>();
 
 const prompt = ref("");
 const agentProvider = ref<AgentProvider>(props.defaultAgentProvider ?? "claude");
 const displayMode = ref<AgentExecutionType>(props.defaultAgentType ?? "pty");
-const pipelineOptions = computed(() => {
-  if (props.pipelines && props.pipelines.length > 0) return props.pipelines;
+const workflowOptions = computed(() => {
+  if (props.workflows && props.workflows.length > 0) return props.workflows;
   return ["no-review"];
 });
-const resolvedDefaultPipeline = computed(() => {
-  if (props.defaultPipeline && pipelineOptions.value.includes(props.defaultPipeline)) {
-    return props.defaultPipeline;
+const resolvedDefaultWorkflow = computed(() => {
+  if (props.defaultWorkflow && workflowOptions.value.includes(props.defaultWorkflow)) {
+    return props.defaultWorkflow;
   }
-  return pipelineOptions.value[0] ?? "no-review";
+  return workflowOptions.value[0] ?? "no-review";
 });
-const selectedPipeline = ref<string>(resolvedDefaultPipeline.value);
-let pipelineSelectionIsAutomatic = true;
-const showPipelinePicker = ref(false);
-const pipelineLabelId = "pipeline-label";
-const pipelineActionLabelId = "pipeline-action-label";
-const pipelineValueId = "pipeline-value";
-const pipelineToggleId = "pipeline-toggle";
-const pipelinePickerId = "pipeline-picker";
+const selectedWorkflow = ref<string>(resolvedDefaultWorkflow.value);
+let workflowSelectionIsAutomatic = true;
+const showWorkflowPicker = ref(false);
+const workflowLabelId = "workflow-label";
+const workflowActionLabelId = "workflow-action-label";
+const workflowValueId = "workflow-value";
+const workflowToggleId = "workflow-toggle";
+const workflowPickerId = "workflow-picker";
 const defaultBranchName = computed(() => props.defaultBranchName ?? "main");
 const selectableBaseBranches = computed(() => props.baseBranches ?? []);
 const defaultSelectableBaseBranch = computed<string | null>(() => {
@@ -160,10 +160,10 @@ watch(agentChoices, (choices) => {
   if (nextChoice) applyChoice(nextChoice);
 }, { immediate: true });
 
-watch([resolvedDefaultPipeline, pipelineOptions], ([defaultPipeline, options]) => {
-  if (!pipelineSelectionIsAutomatic && options.includes(selectedPipeline.value)) return;
-  selectedPipeline.value = defaultPipeline;
-  pipelineSelectionIsAutomatic = true;
+watch([resolvedDefaultWorkflow, workflowOptions], ([defaultWorkflow, options]) => {
+  if (!workflowSelectionIsAutomatic && options.includes(selectedWorkflow.value)) return;
+  selectedWorkflow.value = defaultWorkflow;
+  workflowSelectionIsAutomatic = true;
 }, { immediate: true });
 
 function agentChoiceLabel(provider: AgentProvider, executionType: AgentExecutionType): string {
@@ -226,7 +226,7 @@ function handleSubmit() {
     "submit",
     text,
     agentProvider.value,
-    selectedPipeline.value,
+    selectedWorkflow.value,
     selectedBaseBranch.value,
     displayMode.value,
     selectedBlockerItems.value.map((item) => item.id),
@@ -293,71 +293,71 @@ function handleBaseBranchSearchKeydown(event: KeyboardEvent) {
   }
 }
 
-function handlePipelineSelect(pipeline: string) {
-  selectedPipeline.value = pipeline;
-  pipelineSelectionIsAutomatic = false;
-  showPipelinePicker.value = false;
+function handleWorkflowSelect(workflow: string) {
+  selectedWorkflow.value = workflow;
+  workflowSelectionIsAutomatic = false;
+  showWorkflowPicker.value = false;
   nextTick(() => {
-    document.getElementById(pipelineToggleId)?.focus();
+    document.getElementById(workflowToggleId)?.focus();
   });
 }
 
-function focusPipelineOption(pipeline: string) {
+function focusWorkflowOption(workflow: string) {
   nextTick(() => {
-    document.getElementById(`pipeline-option-${pipeline}`)?.focus();
+    document.getElementById(`workflow-option-${workflow}`)?.focus();
   });
 }
 
-function focusSelectedPipelineOption() {
-  focusPipelineOption(selectedPipeline.value);
+function focusSelectedWorkflowOption() {
+  focusWorkflowOption(selectedWorkflow.value);
 }
 
-function handlePipelineToggle() {
-  showPipelinePicker.value = !showPipelinePicker.value;
-  if (showPipelinePicker.value) focusSelectedPipelineOption();
+function handleWorkflowToggle() {
+  showWorkflowPicker.value = !showWorkflowPicker.value;
+  if (showWorkflowPicker.value) focusSelectedWorkflowOption();
 }
 
-function handlePipelineToggleKeydown(e: KeyboardEvent) {
+function handleWorkflowToggleKeydown(e: KeyboardEvent) {
   if (e.key === "ArrowDown") {
     e.preventDefault();
-    if (!showPipelinePicker.value) showPipelinePicker.value = true;
-    focusSelectedPipelineOption();
+    if (!showWorkflowPicker.value) showWorkflowPicker.value = true;
+    focusSelectedWorkflowOption();
     return;
   }
 
-  if (e.key === "Escape" && showPipelinePicker.value) {
+  if (e.key === "Escape" && showWorkflowPicker.value) {
     e.preventDefault();
-    showPipelinePicker.value = false;
+    showWorkflowPicker.value = false;
   }
 }
 
-function handlePipelineOptionKeydown(e: KeyboardEvent, index: number) {
-  const options = pipelineOptions.value;
+function handleWorkflowOptionKeydown(e: KeyboardEvent, index: number) {
+  const options = workflowOptions.value;
   const lastIndex = options.length - 1;
 
   if (e.key === "ArrowDown") {
     e.preventDefault();
     const nextIndex = index === lastIndex ? 0 : index + 1;
-    focusPipelineOption(options[nextIndex]);
+    focusWorkflowOption(options[nextIndex]);
     return;
   }
 
   if (e.key === "ArrowUp") {
     e.preventDefault();
     const nextIndex = index === 0 ? lastIndex : index - 1;
-    focusPipelineOption(options[nextIndex]);
+    focusWorkflowOption(options[nextIndex]);
     return;
   }
 
   if (e.key === "Home") {
     e.preventDefault();
-    focusPipelineOption(options[0]);
+    focusWorkflowOption(options[0]);
     return;
   }
 
   if (e.key === "End") {
     e.preventDefault();
-    focusPipelineOption(options[lastIndex]);
+    focusWorkflowOption(options[lastIndex]);
     return;
   }
 
@@ -367,8 +367,8 @@ function handlePipelineOptionKeydown(e: KeyboardEvent, index: number) {
 
   if (e.key === "Escape") {
     e.preventDefault();
-    showPipelinePicker.value = false;
-    document.getElementById(pipelineToggleId)?.focus();
+    showWorkflowPicker.value = false;
+    document.getElementById(workflowToggleId)?.focus();
   }
 }
 
@@ -434,8 +434,8 @@ function handleKeydown(e: KeyboardEvent) {
         >
           {{ $t('tasks.loadingOptions') }}
         </div>
-        <div class="pipeline-row">
-          <label class="pipeline-label">{{ $t("tasks.baseBranch") }}</label>
+        <div class="workflow-row">
+          <label class="workflow-label">{{ $t("tasks.baseBranch") }}</label>
           <div class="base-branch-dropdown-shell">
             <div class="base-branch-row">
               <span
@@ -496,57 +496,57 @@ function handleKeydown(e: KeyboardEvent) {
           </div>
         </div>
 
-        <div class="pipeline-row">
-          <label :id="pipelineLabelId" class="pipeline-label">Pipeline</label>
+        <div class="workflow-row">
+          <label :id="workflowLabelId" class="workflow-label">Workflow</label>
           <div class="base-branch-dropdown-shell">
-            <div class="base-branch-row pipeline-value-row">
-              <span :id="pipelineActionLabelId" class="sr-only">{{ $t("addRepo.change") }}</span>
-              <span :id="pipelineValueId" class="base-branch-value" data-testid="pipeline-value">{{ selectedPipeline }}</span>
+            <div class="base-branch-row workflow-value-row">
+              <span :id="workflowActionLabelId" class="sr-only">{{ $t("addRepo.change") }}</span>
+              <span :id="workflowValueId" class="base-branch-value" data-testid="workflow-value">{{ selectedWorkflow }}</span>
               <button
-                :id="pipelineToggleId"
+                :id="workflowToggleId"
                 type="button"
                 class="change-link"
-                data-testid="pipeline-toggle"
-                :aria-controls="pipelinePickerId"
-                :aria-expanded="showPipelinePicker"
+                data-testid="workflow-toggle"
+                :aria-controls="workflowPickerId"
+                :aria-expanded="showWorkflowPicker"
                 aria-haspopup="listbox"
-                :aria-labelledby="`${pipelineActionLabelId} ${pipelineLabelId} ${pipelineValueId}`"
+                :aria-labelledby="`${workflowActionLabelId} ${workflowLabelId} ${workflowValueId}`"
                 :disabled="optionsLoading"
                 @mousedown.prevent
-                @click="handlePipelineToggle"
-                @keydown="handlePipelineToggleKeydown"
+                @click="handleWorkflowToggle"
+                @keydown="handleWorkflowToggleKeydown"
               >
                 {{ $t("addRepo.change") }}
               </button>
             </div>
 
             <div
-              v-if="showPipelinePicker"
-              :id="pipelinePickerId"
+              v-if="showWorkflowPicker"
+              :id="workflowPickerId"
               class="base-branch-dropdown"
-              data-testid="pipeline-dropdown"
+              data-testid="workflow-dropdown"
               role="listbox"
-              :aria-labelledby="pipelineLabelId"
+              :aria-labelledby="workflowLabelId"
             >
               <div
                 class="base-branch-options"
                 :style="{ maxHeight: baseBranchOptionsMaxHeight }"
-                data-testid="pipeline-options"
+                data-testid="workflow-options"
               >
                 <button
-                  v-for="(name, index) in pipelineOptions"
+                  v-for="(name, index) in workflowOptions"
                   :key="name"
-                  :id="`pipeline-option-${name}`"
+                  :id="`workflow-option-${name}`"
                   type="button"
                   class="base-branch-option"
                   role="option"
-                  :class="{ selected: name === selectedPipeline }"
-                  :aria-selected="name === selectedPipeline"
-                  :data-testid="`pipeline-option-${name}`"
-                  :tabindex="name === selectedPipeline ? 0 : -1"
+                  :class="{ selected: name === selectedWorkflow }"
+                  :aria-selected="name === selectedWorkflow"
+                  :data-testid="`workflow-option-${name}`"
+                  :tabindex="name === selectedWorkflow ? 0 : -1"
                   @mousedown.prevent
-                  @click="handlePipelineSelect(name)"
-                  @keydown="handlePipelineOptionKeydown($event, index)"
+                  @click="handleWorkflowSelect(name)"
+                  @keydown="handleWorkflowOptionKeydown($event, index)"
                 >
                   {{ name }}
                 </button>
@@ -555,8 +555,8 @@ function handleKeydown(e: KeyboardEvent) {
           </div>
         </div>
 
-        <div class="pipeline-row">
-          <label class="pipeline-label">{{ $t("tasks.blockedBy") }}</label>
+        <div class="workflow-row">
+          <label class="workflow-label">{{ $t("tasks.blockedBy") }}</label>
           <div class="base-branch-dropdown-shell">
             <div class="base-branch-row">
               <span
@@ -696,20 +696,20 @@ function handleKeydown(e: KeyboardEvent) {
   border: 0;
 }
 
-.pipeline-row {
+.workflow-row {
   display: flex;
   align-items: center;
   gap: 8px;
   margin-top: 8px;
 }
 
-.pipeline-label {
+.workflow-label {
   font-size: 11px;
   color: var(--kn-text-muted);
   white-space: nowrap;
 }
 
-.pipeline-value-row {
+.workflow-value-row {
   flex: 1;
 }
 

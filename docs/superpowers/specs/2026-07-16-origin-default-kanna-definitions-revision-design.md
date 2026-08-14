@@ -33,7 +33,7 @@ The normalized `RepoConfig` remains serializable in the existing snake_case HTTP
 
 Snapshot fetching remains authoritative for task/sidebar state. The fetched snapshot will be published without waiting for definition manifests. Per-repo manifest requests will enrich only the stage-order cache; each failure will be logged and isolated without rejecting the snapshot refresh or replacing good task state.
 
-Opening New Task will treat the definitions manifest as one fallible input. A failure will clear definition-derived pipeline choices, emit a visible error toast, continue loading branches and provider availability, and open the modal. Existing App and keyboard callers can continue invoking the action without owning error presentation.
+Opening New Task will treat the definitions manifest as one fallible input. A failure will clear definition-derived workflow choices, emit a visible error toast, continue loading branches and provider availability, and open the modal. Existing App and keyboard callers can continue invoking the action without owning error presentation.
 
 ## Verification
 

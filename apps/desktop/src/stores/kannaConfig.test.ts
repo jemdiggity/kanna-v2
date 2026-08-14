@@ -44,8 +44,8 @@ describe("task lifecycle config resolution", () => {
         revision: "remote-rev",
         refName: "origin/main",
         config: {},
-        defaultPipeline: "default",
-        pipelines: ["default"],
+        defaultWorkflow: "default",
+        workflows: ["default"],
       }),
     });
   });
@@ -63,8 +63,8 @@ describe("task lifecycle config resolution", () => {
       revision: "remote-rev",
       refName: "origin/main",
       config,
-      defaultPipeline: "default",
-      pipelines: ["default"],
+      defaultWorkflow: "default",
+      workflows: ["default"],
     }));
     updateDesktopServerClientHandlersForTests({ fetchRepoKannaDefinitions });
 
@@ -92,8 +92,8 @@ describe("task lifecycle config resolution", () => {
       revision: "remote-rev",
       refName: "origin/main",
       config: { teardown: ["remote teardown"] },
-      defaultPipeline: "default",
-      pipelines: ["default"],
+      defaultWorkflow: "default",
+      workflows: ["default"],
     }));
     updateDesktopServerClientHandlersForTests({ fetchRepoKannaDefinitions });
     invokeMock.mockImplementation(async (command: string, args?: Record<string, unknown>) => {

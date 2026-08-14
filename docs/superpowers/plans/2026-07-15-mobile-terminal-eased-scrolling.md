@@ -301,4 +301,4 @@ Do not install, launch, or automate an attached iPhone. Report that Chromium pro
 
 ## Commit Ownership
 
-Do not commit in this stage. Kanna's manual pipeline will run the configured commit post after the user reviews and advances the task, so all verified implementation changes should remain in the current worktree.
+Do not commit in this stage. Kanna's manual workflow will run the configured commit post after the user reviews and advances the task, so all verified implementation changes should remain in the current worktree.

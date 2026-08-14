@@ -5,7 +5,7 @@ itself. It explains how the system fits together, how to run it locally, how to
 test it, and how it ships.
 
 Kanna is a Tauri v2 macOS desktop app for orchestrating coding agent tasks —
-each task gets its own git worktree, branch, agent session, and pipeline stage —
+each task gets its own git worktree, branch, agent session, and workflow stage —
 plus a companion mobile app, a PTY daemon, a local API server, and cloud
 services (relay + Firebase).
 

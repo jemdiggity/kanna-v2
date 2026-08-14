@@ -12,7 +12,7 @@ build and the released build are different commits, and the release step asks th
 operator to re-decide everything from scratch.
 
 This is a standard software release problem, not an agent problem. The standard
-answer is a release-candidate pipeline: every candidate is an immutable, versioned
+answer is a release-candidate workflow: every candidate is an immutable, versioned
 build of a known commit; a candidate that survives a soak period is promoted —
 the same commit, not a fresh cut of trunk.
 
@@ -291,7 +291,7 @@ bugfixes.
   provenance as a `Source-Branch:` trailer in the prerelease notes — RC names and
   promotion bases can't drift from the branch the RC came from.
 - **Bugfixes flow forward, then back.** Fixes land on main first through the
-  normal task pipeline and merge master, then get cherry-picked onto
+  normal task workflow and merge master, then get cherry-picked onto
   `release/X.Y` (never fixed only on the branch, or the next release regresses).
   Each backport batch ends with a fresh RC.
 - **Promote from the branch.** Guard 4 pins the branch tip instead of main, so

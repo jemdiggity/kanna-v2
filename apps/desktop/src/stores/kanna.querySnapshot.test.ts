@@ -58,7 +58,7 @@ const mockState = vi.hoisted(() => {
       issue_number: null,
       issue_title: null,
       prompt: "Ship it",
-      pipeline: "default",
+      workflow: "default",
       stage: "in progress",
       stage_result: null,
       active_post_action: null,
@@ -88,7 +88,7 @@ const mockState = vi.hoisted(() => {
   }
 
   let allRepos: Repo[] = [];
-  let pipelineItems: PipelineItem[] = [];
+  let workflowItems: PipelineItem[] = [];
 
   const invokeImplementation = async (command: string, args?: Record<string, unknown>) => {
     switch (command) {
@@ -99,7 +99,7 @@ const mockState = vi.hoisted(() => {
       case "attach_session_with_snapshot":
       case "signal_session":
       case "kill_session":
-      case "get_pipeline_socket_path":
+      case "get_workflow_socket_path":
         return [];
       case "file_exists":
         return true;
@@ -123,7 +123,7 @@ const mockState = vi.hoisted(() => {
   const invokeMock = vi.fn(invokeImplementation);
   const listReposMock = vi.fn(async () => allRepos.filter((repo) => !repo.hidden));
   const listPipelineItemsMock = vi.fn(async (_db: DbHandle, repoId: string) =>
-    pipelineItems.filter((item) => item.repo_id === repoId),
+    workflowItems.filter((item) => item.repo_id === repoId),
   );
   const listTaskBlockersMock = vi.fn(async () => []);
   const getSettingMock = vi.fn(async () => null);
@@ -134,7 +134,7 @@ const mockState = vi.hoisted(() => {
       makeRepo({ id: "repo-1", path: "/tmp/repo-1", name: "repo-1", hidden: 0 }),
       makeRepo({ id: "repo-2", path: "/tmp/repo-2", name: "repo-2", hidden: 0 }),
     ];
-    pipelineItems = [
+    workflowItems = [
       makeItem({ id: "item-1", repo_id: "repo-1" }),
       makeItem({ id: "item-2", repo_id: "repo-2" }),
     ];
@@ -159,11 +159,11 @@ const mockState = vi.hoisted(() => {
     get visibleRepos() {
       return allRepos.filter((repo) => !repo.hidden);
     },
-    get pipelineItems() {
-      return pipelineItems;
+    get workflowItems() {
+      return workflowItems;
     },
-    set pipelineItems(value: PipelineItem[]) {
-      pipelineItems = value;
+    set workflowItems(value: PipelineItem[]) {
+      workflowItems = value;
     },
     makeRepo,
     makeItem,
@@ -195,7 +195,7 @@ vi.mock("@kanna/core", () => ({
   DEFAULT_STAGE_ORDER: ["pr", "review", "in progress"],
 }));
 
-vi.mock("../../../../packages/core/src/pipeline/agent-loader", () => ({
+vi.mock("../../../../packages/core/src/workflow/agent-loader", () => ({
   parseAgentDefinition: vi.fn(() => ({
     name: "agent",
     description: "agent",
@@ -203,14 +203,14 @@ vi.mock("../../../../packages/core/src/pipeline/agent-loader", () => ({
   })),
 }));
 
-vi.mock("../../../../packages/core/src/pipeline/pipeline-loader", () => ({
-  parsePipelineJson: vi.fn(() => ({
+vi.mock("../../../../packages/core/src/workflow/workflow-loader", () => ({
+  parseWorkflowJson: vi.fn(() => ({
     name: "default",
     stages: [],
   })),
 }));
 
-vi.mock("../../../../packages/core/src/pipeline/prompt-builder", () => ({
+vi.mock("../../../../packages/core/src/workflow/prompt-builder", () => ({
   buildStagePrompt: vi.fn(() => "Stage prompt"),
 }));
 
@@ -400,7 +400,7 @@ describe("kanna query snapshot regressions", () => {
     setDesktopSnapshotFetcherForTests(async () => ({
       entries: mockState.visibleRepos.map((repo) => ({
         repo,
-        items: mockState.pipelineItems.filter((item) => item.repo_id === repo.id),
+        items: mockState.workflowItems.filter((item) => item.repo_id === repo.id),
       })),
       taskBlockers: [],
       worktreePaths: {},
@@ -412,8 +412,8 @@ describe("kanna query snapshot regressions", () => {
         revision: "remote-rev",
         refName: "origin/main",
         config: {},
-        defaultPipeline: "default",
-        pipelines: ["default"],
+        defaultWorkflow: "default",
+        workflows: ["default"],
       }),
       findRepoByPath: async (path) =>
         mockState.allRepos.find((repo) => repo.path === path) as never ?? null,
@@ -469,22 +469,22 @@ describe("kanna query snapshot regressions", () => {
         revision: "rev-1",
         refName: "origin/main",
         config: { stage_order: firstOrder },
-        defaultPipeline: "default",
-        pipelines: ["default"],
+        defaultWorkflow: "default",
+        workflows: ["default"],
       },
       {
         revision: "rev-1",
         refName: "origin/main",
         config: { stage_order: ["ignored-same-revision"] },
-        defaultPipeline: "default",
-        pipelines: ["default"],
+        defaultWorkflow: "default",
+        workflows: ["default"],
       },
       {
         revision: "rev-2",
         refName: "origin/main",
         config: {},
-        defaultPipeline: "default",
-        pipelines: ["default"],
+        defaultWorkflow: "default",
+        workflows: ["default"],
       },
     ];
     const fetchRepoKannaDefinitions = vi.fn(async () => {
@@ -535,8 +535,8 @@ describe("kanna query snapshot regressions", () => {
           revision: "healthy-revision",
           refName: "origin/main",
           config: { stage_order: ["review", "in progress"] },
-          defaultPipeline: "default",
-          pipelines: ["default"],
+          defaultWorkflow: "default",
+          workflows: ["default"],
         };
       },
     });
@@ -728,8 +728,8 @@ describe("kanna query snapshot regressions", () => {
       revision: string;
       refName: string;
       config: Record<string, never>;
-      defaultPipeline: string;
-      pipelines: string[];
+      defaultWorkflow: string;
+      workflows: string[];
     }>();
     const definitionsReadStarted = deferred<void>();
     const fetchSnapshot = vi.fn()
@@ -785,8 +785,8 @@ describe("kanna query snapshot regressions", () => {
         revision: "older-rev",
         refName: "origin/main",
         config: {},
-        defaultPipeline: "default",
-        pipelines: ["default"],
+        defaultWorkflow: "default",
+        workflows: ["default"],
       });
       await olderReload;
 
@@ -801,8 +801,8 @@ describe("kanna query snapshot regressions", () => {
         revision: "older-rev",
         refName: "origin/main",
         config: {},
-        defaultPipeline: "default",
-        pipelines: ["default"],
+        defaultWorkflow: "default",
+        workflows: ["default"],
       });
       await olderReload?.catch(() => undefined);
     }
@@ -879,7 +879,7 @@ describe("kanna query snapshot regressions", () => {
         repo_id: "repo-1",
         prompt: "Ship it",
         display_name: null,
-        pipeline: "default",
+        workflow: "default",
         stage: "in progress",
         agent_type: "pty",
         agent_provider: "claude",
@@ -925,7 +925,7 @@ describe("kanna query snapshot regressions", () => {
         repo_id: "repo-1",
         prompt: "Hydrate or expire",
         display_name: null,
-        pipeline: "default",
+        workflow: "default",
         stage: "in progress",
         agent_type: "pty",
         agent_provider: "claude",
@@ -991,7 +991,7 @@ describe("kanna query snapshot regressions", () => {
         repo_id: "repo-1",
         prompt: "Ship it",
         display_name: null,
-        pipeline: "default",
+        workflow: "default",
         stage: "in progress",
         agent_type: "pty",
         agent_provider: "claude",
@@ -1063,7 +1063,7 @@ describe("kanna query snapshot regressions", () => {
           repo_id: repo1.id,
           prompt: survivingItem.prompt ?? "",
           display_name: null,
-          pipeline: "default",
+          workflow: "default",
           stage: "in progress",
           agent_type: "pty",
           agent_provider: "claude",
@@ -1080,7 +1080,7 @@ describe("kanna query snapshot regressions", () => {
           repo_id: repo2.id,
           prompt: "Creating before repo removal",
           display_name: null,
-          pipeline: "default",
+          workflow: "default",
           stage: "in progress",
           agent_type: "pty",
           agent_provider: "claude",
@@ -1097,7 +1097,7 @@ describe("kanna query snapshot regressions", () => {
           repo_id: repo2.id,
           prompt: "Acknowledged before repo removal",
           display_name: null,
-          pipeline: "default",
+          workflow: "default",
           stage: "in progress",
           agent_type: "pty",
           agent_provider: "claude",
@@ -1163,7 +1163,7 @@ describe("kanna query snapshot regressions", () => {
         repo_id: repo2.id,
         prompt: "Retire with local repo",
         display_name: null,
-        pipeline: "default",
+        workflow: "default",
         stage: "in progress",
         agent_type: "pty",
         agent_provider: "claude",

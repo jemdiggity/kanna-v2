@@ -214,7 +214,7 @@ git diff -- apps/mobile/src/state/sessionStore.ts apps/mobile/src/state/sessionS
 Expected: `git diff --check` produces no output. The diff changes only the
 mobile terminal event contract, its LAN/relay adapters, controller/store replay
 logic, their tests, and the approved design/plan documents. Per this Kanna
-stage's instructions, leave the work uncommitted for the pipeline to commit
+stage's instructions, leave the work uncommitted for the workflow to commit
 after manual advancement.
 
 ### Task 4: Preserve Authoritative Snapshot Identity on Reconnect

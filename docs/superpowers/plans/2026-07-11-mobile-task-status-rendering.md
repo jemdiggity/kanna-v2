@@ -13,7 +13,7 @@
 
 **Tech Stack:** TypeScript, React Native, React 19, Vitest, Firestore task snapshots
 
-**Stage constraint:** Do not commit during this implementation stage; the Kanna pipeline handles committing after the user advances the task.
+**Stage constraint:** Do not commit during this implementation stage; the Kanna workflow handles committing after the user advances the task.
 
 ---
 

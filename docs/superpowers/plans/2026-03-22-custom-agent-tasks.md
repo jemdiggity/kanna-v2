@@ -4,7 +4,7 @@
 
 **Goal:** Let users define reusable agent task templates as `.kanna/tasks/<name>/agent.md` files with YAML frontmatter config, discoverable and launchable from the command palette.
 
-**Architecture:** New `packages/core/src/config/custom-tasks.ts` module handles parsing and scanning. New `useCustomTasks` composable manages async discovery with cancellation. `CommandPaletteModal` gains a `dynamicCommands` prop for custom task entries. `usePipeline.createItem` and `spawnPtySession` accept optional `CustomTaskConfig` to overlay settings.
+**Architecture:** New `packages/core/src/config/custom-tasks.ts` module handles parsing and scanning. New `useCustomTasks` composable manages async discovery with cancellation. `CommandPaletteModal` gains a `dynamicCommands` prop for custom task entries. `useWorkflow.createItem` and `spawnPtySession` accept optional `CustomTaskConfig` to overlay settings.
 
 **Tech Stack:** TypeScript, Vue 3, Tauri v2, vitest, `yaml` npm package for frontmatter parsing
 
@@ -23,7 +23,7 @@
 - `packages/core/package.json` — add `yaml` dependency
 - `packages/core/src/index.ts` — export custom-tasks module
 - `packages/db/src/queries.ts` — `insertPipelineItem` accepts optional `display_name`
-- `apps/desktop/src/composables/usePipeline.ts` — `createItem` and `spawnPtySession` accept `CustomTaskConfig`
+- `apps/desktop/src/composables/useWorkflow.ts` — `createItem` and `spawnPtySession` accept `CustomTaskConfig`
 - `apps/desktop/src/components/CommandPaletteModal.vue` — `dynamicCommands` prop, description subtitle
 - `apps/desktop/src/App.vue` — wire up `useCustomTasks`, pass dynamic commands to palette, handle custom task actions
 
@@ -677,11 +677,11 @@ git commit -m "feat: create_agent_session accepts disallowed_tools and max_budge
 ### Task 4: Modify `spawnPtySession` to accept custom task config
 
 **Files:**
-- Modify: `apps/desktop/src/composables/usePipeline.ts:138-217`
+- Modify: `apps/desktop/src/composables/useWorkflow.ts:138-217`
 
 - [ ] **Step 1: Update `spawnPtySession` signature and CLI construction**
 
-In `apps/desktop/src/composables/usePipeline.ts`, modify `spawnPtySession` to accept an optional config object for custom task settings:
+In `apps/desktop/src/composables/useWorkflow.ts`, modify `spawnPtySession` to accept an optional config object for custom task settings:
 
 ```typescript
 interface PtySpawnOptions {
@@ -756,7 +756,7 @@ Expected: No TypeScript errors.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add apps/desktop/src/composables/usePipeline.ts
+git add apps/desktop/src/composables/useWorkflow.ts
 git commit -m "feat: spawnPtySession accepts custom task config options"
 ```
 
@@ -765,7 +765,7 @@ git commit -m "feat: spawnPtySession accepts custom task config options"
 ### Task 5: Modify `createItem` to accept `CustomTaskConfig`
 
 **Files:**
-- Modify: `apps/desktop/src/composables/usePipeline.ts:34-134`
+- Modify: `apps/desktop/src/composables/useWorkflow.ts:34-134`
 
 - [ ] **Step 1: Update `createItem` signature and implementation**
 
@@ -841,7 +841,7 @@ if (effectiveAgentType !== "pty") {
       setupCmdsOverride: opts?.customTask?.setup,
     });
   } catch (e) {
-    console.warn("[pipeline] PTY pre-spawn failed, will retry on mount:", e);
+    console.warn("[workflow] PTY pre-spawn failed, will retry on mount:", e);
   }
 }
 ```
@@ -857,7 +857,7 @@ Expected: No TypeScript errors.
 - [ ] **Step 3: Commit**
 
 ```bash
-git add apps/desktop/src/composables/usePipeline.ts
+git add apps/desktop/src/composables/useWorkflow.ts
 git commit -m "feat: createItem accepts CustomTaskConfig for custom agent tasks"
 ```
 

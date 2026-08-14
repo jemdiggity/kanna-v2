@@ -43,7 +43,7 @@ Migration added to `runMigrations()` in `App.vue` (and mirrored in `packages/db`
 
 ### 2. System Tags
 
-Add `"archived"` to the system tags list in `packages/core/src/pipeline/types.ts`.
+Add `"archived"` to the system tags list in `packages/core/src/workflow/types.ts`.
 
 Archived tasks are filtered out of the sidebar the same way "done" tasks are today.
 
@@ -133,7 +133,7 @@ Unlike "done", archiving a task should NOT trigger unblocking of dependent tasks
 | `apps/desktop/src/stores/db.ts` | Migration for `claude_session_id` column |
 | `packages/db/src/schema.ts` | Add `claude_session_id` to `PipelineItem` |
 | `packages/db/src/migrations/001_initial.sql` | Reference only (column added via ALTER) |
-| `packages/core/src/pipeline/types.ts` | Add `"archived"` to system tags |
+| `packages/core/src/workflow/types.ts` | Add `"archived"` to system tags |
 | `crates/daemon/src/main.rs` | Add `"SIGINT"` to signal match |
 | Sidebar filtering (wherever "done" is filtered) | Also filter "archived" |
 

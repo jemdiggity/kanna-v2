@@ -3,7 +3,7 @@ use crate::api::{
     dependent_tasks_exist_path, dependent_tasks_exist_via_api, get_task_via_api,
     list_task_children_via_api, parse_wait_until, rename_task_via_api, repo_agent_list_path,
     repo_task_list_path, request_revision_via_api, rerun_stage_via_api, resume_task_via_api,
-    send_task_input_via_api, set_task_parent_via_api, set_task_pipeline_via_api, signal_agent_path,
+    send_task_input_via_api, set_task_parent_via_api, set_task_workflow_via_api, signal_agent_path,
     signal_agent_via_api, signal_merge_handoff_via_api, task_children_path, task_get_path,
     task_list_path, task_logs_path, task_matches_wait_until, task_search_path,
     unblock_task_via_api, wait_task_via_api, WaitTaskOutcome,
@@ -24,7 +24,7 @@ use crate::commands::task::{
 use crate::commands::tool::build_tool_call_args;
 use crate::config::resolve_server_base_url;
 use crate::models::{
-    SetTaskParentRequest, SetTaskPipelineRequest, SignalAgentRequest, TaskCreateOptions,
+    SetTaskParentRequest, SetTaskWorkflowRequest, SignalAgentRequest, TaskCreateOptions,
     TaskDetail, TaskInputResponse, TaskLatestRun, TaskRenameRequest, TaskSummary, WaitUntil,
 };
 use clap::{Command, CommandFactory, Parser};
@@ -147,10 +147,10 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
             },
         ),
         (
-            "kanna_set_task_pipeline",
+            "kanna_set_task_workflow",
             TypedToolSurface {
-                command_path: &["task", "set-pipeline"],
-                param_args: &[("task_id", "task_id"), ("pipeline_name", "pipeline_name")],
+                command_path: &["task", "set-workflow"],
+                param_args: &[("task_id", "task_id"), ("workflow_name", "workflow_name")],
             },
         ),
         (
@@ -189,7 +189,7 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
                     ("repo_id", "repo_id"),
                     ("prompt", "prompt"),
                     ("display_name", "display_name"),
-                    ("pipeline_name", "pipeline_name"),
+                    ("workflow_name", "workflow_name"),
                     ("base_ref", "base_ref"),
                     ("agent", "agent"),
                     ("agent_provider", "agent_provider"),

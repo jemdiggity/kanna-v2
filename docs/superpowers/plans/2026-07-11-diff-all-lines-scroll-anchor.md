@@ -12,7 +12,7 @@
 
 ## Workflow constraint
 
-This Kanna stage leaves commits to the later pipeline. Execute the steps without creating a local commit.
+This Kanna stage leaves commits to the later workflow. Execute the steps without creating a local commit.
 
 ## File structure
 

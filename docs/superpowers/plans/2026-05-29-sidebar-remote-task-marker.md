@@ -13,7 +13,7 @@
 ## File Structure
 
 - Modify `apps/desktop/src/App.vue`: add a `remote_task` boolean to each computed sidebar item based on `task.owner.kind !== "local"`.
-- Modify `apps/desktop/src/components/Sidebar.vue`: accept pipeline items with optional `remote_task`, render a muted monospace `< ` marker before remote task titles, and expose a discoverable label via `title`.
+- Modify `apps/desktop/src/components/Sidebar.vue`: accept workflow items with optional `remote_task`, render a muted monospace `< ` marker before remote task titles, and expose a discoverable label via `title`.
 - Modify `apps/desktop/src/components/__tests__/Sidebar.test.ts`: add focused component tests that prove local and remote tasks render differently.
 
 ## Task 1: Pass Remote Ownership Metadata Into Sidebar Items
@@ -85,7 +85,7 @@ it("marks remote tasks with a leading angle marker and leaves local tasks unmark
     }),
   ], null);
 
-  const titles = wrapper.findAll(".pipeline-item .item-title");
+  const titles = wrapper.findAll(".workflow-item .item-title");
   expect(titles).toHaveLength(2);
   expect(titles[0]?.text()).toBe("< LAN visible task");
   expect(titles[0]?.attributes("title")).toBe("Remote task");
@@ -124,13 +124,13 @@ type SidebarPipelineItem = PipelineItem & {
 Then change the props type from:
 
 ```ts
-  pipelineItems: PipelineItem[];
+  workflowItems: PipelineItem[];
 ```
 
 to:
 
 ```ts
-  pipelineItems: SidebarPipelineItem[];
+  workflowItems: SidebarPipelineItem[];
 ```
 
 Change the `DraggableChange` call sites and helpers that currently mention `PipelineItem` to use `SidebarPipelineItem`:

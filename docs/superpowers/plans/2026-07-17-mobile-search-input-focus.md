@@ -322,4 +322,4 @@ git status --short
 git diff -- apps/mobile/src/App.tsx apps/mobile/src/App.component.test.tsx apps/mobile/src/screens/SearchScreen.tsx apps/mobile/src/screens/SearchScreen.test.tsx docs/superpowers/specs/2026-07-17-mobile-search-input-focus-design.md
 ```
 
-Expected: no whitespace errors; only the approved search-focus implementation, tests, and design/plan documents are changed. These task-related changes are ready for the pipeline's commit stage.
+Expected: no whitespace errors; only the approved search-focus implementation, tests, and design/plan documents are changed. These task-related changes are ready for the workflow's commit stage.

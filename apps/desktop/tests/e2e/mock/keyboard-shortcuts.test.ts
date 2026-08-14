@@ -135,7 +135,7 @@ describe("keyboard shortcuts", () => {
 
   async function sidebarTaskTitles(): Promise<string[]> {
     return await client.executeSync<string[]>(
-      `return Array.from(document.querySelectorAll(".pipeline-item .item-title"))
+      `return Array.from(document.querySelectorAll(".workflow-item .item-title"))
         .map(function(element) { return element.textContent?.trim() || ""; })
         .filter(Boolean);`,
     );
@@ -144,7 +144,7 @@ describe("keyboard shortcuts", () => {
   async function getSidebarScrollMetrics(): Promise<SidebarScrollMetrics> {
     return await client.executeSync<SidebarScrollMetrics>(
       `const content = document.querySelector(".sidebar-content");
-       const selected = content?.querySelector(".pipeline-item.selected");
+       const selected = content?.querySelector(".workflow-item.selected");
        if (!(content instanceof HTMLElement) || !(selected instanceof HTMLElement)) {
          return {
            scrollTop: -1,
@@ -785,7 +785,7 @@ describe("keyboard shortcuts", () => {
            mainPanelIsCloudTask: Boolean(unwrap(ctx.mainPanelIsCloudTask)),
            cloudTerminalVisible: Boolean(document.querySelector(".cloud-terminal-shell")),
            localTerminalVisible: Boolean(document.querySelector(".terminal-panel")),
-           selectedSidebarTaskId: document.querySelector(".pipeline-item.selected")?.getAttribute("data-task-id") ?? null,
+           selectedSidebarTaskId: document.querySelector(".workflow-item.selected")?.getAttribute("data-task-id") ?? null,
          };`,
       );
 

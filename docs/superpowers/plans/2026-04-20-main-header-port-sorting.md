@@ -39,7 +39,7 @@ function makeItem(overrides: Partial<PipelineItem> = {}): PipelineItem {
     issue_number: null,
     issue_title: null,
     prompt: "Fix port ordering",
-    pipeline: "default",
+    workflow: "default",
     stage: "in progress",
     stage_result: null,
     tags: "[]",

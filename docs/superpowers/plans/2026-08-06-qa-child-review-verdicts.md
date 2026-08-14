@@ -73,7 +73,7 @@ Expected: PASS.
 ### Task 3: Dispatcher carry-forward contract and documentation
 
 **Files:**
-- Modify: `packages/core/src/pipeline/qa-assets.test.ts`
+- Modify: `packages/core/src/workflow/qa-assets.test.ts`
 - Modify: `.kanna/agents/qa-dispatcher/AGENT.md`
 - Modify: `docs/specs/qa-dispatch-review.md`
 

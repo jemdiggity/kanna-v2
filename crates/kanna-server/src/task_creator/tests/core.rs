@@ -1,6 +1,6 @@
 use super::super::definitions::{
-    AgentDefinition, DefinitionVisibility, PipelineDefinition, PipelineStageTransition,
-    RepoDefinitions,
+    AgentDefinition, DefinitionVisibility, RepoDefinitions, WorkflowDefinition,
+    WorkflowStageTransition,
 };
 use super::super::provider::{
     resolve_agent_provider_with, validate_effort_shape, validate_model_shape,
@@ -43,7 +43,7 @@ fn repo_command_template_identity_persists_the_selected_teardown_for_close() {
             repo_id: "repo-1".to_string(),
             prompt: launch.prompt,
             display_name: Some(launch.display_name),
-            pipeline_name: None,
+            workflow_name: None,
             stage: launch.stage,
             base_ref: None,
             agent: launch.agent,
@@ -322,8 +322,8 @@ fn concurrent_close_cannot_observe_or_interleave_with_partial_reopen() {
 use crate::db::{NewRepo, Repo};
 
 #[test]
-fn pipeline_stage_policy_resolves_revision_transition_with_fallback() {
-    let explicit: PipelineDefinition = serde_json::from_str(
+fn workflow_stage_policy_resolves_revision_transition_with_fallback() {
+    let explicit: WorkflowDefinition = serde_json::from_str(
         r#"{
           "stages": [{
             "name": "in progress",
@@ -333,16 +333,16 @@ fn pipeline_stage_policy_resolves_revision_transition_with_fallback() {
     )
     .unwrap();
     let explicit_policy = &explicit.stages[0].policy;
-    assert_eq!(explicit_policy.transition, PipelineStageTransition::Manual);
+    assert_eq!(explicit_policy.transition, WorkflowStageTransition::Manual);
     assert_eq!(
         explicit_policy.revision_transition(),
-        PipelineStageTransition::Auto
+        WorkflowStageTransition::Auto
     );
     assert!(serde_json::to_string(&explicit)
         .unwrap()
         .contains("revision_transition"));
 
-    let inherited: PipelineDefinition = serde_json::from_str(
+    let inherited: WorkflowDefinition = serde_json::from_str(
         r#"{
           "stages": [{
             "name": "in progress",
@@ -353,10 +353,10 @@ fn pipeline_stage_policy_resolves_revision_transition_with_fallback() {
     .unwrap();
     assert_eq!(
         inherited.stages[0].policy.revision_transition(),
-        PipelineStageTransition::Manual
+        WorkflowStageTransition::Manual
     );
 
-    let invalid = serde_json::from_str::<PipelineDefinition>(
+    let invalid = serde_json::from_str::<WorkflowDefinition>(
         r#"{
           "stages": [{
             "name": "in progress",
@@ -413,11 +413,11 @@ fn resolve_test_agent_definition(
     RepoDefinitions::resolve(&definition_repo(repo_root, "main"))?.agent(agent_name)
 }
 
-fn resolve_test_pipeline_definition(
+fn resolve_test_workflow_definition(
     repo_root: &std::path::Path,
-    pipeline_name: &str,
-) -> Result<super::super::definitions::PipelineDefinition, String> {
-    RepoDefinitions::resolve(&definition_repo(repo_root, "main"))?.pipeline(pipeline_name)
+    workflow_name: &str,
+) -> Result<super::super::definitions::WorkflowDefinition, String> {
+    RepoDefinitions::resolve(&definition_repo(repo_root, "main"))?.workflow(workflow_name)
 }
 
 fn assert_remote_definition_error(error: &str, path: &str, revision: &str) {
@@ -530,7 +530,7 @@ fn create_task_rejects_model_for_provider_without_a_verified_flag() {
             repo_id: "repo-1".to_string(),
             prompt: "Use an unsupported model override".to_string(),
             display_name: None,
-            pipeline_name: None,
+            workflow_name: None,
             stage: None,
             base_ref: None,
             agent: None,
@@ -582,7 +582,7 @@ fn create_task_rejects_unsupported_effort_before_persisting_state() {
             repo_id: "repo-1".to_string(),
             prompt: "Use an unsupported effort override".to_string(),
             display_name: None,
-            pipeline_name: None,
+            workflow_name: None,
             stage: None,
             base_ref: None,
             agent: None,
@@ -638,7 +638,7 @@ fn create_task_rejects_unsupported_provider_before_persisting_state() {
             repo_id: "repo-1".to_string(),
             prompt: "Use an unsupported provider".to_string(),
             display_name: None,
-            pipeline_name: None,
+            workflow_name: None,
             stage: None,
             base_ref: None,
             agent: None,
@@ -902,9 +902,9 @@ fn task_creation_uses_one_remote_default_branch_definition_context() {
     let write_definitions = |prefix: &str, provider: &str| {
         let lower = prefix.to_ascii_lowercase();
         let agent_name = format!("{lower}-agent");
-        let pipeline_name = format!("{lower}-pipeline");
+        let workflow_name = format!("{lower}-workflow");
         let bin_dir = repo_root.join(format!("{lower}-bin"));
-        std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+        std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
         std::fs::create_dir_all(repo_root.join(format!(".kanna/agents/{agent_name}"))).unwrap();
         std::fs::create_dir_all(&bin_dir).unwrap();
         std::fs::create_dir_all(repo_root.join(format!("{lower}-tail"))).unwrap();
@@ -915,7 +915,7 @@ fn task_creation_uses_one_remote_default_branch_definition_context() {
         std::fs::write(
             repo_root.join(".kanna/config.json"),
             serde_json::json!({
-                "pipeline": pipeline_name,
+                "workflow": workflow_name,
                 "setup": [format!("printf {prefix}_SETUP > {lower}-setup.marker")],
                 "ports": {format!("{prefix}_PORT"): 49100},
                 "reserved_port_offsets": [1],
@@ -941,13 +941,13 @@ fn task_creation_uses_one_remote_default_branch_definition_context() {
         )
         .unwrap();
         std::fs::write(
-            repo_root.join(format!(".kanna/pipelines/{pipeline_name}.json")),
+            repo_root.join(format!(".kanna/workflows/{workflow_name}.json")),
             serde_json::json!({
-                "name": pipeline_name,
+                "name": workflow_name,
                 "stages": [{
                     "name": "in progress",
                     "agent": agent_name,
-                    "prompt": format!("{prefix}_PIPELINE $TASK_PROMPT"),
+                    "prompt": format!("{prefix}_WORKFLOW $TASK_PROMPT"),
                     "transition": "manual"
                 }]
             })
@@ -966,7 +966,7 @@ fn task_creation_uses_one_remote_default_branch_definition_context() {
     write_definitions("LOCAL_SENTINEL", "claude");
     publish_origin_main(&repo_root, "publish local sentinel definitions");
 
-    std::fs::remove_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::remove_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::remove_dir_all(repo_root.join(".kanna/agents")).unwrap();
     write_definitions("REMOTE", "codex");
     publish_origin_branch(&repo_root, "dev", "publish remote dev definitions");
@@ -990,7 +990,7 @@ fn task_creation_uses_one_remote_default_branch_definition_context() {
             repo_id: "repo-1".to_string(),
             prompt: "Do remote work".to_string(),
             display_name: None,
-            pipeline_name: None,
+            workflow_name: None,
             stage: None,
             base_ref: None,
             agent: None,
@@ -1021,10 +1021,10 @@ fn task_creation_uses_one_remote_default_branch_definition_context() {
         .get_pipeline_item(&prepared.created_task.task_id)
         .unwrap()
         .unwrap();
-    assert_eq!(stored.pipeline.as_deref(), Some("remote-pipeline"));
-    let pipeline_def = stored.pipeline_def.as_deref().unwrap();
-    assert!(pipeline_def.contains("REMOTE_PIPELINE"), "{pipeline_def}");
-    assert!(!pipeline_def.contains("LOCAL_SENTINEL"), "{pipeline_def}");
+    assert_eq!(stored.pipeline.as_deref(), Some("remote-workflow"));
+    let workflow_def = stored.pipeline_def.as_deref().unwrap();
+    assert!(workflow_def.contains("REMOTE_WORKFLOW"), "{workflow_def}");
+    assert!(!workflow_def.contains("LOCAL_SENTINEL"), "{workflow_def}");
     assert_eq!(prepared.agent_provider, "codex");
     assert_eq!(prepared.model.as_deref(), Some("remote-model"));
     assert_eq!(
@@ -1116,7 +1116,7 @@ fn task_creation_uses_one_remote_default_branch_definition_context() {
         } => {
             assert!(prompt.contains("REMOTE_AGENT REMOTE_VALUE"), "{prompt}");
             assert!(
-                prompt.contains("REMOTE_PIPELINE Do remote work"),
+                prompt.contains("REMOTE_WORKFLOW Do remote work"),
                 "{prompt}"
             );
             assert!(!prompt.contains("LOCAL_SENTINEL"), "{prompt}");
@@ -1263,12 +1263,12 @@ fn repo_definitions_pin_all_repo_owned_resources_to_remote_default_branch() {
     run_git_fixture(&publisher, &["config", "user.email", "test@example.com"]);
     run_git_fixture(&publisher, &["config", "user.name", "Kanna Test"]);
 
-    std::fs::create_dir_all(publisher.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(publisher.join(".kanna/workflows")).unwrap();
     std::fs::create_dir_all(publisher.join(".kanna/agents/review")).unwrap();
     std::fs::write(
         publisher.join(".kanna/config.json"),
         serde_json::json!({
-            "pipeline": "remote-qa",
+            "workflow": "remote-qa",
             "setup": ["REMOTE_SETUP"],
             "teardown": ["REMOTE_TEARDOWN"],
             "test": ["REMOTE_TEST"],
@@ -1290,21 +1290,21 @@ fn repo_definitions_pin_all_repo_owned_resources_to_remote_default_branch() {
     )
     .unwrap();
     std::fs::write(
-        publisher.join(".kanna/pipelines/remote-qa.json"),
+        publisher.join(".kanna/workflows/remote-qa.json"),
         serde_json::json!({
             "name": "remote-qa",
-            "description": "REMOTE_PIPELINE description",
+            "description": "REMOTE_WORKFLOW description",
             "stages": [{
                 "name": "remote review",
-                "description": "REMOTE_PIPELINE stage description",
+                "description": "REMOTE_WORKFLOW stage description",
                 "agent": "review",
-                "prompt": "REMOTE_PIPELINE",
+                "prompt": "REMOTE_WORKFLOW",
                 "policy": {"transition": "manual"},
                 "post": {
                     "name": "remote post",
-                    "description": "REMOTE_PIPELINE post description",
+                    "description": "REMOTE_WORKFLOW post description",
                     "agent": "review",
-                    "prompt": "REMOTE_PIPELINE post"
+                    "prompt": "REMOTE_WORKFLOW post"
                 }
             }]
         })
@@ -1337,7 +1337,7 @@ fn repo_definitions_pin_all_repo_owned_resources_to_remote_default_branch() {
 
     for relative_path in [
         ".kanna/config.json",
-        ".kanna/pipelines/remote-qa.json",
+        ".kanna/workflows/remote-qa.json",
         ".kanna/agents/review/AGENT.md",
         ".kanna/agents/review/EXTEND.md",
     ] {
@@ -1363,7 +1363,7 @@ fn repo_definitions_pin_all_repo_owned_resources_to_remote_default_branch() {
     std::fs::write(
         publisher.join(".kanna/config.json"),
         serde_json::json!({
-            "pipeline": "remote-qa-v2",
+            "workflow": "remote-qa-v2",
             "setup": ["REMOTE_SETUP_V2"],
             "test": ["REMOTE_TEST_V2"],
             "flavors": {"review": "REMOTE_FLAVOR_V2"},
@@ -1375,21 +1375,21 @@ fn repo_definitions_pin_all_repo_owned_resources_to_remote_default_branch() {
     )
     .unwrap();
     std::fs::write(
-        publisher.join(".kanna/pipelines/remote-qa.json"),
+        publisher.join(".kanna/workflows/remote-qa.json"),
         serde_json::json!({
             "name": "remote-qa-v2",
-            "description": "REMOTE_PIPELINE_V2 description",
+            "description": "REMOTE_WORKFLOW_V2 description",
             "stages": [{
                 "name": "remote review v2",
-                "description": "REMOTE_PIPELINE_V2 stage description",
+                "description": "REMOTE_WORKFLOW_V2 stage description",
                 "agent": "review",
-                "prompt": "REMOTE_PIPELINE_V2",
+                "prompt": "REMOTE_WORKFLOW_V2",
                 "policy": {"transition": "manual"},
                 "post": {
                     "name": "remote post v2",
-                    "description": "REMOTE_PIPELINE_V2 post description",
+                    "description": "REMOTE_WORKFLOW_V2 post description",
                     "agent": "review",
-                    "prompt": "REMOTE_PIPELINE_V2 post"
+                    "prompt": "REMOTE_WORKFLOW_V2 post"
                 }
             }]
         })
@@ -1418,7 +1418,7 @@ fn repo_definitions_pin_all_repo_owned_resources_to_remote_default_branch() {
     assert_eq!(definitions.revision(), Some(revision.as_str()));
 
     let config = definitions.config();
-    assert_eq!(config.pipeline.as_deref(), Some("remote-qa"));
+    assert_eq!(config.workflow.as_deref(), Some("remote-qa"));
     assert_eq!(
         string_values(config.setup.as_deref()),
         Some(vec!["REMOTE_SETUP"])
@@ -1478,26 +1478,26 @@ fn repo_definitions_pin_all_repo_owned_resources_to_remote_default_branch() {
         Some(vec!["REMOTE_APPEND"])
     );
 
-    let pipeline = definitions.pipeline("remote-qa").unwrap();
-    assert_eq!(pipeline.name.as_deref(), Some("remote-qa"));
+    let workflow = definitions.workflow("remote-qa").unwrap();
+    assert_eq!(workflow.name.as_deref(), Some("remote-qa"));
     assert_eq!(
-        pipeline.description.as_deref(),
-        Some("REMOTE_PIPELINE description")
+        workflow.description.as_deref(),
+        Some("REMOTE_WORKFLOW description")
     );
     assert_eq!(
-        pipeline.stages[0].description.as_deref(),
-        Some("REMOTE_PIPELINE stage description")
+        workflow.stages[0].description.as_deref(),
+        Some("REMOTE_WORKFLOW stage description")
     );
     assert_eq!(
-        pipeline.stages[0].prompt.as_deref(),
-        Some("REMOTE_PIPELINE")
+        workflow.stages[0].prompt.as_deref(),
+        Some("REMOTE_WORKFLOW")
     );
     assert_eq!(
-        pipeline.stages[0]
+        workflow.stages[0]
             .post
             .as_ref()
             .and_then(|post| post.description.as_deref()),
-        Some("REMOTE_PIPELINE post description")
+        Some("REMOTE_WORKFLOW post description")
     );
 
     let agent = definitions.agent("review").unwrap();
@@ -1515,7 +1515,7 @@ fn repo_definitions_pin_all_repo_owned_resources_to_remote_default_branch() {
     let all_wire_values = format!(
         "{}\n{}\n{}",
         serde_json::to_string(config).unwrap(),
-        serde_json::to_string(&pipeline).unwrap(),
+        serde_json::to_string(&workflow).unwrap(),
         serde_json::to_string(&agent).unwrap(),
     );
     assert!(!all_wire_values.contains("LOCAL_SENTINEL"));
@@ -1525,7 +1525,7 @@ fn repo_definitions_pin_all_repo_owned_resources_to_remote_default_branch() {
     assert_eq!(definitions_v2.revision(), Some(revision_v2.as_str()));
     assert_ne!(definitions_v2.revision(), definitions.revision());
     assert_eq!(
-        definitions_v2.config().pipeline.as_deref(),
+        definitions_v2.config().workflow.as_deref(),
         Some("remote-qa-v2")
     );
     assert_eq!(
@@ -1543,22 +1543,22 @@ fn repo_definitions_pin_all_repo_owned_resources_to_remote_default_branch() {
         Some("REMOTE_WORKSPACE_ENV_V2")
     );
 
-    let pipeline_v2 = definitions_v2.pipeline("remote-qa").unwrap();
-    assert_eq!(pipeline_v2.name.as_deref(), Some("remote-qa-v2"));
+    let workflow_v2 = definitions_v2.workflow("remote-qa").unwrap();
+    assert_eq!(workflow_v2.name.as_deref(), Some("remote-qa-v2"));
     assert_eq!(
-        pipeline_v2.description.as_deref(),
-        Some("REMOTE_PIPELINE_V2 description")
+        workflow_v2.description.as_deref(),
+        Some("REMOTE_WORKFLOW_V2 description")
     );
     assert_eq!(
-        pipeline_v2.stages[0].prompt.as_deref(),
-        Some("REMOTE_PIPELINE_V2")
+        workflow_v2.stages[0].prompt.as_deref(),
+        Some("REMOTE_WORKFLOW_V2")
     );
     assert_eq!(
-        pipeline_v2.stages[0]
+        workflow_v2.stages[0]
             .post
             .as_ref()
             .and_then(|post| post.description.as_deref()),
-        Some("REMOTE_PIPELINE_V2 post description")
+        Some("REMOTE_WORKFLOW_V2 post description")
     );
 
     let agent_v2 = definitions_v2.agent("review").unwrap();
@@ -1581,16 +1581,16 @@ fn missing_remote_custom_definitions_fall_back_only_to_compiled_builtins() {
     let definitions = RepoDefinitions::resolve(&definition_repo(&repo_root, "main")).unwrap();
 
     assert_eq!(
-        definitions.pipeline("no-review").unwrap().name.as_deref(),
+        definitions.workflow("no-review").unwrap().name.as_deref(),
         Some("no-review")
     );
     assert_eq!(definitions.agent("review").unwrap().name, "review");
 
-    let pipeline_error = definitions.pipeline("remote-only").unwrap_err();
+    let workflow_error = definitions.workflow("remote-only").unwrap_err();
     assert!(
-        pipeline_error.contains("compiled resource not found")
-            && pipeline_error.contains(".kanna/pipelines/remote-only.json"),
-        "{pipeline_error}"
+        workflow_error.contains("compiled resource not found")
+            && workflow_error.contains(".kanna/workflows/remote-only.json"),
+        "{workflow_error}"
     );
     let agent_error = definitions.agent("remote-only").unwrap_err();
     assert!(
@@ -1608,7 +1608,7 @@ fn builtin_dispatch_definitions_resolve_from_compiled_resources() {
     publish_origin_main(&repo_root, "publish empty dispatch definition source");
     let definitions = RepoDefinitions::resolve(&definition_repo(&repo_root, "main")).unwrap();
 
-    let dispatch = definitions.pipeline("specialized-reviewers").unwrap();
+    let dispatch = definitions.workflow("specialized-reviewers").unwrap();
     assert_eq!(dispatch.name.as_deref(), Some("specialized-reviewers"));
     let review = dispatch
         .stages
@@ -1616,9 +1616,9 @@ fn builtin_dispatch_definitions_resolve_from_compiled_resources() {
         .find(|stage| stage.name == "review")
         .expect("specialized-reviewers review stage");
     assert_eq!(review.agent.as_deref(), Some("qa-dispatcher"));
-    assert_eq!(review.policy.transition, PipelineStageTransition::Auto);
+    assert_eq!(review.policy.transition, WorkflowStageTransition::Auto);
 
-    let specialty = definitions.pipeline("specialty-review").unwrap();
+    let specialty = definitions.workflow("specialty-review").unwrap();
     assert_eq!(specialty.stages.len(), 1);
     let stage = &specialty.stages[0];
     assert_eq!(stage.name, "review");
@@ -1628,7 +1628,7 @@ fn builtin_dispatch_definitions_resolve_from_compiled_resources() {
     );
     // Manual: both verdicts park the child unread — never auto-close — so
     // the dispatcher uniformly collects the verdict and closes every child.
-    assert_eq!(stage.policy.transition, PipelineStageTransition::Manual);
+    assert_eq!(stage.policy.transition, WorkflowStageTransition::Manual);
 
     for agent_name in [
         "qa-dispatcher",
@@ -1654,7 +1654,7 @@ fn builtin_dispatch_definitions_resolve_from_compiled_resources() {
 }
 
 #[test]
-fn legacy_builtin_pipeline_names_still_resolve_for_committed_repo_config() {
+fn legacy_builtin_workflow_names_still_resolve_for_committed_repo_config() {
     // `default`, `qa`, and `qa-dispatch` shipped as built-ins before the
     // lineup was renamed by review depth. A repo that committed a config
     // selecting one of them must keep resolving after upgrading, without the
@@ -1673,21 +1673,21 @@ fn legacy_builtin_pipeline_names_still_resolve_for_committed_repo_config() {
         std::fs::create_dir_all(repo_root.join(".kanna")).unwrap();
         std::fs::write(
             repo_root.join(".kanna/config.json"),
-            serde_json::json!({ "pipeline": legacy }).to_string(),
+            serde_json::json!({ "workflow": legacy }).to_string(),
         )
         .unwrap();
-        publish_origin_main(&repo_root, "publish legacy pipeline selection");
+        publish_origin_main(&repo_root, "publish legacy workflow selection");
 
         let definitions = RepoDefinitions::resolve(&definition_repo(&repo_root, "main")).unwrap();
 
         // The repo's committed selection still resolves...
-        assert_eq!(definitions.config().pipeline.as_deref(), Some(legacy));
+        assert_eq!(definitions.config().workflow.as_deref(), Some(legacy));
         let resolved = definitions
-            .pipeline(legacy)
+            .workflow(legacy)
             .unwrap_or_else(|error| panic!("legacy `{legacy}` must resolve: {error}"));
 
         // ...to the current definition, which reports its own current name so
-        // the task records which pipeline it actually got.
+        // the task records which workflow it actually got.
         assert_eq!(resolved.name.as_deref(), Some(current));
         let review = resolved.stages.iter().find(|stage| stage.name == "review");
         match review_agent {
@@ -1702,7 +1702,7 @@ fn legacy_builtin_pipeline_names_still_resolve_for_committed_repo_config() {
         }
 
         // The retired name stays out of the user-facing manifest.
-        let names = definitions.pipeline_names().unwrap();
+        let names = definitions.workflow_names().unwrap();
         assert!(
             !names.contains(&legacy.to_string()),
             "`{legacy}` must not be offered as a choice; got {names:?}"
@@ -1717,25 +1717,25 @@ fn legacy_builtin_pipeline_names_still_resolve_for_committed_repo_config() {
 }
 
 #[test]
-fn internal_builtin_pipelines_resolve_without_being_offered_as_a_choice() {
-    // `specialty-review` is the single-stage pipeline `qa-dispatcher` binds for
+fn internal_builtin_workflows_resolve_without_being_offered_as_a_choice() {
+    // `specialty-review` is the single-stage workflow `qa-dispatcher` binds for
     // every child task it fans out. It is one character away from the
-    // `specialized-reviewers` pipeline an operator picks, so offering both in
+    // `specialized-reviewers` workflow an operator picks, so offering both in
     // the picker is an invitation to pick the wrong one — but the name must
     // still resolve, or dispatch breaks.
-    let repo_root = init_git_repo_without_provider_fixtures("definitions-internal-pipeline");
+    let repo_root = init_git_repo_without_provider_fixtures("definitions-internal-workflow");
     std::fs::create_dir_all(repo_root.join(".kanna")).unwrap();
-    publish_origin_main(&repo_root, "publish repo without pipelines");
+    publish_origin_main(&repo_root, "publish repo without workflows");
 
     let definitions = RepoDefinitions::resolve(&definition_repo(&repo_root, "main")).unwrap();
 
-    let names = definitions.pipeline_names().unwrap();
+    let names = definitions.workflow_names().unwrap();
     assert!(
         !names.contains(&"specialty-review".to_string()),
         "internal built-in must not be offered as a choice; got {names:?}"
     );
     let resolved = definitions
-        .pipeline("specialty-review")
+        .workflow("specialty-review")
         .expect("internal built-in must still resolve by name");
     assert_eq!(resolved.name.as_deref(), Some("specialty-review"));
 
@@ -1743,7 +1743,7 @@ fn internal_builtin_pipelines_resolve_without_being_offered_as_a_choice() {
 }
 
 #[test]
-fn a_repo_file_shadowing_an_internal_builtin_pipeline_declares_its_own_visibility() {
+fn a_repo_file_shadowing_an_internal_builtin_workflow_declares_its_own_visibility() {
     // Visibility comes from the effective definition, and a repo file wins
     // over the bundled one — visibility included. A repo that re-declares
     // `"visibility": "internal"` customizes what the dispatcher's children run
@@ -1757,7 +1757,7 @@ fn a_repo_file_shadowing_an_internal_builtin_pipeline_declares_its_own_visibilit
             "definitions-internal-shadow-{}",
             if expect_listed { "public" } else { "internal" }
         ));
-        std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+        std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
         let mut definition = serde_json::json!({
             "name": "specialty-review",
             "stages": [{
@@ -1770,7 +1770,7 @@ fn a_repo_file_shadowing_an_internal_builtin_pipeline_declares_its_own_visibilit
             definition["visibility"] = serde_json::json!(visibility);
         }
         std::fs::write(
-            repo_root.join(".kanna/pipelines/specialty-review.json"),
+            repo_root.join(".kanna/workflows/specialty-review.json"),
             definition.to_string(),
         )
         .unwrap();
@@ -1778,13 +1778,13 @@ fn a_repo_file_shadowing_an_internal_builtin_pipeline_declares_its_own_visibilit
 
         let definitions = RepoDefinitions::resolve(&definition_repo(&repo_root, "main")).unwrap();
 
-        let names = definitions.pipeline_names().unwrap();
+        let names = definitions.workflow_names().unwrap();
         assert_eq!(
             names.contains(&"specialty-review".to_string()),
             expect_listed,
             "{label}: got {names:?}"
         );
-        let resolved = definitions.pipeline("specialty-review").unwrap();
+        let resolved = definitions.workflow("specialty-review").unwrap();
         assert_eq!(
             resolved.stages[0].prompt.as_deref(),
             Some("REPO_SPECIALTY_REVIEW"),
@@ -1796,13 +1796,13 @@ fn a_repo_file_shadowing_an_internal_builtin_pipeline_declares_its_own_visibilit
 }
 
 #[test]
-fn a_repo_authored_pipeline_declaring_internal_visibility_is_unlisted_but_resolvable() {
-    // The mechanism is not reserved for built-ins: a repo pipeline bound by
+fn a_repo_authored_workflow_declaring_internal_visibility_is_unlisted_but_resolvable() {
+    // The mechanism is not reserved for built-ins: a repo workflow bound by
     // the repo's own orchestration can keep itself out of the picker.
-    let repo_root = init_git_repo_without_provider_fixtures("definitions-repo-internal-pipeline");
-    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    let repo_root = init_git_repo_without_provider_fixtures("definitions-repo-internal-workflow");
+    std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::write(
-        repo_root.join(".kanna/pipelines/orchestrated-child.json"),
+        repo_root.join(".kanna/workflows/orchestrated-child.json"),
         serde_json::json!({
             "name": "orchestrated-child",
             "visibility": "internal",
@@ -1815,16 +1815,16 @@ fn a_repo_authored_pipeline_declaring_internal_visibility_is_unlisted_but_resolv
         .to_string(),
     )
     .unwrap();
-    publish_origin_main(&repo_root, "publish repo-internal pipeline");
+    publish_origin_main(&repo_root, "publish repo-internal workflow");
 
     let definitions = RepoDefinitions::resolve(&definition_repo(&repo_root, "main")).unwrap();
 
-    let names = definitions.pipeline_names().unwrap();
+    let names = definitions.workflow_names().unwrap();
     assert!(
         !names.contains(&"orchestrated-child".to_string()),
-        "internal repo pipeline must not be offered; got {names:?}"
+        "internal repo workflow must not be offered; got {names:?}"
     );
-    let resolved = definitions.pipeline("orchestrated-child").unwrap();
+    let resolved = definitions.workflow("orchestrated-child").unwrap();
     assert_eq!(
         resolved.stages[0].prompt.as_deref(),
         Some("REPO_CHILD_REVIEW")
@@ -1980,44 +1980,44 @@ fn agent_frontmatter_rejects_an_unknown_visibility_value() {
 }
 
 #[test]
-fn a_malformed_repo_pipeline_file_stays_listed_instead_of_erroring_the_listing() {
+fn a_malformed_repo_workflow_file_stays_listed_instead_of_erroring_the_listing() {
     // Reading visibility means parsing every file, but the listing must not
-    // fail — or silently drop a name — because one repo pipeline is broken.
+    // fail — or silently drop a name — because one repo workflow is broken.
     // The name stays listed with the public default, and the parse error
-    // surfaces on that pipeline's own resolution.
-    let repo_root = init_git_repo_without_provider_fixtures("definitions-malformed-pipeline");
-    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    // surfaces on that workflow's own resolution.
+    let repo_root = init_git_repo_without_provider_fixtures("definitions-malformed-workflow");
+    std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::write(
-        repo_root.join(".kanna/pipelines/broken.json"),
+        repo_root.join(".kanna/workflows/broken.json"),
         "{ this is not json",
     )
     .unwrap();
-    publish_origin_main(&repo_root, "publish malformed pipeline");
+    publish_origin_main(&repo_root, "publish malformed workflow");
 
     let definitions = RepoDefinitions::resolve(&definition_repo(&repo_root, "main")).unwrap();
 
-    let names = definitions.pipeline_names().unwrap();
+    let names = definitions.workflow_names().unwrap();
     assert!(
         names.contains(&"broken".to_string()),
-        "malformed pipeline must stay listed; got {names:?}"
+        "malformed workflow must stay listed; got {names:?}"
     );
-    let error = definitions.pipeline("broken").unwrap_err();
+    let error = definitions.workflow("broken").unwrap_err();
     assert!(
-        error.contains("invalid pipeline definition"),
-        "the parse error belongs to the pipeline's own resolution: {error}"
+        error.contains("invalid workflow definition"),
+        "the parse error belongs to the workflow's own resolution: {error}"
     );
 
     let _ = std::fs::remove_dir_all(repo_root);
 }
 
 #[test]
-fn legacy_builtin_pipeline_alias_yields_to_a_repo_authored_pipeline_of_the_same_name() {
+fn legacy_builtin_workflow_alias_yields_to_a_repo_authored_workflow_of_the_same_name() {
     // The alias is a compiled fallback, not an override: a repo that ships its
     // own `qa.json` must keep getting its own definition.
     let repo_root = init_git_repo_without_provider_fixtures("definitions-legacy-repo-authored");
-    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::write(
-        repo_root.join(".kanna/pipelines/qa.json"),
+        repo_root.join(".kanna/workflows/qa.json"),
         serde_json::json!({
             "name": "qa",
             "stages": [
@@ -2027,10 +2027,10 @@ fn legacy_builtin_pipeline_alias_yields_to_a_repo_authored_pipeline_of_the_same_
         .to_string(),
     )
     .unwrap();
-    publish_origin_main(&repo_root, "publish repo-authored qa pipeline");
+    publish_origin_main(&repo_root, "publish repo-authored qa workflow");
 
     let definitions = RepoDefinitions::resolve(&definition_repo(&repo_root, "main")).unwrap();
-    let resolved = definitions.pipeline("qa").unwrap();
+    let resolved = definitions.workflow("qa").unwrap();
 
     assert_eq!(resolved.name.as_deref(), Some("qa"));
     assert_eq!(
@@ -2039,9 +2039,9 @@ fn legacy_builtin_pipeline_alias_yields_to_a_repo_authored_pipeline_of_the_same_
         "repo definition wins over the alias"
     );
 
-    // A repo-authored pipeline IS a user-facing choice, unlike the alias.
+    // A repo-authored workflow IS a user-facing choice, unlike the alias.
     assert!(definitions
-        .pipeline_names()
+        .workflow_names()
         .unwrap()
         .contains(&"qa".to_string()));
 
@@ -2049,32 +2049,32 @@ fn legacy_builtin_pipeline_alias_yields_to_a_repo_authored_pipeline_of_the_same_
 }
 
 #[test]
-fn remote_pipeline_tree_read_error_does_not_fall_back_to_compiled_default() {
-    let repo_root = init_git_repo_without_provider_fixtures("definitions-pipeline-tree");
-    let pipeline_path = repo_root.join(".kanna/pipelines/default.json");
-    std::fs::create_dir_all(&pipeline_path).unwrap();
-    std::fs::write(pipeline_path.join("child.json"), "{}").unwrap();
-    let revision = publish_origin_main(&repo_root, "publish pipeline tree");
+fn remote_workflow_tree_read_error_does_not_fall_back_to_compiled_default() {
+    let repo_root = init_git_repo_without_provider_fixtures("definitions-workflow-tree");
+    let workflow_path = repo_root.join(".kanna/workflows/default.json");
+    std::fs::create_dir_all(&workflow_path).unwrap();
+    std::fs::write(workflow_path.join("child.json"), "{}").unwrap();
+    let revision = publish_origin_main(&repo_root, "publish workflow tree");
     let definitions = RepoDefinitions::resolve(&definition_repo(&repo_root, "main")).unwrap();
 
-    let error = definitions.pipeline("default").unwrap_err();
+    let error = definitions.workflow("default").unwrap_err();
 
-    assert_remote_definition_error(&error, ".kanna/pipelines/default.json", &revision);
+    assert_remote_definition_error(&error, ".kanna/workflows/default.json", &revision);
     assert!(error.contains("not a blob"), "{error}");
     let _ = std::fs::remove_dir_all(repo_root);
 }
 
 #[test]
-fn remote_pipeline_manifest_blob_list_error_does_not_return_compiled_names() {
-    let repo_root = init_git_repo_without_provider_fixtures("definitions-pipeline-list-blob");
+fn remote_workflow_manifest_blob_list_error_does_not_return_compiled_names() {
+    let repo_root = init_git_repo_without_provider_fixtures("definitions-workflow-list-blob");
     std::fs::create_dir_all(repo_root.join(".kanna")).unwrap();
-    std::fs::write(repo_root.join(".kanna/pipelines"), "not a tree").unwrap();
-    let revision = publish_origin_main(&repo_root, "publish pipelines blob");
+    std::fs::write(repo_root.join(".kanna/workflows"), "not a tree").unwrap();
+    let revision = publish_origin_main(&repo_root, "publish workflows blob");
     let definitions = RepoDefinitions::resolve(&definition_repo(&repo_root, "main")).unwrap();
 
-    let error = definitions.pipeline_names().unwrap_err();
+    let error = definitions.workflow_names().unwrap_err();
 
-    assert_remote_definition_error(&error, ".kanna/pipelines", &revision);
+    assert_remote_definition_error(&error, ".kanna/workflows", &revision);
     assert!(error.contains("not a tree"), "{error}");
     let _ = std::fs::remove_dir_all(repo_root);
 }
@@ -2082,16 +2082,16 @@ fn remote_pipeline_manifest_blob_list_error_does_not_return_compiled_names() {
 #[test]
 fn local_only_committed_definitions_without_remote_tracking_ref_are_ignored() {
     let repo_root = init_git_repo_without_provider_fixtures("definitions-local-only");
-    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::create_dir_all(repo_root.join(".kanna/agents/local-agent")).unwrap();
     std::fs::write(
         repo_root.join(".kanna/config.json"),
-        r#"{"pipeline":"local-pipeline","setup":["LOCAL_SENTINEL"]}"#,
+        r#"{"workflow":"local-workflow","setup":["LOCAL_SENTINEL"]}"#,
     )
     .unwrap();
     std::fs::write(
-        repo_root.join(".kanna/pipelines/local-pipeline.json"),
-        r#"{"name":"local-pipeline","stages":[{"name":"local","transition":"manual"}]}"#,
+        repo_root.join(".kanna/workflows/local-workflow.json"),
+        r#"{"name":"local-workflow","stages":[{"name":"local","transition":"manual"}]}"#,
     )
     .unwrap();
     std::fs::write(
@@ -2113,10 +2113,10 @@ fn local_only_committed_definitions_without_remote_tracking_ref_are_ignored() {
         serde_json::to_value(definitions.config()).unwrap(),
         serde_json::json!({})
     );
-    assert!(definitions.pipeline("local-pipeline").is_err());
+    assert!(definitions.workflow("local-workflow").is_err());
     assert!(definitions.agent("local-agent").is_err());
     assert_eq!(
-        definitions.pipeline("no-review").unwrap().name.as_deref(),
+        definitions.workflow("no-review").unwrap().name.as_deref(),
         Some("no-review")
     );
     assert_eq!(definitions.agent("review").unwrap().name, "review");
@@ -2132,13 +2132,13 @@ fn repo_config_normalization_matches_shared_parser_behavior() {
         (
             "invalid string arrays preserve valid siblings",
             serde_json::json!({
-                "pipeline": "qa",
+                "workflow": "qa",
                 "setup": ["pnpm install"],
                 "test": "must-be-an-array",
                 "stage_order": ["review", 42]
             }),
             serde_json::json!({
-                "pipeline": "qa",
+                "workflow": "qa",
                 "setup": ["pnpm install"]
             }),
         ),
@@ -2254,17 +2254,17 @@ fn malformed_remote_definitions_report_path_ref_and_revision_without_fallback() 
     );
     assert!(config_error.contains("EOF"), "{config_error}");
 
-    let pipeline_repo = init_git_repo_without_provider_fixtures("definitions-bad-pipeline");
-    std::fs::create_dir_all(pipeline_repo.join(".kanna/pipelines")).unwrap();
-    std::fs::write(pipeline_repo.join(".kanna/pipelines/default.json"), "{").unwrap();
-    let pipeline_revision = publish_origin_main(&pipeline_repo, "publish malformed pipeline");
-    let pipeline_definitions =
-        RepoDefinitions::resolve(&definition_repo(&pipeline_repo, "main")).unwrap();
-    let pipeline_error = pipeline_definitions.pipeline("default").unwrap_err();
+    let workflow_repo = init_git_repo_without_provider_fixtures("definitions-bad-workflow");
+    std::fs::create_dir_all(workflow_repo.join(".kanna/workflows")).unwrap();
+    std::fs::write(workflow_repo.join(".kanna/workflows/default.json"), "{").unwrap();
+    let workflow_revision = publish_origin_main(&workflow_repo, "publish malformed workflow");
+    let workflow_definitions =
+        RepoDefinitions::resolve(&definition_repo(&workflow_repo, "main")).unwrap();
+    let workflow_error = workflow_definitions.workflow("default").unwrap_err();
     assert_remote_definition_error(
-        &pipeline_error,
-        ".kanna/pipelines/default.json",
-        &pipeline_revision,
+        &workflow_error,
+        ".kanna/workflows/default.json",
+        &workflow_revision,
     );
 
     let agent_repo = init_git_repo_without_provider_fixtures("definitions-bad-agent");
@@ -2301,7 +2301,7 @@ fn malformed_remote_definitions_report_path_ref_and_revision_without_fallback() 
         &extension_revision,
     );
 
-    for repo_root in [config_repo, pipeline_repo, agent_repo, extension_repo] {
+    for repo_root in [config_repo, workflow_repo, agent_repo, extension_repo] {
         let _ = std::fs::remove_dir_all(repo_root);
     }
 }
@@ -2341,21 +2341,21 @@ fn remote_agent_requires_name_description_and_supported_permission_mode() {
 }
 
 #[test]
-fn pipeline_names_are_sorted_deduped_remote_and_compiled_union() {
-    let repo_root = init_git_repo_without_provider_fixtures("definition-pipeline-names");
-    let pipeline_dir = repo_root.join(".kanna/pipelines");
-    std::fs::create_dir_all(pipeline_dir.join("nested")).unwrap();
+fn workflow_names_are_sorted_deduped_remote_and_compiled_union() {
+    let repo_root = init_git_repo_without_provider_fixtures("definition-workflow-names");
+    let workflow_dir = repo_root.join(".kanna/workflows");
+    std::fs::create_dir_all(workflow_dir.join("nested")).unwrap();
     for name in ["zeta.json", "alpha.json", "qa.json", "schema.json"] {
-        std::fs::write(pipeline_dir.join(name), "{}").unwrap();
+        std::fs::write(workflow_dir.join(name), "{}").unwrap();
     }
-    std::fs::write(pipeline_dir.join("README.md"), "not a pipeline").unwrap();
-    std::fs::write(pipeline_dir.join("nested/hidden.json"), "{}").unwrap();
-    publish_origin_main(&repo_root, "publish pipeline names");
+    std::fs::write(workflow_dir.join("README.md"), "not a workflow").unwrap();
+    std::fs::write(workflow_dir.join("nested/hidden.json"), "{}").unwrap();
+    publish_origin_main(&repo_root, "publish workflow names");
 
     let definitions = RepoDefinitions::resolve(&definition_repo(&repo_root, "main")).unwrap();
 
     assert_eq!(
-        definitions.pipeline_names().unwrap(),
+        definitions.workflow_names().unwrap(),
         vec![
             "alpha",
             "no-review",
@@ -2402,10 +2402,10 @@ fn extension_overrides_description_but_cannot_rename_base_agent() {
 }
 
 #[test]
-fn stored_pipeline_is_parsed_without_snapshot_resolution_and_preserves_descriptions() {
+fn stored_workflow_is_parsed_without_snapshot_resolution_and_preserves_descriptions() {
     let stored = serde_json::json!({
         "name": "stored",
-        "description": "Stored pipeline",
+        "description": "Stored workflow",
         "stages": [
             {
                 "name": "work",
@@ -2422,16 +2422,16 @@ fn stored_pipeline_is_parsed_without_snapshot_resolution_and_preserves_descripti
     })
     .to_string();
 
-    let pipeline = super::super::definitions::parse_stored_pipeline_definition(&stored).unwrap();
+    let workflow = super::super::definitions::parse_stored_workflow_definition(&stored).unwrap();
 
-    assert_eq!(pipeline.name.as_deref(), Some("stored"));
-    assert_eq!(pipeline.description.as_deref(), Some("Stored pipeline"));
+    assert_eq!(workflow.name.as_deref(), Some("stored"));
+    assert_eq!(workflow.description.as_deref(), Some("Stored workflow"));
     assert_eq!(
-        pipeline.stages[0].description.as_deref(),
+        workflow.stages[0].description.as_deref(),
         Some("Stored stage")
     );
     assert_eq!(
-        pipeline.stages[0]
+        workflow.stages[0]
             .post
             .as_ref()
             .and_then(|post| post.description.as_deref()),
@@ -2527,7 +2527,7 @@ fn read_agent_extension_rejects_malformed_provider_frontmatter() {
 }
 
 #[test]
-fn read_pipeline_definition_rejects_malformed_provider_selections() {
+fn read_workflow_definition_rejects_malformed_provider_selections() {
     let cases = [
         ("empty-array", serde_json::json!([])),
         ("mixed-array", serde_json::json!(["claude", 7])),
@@ -2539,11 +2539,11 @@ fn read_pipeline_definition_rejects_malformed_provider_selections() {
 
     for (label, provider) in cases {
         let repo_root =
-            init_git_repo_without_provider_fixtures(&format!("pipeline-provider-{label}"));
-        let pipeline_dir = repo_root.join(".kanna/pipelines");
-        std::fs::create_dir_all(&pipeline_dir).unwrap();
+            init_git_repo_without_provider_fixtures(&format!("workflow-provider-{label}"));
+        let workflow_dir = repo_root.join(".kanna/workflows");
+        std::fs::create_dir_all(&workflow_dir).unwrap();
         std::fs::write(
-            pipeline_dir.join("qa.json"),
+            workflow_dir.join("qa.json"),
             serde_json::json!({
                 "name": "qa",
                 "stages": [{
@@ -2555,11 +2555,11 @@ fn read_pipeline_definition_rejects_malformed_provider_selections() {
             .to_string(),
         )
         .unwrap();
-        publish_origin_main(&repo_root, "publish malformed pipeline provider");
+        publish_origin_main(&repo_root, "publish malformed workflow provider");
 
-        let error = resolve_test_pipeline_definition(&repo_root, "qa")
+        let error = resolve_test_workflow_definition(&repo_root, "qa")
             .err()
-            .expect("malformed pipeline provider selection should fail");
+            .expect("malformed workflow provider selection should fail");
 
         assert!(
             error.contains("agent_provider"),
@@ -2570,7 +2570,7 @@ fn read_pipeline_definition_rejects_malformed_provider_selections() {
 }
 
 #[test]
-fn read_pipeline_definition_rejects_legacy_csv_provider_selections() {
+fn read_workflow_definition_rejects_legacy_csv_provider_selections() {
     for location in ["stage", "post", "post_action"] {
         let mut stage = serde_json::json!({
             "name": "in progress",
@@ -2586,11 +2586,11 @@ fn read_pipeline_definition_rejects_legacy_csv_provider_selections() {
         }
 
         let repo_root =
-            init_git_repo_without_provider_fixtures(&format!("pipeline-csv-provider-{location}"));
-        let pipeline_dir = repo_root.join(".kanna/pipelines");
-        std::fs::create_dir_all(&pipeline_dir).unwrap();
+            init_git_repo_without_provider_fixtures(&format!("workflow-csv-provider-{location}"));
+        let workflow_dir = repo_root.join(".kanna/workflows");
+        std::fs::create_dir_all(&workflow_dir).unwrap();
         std::fs::write(
-            pipeline_dir.join("qa.json"),
+            workflow_dir.join("qa.json"),
             serde_json::json!({
                 "name": "qa",
                 "stages": [stage],
@@ -2598,11 +2598,11 @@ fn read_pipeline_definition_rejects_legacy_csv_provider_selections() {
             .to_string(),
         )
         .unwrap();
-        publish_origin_main(&repo_root, "publish legacy CSV pipeline provider");
+        publish_origin_main(&repo_root, "publish legacy CSV workflow provider");
 
-        let error = resolve_test_pipeline_definition(&repo_root, "qa")
+        let error = resolve_test_workflow_definition(&repo_root, "qa")
             .err()
-            .expect("live pipeline definitions must reject legacy CSV providers");
+            .expect("live workflow definitions must reject legacy CSV providers");
 
         assert!(
             error.contains("agent_provider"),
@@ -2613,7 +2613,7 @@ fn read_pipeline_definition_rejects_legacy_csv_provider_selections() {
 }
 
 #[test]
-fn stored_pipeline_definition_accepts_legacy_null_provider_and_omits_it_on_reserialize() {
+fn stored_workflow_definition_accepts_legacy_null_provider_and_omits_it_on_reserialize() {
     let snapshot = serde_json::json!({
         "name": "qa",
         "stages": [{
@@ -2629,15 +2629,15 @@ fn stored_pipeline_definition_accepts_legacy_null_provider_and_omits_it_on_reser
     })
     .to_string();
 
-    let pipeline = super::super::definitions::parse_stored_pipeline_definition(&snapshot)
-        .expect("legacy durable pipeline snapshots should remain readable");
-    let serialized = serde_json::to_value(pipeline).unwrap();
+    let workflow = super::super::definitions::parse_stored_workflow_definition(&snapshot)
+        .expect("legacy durable workflow snapshots should remain readable");
+    let serialized = serde_json::to_value(workflow).unwrap();
 
     assert!(serialized["stages"][0].get("agent_provider").is_none());
 }
 
 #[test]
-fn stored_pipeline_definition_normalizes_legacy_csv_and_preserves_provider_lists() {
+fn stored_workflow_definition_normalizes_legacy_csv_and_preserves_provider_lists() {
     for post_key in ["post", "post_action"] {
         let mut stage = serde_json::json!({
             "name": "review",
@@ -2660,9 +2660,9 @@ fn stored_pipeline_definition_normalizes_legacy_csv_and_preserves_provider_lists
         })
         .to_string();
 
-        let pipeline = super::super::definitions::parse_stored_pipeline_definition(&snapshot)
-            .expect("durable pipeline snapshots should remain readable");
-        let serialized = serde_json::to_value(pipeline).unwrap();
+        let workflow = super::super::definitions::parse_stored_workflow_definition(&snapshot)
+            .expect("durable workflow snapshots should remain readable");
+        let serialized = serde_json::to_value(workflow).unwrap();
 
         assert_eq!(
             serialized["stages"][0]["agent_provider"],
@@ -3179,15 +3179,15 @@ fn build_target_stage_prompt_sections_a_carried_task_without_rescanning_it() {
     let repo_root = init_git_repo_without_provider_fixtures("agentless-stage-prompt");
     publish_origin_main(&repo_root, "publish agentless prompt fixture");
     let definitions = RepoDefinitions::resolve(&definition_repo(&repo_root, "main")).unwrap();
-    let stage = super::super::definitions::PipelineStage {
+    let stage = super::super::definitions::WorkflowStage {
         name: "gate".to_string(),
         description: None,
         agent: None,
         prompt: None,
         agent_provider: None,
         environment: None,
-        policy: super::super::definitions::PipelineStagePolicy {
-            transition: PipelineStageTransition::Manual,
+        policy: super::super::definitions::WorkflowStagePolicy {
+            transition: WorkflowStageTransition::Manual,
             revision_transition: None,
         },
         post: None,
@@ -3285,7 +3285,7 @@ fn prepare_task_rejects_unsupported_headless_provider_before_persisting_state() 
                 repo_id: "repo-1".to_string(),
                 prompt: format!("Use {provider} headlessly"),
                 display_name: None,
-                pipeline_name: None,
+                workflow_name: None,
                 stage: None,
                 base_ref: None,
                 agent: None,
@@ -3356,7 +3356,7 @@ fn build_agent_command_adds_claude_kanna_preamble_as_system_prompt() {
     assert!(command.contains("--append-system-prompt '"));
     assert!(command.contains("## Kanna Task Environment"));
     assert!(command.contains(
-        "This session was launched by Kanna as task `task-123`, stage `review` of pipeline `qa` (transition: `auto`)."
+        "This session was launched by Kanna as task `task-123`, stage `review` of workflow `qa` (transition: `auto`)."
     ));
     assert!(!command.contains("{{TASK_CONTEXT}}"));
     assert!(!command.contains("{{MCP_STATUS}}"));
@@ -3378,7 +3378,7 @@ fn build_agent_command_adds_claude_kanna_preamble_as_system_prompt() {
     assert!(command.contains("Do not push a branch or create a pull request"));
     assert!(command.contains("kanna_complete_stage"));
     assert!(command.contains("kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\""));
-    assert!(command.contains("record completion so Kanna can advance the pipeline"));
+    assert!(command.contains("record completion so Kanna can advance the workflow"));
 }
 
 #[test]
@@ -3392,7 +3392,7 @@ fn build_kanna_preamble_renders_transition_specific_completion_guidance() {
         None,
     );
     assert!(auto.contains("This stage's transition is `auto`"));
-    assert!(auto.contains("record completion so Kanna can advance the pipeline"));
+    assert!(auto.contains("record completion so Kanna can advance the workflow"));
     assert!(auto.contains("--status success --summary \"...\""));
     assert!(!auto.contains("{{COMPLETION}}"));
 
@@ -3405,7 +3405,7 @@ fn build_kanna_preamble_renders_transition_specific_completion_guidance() {
         None,
     );
     assert!(manual.contains("This stage's transition is `manual`"));
-    assert!(manual.contains("recording a successful result does not advance the pipeline"));
+    assert!(manual.contains("recording a successful result does not advance the workflow"));
     assert!(manual.contains("record completion only if this stage's prompt asks for it"));
     assert!(manual.contains("record status `failure` with the reason"));
     assert!(!manual.contains("--status success"));
@@ -3827,7 +3827,7 @@ fn prepare_task_defaults_to_pty_session_for_claude_and_codex() {
                 repo_id: "repo-1".to_string(),
                 prompt: format!("Use {provider}"),
                 display_name: None,
-                pipeline_name: None,
+                workflow_name: None,
                 stage: None,
                 base_ref: None,
                 agent: None,
@@ -3913,7 +3913,7 @@ fn prepare_task_uses_requested_initial_terminal_geometry() {
             repo_id: "repo-1".to_string(),
             prompt: "Use requested geometry".to_string(),
             display_name: None,
-            pipeline_name: None,
+            workflow_name: None,
             stage: None,
             base_ref: None,
             agent: None,
@@ -3967,7 +3967,7 @@ fn prepare_task_uses_default_initial_terminal_geometry_for_oversized_request() {
             repo_id: "repo-1".to_string(),
             prompt: "Reject oversized geometry".to_string(),
             display_name: None,
-            pipeline_name: None,
+            workflow_name: None,
             stage: None,
             base_ref: None,
             agent: None,
@@ -4030,7 +4030,7 @@ fn prepare_task_uses_create_request_agent_selector() {
             repo_id: "repo-1".to_string(),
             prompt: "Set up Kanna for this repository.".to_string(),
             display_name: Some("Set Up Repository".to_string()),
-            pipeline_name: None,
+            workflow_name: None,
             stage: None,
             base_ref: None,
             agent: Some("setup".to_string()),
@@ -4103,7 +4103,7 @@ fn prepare_task_named_agent_without_provider_uses_configured_default() {
             repo_id: "repo-1".to_string(),
             prompt: "Ship this repository.".to_string(),
             display_name: None,
-            pipeline_name: None,
+            workflow_name: None,
             stage: None,
             base_ref: None,
             agent: Some("ship".to_string()),
@@ -4143,9 +4143,9 @@ fn prepare_task_named_agent_without_provider_uses_configured_default() {
 }
 
 #[test]
-fn prepare_task_binds_specialty_agent_on_specialty_review_pipeline() {
+fn prepare_task_binds_specialty_agent_on_specialty_review_workflow() {
     // The QA dispatcher's fan-out path: a child task created on the builtin
-    // single-stage `specialty-review` pipeline, with the specialty agent
+    // single-stage `specialty-review` workflow, with the specialty agent
     // bound through the create request's `agent` override.
     let repo_root = init_git_repo("specialty-review-dispatch");
     let config = test_config("specialty-review-dispatch");
@@ -4169,7 +4169,7 @@ fn prepare_task_binds_specialty_agent_on_specialty_review_pipeline() {
             repo_id: "repo-1".to_string(),
             prompt: "Specialty review dispatched from task parent-1.".to_string(),
             display_name: Some("Security Review".to_string()),
-            pipeline_name: Some("specialty-review".to_string()),
+            workflow_name: Some("specialty-review".to_string()),
             stage: None,
             base_ref: None,
             agent: Some("review-security".to_string()),
@@ -4200,7 +4200,7 @@ fn prepare_task_binds_specialty_agent_on_specialty_review_pipeline() {
     assert_eq!(prepared.stage_agent.as_deref(), Some("review-security"));
     assert_eq!(
         prepared.completion_transition,
-        PipelineStageTransition::Manual
+        WorkflowStageTransition::Manual
     );
     match prepared.session {
         PreparedSessionSpawn::Pty { args, .. } => {
@@ -4229,7 +4229,7 @@ fn prepare_task_persists_create_spawn_options_and_custom_setup() {
             repo_id: "repo-1".to_string(),
             prompt: "Run with custom options".to_string(),
             display_name: None,
-            pipeline_name: None,
+            workflow_name: None,
             stage: None,
             base_ref: None,
             agent: None,
@@ -4313,7 +4313,7 @@ fn prepare_task_for_api_resumes_requested_claude_session() {
             repo_id: "repo-1".to_string(),
             prompt: "Resume imported work".to_string(),
             display_name: None,
-            pipeline_name: None,
+            workflow_name: None,
             stage: None,
             base_ref: None,
             agent: None,
@@ -4371,7 +4371,7 @@ fn prepare_task_for_api_prints_transfer_import_summary_before_the_agent() {
             repo_id: "repo-1".to_string(),
             prompt: "Continue the transferred work".to_string(),
             display_name: None,
-            pipeline_name: None,
+            workflow_name: None,
             stage: None,
             base_ref: None,
             agent: None,
@@ -4437,7 +4437,7 @@ fn prepare_task_for_api_omits_the_import_banner_for_local_tasks() {
             repo_id: "repo-1".to_string(),
             prompt: "Do local work".to_string(),
             display_name: None,
-            pipeline_name: None,
+            workflow_name: None,
             stage: None,
             base_ref: None,
             agent: None,
@@ -4490,7 +4490,7 @@ fn prepare_task_for_api_creates_worktree_without_cargo_config() {
             repo_id: "repo-1".to_string(),
             prompt: "Create a task worktree".to_string(),
             display_name: None,
-            pipeline_name: None,
+            workflow_name: None,
             stage: None,
             base_ref: None,
             agent: None,
@@ -4550,7 +4550,7 @@ fn prepare_task_for_api_uses_requested_task_id() {
             repo_id: "repo-1".to_string(),
             prompt: "Create with a requested id".to_string(),
             display_name: None,
-            pipeline_name: None,
+            workflow_name: None,
             stage: None,
             base_ref: None,
             agent: None,
@@ -4598,7 +4598,7 @@ fn create_dormant_task_for_api_uses_requested_task_id() {
             repo_id: "repo-1".to_string(),
             prompt: "Create a dormant task with a requested id".to_string(),
             display_name: None,
-            pipeline_name: None,
+            workflow_name: None,
             stage: None,
             base_ref: None,
             agent: None,
@@ -4655,7 +4655,7 @@ fn dormant_start_preparation_rechecks_open_blockers() {
             repo_id: "repo-1".to_string(),
             prompt: "Do not prepare while blocked".to_string(),
             display_name: None,
-            pipeline_name: None,
+            workflow_name: None,
             stage: None,
             base_ref: None,
             agent: None,
@@ -4720,7 +4720,7 @@ fn dormant_task_preserves_explicit_provider_and_model_until_spawn() {
             repo_id: "repo-1".to_string(),
             prompt: "Start with the requested Codex model".to_string(),
             display_name: None,
-            pipeline_name: None,
+            workflow_name: None,
             stage: None,
             base_ref: None,
             agent: None,
@@ -4815,7 +4815,7 @@ fn dormant_task_composes_repo_preference_with_complete_persisted_spawn_options()
             repo_id: "repo-1".to_string(),
             prompt: "Start with repo preferences and stored spawn options".to_string(),
             display_name: None,
-            pipeline_name: None,
+            workflow_name: None,
             stage: None,
             base_ref: None,
             agent: Some("dormant-review".to_string()),
@@ -4957,7 +4957,7 @@ fn dormant_start_uses_stored_explicit_agent_provider_and_model() {
             repo_id: "repo-1".to_string(),
             prompt: "Resume with stored explicit preferences".to_string(),
             display_name: None,
-            pipeline_name: None,
+            workflow_name: None,
             stage: None,
             base_ref: None,
             agent: Some("dormant-review".to_string()),
@@ -5037,7 +5037,7 @@ fn dormant_start_uses_repo_provider_preference_without_stored_explicit_values() 
             repo_id: "repo-1".to_string(),
             prompt: "Resume with the repo provider preference".to_string(),
             display_name: None,
-            pipeline_name: None,
+            workflow_name: None,
             stage: None,
             base_ref: None,
             agent: None,
@@ -5133,7 +5133,7 @@ fn prepare_task_for_api_classifies_requested_task_id_primary_key_collision() {
             repo_id: "repo-1".to_string(),
             prompt: "Create once".to_string(),
             display_name: None,
-            pipeline_name: None,
+            workflow_name: None,
             stage: None,
             base_ref: None,
             agent: None,
@@ -5195,7 +5195,7 @@ fn create_dormant_task_for_api_classifies_requested_task_id_primary_key_collisio
             repo_id: "repo-1".to_string(),
             prompt: "Create dormant once".to_string(),
             display_name: None,
-            pipeline_name: None,
+            workflow_name: None,
             stage: None,
             base_ref: None,
             agent: None,
@@ -5250,7 +5250,7 @@ fn prepare_codex_agent_uses_resolved_executable_for_headless_spawn() {
             repo_id: "repo-1".to_string(),
             prompt: "Use codex".to_string(),
             display_name: None,
-            pipeline_name: None,
+            workflow_name: None,
             stage: None,
             base_ref: None,
             agent: None,
@@ -5325,7 +5325,7 @@ fn prepare_headless_agent_uses_worktree_workspace_path_for_executable_resolution
             repo_id: "repo-1".to_string(),
             prompt: "Use codex".to_string(),
             display_name: None,
-            pipeline_name: None,
+            workflow_name: None,
             stage: None,
             base_ref: None,
             agent: None,
@@ -5388,7 +5388,7 @@ fn prepare_task_defaults_to_pty_session_for_copilot() {
             repo_id: "repo-1".to_string(),
             prompt: "Use copilot".to_string(),
             display_name: None,
-            pipeline_name: None,
+            workflow_name: None,
             stage: None,
             base_ref: None,
             agent: None,
@@ -5473,7 +5473,7 @@ fn prepare_pty_task_restores_workspace_path_inside_login_shell_command() {
             repo_id: "repo-1".to_string(),
             prompt: "Use codex".to_string(),
             display_name: None,
-            pipeline_name: None,
+            workflow_name: None,
             stage: None,
             base_ref: None,
             agent: None,
@@ -5552,7 +5552,7 @@ fn prepare_task_stores_parent_task_id_for_subtasks() {
             repo_id: "repo-1".to_string(),
             prompt: "Child prompt".to_string(),
             display_name: None,
-            pipeline_name: None,
+            workflow_name: None,
             stage: None,
             base_ref: None,
             agent: None,
@@ -5604,7 +5604,7 @@ fn prepare_task_rejects_missing_parent_task() {
             repo_id: "repo-1".to_string(),
             prompt: "Child prompt".to_string(),
             display_name: None,
-            pipeline_name: None,
+            workflow_name: None,
             stage: None,
             base_ref: None,
             agent: None,
@@ -5664,9 +5664,9 @@ fn build_spawn_env_prefers_configured_kanna_cli_path() {
 }
 
 #[test]
-fn prepare_task_uses_builtin_default_pipeline_when_repo_has_no_local_default_pipeline() {
+fn prepare_task_uses_builtin_default_workflow_when_repo_has_no_local_default_workflow() {
     let repo_root = std::env::temp_dir().join(format!(
-        "kanna-task-default-pipeline-fallback-{}",
+        "kanna-task-default-workflow-fallback-{}",
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&repo_root);
@@ -5705,7 +5705,7 @@ fn prepare_task_uses_builtin_default_pipeline_when_repo_has_no_local_default_pip
         .status()
         .unwrap()
         .success());
-    publish_origin_main(&repo_root, "publish default pipeline fallback fixture");
+    publish_origin_main(&repo_root, "publish default workflow fallback fixture");
 
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
@@ -5714,7 +5714,7 @@ fn prepare_task_uses_builtin_default_pipeline_when_repo_has_no_local_default_pip
         firebase_auth_emulator_url: None,
         firebase_firestore_emulator_host: None,
         daemon_dir: "/tmp/kanna-daemon".to_string(),
-        db_path: Db::test_db_path("default-pipeline-fallback"),
+        db_path: Db::test_db_path("default-workflow-fallback"),
         kanna_cli_path: None,
         desktop_id: "desktop-1".to_string(),
         desktop_secret: Some("desktop-secret".to_string()),
@@ -5732,7 +5732,7 @@ fn prepare_task_uses_builtin_default_pipeline_when_repo_has_no_local_default_pip
 
     let original_cwd = std::env::current_dir().unwrap();
     let unrelated_cwd = std::env::temp_dir().join(format!(
-        "kanna-task-default-pipeline-unrelated-cwd-{}",
+        "kanna-task-default-workflow-unrelated-cwd-{}",
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&unrelated_cwd);
@@ -5746,7 +5746,7 @@ fn prepare_task_uses_builtin_default_pipeline_when_repo_has_no_local_default_pip
             repo_id: "repo-1".to_string(),
             prompt: "Implement the fallback".to_string(),
             display_name: None,
-            pipeline_name: None,
+            workflow_name: None,
             stage: None,
             base_ref: None,
             agent: None,
@@ -5869,7 +5869,7 @@ fn prepare_task_prefers_explicit_then_repo_then_agent_definition_over_default_pr
             repo_id: "repo-1".to_string(),
             prompt: "Use the built-in implement provider".to_string(),
             display_name: None,
-            pipeline_name: None,
+            workflow_name: None,
             stage: None,
             base_ref: None,
             agent: None,
@@ -5923,7 +5923,7 @@ fn prepare_task_prefers_explicit_then_repo_then_agent_definition_over_default_pr
             repo_id: "repo-1".to_string(),
             prompt: "Use the layered agent definition".to_string(),
             display_name: None,
-            pipeline_name: None,
+            workflow_name: None,
             stage: None,
             base_ref: None,
             agent: None,
@@ -5980,7 +5980,7 @@ fn prepare_task_prefers_explicit_then_repo_then_agent_definition_over_default_pr
             repo_id: "repo-1".to_string(),
             prompt: "Use the repo provider preference".to_string(),
             display_name: None,
-            pipeline_name: None,
+            workflow_name: None,
             stage: None,
             base_ref: None,
             agent: None,
@@ -6021,7 +6021,7 @@ fn prepare_task_prefers_explicit_then_repo_then_agent_definition_over_default_pr
             repo_id: "repo-1".to_string(),
             prompt: "Use the explicit provider".to_string(),
             display_name: None,
-            pipeline_name: None,
+            workflow_name: None,
             stage: None,
             base_ref: None,
             agent: None,
@@ -6078,7 +6078,7 @@ fn create_task_model_and_provider_precedence_reaches_claude_and_codex_pty_argv()
         repo_id: String::new(),
         prompt: String::new(),
         display_name: None,
-        pipeline_name: None,
+        workflow_name: None,
         stage: None,
         base_ref: None,
         agent: None,
@@ -6104,14 +6104,14 @@ fn create_task_model_and_provider_precedence_reaches_claude_and_codex_pty_argv()
     };
     let repo_root = init_git_repo("create-model-precedence-contract");
     std::fs::create_dir_all(repo_root.join(".kanna/agents/model-agent")).unwrap();
-    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::write(
         repo_root.join(".kanna/agents/model-agent/AGENT.md"),
         "---\nname: model-agent\ndescription: Model precedence fixture\nagent_provider: claude\nmodel: definition-model\n---\nRun $TASK_PROMPT",
     )
     .unwrap();
     std::fs::write(
-        repo_root.join(".kanna/pipelines/model-contract.json"),
+        repo_root.join(".kanna/workflows/model-contract.json"),
         serde_json::json!({
             "stages": [{
                 "name": "in progress",
@@ -6136,7 +6136,7 @@ fn create_task_model_and_provider_precedence_reaches_claude_and_codex_pty_argv()
         CreateTaskRequest {
             repo_id: "repo-1".to_string(),
             prompt: "Use definition model".to_string(),
-            pipeline_name: Some("model-contract".to_string()),
+            workflow_name: Some("model-contract".to_string()),
             agent_type: Some("pty".to_string()),
             ..request_defaults()
         },
@@ -6152,7 +6152,7 @@ fn create_task_model_and_provider_precedence_reaches_claude_and_codex_pty_argv()
             CreateTaskRequest {
                 repo_id: "repo-1".to_string(),
                 prompt: format!("Use explicit {} model", contract.provider),
-                pipeline_name: Some("model-contract".to_string()),
+                workflow_name: Some("model-contract".to_string()),
                 agent_provider: Some(contract.provider.clone()),
                 agent_type: Some("pty".to_string()),
                 model: Some(contract.model.clone()),
@@ -6181,7 +6181,7 @@ fn create_task_model_and_provider_precedence_reaches_claude_and_codex_pty_argv()
                 CreateTaskRequest {
                     repo_id: "repo-1".to_string(),
                     prompt: format!("Use explicit {} model headlessly", contract.provider),
-                    pipeline_name: Some("model-contract".to_string()),
+                    workflow_name: Some("model-contract".to_string()),
                     agent_provider: Some(contract.provider.clone()),
                     agent_type: Some("agent".to_string()),
                     model: Some(contract.model.clone()),
@@ -6240,7 +6240,7 @@ fn create_task_effort_reaches_every_provider_native_pty_control() {
         repo_id: String::new(),
         prompt: String::new(),
         display_name: None,
-        pipeline_name: None,
+        workflow_name: None,
         stage: None,
         base_ref: None,
         agent: None,
@@ -6266,14 +6266,14 @@ fn create_task_effort_reaches_every_provider_native_pty_control() {
     };
     let repo_root = init_git_repo("create-effort-spawn-contract");
     std::fs::create_dir_all(repo_root.join(".kanna/agents/effort-agent")).unwrap();
-    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::write(
         repo_root.join(".kanna/agents/effort-agent/AGENT.md"),
         "---\nname: effort-agent\ndescription: Effort spawn fixture\nagent_provider: claude\neffort: medium\n---\nRun $TASK_PROMPT",
     )
     .unwrap();
     std::fs::write(
-        repo_root.join(".kanna/pipelines/effort-contract.json"),
+        repo_root.join(".kanna/workflows/effort-contract.json"),
         serde_json::json!({
             "stages": [{
                 "name": "in progress",
@@ -6298,7 +6298,7 @@ fn create_task_effort_reaches_every_provider_native_pty_control() {
         CreateTaskRequest {
             repo_id: "repo-1".to_string(),
             prompt: "Use definition effort".to_string(),
-            pipeline_name: Some("effort-contract".to_string()),
+            workflow_name: Some("effort-contract".to_string()),
             agent_type: Some("pty".to_string()),
             ..request_defaults()
         },
@@ -6313,7 +6313,7 @@ fn create_task_effort_reaches_every_provider_native_pty_control() {
             CreateTaskRequest {
                 repo_id: "repo-1".to_string(),
                 prompt: format!("Use explicit {} effort", contract.provider),
-                pipeline_name: Some("effort-contract".to_string()),
+                workflow_name: Some("effort-contract".to_string()),
                 agent_provider: Some(contract.provider.clone()),
                 agent_type: Some("pty".to_string()),
                 effort: Some(contract.effort.clone()),

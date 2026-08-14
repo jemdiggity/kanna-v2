@@ -80,7 +80,7 @@ pub(super) async fn run_repo_command(
             repo_id,
             prompt: launch.prompt,
             display_name: Some(launch.display_name),
-            pipeline_name: None,
+            workflow_name: None,
             stage: launch.stage,
             base_ref: None,
             agent: launch.agent,

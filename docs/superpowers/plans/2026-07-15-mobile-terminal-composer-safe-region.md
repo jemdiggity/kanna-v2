@@ -22,7 +22,7 @@
 - Modify `tests/tui-fidelity/src/render.ts`, `run.ts`, `package.json`, and `README.md`: share the instrumented document and run/document the regression.
 - Modify `apps/mobile/e2e/terminal-streaming-coverage.md`: replace the stale `.xterm-viewport` contract and document the Appium gap/substitute.
 
-This Kanna stage explicitly leaves commits to its pipeline, so the steps below do not create commits.
+This Kanna stage explicitly leaves commits to its workflow, so the steps below do not create commits.
 
 ### Task 1: Add a failing real-browser runtime regression
 

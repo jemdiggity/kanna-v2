@@ -42,7 +42,7 @@
     ],
     "resources": {
       "../../../.kanna/agents/": ".kanna/agents/",
-      "../../../.kanna/pipelines/": ".kanna/pipelines/",
+      "../../../.kanna/workflows/": ".kanna/workflows/",
       "../../../.kanna/tasks/": ".kanna/tasks/"
     },
     "icon": [

@@ -9,6 +9,7 @@ use std::sync::Arc;
 #[serde(rename_all = "camelCase")]
 pub(super) struct OperatorEventInput {
     event_type: String,
+    #[serde(rename = "workflowItemId", alias = "pipelineItemId")]
     pipeline_item_id: Option<String>,
     repo_id: Option<String>,
 }

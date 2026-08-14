@@ -11,7 +11,7 @@ Mobile commands are assigned by the object they require:
 | Scope | Commands | Mobile surface |
 | --- | --- | --- |
 | Task | Rename, Advance Stage, Request Changes, Close, Block/Edit Blockers, Push to Machine | The task view's `+` menu |
-| Repository | Merge Master, Ship, repo-defined custom tasks, Create Agent, Create Pipeline, Set Up Repository, Create Config, New Custom Task | More tab |
+| Repository | Merge Master, Ship, repo-defined custom tasks, Create Agent, Create Workflow, Set Up Repository, Create Config, New Custom Task | More tab |
 | Machine | Pairing, connection, and machine management | Machines UI |
 | Task creation | New Task | Existing global `+` button |
 
@@ -91,7 +91,7 @@ These factory commands are always available for a valid repository:
 - Set Up Repository
 - Create Config
 - Create Agent
-- Create Pipeline
+- Create Workflow
 - New Custom Task
 
 The server is the source of truth for factory labels, descriptions, prompts, and referenced agents. Desktop and mobile should consume the same repo-command definitions rather than maintaining separate prompt copies. Migrating unrelated desktop shortcut commands is outside this change.

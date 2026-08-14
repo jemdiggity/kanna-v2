@@ -48,11 +48,11 @@ impl RemoteDefinitionsFixture {
         // These dirty checkout values must never leak into the API response.
         std::fs::write(
             consumer.join(".kanna/config.json"),
-            json!({"pipeline": "local-stale", "vars": {"SOURCE": "local-stale"}}).to_string(),
+            json!({"workflow": "local-stale", "vars": {"SOURCE": "local-stale"}}).to_string(),
         )
         .unwrap();
         std::fs::write(
-            consumer.join(".kanna/pipelines/remote-qa.json"),
+            consumer.join(".kanna/workflows/remote-qa.json"),
             json!({
                 "name": "local-stale",
                 "stages": [{
@@ -93,24 +93,24 @@ impl RemoteDefinitionsFixture {
         })
     }
 
-    fn publish_malformed_pipeline(&mut self, name: &str) {
+    fn publish_malformed_workflow(&mut self, name: &str) {
         std::fs::write(
-            self.publisher.join(format!(".kanna/pipelines/{name}.json")),
+            self.publisher.join(format!(".kanna/workflows/{name}.json")),
             "{not valid json",
         )
         .unwrap();
         run_git(&self.publisher, &["add", ".kanna"]);
         run_git(
             &self.publisher,
-            &["commit", "-m", "publish malformed pipeline"],
+            &["commit", "-m", "publish malformed workflow"],
         );
         run_git(&self.publisher, &["push", "origin", &self.branch]);
         self.revision = git_stdout(&self.publisher, &["rev-parse", "HEAD"]);
     }
 
-    fn publish_pipeline_prompt(&mut self, prompt: &str) {
+    fn publish_workflow_prompt(&mut self, prompt: &str) {
         std::fs::write(
-            self.publisher.join(".kanna/pipelines/remote-qa.json"),
+            self.publisher.join(".kanna/workflows/remote-qa.json"),
             json!({
                 "stages": [{
                     "name": "review",
@@ -123,19 +123,19 @@ impl RemoteDefinitionsFixture {
         )
         .unwrap();
         run_git(&self.publisher, &["add", ".kanna"]);
-        run_git(&self.publisher, &["commit", "-m", "update remote pipeline"]);
+        run_git(&self.publisher, &["commit", "-m", "update remote workflow"]);
         run_git(&self.publisher, &["push", "origin", &self.branch]);
         self.revision = git_stdout(&self.publisher, &["rev-parse", "HEAD"]);
     }
 }
 
 fn write_remote_definitions(repo: &Path) {
-    std::fs::create_dir_all(repo.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo.join(".kanna/workflows")).unwrap();
     std::fs::create_dir_all(repo.join(".kanna/agents/review")).unwrap();
     std::fs::write(
         repo.join(".kanna/config.json"),
         json!({
-            "pipeline": "remote-qa",
+            "workflow": "remote-qa",
             "test": "must-be-an-array",
             "ports": {"REMOTE_PORT": 49100, "BAD_PORT": "nope"},
             "flavors": {"review": "strict", "bad": 42},
@@ -162,7 +162,7 @@ fn write_remote_definitions(repo: &Path) {
     )
     .unwrap();
     std::fs::write(
-        repo.join(".kanna/pipelines/remote-qa.json"),
+        repo.join(".kanna/workflows/remote-qa.json"),
         json!({
             "description": "remote definition without an explicit name",
             "stages": [{
@@ -177,7 +177,7 @@ fn write_remote_definitions(repo: &Path) {
     )
     .unwrap();
     std::fs::write(
-        repo.join(".kanna/pipelines/qa.json"),
+        repo.join(".kanna/workflows/qa.json"),
         json!({
             "name": "qa",
             "stages": [{
@@ -190,7 +190,7 @@ fn write_remote_definitions(repo: &Path) {
     )
     .unwrap();
     std::fs::write(
-        repo.join(".kanna/pipelines/zeta.json"),
+        repo.join(".kanna/workflows/zeta.json"),
         json!({
             "name": "zeta",
             "stages": [{
@@ -202,7 +202,7 @@ fn write_remote_definitions(repo: &Path) {
     )
     .unwrap();
     std::fs::write(
-        repo.join(".kanna/pipelines/release.v2.json"),
+        repo.join(".kanna/workflows/release.v2.json"),
         json!({
             "stages": [{
                 "name": "release",
@@ -213,11 +213,11 @@ fn write_remote_definitions(repo: &Path) {
         .to_string(),
     )
     .unwrap();
-    // A repo file named after an internal built-in customizes that pipeline's
+    // A repo file named after an internal built-in customizes that workflow's
     // definition; re-declaring `"visibility": "internal"` keeps the name out
     // of the manifest (a repo file omitting the field would promote it).
     std::fs::write(
-        repo.join(".kanna/pipelines/specialty-review.json"),
+        repo.join(".kanna/workflows/specialty-review.json"),
         json!({
             "name": "specialty-review",
             "visibility": "internal",
@@ -230,9 +230,9 @@ fn write_remote_definitions(repo: &Path) {
         .to_string(),
     )
     .unwrap();
-    // A repo-authored pipeline can keep itself out of the picker the same way.
+    // A repo-authored workflow can keep itself out of the picker the same way.
     std::fs::write(
-        repo.join(".kanna/pipelines/hidden-child.json"),
+        repo.join(".kanna/workflows/hidden-child.json"),
         json!({
             "name": "hidden-child",
             "visibility": "internal",
@@ -245,12 +245,12 @@ fn write_remote_definitions(repo: &Path) {
         .to_string(),
     )
     .unwrap();
-    // Reading visibility means parsing every pipeline file; a malformed one
+    // Reading visibility means parsing every workflow file; a malformed one
     // must stay listed instead of erroring (or silently shrinking) the
     // manifest.
-    std::fs::write(repo.join(".kanna/pipelines/broken.json"), "{ not json").unwrap();
-    std::fs::write(repo.join(".kanna/pipelines/invalid\\name.json"), "{}").unwrap();
-    std::fs::write(repo.join(".kanna/pipelines/schema.json"), "{}").unwrap();
+    std::fs::write(repo.join(".kanna/workflows/broken.json"), "{ not json").unwrap();
+    std::fs::write(repo.join(".kanna/workflows/invalid\\name.json"), "{}").unwrap();
+    std::fs::write(repo.join(".kanna/workflows/schema.json"), "{}").unwrap();
     std::fs::write(
         repo.join(".kanna/agents/review/AGENT.md"),
         r#"---
@@ -280,17 +280,17 @@ fn local_only_repo() -> (TempDir, PathBuf) {
         .tempdir()
         .unwrap();
     let repo = temp.path().join("repo");
-    std::fs::create_dir_all(repo.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo.join(".kanna/workflows")).unwrap();
     run_git(&repo, &["init", "--initial-branch", "main"]);
     run_git(&repo, &["config", "user.email", "test@example.com"]);
     run_git(&repo, &["config", "user.name", "Kanna Test"]);
     std::fs::write(
         repo.join(".kanna/config.json"),
-        json!({"pipeline": "local-only", "vars": {"SOURCE": "local-only"}}).to_string(),
+        json!({"workflow": "local-only", "vars": {"SOURCE": "local-only"}}).to_string(),
     )
     .unwrap();
     std::fs::write(
-        repo.join(".kanna/pipelines/local-only.json"),
+        repo.join(".kanna/workflows/local-only.json"),
         json!({
             "name": "local-only",
             "stages": [{"name": "local", "policy": {"transition": "manual"}}]
@@ -358,10 +358,10 @@ fn manifest_router(seed: &str, repo: &Path) -> axum::Router {
 }
 
 #[tokio::test]
-async fn repo_definition_manifest_reports_retired_pipeline_names_as_their_current_name() {
-    // The desktop's new-task picker preselects `defaultPipeline` only when it
-    // is a member of `pipelines`, and otherwise silently falls back to the
-    // first option. Retired names are deliberately absent from `pipelines`,
+async fn repo_definition_manifest_reports_retired_workflow_names_as_their_current_name() {
+    // The desktop's new-task picker preselects `defaultWorkflow` only when it
+    // is a member of `workflows`, and otherwise silently falls back to the
+    // first option. Retired names are deliberately absent from `workflows`,
     // so reporting the committed name verbatim would drop an upgraded repo
     // onto the picker's first option — losing the review depth it configured,
     // with no error.
@@ -374,7 +374,7 @@ async fn repo_definition_manifest_reports_retired_pipeline_names_as_their_curren
             legacy,
             &[(
                 ".kanna/config.json",
-                json!({ "pipeline": legacy }).to_string(),
+                json!({ "workflow": legacy }).to_string(),
             )],
         );
         let app = manifest_router(&format!("definitions-legacy-{legacy}"), &repo);
@@ -383,50 +383,50 @@ async fn repo_definition_manifest_reports_retired_pipeline_names_as_their_curren
         assert_eq!(status, StatusCode::OK);
 
         // The manifest advertises the name the repo actually resolves to...
-        assert_eq!(manifest["defaultPipeline"], current, "legacy `{legacy}`");
+        assert_eq!(manifest["defaultWorkflow"], current, "legacy `{legacy}`");
 
         // ...and that name is selectable, which is the whole point.
-        let pipelines = manifest["pipelines"].as_array().unwrap();
+        let workflows = manifest["workflows"].as_array().unwrap();
         assert!(
-            pipelines.iter().any(|name| name == current),
-            "`{current}` must be selectable; got {pipelines:?}"
+            workflows.iter().any(|name| name == current),
+            "`{current}` must be selectable; got {workflows:?}"
         );
 
         // The retired name stays out of the user-facing choices.
         assert!(
-            !pipelines.iter().any(|name| name == legacy),
-            "`{legacy}` must not be offered; got {pipelines:?}"
+            !workflows.iter().any(|name| name == legacy),
+            "`{legacy}` must not be offered; got {workflows:?}"
         );
 
         // `config` still reports what the repo committed — only the field the
         // UI preselects from is canonicalized.
-        assert_eq!(manifest["config"]["pipeline"], legacy);
+        assert_eq!(manifest["config"]["workflow"], legacy);
 
         // The retired name still resolves on the definition route, for
         // callers that ask for it directly.
-        let (status, pipeline) = json_response(
+        let (status, workflow) = json_response(
             &app,
-            &format!("/v1/repos/repo-1/kanna-definitions/pipelines/{legacy}"),
+            &format!("/v1/repos/repo-1/kanna-definitions/workflows/{legacy}"),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(pipeline["definition"]["name"], current);
+        assert_eq!(workflow["definition"]["name"], current);
     }
 }
 
 #[tokio::test]
-async fn repo_definition_manifest_keeps_a_repo_authored_pipeline_name_verbatim() {
+async fn repo_definition_manifest_keeps_a_repo_authored_workflow_name_verbatim() {
     // A repo shipping its own `qa.json` makes `qa` a real choice, so it
-    // appears in `pipelines` and must not be canonicalized away.
+    // appears in `workflows` and must not be canonicalized away.
     let (_temp, repo) = published_definitions_repo(
         "authored-qa",
         &[
             (
                 ".kanna/config.json",
-                json!({ "pipeline": "qa" }).to_string(),
+                json!({ "workflow": "qa" }).to_string(),
             ),
             (
-                ".kanna/pipelines/qa.json",
+                ".kanna/workflows/qa.json",
                 json!({
                     "name": "qa",
                     "stages": [{"name": "local", "policy": {"transition": "manual"}}]
@@ -439,8 +439,8 @@ async fn repo_definition_manifest_keeps_a_repo_authored_pipeline_name_verbatim()
 
     let (status, manifest) = json_response(&app, "/v1/repos/repo-1/kanna-definitions").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(manifest["defaultPipeline"], "qa");
-    assert!(manifest["pipelines"]
+    assert_eq!(manifest["defaultWorkflow"], "qa");
+    assert!(manifest["workflows"]
         .as_array()
         .unwrap()
         .iter()
@@ -618,14 +618,14 @@ async fn repo_definition_routes_return_one_remote_revision_and_normalized_snake_
         json!(["review", "in progress"])
     );
     assert!(manifest["config"].get("stageOrder").is_none());
-    assert_eq!(manifest["defaultPipeline"], "remote-qa");
+    assert_eq!(manifest["defaultWorkflow"], "remote-qa");
     // `specialty-review` and `hidden-child` are absent because their files
     // declare `"visibility": "internal"` (asserted resolvable below), while
     // the malformed `broken` stays listed: an unparseable file cannot have
     // declared itself internal, and dropping it would hide the repo's own
-    // pipeline behind a silent manifest shrink.
+    // workflow behind a silent manifest shrink.
     assert_eq!(
-        manifest["pipelines"],
+        manifest["workflows"],
         json!([
             "broken",
             "no-review",
@@ -647,7 +647,9 @@ async fn repo_definition_routes_return_one_remote_revision_and_normalized_snake_
         [
             "config",
             "defaultPipeline",
+            "defaultWorkflow",
             "pipelines",
+            "workflows",
             "refName",
             "revision"
         ]
@@ -656,55 +658,63 @@ async fn repo_definition_routes_return_one_remote_revision_and_normalized_snake_
         .collect()
     );
 
-    let (status, pipeline) = json_response(
+    let (status, workflow) = json_response(
+        &app,
+        "/v1/repos/repo-1/kanna-definitions/workflows/remote-qa",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(workflow["revision"], fixture.revision);
+    assert_eq!(workflow["definition"]["name"], "remote-qa");
+    assert_eq!(
+        workflow["definition"]["stages"][0]["prompt"],
+        "REMOTE_PIPELINE"
+    );
+    assert_eq!(
+        workflow["definition"]["stages"][0]["agent_provider"],
+        json!(["codex", "claude"])
+    );
+    assert!(workflow["definition"]["stages"][0]
+        .get("agentProvider")
+        .is_none());
+
+    let (legacy_status, legacy_workflow) = json_response(
         &app,
         "/v1/repos/repo-1/kanna-definitions/pipelines/remote-qa",
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(pipeline["revision"], fixture.revision);
-    assert_eq!(pipeline["definition"]["name"], "remote-qa");
-    assert_eq!(
-        pipeline["definition"]["stages"][0]["prompt"],
-        "REMOTE_PIPELINE"
-    );
-    assert_eq!(
-        pipeline["definition"]["stages"][0]["agent_provider"],
-        json!(["codex", "claude"])
-    );
-    assert!(pipeline["definition"]["stages"][0]
-        .get("agentProvider")
-        .is_none());
+    assert_eq!(legacy_status, StatusCode::OK);
+    assert_eq!(legacy_workflow, workflow);
 
-    let (status, dotted_pipeline) = json_response(
+    let (status, dotted_workflow) = json_response(
         &app,
-        "/v1/repos/repo-1/kanna-definitions/pipelines/release.v2",
+        "/v1/repos/repo-1/kanna-definitions/workflows/release.v2",
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(dotted_pipeline["definition"]["name"], "release.v2");
+    assert_eq!(dotted_workflow["definition"]["name"], "release.v2");
     assert_eq!(
-        dotted_pipeline["definition"]["stages"][0]["prompt"],
+        dotted_workflow["definition"]["stages"][0]["prompt"],
         "REMOTE_DOTTED_PIPELINE"
     );
 
     // Unlisted, but still resolvable — and the repo's override still wins over
-    // the bundled definition, exactly as it does for a listed pipeline.
-    let (status, internal_pipeline) = json_response(
+    // the bundled definition, exactly as it does for a listed workflow.
+    let (status, internal_workflow) = json_response(
         &app,
-        "/v1/repos/repo-1/kanna-definitions/pipelines/specialty-review",
+        "/v1/repos/repo-1/kanna-definitions/workflows/specialty-review",
     )
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
-        internal_pipeline["definition"]["stages"][0]["prompt"],
+        internal_workflow["definition"]["stages"][0]["prompt"],
         "REMOTE_SPECIALTY_REVIEW"
     );
-    assert_eq!(internal_pipeline["definition"]["visibility"], "internal");
+    assert_eq!(internal_workflow["definition"]["visibility"], "internal");
 
     let (status, hidden_child) = json_response(
         &app,
-        "/v1/repos/repo-1/kanna-definitions/pipelines/hidden-child",
+        "/v1/repos/repo-1/kanna-definitions/workflows/hidden-child",
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -713,9 +723,9 @@ async fn repo_definition_routes_return_one_remote_revision_and_normalized_snake_
         "REMOTE_HIDDEN_CHILD"
     );
 
-    // The malformed pipeline's parse error belongs to its own endpoint, not
+    // The malformed workflow's parse error belongs to its own endpoint, not
     // to the manifest that listed it.
-    let broken = response(&app, "/v1/repos/repo-1/kanna-definitions/pipelines/broken").await;
+    let broken = response(&app, "/v1/repos/repo-1/kanna-definitions/workflows/broken").await;
     assert_eq!(broken.status(), StatusCode::INTERNAL_SERVER_ERROR);
 
     let (status, agent) = json_response(
@@ -750,17 +760,17 @@ async fn repo_definition_routes_share_a_fresh_resolved_snapshot() {
     assert_eq!(status, StatusCode::OK);
     let cached_revision = manifest["revision"].clone();
 
-    fixture.publish_pipeline_prompt("REMOTE_PIPELINE_AFTER_CACHE");
+    fixture.publish_workflow_prompt("REMOTE_PIPELINE_AFTER_CACHE");
 
-    let (status, pipeline) = json_response(
+    let (status, workflow) = json_response(
         &app,
-        "/v1/repos/repo-1/kanna-definitions/pipelines/remote-qa",
+        "/v1/repos/repo-1/kanna-definitions/workflows/remote-qa",
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(pipeline["revision"], cached_revision);
+    assert_eq!(workflow["revision"], cached_revision);
     assert_eq!(
-        pipeline["definition"]["stages"][0]["prompt"],
+        workflow["definition"]["stages"][0]["prompt"],
         "REMOTE_PIPELINE"
     );
 }
@@ -784,33 +794,33 @@ async fn repo_definition_routes_use_bundled_only_values_without_a_remote_ref() {
     assert_eq!(manifest["revision"], Value::Null);
     assert_eq!(manifest["refName"], "origin/main");
     assert_eq!(manifest["config"], json!({}));
-    assert_eq!(manifest["defaultPipeline"], "no-review");
+    assert_eq!(manifest["defaultWorkflow"], "no-review");
     // The bundled built-ins, minus `specialty-review`: its definition declares
     // `"visibility": "internal"` because the dispatcher binds it for its child
     // tasks, so it is never a choice the caller makes.
     assert_eq!(
-        manifest["pipelines"],
+        manifest["workflows"],
         json!(["no-review", "single-reviewer", "specialized-reviewers"])
     );
 
-    let (status, pipeline) = json_response(
+    let (status, workflow) = json_response(
         &app,
-        "/v1/repos/repo-1/kanna-definitions/pipelines/no-review",
+        "/v1/repos/repo-1/kanna-definitions/workflows/no-review",
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(pipeline["revision"], Value::Null);
-    assert_eq!(pipeline["definition"]["name"], "no-review");
+    assert_eq!(workflow["revision"], Value::Null);
+    assert_eq!(workflow["definition"]["name"], "no-review");
 
     // Unlisted is not unresolvable: the dispatcher still names it on create,
     // so the definition must serve exactly as before.
-    let (status, pipeline) = json_response(
+    let (status, workflow) = json_response(
         &app,
-        "/v1/repos/repo-1/kanna-definitions/pipelines/specialty-review",
+        "/v1/repos/repo-1/kanna-definitions/workflows/specialty-review",
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(pipeline["definition"]["name"], "specialty-review");
+    assert_eq!(workflow["definition"]["name"], "specialty-review");
 }
 
 #[tokio::test]
@@ -819,8 +829,8 @@ async fn repo_definition_routes_reject_unsafe_names_and_report_missing_resources
     let app = fixture.router("repo-1");
 
     for uri in [
-        "/v1/repos/repo-1/kanna-definitions/pipelines/%2E%2E",
-        "/v1/repos/repo-1/kanna-definitions/pipelines/bad%5Cname",
+        "/v1/repos/repo-1/kanna-definitions/workflows/%2E%2E",
+        "/v1/repos/repo-1/kanna-definitions/workflows/bad%5Cname",
         "/v1/repos/repo-1/kanna-definitions/agents/review%40%2E%2E",
         "/v1/repos/repo-1/kanna-definitions/agents/review%40strict%40extra",
     ] {
@@ -832,7 +842,7 @@ async fn repo_definition_routes_reject_unsafe_names_and_report_missing_resources
     }
 
     assert_eq!(
-        response(&app, "/v1/repos/repo-1/kanna-definitions/pipelines/missing")
+        response(&app, "/v1/repos/repo-1/kanna-definitions/workflows/missing")
             .await
             .status(),
         StatusCode::NOT_FOUND
@@ -855,8 +865,8 @@ async fn repo_definition_routes_reject_unsafe_names_and_report_missing_resources
 async fn malformed_remote_definition_returns_internal_server_error() {
     let mut fixture = RemoteDefinitionsFixture::new("malformed", "dev");
     let app = fixture.router("repo-1");
-    fixture.publish_malformed_pipeline("broken");
+    fixture.publish_malformed_workflow("broken");
 
-    let response = response(&app, "/v1/repos/repo-1/kanna-definitions/pipelines/broken").await;
+    let response = response(&app, "/v1/repos/repo-1/kanna-definitions/workflows/broken").await;
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 }

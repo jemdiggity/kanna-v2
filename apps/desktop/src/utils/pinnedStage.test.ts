@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { pinnedApproveMergePost, pinnedCurrentStage, pinnedPipelineDefinition } from "./pinnedStage";
+import { pinnedApproveMergePost, pinnedCurrentStage, pinnedWorkflowDefinition } from "./pinnedStage";
 
 const DEFAULT_WITH_APPROVE = JSON.stringify({
   name: "default",
@@ -22,12 +22,12 @@ const LEGACY_WITHOUT_POST = JSON.stringify({
   ],
 });
 
-describe("pinnedPipelineDefinition", () => {
+describe("pinnedWorkflowDefinition", () => {
   it("parses the pinned snapshot and returns null for missing or invalid ones", () => {
-    expect(pinnedPipelineDefinition({ pipeline_def: DEFAULT_WITH_APPROVE, stage: "pr" })?.stages).toHaveLength(3);
-    expect(pinnedPipelineDefinition({ pipeline_def: null, stage: "pr" })).toBeNull();
-    expect(pinnedPipelineDefinition({ pipeline_def: "  ", stage: "pr" })).toBeNull();
-    expect(pinnedPipelineDefinition({ pipeline_def: "not json", stage: "pr" })).toBeNull();
+    expect(pinnedWorkflowDefinition({ pipeline_def: DEFAULT_WITH_APPROVE, stage: "pr" })?.stages).toHaveLength(3);
+    expect(pinnedWorkflowDefinition({ pipeline_def: null, stage: "pr" })).toBeNull();
+    expect(pinnedWorkflowDefinition({ pipeline_def: "  ", stage: "pr" })).toBeNull();
+    expect(pinnedWorkflowDefinition({ pipeline_def: "not json", stage: "pr" })).toBeNull();
   });
 });
 
@@ -43,7 +43,7 @@ describe("pinnedCurrentStage", () => {
 describe("pinnedApproveMergePost", () => {
   it("is true only when the pinned current stage carries the approve post", () => {
     expect(pinnedApproveMergePost({ pipeline_def: DEFAULT_WITH_APPROVE, stage: "pr" })).toBe(true);
-    // Pre-change snapshots and custom pipelines without the post must not
+    // Pre-change snapshots and custom workflows without the post must not
     // present approval as a merge.
     expect(pinnedApproveMergePost({ pipeline_def: LEGACY_WITHOUT_POST, stage: "pr" })).toBe(false);
     expect(pinnedApproveMergePost({ pipeline_def: DEFAULT_WITH_APPROVE, stage: "in progress" })).toBe(false);

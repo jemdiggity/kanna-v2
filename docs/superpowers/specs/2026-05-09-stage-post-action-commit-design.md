@@ -2,16 +2,16 @@
 
 ## Summary
 
-The commit step should stop being a normal pipeline stage. It should become a generic post-action attached to the `in progress` stage. While the commit post-action is running, the task remains in `stage = "in progress"` so it stays grouped with implementation work. The sidebar shows the task with a leading `... ` to indicate that a post-action is active.
+The commit step should stop being a normal workflow stage. It should become a generic post-action attached to the `in progress` stage. While the commit post-action is running, the task remains in `stage = "in progress"` so it stays grouped with implementation work. The sidebar shows the task with a leading `... ` to indicate that a post-action is active.
 
-When the commit post-action completes successfully, Kanna clears the post-action marker and advances the task to the next real pipeline stage, usually `pr`.
+When the commit post-action completes successfully, Kanna clears the post-action marker and advances the task to the next real workflow stage, usually `pr`.
 
 ## Goals
 
 - Remove `commit` from the visible stage flow.
 - Keep the task in the `in progress` stage until commit work is complete.
 - Preserve the existing in-place commit behavior: same task, worktree, branch, terminal session, and agent session.
-- Make post-actions generic enough for future stage-local actions without designing a nested pipeline system now.
+- Make post-actions generic enough for future stage-local actions without designing a nested workflow system now.
 - Give users a small, visible sidebar cue that the task is in post-action work.
 
 ## Non-Goals
@@ -21,9 +21,9 @@ When the commit post-action completes successfully, Kanna clears the post-action
 - Do not hide state in tags.
 - Do not make the PR agent responsible for committing dirty work again.
 
-## Pipeline Model
+## Workflow Model
 
-Pipeline stages gain an optional `post_action` object:
+Workflow stages gain an optional `post_action` object:
 
 ```json
 {
@@ -42,15 +42,15 @@ Pipeline stages gain an optional `post_action` object:
 }
 ```
 
-The first implementation supports one post-action per stage. A post-action has its own name, agent, prompt, optional description, optional provider hints, and transition setting. It is not a pipeline stage and should not appear in stage ordering, stage labels, or task grouping.
+The first implementation supports one post-action per stage. A post-action has its own name, agent, prompt, optional description, optional provider hints, and transition setting. It is not a workflow stage and should not appear in stage ordering, stage labels, or task grouping.
 
-The default pipeline becomes:
+The default workflow becomes:
 
 ```text
 in progress --post-action: commit--> pr
 ```
 
-The QA pipeline becomes:
+The QA workflow becomes:
 
 ```text
 in progress --post-action: commit--> review -> pr
@@ -60,7 +60,7 @@ in progress --post-action: commit--> review -> pr
 
 Add a dedicated nullable `pipeline_item.active_post_action` field. The field stores the post-action name while that action is running and is `NULL` otherwise.
 
-`pipeline_item.stage` remains the source of truth for task grouping and pipeline position. During commit post-action work:
+`pipeline_item.stage` remains the source of truth for task grouping and workflow position. During commit post-action work:
 
 - `stage = "in progress"`
 - `active_post_action = "commit"`
@@ -72,7 +72,7 @@ Add a dedicated nullable `pipeline_item.active_post_action` field. The field sto
 
 Manual stage advancement from a stage with a post-action should enter the post-action first:
 
-1. Resolve the current stage from the task's pipeline.
+1. Resolve the current stage from the task's workflow.
 2. If the stage has a `post_action` and the task has no active post-action, build the post-action prompt.
 3. Set `active_post_action` to the post-action name.
 4. Clear stale `stage_result`.
@@ -87,7 +87,7 @@ When `kanna-cli stage-complete --status success` reports completion while `activ
 3. Clear `stage_result`.
 4. Advance from the unchanged current stage to the next real stage.
 
-For the default pipeline, that final advance closes the implementation task and creates the PR task exactly as the normal `in progress -> pr` stage transition does today.
+For the default workflow, that final advance closes the implementation task and creates the PR task exactly as the normal `in progress -> pr` stage transition does today.
 
 If a post-action reports failure, Kanna should leave `active_post_action` set and mark the task unread if it is not selected. The user can inspect the terminal, intervene manually, rerun the post-action, or advance again after resolving the problem.
 
@@ -111,15 +111,15 @@ Rerunning a task without `active_post_action` keeps the existing stage rerun beh
 
 ## Compatibility
 
-Existing pipelines that still contain a `commit` stage should continue to parse and run through the existing stage mechanism. The built-in pipelines should move to `post_action` so new tasks use the cleaner flow by default.
+Existing workflows that still contain a `commit` stage should continue to parse and run through the existing stage mechanism. The built-in workflows should move to `post_action` so new tasks use the cleaner flow by default.
 
-Existing tasks currently in `stage = "commit"` can remain valid. This change does not need to migrate historical tasks because the prior stage name is still a valid custom pipeline stage.
+Existing tasks currently in `stage = "commit"` can remain valid. This change does not need to migrate historical tasks because the prior stage name is still a valid custom workflow stage.
 
 ## Testing
 
 Unit tests should cover:
 
-- pipeline parsing accepts `post_action`,
+- workflow parsing accepts `post_action`,
 - invalid post-action shapes fail validation,
 - stage order defaults no longer include built-in `commit`,
 - advancing from `in progress` with a post-action sets `active_post_action` and leaves `stage` unchanged,

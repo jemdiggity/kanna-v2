@@ -9,7 +9,7 @@ analysis that motivated the design.
 
 ## Question
 
-In the typical `implement → review → pr` pipeline, the implement and review
+In the typical `implement → review → pr` workflow, the implement and review
 stages often iterate several times. Today, when a review agent sends the task
 back with `kanna_request_revision`, the implement stage gets a **completely
 fresh agent** with cleared context. Would resurrecting the previous implement
@@ -49,7 +49,7 @@ agent's session (conversation context intact) improve agentic performance?
 The abstract worry with resuming an agent after critical feedback is
 anchoring: an agent invested in its approach patches minimally instead of
 rethinking. That worry assumes the feedback is *approach-level* ("this design
-is wrong"). In this pipeline it structurally is not:
+is wrong"). In this workflow it structurally is not:
 
 - The review agent (`.kanna/agents/review/AGENT.md`) is a **QA/coverage
   agent**. Its entire prompt is about whether test coverage matches the risk
@@ -93,7 +93,7 @@ a handful of iterations, not dozens.
 
 ## Verdict: resume by default
 
-Resurrection is the right default for this pipeline. The revision loop is an
+Resurrection is the right default for this workflow. The revision loop is an
 interactive steer-the-same-session pattern — the best-performing agent loop
 we know of — artificially broken today by a fresh spawn that discards the
 context most useful for acting on the feedback. Fresh spawn should remain

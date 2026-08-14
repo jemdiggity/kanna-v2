@@ -100,7 +100,9 @@ pub struct TaskDetail {
     pub title: String,
     pub prompt: Option<String>,
     pub stage: Option<String>,
-    pub pipeline_name: Option<String>,
+    pub workflow_name: Option<String>,
+    #[serde(rename = "pipelineName")]
+    pub legacy_pipeline_name: Option<String>,
     pub stage_transition: Option<String>,
     pub activity: Option<String>,
     pub snippet: Option<String>,
@@ -128,7 +130,7 @@ pub struct TaskDetail {
     /// human-requested revision). A review agent reads this with
     /// `revision_limit` to know how much rope the loop has left.
     pub revision_rounds: i64,
-    /// Rounds the task's pipeline allows before the engine parks the task for
+    /// Rounds the task's workflow allows before the engine parks the task for
     /// its human instead of revising again; `0` means unlimited.
     pub revision_limit: i64,
     pub parent_task_id: Option<String>,
@@ -161,7 +163,9 @@ pub struct TaskLatestRun {
 pub struct TaskChild {
     pub id: String,
     pub agent: Option<String>,
-    pub pipeline_name: Option<String>,
+    pub workflow_name: Option<String>,
+    #[serde(rename = "pipelineName")]
+    pub legacy_pipeline_name: Option<String>,
     pub created_at: Option<String>,
     pub closed_at: Option<String>,
     pub latest_run: Option<TaskLatestRun>,
@@ -268,7 +272,8 @@ pub struct CreateTaskRequest {
     pub prompt: String,
     #[serde(alias = "display_name")]
     pub display_name: Option<String>,
-    pub pipeline_name: Option<String>,
+    #[serde(alias = "pipelineName")]
+    pub workflow_name: Option<String>,
     pub stage: Option<String>,
     pub base_ref: Option<String>,
     pub agent: Option<String>,
@@ -379,15 +384,18 @@ pub struct SetTaskParentRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct SetTaskPipelineRequest {
-    pub pipeline_name: String,
+pub struct SetTaskWorkflowRequest {
+    #[serde(alias = "pipelineName")]
+    pub workflow_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct SetTaskPipelineResponse {
+pub struct SetTaskWorkflowResponse {
     pub task_id: String,
-    pub pipeline_name: String,
+    pub workflow_name: String,
+    #[serde(rename = "pipelineName")]
+    pub legacy_pipeline_name: String,
     pub stage: String,
     pub revision_rounds: i64,
     pub revision_limit: i64,
@@ -411,7 +419,7 @@ pub struct TaskActionResponse {
 pub struct RevisionBudgetStatus {
     /// Agent-requested rounds spent, including the one just started.
     pub rounds: i64,
-    /// Rounds the task's pipeline allows; `0` means unlimited.
+    /// Rounds the task's workflow allows; `0` means unlimited.
     pub limit: i64,
     /// True when the budget is spent and no revision was started: the task is
     /// parked at its current stage for its human.
@@ -636,7 +644,8 @@ impl MobileApi {
                 Ok(TaskChild {
                     id: child.id,
                     agent,
-                    pipeline_name: child.pipeline,
+                    workflow_name: child.pipeline.clone(),
+                    legacy_pipeline_name: child.pipeline,
                     created_at: child.created_at,
                     closed_at: child.closed_at,
                     latest_run: latest_run.map(map_task_latest_run),
@@ -803,14 +812,14 @@ fn map_task_detail(
         .and_then(Result::ok)
         .unwrap_or_default();
     let existing_worktree_path = worktree_path.filter(|path| Path::new(path).exists());
-    let pipeline_name = item.pipeline.clone();
+    let workflow_name = item.pipeline.clone();
     let stage_transition = repo
-        .zip(pipeline_name.as_deref())
+        .zip(workflow_name.as_deref())
         .zip(item.stage.as_deref())
-        .and_then(|((repo, pipeline_name), stage_name)| {
+        .and_then(|((repo, workflow_name), stage_name)| {
             crate::task_creator::resolve_stage_transition(
                 repo,
-                pipeline_name,
+                workflow_name,
                 item.pipeline_def.as_deref(),
                 stage_name,
             )
@@ -818,11 +827,11 @@ fn map_task_detail(
             .flatten()
         });
     let revision_limit = repo
-        .zip(pipeline_name.as_deref())
-        .and_then(|(repo, pipeline_name)| {
+        .zip(workflow_name.as_deref())
+        .and_then(|(repo, workflow_name)| {
             crate::task_creator::resolve_revision_limit(
                 repo,
-                pipeline_name,
+                workflow_name,
                 item.pipeline_def.as_deref(),
             )
             .ok()
@@ -843,7 +852,8 @@ fn map_task_detail(
         title,
         prompt,
         stage: item.stage,
-        pipeline_name,
+        workflow_name: workflow_name.clone(),
+        legacy_pipeline_name: workflow_name,
         stage_transition,
         activity: item.activity,
         snippet: waiting_prompt_snippet.clone(),
@@ -1113,7 +1123,7 @@ mod tests {
                 "repoId": "repo-1",
                 "prompt": "Build the view",
                 "displayName": "Short task title",
-                "pipelineName": null,
+                "workflowName": null,
                 "stage": null,
                 "baseRef": null,
                 "agent": null,
@@ -1551,7 +1561,7 @@ mod tests {
     }
 
     #[test]
-    fn task_detail_uses_stored_pipeline_transition_when_origin_definition_is_unavailable() {
+    fn task_detail_uses_stored_workflow_transition_when_origin_definition_is_unavailable() {
         let config = Config {
             relay_url: "wss://relay.example".to_string(),
             device_token: "device-token".to_string(),

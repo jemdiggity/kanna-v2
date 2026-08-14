@@ -54,7 +54,7 @@ Keep these lifecycle facts straight:
 
 - Posts run in the live session and transition automatically after success. Advancing past the final stage closes the task.
 - An open `post` run over an idle session is a wedged post, not progress: the prompt was injected but never recorded, and the transition only fires on the post's success. Read the tail for the cause — a model usage limit sits there silently — clear it, then have the agent record completion.
-- Repo definitions are read from the `origin/main` snapshot, not the task branch: `.kanna/config.json` (including `setup`), pipelines, and agent files. A stage fork therefore runs main's `setup` against the branch's code, so renaming a command a setup step calls breaks transitions in both directions until the rename lands. Edits to these files — including this one — have no effect until they merge.
+- Repo definitions are read from the `origin/main` snapshot, not the task branch: `.kanna/config.json` (including `setup`), workflows, and agent files. A stage fork therefore runs main's `setup` against the branch's code, so renaming a command a setup step calls breaks transitions in both directions until the rename lands. Edits to these files — including this one — have no effect until they merge.
 - Stage transitions fork from the committed tip; only committed work crosses. Never modify an abandoned worktree, but read it to recover uncommitted work.
 - Closing removes worktrees, never branches. Closed tasks remain readable by exact id through `kanna_get_task`; search omits them, so an empty search proves nothing.
 

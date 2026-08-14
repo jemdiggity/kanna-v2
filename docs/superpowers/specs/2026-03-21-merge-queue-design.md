@@ -13,7 +13,7 @@ After the PR agent creates a pull request, there is no in-app way to merge it. U
 Add `"merge"` to the `Stage` union type and add transitions `in_progress → merge` and `merge → done` to `VALID_TRANSITIONS`.
 
 **Files:**
-- `packages/core/src/pipeline/types.ts` — add `"merge"` to `Stage`, add transitions
+- `packages/core/src/workflow/types.ts` — add `"merge"` to `Stage`, add transitions
 
 ### Badge
 
@@ -28,13 +28,13 @@ New "Merge Queue" section between "Pull Requests" and "In Progress".
 
 **Files:**
 - `apps/desktop/src/components/Sidebar.vue`:
-  - Add `sortedMerge(repoId)` filter: `pipelineItems.filter(i => i.repo_id === repoId && i.stage === "merge" && !i.pinned)` sorted by activity
+  - Add `sortedMerge(repoId)` filter: `workflowItems.filter(i => i.repo_id === repoId && i.stage === "merge" && !i.pinned)` sorted by activity
   - Add draggable section with "Merge Queue" label (same template as PR section)
   - Update `itemsForRepo()` to include `sortedMerge()` in the combined list
 
 ### `startMergeAgent(repoId, repoPath)`
 
-New function in `usePipeline.ts`. Takes `repoId` and `repoPath` (from the selected repo). Creates a pipeline item with stage `"merge"`, branched off the repo root's current HEAD (no `baseBranch` option). Uses `--dangerously-skip-permissions` like all other agent tasks.
+New function in `useWorkflow.ts`. Takes `repoId` and `repoPath` (from the selected repo). Creates a workflow item with stage `"merge"`, branched off the repo root's current HEAD (no `baseBranch` option). Uses `--dangerously-skip-permissions` like all other agent tasks.
 
 The agent is an interactive session — after spawning, it asks the user which PRs to merge. No PR numbers are pre-populated.
 
@@ -77,14 +77,14 @@ You are a merge agent. Your job is to safely merge pull requests without breakin
 ```
 
 **Files:**
-- `apps/desktop/src/composables/usePipeline.ts` — add `startMergeAgent(repoId: string, repoPath: string)`, export it
+- `apps/desktop/src/composables/useWorkflow.ts` — add `startMergeAgent(repoId: string, repoPath: string)`, export it
 
 ### Keyboard shortcut and command palette
 
 `Shift+Cmd+M` triggers `startMergeAgent()`. Command palette auto-populates from the shortcuts array.
 
 **Files:**
-- `apps/desktop/src/composables/useKeyboardShortcuts.ts` — add `"mergeQueue"` to `ActionName`, add shortcut def `{ action: "mergeQueue", label: "Merge Queue", group: "Pipeline", key: ["M", "m"], meta: true, shift: true, display: "⇧⌘M" }`
+- `apps/desktop/src/composables/useKeyboardShortcuts.ts` — add `"mergeQueue"` to `ActionName`, add shortcut def `{ action: "mergeQueue", label: "Merge Queue", group: "Workflow", key: ["M", "m"], meta: true, shift: true, display: "⇧⌘M" }`
 - `apps/desktop/src/App.vue` — wire `mergeQueue` action to call `startMergeAgent(selectedRepo.id, selectedRepo.path)`
 
 ### Config: test scripts
@@ -98,10 +98,10 @@ The merge agent reads `.kanna/config.json` directly from the shell to check for 
 
 | File | Change |
 |------|--------|
-| `packages/core/src/pipeline/types.ts` | Add `"merge"` to Stage, add transitions |
+| `packages/core/src/workflow/types.ts` | Add `"merge"` to Stage, add transitions |
 | `apps/desktop/src/components/StageBadge.vue` | Add merge color + label |
 | `apps/desktop/src/components/Sidebar.vue` | Add "Merge Queue" section, update `itemsForRepo()` |
-| `apps/desktop/src/composables/usePipeline.ts` | Add `startMergeAgent()` |
+| `apps/desktop/src/composables/useWorkflow.ts` | Add `startMergeAgent()` |
 | `apps/desktop/src/composables/useKeyboardShortcuts.ts` | Add `mergeQueue` action + shortcut |
 | `apps/desktop/src/App.vue` | Wire `mergeQueue` action handler |
 | `packages/core/src/config/repo-config.ts` | Add `test` field to config type |

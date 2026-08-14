@@ -8,7 +8,7 @@
 
 **Tech Stack:** React Native, TypeScript, Vitest, Rust, Serde, Cargo tests
 
-**Stage constraint:** Do not commit during this implementation stage; Kanna's later pipeline stage owns commits.
+**Stage constraint:** Do not commit during this implementation stage; Kanna's later workflow stage owns commits.
 
 ---
 
@@ -389,7 +389,7 @@ fn prepare_task_uses_requested_initial_terminal_geometry() {
             repo_id: "repo-1".to_string(),
             prompt: "Use the mobile terminal grid".to_string(),
             display_name: None,
-            pipeline_name: None,
+            workflow_name: None,
             stage: None,
             base_ref: None,
             agent: None,

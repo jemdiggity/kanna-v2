@@ -43,10 +43,10 @@
 - Modify: `pnpm-lock.yaml`
 
 - [ ] Add failing desktop tests proving agent-backed setup/custom launches omit `agentProvider`, leaving ordered candidates for the server.
-- [ ] Add failing Rust tests for empty, mixed, non-string, and unknown pipeline/AGENT provider lists and for Copilot/Antigravity headless rejection before durable state.
+- [ ] Add failing Rust tests for empty, mixed, non-string, and unknown workflow/AGENT provider lists and for Copilot/Antigravity headless rejection before durable state.
 - [ ] Add an HTTP/server integration case where the request omits `agentProvider` and an unavailable first agent candidate falls back to the available second candidate.
 - [ ] Remove App-level first-provider selection from agent-definition launch paths; keep scalar preference validation local to `useAppPreferences`.
-- [ ] Make Rust pipeline and YAML frontmatter parsing validate the same non-empty known-provider contract as TypeScript/schema parsing.
+- [ ] Make Rust workflow and YAML frontmatter parsing validate the same non-empty known-provider contract as TypeScript/schema parsing.
 - [ ] Make `resolve_agent_type` reject explicit/default headless sessions when `supports_headless` is false before task ID, DB insert, or worktree creation.
 - [ ] Import generated `AgentProvider` in Firebase function types and add the workspace dependency.
 - [ ] Run focused desktop, core, server, and Firebase type checks.
@@ -129,4 +129,4 @@
 - [ ] Run `cargo test -p kanna-server`.
 - [ ] Review `git diff`, run `git diff --check`, and request a final independent code review.
 
-This revision task intentionally does not commit; Kanna's later pipeline stage owns the commit.
+This revision task intentionally does not commit; Kanna's later workflow stage owns the commit.

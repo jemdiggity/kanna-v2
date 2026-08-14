@@ -4,7 +4,7 @@ Dispatched specialty reviews for the review stage: a QA dispatcher agent
 decides at review time which specialty reviews a branch needs (UI, security,
 network/runtime performance, plus repo-defined specialties), fans each one out
 as a child review task over a fork of the same branch, and aggregates the
-verdicts into the single review decision the pipeline already understands.
+verdicts into the single review decision the workflow already understands.
 
 This is the "review manager" workflow anticipated by
 [task-graph-stages](task-graph-stages.md): the engine executes structure known
@@ -16,7 +16,7 @@ stage-engine semantics were added.
 
 ### No engine changes
 
-Pipelines stay linear. Parallelism lives in child-task fan-out
+Workflows stay linear. Parallelism lives in child-task fan-out
 (`kanna_create_task` with `base_ref` = the dispatcher's branch,
 `parent_task_id`/`notify_task_id` = the dispatcher's task), and join is the
 dispatcher's job (`kanna_wait_task`, then reading the child's recorded
@@ -37,16 +37,16 @@ server-side infers it: `display_name` is the only title input the fan-out has.
 
 ### Built-in definitions
 
-- **`specialized-reviewers` pipeline** — the standard
+- **`specialized-reviewers` workflow** — the standard
   `in progress` (post: `commit`) → `review` → `pr` (post: `approve`) rail,
   with the review stage bound to the `qa-dispatcher` agent
   (`transition: auto`).
-- **`specialty-review` pipeline** — a single manual `review` stage with **no
+- **`specialty-review` workflow** — a single manual `review` stage with **no
   agent binding**; the dispatcher binds the specialty agent through the
   create request's `agent` override. Its definition declares
-  `"visibility": "internal"` (`.kanna/pipelines/specialty-review.json`): Kanna
+  `"visibility": "internal"` (`.kanna/workflows/specialty-review.json`): Kanna
   binds it itself, so the name resolves on create but is never listed as a
-  pipeline a human or an agent chooses — one character from
+  workflow a human or an agent chooses — one character from
   `specialized-reviewers` is too close to offer both in the same picker. A
   repo that ships its own file under the name customizes the definition, and
   must re-declare the visibility to keep it unlisted. Manual is the uniform
@@ -103,7 +103,7 @@ the generic review agent — including this one.
 Four gaps stood between the dispatcher and the existing primitives:
 
 1. **`agent` override on `kanna_create_task`.** The HTTP API already accepted
-   `CreateTaskRequest.agent` (it overrides the pinned pipeline stage's agent
+   `CreateTaskRequest.agent` (it overrides the pinned workflow stage's agent
    binding); the shared tool catalog now exposes it to MCP/CLI callers, and
    `kanna-cli task create` grew a matching `--agent` flag. The `stage`
    override remains deliberately unexposed.
@@ -111,10 +111,10 @@ Four gaps stood between the dispatcher and the existing primitives:
    MCP-first as `kanna_list_task_children {"task_id": "..."}` and through the
    typed fallback `kanna-cli task children --task-id "..."`, returns all direct
    children, including closed children, in chronological oldest-first order.
-   Each item carries `id`, optional `pipelineName`, `agent`, `createdAt`,
+   Each item carries `id`, optional `workflowName`, `agent`, `createdAt`,
    `closedAt`, and `latestRun`, so the dispatcher can reconstruct actual prior
    panel outcomes instead of inferring that an untouched surface passed.
-   `pipelineName` is the discriminator that keeps unrelated direct subtasks out
+   `workflowName` is the discriminator that keeps unrelated direct subtasks out
    of the panel ledger. This reuses the durable task and stage-run records:
    there is no schema migration and no duplicate aggregate verdict table or
    snapshot to keep consistent.
@@ -147,10 +147,10 @@ one; prompts alone cannot hold a limit.
 
 ### Revision-round budget (engine)
 
-A pipeline declares `revision_limit` (top level, default
+A workflow declares `revision_limit` (top level, default
 `DEFAULT_REVISION_LIMIT` = 3; `0` opts out). A negative value is a definition
 error in every parser — the Rust source of truth
-(`normalize_pipeline_definition`, covering both repo pipeline files and pinned
+(`normalize_pipeline_definition`, covering both repo workflow files and pinned
 `pipeline_def` snapshots), the JSON schema, and the TypeScript loader — rather
 than being clamped to `0`, since silently reading a typo as "unlimited" would
 disable the bound the field exists to set. `pipeline_item.revision_rounds`
@@ -224,7 +224,7 @@ agent assets are held to that by `qa-assets.test.ts`.
 
 The budget bounds revising, not verdicts. A review agent that records
 `kanna_complete_stage success` instead of requesting a revision still advances
-the task — unchanged, and the same trust the pipeline has always placed in a
+the task — unchanged, and the same trust the workflow has always placed in a
 review stage's verdict. What the budget removes is the ability to keep sending
 work back forever without a human looking.
 
@@ -304,8 +304,8 @@ unavailable). Closed children are deliberately included: closing a specialty
 child is lifecycle cleanup, not verdict deletion. The response is oldest first,
 so reduction is deterministic:
 
-- First select only children whose `pipelineName` is `specialty-review`.
-  Children from every other pipeline are unrelated subtasks and are ignored,
+- First select only children whose `workflowName` is `specialty-review`.
+  Children from every other workflow are unrelated subtasks and are ignored,
   even when runless or when their `agent` happens to start with `review-`.
 - Within that selected history, every syntactically valid stored `review-*`
   `agent` is a historical specialty key. It remains valid if the repo-defined
@@ -329,11 +329,11 @@ so reduction is deterministic:
   A later terminal child for the same historical key supersedes that unresolved
   evidence. If that finite repair path fails—or a retired specialty cannot be
   dispatched—the dispatcher records broken dispatch once instead of looping.
-- An older endpoint payload may omit `pipelineName`. Every such record is
+- An older endpoint payload may omit `workflowName`. Every such record is
   version-incomplete history and prevents aggregate success because it cannot
   be classified as panel or unrelated. The dispatcher may retry the supported
   MCP/typed CLI query once only when that surface can return the current shape.
-  If `pipelineName` remains absent, it records broken dispatch with the child id
+  If `workflowName` remains absent, it records broken dispatch with the child id
   and an explicit incompatible-server/upgrade-required reason. It never infers
   PASS, overwrites an actual prior terminal verdict, or enters a retry loop.
 - A specialty that has never been reviewed and is untouched this round has no
@@ -375,7 +375,7 @@ Three fallbacks keep the narrowing honest:
   have dropped exactly the report the check exists to read.
   `$PREV_MAIN_RESULT` (`latest_finished_main_stage_run_result`, posts excluded)
   resolves the previous stage agent's own run, leaving `$PREV_RESULT` untouched
-  for the pipelines that want the post result — the `approve` post still reads
+  for the workflows that want the post result — the `approve` post still reads
   it. The chain is covered end to end in
   `http_api::tests::revision_status`: an implementation main run reporting a
   declined finding, its commit post reporting a different summary, and the
@@ -396,10 +396,10 @@ findings.
 ```
 parent review stage (qa-dispatcher, auto)
   ├─ kanna_list_task_children(parent) → closed + open children, oldest first
-  │    └─ select pipelineName=specialty-review, then reduce latest terminal latestRun per review-* agent
-  ├─ kanna_create_task {pipeline_name: specialty-review, agent: review-ui,   base_ref: $BRANCH, parent/notify: self,
+  │    └─ select workflowName=specialty-review, then reduce latest terminal latestRun per review-* agent
+  ├─ kanna_create_task {workflow_name: specialty-review, agent: review-ui,   base_ref: $BRANCH, parent/notify: self,
   │                     display_name: "UI review: <subject> (round n)"}
-  ├─ kanna_create_task {pipeline_name: specialty-review, agent: review-sec…, base_ref: $BRANCH, parent/notify: self,
+  ├─ kanna_create_task {workflow_name: specialty-review, agent: review-sec…, base_ref: $BRANCH, parent/notify: self,
   │                     display_name: "Security review: <subject> (round n)"}
   ├─ kanna_wait_task until finished (per child; waitOutcome timeout → call again; notify "TASK <id> DONE" doubles as a wake-up)
   ├─ kanna_get_task → latestRun.status/summary   (succeeded=PASS / failed=FAIL)
@@ -419,7 +419,7 @@ parent review stage (qa-dispatcher, auto)
 - `crates/kanna-cli` — typed `task create --agent` and `task children
   --task-id` surfaces match the catalog/API contracts.
 - `crates/kanna-server` `task_creator::tests::core` — the builtin
-  `specialized-reviewers`/`specialty-review` pipelines and all four dispatch agents
+  `specialized-reviewers`/`specialty-review` workflows and all four dispatch agents
   resolve from compiled resources; a dispatcher-style create request
   (`specialty-review` + `agent: review-security` + parent/notify) prepares a
   spawn bound to the specialty agent with a manual completion transition.
@@ -437,7 +437,7 @@ parent review stage (qa-dispatcher, auto)
   `review`, marks it `unread`, records the parked verdict with the findings as
   feedback, and reports `exhausted: true`; a `human`-origin revision at the same
   spent budget proceeds and resets the count to 0.
-- `apps/desktop` `pipeline.requestRevision.test.ts` and the diff-modal E2E
+- `apps/desktop` `workflow.requestRevision.test.ts` and the diff-modal E2E
   (`tests/e2e/mock/diff-view.test.ts`) — the desktop revision action posts
   `origin: "human"`, which is what exempts a user-requested revision from the
   agent budget.

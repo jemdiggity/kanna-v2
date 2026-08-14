@@ -240,4 +240,4 @@ Run:
 
 Expected: all canonical Rust checks pass.
 
-Do not commit in this stage; Kanna's later pipeline stage owns the commit.
+Do not commit in this stage; Kanna's later workflow stage owns the commit.

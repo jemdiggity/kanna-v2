@@ -8,7 +8,7 @@ use crate::api::{
     list_task_children_via_api, list_tasks_via_api, notify_mobile_via_api, parse_wait_until,
     rename_task_via_api, request_revision_via_api, rerun_stage_via_api, resume_task_via_api,
     search_tasks_via_api, send_task_input_via_api, set_task_notify_via_api,
-    set_task_parent_via_api, set_task_pipeline_via_api, signal_merge_handoff_via_api,
+    set_task_parent_via_api, set_task_workflow_via_api, signal_merge_handoff_via_api,
     task_logs_via_api, unblock_task_via_api, wait_task_events_via_api, wait_task_via_api,
     WaitTaskOutcome,
 };
@@ -16,7 +16,7 @@ use crate::commands::{parse_metadata_json, print_json};
 use crate::config::resolve_server_base_url_from_env;
 use crate::models::{
     BlockTaskRequest, CreateTaskRequest, MergeHandoffRequest, MobileNotificationRequest,
-    RequestRevisionRequest, SetTaskNotifyRequest, SetTaskParentRequest, SetTaskPipelineRequest,
+    RequestRevisionRequest, SetTaskNotifyRequest, SetTaskParentRequest, SetTaskWorkflowRequest,
     TaskCreateOptions, TaskDetail, TaskInputRequest, TaskRenameRequest, TaskStatusRow, TaskSummary,
 };
 use crate::TaskCommands;
@@ -27,7 +27,7 @@ pub(crate) fn build_create_task_request(options: TaskCreateOptions) -> CreateTas
         repo_id: options.repo_id,
         prompt: options.prompt,
         display_name: options.display_name,
-        pipeline_name: options.pipeline_name,
+        workflow_name: options.workflow_name,
         base_ref: options.base_ref,
         agent: options.agent,
         agent_provider: options.agent_provider,
@@ -291,7 +291,7 @@ pub(crate) async fn run(command: TaskCommands) {
             prompt,
             display_name,
             server_url,
-            pipeline_name,
+            workflow_name,
             base_ref,
             agent,
             agent_provider,
@@ -309,7 +309,7 @@ pub(crate) async fn run(command: TaskCommands) {
                 repo_id,
                 prompt,
                 display_name,
-                pipeline_name,
+                workflow_name,
                 base_ref,
                 agent,
                 agent_provider,
@@ -581,14 +581,14 @@ pub(crate) async fn run(command: TaskCommands) {
                 process::exit(1);
             }
         }
-        TaskCommands::SetPipeline {
+        TaskCommands::SetWorkflow {
             task_id,
-            pipeline_name,
+            workflow_name,
             server_url,
         } => {
             let base_url = resolve_server_base_url_from_env(server_url.as_deref());
-            let request = SetTaskPipelineRequest { pipeline_name };
-            let updated = set_task_pipeline_via_api(&base_url, &task_id, &request)
+            let request = SetTaskWorkflowRequest { workflow_name };
+            let updated = set_task_workflow_via_api(&base_url, &task_id, &request)
                 .await
                 .unwrap_or_else(|e| {
                     eprintln!("Error: {e}");

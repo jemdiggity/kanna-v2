@@ -8,7 +8,7 @@
 
 **Tech Stack:** Vue 3, Pinia, TypeScript, Vitest, Vue Test Utils, Tauri desktop frontend.
 
-**Stage constraint:** Do not commit during this manual Kanna stage. Leave changes in the worktree for the pipeline's later commit stage.
+**Stage constraint:** Do not commit during this manual Kanna stage. Leave changes in the worktree for the workflow's later commit stage.
 
 ---
 
@@ -47,7 +47,7 @@ describe("task initialization UI items", () => {
       repoId: "repo-1",
       prompt: "ship it",
       displayName: "Ship it",
-      pipelineName: "qa",
+      workflowName: "qa",
       agentType: "pty",
       requestedAgentProviders: "copilot",
       nowIso: "2026-07-10T00:00:00.000Z",
@@ -60,7 +60,7 @@ describe("task initialization UI items", () => {
       repo_id: "repo-1",
       prompt: "ship it",
       display_name: "Ship it",
-      pipeline: "qa",
+      workflow: "qa",
       stage: "in progress",
       agent_type: "pty",
       agent_provider: "copilot",
@@ -118,7 +118,7 @@ export interface InitializingTaskItem {
   repo_id: string;
   prompt: string;
   display_name: string | null;
-  pipeline: string;
+  workflow: string;
   stage: string;
   agent_type: AgentExecutionType;
   agent_provider: AgentProvider;
@@ -139,7 +139,7 @@ interface BuildOptions {
   repoId: string;
   prompt: string;
   displayName?: string | null;
-  pipelineName?: string;
+  workflowName?: string;
   stage?: string;
   agentType: AgentExecutionType;
   requestedAgentProviders?: AgentProvider | AgentProvider[];
@@ -155,7 +155,7 @@ export function buildInitializingTaskItem(options: BuildOptions): InitializingTa
     repo_id: options.repoId,
     prompt: options.prompt,
     display_name: options.displayName ?? null,
-    pipeline: options.pipelineName ?? "default",
+    workflow: options.workflowName ?? "default",
     stage: options.stage ?? "in progress",
     agent_type: options.agentType,
     agent_provider: providers[0] ?? "claude",
@@ -221,7 +221,7 @@ function initializingItem(overrides: Partial<InitializingTaskItem> = {}): Initia
     repo_id: "repo-1",
     prompt: "Create a task",
     display_name: null,
-    pipeline: "default",
+    workflow: "default",
     stage: "in progress",
     agent_type: "pty",
     agent_provider: "claude",
@@ -450,7 +450,7 @@ const initializingItem = buildInitializingTaskItem({
   repoId,
   prompt: effectivePrompt,
   displayName,
-  pipelineName: opts?.pipelineName,
+  workflowName: opts?.workflowName,
   agentType: effectiveAgentType,
   requestedAgentProviders,
 });
@@ -570,7 +570,7 @@ it("mounts a terminal only after the UI item has a durable task", async () => {
     pin_order: null,
     display_name: "Make a task",
     closed_at: null,
-    pipeline: "default",
+    workflow: "default",
     pipeline_def: null,
     stage_result: null,
     issue_number: null,
@@ -593,7 +593,7 @@ it("mounts a terminal only after the UI item has a durable task", async () => {
         repo_id: "repo-1",
         prompt: "Make a task",
         display_name: "Make a task",
-        pipeline: "default",
+        workflow: "default",
         stage: "in progress",
         agent_type: "pty",
         agent_provider: "codex",
@@ -731,7 +731,7 @@ const sidebarStore = vi.hoisted(() => ({
     repo_id: string;
     prompt: string;
     display_name: string | null;
-    pipeline: string;
+    workflow: string;
     stage: string;
     agent_type: "pty";
     agent_provider: "claude";
@@ -758,7 +758,7 @@ it("renders and selects an initializing UI item without task controls", async ()
     repo_id: "repo-1",
     prompt: "Initialize this task",
     display_name: null,
-    pipeline: "default",
+    workflow: "default",
     stage: "in progress",
     agent_type: "pty",
     agent_provider: "claude",
@@ -821,7 +821,7 @@ Before draggable ready-task sections for each expanded repo, render:
     <div
       v-for="initializing in initializingItemsForRepo(repo.id)"
       :key="initializing.id"
-      class="pipeline-item initializing-item"
+      class="workflow-item initializing-item"
       :class="{ selected: selectedItemId === initializing.id }"
       :data-initializing-item-id="initializing.id"
       @click="handleSelectInitializingItem(initializing)"
@@ -969,7 +969,7 @@ Expected:
 - Task actions cannot resolve an initializing UI id as a task id.
 - No terminal recovery behavior was weakened or suppressed.
 
-- [ ] **Step 5: Leave the worktree uncommitted for pipeline handoff**
+- [ ] **Step 5: Leave the worktree uncommitted for workflow handoff**
 
 ```bash
 git status --short

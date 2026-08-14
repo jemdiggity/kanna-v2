@@ -8,7 +8,7 @@
 
 **Tech Stack:** Vue 3, TypeScript, Vitest, xterm.js, Pinia, vue-i18n
 
-**Task environment:** This Kanna stage already runs in an isolated task worktree. Leave implementation changes uncommitted because the pipeline owns the later implementation commit.
+**Task environment:** This Kanna stage already runs in an isolated task worktree. Leave implementation changes uncommitted because the workflow owns the later implementation commit.
 
 ---
 
@@ -348,6 +348,6 @@ git diff --stat
 
 Expected: `git diff --check` is silent and the diff contains only the approved feature, tests, locales, spec, and plan.
 
-- [ ] **Step 3: Leave implementation for pipeline commit**
+- [ ] **Step 3: Leave implementation for workflow commit**
 
 Do not push, create a PR, advance the task, or record stage completion. Report behavior and fresh verification results.

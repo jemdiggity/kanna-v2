@@ -53,7 +53,7 @@ prompts carry the resolved branch.
 A full desktop E2E (create dormant chain → restart the packaged app →
 assert survival → close blocker → assert dependent starts on the renamed
 branch) is not yet feasible: the WebDriver harness has no app-restart
-primitive, and driving a real blocker pipeline to close deterministically
+primitive, and driving a real blocker workflow to close deterministically
 requires agent completion without external Claude/Codex credentials. Add
 that flow when the E2E harness can restart the app under test and
 deterministically complete an agent stage.

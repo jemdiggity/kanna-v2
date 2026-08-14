@@ -124,7 +124,7 @@ async function selectTask(client: WebDriverClient, task: PerfTask): Promise<void
   if (result !== "ok") {
     throw new Error(`select task failed: ${result}`);
   }
-  await client.waitForText(".pipeline-item.selected", task.prompt);
+  await client.waitForText(".workflow-item.selected", task.prompt);
 }
 
 async function readMetrics(client: WebDriverClient): Promise<AppMetricsSnapshot> {

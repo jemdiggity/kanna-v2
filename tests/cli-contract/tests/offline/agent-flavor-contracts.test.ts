@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { parseAgentDefinition } from "../../../../packages/core/src/pipeline/agent-loader";
+import { parseAgentDefinition } from "../../../../packages/core/src/workflow/agent-loader";
 
 // This test lives one lane deeper than the historical flat tests directory.
 const repoRoot = resolve(new URL("../../../..", import.meta.url).pathname);
@@ -175,7 +175,7 @@ describe("bundled agent flavor contracts", () => {
     expect(approveAgent).toContain("complete this stage as failure");
     for (const name of BUILTIN_PIPELINES) {
       const pipeline = JSON.parse(
-        read(join(repoRoot, ".kanna", "pipelines", `${name}.json`)),
+        read(join(repoRoot, ".kanna", "workflows", `${name}.json`)),
       ) as { stages?: Array<{ name?: unknown; post?: { agent?: unknown } }> };
       const prStage = pipeline.stages?.find((stage) => stage.name === "pr");
       expect(prStage?.post?.agent, `${name} pr stage post`).toBe("approve");
@@ -205,13 +205,13 @@ describe("bundled agent flavor contracts", () => {
     // `visibility: internal`, so the lineup constant above is only truthful
     // while the bundled files agree with it.
     const specialty = JSON.parse(
-      read(join(repoRoot, ".kanna", "pipelines", "specialty-review.json")),
+      read(join(repoRoot, ".kanna", "workflows", "specialty-review.json")),
     ) as { visibility?: unknown };
     expect(specialty.visibility).toBe("internal");
 
     for (const name of BUILTIN_PIPELINES) {
       const pipeline = JSON.parse(
-        read(join(repoRoot, ".kanna", "pipelines", `${name}.json`)),
+        read(join(repoRoot, ".kanna", "workflows", `${name}.json`)),
       ) as { visibility?: unknown };
       expect(pipeline.visibility, `${name} stays a public choice`).toBeUndefined();
     }
@@ -226,7 +226,7 @@ describe("bundled agent flavor contracts", () => {
 
   it("ships the three built-in pipelines the setup interview offers", () => {
     for (const name of BUILTIN_PIPELINES) {
-      const path = join(repoRoot, ".kanna", "pipelines", `${name}.json`);
+      const path = join(repoRoot, ".kanna", "workflows", `${name}.json`);
       expect(existsSync(path), `${path} must exist`).toBe(true);
 
       const pipeline = JSON.parse(read(path)) as {
@@ -244,7 +244,7 @@ describe("bundled agent flavor contracts", () => {
 
     const reviewAgentFor = (name: string) => {
       const pipeline = JSON.parse(
-        read(join(repoRoot, ".kanna", "pipelines", `${name}.json`)),
+        read(join(repoRoot, ".kanna", "workflows", `${name}.json`)),
       ) as { stages?: Array<{ name?: unknown; agent?: unknown }> };
       return pipeline.stages?.find((stage) => stage.name === "review")?.agent;
     };

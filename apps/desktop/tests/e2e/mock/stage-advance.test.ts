@@ -29,9 +29,9 @@
  *   fake daemon asserting the exact Input/Spawn commands. A full desktop
  *   E2E of post injection would need a deterministic live agent session to
  *   type into under the WebDriver harness; the fixtures here use post-less
- *   pipelines so swaps stay deterministic.
+ *   workflows so swaps stay deterministic.
  * - "closes the source task after a fast teardown exit during stage
- *   advance": advancing never closes the source mid-pipeline anymore; the
+ *   advance": advancing never closes the source mid-workflow anymore; the
  *   final-stage test covers the one remaining close path.
  * - "Cmd+S with a remote workspace task selected does not close a stale
  *   local fallback": covered by the keyboard-shortcuts mock suite, which
@@ -52,9 +52,9 @@ import { resolveAppKannaServer, type AppKannaServer } from "../helpers/kannaServ
 
 const execFileAsync = promisify(execFile);
 
-const TWO_STAGE_PIPELINE = "durable-two-stage-e2e";
-const AUTO_PIPELINE = "durable-auto-e2e";
-const REVISION_PIPELINE = "durable-revision-e2e";
+const TWO_STAGE_WORKFLOW = "durable-two-stage-e2e";
+const AUTO_WORKFLOW = "durable-auto-e2e";
+const REVISION_WORKFLOW = "durable-revision-e2e";
 
 async function git(repoPath: string, args: string[]): Promise<string> {
   const { stdout } = await execFileAsync("git", ["-C", repoPath, ...args]);
@@ -222,7 +222,7 @@ async function waitForSidebarToExcludeTaskId(
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const visible = await client.executeSync<boolean>(
-      `return Boolean(document.querySelector(${JSON.stringify(`.sidebar .pipeline-item[data-task-id="${taskId}"]`)}));`,
+      `return Boolean(document.querySelector(${JSON.stringify(`.sidebar .workflow-item[data-task-id="${taskId}"]`)}));`,
     );
     if (!visible) return;
     await sleep(100);
@@ -340,13 +340,13 @@ describe("stage advance", () => {
     testRepoPath = fixtureRepoRoot;
 
     const kannaDir = join(testRepoPath, ".kanna");
-    await mkdir(join(kannaDir, "pipelines"), { recursive: true });
+    await mkdir(join(kannaDir, "workflows"), { recursive: true });
     await mkdir(join(kannaDir, "agents", "revision-e2e"), { recursive: true });
     await mkdir(join(kannaDir, "fake-bin"), { recursive: true });
     await writeFile(
-      join(kannaDir, "pipelines", `${TWO_STAGE_PIPELINE}.json`),
+      join(kannaDir, "workflows", `${TWO_STAGE_WORKFLOW}.json`),
       JSON.stringify({
-        name: TWO_STAGE_PIPELINE,
+        name: TWO_STAGE_WORKFLOW,
         stages: [
           { name: "in progress", policy: { transition: "manual" } },
           { name: "pr", policy: { transition: "manual" } },
@@ -354,9 +354,9 @@ describe("stage advance", () => {
       }),
     );
     await writeFile(
-      join(kannaDir, "pipelines", `${AUTO_PIPELINE}.json`),
+      join(kannaDir, "workflows", `${AUTO_WORKFLOW}.json`),
       JSON.stringify({
-        name: AUTO_PIPELINE,
+        name: AUTO_WORKFLOW,
         stages: [
           { name: "auto-source", policy: { transition: "auto" } },
           { name: "review", policy: { transition: "manual" } },
@@ -364,9 +364,9 @@ describe("stage advance", () => {
       }),
     );
     await writeFile(
-      join(kannaDir, "pipelines", `${REVISION_PIPELINE}.json`),
+      join(kannaDir, "workflows", `${REVISION_WORKFLOW}.json`),
       JSON.stringify({
-        name: REVISION_PIPELINE,
+        name: REVISION_WORKFLOW,
         environments: {
           "fake-bin": {
             setup: ["export PATH=\"$PWD/.kanna/fake-bin:$PATH\""],
@@ -430,7 +430,7 @@ describe("stage advance", () => {
     await insertTask({
       id: taskId,
       prompt: "Advance this task in place",
-      pipeline: TWO_STAGE_PIPELINE,
+      pipeline: TWO_STAGE_WORKFLOW,
       stage: "in progress",
       branch,
       displayName: "Advance in place source",
@@ -487,7 +487,7 @@ describe("stage advance", () => {
     await insertTask({
       id: taskId,
       prompt: "Advance via keyboard shortcut",
-      pipeline: TWO_STAGE_PIPELINE,
+      pipeline: TWO_STAGE_WORKFLOW,
       stage: "in progress",
       branch,
       displayName: title,
@@ -515,7 +515,7 @@ describe("stage advance", () => {
     await insertTask({
       id: taskId,
       prompt: "Close from the final stage",
-      pipeline: TWO_STAGE_PIPELINE,
+      pipeline: TWO_STAGE_WORKFLOW,
       stage: "pr",
       branch,
       displayName: title,
@@ -536,7 +536,7 @@ describe("stage advance", () => {
     await insertTask({
       id: blockerTaskId,
       prompt: "Open blocker",
-      pipeline: TWO_STAGE_PIPELINE,
+      pipeline: TWO_STAGE_WORKFLOW,
       stage: "in progress",
       branch: null,
       agentType: "agent",
@@ -545,7 +545,7 @@ describe("stage advance", () => {
     await insertTask({
       id: blockedTaskId,
       prompt: "Blocked task",
-      pipeline: TWO_STAGE_PIPELINE,
+      pipeline: TWO_STAGE_WORKFLOW,
       stage: "in progress",
       branch: "task-advance-blocked",
       displayName: "Blocked advance source",
@@ -573,7 +573,7 @@ describe("stage advance", () => {
     await insertTask({
       id: sourceTaskId,
       prompt: "Complete the auto stage",
-      pipeline: AUTO_PIPELINE,
+      pipeline: AUTO_WORKFLOW,
       stage: "auto-source",
       branch: sourceBranch,
       displayName: "Auto complete source",
@@ -581,7 +581,7 @@ describe("stage advance", () => {
     await insertTask({
       id: selectedTaskId,
       prompt: "Keep this task selected",
-      pipeline: AUTO_PIPELINE,
+      pipeline: AUTO_WORKFLOW,
       stage: "auto-source",
       branch: null,
       agentType: "agent",
@@ -638,7 +638,7 @@ describe("stage advance", () => {
     await insertTask({
       id: taskId,
       prompt: "Rerun this stage",
-      pipeline: TWO_STAGE_PIPELINE,
+      pipeline: TWO_STAGE_WORKFLOW,
       stage: "in progress",
       branch,
       displayName: "Rerun stage source",
@@ -687,7 +687,7 @@ describe("stage advance", () => {
     await insertTask({
       id: taskId,
       prompt: reviewPrompt,
-      pipeline: REVISION_PIPELINE,
+      pipeline: REVISION_WORKFLOW,
       stage: "review",
       branch,
       displayName: originalTitle,

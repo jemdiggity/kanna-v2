@@ -344,7 +344,7 @@ void setupWorktreeAndSpawn(
   repoPath,
   worktreePath,
   branch,
-  pipelinePrompt,
+  workflowPrompt,
   effectiveAgentType,
   effectiveAgentProvider,
   {

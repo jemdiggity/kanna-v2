@@ -585,7 +585,7 @@ fn typed_create_body_matches_catalog_create_task_body() {
         repo_id: "repo-1".to_string(),
         prompt: "Ship it".to_string(),
         display_name: Some("Short task title".to_string()),
-        pipeline_name: Some("default".to_string()),
+        workflow_name: Some("default".to_string()),
         base_ref: Some("origin/main".to_string()),
         agent: Some("review-security".to_string()),
         agent_provider: Some("claude".to_string()),
@@ -607,7 +607,7 @@ fn typed_create_body_matches_catalog_create_task_body() {
             "repo_id": "repo-1",
             "prompt": "Ship it",
             "display_name": "Short task title",
-            "pipeline_name": "default",
+            "workflow_name": "default",
             "base_ref": "origin/main",
             "agent": "review-security",
             "agent_provider": "claude",
@@ -876,16 +876,16 @@ fn typed_notify_mobile_body_matches_catalog_notify_mobile_body() {
 }
 
 #[test]
-fn typed_set_pipeline_body_matches_catalog_set_pipeline_body() {
-    let typed_body = serde_json::to_value(crate::models::SetTaskPipelineRequest {
-        pipeline_name: "single-reviewer".to_string(),
+fn typed_set_workflow_body_matches_catalog_set_workflow_body() {
+    let typed_body = serde_json::to_value(crate::models::SetTaskWorkflowRequest {
+        workflow_name: "single-reviewer".to_string(),
     })
     .unwrap();
     let catalog = kanna_tool_catalog::bundled_catalog();
     let resolved = kanna_tool_catalog::resolve_request(
         &catalog,
-        "kanna_set_task_pipeline",
-        &json!({ "task_id": "child-a", "pipeline_name": "single-reviewer" }),
+        "kanna_set_task_workflow",
+        &json!({ "task_id": "child-a", "workflow_name": "single-reviewer" }),
     )
     .unwrap();
 

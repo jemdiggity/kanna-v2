@@ -7,7 +7,7 @@ Related: [kanna-server-boundary.md](kanna-server-boundary.md)
 
 The desktop frontend is a hybrid client. Stage transitions go through
 kanna-server (`POST /v1/tasks/{id}/actions/advance-stage|rerun-stage`,
-`apps/desktop/src/stores/pipeline.ts`), but every other read and write still
+`apps/desktop/src/stores/workflow.ts`), but every other read and write still
 goes directly to SQLite via `tauri-plugin-sql`. kanna-server writes the same
 `kanna-v2.db` through rusqlite. That leaves:
 
@@ -42,7 +42,7 @@ the schema. The frontend holds no SQLite connection.
 - TypeScript type generation: protocol types already derive `ts-rs`
   (`feature = "typescript"`), and `packages/stream-client` +
   `composables/desktopStreamClient.ts` already speak KSP from the desktop.
-- The server already owns the full task/pipeline engine
+- The server already owns the full task/workflow engine
   (`crates/kanna-server/src/task_creator/`) including ports, spawn env,
   prompts, and the completion-notify boundary.
 
@@ -67,7 +67,7 @@ Frontend direct-DB operations mapped to their server-side status:
 | Agent session id updates (`updateAgentSessionId`) | none | Should move server/daemon-side with session ownership |
 | Task transfer raw SQL (`useAppTaskTransfer.ts`, `useAppCloudWorkspace.ts`) | none | Fold into transfer sidecar/server APIs |
 | Snapshot reads (`stores/queries.ts::reloadSnapshot` — repos + items + blockers) | partial (`/v1/repos`, `/v1/repos/{id}/tasks`, `GET /v1/tasks/{id}`) | New: `GET /v1/snapshot` returning everything the UI hydrates from, in one payload |
-| Change notification (pipeline socket nudge + polling) | KSP has terminal/agent/status frames only | New: data-model delta frames (see Phase 1) |
+| Change notification (workflow socket nudge + polling) | KSP has terminal/agent/status frames only | New: data-model delta frames (see Phase 1) |
 | Schema migrations (`stores/db.ts::runMigrations`) | server asserts WAL, no migrations | Move migration runner to kanna-server boot |
 
 ## Phases
@@ -84,7 +84,7 @@ sidecar whose relay code can take down the process.
 1. **Always-on + supervised**: desktop spawns kanna-server during Tauri setup
    (it already does via `MobileServerManager.start()`); add restart-on-crash
    supervision and a readiness signal the frontend can await. Remove the
-   lazy `ensure_mobile_server` retry loops from `pipeline.ts` once readiness
+   lazy `ensure_mobile_server` retry loops from `workflow.ts` once readiness
    is guaranteed.
 2. **Listener split**: localhost listener for the desktop UI (KSP
    `Auth { credential: None }` is already specified for this), separate from
@@ -103,7 +103,7 @@ server recovers without user-visible breakage beyond a reconnect blip.
 
 ### Phase 1 — Reads: snapshot + deltas
 
-1. `GET /v1/snapshot` (repos, pipeline items, blockers, worktree paths,
+1. `GET /v1/snapshot` (repos, workflow items, blockers, worktree paths,
    settings the UI needs) — one request replaces
    `reloadSnapshot()`'s table reads.
 2. New KSP server frames for data-model changes. Start coarse:
@@ -113,7 +113,7 @@ server recovers without user-visible breakage beyond a reconnect blip.
    but transactional with the write. Fine-grained per-row deltas are a later
    optimization, not a prerequisite.
 3. Frontend: `reloadSnapshot()` fetches over HTTP; subscribe to
-   `StateChanged`; the `pipeline_stage_complete` Unix-socket → Tauri event
+   `StateChanged`; the `workflow_stage_complete` Unix-socket → Tauri event
    path and DB polling intervals become redundant and are removed.
 
 Note: direct DB writes from the frontend still exist in this phase and won't

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { TEARDOWN_STAGE, isTaskTearingDown, isTeardownStage, normalizePipelineStage } from "./taskStages";
+import { TEARDOWN_STAGE, isTaskTearingDown, isTeardownStage, normalizeWorkflowStage } from "./taskStages";
 
 describe("taskStages", () => {
   it("uses teardown as the canonical stage name", () => {
@@ -9,9 +9,9 @@ describe("taskStages", () => {
   it("normalizes legacy torndown rows to teardown", () => {
     expect(isTeardownStage("teardown")).toBe(true);
     expect(isTeardownStage("torndown")).toBe(true);
-    expect(normalizePipelineStage("teardown")).toBe("teardown");
-    expect(normalizePipelineStage("torndown")).toBe("teardown");
-    expect(normalizePipelineStage("in progress")).toBe("in progress");
+    expect(normalizeWorkflowStage("teardown")).toBe("teardown");
+    expect(normalizeWorkflowStage("torndown")).toBe("teardown");
+    expect(normalizeWorkflowStage("in progress")).toBe("in progress");
   });
 
   it("treats teardown_started_at as teardown state without requiring a teardown stage", () => {

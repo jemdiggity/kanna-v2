@@ -13,7 +13,7 @@
 ### Task 1: Pass prompt as positional arg, not -p
 
 **Files:**
-- Modify: `apps/desktop/src/composables/usePipeline.ts`
+- Modify: `apps/desktop/src/composables/useWorkflow.ts`
 
 - [ ] **Step 1: Change spawnPtySession to use positional arg**
 
@@ -108,7 +108,7 @@ In `handleSelectItem`, if the item's activity is `"unread"`, update to `"idle"`.
 
 - [ ] **Step 3: On startup, transition stale "working" items to "unread"**
 
-After `reconcileSessions`, for each pipeline item with `activity === "working"`, try to attach. If attach fails, set activity to `"unread"`.
+After `reconcileSessions`, for each workflow item with `activity === "working"`, try to attach. If attach fails, set activity to `"unread"`.
 
 - [ ] **Step 4: Verify event bridge delivers hook_event — check lib.rs Subscribe + loop**
 
@@ -123,7 +123,7 @@ The event bridge in `lib.rs` already sends `Subscribe` and reads `HookEvent` in 
 
 - [ ] **Step 1: Apply font styling based on activity**
 
-In the pipeline item row:
+In the workflow item row:
 ```vue
 <span
   :style="{
@@ -139,7 +139,7 @@ Update `itemsForRepo` to sort:
 ```typescript
 function itemsForRepo(repoId: string) {
   const order = { idle: 0, unread: 1, working: 2 };
-  return props.pipelineItems
+  return props.workflowItems
     .filter(i => i.repo_id === repoId)
     .sort((a, b) => {
       const ao = order[a.activity || 'idle'] ?? 0;
@@ -200,7 +200,7 @@ Add handlers for: `newWindow`, `openFile`, `makePR`, `openTerminal`, `openTermin
 
 - [ ] **Step 3: Create KeyboardShortcutsModal.vue**
 
-Simple modal listing all shortcuts in groups (Pipeline, Navigation, Terminal, Window, Help). Triggered by Cmd+/.
+Simple modal listing all shortcuts in groups (Workflow, Navigation, Terminal, Window, Help). Triggered by Cmd+/.
 
 - [ ] **Step 4: Test — verify each shortcut fires the correct action**
 
@@ -218,7 +218,7 @@ Simple modal listing all shortcuts in groups (Pipeline, Navigation, Terminal, Wi
 
 - [ ] **Step 1: On startup, attempt reattach for in_progress PTY items**
 
-After `reconcileSessions` and activity migration, for each pipeline item where `stage === "in_progress"` and `agent_type === "pty"`:
+After `reconcileSessions` and activity migration, for each workflow item where `stage === "in_progress"` and `agent_type === "pty"`:
 
 ```typescript
 try {

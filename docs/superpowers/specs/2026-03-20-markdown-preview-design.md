@@ -33,7 +33,7 @@ In `FilePreviewModal.vue`:
 - Call `e.preventDefault()` to prevent background scroll
 - Only fire when no modifier keys are pressed (`!e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey`) to avoid conflicting with future shortcuts like `Cmd+Space`
 
-### Rendering Pipeline
+### Rendering Workflow
 
 When `renderMarkdown` is true:
 

@@ -174,7 +174,7 @@ async function waitForTaskActivity(
 async function taskTitleFontWeight(client: WebDriverClient, title: string): Promise<string> {
   return client.executeSync<string>(
     `const title = ${JSON.stringify(title)};
-     const el = Array.from(document.querySelectorAll(".pipeline-item .item-title"))
+     const el = Array.from(document.querySelectorAll(".workflow-item .item-title"))
        .find((candidate) => (candidate.textContent || "").includes(title));
      return el ? window.getComputedStyle(el).fontWeight : "";`,
   );

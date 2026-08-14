@@ -294,7 +294,7 @@ Update all internal callers of `attach_session_inner` (e.g., the re-attach coord
 
 Update frontend callers to pass `agentProvider`:
 
-In `useTerminal.ts`, the `connect` function has access to the pipeline item. Pass provider:
+In `useTerminal.ts`, the `connect` function has access to the workflow item. Pass provider:
 ```typescript
 await invoke("attach_session", { sessionId, agentProvider: item?.agent_provider })
 ```
@@ -755,7 +755,7 @@ source."
 
 ### Task 6: Integration test with dev server
 
-**Goal:** Verify the full pipeline works end-to-end: spawn a Claude session, observe PTY events, confirm activity transitions.
+**Goal:** Verify the full workflow works end-to-end: spawn a Claude session, observe PTY events, confirm activity transitions.
 
 **Files:**
 - No new files — manual verification against running dev server

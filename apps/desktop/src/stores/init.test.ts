@@ -37,7 +37,7 @@ const mockState = vi.hoisted(() => {
       issue_number: null,
       issue_title: null,
       prompt: "Ship it",
-      pipeline: "default",
+      workflow: "default",
       stage: "in progress",
       stage_result: null,
       active_post_action: null,
@@ -81,7 +81,7 @@ const mockState = vi.hoisted(() => {
   const getSharedStreamClientMock = vi.fn(async () => streamClientMock);
   const updatePipelineItemActivityMock = vi.fn(async () => {});
   const clearPipelineItemActivePostActionMock = vi.fn(async () => {});
-  const loadPipelineMock = vi.fn(async () => ({
+  const loadWorkflowMock = vi.fn(async () => ({
     name: "default",
     stages: [
       { name: "commit", transition: "auto" },
@@ -128,7 +128,7 @@ const mockState = vi.hoisted(() => {
     getSharedStreamClientMock.mockClear();
     updatePipelineItemActivityMock.mockClear();
     clearPipelineItemActivePostActionMock.mockClear();
-    loadPipelineMock.mockClear();
+    loadWorkflowMock.mockClear();
     advanceStageMock.mockClear();
     reloadSnapshotMock.mockClear();
     invokeMock.mockClear();
@@ -165,7 +165,7 @@ const mockState = vi.hoisted(() => {
     getSharedStreamClientMock,
     updatePipelineItemActivityMock,
     clearPipelineItemActivePostActionMock,
-    loadPipelineMock,
+    loadWorkflowMock,
     advanceStageMock,
     reloadSnapshotMock,
     invokeMock,
@@ -276,7 +276,7 @@ function makeReadyTaskSlot(task: PipelineItem, slotId: string): TaskUiSlot {
       repo_id: task.repo_id,
       prompt: task.prompt ?? "",
       display_name: task.display_name,
-      pipeline: task.pipeline,
+      workflow: task.pipeline,
       stage: task.stage,
       agent_type: "pty",
       agent_provider: task.agent_provider,
@@ -853,7 +853,7 @@ describe("createInitApi", () => {
         repo_id: "repo-1",
         prompt: "Still hydrating",
         display_name: null,
-        pipeline: "default",
+        workflow: "default",
         stage: "in progress",
         agent_type: "pty",
         agent_provider: "claude",
@@ -1091,7 +1091,7 @@ describe("createInitApi", () => {
     expect(state.codeTheme.value).toBe("match");
   });
 
-  it("does not register the legacy pipeline_stage_complete refresh listener", async () => {
+  it("does not register the legacy workflow_stage_complete refresh listener", async () => {
     const state = createStoreState();
     const services = {
       loadInitialData: vi.fn(async () => {}),
@@ -1113,7 +1113,7 @@ describe("createInitApi", () => {
 
     await initApi.init(createDb());
 
-    expect(mockState.listenMock.mock.calls.map(([eventName]) => eventName)).not.toContain("pipeline_stage_complete");
+    expect(mockState.listenMock.mock.calls.map(([eventName]) => eventName)).not.toContain("workflow_stage_complete");
   });
 
   it("hydrates startup state from the server snapshot without direct DB reads", async () => {

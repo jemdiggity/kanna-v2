@@ -120,14 +120,14 @@ Remote clone and repo bundle fallback remain phase 3 work.
 
 ### Destination task reconstruction
 
-Destination reconstruction should reuse the existing store bootstrap path rather than inventing a second creation pipeline.
+Destination reconstruction should reuse the existing store bootstrap path rather than inventing a second creation workflow.
 
 The imported task becomes a fresh local task with:
 
 - a new `pipeline_item.id`,
 - a new branch name (`task-{newId}`),
 - a new worktree path,
-- the source task prompt/stage/pipeline/display name/provider,
+- the source task prompt/stage/workflow/display name/provider,
 - the source branch used as the worktree start point,
 - a new local PTY or SDK session created through the normal bootstrap path.
 

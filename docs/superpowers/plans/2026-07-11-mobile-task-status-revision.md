@@ -8,7 +8,7 @@
 
 **Tech Stack:** Vue 3, TypeScript, React Native, Firestore, Vitest, WebdriverIO/Appium
 
-**Stage constraint:** Do not commit during this revision stage; Kanna advances and commits in later pipeline stages.
+**Stage constraint:** Do not commit during this revision stage; Kanna advances and commits in later workflow stages.
 
 ---
 

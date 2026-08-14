@@ -1,5 +1,5 @@
-// Pipeline (stage helpers)
-export * from "./pipeline/types.js";
+// Workflow (stage helpers)
+export * from "./workflow/types.js";
 export * from "./terminal/preview.js";
 
 // Slack

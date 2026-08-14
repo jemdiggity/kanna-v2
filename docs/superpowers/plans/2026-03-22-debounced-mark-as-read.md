@@ -352,7 +352,7 @@ import { useMarkAsRead } from "./composables/useMarkAsRead";
 
 - [ ] **Step 2: Call composable in setup**
 
-After the `usePipeline` destructuring (after line 29), add:
+After the `useWorkflow` destructuring (after line 29), add:
 
 ```typescript
 useMarkAsRead(db, selectedItemId, allItems);

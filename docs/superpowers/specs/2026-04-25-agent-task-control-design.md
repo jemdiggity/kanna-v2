@@ -7,9 +7,9 @@ Kanna should expose one task-control boundary for agents, scripts, mobile, and f
 ## Goals
 
 - Let agents complete stages and request revisions without mutating SQLite directly.
-- Keep task lifecycle orchestration in Kanna, where worktree, daemon, pipeline, and DB rules already live.
+- Keep task lifecycle orchestration in Kanna, where worktree, daemon, workflow, and DB rules already live.
 - Provide both a CLI surface for shell-based automation and an MCP stdio surface for structured agent tools.
-- Add a QA pipeline with `in progress -> review -> pr`.
+- Add a QA workflow with `in progress -> review -> pr`.
 
 ## Architecture
 
@@ -39,7 +39,7 @@ Inputs:
 
 ### Request Revision
 
-`request_revision` closes the current task and creates a new task in an earlier pipeline stage, usually `in progress`, based on the reviewed branch.
+`request_revision` closes the current task and creates a new task in an earlier workflow stage, usually `in progress`, based on the reviewed branch.
 
 Inputs:
 
@@ -51,9 +51,9 @@ Inputs:
 
 The created task starts from the current task branch, preserving the audit trail instead of mutating the review task in place.
 
-## QA Pipeline
+## QA Workflow
 
-Add `.kanna/pipelines/qa.json`:
+Add `.kanna/workflows/qa.json`:
 
 - `in progress`: implementation agent, manual transition
 - `review`: QA agent, automatic transition

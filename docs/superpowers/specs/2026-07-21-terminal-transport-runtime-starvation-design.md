@@ -51,12 +51,12 @@ endpoint handlers await the blocking task without executing that work on a
 Tokio worker.
 
 Available-provider resolution uses the same repository-definition cache as
-the manifest, pipeline, and agent endpoints. Parallel Cmd+N requests therefore
+the manifest, workflow, and agent endpoints. Parallel Cmd+N requests therefore
 join one per-repository definition load and read one resolved snapshot.
 
 The cache remains synchronous because every HTTP use of it is inside this
 blocking boundary. Keeping the entire definition operation together also
-protects cache hits whose requested pipeline or agent definition still needs
+protects cache hits whose requested workflow or agent definition still needs
 to read data from Git objects.
 
 Loader panics are converted into the existing `DefinitionLookupError::Other`

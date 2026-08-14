@@ -45,7 +45,7 @@ async function holdNewTaskOptionRequests(
      const heldPaths = new Set([
        ${JSON.stringify(`/v1/repos/${encodeURIComponent(repoId)}/kanna-definitions`)},
        ${JSON.stringify(`/v1/repos/${encodeURIComponent(repoId)}/agent-providers`)},
-       ${JSON.stringify(`/v1/repos/${encodeURIComponent(repoId)}/recent-pipelines`)},
+       ${JSON.stringify(`/v1/repos/${encodeURIComponent(repoId)}/recent-workflows`)},
      ]);
      const responses = new Map(Object.entries(${JSON.stringify(responses)}));
      const gate = {
@@ -178,7 +178,7 @@ async function submitTaskFromModal(
   }>(
     `return {
        agentLabel: document.querySelector(".agent-provider")?.textContent?.trim() ?? "",
-       pipeline: document.querySelector('[data-testid="pipeline-value"]')?.textContent?.trim() ?? "",
+       pipeline: document.querySelector('[data-testid="workflow-value"]')?.textContent?.trim() ?? "",
        baseBranch: document.querySelector('[data-testid="base-branch-value"]')?.textContent?.trim() ?? "",
      };`,
   );
@@ -333,7 +333,7 @@ describe("new task modal", () => {
     testRepoPath = fixtureRepoRoot;
 
     const kannaDir = join(testRepoPath, ".kanna");
-    const pipelinesDir = join(kannaDir, "pipelines");
+    const pipelinesDir = join(kannaDir, "workflows");
     const fakeBinDir = join(kannaDir, "fake-bin");
     await mkdir(pipelinesDir, { recursive: true });
     await mkdir(fakeBinDir, { recursive: true });
@@ -488,7 +488,7 @@ describe("new task modal", () => {
   it("renders an editable New Task modal while repository options are unresolved", async () => {
     const definitionsPath = `/v1/repos/${encodeURIComponent(repoId)}/kanna-definitions`;
     const providersPath = `/v1/repos/${encodeURIComponent(repoId)}/agent-providers`;
-    const recentPipelinesPath = `/v1/repos/${encodeURIComponent(repoId)}/recent-pipelines`;
+    const recentWorkflowsPath = `/v1/repos/${encodeURIComponent(repoId)}/recent-workflows`;
     await holdNewTaskOptionRequests(client, repoId);
 
     try {
@@ -496,12 +496,12 @@ describe("new task modal", () => {
 
       const loading = await client.waitForElement('[data-testid="task-options-loading"]', 5_000);
       expect(loading).toBeTruthy();
-      // The sticky-pipeline lookup is held alongside the other option requests,
+      // The sticky-workflow lookup is held alongside the other option requests,
       // so the modal has to leave its loading state on the slowest of them.
       await waitForHeldNewTaskOptionRequests(client, [
         definitionsPath,
         providersPath,
-        recentPipelinesPath,
+        recentWorkflowsPath,
       ]);
       const prompt = await client.waitForElement(".prompt-input", 2_000);
       await client.sendKeys(prompt, "Prompt remains editable while options load");
@@ -512,7 +512,7 @@ describe("new task modal", () => {
         requestsHeld: string[];
         createDisabled: boolean;
         agentDisabled: boolean;
-        pipelineDisabled: boolean;
+        workflowDisabled: boolean;
         baseBranchDisabled: boolean;
         baseBranch: string;
         baseBranchInvalid: boolean;
@@ -524,7 +524,7 @@ describe("new task modal", () => {
            requestsHeld: Array.from(gate?.requestsHeld ?? []),
            createDisabled: document.querySelector(".modal-overlay .btn-primary")?.disabled === true,
            agentDisabled: document.querySelector(".agent-provider")?.disabled === true,
-           pipelineDisabled: document.querySelector('[data-testid="pipeline-toggle"]')?.disabled === true,
+           workflowDisabled: document.querySelector('[data-testid="workflow-toggle"]')?.disabled === true,
            baseBranchDisabled: document.querySelector('[data-testid="base-branch-toggle"]')?.disabled === true,
            baseBranch: document.querySelector('[data-testid="base-branch-value"]')?.textContent?.trim() ?? "",
            baseBranchInvalid: document.querySelector('[data-testid="base-branch-value"]')?.classList.contains("invalid") === true,
@@ -539,7 +539,7 @@ describe("new task modal", () => {
         ]),
         createDisabled: true,
         agentDisabled: true,
-        pipelineDisabled: true,
+        workflowDisabled: true,
         baseBranchDisabled: true,
         baseBranch: "Loading task options…",
         baseBranchInvalid: false,
@@ -554,16 +554,16 @@ describe("new task modal", () => {
         baseBranch: string;
         createDisabled: boolean;
         agentDisabled: boolean;
-        pipelineDisabled: boolean;
+        workflowDisabled: boolean;
         baseBranchDisabled: boolean;
       }>(
         `return {
            prompt: document.querySelector(".prompt-input")?.value ?? "",
-           pipeline: document.querySelector('[data-testid="pipeline-value"]')?.textContent?.trim() ?? "",
+           pipeline: document.querySelector('[data-testid="workflow-value"]')?.textContent?.trim() ?? "",
            baseBranch: document.querySelector('[data-testid="base-branch-value"]')?.textContent?.trim() ?? "",
            createDisabled: document.querySelector(".modal-overlay .btn-primary")?.disabled === true,
            agentDisabled: document.querySelector(".agent-provider")?.disabled === true,
-           pipelineDisabled: document.querySelector('[data-testid="pipeline-toggle"]')?.disabled === true,
+           workflowDisabled: document.querySelector('[data-testid="workflow-toggle"]')?.disabled === true,
            baseBranchDisabled: document.querySelector('[data-testid="base-branch-toggle"]')?.disabled === true,
          };`,
       );
@@ -573,7 +573,7 @@ describe("new task modal", () => {
         baseBranch: expect.any(String),
         createDisabled: false,
         agentDisabled: false,
-        pipelineDisabled: false,
+        workflowDisabled: false,
         baseBranchDisabled: false,
       });
       expect(loadedState.baseBranch.length).toBeGreaterThan(0);
@@ -600,7 +600,7 @@ describe("new task modal", () => {
   it("shows cached repository options immediately while a reopen refresh is held", async () => {
     const definitionsPath = `/v1/repos/${encodeURIComponent(repoId)}/kanna-definitions`;
     const providersPath = `/v1/repos/${encodeURIComponent(repoId)}/agent-providers`;
-    const recentPipelinesPath = `/v1/repos/${encodeURIComponent(repoId)}/recent-pipelines`;
+    const recentWorkflowsPath = `/v1/repos/${encodeURIComponent(repoId)}/recent-workflows`;
     let optionRequestsHeld = false;
     let trunkBranchCreated = false;
 
@@ -609,7 +609,7 @@ describe("new task modal", () => {
       await dismissStartupShortcutsModal(client);
       await openNewTaskModal(client);
       expect(await client.executeSync<string>(
-        `return document.querySelector('[data-testid="pipeline-value"]')?.textContent?.trim() ?? "";`,
+        `return document.querySelector('[data-testid="workflow-value"]')?.textContent?.trim() ?? "";`,
       )).toBe("qa-review");
       expect(await client.executeSync<string>(
         `return document.querySelector('[data-testid="base-branch-value"]')?.textContent?.trim() ?? "";`,
@@ -626,14 +626,14 @@ describe("new task modal", () => {
         [definitionsPath]: {
           revision: "refreshed-revision",
           refName: "origin/trunk",
-          config: { pipeline: "release" },
-          defaultPipeline: "release",
-          pipelines: ["default", "qa-review", "release"],
+          config: { workflow: "release" },
+          defaultWorkflow: "release",
+          workflows: ["default", "qa-review", "release"],
         },
-        // A repo's most recently used pipeline outranks its configured
+        // A repo's most recently used workflow outranks its configured
         // default, so an empty history is the precondition for observing the
         // refreshed manifest default at all.
-        [recentPipelinesPath]: { pipelines: [] },
+        [recentWorkflowsPath]: { workflows: [] },
       });
       optionRequestsHeld = true;
       await client.executeSync(buildGlobalKeydownScript({ key: "N", meta: true, shift: true }));
@@ -641,7 +641,7 @@ describe("new task modal", () => {
       await waitForHeldNewTaskOptionRequests(client, [
         definitionsPath,
         providersPath,
-        recentPipelinesPath,
+        recentWorkflowsPath,
       ]);
 
       const cachedState = await client.executeSync<{
@@ -653,7 +653,7 @@ describe("new task modal", () => {
         `const gate = window.__KANNA_NEW_TASK_OPTIONS_GATE__;
          return {
            requestsHeld: Array.from(gate?.requestsHeld ?? []),
-           pipeline: document.querySelector('[data-testid="pipeline-value"]')?.textContent?.trim() ?? "",
+           pipeline: document.querySelector('[data-testid="workflow-value"]')?.textContent?.trim() ?? "",
            baseBranch: document.querySelector('[data-testid="base-branch-value"]')?.textContent?.trim() ?? "",
            baseBranchInvalid: document.querySelector('[data-testid="base-branch-value"]')?.classList.contains("invalid") === true,
          };`,
@@ -670,9 +670,9 @@ describe("new task modal", () => {
 
       await releaseNewTaskOptionRequests(client);
       await client.waitForNoElement('[data-testid="task-options-loading"]', 10_000);
-      await client.waitForText('[data-testid="pipeline-value"]', "release", 5_000);
+      await client.waitForText('[data-testid="workflow-value"]', "release", 5_000);
       await client.waitForText('[data-testid="base-branch-value"]', "origin/trunk", 5_000);
-      await client.click(await client.waitForElement('[data-testid="pipeline-toggle"]', 2_000));
+      await client.click(await client.waitForElement('[data-testid="workflow-toggle"]', 2_000));
       await client.click(await client.waitForElement('[data-testid="base-branch-toggle"]', 2_000));
 
       const refreshedState = await client.executeSync<{
@@ -682,8 +682,8 @@ describe("new task modal", () => {
         baseBranchOptions: string[];
       }>(
         `return {
-           pipeline: document.querySelector('[data-testid="pipeline-value"]')?.textContent?.trim() ?? "",
-           pipelineOptions: Array.from(document.querySelectorAll('[data-testid^="pipeline-option-"]'))
+           pipeline: document.querySelector('[data-testid="workflow-value"]')?.textContent?.trim() ?? "",
+           pipelineOptions: Array.from(document.querySelectorAll('[data-testid^="workflow-option-"]'))
              .map((option) => option.textContent?.trim() ?? ""),
            baseBranch: document.querySelector('[data-testid="base-branch-value"]')?.textContent?.trim() ?? "",
            baseBranchOptions: Array.from(document.querySelectorAll('[data-testid^="base-branch-option-"]'))
@@ -710,12 +710,12 @@ describe("new task modal", () => {
     }
   });
 
-  it("opens the pipeline selector as a compact dropdown matching the base branch selector", async () => {
+  it("opens the workflow selector as a compact dropdown matching the base branch selector", async () => {
     await openNewTaskModal(client);
 
-    const toggle = await client.waitForElement('[data-testid="pipeline-toggle"]', 5_000);
+    const toggle = await client.waitForElement('[data-testid="workflow-toggle"]', 5_000);
     await client.click(toggle);
-    await client.waitForElement('[data-testid="pipeline-dropdown"]', 2_000);
+    await client.waitForElement('[data-testid="workflow-dropdown"]', 2_000);
 
     const snapshot = await client.executeSync<{
       dropdownClasses: string[];
@@ -724,8 +724,8 @@ describe("new task modal", () => {
       text: string;
       legacyPickerExists: boolean;
     }>(
-      `const dropdown = document.querySelector('[data-testid="pipeline-dropdown"]');
-       const options = document.querySelector('[data-testid="pipeline-options"]');
+      `const dropdown = document.querySelector('[data-testid="workflow-dropdown"]');
+       const options = document.querySelector('[data-testid="workflow-options"]');
        return {
          dropdownClasses: dropdown ? Array.from(dropdown.classList) : [],
          optionsClasses: options ? Array.from(options.classList) : [],
@@ -963,23 +963,23 @@ describe("new task modal", () => {
     expect(worktreeRows).toEqual([]);
   });
 
-  async function selectPipeline(pipeline: string): Promise<void> {
-    await client.click(await client.waitForElement('[data-testid="pipeline-toggle"]', 2_000));
+  async function selectWorkflow(pipeline: string): Promise<void> {
+    await client.click(await client.waitForElement('[data-testid="workflow-toggle"]', 2_000));
     await client.click(
-      await client.waitForElement(`[data-testid="pipeline-option-${pipeline}"]`, 2_000),
+      await client.waitForElement(`[data-testid="workflow-option-${pipeline}"]`, 2_000),
     );
-    await client.waitForText('[data-testid="pipeline-value"]', pipeline, 2_000);
+    await client.waitForText('[data-testid="workflow-value"]', pipeline, 2_000);
   }
 
-  it("defaults New Task to the pipeline this repository last created a task with", async () => {
+  it("defaults New Task to the workflow this repository last created a task with", async () => {
     // Every task so far used the repo's configured default.
     await openNewTaskModal(client);
     expect(await client.executeSync<string>(
-      `return document.querySelector('[data-testid="pipeline-value"]')?.textContent?.trim() ?? "";`,
+      `return document.querySelector('[data-testid="workflow-value"]')?.textContent?.trim() ?? "";`,
     )).toBe("qa-review");
 
-    const stickyPrompt = "Sticky pipeline picks default";
-    await selectPipeline("default");
+    const stickyPrompt = "Sticky workflow picks default";
+    await selectWorkflow("default");
     await submitTaskFromModal(client, stickyPrompt);
     const stickyTask = await waitForTaskCreated(client, stickyPrompt);
     expect(await queryDb(
@@ -989,13 +989,13 @@ describe("new task modal", () => {
     )).toEqual([{ pipeline: "default" }]);
 
     await openNewTaskModal(client);
-    await client.waitForText('[data-testid="pipeline-value"]', "default", 5_000);
+    await client.waitForText('[data-testid="workflow-value"]', "default", 5_000);
     await client.executeSync(buildGlobalKeydownScript({ key: "Escape" }));
     await client.waitForNoElement(".modal-overlay", 5_000);
   });
 
-  it("remembers the pipeline of a create whose response was lost, past a close and a restart", async () => {
-    const lostPrompt = "Sticky pipeline survives a lost create response";
+  it("remembers the workflow of a create whose response was lost, past a close and a restart", async () => {
+    const lostPrompt = "Sticky workflow survives a lost create response";
 
     // A create that commits its task row server-side but never delivers the
     // response to this window.
@@ -1023,8 +1023,8 @@ describe("new task modal", () => {
     let lostTaskId = "";
     try {
       await openNewTaskModal(client);
-      await client.waitForText('[data-testid="pipeline-value"]', "default", 5_000);
-      await selectPipeline("qa-review");
+      await client.waitForText('[data-testid="workflow-value"]', "default", 5_000);
+      await selectWorkflow("qa-review");
 
       const promptInput = await client.waitForElement(".prompt-input", 2_000);
       await client.sendKeys(promptInput, lostPrompt);
@@ -1064,7 +1064,7 @@ describe("new task modal", () => {
     }
 
     // Closed before the restart: the desktop snapshot drops closed tasks, so
-    // only the durable rows can still answer what pipeline it used.
+    // only the durable rows can still answer what workflow it used.
     await waitForTaskInStore(client, lostTaskId);
     expect(await callVueMethod(client, "store.closeTask", lostTaskId, { selectNext: false })).toBe(true);
     const closedRows = await queryDb(
@@ -1077,7 +1077,7 @@ describe("new task modal", () => {
     await reloadApp(client);
     await dismissStartupShortcutsModal(client);
     await openNewTaskModal(client);
-    await client.waitForText('[data-testid="pipeline-value"]', "qa-review", 5_000);
+    await client.waitForText('[data-testid="workflow-value"]', "qa-review", 5_000);
     await client.executeSync(buildGlobalKeydownScript({ key: "Escape" }));
     await client.waitForNoElement(".modal-overlay", 5_000);
   });

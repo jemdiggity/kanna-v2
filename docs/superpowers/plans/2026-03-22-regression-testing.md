@@ -126,7 +126,7 @@ function createTestDb(): DbHandle & {
         if (repo) repo.hidden = 0;
 
       // ── pipeline_item inserts ──
-      } else if (q.startsWith("INSERT INTO PIPELINE_ITEM")) {
+      } else if (q.startsWith("INSERT INTO WORKFLOW_ITEM")) {
         const [id, repo_id, issue_number, issue_title, prompt, stage, pr_number, pr_url, branch, agent_type, port_offset, port_env, activity] =
           bindValues as unknown[];
         _tables.pipeline_item.push({
@@ -152,13 +152,13 @@ function createTestDb(): DbHandle & {
         });
 
       // ── pipeline_item stage update ──
-      } else if (q.startsWith("UPDATE PIPELINE_ITEM SET STAGE")) {
+      } else if (q.startsWith("UPDATE WORKFLOW_ITEM SET STAGE")) {
         const [newStage, id] = bindValues as string[];
         const item = _tables.pipeline_item.find((p) => p.id === id);
         if (item) { item.stage = newStage; item.updated_at = new Date().toISOString(); }
 
       // ── pipeline_item activity update ──
-      } else if (q.startsWith("UPDATE PIPELINE_ITEM SET ACTIVITY")) {
+      } else if (q.startsWith("UPDATE WORKFLOW_ITEM SET ACTIVITY")) {
         const [activity, id] = bindValues as string[];
         const item = _tables.pipeline_item.find((p) => p.id === id);
         if (item) {
@@ -168,7 +168,7 @@ function createTestDb(): DbHandle & {
         }
 
       // ── pipeline_item PR update ──
-      } else if (q.startsWith("UPDATE PIPELINE_ITEM SET PR_NUMBER")) {
+      } else if (q.startsWith("UPDATE WORKFLOW_ITEM SET PR_NUMBER")) {
         const [prNumber, prUrl, id] = bindValues as unknown[];
         const item = _tables.pipeline_item.find((p) => p.id === id);
         if (item) { item.pr_number = prNumber as number; item.pr_url = prUrl as string; item.updated_at = new Date().toISOString(); }
@@ -180,11 +180,11 @@ function createTestDb(): DbHandle & {
         if (item) { item.display_name = displayName as string | null; item.updated_at = new Date().toISOString(); }
 
       // ── pin ──
-      } else if (q.startsWith("UPDATE PIPELINE_ITEM SET PINNED = 1")) {
+      } else if (q.startsWith("UPDATE WORKFLOW_ITEM SET PINNED = 1")) {
         const [pinOrder, id] = bindValues as unknown[];
         const item = _tables.pipeline_item.find((p) => p.id === id);
         if (item) { item.pinned = 1; item.pin_order = pinOrder as number; item.updated_at = new Date().toISOString(); }
-      } else if (q.startsWith("UPDATE PIPELINE_ITEM SET PINNED = 0")) {
+      } else if (q.startsWith("UPDATE WORKFLOW_ITEM SET PINNED = 0")) {
         const [id] = bindValues as string[];
         const item = _tables.pipeline_item.find((p) => p.id === id);
         if (item) { item.pinned = 0; item.pin_order = null; item.updated_at = new Date().toISOString(); }
@@ -214,7 +214,7 @@ function createTestDb(): DbHandle & {
         }
 
       // ── GC delete ──
-      } else if (q.startsWith("DELETE FROM PIPELINE_ITEM")) {
+      } else if (q.startsWith("DELETE FROM WORKFLOW_ITEM")) {
         const [id] = bindValues as string[];
         _tables.pipeline_item = _tables.pipeline_item.filter((p) => p.id !== id);
 
@@ -276,23 +276,23 @@ function createTestDb(): DbHandle & {
       }
 
       // ── pipeline_item ──
-      if (q.includes("FROM PIPELINE_ITEM") && q.includes("WHERE REPO_ID = ?") && q.includes("STAGE != 'DONE'")) {
+      if (q.includes("FROM WORKFLOW_ITEM") && q.includes("WHERE REPO_ID = ?") && q.includes("STAGE != 'DONE'")) {
         const repoId = (bindValues as string[])[0];
         return _tables.pipeline_item.filter((p) => p.repo_id === repoId && p.stage !== "done") as unknown as T[];
       }
-      if (q.includes("FROM PIPELINE_ITEM") && q.includes("WHERE REPO_ID")) {
+      if (q.includes("FROM WORKFLOW_ITEM") && q.includes("WHERE REPO_ID")) {
         return _tables.pipeline_item.filter((p) => p.repo_id === (bindValues as string[])[0]) as unknown as T[];
       }
-      if (q.includes("FROM PIPELINE_ITEM") && q.includes("ACTIVITY = 'WORKING'")) {
+      if (q.includes("FROM WORKFLOW_ITEM") && q.includes("ACTIVITY = 'WORKING'")) {
         return _tables.pipeline_item.filter((p) => p.activity === "working") as unknown as T[];
       }
-      if (q.includes("FROM PIPELINE_ITEM") && q.includes("STAGE = 'DONE'") && q.includes("ORDER BY")) {
+      if (q.includes("FROM WORKFLOW_ITEM") && q.includes("STAGE = 'DONE'") && q.includes("ORDER BY")) {
         return _tables.pipeline_item
           .filter((p) => p.stage === "done")
           .sort((a, b) => b.updated_at.localeCompare(a.updated_at))
           .slice(0, 1) as unknown as T[];
       }
-      if (q.includes("FROM PIPELINE_ITEM") && q.includes("STAGE = 'BLOCKED'") && q.includes("NOT EXISTS")) {
+      if (q.includes("FROM WORKFLOW_ITEM") && q.includes("STAGE = 'BLOCKED'") && q.includes("NOT EXISTS")) {
         return _tables.pipeline_item.filter((p) => {
           if (p.stage !== "blocked") return false;
           const blockers = _tables.task_blocker
@@ -310,12 +310,12 @@ function createTestDb(): DbHandle & {
         ) as unknown as T[];
       }
       // JOIN queries for listBlockersForItem / listBlockedByItem
-      if (q.includes("FROM PIPELINE_ITEM") && q.includes("JOIN TASK_BLOCKER") && q.includes("BLOCKER_ITEM_ID") && q.includes("BLOCKED_ITEM_ID = ?")) {
+      if (q.includes("FROM WORKFLOW_ITEM") && q.includes("JOIN TASK_BLOCKER") && q.includes("BLOCKER_ITEM_ID") && q.includes("BLOCKED_ITEM_ID = ?")) {
         const blockedId = (bindValues as string[])[0];
         const blockerIds = _tables.task_blocker.filter((b) => b.blocked_item_id === blockedId).map((b) => b.blocker_item_id);
         return _tables.pipeline_item.filter((p) => blockerIds.includes(p.id)) as unknown as T[];
       }
-      if (q.includes("FROM PIPELINE_ITEM") && q.includes("JOIN TASK_BLOCKER") && q.includes("BLOCKED_ITEM_ID") && q.includes("BLOCKER_ITEM_ID = ?")) {
+      if (q.includes("FROM WORKFLOW_ITEM") && q.includes("JOIN TASK_BLOCKER") && q.includes("BLOCKED_ITEM_ID") && q.includes("BLOCKER_ITEM_ID = ?")) {
         const blockerId = (bindValues as string[])[0];
         const blockedIds = _tables.task_blocker.filter((b) => b.blocker_item_id === blockerId).map((b) => b.blocked_item_id);
         return _tables.pipeline_item.filter((p) => blockedIds.includes(p.id)) as unknown as T[];

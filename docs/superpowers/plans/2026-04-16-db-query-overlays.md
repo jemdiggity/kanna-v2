@@ -27,7 +27,7 @@
   Purpose after change: stop directly mutating `items.value`; task creation placeholder and related optimism move into `queries.ts`.
 - `apps/desktop/src/stores/sessions.ts`
   Purpose after change: write runtime status to the DB and trigger query reconciliation through `queries.ts`.
-- `apps/desktop/src/stores/pipeline.ts`
+- `apps/desktop/src/stores/workflow.ts`
   Purpose after change: stage transitions/reruns update via query refresh rather than `context.bump()`.
 - `apps/desktop/src/stores/init.ts`
   Purpose after change: startup loads and reloads through the query layer instead of using a global invalidation token.
@@ -230,7 +230,7 @@ git commit -m "refactor: move optimistic task overlays into queries"
 **Files:**
 - Modify: `apps/desktop/src/stores/tasks.ts`
 - Modify: `apps/desktop/src/stores/sessions.ts`
-- Modify: `apps/desktop/src/stores/pipeline.ts`
+- Modify: `apps/desktop/src/stores/workflow.ts`
 - Modify: `apps/desktop/src/stores/init.ts`
 - Modify: `apps/desktop/src/stores/selection.ts`
 - Modify: `apps/desktop/src/stores/kanna.ts`
@@ -266,7 +266,7 @@ await updatePipelineItemActivity(db, item.id, nextActivity);
 await queries.reloadItems();
 ```
 
-- [ ] **Step 4: Replace session/pipeline/init invalidation with query refreshes**
+- [ ] **Step 4: Replace session/workflow/init invalidation with query refreshes**
 
 Daemon-driven updates, startup recovery, and stage changes should all reconcile through the query layer.
 
@@ -303,7 +303,7 @@ Expected: PASS, with query-layer refreshes fully replacing `bump()`.
 - [ ] **Step 7: Commit the invalidation cleanup**
 
 ```bash
-git add apps/desktop/src/stores/tasks.ts apps/desktop/src/stores/sessions.ts apps/desktop/src/stores/pipeline.ts apps/desktop/src/stores/init.ts apps/desktop/src/stores/selection.ts apps/desktop/src/stores/kanna.ts apps/desktop/src/stores/kanna.runtimeStatusSync.test.ts apps/desktop/src/stores/kanna.taskBaseBranch.test.ts
+git add apps/desktop/src/stores/tasks.ts apps/desktop/src/stores/sessions.ts apps/desktop/src/stores/workflow.ts apps/desktop/src/stores/init.ts apps/desktop/src/stores/selection.ts apps/desktop/src/stores/kanna.ts apps/desktop/src/stores/kanna.runtimeStatusSync.test.ts apps/desktop/src/stores/kanna.taskBaseBranch.test.ts
 git commit -m "refactor: remove store bump invalidation"
 ```
 
@@ -358,7 +358,7 @@ git commit -m "test: preserve store helper exports"
 - Modify: `apps/desktop/src/stores/kanna.ts`
 - Modify: `apps/desktop/src/stores/tasks.ts`
 - Modify: `apps/desktop/src/stores/sessions.ts`
-- Modify: `apps/desktop/src/stores/pipeline.ts`
+- Modify: `apps/desktop/src/stores/workflow.ts`
 - Modify: `apps/desktop/src/stores/init.ts`
 - Test: `apps/desktop/src/stores/kanna.runtimeStatusSync.test.ts`
 - Test: `apps/desktop/src/stores/kanna.taskBaseBranch.test.ts`
@@ -391,6 +391,6 @@ Expected: `queries.ts` owns DB-backed collection logic, and no other module muta
 - [ ] **Step 5: Commit the final query-layer architecture**
 
 ```bash
-git add apps/desktop/src/stores/queries.ts apps/desktop/src/stores/state.ts apps/desktop/src/stores/kanna.ts apps/desktop/src/stores/tasks.ts apps/desktop/src/stores/sessions.ts apps/desktop/src/stores/pipeline.ts apps/desktop/src/stores/init.ts apps/desktop/src/stores/kanna.runtimeStatusSync.test.ts apps/desktop/src/stores/kanna.taskBaseBranch.test.ts apps/desktop/src/stores/kannaConfig.test.ts
+git add apps/desktop/src/stores/queries.ts apps/desktop/src/stores/state.ts apps/desktop/src/stores/kanna.ts apps/desktop/src/stores/tasks.ts apps/desktop/src/stores/sessions.ts apps/desktop/src/stores/workflow.ts apps/desktop/src/stores/init.ts apps/desktop/src/stores/kanna.runtimeStatusSync.test.ts apps/desktop/src/stores/kanna.taskBaseBranch.test.ts apps/desktop/src/stores/kannaConfig.test.ts
 git commit -m "refactor: add db-backed reactive query layer"
 ```

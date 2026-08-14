@@ -80,7 +80,7 @@ async function waitForTaskRow(
 
 async function sidebarRows(client: WebDriverClient): Promise<TaskDomRow[]> {
   return client.executeSync<TaskDomRow[]>(
-    `return Array.from(document.querySelectorAll(".sidebar .pipeline-item")).map((row) => ({
+    `return Array.from(document.querySelectorAll(".sidebar .workflow-item")).map((row) => ({
        id: row.getAttribute("data-task-id") || "",
        text: row.querySelector(".item-title")?.textContent?.trim() || "",
        isSubtask: row.classList.contains("subtask"),
@@ -265,7 +265,7 @@ describe("sidebar task parenting", () => {
 
   it("unpins a pinned task dropped over an unpinned task without assigning a parent", async () => {
     const sourceSelector = `.sidebar .pinned-zone .task-subtree[data-task-id="${PINNED_TASK_ID}"]`;
-    const targetSelector = `.sidebar .type-zone .pipeline-item[data-task-id="${TARGET_TASK_ID}"]`;
+    const targetSelector = `.sidebar .type-zone .workflow-item[data-task-id="${TARGET_TASK_ID}"]`;
     await client.waitForElement(sourceSelector, 5_000);
     await client.waitForElement(targetSelector, 5_000);
 

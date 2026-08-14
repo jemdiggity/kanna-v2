@@ -105,7 +105,7 @@ async function waitForSidebarTaskOrder(
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const rows = await client.executeSync<Array<{ id: string; text: string; subtask: boolean; paddingLeft: string }>>(
-      `return Array.from(document.querySelectorAll(".sidebar .pipeline-item")).map((row) => ({
+      `return Array.from(document.querySelectorAll(".sidebar .workflow-item")).map((row) => ({
          id: row.getAttribute("data-task-id") || "",
          text: row.textContent || "",
          subtask: row.classList.contains("subtask"),
@@ -158,7 +158,7 @@ describe("external task creation", () => {
     testRepoPath = fixtureRepoRoot;
 
     const kannaDir = join(testRepoPath, ".kanna");
-    await mkdir(join(kannaDir, "pipelines"), { recursive: true });
+    await mkdir(join(kannaDir, "workflows"), { recursive: true });
     await mkdir(join(kannaDir, "agents", "external-create-e2e"), { recursive: true });
     await mkdir(join(kannaDir, "fake-bin"), { recursive: true });
     await writeFile(
@@ -172,7 +172,7 @@ describe("external task creation", () => {
       }),
     );
     await writeFile(
-      join(kannaDir, "pipelines", "external-create-e2e.json"),
+      join(kannaDir, "workflows", "external-create-e2e.json"),
       JSON.stringify({
         name: "external-create-e2e",
         stages: [
@@ -264,7 +264,7 @@ describe("external task creation", () => {
         body: JSON.stringify({
           repoId,
           prompt: externalPrompt,
-          pipelineName: "external-create-e2e",
+          workflowName: "external-create-e2e",
           agentType: "pty",
           agentProvider: "codex",
           permissionMode: "dontAsk",
@@ -340,7 +340,7 @@ describe("external task creation", () => {
         body: JSON.stringify({
           repoId,
           prompt: childPrompt,
-          pipelineName: "external-create-e2e",
+          workflowName: "external-create-e2e",
           agentType: "pty",
           agentProvider: "codex",
           permissionMode: "dontAsk",

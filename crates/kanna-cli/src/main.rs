@@ -32,9 +32,9 @@ pub(crate) enum Commands {
         #[arg(long)]
         server_url: Option<String>,
     },
-    /// Signal that a pipeline stage is complete
+    /// Signal that a workflow stage is complete
     StageComplete {
-        /// The task/pipeline_item ID
+        /// The task ID
         #[arg(long)]
         task_id: String,
 
@@ -171,7 +171,7 @@ pub(crate) enum TaskCommands {
     },
     /// Show one recent task by exact ID
     Status {
-        /// The task/pipeline_item ID
+        /// The task ID
         #[arg(long)]
         task_id: String,
 
@@ -181,7 +181,7 @@ pub(crate) enum TaskCommands {
     },
     /// Fetch one task by exact ID
     Get {
-        /// The task/pipeline_item ID
+        /// The task ID
         #[arg(long)]
         task_id: String,
 
@@ -191,7 +191,7 @@ pub(crate) enum TaskCommands {
     },
     /// List a task's direct children, including closed children and verdicts
     Children {
-        /// The parent task/pipeline_item ID
+        /// The parent task ID
         #[arg(long)]
         task_id: String,
 
@@ -211,7 +211,7 @@ pub(crate) enum TaskCommands {
     },
     /// Wait for a task to finish or close
     Wait {
-        /// The task/pipeline_item ID
+        /// The task ID
         #[arg(long)]
         task_id: String,
 
@@ -235,7 +235,7 @@ pub(crate) enum TaskCommands {
     },
     /// Print recent task logs
     Logs {
-        /// The task/pipeline_item ID
+        /// The task ID
         #[arg(long)]
         task_id: String,
 
@@ -265,16 +265,16 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         server_url: Option<String>,
 
-        /// Optional pipeline name override
+        /// Optional workflow name override
         #[arg(long)]
-        pipeline_name: Option<String>,
+        workflow_name: Option<String>,
 
         /// Optional base ref override
         #[arg(long)]
         base_ref: Option<String>,
 
         /// Agent definition name to run the task's first stage with,
-        /// overriding the pipeline stage's own agent binding
+        /// overriding the workflow stage's own agent binding
         #[arg(long)]
         agent: Option<String>,
 
@@ -320,7 +320,7 @@ pub(crate) enum TaskCommands {
     },
     /// Request a new revision task from an existing task branch
     RequestRevision {
-        /// The source task/pipeline_item ID
+        /// The source task ID
         #[arg(long)]
         task_id: String,
 
@@ -346,7 +346,7 @@ pub(crate) enum TaskCommands {
     },
     /// Send feedback or instructions to a running agent task
     SendInput {
-        /// The target task/pipeline_item ID
+        /// The target task ID
         #[arg(long)]
         task_id: String,
 
@@ -360,7 +360,7 @@ pub(crate) enum TaskCommands {
     },
     /// Rename a task by setting its display name
     Rename {
-        /// The task/pipeline_item ID
+        /// The task ID
         #[arg(long)]
         task_id: String,
 
@@ -372,9 +372,9 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         server_url: Option<String>,
     },
-    /// Advance an accepted task to the next pipeline stage
+    /// Advance an accepted task to the next workflow stage
     AdvanceStage {
-        /// The accepted task/pipeline_item ID
+        /// The accepted task ID
         #[arg(long)]
         task_id: String,
 
@@ -384,7 +384,7 @@ pub(crate) enum TaskCommands {
     },
     /// Deliver an explicit approval to the merge singleton
     SignalMerge {
-        /// Approved task/pipeline_item ID
+        /// Approved task ID
         #[arg(long)]
         task_id: String,
 
@@ -408,9 +408,9 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         server_url: Option<String>,
     },
-    /// Rerun the current pipeline stage for a task
+    /// Rerun the current workflow stage for a task
     RerunStage {
-        /// The task/pipeline_item ID to rerun
+        /// The task ID to rerun
         #[arg(long)]
         task_id: String,
 
@@ -420,7 +420,7 @@ pub(crate) enum TaskCommands {
     },
     /// Recover a dead task session, preserving provider context when possible
     Resume {
-        /// The task/pipeline_item ID to resume
+        /// The task ID to resume
         #[arg(long)]
         task_id: String,
 
@@ -430,7 +430,7 @@ pub(crate) enum TaskCommands {
     },
     /// Mark a task as blocked by one or more tasks
     Block {
-        /// The task/pipeline_item ID to block
+        /// The task ID to block
         #[arg(long)]
         task_id: String,
 
@@ -444,7 +444,7 @@ pub(crate) enum TaskCommands {
     },
     /// Remove all blockers from a task
     Unblock {
-        /// The task/pipeline_item ID to unblock
+        /// The task ID to unblock
         #[arg(long)]
         task_id: String,
 
@@ -454,7 +454,7 @@ pub(crate) enum TaskCommands {
     },
     /// Close a task (kills its sessions and hides it from the sidebar)
     Close {
-        /// The task/pipeline_item ID to close
+        /// The task ID to close
         #[arg(long)]
         task_id: String,
 
@@ -464,7 +464,7 @@ pub(crate) enum TaskCommands {
     },
     /// Set or clear a task's parent so it nests as a subtask in the sidebar
     SetParent {
-        /// The task/pipeline_item ID to reparent
+        /// The task ID to reparent
         #[arg(long)]
         task_id: String,
 
@@ -478,7 +478,7 @@ pub(crate) enum TaskCommands {
     },
     /// Set or clear the task notified when a task finishes
     SetNotify {
-        /// The task/pipeline_item ID whose completion should be announced
+        /// The task ID whose completion should be announced
         #[arg(long)]
         task_id: String,
 
@@ -508,15 +508,15 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         server_url: Option<String>,
     },
-    /// Change an open task's pinned pipeline without restarting its live run
-    SetPipeline {
-        /// The task/pipeline_item ID to re-pipeline
+    /// Change an open task's pinned workflow without restarting its live run
+    SetWorkflow {
+        /// The task ID whose workflow should change
         #[arg(long)]
         task_id: String,
 
-        /// Pipeline definition to pin
+        /// Workflow definition to pin
         #[arg(long)]
-        pipeline_name: String,
+        workflow_name: String,
 
         /// Override the local Kanna server base URL
         #[arg(long)]

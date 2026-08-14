@@ -4,7 +4,7 @@
 
 **Goal:** Ship a first-class signed and notarized `Kanna Staging.app` that can be installed beside production and points at staging cloud services and a separate updater channel.
 
-**Architecture:** Reuse the existing Bazel/Tauri release pipeline, but generate a staging Tauri config with a separate product name, bundle id, updater endpoint, and release targets. Keep runtime cloud selection at the app boundary by deriving `KANNA_CLOUD_ENV=staging` from the bundled identifier only in non-debug builds. Extend `kd release ship` with `--staging` while keeping production behavior unchanged.
+**Architecture:** Reuse the existing Bazel/Tauri release workflow, but generate a staging Tauri config with a separate product name, bundle id, updater endpoint, and release targets. Keep runtime cloud selection at the app boundary by deriving `KANNA_CLOUD_ENV=staging` from the bundled identifier only in non-debug builds. Extend `kd release ship` with `--staging` while keeping production behavior unchanged.
 
 **Tech Stack:** Bazel, Tauri v2, Rust, TypeScript, `kd`, GitHub Releases, macOS code signing/notarization.
 

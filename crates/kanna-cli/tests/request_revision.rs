@@ -5,7 +5,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
-fn request_revision_does_not_warn_when_pipeline_socket_is_unavailable() {
+fn request_revision_does_not_warn_when_workflow_socket_is_unavailable() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let server = std::thread::spawn(move || {
@@ -32,7 +32,7 @@ fn request_revision_does_not_warn_when_pipeline_socket_is_unavailable() {
     });
 
     let socket_path = std::env::temp_dir().join(format!(
-        "kanna-cli-dead-pipeline-{}-{}.sock",
+        "kanna-cli-dead-workflow-{}-{}.sock",
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)

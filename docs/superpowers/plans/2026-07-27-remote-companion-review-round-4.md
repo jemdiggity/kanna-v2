@@ -69,7 +69,7 @@ structured-clones a maximum bundle.
   report local companion capacity failures without disconnect/reconnect.
 - [x] Re-run stream-client tests and typecheck.
 
-### Task 4: Transferable desktop decoder pipeline
+### Task 4: Transferable desktop decoder workflow
 
 **Files:**
 - Modify: `apps/desktop/src/services/desktopStreamFrameDecoder.ts`

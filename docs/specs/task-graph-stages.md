@@ -1,7 +1,7 @@
 # Task Graph Stages
 
 A ground-up redesign of how stages work in Kanna. Tasks become durable nodes in
-a dependency graph; stages become mutable lifecycle state on a task; pipelines
+a dependency graph; stages become mutable lifecycle state on a task; workflows
 become per-task stage policy (which agent runs each phase, and where the human
 sits); parallelism moves out of the stage engine and into cheap child-task
 forks. One orchestrator — `kanna-server` — owns all of it.
@@ -33,7 +33,7 @@ The current stage implementation fights both workflows:
 
 1. **Two orchestrators.** The stage state machine exists twice: Rust
    (`crates/kanna-server/src/task_creator/stages.rs`, serving CLI/MCP/mobile/
-   remote) and TypeScript (`apps/desktop/src/stores/pipeline.ts` plus the
+   remote) and TypeScript (`apps/desktop/src/stores/workflow.ts` plus the
    auto-advance reaction in `stores/init.ts`, serving the native desktop).
    Every semantic change lands twice, and both react to the same
    `stage_result` column — the desktop's atomic-claim `UPDATE` is patching a
@@ -75,14 +75,14 @@ top of it.
 - Dependency-driven execution: tasks are armed at creation, dormant while
   blocked, and auto-start when their last blocker resolves (at blocker PR
   time, producing stacked branches).
-- Pipelines as per-task stage policy: which agent/model binds to each stage,
+- Workflows as per-task stage policy: which agent/model binds to each stage,
   and which transitions are automatic versus human-gated.
-- Pin the pipeline definition at task creation so editing
-  `.kanna/pipelines/*.json` cannot change in-flight semantics.
+- Pin the workflow definition at task creation so editing
+  `.kanna/workflows/*.json` cannot change in-flight semantics.
 
 ## Non-Goals
 
-- No pipeline-authoring UI. Pipelines and agents remain files under `.kanna/`
+- No workflow-authoring UI. Workflows and agents remain files under `.kanna/`
   (plus the factory agents that generate them).
 - No engine-enforced join semantics for parallel children. Integration is the
   parent agent's (or the human's) choice — see Fan-Out and Join.
@@ -157,9 +157,9 @@ Retired by `stage_run`: `stage_result`, `active_post_action`,
 `previous_stage`, and the `tags` column (blocked state derives from
 `task_blocker`; visibility derives from `closed_at` alone).
 
-### Pipelines as stage policy
+### Workflows as stage policy
 
-A pipeline stops being a task-spawning engine and becomes per-task policy: the
+A workflow stops being a task-spawning engine and becomes per-task policy: the
 ordered stage list, the agent/model binding per stage, and the HITL markers.
 
 ```json
@@ -186,8 +186,8 @@ ordered stage list, the agent/model binding per stage, and the HITL markers.
 - Agent verdicts are the existing surface: `kanna_complete_stage`
   (success → auto-advance if the stage allows), and `kanna_request_revision`
   (kick back to a named earlier stage with feedback).
-- The resolved pipeline definition is snapshotted onto the task at creation
-  (`pipeline_def` JSON column). Editing `.kanna/pipelines/*.json` affects new
+- The resolved workflow definition is snapshotted onto the task at creation
+  (`pipeline_def` JSON column). Editing `.kanna/workflows/*.json` affects new
   tasks only.
 
 ### Dependency-driven execution
@@ -258,11 +258,11 @@ agent-created child are not different kinds of things.
   target earlier stage with feedback; move `stage` back; respawn.
 
 The native desktop deletes its parallel implementation: `advanceStage`/
-`rerunStage` orchestration in `stores/pipeline.ts` and the `stage_result`
+`rerunStage` orchestration in `stores/workflow.ts` and the `stage_result`
 auto-advance reaction in `stores/init.ts` are replaced by calls to the server
 endpoints — the exact path the remote/cloud desktop
 (`useAppCloudWorkspace.ts`, `desktopRelayTerminal.ts`) already uses. The TS
-pipeline module in `packages/core` shrinks to parsing/validation for display.
+workflow module in `packages/core` shrinks to parsing/validation for display.
 
 New engine responsibilities:
 
@@ -297,7 +297,7 @@ Minimal and font-driven, as today:
 - New `stage_run` table (above), with an index on `(task_id, started_at)`.
 - `task_blocker` unchanged; `blocked` display state derives from it.
 - Migration: in-flight tasks get a synthetic `stage_run` from their current
-  `stage`/`stage_result`; legacy `post_action` pipelines compile to
+  `stage`/`stage_result`; legacy `post_action` workflows compile to
   interleaved auto stages on load.
 
 ## Migration Phases
@@ -307,7 +307,7 @@ Each phase ships independently and leaves the system working:
 1. **Single orchestrator.** Desktop store calls the server action endpoints;
    delete the TS orchestration and the `stage_result` reaction. No schema
    change. (Kills the dual implementation and the auto-advance race.)
-2. **`stage_run` + pipeline snapshot.** Introduce the table and
+2. **`stage_run` + workflow snapshot.** Introduce the table and
    `pipeline_def`; the engine writes runs alongside existing columns; feed
    `$PREV_RESULT` from runs.
 3. **Durable tasks.** Stage transitions and revisions become in-place;
@@ -336,7 +336,7 @@ The first implementation of this spec dissolved `post_action` into ordinary
 stages with `policy.execution: "continue"` — and then never implemented
 `continue`. Every stage transition killed the running agent session and
 spawned the next stage's agent fresh in the same worktree. For the default
-pipeline's `commit` stage this was a strict regression over the old
+workflow's `commit` stage this was a strict regression over the old
 post-action: the implement agent knew which changes were the task and which
 were scratch, and could write the commit from memory; the fresh commit agent
 had to reconstruct all of that from `git status`, paying a full CLI spawn for
@@ -404,7 +404,7 @@ session when the stage transitions forward:
   actually-executing agent/session. Kick-back to an earlier stage resets the
   post: the next advance runs it again.
 
-The default pipeline becomes `in progress` (post: `commit`) → `review` →
+The default workflow becomes `in progress` (post: `commit`) → `review` →
 `pr`. The sidebar never shows `commit`: committing is the tail of
 `in progress`, which is what it always was in practice.
 

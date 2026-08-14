@@ -142,7 +142,7 @@ pub(super) fn build_spawn_env(
     env.insert("KANNA_TASK_ID".to_string(), task_id.to_string());
     env.insert(
         "KANNA_SOCKET_PATH".to_string(),
-        pipeline_socket_path(&config.daemon_dir),
+        workflow_socket_path(&config.daemon_dir),
     );
     env.insert(
         "KANNA_SERVER_BASE_URL".to_string(),
@@ -528,7 +528,7 @@ fn prepend_path_entry(path: Option<&str>, entry: &str) -> String {
         .join(":")
 }
 
-fn pipeline_socket_path(daemon_dir: &str) -> String {
+fn workflow_socket_path(daemon_dir: &str) -> String {
     let dir = PathBuf::from(daemon_dir).join("pipeline");
     kanna_runtime_defaults::socket_path(&dir)
         .to_string_lossy()

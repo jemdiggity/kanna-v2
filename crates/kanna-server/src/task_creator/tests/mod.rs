@@ -1,5 +1,5 @@
 use super::commands::ProviderSessionBinding;
-use super::definitions::PipelineStageTransition;
+use super::definitions::WorkflowStageTransition;
 use super::environment::resolve_binary_from_candidates_with_path_lookup;
 use super::lifecycle::spawn_prepared_task;
 use super::prompt::{build_revision_resume_message, build_revision_task_prompt, PromptContext};
@@ -445,17 +445,17 @@ fn ensure_test_sidecar(name: &str) -> ScopedTestSidecar {
     }
 }
 
-fn init_git_repo_with_pipeline(
+fn init_git_repo_with_workflow(
     label: &str,
-    pipeline_name: &str,
+    workflow_name: &str,
     stage_name: &str,
     transition: &str,
     provider: &str,
 ) -> std::path::PathBuf {
     let repo_root = init_git_repo(label);
-    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::write(
-        repo_root.join(format!(".kanna/pipelines/{pipeline_name}.json")),
+        repo_root.join(format!(".kanna/workflows/{workflow_name}.json")),
         serde_json::json!({
             "stages": [
                 {
@@ -477,11 +477,11 @@ fn init_git_repo_with_pipeline(
         .unwrap()
         .success());
     assert!(Command::new("git")
-        .args(["commit", "-m", "add kanna pipeline"])
+        .args(["commit", "-m", "add kanna workflow"])
         .current_dir(&repo_root)
         .status()
         .unwrap()
         .success());
-    publish_origin_main(&repo_root, "publish kanna pipeline fixture");
+    publish_origin_main(&repo_root, "publish kanna workflow fixture");
     repo_root
 }

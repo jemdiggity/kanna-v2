@@ -259,7 +259,7 @@ interface ShortcutDef {
 Add `context` to each entry:
 
 ```typescript
-// Pipeline — main only
+// Workflow — main only
 { action: "newTask",    ..., context: ["main"] },
 { action: "openFile",   ..., context: ["main"] },
 { action: "openInIDE",  ..., context: ["main"] },
@@ -576,7 +576,7 @@ Run: `./scripts/dev.sh`
 
 Press `⌘/` from the main view. Verify:
 - Title shows "Main Shortcuts"
-- Shows pipeline, navigation, terminal shortcuts
+- Shows workflow, navigation, terminal shortcuts
 - Does NOT show "Maximize" or "Cycle Scope"
 - "Show all shortcuts" link is visible
 - Click "Show all shortcuts" — all groups appear with group headers
@@ -591,7 +591,7 @@ Press `⌘/` again — modal closes. Press `⌘/` — modal opens. Press `Escape
 Open a task with a worktree. Press `⌘D` to open diff viewer. Press `⌘/`. Verify:
 - Title shows "Diff Viewer Shortcuts"
 - Shows: Maximize, Escape, Keyboard Shortcuts, Command Palette, Cycle Scope (Space)
-- Does NOT show pipeline shortcuts
+- Does NOT show workflow shortcuts
 
 - [ ] **Step 5: Test file context**
 

@@ -31,7 +31,7 @@ fn bundled_catalog_parses_and_declares_all_tools() {
             "kanna_wait_events",
             "kanna_notify_mobile",
             "kanna_set_task_notify",
-            "kanna_set_task_pipeline",
+            "kanna_set_task_workflow",
             "kanna_task_logs",
             "kanna_search_tasks",
             "kanna_list_repo_tasks",
@@ -91,8 +91,8 @@ fn generated_schema_preserves_required_order_types_and_enums() {
     assert!(
         list_task_children["description"]
             .as_str()
-            .is_some_and(|description| description.contains("pipelineName")),
-        "list-task-children must document the pipeline identity used to classify runless children"
+            .is_some_and(|description| description.contains("workflowName")),
+        "list-task-children must document the workflow identity used to classify runless children"
     );
 
     let create_task = tools
@@ -632,12 +632,12 @@ fn resolves_expected_requests_for_every_bundled_tool() {
             json!({}),
         ),
         (
-            "kanna_set_task_pipeline",
-            json!({ "task_id": "task-child", "pipeline_name": "single-reviewer" }),
+            "kanna_set_task_workflow",
+            json!({ "task_id": "task-child", "workflow_name": "single-reviewer" }),
             Method::Post,
             ResponseKind::Json,
-            "/v1/tasks/task-child/actions/set-pipeline",
-            json!({ "pipelineName": "single-reviewer" }),
+            "/v1/tasks/task-child/actions/set-workflow",
+            json!({ "workflowName": "single-reviewer" }),
         ),
         (
             "kanna_is_dependent_tasks_exist",
@@ -943,7 +943,7 @@ fn create_task_preserves_parent_and_notify_for_genuine_dispatch_fan_out() {
         &json!({
             "repo_id": "repo-1",
             "prompt": "Specialty review dispatched from task parent-1.",
-            "pipeline_name": "specialty-review",
+            "workflow_name": "specialty-review",
             "agent": "review-security",
             "base_ref": "task-parent-1-2",
             "parent_task_id": "parent-1",
@@ -959,7 +959,7 @@ fn create_task_preserves_parent_and_notify_for_genuine_dispatch_fan_out() {
         json!({
             "repoId": "repo-1",
             "prompt": "Specialty review dispatched from task parent-1.",
-            "pipelineName": "specialty-review",
+            "workflowName": "specialty-review",
             "agent": "review-security",
             "baseRef": "task-parent-1-2",
             "agentType": "pty",

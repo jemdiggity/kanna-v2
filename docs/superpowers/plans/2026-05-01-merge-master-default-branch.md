@@ -6,7 +6,7 @@
 
 **Architecture:** Keep repo branch resolution in the desktop store, where selected repo metadata already exists. Append a runtime context block to the merge agent prompt at merge task creation time, and update the merge agent instructions to consume that context and verify it against Git remote metadata.
 
-**Tech Stack:** Vue 3/Pinia store, Vitest, existing Kanna pipeline agent definitions.
+**Tech Stack:** Vue 3/Pinia store, Vitest, existing Kanna workflow agent definitions.
 
 ---
 
@@ -56,14 +56,14 @@ Expected: FAIL because the merge task prompt is still just the base agent prompt
 Replace:
 
 ```ts
-      const agent = await pipeline.loadAgent(repo.path, "merge");
+      const agent = await workflow.loadAgent(repo.path, "merge");
       await tasks.createItem(repo.id, repo.path, agent.prompt, "pty");
 ```
 
 with:
 
 ```ts
-      const agent = await pipeline.loadAgent(repo.path, "merge");
+      const agent = await workflow.loadAgent(repo.path, "merge");
       const targetBranch = repo.default_branch || "main";
       const prompt = `${agent.prompt.trim()}
 

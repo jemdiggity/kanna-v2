@@ -20,7 +20,7 @@ duplicating outer sections, while still framing legacy raw prompts.
 
 ---
 
-This Kanna stage leaves commits to its later pipeline step. Execute every
+This Kanna stage leaves commits to its later workflow step. Execute every
 test-first step below, but do not create local commits.
 
 ## File Map
@@ -37,11 +37,11 @@ test-first step below, but do not create local commits.
   live-post delivery order.
 - `crates/kanna-agent-protocol/src/adapter.rs` — idempotent runtime/user-prompt
   flattening for non-native system-prompt providers.
-- `packages/core/src/pipeline/prompt-builder.ts` — TypeScript composition,
+- `packages/core/src/workflow/prompt-builder.ts` — TypeScript composition,
   substitution, and flattening mirror.
-- `packages/core/src/pipeline/prompt-builder.test.ts` — exact TypeScript parity
+- `packages/core/src/workflow/prompt-builder.test.ts` — exact TypeScript parity
   tests.
-- `.kanna/agents/pipeline-factory/AGENT.md` — pipeline-author documentation.
+- `.kanna/agents/workflow-factory/AGENT.md` — workflow-author documentation.
 
 ### Task 1: Render Distinct Sections in Rust
 
@@ -108,8 +108,8 @@ test-first step below, but do not create local commits.
 
 **Files:**
 
-- Modify: `packages/core/src/pipeline/prompt-builder.ts`
-- Modify: `packages/core/src/pipeline/prompt-builder.test.ts`
+- Modify: `packages/core/src/workflow/prompt-builder.ts`
+- Modify: `packages/core/src/workflow/prompt-builder.test.ts`
 
 - [ ] Add the same exact section, rendered-empty, agent-only, blank-transport,
   nested-heading, and ordering tests as Rust.
@@ -127,7 +127,7 @@ test-first step below, but do not create local commits.
 - [ ] Run:
 
   ```bash
-  pnpm --dir packages/core exec vitest run src/pipeline/prompt-builder.test.ts --maxWorkers=2
+  pnpm --dir packages/core exec vitest run src/workflow/prompt-builder.test.ts --maxWorkers=2
   pnpm --dir packages/core exec tsc --noEmit
   pnpm --dir packages/core test
   ```
@@ -136,7 +136,7 @@ test-first step below, but do not create local commits.
 
 **Files:**
 
-- Modify: `.kanna/agents/pipeline-factory/AGENT.md`
+- Modify: `.kanna/agents/workflow-factory/AGENT.md`
 - Verify every file in the File Map.
 
 - [ ] Document a stage `prompt` as the assignment rendered under
@@ -155,4 +155,4 @@ test-first step below, but do not create local commits.
   immediately follows the final task heading, raw compatibility remains,
   Claude's native Kanna system prompt stays native, live posts keep their task
   last, fresh post fallbacks do not duplicate completion guidance, revisions
-  are untouched, and all work remains uncommitted for the Kanna pipeline.
+  are untouched, and all work remains uncommitted for the Kanna workflow.

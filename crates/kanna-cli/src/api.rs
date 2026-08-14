@@ -9,8 +9,8 @@ use crate::models::{
     AddRepoRequest, BlockTaskRequest, CompleteStageRequest, CreateTaskRequest, CreateTaskResponse,
     DependentTasksExistResponse, MergeHandoffRequest, MobileNotificationRequest,
     MobileNotificationResponse, RepoDetail, RepoSummary, RequestRevisionRequest,
-    ResolvedAgentDefinition, SetTaskNotifyRequest, SetTaskParentRequest, SetTaskPipelineRequest,
-    SetTaskPipelineResponse, SignalAgentRequest, SignalAgentResponse, TaskActionResponse,
+    ResolvedAgentDefinition, SetTaskNotifyRequest, SetTaskParentRequest, SetTaskWorkflowRequest,
+    SetTaskWorkflowResponse, SignalAgentRequest, SignalAgentResponse, TaskActionResponse,
     TaskChild, TaskDetail, TaskInputRequest, TaskInputResponse, TaskRenameRequest, TaskSummary,
     WaitUntil,
 };
@@ -526,14 +526,14 @@ pub(crate) async fn set_task_parent_via_api(
     .await
 }
 
-pub(crate) async fn set_task_pipeline_via_api(
+pub(crate) async fn set_task_workflow_via_api(
     base_url: &str,
     task_id: &str,
-    request: &SetTaskPipelineRequest,
-) -> Result<SetTaskPipelineResponse, String> {
+    request: &SetTaskWorkflowRequest,
+) -> Result<SetTaskWorkflowResponse, String> {
     post_json(
         base_url,
-        &format!("/v1/tasks/{task_id}/actions/set-pipeline"),
+        &format!("/v1/tasks/{task_id}/actions/set-workflow"),
         request,
     )
     .await

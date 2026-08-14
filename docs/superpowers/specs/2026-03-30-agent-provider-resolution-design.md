@@ -24,7 +24,7 @@ Treat every provider source as an ordered candidate list.
 
 Resolution rules:
 
-1. If a pipeline stage provides `stage.agent_provider`, use that candidate set.
+1. If a workflow stage provides `stage.agent_provider`, use that candidate set.
 2. Otherwise, if the referenced agent definition provides `agent.agent_provider`, use that candidate set.
 3. Otherwise, if the existing task item already has `item.agent_provider`, use that single provider as the candidate set.
 4. Otherwise, throw an error for missing `agent_provider`.
@@ -48,7 +48,7 @@ The check should answer whether each supported provider CLI is installed and cal
 - `copilot`
 - `codex`
 
-The store already has UI-only CLI checks in `MainPanel.vue`, but provider resolution should not depend on that component state. The runtime path should use a shared availability helper that can be called from task creation and pipeline execution code.
+The store already has UI-only CLI checks in `MainPanel.vue`, but provider resolution should not depend on that component state. The runtime path should use a shared availability helper that can be called from task creation and workflow execution code.
 
 ### Launch Path Changes
 
@@ -60,7 +60,7 @@ customTask.agentProvider ?? opts.agentProvider ?? "claude"
 
 Instead, task creation should resolve an explicit provider from the available candidate set and throw if none can be resolved.
 
-Update pipeline stage advance and stage rerun in the same file so they no longer use:
+Update workflow stage advance and stage rerun in the same file so they no longer use:
 
 ```ts
 Array.isArray(agent.agent_provider) ? agent.agent_provider[0] : agent.agent_provider
@@ -119,7 +119,7 @@ After this change, `agent_provider` becomes a capability-preference list rather 
 This affects:
 
 - new task creation
-- pipeline stage advancement
+- workflow stage advancement
 - stage reruns
 
 It does not require changing the parser format. The existing support for single strings, comma-separated strings, and YAML arrays remains valid.

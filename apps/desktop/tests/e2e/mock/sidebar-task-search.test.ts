@@ -49,7 +49,7 @@ async function getSidebarSearchSnapshot(client: WebDriverClient): Promise<Sideba
        hasClearButton: Boolean(document.querySelector(${JSON.stringify(CLEAR_BUTTON_SELECTOR)})),
        isFiltering: Boolean(document.querySelector(".sidebar.is-filtering")),
        repoCount: document.querySelector(".sidebar .repo-count")?.textContent?.trim() ?? null,
-       taskTitles: Array.from(document.querySelectorAll(".sidebar .pipeline-item .item-title"))
+       taskTitles: Array.from(document.querySelectorAll(".sidebar .workflow-item .item-title"))
          .filter(isVisible)
          .map((element) => element.textContent?.trim() ?? ""),
      };`,

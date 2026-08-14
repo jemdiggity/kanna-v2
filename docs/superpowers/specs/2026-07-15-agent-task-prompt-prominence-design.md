@@ -20,7 +20,7 @@ miss.
 - Keep agent instructions and repository extensions intact in a separately
   labeled section.
 - Preserve the established agent-instructions-first, stage-prompt-last order.
-- Include the user's task exactly as many times as the pipeline author
+- Include the user's task exactly as many times as the workflow author
   requested through `$TASK_PROMPT`; Kanna must not add another copy.
 - Apply one prompt structure consistently across Claude, Codex, Copilot,
   OpenCode, and Antigravity, in PTY and headless modes where supported.
@@ -32,7 +32,7 @@ miss.
   instruction discovery.
 - Moving agent definitions into a provider's system-prompt channel.
 - Reordering the task before agent instructions.
-- Changing pipeline stage behavior, transition policy, or completion rules.
+- Changing workflow stage behavior, transition policy, or completion rules.
 - Repeating the task as a primacy or recency reminder. Resumed revisions keep
   their existing deliberate re-anchoring behavior.
 
@@ -91,7 +91,7 @@ Instructions` before the post's `## Your Task` section. A fresh post fallback
 does not receive that live-only instruction because its auto-stage Kanna
 runtime preamble already carries the completion policy.
 
-This boundary keeps provider adapters independent of pipeline semantics while
+This boundary keeps provider adapters independent of workflow semantics while
 preserving compatibility with raw prompts that do not pass through the stage
 builder.
 

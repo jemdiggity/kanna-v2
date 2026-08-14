@@ -53,7 +53,7 @@ async function waitForTaskStage(
 
 describe("real Codex SDK stage advance", () => {
   const client = new WebDriverClient();
-  const pipelineName = "codex-sdk-stage-advance";
+  const workflowName = "codex-sdk-stage-advance";
   let repoId = "";
   let sourceTaskId = "";
   let testRepoPath = "";
@@ -65,12 +65,12 @@ describe("real Codex SDK stage advance", () => {
 
     testRepoPath = await createFixtureRepo("codex-sdk-stage-advance-real-test");
     const kannaDir = join(testRepoPath, ".kanna");
-    await mkdir(join(kannaDir, "pipelines"), { recursive: true });
+    await mkdir(join(kannaDir, "workflows"), { recursive: true });
     await mkdir(join(kannaDir, "agents", "qa-codex-sdk"), { recursive: true });
     await writeFile(
-      join(kannaDir, "pipelines", `${pipelineName}.json`),
+      join(kannaDir, "workflows", `${workflowName}.json`),
       JSON.stringify({
-        name: pipelineName,
+        name: workflowName,
         stages: [
           { name: "in progress", policy: { transition: "manual" } },
           {
@@ -124,7 +124,7 @@ describe("real Codex SDK stage advance", () => {
       "agent",
       {
         agentProvider: "codex",
-        pipelineName,
+        workflowName,
         selectOnCreate: true,
       },
     );

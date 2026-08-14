@@ -47,7 +47,7 @@ The checked-in repo copy is the maintained source artifact. GitHub Pages will pu
 Add a strict JSON Schema that describes the currently supported repo config shape:
 
 - `$schema: string` for instance-side schema self-reference
-- `pipeline: string`
+- `workflow: string`
 - `setup: string[]`
 - `teardown: string[]`
 - `test: string[]`
@@ -155,7 +155,7 @@ Verification should stay practical. It does not need to prove semantic equivalen
 
 - schema drift from `parseRepoConfig()` if future config fields update one artifact but not the other
 - overly strict schema settings could block experimentation if users try unsupported keys intentionally
-- Pages deployment wiring could accidentally publish stale or copied content if the pipeline is not source-of-truth driven
+- Pages deployment wiring could accidentally publish stale or copied content if the workflow is not source-of-truth driven
 
 ## Recommendation
 

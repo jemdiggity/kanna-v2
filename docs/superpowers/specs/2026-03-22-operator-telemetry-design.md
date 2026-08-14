@@ -50,12 +50,12 @@ Following the project pattern where all SQL goes through typed helpers in `packa
 export async function insertOperatorEvent(
   db: DbHandle,
   eventType: "task_selected" | "app_blur" | "app_focus",
-  pipelineItemId: string | null,
+  workflowItemId: string | null,
   repoId: string | null
 ): Promise<void> {
   await db.execute(
     "INSERT INTO operator_event (event_type, pipeline_item_id, repo_id) VALUES (?, ?, ?)",
-    [eventType, pipelineItemId, repoId]
+    [eventType, workflowItemId, repoId]
   );
 }
 ```

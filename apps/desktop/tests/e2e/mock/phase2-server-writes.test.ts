@@ -113,7 +113,7 @@ async function createServerTask(
      const ctx = window.__KANNA_E2E__.setupState;
      ctx.createItem(${JSON.stringify(repoId)}, ${JSON.stringify(repoPath)}, ${JSON.stringify(prompt)}, "pty", ${JSON.stringify({
        agentProvider: "codex",
-       pipelineName: "default",
+       workflowName: "default",
        selectOnCreate: false,
        ...options,
      })})
@@ -160,7 +160,7 @@ describe("Phase 2 server-owned task writes", () => {
     testRepoPath = await realpath(fixtureRepoRoot);
 
     const kannaDir = join(testRepoPath, ".kanna");
-    await mkdir(join(kannaDir, "pipelines"), { recursive: true });
+    await mkdir(join(kannaDir, "workflows"), { recursive: true });
     await mkdir(join(kannaDir, "fake-bin"), { recursive: true });
     await writeFile(
       join(kannaDir, "config.json"),
@@ -176,7 +176,7 @@ describe("Phase 2 server-owned task writes", () => {
       }),
     );
     await writeFile(
-      join(kannaDir, "pipelines", "default.json"),
+      join(kannaDir, "workflows", "default.json"),
       JSON.stringify({
         name: "default",
         stages: [

@@ -176,7 +176,7 @@ pub(super) struct SetTaskNotifyRequest {
 /// `notifyTaskId` was creation-time only, so an orchestrator that adopted an
 /// already-running task had no way to be told when it finished.
 ///
-/// Retargeting is pure pipeline-item state: it needs neither a workspace nor
+/// Retargeting is pure workflow-item state: it needs neither a workspace nor
 /// an agent session, so it works on a task that has not started its first
 /// stage yet. The one thing it cannot do is retarget a task that already
 /// closed — that task will never fire a completion notification again — and

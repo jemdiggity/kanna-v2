@@ -10,7 +10,7 @@ transition model in [task-graph-stages.md](./task-graph-stages.md).
   Workspace lifecycle continues to use `pipeline_item.branch`, while a
   successful PR stage records `pr_url` for the next stage. The engine remains
   forge-neutral: the user-space agents resolve the live PR details when needed.
-- **Forge behavior lives in user-space.** Agents and pipelines are
+- **Forge behavior lives in user-space.** Agents and workflows are
   `.kanna/` files the user owns. The stock flow opens an ordinary PR; a repo
   that opts into `pr@draft-pr` also owns what readies the draft before the
   merge master sees it — `gh pr ready` on approval belongs in
@@ -28,7 +28,7 @@ transition model in [task-graph-stages.md](./task-graph-stages.md).
 
 ## Flow
 
-1. Task walks the pipeline to `pr` (manual). The pr agent published the
+1. Task walks the workflow to `pr` (manual). The pr agent published the
    branch per the user's forge convention (draft PR, or plain push) and
    reported the final `pr_url` after any reuse or retargeting.
 2. Human reviews **in Kanna**: ⌘D branch diff. Verdicts are stage actions:
@@ -69,7 +69,7 @@ transition model in [task-graph-stages.md](./task-graph-stages.md).
 
 - pr AGENT.md: create or reuse the PR (draft only via the opt-in `pr@draft-pr`
   flavor); report the final `pr_url` metadata.
-- pr stage `post: approve` in the built-in pipelines (all three ship it):
+- pr stage `post: approve` in the built-in workflows (all three ship it):
   signal the merge master.
 - merge AGENT.md rewritten git-first: resolve target from runtime
   context/`base_ref`/`origin/HEAD`; detect stacks from branch topology
@@ -85,13 +85,13 @@ transition model in [task-graph-stages.md](./task-graph-stages.md).
 - Generic task input, MCP input, KSP/relay steering, and approval posts all
   deliver policy requests for the resolved repo merge agent to accept or
   decline.
-- ~~Whether the default pipeline ships the approve post or it stays an
+- ~~Whether the default workflow ships the approve post or it stays an
   opt-in example. Default-off until the singleton endpoint exists.~~
   Resolved: the singleton signal endpoint
   (`POST /v1/repos/{repo_id}/agents/{agent}/signal`) exists, and both the
-  default and qa pipelines ship the approve post on their pr stage.
+  default and qa workflows ship the approve post on their pr stage.
   Approval UI derives merge behavior from the task's pinned
-  `pipeline_def`, so pre-change snapshots and custom pipelines without
+  `pipeline_def`, so pre-change snapshots and custom workflows without
   the post keep a plain approve that only advances.
 - Merge master crash recovery: resume via the persisted resume-session id
   vs re-reading a durable journal. Journal preferred if residency ever

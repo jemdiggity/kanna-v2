@@ -31,7 +31,7 @@ const mockState = vi.hoisted(() => {
       issue_number: null,
       issue_title: null,
       prompt: "Ship it",
-      pipeline: "default",
+      workflow: "default",
       stage: "in progress",
       stage_result: null,
       active_post_action: null,
@@ -61,7 +61,7 @@ const mockState = vi.hoisted(() => {
   }
 
   let repos = [makeRepo()];
-  let pipelineItems = [makeItem()];
+  let workflowItems = [makeItem()];
   let worktreeRows: Array<{ pipeline_item_id: string; path: string; branch: string }> = [];
   const listeners = new Map<string, Array<(event: unknown) => void>>();
 
@@ -72,7 +72,7 @@ const mockState = vi.hoisted(() => {
       case "spawn_session":
       case "ensure_term_init":
       case "get_app_data_dir":
-      case "get_pipeline_socket_path":
+      case "get_workflow_socket_path":
       case "run_script":
         return undefined;
       case "file_exists":
@@ -100,7 +100,7 @@ const mockState = vi.hoisted(() => {
   });
 
   const updatePipelineItemActivityMock = vi.fn(async (_db: DbHandle, itemId: string, activity: PipelineItem["activity"]) => {
-    const item = pipelineItems.find((candidate) => candidate.id === itemId);
+    const item = workflowItems.find((candidate) => candidate.id === itemId);
     if (!item) return;
     item.activity = activity;
     item.activity_changed_at = now;
@@ -110,7 +110,7 @@ const mockState = vi.hoisted(() => {
   const fetchSnapshotMock = vi.fn(async () => ({
     entries: repos.map((repo) => ({
       repo,
-      items: pipelineItems.filter((item) => item.repo_id === repo.id && item.closed_at === null),
+      items: workflowItems.filter((item) => item.repo_id === repo.id && item.closed_at === null),
     })),
     taskBlockers: [],
     worktreePaths: {},
@@ -125,7 +125,7 @@ const mockState = vi.hoisted(() => {
 
   function reset(): void {
     repos = [makeRepo()];
-    pipelineItems = [makeItem()];
+    workflowItems = [makeItem()];
     worktreeRows = [];
     listeners.clear();
     invokeMock.mockClear();
@@ -142,11 +142,11 @@ const mockState = vi.hoisted(() => {
     set repos(value: Repo[]) {
       repos = value;
     },
-    get pipelineItems() {
-      return pipelineItems;
+    get workflowItems() {
+      return workflowItems;
     },
-    set pipelineItems(value: PipelineItem[]) {
-      pipelineItems = value;
+    set workflowItems(value: PipelineItem[]) {
+      workflowItems = value;
     },
     get worktreeRows() {
       return worktreeRows;
@@ -203,7 +203,7 @@ vi.mock("@kanna/core", () => ({
   DEFAULT_STAGE_ORDER: ["pr", "review", "in progress"],
 }));
 
-vi.mock("../../../../packages/core/src/pipeline/agent-loader", () => ({
+vi.mock("../../../../packages/core/src/workflow/agent-loader", () => ({
   parseAgentDefinition: vi.fn(() => ({
     name: "agent",
     description: "agent",
@@ -211,14 +211,14 @@ vi.mock("../../../../packages/core/src/pipeline/agent-loader", () => ({
   })),
 }));
 
-vi.mock("../../../../packages/core/src/pipeline/pipeline-loader", () => ({
-  parsePipelineJson: vi.fn(() => ({
+vi.mock("../../../../packages/core/src/workflow/workflow-loader", () => ({
+  parseWorkflowJson: vi.fn(() => ({
     name: "default",
     stages: [],
   })),
 }));
 
-vi.mock("../../../../packages/core/src/pipeline/prompt-builder", () => ({
+vi.mock("../../../../packages/core/src/workflow/prompt-builder", () => ({
   buildStagePrompt: vi.fn(() => "Stage prompt"),
 }));
 
@@ -303,7 +303,7 @@ vi.mock("@kanna/" + "db", () => ({
   hideRepo: vi.fn(async () => {}),
   unhideRepo: vi.fn(async () => {}),
   listPipelineItems: vi.fn(async (_db: DbHandle, repoId: string) =>
-    mockState.pipelineItems.filter((item) => item.repo_id === repoId),
+    mockState.workflowItems.filter((item) => item.repo_id === repoId),
   ),
   listTaskBlockers: vi.fn(async () => []),
   insertPipelineItem: vi.fn(async () => {}),
@@ -317,7 +317,7 @@ vi.mock("@kanna/" + "db", () => ({
   clearPipelineItemStageResult: vi.fn(async () => {}),
   clearPipelineItemActivePostAction: vi.fn(async () => {}),
   closePipelineItem: vi.fn(async (_db: DbHandle, itemId: string) => {
-    const item = mockState.pipelineItems.find((candidate) => candidate.id === itemId);
+    const item = mockState.workflowItems.find((candidate) => candidate.id === itemId);
     if (!item) return;
     item.teardown_started_at = null;
     item.closed_at = "2026-04-16T00:00:00.000Z";
@@ -362,7 +362,7 @@ function createDb(): DbHandle {
       if (sql.includes("SELECT agent_provider FROM pipeline_item")) {
         const itemId = typeof params?.[0] === "string" ? params[0] : null;
         const item = itemId
-          ? mockState.pipelineItems.find((candidate) => candidate.id === itemId)
+          ? mockState.workflowItems.find((candidate) => candidate.id === itemId)
           : null;
         return item ? [{ agent_provider: item.agent_provider }] : [];
       }
@@ -374,7 +374,7 @@ function createDb(): DbHandle {
       }
       if (sql === "SELECT id FROM pipeline_item WHERE id = ? LIMIT 1") {
         const itemId = typeof params?.[0] === "string" ? params[0] : null;
-        return mockState.pipelineItems.some((item) => item.id === itemId) ? [{ id: itemId }] : [];
+        return mockState.workflowItems.some((item) => item.id === itemId) ? [{ id: itemId }] : [];
       }
       return [];
     }),
@@ -411,19 +411,19 @@ describe("kanna runtime status reconciliation", () => {
         revision: "remote-rev",
         refName: "origin/main",
         config: {},
-        defaultPipeline: "default",
-        pipelines: ["default"],
+        defaultWorkflow: "default",
+        workflows: ["default"],
       }),
       releaseTaskPorts: async () => {},
       closeTask: async (taskId) => {
-        const item = mockState.pipelineItems.find((candidate) => candidate.id === taskId);
+        const item = mockState.workflowItems.find((candidate) => candidate.id === taskId);
         if (item) {
           item.closed_at = "2026-04-16T00:00:00.000Z";
           item.updated_at = "2026-04-16T00:00:00.000Z";
         }
       },
       applyTaskRuntimeStatus: async (taskId, input) => {
-        const item = mockState.pipelineItems.find((candidate) => candidate.id === taskId);
+        const item = mockState.workflowItems.find((candidate) => candidate.id === taskId);
         if (!item || item.closed_at != null) return { taskId, activity: null };
         let activity: PipelineItem["activity"] | null = null;
         if (input.status === "busy" && item.activity !== "working") {
@@ -472,7 +472,7 @@ describe("kanna runtime status reconciliation", () => {
 
   it("reconciles KSP terminal busy status to working", async () => {
     await createStore();
-    mockState.pipelineItems[0]!.activity = "idle";
+    mockState.workflowItems[0]!.activity = "idle";
 
     await forwardTerminalRuntimeStatus("task-1", "busy");
     await flushStore();
@@ -482,7 +482,7 @@ describe("kanna runtime status reconciliation", () => {
       "task-1",
       "working",
     );
-    expect(mockState.pipelineItems[0]?.activity).toBe("working");
+    expect(mockState.workflowItems[0]?.activity).toBe("working");
   });
 
   it("reconciles KSP terminal idle status to idle when selected", async () => {
@@ -490,7 +490,7 @@ describe("kanna runtime status reconciliation", () => {
     await store.selectRepo("repo-1");
     await store.selectItem("task-1");
     await flushStore();
-    mockState.pipelineItems[0]!.activity = "working";
+    mockState.workflowItems[0]!.activity = "working";
 
     await forwardTerminalRuntimeStatus("task-1", "idle");
     await flushStore();
@@ -504,7 +504,7 @@ describe("kanna runtime status reconciliation", () => {
 
   it("reconciles KSP terminal idle status to unread when unselected", async () => {
     await createStore();
-    mockState.pipelineItems[0]!.activity = "working";
+    mockState.workflowItems[0]!.activity = "working";
 
     await forwardTerminalRuntimeStatus("task-1", "idle");
     await flushStore();
@@ -521,11 +521,11 @@ describe("kanna runtime status reconciliation", () => {
     await store.selectRepo("repo-1");
     await store.selectItem("task-1");
     await flushStore();
-    mockState.pipelineItems[0]!.activity = "working";
+    mockState.workflowItems[0]!.activity = "working";
 
     // During an initial/reconnect gap the server-side watcher has no lease
     // and conservatively applies the unattached working -> unread rule.
-    mockState.pipelineItems[0]!.activity = "unread";
+    mockState.workflowItems[0]!.activity = "unread";
 
     // AttachSnapshot queues StatusChanged(current) after the snapshot. The
     // selected client replays that idle status and repairs the gap write.
@@ -537,7 +537,7 @@ describe("kanna runtime status reconciliation", () => {
       "task-1",
       "idle",
     );
-    expect(mockState.pipelineItems[0]?.activity).toBe("idle");
+    expect(mockState.workflowItems[0]?.activity).toBe("idle");
   });
 
   it("keeps the pending-setup guard on KSP terminal idle status", async () => {
@@ -557,18 +557,18 @@ describe("kanna runtime status reconciliation", () => {
         "task-1",
       ),
     );
-    mockState.pipelineItems[0]!.activity = "working";
+    mockState.workflowItems[0]!.activity = "working";
 
     await forwardTerminalRuntimeStatus("task-1", "idle");
     await flushStore();
 
     expect(mockState.updatePipelineItemActivityMock).not.toHaveBeenCalled();
-    expect(mockState.pipelineItems[0]?.activity).toBe("working");
+    expect(mockState.workflowItems[0]?.activity).toBe("working");
   });
 
   it("keeps the closed-task guard on KSP terminal status", async () => {
-    mockState.pipelineItems = [{
-      ...mockState.pipelineItems[0]!,
+    mockState.workflowItems = [{
+      ...mockState.workflowItems[0]!,
       closed_at: "2026-06-06 05:38:31",
       activity: "idle",
     }];
@@ -578,13 +578,13 @@ describe("kanna runtime status reconciliation", () => {
     await flushStore();
 
     expect(mockState.updatePipelineItemActivityMock).not.toHaveBeenCalled();
-    expect(mockState.pipelineItems[0]?.activity).toBe("idle");
+    expect(mockState.workflowItems[0]?.activity).toBe("idle");
   });
 
   it("reconciles busy status from a forked workspace branch to the durable task", async () => {
-    mockState.pipelineItems = [
+    mockState.workflowItems = [
       {
-        ...mockState.pipelineItems[0]!,
+        ...mockState.workflowItems[0]!,
         id: "5aa7c7ec",
         branch: "task-5aa7c7ec-7",
         stage: "pr",
@@ -605,7 +605,7 @@ describe("kanna runtime status reconciliation", () => {
       "5aa7c7ec",
       "working",
     );
-    expect(mockState.pipelineItems[0]?.activity).toBe("working");
+    expect(mockState.workflowItems[0]?.activity).toBe("working");
   });
 
   it("keeps an exited task read when another open window has it selected", async () => {
@@ -649,7 +649,7 @@ describe("kanna runtime status reconciliation", () => {
       onSharedInvalidation: vi.fn(async () => vi.fn()),
     });
     await flushStore();
-    mockState.pipelineItems[0]!.activity = "working";
+    mockState.workflowItems[0]!.activity = "working";
 
     mockState.emit("session_exit", {
       session_id: "task-1",
@@ -666,13 +666,13 @@ describe("kanna runtime status reconciliation", () => {
         "idle",
       );
     });
-    expect(mockState.pipelineItems[0]?.activity).toBe("idle");
+    expect(mockState.workflowItems[0]?.activity).toBe("idle");
   });
 
   it("keeps an exited forked workspace task read when another open window has it selected", async () => {
-    mockState.pipelineItems = [
+    mockState.workflowItems = [
       {
-        ...mockState.pipelineItems[0]!,
+        ...mockState.workflowItems[0]!,
         id: "5aa7c7ec",
         branch: "task-5aa7c7ec-7",
         stage: "pr",
@@ -720,7 +720,7 @@ describe("kanna runtime status reconciliation", () => {
       onSharedInvalidation: vi.fn(async () => vi.fn()),
     });
     await flushStore();
-    mockState.pipelineItems[0]!.activity = "working";
+    mockState.workflowItems[0]!.activity = "working";
     expect(store.items[0]).toMatchObject({
       id: "5aa7c7ec",
       branch: "task-5aa7c7ec-7",
@@ -742,13 +742,13 @@ describe("kanna runtime status reconciliation", () => {
         "idle",
       );
     });
-    expect(mockState.pipelineItems[0]?.activity).toBe("idle");
+    expect(mockState.workflowItems[0]?.activity).toBe("idle");
   });
 
   it("ignores session exits for closed tasks", async () => {
-    mockState.pipelineItems = [
+    mockState.workflowItems = [
       {
-        ...mockState.pipelineItems[0]!,
+        ...mockState.workflowItems[0]!,
         stage: "done",
         closed_at: "2026-06-06 05:38:31",
         activity: "idle",
@@ -771,13 +771,13 @@ describe("kanna runtime status reconciliation", () => {
       "task-1",
       "unread",
     );
-    expect(mockState.pipelineItems[0]?.activity).toBe("idle");
+    expect(mockState.workflowItems[0]?.activity).toBe("idle");
   });
 
   it("persists codex resume session ids through the server client from the frontend session_exit path", async () => {
-    mockState.pipelineItems = [
+    mockState.workflowItems = [
       {
-        ...mockState.pipelineItems[0]!,
+        ...mockState.workflowItems[0]!,
         agent_provider: "codex",
       },
     ];
@@ -815,9 +815,9 @@ describe("kanna runtime status reconciliation", () => {
         name: "repo-2",
       },
     ];
-    mockState.pipelineItems = [
+    mockState.workflowItems = [
       {
-        ...mockState.pipelineItems[0]!,
+        ...mockState.workflowItems[0]!,
         id: "task-closing",
         repo_id: "repo-1",
         stage: "in progress",
@@ -825,14 +825,14 @@ describe("kanna runtime status reconciliation", () => {
         created_at: "2026-04-16T00:03:00.000Z",
       },
       {
-        ...mockState.pipelineItems[0]!,
+        ...mockState.workflowItems[0]!,
         id: "task-next",
         repo_id: "repo-1",
         stage: "in progress",
         created_at: "2026-04-16T00:02:00.000Z",
       },
       {
-        ...mockState.pipelineItems[0]!,
+        ...mockState.workflowItems[0]!,
         id: "task-other-repo",
         repo_id: "repo-2",
         stage: "in progress",
@@ -858,9 +858,9 @@ describe("kanna runtime status reconciliation", () => {
   });
 
   it("delegates teardown session auto-close cleanup to the server", async () => {
-    mockState.pipelineItems = [
+    mockState.workflowItems = [
       {
-        ...mockState.pipelineItems[0]!,
+        ...mockState.workflowItems[0]!,
         id: "task-closing",
         repo_id: "repo-1",
         branch: "task-task-closing",
@@ -884,7 +884,7 @@ describe("kanna runtime status reconciliation", () => {
     });
 
     await vi.waitFor(() => {
-      expect(mockState.pipelineItems[0]?.closed_at).toBe("2026-04-16T00:00:00.000Z");
+      expect(mockState.workflowItems[0]?.closed_at).toBe("2026-04-16T00:00:00.000Z");
     });
 
     const cleanupCall = mockState.invokeMock.mock.calls.find(([command, args]) =>
@@ -910,9 +910,9 @@ describe("kanna runtime status reconciliation", () => {
         name: "repo-2",
       },
     ];
-    mockState.pipelineItems = [
+    mockState.workflowItems = [
       {
-        ...mockState.pipelineItems[0]!,
+        ...mockState.workflowItems[0]!,
         id: "task-closing",
         repo_id: "repo-1",
         stage: "in progress",
@@ -920,7 +920,7 @@ describe("kanna runtime status reconciliation", () => {
         created_at: "2026-04-16T00:02:00.000Z",
       },
       {
-        ...mockState.pipelineItems[0]!,
+        ...mockState.workflowItems[0]!,
         id: "task-other-repo",
         repo_id: "repo-2",
         stage: "in progress",

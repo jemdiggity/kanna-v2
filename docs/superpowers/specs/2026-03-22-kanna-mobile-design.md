@@ -57,7 +57,7 @@ Key properties:
 **No resize from mobile:** The phone does not send `resize_session` — the PTY dimensions are owned by the desktop. Resizing from the phone would break the desktop terminal layout. The mobile xterm.js instance renders the output at whatever dimensions the desktop has set, using horizontal scrolling if needed.
 
 **v1 command surface:**
-- `list_pipeline_items` — read pipeline items from SQLite
+- `list_pipeline_items` — read workflow items from SQLite
 - `get_pipeline_item` — single item detail
 - `list_sessions` — daemon session list
 - `attach_session` — start streaming terminal output
@@ -164,7 +164,7 @@ The relay forwards all three types without parsing. It only inspects the initial
 ## v1 Scope
 
 **In scope:**
-- View task pipeline (read-only)
+- View task workflow (read-only)
 - View task details
 - Watch agent terminal output live
 - Send terminal input
@@ -182,7 +182,7 @@ The relay forwards all three types without parsing. It only inspects the initial
 
 ## v1 Experience
 
-Open app on phone → see task pipeline → tap a task → watch agent terminal live → send input if needed.
+Open app on phone → see task workflow → tap a task → watch agent terminal live → send input if needed.
 
 ## Monorepo Layout (additions)
 

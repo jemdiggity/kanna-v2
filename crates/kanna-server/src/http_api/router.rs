@@ -15,8 +15,8 @@ use super::pairing::{claim_pairing_session, create_pairing_session};
 use super::repo_commands::{list_repo_commands, run_repo_command};
 use super::repos::{
     add_repo, dependent_tasks_exist, get_repo_agent_definition, get_repo_by_path,
-    get_repo_kanna_definitions, get_repo_pipeline_definition, list_available_agent_providers,
-    list_recent_repo_pipelines, list_repo_agents, list_repo_tasks, list_repos, patch_repo,
+    get_repo_kanna_definitions, get_repo_workflow_definition, list_available_agent_providers,
+    list_recent_repo_workflows, list_repo_agents, list_repo_tasks, list_repos, patch_repo,
     reorder_repos,
 };
 use super::settings::{delete_setting, get_setting, put_cloud_transfer_identity, put_setting};
@@ -27,7 +27,7 @@ use super::status::status;
 use super::task_actions::{
     abort_task_creation, advance_stage, close_task, complete_stage, pin_task, reopen_task,
     reorder_pinned_tasks, request_revision, rerun_stage, resume_task, run_merge_agent,
-    set_task_parent, set_task_pipeline, unpin_task,
+    set_task_parent, set_task_workflow, unpin_task,
 };
 use super::task_activity::{apply_runtime_status, mark_task_read};
 use super::task_agent_session::put_task_agent_session;
@@ -115,16 +115,24 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(get_repo_kanna_definitions),
         )
         .route(
-            "/v1/repos/{repo_id}/kanna-definitions/pipelines/{pipeline_name}",
-            get(get_repo_pipeline_definition),
+            "/v1/repos/{repo_id}/kanna-definitions/workflows/{workflow_name}",
+            get(get_repo_workflow_definition),
+        )
+        .route(
+            "/v1/repos/{repo_id}/kanna-definitions/pipelines/{workflow_name}",
+            get(get_repo_workflow_definition),
         )
         .route(
             "/v1/repos/{repo_id}/kanna-definitions/agents/{agent_selector}",
             get(get_repo_agent_definition),
         )
         .route(
+            "/v1/repos/{repo_id}/recent-workflows",
+            get(list_recent_repo_workflows),
+        )
+        .route(
             "/v1/repos/{repo_id}/recent-pipelines",
-            get(list_recent_repo_pipelines),
+            get(list_recent_repo_workflows),
         )
         .route(
             "/v1/repos/{repo_id}/agent-providers",
@@ -204,8 +212,12 @@ pub fn router(state: Arc<AppState>) -> Router {
             post(set_task_notify),
         )
         .route(
+            "/v1/tasks/{task_id}/actions/set-workflow",
+            post(set_task_workflow),
+        )
+        .route(
             "/v1/tasks/{task_id}/actions/set-pipeline",
-            post(set_task_pipeline),
+            post(set_task_workflow),
         )
         .route("/v1/tasks/{task_id}/actions/pin", post(pin_task))
         .route("/v1/tasks/{task_id}/actions/unpin", post(unpin_task))

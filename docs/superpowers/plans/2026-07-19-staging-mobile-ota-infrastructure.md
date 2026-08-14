@@ -391,6 +391,6 @@ Run:
 
 Expected: infrastructure, secret, relay service account, secret IAM, and GCS IAM checks pass. If there is no existing SDK 57-compatible update, pointer/manifest remain failed and status remains nonzero; record that precisely as the publisher-task/human-only blocker rather than publishing an OTA.
 
-- [ ] **Step 8: Complete repository review and PR pipeline without publishing**
+- [ ] **Step 8: Complete repository review and PR workflow without publishing**
 
 Inspect the final diff and use Kanna's task workflow to advance through review and PR as explicitly requested. Do not run `mobile ota publish`, do not invoke any production flag, and do not install or launch a physical device. The PR summary must distinguish repository verification from the remaining no-published-update blocker.

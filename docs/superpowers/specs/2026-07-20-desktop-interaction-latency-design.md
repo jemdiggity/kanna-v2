@@ -2,7 +2,7 @@
 
 ## Context
 
-The v0.0.69 staging line moved repository pipeline and agent definitions to the repository's remote default branch. The New Task flow still waits for all option discovery before mounting the modal, and the new definitions request now runs `git fetch origin`. A pre-existing sequencing problem therefore became a multi-second UI delay.
+The v0.0.69 staging line moved repository workflow and agent definitions to the repository's remote default branch. The New Task flow still waits for all option discovery before mounting the modal, and the new definitions request now runs `git fetch origin`. A pre-existing sequencing problem therefore became a multi-second UI delay.
 
 Task close has the same interaction flaw: the frontend waits for the close endpoint to kill sessions, start teardown or worktree cleanup, notify dependents, and return before it changes the visible task selection. Backend cleanup is allowed to take time, but it must not delay local presentation state.
 
@@ -12,7 +12,7 @@ Definition consumers also do not currently avoid repeated remote work. The front
 
 - Mount and focus New Task without awaiting a backend or native command.
 - Populate repository-specific task options asynchronously without allowing stale requests to overwrite a newer modal invocation.
-- Cache resolved remote definitions in the local server so repeated manifest, pipeline, and agent reads avoid repeated fetches.
+- Cache resolved remote definitions in the local server so repeated manifest, workflow, and agent reads avoid repeated fetches.
 - Remove a closing task from the visible UI and select its replacement immediately.
 - Restore optimistic close state when the server rejects the close, without overwriting newer user navigation.
 
@@ -20,7 +20,7 @@ Definition consumers also do not currently avoid repeated remote work. The front
 
 - Do not add a separate frontend definitions cache.
 - Do not change the remote default branch as the authoritative definitions source.
-- Do not weaken task creation's authoritative pipeline pinning.
+- Do not weaken task creation's authoritative workflow pinning.
 - Do not change daemon teardown, worktree cleanup, dependent notification, or close endpoint semantics.
 
 ## Design
@@ -35,7 +35,7 @@ The existing post-submit handoff remains a special case: reopening waits for the
 
 ### Server definitions cache
 
-The local server will own the only definitions cache. It will cache the resolved remote definition snapshot used by the manifest, pipeline, and agent definition routes. The cache key includes repository identity, path, and default branch so repository configuration changes cannot reuse an incompatible entry.
+The local server will own the only definitions cache. It will cache the resolved remote definition snapshot used by the manifest, workflow, and agent definition routes. The cache key includes repository identity, path, and default branch so repository configuration changes cannot reuse an incompatible entry.
 
 Entries have a short bounded freshness interval of 30 seconds. A fresh entry returns without running Git. The first lookup and the first lookup after expiry refresh from `origin`, then replace the cached value. This bounds how long UI metadata can lag a remote definition update while eliminating repeated fetches caused by modal opens, snapshot refreshes, and adjacent definition requests.
 

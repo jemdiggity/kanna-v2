@@ -11,8 +11,8 @@ use std::str::FromStr;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub(super) struct RepoConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) pipeline: Option<String>,
+    #[serde(alias = "workflow", skip_serializing_if = "Option::is_none")]
+    pub(super) workflow: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) setup: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -155,10 +155,10 @@ pub(super) struct RepoWorkspacePathConfig {
 }
 
 /// Whether a definition is offered as a *choice*. Declared by the definition
-/// itself — a top-level `visibility` field in a pipeline JSON, a `visibility`
+/// itself — a top-level `visibility` field in a workflow JSON, a `visibility`
 /// key in AGENT.md frontmatter — and defaulting to public when absent.
 ///
-/// `internal` keeps the name out of every listing (`pipeline_names()`,
+/// `internal` keeps the name out of every listing (`workflow_names()`,
 /// `agents()`, and everything built on them: the repo manifest, the desktop's
 /// new-task picker, `kanna_list_agents`) because Kanna binds the definition
 /// itself and offering it only invites picking it by mistake. Visibility is
@@ -180,23 +180,23 @@ impl DefinitionVisibility {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub(super) struct PipelineDefinition {
+pub(super) struct WorkflowDefinition {
     #[allow(dead_code)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) description: Option<String>,
-    pub(super) stages: Vec<PipelineStage>,
+    pub(super) stages: Vec<WorkflowStage>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) environments: Option<HashMap<String, PipelineEnvironment>>,
+    pub(super) environments: Option<HashMap<String, WorkflowEnvironment>>,
     /// Cap on agent-requested revision rounds per task before the task parks
     /// for its human instead of looping. Omitted means
-    /// `DEFAULT_REVISION_LIMIT`; `0` means unlimited. Pinned `pipeline_def`
+    /// `DEFAULT_REVISION_LIMIT`; `0` means unlimited. Pinned `workflow_def`
     /// snapshots written before this field existed omit it and therefore
     /// inherit the default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) revision_limit: Option<i64>,
-    /// Listing-only: `internal` keeps this pipeline out of `pipeline_names()`.
+    /// Listing-only: `internal` keeps this workflow out of `workflow_names()`.
     /// Resolution never consults it. See `DefinitionVisibility`.
     #[serde(default, skip_serializing_if = "DefinitionVisibility::is_public")]
     pub(super) visibility: DefinitionVisibility,
@@ -208,7 +208,7 @@ pub(super) struct PipelineDefinition {
 /// turns into an open-ended project, so the loop is bounded by default.
 pub(crate) const DEFAULT_REVISION_LIMIT: i64 = 3;
 
-impl PipelineDefinition {
+impl WorkflowDefinition {
     /// Effective revision-round cap: `0` means unlimited. Negative values are
     /// rejected when the definition is parsed, so there is nothing to clamp
     /// here — silently clamping would turn a typo into an unbounded loop,
@@ -219,7 +219,7 @@ impl PipelineDefinition {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub(super) struct PipelineStage {
+pub(super) struct WorkflowStage {
     pub(super) name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) description: Option<String>,
@@ -231,9 +231,9 @@ pub(super) struct PipelineStage {
     pub(super) agent_provider: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) environment: Option<String>,
-    pub(super) policy: PipelineStagePolicy,
+    pub(super) policy: WorkflowStagePolicy,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) post: Option<PipelinePost>,
+    pub(super) post: Option<WorkflowPost>,
 }
 
 /// Tail work of a stage, injected into the stage's running agent session when
@@ -241,7 +241,7 @@ pub(super) struct PipelineStage {
 /// fresh session (and the prompt-body source) when the task's session is
 /// dead; a live session keeps whatever agent is already running.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub(super) struct PipelinePost {
+pub(super) struct WorkflowPost {
     pub(super) name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) description: Option<String>,
@@ -254,26 +254,26 @@ pub(super) struct PipelinePost {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub(super) struct PipelineStagePolicy {
-    pub(super) transition: PipelineStageTransition,
+pub(super) struct WorkflowStagePolicy {
+    pub(super) transition: WorkflowStageTransition,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) revision_transition: Option<PipelineStageTransition>,
+    pub(super) revision_transition: Option<WorkflowStageTransition>,
 }
 
-impl PipelineStagePolicy {
-    pub(super) fn revision_transition(&self) -> PipelineStageTransition {
+impl WorkflowStagePolicy {
+    pub(super) fn revision_transition(&self) -> WorkflowStageTransition {
         self.revision_transition.unwrap_or(self.transition)
     }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum PipelineStageTransition {
+pub(super) enum WorkflowStageTransition {
     Manual,
     Auto,
 }
 
-impl PipelineStageTransition {
+impl WorkflowStageTransition {
     pub(super) fn as_str(self) -> &'static str {
         match self {
             Self::Manual => "manual",
@@ -283,14 +283,14 @@ impl PipelineStageTransition {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub(super) struct PipelineEnvironment {
+pub(super) struct WorkflowEnvironment {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) setup: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) teardown: Option<Vec<String>>,
 }
 
-/// Where a stored stage name sits in a pipeline. In-flight tasks created
+/// Where a stored stage name sits in a workflow. In-flight tasks created
 /// before posts replaced interleaved continue stages can be parked *at* a
 /// folded post name (e.g. `commit`); those resolve to the owning stage's
 /// post rather than erroring.
@@ -300,17 +300,17 @@ pub(super) enum StagePosition {
 }
 
 pub(super) fn resolve_stage_position(
-    pipeline: &PipelineDefinition,
+    workflow: &WorkflowDefinition,
     stage_name: &str,
 ) -> Option<StagePosition> {
-    if let Some(index) = pipeline
+    if let Some(index) = workflow
         .stages
         .iter()
         .position(|stage| stage.name == stage_name)
     {
         return Some(StagePosition::Stage(index));
     }
-    pipeline
+    workflow
         .stages
         .iter()
         .position(|stage| {
@@ -326,16 +326,16 @@ pub(super) fn resolve_stage_position(
 /// prompt building consume for dead-session fallbacks and legacy in-flight
 /// tasks parked at a folded post name. Post success always advances, so the
 /// synthetic policy is `auto`.
-pub(super) fn post_as_stage(owner: &PipelineStage) -> Option<PipelineStage> {
-    owner.post.as_ref().map(|post| PipelineStage {
+pub(super) fn post_as_stage(owner: &WorkflowStage) -> Option<WorkflowStage> {
+    owner.post.as_ref().map(|post| WorkflowStage {
         name: post.name.clone(),
         description: post.description.clone(),
         agent: post.agent.clone(),
         prompt: post.prompt.clone(),
         agent_provider: post.agent_provider.clone(),
         environment: owner.environment.clone(),
-        policy: PipelineStagePolicy {
-            transition: PipelineStageTransition::Auto,
+        policy: WorkflowStagePolicy {
+            transition: WorkflowStageTransition::Auto,
             revision_transition: None,
         },
         post: None,
@@ -343,18 +343,18 @@ pub(super) fn post_as_stage(owner: &PipelineStage) -> Option<PipelineStage> {
 }
 
 #[derive(Deserialize)]
-struct RawPipelineDefinition {
+struct RawWorkflowDefinition {
     name: Option<String>,
     description: Option<String>,
-    stages: Vec<RawPipelineStage>,
-    environments: Option<HashMap<String, PipelineEnvironment>>,
+    stages: Vec<RawWorkflowStage>,
+    environments: Option<HashMap<String, WorkflowEnvironment>>,
     revision_limit: Option<i64>,
     #[serde(default)]
     visibility: DefinitionVisibility,
 }
 
 #[derive(Deserialize)]
-struct RawPipelineStage {
+struct RawWorkflowStage {
     name: String,
     description: Option<String>,
     agent: Option<String>,
@@ -362,22 +362,22 @@ struct RawPipelineStage {
     #[serde(default, deserialize_with = "deserialize_optional_provider_list")]
     agent_provider: Option<Vec<String>>,
     environment: Option<String>,
-    policy: Option<RawPipelineStagePolicy>,
-    transition: Option<PipelineStageTransition>,
-    mode: Option<RawPipelineStageExecution>,
-    post: Option<RawPipelinePost>,
-    post_action: Option<RawPipelinePostAction>,
+    policy: Option<RawWorkflowStagePolicy>,
+    transition: Option<WorkflowStageTransition>,
+    mode: Option<RawWorkflowStageExecution>,
+    post: Option<RawWorkflowPost>,
+    post_action: Option<RawWorkflowPostAction>,
 }
 
 #[derive(Deserialize)]
-struct RawPipelineStagePolicy {
-    transition: PipelineStageTransition,
-    revision_transition: Option<PipelineStageTransition>,
-    execution: Option<RawPipelineStageExecution>,
+struct RawWorkflowStagePolicy {
+    transition: WorkflowStageTransition,
+    revision_transition: Option<WorkflowStageTransition>,
+    execution: Option<RawWorkflowStageExecution>,
 }
 
 #[derive(Deserialize)]
-struct RawPipelinePost {
+struct RawWorkflowPost {
     name: String,
     description: Option<String>,
     agent: Option<String>,
@@ -387,7 +387,7 @@ struct RawPipelinePost {
 }
 
 #[derive(Deserialize)]
-struct RawPipelinePostAction {
+struct RawWorkflowPostAction {
     name: String,
     description: Option<String>,
     agent: Option<String>,
@@ -395,12 +395,12 @@ struct RawPipelinePostAction {
     #[serde(default, deserialize_with = "deserialize_optional_provider_list")]
     agent_provider: Option<Vec<String>>,
     #[allow(dead_code)]
-    transition: Option<PipelineStageTransition>,
+    transition: Option<WorkflowStageTransition>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum RawPipelineStageExecution {
+enum RawWorkflowStageExecution {
     NewTask,
     Continue,
 }
@@ -487,7 +487,7 @@ impl RepoDefinitions {
                 .map_err(|error| definition_error(&snapshot, config_path, error))?,
             None => serde_json::Map::new(),
         };
-        // Agents, pipelines, and the committed config come from the origin
+        // Agents, workflows, and the committed config come from the origin
         // snapshot; only this one file comes from the working tree, because a
         // per-machine override that needed a commit would not be one.
         let local_override = apply_local_config_override(Path::new(repo_path), &mut raw_config)?;
@@ -517,36 +517,47 @@ impl RepoDefinitions {
         &self.config
     }
 
-    pub(super) fn pipeline(&self, name: &str) -> Result<PipelineDefinition, String> {
-        self.pipeline_optional(name)?
-            .ok_or_else(|| format!("compiled resource not found: .kanna/pipelines/{name}.json"))
+    pub(super) fn workflow(&self, name: &str) -> Result<WorkflowDefinition, String> {
+        self.workflow_optional(name)?
+            .ok_or_else(|| format!("compiled resource not found: .kanna/workflows/{name}.json"))
     }
 
-    pub(super) fn pipeline_optional(
+    pub(super) fn workflow_optional(
         &self,
         name: &str,
-    ) -> Result<Option<PipelineDefinition>, String> {
-        let path = format!(".kanna/pipelines/{name}.json");
+    ) -> Result<Option<WorkflowDefinition>, String> {
+        let path = format!(".kanna/workflows/{name}.json");
         match read_snapshot_utf8(&self.snapshot, &path)? {
-            Some(content) => parse_pipeline_definition(&content)
+            Some(content) => parse_workflow_definition(&content)
                 .map(Some)
                 .map_err(|error| definition_error(&self.snapshot, &path, error)),
-            None => compiled_builtin_resource(&path)
-                .map(parse_pipeline_definition)
-                .transpose()
-                .map_err(|error| format!("invalid compiled resource `{path}`: {error}")),
+            None => {
+                // Repositories created before the terminology rename may
+                // still carry `.kanna/pipelines`. A canonical workflow file
+                // always wins when both exist.
+                let legacy_path = format!(".kanna/pipelines/{name}.json");
+                match read_snapshot_utf8(&self.snapshot, &legacy_path)? {
+                    Some(content) => parse_workflow_definition(&content)
+                        .map(Some)
+                        .map_err(|error| definition_error(&self.snapshot, &legacy_path, error)),
+                    None => compiled_builtin_resource(&path)
+                        .map(parse_workflow_definition)
+                        .transpose()
+                        .map_err(|error| format!("invalid compiled resource `{path}`: {error}")),
+                }
+            }
         }
     }
 
-    pub(super) fn task_pipeline(
+    pub(super) fn task_workflow(
         &self,
         name: &str,
         stored: Option<&str>,
-    ) -> Result<PipelineDefinition, String> {
+    ) -> Result<WorkflowDefinition, String> {
         if let Some(stored) = stored.filter(|value| !value.trim().is_empty()) {
-            return parse_stored_pipeline_definition(stored);
+            return parse_stored_workflow_definition(stored);
         }
-        self.pipeline(name)
+        self.workflow(name)
     }
 
     pub(super) fn agent(&self, selector: &str) -> Result<AgentDefinition, String> {
@@ -583,7 +594,7 @@ impl RepoDefinitions {
         Ok(Some(definition))
     }
 
-    /// Every pipeline name this repo offers as a *choice* — what the desktop's
+    /// Every workflow name this repo offers as a *choice* — what the desktop's
     /// new-task picker lists and what a caller may name on task creation.
     ///
     /// A definition opts out of being offered by declaring
@@ -593,45 +604,52 @@ impl RepoDefinitions {
     /// a public choice, and re-declaring `internal` keeps the customization
     /// unlisted. A repo file that cannot be read or parsed stays listed —
     /// listing must not fail, or silently shrink, because one file is
-    /// malformed; the parse error stays with that pipeline's own endpoint.
-    pub(super) fn pipeline_names(&self) -> Result<Vec<String>, String> {
-        let path = ".kanna/pipelines";
-        let entries = self
-            .snapshot
-            .list_direct_entries(path)
-            .map_err(|error| definition_error(&self.snapshot, path, error))?;
+    /// malformed; the parse error stays with that workflow's own endpoint.
+    pub(super) fn workflow_names(&self) -> Result<Vec<String>, String> {
         let mut repo_names = BTreeSet::new();
-        for entry in entries {
-            let Some(name) = entry.strip_suffix(".json") else {
-                continue;
-            };
-            if name.is_empty() || name == "schema" {
-                continue;
+        for path in [".kanna/pipelines", ".kanna/workflows"] {
+            let entries = self
+                .snapshot
+                .list_direct_entries(path)
+                .map_err(|error| definition_error(&self.snapshot, path, error))?;
+            for entry in entries {
+                let Some(name) = entry.strip_suffix(".json") else {
+                    continue;
+                };
+                if name.is_empty() || name == "schema" {
+                    continue;
+                }
+                repo_names.insert(name.to_string());
             }
-            repo_names.insert(name.to_string());
         }
 
         let mut names = BTreeSet::new();
-        for (name, definition) in BUILTIN_PIPELINES {
+        for (name, definition) in BUILTIN_WORKFLOWS {
             // A repo file under this name shadows the bundled definition,
             // visibility included; the repo loop below judges it instead.
             if repo_names.contains(*name) {
                 continue;
             }
-            if declared_pipeline_visibility(definition).is_public() {
+            if declared_workflow_visibility(definition).is_public() {
                 names.insert((*name).to_string());
             }
         }
         for name in repo_names {
-            let file_path = format!(".kanna/pipelines/{name}.json");
-            let visible = match self.snapshot.read_optional_utf8(&file_path) {
-                Ok(Some(content)) => declared_pipeline_visibility(&content).is_public(),
+            let file_path = format!(".kanna/workflows/{name}.json");
+            let legacy_file_path = format!(".kanna/pipelines/{name}.json");
+            let effective_path = if self.snapshot.read_optional_utf8(&file_path)?.is_some() {
+                &file_path
+            } else {
+                &legacy_file_path
+            };
+            let visible = match self.snapshot.read_optional_utf8(effective_path) {
+                Ok(Some(content)) => declared_workflow_visibility(&content).is_public(),
                 // A listed entry should always read back; one that does not
                 // cannot have declared itself internal.
                 Ok(None) => true,
                 Err(error) => {
                     log::warn!(
-                        "listing pipeline `{file_path}` without reading its visibility: {error}"
+                        "listing workflow `{effective_path}` without reading its visibility: {error}"
                     );
                     true
                 }
@@ -801,8 +819,9 @@ fn repo_config_from_object(raw: &serde_json::Map<String, serde_json::Value>) -> 
         });
 
     RepoConfig {
-        pipeline: raw
-            .get("pipeline")
+        workflow: raw
+            .get("workflow")
+            .or_else(|| raw.get("pipeline"))
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
         setup: string_array("setup"),
@@ -904,17 +923,17 @@ fn definition_error(
     )
 }
 
-fn parse_pipeline_definition(content: &str) -> Result<PipelineDefinition, String> {
+fn parse_workflow_definition(content: &str) -> Result<WorkflowDefinition, String> {
     let value: serde_json::Value = serde_json::from_str(content)
-        .map_err(|error| format!("invalid pipeline definition: {error}"))?;
-    reject_explicit_null_pipeline_providers(&value)?;
-    let raw: RawPipelineDefinition = serde_json::from_value(value)
-        .map_err(|error| format!("invalid pipeline definition: {error}"))?;
-    normalize_pipeline_definition(raw)
-        .map_err(|error| format!("invalid pipeline definition: {error}"))
+        .map_err(|error| format!("invalid workflow definition: {error}"))?;
+    reject_explicit_null_workflow_providers(&value)?;
+    let raw: RawWorkflowDefinition = serde_json::from_value(value)
+        .map_err(|error| format!("invalid workflow definition: {error}"))?;
+    normalize_workflow_definition(raw)
+        .map_err(|error| format!("invalid workflow definition: {error}"))
 }
 
-fn reject_explicit_null_pipeline_providers(value: &serde_json::Value) -> Result<(), String> {
+fn reject_explicit_null_workflow_providers(value: &serde_json::Value) -> Result<(), String> {
     let Some(stages) = value.get("stages").and_then(serde_json::Value::as_array) else {
         return Ok(());
     };
@@ -924,7 +943,7 @@ fn reject_explicit_null_pipeline_providers(value: &serde_json::Value) -> Result<
             .is_some_and(serde_json::Value::is_null)
         {
             return Err(format!(
-                "invalid pipeline definition: stages[{index}].agent_provider must be a string or a non-empty array of strings"
+                "invalid workflow definition: stages[{index}].agent_provider must be a string or a non-empty array of strings"
             ));
         }
         for post_key in ["post", "post_action"] {
@@ -935,7 +954,7 @@ fn reject_explicit_null_pipeline_providers(value: &serde_json::Value) -> Result<
                 .is_some_and(serde_json::Value::is_null)
             {
                 return Err(format!(
-                    "invalid pipeline definition: stages[{index}].{post_key}.agent_provider must be a string or a non-empty array of strings"
+                    "invalid workflow definition: stages[{index}].{post_key}.agent_provider must be a string or a non-empty array of strings"
                 ));
             }
         }
@@ -943,19 +962,19 @@ fn reject_explicit_null_pipeline_providers(value: &serde_json::Value) -> Result<
     Ok(())
 }
 
-pub(super) fn parse_stored_pipeline_definition(
+pub(super) fn parse_stored_workflow_definition(
     content: &str,
-) -> Result<PipelineDefinition, String> {
+) -> Result<WorkflowDefinition, String> {
     let mut value: serde_json::Value = serde_json::from_str(content)
-        .map_err(|error| format!("invalid stored pipeline definition: {error}"))?;
-    normalize_legacy_pipeline_provider_csv(&mut value);
-    let raw: RawPipelineDefinition = serde_json::from_value(value)
-        .map_err(|error| format!("invalid stored pipeline definition: {error}"))?;
-    normalize_pipeline_definition(raw)
-        .map_err(|error| format!("invalid stored pipeline definition: {error}"))
+        .map_err(|error| format!("invalid stored workflow definition: {error}"))?;
+    normalize_legacy_workflow_provider_csv(&mut value);
+    let raw: RawWorkflowDefinition = serde_json::from_value(value)
+        .map_err(|error| format!("invalid stored workflow definition: {error}"))?;
+    normalize_workflow_definition(raw)
+        .map_err(|error| format!("invalid stored workflow definition: {error}"))
 }
 
-fn normalize_legacy_pipeline_provider_csv(value: &mut serde_json::Value) {
+fn normalize_legacy_workflow_provider_csv(value: &mut serde_json::Value) {
     let Some(stages) = value
         .get_mut("stages")
         .and_then(serde_json::Value::as_array_mut)
@@ -1097,8 +1116,8 @@ const BUILTIN_AGENT_RESOURCES: &[(&str, &str)] = &[
         include_str!("../../../../.kanna/agents/merge/flavors/github/AGENT.md"),
     ),
     (
-        ".kanna/agents/pipeline-factory/AGENT.md",
-        include_str!("../../../../.kanna/agents/pipeline-factory/AGENT.md"),
+        ".kanna/agents/workflow-factory/AGENT.md",
+        include_str!("../../../../.kanna/agents/workflow-factory/AGENT.md"),
     ),
     (
         ".kanna/agents/pr/AGENT.md",
@@ -1173,64 +1192,64 @@ fn is_builtin_agent_name(name: &str) -> bool {
         .any(|(resource_path, _)| *resource_path == path)
 }
 
-/// Built-in pipelines that shipped under an earlier name, mapped to the
+/// Built-in workflows that shipped under an earlier name, mapped to the
 /// definition each now resolves to. Single source of truth: the compiled
 /// resource fallback below and manifest canonicalization in
 /// `load_repo_kanna_definitions` both read this table, so a retired name never
 /// has its mapping written twice.
 ///
-/// These are resolution aliases only. They stay out of `pipeline_names()`, so
+/// These are resolution aliases only. They stay out of `workflow_names()`, so
 /// a retired name never returns as a user-facing choice, and they always lose
-/// to a repo that ships its own pipeline under the same name.
-pub(super) const LEGACY_BUILTIN_PIPELINES: &[(&str, &str)] = &[
+/// to a repo that ships its own workflow under the same name.
+pub(super) const LEGACY_BUILTIN_WORKFLOWS: &[(&str, &str)] = &[
     ("default", "no-review"),
     ("qa", "single-reviewer"),
     ("qa-dispatch", "specialized-reviewers"),
 ];
 
-/// The current name a possibly-retired built-in pipeline resolves to, or
+/// The current name a possibly-retired built-in workflow resolves to, or
 /// `name` unchanged when it was never retired.
-pub(super) fn canonical_builtin_pipeline_name(name: &str) -> &str {
-    LEGACY_BUILTIN_PIPELINES
+pub(super) fn canonical_builtin_workflow_name(name: &str) -> &str {
+    LEGACY_BUILTIN_WORKFLOWS
         .iter()
         .find_map(|(legacy, current)| (*legacy == name).then_some(*current))
         .unwrap_or(name)
 }
 
-/// Single source of truth for the built-in pipelines, mapping each name to its
-/// bundled definition: both `pipeline_names()` and the compiled-resource
+/// Single source of truth for the built-in workflows, mapping each name to its
+/// bundled definition: both `workflow_names()` and the compiled-resource
 /// fallback read this table, so a built-in can never be offered without
 /// shipping a definition. Whether a name is offered as a choice is declared by
 /// the definition itself, through its `visibility` field: `specialty-review`
-/// declares `"visibility": "internal"` because it is the single-stage pipeline
+/// declares `"visibility": "internal"` because it is the single-stage  workflow
 /// `qa-dispatcher` gives each child task it fans out — one character away from
-/// the `specialized-reviewers` pipeline an operator actually chooses.
-const BUILTIN_PIPELINES: &[(&str, &str)] = &[
+/// the `specialized-reviewers` workflow an operator actually chooses.
+const BUILTIN_WORKFLOWS: &[(&str, &str)] = &[
     (
         "no-review",
-        include_str!("../../../../.kanna/pipelines/no-review.json"),
+        include_str!("../../../../.kanna/workflows/no-review.json"),
     ),
     (
         "single-reviewer",
-        include_str!("../../../../.kanna/pipelines/single-reviewer.json"),
+        include_str!("../../../../.kanna/workflows/single-reviewer.json"),
     ),
     (
         "specialized-reviewers",
-        include_str!("../../../../.kanna/pipelines/specialized-reviewers.json"),
+        include_str!("../../../../.kanna/workflows/specialized-reviewers.json"),
     ),
     (
         "specialty-review",
-        include_str!("../../../../.kanna/pipelines/specialty-review.json"),
+        include_str!("../../../../.kanna/workflows/specialty-review.json"),
     ),
 ];
 
-/// The `visibility` a pipeline definition file declares, probed tolerantly for
-/// listing: `pipeline_names()` must not fail — or silently drop a name —
+/// The `visibility` a workflow definition file declares, probed tolerantly for
+/// listing: `workflow_names()` must not fail — or silently drop a name —
 /// because one repo file is malformed, so anything that is not a well-formed
 /// top-level `"visibility"` declaration counts as the public default. The
 /// file's real parse error stays with its own endpoint, where
-/// `pipeline_optional()` reports it strictly.
-fn declared_pipeline_visibility(content: &str) -> DefinitionVisibility {
+/// `workflow_optional()` reports it strictly.
+fn declared_workflow_visibility(content: &str) -> DefinitionVisibility {
     serde_json::from_str::<serde_json::Value>(content)
         .ok()
         .and_then(|value| {
@@ -1240,26 +1259,26 @@ fn declared_pipeline_visibility(content: &str) -> DefinitionVisibility {
 }
 
 fn compiled_builtin_resource(relative_path: &str) -> Option<&'static str> {
-    // A retired built-in pipeline name serves its current definition.
+    // A retired built-in workflow name serves its current definition.
     if let Some(name) = relative_path
-        .strip_prefix(".kanna/pipelines/")
+        .strip_prefix(".kanna/workflows/")
         .and_then(|file| file.strip_suffix(".json"))
     {
-        let canonical = canonical_builtin_pipeline_name(name);
+        let canonical = canonical_builtin_workflow_name(name);
         if canonical != name {
-            return compiled_builtin_resource(&format!(".kanna/pipelines/{canonical}.json"));
+            return compiled_builtin_resource(&format!(".kanna/workflows/{canonical}.json"));
         }
     }
 
-    let pipeline = relative_path
-        .strip_prefix(".kanna/pipelines/")
+    let workflow = relative_path
+        .strip_prefix(".kanna/workflows/")
         .and_then(|file| file.strip_suffix(".json"))
         .and_then(|name| {
-            BUILTIN_PIPELINES
+            BUILTIN_WORKFLOWS
                 .iter()
                 .find_map(|(builtin, definition)| (*builtin == name).then_some(*definition))
         });
-    pipeline.or_else(|| {
+    workflow.or_else(|| {
         BUILTIN_AGENT_RESOURCES
             .iter()
             .find_map(|(path, content)| (*path == relative_path).then_some(*content))
@@ -1456,10 +1475,10 @@ fn parse_agent_providers(value: Option<YamlValue>) -> Result<Vec<String>, String
     Ok(providers)
 }
 
-fn normalize_pipeline_definition(raw: RawPipelineDefinition) -> Result<PipelineDefinition, String> {
-    let mut stages: Vec<PipelineStage> = Vec::new();
+fn normalize_workflow_definition(raw: RawWorkflowDefinition) -> Result<WorkflowDefinition, String> {
+    let mut stages: Vec<WorkflowStage> = Vec::new();
     for stage in raw.stages {
-        let RawPipelineStage {
+        let RawWorkflowStage {
             name,
             description,
             agent,
@@ -1477,23 +1496,23 @@ fn normalize_pipeline_definition(raw: RawPipelineDefinition) -> Result<PipelineD
             Some(policy) => (
                 policy.transition,
                 policy.revision_transition,
-                matches!(policy.execution, Some(RawPipelineStageExecution::Continue)),
+                matches!(policy.execution, Some(RawWorkflowStageExecution::Continue)),
             ),
             None => (
                 transition.ok_or_else(|| format!("stage {name:?} is missing policy.transition"))?,
                 None,
-                matches!(mode, Some(RawPipelineStageExecution::Continue)),
+                matches!(mode, Some(RawWorkflowStageExecution::Continue)),
             ),
         };
 
         // Legacy interleaved continue stage (old `post_action` compilation or
-        // an `execution: "continue"` policy, including pinned pipeline_def
+        // an `execution: "continue"` policy, including pinned workflow_def
         // snapshots): fold into the preceding stage's post. Stages swap
         // sessions; posts continue them.
         if continues {
             if let Some(previous) = stages.last_mut() {
                 if previous.post.is_none() {
-                    previous.post = Some(PipelinePost {
+                    previous.post = Some(WorkflowPost {
                         name,
                         description,
                         agent,
@@ -1506,14 +1525,14 @@ fn normalize_pipeline_definition(raw: RawPipelineDefinition) -> Result<PipelineD
         }
 
         let post = match (post, post_action) {
-            (Some(post), _) => Some(PipelinePost {
+            (Some(post), _) => Some(WorkflowPost {
                 name: post.name,
                 description: post.description,
                 agent: post.agent,
                 prompt: post.prompt,
                 agent_provider: post.agent_provider,
             }),
-            (None, Some(post_action)) => Some(PipelinePost {
+            (None, Some(post_action)) => Some(WorkflowPost {
                 name: post_action.name,
                 description: post_action.description,
                 agent: post_action.agent,
@@ -1523,14 +1542,14 @@ fn normalize_pipeline_definition(raw: RawPipelineDefinition) -> Result<PipelineD
             (None, None) => None,
         };
 
-        stages.push(PipelineStage {
+        stages.push(WorkflowStage {
             name,
             description,
             agent,
             prompt,
             agent_provider,
             environment,
-            policy: PipelineStagePolicy {
+            policy: WorkflowStagePolicy {
                 transition,
                 revision_transition,
             },
@@ -1550,7 +1569,7 @@ fn normalize_pipeline_definition(raw: RawPipelineDefinition) -> Result<PipelineD
         }
     }
 
-    Ok(PipelineDefinition {
+    Ok(WorkflowDefinition {
         name: raw.name,
         description: raw.description,
         stages,
@@ -1568,7 +1587,7 @@ where
 {
     let value = serde_json::Value::deserialize(deserializer)?;
     let providers = match value {
-        // Pipeline snapshots created before provider validation serialized an
+        // Workflow snapshots created before provider validation serialized an
         // unset optional field as null. Continue reading those durable task
         // snapshots while omitting the field from newly serialized snapshots.
         serde_json::Value::Null => return Ok(None),

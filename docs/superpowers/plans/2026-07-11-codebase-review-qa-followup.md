@@ -4,13 +4,13 @@
 
 **Goal:** Close the four remaining QA gaps around durable provider ordering, Turbo cache inputs, crash-residual SQLite relocation, and OpenCode headless process coverage.
 
-**Architecture:** Pipeline stage and post provider candidates remain ordered collections from repository JSON through the durable `pipeline_def` snapshot and are resolved only at spawn time; legacy scalar and comma-delimited snapshots remain readable. Integration tests exercise real `kanna-server` processes, HTTP routes, daemon protocol commands, SQLite recovery, and the desktop WebDriver flow at the process boundaries where the regressions occurred.
+**Architecture:** Workflow stage and post provider candidates remain ordered collections from repository JSON through the durable `pipeline_def` snapshot and are resolved only at spawn time; legacy scalar and comma-delimited snapshots remain readable. Integration tests exercise real `kanna-server` processes, HTTP routes, daemon protocol commands, SQLite recovery, and the desktop WebDriver flow at the process boundaries where the regressions occurred.
 
 **Tech Stack:** Rust, Serde, Axum, rusqlite/SQLite WAL, Tokio, Turbo 2, pnpm, Vitest, Tauri WebDriver E2E, OpenCode JSONL.
 
 ---
 
-### Task 1: Preserve Ordered Pipeline Provider Candidates Durably
+### Task 1: Preserve Ordered Workflow Provider Candidates Durably
 
 **Files:**
 - Modify: `crates/kanna-server/src/task_creator/definitions.rs`
@@ -20,11 +20,11 @@
 
 - [x] **Step 1: Add failing structural snapshot coverage**
 
-Extend the stored-pipeline unit coverage so a stage and post defined as `agent_provider: ["codex", "claude"]` serialize back as arrays in the same order, and add a legacy stored snapshot case for `"agent_provider":"codex,claude"` that normalizes to the same ordered candidates.
+Extend the stored-workflow unit coverage so a stage and post defined as `agent_provider: ["codex", "claude"]` serialize back as arrays in the same order, and add a legacy stored snapshot case for `"agent_provider":"codex,claude"` that normalizes to the same ordered candidates.
 
 - [x] **Step 2: Add failing real HTTP transition coverage**
 
-Create one repository pipeline with an initial scalar-Claude stage and a second manual stage whose stage and post providers are both `["codex", "claude"]`. Give the second stage and post named agents with no provider frontmatter so an agent definition cannot mask a lost pipeline field. Expose only a fake `claude` executable through `workspace.path.prepend`, create the task through `POST /v1/tasks`, assert the persisted `pipeline_def` contains both JSON arrays, then remove the live pipeline file.
+Create one repository workflow with an initial scalar-Claude stage and a second manual stage whose stage and post providers are both `["codex", "claude"]`. Give the second stage and post named agents with no provider frontmatter so an agent definition cannot mask a lost workflow field. Expose only a fake `claude` executable through `workspace.path.prepend`, create the task through `POST /v1/tasks`, assert the persisted `pipeline_def` contains both JSON arrays, then remove the live workflow file.
 
 Advance through `POST /v1/tasks/{id}/actions/advance-stage` and assert the reloaded second-stage `SpawnAgent` uses `DaemonAgentProvider::Claude` and the repo-scoped fake executable. Advance again, have the fake daemon answer the post's `Input` with `SessionNotFound`, forcing the post fallback spawn, and assert that spawn also uses Claude. The fake daemon must remain available across connections and handle `Subscribe`, `Kill`, `Input`, and all three `SpawnAgent` commands.
 
@@ -51,7 +51,7 @@ match value {
 }
 ```
 
-Derived serialization then writes a JSON array. Update `post_as_stage`, legacy continue-stage folding, synthetic pipeline constructors, and merge task construction to carry the collection without flattening it.
+Derived serialization then writes a JSON array. Update `post_as_stage`, legacy continue-stage folding, synthetic workflow constructors, and merge task construction to carry the collection without flattening it.
 
 - [x] **Step 5: Resolve stage collections without reparsing**
 

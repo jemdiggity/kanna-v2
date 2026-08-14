@@ -8,7 +8,7 @@ Order tasks in the mobile app's repo-scoped Tasks tab by creation time, newest f
 
 Add optional `createdAt` metadata to the mobile `TaskSummary` contract so the app can sort consistently across LAN, relay, and merged task sources while remaining compatible with older peers.
 
-- The SQLite-backed mobile API will copy the existing pipeline item's `created_at` value into task summaries.
+- The SQLite-backed mobile API will copy the existing workflow item's `created_at` value into task summaries.
 - The Firestore mobile task parser will preserve the existing `createdAt` document field and the cloud summary mapper will expose it as `createdAt`.
 - Existing task merge paths use object spreads and will preserve the field without introducing source-specific ordering rules.
 

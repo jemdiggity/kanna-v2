@@ -2,11 +2,11 @@
 
 ## Goal
 
-Make stage boundaries immediately recognizable in a durable task's terminal scrollback by showing an ordered marker whenever Kanna replaces the current agent session with the next pipeline stage.
+Make stage boundaries immediately recognizable in a durable task's terminal scrollback by showing an ordered marker whenever Kanna replaces the current agent session with the next workflow stage.
 
 ## User Experience
 
-When a task moves from one pipeline stage to another, the next terminal section begins with an ANSI-styled separator whose label includes both stage names:
+When a task moves from one workflow stage to another, the next terminal section begins with an ANSI-styled separator whose label includes both stage names:
 
 ```text
 ━━ Stage advanced: in progress → review ━━
@@ -22,7 +22,7 @@ The transition marker belongs to session initialization rather than to an indivi
 
 The daemon will accept the optional prelude on PTY session spawn commands. During session construction, it will write the prelude into the new headless terminal before the child process can produce output, then publish it through the same output stream used for process bytes. This gives snapshots and live clients one consistent ordering and avoids frontend races around `session_created` and attach snapshots. SDK/headless agent sessions have no terminal snapshot and render structured agent events, so they remain unchanged.
 
-The prelude is a general session-spawn capability, but this change has one producer: true pipeline stage swaps. All other spawn call sites omit it.
+The prelude is a general session-spawn capability, but this change has one producer: true workflow stage swaps. All other spawn call sites omit it.
 
 ## Components and Data Flow
 
@@ -31,7 +31,7 @@ The prelude is a general session-spawn capability, but this change has one produ
 3. The daemon initializes the new headless terminal with the prelude before launching or draining the agent process.
 4. Attached clients receive the prelude before new agent output. Clients attaching later receive it in the serialized snapshot.
 
-Stage names are treated as display text, not terminal control input. Formatting must strip or neutralize control characters before embedding names in ANSI output so repository-defined pipeline names cannot inject terminal escape sequences or additional lines.
+Stage names are treated as display text, not terminal control input. Formatting must strip or neutralize control characters before embedding names in ANSI output so repository-defined workflow names cannot inject terminal escape sequences or additional lines.
 
 ## Failure Behavior
 

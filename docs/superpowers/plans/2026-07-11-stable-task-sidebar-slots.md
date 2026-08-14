@@ -8,7 +8,7 @@
 
 **Tech Stack:** Vue 3, Pinia, TypeScript, Vitest, Vue Test Utils, existing Kanna snapshot/store and workspace projection layers.
 
-**Stage constraint:** Do not create commits in this worktree. The Kanna pipeline performs committing after this manual stage advances. Each task ends with a diff/test checkpoint instead of a commit.
+**Stage constraint:** Do not create commits in this worktree. The Kanna workflow performs committing after this manual stage advances. Each task ends with a diff/test checkpoint instead of a commit.
 
 **Implementation note:** The completed implementation strengthens the sketches below with discriminated creating/ready slot types, one-authoritative-snapshot miss grace after acknowledgement, a stateful eagerly primed workspace projector that freezes repo membership during creation, and a two-gate browser lifecycle regression test.
 
@@ -62,7 +62,7 @@ function task(id: string): PipelineItem {
     issue_number: null,
     issue_title: null,
     prompt: "Ship stable slots",
-    pipeline: "default",
+    workflow: "default",
     pipeline_def: null,
     stage: "in progress",
     pr_number: null,
@@ -97,7 +97,7 @@ function creatingSlot() {
     repoId: "repo-1",
     prompt: "Ship stable slots",
     displayName: null,
-    pipelineName: "default",
+    workflowName: "default",
     stage: "in progress",
     agentType: "pty",
     requestedAgentProviders: "claude",
@@ -176,7 +176,7 @@ export interface TaskUiDraft {
   repo_id: string;
   prompt: string;
   display_name: string | null;
-  pipeline: string;
+  workflow: string;
   stage: string;
   agent_type: AgentExecutionType;
   agent_provider: AgentProvider;
@@ -214,7 +214,7 @@ interface BuildCreatingTaskUiSlotOptions {
   repoId: string;
   prompt: string;
   displayName?: string | null;
-  pipelineName?: string;
+  workflowName?: string;
   stage?: string;
   agentType: AgentExecutionType;
   requestedAgentProviders?: AgentProvider | AgentProvider[];
@@ -232,7 +232,7 @@ export function buildCreatingTaskUiSlot(options: BuildCreatingTaskUiSlotOptions)
       repo_id: options.repoId,
       prompt: options.prompt,
       display_name: options.displayName ?? null,
-      pipeline: options.pipelineName ?? "default",
+      workflow: options.workflowName ?? "default",
       stage: options.stage ?? "in progress",
       agent_type: options.agentType,
       agent_provider: providers[0] ?? "claude",
@@ -290,7 +290,7 @@ export function reconcileTaskUiSlots(
         repo_id: task.repo_id,
         prompt: task.prompt ?? "",
         display_name: task.display_name,
-        pipeline: task.pipeline,
+        workflow: task.workflow,
         stage: task.stage,
         agent_type: task.agent_type === "agent" ? "agent" : "pty",
         agent_provider: task.agent_provider,
@@ -317,7 +317,7 @@ export function taskUiSlotToSidebarItem(slot: TaskUiSlot): SidebarTaskItem {
     issue_number: null,
     issue_title: null,
     prompt: slot.draft.prompt,
-    pipeline: slot.draft.pipeline,
+    workflow: slot.draft.workflow,
     pipeline_def: null,
     stage: slot.draft.stage,
     pr_number: null,
@@ -394,7 +394,7 @@ it("hydrates a durable task into its acknowledged UI slot", async () => {
       repo_id: "repo-1",
       prompt: "Ship it",
       display_name: null,
-      pipeline: "default",
+      workflow: "default",
       stage: "in progress",
       agent_type: "pty",
       agent_provider: "claude",
@@ -666,7 +666,7 @@ it("retains an acknowledged slot when task snapshot hydration fails", async () =
     return {
       entries: mockState.repos.map((repo) => ({
         repo,
-        items: mockState.pipelineItems.filter((item) => item.repo_id === repo.id),
+        items: mockState.workflowItems.filter((item) => item.repo_id === repo.id),
       })),
       taskBlockers: mockState.taskBlockers,
       worktreePaths: {},
@@ -962,7 +962,7 @@ it("keeps the same row mounted when a creating slot becomes a durable task", asy
     })],
   });
 
-  expect(wrapper.findAll(".pipeline-item")).toHaveLength(1);
+  expect(wrapper.findAll(".workflow-item")).toHaveLength(1);
   expect(wrapper.get(".repo-count").text()).toBe("1");
   expect(wrapper.get('[data-slot-id="slot-1"]').element).toBe(originalRow);
   expect(wrapper.get('[data-slot-id="slot-1"]').attributes("data-task-id")).toBe("task-1");
@@ -1002,7 +1002,7 @@ Expected: FAIL because components still key and select `PipelineItem.id`.
 
 In `Sidebar.vue`:
 
-- rename prop `pipelineItems` to `taskSlots: AppSidebarItem[]`
+- rename prop `workflowItems` to `taskSlots: AppSidebarItem[]`
 - rename prop `selectedItemId` to `selectedSlotId`
 - pass `taskSlots` to ordering helpers
 - key every task row and draggable item with `slot_id`
@@ -1018,7 +1018,7 @@ The normal row shape should be:
 <div
   v-for="row in subtreeRows(repo.id, element)"
   :key="row.item.slot_id"
-  class="pipeline-item"
+  class="workflow-item"
   :class="{
     selected: selectedSlotId === row.item.slot_id,
     subtask: row.depth > 0,
@@ -1080,7 +1080,7 @@ Run `git diff --check`; inspect `Sidebar.vue` to confirm `slot_id` is used only 
 - Modify: `apps/desktop/src/composables/useAppTaskNavigation.ts`
 - Modify: `apps/desktop/src/composables/useAppKeyboardActions.ts`
 - Modify: `apps/desktop/src/stores/taskCloseActions.ts`
-- Modify: `apps/desktop/src/stores/pipeline.ts`
+- Modify: `apps/desktop/src/stores/workflow.ts`
 - Modify: `apps/desktop/src/stores/windowSelection.ts`
 - Modify: `apps/desktop/src/stores/init.ts`
 - Test: `apps/desktop/src/stores/kanna.taskBaseBranch.test.ts`
@@ -1094,7 +1094,7 @@ Run `git diff --check`; inspect `Sidebar.vue` to confirm `slot_id` is used only 
 Extend the existing close integration coverage in `kanna.taskBaseBranch.test.ts` with a ready slot whose `slot_id` differs from `task_id`:
 
 ```ts
-mockState.pipelineItems = [mockState.makeItem({ id: "task-1" })];
+mockState.workflowItems = [mockState.makeItem({ id: "task-1" })];
 const store = await createStore();
 const slot = store.taskUiSlots.find((candidate) => candidate.task_id === "task-1")!;
 slot.slot_id = "create:slot-1";
@@ -1103,7 +1103,7 @@ await store.selectItem("create:slot-1");
 expect(store.selectedItemId).toBe("create:slot-1");
 expect(store.selectedTaskId).toBe("task-1");
 await store.closeTask();
-expect(mockState.pipelineItems[0]?.closed_at).toBe(mockState.makeItem().updated_at);
+expect(mockState.workflowItems[0]?.closed_at).toBe(mockState.makeItem().updated_at);
 ```
 
 Extend `App.test.ts` navigation coverage to provide sidebar rows whose `slot_id` differs from `task_id`, invoke next/previous navigation, and assert `store.selectedItemId` becomes the target `slot_id`. Extend `useAppKeyboardActions.test.ts` so comparisons against a durable `PipelineItem.id` use `store.selectedTaskId`.
@@ -1125,7 +1125,7 @@ Apply these rules consistently:
 - `useAppTaskNavigation`: locate current/next rows by `slot_id`; call `store.selectItem(slot_id)`; use `task_id` for blocker and remote backend operations.
 - `useAppKeyboardActions`: compare the selected durable task through `store.selectedTaskId` when comparing against `PipelineItem.id`.
 - `taskCloseActions`: use `services.selectedTaskId` for selected-task comparisons; selection replacement resolves the replacement task back to a slot.
-- `pipeline.ts`: compute `sourceTaskIsSelected` from `services.selectedTaskId`; restore selection through `selectItem` so durable IDs resolve to slots.
+- `workflow.ts`: compute `sourceTaskIsSelected` from `services.selectedTaskId`; restore selection through `selectItem` so durable IDs resolve to slots.
 - `windowSelection.ts`: compare current-window selection through `services.selectedTaskId`; persisted other-window selections are already durable IDs.
 - `init.ts`: bootstrap IDs are durable and must resolve to slots after the first snapshot; external refresh preserves the selected slot when its durable task remains.
 
@@ -1136,7 +1136,7 @@ No backend service call may receive `slot_id`.
 Run:
 
 ```bash
-pnpm --dir apps/desktop test -- src/stores/kanna.taskBaseBranch.test.ts src/stores/selection.test.ts src/composables/useAppKeyboardActions.test.ts src/App.test.ts src/stores/pipeline.requestRevision.test.ts src/stores/init.test.ts
+pnpm --dir apps/desktop test -- src/stores/kanna.taskBaseBranch.test.ts src/stores/selection.test.ts src/composables/useAppKeyboardActions.test.ts src/App.test.ts src/stores/workflow.requestRevision.test.ts src/stores/init.test.ts
 ```
 
 Expected: PASS.

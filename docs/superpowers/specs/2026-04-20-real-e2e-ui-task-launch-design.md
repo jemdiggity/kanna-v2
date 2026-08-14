@@ -6,7 +6,7 @@ Move the default real PTY desktop E2E specs from direct Vue method submission to
 
 ## Problem
 
-The current real PTY specs create tasks by calling `handleNewTaskSubmit` through the dev E2E bridge. That still exercises the app's real task-creation pipeline, but it skips part of the user-visible flow:
+The current real PTY specs create tasks by calling `handleNewTaskSubmit` through the dev E2E bridge. That still exercises the app's real task-creation workflow, but it skips part of the user-visible flow:
 
 - opening the modal with `Shift+Cmd+N`
 - focus and modal lifecycle

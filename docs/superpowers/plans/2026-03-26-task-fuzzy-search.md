@@ -163,7 +163,7 @@ In `sortedPinned` (line 33-37), change the return to:
 
 ```typescript
 function sortedPinned(repoId: string): PipelineItem[] {
-  return props.pipelineItems
+  return props.workflowItems
     .filter((i) => i.repo_id === repoId && !hasTag(i, "done") && i.pinned && matchesSearch(i))
     .sort((a, b) => (a.pin_order ?? 0) - (b.pin_order ?? 0));
 }
@@ -174,7 +174,7 @@ In `sortedPR` (line 43-47):
 ```typescript
 function sortedPR(repoId: string): PipelineItem[] {
   return sortByCreatedAt(
-    props.pipelineItems.filter((i) => i.repo_id === repoId && hasTag(i, "pr") && !hasTag(i, "done") && !i.pinned && matchesSearch(i))
+    props.workflowItems.filter((i) => i.repo_id === repoId && hasTag(i, "pr") && !hasTag(i, "done") && !i.pinned && matchesSearch(i))
   );
 }
 ```
@@ -184,7 +184,7 @@ In `sortedMerge` (line 49-53):
 ```typescript
 function sortedMerge(repoId: string): PipelineItem[] {
   return sortByCreatedAt(
-    props.pipelineItems.filter((i) => i.repo_id === repoId && hasTag(i, "merge") && !hasTag(i, "done") && !i.pinned && matchesSearch(i))
+    props.workflowItems.filter((i) => i.repo_id === repoId && hasTag(i, "merge") && !hasTag(i, "done") && !i.pinned && matchesSearch(i))
   );
 }
 ```
@@ -194,7 +194,7 @@ In `sortedActive` (line 55-59):
 ```typescript
 function sortedActive(repoId: string): PipelineItem[] {
   return sortByCreatedAt(
-    props.pipelineItems.filter((i) => i.repo_id === repoId && !hasTag(i, "pr") && !hasTag(i, "merge") && !hasTag(i, "blocked") && !hasTag(i, "done") && !i.pinned && matchesSearch(i))
+    props.workflowItems.filter((i) => i.repo_id === repoId && !hasTag(i, "pr") && !hasTag(i, "merge") && !hasTag(i, "blocked") && !hasTag(i, "done") && !i.pinned && matchesSearch(i))
   );
 }
 ```
@@ -204,7 +204,7 @@ In `sortedBlocked` (line 61-65):
 ```typescript
 function sortedBlocked(repoId: string): PipelineItem[] {
   return sortByCreatedAt(
-    props.pipelineItems.filter((i) => i.repo_id === repoId && hasTag(i, "blocked") && !hasTag(i, "done") && !i.pinned && matchesSearch(i))
+    props.workflowItems.filter((i) => i.repo_id === repoId && hasTag(i, "blocked") && !hasTag(i, "done") && !i.pinned && matchesSearch(i))
   );
 }
 ```

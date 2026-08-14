@@ -31,7 +31,7 @@ The Rust workspace root includes multiple product boundaries:
 
 `crate.from_cargo()` is already split for some sidecar-specific repos, but `desktop_crates` still points at the root workspace manifest. As a result, generated `desktop_crates` metadata includes crates and dependencies that are not part of the desktop crate's direct Cargo boundary.
 
-The desktop app does still depend on sidecar binaries as packaged runtime resources. That dependency is modeled through the sidecar build and staging pipeline, not through the desktop crate's direct Cargo dependency list.
+The desktop app does still depend on sidecar binaries as packaged runtime resources. That dependency is modeled through the sidecar build and staging workflow, not through the desktop crate's direct Cargo dependency list.
 
 ## Proposed Design
 
@@ -53,7 +53,7 @@ The key rule is that crate-universe repo scope should match a Bazel build bounda
 
 ### 2. Keep runtime sidecar packaging separate from Cargo repo scope
 
-The desktop app's runtime dependency on `kanna-daemon`, `kanna-cli`, `kanna-server`, `kanna-terminal-recovery`, and `kanna-task-transfer` remains unchanged. Those binaries continue to be built and staged through the sidecar pipeline and included in Tauri `externalBin`.
+The desktop app's runtime dependency on `kanna-daemon`, `kanna-cli`, `kanna-server`, `kanna-terminal-recovery`, and `kanna-task-transfer` remains unchanged. Those binaries continue to be built and staged through the sidecar workflow and included in Tauri `externalBin`.
 
 This cleanup changes dependency resolution scope for Bazel Rust repos. It does not remove runtime packaging dependencies.
 

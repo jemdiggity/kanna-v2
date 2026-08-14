@@ -255,7 +255,7 @@ Not required in v1:
 - Full mobile task authoring
 - Advanced review flows
 - Full parity with desktop command palette behavior
-- Full pipeline/stage management UI
+- Full workflow/stage management UI
 
 ## Reliability Model
 

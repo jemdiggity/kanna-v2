@@ -2,9 +2,9 @@ import { createPinia, setActivePinia } from "pinia";
 import { nextTick } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DbHandle, PipelineItem, Repo, TaskBlocker, TaskPort } from "../types/kanna";
-import type { PipelineDefinition } from "../../../../packages/core/src/pipeline/pipeline-types";
+import type { WorkflowDefinition } from "../../../../packages/core/src/workflow/workflow-types";
 import type { CustomTaskConfig, RepoConfig } from "@kanna/core";
-import { buildStagePrompt } from "../../../../packages/core/src/pipeline/prompt-builder";
+import { buildStagePrompt } from "../../../../packages/core/src/workflow/prompt-builder";
 
 const toastErrorMock = vi.hoisted(() => vi.fn());
 const toastWarningMock = vi.hoisted(() => vi.fn());
@@ -35,7 +35,7 @@ const mockState = vi.hoisted(() => {
       issue_number: null,
       issue_title: null,
       prompt: "Ship it",
-      pipeline: "default",
+      workflow: "default",
       stage: "in progress",
       stage_result: null,
       active_post_action: null,
@@ -65,8 +65,8 @@ const mockState = vi.hoisted(() => {
   }
 
   let repos = [makeRepo()];
-  let pipelineItems: PipelineItem[] = [];
-  let pipelineDefinition: PipelineDefinition = {
+  let workflowItems: PipelineItem[] = [];
+  let workflowDefinition: WorkflowDefinition = {
     name: "default",
     stages: [],
   };
@@ -106,7 +106,7 @@ const mockState = vi.hoisted(() => {
   });
   const setSettingMock = vi.fn(async () => {});
   const updatePipelineItemTagsMock = vi.fn(async (_db: DbHandle, itemId: string, tags: string[]) => {
-    const item = pipelineItems.find((candidate) => candidate.id === itemId);
+    const item = workflowItems.find((candidate) => candidate.id === itemId);
     if (item) {
       item.tags = JSON.stringify(tags);
       item.updated_at = now;
@@ -158,7 +158,7 @@ const mockState = vi.hoisted(() => {
       case "write_text_file":
         return undefined;
       case "list_sessions":
-        return pipelineItems
+        return workflowItems
           .filter((item) => item.closed_at === null && item.agent_type === "pty")
           .map((item) => ({
             session_id: item.id,
@@ -172,7 +172,7 @@ const mockState = vi.hoisted(() => {
         return `/usr/bin/${String(args?.name ?? "tool")}`;
       case "get_app_data_dir":
         return "/tmp/kanna";
-      case "get_pipeline_socket_path":
+      case "get_workflow_socket_path":
         return "/tmp/kanna.sock";
       case "read_env_var":
         return readEnvVarOverrides[String(args?.name ?? "")] ?? "";
@@ -191,11 +191,11 @@ const mockState = vi.hoisted(() => {
   });
 
   const insertPipelineItemMock = vi.fn(async (_db: DbHandle, item: Partial<PipelineItem>) => {
-    pipelineItems.push(makeItem({
+    workflowItems.push(makeItem({
       id: item.id,
       repo_id: item.repo_id,
       prompt: item.prompt ?? null,
-      pipeline: item.pipeline,
+      workflow: item.pipeline,
       stage: item.stage,
       tags: JSON.stringify(item.tags ?? []),
       branch: item.branch ?? null,
@@ -212,7 +212,7 @@ const mockState = vi.hoisted(() => {
   });
 
   const updatePipelineItemStageMock = vi.fn(async (_db: DbHandle, itemId: string, stage: string) => {
-    const item = pipelineItems.find((candidate) => candidate.id === itemId);
+    const item = workflowItems.find((candidate) => candidate.id === itemId);
     if (item) {
       item.stage = stage;
       item.updated_at = now;
@@ -220,7 +220,7 @@ const mockState = vi.hoisted(() => {
   });
 
   const updatePipelineItemActivityMock = vi.fn(async (_db: DbHandle, itemId: string, activity: PipelineItem["activity"]) => {
-    const item = pipelineItems.find((candidate) => candidate.id === itemId);
+    const item = workflowItems.find((candidate) => candidate.id === itemId);
     if (item) {
       item.activity = activity;
       item.activity_changed_at = now;
@@ -229,7 +229,7 @@ const mockState = vi.hoisted(() => {
   });
 
   const clearPipelineItemStageResultMock = vi.fn(async (_db: DbHandle, itemId: string) => {
-    const item = pipelineItems.find((candidate) => candidate.id === itemId);
+    const item = workflowItems.find((candidate) => candidate.id === itemId);
     if (item) {
       item.stage_result = null;
       item.updated_at = now;
@@ -237,7 +237,7 @@ const mockState = vi.hoisted(() => {
   });
 
   const updatePipelineItemActivePostActionMock = vi.fn(async (_db: DbHandle, itemId: string, activePostAction: string) => {
-    const item = pipelineItems.find((candidate) => candidate.id === itemId);
+    const item = workflowItems.find((candidate) => candidate.id === itemId);
     if (item) {
       item.active_post_action = activePostAction;
       item.updated_at = now;
@@ -245,7 +245,7 @@ const mockState = vi.hoisted(() => {
   });
 
   const clearPipelineItemActivePostActionMock = vi.fn(async (_db: DbHandle, itemId: string) => {
-    const item = pipelineItems.find((candidate) => candidate.id === itemId);
+    const item = workflowItems.find((candidate) => candidate.id === itemId);
     if (item) {
       item.active_post_action = null;
       item.updated_at = now;
@@ -253,7 +253,7 @@ const mockState = vi.hoisted(() => {
   });
 
   const markPipelineItemTearingDownMock = vi.fn(async (_db: DbHandle, itemId: string) => {
-    const item = pipelineItems.find((candidate) => candidate.id === itemId);
+    const item = workflowItems.find((candidate) => candidate.id === itemId);
     if (item) {
       item.teardown_started_at = item.teardown_started_at ?? now;
       item.updated_at = now;
@@ -261,7 +261,7 @@ const mockState = vi.hoisted(() => {
   });
 
   const closePipelineItemMock = vi.fn(async (_db: DbHandle, itemId: string) => {
-    const item = pipelineItems.find((candidate) => candidate.id === itemId);
+    const item = workflowItems.find((candidate) => candidate.id === itemId);
     if (item) {
       item.closed_at = now;
       item.updated_at = now;
@@ -270,8 +270,8 @@ const mockState = vi.hoisted(() => {
 
   function reset(): void {
     repos = [makeRepo()];
-    pipelineItems = [];
-    pipelineDefinition = { name: "default", stages: [] };
+    workflowItems = [];
+    workflowDefinition = { name: "default", stages: [] };
     defaultBranchResponse = "main";
     currentBranchResponse = null;
     baseBranchResponse = ["origin/main", "main"];
@@ -326,17 +326,17 @@ const mockState = vi.hoisted(() => {
     set repos(value: Repo[]) {
       repos = value;
     },
-    get pipelineItems() {
-      return pipelineItems;
+    get workflowItems() {
+      return workflowItems;
     },
-    set pipelineItems(value: PipelineItem[]) {
-      pipelineItems = value;
+    set workflowItems(value: PipelineItem[]) {
+      workflowItems = value;
     },
-    get pipelineDefinition() {
-      return pipelineDefinition;
+    get workflowDefinition() {
+      return workflowDefinition;
     },
-    set pipelineDefinition(value: PipelineDefinition) {
-      pipelineDefinition = value;
+    set workflowDefinition(value: WorkflowDefinition) {
+      workflowDefinition = value;
     },
     get baseBranchResponse() {
       return baseBranchResponse;
@@ -473,7 +473,7 @@ vi.mock("@kanna/core", () => ({
   DEFAULT_STAGE_ORDER: ["pr", "review", "in progress"],
 }));
 
-vi.mock("../../../../packages/core/src/pipeline/agent-loader", () => ({
+vi.mock("../../../../packages/core/src/workflow/agent-loader", () => ({
   parseAgentDefinition: vi.fn((content: string) => {
     const role = content.match(/\.kanna\/agents\/([^/]+)\/AGENT\.md/)?.[1] ?? "agent";
     return {
@@ -485,11 +485,11 @@ vi.mock("../../../../packages/core/src/pipeline/agent-loader", () => ({
   }),
 }));
 
-vi.mock("../../../../packages/core/src/pipeline/pipeline-loader", () => ({
-  parsePipelineJson: vi.fn(() => mockState.pipelineDefinition),
+vi.mock("../../../../packages/core/src/workflow/workflow-loader", () => ({
+  parseWorkflowJson: vi.fn(() => mockState.workflowDefinition),
 }));
 
-vi.mock("../../../../packages/core/src/pipeline/prompt-builder", () => ({
+vi.mock("../../../../packages/core/src/workflow/prompt-builder", () => ({
   buildStagePrompt: vi.fn((agentPrompt: string, stagePrompt: string | undefined, context: { taskPrompt?: string }) =>
     [agentPrompt, stagePrompt]
       .filter((part): part is string => part !== undefined && part.trim() !== "")
@@ -592,7 +592,7 @@ vi.mock("@kanna/" + "db", () => ({
   hideRepo: vi.fn(async () => {}),
   unhideRepo: vi.fn(async () => {}),
   listPipelineItems: vi.fn(async (_db: DbHandle, repoId: string) =>
-    mockState.pipelineItems.filter((item) => item.repo_id === repoId)
+    mockState.workflowItems.filter((item) => item.repo_id === repoId)
   ),
   listTaskBlockers: vi.fn(async () => mockState.taskBlockers),
   insertPipelineItem: mockState.insertPipelineItemMock,
@@ -612,7 +612,7 @@ vi.mock("@kanna/" + "db", () => ({
   clearPipelineItemStageResult: mockState.clearPipelineItemStageResultMock,
   closePipelineItem: mockState.closePipelineItemMock,
   reopenPipelineItem: vi.fn(async (_db: DbHandle, itemId: string) => {
-    const item = mockState.pipelineItems.find((candidate) => candidate.id === itemId);
+    const item = mockState.workflowItems.find((candidate) => candidate.id === itemId);
     if (item) {
       item.closed_at = null;
     }
@@ -656,13 +656,13 @@ function createDb(): DbHandle {
   return {
     execute: vi.fn(async (query: string, bindValues?: unknown[]) => {
       if (query.startsWith("INSERT OR IGNORE INTO task_port")) {
-        const [port, pipelineItemId, envName] = bindValues as [number, string, string];
+        const [port, workflowItemId, envName] = bindValues as [number, string, string];
         if (!mockState.taskPorts.some((taskPort) => taskPort.port === port)) {
           mockState.taskPorts = [
             ...mockState.taskPorts,
             {
               port,
-              pipeline_item_id: pipelineItemId,
+              pipeline_item_id: workflowItemId,
               env_name: envName,
               created_at: mockState.makeItem().created_at,
             },
@@ -674,7 +674,7 @@ function createDb(): DbHandle {
 
       if (query.startsWith("UPDATE pipeline_item SET port_offset = ?, port_env = ?, updated_at = datetime('now') WHERE id = ?")) {
         const [portOffset, portEnv, itemId] = bindValues as [number | null, string | null, string];
-        const item = mockState.pipelineItems.find((candidate) => candidate.id === itemId);
+        const item = mockState.workflowItems.find((candidate) => candidate.id === itemId);
         if (item) {
           item.port_offset = portOffset;
           item.port_env = portEnv;
@@ -684,7 +684,7 @@ function createDb(): DbHandle {
 
       if (query.startsWith("DELETE FROM pipeline_item WHERE id = ?")) {
         const [itemId] = bindValues as [string];
-        mockState.pipelineItems = mockState.pipelineItems.filter((candidate) => candidate.id !== itemId);
+        mockState.workflowItems = mockState.workflowItems.filter((candidate) => candidate.id !== itemId);
         return { rowsAffected: 1 };
       }
 
@@ -713,7 +713,7 @@ function createDb(): DbHandle {
       }
 
       if (query === "SELECT * FROM pipeline_item WHERE closed_at IS NOT NULL ORDER BY closed_at DESC LIMIT 1") {
-        const closed = [...mockState.pipelineItems]
+        const closed = [...mockState.workflowItems]
           .filter((item) => item.closed_at !== null)
           .sort((a, b) => String(b.closed_at).localeCompare(String(a.closed_at)));
         return (closed[0] ? [closed[0]] : []) as T[];
@@ -721,7 +721,7 @@ function createDb(): DbHandle {
 
       if (query === "SELECT id FROM pipeline_item WHERE id = ? LIMIT 1") {
         const [itemId] = bindValues as [string];
-        const item = mockState.pipelineItems.find((candidate) => candidate.id === itemId);
+        const item = mockState.workflowItems.find((candidate) => candidate.id === itemId);
         return (item ? [{ id: item.id }] : []) as T[];
       }
 
@@ -760,7 +760,7 @@ describe("kanna store task base branch integration", () => {
     setDesktopSnapshotFetcherForTests(async () => ({
       entries: mockState.repos.map((repo) => ({
         repo,
-        items: mockState.pipelineItems.filter((item) => item.repo_id === repo.id),
+        items: mockState.workflowItems.filter((item) => item.repo_id === repo.id),
       })),
       taskBlockers: mockState.taskBlockers,
       worktreePaths: {},
@@ -813,7 +813,7 @@ describe("kanna store task base branch integration", () => {
         }
       }
 
-      const item = mockState.pipelineItems.find((candidate) => candidate.id === taskId);
+      const item = mockState.workflowItems.find((candidate) => candidate.id === taskId);
       if (item) {
         item.port_offset = firstPort;
         item.port_env = Object.keys(portEnv).length > 0 ? JSON.stringify(portEnv) : null;
@@ -866,7 +866,7 @@ describe("kanna store task base branch integration", () => {
       config: RepoConfig,
       portEnv: Record<string, string>,
     ): Promise<void> => {
-      const item = mockState.pipelineItems.find((candidate) => candidate.id === taskId);
+      const item = mockState.workflowItems.find((candidate) => candidate.id === taskId);
       if (!item) return;
       if (item.agent_type === "agent") {
         const spawnOptions = item.agent_spawn_options
@@ -924,12 +924,12 @@ describe("kanna store task base branch integration", () => {
         revision: "remote-rev",
         refName: "origin/main",
         config: mockState.repoConfig,
-        defaultPipeline: mockState.repoConfig.pipeline ?? "default",
-        pipelines: ["default"],
+        defaultWorkflow: mockState.repoConfig.pipeline ?? "default",
+        workflows: ["default"],
       }),
-      fetchRepoPipelineDefinition: async () => ({
+      fetchRepoWorkflowDefinition: async () => ({
         revision: "rev-1",
-        definition: mockState.pipelineDefinition,
+        definition: mockState.workflowDefinition,
       }),
       fetchRepoAgentDefinition: async (_repoId, agentSelector) => ({
         revision: "rev-1",
@@ -948,7 +948,7 @@ describe("kanna store task base branch integration", () => {
         }
       },
       fetchClosedTaskIdentities: async () =>
-        mockState.pipelineItems
+        mockState.workflowItems
           .filter((item) => item.closed_at !== null)
           .sort((a, b) => String(b.closed_at).localeCompare(String(a.closed_at)) || a.id.localeCompare(b.id))
           .map((item) => ({ id: item.id, repo_id: item.repo_id })),
@@ -999,7 +999,7 @@ describe("kanna store task base branch integration", () => {
           id: taskId,
           repo_id: repo.id,
           prompt: taskPrompt,
-          pipeline: request.pipelineName ?? "default",
+          workflow: request.workflowName ?? "default",
           stage: request.stage ?? "in progress",
           tags: [],
           branch,
@@ -1045,7 +1045,7 @@ describe("kanna store task base branch integration", () => {
         try {
           await spawnTask(taskId, worktreePath, worktreeConfig, portEnv);
         } catch {
-          mockState.pipelineItems = mockState.pipelineItems.filter((item) => item.id !== taskId);
+          mockState.workflowItems = mockState.workflowItems.filter((item) => item.id !== taskId);
         }
         if (mockState.createTaskResponseGate) {
           await mockState.createTaskResponseGate;
@@ -1060,7 +1060,7 @@ describe("kanna store task base branch integration", () => {
         };
       },
       closeTask: async (taskId) => {
-        const item = mockState.pipelineItems.find((candidate) => candidate.id === taskId);
+        const item = mockState.workflowItems.find((candidate) => candidate.id === taskId);
         const repo = item ? mockState.repos.find((candidate) => candidate.id === item.repo_id) : null;
         if (!item || !repo) return;
         await mockState.invokeMock("kill_session", { sessionId: taskId });
@@ -1084,7 +1084,7 @@ describe("kanna store task base branch integration", () => {
         await mockState.closePipelineItemMock({} as DbHandle, taskId);
       },
       reopenTask: async (taskId) => {
-        const item = mockState.pipelineItems.find((candidate) => candidate.id === taskId);
+        const item = mockState.workflowItems.find((candidate) => candidate.id === taskId);
         const repo = item ? mockState.repos.find((candidate) => candidate.id === item.repo_id) : null;
         if (!item || !repo) return;
         const worktreePath = item.branch ? `${repo.path}/.kanna-worktrees/${item.branch}` : repo.path;
@@ -1103,7 +1103,7 @@ describe("kanna store task base branch integration", () => {
         for (const blocker of blockers) {
           await mockState.removeTaskBlockerMock({} as DbHandle, taskId, blocker.id);
         }
-        const item = mockState.pipelineItems.find((candidate) => candidate.id === taskId);
+        const item = mockState.workflowItems.find((candidate) => candidate.id === taskId);
         if (!item) return;
         if (item.agent_session_id) {
           const message = blockers
@@ -1126,7 +1126,7 @@ describe("kanna store task base branch integration", () => {
         }
       },
       applyTaskRuntimeStatus: async (taskId, input) => {
-        const item = mockState.pipelineItems.find((candidate) => candidate.id === taskId);
+        const item = mockState.workflowItems.find((candidate) => candidate.id === taskId);
         if (!item || item.closed_at != null) return { taskId, activity: null };
         let activity: PipelineItem["activity"] | null = null;
         if (input.status === "busy" && item.activity !== "working") {
@@ -1142,13 +1142,13 @@ describe("kanna store task base branch integration", () => {
         return { taskId, activity };
       },
       markTaskRead: async (taskId) => {
-        const item = mockState.pipelineItems.find((candidate) => candidate.id === taskId);
+        const item = mockState.workflowItems.find((candidate) => candidate.id === taskId);
         if (item?.activity === "unread") item.activity = "idle";
         return { taskId, activity: item?.activity === "idle" ? "idle" : null };
       },
       putTaskAgentSession: async (taskId, agentSessionId) => {
         await mockState.putTaskAgentSessionMock(taskId, agentSessionId);
-        const item = mockState.pipelineItems.find((candidate) => candidate.id === taskId);
+        const item = mockState.workflowItems.find((candidate) => candidate.id === taskId);
         if (item) {
           item.agent_session_id = agentSessionId;
           item.updated_at = mockState.makeItem().updated_at;
@@ -1203,7 +1203,7 @@ describe("kanna store task base branch integration", () => {
       },
       releaseTaskPorts: async (taskId) => {
         mockState.taskPorts = mockState.taskPorts.filter((taskPort) => taskPort.pipeline_item_id !== taskId);
-        const item = mockState.pipelineItems.find((candidate) => candidate.id === taskId);
+        const item = mockState.workflowItems.find((candidate) => candidate.id === taskId);
         if (item) {
           item.port_offset = null;
           item.port_env = null;
@@ -1409,7 +1409,7 @@ describe("kanna store task base branch integration", () => {
     });
 
     await vi.waitFor(() => {
-      const createdItem = mockState.pipelineItems.at(-1);
+      const createdItem = mockState.workflowItems.at(-1);
       expect(createdItem?.port_offset).toBe(1421);
       expect(createdItem?.port_env).toBe(JSON.stringify({
         KANNA_DEV_PORT: "1421",
@@ -1438,7 +1438,7 @@ describe("kanna store task base branch integration", () => {
     });
 
     await vi.waitFor(() => {
-      const createdItem = mockState.pipelineItems.at(-1);
+      const createdItem = mockState.workflowItems.at(-1);
       expect(createdItem?.port_offset).toBe(1422);
       expect(createdItem?.port_env).toBe(JSON.stringify({
         KANNA_DEV_PORT: "1422",
@@ -1475,7 +1475,7 @@ describe("kanna store task base branch integration", () => {
     });
 
     await vi.waitFor(() => {
-      const createdItem = mockState.pipelineItems.at(-1);
+      const createdItem = mockState.workflowItems.at(-1);
       expect(createdItem?.port_offset).toBe(1421);
       expect(createdItem?.port_env).toBe(JSON.stringify({
         KANNA_DEV_PORT: "1421",
@@ -1505,7 +1505,7 @@ describe("kanna store task base branch integration", () => {
     });
 
     await vi.waitFor(() => {
-      const secondItem = mockState.pipelineItems.at(-1);
+      const secondItem = mockState.workflowItems.at(-1);
       expect(secondItem?.port_offset).toBe(1422);
       expect(secondItem?.port_env).toBe(JSON.stringify({
         KANNA_DEV_PORT: "1422",
@@ -1532,7 +1532,7 @@ describe("kanna store task base branch integration", () => {
     });
 
     await vi.waitFor(() => {
-      const createdItem = mockState.pipelineItems.at(-1);
+      const createdItem = mockState.workflowItems.at(-1);
       expect(createdItem).toBeTruthy();
       expect(mockState.invokeMock).toHaveBeenCalledWith(
         "spawn_agent_session",
@@ -1574,7 +1574,7 @@ describe("kanna store task base branch integration", () => {
 
     let createdItem: PipelineItem | undefined;
     await vi.waitFor(() => {
-      createdItem = mockState.pipelineItems.at(-1);
+      createdItem = mockState.workflowItems.at(-1);
       expect(createdItem).toBeTruthy();
       expect(mockState.invokeMock).toHaveBeenCalledWith(
         "run_script",
@@ -1615,7 +1615,7 @@ describe("kanna store task base branch integration", () => {
     });
 
     await vi.waitFor(() => {
-      const createdItem = mockState.pipelineItems.at(-1);
+      const createdItem = mockState.workflowItems.at(-1);
       expect(createdItem).toBeTruthy();
       expect(mockState.invokeMock).toHaveBeenCalledWith(
         "spawn_agent_session",
@@ -1653,7 +1653,7 @@ describe("kanna store task base branch integration", () => {
     });
 
     await vi.waitFor(() => {
-      const createdItem = mockState.pipelineItems.at(-1);
+      const createdItem = mockState.workflowItems.at(-1);
       expect(createdItem).toBeTruthy();
       expect(mockState.invokeMock).toHaveBeenCalledWith(
         "spawn_agent_session",
@@ -1682,7 +1682,7 @@ describe("kanna store task base branch integration", () => {
         "spawn_agent_session",
         expect.objectContaining({ sessionId: taskId }),
       );
-      expect(mockState.pipelineItems.some((item) => item.id === taskId)).toBe(false);
+      expect(mockState.workflowItems.some((item) => item.id === taskId)).toBe(false);
     });
     expect(mockState.upsertTerminalSessionMock).not.toHaveBeenCalledWith(
       expect.anything(),
@@ -1741,7 +1741,7 @@ describe("kanna store task base branch integration", () => {
       expect.stringMatching(/^[0-9a-f-]+$/),
     );
     expect(mockState.updateAgentSessionIdMock).not.toHaveBeenCalled();
-    expect(mockState.pipelineItems.find((item) => item.id === taskId)?.agent_session_id)
+    expect(mockState.workflowItems.find((item) => item.id === taskId)?.agent_session_id)
       .toEqual(expect.stringMatching(/^[0-9a-f-]+$/));
   });
 
@@ -1757,7 +1757,7 @@ describe("kanna store task base branch integration", () => {
         },
       },
     };
-    mockState.pipelineItems = [mockState.makeItem({
+    mockState.workflowItems = [mockState.makeItem({
       id: "task-pty-env",
       branch: "task-pty-env",
       prompt: "Ship PTY env",
@@ -1958,7 +1958,7 @@ describe("kanna store task base branch integration", () => {
         expect.objectContaining({ agentProvider: "claude" }),
       );
     });
-    const durableItem = mockState.pipelineItems.find(
+    const durableItem = mockState.workflowItems.find(
       (item) => item.prompt === "Snapshot before acknowledgement",
     );
     expect(durableItem).toBeDefined();
@@ -1987,7 +1987,7 @@ describe("kanna store task base branch integration", () => {
       return {
         entries: mockState.repos.map((repo) => ({
           repo,
-          items: mockState.pipelineItems.filter((item) => item.repo_id === repo.id),
+          items: mockState.workflowItems.filter((item) => item.repo_id === repo.id),
         })),
         taskBlockers: mockState.taskBlockers,
         worktreePaths: {},
@@ -2022,7 +2022,7 @@ describe("kanna store task base branch integration", () => {
       return {
         entries: mockState.repos.map((repo) => ({
           repo,
-          items: mockState.pipelineItems.filter((item) => item.repo_id === repo.id),
+          items: mockState.workflowItems.filter((item) => item.repo_id === repo.id),
         })),
         taskBlockers: mockState.taskBlockers,
         worktreePaths: {},
@@ -2063,7 +2063,7 @@ describe("kanna store task base branch integration", () => {
   });
 
   it("removes only the creating slot and restores selection when creation fails before acknowledgement", async () => {
-    mockState.pipelineItems = [mockState.makeItem({
+    mockState.workflowItems = [mockState.makeItem({
       id: "item-existing",
       branch: "task-item-existing",
       prompt: "Keep this task",
@@ -2156,7 +2156,7 @@ describe("kanna store task base branch integration", () => {
       branch: "task-item-arrived",
       prompt: "Arrived during creation",
     });
-    mockState.pipelineItems = [arrivedItem];
+    mockState.workflowItems = [arrivedItem];
     await store.init(createDb());
 
     expect(store.items.map((item) => item.id)).toEqual(["item-arrived"]);
@@ -2184,7 +2184,7 @@ describe("kanna store task base branch integration", () => {
   });
 
   it("does not steal selection back when the user leaves a creating slot", async () => {
-    mockState.pipelineItems = [mockState.makeItem({
+    mockState.workflowItems = [mockState.makeItem({
       id: "item-existing",
       branch: "task-item-existing",
       prompt: "Stay here",
@@ -2280,8 +2280,8 @@ describe("kanna store task base branch integration", () => {
     });
   });
 
-  it("spawns a referenced custom task agent instead of wrapping it in the default pipeline agent", async () => {
-    mockState.pipelineDefinition = {
+  it("spawns a referenced custom task agent instead of wrapping it in the default workflow agent", async () => {
+    mockState.workflowDefinition = {
       name: "default",
       stages: [
         {
@@ -2329,7 +2329,7 @@ describe("kanna store task base branch integration", () => {
   });
 
   it("reruns stages through the local kanna-server action endpoint", async () => {
-    mockState.pipelineItems = [
+    mockState.workflowItems = [
       mockState.makeItem({
         id: "item-existing",
         branch: "task-existing",
@@ -2394,7 +2394,7 @@ describe("kanna store task base branch integration", () => {
         API_PORT: 3000,
       },
     };
-    mockState.pipelineItems = [
+    mockState.workflowItems = [
       mockState.makeItem({
         id: "item-closed",
         branch: "task-closed",
@@ -2410,7 +2410,7 @@ describe("kanna store task base branch integration", () => {
 
     await store.undoClose();
 
-    const reopenedItem = mockState.pipelineItems[0];
+    const reopenedItem = mockState.workflowItems[0];
     expect(reopenedItem.closed_at).toBeNull();
     expect(reopenedItem.port_offset).toBe(1421);
     expect(reopenedItem.port_env).toBe(JSON.stringify({
@@ -2440,7 +2440,7 @@ describe("kanna store task base branch integration", () => {
       }
       return undefined;
     };
-    mockState.pipelineItems = [
+    mockState.workflowItems = [
       mockState.makeItem({
         id: "item-closed",
         branch: "task-closed",
@@ -2455,7 +2455,7 @@ describe("kanna store task base branch integration", () => {
 
     await store.undoClose();
 
-    const reopenedItem = mockState.pipelineItems[0];
+    const reopenedItem = mockState.workflowItems[0];
     expect(reopenedItem.closed_at).toBeNull();
     expect(reopenedItem.port_offset).toBe(1421);
     expect(reopenedItem.port_env).toBe(JSON.stringify({
@@ -2480,7 +2480,7 @@ describe("kanna store task base branch integration", () => {
         },
       },
     };
-    mockState.pipelineItems = [mockState.makeItem({
+    mockState.workflowItems = [mockState.makeItem({
       id: "task-shell",
       branch: "task-shell",
     })];
@@ -2517,7 +2517,7 @@ describe("kanna store task base branch integration", () => {
   });
 
   it("reuses the saved prompt when respawning a reopened PTY task", async () => {
-    mockState.pipelineItems = [
+    mockState.workflowItems = [
       mockState.makeItem({
         id: "item-closed",
         branch: "task-closed",
@@ -2552,7 +2552,7 @@ describe("kanna store task base branch integration", () => {
   });
 
   it("delegates missing worktree recreation to the server before respawning a reopened task", async () => {
-    mockState.pipelineItems = [
+    mockState.workflowItems = [
       mockState.makeItem({
         id: "item-closed",
         branch: "task-closed",
@@ -2579,14 +2579,14 @@ describe("kanna store task base branch integration", () => {
   });
 
   it("advances stages through the local kanna-server action endpoint", async () => {
-    mockState.pipelineDefinition = {
+    mockState.workflowDefinition = {
       name: "default",
       stages: [
         { name: "in progress", transition: "manual" },
         { name: "pr", transition: "manual" },
       ],
     };
-    mockState.pipelineItems = [
+    mockState.workflowItems = [
       mockState.makeItem({
         id: "item-existing",
         branch: "task-existing-branch",
@@ -2609,14 +2609,14 @@ describe("kanna store task base branch integration", () => {
   });
 
   it("does not advance a closed task even when its stage is still active", async () => {
-    mockState.pipelineDefinition = {
+    mockState.workflowDefinition = {
       name: "default",
       stages: [
         { name: "review", transition: "manual" },
         { name: "pr", transition: "manual" },
       ],
     };
-    mockState.pipelineItems = [
+    mockState.workflowItems = [
       mockState.makeItem({
         id: "item-closed-review",
         branch: "task-closed-review",
@@ -2636,12 +2636,12 @@ describe("kanna store task base branch integration", () => {
       "git_worktree_add",
       expect.anything(),
     );
-    expect(mockState.pipelineItems[0]?.stage).toBe("review");
-    expect(mockState.pipelineItems[0]?.closed_at).toBe("2026-06-03 00:02:25");
+    expect(mockState.workflowItems[0]?.stage).toBe("review");
+    expect(mockState.workflowItems[0]?.closed_at).toBe("2026-06-03 00:02:25");
   });
 
   it("keeps selection on the same task when the server advances it in place", async () => {
-    mockState.pipelineItems = [
+    mockState.workflowItems = [
       mockState.makeItem({
         id: "item-source",
         branch: "task-source",
@@ -2651,7 +2651,7 @@ describe("kanna store task base branch integration", () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,
       json: async () => {
-        mockState.pipelineItems = [
+        mockState.workflowItems = [
           mockState.makeItem({
             id: "item-source",
             branch: "task-source",
@@ -2675,7 +2675,7 @@ describe("kanna store task base branch integration", () => {
 
   it("shows the next stage immediately while server advance continues", async () => {
     const serverAdvanceGate = mockState.defer();
-    mockState.pipelineDefinition = {
+    mockState.workflowDefinition = {
       name: "default",
       stages: [
         { name: "in progress", transition: "manual" },
@@ -2683,7 +2683,7 @@ describe("kanna store task base branch integration", () => {
         { name: "pr", transition: "manual" },
       ],
     };
-    mockState.pipelineItems = [
+    mockState.workflowItems = [
       mockState.makeItem({
         id: "item-source",
         branch: "task-source",
@@ -2692,7 +2692,7 @@ describe("kanna store task base branch integration", () => {
     ];
     fetchMock.mockImplementationOnce(async () => {
       await serverAdvanceGate.promise;
-      mockState.pipelineItems = [
+      mockState.workflowItems = [
         mockState.makeItem({
           id: "item-source",
           branch: "task-source",
@@ -2728,14 +2728,14 @@ describe("kanna store task base branch integration", () => {
   });
 
   it("keeps the next-stage projection when the detached server action returns before the snapshot advances", async () => {
-    mockState.pipelineDefinition = {
+    mockState.workflowDefinition = {
       name: "default",
       stages: [
         { name: "in progress", transition: "manual" },
         { name: "review", transition: "manual" },
       ],
     };
-    mockState.pipelineItems = [
+    mockState.workflowItems = [
       mockState.makeItem({
         id: "item-source",
         branch: "task-source",
@@ -2760,7 +2760,7 @@ describe("kanna store task base branch integration", () => {
     expect(store.currentItem?.activity).toBe("working");
     expect(store.sortedItemsForCurrentRepo.find((item) => item.id === "item-source")?.stage).toBe("review");
 
-    mockState.pipelineItems = [
+    mockState.workflowItems = [
       mockState.makeItem({
         id: "item-source",
         branch: "task-source-2",
@@ -2775,14 +2775,14 @@ describe("kanna store task base branch integration", () => {
   });
 
   it("waits for a terminal-stage advance snapshot before restoring selection", async () => {
-    mockState.pipelineDefinition = {
+    mockState.workflowDefinition = {
       name: "default",
       stages: [
         { name: "in progress", transition: "manual" },
         { name: "pr", transition: "manual" },
       ],
     };
-    mockState.pipelineItems = [
+    mockState.workflowItems = [
       mockState.makeItem({
         id: "item-source",
         branch: "task-source",
@@ -2813,7 +2813,7 @@ describe("kanna store task base branch integration", () => {
 
     expect(store.selectedItemId).toBe("item-source");
 
-    mockState.pipelineItems = [
+    mockState.workflowItems = [
       mockState.makeItem({
         id: "item-source",
         branch: "task-source",
@@ -2838,7 +2838,7 @@ describe("kanna store task base branch integration", () => {
 
   it("keeps a post-stage advance on the current stage while post dispatch is in flight", async () => {
     const serverAdvanceGate = mockState.defer();
-    mockState.pipelineDefinition = {
+    mockState.workflowDefinition = {
       name: "default",
       stages: [
         {
@@ -2849,7 +2849,7 @@ describe("kanna store task base branch integration", () => {
         { name: "review", policy: { transition: "manual" } },
       ],
     };
-    mockState.pipelineItems = [
+    mockState.workflowItems = [
       mockState.makeItem({
         id: "item-source",
         branch: "task-source",
@@ -2860,7 +2860,7 @@ describe("kanna store task base branch integration", () => {
     ];
     fetchMock.mockImplementationOnce(async () => {
       await serverAdvanceGate.promise;
-      mockState.pipelineItems = [
+      mockState.workflowItems = [
         mockState.makeItem({
           id: "item-source",
           branch: "task-source",
@@ -2899,7 +2899,7 @@ describe("kanna store task base branch integration", () => {
   });
 
   it("moves selection to the next visible item when the advance closes the task", async () => {
-    mockState.pipelineItems = [
+    mockState.workflowItems = [
       mockState.makeItem({
         id: "item-source",
         branch: "task-source",
@@ -2918,7 +2918,7 @@ describe("kanna store task base branch integration", () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,
       json: async () => {
-        mockState.pipelineItems = [
+        mockState.workflowItems = [
           mockState.makeItem({
             id: "item-source",
             branch: "task-source",
@@ -2948,7 +2948,7 @@ describe("kanna store task base branch integration", () => {
   });
 
   it("shows the blocked-task toast when the server rejects stage advance with conflict", async () => {
-    mockState.pipelineItems = [
+    mockState.workflowItems = [
       mockState.makeItem({
         id: "item-blocked",
         branch: "task-blocked",
@@ -2971,7 +2971,7 @@ describe("kanna store task base branch integration", () => {
   });
 
   it("refreshes after the server reruns an active post-action", async () => {
-    mockState.pipelineItems = [
+    mockState.workflowItems = [
       mockState.makeItem({
         id: "item-source",
         branch: "task-source",
@@ -2992,7 +2992,7 @@ describe("kanna store task base branch integration", () => {
   });
 
   it("does not auto-select a created task when selectOnCreate is false", async () => {
-    mockState.pipelineItems = [
+    mockState.workflowItems = [
       mockState.makeItem({
         id: "item-active",
         branch: "task-item-active",
@@ -3022,7 +3022,7 @@ describe("kanna store task base branch integration", () => {
   });
 
   it("marks the current task blocked in place without killing its live session", async () => {
-    mockState.pipelineItems = [
+    mockState.workflowItems = [
       mockState.makeItem({
         id: "item-active",
         branch: "task-item-active",
@@ -3051,7 +3051,7 @@ describe("kanna store task base branch integration", () => {
     await store.blockTask(["item-blocker"]);
     await flushStore();
 
-    const active = mockState.pipelineItems.find((item) => item.id === "item-active");
+    const active = mockState.workflowItems.find((item) => item.id === "item-active");
     expect(active?.branch).toBe("task-item-active");
     expect(active?.agent_session_id).toBe("claude-item-active");
     expect(mockState.taskBlockers).toContainEqual({
@@ -3076,7 +3076,7 @@ describe("kanna store task base branch integration", () => {
       display_name: "Upstream dependency",
     });
 
-    mockState.pipelineItems = [
+    mockState.workflowItems = [
       mockState.makeItem({
         id: "item-blocked",
         branch: "task-item-blocked",
@@ -3094,7 +3094,7 @@ describe("kanna store task base branch integration", () => {
     await store.editBlockedTask("item-blocked", []);
     await flushStore();
 
-    const blocked = mockState.pipelineItems.find((item) => item.id === "item-blocked");
+    const blocked = mockState.workflowItems.find((item) => item.id === "item-blocked");
     expect(blocked?.branch).toBe("task-item-blocked");
     expect(mockState.removeTaskBlockerMock).toHaveBeenCalledWith(
       expect.anything(),
@@ -3115,7 +3115,7 @@ describe("kanna store task base branch integration", () => {
   });
 
   it("closes a blocked task with live resources through the normal cleanup path", async () => {
-    mockState.pipelineItems = [
+    mockState.workflowItems = [
       mockState.makeItem({
         id: "item-blocked",
         branch: "task-item-blocked",
@@ -3136,7 +3136,7 @@ describe("kanna store task base branch integration", () => {
   });
 
   it("delegates close cleanup to the server task action", async () => {
-    mockState.pipelineItems = [
+    mockState.workflowItems = [
       mockState.makeItem({
         id: "item-cleanup",
         branch: "task-item-cleanup",
@@ -3162,14 +3162,14 @@ describe("kanna store task base branch integration", () => {
       typeof args?.script === "string" &&
       args.script.includes("WIP at task close")
     )).toBe(false);
-    expect(mockState.pipelineItems[0]?.closed_at).toBe(mockState.makeItem().updated_at);
+    expect(mockState.workflowItems[0]?.closed_at).toBe(mockState.makeItem().updated_at);
   });
 
   it("marks a task as tearing down before spawning its teardown session", async () => {
     mockState.repoConfig = {
       teardown: ["pnpm cleanup"],
     };
-    mockState.pipelineItems = [
+    mockState.workflowItems = [
       mockState.makeItem({
         id: "item-teardown",
         branch: "task-item-teardown",
@@ -3203,7 +3203,7 @@ describe("kanna store task base branch integration", () => {
         KANNA_DEV_PORT: 1420,
       },
     };
-    mockState.pipelineItems = [
+    mockState.workflowItems = [
       mockState.makeItem({
         id: "item-sdk",
         branch: "task-item-sdk",
@@ -3251,7 +3251,7 @@ describe("kanna store task base branch integration", () => {
       closed_at: "2026-04-14T01:00:00.000Z",
     });
 
-    mockState.pipelineItems = [
+    mockState.workflowItems = [
       mockState.makeItem({
         id: "item-blocked",
         branch: null,

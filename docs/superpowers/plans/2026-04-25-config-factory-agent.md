@@ -60,7 +60,7 @@ Expected: FAIL because the dynamic command does not exist yet.
 
 - [x] **Step 3: Implement the command**
 
-In `apps/desktop/src/App.vue`, add `handleCreateConfig()` next to the existing factory handlers, load `config-factory`, and push a `create-config` dynamic command next to `create-agent` and `create-pipeline`.
+In `apps/desktop/src/App.vue`, add `handleCreateConfig()` next to the existing factory handlers, load `config-factory`, and push a `create-config` dynamic command next to `create-agent` and `create-workflow`.
 
 - [x] **Step 4: Run test to verify it passes**
 

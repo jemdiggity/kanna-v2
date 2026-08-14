@@ -47,7 +47,7 @@
 - Modify: `apps/desktop/src/i18n/locales/en.json`
 
 - [x] Change the query regression test to expect authoritative repos/items to publish and the refresh to resolve when one manifest fails.
-- [x] Change the composable regression test to expect a visible error toast, cleared pipeline metadata, and an open modal while branch/provider loading continues.
+- [x] Change the composable regression test to expect a visible error toast, cleared workflow metadata, and an open modal while branch/provider loading continues.
 - [x] Add mounted-App integration cases proving a definition failure does not blank rendered task state and New Task opens with a toast.
 - [x] Run `pnpm --dir apps/desktop exec vitest run src/stores/kanna.querySnapshot.test.ts src/composables/useAppTaskCreation.test.ts src/App.test.ts` and confirm the new cases fail for the current behavior.
 - [x] Publish the snapshot before manifest enrichment, isolate each manifest failure, and handle New Task manifest failure inside the composable.

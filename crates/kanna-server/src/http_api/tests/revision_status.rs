@@ -87,10 +87,10 @@ async fn request_revision_route_resolves_branch_style_task_id() {
     let unique = super::unique_test_suffix();
     let repo_root = std::env::temp_dir().join(format!("kanna-http-revision-branch-{unique}"));
     init_test_git_repo(&repo_root);
-    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::create_dir_all(repo_root.join(".kanna/agents/implement")).unwrap();
     std::fs::write(
-            repo_root.join(".kanna/pipelines/qa.json"),
+            repo_root.join(".kanna/workflows/qa.json"),
             r#"{
   "stages": [
     { "name": "in progress", "transition": "manual", "agent": "implement", "prompt": "$TASK_PROMPT" },
@@ -112,7 +112,7 @@ async fn request_revision_route_resolves_branch_style_task_id() {
         .unwrap()
         .success());
     assert!(Command::new("git")
-        .args(["commit", "-m", "add pipeline"])
+        .args(["commit", "-m", "add workflow"])
         .current_dir(&repo_root)
         .status()
         .unwrap()
@@ -326,7 +326,7 @@ async fn automatic_revision_completion_dispatches_commit_post_through_http_route
         ]
     })
     .to_string();
-    std::fs::write(repo_root.join(".kanna/pipelines/qa.json"), &pipeline_def).unwrap();
+    std::fs::write(repo_root.join(".kanna/workflows/qa.json"), &pipeline_def).unwrap();
     std::fs::write(
         repo_root.join(".kanna/agents/implement/AGENT.md"),
         "---\nname: Implement\ndescription: Test implementation agent\nagent_provider: claude\n---\nImplement revision:\n$TASK_PROMPT",
@@ -358,12 +358,12 @@ async fn automatic_revision_completion_dispatches_commit_post_through_http_route
     current_pipeline_def["stages"][0]["policy"]["revision_transition"] =
         serde_json::json!("manual");
     std::fs::write(
-        repo_root.join(".kanna/pipelines/qa.json"),
+        repo_root.join(".kanna/workflows/qa.json"),
         current_pipeline_def.to_string(),
     )
     .unwrap();
     assert!(Command::new("git")
-        .args(["add", ".kanna/pipelines/qa.json"])
+        .args(["add", ".kanna/workflows/qa.json"])
         .current_dir(&repo_root)
         .status()
         .unwrap()
@@ -644,10 +644,10 @@ async fn request_revision_route_preserves_title_and_sends_revision_prompt() {
     let repo_root = std::env::temp_dir().join(format!("kanna-http-revision-title-{unique}"));
     init_test_git_repo(&repo_root);
     let kanna_dir = repo_root.join(".kanna");
-    std::fs::create_dir_all(kanna_dir.join("pipelines")).unwrap();
+    std::fs::create_dir_all(kanna_dir.join("workflows")).unwrap();
     std::fs::create_dir_all(kanna_dir.join("agents/revision")).unwrap();
     std::fs::write(
-        kanna_dir.join("pipelines/revision.json"),
+        kanna_dir.join("workflows/revision.json"),
         serde_json::json!({
             "name": "revision",
             "stages": [
@@ -684,7 +684,7 @@ async fn request_revision_route_preserves_title_and_sends_revision_prompt() {
         .unwrap()
         .success());
     assert!(Command::new("git")
-        .args(["commit", "-m", "add revision pipeline"])
+        .args(["commit", "-m", "add revision workflow"])
         .current_dir(&repo_root)
         .status()
         .unwrap()
@@ -913,7 +913,7 @@ fn setup_revision_budget_fixture(label: &str, revision_limit: i64) -> RevisionBu
     let repo_root = std::env::temp_dir().join(format!("kanna-http-revision-budget-{unique}"));
     init_test_git_repo(&repo_root);
     std::fs::write(
-        repo_root.join(".kanna/pipelines/budget.json"),
+        repo_root.join(".kanna/workflows/budget.json"),
         serde_json::json!({
             "name": "budget",
             "revision_limit": revision_limit,
@@ -1315,7 +1315,7 @@ async fn review_prompt_receives_the_implementer_result_while_prev_result_keeps_t
     std::fs::create_dir_all(repo_root.join(".kanna/agents/implement")).unwrap();
     std::fs::create_dir_all(repo_root.join(".kanna/agents/reviewer")).unwrap();
     std::fs::write(
-        repo_root.join(".kanna/pipelines/prevmain.json"),
+        repo_root.join(".kanna/workflows/prevmain.json"),
         serde_json::json!({
             "name": "prevmain",
             "stages": [
@@ -1579,15 +1579,23 @@ async fn review_prompt_receives_the_implementer_result_while_prev_result_keeps_t
         !implementer_field.contains(COMMIT_SUMMARY),
         "the implementer binding must not be the commit post's result: {implementer_field}"
     );
-    // $PREV_RESULT keeps its documented meaning for the pipelines that want
+    // $PREV_RESULT keeps its documented meaning for the workflows that want
     // the post's result.
     assert!(
         latest_field.contains(COMMIT_SUMMARY),
         "$PREV_RESULT must still carry the latest run's result: {latest_field}"
     );
 
-    let item = db.get_pipeline_item("prevmain-1").unwrap().unwrap();
-    assert_eq!(item.stage.as_deref(), Some("review"));
+    let mut transitioned_stage = None;
+    for _ in 0..200 {
+        let item = db.get_pipeline_item("prevmain-1").unwrap().unwrap();
+        if item.stage.as_deref() == Some("review") {
+            transitioned_stage = item.stage;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(transitioned_stage.as_deref(), Some("review"));
 
     daemon_server.abort();
     drop(db);

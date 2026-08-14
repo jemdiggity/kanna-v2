@@ -52,7 +52,7 @@
     },
     {
       "name": "kanna_get_task",
-      "description": "Fetch one Kanna task's detail: current pipeline name (pipelineName), stage, activity, workspace branch (branch), pull-request URL (prUrl), worktree path, blockers, latest stage-run result (latestRun), the revision-round budget (revisionRounds, revisionLimit), and its place in the task tree — parentTaskId upward, childTaskIds downward. childTaskIds lists the task's direct children oldest first and includes closed ones, so a fan-out that lost the ids it created (compaction, a resumed session) rediscovers them here rather than re-listing the repo; a finished child is exactly the one an orchestrator must reconcile.",
+      "description": "Fetch one Kanna task's detail: current workflow name (workflowName), stage, activity, workspace branch (branch), pull-request URL (prUrl), worktree path, blockers, latest stage-run result (latestRun), the revision-round budget (revisionRounds, revisionLimit), and its place in the task tree — parentTaskId upward, childTaskIds downward. childTaskIds lists the task's direct children oldest first and includes closed ones, so a fan-out that lost the ids it created (compaction, a resumed session) rediscovers them here rather than re-listing the repo; a finished child is exactly the one an orchestrator must reconcile.",
       "method": "GET",
       "path": "/v1/tasks/{task_id}",
       "response": "json",
@@ -63,7 +63,7 @@
     },
     {
       "name": "kanna_list_task_children",
-      "description": "List this task's direct children only, including closed children, in chronological order. Each child exposes its pipeline identity (pipelineName), plus the agent and verdict from its latest recorded stage run; pipelineName distinguishes runless specialty-review children from unrelated direct children. Use this durable history to join and reconcile a fan-out after notifications, compaction, or session resume; it is not an arbitrary closed-task listing.",
+      "description": "List this task's direct children only, including closed children, in chronological order. Each child exposes its workflow identity (workflowName), plus the agent and verdict from its latest recorded stage run; workflowName distinguishes runless specialty-review children from unrelated direct children. Use this durable history to join and reconcile a fan-out after notifications, compaction, or session resume; it is not an arbitrary closed-task listing.",
       "method": "GET",
       "path": "/v1/tasks/{task_id}/children",
       "response": "json",
@@ -88,7 +88,7 @@
     },
     {
       "name": "kanna_wait_events",
-      "description": "Watch several Kanna tasks at once: blocks until any of them emits an event, then returns every event since your cursor plus a new cursor. This is the tool for orchestrating child tasks — kanna_wait_task blocks on one id and resolves only on finish, so it cannot watch a fan-out. Scope it by task_ids, by parent_task_id (your own id, to watch everything you fanned out without naming it), or by repo_id. Event types: 'task.created', 'run.started', 'run.finished' (payload.status succeeded/failed/cancelled, payload.result), 'stage.changed', 'task.pipeline_changed', 'task.pr_created', 'task.revision_requested' (payload.exhausted true means the task is parked for its human — stop waiting), 'task.closed', 'task.awaiting_input' (the agent is parked on an interactive prompt and needs an answer, e.g. via kanna_send_task_input), 'task.merge_signaled' (the task's PR reached the repo's merge agent; payload.source is 'agent' or 'engine'), and 'task.merge_handoff_missing' (the pipeline finished a stage that promised the merge handoff with no PR to hand off, so the task was NOT closed — treat it as a failed approval), and 'task.transfer_finalizing' (a cross-machine transfer is shutting the task's agent down so its conversation can be shipped; payload.phase is one of 'wrap-up-sent', 'idle', 'quit-sent', 'exited', 'already-exited', 'degraded'). Call it in a loop, passing back the opaque cursor you were given unchanged: events that fire between two calls are delivered on the next one, each exactly once. Omit the cursor on the first call to receive the retained history. An elapsed window returns waitOutcome 'timeout' with no events — a normal result, not an error. Fixed task/repo scopes use one sequence watermark. parent_task_id binds that same global watermark to the parent id in a constant-size cursor; membership is evaluated at each read checkpoint, so reparenting never rewinds acknowledged events and newly eligible events after the checkpoint are delivered without cursor growth. hasMore true means another batch is already waiting, so call again immediately. In kanna-mcp, task_ids supplied without machine_id may belong to different currently reachable machines: the adapter discovers each owner, waits on all owners concurrently, tags every event with machineId, and returns one aggregate opaque cursor. Pass that cursor back unchanged. A machine_id pins the entire wait to one machine; parent_task_id and repo_id remain machine-scoped and use the local machine unless machine_id is supplied.",
+      "description": "Watch several Kanna tasks at once: blocks until any of them emits an event, then returns every event since your cursor plus a new cursor. This is the tool for orchestrating child tasks — kanna_wait_task blocks on one id and resolves only on finish, so it cannot watch a fan-out. Scope it by task_ids, by parent_task_id (your own id, to watch everything you fanned out without naming it), or by repo_id. Event types: 'task.created', 'run.started', 'run.finished' (payload.status succeeded/failed/cancelled, payload.result), 'stage.changed', 'task.workflow_changed', 'task.pr_created', 'task.revision_requested' (payload.exhausted true means the task is parked for its human — stop waiting), 'task.closed', 'task.awaiting_input' (the agent is parked on an interactive prompt and needs an answer, e.g. via kanna_send_task_input), 'task.merge_signaled' (the task's PR reached the repo's merge agent; payload.source is 'agent' or 'engine'), and 'task.merge_handoff_missing' (the workflow finished a stage that promised the merge handoff with no PR to hand off, so the task was NOT closed — treat it as a failed approval), and 'task.transfer_finalizing' (a cross-machine transfer is shutting the task's agent down so its conversation can be shipped; payload.phase is one of 'wrap-up-sent', 'idle', 'quit-sent', 'exited', 'already-exited', 'degraded'). Call it in a loop, passing back the opaque cursor you were given unchanged: events that fire between two calls are delivered on the next one, each exactly once. Omit the cursor on the first call to receive the retained history. An elapsed window returns waitOutcome 'timeout' with no events — a normal result, not an error. Fixed task/repo scopes use one sequence watermark. parent_task_id binds that same global watermark to the parent id in a constant-size cursor; membership is evaluated at each read checkpoint, so reparenting never rewinds acknowledged events and newly eligible events after the checkpoint are delivered without cursor growth. hasMore true means another batch is already waiting, so call again immediately. In kanna-mcp, task_ids supplied without machine_id may belong to different currently reachable machines: the adapter discovers each owner, waits on all owners concurrently, tags every event with machineId, and returns one aggregate opaque cursor. Pass that cursor back unchanged. A machine_id pins the entire wait to one machine; parent_task_id and repo_id remain machine-scoped and use the local machine unless machine_id is supplied.",
       "method": "GET",
       "path": "/v1/task-events",
       "response": "json",
@@ -117,7 +117,7 @@
     },
     {
       "name": "kanna_set_task_notify",
-      "description": "Set or clear the task that is notified when this task finishes: that task's terminal receives 'TASK <id> DONE [success|failure|closed]: <title>' as input. The status is one of exactly three words: success (ended cleanly), failure (its terminating run reported failure, or its agent process died), closed (closed before finishing its pipeline \u2014 not a failure). Unlike the creation-time notify_task_id this works on an already-running task, so an orchestrator can adopt tasks it did not create. Notification routing is independent of parent_task_id and does not make the task a child. Omit notify_task_id to stop notifying. For watching many tasks at once, prefer kanna_wait_events.",
+      "description": "Set or clear the task that is notified when this task finishes: that task's terminal receives 'TASK <id> DONE [success|failure|closed]: <title>' as input. The status is one of exactly three words: success (ended cleanly), failure (its terminating run reported failure, or its agent process died), closed (closed before finishing its workflow \u2014 not a failure). Unlike the creation-time notify_task_id this works on an already-running task, so an orchestrator can adopt tasks it did not create. Notification routing is independent of parent_task_id and does not make the task a child. Omit notify_task_id to stop notifying. For watching many tasks at once, prefer kanna_wait_events.",
       "method": "POST",
       "path": "/v1/tasks/{task_id}/actions/set-notify",
       "response": "json",
@@ -128,15 +128,15 @@
       ]
     },
     {
-      "name": "kanna_set_task_pipeline",
-      "description": "Change an open task's pipeline and pin the new pipeline definition. The new pipeline must contain a stage with exactly the task's current stage name; incompatible switches are rejected without changing the task. A running stage run and its live session are left untouched: the newly pinned pipeline governs the task when that run next transitions. Revision rounds already spent carry over, and changing a pipeline does not change the repo's sticky creation-time pipeline choice.",
+      "name": "kanna_set_task_workflow",
+      "description": "Change an open task's workflow and pin the new workflow definition. The new workflow must contain a stage with exactly the task's current stage name; incompatible switches are rejected without changing the task. A running stage run and its live session are left untouched: the newly pinned workflow governs the task when that run next transitions. Revision rounds already spent carry over, and changing a workflow does not change the repo's sticky creation-time workflow choice.",
       "method": "POST",
-      "path": "/v1/tasks/{task_id}/actions/set-pipeline",
+      "path": "/v1/tasks/{task_id}/actions/set-workflow",
       "response": "json",
       "params": [
         { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.", "type": "string", "required": false, "location": "routing" },
-        { "name": "task_id", "description": "Task id (stable across stages) or one of the task's branch names (task-{id} or task-{id}-{n}) to re-pipeline.", "type": "string", "required": true, "location": "path" },
-        { "name": "pipeline_name", "description": "Pipeline definition to pin. Retired built-in aliases still resolve (for example, 'default' resolves to 'no-review' unless the repo defines its own 'default' pipeline).", "type": "string", "required": true, "location": "body", "key": "pipelineName" }
+        { "name": "task_id", "description": "Task id (stable across stages) or one of the task's branch names (task-{id} or task-{id}-{n}) whose workflow should change.", "type": "string", "required": true, "location": "path" },
+        { "name": "workflow_name", "description": "Workflow definition to pin. Retired built-in aliases still resolve (for example, 'default' resolves to 'no-review' unless the repo defines its own 'default' workflow).", "type": "string", "required": true, "location": "body", "key": "workflowName" }
       ]
     },
     {
@@ -186,7 +186,7 @@
     },
     {
       "name": "kanna_create_task",
-      "description": "Create a new Kanna task: forks a worktree and starts the pipeline's first stage agent with the prompt. When called from a Kanna task session, repo_id defaults to the current task's repo. `agent` optionally names any resolved agent definition returned by kanna_list_agents to run the task's first stage with, overriding the pipeline stage's own agent binding. Ordinary durable repository work is top-level by default, even when an orchestrator creates it: use notify_task_id to route completion without parent_task_id. Set parent_task_id only for a genuine semantic subtask in a decomposition or fan-out.",
+      "description": "Create a new Kanna task: forks a worktree and starts the workflow's first stage agent with the prompt. When called from a Kanna task session, repo_id defaults to the current task's repo. `agent` optionally names any resolved agent definition returned by kanna_list_agents to run the task's first stage with, overriding the workflow stage's own agent binding. Ordinary durable repository work is top-level by default, even when an orchestrator creates it: use notify_task_id to route completion without parent_task_id. Set parent_task_id only for a genuine semantic subtask in a decomposition or fan-out.",
       "method": "POST",
       "path": "/v1/tasks",
       "response": "json",
@@ -195,7 +195,7 @@
         { "name": "repo_id", "description": "Repository id from kanna_list_repos. Optional inside a Kanna task session, where it defaults to the current task's repo.", "type": "string", "required": false, "location": "body", "key": "repoId" },
         { "name": "prompt", "description": "Task prompt given to the first stage's agent.", "type": "string", "required": true, "location": "body" },
         { "name": "display_name", "description": "Short human-readable task title shown in the sidebar. Omitting it does not derive a title: the task falls back to the prompt text itself, clipped to fit, so tasks whose prompts share an opening line become indistinguishable. Always pass one when creating several tasks from a template.", "type": "string", "required": false, "location": "body", "key": "displayName" },
-        { "name": "pipeline_name", "description": "Pipeline to run, by review depth: 'no-review', 'single-reviewer', or 'specialized-reviewers'. Defaults to the repo's configured pipeline. Internal pipelines Kanna binds itself are not choices here — only name one if an agent definition tells you to.", "type": "string", "required": false, "location": "body", "key": "pipelineName" },
+        { "name": "workflow_name", "description": "Workflow to run, by review depth: 'no-review', 'single-reviewer', or 'specialized-reviewers'. Defaults to the repo's configured workflow. Internal workflows Kanna binds itself are not choices here — only name one if an agent definition tells you to.", "type": "string", "required": false, "location": "body", "key": "workflowName" },
         { "name": "agent", "description": "Any resolved agent definition name. kanna_list_agents lists the choices — definitions declaring `visibility: internal` are excluded from that listing but still resolve here when an agent definition tells you to name one. It runs the first stage instead of the stage's own agent binding; repo overrides and EXTEND.md layering are honored.", "type": "string", "required": false, "location": "body" },
         { "name": "base_ref", "description": "Git ref to fork the task's branch and worktree from. Defaults to the repo's default branch.", "type": "string", "required": false, "location": "body", "key": "baseRef" },
         { "name": "agent_provider", "description": "Explicit agent provider id: 'claude', 'copilot', 'codex', 'opencode', or 'antigravity'. When omitted, Kanna uses the selected stage or agent definition's provider candidates, then the configured user default.", "type": "string", "required": false, "location": "body", "key": "agentProvider" },
@@ -204,7 +204,7 @@
         { "name": "effort", "description": "Provider-native reasoning effort passed without normalization. Codex uses model_reasoning_effort and validates against the selected model; Claude uses --effort (low|medium|high|xhigh|max); Copilot uses --effort (none|minimal|low|medium|high|xhigh|max); OpenCode uses --variant and validates against the selected model; Antigravity uses --effort (low|medium|high). Explicit task effort overrides repo agentProviders effort, then layered agent-definition frontmatter.", "type": "string", "required": false, "location": "body" },
         { "name": "permission_mode", "description": "Permission mode passed to the agent CLI, in camelCase: 'dontAsk', 'acceptEdits', or 'default'.", "type": "string", "required": false, "location": "body", "key": "permissionMode" },
         { "name": "parent_task_id", "description": "Existing durable work-item id to nest this task under as a genuine semantic subtask in a decomposition or fan-out. Omit for ordinary top-level work and when the creator merely owns, assigns, or monitors it; completion routing belongs in notify_task_id.", "type": "string", "required": false, "location": "body", "key": "parentTaskId" },
-        { "name": "notify_task_id", "description": "Task id to notify when this task finishes: that task's terminal receives 'TASK <id> DONE [success|failure|closed]: <title>' as input. The status is one of exactly three words: success (ended cleanly), failure (its terminating run reported failure, or its agent process died), closed (closed before finishing its pipeline \u2014 not a failure). This is independent of parent_task_id: notifying an orchestrator does not make the new task its child.", "type": "string", "required": false, "location": "body", "key": "notifyTaskId" },
+        { "name": "notify_task_id", "description": "Task id to notify when this task finishes: that task's terminal receives 'TASK <id> DONE [success|failure|closed]: <title>' as input. The status is one of exactly three words: success (ended cleanly), failure (its terminating run reported failure, or its agent process died), closed (closed before finishing its workflow \u2014 not a failure). This is independent of parent_task_id: notifying an orchestrator does not make the new task its child.", "type": "string", "required": false, "location": "body", "key": "notifyTaskId" },
         { "name": "allowed_tools", "description": "Allow-listed tool names passed to the agent CLI.", "type": "string_array", "required": false, "location": "body", "key": "allowedTools" },
         { "name": "blocker_task_ids", "description": "Task ids that must finish before this task; it shows as blocked until they do.", "type": "string_array", "required": false, "location": "body", "key": "blockerTaskIds" }
       ]
@@ -276,7 +276,7 @@
     },
     {
       "name": "kanna_advance_stage",
-      "description": "Advance a Kanna task to the next pipeline stage. If the current stage declares a post, the post prompt runs in the current agent session first and its success triggers the transition. A transition forks a fresh branch and worktree from the committed tip and starts the next stage's agent there; the task id stays the same. Advancing past the final stage closes the task.",
+      "description": "Advance a Kanna task to the next workflow stage. If the current stage declares a post, the post prompt runs in the current agent session first and its success triggers the transition. A transition forks a fresh branch and worktree from the committed tip and starts the next stage's agent there; the task id stays the same. Advancing past the final stage closes the task.",
       "method": "POST",
       "path": "/v1/tasks/{task_id}/actions/advance-stage",
       "response": "json",
@@ -287,7 +287,7 @@
     },
     {
       "name": "kanna_rerun_stage",
-      "description": "Explicitly restart the current pipeline stage from scratch in the same worktree: cancels the running stage run and starts a fresh provider conversation. For recovery after a dead session, use kanna_resume_task so Kanna preserves the provider transcript when possible.",
+      "description": "Explicitly restart the current workflow stage from scratch in the same worktree: cancels the running stage run and starts a fresh provider conversation. For recovery after a dead session, use kanna_resume_task so Kanna preserves the provider transcript when possible.",
       "method": "POST",
       "path": "/v1/tasks/{task_id}/actions/rerun-stage",
       "response": "json",
@@ -355,7 +355,7 @@
     },
     {
       "name": "kanna_complete_stage",
-      "description": "Record pipeline stage completion for the current stage run. Success can trigger configured auto-advance; failure records the result and stops advancement.",
+      "description": "Record workflow stage completion for the current stage run. Success can trigger configured auto-advance; failure records the result and stops advancement.",
       "method": "POST",
       "path": "/v1/tasks/{task_id}/actions/complete-stage",
       "response": "json",
@@ -375,7 +375,7 @@
       "params": [
         { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.", "type": "string", "required": false, "location": "routing" },
         { "name": "task_id", "description": "Task id (stable across stages) or one of the task's branch names (task-{id} or task-{id}-{n}).", "type": "string", "required": true, "location": "path" },
-        { "name": "target_stage", "description": "Pipeline stage whose agent should make the changes.", "type": "string", "required": false, "location": "body", "key": "targetStage", "default": "in progress" },
+        { "name": "target_stage", "description": "Workflow stage whose agent should make the changes.", "type": "string", "required": false, "location": "body", "key": "targetStage", "default": "in progress" },
         { "name": "summary", "description": "Short summary of why the revision is needed, shown to the user.", "type": "string", "required": true, "location": "body" },
         { "name": "prompt", "description": "Instructions for the revising agent. Kanna delivers the original task prompt alongside this, so describe only the required changes.", "type": "string", "required": true, "location": "body" },
         { "name": "metadata", "description": "Optional structured data (e.g. review findings) stored on the revision request.", "type": "object", "required": false, "location": "body" }

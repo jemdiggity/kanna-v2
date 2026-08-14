@@ -4,7 +4,7 @@
 
 **Goal:** Extract all persistent state and DB logic from App.vue into a Pinia store with reactive async computed properties, reducing App.vue to a UI shell.
 
-**Architecture:** Single Pinia setup store (`useKannaStore`) owns DB handle, repos, pipeline items, preferences, and event listeners. DB handle resolved before app mount via async bootstrap in main.ts. VueUse `computedAsync` replaces manual refresh calls.
+**Architecture:** Single Pinia setup store (`useKannaStore`) owns DB handle, repos, workflow items, preferences, and event listeners. DB handle resolved before app mount via async bootstrap in main.ts. VueUse `computedAsync` replaces manual refresh calls.
 
 **Tech Stack:** Vue 3, Pinia, @vueuse/core (computedAsync), TypeScript, @kanna/db
 
@@ -318,7 +318,7 @@ export const useKannaStore = defineStore("kanna", () => {
     bump();
   }
 
-  // ── Actions: Pipeline CRUD ───────────────────────────────────────
+  // ── Actions: Workflow CRUD ───────────────────────────────────────
   async function createItem(
     repoId: string,
     repoPath: string,
@@ -1065,7 +1065,7 @@ onMounted(async () => {
     <Sidebar
       v-if="!zenMode && !maximized"
       :repos="store.repos"
-      :pipeline-items="store.items"
+      :workflow-items="store.items"
       :selected-repo-id="store.selectedRepoId"
       :selected-item-id="store.selectedItemId"
       @select-repo="store.selectRepo"
@@ -1199,19 +1199,19 @@ Remove the composables that have been absorbed by the store.
 
 **Files:**
 - Delete: `apps/desktop/src/composables/useRepo.ts`
-- Delete: `apps/desktop/src/composables/usePipeline.ts`
+- Delete: `apps/desktop/src/composables/useWorkflow.ts`
 - Delete: `apps/desktop/src/composables/usePreferences.ts`
 
 - [ ] **Step 1: Delete the files**
 
 ```bash
-git rm apps/desktop/src/composables/useRepo.ts apps/desktop/src/composables/usePipeline.ts apps/desktop/src/composables/usePreferences.ts
+git rm apps/desktop/src/composables/useRepo.ts apps/desktop/src/composables/useWorkflow.ts apps/desktop/src/composables/usePreferences.ts
 ```
 
 - [ ] **Step 2: Verify no remaining imports**
 
 ```bash
-cd apps/desktop && grep -r "useRepo\|usePipeline\|usePreferences" src/ --include="*.ts" --include="*.vue" | grep -v node_modules | grep -v "stores/"
+cd apps/desktop && grep -r "useRepo\|useWorkflow\|usePreferences" src/ --include="*.ts" --include="*.vue" | grep -v node_modules | grep -v "stores/"
 ```
 
 Expected: No output (no remaining references).

@@ -133,7 +133,7 @@ git commit -m "feat: add agent provider resolver"
 
 Expected: a commit is created for the pure resolver helper and its tests.
 
-### Task 2: Use the resolver in task creation and pipeline execution
+### Task 2: Use the resolver in task creation and workflow execution
 
 **Files:**
 - Modify: `apps/desktop/src/stores/kanna.ts`
@@ -356,7 +356,7 @@ Expected: PASS with resolver, precedence, and spawn-guard coverage.
 Run:
 
 ```bash
-bun --cwd packages/core test src/config/custom-tasks.test.ts src/pipeline/agent-loader.test.ts
+bun --cwd packages/core test src/config/custom-tasks.test.ts src/workflow/agent-loader.test.ts
 ```
 
 Expected: PASS with `34/34` tests still green.

@@ -137,7 +137,7 @@ Requires `claude` in PATH with valid auth. Tests use `--max-turns 1`, `--model h
 1. **App startup**: Check for daemon (PID file at `~/Library/Application Support/Kanna/daemon.pid` + socket probe at `daemon.sock`). Spawn if not found.
 2. **Task creation**: User creates task → git worktree created → the Tauri backend builds the Claude command with the session UUID interpolated into the hook settings, then sends `Spawn` to the daemon:
    ```typescript
-   // In usePipeline.ts — build the claude command with hooks
+   // In useWorkflow.ts — build the claude command with hooks
    const hookSettings = JSON.stringify({
      hooks: {
        Stop: [{ hooks: [{ type: "command", command: `kanna-hook stop ${sessionId}` }] }],
@@ -158,7 +158,7 @@ Requires `claude` in PATH with valid auth. Tests use `--max-turns 1`, `--model h
    ```json
    {"type":"HookEvent","session_id":"SESSION_ID","event":"Stop","data":{}}
    ```
-   Daemon relays → Tauri event `hook_event` → frontend updates pipeline state.
+   Daemon relays → Tauri event `hook_event` → frontend updates workflow state.
 5. **Completion**: Process exit → daemon sends `Exit` event → task marked complete.
 
 ### Hook Notification Binary
@@ -272,7 +272,7 @@ The event connection subscribes to the daemon's broadcast channel so it receives
 
 ### Frontend Changes
 
-**usePipeline.ts** — `createItem`:
+**useWorkflow.ts** — `createItem`:
 - Default `agent_type: "pty"` for user tasks
 - PTY mode: call `invoke("spawn_session", { sessionId, cwd, executable: "/bin/zsh", args: ["--login", "-c", claudeCmd], ... })`
 - SDK mode: call `invoke("create_agent_session", { ... })` (existing)
@@ -301,7 +301,7 @@ listen("hook_event", (event) => {
 4. Daemon event bridge in Tauri backend (two connections: command + event)
 5. Daemon sidecar: bundling + startup in Tauri
 6. End-to-end hook delivery test (hook script → daemon → Tauri event)
-7. PTY task creation flow in `usePipeline`
+7. PTY task creation flow in `useWorkflow`
 8. Frontend: conditional TerminalView/AgentView rendering
 9. Hook event handling (Stop → enable PR)
 10. E2E test: create PTY task, verify terminal output, verify hook events

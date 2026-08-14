@@ -504,4 +504,4 @@ git diff -- apps/mobile/src/screens/taskFileSyntaxHighlight.ts apps/mobile/src/s
 
 Expected: no whitespace errors; only the approved highlighting implementation, tests, dependency metadata, spec, and plan are changed.
 
-No commit step is included because this Kanna stage explicitly leaves committing to the pipeline's later commit post.
+No commit step is included because this Kanna stage explicitly leaves committing to the workflow's later commit post.

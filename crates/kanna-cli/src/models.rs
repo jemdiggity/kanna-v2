@@ -86,7 +86,7 @@ pub(crate) struct TaskDetail {
     pub(crate) repo_id: String,
     pub(crate) title: String,
     pub(crate) stage: Option<String>,
-    pub(crate) pipeline_name: Option<String>,
+    pub(crate) workflow_name: Option<String>,
     pub(crate) stage_transition: Option<String>,
     pub(crate) activity: Option<String>,
     pub(crate) snippet: Option<String>,
@@ -99,7 +99,7 @@ pub(crate) struct TaskDetail {
     pub(crate) commits_ahead: i64,
     pub(crate) commits_behind: i64,
     pub(crate) dirty: bool,
-    /// Agent-requested revision rounds spent, and the cap the task's pipeline
+    /// Agent-requested revision rounds spent, and the cap the task's workflow
     /// allows (`0` = unlimited). Optional so a desktop server predating the
     /// revision budget still deserializes; when the server sends them, a
     /// no-MCP agent reading `kanna-cli task get` sees the same budget an MCP
@@ -144,13 +144,13 @@ pub(crate) struct TaskChild {
     pub(crate) id: String,
     pub(crate) agent: Option<String>,
     /// Absence is contract-bearing here, unlike the other fields: a server new
-    /// enough to serve this route always sends a `pipeline` (the column is NOT
-    /// NULL), so a missing `pipelineName` means the responding server predates
+    /// enough to serve this route always sends a `workflow` (the column is NOT
+    /// NULL), so a missing `workflowName` means the responding server predates
     /// the discriminator. Skipping `None` keeps that signal intact through the
     /// typed fallback instead of laundering an old server's omission into an
     /// explicit `null` the dispatcher would have to classify differently.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) pipeline_name: Option<String>,
+    pub(crate) workflow_name: Option<String>,
     pub(crate) created_at: Option<String>,
     pub(crate) closed_at: Option<String>,
     pub(crate) latest_run: Option<TaskLatestRun>,
@@ -191,7 +191,7 @@ pub(crate) struct CreateTaskRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) display_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) pipeline_name: Option<String>,
+    pub(crate) workflow_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) base_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -297,15 +297,15 @@ pub(crate) struct MobileNotificationResponse {
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct SetTaskPipelineRequest {
-    pub(crate) pipeline_name: String,
+pub(crate) struct SetTaskWorkflowRequest {
+    pub(crate) workflow_name: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct SetTaskPipelineResponse {
+pub(crate) struct SetTaskWorkflowResponse {
     pub(crate) task_id: String,
-    pub(crate) pipeline_name: String,
+    pub(crate) workflow_name: String,
     pub(crate) stage: String,
     pub(crate) revision_rounds: i64,
     pub(crate) revision_limit: i64,
@@ -351,7 +351,7 @@ pub(crate) struct TaskCreateOptions {
     pub(crate) repo_id: String,
     pub(crate) prompt: String,
     pub(crate) display_name: Option<String>,
-    pub(crate) pipeline_name: Option<String>,
+    pub(crate) workflow_name: Option<String>,
     pub(crate) base_ref: Option<String>,
     pub(crate) agent: Option<String>,
     pub(crate) agent_provider: Option<String>,

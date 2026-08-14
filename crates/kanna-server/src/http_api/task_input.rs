@@ -171,10 +171,10 @@ pub(super) async fn send_task_input(
 pub(crate) enum TaskCompletionTrigger {
     /// The task's agent session ended on its own: an unkilled daemon `Exit`.
     AgentSessionExit { exit_code: i32 },
-    /// The task advanced past its final pipeline stage — a normal completion.
-    PipelineCompleted,
+    /// The task advanced past its final workflow stage — a normal completion.
+    WorkflowCompleted,
     /// The task was closed directly (sidebar ⇧⌘⌫ or `POST /v1/tasks/{id}/close`)
-    /// without finishing its pipeline.
+    /// without finishing its workflow.
     DirectClose,
 }
 
@@ -187,12 +187,12 @@ pub(crate) enum TaskCompletionTrigger {
 /// receivers match these three words exactly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TaskCompletionStatus {
-    /// The task ran to a clean end: it reached the end of its pipeline, or its
+    /// The task ran to a clean end: it reached the end of its workflow, or its
     /// session ended with no failing verdict against it.
     Success,
     /// The task's terminating run reported failure, or its agent process died.
     Failure,
-    /// The task was closed before finishing its pipeline. Not a failure — no
+    /// The task was closed before finishing its workflow. Not a failure — no
     /// verdict was reached at all.
     Closed,
 }
@@ -212,7 +212,7 @@ impl TaskCompletionStatus {
 /// A direct close reached no verdict, so it reports `closed` whatever state the
 /// task was in. Otherwise the terminating `stage_run` decides: an agent that
 /// reported failure and then let its session end is a failure however cleanly
-/// the PTY exited, and a task that reached the end of its pipeline behind a
+/// the PTY exited, and a task that reached the end of its workflow behind a
 /// succeeded run is a success even though closing it killed the session.
 fn derive_task_completion_status(
     db: &Db,
@@ -322,7 +322,7 @@ pub(crate) fn restore_task_run_for_live_session(
 /// Deliver a completion notification for a task whose close has already
 /// committed.
 ///
-/// By this point the close is durable: the pipeline item is closed, its
+/// By this point the close is durable: the workflow item is closed, its
 /// sessions are gone, and its worktrees are cleaned up. A notify target whose
 /// own session has since died is a routine outcome (orchestrators close
 /// before their children do), and reporting it as a failed close is worse

@@ -120,7 +120,7 @@ pub trait ProviderAdapter: Send {
 /// without a native system-prompt channel. Stage composition owns sectioning,
 /// so an already-sectioned prompt is preserved; raw prompts receive a
 /// compatibility `## Your Task` heading. The TS mirror is
-/// `buildKannaRuntimeUserPrompt` in `packages/core/src/pipeline/prompt-builder.ts`
+/// `buildKannaRuntimeUserPrompt` in `packages/core/src/workflow/prompt-builder.ts`
 /// — keep the formats in sync.
 pub fn prompt_with_system_prompt(system_prompt: Option<&str>, prompt: &str) -> String {
     match system_prompt.filter(|value| !value.trim().is_empty()) {

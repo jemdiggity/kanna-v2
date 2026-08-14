@@ -62,7 +62,7 @@ export async function buildTaskLifecycleEnv(options: {
     ...worktreeEnv,
     ...buildTaskRuntimeEnv({
       taskId: options.taskId,
-      socketPath: await invoke<string>("get_pipeline_socket_path"),
+      socketPath: await invoke<string>("get_workflow_socket_path"),
       serverBaseUrl: await resolveCurrentKannaServerBaseUrl(`creating ${options.logContext} env`),
       kannaCliPath,
       path: worktreeEnv.PATH ?? inheritedPath,

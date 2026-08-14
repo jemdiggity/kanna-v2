@@ -21,7 +21,7 @@ Remote-owned workspace tasks should be visually distinct from local tasks in the
 
 Add a sidebar-only presentation field derived from `WorkspaceTask.owner.kind` before tasks are passed to `Sidebar.vue`. This keeps ownership decisions in the workspace layer and avoids encoding remote detection from task ID prefixes inside the sidebar.
 
-The sidebar component will accept pipeline-item-like objects with optional remote presentation metadata. It will use a helper to determine whether to show the marker, then render title content through a shared task-title fragment for pinned, normal, and blocked rows.
+The sidebar component will accept workflow-item-like objects with optional remote presentation metadata. It will use a helper to determine whether to show the marker, then render title content through a shared task-title fragment for pinned, normal, and blocked rows.
 
 ## Testing
 

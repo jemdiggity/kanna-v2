@@ -30,7 +30,7 @@ impl Drop for ProviderLookupPathGuard {
 fn write_setup_repo(
     label: &str,
     setup_command: &str,
-    with_stage_pipeline: bool,
+    with_stage_workflow: bool,
 ) -> std::path::PathBuf {
     let repo_root = init_git_repo_without_provider_fixtures(label);
     std::fs::create_dir_all(repo_root.join(".kanna")).unwrap();
@@ -47,10 +47,10 @@ fn write_setup_repo(
         .to_string(),
     )
     .unwrap();
-    if with_stage_pipeline {
-        std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    if with_stage_workflow {
+        std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
         std::fs::write(
-            repo_root.join(".kanna/pipelines/default.json"),
+            repo_root.join(".kanna/workflows/default.json"),
             serde_json::json!({
                 "stages": [
                     {
@@ -200,7 +200,7 @@ async fn initial_pty_task_streams_setup_before_starting_setup_created_provider()
             repo_id: "repo-1".to_string(),
             prompt: "Use the setup-provisioned Codex".to_string(),
             display_name: None,
-            pipeline_name: None,
+            workflow_name: None,
             stage: None,
             base_ref: None,
             agent: None,
@@ -368,7 +368,7 @@ fn initial_pty_task_binds_first_provider_before_setup() {
             repo_id: "repo-1".to_string(),
             prompt: "Use the first configured provider".to_string(),
             display_name: None,
-            pipeline_name: None,
+            workflow_name: None,
             stage: None,
             base_ref: None,
             agent: None,
@@ -437,7 +437,7 @@ async fn initial_headless_task_runs_setup_before_resolving_workspace_provider() 
             repo_id: "repo-1".to_string(),
             prompt: "Use the setup-provisioned Codex".to_string(),
             display_name: None,
-            pipeline_name: None,
+            workflow_name: None,
             stage: None,
             base_ref: None,
             agent: None,
@@ -635,9 +635,9 @@ async fn stage_fork_runs_repo_setup_before_resolving_pty_provider() {
 #[test]
 fn headless_post_preparation_does_not_run_fallback_environment_setup() {
     let repo_root = init_git_repo("headless-post-fallback-setup");
-    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::write(
-        repo_root.join(".kanna/pipelines/default.json"),
+        repo_root.join(".kanna/workflows/default.json"),
         serde_json::json!({
             "environments": {
                 "dev": {
@@ -661,7 +661,7 @@ fn headless_post_preparation_does_not_run_fallback_environment_setup() {
         .to_string(),
     )
     .unwrap();
-    publish_origin_main(&repo_root, "publish post fallback setup pipeline");
+    publish_origin_main(&repo_root, "publish post fallback setup workflow");
     let config = test_config("headless-post-fallback-setup");
     let db = Db::open_for_tests(&config.db_path).unwrap();
     let source_worktree = seed_source_task(&config, &db, &repo_root, "agent");

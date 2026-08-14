@@ -92,7 +92,7 @@ Three `alert()` calls in `App.vue` and one in `kanna.ts`:
 Add `useToast()` calls alongside existing `console.error` in catch blocks for:
 - Daemon connection/spawn failures
 - Git operations (checkout, branch creation, worktree)
-- Task/pipeline CRUD failures (create, update, delete, stage transitions)
+- Task/workflow CRUD failures (create, update, delete, stage transitions)
 - GitHub API failures (PR creation, label sync)
 
 `console.error` calls remain in place for debugging. Toast calls are additive.

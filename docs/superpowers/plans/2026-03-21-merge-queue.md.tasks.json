@@ -5,7 +5,7 @@
     {"id": 2, "subject": "Task 2: Add merge stage and transitions", "status": "completed", "lastUpdated": "2026-03-21T12:00:00Z"},
     {"id": 3, "subject": "Task 3: Add merge badge", "status": "completed", "lastUpdated": "2026-03-21T12:00:00Z"},
     {"id": 4, "subject": "Task 4: Add Merge Queue sidebar section", "status": "completed", "blockedBy": [2, 3], "lastUpdated": "2026-03-21T12:01:00Z"},
-    {"id": 5, "subject": "Task 5: Add startMergeAgent() to usePipeline", "status": "completed", "blockedBy": [1, 2], "lastUpdated": "2026-03-21T12:01:00Z"},
+    {"id": 5, "subject": "Task 5: Add startMergeAgent() to useWorkflow", "status": "completed", "blockedBy": [1, 2], "lastUpdated": "2026-03-21T12:01:00Z"},
     {"id": 6, "subject": "Task 6: Add keyboard shortcut, wire action, and hook handlers", "status": "completed", "blockedBy": [5], "lastUpdated": "2026-03-21T12:02:00Z"},
     {"id": 7, "subject": "Task 7: Manual smoke test", "status": "pending", "blockedBy": [4, 6]}
   ],

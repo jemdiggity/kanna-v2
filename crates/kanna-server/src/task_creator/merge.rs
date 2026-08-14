@@ -1,6 +1,6 @@
 use super::definitions::{
-    DefinitionVisibility, PipelineDefinition, PipelineStage, PipelineStagePolicy,
-    PipelineStageTransition,
+    DefinitionVisibility, WorkflowDefinition, WorkflowStage, WorkflowStagePolicy,
+    WorkflowStageTransition,
 };
 use super::lifecycle::spawn_prepared_task_for_api_recording_stage_run;
 use super::types::{PreparedTaskSpawn, TaskCreationRequest};
@@ -49,38 +49,38 @@ fn load_merge_source_repo(db: &Db, source_task_id: &str) -> Result<Repo, String>
 }
 
 fn build_merge_task_request() -> Result<TaskCreationRequest, String> {
-    let pipeline_name = "singleton-merge".to_string();
-    let pipeline = PipelineDefinition {
-        name: Some(pipeline_name.clone()),
+    let workflow_name = "singleton-merge".to_string();
+    let workflow = WorkflowDefinition {
+        name: Some(workflow_name.clone()),
         description: None,
-        stages: vec![PipelineStage {
+        stages: vec![WorkflowStage {
             name: "in progress".to_string(),
             description: None,
             agent: Some("merge".to_string()),
             prompt: Some("$TASK_PROMPT".to_string()),
             agent_provider: None,
             environment: None,
-            policy: PipelineStagePolicy {
-                transition: PipelineStageTransition::Manual,
+            policy: WorkflowStagePolicy {
+                transition: WorkflowStageTransition::Manual,
                 revision_transition: None,
             },
             post: None,
         }],
         environments: None,
         revision_limit: None,
-        // Kanna binds this synthetic pipeline itself; it is never a listed
+        // Kanna binds this synthetic workflow itself; it is never a listed
         // choice, and visibility is never consulted on resolution anyway.
         visibility: DefinitionVisibility::Internal,
     };
-    let pipeline_def =
-        serde_json::to_string(&pipeline).map_err(|e| format!("serialize error: {}", e))?;
+    let workflow_def =
+        serde_json::to_string(&workflow).map_err(|e| format!("serialize error: {}", e))?;
     Ok(TaskCreationRequest {
         requested_task_id: None,
         create_intent_json: None,
         task_prompt: String::new(),
         display_name: Some("Merge Master".to_string()),
-        pipeline_name: Some(pipeline_name),
-        pipeline_def: Some(pipeline_def),
+        workflow_name: Some(workflow_name),
+        workflow_def: Some(workflow_def),
         base_ref: None,
         stored_base_ref: None,
         stage_override: None,

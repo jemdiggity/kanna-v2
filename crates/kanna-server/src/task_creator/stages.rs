@@ -2,8 +2,8 @@ use crate::config::Config;
 use crate::db::{Db, TaskStageSource};
 
 use super::definitions::{
-    parse_stored_pipeline_definition, post_as_stage, resolve_stage_position, PipelineDefinition,
-    PipelineStage, PipelineStageTransition, RepoDefinitions, StagePosition,
+    parse_stored_workflow_definition, post_as_stage, resolve_stage_position, RepoDefinitions,
+    StagePosition, WorkflowDefinition, WorkflowStage, WorkflowStageTransition,
 };
 use super::prepare_stage_run_spawn;
 use super::prompt::{
@@ -18,7 +18,7 @@ use super::types::{
 use super::worktree::next_fork_branch;
 use super::worktree::resolve_current_source_worktree_branch;
 use super::SpawnAgentOverrides;
-use super::FALLBACK_PIPELINE_NAME;
+use super::FALLBACK_WORKFLOW_NAME;
 use crate::db::Repo;
 
 /// Everything stage routing needs about the task being transitioned.
@@ -27,16 +27,16 @@ struct StageTransitionContext<'a> {
     source_task_id: &'a str,
     repo: &'a Repo,
     definitions: &'a RepoDefinitions,
-    pipeline_name: &'a str,
-    pipeline: &'a PipelineDefinition,
+    workflow_name: &'a str,
+    workflow: &'a WorkflowDefinition,
 }
 
 struct LoadedStageTransitionSource {
     source_task: TaskStageSource,
     repo: Repo,
     definitions: RepoDefinitions,
-    pipeline_name: String,
-    pipeline: PipelineDefinition,
+    workflow_name: String,
+    workflow: WorkflowDefinition,
     current_stage_name: String,
 }
 
@@ -63,22 +63,22 @@ fn load_stage_transition_source(
 ) -> Result<LoadedStageTransitionSource, String> {
     let LoadedStageIdentity { source_task, repo } = identity;
     let definitions = RepoDefinitions::resolve(&repo)?;
-    let pipeline_name = source_task
+    let workflow_name = source_task
         .pipeline
         .clone()
-        .unwrap_or_else(|| FALLBACK_PIPELINE_NAME.to_string());
+        .unwrap_or_else(|| FALLBACK_WORKFLOW_NAME.to_string());
     let current_stage_name = source_task
         .stage
         .clone()
         .ok_or_else(|| format!("task has no stage: {}", source_task_id))?;
-    let pipeline =
-        definitions.task_pipeline(&pipeline_name, source_task.pipeline_def.as_deref())?;
+    let workflow =
+        definitions.task_workflow(&workflow_name, source_task.pipeline_def.as_deref())?;
     Ok(LoadedStageTransitionSource {
         source_task,
         repo,
         definitions,
-        pipeline_name,
-        pipeline,
+        workflow_name,
+        workflow,
         current_stage_name,
     })
 }
@@ -104,18 +104,18 @@ pub(crate) fn prepare_advance_stage_for_api(
         source_task_id,
         repo: &loaded.repo,
         definitions: &loaded.definitions,
-        pipeline_name: &loaded.pipeline_name,
-        pipeline: &loaded.pipeline,
+        workflow_name: &loaded.workflow_name,
+        workflow: &loaded.workflow,
     };
 
-    let position = resolve_stage_position(&loaded.pipeline, &loaded.current_stage_name)
-        .ok_or_else(|| format!("stage not found in pipeline: {}", loaded.current_stage_name))?;
+    let position = resolve_stage_position(&loaded.workflow, &loaded.current_stage_name)
+        .ok_or_else(|| format!("stage not found in workflow: {}", loaded.current_stage_name))?;
     match position {
         // Legacy in-flight task parked at a folded post name (e.g. `commit`):
         // the post is the current context, so advancing swaps past its owner.
         StagePosition::Post { owner } => prepare_swap_to_index(db, config, &context, owner + 1),
         StagePosition::Stage(index) => {
-            let stage = &loaded.pipeline.stages[index];
+            let stage = &loaded.workflow.stages[index];
             if let Some(post) = &stage.post {
                 let latest = db
                     .latest_stage_run(source_task_id)
@@ -169,12 +169,12 @@ pub(crate) fn prepare_stage_completion_for_api(
         source_task_id,
         repo: &loaded.repo,
         definitions: &loaded.definitions,
-        pipeline_name: &loaded.pipeline_name,
-        pipeline: &loaded.pipeline,
+        workflow_name: &loaded.workflow_name,
+        workflow: &loaded.workflow,
     };
 
-    let position = resolve_stage_position(&loaded.pipeline, &loaded.current_stage_name)
-        .ok_or_else(|| format!("stage not found in pipeline: {}", loaded.current_stage_name))?;
+    let position = resolve_stage_position(&loaded.workflow, &loaded.current_stage_name)
+        .ok_or_else(|| format!("stage not found in workflow: {}", loaded.current_stage_name))?;
     match position {
         // Legacy in-flight task parked at a folded post name: success means
         // the post finished, which always advances past its owner.
@@ -182,25 +182,25 @@ pub(crate) fn prepare_stage_completion_for_api(
             prepare_swap_to_index(db, config, &context, owner + 1).map(Some)
         }
         StagePosition::Stage(index) => {
-            let stage = &loaded.pipeline.stages[index];
+            let stage = &loaded.workflow.stages[index];
             if finished_run_kind == Some("post") {
                 return prepare_swap_to_index(db, config, &context, index + 1).map(Some);
             }
             let transition = match completion_transition {
-                Some("manual") => PipelineStageTransition::Manual,
-                Some("auto") => PipelineStageTransition::Auto,
+                Some("manual") => WorkflowStageTransition::Manual,
+                Some("auto") => WorkflowStageTransition::Auto,
                 Some(value) => {
                     return Err(format!("invalid stage run completion transition: {value}"))
                 }
                 None => stage.policy.transition,
             };
-            if transition != PipelineStageTransition::Auto {
+            if transition != WorkflowStageTransition::Auto {
                 return Ok(None);
             }
             if stage.post.is_some() {
                 return prepare_post_dispatch(db, config, &context, index).map(Some);
             }
-            if loaded.pipeline.stages.get(index + 1).is_none() {
+            if loaded.workflow.stages.get(index + 1).is_none() {
                 // An auto main-run completion never closes the task; only an
                 // explicit advance (or a post completion) moves past the
                 // final stage.
@@ -217,7 +217,7 @@ fn prepare_swap_to_index(
     context: &StageTransitionContext<'_>,
     next_index: usize,
 ) -> Result<PreparedStageTransition, String> {
-    let Some(next_stage) = context.pipeline.stages.get(next_index) else {
+    let Some(next_stage) = context.workflow.stages.get(next_index) else {
         let workspace_teardown = context
             .source_task
             .branch
@@ -230,7 +230,7 @@ fn prepare_swap_to_index(
                     context.repo,
                     context.definitions,
                     context.source_task_id,
-                    context.pipeline,
+                    context.workflow,
                     stage_name,
                     branch,
                 )
@@ -269,7 +269,7 @@ fn prepare_post_dispatch(
     context: &StageTransitionContext<'_>,
     owner_index: usize,
 ) -> Result<PreparedStageTransition, String> {
-    let owner = &context.pipeline.stages[owner_index];
+    let owner = &context.workflow.stages[owner_index];
     let post_stage =
         post_as_stage(owner).ok_or_else(|| format!("stage has no post: {}", owner.name))?;
     let run_stage = post_stage.name.clone();
@@ -280,7 +280,7 @@ fn prepare_post_dispatch(
     // `item_stage` stays the owner: a post never moves the task's stage.
     let task_id = context.source_task_id;
     let completion_instruction = format!(
-        "When this work is complete, record stage completion: call MCP `kanna_complete_stage {{\"task_id\": \"{task_id}\", \"status\": \"success\", \"summary\": \"...\"}}`; only if MCP tools are unavailable, fall back to `kanna-cli stage-complete --task-id \"{task_id}\" --status success --summary \"...\"`. Kanna will then advance this task's pipeline."
+        "When this work is complete, record stage completion: call MCP `kanna_complete_stage {{\"task_id\": \"{task_id}\", \"status\": \"success\", \"summary\": \"...\"}}`; only if MCP tools are unavailable, fall back to `kanna-cli stage-complete --task-id \"{task_id}\" --status success --summary \"...\"`. Kanna will then advance this task's workflow."
     );
     let (fallback, message) = prepare_stage_run_for_target_returning_prompt(
         db,
@@ -312,7 +312,7 @@ fn prepare_stage_run_for_target(
     db: &Db,
     config: &Config,
     context: &StageTransitionContext<'_>,
-    target_stage: &PipelineStage,
+    target_stage: &WorkflowStage,
     item_stage: &str,
     run_kind: &'static str,
     prompt_override: Option<&str>,
@@ -337,10 +337,10 @@ fn prepare_stage_run_for_target_with_provider(
     db: &Db,
     config: &Config,
     context: &StageTransitionContext<'_>,
-    target_stage: &PipelineStage,
+    target_stage: &WorkflowStage,
     item_stage: &str,
     run_kind: &'static str,
-    completion_transition: PipelineStageTransition,
+    completion_transition: WorkflowStageTransition,
     prompt_override: Option<&str>,
     feedback: Option<String>,
     agent_overrides: SpawnAgentOverrides,
@@ -366,10 +366,10 @@ fn prepare_stage_run_for_target_returning_prompt(
     db: &Db,
     config: &Config,
     context: &StageTransitionContext<'_>,
-    target_stage: &PipelineStage,
+    target_stage: &WorkflowStage,
     item_stage: &str,
     run_kind: &'static str,
-    completion_transition: PipelineStageTransition,
+    completion_transition: WorkflowStageTransition,
     prompt_override: Option<&str>,
     feedback: Option<String>,
     agent_overrides: SpawnAgentOverrides,
@@ -440,8 +440,8 @@ fn prepare_stage_run_for_target_returning_prompt(
         context.repo,
         context.definitions,
         context.source_task_id,
-        context.pipeline_name,
-        context.pipeline,
+        context.workflow_name,
+        context.workflow,
         target_stage,
         item_stage,
         run_kind,
@@ -465,7 +465,7 @@ fn prepare_stage_run_for_target_returning_prompt(
             context.repo,
             context.definitions,
             context.source_task_id,
-            context.pipeline,
+            context.workflow,
             departed_stage,
             branch,
         );
@@ -513,16 +513,16 @@ pub(crate) fn prepare_revision_task_for_api(
         source_task_id,
         repo: &loaded.repo,
         definitions: &loaded.definitions,
-        pipeline_name: &loaded.pipeline_name,
-        pipeline: &loaded.pipeline,
+        workflow_name: &loaded.workflow_name,
+        workflow: &loaded.workflow,
     };
 
-    let position = resolve_stage_position(&loaded.pipeline, target_stage_name)
-        .ok_or_else(|| format!("stage not found in pipeline: {}", target_stage_name))?;
-    let (target_stage, item_stage, run_kind): (PipelineStage, String, &'static str) = match position
+    let position = resolve_stage_position(&loaded.workflow, target_stage_name)
+        .ok_or_else(|| format!("stage not found in workflow: {}", target_stage_name))?;
+    let (target_stage, item_stage, run_kind): (WorkflowStage, String, &'static str) = match position
     {
         StagePosition::Stage(index) => {
-            let stage = loaded.pipeline.stages[index].clone();
+            let stage = loaded.workflow.stages[index].clone();
             let item_stage = stage.name.clone();
             (stage, item_stage, "main")
         }
@@ -530,7 +530,7 @@ pub(crate) fn prepare_revision_task_for_api(
         // the post as a fresh session with feedback; the task's stage is
         // the post's owner.
         StagePosition::Post { owner } => {
-            let owner_stage = &loaded.pipeline.stages[owner];
+            let owner_stage = &loaded.workflow.stages[owner];
             let post_stage = post_as_stage(owner_stage)
                 .ok_or_else(|| format!("stage has no post: {}", owner_stage.name))?;
             (post_stage, owner_stage.name.clone(), "post")
@@ -687,19 +687,19 @@ fn prepare_stage_restart(
         .stage
         .as_deref()
         .ok_or_else(|| format!("task has no stage: {task_id}"))?;
-    let current_position = resolve_stage_position(&loaded.pipeline, item_stage)
-        .ok_or_else(|| format!("stage not found in pipeline: {item_stage}"))?;
+    let current_position = resolve_stage_position(&loaded.workflow, item_stage)
+        .ok_or_else(|| format!("stage not found in workflow: {item_stage}"))?;
     let current_owner = match current_position {
         StagePosition::Stage(index) => index,
         StagePosition::Post { owner } => owner,
     };
-    let (target_stage, run_kind, run_owner): (PipelineStage, &'static str, usize) =
-        match resolve_stage_position(&loaded.pipeline, &run.stage)
-            .ok_or_else(|| format!("stage not found in pipeline: {}", run.stage))?
+    let (target_stage, run_kind, run_owner): (WorkflowStage, &'static str, usize) =
+        match resolve_stage_position(&loaded.workflow, &run.stage)
+            .ok_or_else(|| format!("stage not found in workflow: {}", run.stage))?
         {
-            StagePosition::Stage(index) => (loaded.pipeline.stages[index].clone(), "main", index),
+            StagePosition::Stage(index) => (loaded.workflow.stages[index].clone(), "main", index),
             StagePosition::Post { owner } => (
-                post_as_stage(&loaded.pipeline.stages[owner])
+                post_as_stage(&loaded.workflow.stages[owner])
                     .ok_or_else(|| format!("stage has no post: {}", run.stage))?,
                 "post",
                 owner,
@@ -795,8 +795,8 @@ fn prepare_stage_restart(
         &loaded.repo,
         &loaded.definitions,
         task_id,
-        &loaded.pipeline_name,
-        &loaded.pipeline,
+        &loaded.workflow_name,
+        &loaded.workflow,
         &target_stage,
         item_stage,
         run_kind,
@@ -830,7 +830,7 @@ fn prepare_revision_resume(
     db: &Db,
     config: &Config,
     context: &StageTransitionContext<'_>,
-    target_stage: &PipelineStage,
+    target_stage: &WorkflowStage,
     revision_prompt: &str,
     round: Option<RevisionRound>,
 ) -> Result<ResumePreparation, String> {
@@ -888,8 +888,8 @@ fn prepare_revision_resume(
         context.repo,
         context.definitions,
         task_id,
-        context.pipeline_name,
-        context.pipeline,
+        context.workflow_name,
+        context.workflow,
         target_stage,
         &target_stage.name,
         "main",
@@ -919,7 +919,7 @@ fn prepare_revision_resume(
 }
 
 /// How many agent-requested revision rounds a task has spent, and how many
-/// its pipeline allows. A `limit` of `0` means the pipeline opted out of the
+/// its workflow allows. A `limit` of `0` means the workflow opted out of the
 /// cap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RevisionBudget {
@@ -935,34 +935,34 @@ impl RevisionBudget {
     }
 }
 
-/// Effective revision-round cap for a task's pinned pipeline.
+/// Effective revision-round cap for a task's pinned workflow.
 pub(crate) fn resolve_revision_limit(
     repo: &Repo,
-    pipeline_name: &str,
-    pipeline_def: Option<&str>,
+    workflow_name: &str,
+    workflow_def: Option<&str>,
 ) -> Result<i64, String> {
-    let pipeline = match pipeline_def.filter(|value| !value.trim().is_empty()) {
-        Some(stored) => parse_stored_pipeline_definition(stored)?,
-        None => RepoDefinitions::resolve(repo)?.pipeline(pipeline_name)?,
+    let workflow = match workflow_def.filter(|value| !value.trim().is_empty()) {
+        Some(stored) => parse_stored_workflow_definition(stored)?,
+        None => RepoDefinitions::resolve(repo)?.workflow(workflow_name)?,
     };
-    Ok(pipeline.revision_limit())
+    Ok(workflow.revision_limit())
 }
 
-/// Rounds spent plus the pipeline's cap for a task, as the revision endpoint
+/// Rounds spent plus the workflow's cap for a task, as the revision endpoint
 /// needs them before deciding whether to fork another revision run.
 pub(crate) fn resolve_revision_budget(
     db: &Db,
     source_task_id: &str,
 ) -> Result<RevisionBudget, String> {
     let identity = load_stage_identity(db, source_task_id)?;
-    let pipeline_name = identity
+    let workflow_name = identity
         .source_task
         .pipeline
         .clone()
-        .unwrap_or_else(|| FALLBACK_PIPELINE_NAME.to_string());
+        .unwrap_or_else(|| FALLBACK_WORKFLOW_NAME.to_string());
     let limit = resolve_revision_limit(
         &identity.repo,
-        &pipeline_name,
+        &workflow_name,
         identity.source_task.pipeline_def.as_deref(),
     )?;
     let rounds = db
@@ -972,7 +972,7 @@ pub(crate) fn resolve_revision_budget(
 }
 
 /// The built-in post whose whole job is handing the finished PR to the repo's
-/// merge master. A pipeline that declares it on a stage is promising the
+/// merge master. A workflow that declares it on a stage is promising the
 /// handoff, which is what lets the engine notice when the post finished
 /// without delivering one.
 const MERGE_APPROVE_POST: &str = "approve";
@@ -980,41 +980,41 @@ const MERGE_APPROVE_POST: &str = "approve";
 /// True when the task's pinned stage declares the merge-signaling `approve`
 /// post. Mirrors `pinnedApproveMergePost` in the desktop
 /// (`apps/desktop/src/utils/pinnedStage.ts`): pre-change snapshots and custom
-/// pipelines without that post promise no merge side effect, so nothing may
+/// workflows without that post promise no merge side effect, so nothing may
 /// be enforced on their behalf.
 pub(crate) fn stage_declares_merge_approve_post(
     repo: &Repo,
-    pipeline_name: &str,
-    pipeline_def: Option<&str>,
+    workflow_name: &str,
+    workflow_def: Option<&str>,
     stage_name: &str,
 ) -> Result<bool, String> {
-    let pipeline = match pipeline_def.filter(|value| !value.trim().is_empty()) {
-        Some(stored) => parse_stored_pipeline_definition(stored)?,
-        None => RepoDefinitions::resolve(repo)?.pipeline(pipeline_name)?,
+    let workflow = match workflow_def.filter(|value| !value.trim().is_empty()) {
+        Some(stored) => parse_stored_workflow_definition(stored)?,
+        None => RepoDefinitions::resolve(repo)?.workflow(workflow_name)?,
     };
-    let owner = match resolve_stage_position(&pipeline, stage_name) {
+    let owner = match resolve_stage_position(&workflow, stage_name) {
         Some(StagePosition::Stage(index)) => index,
         Some(StagePosition::Post { owner }) => owner,
         None => return Ok(false),
     };
-    Ok(pipeline.stages[owner].post.as_ref().is_some_and(|post| {
+    Ok(workflow.stages[owner].post.as_ref().is_some_and(|post| {
         post.name == MERGE_APPROVE_POST || post.agent.as_deref() == Some(MERGE_APPROVE_POST)
     }))
 }
 
 pub(crate) fn resolve_stage_transition(
     repo: &Repo,
-    pipeline_name: &str,
-    pipeline_def: Option<&str>,
+    workflow_name: &str,
+    workflow_def: Option<&str>,
     stage_name: &str,
 ) -> Result<Option<String>, String> {
-    let pipeline = match pipeline_def.filter(|value| !value.trim().is_empty()) {
-        Some(stored) => parse_stored_pipeline_definition(stored)?,
-        None => RepoDefinitions::resolve(repo)?.pipeline(pipeline_name)?,
+    let workflow = match workflow_def.filter(|value| !value.trim().is_empty()) {
+        Some(stored) => parse_stored_workflow_definition(stored)?,
+        None => RepoDefinitions::resolve(repo)?.workflow(workflow_name)?,
     };
-    Ok(match resolve_stage_position(&pipeline, stage_name) {
+    Ok(match resolve_stage_position(&workflow, stage_name) {
         Some(StagePosition::Stage(index)) => Some(
-            pipeline.stages[index]
+            workflow.stages[index]
                 .policy
                 .transition
                 .as_str()
@@ -1022,7 +1022,7 @@ pub(crate) fn resolve_stage_transition(
         ),
         // A post always advances on success.
         Some(StagePosition::Post { .. }) => {
-            Some(PipelineStageTransition::Auto.as_str().to_string())
+            Some(WorkflowStageTransition::Auto.as_str().to_string())
         }
         None => None,
     })

@@ -4,7 +4,7 @@
 
 **Goal:** Treat merge as an agent/task type, not as a task lifecycle stage.
 
-**Architecture:** Existing pipeline stages remain the lifecycle source of truth. Merge Master and run-merge-agent flows create ordinary `in progress` tasks that happen to run the merge agent. Startup migrations normalize legacy open `merge` rows to `in progress` while preserving merge tags/display names for search and history.
+**Architecture:** Existing workflow stages remain the lifecycle source of truth. Merge Master and run-merge-agent flows create ordinary `in progress` tasks that happen to run the merge agent. Startup migrations normalize legacy open `merge` rows to `in progress` while preserving merge tags/display names for search and history.
 
 **Tech Stack:** TypeScript/Vue/Pinia/Vitest, Rust kanna-server/kanna-cli tests, SQLite migrations.
 

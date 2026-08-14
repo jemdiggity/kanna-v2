@@ -40,8 +40,8 @@ pub(crate) fn render_guide_markdown(context: &GuideContext) -> String {
     let stage = task
         .and_then(|task| task.stage.as_deref())
         .unwrap_or("unknown");
-    let pipeline = task
-        .and_then(|task| task.pipeline_name.as_deref())
+    let workflow = task
+        .and_then(|task| task.workflow_name.as_deref())
         .unwrap_or("unknown");
     let transition = task
         .and_then(|task| task.stage_transition.as_deref())
@@ -53,14 +53,14 @@ pub(crate) fn render_guide_markdown(context: &GuideContext) -> String {
     let completion_line = if transition == "auto" {
         "Done here means this stage has achieved its goal. Prefer `kanna_complete_stage` to record completion. Fallback: `kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\" --status success --summary \"...\"`."
     } else {
-        "Done here means this stage has achieved its goal. This stage's transition is `manual`: the user advances the pipeline after reviewing your work — record completion only if this stage's prompt asks for it, and record `failure` if you are blocked."
+        "Done here means this stage has achieved its goal. This stage's transition is `manual`: the user advances the workflow after reviewing your work — record completion only if this stage's prompt asks for it, and record `failure` if you are blocked."
     };
     let mut lines = vec![
         "# Kanna Task Guide".to_string(),
         String::new(),
         format!(
-            "You are task `{}`, stage `{}` of pipeline `{}` (`{}`). Branch: `{}`.",
-            context.task_id, stage, pipeline, transition, branch
+            "You are task `{}`, stage `{}` of workflow `{}` (`{}`). Branch: `{}`.",
+            context.task_id, stage, workflow, transition, branch
         ),
         completion_line.to_string(),
     ];
@@ -79,7 +79,7 @@ pub(crate) fn render_guide_markdown(context: &GuideContext) -> String {
         "- Prefer `kanna-mcp` tools for Kanna task operations; fall back to the instance-local `kanna-cli` from the shell only when MCP tools are unavailable. Kanna-spawned tasks export `KANNA_CLI_PATH` and prepend its directory to `PATH`.".to_string(),
         "- Before environment-sensitive operations (releases, mobile notifications, or direct API diagnostics), call `kanna_info`; if MCP is unavailable, run `kanna-cli info`. Use the reported effective connection and authoritative server identity instead of assuming a default endpoint.".to_string(),
         "- Prefer `kanna_complete_stage` to record stage completion. Fallback: `kanna-cli stage-complete`. `success` can trigger an auto-transition when the current stage is configured for auto; `failure` stops advancement.".to_string(),
-        "- Do not push a branch or create a pull request unless this stage's prompt explicitly tells you to do so. Auto stages finish by recording stage completion so Kanna can advance the configured pipeline.".to_string(),
+        "- Do not push a branch or create a pull request unless this stage's prompt explicitly tells you to do so. Auto stages finish by recording stage completion so Kanna can advance the configured workflow.".to_string(),
         "- Manual transitions wait for a user or agent to request advancement.".to_string(),
         "- Advancing follows the next stage policy: continue stages reuse the current task, worktree, branch, and agent session; other stages create a next-stage task in a new worktree and close the source task after successful spawn.".to_string(),
         "- Use create/spawn-subtask tools for follow-up work, `kanna_send_input` for feedback to a running task, `kanna_request_revision` for a new revision task from an existing branch, and blocker tools when this task depends on another task.".to_string(),

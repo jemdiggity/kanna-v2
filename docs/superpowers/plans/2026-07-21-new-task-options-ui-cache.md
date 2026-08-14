@@ -22,7 +22,7 @@ Add this test after `shows New Task before repository options finish loading`:
 
 ```ts
   it("hydrates cached repository options while refreshing them on reopen", async () => {
-    const { creation, availablePipelines, defaultPipelineName, availableBaseBranches } =
+    const { creation, availableWorkflows, defaultWorkflowName, availableBaseBranches } =
       createTaskCreationHarness();
 
     await creation.openNewTaskModal();
@@ -31,8 +31,8 @@ Add this test after `shows New Task before repository options finish loading`:
       revision: string;
       refName: string;
       config: Record<string, never>;
-      defaultPipeline: string;
-      pipelines: string[];
+      defaultWorkflow: string;
+      workflows: string[];
     }>();
     const providers = deferred<["codex"]>();
     const defaultBranch = deferred<string>();
@@ -53,16 +53,16 @@ Add this test after `shows New Task before repository options finish loading`:
     expect(creation.availableAgentProviders.value).toEqual([
       "claude", "copilot", "codex", "opencode", "antigravity",
     ]);
-    expect(availablePipelines.value).toEqual(["default"]);
-    expect(defaultPipelineName.value).toBe("default");
+    expect(availableWorkflows.value).toEqual(["default"]);
+    expect(defaultWorkflowName.value).toBe("default");
     expect(availableBaseBranches.value).toEqual(["origin/main"]);
 
     definitions.resolve({
       revision: "refreshed-rev",
       refName: "origin/trunk",
       config: {},
-      defaultPipeline: "review",
-      pipelines: ["default", "review"],
+      defaultWorkflow: "review",
+      workflows: ["default", "review"],
     });
     providers.resolve(["codex"]);
     defaultBranch.resolve("trunk");
@@ -70,8 +70,8 @@ Add this test after `shows New Task before repository options finish loading`:
     await reopenPromise;
 
     expect(creation.availableAgentProviders.value).toEqual(["codex"]);
-    expect(availablePipelines.value).toEqual(["default", "review"]);
-    expect(defaultPipelineName.value).toBe("review");
+    expect(availableWorkflows.value).toEqual(["default", "review"]);
+    expect(defaultWorkflowName.value).toBe("review");
     expect(availableBaseBranches.value).toEqual(["origin/trunk", "trunk"]);
     expect(creation.newTaskOptionsLoading.value).toBe(false);
   });
@@ -84,7 +84,7 @@ Add a second test to prove the cache key is the repository id rather than one gl
     const {
       creation,
       store,
-      availablePipelines,
+      availableWorkflows,
       availableBaseBranches,
     } = createTaskCreationHarness();
 
@@ -95,8 +95,8 @@ Add a second test to prove the cache key is the repository id rather than one gl
         revision: "repo-2-rev",
         refName: "origin/trunk",
         config: {},
-        defaultPipeline: "review",
-        pipelines: ["default", "review"],
+        defaultWorkflow: "review",
+        workflows: ["default", "review"],
       }),
       fetchRepoAgentProviders: async (): Promise<["codex"]> => ["codex"],
     });
@@ -111,8 +111,8 @@ Add a second test to prove the cache key is the repository id rather than one gl
       revision: string;
       refName: string;
       config: Record<string, never>;
-      defaultPipeline: string;
-      pipelines: string[];
+      defaultWorkflow: string;
+      workflows: string[];
     }>();
     const providers = deferred<["claude"]>();
     const defaultBranch = deferred<string>();
@@ -132,15 +132,15 @@ Add a second test to prove the cache key is the repository id rather than one gl
     expect(creation.availableAgentProviders.value).toEqual([
       "claude", "copilot", "codex", "opencode", "antigravity",
     ]);
-    expect(availablePipelines.value).toEqual(["default"]);
+    expect(availableWorkflows.value).toEqual(["default"]);
     expect(availableBaseBranches.value).toEqual(["origin/main"]);
 
     definitions.resolve({
       revision: "repo-1-refreshed-rev",
       refName: "origin/main",
       config: {},
-      defaultPipeline: "default",
-      pipelines: ["default"],
+      defaultWorkflow: "default",
+      workflows: ["default"],
     });
     providers.resolve(["claude"]);
     defaultBranch.resolve("main");
@@ -156,8 +156,8 @@ Extend `discards option results from a superseded repository load` after its exi
       revision: string;
       refName: string;
       config: Record<string, never>;
-      defaultPipeline: string;
-      pipelines: string[];
+      defaultWorkflow: string;
+      workflows: string[];
     }>();
     const refreshedProviders = deferred<[]>();
     const refreshedDefaultBranch = deferred<string>();
@@ -174,15 +174,15 @@ Extend `discards option results from a superseded repository load` after its exi
 
     const thirdOpen = creation.openNewTaskModal("repo-1");
 
-    expect(availablePipelines.value).toEqual([]);
+    expect(availableWorkflows.value).toEqual([]);
     expect(availableBaseBranches.value).toEqual([]);
 
     refreshedDefinitions.resolve({
       revision: "repo-1-current-rev",
       refName: "origin/main",
       config: {},
-      defaultPipeline: "default",
-      pipelines: ["default"],
+      defaultWorkflow: "default",
+      workflows: ["default"],
     });
     refreshedProviders.resolve([]);
     refreshedDefaultBranch.resolve("main");
@@ -198,7 +198,7 @@ Run:
 pnpm --dir apps/desktop exec vitest run --maxWorkers=2 src/composables/useAppTaskCreation.test.ts
 ```
 
-Expected: FAIL because reopening a previously loaded repository clears providers, pipelines, and base branches instead of retaining that repository's first load values.
+Expected: FAIL because reopening a previously loaded repository clears providers, workflows, and base branches instead of retaining that repository's first load values.
 
 - [ ] **Step 3: Add the snapshot boundary and repo-scoped cache**
 
@@ -207,8 +207,8 @@ Add these definitions near `UseAppTaskCreationOptions`:
 ```ts
 interface NewTaskOptionsSnapshot {
   availableAgentProviders: AgentProvider[] | undefined;
-  availablePipelines: string[];
-  defaultPipelineName: string | undefined;
+  availableWorkflows: string[];
+  defaultWorkflowName: string | undefined;
   availableBaseBranches: string[];
   defaultBaseBranchName: string | undefined;
   repoDefaultBranchName: string | undefined;
@@ -222,8 +222,8 @@ Inside `useAppTaskCreation`, add the cache and two focused state helpers:
 
   function applyNewTaskOptions(snapshot: NewTaskOptionsSnapshot) {
     availableAgentProviders.value = snapshot.availableAgentProviders;
-    availablePipelines.value = snapshot.availablePipelines;
-    defaultPipelineName.value = snapshot.defaultPipelineName;
+    availableWorkflows.value = snapshot.availableWorkflows;
+    defaultWorkflowName.value = snapshot.defaultWorkflowName;
     availableBaseBranches.value = snapshot.availableBaseBranches;
     defaultBaseBranchName.value = snapshot.defaultBaseBranchName;
     repoDefaultBranchName.value = snapshot.repoDefaultBranchName;
@@ -232,8 +232,8 @@ Inside `useAppTaskCreation`, add the cache and two focused state helpers:
   function clearNewTaskOptions() {
     applyNewTaskOptions({
       availableAgentProviders: undefined,
-      availablePipelines: [],
-      defaultPipelineName: undefined,
+      availableWorkflows: [],
+      defaultWorkflowName: undefined,
       availableBaseBranches: [],
       defaultBaseBranchName: undefined,
       repoDefaultBranchName: undefined,
@@ -257,8 +257,8 @@ For the local-repository result, construct and atomically apply a snapshot after
 ```ts
         const snapshot: NewTaskOptionsSnapshot = {
           availableAgentProviders: repoAgentProviders,
-          availablePipelines: manifest?.pipelines ?? [],
-          defaultPipelineName: manifest?.defaultPipeline,
+          availableWorkflows: manifest?.workflows ?? [],
+          defaultWorkflowName: manifest?.defaultWorkflow,
           availableBaseBranches: baseBranches,
           defaultBaseBranchName:
             getDefaultBaseBranch(baseBranches, defaultBranch || "main") || undefined,
@@ -273,8 +273,8 @@ For a cloud-only result, construct the complete cloud snapshot after its existin
 ```ts
         const snapshot: NewTaskOptionsSnapshot = {
           availableAgentProviders: undefined,
-          availablePipelines: [],
-          defaultPipelineName: undefined,
+          availableWorkflows: [],
+          defaultWorkflowName: undefined,
           availableBaseBranches: baseBranches,
           defaultBaseBranchName:
             getDefaultBaseBranch(baseBranches, cloudRepo?.default_branch || "main") || undefined,
@@ -317,7 +317,7 @@ Add this test after `keeps prompt entry available while task options load`:
       props: {
         optionsLoading: true,
         availableAgentProviders: undefined,
-        pipelines: [],
+        workflows: [],
         baseBranches: [],
       },
       global: { mocks: { $t: (key: string) => key } },

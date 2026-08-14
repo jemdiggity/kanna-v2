@@ -153,7 +153,7 @@ never the Firebase CLI directly.
 | `crates/runtime-defaults/` | Shared constants: bundle ids, DB name, relay URLs, Firebase project ids, ports |
 | `crates/task-transfer/` | Peer-to-peer desktop protocol (mDNS discovery via `_kanna-xfer._tcp`, crypto, peer registry): task transfer plus peer task snapshots and observing/sending input to peer sessions |
 | `crates/tauri-plugin-delta-updater/` | Self-updater plugin (stub) |
-| `packages/core/` | Shared TS business logic: pipeline types/tags, repo config, custom tasks, GitHub/Slack/Discord clients |
+| `packages/core/` | Shared TS business logic: workflow types/tags, repo config, custom tasks, GitHub/Slack/Discord clients |
 | `packages/db/` | TS mirror of the SQLite schema plus a query layer over the `DbHandle` interface |
 | `packages/terminal-recovery/` | Rust terminal snapshot/session-mirror service (staged at runtime via `scripts/stage-terminal-recovery-runtime.sh`) |
 | `tools/kd/` | The `kd` development CLI and the `kd-mcp` server (task registry in `src/tasks/registry.ts`) |
@@ -177,12 +177,12 @@ Task creation and terminal streaming, end to end:
 3. Frontend `AttachSnapshot` hydrates xterm.js from the headless terminal, then
    streams live output; typed input goes back through `send_input` → PTY.
 4. Agent finishes → hook/idle detection marks the task `unread`; the user
-   reviews the diff (⌘D) and advances the pipeline (⌘S).
+   reviews the diff (⌘D) and advances the workflow (⌘S).
 5. Stage transitions fork a fresh workspace (new branch + worktree from the
    committed tip) and respawn the session for the next stage's agent; only
    committed work crosses stage boundaries.
 
-Pipeline semantics are split across three places: task/pipeline/workspace/post
+Workflow semantics are split across three places: task/workflow/workspace/post
 definitions and close behavior are in [`AGENTS.md`](../../AGENTS.md) under
 "Core concepts"; the stage-advance, revision-budget, and revision-resume
 contracts are under its "Common Pitfalls"; and the user-facing task flows,
@@ -200,7 +200,7 @@ Worth internalizing — most architectural mistakes violate one of these:
 - **KSP frame types** → Rust in `kanna-agent-protocol`, generated into
   `packages/agent-protocol`.
 - **Shared environment constants** → `crates/runtime-defaults`.
-- **Built-in agent/pipeline definitions** → `.kanna/` files bundled as Tauri
+- **Built-in agent/workflow definitions** → `.kanna/` files bundled as Tauri
   resources, never TypeScript string constants.
 - **Packaged app version** → the root `VERSION` file.
 - **Completion notification** → server/daemon boundary, never the desktop

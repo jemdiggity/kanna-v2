@@ -27,7 +27,7 @@ export interface RepoAgentProviderPreference {
 }
 
 export interface RepoConfig {
-  pipeline?: string;
+  workflow?: string;
   setup?: string[];
   teardown?: string[];
   test?: string[];
@@ -51,8 +51,13 @@ export function parseRepoConfig(json: string): RepoConfig {
   const raw = parsed as Record<string, unknown>;
   const config: RepoConfig = {};
 
-  if (typeof raw.pipeline === "string") {
-    config.pipeline = raw.pipeline;
+  const workflow = typeof raw.workflow === "string"
+    ? raw.workflow
+    : typeof raw.pipeline === "string"
+      ? raw.pipeline
+      : undefined;
+  if (workflow !== undefined) {
+    config.workflow = workflow;
   }
 
   if (Array.isArray(raw.setup) && raw.setup.every((s) => typeof s === "string")) {

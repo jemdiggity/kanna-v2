@@ -10,7 +10,7 @@
 
 ---
 
-This Kanna stage delegates commits to a later pipeline stage, so the commit steps normally required by the planning workflow are intentionally omitted.
+This Kanna stage delegates commits to a later workflow stage, so the commit steps normally required by the planning workflow are intentionally omitted.
 
 ## File Map
 

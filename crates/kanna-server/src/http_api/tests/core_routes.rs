@@ -1324,7 +1324,7 @@ async fn operator_events_route_inserts_batched_events() {
                         "events": [
                             {
                                 "eventType": "task_selected",
-                                "pipelineItemId": "task-1",
+                                "workflowItemId": "task-1",
                                 "repoId": "repo-1"
                             },
                             {
@@ -2737,6 +2737,7 @@ async fn list_task_children_route_returns_open_and_closed_direct_children_with_v
             {
                 "id": "task-child-security",
                 "agent": "review-security",
+                "workflowName": "default",
                 "pipelineName": "default",
                 "createdAt": "2026-08-06 09:00:00",
                 "closedAt": null,
@@ -2754,6 +2755,7 @@ async fn list_task_children_route_returns_open_and_closed_direct_children_with_v
             {
                 "id": "task-child-compat",
                 "agent": "review-compat",
+                "workflowName": "default",
                 "pipelineName": "default",
                 "createdAt": "2026-08-06 10:00:00",
                 "closedAt": "2026-08-06 10:30:00",
@@ -2771,6 +2773,7 @@ async fn list_task_children_route_returns_open_and_closed_direct_children_with_v
             {
                 "id": "task-child-no-run",
                 "agent": null,
+                "workflowName": "specialty-review",
                 "pipelineName": "specialty-review",
                 "createdAt": "2026-08-06 10:30:00",
                 "closedAt": null,
@@ -2779,6 +2782,7 @@ async fn list_task_children_route_returns_open_and_closed_direct_children_with_v
             {
                 "id": "task-child-default-no-run",
                 "agent": null,
+                "workflowName": "default",
                 "pipelineName": "default",
                 "createdAt": "2026-08-06 10:45:00",
                 "closedAt": null,
@@ -3083,7 +3087,7 @@ async fn get_task_route_returns_worktree_git_state() {
         task.worktree_path.as_deref(),
         Some(worktree_string.as_str())
     );
-    assert_eq!(task.pipeline_name.as_deref(), Some("default"));
+    assert_eq!(task.workflow_name.as_deref(), Some("default"));
     assert_eq!(task.stage_transition.as_deref(), Some("manual"));
     assert_eq!(task.commits_ahead, 1);
     assert_eq!(task.commits_behind, 0);

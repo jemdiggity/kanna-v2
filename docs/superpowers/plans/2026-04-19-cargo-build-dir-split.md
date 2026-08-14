@@ -6,7 +6,7 @@
 
 **Architecture:** Move shared compile reuse from the current worktree-only `CARGO_TARGET_DIR` experiment to Cargo's stable `build.build-dir` support. Keep `build.target-dir = ".build"` for private final outputs, remove shared-final-artifact assumptions from dev and sidecar scripts, and update tests plus cleanup behavior to reflect the new steady state.
 
-**Tech Stack:** Cargo config, Bash scripts, pnpm/Vitest, Tauri desktop build pipeline
+**Tech Stack:** Cargo config, Bash scripts, pnpm/Vitest, Tauri desktop build workflow
 
 ---
 

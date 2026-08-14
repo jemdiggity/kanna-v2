@@ -5,7 +5,7 @@ export function isTeardownStage(stage: string): boolean {
   return stage === TEARDOWN_STAGE || stage === LEGACY_TORNDOWN_STAGE;
 }
 
-export function normalizePipelineStage(stage: string): string {
+export function normalizeWorkflowStage(stage: string): string {
   return isTeardownStage(stage) ? TEARDOWN_STAGE : stage;
 }
 

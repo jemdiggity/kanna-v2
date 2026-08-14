@@ -1,7 +1,7 @@
 # Mobile Terminal Stream Compaction Implementation Plan
 
 > **For agentic workers:** Keep execution in the current Kanna stage. This
-> worktree is already isolated, and the stage pipeline owns commits.
+> worktree is already isolated, and the stage workflow owns commits.
 
 **Goal:** Preserve authoritative terminal snapshots and keep live mobile xterm
 updates append-only when the retained base64 history crosses its one-megabyte

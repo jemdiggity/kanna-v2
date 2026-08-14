@@ -6,7 +6,7 @@
 
 **Architecture:** This is a configuration consistency change across three layers: built-in agent markdown definitions, parser/type validation in `packages/core`, and tests that encode provider expectations. The runtime spawn path already supports Codex, so the work should avoid behavioral changes and focus on keeping source-of-truth files, docs, and parsing rules in sync.
 
-**Tech Stack:** Markdown frontmatter, TypeScript, Vitest, Kanna pipeline agent definitions
+**Tech Stack:** Markdown frontmatter, TypeScript, Vitest, Kanna workflow agent definitions
 
 ---
 
@@ -17,7 +17,7 @@
 - Modify: `.kanna/agents/pr/AGENT.md`
 - Modify: `.kanna/agents/merge/AGENT.md`
 - Modify: `.kanna/agents/agent-factory/AGENT.md`
-- Modify: `.kanna/agents/pipeline-factory/AGENT.md`
+- Modify: `.kanna/agents/workflow-factory/AGENT.md`
 
 - [ ] **Step 1: Inspect the current built-in agent frontmatter and built-in factory wording**
 
@@ -28,7 +28,7 @@ sed -n '1,120p' .kanna/agents/implement/AGENT.md
 sed -n '1,160p' .kanna/agents/pr/AGENT.md
 sed -n '1,200p' .kanna/agents/merge/AGENT.md
 sed -n '1,220p' .kanna/agents/agent-factory/AGENT.md
-sed -n '1,220p' .kanna/agents/pipeline-factory/AGENT.md
+sed -n '1,220p' .kanna/agents/workflow-factory/AGENT.md
 ```
 
 Expected: the files still show `agent_provider: claude, copilot`, and several files still include `model: sonnet` or Claude-specific provider examples.
@@ -75,8 +75,8 @@ permission_mode: default
 
 ```md
 ---
-name: pipeline-factory
-description: Helps users create new pipeline definitions for Kanna
+name: workflow-factory
+description: Helps users create new workflow definitions for Kanna
 agent_provider: codex, copilot
 permission_mode: default
 ---
@@ -99,7 +99,7 @@ allowed_tools: []                # optional: tool allowlist (provider-specific)
 | `model` | string | no | Optional model override. Falls back to provider default. |
 ```
 
-In `.kanna/agents/pipeline-factory/AGENT.md`, make these wording changes:
+In `.kanna/agents/workflow-factory/AGENT.md`, make these wording changes:
 
 ```md
 "agent_provider": "<optional override: codex | copilot>",
@@ -128,7 +128,7 @@ Expected:
 Run:
 
 ```bash
-git add .kanna/agents/implement/AGENT.md .kanna/agents/pr/AGENT.md .kanna/agents/merge/AGENT.md .kanna/agents/agent-factory/AGENT.md .kanna/agents/pipeline-factory/AGENT.md
+git add .kanna/agents/implement/AGENT.md .kanna/agents/pr/AGENT.md .kanna/agents/merge/AGENT.md .kanna/agents/agent-factory/AGENT.md .kanna/agents/workflow-factory/AGENT.md
 git commit -m "chore: update built-in agents for codex and copilot"
 ```
 
@@ -229,16 +229,16 @@ Expected: a commit is created for the `packages/core` custom task parser and tes
 ### Task 3: Align agent-loader tests with Codex/Copilot built-in definitions and run final verification
 
 **Files:**
-- Test: `packages/core/src/pipeline/agent-loader.test.ts`
+- Test: `packages/core/src/workflow/agent-loader.test.ts`
 - Verify: `.kanna/agents/implement/AGENT.md`
 - Verify: `.kanna/agents/pr/AGENT.md`
 - Verify: `.kanna/agents/merge/AGENT.md`
 - Verify: `.kanna/agents/agent-factory/AGENT.md`
-- Verify: `.kanna/agents/pipeline-factory/AGENT.md`
+- Verify: `.kanna/agents/workflow-factory/AGENT.md`
 
 - [ ] **Step 1: Update agent-loader tests to include Codex-compatible provider examples**
 
-In `packages/core/src/pipeline/agent-loader.test.ts`, change the provider examples to avoid Claude-specific assumptions:
+In `packages/core/src/workflow/agent-loader.test.ts`, change the provider examples to avoid Claude-specific assumptions:
 
 ```ts
   it("parses valid AGENT.md with all fields", () => {
@@ -315,12 +315,12 @@ Do something.
 
 Expected: the tests still verify parser behavior, but now reflect the supported provider pair used by built-in agents.
 
-- [ ] **Step 2: Run the targeted pipeline parser test file**
+- [ ] **Step 2: Run the targeted workflow parser test file**
 
 Run:
 
 ```bash
-bun --filter @kanna/core test packages/core/src/pipeline/agent-loader.test.ts
+bun --filter @kanna/core test packages/core/src/workflow/agent-loader.test.ts
 ```
 
 Expected: all tests in `agent-loader.test.ts` pass.
@@ -330,7 +330,7 @@ Expected: all tests in `agent-loader.test.ts` pass.
 Run:
 
 ```bash
-bun --filter @kanna/core test packages/core/src/config/custom-tasks.test.ts packages/core/src/pipeline/agent-loader.test.ts
+bun --filter @kanna/core test packages/core/src/config/custom-tasks.test.ts packages/core/src/workflow/agent-loader.test.ts
 ```
 
 Expected: both test files pass in one run with no provider-related failures.
@@ -344,7 +344,7 @@ sed -n '1,40p' .kanna/agents/implement/AGENT.md
 sed -n '1,40p' .kanna/agents/pr/AGENT.md
 sed -n '1,40p' .kanna/agents/merge/AGENT.md
 sed -n '1,60p' .kanna/agents/agent-factory/AGENT.md
-sed -n '1,60p' .kanna/agents/pipeline-factory/AGENT.md
+sed -n '1,60p' .kanna/agents/workflow-factory/AGENT.md
 ```
 
 Expected:
@@ -357,7 +357,7 @@ Expected:
 Run:
 
 ```bash
-git add packages/core/src/pipeline/agent-loader.test.ts
+git add packages/core/src/workflow/agent-loader.test.ts
 git commit -m "test: align agent loader fixtures with codex providers"
 ```
 

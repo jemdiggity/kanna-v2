@@ -24,7 +24,7 @@ use serde_json::Value;
 use std::path::Path;
 use std::sync::Arc;
 
-/// The source task as the engine needs it: the pipeline row plus the two
+/// The source task as the engine needs it: the durable task row plus the two
 /// fields that live beside it — the provider session a push must ship, and the
 /// worktree that session's transcript is keyed by.
 struct SourceTask {

@@ -7,7 +7,7 @@ fn guide_markdown_includes_live_context_and_all_catalog_tools() {
         repo_id: "repo-1".to_string(),
         title: "Review branch".to_string(),
         stage: Some("review".to_string()),
-        pipeline_name: Some("qa".to_string()),
+        workflow_name: Some("qa".to_string()),
         stage_transition: Some("auto".to_string()),
         activity: Some("working".to_string()),
         snippet: None,
@@ -33,7 +33,7 @@ fn guide_markdown_includes_live_context_and_all_catalog_tools() {
         catalog: kanna_tool_catalog::bundled_catalog(),
     });
 
-    assert!(guide.contains("You are task `task-123`, stage `review` of pipeline `qa` (`auto`)"));
+    assert!(guide.contains("You are task `task-123`, stage `review` of workflow `qa` (`auto`)"));
     assert!(guide.contains("Auto stages finish by recording stage completion"));
     assert!(guide.contains(
             "Prefer `kanna-mcp` tools for Kanna task operations; fall back to the instance-local `kanna-cli` from the shell only when MCP tools are unavailable."
@@ -54,13 +54,13 @@ fn guide_markdown_includes_live_context_and_all_catalog_tools() {
 }
 
 #[test]
-fn guide_markdown_tells_manual_stages_the_user_advances_the_pipeline() {
+fn guide_markdown_tells_manual_stages_the_user_advances_the_workflow() {
     let task = TaskDetail {
         id: "task-456".to_string(),
         repo_id: "repo-1".to_string(),
         title: "Implement feature".to_string(),
         stage: Some("in progress".to_string()),
-        pipeline_name: Some("default".to_string()),
+        workflow_name: Some("default".to_string()),
         stage_transition: Some("manual".to_string()),
         activity: Some("working".to_string()),
         snippet: None,
@@ -87,8 +87,8 @@ fn guide_markdown_tells_manual_stages_the_user_advances_the_pipeline() {
     });
 
     assert!(guide
-        .contains("You are task `task-456`, stage `in progress` of pipeline `default` (`manual`)"));
-    assert!(guide.contains("the user advances the pipeline after reviewing your work"));
+        .contains("You are task `task-456`, stage `in progress` of workflow `default` (`manual`)"));
+    assert!(guide.contains("the user advances the workflow after reviewing your work"));
     assert!(guide.contains("record completion only if this stage's prompt asks for it"));
     assert!(!guide.contains("--status success"));
 }
@@ -102,7 +102,7 @@ async fn guide_json_fetches_env_task_id_and_includes_workflow_context_and_tools(
                 "repoId": "repo-1",
                 "title": "Add guide coverage",
                 "stage": "verify",
-                "pipelineName": "qa",
+                "workflowName": "qa",
                 "stageTransition": "auto",
                 "activity": "working",
                 "snippet": null,
@@ -132,7 +132,7 @@ async fn guide_json_fetches_env_task_id_and_includes_workflow_context_and_tools(
 
     assert!(request.starts_with("GET /v1/tasks/task-123 HTTP/1.1"));
     assert_eq!(guide["taskId"], "task-123");
-    assert_eq!(guide["task"]["pipelineName"], "qa");
+    assert_eq!(guide["task"]["workflowName"], "qa");
     assert_eq!(guide["task"]["stage"], "verify");
     assert_eq!(guide["task"]["stageTransition"], "auto");
     assert!(guide["workflow"]["advanceStage"]
@@ -179,7 +179,7 @@ async fn guide_json_command_fetches_env_task_id_and_prints_workflow_context_and_
                 "repoId": "repo-1",
                 "title": "Wire guide command",
                 "stage": "implement",
-                "pipelineName": "revision",
+                "workflowName": "revision",
                 "stageTransition": "manual",
                 "activity": "working",
                 "snippet": null,
@@ -221,7 +221,7 @@ async fn guide_json_command_fetches_env_task_id_and_prints_workflow_context_and_
 
     assert!(request.starts_with("GET /v1/tasks/task-456 HTTP/1.1"));
     assert_eq!(guide["taskId"], "task-456");
-    assert_eq!(guide["task"]["pipelineName"], "revision");
+    assert_eq!(guide["task"]["workflowName"], "revision");
     assert_eq!(guide["task"]["stage"], "implement");
     assert_eq!(guide["task"]["stageTransition"], "manual");
     assert!(guide["workflow"]["manualTransition"]

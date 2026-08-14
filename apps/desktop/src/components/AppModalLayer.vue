@@ -86,15 +86,15 @@ function setPreferencesRef(component: Element | ComponentPublicInstance | null) 
     :default-agent-type="preferences.defaultAgentType"
     :recent-agent-choices="preferences.recentAgentChoices"
     :available-agent-providers="c.appTaskCreation.availableAgentProviders.value"
-    :pipelines="m.availablePipelines.value"
-    :default-pipeline="m.defaultPipelineName.value"
+    :workflows="m.availableWorkflows.value"
+    :default-workflow="m.defaultWorkflowName.value"
     :base-branches="m.availableBaseBranches.value"
     :default-base-branch="m.defaultBaseBranchName.value"
     :default-branch-name="m.repoDefaultBranchName.value"
     :options-loading="c.appTaskCreation.newTaskOptionsLoading.value"
     :submission-pending="c.appTaskCreation.newTaskSubmissionPending.value"
     :blocker-candidates="c.appTaskCreation.newTaskBlockerCandidates.value"
-    @submit="(prompt, agentProvider, pipelineName, baseBranch, agentType, blockerTaskIds) => c.appTaskCreation.handleNewTaskSubmit(prompt, agentProvider, pipelineName, baseBranch, agentType, blockerTaskIds)"
+    @submit="(prompt, agentProvider, workflowName, baseBranch, agentType, blockerTaskIds) => c.appTaskCreation.handleNewTaskSubmit(prompt, agentProvider, workflowName, baseBranch, agentType, blockerTaskIds)"
     @cancel="m.showNewTaskModal.value = false"
   />
   <AddRepoModal

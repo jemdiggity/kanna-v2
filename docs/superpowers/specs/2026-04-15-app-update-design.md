@@ -9,7 +9,7 @@ Kanna should support packaged-app self-updates on macOS using Tauri's official u
 
 If the user chooses to update, Kanna will download and install the signed updater bundle, show progress in the prompt UI, and then offer a restart action after installation completes. Kanna will not restart automatically.
 
-The release pipeline must also publish updater artifacts in addition to the existing DMG assets. `ship.sh` will generate the signed updater bundle and a static `latest.json` metadata file that the packaged app can query via the official Tauri updater plugin.
+The release workflow must also publish updater artifacts in addition to the existing DMG assets. `ship.sh` will generate the signed updater bundle and a static `latest.json` metadata file that the packaged app can query via the official Tauri updater plugin.
 
 ## Problem
 
@@ -221,7 +221,7 @@ Register the official updater plugin in the Tauri builder. The local `tauri-plug
 
 The local crate may be removed outright or left only if it serves another non-runtime purpose later. For this feature, the runtime must stop depending on it.
 
-## Release Pipeline Changes
+## Release Workflow Changes
 
 ### Updater Artifacts
 
@@ -277,7 +277,7 @@ The GitHub release for each version must upload:
 - x86_64 updater signature
 - `latest.json`
 
-Because the runtime will always query the static `latest.json` endpoint, the release pipeline must ensure that file is updated atomically with the release assets for a given version.
+Because the runtime will always query the static `latest.json` endpoint, the release workflow must ensure that file is updated atomically with the release assets for a given version.
 
 ## Security And Validation
 

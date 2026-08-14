@@ -22,7 +22,7 @@ Replace the "Add Repo" button in the sidebar footer with a persistent search inp
 - Within each category group (pinned, merge, PR, in-progress, blocked), matched items keep their existing sort order (no re-ranking by score)
 - When the query is cleared, the full sidebar restores immediately
 
-**Filtering is display-only.** The `pipelineItems` prop stays unfiltered. Computed refs inside Sidebar derive filtered lists for rendering. Drag/drop and pin logic operate on the full unfiltered prop and are unaffected.
+**Filtering is display-only.** The `workflowItems` prop stays unfiltered. Computed refs inside Sidebar derive filtered lists for rendering. Drag/drop and pin logic operate on the full unfiltered prop and are unaffected.
 
 **Collapse behavior:** When a search query is active, collapsed repos auto-expand to show results. When the query is cleared, collapse state restores to what it was before.
 

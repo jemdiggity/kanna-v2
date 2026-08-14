@@ -31,7 +31,7 @@ The resolver should return `python` for Bazel/Starlark files and otherwise prese
 - When previewing Bazel/Starlark files, load and render with `python`.
 - Preserve the current fallback behavior to `text` if a language fails to load.
 
-This keeps the file preview pipeline unchanged except for filename-aware language detection.
+This keeps the file preview workflow unchanged except for filename-aware language detection.
 
 ### File: `apps/desktop/src/components/DiffView.vue`
 

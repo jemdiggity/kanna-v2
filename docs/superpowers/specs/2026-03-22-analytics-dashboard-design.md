@@ -21,7 +21,7 @@ Data source: `pipeline_item` table, scoped to `repo_id = selectedRepoId`.
 - "Created" = `COUNT(*)` grouped by `DATE(created_at)`
 - "Completed" = `COUNT(*)` where `stage = 'done'` grouped by `DATE(updated_at)`
 
-**Empty state:** If the repo has zero pipeline items, show a centered message: "No tasks yet" instead of an empty chart.
+**Empty state:** If the repo has zero workflow items, show a centered message: "No tasks yet" instead of an empty chart.
 
 ### View 2: Activity Time
 
@@ -150,7 +150,7 @@ Composable that takes `db: Ref<DbHandle | null>` and `repoId: Ref<string | null>
 - `headlineStats` — computed summary numbers
 - `timeRange` — computed adaptive bucket size
 - `refresh()` — re-query the DB
-- `hasData` — boolean, false when no pipeline items exist for the repo
+- `hasData` — boolean, false when no workflow items exist for the repo
 
 All queries are raw SQL via `db.select()`. Duration calculation for activity view is done in JS (see View 2 section above).
 

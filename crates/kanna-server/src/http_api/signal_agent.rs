@@ -165,14 +165,14 @@ async fn deliver_merge_handoff(
     Ok(response)
 }
 
-/// Hand the task's PR to the repo's merge master before the pipeline closes
+/// Hand the task's PR to the repo's merge master before the workflow closes
 /// it, when the approve post finished without doing so itself.
 ///
 /// The post is injected into whatever agent session the pr stage left running,
 /// so the handoff cannot rest on that agent having read and followed the post
 /// prompt: a pr agent that was still mid-work when the post arrived reads it
 /// as its next instruction, creates the PR, reports that, and never signals.
-/// The pipeline promised the handoff by declaring the post, so the engine —
+/// The workflow promised the handoff by declaring the post, so the engine —
 /// which holds the recorded `pr_url` either way — owes it.
 ///
 /// This delivers the same ordinary policy request the post would have. It
@@ -186,10 +186,10 @@ pub(super) async fn ensure_merge_handoff_before_close(
         return Ok(());
     };
     let Some(pr_url) = pending.pr_url else {
-        // Nothing to hand off, on a pipeline whose final stage promised a
+        // Nothing to hand off, on a workflow whose final stage promised a
         // handoff: the approve post reported success without ever producing
         // the PR it exists to approve. Refuse the close so the task parks for
-        // its human instead of disappearing as a completed pipeline.
+        // its human instead of disappearing as a completed workflow.
         let reason = format!(
             "task {task_id} finished stage '{}' whose post signals the merge master, but no PR \
              URL was ever recorded — nothing was handed off",
@@ -231,7 +231,7 @@ pub(super) async fn ensure_merge_handoff_before_close(
 }
 
 /// What the engine would send on the task's behalf, or `None` when the task
-/// owes nothing — its pipeline never promised a handoff, or the approve post
+/// owes nothing — its workflow never promised a handoff, or the approve post
 /// already delivered one.
 struct PendingMergeHandoff {
     stage: String,
@@ -272,20 +272,20 @@ async fn resolve_pending_merge_handoff(
         else {
             return Ok(None);
         };
-        let pipeline_name = task
+        let workflow_name = task
             .pipeline
             .clone()
-            .unwrap_or_else(|| crate::task_creator::FALLBACK_PIPELINE_NAME.to_string());
+            .unwrap_or_else(|| crate::task_creator::FALLBACK_WORKFLOW_NAME.to_string());
         let declares_post = crate::task_creator::stage_declares_merge_approve_post(
             &repo,
-            &pipeline_name,
+            &workflow_name,
             task.pipeline_def.as_deref(),
             &stage,
         )
         .map_err(|error| {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to resolve pipeline for {task_id}: {error}"),
+                format!("failed to resolve workflow for {task_id}: {error}"),
             )
         })?;
         if !declares_post {

@@ -24,7 +24,7 @@ function sidebarTask(slotId: string, repoId: string): SidebarTaskItem {
     issue_number: null,
     issue_title: null,
     prompt: slotId,
-    pipeline: "default",
+    workflow: "default",
     pipeline_def: null,
     stage: "in progress",
     stage_result: null,

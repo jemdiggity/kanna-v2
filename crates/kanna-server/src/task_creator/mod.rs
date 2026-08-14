@@ -25,7 +25,7 @@ use commands::{
 };
 pub(crate) use definition_cache::RepoDefinitionsCache;
 use definitions::{
-    PipelineStage, PipelineStagePolicy, PipelineStageTransition, RepoConfig, RepoDefinitions,
+    RepoConfig, RepoDefinitions, WorkflowStage, WorkflowStagePolicy, WorkflowStageTransition,
 };
 use environment::{
     append_executable_parent_to_path, build_spawn_env, build_workspace_search_path,
@@ -80,7 +80,7 @@ pub(crate) use stages::{
 };
 pub(crate) use worktree::{local_branch_exists, resolve_current_source_worktree_branch};
 
-pub(crate) const FALLBACK_PIPELINE_NAME: &str = "no-review";
+pub(crate) const FALLBACK_WORKFLOW_NAME: &str = "no-review";
 
 #[derive(Clone, Debug)]
 pub(crate) enum DefinitionLookupError {
@@ -111,15 +111,19 @@ pub(crate) struct RepoKannaDefinitions {
     revision: Option<String>,
     ref_name: String,
     config: RepoConfig,
-    default_pipeline: String,
-    pipelines: Vec<String>,
+    default_workflow: String,
+    workflows: Vec<String>,
+    #[serde(rename = "defaultPipeline")]
+    legacy_default_pipeline: String,
+    #[serde(rename = "pipelines")]
+    legacy_pipelines: Vec<String>,
 }
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct RevisionedPipelineDefinition {
+pub(crate) struct RevisionedWorkflowDefinition {
     revision: Option<String>,
-    definition: definitions::PipelineDefinition,
+    definition: definitions::WorkflowDefinition,
 }
 
 #[derive(serde::Serialize)]
@@ -129,33 +133,33 @@ pub(crate) struct RevisionedAgentDefinition {
     definition: definitions::AgentDefinition,
 }
 
-pub(crate) struct TaskPipelineSnapshot {
+pub(crate) struct TaskWorkflowSnapshot {
     pub(crate) definition_json: String,
     pub(crate) stage_names: Vec<String>,
     pub(crate) revision_limit: i64,
 }
 
-/// Resolve and serialize a pipeline through the same pinning path task
-/// creation uses. A dynamic pipeline change is creation of a new durable
+/// Resolve and serialize a workflow through the same pinning path task
+/// creation uses. A dynamic workflow change is creation of a new durable
 /// snapshot for an existing task, so aliasing, repo overrides, legacy
 /// normalization, and revision-limit defaults must not grow a second resolver.
-pub(crate) fn resolve_task_pipeline_snapshot(
+pub(crate) fn resolve_task_workflow_snapshot(
     repo: &Repo,
-    pipeline_name: &str,
-) -> Result<TaskPipelineSnapshot, String> {
-    validate_definition_component(pipeline_name, "pipeline name")
+    workflow_name: &str,
+) -> Result<TaskWorkflowSnapshot, String> {
+    validate_definition_component(workflow_name, "workflow name")
         .map_err(|error| error.to_string())?;
     let definitions = RepoDefinitions::resolve(repo)?;
-    let (pipeline, definition_json) =
-        pin_task_pipeline_definition(&definitions, pipeline_name, None)?;
-    Ok(TaskPipelineSnapshot {
+    let (workflow, definition_json) =
+        pin_task_workflow_definition(&definitions, workflow_name, None)?;
+    Ok(TaskWorkflowSnapshot {
         definition_json,
-        stage_names: pipeline
+        stage_names: workflow
             .stages
             .iter()
             .map(|stage| stage.name.clone())
             .collect(),
-        revision_limit: pipeline.revision_limit(),
+        revision_limit: workflow.revision_limit(),
     })
 }
 
@@ -173,60 +177,62 @@ pub(crate) fn load_repo_kanna_definitions(
     repo: &Repo,
 ) -> Result<RepoKannaDefinitions, DefinitionLookupError> {
     cache.with_definitions(repo, |definitions| {
-        let pipelines = definitions
-            .pipeline_names()
+        let workflows = definitions
+            .workflow_names()
             .map_err(DefinitionLookupError::Other)?
             .into_iter()
-            .filter(|name| validate_definition_component(name, "pipeline name").is_ok())
+            .filter(|name| validate_definition_component(name, "workflow name").is_ok())
             .collect::<Vec<String>>();
-        let configured_pipeline = definitions
+        let configured_workflow = definitions
             .config()
-            .pipeline
+            .workflow
             .clone()
-            .unwrap_or_else(|| FALLBACK_PIPELINE_NAME.to_string());
+            .unwrap_or_else(|| FALLBACK_WORKFLOW_NAME.to_string());
         // The manifest's default must be a name the caller can select from
-        // `pipelines`. A repo whose committed config still names a retired
+        // `workflows`. A repo whose committed config still names a retired
         // built-in (`default`, `qa`, `qa-dispatch`) resolves to the current definition,
-        // but the retired name is deliberately absent from `pipelines` — so
+        // but the retired name is deliberately absent from `workflows` — so
         // report the current name here or the desktop's picker silently falls
         // back to its first option and the repo loses its configured review
-        // depth. A repo shipping its own pipeline under that name keeps it:
-        // then the name is a real choice and appears in `pipelines`.
-        let default_pipeline = if pipelines.contains(&configured_pipeline) {
-            configured_pipeline
+        // depth. A repo shipping its own workflow under that name keeps it:
+        // then the name is a real choice and appears in `workflows`.
+        let default_workflow = if workflows.contains(&configured_workflow) {
+            configured_workflow
         } else {
-            definitions::canonical_builtin_pipeline_name(&configured_pipeline).to_string()
+            definitions::canonical_builtin_workflow_name(&configured_workflow).to_string()
         };
         Ok(RepoKannaDefinitions {
             revision: definitions.revision().map(str::to_string),
             ref_name: definitions.ref_name().to_string(),
             config: definitions.config().clone(),
-            default_pipeline,
-            pipelines,
+            legacy_default_pipeline: default_workflow.clone(),
+            legacy_pipelines: workflows.clone(),
+            default_workflow,
+            workflows,
         })
     })
 }
 
-/// Canonicalize stored recently-used pipeline names for the sticky new-task
+/// Canonicalize stored recently-used workflow names for the sticky new-task
 /// default. Task rows are durable, so `pipeline_item.initial_pipeline` can
 /// still name a retired built-in (`default`, `qa`, `qa-dispatch`); serving that name
 /// verbatim would make the sticky picker skip it — the retired name is
-/// deliberately absent from the repo's selectable pipelines — and silently
+/// deliberately absent from the repo's selectable workflows — and silently
 /// fall back, losing the depth of review the operator last chose. Same rule
-/// as the manifest's `defaultPipeline`: a name the repo still offers stays
+/// as the manifest's `defaultWorkflow`: a name the repo still offers stays
 /// verbatim (a repo shipping its own `default.json` makes `default` a real
 /// choice), anything else maps through the retired-name table. Canonicalizing
 /// can collapse two stored names into one, so duplicates keep only their
 /// newest position. When the repo's definitions cannot be resolved the stored
 /// names are served untouched — the caller filters by availability anyway.
-pub(crate) fn canonicalize_recent_pipeline_names(
+pub(crate) fn canonicalize_recent_workflow_names(
     cache: &RepoDefinitionsCache,
     repo: &Repo,
     stored: Vec<String>,
 ) -> Vec<String> {
     let Ok(offered) = cache.with_definitions(repo, |definitions| {
         definitions
-            .pipeline_names()
+            .workflow_names()
             .map_err(DefinitionLookupError::Other)
     }) else {
         return stored;
@@ -238,32 +244,32 @@ pub(crate) fn canonicalize_recent_pipeline_names(
             if offered.contains(&name) {
                 name
             } else {
-                definitions::canonical_builtin_pipeline_name(&name).to_string()
+                definitions::canonical_builtin_workflow_name(&name).to_string()
             }
         })
         .filter(|name| seen.insert(name.clone()))
         .collect()
 }
 
-pub(crate) fn load_repo_pipeline_definition(
+pub(crate) fn load_repo_workflow_definition(
     cache: &RepoDefinitionsCache,
     repo: &Repo,
-    pipeline_name: &str,
-) -> Result<RevisionedPipelineDefinition, DefinitionLookupError> {
-    validate_definition_component(pipeline_name, "pipeline name")?;
+    workflow_name: &str,
+) -> Result<RevisionedWorkflowDefinition, DefinitionLookupError> {
+    validate_definition_component(workflow_name, "workflow name")?;
     cache.with_definitions(repo, |definitions| {
         let mut definition = definitions
-            .pipeline_optional(pipeline_name)
+            .workflow_optional(workflow_name)
             .map_err(DefinitionLookupError::Other)?
             .ok_or_else(|| {
                 DefinitionLookupError::NotFound(format!(
-                    "pipeline definition not found: {pipeline_name}"
+                    "workflow definition not found: {workflow_name}"
                 ))
             })?;
         if definition.name.is_none() {
-            definition.name = Some(pipeline_name.to_string());
+            definition.name = Some(workflow_name.to_string());
         }
-        Ok(RevisionedPipelineDefinition {
+        Ok(RevisionedWorkflowDefinition {
             revision: definitions.revision().map(str::to_string),
             definition,
         })
@@ -450,25 +456,25 @@ pub(crate) fn prepare_rerun_stage_for_api(
         .ok_or_else(|| format!("repo not found for task: {}", task_id))?;
     let definitions = RepoDefinitions::resolve(&repo)?;
     let repo_config = definitions.config();
-    let pipeline_name = source_task
+    let workflow_name = source_task
         .pipeline
         .clone()
-        .unwrap_or_else(|| FALLBACK_PIPELINE_NAME.to_string());
+        .unwrap_or_else(|| FALLBACK_WORKFLOW_NAME.to_string());
     let stage_name = source_task
         .stage
         .clone()
         .ok_or_else(|| format!("task has no stage: {}", task_id))?;
-    let pipeline =
-        definitions.task_pipeline(&pipeline_name, source_task.pipeline_def.as_deref())?;
+    let workflow =
+        definitions.task_workflow(&workflow_name, source_task.pipeline_def.as_deref())?;
     // A legacy in-flight task can be parked at a folded post name (e.g.
     // `commit`); rerunning it respawns the post as a fresh session.
-    let (current_stage, run_kind): (PipelineStage, &'static str) =
-        match definitions::resolve_stage_position(&pipeline, &stage_name)
-            .ok_or_else(|| format!("stage not found in pipeline: {}", stage_name))?
+    let (current_stage, run_kind): (WorkflowStage, &'static str) =
+        match definitions::resolve_stage_position(&workflow, &stage_name)
+            .ok_or_else(|| format!("stage not found in workflow: {}", stage_name))?
         {
-            definitions::StagePosition::Stage(index) => (pipeline.stages[index].clone(), "main"),
+            definitions::StagePosition::Stage(index) => (workflow.stages[index].clone(), "main"),
             definitions::StagePosition::Post { owner } => {
-                let owner_stage = &pipeline.stages[owner];
+                let owner_stage = &workflow.stages[owner];
                 (
                     definitions::post_as_stage(owner_stage)
                         .ok_or_else(|| format!("stage has no post: {}", owner_stage.name))?,
@@ -591,7 +597,7 @@ pub(crate) fn prepare_rerun_stage_for_api(
     let stage_setup = current_stage
         .environment
         .as_deref()
-        .and_then(|name| pipeline.environments.as_ref()?.get(name))
+        .and_then(|name| workflow.environments.as_ref()?.get(name))
         .and_then(|environment| environment.setup.clone())
         .unwrap_or_default();
     let defer_headless_setup = agent_type == AgentSessionType::Agent && !stage_setup.is_empty();
@@ -601,7 +607,7 @@ pub(crate) fn prepare_rerun_stage_for_api(
         agent_type,
         task_id,
         &stage_name,
-        &pipeline_name,
+        &workflow_name,
         Some(current_stage.policy.transition.as_str()),
         prompt,
         model,
@@ -738,7 +744,7 @@ pub(crate) fn prepare_create_task_repair_for_api(
             agent_type,
             task_id,
             &resolved.stage_name,
-            &resolved.pipeline_name,
+            &resolved.workflow_name,
             Some(resolved.stage_transition.as_str()),
             resolved.final_prompt,
             resolved.model.clone(),
@@ -799,8 +805,8 @@ pub(crate) fn prepare_create_task_repair_for_api(
             create_intent_json: None,
             task_prompt: request.prompt,
             display_name: request.display_name,
-            pipeline_name: source_task.pipeline.clone().or(request.pipeline_name),
-            pipeline_def: source_task.pipeline_def.clone(),
+            workflow_name: source_task.pipeline.clone().or(request.workflow_name),
+            workflow_def: source_task.pipeline_def.clone(),
             base_ref: request.base_ref,
             stored_base_ref: source_task.base_ref,
             stage_override: request.stage,
@@ -854,7 +860,7 @@ pub(crate) fn prepare_create_task_repair_for_api(
         agent_type,
         task_id,
         &resolved.stage_name,
-        &resolved.pipeline_name,
+        &resolved.workflow_name,
         Some(resolved.stage_transition.as_str()),
         resolved.final_prompt,
         resolved.model.clone(),
@@ -929,12 +935,12 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
     repo: &Repo,
     definitions: &RepoDefinitions,
     task_id: &str,
-    pipeline_name: &str,
-    pipeline: &definitions::PipelineDefinition,
-    target_stage: &PipelineStage,
+    workflow_name: &str,
+    workflow: &definitions::WorkflowDefinition,
+    target_stage: &WorkflowStage,
     item_stage: &str,
     run_kind: &'static str,
-    completion_transition: PipelineStageTransition,
+    completion_transition: WorkflowStageTransition,
     workspace_spec: RunWorkspaceSpec,
     final_prompt: String,
     branch: &str,
@@ -1030,7 +1036,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
                 target_stage
                     .environment
                     .as_deref()
-                    .and_then(|name| pipeline.environments.as_ref()?.get(name))
+                    .and_then(|name| workflow.environments.as_ref()?.get(name))
                     .and_then(|environment| environment.setup.clone())
                     .unwrap_or_default(),
             );
@@ -1075,7 +1081,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
             agent_type,
             task_id,
             &target_stage.name,
-            pipeline_name,
+            workflow_name,
             Some(completion_transition.as_str()),
             final_prompt.clone(),
             model.clone(),
@@ -1098,7 +1104,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
             commands: setup,
             provider_candidates: provider_candidates.clone(),
             source_agent_type: source_agent_type.map(str::to_string),
-            pipeline_name: pipeline_name.to_string(),
+            workflow_name: workflow_name.to_string(),
             final_prompt: final_prompt.clone(),
             model: stage_run_model.clone(),
             effort: effort.clone(),
@@ -1230,7 +1236,7 @@ pub(crate) fn finish_deferred_stage_setup(
         agent_type,
         &prepared.task_id,
         &prepared.run_stage,
-        &deferred.pipeline_name,
+        &deferred.workflow_name,
         Some(prepared.completion_transition.as_str()),
         deferred.final_prompt,
         deferred.model,
@@ -1293,19 +1299,19 @@ fn try_prepare_workspace_teardown_for_close(
         return Ok(None);
     };
     let definitions = RepoDefinitions::resolve(&repo)?;
-    let pipeline_name = source_task
+    let workflow_name = source_task
         .pipeline
         .clone()
-        .unwrap_or_else(|| FALLBACK_PIPELINE_NAME.to_string());
-    let pipeline =
-        definitions.task_pipeline(&pipeline_name, source_task.pipeline_def.as_deref())?;
+        .unwrap_or_else(|| FALLBACK_WORKFLOW_NAME.to_string());
+    let workflow =
+        definitions.task_workflow(&workflow_name, source_task.pipeline_def.as_deref())?;
     Ok(prepare_workspace_teardown_for_transition_close(
         db,
         config,
         &repo,
         &definitions,
         task_id,
-        &pipeline,
+        &workflow,
         stage_name,
         branch,
     ))
@@ -1318,7 +1324,7 @@ pub(in crate::task_creator) fn prepare_workspace_teardown_for_transition_close(
     repo: &Repo,
     definitions: &RepoDefinitions,
     task_id: &str,
-    pipeline: &definitions::PipelineDefinition,
+    workflow: &definitions::WorkflowDefinition,
     stage_name: &str,
     branch: &str,
 ) -> Option<PreparedWorkspaceTeardown> {
@@ -1329,7 +1335,7 @@ pub(in crate::task_creator) fn prepare_workspace_teardown_for_transition_close(
         repo,
         definitions,
         task_id,
-        pipeline,
+        workflow,
         stage_name,
         branch,
         &task_template_teardown,
@@ -1344,7 +1350,7 @@ pub(in crate::task_creator) fn prepare_workspace_teardown(
     repo: &Repo,
     definitions: &RepoDefinitions,
     task_id: &str,
-    pipeline: &definitions::PipelineDefinition,
+    workflow: &definitions::WorkflowDefinition,
     stage_name: &str,
     branch: &str,
 ) -> Option<PreparedWorkspaceTeardown> {
@@ -1354,7 +1360,7 @@ pub(in crate::task_creator) fn prepare_workspace_teardown(
         repo,
         definitions,
         task_id,
-        pipeline,
+        workflow,
         stage_name,
         branch,
         &[],
@@ -1368,7 +1374,7 @@ fn prepare_workspace_teardown_with_extra(
     repo: &Repo,
     definitions: &RepoDefinitions,
     task_id: &str,
-    pipeline: &definitions::PipelineDefinition,
+    workflow: &definitions::WorkflowDefinition,
     stage_name: &str,
     branch: &str,
     extra_teardown: &[String],
@@ -1382,7 +1388,7 @@ fn prepare_workspace_teardown_with_extra(
         return None;
     }
     let repo_config = definitions.config();
-    let mut teardown = stage_environment_teardown(pipeline, stage_name);
+    let mut teardown = stage_environment_teardown(workflow, stage_name);
     teardown.extend(extra_teardown.iter().cloned());
     teardown.extend(repo_config.teardown.clone().unwrap_or_default());
     if teardown.is_empty() {
@@ -1461,20 +1467,20 @@ fn append_close_cleanup_to_teardown(
 }
 
 fn stage_environment_teardown(
-    pipeline: &definitions::PipelineDefinition,
+    workflow: &definitions::WorkflowDefinition,
     stage_name: &str,
 ) -> Vec<String> {
-    let environment_name = match definitions::resolve_stage_position(pipeline, stage_name) {
+    let environment_name = match definitions::resolve_stage_position(workflow, stage_name) {
         Some(definitions::StagePosition::Stage(index)) => {
-            pipeline.stages[index].environment.as_ref()
+            workflow.stages[index].environment.as_ref()
         }
         Some(definitions::StagePosition::Post { owner }) => {
-            pipeline.stages[owner].environment.as_ref()
+            workflow.stages[owner].environment.as_ref()
         }
         None => None,
     };
     environment_name
-        .and_then(|name| pipeline.environments.as_ref()?.get(name))
+        .and_then(|name| workflow.environments.as_ref()?.get(name))
         .and_then(|environment| environment.teardown.clone())
         .unwrap_or_default()
 }
@@ -1489,7 +1495,7 @@ fn build_prepared_session(
     agent_type: AgentSessionType,
     task_id: &str,
     stage_name: &str,
-    pipeline_name: &str,
+    workflow_name: &str,
     stage_transition: Option<&str>,
     final_prompt: String,
     model: Option<String>,
@@ -1562,7 +1568,7 @@ fn build_prepared_session(
                 &provider,
                 task_id,
                 stage_name,
-                pipeline_name,
+                workflow_name,
                 stage_transition,
                 mcp_config_path.as_deref(),
             );
@@ -1624,7 +1630,7 @@ fn build_prepared_session(
                 &provider,
                 task_id,
                 stage_name,
-                pipeline_name,
+                workflow_name,
                 stage_transition,
                 mcp_config_path.as_deref(),
             );
@@ -1714,8 +1720,8 @@ pub(crate) fn prepare_task_for_api_with_error(
             create_intent_json: Some(create_intent_json),
             task_prompt: request.prompt.clone(),
             display_name: request.display_name,
-            pipeline_name: request.pipeline_name,
-            pipeline_def: None,
+            workflow_name: request.workflow_name,
+            workflow_def: None,
             base_ref: request.base_ref,
             stored_base_ref: None,
             stage_override: request.stage,
@@ -1764,31 +1770,31 @@ pub(crate) fn prepare_singleton_agent_task_for_api(
     } else {
         None
     };
-    let pipeline_name = format!("singleton-{agent_name}");
-    let pipeline = definitions::PipelineDefinition {
-        name: Some(pipeline_name.clone()),
+    let workflow_name = format!("singleton-{agent_name}");
+    let workflow = definitions::WorkflowDefinition {
+        name: Some(workflow_name.clone()),
         description: None,
-        stages: vec![PipelineStage {
+        stages: vec![WorkflowStage {
             name: "in progress".to_string(),
             description: None,
             agent: Some(agent_name.to_string()),
             prompt: Some("$TASK_PROMPT".to_string()),
             agent_provider: None,
             environment: None,
-            policy: PipelineStagePolicy {
-                transition: PipelineStageTransition::Manual,
+            policy: WorkflowStagePolicy {
+                transition: WorkflowStageTransition::Manual,
                 revision_transition: None,
             },
             post: None,
         }],
         environments: None,
         revision_limit: None,
-        // Kanna binds this synthetic pipeline itself; it is never a listed
+        // Kanna binds this synthetic workflow itself; it is never a listed
         // choice, and visibility is never consulted on resolution anyway.
         visibility: definitions::DefinitionVisibility::Internal,
     };
-    let pipeline_def =
-        serde_json::to_string(&pipeline).map_err(|e| format!("serialize error: {}", e))?;
+    let workflow_def =
+        serde_json::to_string(&workflow).map_err(|e| format!("serialize error: {}", e))?;
     let display_name = match agent_name {
         "merge" => Some("Merge Master".to_string()),
         "task-manager" => Some("Kanna Task Manager".to_string()),
@@ -1804,8 +1810,8 @@ pub(crate) fn prepare_singleton_agent_task_for_api(
             create_intent_json: None,
             task_prompt: message.to_string(),
             display_name,
-            pipeline_name: Some(pipeline_name),
-            pipeline_def: Some(pipeline_def),
+            workflow_name: Some(workflow_name),
+            workflow_def: Some(workflow_def),
             base_ref: None,
             stored_base_ref: None,
             stage_override: None,
@@ -1865,22 +1871,22 @@ Resolve any conflicts preserving both sides' intent. Run the repo's relevant che
 Commit the reconciled result. Do not push or open a PR. When complete, record stage \
 completion with status success so Kanna can run the commit post and close this integration task."
     );
-    let pipeline_name = "integration".to_string();
-    let pipeline = definitions::PipelineDefinition {
-        name: Some(pipeline_name.clone()),
+    let workflow_name = "integration".to_string();
+    let workflow = definitions::WorkflowDefinition {
+        name: Some(workflow_name.clone()),
         description: None,
-        stages: vec![PipelineStage {
+        stages: vec![WorkflowStage {
             name: "in progress".to_string(),
             description: None,
             agent: None,
             prompt: Some("$TASK_PROMPT".to_string()),
             agent_provider: None,
             environment: None,
-            policy: PipelineStagePolicy {
-                transition: PipelineStageTransition::Auto,
+            policy: WorkflowStagePolicy {
+                transition: WorkflowStageTransition::Auto,
                 revision_transition: None,
             },
-            post: Some(definitions::PipelinePost {
+            post: Some(definitions::WorkflowPost {
                 name: "commit".to_string(),
                 description: None,
                 agent: Some("commit".to_string()),
@@ -1892,12 +1898,12 @@ completion with status success so Kanna can run the commit post and close this i
         }],
         environments: None,
         revision_limit: None,
-        // Kanna binds this synthetic pipeline itself; it is never a listed
+        // Kanna binds this synthetic workflow itself; it is never a listed
         // choice, and visibility is never consulted on resolution anyway.
         visibility: definitions::DefinitionVisibility::Internal,
     };
-    let pipeline_def =
-        serde_json::to_string(&pipeline).map_err(|e| format!("serialize error: {}", e))?;
+    let workflow_def =
+        serde_json::to_string(&workflow).map_err(|e| format!("serialize error: {}", e))?;
 
     prepare_task_spawn(
         db,
@@ -1908,8 +1914,8 @@ completion with status success so Kanna can run the commit post and close this i
             create_intent_json: None,
             task_prompt: prompt,
             display_name: Some(format!("Integrate: {dependent_name}")),
-            pipeline_name: Some(pipeline_name),
-            pipeline_def: Some(pipeline_def),
+            workflow_name: Some(workflow_name),
+            workflow_def: Some(workflow_def),
             base_ref: Some(base_ref.to_string()),
             stored_base_ref: Some(base_ref.to_string()),
             stage_override: None,
@@ -1977,23 +1983,23 @@ pub(crate) fn create_dormant_task_for_api_with_error(
         None
     };
 
-    let pipeline_name = request
-        .pipeline_name
-        .or(repo_config.pipeline.clone())
-        .unwrap_or_else(|| FALLBACK_PIPELINE_NAME.to_string());
-    let (pipeline, pipeline_def_json) =
-        pin_task_pipeline_definition(&definitions, &pipeline_name, None)?;
+    let workflow_name = request
+        .workflow_name
+        .or(repo_config.workflow.clone())
+        .unwrap_or_else(|| FALLBACK_WORKFLOW_NAME.to_string());
+    let (workflow, workflow_def_json) =
+        pin_task_workflow_definition(&definitions, &workflow_name, None)?;
     let stage = if let Some(stage_name) = request.stage.as_deref() {
-        pipeline
+        workflow
             .stages
             .iter()
             .find(|stage| stage.name == stage_name)
-            .ok_or_else(|| format!("stage not found in pipeline: {}", stage_name))?
+            .ok_or_else(|| format!("stage not found in workflow: {}", stage_name))?
     } else {
-        pipeline
+        workflow
             .stages
             .first()
-            .ok_or_else(|| format!("pipeline has no stages: {}", pipeline_name))?
+            .ok_or_else(|| format!("workflow has no stages: {}", workflow_name))?
     };
     let stage_agent = request.agent.clone().or_else(|| stage.agent.clone());
     let agent = if let Some(agent_name) = stage_agent.as_deref() {
@@ -2059,8 +2065,8 @@ pub(crate) fn create_dormant_task_for_api_with_error(
             repo_id: &repo.id,
             prompt: &request.prompt,
             display_name: request.display_name.as_deref(),
-            pipeline: &pipeline_name,
-            pipeline_def: Some(&pipeline_def_json),
+            pipeline: &workflow_name,
+            pipeline_def: Some(&workflow_def_json),
             stage: &stage_name,
             branch: &branch,
             agent_type: agent_type.as_str(),
@@ -2142,20 +2148,20 @@ pub(crate) fn prepare_start_dormant_task_for_api(
     let definitions = RepoDefinitions::resolve(&repo)?;
     let repo_config = definitions.config();
 
-    let pipeline_name = item
+    let workflow_name = item
         .pipeline
         .clone()
-        .unwrap_or_else(|| FALLBACK_PIPELINE_NAME.to_string());
-    let pipeline = definitions.task_pipeline(&pipeline_name, item.pipeline_def.as_deref())?;
+        .unwrap_or_else(|| FALLBACK_WORKFLOW_NAME.to_string());
+    let workflow = definitions.task_workflow(&workflow_name, item.pipeline_def.as_deref())?;
     let stage_name = item
         .stage
         .clone()
         .ok_or_else(|| format!("task has no stage: {}", task_id))?;
-    let stage = pipeline
+    let stage = workflow
         .stages
         .iter()
         .find(|stage| stage.name == stage_name)
-        .ok_or_else(|| format!("stage not found in pipeline: {}", stage_name))?;
+        .ok_or_else(|| format!("stage not found in workflow: {}", stage_name))?;
     let stage_agent = create_request
         .as_ref()
         .and_then(|request| request.agent.clone())
@@ -2258,7 +2264,7 @@ pub(crate) fn prepare_start_dormant_task_for_api(
     let stage_setup = stage
         .environment
         .as_deref()
-        .and_then(|name| pipeline.environments.as_ref()?.get(name))
+        .and_then(|name| workflow.environments.as_ref()?.get(name))
         .and_then(|environment| environment.setup.clone())
         .unwrap_or_default();
     let setup = new_task_setup_cmds(
@@ -2354,7 +2360,7 @@ pub(crate) fn prepare_start_dormant_task_for_api(
         agent_type,
         task_id,
         &stage_name,
-        &pipeline_name,
+        &workflow_name,
         Some(stage.policy.transition.as_str()),
         final_prompt,
         model,
@@ -2441,10 +2447,10 @@ fn resolve_initial_terminal_geometry(cols: Option<u16>, rows: Option<u16>) -> Op
 struct ResolvedTaskSpawn {
     original_prompt: String,
     display_name: Option<String>,
-    pipeline_name: String,
-    pipeline_def_json: String,
+    workflow_name: String,
+    workflow_def_json: String,
     stage_name: String,
-    stage_transition: PipelineStageTransition,
+    stage_transition: WorkflowStageTransition,
     stage_agent: Option<String>,
     provider_candidates: Vec<AgentProvider>,
     requested_agent_type: Option<String>,
@@ -2473,9 +2479,9 @@ struct ResolvedTaskSpawn {
 #[serde(rename_all = "camelCase")]
 struct ResolvedCreateTaskIntent {
     final_prompt: String,
-    pipeline_name: String,
+    workflow_name: String,
     stage_name: String,
-    stage_transition: PipelineStageTransition,
+    stage_transition: WorkflowStageTransition,
     stage_agent: Option<String>,
     provider: String,
     agent_type: String,
@@ -2510,7 +2516,7 @@ fn resolved_create_task_intent_json(
         "_kannaResolved".to_string(),
         serde_json::to_value(ResolvedCreateTaskIntent {
             final_prompt: resolved.final_prompt.clone(),
-            pipeline_name: resolved.pipeline_name.clone(),
+            workflow_name: resolved.workflow_name.clone(),
             stage_name: resolved.stage_name.clone(),
             stage_transition: resolved.stage_transition,
             stage_agent: resolved.stage_agent.clone(),
@@ -2746,15 +2752,15 @@ fn resolve_agent_model(
         .or_else(|| agent.and_then(|agent| agent.model.clone()))
 }
 
-fn pin_task_pipeline_definition(
+fn pin_task_workflow_definition(
     definitions: &RepoDefinitions,
-    pipeline_name: &str,
+    workflow_name: &str,
     stored: Option<&str>,
-) -> Result<(definitions::PipelineDefinition, String), String> {
-    let pipeline = definitions.task_pipeline(pipeline_name, stored)?;
+) -> Result<(definitions::WorkflowDefinition, String), String> {
+    let workflow = definitions.task_workflow(workflow_name, stored)?;
     let definition_json =
-        serde_json::to_string(&pipeline).map_err(|e| format!("serialize error: {e}"))?;
-    Ok((pipeline, definition_json))
+        serde_json::to_string(&workflow).map_err(|e| format!("serialize error: {e}"))?;
+    Ok((workflow, definition_json))
 }
 
 fn resolve_agent_effort(
@@ -2775,25 +2781,25 @@ fn resolve_task_spawn(
     let repo_config = definitions.config();
     let original_prompt = request.task_prompt.clone();
     let display_name = request.display_name.clone();
-    let pipeline_name = request
-        .pipeline_name
+    let workflow_name = request
+        .workflow_name
         .clone()
-        .or(repo_config.pipeline.clone())
-        .unwrap_or_else(|| FALLBACK_PIPELINE_NAME.to_string());
-    let (pipeline, pipeline_def_json) =
-        pin_task_pipeline_definition(definitions, &pipeline_name, request.pipeline_def.as_deref())?;
+        .or(repo_config.workflow.clone())
+        .unwrap_or_else(|| FALLBACK_WORKFLOW_NAME.to_string());
+    let (workflow, workflow_def_json) =
+        pin_task_workflow_definition(definitions, &workflow_name, request.workflow_def.as_deref())?;
     let stage = if let Some(stage_name) = request.stage_override.as_deref() {
-        pipeline
+        workflow
             .stages
             .iter()
             .find(|stage| stage.name == stage_name)
-            .ok_or_else(|| format!("stage not found in pipeline: {}", stage_name))?
+            .ok_or_else(|| format!("stage not found in workflow: {}", stage_name))?
             .clone()
     } else {
-        pipeline
+        workflow
             .stages
             .first()
-            .ok_or_else(|| format!("pipeline has no stages: {}", pipeline_name))?
+            .ok_or_else(|| format!("workflow has no stages: {}", workflow_name))?
             .clone()
     };
 
@@ -2903,8 +2909,8 @@ fn resolve_task_spawn(
     Ok(ResolvedTaskSpawn {
         original_prompt,
         display_name,
-        pipeline_name,
-        pipeline_def_json,
+        workflow_name,
+        workflow_def_json,
         stage_name,
         stage_transition: stage.policy.transition,
         stage_agent,
@@ -2914,7 +2920,7 @@ fn resolve_task_spawn(
         stage_setup: stage
             .environment
             .as_deref()
-            .and_then(|name| pipeline.environments.as_ref()?.get(name))
+            .and_then(|name| workflow.environments.as_ref()?.get(name))
             .and_then(|environment| environment.setup.clone())
             .unwrap_or_default(),
         final_prompt,
@@ -2953,8 +2959,8 @@ fn insert_new_task_record(
         repo_id: &repo.id,
         prompt: &resolved.original_prompt,
         display_name: resolved.display_name.as_deref(),
-        pipeline: &resolved.pipeline_name,
-        pipeline_def: Some(&resolved.pipeline_def_json),
+        pipeline: &resolved.workflow_name,
+        pipeline_def: Some(&resolved.workflow_def_json),
         stage: &resolved.stage_name,
         branch,
         agent_type: agent_type.as_str(),
@@ -3218,7 +3224,7 @@ fn prepare_new_task_session(
         agent_type,
         task_id,
         &resolved.stage_name,
-        &resolved.pipeline_name,
+        &resolved.workflow_name,
         Some(resolved.stage_transition.as_str()),
         resolved.final_prompt.clone(),
         resolved.model.clone(),

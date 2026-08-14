@@ -103,11 +103,11 @@ git commit -m "feat: add test field to RepoConfig for merge queue"
 ### Task 2: Add `merge` stage and transitions
 
 **Files:**
-- Modify: `packages/core/src/pipeline/types.ts:1-9`
+- Modify: `packages/core/src/workflow/types.ts:1-9`
 
 - [ ] **Step 1: Add `merge` to Stage type and transitions**
 
-In `packages/core/src/pipeline/types.ts`:
+In `packages/core/src/workflow/types.ts`:
 
 ```typescript
 export type Stage = "in_progress" | "pr" | "merge" | "done";
@@ -131,8 +131,8 @@ Expected: All tests PASS. No tests break because `canTransition` just checks the
 - [ ] **Step 3: Commit**
 
 ```bash
-git add packages/core/src/pipeline/types.ts
-git commit -m "feat: add merge stage to pipeline types"
+git add packages/core/src/workflow/types.ts
+git commit -m "feat: add merge stage to workflow types"
 ```
 
 ---
@@ -183,7 +183,7 @@ In `apps/desktop/src/components/Sidebar.vue` script section, after `sortedPR()` 
 ```typescript
 function sortedMerge(repoId: string): PipelineItem[] {
   return sortByActivity(
-    props.pipelineItems.filter((i) => i.repo_id === repoId && i.stage === "merge" && !i.pinned)
+    props.workflowItems.filter((i) => i.repo_id === repoId && i.stage === "merge" && !i.pinned)
   );
 }
 ```
@@ -220,7 +220,7 @@ In the template, after the PR `</draggable>` block (after line 262) and before t
           >
             <template #item="{ element }">
               <div
-                class="pipeline-item"
+                class="workflow-item"
                 :class="{ selected: selectedItemId === element.id }"
                 @click="handleSelectItem(element)"
                 @dblclick.stop="startRename(element)"
@@ -256,14 +256,14 @@ git commit -m "feat: add Merge Queue section to sidebar"
 
 ---
 
-### Task 5: Add `startMergeAgent()` to usePipeline
+### Task 5: Add `startMergeAgent()` to useWorkflow
 
 **Files:**
-- Modify: `apps/desktop/src/composables/usePipeline.ts:219-237` (after `startPrAgent`)
+- Modify: `apps/desktop/src/composables/useWorkflow.ts:219-237` (after `startPrAgent`)
 
 - [ ] **Step 1: Add `startMergeAgent` function**
 
-In `apps/desktop/src/composables/usePipeline.ts`, after `startPrAgent` (after line 237), add:
+In `apps/desktop/src/composables/useWorkflow.ts`, after `startPrAgent` (after line 237), add:
 
 ```typescript
   async function startMergeAgent(repoId: string, repoPath: string) {
@@ -332,8 +332,8 @@ In the `return` statement (line 280), add `startMergeAgent`:
 - [ ] **Step 3: Commit**
 
 ```bash
-git add apps/desktop/src/composables/usePipeline.ts
-git commit -m "feat: add startMergeAgent to usePipeline"
+git add apps/desktop/src/composables/useWorkflow.ts
+git commit -m "feat: add startMergeAgent to useWorkflow"
 ```
 
 ---
@@ -375,7 +375,7 @@ export type ActionName =
 In the `shortcuts` array, after the `makePR` entry (line 48):
 
 ```typescript
-  { action: "mergeQueue", label: "Merge Queue",      group: "Pipeline",   key: ["M", "m"],                     meta: true, shift: true,  display: "⇧⌘M" },
+  { action: "mergeQueue", label: "Merge Queue",      group: "Workflow",   key: ["M", "m"],                     meta: true, shift: true,  display: "⇧⌘M" },
 ```
 
 - [ ] **Step 3: Add `startMergeAgent` to App.vue destructuring**
@@ -383,7 +383,7 @@ In the `shortcuts` array, after the `makePR` entry (line 48):
 In `apps/desktop/src/App.vue` line 29, add `startMergeAgent` to the destructured return:
 
 ```typescript
-const { allItems, selectedItemId, loadAllItems, transition, createItem, spawnPtySession, startPrAgent, startMergeAgent, selectedItem, pinItem, unpinItem, reorderPinned, renameItem } = usePipeline(db);
+const { allItems, selectedItemId, loadAllItems, transition, createItem, spawnPtySession, startPrAgent, startMergeAgent, selectedItem, pinItem, unpinItem, reorderPinned, renameItem } = useWorkflow(db);
 ```
 
 - [ ] **Step 4: Wire `mergeQueue` action handler**

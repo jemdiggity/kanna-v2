@@ -6,7 +6,7 @@ import { createQueriesApi } from "./queries";
 import { createSelectionApi } from "./selection";
 import { recordSelectionIntent as recordStoreSelectionIntent } from "./selectionIntent";
 import { createSessionsApi } from "./sessions";
-import { createPipelineApi } from "./pipeline";
+import { createWorkflowApi } from "./workflow";
 import { createTasksApi } from "./tasks";
 import { createTransferApi } from "./transfer";
 import { createInitApi } from "./init";
@@ -27,7 +27,7 @@ export const useKannaStore = defineStore("kanna", () => {
   const queries = createQueriesApi(context);
   const selection = createSelectionApi(context);
   const sessions = createSessionsApi(context);
-  const pipeline = createPipelineApi(context);
+  const workflow = createWorkflowApi(context);
   const tasks = createTasksApi(context);
   const initApi = createInitApi(context, ports, tasks);
 
@@ -60,11 +60,11 @@ export const useKannaStore = defineStore("kanna", () => {
   services.spawnPtySession = sessions.spawnPtySession;
   services.recoverTaskSession = sessions.recoverTaskSession;
 
-  services.loadPipeline = pipeline.loadPipeline;
-  services.loadAgent = pipeline.loadAgent;
-  services.advanceStage = pipeline.advanceStage;
-  services.requestRevision = pipeline.requestRevision;
-  services.rerunStage = pipeline.rerunStage;
+  services.loadWorkflow = workflow.loadWorkflow;
+  services.loadAgent = workflow.loadAgent;
+  services.advanceStage = workflow.advanceStage;
+  services.requestRevision = workflow.requestRevision;
+  services.rerunStage = workflow.rerunStage;
 
   services.createItem = tasks.createItem;
   services.closeTask = tasks.closeTask;
@@ -80,7 +80,7 @@ export const useKannaStore = defineStore("kanna", () => {
     const item = selection.currentItem.value;
     if (!item) return;
     try {
-      await pipeline.advanceStage(item.id);
+      await workflow.advanceStage(item.id);
     } catch (error) {
       console.error("[store] stage advance failed:", error);
       toast.error(context.tt("toasts.prAgentFailed"));
@@ -101,7 +101,7 @@ export const useKannaStore = defineStore("kanna", () => {
     if (!repo) return;
 
     try {
-      const agent = await pipeline.loadAgent(repo.id, "merge");
+      const agent = await workflow.loadAgent(repo.id, "merge");
       const targetBranch = repo.default_branch || "main";
       const prompt = `${agent.prompt.trim()}
 
@@ -182,11 +182,11 @@ Use this branch as the default when the user does not specify a target branch. B
     closeTask: tasks.closeTask,
     undoClose: tasks.undoClose,
 
-    advanceStage: pipeline.advanceStage,
-    requestRevision: pipeline.requestRevision,
-    rerunStage: pipeline.rerunStage,
-    loadPipeline: pipeline.loadPipeline,
-    loadAgent: pipeline.loadAgent,
+    advanceStage: workflow.advanceStage,
+    requestRevision: workflow.requestRevision,
+    rerunStage: workflow.rerunStage,
+    loadWorkflow: workflow.loadWorkflow,
+    loadAgent: workflow.loadAgent,
 
     makePR,
     mergeQueue,

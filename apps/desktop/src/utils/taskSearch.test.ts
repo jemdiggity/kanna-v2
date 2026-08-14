@@ -9,7 +9,7 @@ function makeItem(overrides: Partial<PipelineItem> = {}): PipelineItem {
     issue_number: null,
     issue_title: null,
     prompt: "Refactor task search behavior to reduce false positives",
-    pipeline: "default",
+    workflow: "default",
     stage: "in progress",
     stage_result: null,
     tags: "[]",

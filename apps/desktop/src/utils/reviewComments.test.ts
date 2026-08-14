@@ -8,8 +8,8 @@ import {
 
 describe("review comment prompt composition", () => {
   it("formats single-line and range anchors", () => {
-    expect(formatReviewAnchor({ filePath: "apps/desktop/src/stores/pipeline.ts", startLine: 118, endLine: 118 }))
-      .toBe("apps/desktop/src/stores/pipeline.ts:118");
+    expect(formatReviewAnchor({ filePath: "apps/desktop/src/stores/workflow.ts", startLine: 118, endLine: 118 }))
+      .toBe("apps/desktop/src/stores/workflow.ts:118");
     expect(formatReviewAnchor({ filePath: "crates/kanna-server/src/http_api/task_actions.rs", startLine: 41, endLine: 44 }))
       .toBe("crates/kanna-server/src/http_api/task_actions.rs:41-44");
   });
@@ -18,7 +18,7 @@ describe("review comment prompt composition", () => {
     const comments: PendingReviewComment[] = [
       {
         id: "comment-1",
-        filePath: "apps/desktop/src/stores/pipeline.ts",
+        filePath: "apps/desktop/src/stores/workflow.ts",
         startLine: 118,
         endLine: 124,
         excerpt: "for (const attempt of attempts) {\n  await run();\n}",
@@ -45,7 +45,7 @@ describe("review comment prompt composition", () => {
     })).toBe([
       "Revision requested from review of task-8f41c409 @ 83b57a05 (branch diff vs main).",
       "",
-      "apps/desktop/src/stores/pipeline.ts:118-124",
+      "apps/desktop/src/stores/workflow.ts:118-124",
       "> for (const attempt of attempts) {",
       ">   await run();",
       "> }",

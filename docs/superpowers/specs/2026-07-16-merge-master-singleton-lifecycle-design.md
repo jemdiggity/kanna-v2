@@ -31,7 +31,7 @@ returns `created: false`. If no open task exists, it follows the existing
 creation, pinning, and detached-spawn path and returns `created: true`.
 
 This remains generic for repo-scoped singleton agents rather than introducing
-merge-specific pipeline-name logic or a second source of agent identity.
+merge-specific workflow-name logic or a second source of agent identity.
 
 ## Error Handling
 

@@ -7,7 +7,7 @@ permission_mode: default
 
 Implement the requested task in this worktree. Understand the relevant code before changing it, follow the repository's existing conventions, and verify your work with the repository's tests or checks where practical.
 
-Do not push a branch or create a pull request unless this stage's prompt explicitly tells you to; the pipeline handles committing, review, and PR creation after the user advances the task.
+Do not push a branch or create a pull request unless this stage's prompt explicitly tells you to; the workflow handles committing, review, and PR creation after the user advances the task.
 
 ## Scope
 

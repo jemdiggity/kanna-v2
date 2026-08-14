@@ -94,7 +94,7 @@ export interface CreateTaskRequest {
   repoId: string;
   prompt: string;
   desktopId?: string;
-  pipelineName?: string;
+  workflowName?: string;
   baseRef?: string;
   stage?: string;
   agentProvider?: string;
@@ -220,7 +220,7 @@ export interface TaskLatestRun {
 }
 
 export interface TaskDetail extends TaskSummary {
-  pipelineName?: string | null;
+  workflowName?: string | null;
   stageTransition?: string | null;
   /** Resolved model used by the latest stage run. */
   model?: string | null;
@@ -236,6 +236,6 @@ export interface TaskDetail extends TaskSummary {
   latestRun?: TaskLatestRun | null;
   /** Agent-requested revision rounds spent since the last human-requested one. */
   revisionRounds?: number;
-  /** Rounds the task's pipeline allows before it parks for its human; 0 = unlimited. */
+  /** Rounds the task's workflow allows before it parks for its human; 0 = unlimited. */
   revisionLimit?: number;
 }

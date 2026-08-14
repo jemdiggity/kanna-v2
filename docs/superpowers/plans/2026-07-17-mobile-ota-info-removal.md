@@ -62,4 +62,4 @@
 - [x] **Step 5: Run `pnpm --dir apps/mobile typecheck`, evaluate whether the managed Appium environment is available, and run the smoke when available.**
 - [x] **Step 6: Run `git diff --check` and inspect `git status --short` before handoff.**
 
-No commit step is included because this Kanna stage explicitly leaves committing to the later pipeline transition.
+No commit step is included because this Kanna stage explicitly leaves committing to the later workflow transition.

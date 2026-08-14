@@ -1835,7 +1835,7 @@ describe("diff view", () => {
     await restoreSharedFixtureTask(task.id);
   });
 
-  it("keeps approval generic and closing for pinned pipelines without an approve post", async () => {
+  it("keeps approval generic and closing for pinned workflows without an approve post", async () => {
     const task = await parkSelectedTaskAtPr(E2E_PR_NO_POST_PIPELINE_DEF);
     await installStageActionRecorder(client);
 

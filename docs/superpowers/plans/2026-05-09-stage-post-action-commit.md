@@ -2,34 +2,34 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace the visible `commit` pipeline stage with a generic post-action attached to `in progress`, keeping tasks grouped as `in progress` until commit completes.
+**Goal:** Replace the visible `commit` workflow stage with a generic post-action attached to `in progress`, keeping tasks grouped as `in progress` until commit completes.
 
-**Architecture:** Pipeline stages gain a single optional `post_action` object. Runtime state lives on `pipeline_item.active_post_action`; `pipeline_item.stage` remains the grouping and stage-advance source of truth. Stage completion handling treats `stage_result` as a post-action result when `active_post_action` is set, clears the marker on success, then advances to the next real stage with an explicit `skipPostAction` option.
+**Architecture:** Workflow stages gain a single optional `post_action` object. Runtime state lives on `pipeline_item.active_post_action`; `pipeline_item.stage` remains the grouping and stage-advance source of truth. Stage completion handling treats `stage_result` as a post-action result when `active_post_action` is set, clears the marker on success, then advances to the next real stage with an explicit `skipPostAction` option.
 
 **Tech Stack:** TypeScript, Vue 3, Pinia, Vitest, SQLite migrations, Tauri command mocks, WebDriver E2E.
 
 ---
 
-### Task 1: Parse Post-Actions And Update Built-In Pipeline Shape
+### Task 1: Parse Post-Actions And Update Built-In Workflow Shape
 
 **Files:**
-- Modify: `packages/core/src/pipeline/pipeline-types.ts`
-- Modify: `packages/core/src/pipeline/pipeline-loader.ts`
-- Modify: `packages/core/src/pipeline/pipeline-loader.test.ts`
+- Modify: `packages/core/src/workflow/workflow-types.ts`
+- Modify: `packages/core/src/workflow/workflow-loader.ts`
+- Modify: `packages/core/src/workflow/workflow-loader.test.ts`
 - Modify: `packages/core/src/config/repo-config.ts`
 - Modify: `packages/core/src/config/repo-config.test.ts`
-- Modify: `.kanna/pipelines/default.json`
-- Modify: `.kanna/pipelines/qa.json`
-- Modify: `.kanna/pipelines/schema.json`
+- Modify: `.kanna/workflows/default.json`
+- Modify: `.kanna/workflows/qa.json`
+- Modify: `.kanna/workflows/schema.json`
 
 - [ ] **Step 1: Write failing parser tests**
 
-Add these tests to `describe("parsePipelineJson", ...)` in `packages/core/src/pipeline/pipeline-loader.test.ts`:
+Add these tests to `describe("parseWorkflowJson", ...)` in `packages/core/src/workflow/workflow-loader.test.ts`:
 
 ```ts
   it("parses a stage post_action", () => {
     const json = JSON.stringify({
-      name: "My Pipeline",
+      name: "My Workflow",
       stages: [
         {
           name: "in progress",
@@ -47,7 +47,7 @@ Add these tests to `describe("parsePipelineJson", ...)` in `packages/core/src/pi
       ],
     });
 
-    const result = parsePipelineJson(json);
+    const result = parseWorkflowJson(json);
 
     expect(result.stages[0].post_action).toEqual({
       name: "commit",
@@ -61,22 +61,22 @@ Add these tests to `describe("parsePipelineJson", ...)` in `packages/core/src/pi
 
   it("ignores non-object post_action values", () => {
     const json = JSON.stringify({
-      name: "My Pipeline",
+      name: "My Workflow",
       stages: [{ name: "in progress", transition: "manual", post_action: "commit" }],
     });
 
-    const result = parsePipelineJson(json);
+    const result = parseWorkflowJson(json);
 
     expect(result.stages[0].post_action).toBeUndefined();
   });
 ```
 
-Add these tests to `describe("validatePipeline", ...)`:
+Add these tests to `describe("validateWorkflow", ...)`:
 
 ```ts
   it("returns error for post_action without a name", () => {
-    const pipeline = {
-      name: "Pipeline",
+    const workflow = {
+      name: "Workflow",
       stages: [
         {
           name: "in progress",
@@ -86,14 +86,14 @@ Add these tests to `describe("validatePipeline", ...)`:
       ],
     };
 
-    const errors = validatePipeline(pipeline);
+    const errors = validateWorkflow(workflow);
 
     expect(errors.some((error) => error.includes("post_action") && error.includes("name"))).toBe(true);
   });
 
   it("returns error for invalid post_action transition", () => {
-    const pipeline = {
-      name: "Pipeline",
+    const workflow = {
+      name: "Workflow",
       stages: [
         {
           name: "in progress",
@@ -103,7 +103,7 @@ Add these tests to `describe("validatePipeline", ...)`:
       ],
     };
 
-    const errors = validatePipeline(pipeline);
+    const errors = validateWorkflow(workflow);
 
     expect(errors.some((error) => error.includes("post_action") && error.includes("transition"))).toBe(true);
   });
@@ -123,17 +123,17 @@ Update the first test in `packages/core/src/config/repo-config.test.ts` to expec
 Run:
 
 ```bash
-pnpm --dir packages/core exec vitest run src/pipeline/pipeline-loader.test.ts src/config/repo-config.test.ts
+pnpm --dir packages/core exec vitest run src/workflow/workflow-loader.test.ts src/config/repo-config.test.ts
 ```
 
 Expected: FAIL because `post_action` is not typed or parsed, validation does not inspect it, and `DEFAULT_STAGE_ORDER` still includes `commit`.
 
 - [ ] **Step 3: Add post-action types**
 
-In `packages/core/src/pipeline/pipeline-types.ts`, add:
+In `packages/core/src/workflow/workflow-types.ts`, add:
 
 ```ts
-export interface PipelinePostAction {
+export interface WorkflowPostAction {
   name: string;
   description?: string;
   agent?: string;
@@ -143,23 +143,23 @@ export interface PipelinePostAction {
 }
 ```
 
-Then add this property to `PipelineStage`:
+Then add this property to `WorkflowStage`:
 
 ```ts
-  post_action?: PipelinePostAction;
+  post_action?: WorkflowPostAction;
 ```
 
 - [ ] **Step 4: Add parser and validation support**
 
-In `packages/core/src/pipeline/pipeline-loader.ts`, add this helper above `extractStages`:
+In `packages/core/src/workflow/workflow-loader.ts`, add this helper above `extractStages`:
 
 ```ts
-function extractPostAction(value: unknown): PipelineStage["post_action"] | undefined {
+function extractPostAction(value: unknown): WorkflowStage["post_action"] | undefined {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return undefined;
   }
   const raw = value as Record<string, unknown>;
-  const postAction: PipelineStage["post_action"] = {
+  const postAction: WorkflowStage["post_action"] = {
     name: typeof raw["name"] === "string" ? raw["name"] : "",
     transition: (raw["transition"] as "manual" | "auto") ?? "",
   };
@@ -185,7 +185,7 @@ In `extractStages`, after `mode` parsing, add:
     }
 ```
 
-In `validatePipeline`, inside the stage loop, add:
+In `validateWorkflow`, inside the stage loop, add:
 
 ```ts
     if (stage.post_action !== undefined) {
@@ -208,9 +208,9 @@ In `packages/core/src/config/repo-config.ts`, change:
 export const DEFAULT_STAGE_ORDER: readonly string[] = ["merge", "pr", "review", "in progress"];
 ```
 
-- [ ] **Step 6: Update built-in pipeline JSON**
+- [ ] **Step 6: Update built-in workflow JSON**
 
-In `.kanna/pipelines/default.json`, make the stages:
+In `.kanna/workflows/default.json`, make the stages:
 
 ```json
 [
@@ -239,9 +239,9 @@ In `.kanna/pipelines/default.json`, make the stages:
 ]
 ```
 
-In `.kanna/pipelines/qa.json`, make `in progress` contain the same `post_action`, remove the standalone `commit` stage, and keep `review` then `pr`.
+In `.kanna/workflows/qa.json`, make `in progress` contain the same `post_action`, remove the standalone `commit` stage, and keep `review` then `pr`.
 
-In `.kanna/pipelines/schema.json`, add `post_action` to stage properties with the same fields as a stage-local action:
+In `.kanna/workflows/schema.json`, add `post_action` to stage properties with the same fields as a stage-local action:
 
 ```json
 "post_action": {
@@ -275,7 +275,7 @@ Also update the schema example to use `post_action` on `in progress` and remove 
 Run:
 
 ```bash
-pnpm --dir packages/core exec vitest run src/pipeline/pipeline-loader.test.ts src/config/repo-config.test.ts
+pnpm --dir packages/core exec vitest run src/workflow/workflow-loader.test.ts src/config/repo-config.test.ts
 ```
 
 Expected: PASS.
@@ -285,8 +285,8 @@ Expected: PASS.
 Run:
 
 ```bash
-git add packages/core/src/pipeline/pipeline-types.ts packages/core/src/pipeline/pipeline-loader.ts packages/core/src/pipeline/pipeline-loader.test.ts packages/core/src/config/repo-config.ts packages/core/src/config/repo-config.test.ts .kanna/pipelines/default.json .kanna/pipelines/qa.json .kanna/pipelines/schema.json
-git commit -m "feat: define pipeline post actions"
+git add packages/core/src/workflow/workflow-types.ts packages/core/src/workflow/workflow-loader.ts packages/core/src/workflow/workflow-loader.test.ts packages/core/src/config/repo-config.ts packages/core/src/config/repo-config.test.ts .kanna/workflows/default.json .kanna/workflows/qa.json .kanna/workflows/schema.json
+git commit -m "feat: define workflow post actions"
 ```
 
 ### Task 2: Persist Active Post-Action State
@@ -397,7 +397,7 @@ export async function clearPipelineItemActivePostAction(
 Update the `insertPipelineItem` omit list to include `"active_post_action"`:
 
 ```ts
-Omit<PipelineItem, "created_at" | "updated_at" | "activity_changed_at" | "unread_at" | "pinned" | "pin_order" | "display_name" | "closed_at" | "pipeline" | "stage" | "stage_result" | "active_post_action" | "tags" | "base_ref" | "agent_session_id" | "previous_stage" | "last_output_preview">
+Omit<PipelineItem, "created_at" | "updated_at" | "activity_changed_at" | "unread_at" | "pinned" | "pin_order" | "display_name" | "closed_at" | "workflow" | "stage" | "stage_result" | "active_post_action" | "tags" | "base_ref" | "agent_session_id" | "previous_stage" | "last_output_preview">
 ```
 
 - [ ] **Step 5: Add migrations**
@@ -436,7 +436,7 @@ In `apps/desktop/src/utils/taskTransfer.ts`, add `active_post_action` to `Outgoi
 Add it to `BuildOutgoingTransferPayloadInput.item`:
 
 ```ts
-    "id" | "prompt" | "stage" | "active_post_action" | "branch" | "pipeline" | "display_name" | "base_ref" | "agent_type" | "agent_provider" | "agent_session_id"
+    "id" | "prompt" | "stage" | "active_post_action" | "branch" | "workflow" | "display_name" | "base_ref" | "agent_type" | "agent_provider" | "agent_session_id"
 ```
 
 Add it to `buildOutgoingTransferPayload`:
@@ -475,7 +475,7 @@ git commit -m "feat: persist active task post actions"
 
 **Files:**
 - Modify: `apps/desktop/src/stores/state.ts`
-- Modify: `apps/desktop/src/stores/pipeline.ts`
+- Modify: `apps/desktop/src/stores/workflow.ts`
 - Modify: `apps/desktop/src/stores/kanna.taskBaseBranch.test.ts`
 
 - [ ] **Step 1: Write failing store tests**
@@ -490,11 +490,11 @@ Add mocks for the new DB helpers in the existing `@kanna/db` mock:
 
 ```ts
 const updatePipelineItemActivePostActionMock = vi.fn(async (_db: DbHandle, itemId: string, activePostAction: string) => {
-  const item = mockState.pipelineItems.find((candidate) => candidate.id === itemId);
+  const item = mockState.workflowItems.find((candidate) => candidate.id === itemId);
   if (item) item.active_post_action = activePostAction;
 });
 const clearPipelineItemActivePostActionMock = vi.fn(async (_db: DbHandle, itemId: string) => {
-  const item = mockState.pipelineItems.find((candidate) => candidate.id === itemId);
+  const item = mockState.workflowItems.find((candidate) => candidate.id === itemId);
   if (item) item.active_post_action = null;
 });
 ```
@@ -505,7 +505,7 @@ Add this test near the existing continue-mode tests:
 
 ```ts
   it("starts a stage post-action without changing the task stage", async () => {
-    mockState.pipelineDefinition = {
+    mockState.workflowDefinition = {
       name: "default",
       stages: [
         {
@@ -521,7 +521,7 @@ Add this test near the existing continue-mode tests:
         { name: "pr", transition: "manual" },
       ],
     };
-    mockState.pipelineItems = [
+    mockState.workflowItems = [
       mockState.makeItem({
         id: "item-source",
         branch: "task-source",
@@ -545,7 +545,7 @@ Add this test near the existing continue-mode tests:
       "item-source",
       "commit",
     );
-    expect(mockState.pipelineItems[0].stage).toBe("in progress");
+    expect(mockState.workflowItems[0].stage).toBe("in progress");
     expect(mockState.closePipelineItemMock).not.toHaveBeenCalled();
     expect(mockState.insertPipelineItemMock).not.toHaveBeenCalled();
     expect(mockState.clearPipelineItemStageResultMock).toHaveBeenCalledWith(expect.anything(), "item-source");
@@ -560,7 +560,7 @@ Add this test to prove completed post-actions can skip re-entry:
 
 ```ts
   it("skips the post-action and advances to the next real stage when requested", async () => {
-    mockState.pipelineDefinition = {
+    mockState.workflowDefinition = {
       name: "default",
       stages: [
         {
@@ -571,7 +571,7 @@ Add this test to prove completed post-actions can skip re-entry:
         { name: "pr", transition: "manual", agent: "pr" },
       ],
     };
-    mockState.pipelineItems = [
+    mockState.workflowItems = [
       mockState.makeItem({
         id: "item-source",
         branch: "task-source",
@@ -614,9 +614,9 @@ export interface AdvanceStageOptions {
 }
 ```
 
-- [ ] **Step 4: Add post-action helpers to `pipeline.ts`**
+- [ ] **Step 4: Add post-action helpers to `workflow.ts`**
 
-In `apps/desktop/src/stores/pipeline.ts`, update imports:
+In `apps/desktop/src/stores/workflow.ts`, update imports:
 
 ```ts
 import {
@@ -630,7 +630,7 @@ import {
 Update the type import:
 
 ```ts
-import type { AgentDefinition, PipelineDefinition, PipelinePostAction, PipelineStage } from "../../../../packages/core/src/pipeline/pipeline-types";
+import type { AgentDefinition, WorkflowDefinition, WorkflowPostAction, WorkflowStage } from "../../../../packages/core/src/workflow/workflow-types";
 ```
 
 Add a helper to resolve prompt and options for either a stage or post-action:
@@ -641,7 +641,7 @@ Add a helper to resolve prompt and options for either a stage or post-action:
     item: import("@kanna/db").PipelineItem,
     sourceBranch: string,
     sourceWorktree: string | undefined,
-    execution: PipelineStage | PipelinePostAction,
+    execution: WorkflowStage | WorkflowPostAction,
   ): Promise<{ prompt: string; agentProvider: import("@kanna/db").AgentProvider; agent: AgentDefinition | null }> {
     if (!execution.agent) {
       return { prompt: "", agentProvider: item.agent_provider, agent: null };
@@ -672,7 +672,7 @@ Add an `enterPostAction` helper:
 ```ts
   async function enterPostAction(
     item: import("@kanna/db").PipelineItem,
-    postAction: PipelinePostAction,
+    postAction: WorkflowPostAction,
     stagePrompt: string,
     agentProvider: string | null | undefined,
   ): Promise<void> {
@@ -710,7 +710,7 @@ Inside the try block, replace the unconditional stage update with:
 In `advanceStage`, after resolving `sourceBranch` and `sourceWorktree`, add before `getNextStage` new-task behavior:
 
 ```ts
-    const currentStage = pipeline.stages.find((stage) => stage.name === item.stage);
+    const currentStage = workflow.stages.find((stage) => stage.name === item.stage);
     if (!options.skipPostAction && !item.active_post_action && currentStage?.post_action) {
       try {
         const execution = await buildExecutionPrompt(repo.path, item, sourceBranch, sourceWorktree, currentStage.post_action);
@@ -750,7 +750,7 @@ Expected: PASS.
 Run:
 
 ```bash
-git add apps/desktop/src/stores/state.ts apps/desktop/src/stores/pipeline.ts apps/desktop/src/stores/kanna.taskBaseBranch.test.ts
+git add apps/desktop/src/stores/state.ts apps/desktop/src/stores/workflow.ts apps/desktop/src/stores/kanna.taskBaseBranch.test.ts
 git commit -m "feat: enter task post actions in place"
 ```
 
@@ -758,7 +758,7 @@ git commit -m "feat: enter task post actions in place"
 
 **Files:**
 - Modify: `apps/desktop/src/stores/init.ts`
-- Modify: `apps/desktop/src/stores/pipeline.ts`
+- Modify: `apps/desktop/src/stores/workflow.ts`
 - Modify: `apps/desktop/src/stores/init.test.ts`
 - Modify: `apps/desktop/src/stores/kanna.taskBaseBranch.test.ts`
 
@@ -770,12 +770,12 @@ In `apps/desktop/src/stores/init.test.ts`, update base task fixtures to include:
 active_post_action: null,
 ```
 
-Add a test near the existing `pipeline_stage_complete` tests:
+Add a test near the existing `workflow_stage_complete` tests:
 
 ```ts
   it("clears a successful active post-action and advances to the next real stage", async () => {
     const taskId = "task-post-action";
-    mockState.pipelineItems = [
+    mockState.workflowItems = [
       mockState.makeItem({
         id: taskId,
         stage: "in progress",
@@ -783,7 +783,7 @@ Add a test near the existing `pipeline_stage_complete` tests:
         stage_result: JSON.stringify({ status: "success", summary: "committed" }),
       }),
     ];
-    mockState.pipelineDefinition = {
+    mockState.workflowDefinition = {
       name: "default",
       stages: [
         {
@@ -795,7 +795,7 @@ Add a test near the existing `pipeline_stage_complete` tests:
       ],
     };
 
-    await emitPipelineStageComplete(taskId);
+    await emitWorkflowStageComplete(taskId);
 
     expect(mockState.clearPipelineItemActivePostActionMock).toHaveBeenCalledWith(expect.anything(), taskId);
     expect(mockState.advanceStageMock).toHaveBeenCalledWith(taskId, {
@@ -806,7 +806,7 @@ Add a test near the existing `pipeline_stage_complete` tests:
 
   it("leaves a failed active post-action in place", async () => {
     const taskId = "task-post-action-failed";
-    mockState.pipelineItems = [
+    mockState.workflowItems = [
       mockState.makeItem({
         id: taskId,
         stage: "in progress",
@@ -815,7 +815,7 @@ Add a test near the existing `pipeline_stage_complete` tests:
       }),
     ];
 
-    await emitPipelineStageComplete(taskId);
+    await emitWorkflowStageComplete(taskId);
 
     expect(mockState.clearPipelineItemActivePostActionMock).not.toHaveBeenCalled();
     expect(mockState.advanceStageMock).not.toHaveBeenCalled();
@@ -827,9 +827,9 @@ Use this helper in `apps/desktop/src/stores/init.test.ts` to retrieve the regist
 ```ts
 function getStageCompleteHandler(): (event: unknown) => Promise<void> {
   const handler = mockState.listenMock.mock.calls.find(
-    ([eventName]) => eventName === "pipeline_stage_complete",
+    ([eventName]) => eventName === "workflow_stage_complete",
   )?.[1] as ((event: unknown) => Promise<void>) | undefined;
-  if (!handler) throw new Error("pipeline_stage_complete handler was not registered");
+  if (!handler) throw new Error("workflow_stage_complete handler was not registered");
   return handler;
 }
 ```
@@ -846,7 +846,7 @@ In `apps/desktop/src/stores/kanna.taskBaseBranch.test.ts`, add:
 
 ```ts
   it("reruns the active post-action prompt instead of the parent stage prompt", async () => {
-    mockState.pipelineDefinition = {
+    mockState.workflowDefinition = {
       name: "default",
       stages: [
         {
@@ -864,7 +864,7 @@ In `apps/desktop/src/stores/kanna.taskBaseBranch.test.ts`, add:
         { name: "pr", transition: "manual" },
       ],
     };
-    mockState.pipelineItems = [
+    mockState.workflowItems = [
       mockState.makeItem({
         id: "item-source",
         branch: "task-source",
@@ -904,7 +904,7 @@ In `apps/desktop/src/stores/init.ts`, import:
 import { clearPipelineItemActivePostAction, updatePipelineItemActivity } from "@kanna/db";
 ```
 
-In the `pipeline_stage_complete` listener, after parsing a successful result and claiming `stage_result`, branch on `claimedItemSnapshot.active_post_action`:
+In the `workflow_stage_complete` listener, after parsing a successful result and claiming `stage_result`, branch on `claimedItemSnapshot.active_post_action`:
 
 ```ts
               if (claimedItemSnapshot.active_post_action) {
@@ -935,7 +935,7 @@ Keep the existing failure behavior: no advance, unread marker still applied if t
 
 - [ ] **Step 5: Update rerun behavior**
 
-In `apps/desktop/src/stores/pipeline.ts`, in `rerunStage`, after resolving `currentStage`, add:
+In `apps/desktop/src/stores/workflow.ts`, in `rerunStage`, after resolving `currentStage`, add:
 
 ```ts
     const activePostAction = item.active_post_action
@@ -976,7 +976,7 @@ Expected: PASS.
 Run:
 
 ```bash
-git add apps/desktop/src/stores/init.ts apps/desktop/src/stores/pipeline.ts apps/desktop/src/stores/init.test.ts apps/desktop/src/stores/kanna.taskBaseBranch.test.ts
+git add apps/desktop/src/stores/init.ts apps/desktop/src/stores/workflow.ts apps/desktop/src/stores/init.test.ts apps/desktop/src/stores/kanna.taskBaseBranch.test.ts
 git commit -m "feat: complete task post actions"
 ```
 
@@ -1093,7 +1093,7 @@ git commit -m "feat: show active post actions in sidebar"
 
 - [ ] **Step 1: Write failing E2E updates**
 
-In `apps/desktop/tests/e2e/mock/stage-advance.test.ts`, change the `continue-e2e` pipeline setup from a standalone `commit` stage to:
+In `apps/desktop/tests/e2e/mock/stage-advance.test.ts`, change the `continue-e2e` workflow setup from a standalone `commit` stage to:
 
 ```ts
 stages: [
@@ -1140,7 +1140,7 @@ it("clears a successful commit post-action and creates the PR task", async () =>
   await execDb(
     client,
     `INSERT INTO pipeline_item (
-       id, repo_id, prompt, pipeline, stage, active_post_action, stage_result, tags, branch,
+       id, repo_id, prompt, workflow, stage, active_post_action, stage_result, tags, branch,
        agent_type, agent_provider, activity, display_name, created_at, updated_at
      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
     [
@@ -1161,7 +1161,7 @@ it("clears a successful commit post-action and creates the PR task", async () =>
   );
   await hydrateStoreItem(client, taskId);
 
-  await sendPipelineStageComplete(client, taskId);
+  await sendWorkflowStageComplete(client, taskId);
 
   const prTaskId = await waitForCreatedStageTask(client, repoId, "pr");
   expect(prTaskId).not.toBe(taskId);
@@ -1208,7 +1208,7 @@ Run:
 
 ```bash
 git add apps/desktop/tests/e2e/mock/stage-advance.test.ts apps/desktop/tests/e2e/mock/stage-order.test.ts
-git commit -m "test: cover task post-action pipeline flow"
+git commit -m "test: cover task post-action workflow flow"
 ```
 
 ### Task 7: Final Verification And Typecheck
@@ -1231,7 +1231,7 @@ Expected: PASS with no TypeScript errors.
 Run:
 
 ```bash
-pnpm --dir packages/core exec vitest run src/pipeline/pipeline-loader.test.ts src/config/repo-config.test.ts
+pnpm --dir packages/core exec vitest run src/workflow/workflow-loader.test.ts src/config/repo-config.test.ts
 pnpm --dir packages/db exec vitest run src/queries.test.ts
 pnpm --dir apps/desktop exec vitest run src/stores/init.test.ts src/stores/kanna.taskBaseBranch.test.ts src/components/__tests__/Sidebar.test.ts src/stores/selection.test.ts
 ```

@@ -7,7 +7,7 @@ The New Task modal opens before its repository-specific options finish loading. 
 ## Goals
 
 - Reopening New Task for a previously loaded repository immediately displays its last known valid options.
-- Every open still refreshes repository options so branches, pipelines, and agent availability do not become permanently stale.
+- Every open still refreshes repository options so branches, workflows, and agent availability do not become permanently stale.
 - A repository that has never loaded does not display a validation error while options are loading.
 - Switching repositories while loads overlap never displays or commits options from the wrong repository.
 - Genuine loaded states with no valid base branch continue to display “Select a valid base branch” and block creation.
@@ -16,7 +16,7 @@ The New Task modal opens before its repository-specific options finish loading. 
 
 - Persisting New Task options across application restarts.
 - Adding a time-to-live or suppressing refreshes.
-- Caching the prompt, manually selected pipeline, manually selected branch, or other draft form state.
+- Caching the prompt, manually selected workflow, manually selected branch, or other draft form state.
 - Changing backend branch discovery or repository-definition APIs.
 
 ## Design
@@ -24,7 +24,7 @@ The New Task modal opens before its repository-specific options finish loading. 
 `useAppTaskCreation` will own an in-memory map keyed by repository id. Each entry is one complete New Task option snapshot containing:
 
 - available agent providers;
-- available pipelines and the default pipeline;
+- available workflows and the default workflow;
 - available base branches and the resolved default base branch;
 - the repository default branch name.
 

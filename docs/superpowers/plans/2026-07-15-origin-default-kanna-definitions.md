@@ -2,13 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Auto-select `superpowers:subagent-driven-development` or `superpowers:executing-plans` based on task coupling, subagent availability, and whether execution should stay in the current session. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Resolve every live repository-owned Kanna config, pipeline, agent, and extension read from one freshly fetched `origin/<default_branch>` commit instead of the local checkout.
+**Goal:** Resolve every live repository-owned Kanna config, workflow, agent, and extension read from one freshly fetched `origin/<default_branch>` commit instead of the local checkout.
 
-**Architecture:** Add a Git-object-backed `RepoDefinitionSnapshot`, then wrap it in `RepoDefinitions` so config is parsed once and every definition read in one orchestration operation is pinned to the same commit. Keep the server as the source of truth and expose revisioned manifest/pipeline/agent endpoints to desktop consumers; the durable task `pipeline_def` snapshot remains authoritative for existing tasks.
+**Architecture:** Add a Git-object-backed `RepoDefinitionSnapshot`, then wrap it in `RepoDefinitions` so config is parsed once and every definition read in one orchestration operation is pinned to the same commit. Keep the server as the source of truth and expose revisioned manifest/workflow/agent endpoints to desktop consumers; the durable task `pipeline_def` snapshot remains authoritative for existing tasks.
 
 **Tech Stack:** Rust 2021, `std::process::Command`, serde/serde_json/serde_yaml, Axum, Vue 3/Pinia, TypeScript, Vitest, pnpm, Cargo.
 
-**Stage constraint:** Do not create commits in this Kanna stage. The pipeline's later commit step owns committing all implementation and documentation changes.
+**Stage constraint:** Do not create commits in this Kanna stage. The workflow's later commit step owns committing all implementation and documentation changes.
 
 ---
 
@@ -21,8 +21,8 @@
 - Create `crates/kanna-server/src/http_api/tests/repo_definitions.rs`: endpoint contract and stale-local/fresh-remote coverage.
 - Modify `crates/kanna-server/src/http_api/repos.rs` and `router.rs`: server-owned definition endpoints.
 - Modify `apps/desktop/src/services/desktopServerClient.ts`: typed endpoint clients and test seams.
-- Modify `apps/desktop/src/stores/pipeline.ts` and `state.ts`: revision-aware definitions and repo-ID-based config loading.
-- Modify desktop task creation, navigation, query, session, and teardown consumers so no orchestration read uses local `.kanna/config.json`, pipelines, or agents.
+- Modify `apps/desktop/src/stores/workflow.ts` and `state.ts`: revision-aware definitions and repo-ID-based config loading.
+- Modify desktop task creation, navigation, query, session, and teardown consumers so no orchestration read uses local `.kanna/config.json`, workflows, or agents.
 
 ### Task 1: Git-backed immutable definition snapshot
 
@@ -201,7 +201,7 @@ fn validate_relative_path(path: &str) -> Result<(), String> {
 
 Run the Task 1 command again. Expected: all snapshot tests pass, including fetch refresh, immutable commit pinning, cached offline ref, no-ref bundled-only behavior, path rejection, direct tree listing, and non-UTF-8 errors.
 
-### Task 2: Source-aware config, pipeline, and agent definitions
+### Task 2: Source-aware config, workflow, and agent definitions
 
 **Files:**
 - Modify: `crates/kanna-server/src/task_creator/definitions.rs`
@@ -210,7 +210,7 @@ Run the Task 1 command again. Expected: all snapshot tests pass, including fetch
 
 - [ ] **Step 1: Add a failing aggregate-loader regression test**
 
-Create a remote fixture whose origin commit contains a complete config, custom pipeline, role override, and extension. After fetching, overwrite all four local files with `LOCAL_SENTINEL` without committing. Assert:
+Create a remote fixture whose origin commit contains a complete config, custom workflow, role override, and extension. After fetching, overwrite all four local files with `LOCAL_SENTINEL` without committing. Assert:
 
 ```rust
 #[test]
@@ -220,7 +220,7 @@ fn repo_definitions_use_one_remote_snapshot_for_all_kanna_parameters() {
     let definitions = RepoDefinitions::resolve(&repo).unwrap();
 
     assert_eq!(definitions.ref_name(), "origin/dev");
-    assert_eq!(definitions.config().pipeline.as_deref(), Some("remote-qa"));
+    assert_eq!(definitions.config().workflow.as_deref(), Some("remote-qa"));
     assert_eq!(definitions.config().setup.as_deref(), Some(&["remote setup".to_string()][..]));
     assert_eq!(definitions.config().teardown.as_deref(), Some(&["remote teardown".to_string()][..]));
     assert_eq!(definitions.config().ports.as_ref().unwrap()["KANNA_DEV_PORT"], 1420);
@@ -231,8 +231,8 @@ fn repo_definitions_use_one_remote_snapshot_for_all_kanna_parameters() {
     assert_eq!(definitions.config().stage_order.as_deref(), Some(&["review".to_string(), "pr".to_string()][..]));
     assert_eq!(definitions.config().workspace.as_ref().unwrap().env.as_ref().unwrap()["REMOTE_ENV"], "yes");
 
-    let pipeline = definitions.pipeline("remote-qa").unwrap();
-    assert_eq!(pipeline.stages[0].prompt.as_deref(), Some("REMOTE_PIPELINE"));
+    let workflow = definitions.workflow("remote-qa").unwrap();
+    assert_eq!(workflow.stages[0].prompt.as_deref(), Some("REMOTE_WORKFLOW"));
     let agent = definitions.agent("review").unwrap();
     assert!(agent.prompt.contains("REMOTE_AGENT"));
     assert!(agent.prompt.contains("REMOTE_EXTENSION"));
@@ -272,17 +272,17 @@ impl RepoDefinitions {
     pub(crate) fn revision(&self) -> Option<&str> { self.snapshot.revision() }
     pub(crate) fn ref_name(&self) -> &str { self.snapshot.ref_name() }
     pub(crate) fn config(&self) -> &RepoConfig { &self.config }
-    pub(crate) fn pipeline(&self, name: &str) -> Result<PipelineDefinition, String> {
+    pub(crate) fn workflow(&self, name: &str) -> Result<WorkflowDefinition, String> {
         read_pipeline_definition(&self.snapshot, name)
     }
-    pub(crate) fn task_pipeline(&self, name: &str, stored: Option<&str>) -> Result<PipelineDefinition, String> {
+    pub(crate) fn task_workflow(&self, name: &str, stored: Option<&str>) -> Result<WorkflowDefinition, String> {
         read_task_pipeline_definition(&self.snapshot, name, stored)
     }
     pub(crate) fn agent(&self, selector: &str) -> Result<AgentDefinition, String> {
         read_agent_definition(&self.snapshot, &self.config, selector)
     }
-    pub(crate) fn pipeline_names(&self) -> Result<Vec<String>, String> {
-        let mut names = self.snapshot.list_direct_entries(".kanna/pipelines")?
+    pub(crate) fn workflow_names(&self) -> Result<Vec<String>, String> {
+        let mut names = self.snapshot.list_direct_entries(".kanna/workflows")?
             .into_iter()
             .filter(|name| name.ends_with(".json") && name != "schema.json")
             .map(|name| name.trim_end_matches(".json").to_string())
@@ -307,7 +307,7 @@ pub(super) env: Option<HashMap<String, String>>, // on RepoWorkspaceConfig
 
 Extend agent parsing with `name` and `description`, serialize `agent_providers` as `agent_provider`, and allow an extension description to override the base. Preserve schema snake_case for `agent_provider`, `permission_mode`, and `allowed_tools`.
 
-Extend normalized pipeline/stage/post types with optional descriptions and provide API DTO conversion that omits absent values and fills a missing pipeline name from the requested filename. Do not change stored pipeline semantics.
+Extend normalized workflow/stage/post types with optional descriptions and provide API DTO conversion that omits absent values and fills a missing workflow name from the requested filename. Do not change stored workflow semantics.
 
 - [ ] **Step 4: Make fixture definitions committed and remotely addressable**
 
@@ -326,7 +326,7 @@ fn publish_origin_main(repo_root: &std::path::Path, message: &str) {
 }
 ```
 
-Call it from `init_git_repo*` after the initial commit and after helper-created pipeline commits. Direct parser tests may construct a snapshot at the cached ref; orchestration tests that add definitions later must publish them explicitly.
+Call it from `init_git_repo*` after the initial commit and after helper-created workflow commits. Direct parser tests may construct a snapshot at the cached ref; orchestration tests that add definitions later must publish them explicitly.
 
 - [ ] **Step 5: Run definition and parser tests**
 
@@ -355,13 +355,13 @@ Expected: all existing parser/flavor/extension tests and the new remote-source t
 
 - [ ] **Step 1: Add failing task-creation and stage-transition regressions**
 
-Add a creation test where local and remote definitions disagree, then assert the prepared task uses the remote pipeline snapshot, agent body, model, permission mode, tools, config vars, port base, setup command, workspace env, and PATH entry. Add a stage test that advances origin after a `RepoDefinitions` context is created and proves prompt, spawn, and teardown within that operation all use its original revision.
+Add a creation test where local and remote definitions disagree, then assert the prepared task uses the remote workflow snapshot, agent body, model, permission mode, tools, config vars, port base, setup command, workspace env, and PATH entry. Add a stage test that advances origin after a `RepoDefinitions` context is created and proves prompt, spawn, and teardown within that operation all use its original revision.
 
 The creation assertions should include:
 
 ```rust
-assert_eq!(stored.pipeline.as_deref(), Some("remote-qa"));
-assert!(stored.pipeline_def.as_deref().unwrap().contains("REMOTE_PIPELINE"));
+assert_eq!(stored.workflow.as_deref(), Some("remote-qa"));
+assert!(stored.pipeline_def.as_deref().unwrap().contains("REMOTE_WORKFLOW"));
 assert!(runtime_prompt(&prepared).contains("REMOTE_AGENT remote-team"));
 assert_eq!(prepared.model.as_deref(), Some("remote-model"));
 assert_eq!(prepared.env.get("REMOTE_ENV").map(String::as_str), Some("yes"));
@@ -414,7 +414,7 @@ Delete all worktree/root rereads. Relative workspace PATH entries still resolve 
 
 - [ ] **Step 4: Thread the context through stages, prompts, revisions, and teardown**
 
-Add `definitions: &'a RepoDefinitions` to `StageTransitionContext`. `load_stage_transition_source` resolves it once, uses `definitions.task_pipeline(...)`, and returns it with the source context.
+Add `definitions: &'a RepoDefinitions` to `StageTransitionContext`. `load_stage_transition_source` resolves it once, uses `definitions.task_workflow(...)`, and returns it with the source context.
 
 Change the core signatures to:
 
@@ -422,7 +422,7 @@ Change the core signatures to:
 pub(super) fn build_target_stage_prompt(
     definitions: &RepoDefinitions,
     repo_path: &str,
-    stage: &PipelineStage,
+    stage: &WorkflowStage,
     task_prompt: &str,
     prev_result: Option<&str>,
     branch: Option<&str>,
@@ -436,9 +436,9 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
     repo: &Repo,
     definitions: &RepoDefinitions,
     task_id: &str,
-    pipeline_name: &str,
-    pipeline: &PipelineDefinition,
-    target_stage: &PipelineStage,
+    workflow_name: &str,
+    workflow: &WorkflowDefinition,
+    target_stage: &WorkflowStage,
     item_stage: &str,
     run_kind: &'static str,
     workspace_spec: RunWorkspaceSpec,
@@ -539,11 +539,11 @@ async fn repo_definition_routes_return_remote_revision_and_normalized_definition
     let manifest = get_json(&app, "/v1/repos/repo-1/kanna-definitions").await;
     assert_eq!(manifest["refName"], "origin/dev");
     assert_eq!(manifest["config"]["vars"]["SOURCE"], "remote");
-    assert_eq!(manifest["defaultPipeline"], "remote-qa");
-    assert_eq!(manifest["pipelines"], serde_json::json!(["default", "qa", "remote-qa"]));
+    assert_eq!(manifest["defaultWorkflow"], "remote-qa");
+    assert_eq!(manifest["workflows"], serde_json::json!(["default", "qa", "remote-qa"]));
 
-    let pipeline = get_json(&app, "/v1/repos/repo-1/kanna-definitions/pipelines/remote-qa").await;
-    assert_eq!(pipeline["definition"]["stages"][0]["prompt"], "REMOTE_PIPELINE");
+    let workflow = get_json(&app, "/v1/repos/repo-1/kanna-definitions/workflows/remote-qa").await;
+    assert_eq!(workflow["definition"]["stages"][0]["prompt"], "REMOTE_WORKFLOW");
 
     let agent = get_json(&app, "/v1/repos/repo-1/kanna-definitions/agents/review%40strict").await;
     assert_eq!(agent["definition"]["agent_provider"], serde_json::json!(["codex", "claude"]));
@@ -574,8 +574,8 @@ pub(crate) struct RepoKannaDefinitions {
     revision: Option<String>,
     ref_name: String,
     config: RepoConfig,
-    default_pipeline: String,
-    pipelines: Vec<String>,
+    default_workflow: String,
+    workflows: Vec<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -586,7 +586,7 @@ pub(crate) struct RevisionedDefinition<T> {
 }
 ```
 
-Add functions returning a typed `DefinitionLookupError::{InvalidName, NotFound, Other}` so HTTP status mapping never parses error strings. Validate pipeline names as one safe direct component and agent selectors as `role` or `role@flavor`, with each part nonempty and free of `/`, `\\`, `.`, `..`, control, or NUL characters.
+Add functions returning a typed `DefinitionLookupError::{InvalidName, NotFound, Other}` so HTTP status mapping never parses error strings. Validate workflow names as one safe direct component and agent selectors as `role` or `role@flavor`, with each part nonempty and free of `/`, `\\`, `.`, `..`, control, or NUL characters.
 
 - [ ] **Step 4: Implement handlers and routes**
 
@@ -594,7 +594,7 @@ Add handlers in `repos.rs` that follow `list_available_agent_providers` for DB l
 
 ```rust
 .route("/v1/repos/{repo_id}/kanna-definitions", get(get_repo_kanna_definitions))
-.route("/v1/repos/{repo_id}/kanna-definitions/pipelines/{pipeline_name}", get(get_repo_pipeline_definition))
+.route("/v1/repos/{repo_id}/kanna-definitions/workflows/{workflow_name}", get(get_repo_pipeline_definition))
 .route("/v1/repos/{repo_id}/kanna-definitions/agents/{agent_selector}", get(get_repo_agent_definition))
 ```
 
@@ -619,23 +619,23 @@ Expected: all route contracts and existing server tests pass.
 
 - [ ] **Step 1: Write failing client endpoint tests**
 
-Add tests that return representative manifest/pipeline/agent JSON and assert separately encoded path segments:
+Add tests that return representative manifest/workflow/agent JSON and assert separately encoded path segments:
 
 ```typescript
 await expect(fetchDesktopRepoKannaDefinitions("repo/with space")).resolves.toMatchObject({
   revision: "abc123",
   refName: "origin/main",
-  defaultPipeline: "qa",
-  pipelines: ["default", "qa"],
+  defaultWorkflow: "qa",
+  workflows: ["default", "qa"],
 });
 expect(fetchMock).toHaveBeenCalledWith(
   "http://127.0.0.1:48121/v1/repos/repo%2Fwith%20space/kanna-definitions",
   expect.objectContaining({ method: "GET" }),
 );
 
-await fetchDesktopRepoPipelineDefinition("repo/one", "qa candidate");
+await fetchDesktopRepoWorkflowDefinition("repo/one", "qa candidate");
 expect(fetchMock).toHaveBeenLastCalledWith(
-  "http://127.0.0.1:48121/v1/repos/repo%2Fone/kanna-definitions/pipelines/qa%20candidate",
+  "http://127.0.0.1:48121/v1/repos/repo%2Fone/kanna-definitions/workflows/qa%20candidate",
   expect.anything(),
 );
 
@@ -665,13 +665,13 @@ export interface DesktopRepoKannaDefinitions {
   revision: string | null;
   refName: string;
   config: RepoConfig;
-  defaultPipeline: string;
-  pipelines: string[];
+  defaultWorkflow: string;
+  workflows: string[];
 }
 
-export interface DesktopRepoPipelineDefinition {
+export interface DesktopRepoWorkflowDefinition {
   revision: string | null;
-  definition: PipelineDefinition;
+  definition: WorkflowDefinition;
 }
 
 export interface DesktopRepoAgentDefinition {
@@ -686,21 +686,21 @@ Add matching `DesktopServerClientHandlersForTests` callbacks and fetch functions
 
 Run the Task 5 command again. Expected: endpoint, casing, encoding, and test-handler override tests pass.
 
-### Task 6: Replace desktop pipeline/agent filesystem loaders with revisioned server definitions
+### Task 6: Replace desktop workflow/agent filesystem loaders with revisioned server definitions
 
 **Files:**
-- Modify: `apps/desktop/src/stores/pipeline.ts`
+- Modify: `apps/desktop/src/stores/workflow.ts`
 - Modify: `apps/desktop/src/stores/state.ts`
 - Modify: `apps/desktop/src/stores/kanna.ts`
 - Modify: `apps/desktop/src/composables/useAppTaskNavigation.ts`
-- Modify: `apps/desktop/src/stores/pipelineAgentExtension.test.ts`
-- Modify: `apps/desktop/src/stores/pipeline.selection.test.ts`
+- Modify: `apps/desktop/src/stores/workflowAgentExtension.test.ts`
+- Modify: `apps/desktop/src/stores/workflow.selection.test.ts`
 - Modify: `apps/desktop/src/stores/kanna.taskBaseBranch.test.ts`
 - Modify: `apps/desktop/src/App.test.ts`
 
 - [ ] **Step 1: Replace filesystem-loader tests with failing server-resolution tests**
 
-In `pipelineAgentExtension.test.ts`, inject `fetchRepoAgentDefinition` and assert repo-ID routing, revision replacement, object reuse for equal revisions, and error propagation:
+In `workflowAgentExtension.test.ts`, inject `fetchRepoAgentDefinition` and assert repo-ID routing, revision replacement, object reuse for equal revisions, and error propagation:
 
 ```typescript
 const first = { revision: "rev-1", definition: remoteAgent("REMOTE_AGENT") };
@@ -723,7 +723,7 @@ expect(changed.prompt).toBe("REMOTE_AGENT_V2");
 expect(invokeMock).not.toHaveBeenCalledWith("read_text_file", expect.anything());
 ```
 
-Update selection tests to inject `fetchRepoPipelineDefinition` instead of seeding a path-only cache.
+Update selection tests to inject `fetchRepoWorkflowDefinition` instead of seeding a path-only cache.
 
 - [ ] **Step 2: Run focused store tests and verify RED**
 
@@ -731,18 +731,18 @@ Run:
 
 ```bash
 pnpm --dir apps/desktop exec vitest run \
-  src/stores/pipelineAgentExtension.test.ts \
-  src/stores/pipeline.selection.test.ts
+  src/stores/workflowAgentExtension.test.ts \
+  src/stores/workflow.selection.test.ts
 ```
 
 Expected: current functions treat the first argument as a path and call local filesystem invokes.
 
 - [ ] **Step 3: Implement repo-ID, revision-aware store loading**
 
-Change `PipelineApi` and `StoreServices` to:
+Change `WorkflowApi` and `StoreServices` to:
 
 ```typescript
-loadPipeline: (repoId: string, pipelineName: string) => Promise<PipelineDefinition>;
+loadWorkflow: (repoId: string, workflowName: string) => Promise<WorkflowDefinition>;
 loadAgent: (repoId: string, agentName: string) => Promise<AgentDefinition>;
 ```
 
@@ -753,11 +753,11 @@ interface RevisionedCacheEntry<T> {
   revision: string | null;
   definition: T;
 }
-pipelineCache: Map<string, RevisionedCacheEntry<PipelineDefinition>>;
+workflowCache: Map<string, RevisionedCacheEntry<WorkflowDefinition>>;
 agentCache: Map<string, RevisionedCacheEntry<AgentDefinition>>;
 ```
 
-Each load calls the server endpoint so it can observe a new revision, returns the cached object when `cached.revision === response.revision`, and otherwise replaces the entry. Remove `parseRepoConfig`, local/builtin parsers, selector logic, and all definition `invoke` reads from `pipeline.ts`.
+Each load calls the server endpoint so it can observe a new revision, returns the cached object when `cached.revision === response.revision`, and otherwise replaces the entry. Remove `parseRepoConfig`, local/builtin parsers, selector logic, and all definition `invoke` reads from `workflow.ts`.
 
 Pass `item.repo_id` in optimistic stage projection. Pass `repo.id` from `mergeQueue`, custom-task launch, config-factory launch, and setup launch call sites in `kanna.ts` and `useAppTaskNavigation.ts`.
 
@@ -767,15 +767,15 @@ Run:
 
 ```bash
 pnpm --dir apps/desktop exec vitest run \
-  src/stores/pipelineAgentExtension.test.ts \
-  src/stores/pipeline.selection.test.ts \
+  src/stores/workflowAgentExtension.test.ts \
+  src/stores/workflow.selection.test.ts \
   src/stores/kanna.taskBaseBranch.test.ts \
   src/App.test.ts
 ```
 
 Expected: all server-resolution, cache-revision, merge-agent, setup-agent, and optimistic-selection tests pass.
 
-### Task 7: Move pipeline discovery and every live desktop repo-config consumer to the manifest
+### Task 7: Move workflow discovery and every live desktop repo-config consumer to the manifest
 
 **Files:**
 - Modify: `apps/desktop/src/composables/useAppTaskCreation.ts`
@@ -799,21 +799,21 @@ const manifest = {
   revision: "remote-rev",
   refName: "origin/main",
   config: {
-    pipeline: "remote-qa",
+    workflow: "remote-qa",
     stage_order: ["review", "pr"],
     setup: ["remote setup"],
     teardown: ["remote teardown"],
     workspace: { env: { REMOTE_ENV: "yes" }, path: { prepend: ["remote-bin"] } },
   },
-  defaultPipeline: "remote-qa",
-  pipelines: ["default", "remote-qa"],
+  defaultWorkflow: "remote-qa",
+  workflows: ["default", "remote-qa"],
 };
 updateDesktopServerClientHandlersForTests({ fetchRepoKannaDefinitions: async () => manifest });
 ```
 
 Assert:
 
-- `openNewTaskModal` displays `manifest.pipelines/defaultPipeline` and never invokes `list_dir` or `read_text_file` for definitions;
+- `openNewTaskModal` displays `manifest.workflows/defaultWorkflow` and never invokes `list_dir` or `read_text_file` for definitions;
 - snapshot reload uses `stage_order` from the manifest;
 - recovered agent sessions and worktree shells receive `REMOTE_ENV` and a worktree-relative `remote-bin` PATH;
 - repo teardown uses `manifest.config.teardown` while custom task-template teardown remains local;
@@ -831,15 +831,15 @@ pnpm --dir apps/desktop exec vitest run --maxWorkers=2 \
   src/stores/sessions.test.ts
 ```
 
-Expected: tests show local `.kanna/config.json` and pipeline-directory reads.
+Expected: tests show local `.kanna/config.json` and workflow-directory reads.
 
-- [ ] **Step 3: Load modal pipeline choices from the manifest**
+- [ ] **Step 3: Load modal workflow choices from the manifest**
 
 In `openNewTaskModal`, fetch `fetchDesktopRepoKannaDefinitions(targetRepo.id)` before provider discovery. Set:
 
 ```typescript
-availablePipelines.value = manifest.pipelines;
-defaultPipelineName.value = manifest.defaultPipeline;
+availableWorkflows.value = manifest.workflows;
+defaultWorkflowName.value = manifest.defaultWorkflow;
 ```
 
 Retain Git base-branch discovery. Keep cloud-only repos empty until they are cloned/imported. On import/setup, call `store.loadAgent(repoId, "setup")`.
@@ -872,8 +872,8 @@ Run:
 pnpm --dir apps/desktop exec vitest run --maxWorkers=2 \
   src/services/desktopServerClient.test.ts \
   src/composables/useAppTaskCreation.test.ts \
-  src/stores/pipelineAgentExtension.test.ts \
-  src/stores/pipeline.selection.test.ts \
+  src/stores/workflowAgentExtension.test.ts \
+  src/stores/workflow.selection.test.ts \
   src/stores/kanna.querySnapshot.test.ts \
   src/stores/sessions.test.ts \
   src/stores/kannaConfig.test.ts \
@@ -896,11 +896,11 @@ Run:
 
 ```bash
 rg -n --glob '!**/*.test.*' --glob '!**/fixtures/**' \
-  '\.kanna/(config\.json|pipelines|agents)' \
+  '\.kanna/(config\.json|workflows|agents)' \
   apps/desktop/src crates/kanna-server/src/task_creator
 ```
 
-Expected: no live filesystem readers remain for config/pipelines/agents. Allowed hits are user-facing prompt text, compiled `include_str!` resources, comments, and intentionally local `.kanna/tasks` discovery.
+Expected: no live filesystem readers remain for config/workflows/agents. Allowed hits are user-facing prompt text, compiled `include_str!` resources, comments, and intentionally local `.kanna/tasks` discovery.
 
 - [ ] **Step 2: Run formatting and diff checks**
 
@@ -945,4 +945,4 @@ git diff -- docs/superpowers/specs/2026-07-15-origin-default-kanna-definitions-d
   docs/superpowers/plans/2026-07-15-origin-default-kanna-definitions.md
 ```
 
-Confirm the diff contains only this task's implementation, tests, and design/plan documents. Leave all changes uncommitted for the pipeline's commit stage.
+Confirm the diff contains only this task's implementation, tests, and design/plan documents. Leave all changes uncommitted for the workflow's commit stage.

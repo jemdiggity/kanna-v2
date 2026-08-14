@@ -214,7 +214,7 @@ pnpm test:tui-fidelity
 
 Run broader repository checks if focused verification exposes shared-package
 changes. Physical-device launch and Appium remain human-only; the checked-in
-fidelity pipeline is deterministic and exercises the renderer used on device.
+fidelity workflow is deterministic and exercises the renderer used on device.
 
 ## Non-Goals
 

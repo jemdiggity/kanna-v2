@@ -15,7 +15,7 @@ instead. The integration task:
 - starts from the first blocker branch,
 - asks the inherited agent provider to merge the remaining blocker branches,
   resolve conflicts preserving both sides' intent, run checks, and commit,
-- uses a one-stage auto pipeline with a `commit` post, so successful completion
+- uses a one-stage auto workflow with a `commit` post, so successful completion
   closes the integration task without creating a PR, and
 - replaces the dependent's blocker rows, leaving the dependent dormant and
   blocked only on the integration task.

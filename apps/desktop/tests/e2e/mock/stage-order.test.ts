@@ -20,7 +20,7 @@ async function visibleStageLabels(client: WebDriverClient, repoId: string): Prom
 
 async function visibleTaskPositions(client: WebDriverClient, repoId: string): Promise<PositionedText[]> {
   return await client.executeSync<PositionedText[]>(
-    `return Array.from(document.querySelectorAll(${JSON.stringify(`.repo-section[data-repo-id="${repoId}"] .pipeline-item .item-title`)}))
+    `return Array.from(document.querySelectorAll(${JSON.stringify(`.repo-section[data-repo-id="${repoId}"] .workflow-item .item-title`)}))
       .map((el) => ({ text: el.textContent?.trim() || "", top: el.getBoundingClientRect().top }))
       .filter((entry) => entry.text.length > 0);`,
   );

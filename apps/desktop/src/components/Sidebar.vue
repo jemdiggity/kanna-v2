@@ -533,7 +533,7 @@ function pointerFromEvent(event: Event | undefined | null): { x: number; y: numb
 }
 
 function taskRowAtPoint(x: number, y: number): { id: string; pinned: boolean } | null {
-  const row = document.elementFromPoint(x, y)?.closest<HTMLElement>(".pipeline-item");
+  const row = document.elementFromPoint(x, y)?.closest<HTMLElement>(".workflow-item");
   const id = row?.dataset.taskId;
   if (!row || !id || !readyTaskByDurableId(id)) return null;
   return { id, pinned: Boolean(row.closest(".pinned-zone")) };
@@ -565,7 +565,7 @@ function stopTaskDragTracking() {
 function taskIdFromDragStart(evt: SortableDragEvent): string | null {
   const target = evt.originalEvent?.target;
   if (target instanceof HTMLElement) {
-    const rowTaskId = target.closest<HTMLElement>(".pipeline-item[data-task-id]")?.dataset.taskId;
+    const rowTaskId = target.closest<HTMLElement>(".workflow-item[data-task-id]")?.dataset.taskId;
     if (readyTaskByDurableId(rowTaskId)) return rowTaskId ?? null;
   }
   const itemTaskId = evt.item?.dataset.taskId;
@@ -639,7 +639,7 @@ async function scrollSelectedTaskIntoView() {
   if (!props.selectedSlotId) return;
   await nextTick();
   sidebarContentRef.value
-    ?.querySelector<HTMLElement>(".pipeline-item.selected")
+    ?.querySelector<HTMLElement>(".workflow-item.selected")
     ?.scrollIntoView({ block: "nearest", inline: "nearest" });
 }
 
@@ -731,7 +731,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
             >&times;</button>
           </div>
 
-          <div v-if="!collapsedRepos.has(repo.id)" class="pipeline-list">
+          <div v-if="!collapsedRepos.has(repo.id)" class="workflow-list">
           <!-- Pinned tasks (draggable, sortable) -->
           <draggable
             :model-value="sortedPinned(repo.id)"
@@ -757,7 +757,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                 <div
                   v-for="row in subtreeRows(repo.id, element)"
                   :key="row.item.slot_id"
-                  class="pipeline-item"
+                  class="workflow-item"
                   :data-slot-id="row.item.slot_id"
                   :data-task-id="row.item.task_id"
                   :data-transfer-state="transferMarker(row.item)?.state"
@@ -866,7 +866,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                   <div
                     v-for="row in subtreeRows(repo.id, element)"
                     :key="row.item.slot_id"
-                    class="pipeline-item"
+                    class="workflow-item"
                     :data-slot-id="row.item.slot_id"
                     :data-task-id="row.item.task_id"
                     :data-transfer-state="transferMarker(row.item)?.state"
@@ -930,7 +930,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
               <div
                 v-for="row in subtreeRows(repo.id, blocked)"
                 :key="row.item.slot_id"
-                class="pipeline-item"
+                class="workflow-item"
                 :data-slot-id="row.item.slot_id"
                 :data-task-id="row.item.task_id"
                 :data-transfer-state="transferMarker(row.item)?.state"
@@ -992,7 +992,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
               <div
                 v-for="item in group.items"
                 :key="item.slot_id"
-                class="pipeline-item"
+                class="workflow-item"
                 :data-slot-id="item.slot_id"
                 :data-task-id="item.task_id"
                 :data-transfer-state="transferMarker(item)?.state"
@@ -1278,11 +1278,11 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
   opacity: 1;
 }
 
-.pipeline-list {
+.workflow-list {
   padding-left: 20px;
 }
 
-.pipeline-item {
+.workflow-item {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1298,12 +1298,12 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
   flex-direction: column;
 }
 
-.pipeline-item.subtask {
+.workflow-item.subtask {
   position: relative;
 }
 
 /* Subtask guide rail: a short vertical tick marking nesting under the parent. */
-.pipeline-item.subtask::before {
+.workflow-item.subtask::before {
   content: "";
   position: absolute;
   left: 16px;
@@ -1313,26 +1313,26 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
   background: var(--kn-border-subtle, var(--kn-bg-panel-raised));
 }
 
-.pipeline-item:hover {
+.workflow-item:hover {
   background: var(--kn-bg-panel-raised);
 }
 
-.pipeline-item.selected {
+.workflow-item.selected {
   background: var(--kn-bg-selected);
   outline: 1px solid var(--kn-accent);
 }
 
 /* Highlighted while a dragged task hovers over it as a potential parent. */
-.pipeline-item.drop-target {
+.workflow-item.drop-target {
   background: var(--kn-bg-selected);
   outline: 1px dashed var(--kn-accent);
 }
 
-.sidebar.is-filtering .pipeline-item.selected {
+.sidebar.is-filtering .workflow-item.selected {
   outline-color: var(--kn-warning);
 }
 
-.sidebar.is-filtering .pipeline-item.drop-target {
+.sidebar.is-filtering .workflow-item.drop-target {
   outline-color: var(--kn-warning);
 }
 
@@ -1347,7 +1347,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
   pointer-events: none;
 }
 
-.pipeline-item.initializing-item .item-title {
+.workflow-item.initializing-item .item-title {
   color: var(--kn-text-muted);
   font-style: italic;
 }
@@ -1409,7 +1409,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
   opacity: 0;
 }
 
-.pipeline-item:hover .subtask-detach,
+.workflow-item:hover .subtask-detach,
 .subtask-detach:focus-visible {
   opacity: 1;
 }

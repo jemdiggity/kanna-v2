@@ -139,4 +139,4 @@ git diff --check
 git status --short
 ```
 
-Expected: the test passes, `git diff --check` is silent, and status lists only the intended plan, Rust source, Rust tests, generated registry, server test, and desktop test changes. Product changes remain uncommitted because this Kanna pipeline performs committing after the user advances the stage.
+Expected: the test passes, `git diff --check` is silent, and status lists only the intended plan, Rust source, Rust tests, generated registry, server test, and desktop test changes. Product changes remain uncommitted because this Kanna workflow performs committing after the user advances the stage.

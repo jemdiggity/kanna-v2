@@ -34,7 +34,7 @@ New consumers use `version` and `environment`. `serverVersion` remains present s
 
 The desktop app owns the identity of the active installed build. A single reusable `kanna-server` sidecar can be packaged in multiple app variants, so the sidecar binary's Cargo package version is not authoritative for the installed app.
 
-The release pipeline will continue resolving the complete release version before invoking Bazel. For staging, that resolved value includes the prerelease sequence and is temporarily synchronized into the build's version inputs before the build starts. The built desktop therefore receives the same complete version used by its bundle, updater manifest, and release assets.
+The release workflow will continue resolving the complete release version before invoking Bazel. For staging, that resolved value includes the prerelease sequence and is temporarily synchronized into the build's version inputs before the build starts. The built desktop therefore receives the same complete version used by its bundle, updater manifest, and release assets.
 
 At runtime, the desktop will construct server metadata from:
 

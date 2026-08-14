@@ -49,7 +49,7 @@ fn untracked_paths(repo: &Repo) -> String {
 
 fn committed_provider_fixture() -> serde_json::Value {
     serde_json::json!({
-        "pipeline": "single-reviewer",
+        "workflow": "single-reviewer",
         "setup": ["COMMITTED_SETUP"],
         "ports": {"COMMITTED_PORT": 4100, "SHARED_PORT": 4200},
         "agentProviders": {
@@ -84,7 +84,7 @@ fn a_local_config_layers_over_the_committed_one_without_any_commit() {
         &repo,
         &serde_json::json!({
             "$schema": "https://schemas.kanna.build/config.schema.json",
-            "pipeline": "no-review",
+            "workflow": "no-review",
             "setup": ["LOCAL_SETUP"],
             "ports": {"SHARED_PORT": 4300},
             "agentProviders": {"*": {"provider": ["claude", "codex"]}}
@@ -101,7 +101,7 @@ fn a_local_config_layers_over_the_committed_one_without_any_commit() {
     );
 
     let config = local.config();
-    assert_eq!(config.pipeline.as_deref(), Some("no-review"));
+    assert_eq!(config.workflow.as_deref(), Some("no-review"));
     // Arrays replace; they never concatenate.
     assert_eq!(
         config.setup.as_deref(),
@@ -141,7 +141,7 @@ fn a_local_config_layers_over_the_committed_one_without_any_commit() {
     );
     assert_eq!(
         provenance.keys(),
-        ["agentProviders", "pipeline", "ports", "setup"]
+        ["agentProviders", "ports", "setup", "workflow"]
     );
 
     let _ = std::fs::remove_dir_all(&repo.path);
@@ -189,7 +189,7 @@ fn local_provider_preference_beats_the_repo_and_agent_but_loses_to_a_task_overri
         Some("local-model"),
     );
 
-    // … and loses to an explicit task override and to a pipeline stage's
+    // … and loses to an explicit task override and to a workflow stage's
     // pinned provider, which the local layer deliberately does not displace.
     assert_eq!(
         resolve_agent_provider_with(
@@ -236,17 +236,17 @@ fn a_working_tree_config_json_stays_ignored_while_config_local_json_applies() {
     // definitions — only the file that exists to be local is.
     std::fs::write(
         std::path::Path::new(&repo.path).join(".kanna/config.json"),
-        serde_json::json!({"pipeline": "WORKING_TREE_PIPELINE"}).to_string(),
+        serde_json::json!({"workflow": "WORKING_TREE_WORKFLOW"}).to_string(),
     )
     .unwrap();
     write_local_config(
         &repo,
-        &serde_json::json!({"pipeline": "no-review"}).to_string(),
+        &serde_json::json!({"workflow": "no-review"}).to_string(),
     );
 
     let definitions = RepoDefinitions::resolve(&repo).expect("resolve layered definitions");
 
-    assert_eq!(definitions.config().pipeline.as_deref(), Some("no-review"));
+    assert_eq!(definitions.config().workflow.as_deref(), Some("no-review"));
     // The working tree's committed-config edits neither win nor leak.
     assert_eq!(
         definitions.config().ports.as_ref().map(|ports| ports.len()),
@@ -262,7 +262,7 @@ fn a_malformed_local_config_fails_resolution_by_name_instead_of_falling_back() {
         init_repo_with_committed_config("local-config-malformed", committed_provider_fixture());
 
     for (local_config, expected) in [
-        ("{\"pipeline\":", "is not valid JSON"),
+        ("{\"workflow\":", "is not valid JSON"),
         (
             "{\"vars\": {\"OWNER\": \"local\"}}",
             "cannot override `vars` per machine",
