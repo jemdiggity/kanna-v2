@@ -37,6 +37,7 @@ function delay(ms: number): Promise<void> {
 
 export function useAppUpdate() {
   const status = ref<UpdateStatus>("idle");
+  const windowFocused = ref(!isTauri);
   const updateRef = shallowRef<UpdateHandle | null>(null);
   const updateVersion = ref<string | null>(null);
   const releaseNotes = ref<string | null>(null);
@@ -47,10 +48,11 @@ export function useAppUpdate() {
   const errorMessage = ref<string | null>(null);
   const visible = computed(
     () =>
-      status.value === "available" ||
-      status.value === "downloading" ||
-      status.value === "readyToRestart" ||
-      status.value === "error",
+      windowFocused.value &&
+      (status.value === "available" ||
+        status.value === "downloading" ||
+        status.value === "readyToRestart" ||
+        status.value === "error"),
   );
 
   let started = false;
@@ -60,6 +62,41 @@ export function useAppUpdate() {
   let intervalTimer: ReturnType<typeof setInterval> | null = null;
   let enabledPromise: Promise<boolean> | null = null;
   let updaterEnabled: boolean | null = null;
+  let unlistenWindowFocus: (() => void) | null = null;
+
+  async function startWindowFocusTracking(): Promise<void> {
+    if (!isTauri) {
+      windowFocused.value = true;
+      return;
+    }
+
+    let listenerRegistered = false;
+    try {
+      const { getCurrentWindow } = await import("@tauri-apps/api/window");
+      const currentWindow = getCurrentWindow();
+      let focusEventSeen = false;
+      const unlisten = await currentWindow.onFocusChanged((event) => {
+        focusEventSeen = true;
+        windowFocused.value = event.payload;
+      });
+      listenerRegistered = true;
+      if (disposed) {
+        unlisten();
+        return;
+      }
+      unlistenWindowFocus = unlisten;
+
+      const focused = await currentWindow.isFocused();
+      if (!disposed && !focusEventSeen) {
+        windowFocused.value = focused;
+      }
+    } catch (error) {
+      if (!listenerRegistered) {
+        windowFocused.value = true;
+      }
+      console.error("[updater] failed to track current window focus", error);
+    }
+  }
 
   async function ensureEnabled(): Promise<boolean> {
     if (updaterEnabled !== null) return updaterEnabled;
@@ -158,6 +195,7 @@ export function useAppUpdate() {
   function start() {
     if (started) return;
     started = true;
+    void startWindowFocusTracking();
     void (async () => {
       if (disposed) return;
       if (!(await ensureEnabled())) return;
@@ -263,6 +301,8 @@ export function useAppUpdate() {
     void closeUpdateHandle(updateRef.value);
     if (startupTimer) clearTimeout(startupTimer);
     if (intervalTimer) clearInterval(intervalTimer);
+    unlistenWindowFocus?.();
+    unlistenWindowFocus = null;
     startupTimer = null;
     intervalTimer = null;
   }

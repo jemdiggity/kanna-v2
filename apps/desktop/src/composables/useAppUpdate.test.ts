@@ -10,6 +10,15 @@ const relaunchMock = vi.fn();
 const invokeMock = vi.fn();
 const downloadAndInstallMock = vi.fn();
 const closeMock = vi.fn();
+const isFocusedMock = vi.fn();
+const focusUnlistenMock = vi.fn();
+let focusChangedHandler: ((event: { payload: boolean }) => void) | null = null;
+const onFocusChangedMock = vi.fn(
+  async (handler: (event: { payload: boolean }) => void) => {
+    focusChangedHandler = handler;
+    return focusUnlistenMock;
+  },
+);
 
 vi.mock("@tauri-apps/plugin-updater", () => ({
   check: (...args: unknown[]) => checkMock(...args),
@@ -17,6 +26,13 @@ vi.mock("@tauri-apps/plugin-updater", () => ({
 
 vi.mock("@tauri-apps/plugin-process", () => ({
   relaunch: (...args: unknown[]) => relaunchMock(...args),
+}));
+
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: () => ({
+    isFocused: (...args: unknown[]) => isFocusedMock(...args),
+    onFocusChanged: (...args: unknown[]) => onFocusChangedMock(...args),
+  }),
 }));
 
 vi.mock("../invoke", () => ({
@@ -101,6 +117,11 @@ describe("useAppUpdate", () => {
     invokeMock.mockReset();
     downloadAndInstallMock.mockReset();
     closeMock.mockReset();
+    isFocusedMock.mockReset();
+    isFocusedMock.mockResolvedValue(true);
+    focusUnlistenMock.mockReset();
+    focusChangedHandler = null;
+    onFocusChangedMock.mockClear();
     invokeMock.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
       if (command === "read_env_var" && args?.name === "KANNA_WORKTREE") return "";
       throw new Error(`unexpected invoke: ${command}`);
@@ -127,6 +148,33 @@ describe("useAppUpdate", () => {
     await vi.advanceTimersByTimeAsync(6 * 60 * 60 * 1000);
     await flush();
     expect(checkMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows an available update only while the current native window is focused", async () => {
+    checkMock.mockResolvedValue(makeUpdate("0.0.39"));
+    const updater = useAppUpdate();
+    updater.start();
+    await flush();
+    await updater.checkNow();
+
+    await vi.waitFor(() => expect(focusChangedHandler).not.toBeNull());
+    expect(updater.visible.value).toBe(true);
+
+    focusChangedHandler?.({ payload: false });
+    expect(updater.visible.value).toBe(false);
+
+    focusChangedHandler?.({ payload: true });
+    expect(updater.visible.value).toBe(true);
+  });
+
+  it("stops tracking native window focus when disposed", async () => {
+    const updater = useAppUpdate();
+    updater.start();
+    await vi.waitFor(() => expect(focusChangedHandler).not.toBeNull());
+
+    updater.dispose();
+
+    expect(focusUnlistenMock).toHaveBeenCalledTimes(1);
   });
 
   it("suppresses a dismissed version for the rest of the session but surfaces a newer one", async () => {
