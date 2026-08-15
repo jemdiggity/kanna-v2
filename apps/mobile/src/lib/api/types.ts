@@ -206,6 +206,10 @@ export interface TaskSummary {
   parentTaskId?: string | null;
   /** Owner-local ids of unresolved blockers; non-empty means blocked. */
   blockedByTaskIds?: string[];
+  /** Canonical owner-side task pin state. */
+  pinned?: boolean;
+  /** Owner-side ordering position among pinned tasks in the same repo. */
+  pinOrder?: number | null;
 }
 
 export interface TaskLatestRun {

@@ -7,6 +7,33 @@ import {
 } from "./lanTransport";
 
 describe("createLanTransport", () => {
+  it("pins at the canonical top position and unpins through encoded task routes", async () => {
+    const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ taskId: "task/one" })
+    });
+    const transport = createLanTransport("http://127.0.0.1:48120", fetchImpl);
+
+    await transport.pinTask("task/one");
+    await transport.unpinTask("task/one");
+
+    expect(fetchImpl).toHaveBeenNthCalledWith(
+      1,
+      "http://127.0.0.1:48120/v1/tasks/task%2Fone/actions/pin",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({})
+      }
+    );
+    expect(fetchImpl).toHaveBeenNthCalledWith(
+      2,
+      "http://127.0.0.1:48120/v1/tasks/task%2Fone/actions/unpin",
+      { method: "POST" }
+    );
+  });
+
   it("lists and runs encoded repository commands over LAN", async () => {
     const fetchImpl = vi.fn<FetchLike>()
       .mockResolvedValueOnce({

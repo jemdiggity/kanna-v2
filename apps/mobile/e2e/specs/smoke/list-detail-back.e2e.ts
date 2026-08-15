@@ -1,5 +1,9 @@
 import type { Browser } from "webdriverio";
-import { selectors } from "../../helpers/selectors";
+import {
+  selectors,
+  taskPinActionSelector,
+  tasksRepoSelector
+} from "../../helpers/selectors";
 import { DEFAULT_MOBILE_TERMINAL_GEOMETRY } from "../../../src/mobileTerminalGeometry";
 
 const SCREEN_TIMEOUT_MS = 30_000;
@@ -143,12 +147,24 @@ interface WebViewContextDriver {
 }
 
 type FetchLike = (
-  input: string
+  input: string,
+  init?: {
+    method?: string;
+    headers?: Record<string, string>;
+    body?: string;
+  }
 ) => Promise<{
   ok: boolean;
   status: number;
   json(): Promise<unknown>;
 }>;
+
+interface MobileTaskPinSummary {
+  id: string;
+  repoId: string;
+  pinned?: boolean;
+  pinOrder?: number | null;
+}
 
 interface RunListDetailBackSmokeOptions {
   desktopServerUrl?: string;
@@ -857,6 +873,94 @@ export async function performTaskDetailEdgeSwipeBack(
   );
 }
 
+export async function exerciseTaskPinSwipe(
+  driver: Browser,
+  desktopServerUrl: string,
+  taskId: string,
+  fetchImpl: FetchLike = fetch
+): Promise<void> {
+  const detailResponse = await fetchImpl(
+    `${desktopServerUrl}/v1/tasks/${encodeURIComponent(taskId)}`
+  );
+  if (!detailResponse.ok) {
+    throw new Error(`Could not load pin fixture task (${detailResponse.status}).`);
+  }
+  const detail = (await detailResponse.json()) as { repoId?: unknown };
+  if (typeof detail.repoId !== "string") {
+    throw new Error("Pin fixture task did not expose a repository id.");
+  }
+  const taskUrl = `${desktopServerUrl}/v1/repos/${encodeURIComponent(detail.repoId)}/tasks`;
+  const readPinState = async (): Promise<{
+    pinned: boolean;
+    pinOrder: number | null;
+  }> => {
+    const response = await fetchImpl(taskUrl);
+    if (!response.ok) {
+      throw new Error(`Could not read pin fixture state (${response.status}).`);
+    }
+    const tasks = (await response.json()) as MobileTaskPinSummary[];
+    const task = tasks.find((candidate) => candidate.id === taskId);
+    if (!task) throw new Error("Pin fixture task disappeared from its repository.");
+    return {
+      pinned: task.pinned ?? false,
+      pinOrder: task.pinOrder ?? null
+    };
+  };
+  const initialPinState = await readPinState();
+  const restorePath = initialPinState.pinned ? "pin" : "unpin";
+
+  try {
+    const repo = await driver.$(tasksRepoSelector(detail.repoId));
+    await repo.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+    await repo.click();
+    const row = await driver.$(`~mobile.task-row.${taskId}`);
+    await row.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+    const [{ x, y }, { width, height }] = await Promise.all([
+      row.getLocation(),
+      row.getSize()
+    ]);
+    await driver.execute("mobile: dragFromToForDuration", {
+      duration: 0.35,
+      fromX: Math.round(x + width * 0.8),
+      fromY: Math.round(y + height / 2),
+      toX: Math.round(x + width * 0.35),
+      toY: Math.round(y + height / 2)
+    });
+    const action = await driver.$(taskPinActionSelector(taskId));
+    await action.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+    await action.click();
+    await driver.waitUntil(
+      async () =>
+        (await readPinState()).pinned === !initialPinState.pinned,
+      {
+        interval: POLL_INTERVAL_MS,
+        timeout: SCREEN_TIMEOUT_MS,
+        timeoutMsg: "Expected the swiped pin action to update canonical server state"
+      }
+    );
+  } finally {
+    if ((await readPinState()).pinned !== initialPinState.pinned) {
+      const response = await fetchImpl(
+        `${desktopServerUrl}/v1/tasks/${encodeURIComponent(taskId)}/actions/${restorePath}`,
+        {
+          method: "POST",
+          ...(initialPinState.pinned
+            ? {
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  position: initialPinState.pinOrder ?? 0
+                })
+              }
+            : {})
+        }
+      );
+      if (!response.ok) {
+        throw new Error(`Could not restore pin fixture state (${response.status}).`);
+      }
+    }
+  }
+}
+
 export async function runListDetailBackSmoke(
   driver: Browser,
   options: RunListDetailBackSmokeOptions = {}
@@ -881,6 +985,12 @@ export async function runListDetailBackSmoke(
   await appShell.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
 
   await ensureTaskListVisible(ui);
+  await exerciseTaskPinSwipe(
+    driver,
+    desktopServerUrl,
+    fixture.taskId,
+    options.fetchImpl
+  );
   await openPtyFixtureTask(ui, fixture.taskId);
 
   await driver.pause(1_000);

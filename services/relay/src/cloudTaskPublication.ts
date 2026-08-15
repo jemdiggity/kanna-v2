@@ -205,6 +205,7 @@ function validateTask(
   if (transitionRevision !== null && transitionRevision.length === 0) {
     throw new Error(`${path}.transitionRevision must be null or a non-empty string`);
   }
+  const pinOrder = optionalNullableInteger(task.pinOrder, `${path}.pinOrder`);
 
   return {
     ...(cloudTaskId === undefined ? {} : { cloudTaskId }),
@@ -244,6 +245,8 @@ function validateTask(
     transfer: validatedTransfer,
     blockedByTaskIds,
     parentTaskId: optionalNullableString(task.parentTaskId, `${path}.parentTaskId`, 128),
+    pinned: optionalBoolean(task.pinned, `${path}.pinned`),
+    ...(pinOrder === undefined ? {} : { pinOrder }),
     createdAt: requiredString(task.createdAt, `${path}.createdAt`, 64),
     updatedAt: requiredString(task.updatedAt, `${path}.updatedAt`, 64),
     closedAt: null,
@@ -589,6 +592,18 @@ function optionalBoolean(value: unknown, field: string): boolean {
     throw new Error(`${field} must be a boolean`);
   }
   return value;
+}
+
+function optionalNullableInteger(
+  value: unknown,
+  field: string,
+): number | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (!Number.isSafeInteger(value)) {
+    throw new Error(`${field} must be null or an integer`);
+  }
+  return value as number;
 }
 
 function nullableInteger(value: unknown, field: string): number | null {

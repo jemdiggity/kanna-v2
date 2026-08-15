@@ -934,6 +934,8 @@ function createDisconnectedClient(): KannaClient {
     runMergeAgent: unavailable,
     advanceTaskStage: unavailable,
     markTaskRead: unavailable,
+    pinTask: unavailable,
+    unpinTask: unavailable,
     closeTask: unavailable,
     sendTaskInput: unavailable,
     readTaskFile: unavailable,
@@ -1139,6 +1141,10 @@ function createTrustedLanFallbackClient({
       (await resolveClient(desktopId)).advanceTaskStage(taskId),
     markTaskRead: async (taskId) =>
       (await resolveClient(desktopId)).markTaskRead(taskId),
+    pinTask: async (taskId) =>
+      (await resolveClient(desktopId)).pinTask(taskId),
+    unpinTask: async (taskId) =>
+      (await resolveClient(desktopId)).unpinTask(taskId),
     closeTask: async (taskId) =>
       (await resolveClient(desktopId)).closeTask(taskId),
     sendTaskInput: async (taskId, input) =>
@@ -1346,6 +1352,8 @@ function createDelegatingClient(getClient: () => KannaClient): KannaClient {
     runMergeAgent: (taskId) => getClient().runMergeAgent(taskId),
     advanceTaskStage: (taskId) => getClient().advanceTaskStage(taskId),
     markTaskRead: (taskId) => getClient().markTaskRead(taskId),
+    pinTask: (taskId) => getClient().pinTask(taskId),
+    unpinTask: (taskId) => getClient().unpinTask(taskId),
     closeTask: (taskId) => getClient().closeTask(taskId),
     sendTaskInput: (taskId, input) => getClient().sendTaskInput(taskId, input),
     readTaskFile: (taskId, path) => getClient().readTaskFile(taskId, path),

@@ -106,6 +106,14 @@ export function taskMentionedFilesRowSelector(path: string): string {
   return `~${MOBILE_E2E_IDS.taskMentionedFilesRow(path)}`;
 }
 
+export function taskPinActionSelector(taskId: string): string {
+  return `~${MOBILE_E2E_IDS.taskPinAction(taskId)}`;
+}
+
+export function tasksRepoSelector(repoId: string): string {
+  return `~${MOBILE_E2E_IDS.tasksRepo(repoId)}`;
+}
+
 export function machineRowSelector(desktopId: string): string {
   return `~${MOBILE_E2E_IDS.machineRow(desktopId)}`;
 }

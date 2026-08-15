@@ -2519,6 +2519,94 @@ async fn list_repo_tasks_route_returns_repo_scoped_tasks() {
 }
 
 #[tokio::test]
+async fn mobile_pin_actions_round_trip_through_canonical_task_summaries() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-first",
+            "repo-1",
+            "first prompt",
+            Some("First Task"),
+            "in progress",
+            "2026-04-17 06:00:00",
+        )
+        .unwrap();
+        db.insert_test_pipeline_item(
+            "task-second",
+            "repo-1",
+            "second prompt",
+            Some("Second Task"),
+            "in progress",
+            "2026-04-17 07:00:00",
+        )
+        .unwrap();
+        db.pin_pipeline_item("task-first", 0).unwrap();
+    });
+
+    let mut pin_request = direct_lan_request(
+        axum::http::Method::POST,
+        "/v1/tasks/task-second/actions/pin",
+    );
+    pin_request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            49152,
+        ))));
+    let pin = app.clone().oneshot(pin_request).await.unwrap();
+    assert_eq!(pin.status(), StatusCode::OK);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/repos/repo-1/tasks")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let tasks: Vec<crate::mobile_api::TaskSummary> = from_slice(&body).unwrap();
+    let first = tasks.iter().find(|task| task.id == "task-first").unwrap();
+    let second = tasks.iter().find(|task| task.id == "task-second").unwrap();
+    assert!(first.pinned);
+    assert_eq!(first.pin_order, Some(1));
+    assert!(second.pinned);
+    assert_eq!(second.pin_order, Some(0));
+
+    let mut unpin_request = direct_lan_request(
+        axum::http::Method::POST,
+        "/v1/tasks/task-second/actions/unpin",
+    );
+    unpin_request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            49152,
+        ))));
+    let unpin = app.clone().oneshot(unpin_request).await.unwrap();
+    assert_eq!(unpin.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(
+            Request::get("/v1/repos/repo-1/tasks")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let tasks: Vec<crate::mobile_api::TaskSummary> = from_slice(&body).unwrap();
+    let second = tasks.iter().find(|task| task.id == "task-second").unwrap();
+    assert!(!second.pinned);
+    assert_eq!(second.pin_order, None);
+}
+
+#[tokio::test]
 async fn list_recent_tasks_route_returns_open_tasks_in_updated_order() {
     let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
         db.insert_test_repo("repo-1", "Repo One").unwrap();

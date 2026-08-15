@@ -3,6 +3,7 @@ import * as smokeModule from "./list-detail-back.e2e";
 import {
   assertPtyTerminalFixtureAvailable,
   ensureTaskListVisible,
+  exerciseTaskPinSwipe,
   exerciseListDetailBackFromOrigin,
   inspectTerminalWebView,
   openPtyFixtureTask,
@@ -102,6 +103,80 @@ describe("performTaskDetailEdgeSwipeBack", () => {
     expect(taskDetail.isExisting).toHaveBeenCalled();
     expect(tasksScreen.isExisting).toHaveBeenCalled();
     expect(tasksScreen.isDisplayed).toHaveBeenCalled();
+  });
+});
+
+describe("exerciseTaskPinSwipe", () => {
+  it("reveals the row action, observes canonical state, and restores the fixture", async () => {
+    let pinned = false;
+    const row = {
+      getLocation: vi.fn(async () => ({ x: 10, y: 100 })),
+      getSize: vi.fn(async () => ({ width: 360, height: 90 })),
+      waitForDisplayed: vi.fn(async () => undefined)
+    };
+    const action = {
+      click: vi.fn(async () => {
+        pinned = true;
+      }),
+      waitForDisplayed: vi.fn(async () => undefined)
+    };
+    const repo = {
+      click: vi.fn(async () => undefined),
+      waitForDisplayed: vi.fn(async () => undefined)
+    };
+    const driver = {
+      $: vi.fn(async (selector: string) => {
+        if (selector === "~mobile.tasks.repo.repo-1") return repo;
+        return selector === "~mobile.task-row.task-1" ? row : action;
+      }),
+      execute: vi.fn(async () => undefined),
+      waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
+        if (!(await condition())) throw new Error(options.timeoutMsg);
+      })
+    };
+    const fetchImpl = vi.fn(async (url: string, init?: { method?: string }) => {
+      if (url.endsWith("/v1/tasks/task-1")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ repoId: "repo-1" })
+        };
+      }
+      if (url.endsWith("/actions/unpin") && init?.method === "POST") {
+        pinned = false;
+        return { ok: true, status: 200, json: async () => ({}) };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => [{ id: "task-1", repoId: "repo-1", pinned }]
+      };
+    });
+
+    await exerciseTaskPinSwipe(
+      driver as never,
+      "http://127.0.0.1:48120",
+      "task-1",
+      fetchImpl
+    );
+
+    expect(driver.execute).toHaveBeenCalledWith(
+      "mobile: dragFromToForDuration",
+      {
+        duration: 0.35,
+        fromX: 298,
+        fromY: 145,
+        toX: 136,
+        toY: 145
+      }
+    );
+    expect(repo.click).toHaveBeenCalledOnce();
+    expect(action.click).toHaveBeenCalledOnce();
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "http://127.0.0.1:48120/v1/tasks/task-1/actions/unpin",
+      { method: "POST" }
+    );
+    expect(pinned).toBe(false);
   });
 });
 

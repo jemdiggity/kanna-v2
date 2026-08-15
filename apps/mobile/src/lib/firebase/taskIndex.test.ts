@@ -81,6 +81,8 @@ function validTask(
     createdAt: "2026-05-14T00:00:00.000Z",
     updatedAt: "2026-05-14T00:01:00.000Z",
     closedAt: null,
+    pinned: false,
+    pinOrder: null,
     ...overrides,
   };
 }
@@ -247,6 +249,8 @@ describe("cloud task index", () => {
       activity: "working",
       parentTaskId: null,
       blockedByTaskIds: [],
+      pinned: false,
+      pinOrder: null,
       ownerDesktopId: "desktop-1",
       ownerLocalRepoId: "local-repo-1",
       ownerLocalTaskId: "task-1",
@@ -270,6 +274,20 @@ describe("cloud task index", () => {
         .parentTaskId,
     ).toBe("task-parent");
     expect(mapCloudTaskSnapshot(legacySnapshot).parentTaskId).toBeNull();
+  });
+
+  it("carries canonical pin metadata and defaults legacy documents to unpinned", () => {
+    expect(
+      mapCloudTaskSnapshot({
+        ...legacySnapshot,
+        pinned: true,
+        pinOrder: 2
+      })
+    ).toMatchObject({ pinned: true, pinOrder: 2 });
+    expect(mapCloudTaskSnapshot(legacySnapshot)).toMatchObject({
+      pinned: false,
+      pinOrder: null
+    });
   });
 
   const legacySnapshot = {

@@ -202,6 +202,31 @@ describe("TaskCard", () => {
     );
   });
 
+  it("announces pinned state and exposes a labeled non-swipe action", () => {
+    if (!TaskCard) throw new Error("TaskCard was not loaded");
+    const onToggle = vi.fn();
+    const tree = TaskCard({
+      task: {
+        id: "task-1",
+        repoId: "repo-1",
+        title: "Pinned task",
+        stage: "review",
+        pinned: true
+      },
+      pinAction: { error: null, pending: false, onToggle },
+      onPress: vi.fn()
+    }) as ElementNode;
+
+    expect(tree.props?.accessibilityLabel).toBe(
+      "Pinned. Pinned task. review. …"
+    );
+    expect(tree.props?.accessibilityActions).toEqual([
+      { name: "unpin", label: "Unpin" }
+    ]);
+    const button = findTextNodeByCompleteText(tree, "Unpin");
+    expect(button).not.toBeNull();
+  });
+
   it("renders a normalized multiline prompt only once in text and accessibility", () => {
     if (!TaskCard) throw new Error("TaskCard was not loaded");
 

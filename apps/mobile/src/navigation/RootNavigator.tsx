@@ -355,6 +355,9 @@ function TasksTabRoute() {
           void controller.selectRepo(repoId);
         }}
         onOpenTask={pushTask}
+        onSetTaskPinned={(taskId, pinned) =>
+          controller.setTaskPinned(taskId, pinned)
+        }
       />
     </StandardScreen>
   );
@@ -376,6 +379,9 @@ function ActivityTabRoute() {
           void controller.selectRepo(repoId);
         }}
         onOpenTask={pushTask}
+        onSetTaskPinned={(taskId, pinned) =>
+          controller.setTaskPinned(taskId, pinned)
+        }
       />
     </StandardScreen>
   );
@@ -402,6 +408,9 @@ function SearchRoute() {
           void controller.searchTasks(query);
         }}
         onOpenTask={pushTask}
+        onSetTaskPinned={(taskId, pinned) =>
+          controller.setTaskPinned(taskId, pinned)
+        }
       />
     </UtilityScreen>
   );

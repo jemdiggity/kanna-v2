@@ -38,6 +38,69 @@ fn database_open_flags_use_sqlite_mutexes_for_shared_desktop_db() {
 }
 
 #[test]
+fn pin_at_top_rolls_back_existing_pin_order_when_target_update_fails() {
+    let path = temp_db_path();
+    let path_string = path.to_string_lossy().to_string();
+    let db = Db::open_for_tests(&path_string).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One")
+        .expect("insert repo");
+    db.insert_test_pipeline_item(
+        "task-anchor",
+        "repo-1",
+        "anchor prompt",
+        Some("Anchor"),
+        "in progress",
+        "2026-08-15 10:00:00",
+    )
+    .expect("insert anchor");
+    db.insert_test_pipeline_item(
+        "task-target",
+        "repo-1",
+        "target prompt",
+        Some("Target"),
+        "in progress",
+        "2026-08-15 11:00:00",
+    )
+    .expect("insert target");
+    db.pin_pipeline_item("task-anchor", 0).expect("pin anchor");
+    db.conn
+        .execute_batch(
+            "CREATE TRIGGER fail_target_pin
+             BEFORE UPDATE OF pinned ON pipeline_item
+             WHEN NEW.id = 'task-target' AND NEW.pinned = 1
+             BEGIN
+               SELECT RAISE(ABORT, 'forced target pin failure');
+             END;",
+        )
+        .expect("install failure trigger");
+
+    db.pin_pipeline_item_at_top("repo-1", "task-target")
+        .expect_err("target pin should fail");
+
+    let anchor: (i64, Option<i64>) = db
+        .conn
+        .query_row(
+            "SELECT pinned, pin_order FROM pipeline_item WHERE id = 'task-anchor'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read anchor");
+    let target: (i64, Option<i64>) = db
+        .conn
+        .query_row(
+            "SELECT pinned, pin_order FROM pipeline_item WHERE id = 'task-target'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read target");
+    assert_eq!(anchor, (1, Some(0)));
+    assert_eq!(target, (0, None));
+
+    drop(db);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn setting_mutations_are_serialized_across_connections() {
     let path = temp_db_path();
     let path_string = path.to_string_lossy().to_string();

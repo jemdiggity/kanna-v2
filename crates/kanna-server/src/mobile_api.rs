@@ -88,6 +88,8 @@ pub struct TaskSummary {
     pub waiting_prompt_snippet: Option<String>,
     pub agent_type: Option<String>,
     pub parent_task_id: Option<String>,
+    pub pinned: bool,
+    pub pin_order: Option<i64>,
     #[serde(default)]
     pub blocked_by_task_ids: Vec<String>,
 }
@@ -768,6 +770,8 @@ fn map_task_summary(
         waiting_prompt_snippet,
         agent_type: item.agent_type,
         parent_task_id: item.parent_task_id,
+        pinned: item.pinned.unwrap_or(0) != 0,
+        pin_order: item.pin_order,
         blocked_by_task_ids,
     }
 }

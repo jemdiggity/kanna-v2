@@ -90,6 +90,8 @@ function createClientMock(overrides: Partial<KannaClient> = {}): KannaClient {
     runMergeAgent: vi.fn().mockResolvedValue({ taskId: "task-merge" }),
     advanceTaskStage: vi.fn().mockResolvedValue({ taskId: "task-advanced" }),
     markTaskRead: vi.fn().mockResolvedValue({ taskId: "task-1", activity: "idle" }),
+    pinTask: vi.fn().mockResolvedValue(undefined),
+    unpinTask: vi.fn().mockResolvedValue(undefined),
     abortTaskCreation: vi.fn().mockResolvedValue(undefined),
     closeTask: vi.fn().mockResolvedValue(undefined),
     sendTaskInput: vi.fn().mockResolvedValue(undefined),
@@ -140,6 +142,8 @@ describe("mergeCloudAndLanTasks", () => {
       waitingPromptSnippet: "cloud snippet",
       agentProvider: "claude",
       agentType: "pty",
+      pinned: false,
+      pinOrder: null,
       ownerDesktopId: "desktop-lan",
       ownerLocalRepoId: "local-repo",
       ownerLocalTaskId: "local-task",
@@ -156,7 +160,9 @@ describe("mergeCloudAndLanTasks", () => {
       stage: "pr",
       waitingPromptSnippet: "LAN snippet",
       agentProvider: "codex",
-      agentType: "agent"
+      agentType: "agent",
+      pinned: true,
+      pinOrder: 3
       }),
       prompt:
         "First line of the canonical task prompt.\nSecond line.\nPROMPT_END_SENTINEL"
@@ -175,7 +181,9 @@ describe("mergeCloudAndLanTasks", () => {
           "First line of the canonical task prompt.\nSecond line.\nPROMPT_END_SENTINEL",
         stage: "pr",
         waitingPromptSnippet: "LAN snippet",
-        agentType: "agent"
+        agentType: "agent",
+        pinned: true,
+        pinOrder: 3
       }
     ]);
     expect(result.routes.get("cloud-X")).toEqual({
@@ -1289,6 +1297,8 @@ describe("createCloudLanClient", () => {
     await client.advanceTaskStage("cloud-only");
     await client.runMergeAgent("cloud-duplicate");
     await client.markTaskRead("cloud-duplicate");
+    await client.pinTask("cloud-duplicate");
+    await client.unpinTask("cloud-only");
     await client.getTask?.("cloud-duplicate");
     await client.getTask?.("cloud-only");
 
@@ -1325,6 +1335,9 @@ describe("createCloudLanClient", () => {
     expect(lan.runMergeAgent).toHaveBeenCalledWith("local-duplicate");
     expect(lan.markTaskRead).toHaveBeenCalledWith("local-duplicate");
     expect(cloud.markTaskRead).not.toHaveBeenCalled();
+    expect(lan.pinTask).toHaveBeenCalledWith("local-duplicate");
+    expect(cloud.pinTask).not.toHaveBeenCalled();
+    expect(cloud.unpinTask).toHaveBeenCalledWith("cloud-only");
     expect(lan.getTask).toHaveBeenCalledWith("local-duplicate");
     expect(cloud.getTask).toHaveBeenCalledWith("cloud-only");
   });

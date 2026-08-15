@@ -79,6 +79,8 @@ struct CloudTaskSnapshot {
     transfer: CloudTransferSnapshot,
     blocked_by_task_ids: Vec<String>,
     parent_task_id: Option<String>,
+    pinned: bool,
+    pin_order: Option<i64>,
     created_at: String,
     updated_at: String,
     closed_at: Option<String>,
@@ -261,6 +263,8 @@ fn map_task(
         transfer,
         blocked_by_task_ids: blocked_by_task_ids.into_iter().take(100).collect(),
         parent_task_id: truncate_option(item.parent_task_id, 128),
+        pinned: item.pinned != 0,
+        pin_order: item.pin_order,
         created_at,
         updated_at,
         closed_at: item.closed_at,
@@ -587,6 +591,8 @@ mod tests {
             serde_json::json!({"provider":"codex","type":"pty"})
         );
         assert_eq!(json["tasks"][0]["parentTaskId"], serde_json::Value::Null);
+        assert_eq!(json["tasks"][0]["pinned"], false);
+        assert_eq!(json["tasks"][0]["pinOrder"], serde_json::Value::Null);
     }
 
     #[test]
@@ -710,6 +716,19 @@ mod tests {
         let json = serde_json::to_value(snapshot).unwrap();
 
         assert_eq!(json["tasks"][0]["parentTaskId"], "task-parent");
+    }
+
+    #[test]
+    fn snapshot_mapping_publishes_canonical_pin_state() {
+        let mut source = ui_snapshot("idle");
+        source.entries[0].items[0].pinned = 1;
+        source.entries[0].items[0].pin_order = Some(3);
+
+        let snapshot = map_ui_snapshot("desktop-1", "Studio Mac", source);
+        let json = serde_json::to_value(snapshot).unwrap();
+
+        assert_eq!(json["tasks"][0]["pinned"], true);
+        assert_eq!(json["tasks"][0]["pinOrder"], 3);
     }
 
     #[test]

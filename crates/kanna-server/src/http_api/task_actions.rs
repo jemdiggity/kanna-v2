@@ -308,7 +308,7 @@ enum BlockerResolution {
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct PinTaskRequest {
-    position: i64,
+    position: Option<i64>,
 }
 
 pub(super) async fn pin_task(
@@ -323,8 +323,23 @@ pub(super) async fn pin_task(
         )
     })?;
     let task_id = resolve_existing_task_id(&db, &task_id)?;
-    db.pin_pipeline_item(&task_id, payload.position)
-        .map_err(|e| db_write_error("db error", e))?;
+    if let Some(position) = payload.position {
+        db.pin_pipeline_item(&task_id, position)
+            .map_err(|e| db_write_error("db error", e))?;
+    } else {
+        let repo_id = db
+            .get_pipeline_item(&task_id)
+            .map_err(|e| db_write_error("db error", e))?
+            .ok_or_else(|| {
+                (
+                    axum::http::StatusCode::NOT_FOUND,
+                    format!("task not found: {task_id}"),
+                )
+            })?
+            .repo_id;
+        db.pin_pipeline_item_at_top(&repo_id, &task_id)
+            .map_err(|e| db_write_error("db error", e))?;
+    }
     state.publish_state_changed(StateChangeScope::Tasks);
     Ok(Json(crate::mobile_api::TaskActionResponse {
         task_id,

@@ -37,6 +37,15 @@ export const MOBILE_E2E_IDS = {
   agentMessageReady: "mobile.agent-message-ready",
   terminalOverlay: "mobile.terminal-overlay",
   taskCreationRecoverButton: "mobile.task-creation.recover",
+  taskPinAction(taskId: string): string {
+    return `mobile.task-pin-action.${taskId}`;
+  },
+  taskPinButton(taskId: string): string {
+    return `mobile.task-pin-button.${taskId}`;
+  },
+  taskPinError(taskId: string): string {
+    return `mobile.task-pin-error.${taskId}`;
+  },
   taskBlockedPlaceholder: "mobile.task-blocked-placeholder",
   terminalInspection: "mobile.terminal-inspection",
   visualCompanionButton: "mobile.visual-companion.button",

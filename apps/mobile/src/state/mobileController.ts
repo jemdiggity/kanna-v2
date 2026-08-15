@@ -65,6 +65,7 @@ export interface MobileController {
   setComposerOptionsExpanded(isExpanded: boolean): void;
   selectComposerAgentProvider(provider: ComposerAgentProvider): void;
   searchTasks(query: string): Promise<void>;
+  setTaskPinned(taskId: string, pinned: boolean): Promise<void>;
   createTask(terminalGeometry?: MobileTerminalGeometry): Promise<string | null>;
   recoverTaskCreation(slotId?: string): Promise<string | null>;
   abortTaskCreation(slotId: string): Promise<void>;
@@ -244,6 +245,7 @@ export function createMobileController(
   >();
   const taskCreationPersistenceFlights = new Map<string, Promise<void>>();
   const recoveryStartedTaskIds = new Set<string>();
+  const taskPinFlights = new Set<string>();
   let lastSubmittedTaskCreationId: string | null = null;
   let repoCommandLoadGeneration = 0;
   const repoCommandCatalogs = new Map<string, RepoCommandCatalog>();
@@ -2012,6 +2014,41 @@ export function createMobileController(
         if (taskCollectionsRevision === searchRevision) {
           fail(error);
         }
+      }
+    },
+
+    async setTaskPinned(taskId, pinned) {
+      const task = findTask(taskId);
+      if (!task) {
+        throw new Error("This task is no longer available.");
+      }
+      if (taskPinFlights.has(task.id)) {
+        return;
+      }
+      const previousPinned = task.pinned ?? false;
+      const previousPinOrder = task.pinOrder ?? null;
+      if (previousPinned === pinned) {
+        return;
+      }
+
+      taskPinFlights.add(task.id);
+      // Reject collection reads that began before this mutation so a stale
+      // repo response cannot immediately overwrite the optimistic pin state.
+      taskCollectionsRevision += 1;
+      store.setTaskPinState(task.id, pinned, pinned ? 0 : null);
+      try {
+        if (pinned) {
+          await client.pinTask(task.id);
+        } else {
+          await client.unpinTask(task.id);
+        }
+      } catch (error) {
+        store.setTaskPinState(task.id, previousPinned, previousPinOrder);
+        const action = pinned ? "pin" : "unpin";
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(`Could not ${action} task: ${detail}`);
+      } finally {
+        taskPinFlights.delete(task.id);
       }
     },
 

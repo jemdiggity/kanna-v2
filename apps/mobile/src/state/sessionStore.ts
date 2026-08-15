@@ -232,6 +232,11 @@ export interface SessionStore {
   setRecentTasks(tasks: TaskSummary[]): void;
   setSearchResults(query: string, results: TaskSummary[]): void;
   setTaskActivity(taskId: string, activity: TaskActivity): void;
+  setTaskPinState(
+    taskId: string,
+    pinned: boolean,
+    pinOrder: number | null
+  ): void;
   setTaskPrompt(taskId: string, prompt: string): void;
   setSelectedTask(taskId: string | null): void;
   beginTaskAction(taskId: string, action: TaskStageAction): boolean;
@@ -885,6 +890,40 @@ export function createSessionStore(): SessionStore {
       if (!changed) return;
 
       state = { ...state, repoTasks, recentTasks, searchResults };
+      publish();
+    },
+    setTaskPinState(taskId, pinned, pinOrder) {
+      let changed = false;
+      const updateTask = (task: TaskSummary): TaskSummary => {
+        if (
+          task.id !== taskId ||
+          ((task.pinned ?? false) === pinned &&
+            (task.pinOrder ?? null) === pinOrder)
+        ) {
+          return task;
+        }
+        changed = true;
+        return { ...task, pinned, pinOrder };
+      };
+      const updateTasks = (tasks: readonly TaskSummary[]): TaskSummary[] =>
+        tasks.map(updateTask);
+      const repoTasks = updateTasks(state.repoTasks);
+      const recentTasks = updateTasks(state.recentTasks);
+      const searchResults = updateTasks(state.searchResults);
+      const taskUiSlots = state.taskUiSlots.map((slot) =>
+        slot.state === "ready" && slot.task.id === taskId
+          ? { ...slot, task: updateTask(slot.task) }
+          : slot
+      );
+      if (!changed) return;
+
+      state = {
+        ...state,
+        repoTasks,
+        recentTasks,
+        searchResults,
+        taskUiSlots
+      };
       publish();
     },
     setTaskPrompt(taskId, prompt) {
