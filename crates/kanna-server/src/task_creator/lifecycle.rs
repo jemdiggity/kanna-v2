@@ -965,6 +965,45 @@ fn prepare_deferred_rerun_setup(prepared: &mut PreparedStageRerun) -> Result<(),
     Ok(())
 }
 
+/// Owns replacement bookkeeping across every exit from the async Kill request,
+/// including cancellation while its response is pending.
+struct SessionReplacementAttempt<'a> {
+    replacements: &'a SessionReplacements,
+    session_id: &'a str,
+    armed: bool,
+}
+
+impl<'a> SessionReplacementAttempt<'a> {
+    fn begin(replacements: &'a SessionReplacements, session_id: &'a str) -> Self {
+        replacements.begin(session_id);
+        Self {
+            replacements,
+            session_id,
+            armed: true,
+        }
+    }
+
+    fn finish(&mut self) {
+        if self.armed {
+            self.replacements.finish(self.session_id);
+            self.armed = false;
+        }
+    }
+
+    fn cancel(&mut self) {
+        if self.armed {
+            self.replacements.cancel(self.session_id);
+            self.armed = false;
+        }
+    }
+}
+
+impl Drop for SessionReplacementAttempt<'_> {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
 /// Kill a session as part of an orchestrated replacement (stage swap, rerun,
 /// close). The replacement entry is registered BEFORE the Kill is sent —
 /// the daemon broadcasts the resulting Exit concurrently with the Kill
@@ -975,40 +1014,43 @@ pub(crate) async fn kill_session_replacing(
     replacements: &SessionReplacements,
     session_id: &str,
 ) -> Result<(), String> {
-    replacements.begin(session_id);
-    let kill = daemon
+    let mut replacement = SessionReplacementAttempt::begin(replacements, session_id);
+    let kill = match daemon
         .send_command_retrying_successor(&DaemonCommand::Kill {
             session_id: session_id.to_string(),
         })
         .await
-        .map_err(|e| {
-            replacements.cancel(session_id);
-            format!("daemon error: {}", e)
-        })?;
+    {
+        Ok(kill) => kill,
+        Err(error) => {
+            replacement.cancel();
+            return Err(format!("daemon error: {error}"));
+        }
+    };
     match kill {
         DaemonEvent::Ok => {
-            replacements.finish(session_id);
+            replacement.finish();
             Ok(())
         }
         DaemonEvent::Error {
             code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
             ..
         } => {
-            replacements.cancel(session_id);
+            replacement.cancel();
             Ok(())
         }
         DaemonEvent::Error { message, .. }
             if message.to_ascii_lowercase().contains("session not found") =>
         {
-            replacements.cancel(session_id);
+            replacement.cancel();
             Ok(())
         }
         DaemonEvent::Error { message, .. } => {
-            replacements.cancel(session_id);
+            replacement.cancel();
             Err(format!("daemon error: {}", message))
         }
         other => {
-            replacements.cancel(session_id);
+            replacement.cancel();
             Err(format!("unexpected daemon response: {:?}", other))
         }
     }
@@ -1731,7 +1773,8 @@ mod successor_retry_tests {
     };
     use crate::daemon_client::DaemonClient;
     use crate::session_replacements::SessionReplacements;
-    use kanna_daemon::protocol::{ErrorCode, Event};
+    use crate::task_input_queue::{TaskInputCoordinator, TaskInputSource};
+    use kanna_daemon::protocol::{Command, ErrorCode, Event};
     use std::path::Path;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
@@ -2208,6 +2251,96 @@ mod successor_retry_tests {
         );
         let (first, second) = server.await.unwrap();
         assert_eq!(first, second, "the one replay must stay byte-for-byte");
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(Path::new(&daemon_dir));
+    }
+
+    #[tokio::test]
+    async fn cancelled_replacement_kill_releases_task_input_fence() {
+        let daemon_dir = std::env::temp_dir().join(format!(
+            "kanna-replacement-cancel-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&daemon_dir).unwrap();
+        let socket_path = kanna_runtime_defaults::socket_path(&daemon_dir);
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let (kill_read_tx, kill_read_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (kill_stream, _) = listener.accept().await.unwrap();
+            let (kill_read, _kill_write) = kill_stream.into_split();
+            let mut kill_line = String::new();
+            BufReader::new(kill_read)
+                .read_line(&mut kill_line)
+                .await
+                .unwrap();
+            assert!(matches!(
+                serde_json::from_str::<Command>(kill_line.trim()).unwrap(),
+                Command::Kill { session_id } if session_id == "replace-cancelled"
+            ));
+            kill_read_tx.send(()).unwrap();
+
+            let (input_stream, _) = listener.accept().await.unwrap();
+            let (input_read, mut input_write) = input_stream.into_split();
+            let mut input_line = String::new();
+            BufReader::new(input_read)
+                .read_line(&mut input_line)
+                .await
+                .unwrap();
+            assert!(matches!(
+                serde_json::from_str::<Command>(input_line.trim()).unwrap(),
+                Command::InputIfSession {
+                    session_id,
+                    expected_pid: 4242,
+                    data,
+                } if session_id == "replace-cancelled" && data == vec![b'\r']
+            ));
+            input_write
+                .write_all(serde_json::to_string(&Event::Ok).unwrap().as_bytes())
+                .await
+                .unwrap();
+            input_write.write_all(b"\n").await.unwrap();
+            input_write.flush().await.unwrap();
+        });
+
+        let coordinator = TaskInputCoordinator::new(
+            daemon_dir.to_string_lossy().to_string(),
+            daemon_dir.join("input.db").to_string_lossy().to_string(),
+        );
+        let replacements = SessionReplacements::with_task_input(coordinator.clone());
+        let mut daemon = DaemonClient::connect(daemon_dir.to_str().unwrap())
+            .await
+            .unwrap();
+        let kill_replacements = replacements.clone();
+        let kill = tokio::spawn(async move {
+            kill_session_replacing(&mut daemon, &kill_replacements, "replace-cancelled").await
+        });
+        kill_read_rx.await.unwrap();
+        kill.abort();
+        assert!(kill.await.unwrap_err().is_cancelled());
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            coordinator.submit_message_if_session(
+                "replace-cancelled",
+                "replace-cancelled",
+                4242,
+                TaskInputSource::Human,
+                "",
+            ),
+        )
+        .await
+        .expect("input admission should not remain fenced after cancellation")
+        .expect("input should reach the still-live session after cancellation");
+        assert!(
+            !replacements.consume("replace-cancelled"),
+            "cancellation must remove the unmatched replacement marker"
+        );
+
+        server.await.unwrap();
         let _ = std::fs::remove_file(socket_path);
         let _ = std::fs::remove_dir_all(Path::new(&daemon_dir));
     }
