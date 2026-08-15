@@ -461,7 +461,8 @@ function MoreRouteContent({
   const { controller, pushPreparedTask, state } = useNavigationContent();
   const commandRepos = filterCommandAvailableRepos(
     state.repos,
-    state.unavailableRepoCommandIds
+    state.unavailableRepoCommandIds,
+    state.selectedRepoId
   );
 
   return (

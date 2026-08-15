@@ -860,63 +860,44 @@ export function createMobileController(
 
   const loadRepoCommands = async (): Promise<void> => {
     const commandState = store.getState();
-    let repoId = commandState.selectedRepoId;
-    if (
-      !repoId ||
-      commandState.runningRepoCommandId !== null ||
-      commandState.pendingRepoCommandTask !== null
-    ) {
+    const repoId = commandState.selectedRepoId;
+    if (!repoId || commandState.runningRepoCommandId !== null) {
       return;
     }
     const generation = ++repoCommandLoadGeneration;
-    while (repoId) {
-      const cachedCatalog = repoCommandCatalogs.get(repoId);
-      if (cachedCatalog) {
-        store.setRepoCommandCatalog(cachedCatalog);
-      } else {
-        store.setRepoCommandLoading(repoId);
-      }
-      try {
-        const catalog = await client.listRepoCommands(repoId);
-        if (
-          generation !== repoCommandLoadGeneration ||
-          store.getState().selectedRepoId !== repoId
-        ) {
-          return;
-        }
-        const normalizedCatalog = { ...catalog, repoId };
-        repoCommandCatalogs.set(repoId, normalizedCatalog);
-        store.setRepoCommandCatalog(normalizedCatalog);
+    const cachedCatalog = repoCommandCatalogs.get(repoId);
+    if (cachedCatalog) {
+      store.setRepoCommandCatalog(cachedCatalog);
+    } else {
+      store.setRepoCommandLoading(repoId);
+    }
+    try {
+      const catalog = await client.listRepoCommands(repoId);
+      if (
+        generation !== repoCommandLoadGeneration ||
+        store.getState().selectedRepoId !== repoId
+      ) {
         return;
-      } catch (error) {
-        if (
-          generation !== repoCommandLoadGeneration ||
-          store.getState().selectedRepoId !== repoId
-        ) {
-          return;
-        }
-        if (cachedCatalog) {
-          return;
-        }
-
-        store.markRepoCommandsUnavailable(repoId);
-        const nextRepo = store.getState().repos.find(
-          (candidate) =>
-            !store.getState().unavailableRepoCommandIds.includes(candidate.id)
-        );
-        if (!nextRepo) {
-          store.setRepoCommandError(
-            repoId,
-            error instanceof Error ? error.message : String(error)
-          );
-          return;
-        }
-
-        taskCollectionsRevision += 1;
-        store.selectRepo(nextRepo.id);
-        void loadRepoTasks(nextRepo.id).catch(() => undefined);
-        repoId = nextRepo.id;
       }
+      const normalizedCatalog = { ...catalog, repoId };
+      repoCommandCatalogs.set(repoId, normalizedCatalog);
+      store.setRepoCommandCatalog(normalizedCatalog);
+    } catch (error) {
+      if (
+        generation !== repoCommandLoadGeneration ||
+        store.getState().selectedRepoId !== repoId
+      ) {
+        return;
+      }
+      if (cachedCatalog) {
+        return;
+      }
+
+      store.markRepoCommandsUnavailable(repoId);
+      store.setRepoCommandError(
+        repoId,
+        error instanceof Error ? error.message : String(error)
+      );
     }
   };
 
@@ -1134,6 +1115,18 @@ export function createMobileController(
     startTaskCompanion(taskId);
   };
 
+  const openTask = (taskId: string) => {
+    taskCollectionsRevision += 1;
+    const slot = taskUiSlotForSelection(store.getState().taskUiSlots, taskId);
+    const selectionId = slot?.slotId ?? taskId;
+    const durableTaskId = slot?.taskId ?? findCollectionTask(taskId)?.id ?? null;
+    store.setSelectedTask(selectionId);
+    reconcileSelectedTaskRead();
+    if (durableTaskId) {
+      startTaskView(durableTaskId);
+    }
+  };
+
   const reconcileSelectedTaskRoute = () => {
     const selectedTaskId = store.getState().selectedTaskId;
     const durableTaskId = durableTaskIdForSelection(selectedTaskId);
@@ -1143,6 +1136,20 @@ export function createMobileController(
   };
   taskRoutesUnsubscribe =
     options.subscribeTaskRouteChanges?.(reconcileSelectedTaskRoute) ?? null;
+
+  const resolvePendingRepoCommandTaskFromCollections = (): void => {
+    const pendingTask = store.getState().pendingRepoCommandTask;
+    if (!pendingTask || !findCollectionTask(pendingTask.taskId)) {
+      return;
+    }
+
+    store.resolveRepoCommandTask(pendingTask.taskId);
+    setUnownedErrorMessage(null);
+    openTask(pendingTask.taskId);
+    if (store.getState().runningRepoCommandId === null) {
+      void loadRepoCommands();
+    }
+  };
 
   const loadCollections = async () => {
     const readRevision = taskCollectionsRevision;
@@ -1185,6 +1192,7 @@ export function createMobileController(
     );
     reconcileSelectedTask(true);
     store.setTaskCollectionStatus("ready");
+    resolvePendingRepoCommandTaskFromCollections();
   };
 
   const refreshDesktops = async (options: { force?: boolean } = {}) => {
@@ -1268,6 +1276,7 @@ export function createMobileController(
     );
     reconcileSelectedTask(true);
     store.setTaskCollectionStatus("ready");
+    resolvePendingRepoCommandTaskFromCollections();
     return true;
   };
 
@@ -1275,8 +1284,8 @@ export function createMobileController(
     pendingTask: PendingRepoCommandTask
   ): Promise<boolean> => {
     try {
-      const committed = await refreshTaskCollections();
-      if (!committed || !findCollectionTask(pendingTask.taskId)) {
+      await refreshTaskCollections();
+      if (!findCollectionTask(pendingTask.taskId)) {
         store.setRepoCommandTaskLoadError(
           pendingTask,
           REPO_COMMAND_TASK_LOAD_ERROR
@@ -1348,6 +1357,7 @@ export function createMobileController(
     if (cloudAuthoritative) {
       store.setTaskCollectionStatus("ready");
     }
+    resolvePendingRepoCommandTaskFromCollections();
 
     void client.listRepos().then((repos) => {
       if (
@@ -1959,12 +1969,17 @@ export function createMobileController(
     },
 
     async retryRepoCommand() {
+      const commandState = store.getState();
       const pendingTask = store.beginRepoCommandTaskRefresh();
       if (!pendingTask) {
-        if (!store.getState().pendingRepoCommandTask) {
-          store.resetRepoCommandAvailability();
-          await loadRepoCommands();
+        if (
+          commandState.runningRepoCommandId !== null ||
+          commandState.pendingRepoCommandTask !== null
+        ) {
+          return null;
         }
+        store.resetRepoCommandAvailability();
+        await loadRepoCommands();
         return null;
       }
 
@@ -1977,19 +1992,13 @@ export function createMobileController(
       } finally {
         store.finishRepoCommandRun(pendingTask.commandId);
       }
+      store.resetRepoCommandAvailability();
+      await loadRepoCommands();
       return openedTaskId;
     },
 
     openTask(taskId) {
-      taskCollectionsRevision += 1;
-      const slot = taskUiSlotForSelection(store.getState().taskUiSlots, taskId);
-      const selectionId = slot?.slotId ?? taskId;
-      const durableTaskId = slot?.taskId ?? findCollectionTask(taskId)?.id ?? null;
-      store.setSelectedTask(selectionId);
-      reconcileSelectedTaskRead();
-      if (durableTaskId) {
-        startTaskView(durableTaskId);
-      }
+      openTask(taskId);
     },
 
     closeTask(taskId) {

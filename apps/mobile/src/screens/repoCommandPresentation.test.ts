@@ -37,9 +37,12 @@ describe("buildRepoCommandSections", () => {
       { id: "repo-live", name: "Live" }
     ];
 
-    expect(filterCommandAvailableRepos(repos, ["repo-stale"])).toEqual([
+    expect(filterCommandAvailableRepos(repos, ["repo-stale"], null)).toEqual([
       { id: "repo-live", name: "Live" }
     ]);
+    expect(
+      filterCommandAvailableRepos(repos, ["repo-stale"], "repo-stale")
+    ).toEqual(repos);
     expect(repos).toHaveLength(2);
   });
 

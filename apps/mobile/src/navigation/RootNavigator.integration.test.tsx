@@ -978,7 +978,7 @@ describe("RootNavigator task Back integration", () => {
 });
 
 describe("RootNavigator More integration", () => {
-  it("falls through an unavailable repo and renders commands without removing it from shared state", async () => {
+  it("keeps a command-unavailable repository selected and visible", async () => {
     const client = createClientMock();
     const store = createSessionStore();
     store.setRepos([
@@ -1002,30 +1002,25 @@ describe("RootNavigator More integration", () => {
     });
 
     expect(client.listRepoCommands).toHaveBeenNthCalledWith(1, "repo-1");
-    expect(client.listRepoCommands).toHaveBeenNthCalledWith(2, "repo-2");
     expect(
-      rendered.root.findAll(
+      rendered.root.find(
         (node) => node.props.testID === "mobile.more.repo.repo-1"
       )
-    ).toHaveLength(0);
+    ).toBeDefined();
     expect(
       rendered.root.find(
         (node) => node.props.testID === "mobile.more.repo.repo-2"
       )
     ).toBeDefined();
-    expect(
-      rendered.root.find(
-        (node) =>
-          node.props.testID === "mobile.more.command.custom:merge-master"
-      )
-    ).toBeDefined();
+    expect(visibleText()).toContain("Commands unavailable");
     expect(store.getState()).toMatchObject({
       repos: [
         { id: "repo-1", name: "Unavailable repo" },
         { id: "repo-2", name: "Working repo" }
       ],
-      selectedRepoId: "repo-2",
-      repoCommandStatus: "ready"
+      selectedRepoId: "repo-1",
+      repoCommandStatus: "error",
+      unavailableRepoCommandIds: ["repo-1"]
     });
   });
 
