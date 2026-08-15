@@ -33,6 +33,8 @@ export interface CloudTaskSnapshot {
   agent?: { provider?: string | null; type?: string | null } | null;
   parentTaskId?: string | null;
   blockedByTaskIds?: string[];
+  pinned?: boolean;
+  pinOrder?: number | null;
   createdAt: string;
   updatedAt: string;
   closedAt?: string | null;
@@ -280,6 +282,8 @@ function parseCloudTaskSnapshot(value: unknown): CloudTaskSnapshot {
     agent: parseCloudTaskAgent(value.agent),
     parentTaskId: optionalNullableString(value.parentTaskId),
     blockedByTaskIds: parseCloudTaskBlockerIds(value.blockedByTaskIds),
+    pinned: optionalBoolean(value.pinned),
+    pinOrder: optionalNullableNumber(value.pinOrder),
     createdAt,
     updatedAt,
     closedAt: value.closedAt === null
@@ -327,6 +331,17 @@ function optionalNullableString(value: unknown): string | null | undefined {
   return value === null ? null : optionalString(value);
 }
 
+function optionalBoolean(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function optionalNullableNumber(value: unknown): number | null | undefined {
+  if (value === null) return null;
+  return typeof value === "number" && Number.isSafeInteger(value)
+    ? value
+    : undefined;
+}
+
 export function mapCloudTaskSnapshot(snapshot: CloudTaskSnapshot): CloudTaskSummary {
   // Repos with a remote URL hash display under the machine-independent
   // canonical repo id so the same repository on several desktops folds into
@@ -351,6 +366,8 @@ export function mapCloudTaskSnapshot(snapshot: CloudTaskSnapshot): CloudTaskSumm
     activity: normalizeTaskActivity(snapshot.activity),
     parentTaskId: snapshot.parentTaskId ?? null,
     blockedByTaskIds: snapshot.blockedByTaskIds ?? [],
+    pinned: snapshot.pinned ?? false,
+    pinOrder: snapshot.pinOrder ?? null,
     ownerDesktopId: snapshot.ownerDesktopId,
     ...(ownerLocalRepoId ? { ownerLocalRepoId } : {}),
     ownerLocalTaskId: snapshot.ownerLocalTaskId,

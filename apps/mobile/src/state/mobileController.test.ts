@@ -199,6 +199,8 @@ function createClientMock(): ClientMock {
       taskId: "task-1",
       activity: "idle"
     }),
+    pinTask: vi.fn().mockResolvedValue(undefined),
+    unpinTask: vi.fn().mockResolvedValue(undefined),
     readTaskFile: vi.fn().mockResolvedValue({
       path: "docs/spec.md",
       content: "# Spec"
@@ -269,6 +271,71 @@ describe("createMobileController", () => {
       claimPayload: vi.fn().mockResolvedValue(trustedDesktop)
     };
   }
+
+  it("optimistically pins without disturbing selection and rolls back a failed unpin", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const pinDeferred = createDeferred<void>();
+    client.pinTask.mockReturnValueOnce(pinDeferred.promise);
+    const controller = createMobileController(client, store);
+    await controller.bootstrap();
+    controller.openTask("task-1");
+
+    const pinning = controller.setTaskPinned("task-1", true);
+    expect(store.getState().repoTasks[0]).toMatchObject({
+      id: "task-1",
+      pinned: true,
+      pinOrder: 0
+    });
+    expect(store.getState().selectedTaskId).toBe("task-1");
+    pinDeferred.resolve();
+    await pinning;
+
+    client.unpinTask.mockRejectedValueOnce(new Error("relay unavailable"));
+    await expect(controller.setTaskPinned("task-1", false)).rejects.toThrow(
+      "Could not unpin task: relay unavailable"
+    );
+    expect(store.getState().repoTasks[0]).toMatchObject({
+      id: "task-1",
+      pinned: true,
+      pinOrder: 0
+    });
+    expect(store.getState().selectedTaskId).toBe("task-1");
+  });
+
+  it("keeps an optimistic pin when an older repo read completes", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const staleRepoRead = createDeferred<TaskSummary[]>();
+    const staleRepoReadStarted = createDeferred<void>();
+    const controller = createMobileController(client, store);
+    await controller.bootstrap();
+    client.listRepoTasks.mockImplementationOnce(() => {
+      staleRepoReadStarted.resolve();
+      return staleRepoRead.promise;
+    });
+
+    const selection = controller.selectRepo("repo-1");
+    await staleRepoReadStarted.promise;
+    await controller.setTaskPinned("task-1", true);
+    staleRepoRead.resolve([
+      {
+        id: "task-1",
+        repoId: "repo-1",
+        title: "Stale task snapshot",
+        stage: "in progress",
+        pinned: false,
+        pinOrder: null
+      }
+    ]);
+    await selection;
+
+    expect(store.getState().repoTasks[0]).toMatchObject({
+      id: "task-1",
+      pinned: true,
+      pinOrder: 0
+    });
+  });
 
   it("marks polled task collections ready after bootstrap", async () => {
     const store = createSessionStore();

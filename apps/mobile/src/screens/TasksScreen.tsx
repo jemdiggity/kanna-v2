@@ -20,6 +20,7 @@ interface TasksScreenProps {
   onOpenMachines?(): void;
   onSelectRepo(repoId: string): void;
   onOpenTask(taskId: string): void;
+  onSetTaskPinned?(taskId: string, pinned: boolean): Promise<void>;
 }
 
 function sortTaskSlotsNewestFirst(taskSlots: readonly TaskUiSlot[]): TaskUiSlot[] {
@@ -42,7 +43,8 @@ export function TasksScreen({
   scrollViewRef,
   onOpenMachines,
   onSelectRepo,
-  onOpenTask
+  onOpenTask,
+  onSetTaskPinned
 }: TasksScreenProps) {
   const isRecentView = heading === "Recent";
   const repoNamesById = new Map(repos.map((repo) => [repo.id, repo.name]));
@@ -130,6 +132,7 @@ export function TasksScreen({
             repoLabelForTask={isRecentView ? recentTaskRepoLabel : undefined}
             taskSlots={displayedTaskSlots}
             onOpenTask={onOpenTask}
+            onSetTaskPinned={onSetTaskPinned}
           />
         )}
       </View>

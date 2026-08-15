@@ -5,6 +5,7 @@ import type { TaskSummary } from "../lib/api/types";
 import type { TaskUiSlot } from "../state/taskUiSlots";
 import { taskUiSlotToTaskSummary } from "../state/taskUiSlots";
 import { buildTaskTreeRows, type TaskTreeRow } from "../screens/taskTreeRows";
+import { SwipeableTaskCard } from "./SwipeableTaskCard";
 import { TaskCard } from "./TaskCard";
 import { LoadingText } from "./LoadingText";
 
@@ -21,6 +22,7 @@ interface TaskListProps {
   taskSlots: TaskUiSlot[];
   testID?: string;
   onOpenTask(taskId: string): void;
+  onSetTaskPinned?(taskId: string, pinned: boolean): Promise<void>;
 }
 
 export function TaskList({
@@ -31,7 +33,8 @@ export function TaskList({
   repoLabelForTask,
   testID,
   taskSlots,
-  onOpenTask
+  onOpenTask,
+  onSetTaskPinned
 }: TaskListProps) {
   if (!taskSlots.length) {
     return (
@@ -53,15 +56,21 @@ export function TaskList({
     <View collapsable={false} style={styles.list} testID={testID}>
       {rows.map(({ slot, depth }) => {
         const task = taskUiSlotToTaskSummary(slot);
-        const card = (
-          <TaskCard
-            isSubtask={depth > 0}
+        const commonProps = {
+          isSubtask: depth > 0,
+          repoLabel: repoLabelForTask?.(task) ?? null,
+          task,
+          uiId: slot.slotId,
+          onPress: () => onOpenTask(slot.slotId)
+        };
+        const card = slot.state === "ready" && onSetTaskPinned ? (
+          <SwipeableTaskCard
             key={slot.slotId}
-            repoLabel={repoLabelForTask?.(task) ?? null}
-            task={task}
-            uiId={slot.slotId}
-            onPress={() => onOpenTask(slot.slotId)}
+            {...commonProps}
+            onTogglePin={(pinned) => onSetTaskPinned(slot.taskId, pinned)}
           />
+        ) : (
+          <TaskCard key={slot.slotId} {...commonProps} />
         );
         if (depth === 0) {
           return <React.Fragment key={slot.slotId}>{card}</React.Fragment>;

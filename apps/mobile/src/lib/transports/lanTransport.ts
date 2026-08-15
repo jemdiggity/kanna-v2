@@ -183,6 +183,22 @@ export function createLanTransport(
       request<TaskActivityResponse>(`/v1/tasks/${encodeURIComponent(taskId)}/actions/mark-read`, {
         method: "POST"
       }),
+    pinTask: async (taskId: string) => {
+      await request<TaskActionResponse>(
+        `/v1/tasks/${encodeURIComponent(taskId)}/actions/pin`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({})
+        }
+      );
+    },
+    unpinTask: async (taskId: string) => {
+      await request<TaskActionResponse>(
+        `/v1/tasks/${encodeURIComponent(taskId)}/actions/unpin`,
+        { method: "POST" }
+      );
+    },
     closeTask: (taskId: string) =>
       request<void>(`/v1/tasks/${encodeURIComponent(taskId)}/actions/close`, {
         method: "POST"

@@ -578,14 +578,15 @@ impl Db {
         repo_id: &str,
         task_id: &str,
     ) -> Result<(), rusqlite::Error> {
-        self.conn.execute(
+        let transaction = self.conn.unchecked_transaction()?;
+        transaction.execute(
             "UPDATE pipeline_item
              SET pin_order = COALESCE(pin_order, 0) + 1,
                  updated_at = datetime('now')
              WHERE repo_id = ? AND closed_at IS NULL AND pinned = 1",
             [repo_id],
         )?;
-        let rows_affected = self.conn.execute(
+        let rows_affected = transaction.execute(
             "UPDATE pipeline_item
              SET pinned = 1, pin_order = 0, updated_at = datetime('now')
              WHERE id = ?",
@@ -594,6 +595,7 @@ impl Db {
         if rows_affected == 0 {
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
+        transaction.commit()?;
         Ok(())
     }
 

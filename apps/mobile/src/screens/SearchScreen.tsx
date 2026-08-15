@@ -11,6 +11,7 @@ interface SearchScreenProps {
   results: TaskSummary[];
   onChangeQuery(query: string): void;
   onOpenTask(taskId: string): void;
+  onSetTaskPinned?(taskId: string, pinned: boolean): Promise<void>;
 }
 
 export function SearchScreen({
@@ -18,7 +19,8 @@ export function SearchScreen({
   query,
   results,
   onChangeQuery,
-  onOpenTask
+  onOpenTask,
+  onSetTaskPinned
 }: SearchScreenProps) {
   const inputRef = useRef<TextInput>(null);
 
@@ -63,6 +65,7 @@ export function SearchScreen({
           }
           taskSlots={projectTaskUiSlots(results, [])}
           onOpenTask={onOpenTask}
+          onSetTaskPinned={onSetTaskPinned}
         />
       </View>
     </ScrollView>

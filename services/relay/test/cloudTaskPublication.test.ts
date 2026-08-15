@@ -41,6 +41,8 @@ function task(overrides: Record<string, unknown> = {}): Record<string, unknown> 
       destinationDesktopId: null,
     },
     blockedByTaskIds: [],
+    pinned: false,
+    pinOrder: null,
     createdAt: "2026-07-14 00:00:00",
     updatedAt: "2026-07-14 00:01:00",
     closedAt: null,
@@ -86,9 +88,28 @@ describe("cloud task publication validation", () => {
       blockerRevision: 6,
       transitionRevision: "run-4",
       waitingPromptSnippet: "Ready for review",
+      pinned: false,
+      pinOrder: null,
       agent: { provider: "codex", type: "pty" },
       repo: { remoteUrlHash: "remote-hash" },
     });
+  });
+
+  it("preserves canonical pin metadata and defaults older publishers to unpinned", () => {
+    const pinned = validateCloudTaskPublication(
+      publication([task({ pinned: true, pinOrder: 4 })]),
+      "desktop-1",
+    );
+    expect(pinned.tasks[0]).toMatchObject({ pinned: true, pinOrder: 4 });
+
+    const legacyTask = task();
+    delete legacyTask.pinned;
+    delete legacyTask.pinOrder;
+    const legacy = validateCloudTaskPublication(
+      publication([legacyTask]),
+      "desktop-1",
+    );
+    expect(legacy.tasks[0]).toMatchObject({ pinned: false });
   });
 
   it("accepts older publishers without desktop transfer metadata", () => {

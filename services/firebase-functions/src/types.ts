@@ -60,6 +60,8 @@ export interface CloudTaskSnapshot {
   };
   blockedByTaskIds: string[];
   parentTaskId: string | null;
+  pinned?: boolean;
+  pinOrder?: number | null;
   createdAt: string;
   updatedAt: string;
   closedAt: string | null;

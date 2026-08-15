@@ -158,6 +158,12 @@ export function mergeCloudAndLanTasks({
       if (lanTask.blockedByTaskIds !== undefined) {
         mergedTask.blockedByTaskIds = lanTask.blockedByTaskIds;
       }
+      if (lanTask.pinned !== undefined) {
+        mergedTask.pinned = lanTask.pinned;
+      }
+      if (lanTask.pinOrder !== undefined) {
+        mergedTask.pinOrder = lanTask.pinOrder;
+      }
       tasks.push(mergedTask);
       usedDisplayTaskIds.add(cloudTask.id);
       routes.set(
@@ -1375,6 +1381,14 @@ export function createCloudLanClient(
     markTaskRead: (taskId) =>
       invokeTaskRoute(taskId, (client, routedTaskId) =>
         client.markTaskRead(routedTaskId)
+      ),
+    pinTask: (taskId) =>
+      invokeTaskRoute(taskId, (client, routedTaskId) =>
+        client.pinTask(routedTaskId)
+      ),
+    unpinTask: (taskId) =>
+      invokeTaskRoute(taskId, (client, routedTaskId) =>
+        client.unpinTask(routedTaskId)
       ),
     closeTask: async (taskId) => {
       const route = routeForTask(taskId);

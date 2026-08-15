@@ -1,15 +1,28 @@
 import React from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import {
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
+  type AccessibilityActionEvent
+} from "react-native";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { TaskSummary } from "../lib/api/types";
 import { isTaskBlocked } from "../lib/api/taskIdentity";
 import { buildTaskListItemModel } from "../screens/taskPresentation";
+
+export interface TaskCardPinAction {
+  error: string | null;
+  pendingPinned: boolean | null;
+  onToggle(): void;
+}
 
 interface TaskCardProps {
   task: TaskSummary;
   uiId?: string;
   isSubtask?: boolean;
   repoLabel?: string | null;
+  pinAction?: TaskCardPinAction;
   onPress(): void;
 }
 
@@ -18,13 +31,24 @@ export function TaskCard({
   uiId = task.id,
   isSubtask = false,
   repoLabel = null,
+  pinAction,
   onPress
 }: TaskCardProps) {
   const model = buildTaskListItemModel(task);
   const blocked = isTaskBlocked(task);
+  const pinned = task.pinned ?? false;
+  const pinLabel = pinned ? "Unpin" : "Pin";
+  const pendingPinLabel =
+    pinAction?.pendingPinned === true
+      ? "Pinning…"
+      : pinAction?.pendingPinned === false
+        ? "Unpinning…"
+        : null;
+  const pinAccessibilityLabel = `${pendingPinLabel ?? pinLabel} ${model.title}`;
   const accessibilityLabel = [
     isSubtask ? "Subtask" : null,
     blocked ? "Blocked" : null,
+    pinned ? "Pinned" : null,
     model.title,
     repoLabel,
     model.stageLabel,
@@ -42,15 +66,26 @@ export function TaskCard({
       : effectiveActivity === "working"
         ? styles.titleWorking
         : styles.titleIdle;
+  const handleAccessibilityAction = (event: AccessibilityActionEvent) => {
+    if (event.nativeEvent.actionName === (pinned ? "unpin" : "pin")) {
+      pinAction?.onToggle();
+    }
+  };
 
   return (
     <Pressable
+      accessibilityActions={
+        pinAction
+          ? [{ name: pinned ? "unpin" : "pin", label: pinLabel }]
+          : undefined
+      }
       accessibilityLabel={accessibilityLabel}
       accessibilityRole="button"
       accessibilityValue={{ text: effectiveActivity }}
       accessible
       style={styles.card}
       testID={MOBILE_E2E_IDS.taskListItem(uiId)}
+      onAccessibilityAction={handleAccessibilityAction}
       onPress={onPress}
     >
       {repoLabel ? (
@@ -73,6 +108,34 @@ export function TaskCard({
               </Text>
             </View>
           ) : null}
+          {pinAction ? (
+            <Pressable
+              accessibilityLabel={pinAccessibilityLabel}
+              accessibilityRole="button"
+              accessibilityState={{
+                busy: pinAction.pendingPinned !== null,
+                disabled: pinAction.pendingPinned !== null
+              }}
+              style={[
+                styles.pinButton,
+                pinned ? styles.pinButtonActive : null
+              ]}
+              testID={MOBILE_E2E_IDS.taskPinButton(uiId)}
+              onPress={(event) => {
+                event.stopPropagation();
+                pinAction.onToggle();
+              }}
+            >
+              <Text
+                style={[
+                  styles.pinButtonLabel,
+                  pinned ? styles.pinButtonLabelActive : null
+                ]}
+              >
+                {pendingPinLabel ?? pinLabel}
+              </Text>
+            </Pressable>
+          ) : null}
         </View>
       </View>
       {model.waitingPromptSnippet ? (
@@ -86,6 +149,15 @@ export function TaskCard({
           ]}
         >
           {model.waitingPromptSnippet}
+        </Text>
+      ) : null}
+      {pinAction?.error ? (
+        <Text
+          accessibilityLiveRegion="polite"
+          style={styles.pinError}
+          testID={MOBILE_E2E_IDS.taskPinError(uiId)}
+        >
+          {pinAction.error}
         </Text>
       ) : null}
     </Pressable>
@@ -155,6 +227,27 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     textTransform: "uppercase"
   },
+  pinButton: {
+    alignSelf: "flex-end",
+    backgroundColor: "#172843",
+    borderColor: "#36527E",
+    borderRadius: 999,
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    paddingVertical: 6
+  },
+  pinButtonActive: {
+    backgroundColor: "#DDEAFF",
+    borderColor: "#A9C7F5"
+  },
+  pinButtonLabel: {
+    color: "#B8CAE7",
+    fontSize: 11,
+    fontWeight: "800"
+  },
+  pinButtonLabelActive: {
+    color: "#10213D"
+  },
   preview: {
     color: "#B8C6DB",
     fontSize: 14,
@@ -162,5 +255,10 @@ const styles = StyleSheet.create({
   },
   previewPlaceholder: {
     color: "#6F819E"
+  },
+  pinError: {
+    color: "#FF9DAA",
+    fontSize: 13,
+    lineHeight: 18
   }
 });
