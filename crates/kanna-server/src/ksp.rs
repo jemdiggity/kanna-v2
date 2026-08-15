@@ -129,6 +129,34 @@ static COMPANION_SERIALIZE_TEST_GATES: OnceLock<
 static COMPANION_CHANGED_SCAN_COUNTS: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
 
 #[cfg(test)]
+type TerminalInputSendTestHook = Box<dyn FnOnce() + Send>;
+
+#[cfg(test)]
+static TERMINAL_INPUT_SEND_TEST_HOOKS: OnceLock<Mutex<HashMap<String, TerminalInputSendTestHook>>> =
+    OnceLock::new();
+
+#[cfg(test)]
+fn install_terminal_input_send_test_hook(task_id: &str, hook: impl FnOnce() + Send + 'static) {
+    TERMINAL_INPUT_SEND_TEST_HOOKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(task_id.to_string(), Box::new(hook));
+}
+
+#[cfg(test)]
+fn run_terminal_input_send_test_hook(task_id: &str) {
+    let hook = TERMINAL_INPUT_SEND_TEST_HOOKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(task_id);
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[cfg(test)]
 fn companion_scan_test_key(db_path: &str, task_id: &str) -> String {
     serde_json::to_string(&(db_path, task_id)).expect("companion scan test key must serialize")
 }
@@ -2536,6 +2564,13 @@ impl StreamConn {
     }
 
     fn enqueue_terminal_input(&mut self, task_id: String, data: Vec<u8>) {
+        enum EnqueueAttempt {
+            Sent,
+            Retiring,
+            Full,
+            Closed,
+        }
+
         if data.len() > MAX_TERMINAL_INPUT_BYTES {
             try_send_task_error(
                 &self.frame_tx,
@@ -2546,6 +2581,15 @@ impl StreamConn {
             return;
         }
         self.prune_finished_terminal_inputs();
+        let admission_session_id = self
+            .terminal_inputs
+            .get(&task_id)
+            .and_then(|input| input.session_id.clone())
+            .or_else(|| direct_terminal_session_id(&task_id));
+        let admission = self
+            .state
+            .task_input
+            .capture_operator_admission(admission_session_id.as_deref());
         for attempt in 0..2 {
             if !self.terminal_inputs.contains_key(&task_id) {
                 if self.terminal_inputs.len() >= MAX_TERMINAL_INPUT_ROUTES {
@@ -2568,51 +2612,50 @@ impl StreamConn {
                 .terminal_inputs
                 .get(&task_id)
                 .expect("terminal input inserted");
-            let admission = self
-                .state
-                .task_input
-                .capture_operator_admission(input.session_id.as_deref());
-            let retiring = {
+            let send_result = {
                 let mut pending = input
                     .pending
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 if pending.retiring {
-                    true
+                    EnqueueAttempt::Retiring
                 } else {
-                    pending.queued = pending.queued.saturating_add(1);
-                    false
+                    match input.tx.try_send(TerminalInputRequest {
+                        data: data.clone(),
+                        admission: admission.clone(),
+                    }) {
+                        Ok(()) => {
+                            pending.queued = pending.queued.saturating_add(1);
+                            EnqueueAttempt::Sent
+                        }
+                        Err(TrySendError::Full(_)) => EnqueueAttempt::Full,
+                        Err(TrySendError::Closed(_)) => {
+                            pending.retiring = true;
+                            EnqueueAttempt::Closed
+                        }
+                    }
                 }
             };
-            if retiring {
-                if let Some(input) = self.terminal_inputs.remove(&task_id) {
-                    input.task.abort();
-                }
-                if attempt == 1 {
-                    try_send_task_error(
-                        &self.frame_tx,
-                        &task_id,
-                        "terminal_input_unavailable",
-                        "terminal input worker retired before accepting input".to_string(),
-                    );
-                    return;
-                }
-                continue;
-            }
-
-            let send_result = input.tx.try_send(TerminalInputRequest {
-                data: data.clone(),
-                admission,
-            });
+            #[cfg(test)]
+            run_terminal_input_send_test_hook(&task_id);
             match send_result {
-                Ok(()) => return,
-                Err(TrySendError::Full(_)) => {
-                    let mut pending = input
-                        .pending
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    pending.queued = pending.queued.saturating_sub(1);
-                    drop(pending);
+                EnqueueAttempt::Sent => return,
+                EnqueueAttempt::Retiring => {
+                    if let Some(input) = self.terminal_inputs.remove(&task_id) {
+                        input.task.abort();
+                    }
+                    if attempt == 1 {
+                        try_send_task_error(
+                            &self.frame_tx,
+                            &task_id,
+                            "terminal_input_unavailable",
+                            "terminal input worker retired before accepting input".to_string(),
+                        );
+                        return;
+                    }
+                    continue;
+                }
+                EnqueueAttempt::Full => {
                     try_send_task_error(
                         &self.frame_tx,
                         &task_id,
@@ -2621,14 +2664,7 @@ impl StreamConn {
                     );
                     return;
                 }
-                Err(TrySendError::Closed(_)) => {
-                    let mut pending = input
-                        .pending
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    pending.queued = pending.queued.saturating_sub(1);
-                    pending.retiring = true;
-                    drop(pending);
+                EnqueueAttempt::Closed => {
                     if let Some(input) = self.terminal_inputs.remove(&task_id) {
                         input.task.abort();
                     }
@@ -9591,6 +9627,132 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .retiring
+        );
+        conn.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn closed_worker_retry_preserves_admission_captured_before_replacement() {
+        let (tx, input_rx) = mpsc::channel(1);
+        drop(input_rx);
+        let task = tokio::spawn(std::future::pending::<()>());
+        let (cancel_tx, _cancel_rx) = watch::channel(false);
+        let pending = Arc::new(Mutex::new(TerminalInputPending::default()));
+        let (conn, _outbound_rx) = terminal_input_conn_with_worker(
+            "terminal-input-closed-replacement",
+            "shell-input-closed-replacement",
+            TerminalInputHandle {
+                session_id: Some("shell-input-closed-replacement".into()),
+                tx,
+                cancel_tx,
+                pending: Arc::clone(&pending),
+                task,
+            },
+        );
+        let state = Arc::clone(&conn.state);
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let lock_thread = std::thread::spawn(move || {
+            let _guard = pending
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            locked_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        locked_rx.recv().unwrap();
+
+        let enqueue = tokio::spawn(async move {
+            let mut conn = conn;
+            assert!(
+                conn.handle(ClientFrame::TermInput {
+                    task_id: "shell-input-closed-replacement".into(),
+                    data_b64: b64(b"pre-replacement"),
+                })
+                .await
+            );
+            conn
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while state.task_input.operator_admission_capture_count() < 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("input frame did not capture its original admission");
+
+        state
+            .task_input
+            .begin_session_replacement("shell-input-closed-replacement");
+        state
+            .task_input
+            .finish_session_replacement("shell-input-closed-replacement");
+        release_tx.send(()).unwrap();
+        let mut conn = enqueue.await.unwrap();
+        lock_thread.join().unwrap();
+
+        assert_eq!(
+            state.task_input.operator_admission_capture_count(),
+            1,
+            "worker refresh retargeted the frame by recapturing admission"
+        );
+        conn.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn cancellation_between_reservation_and_send_cannot_also_deliver_on_retry() {
+        let (tx, input_rx) = mpsc::channel(1);
+        let input_rx = Arc::new(Mutex::new(Some(input_rx)));
+        let task = tokio::spawn(std::future::pending::<()>());
+        let (cancel_tx, _cancel_rx) = watch::channel(false);
+        let pending = Arc::new(Mutex::new(TerminalInputPending::default()));
+        let canceled = Arc::new(AtomicUsize::new(0));
+        let callback_pending = Arc::clone(&pending);
+        let callback_input_rx = Arc::clone(&input_rx);
+        let callback_canceled = Arc::clone(&canceled);
+        install_terminal_input_send_test_hook("shell-input-reservation-race", move || {
+            let mut pending = callback_pending
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            callback_canceled.store(pending.queued, Ordering::Release);
+            pending.retiring = true;
+            pending.queued = 0;
+            callback_input_rx
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take();
+        });
+        let (mut conn, _outbound_rx) = terminal_input_conn_with_worker(
+            "terminal-input-reservation-race",
+            "shell-input-reservation-race",
+            TerminalInputHandle {
+                session_id: Some("shell-input-reservation-race".into()),
+                tx,
+                cancel_tx,
+                pending,
+                task,
+            },
+        );
+
+        assert!(
+            conn.handle(ClientFrame::TermInput {
+                task_id: "shell-input-reservation-race".into(),
+                data_b64: b64(b"single-delivery"),
+            })
+            .await
+        );
+        let accepted = {
+            let pending = conn
+                .terminal_inputs
+                .get("shell-input-reservation-race")
+                .expect("terminal input worker")
+                .pending
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            pending.queued + pending.in_flight
+        };
+        assert!(
+            canceled.load(Ordering::Acquire) == 0 || accepted == 0,
+            "the same frame was counted as canceled and accepted by the retry"
         );
         conn.shutdown().await;
     }

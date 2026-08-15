@@ -304,6 +304,8 @@ pub(crate) struct TaskInputCoordinator {
     admitted_count: Arc<AtomicU64>,
     #[cfg(test)]
     admitted: Arc<Notify>,
+    #[cfg(test)]
+    operator_admission_captures: Arc<AtomicU64>,
 }
 
 impl TaskInputCoordinator {
@@ -318,6 +320,8 @@ impl TaskInputCoordinator {
             admitted_count: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             admitted: Arc::new(Notify::new()),
+            #[cfg(test)]
+            operator_admission_captures: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -566,14 +570,19 @@ impl TaskInputCoordinator {
             .registry
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        TaskInputAdmission {
+        let admission = TaskInputAdmission {
             capture_generation: registry.route_generation,
             route: session_id.map(|session_id| CapturedInputRoute {
                 session_id: session_id.to_string(),
                 pid: registry.current_pid.get(session_id).copied(),
                 route_epoch: registry.route_epochs.get(session_id).copied().unwrap_or(0),
             }),
-        }
+        };
+        drop(registry);
+        #[cfg(test)]
+        self.operator_admission_captures
+            .fetch_add(1, Ordering::Release);
+        admission
     }
 
     pub(crate) async fn send_operator_bytes_at_admission(
@@ -923,6 +932,11 @@ impl TaskInputCoordinator {
             }
             notified.await;
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn operator_admission_capture_count(&self) -> u64 {
+        self.operator_admission_captures.load(Ordering::Acquire)
     }
 
     #[cfg(test)]
