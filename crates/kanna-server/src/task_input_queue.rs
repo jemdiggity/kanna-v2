@@ -89,6 +89,19 @@ struct SessionInputWorker {
 }
 
 #[derive(Clone)]
+pub(crate) struct TaskInputAdmission {
+    capture_generation: u64,
+    route: Option<CapturedInputRoute>,
+}
+
+#[derive(Clone)]
+struct CapturedInputRoute {
+    session_id: String,
+    pid: Option<u32>,
+    route_epoch: u64,
+}
+
+#[derive(Clone)]
 pub(crate) struct TaskInputRouteSnapshot {
     incarnation: SessionIncarnation,
     worker_id: Option<u64>,
@@ -106,6 +119,8 @@ struct TaskInputRegistry {
     workers: HashMap<SessionIncarnation, SessionInputWorker>,
     current_pid: HashMap<String, u32>,
     route_epochs: HashMap<String, u64>,
+    route_generations: HashMap<String, u64>,
+    route_generation: u64,
     replacement_fences: HashMap<String, usize>,
 }
 
@@ -543,6 +558,82 @@ impl TaskInputCoordinator {
             .await
     }
 
+    pub(crate) fn capture_operator_admission(
+        &self,
+        session_id: Option<&str>,
+    ) -> TaskInputAdmission {
+        let registry = self
+            .registry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        TaskInputAdmission {
+            capture_generation: registry.route_generation,
+            route: session_id.map(|session_id| CapturedInputRoute {
+                session_id: session_id.to_string(),
+                pid: registry.current_pid.get(session_id).copied(),
+                route_epoch: registry.route_epochs.get(session_id).copied().unwrap_or(0),
+            }),
+        }
+    }
+
+    pub(crate) async fn send_operator_bytes_at_admission(
+        &self,
+        task_id: &str,
+        session_id: &str,
+        data: Vec<u8>,
+        admission: TaskInputAdmission,
+    ) -> Result<(), TaskInputError> {
+        let captured_route = {
+            let registry = self
+                .registry
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            match admission.route {
+                Some(route) if route.session_id == session_id => route,
+                Some(_) => return Err(TaskInputError::SessionNotFound),
+                None => {
+                    let route_generation = registry
+                        .route_generations
+                        .get(session_id)
+                        .copied()
+                        .unwrap_or(0);
+                    if route_generation > admission.capture_generation {
+                        return Err(TaskInputError::SessionNotFound);
+                    }
+                    CapturedInputRoute {
+                        session_id: session_id.to_string(),
+                        pid: registry.current_pid.get(session_id).copied(),
+                        route_epoch: registry.route_epochs.get(session_id).copied().unwrap_or(0),
+                    }
+                }
+            }
+        };
+
+        let incarnation = match captured_route.pid {
+            Some(pid) => SessionIncarnation {
+                session_id: session_id.to_string(),
+                pid,
+            },
+            None => {
+                let (pid, _, discovered_epoch) = self.discover_live_pty_session(session_id).await?;
+                if discovered_epoch != captured_route.route_epoch {
+                    return Err(TaskInputError::SessionNotFound);
+                }
+                SessionIncarnation {
+                    session_id: session_id.to_string(),
+                    pid,
+                }
+            }
+        };
+        self.send_operator_bytes_if_session_at_epoch(
+            task_id,
+            incarnation,
+            data,
+            Some(captured_route.route_epoch),
+        )
+        .await
+    }
+
     #[cfg(test)]
     async fn send_operator_bytes_if_session(
         &self,
@@ -730,6 +821,10 @@ impl TaskInputCoordinator {
     }
 
     fn advance_route_epoch(registry: &mut TaskInputRegistry, session_id: &str) {
+        registry.route_generation = registry.route_generation.wrapping_add(1);
+        registry
+            .route_generations
+            .insert(session_id.to_string(), registry.route_generation);
         let epoch = registry
             .route_epochs
             .entry(session_id.to_string())
@@ -3200,6 +3295,91 @@ mod tests {
             !daemon.await.unwrap(),
             "route captured before replacement begin reached the daemon"
         );
+    }
+
+    #[tokio::test]
+    async fn admissions_captured_before_first_pid_discovery_share_the_same_epoch() {
+        let daemon_dir = tempfile::tempdir().unwrap();
+        let socket_path = kanna_runtime_defaults::socket_path(daemon_dir.path());
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let (data_tx, mut data_rx) = mpsc::unbounded_channel();
+        let daemon = tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let data_tx = data_tx.clone();
+                tokio::spawn(async move {
+                    let (read_half, mut write_half) = stream.into_split();
+                    let mut reader = BufReader::new(read_half);
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).await.unwrap() == 0 {
+                            return;
+                        }
+                        let command = serde_json::from_str::<DaemonCommand>(line.trim()).unwrap();
+                        let is_list = matches!(&command, DaemonCommand::List);
+                        let event = match command {
+                            DaemonCommand::List => DaemonEvent::SessionList {
+                                sessions: vec![kanna_daemon::protocol::SessionInfo {
+                                    session_id: "task-first-discovery".into(),
+                                    pid: 4242,
+                                    cwd: "/tmp".into(),
+                                    state: kanna_daemon::protocol::SessionState::Active,
+                                    idle_seconds: 0,
+                                    status: kanna_daemon::protocol::SessionStatus::Idle,
+                                    kind: kanna_daemon::protocol::SessionKind::Pty,
+                                }],
+                            },
+                            DaemonCommand::InputIfSession {
+                                expected_pid, data, ..
+                            } => {
+                                assert_eq!(expected_pid, 4242);
+                                data_tx.send(data).unwrap();
+                                DaemonEvent::Ok
+                            }
+                            other => panic!("unexpected daemon command: {other:?}"),
+                        };
+                        write_half
+                            .write_all(
+                                format!("{}\n", serde_json::to_string(&event).unwrap()).as_bytes(),
+                            )
+                            .await
+                            .unwrap();
+                        if is_list {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        let coordinator = TaskInputCoordinator::new(
+            daemon_dir.path().to_string_lossy().to_string(),
+            Db::test_db_path("input-admission-first-discovery"),
+        );
+        let first = coordinator.capture_operator_admission(Some("task-first-discovery"));
+        let second = coordinator.capture_operator_admission(Some("task-first-discovery"));
+
+        coordinator
+            .send_operator_bytes_at_admission(
+                "task-first-discovery",
+                "task-first-discovery",
+                b"first".to_vec(),
+                first,
+            )
+            .await
+            .unwrap();
+        coordinator
+            .send_operator_bytes_at_admission(
+                "task-first-discovery",
+                "task-first-discovery",
+                b"second".to_vec(),
+                second,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(data_rx.recv().await.unwrap(), b"first");
+        assert_eq!(data_rx.recv().await.unwrap(), b"second");
+        daemon.abort();
     }
 
     #[tokio::test]
