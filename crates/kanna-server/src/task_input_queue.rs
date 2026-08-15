@@ -139,11 +139,12 @@ enum TerminalParserState {
     Ss3,
     Csi(Vec<u8>),
     X10Mouse {
-        values_remaining: u8,
-        utf8_continuations: u8,
+        bytes_remaining: u8,
     },
     Osc,
     OscEscape,
+    ControlString,
+    ControlStringEscape,
 }
 
 enum OperatorAction {
@@ -238,6 +239,9 @@ impl TerminalInputParser {
                 } else if byte == b']' {
                     self.state = TerminalParserState::Osc;
                     None
+                } else if matches!(byte, b'P' | b'X' | b'^' | b'_') {
+                    self.state = TerminalParserState::ControlString;
+                    None
                 } else {
                     self.state = TerminalParserState::Normal;
                     self.parse_byte(byte)
@@ -259,10 +263,7 @@ impl TerminalInputParser {
                         self.bracketed_paste_end_prefix = 0;
                         None
                     } else if marker == b"M" {
-                        self.state = TerminalParserState::X10Mouse {
-                            values_remaining: 3,
-                            utf8_continuations: 0,
-                        };
+                        self.state = TerminalParserState::X10Mouse { bytes_remaining: 3 };
                         None
                     } else {
                         self.state = TerminalParserState::Normal;
@@ -272,22 +273,9 @@ impl TerminalInputParser {
                     None
                 }
             }
-            TerminalParserState::X10Mouse {
-                values_remaining,
-                utf8_continuations,
-            } => {
-                if *utf8_continuations > 0 {
-                    *utf8_continuations -= 1;
-                } else {
-                    *values_remaining = values_remaining.saturating_sub(1);
-                    *utf8_continuations = match byte {
-                        0xc2..=0xdf => 1,
-                        0xe0..=0xef => 2,
-                        0xf0..=0xf4 => 3,
-                        _ => 0,
-                    };
-                }
-                if *values_remaining == 0 && *utf8_continuations == 0 {
+            TerminalParserState::X10Mouse { bytes_remaining } => {
+                *bytes_remaining = bytes_remaining.saturating_sub(1);
+                if *bytes_remaining == 0 {
                     self.state = TerminalParserState::Normal;
                 }
                 None
@@ -305,6 +293,20 @@ impl TerminalInputParser {
                     self.state = TerminalParserState::Normal;
                 } else if byte != b'\x1b' {
                     self.state = TerminalParserState::Osc;
+                }
+                None
+            }
+            TerminalParserState::ControlString => {
+                if byte == b'\x1b' {
+                    self.state = TerminalParserState::ControlStringEscape;
+                }
+                None
+            }
+            TerminalParserState::ControlStringEscape => {
+                if byte == b'\\' {
+                    self.state = TerminalParserState::Normal;
+                } else if byte != b'\x1b' {
+                    self.state = TerminalParserState::ControlString;
                 }
                 None
             }
@@ -2119,6 +2121,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dcs_reply_does_not_open_a_draft_across_frames_or_create_human_audit() {
+        let unique = format!(
+            "kanna-dcs-reply-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = tempfile::tempdir().unwrap();
+        let (mut commands, daemon) = spawn_recording_daemon(daemon_dir.path());
+        let db_path = Db::test_db_path(&unique);
+        let db = Db::open_for_tests(&db_path).unwrap();
+        db.insert_test_repo("repo-1", "Repo").unwrap();
+        db.insert_test_pipeline_item(
+            "task-target",
+            "repo-1",
+            "Target",
+            None,
+            "in progress",
+            "2026-08-15T00:00:00Z",
+        )
+        .unwrap();
+        drop(db);
+        let coordinator = TaskInputCoordinator::new(
+            daemon_dir.path().to_string_lossy().to_string(),
+            db_path.clone(),
+        );
+        let incarnation = SessionIncarnation {
+            session_id: "task-target".to_string(),
+            pid: 4242,
+        };
+
+        for frame in [
+            b"\x1bP>|xterm.js".as_slice(),
+            b" 6.0.0".as_slice(),
+            b"\x1b".as_slice(),
+            b"\\".as_slice(),
+        ] {
+            coordinator
+                .send_operator_bytes_if_session("task-target", incarnation.clone(), frame.to_vec())
+                .await
+                .unwrap();
+            assert_eq!(next_input_bytes(&mut commands).await, frame);
+        }
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            coordinator.submit_message_if_session(
+                "task-target",
+                "task-target",
+                4242,
+                TaskInputSource::Api,
+                "after DCS",
+            ),
+        )
+        .await;
+        assert!(matches!(result, Ok(Ok(()))));
+        assert_eq!(next_input_bytes(&mut commands).await, b"after DCS");
+        assert_eq!(next_input_bytes(&mut commands).await, vec![b'\r']);
+
+        let events = Db::open(&db_path)
+            .unwrap()
+            .list_recent_input_events("task-target", 10)
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].payload["source"], "api");
+        assert_eq!(events[0].payload["boundary"], "message");
+
+        drop(coordinator);
+        daemon.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn x10_mouse_reports_do_not_open_a_draft_across_frames() {
         let daemon_dir = tempfile::tempdir().unwrap();
         let (mut commands, daemon) = spawn_recording_daemon(daemon_dir.path());
@@ -2138,12 +2214,8 @@ mod tests {
                 "after split X10",
             ),
             (
-                vec![
-                    b"\x1b[M \xc2".as_slice(),
-                    b"\x80\xe0\xa0".as_slice(),
-                    b"\x80".as_slice(),
-                ],
-                "after UTF-8 X10",
+                vec![b"\x1b[M \xc2".as_slice(), b"!".as_slice()],
+                "after high-byte X10",
             ),
             (vec![b"\x1b[<0;10;20M".as_slice()], "after SGR mouse"),
         ] {
