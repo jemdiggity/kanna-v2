@@ -2871,6 +2871,10 @@ fn read_agent_definition_loads_builtin_task_manager_agent_with_codex_first() {
         .prompt
         .contains("never continuously re-arm an idle `kanna_wait_events` MCP call"));
     assert!(definition.prompt.contains("connection.effectiveBaseUrl"));
+    assert!(definition.prompt.contains("serverStatus.desktop.id"));
+    assert!(definition
+        .prompt
+        .contains("taskIds cursor is a multi-machine aggregate"));
     assert!(definition
         .prompt
         .contains("[\"repoId\", \"taskIds\", \"parentTaskId\"]"));

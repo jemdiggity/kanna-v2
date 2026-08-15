@@ -156,6 +156,8 @@ describe("QA workflow assets", () => {
       "never continuously re-arm an idle `kanna_wait_events` MCP call"
     );
     expect(agent.prompt).toContain("connection.effectiveBaseUrl");
+    expect(agent.prompt).toContain("serverStatus.desktop.id");
+    expect(agent.prompt).toContain("taskIds cursor is a multi-machine aggregate");
     expect(agent.prompt).toContain('["repoId", "taskIds", "parentTaskId"]');
     expect(agent.prompt).toContain(
       'url.searchParams.set("timeoutSecs", String(timeoutSecs))'
