@@ -168,6 +168,8 @@ describe("QA workflow assets", () => {
       "Kanna's current task and log surfaces do not expose a reliable universal token counter"
     );
     expect(agent.prompt).toContain("Preserve branches and commits when retiring the old work");
+    expect(agent.prompt).toContain("Resolve the authoritative remote default-branch tip");
+    expect(agent.prompt).toContain("A bare local branch name is a possibly stale pointer");
     expect(agent.prompt).toContain(
       "short human-readable name or purpose followed by its id in parentheses"
     );

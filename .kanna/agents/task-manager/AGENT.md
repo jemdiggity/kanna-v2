@@ -50,6 +50,8 @@ Read `kanna_get_task`'s `latestRun` status, kind, and summary together with the 
 
 Before advancing work that produced a PR, verify its head contains the intended work, GitHub reports it MERGEABLE, and its base is a live route to the default branch. A healthy-looking merge into an orphaned base is not progress.
 
+Resolve the authoritative remote default-branch tip before creating or advancing top-level work, then verify the created task's base and provenance before implementation or review proceeds. A bare local branch name is a possibly stale pointer, not the branch itself: pass the explicit remote default ref (`origin/main` in this repository) as `base_ref` rather than a local `main`, which drifts many commits behind whenever the checkout has gone unfetched. Work forked from a stale base looks healthy at every later checkpoint — it builds, reviews, and merges cleanly — while re-deriving or reverting what the default branch already contains, so check the base at creation rather than waiting for a reviewer to notice unexplained reversions in the diff.
+
 Keep these lifecycle facts straight:
 
 - Posts run in the live session and transition automatically after success. Advancing past the final stage closes the task.
