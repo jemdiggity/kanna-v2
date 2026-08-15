@@ -453,6 +453,60 @@ describe("createMobileController", () => {
     });
   });
 
+  it("does not suppress a later live activity when dismissal succeeds after its subscription update", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    const response = createDeferred<{ taskId: string; activity: "idle" }>();
+    const unreadTask: TaskSummary = {
+      id: "task-1",
+      repoId: "repo-1",
+      title: "Unread task",
+      stage: "review",
+      activity: "unread",
+      activityRevision: 7
+    };
+    let publishCloudTasks: ((tasks: TaskSummary[]) => void) | null = null;
+    auth.getState = vi.fn(() => ({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    }));
+    client.getStatus.mockResolvedValueOnce({
+      state: "running",
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud",
+      lanHost: "cloud",
+      lanPort: 0,
+      pairingCode: null
+    });
+    client.markTaskRead.mockReturnValueOnce(response.promise);
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks: vi.fn((_uid, onUpdate) => {
+        publishCloudTasks = onUpdate;
+        onUpdate([unreadTask]);
+        return () => undefined;
+      })
+    });
+    await controller.bootstrap();
+
+    const dismissal = controller.dismissActivity("task-1");
+    publishCloudTasks?.([
+      { ...unreadTask, activity: "unread", activityRevision: 9 }
+    ]);
+    response.resolve({ taskId: "task-1", activity: "idle" });
+    await dismissal;
+
+    expect(client.markTaskRead).toHaveBeenCalledWith("task-1", 7);
+    expect(store.getState().recentTasks[0]).toMatchObject({
+      activity: "unread",
+      activityRevision: 9
+    });
+    expect(store.getState().repoTasks[0]).toMatchObject({
+      activity: "unread",
+      activityRevision: 9
+    });
+  });
+
   it("marks polled task collections ready after bootstrap", async () => {
     const store = createSessionStore();
     const controller = createMobileController(createClientMock(), store);

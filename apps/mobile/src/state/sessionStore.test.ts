@@ -1175,6 +1175,35 @@ describe("createSessionStore", () => {
     });
   });
 
+  it("does not lower newer activity revisions while acknowledging stale task copies", () => {
+    const store = createSessionStore();
+    const task = {
+      id: "task-activity",
+      repoId: "repo-1",
+      title: "Activity",
+      stage: "review",
+      activity: "unread" as const
+    };
+    store.setRepoTasks([{ ...task, activityRevision: 6 }]);
+    store.setRecentTasks([{ ...task, activityRevision: 9 }]);
+    store.setSearchResults("Activity", [{ ...task, activityRevision: 7 }]);
+
+    store.setTaskActivity("task-activity", "idle", 8);
+
+    expect(store.getState().repoTasks[0]).toMatchObject({
+      activity: "idle",
+      activityRevision: 8
+    });
+    expect(store.getState().searchResults[0]).toMatchObject({
+      activity: "idle",
+      activityRevision: 8
+    });
+    expect(store.getState().recentTasks[0]).toMatchObject({
+      activity: "unread",
+      activityRevision: 9
+    });
+  });
+
   it("publishes when only relationship fields change on a refreshed task", () => {
     const store = createSessionStore();
     let publishes = 0;

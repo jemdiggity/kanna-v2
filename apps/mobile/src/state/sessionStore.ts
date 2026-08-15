@@ -915,6 +915,9 @@ export function createSessionStore(): SessionStore {
       const updateTask = (task: TaskSummary): TaskSummary => {
         if (
           task.id !== taskId ||
+          (activityRevision !== undefined &&
+            task.activityRevision !== undefined &&
+            task.activityRevision > activityRevision) ||
           ((task.activity ?? "idle") === activity &&
             (activityRevision === undefined ||
               task.activityRevision === activityRevision))
