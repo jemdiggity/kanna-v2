@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
+import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { TaskActivity, TaskSummary } from "../lib/api/types";
 
 vi.mock("react-native", () => ({
@@ -53,6 +54,22 @@ function findTextNodeByCompleteText(
 
   for (const child of flattenChildren(node.props?.children)) {
     const match = findTextNodeByCompleteText(child, expectedText);
+    if (match) return match;
+  }
+
+  return null;
+}
+
+function findNodeByProp(
+  node: ElementChild,
+  prop: string,
+  expectedValue: unknown
+): ElementNode | null {
+  if (!node || typeof node !== "object") return null;
+  if (node.props?.[prop] === expectedValue) return node;
+
+  for (const child of flattenChildren(node.props?.children)) {
+    const match = findNodeByProp(child, prop, expectedValue);
     if (match) return match;
   }
 
@@ -213,7 +230,7 @@ describe("TaskCard", () => {
         stage: "review",
         pinned: true
       },
-      pinAction: { error: null, pending: false, onToggle },
+      pinAction: { error: null, pendingPinned: null, onToggle },
       onPress: vi.fn()
     }) as ElementNode;
 
@@ -226,6 +243,50 @@ describe("TaskCard", () => {
     const button = findTextNodeByCompleteText(tree, "Unpin");
     expect(button).not.toBeNull();
   });
+
+  it.each([
+    {
+      optimisticPinned: true,
+      pendingPinned: true,
+      pendingLabel: "Pinning…"
+    },
+    {
+      optimisticPinned: false,
+      pendingPinned: false,
+      pendingLabel: "Unpinning…"
+    }
+  ])(
+    "renders and announces $pendingLabel after the optimistic task rerender",
+    ({ optimisticPinned, pendingPinned, pendingLabel }) => {
+      if (!TaskCard) throw new Error("TaskCard was not loaded");
+      const tree = TaskCard({
+        task: {
+          id: "task-1",
+          repoId: "repo-1",
+          title: "Pending task",
+          stage: "review",
+          pinned: optimisticPinned
+        },
+        pinAction: { error: null, pendingPinned, onToggle: vi.fn() },
+        onPress: vi.fn()
+      }) as ElementNode;
+      const button = findNodeByProp(
+        tree,
+        "testID",
+        MOBILE_E2E_IDS.taskPinButton("task-1")
+      );
+
+      expect(button).not.toBeNull();
+      expect(textContent(button ?? null)).toBe(pendingLabel);
+      expect(button?.props?.accessibilityLabel).toBe(
+        `${pendingLabel} Pending task`
+      );
+      expect(button?.props?.accessibilityState).toEqual({
+        busy: true,
+        disabled: true
+      });
+    }
+  );
 
   it("renders a normalized multiline prompt only once in text and accessibility", () => {
     if (!TaskCard) throw new Error("TaskCard was not loaded");

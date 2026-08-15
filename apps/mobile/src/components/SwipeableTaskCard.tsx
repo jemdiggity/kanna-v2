@@ -35,11 +35,17 @@ export function SwipeableTaskCard({
   onTogglePin
 }: SwipeableTaskCardProps) {
   const [swipeOffset, setSwipeOffset] = useState(0);
-  const [pinPending, setPinPending] = useState(false);
+  const [pendingPinned, setPendingPinned] = useState<boolean | null>(null);
   const [pinError, setPinError] = useState<string | null>(null);
   const touchStart = useRef<{ x: number; y: number } | null>(null);
   const pinned = task.pinned ?? false;
   const pinLabel = pinned ? "Unpin" : "Pin";
+  const pendingPinLabel =
+    pendingPinned === null
+      ? null
+      : pendingPinned
+        ? "Pinning…"
+        : "Unpinning…";
   const actionRevealed = swipeOffset < 0;
 
   if (!onTogglePin) {
@@ -64,16 +70,17 @@ export function SwipeableTaskCard({
       : { dx: 0, dy: 0 };
   };
   const togglePin = async () => {
-    if (pinPending) return;
-    setPinPending(true);
+    if (pendingPinned !== null) return;
+    const nextPinned = !pinned;
+    setPendingPinned(nextPinned);
     setPinError(null);
     try {
-      await onTogglePin(!pinned);
+      await onTogglePin(nextPinned);
       setSwipeOffset(0);
     } catch (error) {
       setPinError(error instanceof Error ? error.message : String(error));
     } finally {
-      setPinPending(false);
+      setPendingPinned(null);
     }
   };
 
@@ -81,9 +88,14 @@ export function SwipeableTaskCard({
     <View style={styles.container}>
       <Pressable
         accessibilityElementsHidden={!actionRevealed}
-        accessibilityLabel={`${pinLabel} ${buildTaskListItemModel(task).title}`}
+        accessibilityLabel={`${pendingPinLabel ?? pinLabel} ${
+          buildTaskListItemModel(task).title
+        }`}
         accessibilityRole="button"
-        accessibilityState={{ busy: pinPending, disabled: pinPending }}
+        accessibilityState={{
+          busy: pendingPinned !== null,
+          disabled: pendingPinned !== null
+        }}
         importantForAccessibility={
           actionRevealed ? "yes" : "no-hide-descendants"
         }
@@ -96,9 +108,7 @@ export function SwipeableTaskCard({
           void togglePin();
         }}
       >
-        <Text style={styles.actionLabel}>
-          {pinPending ? `${pinLabel}ning…` : pinLabel}
-        </Text>
+        <Text style={styles.actionLabel}>{pendingPinLabel ?? pinLabel}</Text>
       </Pressable>
       <View
         style={{ transform: [{ translateX: swipeOffset }] }}
@@ -131,7 +141,7 @@ export function SwipeableTaskCard({
           isSubtask={isSubtask}
           pinAction={{
             error: pinError,
-            pending: pinPending,
+            pendingPinned,
             onToggle: () => {
               void togglePin();
             }

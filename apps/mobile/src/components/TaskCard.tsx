@@ -13,7 +13,7 @@ import { buildTaskListItemModel } from "../screens/taskPresentation";
 
 export interface TaskCardPinAction {
   error: string | null;
-  pending: boolean;
+  pendingPinned: boolean | null;
   onToggle(): void;
 }
 
@@ -38,7 +38,13 @@ export function TaskCard({
   const blocked = isTaskBlocked(task);
   const pinned = task.pinned ?? false;
   const pinLabel = pinned ? "Unpin" : "Pin";
-  const pinAccessibilityLabel = `${pinLabel} ${model.title}`;
+  const pendingPinLabel =
+    pinAction?.pendingPinned === true
+      ? "Pinning…"
+      : pinAction?.pendingPinned === false
+        ? "Unpinning…"
+        : null;
+  const pinAccessibilityLabel = `${pendingPinLabel ?? pinLabel} ${model.title}`;
   const accessibilityLabel = [
     isSubtask ? "Subtask" : null,
     blocked ? "Blocked" : null,
@@ -107,8 +113,8 @@ export function TaskCard({
               accessibilityLabel={pinAccessibilityLabel}
               accessibilityRole="button"
               accessibilityState={{
-                busy: pinAction.pending,
-                disabled: pinAction.pending
+                busy: pinAction.pendingPinned !== null,
+                disabled: pinAction.pendingPinned !== null
               }}
               style={[
                 styles.pinButton,
@@ -126,7 +132,7 @@ export function TaskCard({
                   pinned ? styles.pinButtonLabelActive : null
                 ]}
               >
-                {pinAction.pending ? `${pinLabel}ning…` : pinLabel}
+                {pendingPinLabel ?? pinLabel}
               </Text>
             </Pressable>
           ) : null}
