@@ -159,6 +159,15 @@ describe("QA workflow assets", () => {
     expect(agent.prompt).toContain('"parent_task_id": "<durable-work-item-id>"');
     expect(agent.prompt).toContain("purpose-built child workflows");
     expect(agent.prompt).toContain("latestRun");
+    expect(agent.prompt).toContain("Audit Premise, Scope, And Runaway Work");
+    expect(agent.prompt).toContain("ask the agent for one concise re-report");
+    expect(agent.prompt).toContain("HOLD implementation and merge handoff");
+    expect(agent.prompt).toContain("independent, bounded, on-demand architect consultation");
+    expect(agent.prompt).toContain("do not perform the architectural design yourself");
+    expect(agent.prompt).toContain(
+      "Kanna's current task and log surfaces do not expose a reliable universal token counter"
+    );
+    expect(agent.prompt).toContain("Preserve branches and commits when retiring the old work");
     expect(agent.prompt).toContain(
       "short human-readable name or purpose followed by its id in parentheses"
     );
