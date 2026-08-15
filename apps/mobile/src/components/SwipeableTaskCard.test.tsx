@@ -61,6 +61,26 @@ function cardElement(
   );
 }
 
+function dismissCardElement(onDismiss: () => Promise<void>) {
+  if (!SwipeableTaskCard) throw new Error("SwipeableTaskCard was not loaded");
+  return (
+    <SwipeableTaskCard
+      isSubtask={false}
+      repoLabel="Kanna"
+      task={{
+        id: "task-activity",
+        repoId: "repo-1",
+        title: "Review this activity",
+        stage: "review",
+        activity: "unread"
+      }}
+      uiId="task-activity"
+      onDismiss={onDismiss}
+      onPress={vi.fn()}
+    />
+  );
+}
+
 function touch(pageX: number, pageY: number) {
   return { nativeEvent: { pageX, pageY } };
 }
@@ -110,6 +130,72 @@ describe("SwipeableTaskCard", () => {
     });
     expect(error.props.accessibilityLiveRegion).toBe("polite");
     expect(error.props.children).toBe("offline");
+  });
+
+  it("reveals Dismiss for a deliberate swipe and exposes a non-swipe fallback", async () => {
+    if (!SwipeableTaskCard) throw new Error("SwipeableTaskCard was not loaded");
+    const onDismiss = vi.fn().mockResolvedValue(undefined);
+    let renderer: ReactTestRenderer | null = null;
+    await act(async () => {
+      renderer = create(dismissCardElement(onDismiss));
+    });
+    if (!renderer) throw new Error("SwipeableTaskCard did not render");
+    const responder = renderer.root.findAllByType("View").find(
+      (node) => typeof node.props.onTouchStart === "function"
+    );
+    if (!responder) throw new Error("Swipe responder was not rendered");
+
+    act(() => responder.props.onTouchStart(touch(200, 100)));
+    expect(
+      responder.props.onMoveShouldSetResponderCapture(touch(190, 70))
+    ).toBe(false);
+    expect(
+      responder.props.onMoveShouldSetResponderCapture(touch(125, 96))
+    ).toBe(true);
+    act(() => {
+      responder.props.onResponderMove(touch(125, 96));
+      responder.props.onResponderRelease(touch(125, 96));
+    });
+
+    const swipeAction = renderer.root.findByProps({
+      testID: MOBILE_E2E_IDS.activityDismissAction("task-activity")
+    });
+    expect(swipeAction.props).toMatchObject({
+      accessibilityLabel: "Dismiss Review this activity",
+      importantForAccessibility: "yes"
+    });
+    const button = renderer.root.findByProps({
+      testID: MOBILE_E2E_IDS.activityDismissButton("task-activity")
+    });
+    await act(async () => {
+      button.props.onPress({ stopPropagation: vi.fn() });
+      await Promise.resolve();
+    });
+    expect(onDismiss).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a failed dismissal visible and announces its inline error", async () => {
+    if (!SwipeableTaskCard) throw new Error("SwipeableTaskCard was not loaded");
+    const onDismiss = vi.fn().mockRejectedValue(new Error("owner offline"));
+    let renderer: ReactTestRenderer | null = null;
+    await act(async () => {
+      renderer = create(dismissCardElement(onDismiss));
+    });
+    if (!renderer) throw new Error("SwipeableTaskCard did not render");
+    const button = renderer.root.findByProps({
+      testID: MOBILE_E2E_IDS.activityDismissButton("task-activity")
+    });
+
+    await act(async () => {
+      button.props.onPress({ stopPropagation: vi.fn() });
+      await Promise.resolve();
+    });
+
+    const error = renderer.root.findByProps({
+      testID: MOBILE_E2E_IDS.activityDismissError("task-activity")
+    });
+    expect(error.props.accessibilityLiveRegion).toBe("polite");
+    expect(error.props.children).toBe("owner offline");
   });
 
   it.each([

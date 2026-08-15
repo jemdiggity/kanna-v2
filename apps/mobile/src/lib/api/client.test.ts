@@ -187,6 +187,12 @@ describe("createKannaClient", () => {
       taskId: "task-1",
       activity: "idle"
     });
+    expect(transport.markTaskRead).toHaveBeenCalledWith("task-1", undefined);
+    expect(await client.markTaskRead("task-1", 7)).toEqual({
+      taskId: "task-1",
+      activity: "idle"
+    });
+    expect(transport.markTaskRead).toHaveBeenLastCalledWith("task-1", 7);
     await expect(client.pinTask("task-1")).resolves.toBeUndefined();
     await expect(client.unpinTask("task-1")).resolves.toBeUndefined();
     expect(transport.pinTask).toHaveBeenCalledWith("task-1");

@@ -337,6 +337,176 @@ describe("createMobileController", () => {
     });
   });
 
+  it("dismisses exactly the visible activity revision without removing the task", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+    await controller.bootstrap();
+    store.setRepoTasks([
+      {
+        id: "task-1",
+        repoId: "repo-1",
+        title: "Unread task",
+        stage: "review",
+        activity: "unread",
+        activityRevision: 7
+      }
+    ]);
+    store.setRecentTasks(store.getState().repoTasks);
+    controller.openTask("task-1");
+
+    await controller.dismissActivity("task-1");
+
+    expect(client.markTaskRead).toHaveBeenCalledWith("task-1", 7);
+    expect(store.getState().recentTasks).toEqual([
+      expect.objectContaining({
+        id: "task-1",
+        activity: "idle",
+        activityRevision: 8
+      })
+    ]);
+    expect(store.getState().repoTasks).toHaveLength(1);
+    expect(store.getState().selectedTaskId).toBe("task-1");
+  });
+
+  it.each([
+    { repoActivity: "idle" as const, repoActivityRevision: 6 },
+    { repoActivity: "unread" as const, repoActivityRevision: 6 }
+  ])(
+    "dismisses the recent Activity revision when the repo copy is $repoActivity at an older revision",
+    async ({ repoActivity, repoActivityRevision }) => {
+      const store = createSessionStore();
+      const client = createClientMock();
+      const controller = createMobileController(client, store);
+      await controller.bootstrap();
+      store.setRepoTasks([
+        {
+          id: "task-1",
+          repoId: "repo-1",
+          title: "Stale repo task",
+          stage: "review",
+          activity: repoActivity,
+          activityRevision: repoActivityRevision
+        }
+      ]);
+      store.setRecentTasks([
+        {
+          id: "task-1",
+          repoId: "repo-1",
+          title: "Visible Activity task",
+          stage: "review",
+          activity: "unread",
+          activityRevision: 7
+        }
+      ]);
+
+      await controller.dismissActivity("task-1");
+
+      expect(client.markTaskRead).toHaveBeenCalledWith("task-1", 7);
+      expect(store.getState().recentTasks).toEqual([
+        expect.objectContaining({
+          id: "task-1",
+          activity: "idle",
+          activityRevision: 8
+        })
+      ]);
+      expect(store.getState().repoTasks).toEqual([
+        expect.objectContaining({
+          id: "task-1",
+          activity: "idle",
+          activityRevision: 8
+        })
+      ]);
+    }
+  );
+
+  it("does not suppress a later distinct activity when dismissal loses its revision race", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const response = createDeferred<{ taskId: string; activity: null }>();
+    client.markTaskRead.mockReturnValueOnce(response.promise);
+    const controller = createMobileController(client, store);
+    await controller.bootstrap();
+    const unreadTasks: TaskSummary[] = [
+      {
+        id: "task-1",
+        repoId: "repo-1",
+        title: "Unread task",
+        stage: "review",
+        activity: "unread",
+        activityRevision: 7
+      }
+    ];
+    store.setRepoTasks(unreadTasks);
+    store.setRecentTasks(unreadTasks);
+
+    const dismissal = controller.dismissActivity("task-1");
+    store.setTaskActivity("task-1", "unread", 8);
+    response.resolve({ taskId: "task-1", activity: null });
+
+    await expect(dismissal).rejects.toThrow(
+      "The activity changed before it could be dismissed"
+    );
+    expect(store.getState().recentTasks[0]).toMatchObject({
+      activity: "unread",
+      activityRevision: 8
+    });
+  });
+
+  it("does not suppress a later live activity when dismissal succeeds after its subscription update", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    const response = createDeferred<{ taskId: string; activity: "idle" }>();
+    const unreadTask: TaskSummary = {
+      id: "task-1",
+      repoId: "repo-1",
+      title: "Unread task",
+      stage: "review",
+      activity: "unread",
+      activityRevision: 7
+    };
+    let publishCloudTasks: ((tasks: TaskSummary[]) => void) | null = null;
+    auth.getState = vi.fn(() => ({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    }));
+    client.getStatus.mockResolvedValueOnce({
+      state: "running",
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud",
+      lanHost: "cloud",
+      lanPort: 0,
+      pairingCode: null
+    });
+    client.markTaskRead.mockReturnValueOnce(response.promise);
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks: vi.fn((_uid, onUpdate) => {
+        publishCloudTasks = onUpdate;
+        onUpdate([unreadTask]);
+        return () => undefined;
+      })
+    });
+    await controller.bootstrap();
+
+    const dismissal = controller.dismissActivity("task-1");
+    publishCloudTasks?.([
+      { ...unreadTask, activity: "unread", activityRevision: 9 }
+    ]);
+    response.resolve({ taskId: "task-1", activity: "idle" });
+    await dismissal;
+
+    expect(client.markTaskRead).toHaveBeenCalledWith("task-1", 7);
+    expect(store.getState().recentTasks[0]).toMatchObject({
+      activity: "unread",
+      activityRevision: 9
+    });
+    expect(store.getState().repoTasks[0]).toMatchObject({
+      activity: "unread",
+      activityRevision: 9
+    });
+  });
+
   it("marks polled task collections ready after bootstrap", async () => {
     const store = createSessionStore();
     const controller = createMobileController(createClientMock(), store);

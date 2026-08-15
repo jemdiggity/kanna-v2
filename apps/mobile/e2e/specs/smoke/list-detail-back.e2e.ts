@@ -1,5 +1,6 @@
 import type { Browser } from "webdriverio";
 import {
+  activityDismissActionSelector,
   selectors,
   taskPinActionSelector,
   tasksRepoSelector
@@ -164,6 +165,11 @@ interface MobileTaskPinSummary {
   repoId: string;
   pinned?: boolean;
   pinOrder?: number | null;
+}
+
+interface MobileTaskActivitySummary {
+  id: string;
+  activity?: string | null;
 }
 
 interface RunListDetailBackSmokeOptions {
@@ -961,6 +967,92 @@ export async function exerciseTaskPinSwipe(
   }
 }
 
+async function prepareTaskUnreadActivity(
+  desktopServerUrl: string,
+  taskId: string,
+  fetchImpl: FetchLike
+): Promise<void> {
+  const actionUrl = `${desktopServerUrl}/v1/tasks/${encodeURIComponent(taskId)}/actions/runtime-status`;
+  for (const status of ["busy", "idle"] as const) {
+    const response = await fetchImpl(actionUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status, selected: false })
+    });
+    if (!response.ok) {
+      throw new Error(
+        `Could not prepare unread Activity fixture (${response.status}).`
+      );
+    }
+  }
+}
+
+export async function exerciseActivityDismissSwipe(
+  driver: Browser,
+  desktopServerUrl: string,
+  taskId: string,
+  fetchImpl: FetchLike = fetch
+): Promise<void> {
+  const readActivity = async (): Promise<string | null> => {
+    const response = await fetchImpl(`${desktopServerUrl}/v1/tasks/recent`);
+    if (!response.ok) {
+      throw new Error(`Could not read Activity fixture (${response.status}).`);
+    }
+    const tasks = (await response.json()) as MobileTaskActivitySummary[];
+    const task = tasks.find((candidate) => candidate.id === taskId);
+    if (!task) {
+      throw new Error("Activity fixture task was removed from recent tasks.");
+    }
+    return task.activity ?? null;
+  };
+
+  await prepareTaskUnreadActivity(desktopServerUrl, taskId, fetchImpl);
+  const activityTab = await driver.$(selectors.recentTab);
+  await activityTab.click();
+  const screen = await driver.$(selectors.recentScreen);
+  await screen.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  const row = await driver.$(`~mobile.task-row.${taskId}`);
+  await row.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  const [{ x, y }, { width, height }] = await Promise.all([
+    row.getLocation(),
+    row.getSize()
+  ]);
+  await driver.execute("mobile: dragFromToForDuration", {
+    duration: 0.35,
+    fromX: Math.round(x + width * 0.8),
+    fromY: Math.round(y + height / 2),
+    toX: Math.round(x + width * 0.35),
+    toY: Math.round(y + height / 2)
+  });
+  const action = await driver.$(activityDismissActionSelector(taskId));
+  await action.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await action.click();
+  await driver.waitUntil(
+    async () => (await readActivity()) === "idle",
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg:
+        "Expected Activity dismissal to acknowledge the owner task without removing it"
+    }
+  );
+  await driver.waitUntil(
+    async () => {
+      const dismissedRow = await driver.$(`~mobile.task-row.${taskId}`);
+      return !(await dismissedRow.isExisting());
+    },
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg: "Expected the acknowledged Activity row to leave the list"
+    }
+  );
+
+  await prepareTaskUnreadActivity(desktopServerUrl, taskId, fetchImpl);
+  const laterActivityRow = await driver.$(`~mobile.task-row.${taskId}`);
+  await laterActivityRow.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+}
+
 export async function runListDetailBackSmoke(
   driver: Browser,
   options: RunListDetailBackSmokeOptions = {}
@@ -986,6 +1078,12 @@ export async function runListDetailBackSmoke(
 
   await ensureTaskListVisible(ui);
   await exerciseTaskPinSwipe(
+    driver,
+    desktopServerUrl,
+    fixture.taskId,
+    options.fetchImpl
+  );
+  await exerciseActivityDismissSwipe(
     driver,
     desktopServerUrl,
     fixture.taskId,
@@ -1048,6 +1146,12 @@ export async function runListDetailBackSmoke(
   await waitForRenderedPtyTerminal(ui, fixture);
   await performTaskDetailEdgeSwipeBack(driver);
   await waitForTaskRows(ui);
+
+  await prepareTaskUnreadActivity(
+    desktopServerUrl,
+    fixture.taskId,
+    options.fetchImpl ?? fetch
+  );
 
   await exerciseListDetailBackFromOrigin(
     {

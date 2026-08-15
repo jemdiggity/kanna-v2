@@ -3,7 +3,7 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { RepoSummary, TaskSummary } from "../lib/api/types";
 import { TaskList } from "../components/TaskList";
-import { orderActivityTasks } from "./activityTaskOrder";
+import { visibleActivityTasks } from "./activityTaskOrder";
 import { taskCreationTimestamp } from "./taskTreeRows";
 import type { TaskUiSlot } from "../state/taskUiSlots";
 import { taskUiSlotToTaskSummary } from "../state/taskUiSlots";
@@ -20,6 +20,7 @@ interface TasksScreenProps {
   onOpenMachines?(): void;
   onSelectRepo(repoId: string): void;
   onOpenTask(taskId: string): void;
+  onDismissActivity?(taskId: string): Promise<void>;
   onSetTaskPinned?(taskId: string, pinned: boolean): Promise<void>;
 }
 
@@ -44,6 +45,7 @@ export function TasksScreen({
   onOpenMachines,
   onSelectRepo,
   onOpenTask,
+  onDismissActivity,
   onSetTaskPinned
 }: TasksScreenProps) {
   const isRecentView = heading === "Recent";
@@ -58,7 +60,7 @@ export function TasksScreen({
       )
     : taskSlots;
   const displayedTaskSlots = isRecentView
-    ? orderActivityTasks(taskSlots.map(taskUiSlotToTaskSummary)).map(
+    ? visibleActivityTasks(taskSlots.map(taskUiSlotToTaskSummary)).map(
         (task) => taskSlots.find(
           (slot) => taskUiSlotToTaskSummary(slot).id === task.id
         )!
@@ -121,7 +123,7 @@ export function TasksScreen({
           <DesktopSetupEmptyState onOpenMachines={onOpenMachines} />
         ) : (
           <TaskList
-            emptyLabel="No tasks yet."
+            emptyLabel={isRecentView ? "You're all caught up." : "No tasks yet."}
             errorLabel={
               taskCollectionStatus === "error" ? "Could not load tasks." : null
             }
@@ -132,6 +134,7 @@ export function TasksScreen({
             repoLabelForTask={isRecentView ? recentTaskRepoLabel : undefined}
             taskSlots={displayedTaskSlots}
             onOpenTask={onOpenTask}
+            onDismissTask={isRecentView ? onDismissActivity : undefined}
             onSetTaskPinned={onSetTaskPinned}
           />
         )}

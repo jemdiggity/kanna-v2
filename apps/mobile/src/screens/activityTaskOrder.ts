@@ -19,3 +19,15 @@ export function orderActivityTasks(
     )
     .map(({ task }) => task);
 }
+
+export function visibleActivityTasks(
+  tasks: readonly TaskSummary[]
+): TaskSummary[] {
+  return orderActivityTasks(
+    tasks.filter((task) => task.activity === "unread")
+  );
+}
+
+export function unreadActivityCount(tasks: readonly TaskSummary[]): number {
+  return tasks.filter((task) => task.activity === "unread").length;
+}

@@ -335,6 +335,38 @@ describe("remote transport", () => {
     });
   });
 
+  it("routes revision-fenced dismissal to the cloud task owner", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue({
+      taskId: "local-task-1",
+      activity: "idle"
+    });
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => null,
+      invokeDesktop,
+      listCloudTasks: async () => [{
+        id: "cloud-task-1",
+        repoId: "repo-1",
+        title: "Cloud task",
+        stage: "in progress",
+        activity: "unread",
+        activityRevision: 12,
+        ownerDesktopId: "desktop-owner",
+        ownerLocalTaskId: "local-task-1",
+        ownerOnline: true
+      }]
+    });
+
+    await transport.markTaskRead("cloud-task-1", 12);
+
+    expect(invokeDesktop).toHaveBeenCalledWith({
+      desktopId: "desktop-owner",
+      method: "POST",
+      path: "/v1/tasks/local-task-1/actions/mark-read",
+      body: { expectedActivityRevision: 12 }
+    });
+  });
+
   it("refreshes a cached cloud route before marking a task read", async () => {
     const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue({
       taskId: "local-task-b",

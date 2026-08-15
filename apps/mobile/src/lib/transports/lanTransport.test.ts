@@ -337,6 +337,26 @@ describe("createLanTransport", () => {
     );
   });
 
+  it("fences Activity dismissal to the rendered activity revision", async () => {
+    const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ taskId: "task/read", activity: "idle" })
+    });
+    const transport = createLanTransport("http://127.0.0.1:48120", fetchImpl);
+
+    await transport.markTaskRead("task/read", 7);
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "http://127.0.0.1:48120/v1/tasks/task%2Fread/actions/mark-read",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ expectedActivityRevision: 7 })
+      }
+    );
+  });
+
   it("calls the shared LAN API routes for task listing, repo listing, and task creation", async () => {
     const fetchImpl = vi.fn<FetchLike>()
       .mockResolvedValueOnce({

@@ -9,12 +9,14 @@ import {
 } from "../navigation/navigationConfig";
 
 interface FloatingToolbarProps extends BottomTabBarProps {
+  activityCount?: number;
   onSelectUtilityAction(action: "search" | "create"): void;
 }
 
 export function FloatingToolbar({
   state,
   navigation,
+  activityCount = 0,
   onSelectUtilityAction
 }: FloatingToolbarProps) {
   const searchAction = UTILITY_ACTIONS.find((action) => action.name === "search");
@@ -45,8 +47,15 @@ export function FloatingToolbar({
           );
           if (!tab) return null;
           const active = state.index === index;
+          const tabActivityCount =
+            route.name === "Activity" ? activityCount : 0;
           return (
             <Pressable
+              accessibilityLabel={
+                tabActivityCount > 0
+                  ? `${tab.label}, ${tabActivityCount} unread`
+                  : tab.label
+              }
               accessibilityRole="tab"
               accessibilityState={{ selected: active }}
               key={tab.name}
@@ -68,6 +77,16 @@ export function FloatingToolbar({
                 name={tab.icon as keyof typeof Ionicons.glyphMap}
                 size={23}
               />
+              {tabActivityCount > 0 ? (
+                <View
+                  style={styles.badge}
+                  testID={MOBILE_E2E_IDS.activityBadge}
+                >
+                  <Text style={styles.badgeLabel}>
+                    {tabActivityCount > 99 ? "99+" : tabActivityCount}
+                  </Text>
+                </View>
+              ) : null}
               <Text style={[styles.label, active ? styles.labelActive : null]}>
                 {tab.label}
               </Text>
@@ -132,6 +151,25 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     paddingHorizontal: 6,
     paddingVertical: 7
+  },
+  badge: {
+    alignItems: "center",
+    backgroundColor: "#C43D55",
+    borderColor: "#080F1B",
+    borderRadius: 9,
+    borderWidth: 1,
+    justifyContent: "center",
+    minHeight: 18,
+    minWidth: 18,
+    paddingHorizontal: 4,
+    position: "absolute",
+    right: 12,
+    top: 3
+  },
+  badgeLabel: {
+    color: "#FFFFFF",
+    fontSize: 10,
+    fontWeight: "800"
   },
   itemActive: {
     backgroundColor: "#E8F1FF"

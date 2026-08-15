@@ -150,6 +150,12 @@ export function mergeCloudAndLanTasks({
       if (lanTask.agentType !== null && lanTask.agentType !== undefined) {
         mergedTask.agentType = lanTask.agentType;
       }
+      if (lanTask.activity !== undefined) {
+        mergedTask.activity = lanTask.activity;
+      }
+      if (lanTask.activityRevision !== undefined) {
+        mergedTask.activityRevision = lanTask.activityRevision;
+      }
       // LAN is fresher; null/empty are meaningful (parent detached, blockers
       // resolved), so only an absent field falls back to the cloud snapshot.
       if (lanTask.parentTaskId !== undefined) {
@@ -285,6 +291,12 @@ function mergeCloudWithPreservedLanProjection(
       preservedTask.agentType !== undefined
     ) {
       mergedTask.agentType = preservedTask.agentType;
+    }
+    if (preservedTask.activity !== undefined) {
+      mergedTask.activity = preservedTask.activity;
+    }
+    if (preservedTask.activityRevision !== undefined) {
+      mergedTask.activityRevision = preservedTask.activityRevision;
     }
     if (preservedTask.parentTaskId !== undefined) {
       mergedTask.parentTaskId = preservedTask.parentTaskId;
@@ -1378,9 +1390,11 @@ export function createCloudLanClient(
       invokeTaskActionRoute(taskId, (client, routedTaskId) =>
         client.advanceTaskStage(routedTaskId)
       ),
-    markTaskRead: (taskId) =>
+    markTaskRead: (taskId, expectedActivityRevision) =>
       invokeTaskRoute(taskId, (client, routedTaskId) =>
-        client.markTaskRead(routedTaskId)
+        expectedActivityRevision === undefined
+          ? client.markTaskRead(routedTaskId)
+          : client.markTaskRead(routedTaskId, expectedActivityRevision)
       ),
     pinTask: (taskId) =>
       invokeTaskRoute(taskId, (client, routedTaskId) =>

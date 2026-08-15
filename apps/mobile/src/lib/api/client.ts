@@ -112,7 +112,10 @@ export interface KannaTransport {
   abortTaskCreation(input: AbortTaskCreationRequest): Promise<void>;
   runMergeAgent(taskId: string): Promise<TaskActionResponse>;
   advanceTaskStage(taskId: string): Promise<TaskActionResponse>;
-  markTaskRead(taskId: string): Promise<TaskActivityResponse>;
+  markTaskRead(
+    taskId: string,
+    expectedActivityRevision?: number
+  ): Promise<TaskActivityResponse>;
   pinTask(taskId: string): Promise<void>;
   unpinTask(taskId: string): Promise<void>;
   closeTask(taskId: string): Promise<void>;
@@ -156,7 +159,10 @@ export interface KannaClient {
   abortTaskCreation(input: AbortTaskCreationRequest): Promise<void>;
   runMergeAgent(taskId: string): Promise<TaskActionResponse>;
   advanceTaskStage(taskId: string): Promise<TaskActionResponse>;
-  markTaskRead(taskId: string): Promise<TaskActivityResponse>;
+  markTaskRead(
+    taskId: string,
+    expectedActivityRevision?: number
+  ): Promise<TaskActivityResponse>;
   pinTask(taskId: string): Promise<void>;
   unpinTask(taskId: string): Promise<void>;
   closeTask(taskId: string): Promise<void>;
@@ -236,7 +242,8 @@ export function createKannaClient(transport: KannaTransport): KannaClient {
     abortTaskCreation: (input) => transport.abortTaskCreation(input),
     runMergeAgent: (taskId) => transport.runMergeAgent(taskId),
     advanceTaskStage: (taskId) => transport.advanceTaskStage(taskId),
-    markTaskRead: (taskId) => transport.markTaskRead(taskId),
+    markTaskRead: (taskId, expectedActivityRevision) =>
+      transport.markTaskRead(taskId, expectedActivityRevision),
     pinTask: (taskId) => transport.pinTask(taskId),
     unpinTask: (taskId) => transport.unpinTask(taskId),
     closeTask: (taskId) => transport.closeTask(taskId),

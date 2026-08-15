@@ -273,6 +273,7 @@ function parseCloudTaskSnapshot(value: unknown): CloudTaskSnapshot {
     displayName: optionalNullableString(value.displayName),
     stage: requiredString(value.stage, "stage"),
     activity: optionalNullableString(value.activity),
+    activityRevision: optionalNonNegativeInteger(value.activityRevision),
     status: optionalString(value.status),
     repo: {
       cloudRepoId: requiredString(value.repo.cloudRepoId, "repo.cloudRepoId"),
@@ -335,6 +336,14 @@ function optionalBoolean(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
 }
 
+function optionalNonNegativeInteger(value: unknown): number | undefined {
+  return typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= 0
+    ? value
+    : undefined;
+}
+
 function optionalNullableNumber(value: unknown): number | null | undefined {
   if (value === null) return null;
   return typeof value === "number" && Number.isSafeInteger(value)
@@ -364,6 +373,9 @@ export function mapCloudTaskSnapshot(snapshot: CloudTaskSnapshot): CloudTaskSumm
     agentProvider: snapshot.agent?.provider ?? null,
     agentType: normalizeAgentType(snapshot.agent?.type),
     activity: normalizeTaskActivity(snapshot.activity),
+    ...(snapshot.activityRevision === undefined
+      ? {}
+      : { activityRevision: snapshot.activityRevision }),
     parentTaskId: snapshot.parentTaskId ?? null,
     blockedByTaskIds: snapshot.blockedByTaskIds ?? [],
     pinned: snapshot.pinned ?? false,

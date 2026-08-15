@@ -211,6 +211,7 @@ describe("cloud task index", () => {
         displayName: "Short renamed cloud task",
         stage: "in progress",
         activity: "working",
+        activityRevision: 7,
         status: "active",
         repo: {
           cloudRepoId: "repo-1",
@@ -247,6 +248,7 @@ describe("cloud task index", () => {
       agentProvider: "claude",
       agentType: "agent",
       activity: "working",
+      activityRevision: 7,
       parentTaskId: null,
       blockedByTaskIds: [],
       pinned: false,
@@ -548,6 +550,29 @@ describe("cloud task index", () => {
       "working",
       "unread",
       "idle",
+    ]);
+  });
+
+  it("forwards the owner activity revision from raw Firestore documents", () => {
+    const onUpdate = vi.fn();
+    const listeners = captureSnapshotListeners();
+    createFirestoreTaskIndex({ kind: "firestore" } as never).subscribeRecentTasks(
+      "user-1",
+      onUpdate,
+    );
+    listeners.root().onNext({ docs: [desktopDocument("desktop-a")] });
+
+    listeners.child("desktop-a").onNext(taskSnapshot(validTask({
+      activity: "unread",
+      activityRevision: 7,
+      ownerDesktopId: "desktop-a",
+    })));
+
+    expect(onUpdate).toHaveBeenCalledWith([
+      expect.objectContaining({
+        activity: "unread",
+        activityRevision: 7,
+      }),
     ]);
   });
 
