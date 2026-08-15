@@ -751,8 +751,7 @@ export function createSessionStore(): SessionStore {
     setRepoCommandLoading(repoId) {
       if (
         state.selectedRepoId !== repoId ||
-        state.runningRepoCommandId !== null ||
-        state.pendingRepoCommandTask !== null
+        state.runningRepoCommandId !== null
       ) return;
       state = {
         ...state,
@@ -765,8 +764,7 @@ export function createSessionStore(): SessionStore {
     setRepoCommandCatalog(repoCommandCatalog) {
       if (
         state.selectedRepoId !== repoCommandCatalog.repoId ||
-        state.runningRepoCommandId !== null ||
-        state.pendingRepoCommandTask !== null
+        state.runningRepoCommandId !== null
       ) return;
       const unavailableRepoCommandIds = state.unavailableRepoCommandIds.filter(
         (repoId) => repoId !== repoCommandCatalog.repoId
@@ -783,8 +781,7 @@ export function createSessionStore(): SessionStore {
     setRepoCommandError(repoId, repoCommandErrorMessage) {
       if (
         state.selectedRepoId !== repoId ||
-        state.runningRepoCommandId !== null ||
-        state.pendingRepoCommandTask !== null
+        state.runningRepoCommandId !== null
       ) return;
       state = {
         ...state,

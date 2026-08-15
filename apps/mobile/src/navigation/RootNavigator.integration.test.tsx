@@ -954,8 +954,10 @@ describe("RootNavigator More integration", () => {
     client.listRecentTasks = vi.fn()
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
       .mockResolvedValue([delayedTask]);
     client.listRepoTasks = vi.fn()
+      .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
       .mockResolvedValue([delayedTask]);
@@ -998,6 +1000,31 @@ describe("RootNavigator More integration", () => {
     ).toHaveLength(0);
 
     await act(async () => {
+      rendered!.root.find(
+        (node) => node.props.testID === MOBILE_E2E_IDS.moreRetryButton
+      ).props.onPress();
+      await flushMicrotasks();
+    });
+
+    expect(visibleText()).not.toContain("Commands unavailable");
+    expect(
+      rendered!.root.find(
+        (node) =>
+          node.props.testID ===
+          MOBILE_E2E_IDS.moreCommand("custom:task-manager")
+      )
+    ).toBeDefined();
+    expect(store.getState()).toMatchObject({
+      selectedRepoId: "repo-1",
+      selectedTaskId: null,
+      pendingRepoCommandTask: { taskId: delayedTask.id },
+      repoCommandCatalog: { revision: "repo-1-catalog" },
+      repoCommandStatus: "ready",
+      repoCommandErrorMessage: null,
+      unavailableRepoCommandIds: []
+    });
+
+    await act(async () => {
       await vi.advanceTimersByTimeAsync(3_000);
       await flushMicrotasks();
     });
@@ -1008,7 +1035,7 @@ describe("RootNavigator More integration", () => {
       )
     ).toHaveLength(1);
     expect(visibleText()).toContain("Delayed command task");
-    expect(client.listRepoCommands).toHaveBeenCalledTimes(2);
+    expect(client.listRepoCommands).toHaveBeenCalledTimes(3);
     expect(store.getState()).toMatchObject({
       selectedRepoId: "repo-1",
       selectedTaskId: delayedTask.id,

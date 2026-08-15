@@ -218,6 +218,37 @@ describe("createSessionStore", () => {
     });
   });
 
+  it("commits a recovered catalog while retaining a created command task", () => {
+    const store = createSessionStore();
+    store.selectRepo("repo-1");
+    store.setRepoCommandTaskLoadError({
+      commandId: "factory:create-agent",
+      taskId: "task-command"
+    }, "The command launched successfully, but its task could not be loaded.");
+
+    store.setRepoCommandLoading("repo-1");
+    store.setRepoCommandCatalog({
+      repoId: "repo-1",
+      revision: "catalog-v2",
+      commands: [{
+        id: "factory:create-agent",
+        label: "Create Agent",
+        description: "Create a new agent definition",
+        group: "configure"
+      }]
+    });
+
+    expect(store.getState()).toMatchObject({
+      repoCommandCatalog: { revision: "catalog-v2" },
+      repoCommandStatus: "ready",
+      repoCommandErrorMessage: null,
+      pendingRepoCommandTask: {
+        commandId: "factory:create-agent",
+        taskId: "task-command"
+      }
+    });
+  });
+
   it("tracks repository command failures without removing task repositories", () => {
     const store = createSessionStore();
     store.setRepos([
