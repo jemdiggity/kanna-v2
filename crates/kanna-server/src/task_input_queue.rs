@@ -88,6 +88,12 @@ struct SessionInputWorker {
     abort: tokio::task::AbortHandle,
 }
 
+#[derive(Clone)]
+pub(crate) struct TaskInputWorkerSnapshot {
+    incarnation: SessionIncarnation,
+    worker_id: u64,
+}
+
 #[derive(Default)]
 struct TaskInputRegistry {
     workers: HashMap<SessionIncarnation, SessionInputWorker>,
@@ -602,6 +608,7 @@ impl TaskInputCoordinator {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn retire_session(&self, session_id: &str) {
         let mut registry = self
             .registry
@@ -609,6 +616,50 @@ impl TaskInputCoordinator {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         Self::advance_route_epoch(&mut registry, session_id);
         Self::retire_session_workers(&mut registry, session_id);
+    }
+
+    pub(crate) fn snapshot_session_worker(
+        &self,
+        session_id: &str,
+    ) -> Option<TaskInputWorkerSnapshot> {
+        let registry = self
+            .registry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let incarnation = SessionIncarnation {
+            session_id: session_id.to_string(),
+            pid: *registry.current_pid.get(session_id)?,
+        };
+        let worker_id = registry.workers.get(&incarnation)?.id;
+        Some(TaskInputWorkerSnapshot {
+            incarnation,
+            worker_id,
+        })
+    }
+
+    pub(crate) fn retire_session_worker_if_current(&self, snapshot: TaskInputWorkerSnapshot) {
+        let mut registry = self
+            .registry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let is_current_generation = registry
+            .workers
+            .get(&snapshot.incarnation)
+            .is_some_and(|worker| worker.id == snapshot.worker_id);
+        if !is_current_generation {
+            return;
+        }
+        Self::advance_route_epoch(&mut registry, &snapshot.incarnation.session_id);
+        if let Some(worker) = registry.workers.remove(&snapshot.incarnation) {
+            worker.abort.abort();
+        }
+        if registry.current_pid.get(&snapshot.incarnation.session_id)
+            == Some(&snapshot.incarnation.pid)
+        {
+            registry
+                .current_pid
+                .remove(&snapshot.incarnation.session_id);
+        }
     }
 
     pub(crate) fn begin_session_replacement(&self, session_id: &str) {
@@ -3543,6 +3594,68 @@ mod tests {
         ack_fresh_tx.send(()).unwrap();
         assert!(matches!(fresh.await.unwrap(), Ok(())));
         replacement_daemon.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn conditional_exit_retirement_preserves_newer_same_pid_worker_generation() {
+        let coordinator = TaskInputCoordinator::new(
+            "/unused".to_string(),
+            Db::test_db_path("input-conditional-exit-retirement"),
+        );
+        let incarnation = SessionIncarnation {
+            session_id: "task-reconnect".to_string(),
+            pid: 7373,
+        };
+        let (old_sender, _old_receiver) = mpsc::channel(INPUT_QUEUE_CAPACITY);
+        let old_task = tokio::spawn(std::future::pending::<()>());
+        {
+            let mut registry = coordinator.registry.lock().unwrap();
+            registry
+                .current_pid
+                .insert(incarnation.session_id.clone(), incarnation.pid);
+            registry.workers.insert(
+                incarnation.clone(),
+                SessionInputWorker {
+                    id: 41,
+                    sender: old_sender,
+                    abort: old_task.abort_handle(),
+                },
+            );
+        }
+        let stale_snapshot = coordinator
+            .snapshot_session_worker(&incarnation.session_id)
+            .unwrap();
+
+        let (fresh_sender, _fresh_receiver) = mpsc::channel(INPUT_QUEUE_CAPACITY);
+        let fresh_task = tokio::spawn(std::future::pending::<()>());
+        coordinator.registry.lock().unwrap().workers.insert(
+            incarnation.clone(),
+            SessionInputWorker {
+                id: 42,
+                sender: fresh_sender,
+                abort: fresh_task.abort_handle(),
+            },
+        );
+
+        coordinator.retire_session_worker_if_current(stale_snapshot);
+        assert_eq!(coordinator.current_pid(&incarnation.session_id), Some(7373));
+        assert_eq!(
+            coordinator
+                .registry
+                .lock()
+                .unwrap()
+                .workers
+                .get(&incarnation)
+                .map(|worker| worker.id),
+            Some(42)
+        );
+        assert!(
+            !fresh_task.is_finished(),
+            "stale Exit cleanup aborted the newer same-PID worker"
+        );
+
+        old_task.abort();
+        fresh_task.abort();
     }
 
     #[tokio::test]

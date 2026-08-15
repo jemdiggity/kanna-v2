@@ -169,6 +169,57 @@ pub(crate) async fn terminal_detach_reconciliation_loop(
     }
 }
 
+fn reconcile_unmarked_exit_task_input(state: &http_api::AppState, session_id: &str) {
+    let Some(snapshot) = state.task_input.snapshot_session_worker(session_id) else {
+        return;
+    };
+    let task_input = state.task_input.clone();
+    let daemon_dir = state.config().daemon_dir.clone();
+    let session_id = session_id.to_string();
+    tokio::spawn(async move {
+        use kanna_daemon::protocol::{
+            Command as DaemonCommand, Event as DaemonEvent, SessionKind, SessionState,
+        };
+
+        let result = async {
+            let mut daemon = daemon_client::DaemonClient::connect(&daemon_dir)
+                .await
+                .map_err(|error| format!("daemon connection failed: {error}"))?;
+            match daemon
+                .send_command(&DaemonCommand::List)
+                .await
+                .map_err(|error| format!("daemon List failed: {error}"))?
+            {
+                DaemonEvent::SessionList { sessions } => {
+                    let replacement_is_live = sessions.into_iter().any(|session| {
+                        session.session_id == session_id
+                            && session.kind == SessionKind::Pty
+                            && matches!(session.state, SessionState::Active)
+                    });
+                    if !replacement_is_live {
+                        task_input.retire_session_worker_if_current(snapshot);
+                    }
+                    Ok(())
+                }
+                DaemonEvent::Error { message, .. } => {
+                    Err(format!("daemon List returned error: {message}"))
+                }
+                other => Err(format!("unexpected daemon List response: {other:?}")),
+            }
+        }
+        .await;
+        if let Err(error) = result {
+            // Reconciliation is deliberately conservative: an uncertain List
+            // must not destroy a worker that may belong to a live replacement.
+            log::warn!(
+                "preserving task-input worker after uncertain Exit reconciliation for {}: {}",
+                session_id,
+                error
+            );
+        }
+    });
+}
+
 pub(crate) async fn terminal_state_watcher_loop(
     state: Arc<http_api::AppState>,
     replacements: session_replacements::SessionReplacements,
@@ -307,7 +358,7 @@ async fn terminal_state_watcher_once(
                 // legitimate Exit for the same session id.
                 let replaced = replacements.consume(&session_id);
                 if !replaced {
-                    state.task_input.retire_session(&session_id);
+                    reconcile_unmarked_exit_task_input(state, &session_id);
                 }
                 if replaced || killed {
                     // Orchestrated kill (stage swap, rerun, close) — not the
@@ -609,13 +660,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn watcher_exit_retires_task_input_worker_before_killed_short_circuit() {
+    async fn unmarked_killed_exit_retires_snapshotted_worker_when_session_is_absent() {
         let unique = unique_name("terminal-watcher-retires-input");
         let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
         let config = test_config(&unique, &daemon_dir);
         seed_plain_task(&config);
         let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
         let state = http_api::AppState::new(config.clone());
+        let (reconcile_seen_tx, reconcile_seen_rx) = oneshot::channel();
+        let (release_reconcile_tx, release_reconcile_rx) = oneshot::channel();
 
         let server = tokio::spawn(async move {
             let (list_stream, _) = listener.accept().await.unwrap();
@@ -665,6 +718,25 @@ mod tests {
                 },
             )
             .await;
+            write_event(&mut subscriber, &DaemonEvent::ShuttingDown).await;
+
+            let (reconcile_stream, _) = listener.accept().await.unwrap();
+            let (reconcile_read, mut reconcile_write) = reconcile_stream.into_split();
+            let mut reconcile_reader = BufReader::new(reconcile_read);
+            line.clear();
+            reconcile_reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::List
+            ));
+            reconcile_seen_tx.send(()).unwrap();
+            release_reconcile_rx.await.unwrap();
+            write_event(
+                &mut reconcile_write,
+                &DaemonEvent::SessionList { sessions: vec![] },
+            )
+            .await;
+
             line.clear();
             assert_eq!(
                 timeout(Duration::from_secs(1), input_reader.read_line(&mut line))
@@ -673,7 +745,6 @@ mod tests {
                     .unwrap(),
                 0
             );
-            write_event(&mut subscriber, &DaemonEvent::ShuttingDown).await;
         });
 
         state
@@ -691,14 +762,110 @@ mod tests {
         .await
         .expect("watcher did not finish")
         .unwrap();
-        server.await.unwrap();
+        timeout(Duration::from_secs(1), reconcile_seen_rx)
+            .await
+            .expect("unmarked Exit did not start daemon reconciliation")
+            .unwrap();
+        release_reconcile_tx.send(()).unwrap();
+        timeout(Duration::from_secs(2), server)
+            .await
+            .expect("reconciliation did not retire the snapshotted worker")
+            .unwrap();
 
         let _ = std::fs::remove_file(socket_path);
         let _ = std::fs::remove_dir_all(daemon_dir);
     }
 
     #[tokio::test]
-    async fn delayed_replacement_exit_does_not_retire_fresh_same_id_input_worker() {
+    async fn uncertain_exit_reconciliation_preserves_worker_and_later_frames() {
+        let unique = unique_name("terminal-watcher-uncertain-exit-reconciliation");
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        let config = test_config(&unique, &daemon_dir);
+        let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
+        let state = http_api::AppState::new(config);
+        let (reconcile_dropped_tx, reconcile_dropped_rx) = oneshot::channel();
+
+        let server = tokio::spawn(async move {
+            let (list_stream, _) = listener.accept().await.unwrap();
+            let (list_read, mut list_write) = list_stream.into_split();
+            let mut list_reader = BufReader::new(list_read);
+            let mut line = String::new();
+            list_reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::List
+            ));
+            write_event(
+                &mut list_write,
+                &DaemonEvent::SessionList {
+                    sessions: vec![SessionInfo {
+                        session_id: "task-child".to_string(),
+                        pid: 4242,
+                        cwd: "/tmp".to_string(),
+                        state: SessionState::Active,
+                        idle_seconds: 0,
+                        status: kanna_daemon::protocol::SessionStatus::Idle,
+                        kind: kanna_daemon::protocol::SessionKind::Pty,
+                    }],
+                },
+            )
+            .await;
+
+            let (input_stream, _) = listener.accept().await.unwrap();
+            let (input_read, mut input_write) = input_stream.into_split();
+            let mut input_reader = BufReader::new(input_read);
+            line.clear();
+            input_reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::InputIfSession { data, .. } if data == b"first"
+            ));
+            write_event(&mut input_write, &DaemonEvent::Ok).await;
+
+            let (reconcile_stream, _) = listener.accept().await.unwrap();
+            let (reconcile_read, reconcile_write) = reconcile_stream.into_split();
+            let mut reconcile_reader = BufReader::new(reconcile_read);
+            line.clear();
+            reconcile_reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::List
+            ));
+            drop(reconcile_reader);
+            drop(reconcile_write);
+            reconcile_dropped_tx.send(()).unwrap();
+
+            line.clear();
+            input_reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::InputIfSession { data, .. } if data == b" later"
+            ));
+            write_event(&mut input_write, &DaemonEvent::Ok).await;
+        });
+
+        state
+            .task_input
+            .send_operator_bytes("task-child", "task-child", b"first".to_vec())
+            .await
+            .unwrap();
+        reconcile_unmarked_exit_task_input(&state, "task-child");
+        reconcile_dropped_rx.await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(state.task_input.current_pid("task-child"), Some(4242));
+        state
+            .task_input
+            .send_operator_bytes("task-child", "task-child", b" later".to_vec())
+            .await
+            .unwrap();
+
+        server.await.unwrap();
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn delayed_replacement_exit_after_marker_clear_preserves_fresh_same_id_worker() {
         let unique = unique_name("terminal-watcher-delayed-replacement-exit");
         let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
         let config = test_config(&unique, &daemon_dir);
@@ -707,13 +874,14 @@ mod tests {
         let replacements = state.session_replacements();
         let (old_seen_tx, old_seen_rx) = oneshot::channel();
         let (kill_seen_tx, kill_seen_rx) = oneshot::channel();
+        let (ack_kill_tx, ack_kill_rx) = oneshot::channel();
         let (fresh_seen_tx, fresh_seen_rx) = oneshot::channel();
         let (ack_fresh_tx, ack_fresh_rx) = oneshot::channel();
 
         let server = tokio::spawn(async move {
             let mut ack_fresh_rx = Some(ack_fresh_rx);
             let mut kill_seen_tx = Some(kill_seen_tx);
-            let mut held_kill_write = None;
+            let mut ack_kill_rx = Some(ack_kill_rx);
             for (seen, expected_data) in [
                 (old_seen_tx, b"old worker".as_slice()),
                 (fresh_seen_tx, b"fresh worker".as_slice()),
@@ -764,7 +932,7 @@ mod tests {
                         0
                     );
                     let (kill_stream, _) = listener.accept().await.unwrap();
-                    let (kill_read, kill_write) = kill_stream.into_split();
+                    let (kill_read, mut kill_write) = kill_stream.into_split();
                     let mut kill_reader = BufReader::new(kill_read);
                     line.clear();
                     kill_reader.read_line(&mut line).await.unwrap();
@@ -772,8 +940,9 @@ mod tests {
                         serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
                         DaemonCommand::Kill { session_id } if session_id == "task-child"
                     ));
-                    held_kill_write = Some(kill_write);
                     kill_seen_tx.take().unwrap().send(()).unwrap();
+                    ack_kill_rx.take().unwrap().await.unwrap();
+                    write_event(&mut kill_write, &DaemonEvent::Ok).await;
                 } else {
                     let mut fresh_write = input_write;
                     let mut subscriber = expect_subscribe(&listener).await;
@@ -788,11 +957,34 @@ mod tests {
                     )
                     .await;
                     write_event(&mut subscriber, &DaemonEvent::ShuttingDown).await;
+                    let (reconcile_stream, _) = listener.accept().await.unwrap();
+                    let (reconcile_read, mut reconcile_write) = reconcile_stream.into_split();
+                    let mut reconcile_reader = BufReader::new(reconcile_read);
+                    line.clear();
+                    reconcile_reader.read_line(&mut line).await.unwrap();
+                    assert!(matches!(
+                        serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                        DaemonCommand::List
+                    ));
+                    write_event(
+                        &mut reconcile_write,
+                        &DaemonEvent::SessionList {
+                            sessions: vec![SessionInfo {
+                                session_id: "task-child".to_string(),
+                                pid: 4242,
+                                cwd: "/tmp".to_string(),
+                                state: SessionState::Active,
+                                idle_seconds: 0,
+                                status: kanna_daemon::protocol::SessionStatus::Idle,
+                                kind: kanna_daemon::protocol::SessionKind::Pty,
+                            }],
+                        },
+                    )
+                    .await;
                     ack_fresh_rx.take().unwrap().await.unwrap();
                     write_event(&mut fresh_write, &DaemonEvent::Ok).await;
                 }
             }
-            drop(held_kill_write);
         });
 
         let old_state = state.clone();
@@ -825,8 +1017,9 @@ mod tests {
             Err(crate::task_input_queue::TaskInputError::Uncertain(_))
         ));
         kill_seen_rx.await.unwrap();
-        kill.abort();
-        assert!(kill.await.unwrap_err().is_cancelled());
+        replacements.clear();
+        ack_kill_tx.send(()).unwrap();
+        kill.await.unwrap().unwrap();
 
         let fresh_state = state.clone();
         let fresh = tokio::spawn(async move {
