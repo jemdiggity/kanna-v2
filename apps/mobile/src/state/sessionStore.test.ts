@@ -1147,6 +1147,34 @@ describe("createSessionStore", () => {
     expect(publishes).toBe(0);
   });
 
+  it("keeps a dismissed activity through a stale refresh and accepts a later revision", () => {
+    const store = createSessionStore();
+    const task = {
+      id: "task-activity",
+      repoId: "repo-1",
+      title: "Activity",
+      stage: "review",
+      activity: "unread" as const,
+      activityRevision: 4
+    };
+    store.setRecentTasks([task]);
+    store.setTaskActivity("task-activity", "idle", 5);
+
+    store.setRecentTasks([task]);
+    expect(store.getState().recentTasks[0]).toMatchObject({
+      activity: "idle",
+      activityRevision: 5
+    });
+
+    store.setRecentTasks([
+      { ...task, activity: "unread", activityRevision: 6 }
+    ]);
+    expect(store.getState().recentTasks[0]).toMatchObject({
+      activity: "unread",
+      activityRevision: 6
+    });
+  });
+
   it("publishes when only relationship fields change on a refreshed task", () => {
     const store = createSessionStore();
     let publishes = 0;

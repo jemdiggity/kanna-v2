@@ -1296,7 +1296,7 @@ describe("createCloudLanClient", () => {
     await client.closeTask("lan-only");
     await client.advanceTaskStage("cloud-only");
     await client.runMergeAgent("cloud-duplicate");
-    await client.markTaskRead("cloud-duplicate");
+    await client.markTaskRead("cloud-duplicate", 7);
     await client.pinTask("cloud-duplicate");
     await client.unpinTask("cloud-only");
     await client.getTask?.("cloud-duplicate");
@@ -1333,7 +1333,7 @@ describe("createCloudLanClient", () => {
     expect(lan.closeTask).toHaveBeenCalledWith("lan-only");
     expect(cloud.advanceTaskStage).toHaveBeenCalledWith("cloud-only");
     expect(lan.runMergeAgent).toHaveBeenCalledWith("local-duplicate");
-    expect(lan.markTaskRead).toHaveBeenCalledWith("local-duplicate");
+    expect(lan.markTaskRead).toHaveBeenCalledWith("local-duplicate", 7);
     expect(cloud.markTaskRead).not.toHaveBeenCalled();
     expect(lan.pinTask).toHaveBeenCalledWith("local-duplicate");
     expect(cloud.pinTask).not.toHaveBeenCalled();

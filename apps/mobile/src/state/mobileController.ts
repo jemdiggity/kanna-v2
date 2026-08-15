@@ -65,6 +65,7 @@ export interface MobileController {
   setComposerOptionsExpanded(isExpanded: boolean): void;
   selectComposerAgentProvider(provider: ComposerAgentProvider): void;
   searchTasks(query: string): Promise<void>;
+  dismissActivity(taskId: string): Promise<void>;
   setTaskPinned(taskId: string, pinned: boolean): Promise<void>;
   createTask(terminalGeometry?: MobileTerminalGeometry): Promise<string | null>;
   recoverTaskCreation(slotId?: string): Promise<string | null>;
@@ -246,6 +247,7 @@ export function createMobileController(
   const taskCreationPersistenceFlights = new Map<string, Promise<void>>();
   const recoveryStartedTaskIds = new Set<string>();
   const taskPinFlights = new Set<string>();
+  const activityDismissFlights = new Set<string>();
   let lastSubmittedTaskCreationId: string | null = null;
   let repoCommandLoadGeneration = 0;
   const repoCommandCatalogs = new Map<string, RepoCommandCatalog>();
@@ -496,16 +498,24 @@ export function createMobileController(
   const selectedTaskReadState = () => {
     const state = store.getState();
     const selectedTaskId = durableTaskIdForSelection(state.selectedTaskId);
-    const activities: TaskActivity[] = selectedTaskId
+    const taskCopies = selectedTaskId
       ? [state.repoTasks, state.recentTasks, state.searchResults]
           .flatMap((tasks) => tasks.filter((task) => task.id === selectedTaskId))
-          .map((task) => task.activity ?? "idle")
       : [];
+    const activities: TaskActivity[] = taskCopies.map(
+      (task) => task.activity ?? "idle"
+    );
+    const activityRevisions = taskCopies.map((task) => task.activityRevision);
     const activity =
       activities.length > 0 &&
       activities.every((candidate) => candidate === activities[0])
         ? activities[0]
         : null;
+    const activityRevision =
+      activityRevisions.length > 0 &&
+      activityRevisions.every((candidate) => candidate === activityRevisions[0])
+        ? activityRevisions[0]
+        : undefined;
 
     return {
       taskId: selectedTaskId,
@@ -514,24 +524,38 @@ export function createMobileController(
         state.connectionState === "connected" &&
         selectedTaskId !== null,
       activities,
-      activity
+      activity,
+      activityRevision
     };
   };
+  const markTaskRead = (
+    taskId: string,
+    expectedActivityRevision: number | undefined
+  ) =>
+    expectedActivityRevision === undefined
+      ? client.markTaskRead(taskId)
+      : client.markTaskRead(taskId, expectedActivityRevision);
 
   const selectedTaskReadKey = (): string | null => {
-    const { taskId, visible, activities } = selectedTaskReadState();
+    const { taskId, visible, activities, activityRevision } =
+      selectedTaskReadState();
     const selectedTaskId = taskId;
     if (!selectedTaskId) return null;
-    return `${selectedTaskId}\u0000${visible ? "visible" : "hidden"}\u0000${activities.join(",")}`;
+    return `${selectedTaskId}\u0000${visible ? "visible" : "hidden"}\u0000${activities.join(",")}\u0000${activityRevision ?? "legacy"}`;
   };
 
-  const canMarkSelectedTaskRead = (taskId: string, generation: number) => {
+  const canMarkSelectedTaskRead = (
+    taskId: string,
+    generation: number,
+    expectedActivityRevision: number | undefined
+  ) => {
     const selected = selectedTaskReadState();
     return (
       generation === markReadGeneration &&
       selected.taskId === taskId &&
       selected.visible &&
-      selected.activity === "unread"
+      selected.activity === "unread" &&
+      selected.activityRevision === expectedActivityRevision
     );
   };
 
@@ -553,31 +577,59 @@ export function createMobileController(
     const taskId = selected.taskId;
     markReadTimer = setTimeout(() => {
       markReadTimer = null;
-      void markSelectedTaskRead(taskId, generation, 1);
+      void markSelectedTaskRead(
+        taskId,
+        generation,
+        selected.activityRevision,
+        1
+      );
     }, MARK_READ_DEBOUNCE_MS);
   };
 
   const markSelectedTaskRead = async (
     taskId: string,
     generation: number,
+    expectedActivityRevision: number | undefined,
     attempt: number
   ) => {
-    if (!canMarkSelectedTaskRead(taskId, generation)) {
+    if (
+      !canMarkSelectedTaskRead(
+        taskId,
+        generation,
+        expectedActivityRevision
+      )
+    ) {
       return;
     }
 
     try {
-      const response = await client.markTaskRead(taskId);
+      const response = await markTaskRead(taskId, expectedActivityRevision);
       if (
-        !canMarkSelectedTaskRead(taskId, generation)
+        !canMarkSelectedTaskRead(
+          taskId,
+          generation,
+          expectedActivityRevision
+        )
         || response.activity !== "idle"
       ) {
         return;
       }
-      store.setTaskActivity(taskId, "idle");
+      store.setTaskActivity(
+        taskId,
+        "idle",
+        expectedActivityRevision === undefined
+          ? undefined
+          : expectedActivityRevision + 1
+      );
       reconcileSelectedTaskRead();
     } catch {
-      if (!canMarkSelectedTaskRead(taskId, generation)) return;
+      if (
+        !canMarkSelectedTaskRead(
+          taskId,
+          generation,
+          expectedActivityRevision
+        )
+      ) return;
       if (attempt >= MARK_READ_MAX_ATTEMPTS) {
         exhaustedMarkReadGeneration = generation;
         return;
@@ -586,7 +638,12 @@ export function createMobileController(
       const retryDelay = MARK_READ_RETRY_BASE_MS * 2 ** (attempt - 1);
       markReadTimer = setTimeout(() => {
         markReadTimer = null;
-        void markSelectedTaskRead(taskId, generation, attempt + 1);
+        void markSelectedTaskRead(
+          taskId,
+          generation,
+          expectedActivityRevision,
+          attempt + 1
+        );
       }, retryDelay);
     }
   };
@@ -2014,6 +2071,38 @@ export function createMobileController(
         if (taskCollectionsRevision === searchRevision) {
           fail(error);
         }
+      }
+    },
+
+    async dismissActivity(taskId) {
+      const task = findTask(taskId);
+      if (!task || task.activity !== "unread") {
+        throw new Error("This activity is no longer available.");
+      }
+      if (activityDismissFlights.has(task.id)) {
+        return;
+      }
+
+      activityDismissFlights.add(task.id);
+      taskCollectionsRevision += 1;
+      try {
+        const response = await markTaskRead(task.id, task.activityRevision);
+        if (response.activity !== "idle") {
+          throw new Error("The activity changed before it could be dismissed.");
+        }
+        store.setTaskActivity(
+          task.id,
+          "idle",
+          task.activityRevision === undefined
+            ? undefined
+            : task.activityRevision + 1
+        );
+        reconcileSelectedTaskRead();
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(`Could not dismiss activity: ${detail}`);
+      } finally {
+        activityDismissFlights.delete(task.id);
       }
     },
 

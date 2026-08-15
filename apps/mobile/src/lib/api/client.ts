@@ -112,7 +112,10 @@ export interface KannaTransport {
   abortTaskCreation(input: AbortTaskCreationRequest): Promise<void>;
   runMergeAgent(taskId: string): Promise<TaskActionResponse>;
   advanceTaskStage(taskId: string): Promise<TaskActionResponse>;
-  markTaskRead(taskId: string): Promise<TaskActivityResponse>;
+  markTaskRead(
+    taskId: string,
+    expectedActivityRevision?: number
+  ): Promise<TaskActivityResponse>;
   pinTask(taskId: string): Promise<void>;
   unpinTask(taskId: string): Promise<void>;
   closeTask(taskId: string): Promise<void>;
@@ -156,7 +159,10 @@ export interface KannaClient {
   abortTaskCreation(input: AbortTaskCreationRequest): Promise<void>;
   runMergeAgent(taskId: string): Promise<TaskActionResponse>;
   advanceTaskStage(taskId: string): Promise<TaskActionResponse>;
-  markTaskRead(taskId: string): Promise<TaskActivityResponse>;
+  markTaskRead(
+    taskId: string,
+    expectedActivityRevision?: number
+  ): Promise<TaskActivityResponse>;
   pinTask(taskId: string): Promise<void>;
   unpinTask(taskId: string): Promise<void>;
   closeTask(taskId: string): Promise<void>;

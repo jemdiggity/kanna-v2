@@ -364,6 +364,9 @@ export function mapCloudTaskSnapshot(snapshot: CloudTaskSnapshot): CloudTaskSumm
     agentProvider: snapshot.agent?.provider ?? null,
     agentType: normalizeAgentType(snapshot.agent?.type),
     activity: normalizeTaskActivity(snapshot.activity),
+    ...(snapshot.activityRevision === undefined
+      ? {}
+      : { activityRevision: snapshot.activityRevision }),
     parentTaskId: snapshot.parentTaskId ?? null,
     blockedByTaskIds: snapshot.blockedByTaskIds ?? [],
     pinned: snapshot.pinned ?? false,

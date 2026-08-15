@@ -245,6 +245,7 @@ describe("TasksScreen", () => {
         repoId: "repo-a",
         title: "Task A",
         stage: "review",
+        activity: "unread" as const,
         createdAt: "2026-07-15T08:00:00.000Z"
       },
       {
@@ -252,6 +253,7 @@ describe("TasksScreen", () => {
         repoId: "repo-b",
         title: "Task B",
         stage: "in progress",
+        activity: "unread" as const,
         createdAt: "2026-07-17T08:00:00.000Z"
       }
     ];
@@ -276,7 +278,7 @@ describe("TasksScreen", () => {
     expect(textContent(tree)).not.toContain("Repo A");
   });
 
-  it("orders Recent tasks by attention state while preserving group order", () => {
+  it("shows only unread Activity entries while preserving source order", () => {
     if (!TasksScreen || !TaskList) throw new Error("TasksScreen was not loaded");
     const tasks = [
       {
@@ -325,7 +327,7 @@ describe("TasksScreen", () => {
       }>).map(
         ({ taskId }) => taskId
       )
-    ).toEqual(["unread-1", "unread-2", "idle-1", "working-1"]);
+    ).toEqual(["unread-1", "unread-2"]);
   });
 
   it("labels Recent tasks with their repo so similar titles stay distinguishable", () => {
@@ -336,19 +338,22 @@ describe("TasksScreen", () => {
         repoId: "repo-a",
         repoName: "Cloud Repo",
         title: "Fix login",
-        stage: "review"
+        stage: "review",
+        activity: "unread" as const
       },
       {
         id: "task-lan",
         repoId: "repo-b",
         title: "Fix login",
-        stage: "review"
+        stage: "review",
+        activity: "unread" as const
       },
       {
         id: "task-unknown",
         repoId: "repo-unknown",
         title: "Fix login",
-        stage: "review"
+        stage: "review",
+        activity: "unread" as const
       }
     ];
 
@@ -546,7 +551,13 @@ describe("TasksScreen", () => {
     if (!TasksScreen || !TaskList) throw new Error("TasksScreen was not loaded");
     const onOpenTask = vi.fn();
     const [slot] = projectTaskUiSlots(
-      [{ id: "task-durable", repoId: "repo-1", title: "Task", stage: "review" }],
+      [{
+        id: "task-durable",
+        repoId: "repo-1",
+        title: "Task",
+        stage: "review",
+        activity: "unread"
+      }],
       []
     );
     const stableSlot = { ...slot!, slotId: "create:slot-1" };

@@ -44,6 +44,7 @@ import { SearchScreen } from "../screens/SearchScreen";
 import { TaskScreen } from "../screens/TaskScreen";
 import type { TaskQuickReply } from "../screens/taskQuickReplies";
 import { TasksScreen } from "../screens/TasksScreen";
+import { unreadActivityCount } from "../screens/activityTaskOrder";
 import type { MobileController } from "../state/mobileController";
 import { buildMachineInventory } from "../state/machineInventory";
 import type {
@@ -317,11 +318,12 @@ function MainTabsRoute() {
 }
 
 function NavigatorTabBar(props: BottomTabBarProps) {
-  const { openComposer, pushSearch } = useNavigationContent();
+  const { openComposer, pushSearch, state } = useNavigationContent();
 
   return (
     <FloatingToolbar
       {...props}
+      activityCount={unreadActivityCount(state.recentTasks)}
       onSelectUtilityAction={(action) => {
         if (action === "search") {
           pushSearch();
@@ -379,6 +381,7 @@ function ActivityTabRoute() {
           void controller.selectRepo(repoId);
         }}
         onOpenTask={pushTask}
+        onDismissActivity={(taskId) => controller.dismissActivity(taskId)}
         onSetTaskPinned={(taskId, pinned) =>
           controller.setTaskPinned(taskId, pinned)
         }

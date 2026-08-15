@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { TaskActivity, TaskSummary } from "../lib/api/types";
-import { orderActivityTasks } from "./activityTaskOrder";
+import {
+  orderActivityTasks,
+  unreadActivityCount,
+  visibleActivityTasks
+} from "./activityTaskOrder";
 
 function task(id: string, activity?: TaskActivity | null): TaskSummary {
   return {
@@ -42,5 +46,20 @@ describe("orderActivityTasks", () => {
 
     expect(ordered).not.toBe(tasks);
     expect(tasks.map(({ id }) => id)).toEqual(["working", "unread"]);
+  });
+
+  it("projects and counts only unread notification entries", () => {
+    const tasks = [
+      task("working", "working"),
+      task("unread-1", "unread"),
+      task("idle", "idle"),
+      task("unread-2", "unread")
+    ];
+
+    expect(visibleActivityTasks(tasks).map(({ id }) => id)).toEqual([
+      "unread-1",
+      "unread-2"
+    ]);
+    expect(unreadActivityCount(tasks)).toBe(2);
   });
 });

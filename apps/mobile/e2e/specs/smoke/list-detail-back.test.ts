@@ -3,6 +3,7 @@ import * as smokeModule from "./list-detail-back.e2e";
 import {
   assertPtyTerminalFixtureAvailable,
   ensureTaskListVisible,
+  exerciseActivityDismissSwipe,
   exerciseTaskPinSwipe,
   exerciseListDetailBackFromOrigin,
   inspectTerminalWebView,
@@ -177,6 +178,71 @@ describe("exerciseTaskPinSwipe", () => {
       { method: "POST" }
     );
     expect(pinned).toBe(false);
+  });
+});
+
+describe("exerciseActivityDismissSwipe", () => {
+  it("swipes, acknowledges only activity, and observes a later revision", async () => {
+    let activity = "idle";
+    const row = {
+      getLocation: vi.fn(async () => ({ x: 10, y: 100 })),
+      getSize: vi.fn(async () => ({ width: 360, height: 90 })),
+      isExisting: vi.fn(async () => activity === "unread"),
+      waitForDisplayed: vi.fn(async () => undefined)
+    };
+    const activityTab = { click: vi.fn(async () => undefined) };
+    const screen = { waitForDisplayed: vi.fn(async () => undefined) };
+    const action = {
+      click: vi.fn(async () => {
+        activity = "idle";
+      }),
+      waitForDisplayed: vi.fn(async () => undefined)
+    };
+    const driver = {
+      $: vi.fn(async (selector: string) => {
+        if (selector === selectors.recentTab) return activityTab;
+        if (selector === selectors.recentScreen) return screen;
+        if (selector === "~mobile.task-row.task-1") return row;
+        return action;
+      }),
+      execute: vi.fn(async () => undefined),
+      waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
+        if (!(await condition())) throw new Error(options.timeoutMsg);
+      })
+    };
+    const fetchImpl = vi.fn(async (url: string, init?: { body?: string }) => {
+      if (url.endsWith("/actions/runtime-status")) {
+        const body = JSON.parse(init?.body ?? "{}") as { status?: string };
+        activity = body.status === "busy" ? "working" : "unread";
+        return { ok: true, status: 200, json: async () => ({}) };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => [{ id: "task-1", activity }]
+      };
+    });
+
+    await exerciseActivityDismissSwipe(
+      driver as never,
+      "http://127.0.0.1:48120",
+      "task-1",
+      fetchImpl
+    );
+
+    expect(driver.execute).toHaveBeenCalledWith(
+      "mobile: dragFromToForDuration",
+      {
+        duration: 0.35,
+        fromX: 298,
+        fromY: 145,
+        toX: 136,
+        toY: 145
+      }
+    );
+    expect(action.click).toHaveBeenCalledOnce();
+    expect(activity).toBe("unread");
+    expect(row.waitForDisplayed).toHaveBeenCalledTimes(2);
   });
 });
 

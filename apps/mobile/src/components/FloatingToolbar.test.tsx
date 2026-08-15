@@ -115,6 +115,30 @@ describe("FloatingToolbar", () => {
     );
   });
 
+  it("shows the unread Activity count from the shared notification projection", async () => {
+    if (!FloatingToolbar) throw new Error("FloatingToolbar was not loaded");
+    const navigatorProps = createNavigatorProps();
+
+    await act(async () => {
+      rendered = create(
+        React.createElement(FloatingToolbar, {
+          ...navigatorProps,
+          activityCount: 3,
+          onSelectUtilityAction: vi.fn()
+        } as never)
+      );
+    });
+
+    const activity = rendered.root.find(
+      (node) => node.props.testID?.endsWith("recent")
+    );
+    const badge = rendered.root.findByProps({
+      testID: "mobile.activity-badge"
+    });
+    expect(activity.props.accessibilityLabel).toBe("Activity, 3 unread");
+    expect(badge.findByType("Text").props.children).toBe(3);
+  });
+
   it("emits the active tab press without recreating navigation state", async () => {
     if (!FloatingToolbar) throw new Error("FloatingToolbar was not loaded");
     const navigatorProps = createNavigatorProps(0);

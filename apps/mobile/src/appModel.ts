@@ -1139,8 +1139,13 @@ function createTrustedLanFallbackClient({
       (await resolveClient(desktopId)).runMergeAgent(taskId),
     advanceTaskStage: async (taskId) =>
       (await resolveClient(desktopId)).advanceTaskStage(taskId),
-    markTaskRead: async (taskId) =>
-      (await resolveClient(desktopId)).markTaskRead(taskId),
+    markTaskRead: async (taskId, expectedActivityRevision) =>
+      expectedActivityRevision === undefined
+        ? (await resolveClient(desktopId)).markTaskRead(taskId)
+        : (await resolveClient(desktopId)).markTaskRead(
+            taskId,
+            expectedActivityRevision
+          ),
     pinTask: async (taskId) =>
       (await resolveClient(desktopId)).pinTask(taskId),
     unpinTask: async (taskId) =>
@@ -1351,7 +1356,10 @@ function createDelegatingClient(getClient: () => KannaClient): KannaClient {
     abortTaskCreation: (input) => getClient().abortTaskCreation(input),
     runMergeAgent: (taskId) => getClient().runMergeAgent(taskId),
     advanceTaskStage: (taskId) => getClient().advanceTaskStage(taskId),
-    markTaskRead: (taskId) => getClient().markTaskRead(taskId),
+    markTaskRead: (taskId, expectedActivityRevision) =>
+      expectedActivityRevision === undefined
+        ? getClient().markTaskRead(taskId)
+        : getClient().markTaskRead(taskId, expectedActivityRevision),
     pinTask: (taskId) => getClient().pinTask(taskId),
     unpinTask: (taskId) => getClient().unpinTask(taskId),
     closeTask: (taskId) => getClient().closeTask(taskId),

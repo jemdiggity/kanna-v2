@@ -17,12 +17,19 @@ export interface TaskCardPinAction {
   onToggle(): void;
 }
 
+export interface TaskCardDismissAction {
+  error: string | null;
+  pending: boolean;
+  onDismiss(): void;
+}
+
 interface TaskCardProps {
   task: TaskSummary;
   uiId?: string;
   isSubtask?: boolean;
   repoLabel?: string | null;
   pinAction?: TaskCardPinAction;
+  dismissAction?: TaskCardDismissAction;
   onPress(): void;
 }
 
@@ -32,6 +39,7 @@ export function TaskCard({
   isSubtask = false,
   repoLabel = null,
   pinAction,
+  dismissAction,
   onPress
 }: TaskCardProps) {
   const model = buildTaskListItemModel(task);
@@ -69,15 +77,21 @@ export function TaskCard({
   const handleAccessibilityAction = (event: AccessibilityActionEvent) => {
     if (event.nativeEvent.actionName === (pinned ? "unpin" : "pin")) {
       pinAction?.onToggle();
+    } else if (event.nativeEvent.actionName === "dismiss") {
+      dismissAction?.onDismiss();
     }
   };
+  const accessibilityActions = [
+    ...(pinAction
+      ? [{ name: pinned ? "unpin" : "pin", label: pinLabel }]
+      : []),
+    ...(dismissAction ? [{ name: "dismiss", label: "Dismiss" }] : [])
+  ];
 
   return (
     <Pressable
       accessibilityActions={
-        pinAction
-          ? [{ name: pinned ? "unpin" : "pin", label: pinLabel }]
-          : undefined
+        accessibilityActions.length > 0 ? accessibilityActions : undefined
       }
       accessibilityLabel={accessibilityLabel}
       accessibilityRole="button"
@@ -136,6 +150,28 @@ export function TaskCard({
               </Text>
             </Pressable>
           ) : null}
+          {dismissAction ? (
+            <Pressable
+              accessibilityLabel={`${
+                dismissAction.pending ? "Dismissing" : "Dismiss"
+              } ${model.title}`}
+              accessibilityRole="button"
+              accessibilityState={{
+                busy: dismissAction.pending,
+                disabled: dismissAction.pending
+              }}
+              style={styles.dismissButton}
+              testID={MOBILE_E2E_IDS.activityDismissButton(uiId)}
+              onPress={(event) => {
+                event.stopPropagation();
+                dismissAction.onDismiss();
+              }}
+            >
+              <Text style={styles.dismissButtonLabel}>
+                {dismissAction.pending ? "Dismissing…" : "Dismiss"}
+              </Text>
+            </Pressable>
+          ) : null}
         </View>
       </View>
       {model.waitingPromptSnippet ? (
@@ -158,6 +194,15 @@ export function TaskCard({
           testID={MOBILE_E2E_IDS.taskPinError(uiId)}
         >
           {pinAction.error}
+        </Text>
+      ) : null}
+      {dismissAction?.error ? (
+        <Text
+          accessibilityLiveRegion="polite"
+          style={styles.actionError}
+          testID={MOBILE_E2E_IDS.activityDismissError(uiId)}
+        >
+          {dismissAction.error}
         </Text>
       ) : null}
     </Pressable>
@@ -248,6 +293,20 @@ const styles = StyleSheet.create({
   pinButtonLabelActive: {
     color: "#10213D"
   },
+  dismissButton: {
+    alignSelf: "flex-end",
+    backgroundColor: "#321B24",
+    borderColor: "#713548",
+    borderRadius: 999,
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    paddingVertical: 6
+  },
+  dismissButtonLabel: {
+    color: "#FFB8C4",
+    fontSize: 11,
+    fontWeight: "800"
+  },
   preview: {
     color: "#B8C6DB",
     fontSize: 14,
@@ -257,6 +316,11 @@ const styles = StyleSheet.create({
     color: "#6F819E"
   },
   pinError: {
+    color: "#FF9DAA",
+    fontSize: 13,
+    lineHeight: 18
+  },
+  actionError: {
     color: "#FF9DAA",
     fontSize: 13,
     lineHeight: 18

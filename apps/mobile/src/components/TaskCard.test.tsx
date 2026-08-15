@@ -244,6 +244,34 @@ describe("TaskCard", () => {
     expect(button).not.toBeNull();
   });
 
+  it("exposes Activity dismissal as a visible button and accessibility action", () => {
+    if (!TaskCard) throw new Error("TaskCard was not loaded");
+    const onDismiss = vi.fn();
+    const tree = TaskCard({
+      task: {
+        id: "task-activity",
+        repoId: "repo-1",
+        title: "Unread activity",
+        stage: "review",
+        activity: "unread"
+      },
+      dismissAction: { error: null, pending: false, onDismiss },
+      onPress: vi.fn()
+    }) as ElementNode;
+
+    expect(tree.props?.accessibilityActions).toEqual([
+      { name: "dismiss", label: "Dismiss" }
+    ]);
+    expect(findTextNodeByCompleteText(tree, "Dismiss")).not.toBeNull();
+    expect(
+      findNodeByProp(
+        tree,
+        "testID",
+        MOBILE_E2E_IDS.activityDismissButton("task-activity")
+      )
+    ).not.toBeNull();
+  });
+
   it.each([
     {
       optimisticPinned: true,

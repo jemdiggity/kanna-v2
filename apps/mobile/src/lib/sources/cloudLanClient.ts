@@ -1378,9 +1378,11 @@ export function createCloudLanClient(
       invokeTaskActionRoute(taskId, (client, routedTaskId) =>
         client.advanceTaskStage(routedTaskId)
       ),
-    markTaskRead: (taskId) =>
+    markTaskRead: (taskId, expectedActivityRevision) =>
       invokeTaskRoute(taskId, (client, routedTaskId) =>
-        client.markTaskRead(routedTaskId)
+        expectedActivityRevision === undefined
+          ? client.markTaskRead(routedTaskId)
+          : client.markTaskRead(routedTaskId, expectedActivityRevision)
       ),
     pinTask: (taskId) =>
       invokeTaskRoute(taskId, (client, routedTaskId) =>

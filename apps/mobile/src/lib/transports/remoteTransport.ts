@@ -760,13 +760,15 @@ export function createRemoteTransport({
         (localTaskId) =>
           `/v1/tasks/${encodeURIComponent(localTaskId)}/actions/advance-stage`
       ),
-    markTaskRead: (taskId: string) =>
+    markTaskRead: (taskId: string, expectedActivityRevision?: number) =>
       requestTask<TaskActivityResponse>(
         taskId,
         "POST",
         (localTaskId) =>
           `/v1/tasks/${encodeURIComponent(localTaskId)}/actions/mark-read`,
-        null,
+        expectedActivityRevision === undefined
+          ? null
+          : { expectedActivityRevision },
         true
       ),
     pinTask: async (taskId: string) => {

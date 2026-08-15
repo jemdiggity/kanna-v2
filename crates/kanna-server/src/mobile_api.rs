@@ -84,6 +84,7 @@ pub struct TaskSummary {
     pub stage: Option<String>,
     pub created_at: Option<String>,
     pub activity: Option<String>,
+    pub activity_revision: i64,
     pub snippet: Option<String>,
     pub waiting_prompt_snippet: Option<String>,
     pub agent_type: Option<String>,
@@ -766,6 +767,7 @@ fn map_task_summary(
         stage: item.stage,
         created_at: item.created_at,
         activity: item.activity,
+        activity_revision: item.activity_revision,
         snippet: waiting_prompt_snippet.clone(),
         waiting_prompt_snippet,
         agent_type: item.agent_type,
@@ -1319,6 +1321,8 @@ mod tests {
             "2026-04-17 07:00:00",
         )
         .unwrap();
+        db.update_pipeline_item_activity("task-newer", "unread")
+            .unwrap();
         db.insert_test_pipeline_item(
             "task-done",
             "repo-1",
@@ -1336,6 +1340,8 @@ mod tests {
         assert_eq!(tasks.len(), 2);
         assert_eq!(tasks[0].id, "task-newer");
         assert_eq!(tasks[0].repo_name.as_deref(), Some("Repo One"));
+        assert_eq!(tasks[0].activity.as_deref(), Some("unread"));
+        assert_eq!(tasks[0].activity_revision, 1);
         assert_eq!(tasks[1].id, "task-older");
         assert_eq!(tasks[1].repo_name.as_deref(), Some("Repo One"));
     }

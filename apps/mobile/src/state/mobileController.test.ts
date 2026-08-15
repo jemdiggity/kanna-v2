@@ -337,6 +337,71 @@ describe("createMobileController", () => {
     });
   });
 
+  it("dismisses exactly the visible activity revision without removing the task", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+    await controller.bootstrap();
+    store.setRepoTasks([
+      {
+        id: "task-1",
+        repoId: "repo-1",
+        title: "Unread task",
+        stage: "review",
+        activity: "unread",
+        activityRevision: 7
+      }
+    ]);
+    store.setRecentTasks(store.getState().repoTasks);
+    controller.openTask("task-1");
+
+    await controller.dismissActivity("task-1");
+
+    expect(client.markTaskRead).toHaveBeenCalledWith("task-1", 7);
+    expect(store.getState().recentTasks).toEqual([
+      expect.objectContaining({
+        id: "task-1",
+        activity: "idle",
+        activityRevision: 8
+      })
+    ]);
+    expect(store.getState().repoTasks).toHaveLength(1);
+    expect(store.getState().selectedTaskId).toBe("task-1");
+  });
+
+  it("does not suppress a later distinct activity when dismissal loses its revision race", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const response = createDeferred<{ taskId: string; activity: null }>();
+    client.markTaskRead.mockReturnValueOnce(response.promise);
+    const controller = createMobileController(client, store);
+    await controller.bootstrap();
+    const unreadTasks: TaskSummary[] = [
+      {
+        id: "task-1",
+        repoId: "repo-1",
+        title: "Unread task",
+        stage: "review",
+        activity: "unread",
+        activityRevision: 7
+      }
+    ];
+    store.setRepoTasks(unreadTasks);
+    store.setRecentTasks(unreadTasks);
+
+    const dismissal = controller.dismissActivity("task-1");
+    store.setTaskActivity("task-1", "unread", 8);
+    response.resolve({ taskId: "task-1", activity: null });
+
+    await expect(dismissal).rejects.toThrow(
+      "The activity changed before it could be dismissed"
+    );
+    expect(store.getState().recentTasks[0]).toMatchObject({
+      activity: "unread",
+      activityRevision: 8
+    });
+  });
+
   it("marks polled task collections ready after bootstrap", async () => {
     const store = createSessionStore();
     const controller = createMobileController(createClientMock(), store);

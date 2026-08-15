@@ -10,6 +10,16 @@ export const MOBILE_E2E_IDS = {
     return `mobile.tasks.repo.${repoId}`;
   },
   recentScreen: "mobile.recent-screen",
+  activityBadge: "mobile.activity-badge",
+  activityDismissAction(taskId: string): string {
+    return `mobile.activity-dismiss-action.${taskId}`;
+  },
+  activityDismissButton(taskId: string): string {
+    return `mobile.activity-dismiss-button.${taskId}`;
+  },
+  activityDismissError(taskId: string): string {
+    return `mobile.activity-dismiss-error.${taskId}`;
+  },
   searchScreen: "mobile.search-screen",
   searchInput: "mobile.search-input",
   searchKeyboardDismissTarget: "mobile.search-keyboard-dismiss-target",

@@ -22,6 +22,7 @@ interface TaskListProps {
   taskSlots: TaskUiSlot[];
   testID?: string;
   onOpenTask(taskId: string): void;
+  onDismissTask?(taskId: string): Promise<void>;
   onSetTaskPinned?(taskId: string, pinned: boolean): Promise<void>;
 }
 
@@ -34,6 +35,7 @@ export function TaskList({
   testID,
   taskSlots,
   onOpenTask,
+  onDismissTask,
   onSetTaskPinned
 }: TaskListProps) {
   if (!taskSlots.length) {
@@ -63,11 +65,21 @@ export function TaskList({
           uiId: slot.slotId,
           onPress: () => onOpenTask(slot.slotId)
         };
-        const card = slot.state === "ready" && onSetTaskPinned ? (
+        const card = slot.state === "ready" &&
+          (onSetTaskPinned || onDismissTask) ? (
           <SwipeableTaskCard
             key={slot.slotId}
             {...commonProps}
-            onTogglePin={(pinned) => onSetTaskPinned(slot.taskId, pinned)}
+            onDismiss={
+              onDismissTask
+                ? () => onDismissTask(slot.taskId)
+                : undefined
+            }
+            onTogglePin={
+              onSetTaskPinned
+                ? (pinned) => onSetTaskPinned(slot.taskId, pinned)
+                : undefined
+            }
           />
         ) : (
           <TaskCard key={slot.slotId} {...commonProps} />

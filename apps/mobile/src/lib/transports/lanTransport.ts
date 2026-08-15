@@ -179,9 +179,15 @@ export function createLanTransport(
       request<TaskActionResponse>(`/v1/tasks/${encodeURIComponent(taskId)}/actions/advance-stage`, {
         method: "POST"
       }),
-    markTaskRead: (taskId: string) =>
+    markTaskRead: (taskId: string, expectedActivityRevision?: number) =>
       request<TaskActivityResponse>(`/v1/tasks/${encodeURIComponent(taskId)}/actions/mark-read`, {
-        method: "POST"
+        method: "POST",
+        ...(expectedActivityRevision === undefined
+          ? {}
+          : {
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ expectedActivityRevision })
+            })
       }),
     pinTask: async (taskId: string) => {
       await request<TaskActionResponse>(

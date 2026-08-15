@@ -231,7 +231,11 @@ export interface SessionStore {
   resetRepoCommandAvailability(): void;
   setRecentTasks(tasks: TaskSummary[]): void;
   setSearchResults(query: string, results: TaskSummary[]): void;
-  setTaskActivity(taskId: string, activity: TaskActivity): void;
+  setTaskActivity(
+    taskId: string,
+    activity: TaskActivity,
+    activityRevision?: number
+  ): void;
   setTaskPinState(
     taskId: string,
     pinned: boolean,
@@ -447,6 +451,8 @@ export function createSessionStore(): SessionStore {
         task.stage === other.stage &&
         (task.createdAt ?? null) === (other.createdAt ?? null) &&
         (task.activity ?? "idle") === (other.activity ?? "idle") &&
+        (task.activityRevision ?? null) ===
+          (other.activityRevision ?? null) &&
         (task.waitingPromptSnippet ?? null) ===
           (other.waitingPromptSnippet ?? null) &&
         (task.agentType ?? null) === (other.agentType ?? null) &&
@@ -466,6 +472,27 @@ export function createSessionStore(): SessionStore {
       uniqueTasks.push(task);
     }
     return uniqueTasks;
+  };
+  const preserveNewerTaskActivities = (
+    currentTasks: readonly TaskSummary[],
+    incomingTasks: readonly TaskSummary[]
+  ): TaskSummary[] => {
+    const currentById = new Map(currentTasks.map((task) => [task.id, task]));
+    return incomingTasks.map((task) => {
+      const current = currentById.get(task.id);
+      if (
+        current?.activityRevision === undefined ||
+        task.activityRevision === undefined ||
+        task.activityRevision >= current.activityRevision
+      ) {
+        return task;
+      }
+      return {
+        ...task,
+        activity: current.activity,
+        activityRevision: current.activityRevision
+      };
+    });
   };
   const hasTaskInCollections = (taskId: string | null) => {
     if (!taskId) {
@@ -742,7 +769,10 @@ export function createSessionStore(): SessionStore {
       publish();
     },
     setRepoTasks(repoTasks) {
-      const uniqueTasks = dedupeTasksById(repoTasks);
+      const uniqueTasks = preserveNewerTaskActivities(
+        state.repoTasks,
+        dedupeTasksById(repoTasks)
+      );
       if (areTaskListsEqual(state.repoTasks, uniqueTasks)) {
         return;
       }
@@ -854,7 +884,10 @@ export function createSessionStore(): SessionStore {
       publish();
     },
     setRecentTasks(tasks) {
-      const uniqueTasks = dedupeTasksById(tasks);
+      const uniqueTasks = preserveNewerTaskActivities(
+        state.recentTasks,
+        dedupeTasksById(tasks)
+      );
       if (areTaskListsEqual(state.recentTasks, uniqueTasks)) {
         return;
       }
@@ -866,7 +899,10 @@ export function createSessionStore(): SessionStore {
       publish();
     },
     setSearchResults(query, results) {
-      const uniqueResults = dedupeTasksById(results);
+      const uniqueResults = preserveNewerTaskActivities(
+        state.searchResults,
+        dedupeTasksById(results)
+      );
       state = {
         ...state,
         searchQuery: query,
@@ -874,22 +910,43 @@ export function createSessionStore(): SessionStore {
       };
       publish();
     },
-    setTaskActivity(taskId, activity) {
+    setTaskActivity(taskId, activity, activityRevision) {
       let changed = false;
+      const updateTask = (task: TaskSummary): TaskSummary => {
+        if (
+          task.id !== taskId ||
+          ((task.activity ?? "idle") === activity &&
+            (activityRevision === undefined ||
+              task.activityRevision === activityRevision))
+        ) {
+          return task;
+        }
+        changed = true;
+        return {
+          ...task,
+          activity,
+          ...(activityRevision === undefined ? {} : { activityRevision })
+        };
+      };
       const updateTasks = (tasks: readonly TaskSummary[]): TaskSummary[] =>
-        tasks.map((task) => {
-          if (task.id !== taskId || (task.activity ?? "idle") === activity) {
-            return task;
-          }
-          changed = true;
-          return { ...task, activity };
-        });
+        tasks.map(updateTask);
       const repoTasks = updateTasks(state.repoTasks);
       const recentTasks = updateTasks(state.recentTasks);
       const searchResults = updateTasks(state.searchResults);
+      const taskUiSlots = state.taskUiSlots.map((slot) =>
+        slot.state === "ready" && slot.task.id === taskId
+          ? { ...slot, task: updateTask(slot.task) }
+          : slot
+      );
       if (!changed) return;
 
-      state = { ...state, repoTasks, recentTasks, searchResults };
+      state = {
+        ...state,
+        repoTasks,
+        recentTasks,
+        searchResults,
+        taskUiSlots
+      };
       publish();
     },
     setTaskPinState(taskId, pinned, pinOrder) {
