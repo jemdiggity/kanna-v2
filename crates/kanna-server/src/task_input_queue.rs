@@ -138,6 +138,10 @@ enum TerminalParserState {
     Escape,
     Ss3,
     Csi(Vec<u8>),
+    X10Mouse {
+        values_remaining: u8,
+        utf8_continuations: u8,
+    },
     Osc,
     OscEscape,
 }
@@ -158,7 +162,17 @@ struct OperatorSegment {
 
 impl TerminalInputParser {
     fn owns_operator_turn(&self) -> bool {
-        self.bracketed_paste || !matches!(self.state, TerminalParserState::Normal)
+        self.bracketed_paste
+            || !matches!(
+                self.state,
+                TerminalParserState::Normal | TerminalParserState::Escape
+            )
+    }
+
+    fn break_for_logical_message(&mut self) {
+        if matches!(self.state, TerminalParserState::Escape) {
+            self.state = TerminalParserState::Normal;
+        }
     }
 
     fn segments(&self, data: &[u8]) -> Vec<OperatorSegment> {
@@ -239,17 +253,44 @@ impl TerminalInputParser {
                 }
                 if (0x40..=0x7e).contains(&byte) {
                     let marker = std::mem::take(bytes);
-                    self.state = TerminalParserState::Normal;
                     if marker == b"200~" {
+                        self.state = TerminalParserState::Normal;
                         self.bracketed_paste = true;
                         self.bracketed_paste_end_prefix = 0;
                         None
+                    } else if marker == b"M" {
+                        self.state = TerminalParserState::X10Mouse {
+                            values_remaining: 3,
+                            utf8_continuations: 0,
+                        };
+                        None
                     } else {
+                        self.state = TerminalParserState::Normal;
                         None
                     }
                 } else {
                     None
                 }
+            }
+            TerminalParserState::X10Mouse {
+                values_remaining,
+                utf8_continuations,
+            } => {
+                if *utf8_continuations > 0 {
+                    *utf8_continuations -= 1;
+                } else {
+                    *values_remaining = values_remaining.saturating_sub(1);
+                    *utf8_continuations = match byte {
+                        0xc2..=0xdf => 1,
+                        0xe0..=0xef => 2,
+                        0xf0..=0xf4 => 3,
+                        _ => 0,
+                    };
+                }
+                if *values_remaining == 0 && *utf8_continuations == 0 {
+                    self.state = TerminalParserState::Normal;
+                }
+                None
             }
             TerminalParserState::Osc => {
                 if byte == b'\x07' {
@@ -705,6 +746,9 @@ impl TaskInputCoordinator {
         if !is_current_worker {
             return;
         }
+        if !clear_current_pid {
+            Self::advance_route_epoch(&mut registry, &incarnation.session_id);
+        }
         if let Some(worker) = registry.workers.remove(incarnation) {
             worker.abort.abort();
         }
@@ -1057,6 +1101,7 @@ async fn run_session_input_worker(
             InputRequest::Message(mut message) => {
                 message.sequence = Some(next_sequence.fetch_add(1, Ordering::Relaxed));
                 if claim_message_delivery(&message) {
+                    parser.break_for_logical_message();
                     if let Some(error) = deliver_message(
                         &daemon_dir,
                         &db_path,
@@ -1285,9 +1330,14 @@ async fn deliver_operator_bytes(
                 }
                 OperatorAction::Printable => {}
                 OperatorAction::Boundary { delivery, boundary } => {
-                    if let Some(draft) = draft.take() {
-                        completed_drafts.push((draft, delivery, boundary));
-                    }
+                    let completed = draft.take().unwrap_or_else(|| {
+                        (
+                            next_sequence.fetch_add(1, Ordering::Relaxed),
+                            request.task_id.clone(),
+                            request.source,
+                        )
+                    });
+                    completed_drafts.push((completed, delivery, boundary));
                 }
             }
         }
@@ -1317,6 +1367,7 @@ async fn deliver_operator_bytes(
                         incarnation,
                         daemon,
                         deferred_messages,
+                        parser,
                     )
                     .await
                     {
@@ -1393,11 +1444,13 @@ async fn flush_deferred_messages(
     incarnation: &SessionIncarnation,
     daemon: &mut Option<DaemonClient>,
     deferred_messages: &mut VecDeque<MessageRequest>,
+    parser: &mut TerminalInputParser,
 ) -> Option<TaskInputError> {
     while let Some(message) = deferred_messages.pop_front() {
         if !claim_message_delivery(&message) {
             continue;
         }
+        parser.break_for_logical_message();
         if let Some(error) = deliver_message(
             daemon_dir,
             db_path,
@@ -1981,8 +2034,9 @@ mod tests {
             .unwrap()
             .list_recent_input_events("task-target", 10)
             .unwrap();
-        assert_eq!(events.len(), 1);
+        assert_eq!(events.len(), 2);
         assert_eq!(events[0].payload["boundary"], "message");
+        assert_eq!(events[1].payload["boundary"], "terminal-enter");
 
         drop(coordinator);
         daemon.await.unwrap();
@@ -2059,6 +2113,218 @@ mod tests {
         assert_eq!(next_input_bytes(&mut commands).await, protocol);
         assert_eq!(next_input_bytes(&mut commands).await, b"message");
         assert_eq!(next_input_bytes(&mut commands).await, vec![b'\r']);
+
+        drop(coordinator);
+        daemon.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn x10_mouse_reports_do_not_open_a_draft_across_frames() {
+        let daemon_dir = tempfile::tempdir().unwrap();
+        let (mut commands, daemon) = spawn_recording_daemon(daemon_dir.path());
+        let coordinator = TaskInputCoordinator::new(
+            daemon_dir.path().to_string_lossy().to_string(),
+            Db::test_db_path("input-x10-mouse-protocol"),
+        );
+        let incarnation = SessionIncarnation {
+            session_id: "task-target".to_string(),
+            pid: 4242,
+        };
+
+        for (frames, message) in [
+            (vec![b"\x1b[M !!".as_slice()], "after full X10"),
+            (
+                vec![b"\x1b[M ".as_slice(), b"!!".as_slice()],
+                "after split X10",
+            ),
+            (
+                vec![
+                    b"\x1b[M \xc2".as_slice(),
+                    b"\x80\xe0\xa0".as_slice(),
+                    b"\x80".as_slice(),
+                ],
+                "after UTF-8 X10",
+            ),
+            (vec![b"\x1b[<0;10;20M".as_slice()], "after SGR mouse"),
+        ] {
+            for frame in frames {
+                coordinator
+                    .send_operator_bytes_if_session(
+                        "task-target",
+                        incarnation.clone(),
+                        frame.to_vec(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(next_input_bytes(&mut commands).await, frame);
+            }
+            let result = tokio::time::timeout(
+                Duration::from_secs(1),
+                coordinator.submit_message_if_session(
+                    "task-target",
+                    "task-target",
+                    4242,
+                    TaskInputSource::Api,
+                    message,
+                ),
+            )
+            .await;
+            assert!(matches!(result, Ok(Ok(()))));
+            assert_eq!(next_input_bytes(&mut commands).await, message.as_bytes());
+            assert_eq!(next_input_bytes(&mut commands).await, vec![b'\r']);
+        }
+
+        drop(coordinator);
+        daemon.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn lone_escape_does_not_own_a_draft_but_split_csi_stays_valid() {
+        let daemon_dir = tempfile::tempdir().unwrap();
+        let (mut commands, daemon) = spawn_recording_daemon(daemon_dir.path());
+        let coordinator = TaskInputCoordinator::new(
+            daemon_dir.path().to_string_lossy().to_string(),
+            Db::test_db_path("input-lone-escape-protocol"),
+        );
+        let incarnation = SessionIncarnation {
+            session_id: "task-target".to_string(),
+            pid: 4242,
+        };
+
+        for frame in [b"\x1b".as_slice(), b"[D".as_slice()] {
+            coordinator
+                .send_operator_bytes_if_session("task-target", incarnation.clone(), frame.to_vec())
+                .await
+                .unwrap();
+            assert_eq!(next_input_bytes(&mut commands).await, frame);
+        }
+        coordinator
+            .submit_message_if_session(
+                "task-target",
+                "task-target",
+                4242,
+                TaskInputSource::Api,
+                "after split CSI",
+            )
+            .await
+            .unwrap();
+        assert_eq!(next_input_bytes(&mut commands).await, b"after split CSI");
+        assert_eq!(next_input_bytes(&mut commands).await, vec![b'\r']);
+
+        coordinator
+            .send_operator_bytes_if_session("task-target", incarnation.clone(), b"\x1b".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(next_input_bytes(&mut commands).await, b"\x1b");
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            coordinator.submit_message_if_session(
+                "task-target",
+                "task-target",
+                4242,
+                TaskInputSource::Api,
+                "after lone escape",
+            ),
+        )
+        .await;
+        assert!(matches!(result, Ok(Ok(()))));
+        assert_eq!(next_input_bytes(&mut commands).await, b"after lone escape");
+        assert_eq!(next_input_bytes(&mut commands).await, vec![b'\r']);
+
+        coordinator
+            .send_operator_bytes_if_session(
+                "task-target",
+                incarnation.clone(),
+                b"[200~ordinary".to_vec(),
+            )
+            .await
+            .unwrap();
+        let (_, _, mut message) = coordinator
+            .queue_message_if_session(
+                "task-target",
+                "task-target",
+                4242,
+                TaskInputSource::Api,
+                "after literal marker",
+            )
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            message.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert_eq!(next_input_bytes(&mut commands).await, b"[200~ordinary");
+
+        coordinator
+            .send_operator_bytes_if_session("task-target", incarnation, vec![b'\r'])
+            .await
+            .unwrap();
+        assert!(matches!(message.try_recv(), Ok(Ok(()))));
+        assert_eq!(next_input_bytes(&mut commands).await, vec![b'\r']);
+        assert_eq!(
+            next_input_bytes(&mut commands).await,
+            b"after literal marker"
+        );
+        assert_eq!(next_input_bytes(&mut commands).await, vec![b'\r']);
+
+        drop(coordinator);
+        daemon.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn lone_enter_and_cancel_are_audited_as_completed_submissions() {
+        let unique = format!(
+            "kanna-lone-boundary-audit-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = tempfile::tempdir().unwrap();
+        let (mut commands, daemon) = spawn_recording_daemon(daemon_dir.path());
+        let db_path = Db::test_db_path(&unique);
+        let db = Db::open_for_tests(&db_path).unwrap();
+        db.insert_test_repo("repo-1", "Repo").unwrap();
+        db.insert_test_pipeline_item(
+            "task-target",
+            "repo-1",
+            "Target",
+            None,
+            "in progress",
+            "2026-08-15T00:00:00Z",
+        )
+        .unwrap();
+        drop(db);
+        let coordinator = TaskInputCoordinator::new(
+            daemon_dir.path().to_string_lossy().to_string(),
+            db_path.clone(),
+        );
+        let incarnation = SessionIncarnation {
+            session_id: "task-target".to_string(),
+            pid: 4242,
+        };
+
+        for boundary in [b'\r', b'\x03'] {
+            coordinator
+                .send_operator_bytes_if_session("task-target", incarnation.clone(), vec![boundary])
+                .await
+                .unwrap();
+            assert_eq!(next_input_bytes(&mut commands).await, vec![boundary]);
+        }
+
+        let events = Db::open(&db_path)
+            .unwrap()
+            .list_recent_input_events("task-target", 10)
+            .unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].payload["source"], "human");
+        assert_eq!(events[0].payload["delivery"], "delivered");
+        assert_eq!(events[0].payload["boundary"], "terminal-enter");
+        assert_eq!(events[1].payload["source"], "human");
+        assert_eq!(events[1].payload["delivery"], "cancelled");
+        assert_eq!(events[1].payload["boundary"], "terminal-cancel");
 
         drop(coordinator);
         daemon.await.unwrap();
@@ -2816,6 +3082,113 @@ mod tests {
             })
             .unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn uncertain_eviction_fences_pre_error_admissions_before_same_pid_reconnect() {
+        let daemon_dir = tempfile::tempdir().unwrap();
+        let socket_path = kanna_runtime_defaults::socket_path(daemon_dir.path());
+        let first_listener = UnixListener::bind(&socket_path).unwrap();
+        let first_daemon = tokio::spawn(async move {
+            let (stream, _) = first_listener.accept().await.unwrap();
+            let (read_half, _write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::InputIfSession {
+                    expected_pid: 7373,
+                    data,
+                    ..
+                } if data == b"uncertain"
+            ));
+        });
+        let coordinator = TaskInputCoordinator::new(
+            daemon_dir.path().to_string_lossy().to_string(),
+            Db::test_db_path("input-uncertain-admission-fence"),
+        );
+        coordinator
+            .registry
+            .lock()
+            .unwrap()
+            .current_pid
+            .insert("task-reconnect".into(), 7373);
+        let uncertain = coordinator.capture_operator_admission(Some("task-reconnect"));
+        let stale = coordinator.capture_operator_admission(Some("task-reconnect"));
+
+        assert!(matches!(
+            coordinator
+                .send_operator_bytes_at_admission(
+                    "task-reconnect",
+                    "task-reconnect",
+                    b"uncertain".to_vec(),
+                    uncertain,
+                )
+                .await,
+            Err(TaskInputError::Uncertain(_))
+        ));
+        first_daemon.await.unwrap();
+        assert_eq!(coordinator.current_pid("task-reconnect"), Some(7373));
+
+        std::fs::remove_file(&socket_path).unwrap();
+        let successor_listener = UnixListener::bind(&socket_path).unwrap();
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+        let successor = tokio::spawn(async move {
+            loop {
+                let (stream, _) = successor_listener.accept().await.unwrap();
+                let command_tx = command_tx.clone();
+                tokio::spawn(async move {
+                    let (read_half, mut write_half) = stream.into_split();
+                    let mut reader = BufReader::new(read_half);
+                    let mut line = String::new();
+                    reader.read_line(&mut line).await.unwrap();
+                    command_tx
+                        .send(serde_json::from_str::<DaemonCommand>(line.trim()).unwrap())
+                        .unwrap();
+                    write_half
+                        .write_all(
+                            format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap())
+                                .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                });
+            }
+        });
+
+        assert!(matches!(
+            coordinator
+                .send_operator_bytes_at_admission(
+                    "task-reconnect",
+                    "task-reconnect",
+                    b"stale queued".to_vec(),
+                    stale,
+                )
+                .await,
+            Err(TaskInputError::SessionNotFound)
+        ));
+        let fresh = coordinator.capture_operator_admission(Some("task-reconnect"));
+        coordinator
+            .send_operator_bytes_at_admission(
+                "task-reconnect",
+                "task-reconnect",
+                b"fresh after error".to_vec(),
+                fresh,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            command_rx.recv().await,
+            Some(DaemonCommand::InputIfSession { data, .. })
+                if data == b"fresh after error"
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), command_rx.recv())
+                .await
+                .is_err()
+        );
+        successor.abort();
     }
 
     #[tokio::test]
