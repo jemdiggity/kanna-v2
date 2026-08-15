@@ -185,6 +185,10 @@ export default function RootNavigator({
     controller.openTask(taskId);
     pushPreparedTask(taskId);
   }, [controller, pushPreparedTask]);
+  useEffect(
+    () => controller.subscribeRepoCommandTaskOpen(pushPreparedTask),
+    [controller, pushPreparedTask]
+  );
   useEffect(() => {
     if (
       !notificationTaskRequest ||
