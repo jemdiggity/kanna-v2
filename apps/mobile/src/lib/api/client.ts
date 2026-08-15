@@ -242,7 +242,8 @@ export function createKannaClient(transport: KannaTransport): KannaClient {
     abortTaskCreation: (input) => transport.abortTaskCreation(input),
     runMergeAgent: (taskId) => transport.runMergeAgent(taskId),
     advanceTaskStage: (taskId) => transport.advanceTaskStage(taskId),
-    markTaskRead: (taskId) => transport.markTaskRead(taskId),
+    markTaskRead: (taskId, expectedActivityRevision) =>
+      transport.markTaskRead(taskId, expectedActivityRevision),
     pinTask: (taskId) => transport.pinTask(taskId),
     unpinTask: (taskId) => transport.unpinTask(taskId),
     closeTask: (taskId) => transport.closeTask(taskId),
