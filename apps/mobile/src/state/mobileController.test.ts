@@ -788,6 +788,10 @@ describe("createMobileController", () => {
     const store = createSessionStore();
     const client = createClientMock();
     const controller = createMobileController(client, store);
+    const openedTaskIds: string[] = [];
+    controller.subscribeRepoCommandTaskOpen((taskId) => {
+      openedTaskIds.push(taskId);
+    });
     await controller.bootstrap();
     controller.setNavigationView("more");
     await flushMicrotasks();
@@ -840,6 +844,7 @@ describe("createMobileController", () => {
       "task-command",
       expect.any(Function)
     );
+    expect(openedTaskIds).toEqual([]);
   });
 
   it("opens a command task when a later collection refresh makes it visible", async () => {
@@ -847,6 +852,10 @@ describe("createMobileController", () => {
     const store = createSessionStore();
     const client = createClientMock();
     const controller = createMobileController(client, store);
+    const openedTaskIds: string[] = [];
+    const unsubscribe = controller.subscribeRepoCommandTaskOpen((taskId) => {
+      openedTaskIds.push(taskId);
+    });
     await controller.bootstrap();
     controller.setNavigationView("more");
     await flushMicrotasks();
@@ -883,6 +892,9 @@ describe("createMobileController", () => {
       "task-command",
       expect.any(Function)
     );
+    expect(openedTaskIds).toEqual(["task-command"]);
+
+    unsubscribe();
   });
 
   it("retries both task resolution and the command catalog from a latched error", async () => {

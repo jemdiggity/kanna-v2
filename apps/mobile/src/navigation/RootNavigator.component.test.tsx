@@ -91,7 +91,9 @@ describe("RootNavigator", () => {
     await act(async () => {
       rendered = create(
         <RootNavigator
-          controller={{} as never}
+          controller={{
+            subscribeRepoCommandTaskOpen: () => () => undefined
+          } as never}
           forceCloudEnabled={false}
           initialState={{
             index: 0,
@@ -141,7 +143,9 @@ describe("RootNavigator", () => {
     await act(async () => {
       rendered = create(
         <RootNavigator
-          controller={{} as never}
+          controller={{
+            subscribeRepoCommandTaskOpen: () => () => undefined
+          } as never}
           forceCloudEnabled={false}
           initialState={{
             index: 0,

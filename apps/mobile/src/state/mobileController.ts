@@ -56,6 +56,7 @@ export interface MobileController {
   loadRepoCommands(): Promise<void>;
   runRepoCommand(commandId: string): Promise<string | null>;
   retryRepoCommand(): Promise<string | null>;
+  subscribeRepoCommandTaskOpen(listener: (taskId: string) => void): () => void;
   openTask(taskId: string): void;
   closeTask(taskId?: string): void;
   openComposer(): void;
@@ -220,6 +221,7 @@ export function createMobileController(
   let authUnsubscribe: (() => void) | null = null;
   let cloudTasksUnsubscribe: (() => void) | null = null;
   let taskRoutesUnsubscribe: (() => void) | null = null;
+  const repoCommandTaskOpenListeners = new Set<(taskId: string) => void>();
   let bootstrapInFlight: Promise<void> | null = null;
   let bootstrapRequested = false;
   let cloudSubscriptionEpoch = 0;
@@ -1147,6 +1149,9 @@ export function createMobileController(
     setUnownedErrorMessage(null);
     openTask(pendingTask.taskId);
     if (store.getState().runningRepoCommandId === null) {
+      for (const listener of repoCommandTaskOpenListeners) {
+        listener(pendingTask.taskId);
+      }
       void loadRepoCommands();
     }
   };
@@ -1997,6 +2002,11 @@ export function createMobileController(
       return openedTaskId;
     },
 
+    subscribeRepoCommandTaskOpen(listener) {
+      repoCommandTaskOpenListeners.add(listener);
+      return () => repoCommandTaskOpenListeners.delete(listener);
+    },
+
     openTask(taskId) {
       openTask(taskId);
     },
@@ -2610,6 +2620,7 @@ export function createMobileController(
       authUnsubscribe = null;
       taskRoutesUnsubscribe?.();
       taskRoutesUnsubscribe = null;
+      repoCommandTaskOpenListeners.clear();
     }
   };
 }
