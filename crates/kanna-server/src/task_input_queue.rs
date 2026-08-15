@@ -6,7 +6,7 @@ use kanna_daemon::protocol::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 #[cfg(test)]
 use tokio::sync::Notify;
@@ -16,6 +16,9 @@ const SUBMIT_ENTER_DELAY_MS: u64 = 150;
 const INPUT_DELIVERY_TIMEOUT_SECS: u64 = 30;
 const INPUT_QUEUE_CAPACITY: usize = 256;
 const AUDIT_TEXT_LIMIT: usize = 4096;
+const MESSAGE_PENDING: u8 = 0;
+const MESSAGE_DELIVERING: u8 = 1;
+const MESSAGE_CANCELED: u8 = 2;
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -62,6 +65,7 @@ struct MessageRequest {
     text: String,
     source: TaskInputSource,
     response: oneshot::Sender<Result<(), TaskInputError>>,
+    ownership: Arc<AtomicU8>,
     sequence: Option<u64>,
 }
 
@@ -322,28 +326,34 @@ impl TaskInputCoordinator {
         source: TaskInputSource,
         input: &str,
     ) -> Result<(), TaskInputError> {
+        validate_task_input(source, input).map_err(TaskInputError::Other)?;
         let incarnation = SessionIncarnation {
             session_id: session_id.to_string(),
             pid: expected_pid,
         };
-        let result = match tokio::time::timeout(
-            std::time::Duration::from_secs(INPUT_DELIVERY_TIMEOUT_SECS),
-            async {
-                let (_, response) = self
-                    .queue_message_if_session(task_id, session_id, expected_pid, source, input)
-                    .await?;
-                response
-                    .await
-                    .map_err(|_| TaskInputError::Other("task input worker stopped".to_string()))?
-            },
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(_) => Err(TaskInputError::Other(format!(
-                "task input delivery timed out after {INPUT_DELIVERY_TIMEOUT_SECS}s"
-            ))),
-        };
+        let ownership = Arc::new(AtomicU8::new(MESSAGE_PENDING));
+        let (response, mut result_rx) = oneshot::channel();
+        let deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_secs(INPUT_DELIVERY_TIMEOUT_SECS);
+        let request = InputRequest::Message(MessageRequest {
+            task_id: task_id.to_string(),
+            text: task_input_message(input).to_string(),
+            source,
+            response,
+            ownership: Arc::clone(&ownership),
+            sequence: None,
+        });
+        let result =
+            match tokio::time::timeout_at(deadline, self.enqueue(incarnation.clone(), request))
+                .await
+            {
+                Ok(Ok(())) => match tokio::time::timeout_at(deadline, &mut result_rx).await {
+                    Ok(result) => worker_response_result(result),
+                    Err(_) => finish_message_deadline(&ownership, result_rx).await,
+                },
+                Ok(Err(error)) => Err(error),
+                Err(_) => finish_message_deadline(&ownership, result_rx).await,
+            };
         if matches!(result, Err(TaskInputError::SessionNotFound)) {
             self.workers
                 .lock()
@@ -353,6 +363,7 @@ impl TaskInputCoordinator {
         result
     }
 
+    #[cfg(test)]
     async fn queue_message_if_session(
         &self,
         task_id: &str,
@@ -369,6 +380,7 @@ impl TaskInputCoordinator {
     > {
         validate_task_input(source, input).map_err(TaskInputError::Other)?;
         let (response, result) = oneshot::channel();
+        let ownership = Arc::new(AtomicU8::new(MESSAGE_PENDING));
         let incarnation = SessionIncarnation {
             session_id: session_id.to_string(),
             pid: expected_pid,
@@ -380,6 +392,7 @@ impl TaskInputCoordinator {
                 text: task_input_message(input).to_string(),
                 source,
                 response,
+                ownership,
                 sequence: None,
             }),
         )
@@ -510,8 +523,59 @@ impl TaskInputCoordinator {
     }
 }
 
+fn worker_response_result(
+    result: Result<Result<(), TaskInputError>, oneshot::error::RecvError>,
+) -> Result<(), TaskInputError> {
+    result.map_err(|_| TaskInputError::Other("task input worker stopped".to_string()))?
+}
+
+async fn finish_message_deadline(
+    ownership: &AtomicU8,
+    response: oneshot::Receiver<Result<(), TaskInputError>>,
+) -> Result<(), TaskInputError> {
+    match ownership.compare_exchange(
+        MESSAGE_PENDING,
+        MESSAGE_CANCELED,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    ) {
+        Ok(_) | Err(MESSAGE_CANCELED) => Err(TaskInputError::Other(format!(
+            "task input delivery timed out after {INPUT_DELIVERY_TIMEOUT_SECS}s"
+        ))),
+        Err(MESSAGE_DELIVERING) => worker_response_result(response.await),
+        Err(state) => Err(TaskInputError::Other(format!(
+            "task input request reached unknown ownership state {state}"
+        ))),
+    }
+}
+
 pub(crate) fn task_input_message(input: &str) -> &str {
     input.trim_end_matches(['\r', '\n'])
+}
+
+fn message_is_pending(request: &MessageRequest) -> bool {
+    if request.response.is_closed() {
+        let _ = request.ownership.compare_exchange(
+            MESSAGE_PENDING,
+            MESSAGE_CANCELED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+    request.ownership.load(Ordering::Acquire) == MESSAGE_PENDING
+}
+
+fn claim_message_delivery(request: &MessageRequest) -> bool {
+    message_is_pending(request)
+        && request
+            .ownership
+            .compare_exchange(
+                MESSAGE_PENDING,
+                MESSAGE_DELIVERING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
 }
 
 async fn run_session_input_worker(
@@ -533,8 +597,8 @@ async fn run_session_input_worker(
             continue;
         }
         match request {
-            InputRequest::Message(message) if message.response.is_closed() => {}
-            InputRequest::Message(mut message) if draft.is_some() => {
+            InputRequest::Message(message) if !message_is_pending(&message) => {}
+            InputRequest::Message(mut message) if draft.is_some() || parser.bracketed_paste => {
                 message.sequence = Some(next_sequence.fetch_add(1, Ordering::Relaxed));
                 if deferred_messages.len() >= INPUT_QUEUE_CAPACITY {
                     let _ = message.response.send(Err(TaskInputError::Other(format!(
@@ -546,17 +610,19 @@ async fn run_session_input_worker(
             }
             InputRequest::Message(mut message) => {
                 message.sequence = Some(next_sequence.fetch_add(1, Ordering::Relaxed));
-                if let Some(reason) = deliver_message(
-                    &daemon_dir,
-                    &db_path,
-                    &next_sequence,
-                    &incarnation,
-                    &mut daemon,
-                    message,
-                )
-                .await
-                {
-                    poisoned = Some(reason);
+                if claim_message_delivery(&message) {
+                    if let Some(reason) = deliver_message(
+                        &daemon_dir,
+                        &db_path,
+                        &next_sequence,
+                        &incarnation,
+                        &mut daemon,
+                        message,
+                    )
+                    .await
+                    {
+                        poisoned = Some(reason);
+                    }
                 }
             }
             InputRequest::Operator(operator) => {
@@ -784,7 +850,7 @@ async fn deliver_operator_bytes(
                     )
                     .await;
                 }
-                if draft.is_none() {
+                if draft.is_none() && !parser.bracketed_paste {
                     if let Some(reason) = flush_deferred_messages(
                         daemon_dir,
                         db_path,
@@ -875,7 +941,7 @@ async fn flush_deferred_messages(
     deferred_messages: &mut VecDeque<MessageRequest>,
 ) -> Option<String> {
     while let Some(message) = deferred_messages.pop_front() {
-        if message.response.is_closed() {
+        if !claim_message_delivery(&message) {
             continue;
         }
         if let Some(reason) = deliver_message(
@@ -1019,6 +1085,56 @@ mod tests {
             }
         });
         (commands_rx, daemon)
+    }
+
+    fn spawn_gated_ack_daemon(
+        daemon_dir: &std::path::Path,
+        gated_data: Vec<u8>,
+    ) -> (
+        mpsc::UnboundedReceiver<DaemonCommand>,
+        oneshot::Sender<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let socket_path = kanna_runtime_defaults::socket_path(daemon_dir);
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let (commands_tx, commands_rx) = mpsc::unbounded_channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let daemon = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut release_rx = Some(release_rx);
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).await.unwrap() == 0 {
+                    break;
+                }
+                let command = serde_json::from_str::<DaemonCommand>(line.trim()).unwrap();
+                let should_gate = matches!(
+                    &command,
+                    DaemonCommand::InputIfSession { data, .. } if *data == gated_data
+                );
+                if commands_tx.send(command).is_err() {
+                    break;
+                }
+                if should_gate {
+                    if let Some(release) = release_rx.take() {
+                        let _ = release.await;
+                    }
+                }
+                if write_half
+                    .write_all(
+                        format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap())
+                            .as_bytes(),
+                    )
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        (commands_rx, release_tx, daemon)
     }
 
     async fn next_input_bytes(commands: &mut mpsc::UnboundedReceiver<DaemonCommand>) -> Vec<u8> {
@@ -1245,6 +1361,85 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].payload["boundary"], "terminal-enter");
         assert_eq!(events[1].payload["boundary"], "message");
+
+        drop(coordinator);
+        daemon.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn empty_bracketed_paste_owns_turn_until_end_marker() {
+        let unique = format!(
+            "kanna-empty-paste-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = tempfile::tempdir().unwrap();
+        let (mut commands, daemon) = spawn_recording_daemon(daemon_dir.path());
+        let db_path = Db::test_db_path(&unique);
+        let db = Db::open_for_tests(&db_path).unwrap();
+        db.insert_test_repo("repo-1", "Repo").unwrap();
+        db.insert_test_pipeline_item(
+            "task-target",
+            "repo-1",
+            "Target",
+            None,
+            "in progress",
+            "2026-08-15T00:00:00Z",
+        )
+        .unwrap();
+        drop(db);
+
+        let coordinator = TaskInputCoordinator::new(
+            daemon_dir.path().to_string_lossy().to_string(),
+            db_path.clone(),
+        );
+        let incarnation = SessionIncarnation {
+            session_id: "task-target".to_string(),
+            pid: 4242,
+        };
+        for frame in [b"\x1b[20".as_slice(), b"0~".as_slice()] {
+            coordinator
+                .send_operator_bytes_if_session("task-target", incarnation.clone(), frame.to_vec())
+                .await
+                .unwrap();
+            assert_eq!(next_input_bytes(&mut commands).await, frame);
+        }
+
+        let (_, mut message) = coordinator
+            .queue_message_if_session(
+                "task-target",
+                "task-target",
+                4242,
+                TaskInputSource::Api,
+                "after empty paste",
+            )
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            message.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(commands.try_recv().is_err());
+
+        coordinator
+            .send_operator_bytes_if_session("task-target", incarnation, b"\x1b[201~".to_vec())
+            .await
+            .unwrap();
+        assert!(matches!(message.try_recv(), Ok(Ok(()))));
+        assert_eq!(next_input_bytes(&mut commands).await, b"\x1b[201~");
+        assert_eq!(next_input_bytes(&mut commands).await, b"after empty paste");
+        assert_eq!(next_input_bytes(&mut commands).await, vec![b'\r']);
+
+        let events = Db::open(&db_path)
+            .unwrap()
+            .list_recent_input_events("task-target", 10)
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].payload["boundary"], "message");
 
         drop(coordinator);
         daemon.await.unwrap();
@@ -1554,6 +1749,102 @@ mod tests {
         assert_eq!(next_input_bytes(&mut commands).await, vec![b'\r']);
         assert!(commands.try_recv().is_err());
 
+        drop(coordinator);
+        daemon.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deadline_does_not_cancel_deferred_message_after_worker_claims_it() {
+        let daemon_dir = tempfile::tempdir().unwrap();
+        let (mut commands, release_ack, daemon) =
+            spawn_gated_ack_daemon(daemon_dir.path(), b"claimed".to_vec());
+        let coordinator = TaskInputCoordinator::new(
+            daemon_dir.path().to_string_lossy().to_string(),
+            Db::test_db_path("input-claimed-before-deadline"),
+        );
+        let incarnation = SessionIncarnation {
+            session_id: "task-target".to_string(),
+            pid: 4242,
+        };
+
+        coordinator
+            .send_operator_bytes_if_session("task-target", incarnation.clone(), b"draft".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(next_input_bytes(&mut commands).await, b"draft");
+        let submit_coordinator = coordinator.clone();
+        let submit = tokio::spawn(async move {
+            submit_coordinator
+                .submit_message_if_session(
+                    "task-target",
+                    "task-target",
+                    4242,
+                    TaskInputSource::Api,
+                    "claimed",
+                )
+                .await
+        });
+        coordinator.wait_for_admissions(2).await;
+        tokio::time::advance(Duration::from_secs(29)).await;
+
+        let close_coordinator = coordinator.clone();
+        let close = tokio::spawn(async move {
+            close_coordinator
+                .send_operator_bytes_if_session("task-target", incarnation, vec![b'\r'])
+                .await
+        });
+        assert_eq!(next_input_bytes(&mut commands).await, vec![b'\r']);
+        assert_eq!(next_input_bytes(&mut commands).await, b"claimed");
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !submit.is_finished(),
+            "caller returned a definite timeout after delivery started"
+        );
+
+        release_ack.send(()).unwrap();
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(SUBMIT_ENTER_DELAY_MS)).await;
+        assert_eq!(next_input_bytes(&mut commands).await, vec![b'\r']);
+        assert!(matches!(submit.await.unwrap(), Ok(())));
+        assert!(matches!(close.await.unwrap(), Ok(())));
+
+        drop(coordinator);
+        daemon.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn direct_delivery_uses_daemon_uncertainty_after_outer_deadline() {
+        let daemon_dir = tempfile::tempdir().unwrap();
+        let (mut commands, release_ack, daemon) =
+            spawn_gated_ack_daemon(daemon_dir.path(), b"direct".to_vec());
+        let coordinator = TaskInputCoordinator::new(
+            daemon_dir.path().to_string_lossy().to_string(),
+            Db::test_db_path("input-direct-deadline"),
+        );
+        let submit_coordinator = coordinator.clone();
+        let submit = tokio::spawn(async move {
+            submit_coordinator
+                .submit_message_if_session(
+                    "task-target",
+                    "task-target",
+                    4242,
+                    TaskInputSource::Api,
+                    "direct",
+                )
+                .await
+        });
+        coordinator.wait_for_admissions(1).await;
+        assert_eq!(next_input_bytes(&mut commands).await, b"direct");
+
+        tokio::time::advance(Duration::from_secs(30)).await;
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            submit.await.unwrap(),
+            Err(TaskInputError::Uncertain(message)) if message.contains("timed out")
+        ));
+
+        drop(release_ack);
         drop(coordinator);
         daemon.await.unwrap();
     }
