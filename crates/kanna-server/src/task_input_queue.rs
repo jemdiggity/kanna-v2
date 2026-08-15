@@ -81,6 +81,7 @@ enum InputRequest {
 struct TerminalInputParser {
     state: TerminalParserState,
     bracketed_paste: bool,
+    bracketed_paste_end_prefix: usize,
 }
 
 #[derive(Clone, Default)]
@@ -139,13 +140,14 @@ impl TerminalInputParser {
     }
 
     fn parse_byte(&mut self, byte: u8) -> Option<OperatorAction> {
+        if self.bracketed_paste {
+            return self.parse_bracketed_paste_byte(byte);
+        }
         match &mut self.state {
             TerminalParserState::Normal => {
                 if byte == b'\x1b' {
                     self.state = TerminalParserState::Escape;
                     None
-                } else if self.bracketed_paste {
-                    Some(OperatorAction::Printable)
                 } else {
                     match byte {
                         b'\r' | b'\n' => Some(OperatorAction::Boundary {
@@ -165,10 +167,10 @@ impl TerminalInputParser {
                 if byte == b'[' {
                     self.state = TerminalParserState::Csi(Vec::new());
                     None
-                } else if !self.bracketed_paste && byte == b'O' {
+                } else if byte == b'O' {
                     self.state = TerminalParserState::Ss3;
                     None
-                } else if !self.bracketed_paste && byte == b']' {
+                } else if byte == b']' {
                     self.state = TerminalParserState::Osc;
                     None
                 } else {
@@ -185,17 +187,12 @@ impl TerminalInputParser {
                     bytes.push(byte);
                 }
                 if (0x40..=0x7e).contains(&byte) {
-                    let bracketed_paste = self.bracketed_paste;
                     let marker = std::mem::take(bytes);
                     self.state = TerminalParserState::Normal;
-                    if marker == b"200~" && !bracketed_paste {
+                    if marker == b"200~" {
                         self.bracketed_paste = true;
+                        self.bracketed_paste_end_prefix = 0;
                         None
-                    } else if marker == b"201~" && bracketed_paste {
-                        self.bracketed_paste = false;
-                        None
-                    } else if bracketed_paste {
-                        Some(OperatorAction::Printable)
                     } else {
                         None
                     }
@@ -219,6 +216,28 @@ impl TerminalInputParser {
                 }
                 None
             }
+        }
+    }
+
+    fn parse_bracketed_paste_byte(&mut self, byte: u8) -> Option<OperatorAction> {
+        const END_MARKER: &[u8] = b"\x1b[201~";
+
+        if byte == END_MARKER[self.bracketed_paste_end_prefix] {
+            self.bracketed_paste_end_prefix += 1;
+            if self.bracketed_paste_end_prefix == END_MARKER.len() {
+                self.bracketed_paste = false;
+                self.bracketed_paste_end_prefix = 0;
+                self.state = TerminalParserState::Normal;
+            }
+            return None;
+        }
+
+        let failed_prefix_is_content = self.bracketed_paste_end_prefix > 0;
+        self.bracketed_paste_end_prefix = usize::from(byte == END_MARKER[0]);
+        if failed_prefix_is_content || self.bracketed_paste_end_prefix == 0 {
+            Some(OperatorAction::Printable)
+        } else {
+            None
         }
     }
 }
@@ -1133,6 +1152,90 @@ mod tests {
         message.await.unwrap().unwrap();
         assert_eq!(next_input_bytes(&mut commands).await, vec![b'\r']);
         assert_eq!(next_input_bytes(&mut commands).await, b"queued message");
+        assert_eq!(next_input_bytes(&mut commands).await, vec![b'\r']);
+
+        let events = Db::open(&db_path)
+            .unwrap()
+            .list_recent_input_events("task-target", 10)
+            .unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].payload["boundary"], "terminal-enter");
+        assert_eq!(events[1].payload["boundary"], "message");
+
+        drop(coordinator);
+        daemon.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pasted_incomplete_csi_does_not_mask_cross_frame_end_delimiter() {
+        let unique = format!(
+            "kanna-paste-overlap-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = tempfile::tempdir().unwrap();
+        let (mut commands, daemon) = spawn_recording_daemon(daemon_dir.path());
+        let db_path = Db::test_db_path(&unique);
+        let db = Db::open_for_tests(&db_path).unwrap();
+        db.insert_test_repo("repo-1", "Repo").unwrap();
+        db.insert_test_pipeline_item(
+            "task-target",
+            "repo-1",
+            "Target",
+            None,
+            "in progress",
+            "2026-08-15T00:00:00Z",
+        )
+        .unwrap();
+        drop(db);
+
+        let coordinator = TaskInputCoordinator::new(
+            daemon_dir.path().to_string_lossy().to_string(),
+            db_path.clone(),
+        );
+        let incarnation = SessionIncarnation {
+            session_id: "task-target".to_string(),
+            pid: 4242,
+        };
+        let frames = [
+            b"\x1b[200~paste content\x1b[".as_slice(),
+            b"\x1b[20".as_slice(),
+            b"1~".as_slice(),
+        ];
+
+        for frame in frames {
+            coordinator
+                .send_operator_bytes_if_session("task-target", incarnation.clone(), frame.to_vec())
+                .await
+                .unwrap();
+            assert_eq!(next_input_bytes(&mut commands).await, frame);
+        }
+        let (_, mut message) = coordinator
+            .queue_message_if_session(
+                "task-target",
+                "task-target",
+                4242,
+                TaskInputSource::Api,
+                "queued",
+            )
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            message.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+
+        coordinator
+            .send_operator_bytes_if_session("task-target", incarnation, vec![b'\r'])
+            .await
+            .unwrap();
+        assert!(matches!(message.try_recv(), Ok(Ok(()))));
+        assert_eq!(next_input_bytes(&mut commands).await, vec![b'\r']);
+        assert_eq!(next_input_bytes(&mut commands).await, b"queued");
         assert_eq!(next_input_bytes(&mut commands).await, vec![b'\r']);
 
         let events = Db::open(&db_path)
