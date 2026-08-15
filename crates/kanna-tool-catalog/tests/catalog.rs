@@ -883,6 +883,7 @@ fn wait_events_documents_every_event_type_the_server_emits() {
         "task.closed",
         "task.awaiting_input",
         "task.activity_changed",
+        "task.input",
         "task.merge_signaled",
         "task.merge_handoff_missing",
         "task.transfer_finalizing",
@@ -898,6 +899,20 @@ fn wait_events_documents_every_event_type_the_server_emits() {
             && description.contains("waitingPromptSnippet")
             && description.contains("does not prove"),
         "kanna_wait_events must distinguish the provider-neutral activity edge from confirmed awaiting input: {description}"
+    );
+    assert!(
+        [
+            "payload.source",
+            "delivery",
+            "boundary",
+            "queueSequence",
+            "sessionPid",
+            "bounded payload.text",
+            "payload.truncated",
+        ]
+        .into_iter()
+        .all(|field| description.contains(field)),
+        "kanna_wait_events must document task.input attribution and optional bounded text fields: {description}"
     );
 }
 

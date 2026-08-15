@@ -1597,6 +1597,7 @@ async fn handle_stream_channels(
         companion_tx,
         attachments: HashMap::new(),
         terminal_controls: HashMap::new(),
+        terminal_inputs: HashMap::new(),
         agent_commands: None,
         requests: None,
         companion_events: None,
@@ -1649,6 +1650,7 @@ struct StreamConn {
     companion_tx: CompanionFrameSender,
     attachments: HashMap<(String, StreamKind), StreamAttachment>,
     terminal_controls: HashMap<String, TerminalControlHandle>,
+    terminal_inputs: HashMap<String, TerminalInputHandle>,
     agent_commands: Option<AgentCommandWorker>,
     requests: Option<RequestWorker>,
     companion_events: Option<CompanionEventWorker>,
@@ -1666,6 +1668,7 @@ struct StreamAttachment {
 }
 
 const TERMINAL_CONTROL_QUEUE_CAPACITY: usize = 256;
+const TERMINAL_INPUT_QUEUE_CAPACITY: usize = 256;
 const AGENT_COMMAND_QUEUE_CAPACITY: usize = 256;
 const REQUEST_QUEUE_CAPACITY: usize = 32;
 const MAX_REQUEST_CONCURRENCY: usize = 4;
@@ -1778,6 +1781,12 @@ struct TerminalControlHandle {
     task: JoinHandle<()>,
 }
 
+struct TerminalInputHandle {
+    session_id: Option<String>,
+    tx: mpsc::Sender<Vec<u8>>,
+    task: JoinHandle<()>,
+}
+
 async fn terminal_control_cancelled(cancel_rx: &mut watch::Receiver<bool>) {
     if *cancel_rx.borrow() {
         return;
@@ -1825,6 +1834,44 @@ async fn resolve_task_session_id(db_path: String, task_id: String) -> Result<Str
 
 fn direct_terminal_session_id(task_id: &str) -> Option<String> {
     task_id.starts_with("shell-").then(|| task_id.to_string())
+}
+
+async fn run_terminal_input(
+    state: Arc<AppState>,
+    task_id: String,
+    initial_session_id: Option<String>,
+    mut input_rx: mpsc::Receiver<Vec<u8>>,
+    frame_tx: mpsc::Sender<ServerFrame>,
+) {
+    let session_id = match initial_session_id {
+        Some(session_id) => session_id,
+        None => {
+            match resolve_task_session_id(state.config().db_path.clone(), task_id.clone()).await {
+                Ok(session_id) => session_id,
+                Err(message) => {
+                    send_task_error(&frame_tx, &task_id, "no_session", message).await;
+                    return;
+                }
+            }
+        }
+    };
+
+    while let Some(data) = input_rx.recv().await {
+        if let Err(error) = state
+            .task_input
+            .send_operator_bytes(&task_id, &session_id, data)
+            .await
+        {
+            let message = match error {
+                crate::task_input_queue::TaskInputError::SessionNotFound => {
+                    format!("session not found: {session_id}")
+                }
+                crate::task_input_queue::TaskInputError::Other(message)
+                | crate::task_input_queue::TaskInputError::Uncertain(message) => message,
+            };
+            send_task_error(&frame_tx, &task_id, "daemon", message).await;
+        }
+    }
 }
 
 async fn run_terminal_control(
@@ -2275,6 +2322,15 @@ impl StreamConn {
         for control in controls {
             let _ = control.task.await;
         }
+        let inputs = self
+            .terminal_inputs
+            .drain()
+            .map(|(_, input)| input)
+            .collect::<Vec<_>>();
+        for input in inputs {
+            input.task.abort();
+            let _ = input.task.await;
+        }
         if let Some(worker) = self.agent_commands.take() {
             worker.task.abort();
         }
@@ -2289,6 +2345,91 @@ impl StreamConn {
     async fn retire_terminal_control(control: TerminalControlHandle) {
         let _ = control.cancel_tx.send(true);
         let _ = control.task.await;
+    }
+
+    async fn retire_terminal_input(input: TerminalInputHandle) {
+        input.task.abort();
+        let _ = input.task.await;
+    }
+
+    fn create_terminal_input(
+        &self,
+        task_id: String,
+        session_id: Option<String>,
+    ) -> TerminalInputHandle {
+        let (tx, input_rx) = mpsc::channel(TERMINAL_INPUT_QUEUE_CAPACITY);
+        let task = tokio::spawn(run_terminal_input(
+            self.state.clone(),
+            task_id,
+            session_id.clone(),
+            input_rx,
+            self.frame_tx.clone(),
+        ));
+        TerminalInputHandle {
+            session_id,
+            tx,
+            task,
+        }
+    }
+
+    async fn replace_terminal_input_route(&mut self, task_id: &str, session_id: String) {
+        let route_matches = self
+            .terminal_inputs
+            .get(task_id)
+            .is_some_and(|input| input.session_id.as_deref() == Some(session_id.as_str()));
+        if route_matches {
+            return;
+        }
+        if let Some(existing) = self.terminal_inputs.remove(task_id) {
+            Self::retire_terminal_input(existing).await;
+        }
+        let input = self.create_terminal_input(task_id.to_string(), Some(session_id));
+        self.terminal_inputs.insert(task_id.to_string(), input);
+    }
+
+    fn enqueue_terminal_input(&mut self, task_id: String, data: Vec<u8>) {
+        if !self.terminal_inputs.contains_key(&task_id) {
+            let session_id = direct_terminal_session_id(&task_id);
+            let input = self.create_terminal_input(task_id.clone(), session_id);
+            self.terminal_inputs.insert(task_id.clone(), input);
+        }
+
+        let send_result = self
+            .terminal_inputs
+            .get(&task_id)
+            .expect("terminal input inserted")
+            .tx
+            .try_send(data);
+        match send_result {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                let frame_tx = self.frame_tx.clone();
+                tokio::spawn(async move {
+                    send_task_error(
+                        &frame_tx,
+                        &task_id,
+                        "terminal_input_busy",
+                        "terminal input queue is full".to_string(),
+                    )
+                    .await;
+                });
+            }
+            Err(TrySendError::Closed(_)) => {
+                if let Some(input) = self.terminal_inputs.remove(&task_id) {
+                    input.task.abort();
+                }
+                let frame_tx = self.frame_tx.clone();
+                tokio::spawn(async move {
+                    send_task_error(
+                        &frame_tx,
+                        &task_id,
+                        "terminal_input_unavailable",
+                        "terminal input channel closed".to_string(),
+                    )
+                    .await;
+                });
+            }
+        }
     }
 
     fn create_terminal_control(
@@ -2698,6 +2839,9 @@ impl StreamConn {
                     if let Some(control) = self.terminal_controls.remove(&task_id) {
                         Self::retire_terminal_control(control).await;
                     }
+                    if let Some(input) = self.terminal_inputs.remove(&task_id) {
+                        Self::retire_terminal_input(input).await;
+                    }
                 }
                 if kind == StreamKind::Companion {
                     self.companion_tx.invalidate(&task_id);
@@ -2739,43 +2883,7 @@ impl StreamConn {
                         return true;
                     }
                 };
-                let session_id = self
-                    .terminal_controls
-                    .get(&task_id)
-                    .and_then(|control| control.session_id.clone())
-                    .or_else(|| direct_terminal_session_id(&task_id));
-                let session_id = match session_id {
-                    Some(session_id) => Ok(session_id),
-                    None => {
-                        resolve_task_session_id(
-                            self.state.config().db_path.clone(),
-                            task_id.clone(),
-                        )
-                        .await
-                    }
-                };
-                match session_id {
-                    Ok(session_id) => {
-                        if let Err(error) = self
-                            .state
-                            .task_input
-                            .send_operator_bytes(&task_id, &session_id, data)
-                            .await
-                        {
-                            let message = match error {
-                                crate::task_input_queue::TaskInputError::SessionNotFound => {
-                                    format!("session not found: {session_id}")
-                                }
-                                crate::task_input_queue::TaskInputError::Other(message)
-                                | crate::task_input_queue::TaskInputError::Uncertain(message) => {
-                                    message
-                                }
-                            };
-                            self.error(Some(task_id), "daemon", message).await;
-                        }
-                    }
-                    Err(message) => self.error(Some(task_id), "no_session", message).await,
-                }
+                self.enqueue_terminal_input(task_id, data);
             }
             ClientFrame::TermResize {
                 task_id,
@@ -3014,6 +3122,8 @@ impl StreamConn {
 
         if kind == StreamKind::Terminal {
             self.replace_terminal_control_route(&task_id, session_id.clone())
+                .await;
+            self.replace_terminal_input_route(&task_id, session_id.clone())
                 .await;
         }
 
@@ -4357,6 +4467,7 @@ mod tests {
                 companion_tx,
                 attachments: HashMap::new(),
                 terminal_controls: HashMap::new(),
+                terminal_inputs: HashMap::new(),
                 agent_commands: None,
                 requests: None,
                 companion_events: None,
@@ -7335,6 +7446,7 @@ mod tests {
                 companion_tx,
                 attachments: HashMap::new(),
                 terminal_controls: HashMap::new(),
+                terminal_inputs: HashMap::new(),
                 agent_commands: None,
                 requests: None,
                 companion_events: Some(worker),
@@ -7442,6 +7554,7 @@ mod tests {
             companion_tx,
             attachments: HashMap::new(),
             terminal_controls: HashMap::new(),
+            terminal_inputs: HashMap::new(),
             agent_commands: None,
             requests: None,
             companion_events: None,
@@ -7879,7 +7992,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terminal_mobile_api_and_completion_inputs_are_distinct_fifo_submissions() {
+    async fn terminal_altitude_paste_and_queued_inputs_are_distinct_fifo_submissions() {
         use axum::body::Body;
         use axum::http::Request;
         use std::sync::{Arc as StdArc, Mutex};
@@ -8014,11 +8127,12 @@ mod tests {
         send_frame(&mut socket, &client_auth_frame()).await;
         assert_eq!(recv_frame(&mut socket).await, auth_ok_frame_for(false));
 
+        let altitude_paste = b"\x1b[13;2u\x1b[200~paste\nbody\x1b[201~";
         send_frame(
             &mut socket,
             &ClientFrame::TermInput {
                 task_id: "task-target".into(),
-                data_b64: b64(b"approved"),
+                data_b64: b64(altitude_paste),
             },
         )
         .await;
@@ -8096,7 +8210,7 @@ mod tests {
         assert_eq!(
             *writes.lock().unwrap(),
             vec![
-                b"approved".to_vec(),
+                altitude_paste.to_vec(),
                 vec![b'\r'],
                 b"mobile reply".to_vec(),
                 vec![b'\r'],
@@ -8314,6 +8428,180 @@ mod tests {
         );
         assert_eq!(daemon.await.expect("fake control daemon failed"), 2);
 
+        drop(socket);
+        let _ = std::fs::remove_dir_all(&daemon_dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocked_terminal_input_does_not_block_ksp_requests_or_resize() {
+        let unique = format!(
+            "ksp-input-opposite-hol-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+        let mut config = test_config("ksp-input-opposite-hol", "KSP Input Opposite HOL");
+        config.daemon_dir = daemon_dir.to_string_lossy().to_string();
+        config.db_path = Db::test_db_path(&unique);
+        config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+        let _db = Db::open_for_tests(&config.db_path).expect("open test db");
+
+        let socket_path = daemon_socket_path_for_dir(&config.daemon_dir);
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).expect("bind input HOL daemon socket");
+        let (command_tx, mut command_rx) = mpsc::channel(4);
+        let release_input = Arc::new(tokio::sync::Notify::new());
+        let input_blocked = Arc::new(tokio::sync::Notify::new());
+        let daemon_release = Arc::clone(&release_input);
+        let daemon_blocked = Arc::clone(&input_blocked);
+        let daemon = tokio::spawn(async move {
+            let mut handlers = tokio::task::JoinSet::new();
+            loop {
+                let (stream, _) = listener.accept().await.expect("accept daemon connection");
+                let command_tx = command_tx.clone();
+                let release_input = Arc::clone(&daemon_release);
+                let input_blocked = Arc::clone(&daemon_blocked);
+                handlers.spawn(async move {
+                    let (read_half, mut write_half) = stream.into_split();
+                    let mut reader = BufReader::new(read_half);
+                    loop {
+                        let mut line = String::new();
+                        let read = reader
+                            .read_line(&mut line)
+                            .await
+                            .expect("read daemon command");
+                        if read == 0 {
+                            return;
+                        }
+                        let command: DaemonCommand =
+                            serde_json::from_str(line.trim()).expect("parse daemon command");
+                        match command {
+                            DaemonCommand::List => {
+                                let event = DaemonEvent::SessionList {
+                                    sessions: vec![kanna_daemon::protocol::SessionInfo {
+                                        session_id: "shell-input-opposite-hol".into(),
+                                        pid: 4242,
+                                        cwd: "/tmp".into(),
+                                        state: kanna_daemon::protocol::SessionState::Active,
+                                        idle_seconds: 0,
+                                        status: SessionStatus::Idle,
+                                        kind: kanna_daemon::protocol::SessionKind::Pty,
+                                    }],
+                                };
+                                write_half
+                                    .write_all(
+                                        format!("{}\n", serde_json::to_string(&event).unwrap())
+                                            .as_bytes(),
+                                    )
+                                    .await
+                                    .expect("write daemon session list");
+                            }
+                            DaemonCommand::InputIfSession { .. } => {
+                                command_tx
+                                    .send(command)
+                                    .await
+                                    .expect("publish blocked terminal input");
+                                input_blocked.notify_one();
+                                release_input.notified().await;
+                                write_half
+                                    .write_all(
+                                        format!(
+                                            "{}\n",
+                                            serde_json::to_string(&DaemonEvent::Ok).unwrap()
+                                        )
+                                        .as_bytes(),
+                                    )
+                                    .await
+                                    .expect("ack terminal input");
+                            }
+                            DaemonCommand::ResizeNoReply { .. } => {
+                                command_tx
+                                    .send(command)
+                                    .await
+                                    .expect("publish terminal resize");
+                            }
+                            other => panic!("unexpected daemon command: {other:?}"),
+                        }
+                    }
+                });
+            }
+        });
+
+        let url = serve_router(crate::http_api::router(Arc::new(AppState::new(config)))).await;
+        let mut socket = ws_connect(&url).await;
+        send_frame(&mut socket, &client_auth_frame()).await;
+        assert_eq!(recv_frame(&mut socket).await, auth_ok_frame_for(false));
+
+        send_frame(
+            &mut socket,
+            &ClientFrame::TermInput {
+                task_id: "shell-input-opposite-hol".into(),
+                data_b64: b64(b"blocked"),
+            },
+        )
+        .await;
+        send_frame(
+            &mut socket,
+            &ClientFrame::Request {
+                id: 72,
+                method: "GET".into(),
+                path: "/v1/status".into(),
+                body: None,
+            },
+        )
+        .await;
+        send_frame(
+            &mut socket,
+            &ClientFrame::TermResize {
+                task_id: "shell-input-opposite-hol".into(),
+                cols: 132,
+                rows: 44,
+            },
+        )
+        .await;
+
+        tokio::time::timeout(Duration::from_secs(1), input_blocked.notified())
+            .await
+            .expect("terminal input did not reach daemon");
+
+        let response = tokio::time::timeout(Duration::from_millis(300), recv_frame(&mut socket));
+        let resize = tokio::time::timeout(Duration::from_millis(300), async {
+            loop {
+                match command_rx.recv().await {
+                    Some(command @ DaemonCommand::ResizeNoReply { .. }) => return Some(command),
+                    Some(DaemonCommand::InputIfSession { data, .. }) => {
+                        assert_eq!(data, b"blocked");
+                    }
+                    Some(other) => panic!("unexpected observed daemon command: {other:?}"),
+                    None => return None,
+                }
+            }
+        });
+        let (response, resize) = tokio::join!(response, resize);
+        release_input.notify_waiters();
+
+        assert!(matches!(
+            response.expect("KSP request waited behind terminal input"),
+            ServerFrame::Response {
+                id: 72,
+                status: 200,
+                ..
+            }
+        ));
+        assert_command(
+            resize.expect("terminal resize waited behind terminal input"),
+            DaemonCommand::ResizeNoReply {
+                session_id: "shell-input-opposite-hol".into(),
+                cols: 132,
+                rows: 44,
+            },
+        );
+
+        daemon.abort();
         drop(socket);
         let _ = std::fs::remove_dir_all(&daemon_dir);
     }
@@ -8714,7 +9002,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terminal_control_route_replacement_uses_the_new_session() {
+    async fn terminal_route_replacement_updates_control_and_input_workers() {
         let unique = format!(
             "ksp-terminal-route-replacement-{}-{}",
             std::process::id(),
@@ -8743,6 +9031,7 @@ mod tests {
             companion_tx,
             attachments: HashMap::new(),
             terminal_controls: HashMap::new(),
+            terminal_inputs: HashMap::new(),
             agent_commands: None,
             requests: None,
             companion_events: None,
@@ -8754,6 +9043,8 @@ mod tests {
         };
 
         conn.replace_terminal_control_route("task-route", "daemon-session-old".into())
+            .await;
+        conn.replace_terminal_input_route("task-route", "daemon-session-old".into())
             .await;
         conn.enqueue_terminal_control(
             "task-route".into(),
@@ -8769,6 +9060,14 @@ mod tests {
 
         conn.replace_terminal_control_route("task-route", "daemon-session-new".into())
             .await;
+        conn.replace_terminal_input_route("task-route", "daemon-session-new".into())
+            .await;
+        assert_eq!(
+            conn.terminal_inputs
+                .get("task-route")
+                .and_then(|input| input.session_id.as_deref()),
+            Some("daemon-session-new")
+        );
         conn.enqueue_terminal_control(
             "task-route".into(),
             TerminalControlCommand::Input(b"new".to_vec()),
@@ -8784,6 +9083,111 @@ mod tests {
         conn.shutdown().await;
 
         let _ = std::fs::remove_dir_all(&daemon_dir);
+    }
+
+    fn terminal_input_conn_with_worker(
+        test_name: &str,
+        task_id: &str,
+        worker: TerminalInputHandle,
+    ) -> (StreamConn, OutboundFrameReceiver) {
+        let state = Arc::new(AppState::new(test_config(
+            test_name,
+            "Terminal Input Queue",
+        )));
+        let (frame_tx, companion_tx, outbound_rx) = outbound_frame_channel(8);
+        (
+            StreamConn {
+                state,
+                frame_tx,
+                companion_tx,
+                attachments: HashMap::new(),
+                terminal_controls: HashMap::new(),
+                terminal_inputs: HashMap::from([(task_id.to_string(), worker)]),
+                agent_commands: None,
+                requests: None,
+                companion_events: None,
+                authed: true,
+                supports_companion_event_epoch: false,
+                legacy_companion_tasks_on_connection: HashSet::new(),
+                auth_mode: AuthMode::AllowEmpty,
+                companion_access: true,
+            },
+            outbound_rx,
+        )
+    }
+
+    #[tokio::test]
+    async fn full_terminal_input_queue_reports_a_typed_error() {
+        let (tx, input_rx) = mpsc::channel(1);
+        tx.try_send(b"already queued".to_vec()).unwrap();
+        let task = tokio::spawn(async move {
+            let _input_rx = input_rx;
+            std::future::pending::<()>().await;
+        });
+        let (mut conn, mut outbound_rx) = terminal_input_conn_with_worker(
+            "terminal-input-full",
+            "task-input-full",
+            TerminalInputHandle {
+                session_id: Some("session-input-full".into()),
+                tx,
+                task,
+            },
+        );
+
+        assert!(
+            conn.handle(ClientFrame::TermInput {
+                task_id: "task-input-full".into(),
+                data_b64: b64(b"overflow"),
+            })
+            .await
+        );
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_millis(300), outbound_rx.recv())
+                .await
+                .expect("full terminal input queue did not report an error"),
+            Some(ServerFrame::Error {
+                task_id: Some(task_id),
+                code,
+                ..
+            }) if task_id == "task-input-full" && code == "terminal_input_busy"
+        ));
+        conn.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn closed_terminal_input_queue_reports_a_typed_error_and_is_retired() {
+        let (tx, input_rx) = mpsc::channel(1);
+        drop(input_rx);
+        let task = tokio::spawn(std::future::pending::<()>());
+        let (mut conn, mut outbound_rx) = terminal_input_conn_with_worker(
+            "terminal-input-closed",
+            "task-input-closed",
+            TerminalInputHandle {
+                session_id: Some("session-input-closed".into()),
+                tx,
+                task,
+            },
+        );
+
+        assert!(
+            conn.handle(ClientFrame::TermInput {
+                task_id: "task-input-closed".into(),
+                data_b64: b64(b"closed"),
+            })
+            .await
+        );
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_millis(300), outbound_rx.recv())
+                .await
+                .expect("closed terminal input queue did not report an error"),
+            Some(ServerFrame::Error {
+                task_id: Some(task_id),
+                code,
+                ..
+            }) if task_id == "task-input-closed" && code == "terminal_input_unavailable"
+        ));
+        assert!(!conn.terminal_inputs.contains_key("task-input-closed"));
+        conn.shutdown().await;
     }
 
     #[tokio::test]
@@ -8812,6 +9216,7 @@ mod tests {
             companion_tx,
             attachments: HashMap::new(),
             terminal_controls: HashMap::new(),
+            terminal_inputs: HashMap::new(),
             agent_commands: None,
             requests: None,
             companion_events: None,
@@ -8857,7 +9262,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terminal_detach_drops_control_socket_resize_ownership() {
+    async fn terminal_detach_retires_control_and_input_workers() {
         let state = Arc::new(AppState::new(test_config(
             "ksp-terminal-detach-control",
             "KSP Terminal Detach Control",
@@ -8869,6 +9274,7 @@ mod tests {
             companion_tx,
             attachments: HashMap::new(),
             terminal_controls: HashMap::new(),
+            terminal_inputs: HashMap::new(),
             agent_commands: None,
             requests: None,
             companion_events: None,
@@ -8880,7 +9286,10 @@ mod tests {
         };
         conn.replace_terminal_control_route("task-detach", "daemon-session-detach".into())
             .await;
+        conn.replace_terminal_input_route("task-detach", "daemon-session-detach".into())
+            .await;
         assert!(conn.terminal_controls.contains_key("task-detach"));
+        assert!(conn.terminal_inputs.contains_key("task-detach"));
 
         assert!(
             conn.handle(ClientFrame::Detach {
@@ -8892,6 +9301,7 @@ mod tests {
         );
 
         assert!(!conn.terminal_controls.contains_key("task-detach"));
+        assert!(!conn.terminal_inputs.contains_key("task-detach"));
         conn.shutdown().await;
     }
 
@@ -8975,6 +9385,7 @@ mod tests {
             companion_tx,
             attachments: HashMap::new(),
             terminal_controls: HashMap::new(),
+            terminal_inputs: HashMap::new(),
             agent_commands: None,
             requests: None,
             companion_events: None,
