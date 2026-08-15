@@ -170,7 +170,7 @@ pub(crate) async fn terminal_detach_reconciliation_loop(
 }
 
 fn reconcile_unmarked_exit_task_input(state: &http_api::AppState, session_id: &str) {
-    let Some(snapshot) = state.task_input.snapshot_session_worker(session_id) else {
+    let Some(snapshot) = state.task_input.snapshot_session_route(session_id) else {
         return;
     };
     let task_input = state.task_input.clone();
@@ -191,13 +191,15 @@ fn reconcile_unmarked_exit_task_input(state: &http_api::AppState, session_id: &s
                 .map_err(|error| format!("daemon List failed: {error}"))?
             {
                 DaemonEvent::SessionList { sessions } => {
-                    let replacement_is_live = sessions.into_iter().any(|session| {
+                    let snapshot_pid = snapshot.pid();
+                    let snapshot_route_is_live = sessions.into_iter().any(|session| {
                         session.session_id == session_id
+                            && session.pid == snapshot_pid
                             && session.kind == SessionKind::Pty
                             && matches!(session.state, SessionState::Active)
                     });
-                    if !replacement_is_live {
-                        task_input.retire_session_worker_if_current(snapshot);
+                    if !snapshot_route_is_live {
+                        task_input.retire_session_route_if_current(snapshot);
                     }
                     Ok(())
                 }
@@ -859,6 +861,166 @@ mod tests {
             .await
             .unwrap();
 
+        server.await.unwrap();
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn unmarked_exit_reconciles_pid_only_route_to_live_replacement_pid() {
+        let unique = unique_name("terminal-watcher-pid-only-route-reconciliation");
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        let config = test_config(&unique, &daemon_dir);
+        let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
+        let state = http_api::AppState::new(config);
+
+        let replacement_session = || SessionInfo {
+            session_id: "task-child".to_string(),
+            pid: 2222,
+            cwd: "/tmp".to_string(),
+            state: SessionState::Active,
+            idle_seconds: 0,
+            status: kanna_daemon::protocol::SessionStatus::Idle,
+            kind: kanna_daemon::protocol::SessionKind::Pty,
+        };
+        let server = tokio::spawn(async move {
+            let (list_stream, _) = listener.accept().await.unwrap();
+            let (list_read, mut list_write) = list_stream.into_split();
+            let mut list_reader = BufReader::new(list_read);
+            let mut line = String::new();
+            list_reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::List
+            ));
+            write_event(
+                &mut list_write,
+                &DaemonEvent::SessionList {
+                    sessions: vec![SessionInfo {
+                        session_id: "task-child".to_string(),
+                        pid: 1111,
+                        cwd: "/tmp".to_string(),
+                        state: SessionState::Active,
+                        idle_seconds: 0,
+                        status: kanna_daemon::protocol::SessionStatus::Idle,
+                        kind: kanna_daemon::protocol::SessionKind::Pty,
+                    }],
+                },
+            )
+            .await;
+
+            let (uncertain_stream, _) = listener.accept().await.unwrap();
+            let (uncertain_read, uncertain_write) = uncertain_stream.into_split();
+            let mut uncertain_reader = BufReader::new(uncertain_read);
+            line.clear();
+            uncertain_reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::InputIfSession {
+                    expected_pid: 1111,
+                    data,
+                    ..
+                } if data == b"uncertain"
+            ));
+            drop(uncertain_reader);
+            drop(uncertain_write);
+
+            let mut subscriber =
+                expect_subscribe_with_sessions(&listener, vec![replacement_session()]).await;
+            write_event(
+                &mut subscriber,
+                &DaemonEvent::Exit {
+                    session_id: "task-child".to_string(),
+                    code: -1,
+                    resume_session_id: None,
+                    killed: true,
+                },
+            )
+            .await;
+            write_event(&mut subscriber, &DaemonEvent::ShuttingDown).await;
+
+            let (reconcile_stream, _) = listener.accept().await.unwrap();
+            let (reconcile_read, mut reconcile_write) = reconcile_stream.into_split();
+            let mut reconcile_reader = BufReader::new(reconcile_read);
+            line.clear();
+            reconcile_reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::List
+            ));
+            write_event(
+                &mut reconcile_write,
+                &DaemonEvent::SessionList {
+                    sessions: vec![replacement_session()],
+                },
+            )
+            .await;
+
+            let (public_list_stream, _) = listener.accept().await.unwrap();
+            let (public_list_read, mut public_list_write) = public_list_stream.into_split();
+            let mut public_list_reader = BufReader::new(public_list_read);
+            line.clear();
+            public_list_reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::List
+            ));
+            write_event(
+                &mut public_list_write,
+                &DaemonEvent::SessionList {
+                    sessions: vec![replacement_session()],
+                },
+            )
+            .await;
+
+            let (input_stream, _) = listener.accept().await.unwrap();
+            let (input_read, mut input_write) = input_stream.into_split();
+            let mut input_reader = BufReader::new(input_read);
+            line.clear();
+            input_reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::InputIfSession {
+                    expected_pid: 2222,
+                    data,
+                    ..
+                } if data == b"\r"
+            ));
+            write_event(&mut input_write, &DaemonEvent::Ok).await;
+        });
+
+        assert!(matches!(
+            state
+                .task_input
+                .send_operator_bytes("task-child", "task-child", b"uncertain".to_vec())
+                .await,
+            Err(crate::task_input_queue::TaskInputError::Uncertain(_))
+        ));
+        assert_eq!(state.task_input.current_pid("task-child"), Some(1111));
+        terminal_state_watcher_once(
+            &state,
+            &session_replacements::SessionReplacements::default(),
+        )
+        .await
+        .unwrap();
+        timeout(Duration::from_secs(1), async {
+            while state.task_input.current_pid("task-child").is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("different live PID did not clear the stale PID-only route");
+
+        state
+            .task_input
+            .submit_message(
+                "task-child",
+                "task-child",
+                crate::task_input_queue::TaskInputSource::Api,
+                "",
+            )
+            .await
+            .expect("public message admission should use the replacement PID");
         server.await.unwrap();
         let _ = std::fs::remove_file(socket_path);
         let _ = std::fs::remove_dir_all(daemon_dir);

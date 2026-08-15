@@ -89,9 +89,16 @@ struct SessionInputWorker {
 }
 
 #[derive(Clone)]
-pub(crate) struct TaskInputWorkerSnapshot {
+pub(crate) struct TaskInputRouteSnapshot {
     incarnation: SessionIncarnation,
-    worker_id: u64,
+    worker_id: Option<u64>,
+    route_epoch: u64,
+}
+
+impl TaskInputRouteSnapshot {
+    pub(crate) fn pid(&self) -> u32 {
+        self.incarnation.pid
+    }
 }
 
 #[derive(Default)]
@@ -618,10 +625,10 @@ impl TaskInputCoordinator {
         Self::retire_session_workers(&mut registry, session_id);
     }
 
-    pub(crate) fn snapshot_session_worker(
+    pub(crate) fn snapshot_session_route(
         &self,
         session_id: &str,
-    ) -> Option<TaskInputWorkerSnapshot> {
+    ) -> Option<TaskInputRouteSnapshot> {
         let registry = self
             .registry
             .lock()
@@ -630,23 +637,40 @@ impl TaskInputCoordinator {
             session_id: session_id.to_string(),
             pid: *registry.current_pid.get(session_id)?,
         };
-        let worker_id = registry.workers.get(&incarnation)?.id;
-        Some(TaskInputWorkerSnapshot {
+        let worker_id = registry.workers.get(&incarnation).map(|worker| worker.id);
+        let route_epoch = registry.route_epochs.get(session_id).copied().unwrap_or(0);
+        Some(TaskInputRouteSnapshot {
             incarnation,
             worker_id,
+            route_epoch,
         })
     }
 
-    pub(crate) fn retire_session_worker_if_current(&self, snapshot: TaskInputWorkerSnapshot) {
+    pub(crate) fn retire_session_route_if_current(&self, snapshot: TaskInputRouteSnapshot) {
         let mut registry = self
             .registry
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let is_current_generation = registry
+        let current_worker_id = registry
             .workers
             .get(&snapshot.incarnation)
-            .is_some_and(|worker| worker.id == snapshot.worker_id);
-        if !is_current_generation {
+            .map(|worker| worker.id);
+        let worker_generation_unchanged = match (snapshot.worker_id, current_worker_id) {
+            (Some(snapshot_id), Some(current_id)) => snapshot_id == current_id,
+            (Some(_), None) | (None, None) => true,
+            (None, Some(_)) => false,
+        };
+        let route_generation_unchanged = registry
+            .route_epochs
+            .get(&snapshot.incarnation.session_id)
+            .copied()
+            .unwrap_or(0)
+            == snapshot.route_epoch;
+        if !worker_generation_unchanged
+            || !route_generation_unchanged
+            || registry.current_pid.get(&snapshot.incarnation.session_id)
+                != Some(&snapshot.incarnation.pid)
+        {
             return;
         }
         Self::advance_route_epoch(&mut registry, &snapshot.incarnation.session_id);
@@ -3623,7 +3647,7 @@ mod tests {
             );
         }
         let stale_snapshot = coordinator
-            .snapshot_session_worker(&incarnation.session_id)
+            .snapshot_session_route(&incarnation.session_id)
             .unwrap();
 
         let (fresh_sender, _fresh_receiver) = mpsc::channel(INPUT_QUEUE_CAPACITY);
@@ -3637,7 +3661,7 @@ mod tests {
             },
         );
 
-        coordinator.retire_session_worker_if_current(stale_snapshot);
+        coordinator.retire_session_route_if_current(stale_snapshot);
         assert_eq!(coordinator.current_pid(&incarnation.session_id), Some(7373));
         assert_eq!(
             coordinator
@@ -3656,6 +3680,79 @@ mod tests {
 
         old_task.abort();
         fresh_task.abort();
+    }
+
+    #[tokio::test]
+    async fn exit_retirement_clears_pid_only_route_before_different_pid_admission() {
+        let daemon_dir = tempfile::tempdir().unwrap();
+        let (mut commands, daemon) = spawn_recording_daemon(daemon_dir.path());
+        let coordinator = TaskInputCoordinator::new(
+            daemon_dir.path().to_string_lossy().to_string(),
+            Db::test_db_path("input-pid-only-exit-retirement"),
+        );
+        coordinator
+            .registry
+            .lock()
+            .unwrap()
+            .current_pid
+            .insert("task-reconnect".to_string(), 1111);
+
+        let stale_route = coordinator
+            .snapshot_session_route("task-reconnect")
+            .expect("a PID-only route still needs an Exit cleanup snapshot");
+        coordinator.retire_session_route_if_current(stale_route);
+        assert_eq!(coordinator.current_pid("task-reconnect"), None);
+
+        coordinator
+            .submit_message_if_session(
+                "task-reconnect",
+                "task-reconnect",
+                2222,
+                TaskInputSource::Api,
+                "",
+            )
+            .await
+            .expect("the replacement PID should be admitted after stale-route cleanup");
+        assert!(matches!(
+            commands.recv().await.unwrap(),
+            DaemonCommand::InputIfSession {
+                expected_pid: 2222,
+                data,
+                ..
+            } if data == b"\r"
+        ));
+
+        drop(coordinator);
+        daemon.await.unwrap();
+    }
+
+    #[test]
+    fn conditional_exit_retirement_preserves_newer_pid_only_route_generation() {
+        let coordinator = TaskInputCoordinator::new(
+            "/unused".to_string(),
+            Db::test_db_path("input-newer-pid-only-route"),
+        );
+        coordinator
+            .registry
+            .lock()
+            .unwrap()
+            .current_pid
+            .insert("task-reconnect".to_string(), 1111);
+        let stale_route = coordinator
+            .snapshot_session_route("task-reconnect")
+            .unwrap();
+
+        coordinator.begin_session_replacement("task-reconnect");
+        coordinator.finish_session_replacement("task-reconnect");
+        coordinator
+            .registry
+            .lock()
+            .unwrap()
+            .current_pid
+            .insert("task-reconnect".to_string(), 1111);
+        coordinator.retire_session_route_if_current(stale_route);
+
+        assert_eq!(coordinator.current_pid("task-reconnect"), Some(1111));
     }
 
     #[tokio::test]
