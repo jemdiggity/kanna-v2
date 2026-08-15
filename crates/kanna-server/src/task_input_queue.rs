@@ -114,6 +114,10 @@ struct OperatorSegment {
 }
 
 impl TerminalInputParser {
+    fn owns_operator_turn(&self) -> bool {
+        self.bracketed_paste || !matches!(self.state, TerminalParserState::Normal)
+    }
+
     fn segments(&self, data: &[u8]) -> Vec<OperatorSegment> {
         let mut parser = self.clone();
         let mut segments = Vec::new();
@@ -598,7 +602,9 @@ async fn run_session_input_worker(
         }
         match request {
             InputRequest::Message(message) if !message_is_pending(&message) => {}
-            InputRequest::Message(mut message) if draft.is_some() || parser.bracketed_paste => {
+            InputRequest::Message(mut message)
+                if draft.is_some() || parser.owns_operator_turn() =>
+            {
                 message.sequence = Some(next_sequence.fetch_add(1, Ordering::Relaxed));
                 if deferred_messages.len() >= INPUT_QUEUE_CAPACITY {
                     let _ = message.response.send(Err(TaskInputError::Other(format!(
@@ -850,7 +856,7 @@ async fn deliver_operator_bytes(
                     )
                     .await;
                 }
-                if draft.is_none() && !parser.bracketed_paste {
+                if draft.is_none() && !parser.owns_operator_turn() {
                     if let Some(reason) = flush_deferred_messages(
                         daemon_dir,
                         db_path,
@@ -1446,6 +1452,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn partial_paste_begin_prefix_owns_turn_without_a_human_audit() {
+        let unique = format!(
+            "kanna-partial-paste-begin-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = tempfile::tempdir().unwrap();
+        let (mut commands, daemon) = spawn_recording_daemon(daemon_dir.path());
+        let db_path = Db::test_db_path(&unique);
+        let db = Db::open_for_tests(&db_path).unwrap();
+        db.insert_test_repo("repo-1", "Repo").unwrap();
+        db.insert_test_pipeline_item(
+            "task-target",
+            "repo-1",
+            "Target",
+            None,
+            "in progress",
+            "2026-08-15T00:00:00Z",
+        )
+        .unwrap();
+        drop(db);
+
+        let coordinator = TaskInputCoordinator::new(
+            daemon_dir.path().to_string_lossy().to_string(),
+            db_path.clone(),
+        );
+        let incarnation = SessionIncarnation {
+            session_id: "task-target".to_string(),
+            pid: 4242,
+        };
+        coordinator
+            .send_operator_bytes_if_session("task-target", incarnation.clone(), b"\x1b[20".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(next_input_bytes(&mut commands).await, b"\x1b[20");
+
+        let (_, mut message) = coordinator
+            .queue_message_if_session(
+                "task-target",
+                "task-target",
+                4242,
+                TaskInputSource::Api,
+                "after split marker",
+            )
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), commands.recv())
+                .await
+                .is_err(),
+            "message bytes entered an incomplete paste-begin prefix"
+        );
+        assert!(matches!(
+            message.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+
+        for frame in [b"0~".as_slice(), b"\x1b[201~".as_slice()] {
+            coordinator
+                .send_operator_bytes_if_session("task-target", incarnation.clone(), frame.to_vec())
+                .await
+                .unwrap();
+            assert_eq!(next_input_bytes(&mut commands).await, frame);
+        }
+        assert!(matches!(message.try_recv(), Ok(Ok(()))));
+        assert_eq!(next_input_bytes(&mut commands).await, b"after split marker");
+        assert_eq!(next_input_bytes(&mut commands).await, vec![b'\r']);
+
+        coordinator
+            .send_operator_bytes_if_session("task-target", incarnation, vec![b'\r'])
+            .await
+            .unwrap();
+        assert_eq!(next_input_bytes(&mut commands).await, vec![b'\r']);
+        let events = Db::open(&db_path)
+            .unwrap()
+            .list_recent_input_events("task-target", 10)
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].payload["boundary"], "message");
+
+        drop(coordinator);
+        daemon.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn cursor_and_clipboard_protocol_bytes_do_not_open_a_draft() {
         let daemon_dir = tempfile::tempdir().unwrap();
         let (mut commands, daemon) = spawn_recording_daemon(daemon_dir.path());
@@ -1747,6 +1841,58 @@ mod tests {
         tokio::task::yield_now().await;
         assert_eq!(next_input_bytes(&mut commands).await, b"draft");
         assert_eq!(next_input_bytes(&mut commands).await, vec![b'\r']);
+        assert!(commands.try_recv().is_err());
+
+        drop(coordinator);
+        daemon.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn message_behind_incomplete_control_sequence_still_times_out_and_cancels() {
+        let daemon_dir = tempfile::tempdir().unwrap();
+        let (mut commands, daemon) = spawn_recording_daemon(daemon_dir.path());
+        let coordinator = TaskInputCoordinator::new(
+            daemon_dir.path().to_string_lossy().to_string(),
+            Db::test_db_path("input-incomplete-control-timeout"),
+        );
+        let incarnation = SessionIncarnation {
+            session_id: "task-target".to_string(),
+            pid: 4242,
+        };
+        coordinator
+            .send_operator_bytes_if_session("task-target", incarnation.clone(), b"\x1b[20".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(next_input_bytes(&mut commands).await, b"\x1b[20");
+
+        let submit_coordinator = coordinator.clone();
+        let submit = tokio::spawn(async move {
+            submit_coordinator
+                .submit_message_if_session(
+                    "task-target",
+                    "task-target",
+                    4242,
+                    TaskInputSource::Api,
+                    "must stay canceled",
+                )
+                .await
+        });
+        coordinator.wait_for_admissions(2).await;
+        tokio::time::advance(Duration::from_secs(30)).await;
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            submit.await.unwrap(),
+            Err(TaskInputError::Other(message)) if message.contains("timed out")
+        ));
+
+        for frame in [b"0~".as_slice(), b"\x1b[201~".as_slice()] {
+            coordinator
+                .send_operator_bytes_if_session("task-target", incarnation.clone(), frame.to_vec())
+                .await
+                .unwrap();
+            assert_eq!(next_input_bytes(&mut commands).await, frame);
+        }
+        tokio::task::yield_now().await;
         assert!(commands.try_recv().is_err());
 
         drop(coordinator);
