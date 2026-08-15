@@ -5,7 +5,7 @@ use kanna_daemon::protocol::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 #[cfg(test)]
@@ -93,7 +93,7 @@ struct TaskInputRegistry {
     workers: HashMap<SessionIncarnation, SessionInputWorker>,
     current_pid: HashMap<String, u32>,
     route_epochs: HashMap<String, u64>,
-    replacement_fences: HashSet<String>,
+    replacement_fences: HashMap<String, usize>,
 }
 
 #[derive(Clone, Default)]
@@ -617,7 +617,11 @@ impl TaskInputCoordinator {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         Self::advance_route_epoch(&mut registry, session_id);
-        registry.replacement_fences.insert(session_id.to_string());
+        let active_attempts = registry
+            .replacement_fences
+            .entry(session_id.to_string())
+            .or_insert(0);
+        *active_attempts = active_attempts.saturating_add(1);
         Self::retire_session_workers(&mut registry, session_id);
     }
 
@@ -627,7 +631,17 @@ impl TaskInputCoordinator {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         Self::advance_route_epoch(&mut registry, session_id);
-        registry.replacement_fences.remove(session_id);
+        let remove_fence =
+            registry
+                .replacement_fences
+                .get_mut(session_id)
+                .is_some_and(|active_attempts| {
+                    *active_attempts = active_attempts.saturating_sub(1);
+                    *active_attempts == 0
+                });
+        if remove_fence {
+            registry.replacement_fences.remove(session_id);
+        }
     }
 
     pub(crate) fn route_epoch(&self, session_id: &str) -> u64 {
@@ -677,7 +691,7 @@ impl TaskInputCoordinator {
                 .unwrap_or(0);
             if registry
                 .replacement_fences
-                .contains(&incarnation.session_id)
+                .contains_key(&incarnation.session_id)
                 || route_epoch.is_some_and(|route_epoch| route_epoch != current_route_epoch)
                 || registry
                     .current_pid
@@ -749,6 +763,17 @@ impl TaskInputCoordinator {
             .current_pid
             .get(session_id)
             .copied()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replacement_fence_count(&self, session_id: &str) -> usize {
+        self.registry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .replacement_fences
+            .get(session_id)
+            .copied()
+            .unwrap_or(0)
     }
 }
 
@@ -3100,6 +3125,57 @@ mod tests {
             !daemon.await.unwrap(),
             "route captured before replacement begin reached the daemon"
         );
+    }
+
+    #[tokio::test]
+    async fn overlapping_replacement_fences_block_until_each_attempt_finishes() {
+        let daemon_dir = tempfile::tempdir().unwrap();
+        let (mut commands, daemon) = spawn_recording_daemon(daemon_dir.path());
+        let coordinator = TaskInputCoordinator::new(
+            daemon_dir.path().to_string_lossy().to_string(),
+            Db::test_db_path("input-overlapping-replacement-fences"),
+        );
+
+        coordinator.begin_session_replacement("task-target");
+        coordinator.begin_session_replacement("task-target");
+        coordinator.finish_session_replacement("task-target");
+
+        assert!(matches!(
+            coordinator
+                .send_operator_bytes_if_session(
+                    "task-target",
+                    SessionIncarnation {
+                        session_id: "task-target".to_string(),
+                        pid: 4242,
+                    },
+                    b"still fenced".to_vec(),
+                )
+                .await,
+            Err(TaskInputError::SessionNotFound)
+        ));
+        assert!(
+            timeout(Duration::from_millis(50), commands.recv())
+                .await
+                .is_err(),
+            "finishing one overlapping attempt must not admit input"
+        );
+
+        coordinator.finish_session_replacement("task-target");
+        coordinator
+            .send_operator_bytes_if_session(
+                "task-target",
+                SessionIncarnation {
+                    session_id: "task-target".to_string(),
+                    pid: 4242,
+                },
+                b"fresh".to_vec(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(next_input_bytes(&mut commands).await, b"fresh");
+
+        drop(coordinator);
+        daemon.await.unwrap();
     }
 
     #[tokio::test]

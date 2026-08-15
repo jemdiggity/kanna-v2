@@ -51,9 +51,8 @@ impl SessionReplacements {
     }
 
     pub fn cancel(&self, session_id: &str) {
-        if self.consume(session_id) {
-            self.finish(session_id);
-        }
+        self.consume(session_id);
+        self.finish(session_id);
     }
 
     pub fn consume(&self, session_id: &str) -> bool {

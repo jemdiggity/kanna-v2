@@ -706,11 +706,14 @@ mod tests {
         let state = http_api::AppState::new(config);
         let replacements = state.session_replacements();
         let (old_seen_tx, old_seen_rx) = oneshot::channel();
+        let (kill_seen_tx, kill_seen_rx) = oneshot::channel();
         let (fresh_seen_tx, fresh_seen_rx) = oneshot::channel();
         let (ack_fresh_tx, ack_fresh_rx) = oneshot::channel();
 
         let server = tokio::spawn(async move {
             let mut ack_fresh_rx = Some(ack_fresh_rx);
+            let mut kill_seen_tx = Some(kill_seen_tx);
+            let mut held_kill_write = None;
             for (seen, expected_data) in [
                 (old_seen_tx, b"old worker".as_slice()),
                 (fresh_seen_tx, b"fresh worker".as_slice()),
@@ -760,6 +763,17 @@ mod tests {
                             .unwrap(),
                         0
                     );
+                    let (kill_stream, _) = listener.accept().await.unwrap();
+                    let (kill_read, kill_write) = kill_stream.into_split();
+                    let mut kill_reader = BufReader::new(kill_read);
+                    line.clear();
+                    kill_reader.read_line(&mut line).await.unwrap();
+                    assert!(matches!(
+                        serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                        DaemonCommand::Kill { session_id } if session_id == "task-child"
+                    ));
+                    held_kill_write = Some(kill_write);
+                    kill_seen_tx.take().unwrap().send(()).unwrap();
                 } else {
                     let mut fresh_write = input_write;
                     let mut subscriber = expect_subscribe(&listener).await;
@@ -778,6 +792,7 @@ mod tests {
                     write_event(&mut fresh_write, &DaemonEvent::Ok).await;
                 }
             }
+            drop(held_kill_write);
         });
 
         let old_state = state.clone();
@@ -789,7 +804,18 @@ mod tests {
         });
         old_seen_rx.await.unwrap();
 
-        replacements.begin("task-child");
+        let mut kill_daemon = daemon_client::DaemonClient::connect(&daemon_dir.to_string_lossy())
+            .await
+            .unwrap();
+        let kill_replacements = replacements.clone();
+        let kill = tokio::spawn(async move {
+            crate::task_creator::kill_session_replacing(
+                &mut kill_daemon,
+                &kill_replacements,
+                "task-child",
+            )
+            .await
+        });
 
         assert!(matches!(
             timeout(Duration::from_secs(1), old)
@@ -798,7 +824,9 @@ mod tests {
                 .unwrap(),
             Err(crate::task_input_queue::TaskInputError::Uncertain(_))
         ));
-        replacements.finish("task-child");
+        kill_seen_rx.await.unwrap();
+        kill.abort();
+        assert!(kill.await.unwrap_err().is_cancelled());
 
         let fresh_state = state.clone();
         let fresh = tokio::spawn(async move {

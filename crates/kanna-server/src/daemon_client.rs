@@ -1,5 +1,6 @@
 use kanna_daemon::protocol::{Command, Event};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -242,9 +243,51 @@ impl DaemonClient {
         self.send_serialized_command(&json).await
     }
 
+    /// Send one non-Spawn lifecycle command while exposing its delivery
+    /// boundary to cancellation cleanup. The flag becomes true as soon as the
+    /// newline-delimited command is fully written (the daemon can parse it at
+    /// that point) and resets only when a daemon explicitly proves
+    /// `RetryOnSuccessor` before side effects.
+    pub(crate) async fn send_command_retrying_successor_tracking_submission(
+        &mut self,
+        cmd: &Command,
+        submitted: &AtomicBool,
+    ) -> Result<Event, Box<dyn std::error::Error>> {
+        debug_assert!(!matches!(cmd, Command::Spawn { .. }));
+        let json = serde_json::to_string(cmd)?;
+        let first = self
+            .send_serialized_command_tracking_submission(&json, Some(submitted))
+            .await?;
+        if !matches!(
+            first,
+            Event::Error {
+                code: Some(kanna_daemon::protocol::ErrorCode::RetryOnSuccessor),
+                ..
+            }
+        ) {
+            return Ok(first);
+        }
+
+        submitted.store(false, Ordering::Release);
+        let previous_pid = self.connected_pid;
+        let successor = wait_for_successor(&self.daemon_dir, previous_pid).await?;
+        *self = successor;
+        self.send_serialized_command_tracking_submission(&json, Some(submitted))
+            .await
+    }
+
     async fn send_serialized_command(
         &mut self,
         json: &str,
+    ) -> Result<Event, Box<dyn std::error::Error>> {
+        self.send_serialized_command_tracking_submission(json, None)
+            .await
+    }
+
+    async fn send_serialized_command_tracking_submission(
+        &mut self,
+        json: &str,
+        submitted: Option<&AtomicBool>,
     ) -> Result<Event, Box<dyn std::error::Error>> {
         if self.poisoned {
             return Err(
@@ -254,6 +297,9 @@ impl DaemonClient {
         let round_trip = async {
             self.writer.write_all(json.as_bytes()).await?;
             self.writer.write_all(b"\n").await?;
+            if let Some(submitted) = submitted {
+                submitted.store(true, Ordering::Release);
+            }
             self.writer.flush().await?;
             let mut line = String::new();
             self.reader.read_line(&mut line).await?;

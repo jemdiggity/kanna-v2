@@ -12,6 +12,7 @@ use crate::task_input_queue::{TaskInputCoordinator, TaskInputSource};
 use kanna_daemon::protocol::{
     AgentSpawnParams, Command as DaemonCommand, Event as DaemonEvent, TerminalSnapshot,
 };
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub(crate) fn prepared_task_id(prepared: &PreparedTaskSpawn) -> &str {
     &prepared.created_task.task_id
@@ -970,6 +971,7 @@ fn prepare_deferred_rerun_setup(prepared: &mut PreparedStageRerun) -> Result<(),
 struct SessionReplacementAttempt<'a> {
     replacements: &'a SessionReplacements,
     session_id: &'a str,
+    submitted: AtomicBool,
     armed: bool,
 }
 
@@ -979,8 +981,13 @@ impl<'a> SessionReplacementAttempt<'a> {
         Self {
             replacements,
             session_id,
+            submitted: AtomicBool::new(false),
             armed: true,
         }
+    }
+
+    fn submitted(&self) -> &AtomicBool {
+        &self.submitted
     }
 
     fn finish(&mut self) {
@@ -1000,7 +1007,11 @@ impl<'a> SessionReplacementAttempt<'a> {
 
 impl Drop for SessionReplacementAttempt<'_> {
     fn drop(&mut self) {
-        self.cancel();
+        if self.submitted.load(Ordering::Acquire) {
+            self.finish();
+        } else {
+            self.cancel();
+        }
     }
 }
 
@@ -1016,14 +1027,16 @@ pub(crate) async fn kill_session_replacing(
 ) -> Result<(), String> {
     let mut replacement = SessionReplacementAttempt::begin(replacements, session_id);
     let kill = match daemon
-        .send_command_retrying_successor(&DaemonCommand::Kill {
-            session_id: session_id.to_string(),
-        })
+        .send_command_retrying_successor_tracking_submission(
+            &DaemonCommand::Kill {
+                session_id: session_id.to_string(),
+            },
+            replacement.submitted(),
+        )
         .await
     {
         Ok(kill) => kill,
         Err(error) => {
-            replacement.cancel();
             return Err(format!("daemon error: {error}"));
         }
     };
@@ -1769,9 +1782,10 @@ mod successor_retry_tests {
         advance_server_completion_context, initialize_completion_context, kill_session_replacing,
         legacy_shared_completion_directory, prune_completion_contexts_on_startup,
         remove_completion_contexts, resolve_legacy_completion_retry_run,
-        uses_legacy_completion_context,
+        uses_legacy_completion_context, SessionReplacementAttempt,
     };
     use crate::daemon_client::DaemonClient;
+    use crate::db::Db;
     use crate::session_replacements::SessionReplacements;
     use crate::task_input_queue::{TaskInputCoordinator, TaskInputSource};
     use kanna_daemon::protocol::{Command, ErrorCode, Event};
@@ -2256,7 +2270,7 @@ mod successor_retry_tests {
     }
 
     #[tokio::test]
-    async fn cancelled_replacement_kill_releases_task_input_fence() {
+    async fn cancelled_submitted_replacement_releases_fence_and_preserves_exit_marker() {
         let daemon_dir = std::env::temp_dir().join(format!(
             "kanna-replacement-cancel-test-{}-{}",
             std::process::id(),
@@ -2336,13 +2350,36 @@ mod successor_retry_tests {
         .expect("input admission should not remain fenced after cancellation")
         .expect("input should reach the still-live session after cancellation");
         assert!(
-            !replacements.consume("replace-cancelled"),
-            "cancellation must remove the unmatched replacement marker"
+            replacements.consume("replace-cancelled"),
+            "a submitted Kill may still emit a delayed replacement Exit"
         );
 
         server.await.unwrap();
         let _ = std::fs::remove_file(socket_path);
         let _ = std::fs::remove_dir_all(Path::new(&daemon_dir));
+    }
+
+    #[test]
+    fn dropped_unsubmitted_attempt_keeps_an_overlapping_attempt_fenced() {
+        let coordinator = TaskInputCoordinator::new(
+            "/unused".to_string(),
+            Db::test_db_path("input-dropped-overlapping-replacement"),
+        );
+        let replacements = SessionReplacements::with_task_input(coordinator.clone());
+        replacements.begin("replace-overlap");
+        {
+            let _cancelled = SessionReplacementAttempt::begin(&replacements, "replace-overlap");
+            assert_eq!(coordinator.replacement_fence_count("replace-overlap"), 2);
+        }
+
+        assert_eq!(coordinator.replacement_fence_count("replace-overlap"), 1);
+        assert!(
+            replacements.consume("replace-overlap"),
+            "the other attempt's Exit marker must survive"
+        );
+        assert!(!replacements.consume("replace-overlap"));
+        replacements.finish("replace-overlap");
+        assert_eq!(coordinator.replacement_fence_count("replace-overlap"), 0);
     }
 }
 
