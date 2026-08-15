@@ -964,9 +964,12 @@ describe("createMobileController", () => {
 
     expect(client.listRepoCommands).toHaveBeenCalledTimes(catalogReads + 1);
     expect(store.getState()).toMatchObject({
-      repoCommandStatus: "error",
-      repoCommandErrorMessage:
-        "The command launched successfully, but its task could not be loaded. Check your connection and try again.",
+      repoCommandCatalog: {
+        repoId: "repo-1",
+        revision: "catalog-v2"
+      },
+      repoCommandStatus: "ready",
+      repoCommandErrorMessage: null,
       pendingRepoCommandTask: { taskId: "task-command" },
       runningRepoCommandId: null,
       unavailableRepoCommandIds: []
