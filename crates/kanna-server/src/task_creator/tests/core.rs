@@ -2874,6 +2874,30 @@ fn read_agent_definition_loads_builtin_task_manager_agent_with_codex_first() {
     assert!(definition.prompt.contains("git rebase --onto"));
     assert!(definition.prompt.contains("Ask it to `HOLD`"));
     assert!(definition.prompt.contains("payload.exhausted"));
+    assert!(definition
+        .prompt
+        .contains("Audit Premise, Scope, And Runaway Work"));
+    assert!(definition
+        .prompt
+        .contains("ask the agent for one concise re-report"));
+    assert!(definition
+        .prompt
+        .contains("do not perform the architectural design yourself"));
+    assert!(definition
+        .prompt
+        .contains("independent, bounded, on-demand architect consultation"));
+    assert!(definition.prompt.contains(
+        "Kanna's current task and log surfaces do not expose a reliable universal token counter"
+    ));
+    assert!(definition
+        .prompt
+        .contains("Preserve branches and commits when retiring the old work"));
+    assert!(definition
+        .prompt
+        .contains("Resolve the authoritative remote default-branch tip"));
+    assert!(definition
+        .prompt
+        .contains("A bare local branch name is a possibly stale pointer"));
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }
