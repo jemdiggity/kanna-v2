@@ -302,6 +302,7 @@ async fn terminal_state_watcher_once(
                 killed,
                 resume_session_id,
             } => {
+                state.task_input.retire_session(&session_id);
                 // Consume the replacement entry even when the event is
                 // self-describing — a leftover entry would swallow a future
                 // legitimate Exit for the same session id.
@@ -600,6 +601,213 @@ mod tests {
         server.await.unwrap();
 
         assert_task_not_completed(&config);
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn watcher_exit_retires_task_input_worker_before_killed_short_circuit() {
+        let unique = unique_name("terminal-watcher-retires-input");
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        let config = test_config(&unique, &daemon_dir);
+        seed_plain_task(&config);
+        let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
+        let state = http_api::AppState::new(config.clone());
+
+        let server = tokio::spawn(async move {
+            let (list_stream, _) = listener.accept().await.unwrap();
+            let (list_read, mut list_write) = list_stream.into_split();
+            let mut list_reader = BufReader::new(list_read);
+            let mut line = String::new();
+            list_reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::List
+            ));
+            write_event(
+                &mut list_write,
+                &DaemonEvent::SessionList {
+                    sessions: vec![SessionInfo {
+                        session_id: "task-child".to_string(),
+                        pid: 4242,
+                        cwd: "/tmp".to_string(),
+                        state: SessionState::Active,
+                        idle_seconds: 0,
+                        status: kanna_daemon::protocol::SessionStatus::Idle,
+                        kind: kanna_daemon::protocol::SessionKind::Pty,
+                    }],
+                },
+            )
+            .await;
+
+            let (input_stream, _) = listener.accept().await.unwrap();
+            let (input_read, mut input_write) = input_stream.into_split();
+            let mut input_reader = BufReader::new(input_read);
+            line.clear();
+            input_reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::InputIfSession { data, .. } if data == b"draft"
+            ));
+            write_event(&mut input_write, &DaemonEvent::Ok).await;
+
+            let mut subscriber = expect_subscribe(&listener).await;
+            write_event(
+                &mut subscriber,
+                &DaemonEvent::Exit {
+                    session_id: "task-child".to_string(),
+                    code: -1,
+                    resume_session_id: None,
+                    killed: true,
+                },
+            )
+            .await;
+            line.clear();
+            assert_eq!(
+                timeout(Duration::from_secs(1), input_reader.read_line(&mut line))
+                    .await
+                    .expect("Exit did not drop the retired task-input socket")
+                    .unwrap(),
+                0
+            );
+            write_event(&mut subscriber, &DaemonEvent::ShuttingDown).await;
+        });
+
+        state
+            .task_input
+            .send_operator_bytes("task-child", "task-child", b"draft".to_vec())
+            .await
+            .unwrap();
+        timeout(
+            Duration::from_secs(2),
+            terminal_state_watcher_once(
+                &state,
+                &session_replacements::SessionReplacements::default(),
+            ),
+        )
+        .await
+        .expect("watcher did not finish")
+        .unwrap();
+        server.await.unwrap();
+
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn terminal_state_finalization_does_not_wait_for_blocked_completion_notification() {
+        let unique = unique_name("terminal-state-nonblocking-notify");
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        let config = test_config(&unique, &daemon_dir);
+        seed_notifying_task(&config);
+        Db::open(&config.db_path)
+            .unwrap()
+            .insert_stage_run(crate::db::NewStageRun {
+                id: "run-child",
+                task_id: "task-child",
+                stage: "in progress",
+                kind: "main",
+                agent: None,
+                agent_provider: Some("codex"),
+                model: None,
+                effort: None,
+                status: "running",
+                result: None,
+                feedback: None,
+                session_id: Some("task-child"),
+                provider_session_id: None,
+                cwd: Some("/tmp/task-child"),
+                resumed_from_run_id: None,
+            })
+            .unwrap();
+        let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
+        let state = http_api::AppState::new(config.clone());
+
+        let server = tokio::spawn(async move {
+            let (list_stream, _) = listener.accept().await.unwrap();
+            let (list_read, mut list_write) = list_stream.into_split();
+            let mut list_reader = BufReader::new(list_read);
+            let mut line = String::new();
+            list_reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::List
+            ));
+            let parent_session = SessionInfo {
+                session_id: "task-parent".to_string(),
+                pid: 4242,
+                cwd: "/tmp".to_string(),
+                state: SessionState::Active,
+                idle_seconds: 0,
+                status: kanna_daemon::protocol::SessionStatus::Idle,
+                kind: kanna_daemon::protocol::SessionKind::Pty,
+            };
+            write_event(
+                &mut list_write,
+                &DaemonEvent::SessionList {
+                    sessions: vec![parent_session.clone()],
+                },
+            )
+            .await;
+
+            let (input_stream, _) = listener.accept().await.unwrap();
+            let (input_read, mut input_write) = input_stream.into_split();
+            let mut input_reader = BufReader::new(input_read);
+            line.clear();
+            input_reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::InputIfSession { data, .. } if data == b"operator draft"
+            ));
+            write_event(&mut input_write, &DaemonEvent::Ok).await;
+
+            let (notify_list_stream, _) = listener.accept().await.unwrap();
+            let (notify_list_read, mut notify_list_write) = notify_list_stream.into_split();
+            let mut notify_list_reader = BufReader::new(notify_list_read);
+            line.clear();
+            notify_list_reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::List
+            ));
+            write_event(
+                &mut notify_list_write,
+                &DaemonEvent::SessionList {
+                    sessions: vec![parent_session],
+                },
+            )
+            .await;
+
+            line.clear();
+            assert_eq!(input_reader.read_line(&mut line).await.unwrap(), 0);
+        });
+
+        state
+            .task_input
+            .send_operator_bytes("task-parent", "task-parent", b"operator draft".to_vec())
+            .await
+            .unwrap();
+
+        timeout(
+            Duration::from_millis(500),
+            http_api::handle_task_terminal_state(&state, "task-child", 0),
+        )
+        .await
+        .expect("durable terminal finalization waited for a blocked notification")
+        .unwrap();
+        state.task_input.wait_for_admissions(2).await;
+        let run = Db::open(&config.db_path)
+            .unwrap()
+            .latest_stage_run("task-child")
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.status, "cancelled");
+        state.task_input.retire_session("task-parent");
+        timeout(Duration::from_secs(1), server)
+            .await
+            .expect("blocked notification worker did not retire")
+            .unwrap();
+
         let _ = std::fs::remove_file(socket_path);
         let _ = std::fs::remove_dir_all(daemon_dir);
     }

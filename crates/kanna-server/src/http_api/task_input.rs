@@ -396,12 +396,16 @@ pub(crate) async fn handle_task_terminal_state(
         return Ok(());
     };
     state.publish_state_changed(StateChangeScope::Tasks);
-    notify_task_completion(
-        state,
-        &pipeline_item_id,
-        TaskCompletionTrigger::AgentSessionExit { exit_code },
-    )
-    .await
+    let notification_state = state.clone();
+    tokio::spawn(async move {
+        notify_task_completion_best_effort(
+            &notification_state,
+            &pipeline_item_id,
+            TaskCompletionTrigger::AgentSessionExit { exit_code },
+        )
+        .await;
+    });
+    Ok(())
 }
 
 pub(crate) fn mark_task_session_interrupted(
@@ -444,22 +448,20 @@ pub(crate) fn restore_task_run_for_live_session(
         .map_err(|error| format!("db error: {error}"))
 }
 
-/// Deliver a completion notification for a task whose close has already
-/// committed.
+/// Deliver a completion notification after the task's terminal state change
+/// has already committed.
 ///
-/// By this point the close is durable: the workflow item is closed, its
-/// sessions are gone, and its worktrees are cleaned up. A notify target whose
-/// own session has since died is a routine outcome (orchestrators close
-/// before their children do), and reporting it as a failed close is worse
-/// than losing the message — the caller sees a 500 for a close that landed
-/// and either retries it or treats the task as still open. Log and continue.
+/// A notify target whose own session has since died is a routine outcome
+/// (orchestrators can finish before their children do). The task state must
+/// not be reported as failed after its durable mutation landed. Log and
+/// continue.
 pub(super) async fn notify_task_completion_best_effort(
     state: &AppState,
     child_id: &str,
     trigger: TaskCompletionTrigger,
 ) {
     if let Err(error) = notify_task_completion(state, child_id, trigger).await {
-        log::warn!("failed to deliver completion notification for closed task {child_id}: {error}");
+        log::warn!("failed to deliver completion notification for task {child_id}: {error}");
     }
 }
 

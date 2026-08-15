@@ -358,11 +358,12 @@ impl TaskInputCoordinator {
                 Ok(Err(error)) => Err(error),
                 Err(_) => finish_message_deadline(&ownership, result_rx).await,
             };
-        if matches!(result, Err(TaskInputError::SessionNotFound)) {
-            self.workers
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .remove(&incarnation);
+        if let Err(error) = &result {
+            match error {
+                TaskInputError::SessionNotFound => self.evict_incarnation(&incarnation, true),
+                TaskInputError::Uncertain(_) => self.evict_incarnation(&incarnation, false),
+                TaskInputError::Other(_) => {}
+            }
         }
         result
     }
@@ -454,11 +455,23 @@ impl TaskInputCoordinator {
         let result = result
             .await
             .map_err(|_| TaskInputError::Other("task input worker stopped".to_string()))?;
-        if matches!(result, Err(TaskInputError::SessionNotFound)) {
-            self.workers
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .remove(&incarnation);
+        if let Err(error) = &result {
+            let clear_current_pid = match error {
+                TaskInputError::SessionNotFound => true,
+                TaskInputError::Uncertain(_) => false,
+                TaskInputError::Other(_) => return result,
+            };
+            self.evict_incarnation(&incarnation, clear_current_pid);
+        }
+        result
+    }
+
+    fn evict_incarnation(&self, incarnation: &SessionIncarnation, clear_current_pid: bool) {
+        self.workers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(incarnation);
+        if clear_current_pid {
             let mut current_pid = self
                 .current_pid
                 .lock()
@@ -467,7 +480,17 @@ impl TaskInputCoordinator {
                 current_pid.remove(&incarnation.session_id);
             }
         }
-        result
+    }
+
+    pub(crate) fn retire_session(&self, session_id: &str) {
+        self.workers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|incarnation, _| incarnation.session_id != session_id);
+        self.current_pid
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(session_id);
     }
 
     async fn enqueue(
@@ -692,15 +715,23 @@ async fn send_fenced_input(
     incarnation: &SessionIncarnation,
     data: Vec<u8>,
 ) -> Result<(), TaskInputError> {
-    let daemon = daemon_for_input(daemon_dir, daemon).await?;
-    let event = daemon
+    let result = daemon_for_input(daemon_dir, daemon)
+        .await?
         .send_command(&DaemonCommand::InputIfSession {
             session_id: incarnation.session_id.clone(),
             expected_pid: incarnation.pid,
             data,
         })
-        .await
-        .map_err(|error| TaskInputError::Uncertain(format!("daemon response lost: {error}")))?;
+        .await;
+    let event = match result {
+        Ok(event) => event,
+        Err(error) => {
+            *daemon = None;
+            return Err(TaskInputError::Uncertain(format!(
+                "daemon response lost: {error}"
+            )));
+        }
+    };
     match event {
         DaemonEvent::Ok => Ok(()),
         DaemonEvent::Error {
@@ -2246,6 +2277,151 @@ mod tests {
                 data: b"after\r".to_vec(),
             })
             .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn uncertain_operator_delivery_evicts_same_pid_worker_for_replacement_daemon() {
+        let daemon_dir = tempfile::tempdir().unwrap();
+        let socket_path = kanna_runtime_defaults::socket_path(daemon_dir.path());
+        let first_listener = UnixListener::bind(&socket_path).unwrap();
+        let first_daemon = tokio::spawn(async move {
+            let (stream, _) = first_listener.accept().await.unwrap();
+            let (read_half, _write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            serde_json::from_str::<DaemonCommand>(line.trim()).unwrap()
+        });
+        let coordinator = TaskInputCoordinator::new(
+            daemon_dir.path().to_string_lossy().to_string(),
+            Db::test_db_path("input-uncertain-replacement"),
+        );
+        let incarnation = SessionIncarnation {
+            session_id: "task-reconnect".to_string(),
+            pid: 7373,
+        };
+
+        assert!(matches!(
+            coordinator
+                .send_operator_bytes_if_session(
+                    "task-reconnect",
+                    incarnation.clone(),
+                    b"uncertain".to_vec(),
+                )
+                .await,
+            Err(TaskInputError::Uncertain(_))
+        ));
+        assert_eq!(
+            serde_json::to_value(first_daemon.await.unwrap()).unwrap(),
+            serde_json::to_value(DaemonCommand::InputIfSession {
+                session_id: "task-reconnect".to_string(),
+                expected_pid: 7373,
+                data: b"uncertain".to_vec(),
+            })
+            .unwrap()
+        );
+
+        std::fs::remove_file(&socket_path).unwrap();
+        let replacement_listener = UnixListener::bind(&socket_path).unwrap();
+        let replacement_daemon = tokio::spawn(async move {
+            let (stream, _) = replacement_listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let command = serde_json::from_str::<DaemonCommand>(line.trim()).unwrap();
+            write_half
+                .write_all(
+                    format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap()).as_bytes(),
+                )
+                .await
+                .unwrap();
+            let mut replay = String::new();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), reader.read_line(&mut replay))
+                    .await
+                    .is_err(),
+                "uncertain input was replayed after the distinct replacement input"
+            );
+            command
+        });
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            coordinator.send_operator_bytes_if_session(
+                "task-reconnect",
+                incarnation,
+                b"replacement".to_vec(),
+            ),
+        )
+        .await
+        .expect("same-PID input did not connect to the replacement daemon")
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(replacement_daemon.await.unwrap()).unwrap(),
+            serde_json::to_value(DaemonCommand::InputIfSession {
+                session_id: "task-reconnect".to_string(),
+                expected_pid: 7373,
+                data: b"replacement".to_vec(),
+            })
+            .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn retiring_session_releases_worker_pid_and_daemon_socket() {
+        let daemon_dir = tempfile::tempdir().unwrap();
+        let socket_path = kanna_runtime_defaults::socket_path(daemon_dir.path());
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let daemon = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            write_half
+                .write_all(
+                    format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap()).as_bytes(),
+                )
+                .await
+                .unwrap();
+            line.clear();
+            reader.read_line(&mut line).await.unwrap()
+        });
+        let coordinator = TaskInputCoordinator::new(
+            daemon_dir.path().to_string_lossy().to_string(),
+            Db::test_db_path("input-retire-session"),
+        );
+        let incarnation = SessionIncarnation {
+            session_id: "task-retired".to_string(),
+            pid: 8181,
+        };
+
+        coordinator
+            .send_operator_bytes_if_session("task-retired", incarnation, b"open draft".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(coordinator.workers.lock().unwrap().len(), 1);
+        assert_eq!(
+            coordinator.current_pid.lock().unwrap().get("task-retired"),
+            Some(&8181)
+        );
+
+        coordinator.retire_session("task-retired");
+
+        assert!(coordinator.workers.lock().unwrap().is_empty());
+        assert!(!coordinator
+            .current_pid
+            .lock()
+            .unwrap()
+            .contains_key("task-retired"));
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), daemon)
+                .await
+                .expect("retired worker kept its daemon socket open")
+                .unwrap(),
+            0
         );
     }
 }
