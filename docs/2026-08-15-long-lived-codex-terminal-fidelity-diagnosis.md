@@ -59,8 +59,9 @@ investigation did not cause that transition.
 1. The daemon feeds PTY bytes into a Ghostty headless terminal and serializes
    it with `ghostty_xterm_compat_serialize` (`headless_terminal.rs`). Snapshot
    and attach-snapshot both take that live state under the session/fanout lock
-   (`session.rs`, `connection.rs`). The serializer has a 10,000-byte scrollback
-   budget and emits VT, not a structured primary/alternate-screen object.
+   (`session.rs`, `connection.rs`). The headless terminal computes a byte budget
+   sized to retain 10,000 logical scrollback rows, and the serializer emits VT,
+   not a structured primary/alternate-screen object.
 2. `kanna-server` requests `AttachSnapshot` and base64-wraps the returned VT in
    `TermSnapshot`; it does not reinterpret those bytes (`ksp.rs`). Snapshot and
    subsequent output registration are atomic at the daemon fanout boundary.
@@ -283,7 +284,7 @@ sed -n '1,260p' crates/daemon/src/headless_terminal.rs
 sed -n '1,280p' crates/daemon/src/connection.rs
 sed -n '3480,3735p' crates/kanna-server/src/ksp.rs
 sed -n '1,280p' apps/desktop/src/composables/terminalSessionLifecycle.ts
-sed -n '1,240p' apps/desktop/src/components/terminal/TerminalTabs.vue
+sed -n '1,240p' apps/desktop/src/components/TerminalTabs.vue
 sed -n '1,260p' apps/desktop/src/composables/useTerminal.ts
 git blame -L 80,100 -- apps/desktop/src/composables/terminalSessionLifecycle.ts
 git show --stat --oneline 7c9dda70ab
