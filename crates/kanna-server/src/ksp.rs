@@ -1916,7 +1916,23 @@ async fn run_terminal_input(
             request = tokio::time::timeout(TERMINAL_INPUT_IDLE_TIMEOUT, input_rx.recv()) => {
                 match request {
                     Ok(Some(request)) => request,
-                    Ok(None) | Err(_) => return,
+                    Ok(None) => {
+                        pending
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .retiring = true;
+                        return;
+                    }
+                    Err(_) => {
+                        let mut pending = pending
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        if pending.queued == 0 {
+                            pending.retiring = true;
+                            return;
+                        }
+                        continue;
+                    }
                 }
             }
         };
@@ -2530,71 +2546,102 @@ impl StreamConn {
             return;
         }
         self.prune_finished_terminal_inputs();
-        if !self.terminal_inputs.contains_key(&task_id) {
-            if self.terminal_inputs.len() >= MAX_TERMINAL_INPUT_ROUTES {
-                try_send_task_error(
-                    &self.frame_tx,
-                    &task_id,
-                    "terminal_input_resource_limit",
-                    format!(
-                        "this connection already owns {MAX_TERMINAL_INPUT_ROUTES} terminal input routes"
-                    ),
-                );
-                return;
+        for attempt in 0..2 {
+            if !self.terminal_inputs.contains_key(&task_id) {
+                if self.terminal_inputs.len() >= MAX_TERMINAL_INPUT_ROUTES {
+                    try_send_task_error(
+                        &self.frame_tx,
+                        &task_id,
+                        "terminal_input_resource_limit",
+                        format!(
+                            "this connection already owns {MAX_TERMINAL_INPUT_ROUTES} terminal input routes"
+                        ),
+                    );
+                    return;
+                }
+                let session_id = direct_terminal_session_id(&task_id);
+                let input = self.create_terminal_input(task_id.clone(), session_id);
+                self.terminal_inputs.insert(task_id.clone(), input);
             }
-            let session_id = direct_terminal_session_id(&task_id);
-            let input = self.create_terminal_input(task_id.clone(), session_id);
-            self.terminal_inputs.insert(task_id.clone(), input);
-        }
 
-        let input = self
-            .terminal_inputs
-            .get(&task_id)
-            .expect("terminal input inserted");
-        let admission = self
-            .state
-            .task_input
-            .capture_operator_admission(input.session_id.as_deref());
-        {
-            let mut pending = input
-                .pending
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            pending.queued = pending.queued.saturating_add(1);
-        }
-        let send_result = input.tx.try_send(TerminalInputRequest { data, admission });
-        match send_result {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) => {
+            let input = self
+                .terminal_inputs
+                .get(&task_id)
+                .expect("terminal input inserted");
+            let admission = self
+                .state
+                .task_input
+                .capture_operator_admission(input.session_id.as_deref());
+            let retiring = {
                 let mut pending = input
                     .pending
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                pending.queued = pending.queued.saturating_sub(1);
-                drop(pending);
-                try_send_task_error(
-                    &self.frame_tx,
-                    &task_id,
-                    "terminal_input_busy",
-                    "terminal input queue is full".to_string(),
-                );
-            }
-            Err(TrySendError::Closed(_)) => {
-                let mut pending = input
-                    .pending
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                pending.queued = pending.queued.saturating_sub(1);
-                drop(pending);
+                if pending.retiring {
+                    true
+                } else {
+                    pending.queued = pending.queued.saturating_add(1);
+                    false
+                }
+            };
+            if retiring {
                 if let Some(input) = self.terminal_inputs.remove(&task_id) {
                     input.task.abort();
                 }
-                try_send_task_error(
-                    &self.frame_tx,
-                    &task_id,
-                    "terminal_input_unavailable",
-                    "terminal input channel closed".to_string(),
-                );
+                if attempt == 1 {
+                    try_send_task_error(
+                        &self.frame_tx,
+                        &task_id,
+                        "terminal_input_unavailable",
+                        "terminal input worker retired before accepting input".to_string(),
+                    );
+                    return;
+                }
+                continue;
+            }
+
+            let send_result = input.tx.try_send(TerminalInputRequest {
+                data: data.clone(),
+                admission,
+            });
+            match send_result {
+                Ok(()) => return,
+                Err(TrySendError::Full(_)) => {
+                    let mut pending = input
+                        .pending
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    pending.queued = pending.queued.saturating_sub(1);
+                    drop(pending);
+                    try_send_task_error(
+                        &self.frame_tx,
+                        &task_id,
+                        "terminal_input_busy",
+                        "terminal input queue is full".to_string(),
+                    );
+                    return;
+                }
+                Err(TrySendError::Closed(_)) => {
+                    let mut pending = input
+                        .pending
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    pending.queued = pending.queued.saturating_sub(1);
+                    pending.retiring = true;
+                    drop(pending);
+                    if let Some(input) = self.terminal_inputs.remove(&task_id) {
+                        input.task.abort();
+                    }
+                    if attempt == 1 {
+                        try_send_task_error(
+                            &self.frame_tx,
+                            &task_id,
+                            "terminal_input_unavailable",
+                            "terminal input channel closed".to_string(),
+                        );
+                        return;
+                    }
+                }
             }
         }
     }
@@ -8388,7 +8435,17 @@ mod tests {
             ]
         );
         let db = Db::open(&config.db_path).unwrap();
-        let events = db.list_recent_input_events("task-target", 10).unwrap();
+        let events = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let events = db.list_recent_input_events("task-target", 10).unwrap();
+                if events.len() >= 4 {
+                    break events;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("four durable task.input events were not recorded");
         assert_eq!(
             events
                 .iter()
@@ -9488,11 +9545,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn closed_terminal_input_queue_reports_a_typed_error_and_is_retired() {
+    async fn closed_terminal_input_queue_is_replaced_before_retry() {
         let (tx, input_rx) = mpsc::channel(1);
         drop(input_rx);
         let task = tokio::spawn(std::future::pending::<()>());
         let (cancel_tx, _cancel_rx) = watch::channel(false);
+        let stale_pending = Arc::new(Mutex::new(TerminalInputPending::default()));
         let (mut conn, mut outbound_rx) = terminal_input_conn_with_worker(
             "terminal-input-closed",
             "task-input-closed",
@@ -9500,7 +9558,7 @@ mod tests {
                 session_id: Some("session-input-closed".into()),
                 tx,
                 cancel_tx,
-                pending: Arc::new(Mutex::new(TerminalInputPending::default())),
+                pending: Arc::clone(&stale_pending),
                 task,
             },
         );
@@ -9520,10 +9578,106 @@ mod tests {
                 task_id: Some(task_id),
                 code,
                 ..
-            }) if task_id == "task-input-closed" && code == "terminal_input_unavailable"
+            }) if task_id == "task-input-closed" && code == "no_session"
         ));
-        assert!(!conn.terminal_inputs.contains_key("task-input-closed"));
+        let replacement = conn
+            .terminal_inputs
+            .get("task-input-closed")
+            .expect("closed worker was replaced");
+        assert!(!Arc::ptr_eq(&replacement.pending, &stale_pending));
+        assert!(
+            replacement
+                .pending
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .retiring
+        );
         conn.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn terminal_input_replaces_self_retired_worker_before_accepting_frame() {
+        let (tx, input_rx) = mpsc::channel(1);
+        let task = tokio::spawn(async move {
+            let _input_rx = input_rx;
+            std::future::pending::<()>().await;
+        });
+        let stale_abort = task.abort_handle();
+        let (cancel_tx, _cancel_rx) = watch::channel(false);
+        let stale_pending = Arc::new(Mutex::new(TerminalInputPending {
+            queued: 0,
+            in_flight: 0,
+            retiring: true,
+        }));
+        let (mut conn, _outbound_rx) = terminal_input_conn_with_worker(
+            "terminal-input-self-retired",
+            "shell-input-self-retired",
+            TerminalInputHandle {
+                session_id: Some("shell-input-self-retired".into()),
+                tx,
+                cancel_tx,
+                pending: Arc::clone(&stale_pending),
+                task,
+            },
+        );
+
+        assert!(
+            conn.handle(ClientFrame::TermInput {
+                task_id: "shell-input-self-retired".into(),
+                data_b64: b64(b"accepted-by-replacement"),
+            })
+            .await
+        );
+        let replacement_pending = Arc::clone(
+            &conn
+                .terminal_inputs
+                .get("shell-input-self-retired")
+                .expect("replacement worker")
+                .pending,
+        );
+        assert!(!Arc::ptr_eq(&replacement_pending, &stale_pending));
+        let (retiring, accepted) = {
+            let pending = replacement_pending
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            (pending.retiring, pending.queued + pending.in_flight)
+        };
+        assert!(!retiring);
+        assert_eq!(accepted, 1);
+        tokio::task::yield_now().await;
+        assert!(stale_abort.is_finished());
+        conn.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_terminal_input_worker_marks_itself_retiring_before_exit() {
+        let state = Arc::new(AppState::new(test_config(
+            "terminal-input-idle-retirement",
+            "Terminal Input Idle Retirement",
+        )));
+        let (_tx, input_rx) = mpsc::channel(1);
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let pending = Arc::new(Mutex::new(TerminalInputPending::default()));
+        let (frame_tx, _companion_tx, _outbound_rx) = outbound_frame_channel(1);
+        let task = tokio::spawn(run_terminal_input(
+            state,
+            "shell-input-idle-retirement".into(),
+            Some("shell-input-idle-retirement".into()),
+            input_rx,
+            cancel_rx,
+            Arc::clone(&pending),
+            frame_tx,
+        ));
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(TERMINAL_INPUT_IDLE_TIMEOUT).await;
+        task.await.expect("idle worker exits cleanly");
+        assert!(
+            pending
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .retiring
+        );
     }
 
     #[tokio::test]
