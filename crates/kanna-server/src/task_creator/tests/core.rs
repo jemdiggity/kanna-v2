@@ -1630,7 +1630,18 @@ fn builtin_dispatch_definitions_resolve_from_compiled_resources() {
     // the dispatcher uniformly collects the verdict and closes every child.
     assert_eq!(stage.policy.transition, WorkflowStageTransition::Manual);
 
+    let consultation = definitions.workflow("architect-consultation").unwrap();
+    assert_eq!(consultation.stages.len(), 1);
+    let consultation_stage = &consultation.stages[0];
+    assert_eq!(consultation_stage.name, "consultation");
+    assert_eq!(consultation_stage.agent.as_deref(), Some("architect"));
+    assert_eq!(
+        consultation_stage.policy.transition,
+        WorkflowStageTransition::Manual
+    );
+
     for agent_name in [
+        "architect",
         "qa-dispatcher",
         "review-ui",
         "review-security",
@@ -1730,14 +1741,17 @@ fn internal_builtin_workflows_resolve_without_being_offered_as_a_choice() {
     let definitions = RepoDefinitions::resolve(&definition_repo(&repo_root, "main")).unwrap();
 
     let names = definitions.workflow_names().unwrap();
-    assert!(
-        !names.contains(&"specialty-review".to_string()),
-        "internal built-in must not be offered as a choice; got {names:?}"
-    );
-    let resolved = definitions
-        .workflow("specialty-review")
-        .expect("internal built-in must still resolve by name");
-    assert_eq!(resolved.name.as_deref(), Some("specialty-review"));
+    for internal in ["architect-consultation", "specialty-review"] {
+        assert!(
+            !names.contains(&internal.to_string()),
+            "internal built-in `{internal}` must not be offered as a choice; got {names:?}"
+        );
+        let resolved = definitions
+            .workflow(internal)
+            .unwrap_or_else(|error| panic!("internal built-in `{internal}` must resolve: {error}"));
+        assert_eq!(resolved.name.as_deref(), Some(internal));
+        assert_eq!(resolved.visibility, DefinitionVisibility::Internal);
+    }
 
     let _ = std::fs::remove_dir_all(repo_root);
 }
@@ -1836,10 +1850,10 @@ fn a_repo_authored_workflow_declaring_internal_visibility_is_unlisted_but_resolv
 
 #[test]
 fn internal_builtin_agents_are_unlisted_but_resolve_by_name() {
-    // Kanna binds `commit` and `approve` itself as stage posts; their
-    // AGENT.md frontmatter declares `visibility: internal`, so `agents()`
-    // omits them while stage posts (and explicit `agent` overrides) keep
-    // resolving them by name.
+    // Kanna binds `commit` and `approve` as stage posts and `architect` from
+    // the purpose-built consultation workflow. Their AGENT.md frontmatter
+    // declares `visibility: internal`, so `agents()` omits them while their
+    // owning workflow bindings keep resolving them by name.
     let repo_root = init_git_repo_without_provider_fixtures("definitions-internal-agents");
     publish_origin_main(&repo_root, "publish repo without agents");
 
@@ -1850,7 +1864,7 @@ fn internal_builtin_agents_are_unlisted_but_resolve_by_name() {
         .iter()
         .map(|agent| agent.name.as_str())
         .collect::<Vec<_>>();
-    for internal in ["commit", "approve"] {
+    for internal in ["architect", "commit", "approve"] {
         assert!(
             !listed_names.contains(&internal),
             "`{internal}` must not be offered as a choice; got {listed_names:?}"
@@ -2882,10 +2896,14 @@ fn read_agent_definition_loads_builtin_task_manager_agent_with_codex_first() {
         .contains("ask the agent for one concise re-report"));
     assert!(definition
         .prompt
-        .contains("do not perform the architectural design yourself"));
+        .contains("independent, bounded, on-demand architect consultation"));
     assert!(definition
         .prompt
-        .contains("independent, bounded, on-demand architect consultation"));
+        .contains("\"workflow_name\": \"architect-consultation\""));
+    assert!(definition
+        .prompt
+        .contains("\"parent_task_id\": \"<assessed-durable-work-item-id>\""));
+    assert!(definition.prompt.contains("Do not add an `agent` override"));
     assert!(definition.prompt.contains(
         "Kanna's current task and log surfaces do not expose a reliable universal token counter"
     ));
@@ -4241,6 +4259,93 @@ fn prepare_task_binds_specialty_agent_on_specialty_review_workflow() {
             let command = args.join(" ");
             assert!(command.contains("specialty security review agent"));
             assert!(command.contains("Specialty review dispatched from task parent-1."));
+        }
+        _ => panic!("expected pty session"),
+    }
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn prepare_task_binds_bounded_architect_consultation_to_assessed_work_item() {
+    let repo_root = init_git_repo("architect-consultation");
+    let config = test_config("architect-consultation");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "work-item-1",
+        "repo-1",
+        "durable work item being assessed",
+        None,
+        "in progress",
+        "2026-08-15 09:00:00",
+    )
+    .unwrap();
+    db.insert_test_pipeline_item(
+        "manager-1",
+        "repo-1",
+        "long-running task manager",
+        None,
+        "in progress",
+        "2026-08-15 09:01:00",
+    )
+    .unwrap();
+
+    let prompt = "Assess durable work item work-item-1.\nOriginal objective: preserve sessions across upgrades.\nDecision needed: choose the lifecycle owner.\nArtifact requested: none (advisory verdict only).";
+    let prepared = prepare_task_for_api(
+        &db,
+        &config,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: prompt.to_string(),
+            display_name: Some("Architect consultation: lifecycle owner".to_string()),
+            workflow_name: Some("architect-consultation".to_string()),
+            stage: None,
+            base_ref: None,
+            agent: None,
+            agent_provider: Some("codex".to_string()),
+            agent_type: Some("pty".to_string()),
+            terminal_cols: None,
+            terminal_rows: None,
+            model: None,
+            effort: None,
+            permission_mode: None,
+            allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            task_template: None,
+            resume_session_id: None,
+            recovery_snapshot: None,
+            transfer_import: None,
+            notify_task_id: Some("manager-1".to_string()),
+            parent_task_id: Some("work-item-1".to_string()),
+            blocker_task_ids: None,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(prepared.created_task.stage, "consultation");
+    assert_eq!(prepared.stage_agent.as_deref(), Some("architect"));
+    assert_eq!(
+        prepared.completion_transition,
+        WorkflowStageTransition::Manual
+    );
+    let stored = db
+        .get_pipeline_item(&prepared.created_task.task_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.pipeline.as_deref(), Some("architect-consultation"));
+    assert_eq!(stored.parent_task_id.as_deref(), Some("work-item-1"));
+    assert_eq!(stored.notify_task_id.as_deref(), Some("manager-1"));
+    match prepared.session {
+        PreparedSessionSpawn::Pty { args, .. } => {
+            let command = args.join(" ");
+            assert!(command.contains("Kanna Architect"));
+            assert!(command.contains("choose the lifecycle owner"));
+            assert!(command.contains("Artifact requested: none"));
         }
         _ => panic!("expected pty session"),
     }

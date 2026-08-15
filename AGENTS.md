@@ -75,13 +75,18 @@ Advancing past the final stage closes the task. Close snapshots dirty state
 into local WIP commits, removes the task's worktrees, and **keeps the
 branches** — close never deletes a branch.
 
-Built-in workflows, by review depth: `no-review` (no review stage — the
+Built-in product-work workflows, by review depth: `no-review` (no review stage — the
 fallback when a repo names none), `single-reviewer` (one `review` agent), and
 `specialized-reviewers` (a dispatched specialty panel). `specialty-review` is
 not a choice: it is the single-stage workflow the dispatcher gives its child
 tasks, and its definition declares `"visibility": "internal"`, so it resolves
 by name but never reaches the repo manifest, the new-task picker, or the tool
-catalog's advertised lineup. Visibility is declared by the definition itself —
+catalog's advertised lineup. The same internal, explicitly bound convention
+applies to `architect-consultation`, the single manual-stage workflow a task
+manager uses for a bounded `architect` advisory child of the durable work item
+being assessed. Neither the workflow nor agent is an ordinary picker choice,
+and the architect never owns a perpetual management loop. Visibility is
+declared by the definition itself —
 a top-level `visibility` field (`public` | `internal`, default `public`) in a
 workflow JSON, or the same key in AGENT.md frontmatter (the `commit` and
 `approve` stage posts declare `internal`; EXTEND.md may override it) — and it

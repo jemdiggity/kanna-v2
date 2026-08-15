@@ -6,6 +6,26 @@ import desktopPkg from "../package.json";
 import tauriConf from "../src-tauri/tauri.conf.json";
 
 describe("desktop sidecar packaging", () => {
+  it("bundles the canonical architect definitions as desktop resources", () => {
+    const repoRoot = resolve(import.meta.dirname, "../../..");
+    const resources = tauriConf.bundle.resources;
+    const architectAgent = readFileSync(
+      resolve(repoRoot, ".kanna/agents/architect/AGENT.md"),
+      "utf8",
+    );
+    const architectWorkflow = readFileSync(
+      resolve(repoRoot, ".kanna/workflows/architect-consultation.json"),
+      "utf8",
+    );
+
+    expect(resources["../../../.kanna/agents/"]).toBe(".kanna/agents/");
+    expect(resources["../../../.kanna/workflows/"]).toBe(".kanna/workflows/");
+    expect(architectAgent).toContain("name: architect");
+    expect(architectAgent).toContain("visibility: internal");
+    expect(architectWorkflow).toContain('"name": "architect-consultation"');
+    expect(architectWorkflow).toContain('"agent": "architect"');
+  });
+
   it("keeps release builds free of dev-only version and sidecar staging hooks", () => {
     expect(tauriConf.build.beforeBuildCommand).not.toContain("sync-version.sh");
     expect(tauriConf.build.beforeBuildCommand).not.toContain("build:sidecars");

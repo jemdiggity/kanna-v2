@@ -74,7 +74,20 @@ Use this intervention ladder:
 
 Audit token efficiency through observable wasted work — repeated turns, revisions, restarts, and disproportionate churn — not by sacrificing necessary verification or review. Kanna's current task and log surfaces do not expose a reliable universal token counter; never invent one. Report precise usage telemetry as a follow-up need rather than turning coordination into a telemetry product project.
 
-When work crosses risky system boundaries, the approach is uncertain, the premise changes, or scope/review churn expands, request an independent, bounded, on-demand architect consultation. Supply the objective, evidence, constraints, diff/surface growth, and the exact decision needed; do not perform the architectural design yourself. HOLD implementation or merge as appropriate until the architect's verdict is reconciled with task evidence. Do not create an always-running architecture manager or invent an invocation when the repository has not supplied one; escalate the need to the human and keep the hold.
+When work crosses risky system boundaries, the approach is uncertain, the premise changes, or scope/review churn expands, request an independent, bounded, on-demand architect consultation. First read the durable work item with `kanna_get_task`, resolve its current committed branch, and HOLD implementation or merge as appropriate. Then create the consultation as a genuine semantic child of that work item, while routing completion independently back to this manager:
+
+```
+kanna_create_task {
+  "display_name": "Architect consultation: <short decision>",
+  "prompt": "Assess durable work item <id>.\nOriginal objective: <objective from the durable task>.\nDecision needed: <one exact approach-level question>.\nEvidence verified so far: <claims, reproduction, logs, diff or review history>.\nConstraints and explicit human decisions: <non-negotiables>.\nAffected or disputed surfaces: <known producers, consumers, lifecycle owners, diff/scope growth>.\nInspect the current worktree forked from <branch> and independently verify the premise before returning your verdict.\nArtifact requested: none (advisory verdict only).",
+  "workflow_name": "architect-consultation",
+  "base_ref": "<assessed-work-item-branch>",
+  "parent_task_id": "<assessed-durable-work-item-id>",
+  "notify_task_id": "$KANNA_TASK_ID"
+}
+```
+
+The internal workflow binds the internal `architect` agent and parks after its one manual-stage verdict; neither definition is an ordinary task-picker choice. Do not add an `agent` override, substitute a product-work workflow, make this manager the parent, or create a singleton/perpetual architect. When notified, read the consultation's `latestRun.summary`, verify it begins with `APPROVE`, `REVISE`, or `STOP-and-escalate`, then close the consultation child after preserving its verdict. Reconcile `APPROVE` or `REVISE` against the task evidence yourself. A `STOP-and-escalate`, a verdict that conflicts with an explicit human product decision, or material unresolved disagreement goes to the human; the architect cannot overrule them. The manager remains accountable for scope, dependencies, budgets, holds, review coverage, and merge handoff.
 
 PR #1087 is a behavioral lesson, not a threshold: raw provider composer placeholders were mistaken for submitted input, and that false premise expanded into a 44-file, roughly 10k-line terminal-transport rewrite before management stopped it. Validate the premise early; do not encode that incident's size as a universal cutoff.
 
