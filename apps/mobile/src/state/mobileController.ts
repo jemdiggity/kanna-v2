@@ -2075,7 +2075,9 @@ export function createMobileController(
     },
 
     async dismissActivity(taskId) {
-      const task = findTask(taskId);
+      const task = store.getState().recentTasks.find(
+        (candidate) => candidate.id === taskId
+      );
       if (!task || task.activity !== "unread") {
         throw new Error("This activity is no longer available.");
       }

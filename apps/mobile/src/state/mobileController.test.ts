@@ -369,6 +369,57 @@ describe("createMobileController", () => {
     expect(store.getState().selectedTaskId).toBe("task-1");
   });
 
+  it.each([
+    { repoActivity: "idle" as const, repoActivityRevision: 6 },
+    { repoActivity: "unread" as const, repoActivityRevision: 6 }
+  ])(
+    "dismisses the recent Activity revision when the repo copy is $repoActivity at an older revision",
+    async ({ repoActivity, repoActivityRevision }) => {
+      const store = createSessionStore();
+      const client = createClientMock();
+      const controller = createMobileController(client, store);
+      await controller.bootstrap();
+      store.setRepoTasks([
+        {
+          id: "task-1",
+          repoId: "repo-1",
+          title: "Stale repo task",
+          stage: "review",
+          activity: repoActivity,
+          activityRevision: repoActivityRevision
+        }
+      ]);
+      store.setRecentTasks([
+        {
+          id: "task-1",
+          repoId: "repo-1",
+          title: "Visible Activity task",
+          stage: "review",
+          activity: "unread",
+          activityRevision: 7
+        }
+      ]);
+
+      await controller.dismissActivity("task-1");
+
+      expect(client.markTaskRead).toHaveBeenCalledWith("task-1", 7);
+      expect(store.getState().recentTasks).toEqual([
+        expect.objectContaining({
+          id: "task-1",
+          activity: "idle",
+          activityRevision: 8
+        })
+      ]);
+      expect(store.getState().repoTasks).toEqual([
+        expect.objectContaining({
+          id: "task-1",
+          activity: "idle",
+          activityRevision: 8
+        })
+      ]);
+    }
+  );
+
   it("does not suppress a later distinct activity when dismissal loses its revision race", async () => {
     const store = createSessionStore();
     const client = createClientMock();
