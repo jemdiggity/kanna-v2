@@ -214,6 +214,8 @@ async fn stalled_mark_read_does_not_monopolize_sidecar_control() {
             target_peer_id: "peer-target".into(),
             session_id: "task-unread".into(),
             data: b"first".to_vec(),
+            submission_boundary: false,
+            control_input: false,
         },
     );
     write_control(
@@ -223,6 +225,8 @@ async fn stalled_mark_read_does_not_monopolize_sidecar_control() {
             target_peer_id: "peer-target".into(),
             session_id: "task-unread".into(),
             data: b"second".to_vec(),
+            submission_boundary: false,
+            control_input: false,
         },
     );
     write_control(

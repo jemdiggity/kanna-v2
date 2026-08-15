@@ -38,6 +38,7 @@ pub enum StreamKind {
 pub enum KspCapability {
     CompanionAttachmentEpoch,
     CompanionEventEpoch,
+    TermInputBoundary,
     #[serde(other)]
     Unknown,
 }
@@ -162,6 +163,19 @@ pub enum ClientFrame {
     },
     /// Raw terminal input for PTY tasks (base64 bytes).
     TermInput {
+        task_id: String,
+        data_b64: String,
+    },
+    /// Raw terminal input which the producer explicitly identifies as a
+    /// current-composer submission event.
+    TermInputBoundary {
+        task_id: String,
+        data_b64: String,
+    },
+    /// Raw terminal control that neither edits nor submits the composer.
+    /// Producers use this for mouse/scroll/focus reports so those controls
+    /// cannot create a phantom draft that strands logical task messages.
+    TermInputControl {
         task_id: String,
         data_b64: String,
     },
@@ -348,7 +362,10 @@ mod tests {
         let frames = vec![
             ClientFrame::Auth {
                 credential: None,
-                capabilities: vec![KspCapability::CompanionEventEpoch],
+                capabilities: vec![
+                    KspCapability::CompanionEventEpoch,
+                    KspCapability::TermInputBoundary,
+                ],
             },
             ClientFrame::Attach {
                 task_id: "t1".into(),
@@ -373,6 +390,10 @@ mod tests {
             ClientFrame::TermInput {
                 task_id: "t2".into(),
                 data_b64: "aGk=".into(),
+            },
+            ClientFrame::TermInputBoundary {
+                task_id: "t2".into(),
+                data_b64: "DQ==".into(),
             },
             ClientFrame::Request {
                 id: 1,
@@ -429,6 +450,7 @@ mod tests {
             capabilities: vec![
                 KspCapability::CompanionAttachmentEpoch,
                 KspCapability::CompanionEventEpoch,
+                KspCapability::TermInputBoundary,
             ],
         };
         assert_eq!(
@@ -438,7 +460,8 @@ mod tests {
                 "stream_kinds": ["agent", "terminal", "companion"],
                 "capabilities": [
                     "companion_attachment_epoch",
-                    "companion_event_epoch"
+                    "companion_event_epoch",
+                    "term_input_boundary"
                 ]
             })
         );

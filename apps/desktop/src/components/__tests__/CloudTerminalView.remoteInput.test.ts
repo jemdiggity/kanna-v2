@@ -207,6 +207,31 @@ describe("CloudTerminalView", () => {
     wrapper.unmount();
   });
 
+  it("declares an unmodified Enter as a submission boundary", async () => {
+    harness.sendInput.mockResolvedValue(undefined);
+    const { default: CloudTerminalView } = await import("../CloudTerminalView.vue");
+    const wrapper = mount(CloudTerminalView, {
+      props: {
+        ownerDesktopId: "desktop-1",
+        ownerTaskId: "task-1",
+        transport: "cloud",
+      },
+    });
+    await flushPromises();
+
+    harness.keyHandler?.(new KeyboardEvent("keydown", { key: "Enter" }));
+    harness.dataListener?.("\r");
+    await flushPromises();
+
+    expect(harness.sendInput).toHaveBeenCalledWith({
+      desktopId: "desktop-1",
+      taskId: "task-1",
+      data: "\r",
+      submissionBoundary: true,
+    });
+    wrapper.unmount();
+  });
+
   it("chunks the largest accepted paste into wire-safe UTF-8 input frames", async () => {
     harness.sendInput.mockResolvedValue(undefined);
     const { default: CloudTerminalView } = await import("../CloudTerminalView.vue");

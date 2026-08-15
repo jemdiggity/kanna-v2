@@ -1004,8 +1004,16 @@ async fn handle_request(
             target_peer_id,
             session_id,
             data,
+            submission_boundary,
+            control_input,
         } => match runtime
-            .send_peer_session_input(&target_peer_id, &session_id, data)
+            .send_peer_session_input(
+                &target_peer_id,
+                &session_id,
+                data,
+                submission_boundary,
+                control_input,
+            )
             .await
         {
             Ok(()) => ControlResponse::SendPeerSessionInput { request_id },
@@ -1799,6 +1807,8 @@ mod tests {
             target_peer_id: "peer-owner".into(),
             session_id: "task-1".into(),
             data: b"live".to_vec(),
+            submission_boundary: false,
+            control_input: false,
         };
         let entered = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());

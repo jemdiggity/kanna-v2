@@ -61,6 +61,7 @@ export interface RawRelayClient {
 export interface TerminalEventCollector {
   close(): void;
   outputText(): string;
+  sendInput(dataB64: string, submissionBoundary?: boolean, controlInput?: boolean): void;
   waitForExit(expectedCode: number, timeoutMs?: number): Promise<void>;
   waitForOutput(marker: string, timeoutMs?: number): Promise<string>;
   waitForSnapshot(
@@ -100,6 +101,7 @@ export async function createScriptedTask(
     redactInput?: boolean;
     setupCommands?: string[];
     snapshotHistory?: ScriptedAgentOptions["snapshotHistory"];
+    tracePartialInput?: boolean;
     waitingPromptSnippet?: string;
   }
 ): Promise<ScriptedTask> {
@@ -111,6 +113,7 @@ export async function createScriptedTask(
     redactInput: options.redactInput,
     setupCommands: options.setupCommands,
     snapshotHistory: options.snapshotHistory,
+    tracePartialInput: options.tracePartialInput,
   });
 
   const repo = asCreatedRepo(await harness.client.invokeDesktop({
@@ -386,6 +389,16 @@ class TerminalEventCollectorImpl implements TerminalEventCollector {
 
   outputText(): string {
     return this.chunks.join("");
+  }
+
+  sendInput(dataB64: string, submissionBoundary = false, controlInput = false): void {
+    if (controlInput) {
+      this.subscription.sendInput?.(dataB64, false, true);
+    } else if (submissionBoundary) {
+      this.subscription.sendInput?.(dataB64, true);
+    } else {
+      this.subscription.sendInput?.(dataB64);
+    }
   }
 
   async waitForOutput(marker: string, timeoutMs = 10_000): Promise<string> {

@@ -412,6 +412,7 @@ describe("createSessionsApi", () => {
     expect(mocks.invokeMock).toHaveBeenCalledWith("send_input", {
       sessionId: "task-1",
       data: Array.from(new TextEncoder().encode("\r")),
+      submissionBoundary: true,
     });
     expect(mocks.invokeMock).not.toHaveBeenCalledWith("send_input", {
       sessionId: "task-1",

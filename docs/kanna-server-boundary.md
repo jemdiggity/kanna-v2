@@ -11,6 +11,23 @@ The desktop frontend itself is planned to become a `kanna-server` client as well
 - daemon: PTY and session ownership, terminal input and output, agent process lifecycle
 - SQLite DB: repo and task persistence, task metadata, query backing for server resources
 
+## Terminal Input Boundaries
+
+`POST /v1/tasks/{task_id}/input` carries one logical message, not raw terminal
+bytes. The daemon is the authoritative queue owner: it submits the message
+immediately when the composer is clear, or retains it behind an unsent human
+draft until that draft crosses a producer-declared submission boundary. The
+accepted queue is session-scoped, survives server/frontend reconnects and
+transactional daemon handoff, and is never redirected to a later run or stage.
+
+Raw terminal producers classify each frame as draft, submission, or control.
+Desktop keyboard events declare unmodified Enter; mobile LAN and relay clients
+forward the same boundary bit, while mobile mouse/scroll reports are controls
+that neither create nor clear draft state. KSP peers must mutually advertise
+`term_input_boundary`; a mixed-version connection rejects all terminal input
+rather than accept bytes whose boundary meaning may be lost. CR/LF content is
+opaque and never used to infer submission, including inside multiline paste.
+
 ## v1 LAN Surface
 
 - `GET /v1/status`
@@ -555,7 +572,7 @@ way. Deriving it from the exit code alone is what made every clean completion â€
 and every direct close â€” report `DONE [failure]`.
 
 Delivery is claimed once via `pipeline_item.notified_at` and goes through the
-same two-step input helper as `POST /v1/tasks/{task_id}/input`. All of it is
+same logical-input helper as `POST /v1/tasks/{task_id}/input`. All of it is
 server/daemon-side; it must not depend on the desktop event bridge being open.
 
 ## Merge Handoff
@@ -682,7 +699,7 @@ The CLI remains the shell/script interface; MCP is the structured agent-tool int
 
 ## CLI Task Actions
 
-- `kanna-cli task send-input --task-id <TASK_ID> --message <MESSAGE> [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/input`. Input is delivered only to an active daemon PTY session, fenced to the PTY process ID observed before the first byte is submitted while the server holds the task lifecycle lease, and is never queued or stored for a later run or stage. A successful acknowledged submission prints `{ "ok": true }`; an absent or concurrently replaced session returns HTTP 409 with `reason: "no_live_agent_session"`, the latest run status/finish time when available, and explicit `kanna_resume_task` / `kanna_rerun_stage` recovery guidance. If delivery becomes uncertain after any bytes were accepted, the server reports that separately so callers do not retry blindly.
+- `kanna-cli task send-input --task-id <TASK_ID> --message <MESSAGE> [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/input`. Input is accepted only for an active daemon PTY session, fenced to the PTY process ID observed before acceptance while the server holds the task lifecycle lease. The daemon may retain it behind an active human draft, but never for a later run or stage. A successful acknowledgement prints `{ "ok": true }`; an absent or concurrently replaced session returns HTTP 409 with `reason: "no_live_agent_session"`, the latest run status/finish time when available, and explicit `kanna_resume_task` / `kanna_rerun_stage` recovery guidance. If the acknowledgement is lost after acceptance, the server reports uncertain delivery so callers do not retry blindly.
 - `kanna-cli task advance-stage --task-id <TASK_ID> [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/actions/advance-stage` and prints the action response as JSON.
 - `kanna-cli task signal-merge --task-id <TASK_ID> --branch <HEAD> --target <BASE> --summary <SUMMARY> [--pr-url <URL>] [--server-url <URL>]` sends an ordinary request to the repository's merge agent.
 - `kanna-cli task resume --task-id <TASK_ID> [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/actions/resume`. It is valid only for a latest `cancelled` or `failed` run whose daemon session is dead. It resumes the provider conversation when its durable transcript and original worktree pass the shared revision-resume checks; unsupported or missing provider context starts fresh and records `resumeFallbackReason`, while task-state precondition failures return an explanatory conflict. An empty route-level 404 identifies an older server that does not provide the action. Callers may use `rerun-stage` when recovery is unavailable or a deliberately fresh conversation is acceptable.

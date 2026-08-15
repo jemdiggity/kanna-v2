@@ -272,8 +272,8 @@ export function createLanTransport(
         close() {
           client.close();
         },
-        sendInput(dataB64: string) {
-          client.sendTermInput(taskId, dataB64);
+        sendInput(dataB64: string, submissionBoundary = false, controlInput = false) {
+          client.sendTermInput(taskId, dataB64, submissionBoundary, controlInput);
         },
         resize(cols: number, rows: number) {
           client.sendTermResize(taskId, cols, rows);

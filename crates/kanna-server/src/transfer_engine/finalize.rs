@@ -10,12 +10,12 @@
 //! task could be finalized at all. On 2026-08-06 that is exactly what happened:
 //! `[handoff] adopted session …` at 10:43, the signal refused at 13:43.
 //!
-//! Injected input has none of that constraint. `Command::Input` performs no
-//! ownership check — it writes bytes to the master fd for any live session,
-//! adopted or not — and it is the same path a person typing into the terminal
-//! takes. So finalization *asks* the agent to stop instead of signalling it:
+//! Injected input has none of that constraint. `Command::SubmitInput` accepts a
+//! logical message for any live session, adopted or not, and queues it behind
+//! any raw terminal draft. So finalization *asks* the agent to stop instead of
+//! signalling it:
 //!
-//! 1. inject a wrap-up message through the ordinary two-step input helper;
+//! 1. inject a wrap-up message through the daemon-owned logical input queue;
 //! 2. wait for the session to reach `Idle` — the composer-free state — and to
 //!    stay there, off the daemon `StatusChanged` stream the server already
 //!    consumes;
@@ -33,7 +33,7 @@
 //! `opencode-injected-input.test.ts`), so quitting before the agent is idle
 //! truncates the very wrap-up the transfer is trying to capture. And *reaching*
 //! `Idle` is not the same as being finished — the daemon can publish it inside
-//! the injection's own gap between message and CR, or between two turns of a
+//! its own gap between a logical message and CR, or between two turns of a
 //! 500 ms-throttled detector — so the status has to hold for a settle window
 //! before the quit goes out ([`IDLE_SETTLE`], [`IDLE_EDGE_SETTLE`]).
 //!
@@ -133,10 +133,9 @@ const IDLE_SETTLE: Duration = Duration::from_secs(20);
 /// the edge as the answer amounted to. Two `Idle` edges mean nothing about the
 /// wrap-up:
 ///
-/// - the injection is two writes with a pause between them
-///   (`SUBMIT_ENTER_DELAY_MS`, 150 ms), and the daemon can publish `Idle` inside
-///   that gap — the session is idle because the message has not been submitted
-///   yet;
+/// - the daemon writes a logical message and its Enter separately, with a
+///   150 ms pause, and can publish `Idle` inside that gap — the session is idle
+///   because the message has not been submitted yet;
 /// - busy detection is 500 ms-throttled, so an agent that pauses between turns
 ///   can be published as `Idle` mid-work.
 ///
@@ -459,9 +458,8 @@ async fn inject(
             Ok(daemon) => daemon,
             Err(error) => return release(format!("daemon error: {error}")),
         };
-    // The two-step helper every other Kanna input path uses: the text as one
-    // write, then a lone CR after a pause so it registers as a discrete Enter
-    // rather than a paste whose newline is folded into the buffer.
+    // The daemon-owned logical queue every other Kanna message path uses keeps
+    // this message separate from raw drafts and synthesizes its discrete Enter.
     match try_submit_task_input(&mut daemon, task_id, message).await {
         Ok(()) => Injected::Sent,
         Err(TaskInputError::SessionNotFound) => Injected::SessionGone,
@@ -874,7 +872,7 @@ mod tests {
                         .into_iter()
                         .collect(),
                 },
-                DaemonCommand::Input { data, .. } => {
+                DaemonCommand::SubmitInput { data, .. } => {
                     log.lock()
                         .expect("log")
                         .inputs
@@ -979,19 +977,18 @@ mod tests {
             }
         });
 
-        // The wrap-up is a message plus a discrete CR: two writes.
-        daemon.wait_for_inputs(2).await;
+        daemon.wait_for_inputs(1).await;
         // Still busy — a quit typed now would truncate the turn.
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert_eq!(
             daemon.inputs().len(),
-            2,
+            1,
             "something was typed at a busy agent: {:?}",
             daemon.inputs(),
         );
 
         daemon.status(SessionStatus::Idle);
-        daemon.wait_for_inputs(4).await;
+        daemon.wait_for_inputs(2).await;
         daemon.exit();
 
         let outcome = sequence.await.expect("sequence");
@@ -1006,15 +1003,13 @@ mod tests {
             inputs[0].contains("transferred to another machine"),
             "the first thing typed was not the wrap-up: {inputs:?}",
         );
-        assert_eq!(inputs[1], "\r");
         assert_eq!(
-            inputs[2], "/exit",
+            inputs[1], "/exit",
             "the quit command was not typed: {inputs:?}"
         );
-        assert_eq!(inputs[3], "\r");
         assert_eq!(
             daemon.inputs_at_idle(),
-            Some(2),
+            Some(1),
             "the quit was typed before the session was reported idle: {inputs:?}",
         );
         assert_eq!(
@@ -1024,19 +1019,15 @@ mod tests {
         );
     }
 
-    /// The `Idle` the daemon publishes *while the wrap-up is being typed* is not
-    /// the end of the wrap-up.
+    /// The `Idle` the daemon publishes while it submits the wrap-up is not the
+    /// end of the wrap-up.
     ///
-    /// The two-step input helper writes the message, pauses so the newline
-    /// registers as a discrete Enter, and only then writes the CR. The session is
-    /// legitimately idle across that gap — nothing has been submitted yet — and
-    /// the daemon publishes status changes as they happen, so an `Idle` edge
-    /// lands inside it. Returned on, it let `/exit` follow the wrap-up straight
-    /// into the composer: the agent was asked to wrap up, killed before it could
-    /// answer, and the payload still shipped `cleanlyFinalized: true` with the
-    /// truncated conversation. The quit waits for the status to *hold*.
+    /// The daemon writes the accepted message, pauses so its CR registers as a
+    /// discrete Enter, and only then writes that CR. The session is legitimately
+    /// idle across that gap, so a transient `Idle` edge still cannot release the
+    /// quit. The quit waits for the status to *hold*.
     #[tokio::test]
-    async fn an_idle_published_while_the_wrap_up_is_typed_does_not_release_the_quit() {
+    async fn an_idle_published_while_the_wrap_up_is_submitted_does_not_release_the_quit() {
         let daemon = FakeDaemon::start("idle-mid-injection", Some(SessionStatus::Busy));
         let state = state_for(&daemon, "desktop-finalize-mid-injection");
 
@@ -1048,18 +1039,18 @@ mod tests {
             }
         });
 
-        // The message is out and the CR is not: exactly the gap the helper
-        // leaves, and the session is idle inside it.
+        // Acceptance precedes the daemon-owned delayed Enter, so the session
+        // can publish an idle edge after this command is acknowledged.
         daemon.wait_for_inputs(1).await;
         daemon.status(SessionStatus::Idle);
 
-        // The CR lands, the agent takes the message and starts the wrap-up.
-        daemon.wait_for_inputs(2).await;
+        // The Enter lands, the agent takes the message and starts the wrap-up.
+        tokio::time::sleep(Duration::from_millis(200)).await;
         daemon.status(SessionStatus::Busy);
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert_eq!(
             daemon.inputs().len(),
-            2,
+            1,
             "the quit was released by an idle published mid-injection: {:?}",
             daemon.inputs(),
         );
@@ -1071,7 +1062,7 @@ mod tests {
 
         // The real end of the turn.
         daemon.status(SessionStatus::Idle);
-        daemon.wait_for_inputs(4).await;
+        daemon.wait_for_inputs(2).await;
         daemon.exit();
 
         let outcome = sequence.await.expect("sequence");
@@ -1081,7 +1072,7 @@ mod tests {
             outcome.degraded_reason,
         );
         assert_eq!(
-            daemon.inputs()[2],
+            daemon.inputs()[1],
             "/exit",
             "the quit command was not what followed the wrap-up: {:?}",
             daemon.inputs(),
@@ -1103,13 +1094,13 @@ mod tests {
             }
         });
 
-        daemon.wait_for_inputs(2).await;
+        daemon.wait_for_inputs(1).await;
         daemon.status(SessionStatus::Idle);
-        daemon.wait_for_inputs(4).await;
+        daemon.wait_for_inputs(2).await;
         daemon.exit();
         sequence.await.expect("sequence");
 
-        assert_eq!(daemon.inputs()[2], "/quit");
+        assert_eq!(daemon.inputs()[1], "/quit");
     }
 
     /// A task whose agent already stopped has nothing to wrap up: the

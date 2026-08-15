@@ -402,12 +402,14 @@ mod tests {
                 serde_json::from_str(line.trim()).unwrap();
             assert!(matches!(
                 command,
-                kanna_daemon::protocol::Command::NegotiateProtectedInput { version: 2 }
+                kanna_daemon::protocol::Command::NegotiateProtectedInput {
+                    version: kanna_daemon::protocol::PROTECTED_INPUT_PROTOCOL_VERSION
+                }
             ));
             negotiated_tx.send(()).unwrap();
             let refusal = kanna_daemon::protocol::Event::Error {
                 code: Some(kanna_daemon::protocol::ErrorCode::ProtectedInputProtocolRequired),
-                message: "protected-input protocol mismatch: expected 1, got 2".to_string(),
+                message: "protected-input protocol mismatch".to_string(),
             };
             write
                 .write_all(format!("{}\n", serde_json::to_string(&refusal).unwrap()).as_bytes())

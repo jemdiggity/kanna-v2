@@ -185,7 +185,12 @@ function createSocketHarness(): {
           const frame = socket.sentFrames.at(-1);
           if (frame?.type === "auth") {
             queueMicrotask(() => {
-              socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
+              socket.onmessage?.({
+                data: JSON.stringify({
+                  type: "auth_ok",
+                  capabilities: ["term_input_boundary"],
+                }),
+              });
             });
           }
         },
@@ -288,7 +293,7 @@ function NavigatorHarness({
 }
 
 describe("RootNavigator terminal scroll input integration", () => {
-  it("routes a task-detail bridge payload through the controller and LAN KSP as term_input", async () => {
+  it("routes a task-detail scroll control through the controller and LAN KSP as term_input_control", async () => {
     const harness = createSocketHarness();
     const client = createKannaClient(
       createLanTransport("http://127.0.0.1:48120", createLanFetchFixture(), harness.factory)
@@ -338,17 +343,17 @@ describe("RootNavigator terminal scroll input integration", () => {
     });
 
     const frameTypes = terminalSocket.sentFrames.map((frame) => frame.type);
-    expect(frameTypes.indexOf("term_input")).toBeGreaterThan(
+    expect(frameTypes.indexOf("term_input_control")).toBeGreaterThan(
       frameTypes.indexOf("attach")
     );
     expect(terminalSocket.sentFrames).toContainEqual({
-      type: "term_input",
+      type: "term_input_control",
       task_id: TASK_ID,
       data_b64: SCROLL_INPUT_B64
     });
 
     const termInputCount = () =>
-      terminalSocket.sentFrames.filter((frame) => frame.type === "term_input").length;
+      terminalSocket.sentFrames.filter((frame) => frame.type === "term_input_control").length;
     const beforeEmptyPayload = termInputCount();
     await act(async () => {
       onSendTerminalInput?.("");

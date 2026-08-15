@@ -23,7 +23,8 @@ use crate::operator_auth::OperatorAuthorizer;
 use crate::output::{handle_output_chunk, stream_output};
 use crate::paths::daemon_data_dir;
 use crate::session::{
-    pty_occupancy_snapshot, SessionHandle, SessionManager, SessionRecord, StreamControl,
+    pty_occupancy_snapshot, RawInputKind, SessionHandle, SessionManager, SessionRecord,
+    StreamControl,
 };
 use crate::socket::{read_command, write_event};
 use crate::successor_auth::SuccessorAuthorizer;
@@ -481,6 +482,9 @@ pub(crate) async fn handle_command(
                         last_status_check_at: None,
                         operator_input_only,
                         input_policy_classified: true,
+                        raw_input_draft_active: false,
+                        raw_input_draft_state_known: true,
+                        pending_logical_inputs: Vec::new(),
                     }));
                     let io_fd = match handle.try_clone_io_fd().await {
                         Ok(fd) => fd,
@@ -676,7 +680,28 @@ pub(crate) async fn handle_command(
             let _ = write_event(&mut *writer.lock().await, &evt).await;
         }
 
-        Command::Input { session_id, data } => {
+        command @ (Command::Input { .. }
+        | Command::InputBoundary { .. }
+        | Command::InputControl { .. }) => {
+            let (session_id, data, kind) = match command {
+                Command::Input { session_id, data } => (session_id, data, RawInputKind::Draft),
+                Command::InputBoundary { session_id, data } => {
+                    (session_id, data, RawInputKind::Submission)
+                }
+                Command::InputControl { session_id, data } => {
+                    (session_id, data, RawInputKind::Control)
+                }
+                _ => unreachable!("input command pattern already matched"),
+            };
+            let daemon_lifecycle_guard = daemon_lifecycle.read().await;
+            if *daemon_lifecycle_guard != DaemonLifecycleState::Running {
+                let evt = error_event(
+                    Some(protocol::ErrorCode::RetryOnSuccessor),
+                    "daemon handoff already committed; send input to the adopting daemon",
+                );
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            }
             let Some(session) = session_handle(&sessions, &session_id).await else {
                 let evt = error_event(
                     Some(protocol::ErrorCode::SessionNotFound),
@@ -695,7 +720,7 @@ pub(crate) async fn handle_command(
                 return;
             }
 
-            let evt = match session.enqueue_acknowledged_input(data) {
+            let evt = match session.enqueue_acknowledged_raw_input(data, kind) {
                 Ok(written) => match written.await {
                     Ok(()) => Event::Ok,
                     Err(_) => error_event(
@@ -716,6 +741,15 @@ pub(crate) async fn handle_command(
             expected_pid,
             data,
         } => {
+            let daemon_lifecycle_guard = daemon_lifecycle.read().await;
+            if *daemon_lifecycle_guard != DaemonLifecycleState::Running {
+                let evt = error_event(
+                    Some(protocol::ErrorCode::RetryOnSuccessor),
+                    "daemon handoff already committed; send input to the adopting daemon",
+                );
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            }
             let Some(session) = session_handle(&sessions, &session_id).await else {
                 let evt = error_event(
                     Some(protocol::ErrorCode::SessionNotFound),
@@ -746,7 +780,7 @@ pub(crate) async fn handle_command(
                 return;
             }
 
-            let evt = match session.enqueue_acknowledged_input(data) {
+            let evt = match session.enqueue_acknowledged_raw_input(data, RawInputKind::Draft) {
                 Ok(written) => match written.await {
                     Ok(()) => Event::Ok,
                     Err(_) => error_event(
@@ -762,7 +796,129 @@ pub(crate) async fn handle_command(
             let _ = write_event(&mut *writer.lock().await, &evt).await;
         }
 
-        Command::InputNoReply { session_id, data } => {
+        Command::SubmitInput { session_id, data } => {
+            let daemon_lifecycle_guard = daemon_lifecycle.read().await;
+            if *daemon_lifecycle_guard != DaemonLifecycleState::Running {
+                let evt = error_event(
+                    Some(protocol::ErrorCode::RetryOnSuccessor),
+                    "daemon handoff already committed; submit input to the adopting daemon",
+                );
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            }
+            let Some(session) = session_handle(&sessions, &session_id).await else {
+                let evt = error_event(
+                    Some(protocol::ErrorCode::SessionNotFound),
+                    format!("session not found: {session_id}"),
+                );
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            };
+            if session.operator_input_only().await {
+                let evt = error_event(
+                    Some(protocol::ErrorCode::InputUnauthorized),
+                    format!("session requires authenticated operator input: {session_id}"),
+                );
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            }
+            let evt = match session.enqueue_logical_input(data) {
+                Ok(()) => Event::Ok,
+                Err(crate::session::InputQueueError::InheritedDraftStateUnknown) => error_event(
+                    Some(protocol::ErrorCode::InheritedDraftStateUnknown),
+                    format!(
+                        "logical input refused for session {session_id}: inherited draft state is unknown; retry after explicit terminal submission"
+                    ),
+                ),
+                Err(_) => error_event(
+                    Some(protocol::ErrorCode::WriteFailed),
+                    format!("input queue closed for session: {session_id}"),
+                ),
+            };
+            let _ = write_event(&mut *writer.lock().await, &evt).await;
+        }
+
+        Command::SubmitInputIfSession {
+            session_id,
+            expected_pid,
+            data,
+        } => {
+            let daemon_lifecycle_guard = daemon_lifecycle.read().await;
+            if *daemon_lifecycle_guard != DaemonLifecycleState::Running {
+                let evt = error_event(
+                    Some(protocol::ErrorCode::RetryOnSuccessor),
+                    "daemon handoff already committed; submit input to the adopting daemon",
+                );
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            }
+            let Some(session) = session_handle(&sessions, &session_id).await else {
+                let evt = error_event(
+                    Some(protocol::ErrorCode::SessionNotFound),
+                    format!("session not found: {session_id}"),
+                );
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            };
+            let actual_pid = session.pty.lock().await.pid();
+            if actual_pid != expected_pid {
+                let evt = error_event(
+                    Some(protocol::ErrorCode::SessionIncarnationMismatch),
+                    format!(
+                        "session incarnation changed for {session_id}: expected pid {expected_pid}, found {actual_pid}"
+                    ),
+                );
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            }
+            if session.operator_input_only().await {
+                let evt = error_event(
+                    Some(protocol::ErrorCode::InputUnauthorized),
+                    format!("session requires authenticated operator input: {session_id}"),
+                );
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            }
+            let evt = match session.enqueue_logical_input(data) {
+                Ok(()) => Event::Ok,
+                Err(crate::session::InputQueueError::InheritedDraftStateUnknown) => error_event(
+                    Some(protocol::ErrorCode::InheritedDraftStateUnknown),
+                    format!(
+                        "logical input refused for session {session_id}: inherited draft state is unknown; retry after explicit terminal submission"
+                    ),
+                ),
+                Err(_) => error_event(
+                    Some(protocol::ErrorCode::WriteFailed),
+                    format!("input queue closed for session: {session_id}"),
+                ),
+            };
+            let _ = write_event(&mut *writer.lock().await, &evt).await;
+        }
+
+        command @ (Command::InputNoReply { .. }
+        | Command::InputBoundaryNoReply { .. }
+        | Command::InputControlNoReply { .. }) => {
+            let (session_id, data, kind) = match command {
+                Command::InputNoReply { session_id, data } => {
+                    (session_id, data, RawInputKind::Draft)
+                }
+                Command::InputBoundaryNoReply { session_id, data } => {
+                    (session_id, data, RawInputKind::Submission)
+                }
+                Command::InputControlNoReply { session_id, data } => {
+                    (session_id, data, RawInputKind::Control)
+                }
+                _ => unreachable!("input command pattern already matched"),
+            };
+            let daemon_lifecycle_guard = daemon_lifecycle.read().await;
+            if *daemon_lifecycle_guard != DaemonLifecycleState::Running {
+                let evt = error_event(
+                    Some(protocol::ErrorCode::RetryOnSuccessor),
+                    "daemon handoff already committed; send input to the adopting daemon",
+                );
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            }
             let Some(session) = session_handle(&sessions, &session_id).await else {
                 let evt = error_event(
                     Some(protocol::ErrorCode::SessionNotFound),
@@ -781,7 +937,7 @@ pub(crate) async fn handle_command(
                 return;
             }
 
-            if session.enqueue_input(data).is_err() {
+            if session.enqueue_raw_input(data, kind).is_err() {
                 let evt = error_event(
                     Some(protocol::ErrorCode::WriteFailed),
                     format!("input queue closed for session: {}", session_id),
@@ -791,6 +947,15 @@ pub(crate) async fn handle_command(
         }
 
         Command::OperatorInput { session_id, data } => {
+            let daemon_lifecycle_guard = daemon_lifecycle.read().await;
+            if *daemon_lifecycle_guard != DaemonLifecycleState::Running {
+                let evt = error_event(
+                    Some(protocol::ErrorCode::RetryOnSuccessor),
+                    "daemon handoff already committed; send input to the adopting daemon",
+                );
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            }
             if let Err(message) = operator_authorizer.authorize(raw_fd, false) {
                 let evt = error_event(Some(protocol::ErrorCode::InputUnauthorized), message);
                 let _ = write_event(&mut *writer.lock().await, &evt).await;
@@ -812,7 +977,7 @@ pub(crate) async fn handle_command(
                 let _ = write_event(&mut *writer.lock().await, &evt).await;
                 return;
             }
-            let evt = match session.enqueue_acknowledged_input(data) {
+            let evt = match session.enqueue_acknowledged_raw_input(data, RawInputKind::Draft) {
                 Ok(written) => match written.await {
                     Ok(()) => Event::Ok,
                     Err(_) => error_event(
@@ -829,6 +994,15 @@ pub(crate) async fn handle_command(
         }
 
         Command::SystemInput { session_id, data } => {
+            let daemon_lifecycle_guard = daemon_lifecycle.read().await;
+            if *daemon_lifecycle_guard != DaemonLifecycleState::Running {
+                let evt = error_event(
+                    Some(protocol::ErrorCode::RetryOnSuccessor),
+                    "daemon handoff already committed; send input to the adopting daemon",
+                );
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            }
             if let Err(message) = operator_authorizer.authorize_system_input(raw_fd) {
                 let evt = error_event(Some(protocol::ErrorCode::InputUnauthorized), message);
                 let _ = write_event(&mut *writer.lock().await, &evt).await;
@@ -850,7 +1024,7 @@ pub(crate) async fn handle_command(
                 let _ = write_event(&mut *writer.lock().await, &evt).await;
                 return;
             }
-            let evt = match session.enqueue_acknowledged_input(data) {
+            let evt = match session.enqueue_acknowledged_raw_input(data, RawInputKind::Draft) {
                 Ok(written) => match written.await {
                     Ok(()) => Event::Ok,
                     Err(_) => error_event(

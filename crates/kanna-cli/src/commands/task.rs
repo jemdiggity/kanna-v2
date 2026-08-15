@@ -58,7 +58,7 @@ pub(crate) fn build_request_revision_request(
 
 pub(crate) fn build_send_task_input_request(message: String) -> TaskInputRequest {
     // Send the message text as-is. Submitting it to the agent terminal (typing
-    // the text, then a discrete Enter keystroke) is the desktop server's job at
+    // the text, then a discrete Enter keystroke) is the daemon's job at
     // /v1/tasks/{id}/input — keeping that policy server-side means kanna-cli,
     // kanna-mcp, and the mobile app all submit consistently.
     TaskInputRequest { input: message }

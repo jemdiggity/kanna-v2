@@ -392,6 +392,8 @@ export function createDesktopLanTerminalClient(): DesktopRemoteTaskClient {
         peerId: options.desktopId,
         sessionId: options.taskId,
         data: options.data,
+        ...(options.submissionBoundary ? { submissionBoundary: true } : {}),
+        ...(options.controlInput ? { controlInput: true } : {}),
       });
     },
     async resize(options) {

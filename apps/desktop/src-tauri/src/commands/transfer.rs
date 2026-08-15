@@ -313,6 +313,8 @@ pub async fn send_transfer_peer_session_input(
     peer_id: String,
     session_id: String,
     data: String,
+    submission_boundary: Option<bool>,
+    control_input: Option<bool>,
 ) -> Result<Value, String> {
     transfer_control(
         &app,
@@ -321,6 +323,8 @@ pub async fn send_transfer_peer_session_input(
             "peerId": peer_id,
             "sessionId": session_id,
             "data": data,
+            "submissionBoundary": submission_boundary.unwrap_or(false),
+            "controlInput": control_input.unwrap_or(false),
         }),
     )
     .await

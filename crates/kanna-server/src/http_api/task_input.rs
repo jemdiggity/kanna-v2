@@ -64,21 +64,9 @@ fn map_task_input_error((status, message): (axum::http::StatusCode, String)) -> 
     task_input_http_error(status, reason, message, None)
 }
 
-/// Delay between typing a task-input message and the synthesized Enter.
-///
-/// The agent CLI coalesces a single bulk write (message text plus a trailing
-/// carriage return) as a *paste*, where the CR is folded into the buffer as a
-/// literal newline and the message is never submitted. Writing the text and the
-/// carriage return as two acknowledged Input commands separated by a short
-/// pause makes the CR register as a discrete Enter keystroke — exactly how a
-/// human types then presses Enter. The daemon acknowledges Input only after it
-/// reaches the PTY, so this delay cannot begin while the message is still
-/// queued. 150ms was validated against the live Claude CLI.
-const SUBMIT_ENTER_DELAY_MS: u64 = 150;
-
 /// The message portion of a `/v1/tasks/{id}/input` payload: the caller's text
 /// with any trailing CR/LF stripped (callers vary — the CLI may append `\r`, the
-/// MCP appends nothing). The Enter is synthesized separately by the handler.
+/// MCP appends nothing). The daemon delivers it as one logical submission.
 pub(super) fn task_input_message(input: &str) -> &str {
     input.trim_end_matches(['\r', '\n'])
 }
@@ -94,20 +82,22 @@ pub(crate) enum TaskInputError {
     Uncertain(String),
 }
 
-/// Send one raw Input command to a daemon session.
-async fn send_raw_session_input(
+/// Queue one semantic logical message in a daemon session. The daemon owns the
+/// raw-draft boundary because it is the only process that observes every raw
+/// terminal writer and survives frontend/server reconnects.
+async fn send_logical_session_input(
     daemon: &mut crate::daemon_client::DaemonClient,
     session_id: &str,
     expected_pid: Option<u32>,
     data: Vec<u8>,
 ) -> Result<(), TaskInputError> {
     let command = match expected_pid {
-        Some(expected_pid) => DaemonCommand::InputIfSession {
+        Some(expected_pid) => DaemonCommand::SubmitInputIfSession {
             session_id: session_id.to_string(),
             expected_pid,
             data,
         },
-        None => DaemonCommand::Input {
+        None => DaemonCommand::SubmitInput {
             session_id: session_id.to_string(),
             data,
         },
@@ -170,35 +160,17 @@ async fn try_submit_task_input_to_session(
     expected_pid: Option<u32>,
     input: &str,
 ) -> Result<(), TaskInputError> {
-    // Type the message, then press Enter as a discrete keystroke (see
-    // SUBMIT_ENTER_DELAY_MS). The daemon stays a raw byte pipe; this submission
-    // policy lives here so every client — kanna-cli, kanna-mcp, mobile, and
-    // server-side notifications — submits consistently.
+    // Every logical caller — kanna-cli, kanna-mcp, mobile, and server-side
+    // notifications — enters the daemon as one semantic message. It either
+    // submits atomically now or waits behind a raw human draft there.
     let message = task_input_message(input);
-    if !message.is_empty() {
-        send_raw_session_input(
-            daemon,
-            session_id,
-            expected_pid,
-            message.as_bytes().to_vec(),
-        )
-        .await?;
-        tokio::time::sleep(std::time::Duration::from_millis(SUBMIT_ENTER_DELAY_MS)).await;
-    }
-    if let Err(error) = send_raw_session_input(daemon, session_id, expected_pid, vec![b'\r']).await
-    {
-        return Err(if message.is_empty() {
-            error
-        } else {
-            TaskInputError::Uncertain(match error {
-                TaskInputError::SessionNotFound => {
-                    format!("session disappeared after message bytes were accepted: {session_id}")
-                }
-                TaskInputError::Other(message) | TaskInputError::Uncertain(message) => message,
-            })
-        });
-    }
-    Ok(())
+    send_logical_session_input(
+        daemon,
+        session_id,
+        expected_pid,
+        message.as_bytes().to_vec(),
+    )
+    .await
 }
 
 /// Submit ordinary input to a task session and map delivery failures to HTTP.

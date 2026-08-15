@@ -67,6 +67,9 @@ fn parse_handoff_response_accepts_v2_payload() {
             agent_spawn: None,
             operator_input_only: false,
             input_policy_classified: false,
+            raw_input_draft_active: false,
+            raw_input_draft_state_known: true,
+            pending_logical_inputs: Vec::new(),
         }],
     })
     .unwrap();
@@ -658,6 +661,9 @@ fn handoff_session(kind: protocol::SessionKind, agent_fd_count: u8) -> protocol:
         agent_spawn: None,
         operator_input_only: false,
         input_policy_classified: true,
+        raw_input_draft_active: false,
+        raw_input_draft_state_known: true,
+        pending_logical_inputs: Vec::new(),
     }
 }
 
@@ -1451,6 +1457,9 @@ async fn forged_agent_handoff_cannot_target_unrelated_processes() {
         agent_spawn: Some(sleeper_spawn_params("forged")),
         operator_input_only: false,
         input_policy_classified: true,
+        raw_input_draft_active: false,
+        raw_input_draft_state_known: true,
+        pending_logical_inputs: Vec::new(),
     };
     crate::agent_runtime::adopt_agent_session(
         info,
@@ -1525,6 +1534,9 @@ async fn legacy_handoff_without_identity_keeps_live_agents_killable() {
         agent_spawn: Some(sleeper_spawn_params("legacy")),
         operator_input_only: false,
         input_policy_classified: false,
+        raw_input_draft_active: false,
+        raw_input_draft_state_known: false,
+        pending_logical_inputs: Vec::new(),
     };
     crate::agent_runtime::adopt_agent_session(
         info,

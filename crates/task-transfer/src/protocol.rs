@@ -69,6 +69,10 @@ pub enum ControlRequest {
         target_peer_id: String,
         session_id: String,
         data: Vec<u8>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        submission_boundary: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        control_input: bool,
     },
     ResizePeerSession {
         request_id: String,
@@ -438,6 +442,10 @@ pub enum PeerRequest {
         requester_peer_id: String,
         session_id: String,
         data: Vec<u8>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        submission_boundary: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        control_input: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sealed_payload: Option<String>,
     },
@@ -600,6 +608,10 @@ pub enum PeerTerminalControl {
     Input {
         session_id: String,
         data: Vec<u8>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        submission_boundary: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        control_input: bool,
     },
     Resize {
         session_id: String,

@@ -1355,6 +1355,8 @@ impl TransferRuntime {
         target_peer_id: &str,
         session_id: &str,
         data: Vec<u8>,
+        submission_boundary: bool,
+        control_input: bool,
     ) -> Result<(), RuntimeError> {
         if self
             .send_observed_terminal_control(
@@ -1363,6 +1365,8 @@ impl TransferRuntime {
                 PeerTerminalControl::Input {
                     session_id: session_id.to_owned(),
                     data: data.clone(),
+                    submission_boundary,
+                    control_input,
                 },
             )
             .await
@@ -1380,6 +1384,8 @@ impl TransferRuntime {
                 serde_json::json!({
                     "session_id": session_id,
                     "data": data,
+                    "submission_boundary": submission_boundary,
+                    "control_input": control_input,
                 }),
             )
             .await?;
@@ -1391,6 +1397,8 @@ impl TransferRuntime {
                     requester_peer_id: self.config.peer_id.clone(),
                     session_id: session_id.to_owned(),
                     data,
+                    submission_boundary,
+                    control_input,
                     sealed_payload: Some(sealed_payload),
                 },
             )

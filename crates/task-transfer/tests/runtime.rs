@@ -345,7 +345,13 @@ async fn terminal_input_chunk_at_the_ui_boundary_fits_the_authenticated_peer_fra
     });
 
     runtime
-        .send_peer_session_input("peer-hostile", "task-boundary", vec![u8::MAX; 4 * 1024])
+        .send_peer_session_input(
+            "peer-hostile",
+            "task-boundary",
+            vec![u8::MAX; 4 * 1024],
+            false,
+            false,
+        )
         .await
         .unwrap();
     server.await.unwrap();
@@ -3833,7 +3839,13 @@ async fn protocol_v4_terminal_input_uses_the_authenticated_observer_stream() {
 
     tokio::time::timeout(
         Duration::from_millis(250),
-        primary.send_peer_session_input("peer-target", "task-1", b"typed\x7f".to_vec()),
+        primary.send_peer_session_input(
+            "peer-target",
+            "task-1",
+            b"typed\x7f".to_vec(),
+            false,
+            false,
+        ),
     )
     .await
     .expect("duplex terminal input waited for a remote acknowledgement")
@@ -3845,6 +3857,8 @@ async fn protocol_v4_terminal_input_uses_the_authenticated_observer_stream() {
         PeerTerminalControl::Input {
             session_id: "task-1".into(),
             data: b"typed\x7f".to_vec(),
+            submission_boundary: false,
+            control_input: false,
         }
     );
     assert!(
@@ -5019,7 +5033,13 @@ async fn stalled_mark_read_is_bounded_without_blocking_terminal_control_or_snaps
 
     let controls = tokio::time::timeout(Duration::from_millis(250), async {
         let (input, snapshots) = tokio::join!(
-            runtime.send_peer_session_input("peer-target", "task-unread", b"x".to_vec()),
+            runtime.send_peer_session_input(
+                "peer-target",
+                "task-unread",
+                b"x".to_vec(),
+                false,
+                false,
+            ),
             runtime.list_peer_task_snapshots(),
         );
         input.unwrap();
@@ -5840,7 +5860,7 @@ async fn requester_restart_does_not_reuse_ids_for_authenticated_task_operations(
 
         for result in [
             runtime
-                .send_peer_session_input("peer-owner", "owner-task-1", b"x".to_vec())
+                .send_peer_session_input("peer-owner", "owner-task-1", b"x".to_vec(), false, false)
                 .await,
             runtime
                 .resize_peer_session("peer-owner", "owner-task-1", 100, 40)
@@ -5940,7 +5960,7 @@ async fn repeated_terminal_input_replay_records_stay_memory_only() {
 
     for _ in 0..32 {
         let error = requester
-            .send_peer_session_input("peer-owner", "owner-task-1", b"x".to_vec())
+            .send_peer_session_input("peer-owner", "owner-task-1", b"x".to_vec(), false, false)
             .await
             .expect_err("owner daemon is intentionally absent");
         assert!(!error.to_string().contains("replayed authenticated"));

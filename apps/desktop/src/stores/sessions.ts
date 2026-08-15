@@ -456,6 +456,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
       await invoke("send_input", {
         sessionId,
         data: encodeDaemonInput("\r"),
+        submissionBoundary: true,
       });
     }
   }

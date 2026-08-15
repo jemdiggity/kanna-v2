@@ -55,14 +55,14 @@ async fn assert_signal_agent_reuses_open_task_with_run_status(run_status: &str, 
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         let mut inputs = Vec::new();
-        for _ in 0..2 {
+        for _ in 0..1 {
             let command = read_test_daemon_command(&mut reader, &mut write_half).await;
             match command {
-                DaemonCommand::Input { session_id, data } => {
+                DaemonCommand::SubmitInput { session_id, data } => {
                     assert_eq!(session_id, "merge-session");
                     inputs.push(data);
                 }
-                other => panic!("expected ordinary Input command, got {other:?}"),
+                other => panic!("expected semantic SubmitInput command, got {other:?}"),
             }
             write_half
                 .write_all(
@@ -149,7 +149,7 @@ async fn assert_signal_agent_reuses_open_task_with_run_status(run_status: &str, 
     assert_eq!(body["taskId"], "task-merge");
     assert_eq!(body["created"], false);
     let inputs = daemon_server.await.unwrap();
-    assert_eq!(inputs, vec![message.as_bytes().to_vec(), vec![b'\r']]);
+    assert_eq!(inputs, vec![message.as_bytes().to_vec()]);
 
     let _ = std::fs::remove_file(socket_path);
     let _ = std::fs::remove_dir_all(daemon_dir);
@@ -251,13 +251,13 @@ async fn merge_handoff_route_sends_an_ordinary_repo_policy_request() {
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         let mut inputs = Vec::new();
-        for _ in 0..2 {
+        for _ in 0..1 {
             match read_test_daemon_command(&mut reader, &mut write_half).await {
-                DaemonCommand::Input { session_id, data } => {
+                DaemonCommand::SubmitInput { session_id, data } => {
                     assert_eq!(session_id, "merge-session");
                     inputs.push(data);
                 }
-                other => panic!("expected ordinary Input command, got {other:?}"),
+                other => panic!("expected SubmitInput command, got {other:?}"),
             }
             write_half
                 .write_all(
@@ -324,10 +324,7 @@ async fn merge_handoff_route_sends_an_ordinary_repo_policy_request() {
     let inputs = daemon_server.await.unwrap();
     assert_eq!(
         inputs,
-        vec![
-            b"MERGE feature/head -> main [TASK task-source] [PR https://github.com/acme/repo/pull/51]: Ready for repository policy".to_vec(),
-            vec![b'\r'],
-        ]
+        vec![b"MERGE feature/head -> main [TASK task-source] [PR https://github.com/acme/repo/pull/51]: Ready for repository policy".to_vec()]
     );
 
     let _ = std::fs::remove_file(socket_path);
@@ -1066,7 +1063,7 @@ async fn send_task_input_delivers_to_a_live_session_after_a_finished_run() {
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         let mut commands = Vec::new();
-        while commands.len() < 3 {
+        while commands.len() < 2 {
             let command = read_test_daemon_command(&mut reader, &mut write_half).await;
             let response = match &command {
                 DaemonCommand::List => DaemonEvent::SessionList {
@@ -1080,7 +1077,7 @@ async fn send_task_input_delivers_to_a_live_session_after_a_finished_run() {
                         kind: Default::default(),
                     }],
                 },
-                DaemonCommand::InputIfSession { .. } => DaemonEvent::Ok,
+                DaemonCommand::SubmitInputIfSession { .. } => DaemonEvent::Ok,
                 other => panic!("unexpected daemon command: {other:?}"),
             };
             commands.push(command);
@@ -1143,15 +1140,9 @@ async fn send_task_input_delivers_to_a_live_session_after_a_finished_run() {
     assert!(matches!(commands[0], DaemonCommand::List));
     assert!(matches!(
         &commands[1],
-        DaemonCommand::InputIfSession { session_id, expected_pid, data }
+        DaemonCommand::SubmitInputIfSession { session_id, expected_pid, data }
             if session_id == "task-live" && *expected_pid == 42 && data == b"One more change"
     ));
-    assert!(matches!(
-        &commands[2],
-        DaemonCommand::InputIfSession { session_id, expected_pid, data }
-            if session_id == "task-live" && *expected_pid == 42 && data == b"\r"
-    ));
-
     let _ = std::fs::remove_file(socket_path);
     let _ = std::fs::remove_dir_all(daemon_dir);
     let _ = std::fs::remove_file(config.db_path);
@@ -1190,7 +1181,7 @@ async fn send_task_input_reports_daemon_write_failure_as_delivery_uncertain() {
                         kind: Default::default(),
                     }],
                 },
-                DaemonCommand::InputIfSession { .. } => DaemonEvent::Error {
+                DaemonCommand::SubmitInputIfSession { .. } => DaemonEvent::Error {
                     code: Some(ErrorCode::WriteFailed),
                     message: "input write failed for session: task-write-failed".to_string(),
                 },
@@ -1263,7 +1254,7 @@ async fn send_task_input_reports_daemon_write_failure_as_delivery_uncertain() {
     );
     assert!(matches!(
         daemon_server.await.unwrap().as_slice(),
-        [DaemonCommand::List, DaemonCommand::InputIfSession {
+        [DaemonCommand::List, DaemonCommand::SubmitInputIfSession {
             session_id,
             expected_pid: 42,
             data,
@@ -1276,7 +1267,7 @@ async fn send_task_input_reports_daemon_write_failure_as_delivery_uncertain() {
 }
 
 #[tokio::test]
-async fn submit_task_input_sends_text_then_enter_as_discrete_inputs() {
+async fn submit_task_input_sends_one_semantic_daemon_message() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
     use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
@@ -1299,14 +1290,14 @@ async fn submit_task_input_sends_text_then_enter_as_discrete_inputs() {
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         let mut inputs = Vec::new();
-        for _ in 0..2 {
+        for _ in 0..1 {
             let command = read_test_daemon_command(&mut reader, &mut write_half).await;
             match command {
-                DaemonCommand::Input { session_id, data } => {
+                DaemonCommand::SubmitInput { session_id, data } => {
                     assert_eq!(session_id, "task-target");
                     inputs.push(data);
                 }
-                other => panic!("expected Input command, got {other:?}"),
+                other => panic!("expected SubmitInput command, got {other:?}"),
             }
             write_half
                 .write_all(
@@ -1326,7 +1317,7 @@ async fn submit_task_input_sends_text_then_enter_as_discrete_inputs() {
         .unwrap();
     let inputs = server.await.unwrap();
 
-    assert_eq!(inputs, vec![b"hello".to_vec(), vec![b'\r']]);
+    assert_eq!(inputs, vec![b"hello".to_vec()]);
 
     let _ = std::fs::remove_file(socket_path);
     let _ = std::fs::remove_dir_all(daemon_dir);
@@ -1356,14 +1347,14 @@ async fn terminal_state_notification_sends_once_to_notify_target() {
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         let mut inputs = Vec::new();
-        for _ in 0..2 {
+        for _ in 0..1 {
             let command = read_test_daemon_command(&mut reader, &mut write_half).await;
             match command {
-                DaemonCommand::Input { session_id, data } => {
+                DaemonCommand::SubmitInput { session_id, data } => {
                     assert_eq!(session_id, "task-parent");
                     inputs.push(data);
                 }
-                other => panic!("expected Input command, got {other:?}"),
+                other => panic!("expected SubmitInput command, got {other:?}"),
             }
             write_half
                 .write_all(
@@ -1420,10 +1411,7 @@ async fn terminal_state_notification_sends_once_to_notify_target() {
     let inputs = server.await.unwrap();
     assert_eq!(
         inputs,
-        vec![
-            b"TASK task-child DONE [success]: Child Display".to_vec(),
-            vec![b'\r']
-        ]
+        vec![b"TASK task-child DONE [success]: Child Display".to_vec()]
     );
 
     super::handle_task_terminal_state(state.as_ref(), "task-child", 0)
@@ -1708,7 +1696,7 @@ mod merge_handoff_on_close {
                         read_test_daemon_command_optional(&mut reader, &mut write_half).await
                     {
                         let response = match command {
-                            DaemonCommand::Input { session_id, data } => {
+                            DaemonCommand::SubmitInput { session_id, data } => {
                                 recorded.lock().unwrap().push((session_id, data));
                                 DaemonEvent::Ok
                             }
@@ -2069,15 +2057,15 @@ mod completion_notification {
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         let mut inputs = Vec::new();
-        for _ in 0..2 {
+        for _ in 0..1 {
             let mut line = String::new();
             reader.read_line(&mut line).await.unwrap();
             match serde_json::from_str::<DaemonCommand>(line.trim()).unwrap() {
-                DaemonCommand::Input { session_id, data } => {
+                DaemonCommand::SubmitInput { session_id, data } => {
                     assert_eq!(session_id, "task-parent");
                     inputs.push(data);
                 }
-                other => panic!("expected Input command, got {other:?}"),
+                other => panic!("expected SubmitInput command, got {other:?}"),
             }
             write_half
                 .write_all(
@@ -2092,7 +2080,7 @@ mod completion_notification {
     fn assert_notified(inputs: Vec<Vec<u8>>, expected: &str) {
         assert_eq!(
             inputs,
-            vec![expected.as_bytes().to_vec(), vec![b'\r']],
+            vec![expected.as_bytes().to_vec()],
             "notification payload mismatch; expected {expected}"
         );
     }

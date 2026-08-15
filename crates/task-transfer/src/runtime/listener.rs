@@ -1496,6 +1496,8 @@ async fn handle_connection(
             requester_peer_id,
             session_id,
             data,
+            submission_boundary,
+            control_input,
             sealed_payload,
         }) => match async {
             let payload = authenticate_peer_request(
@@ -1508,7 +1510,24 @@ async fn handle_connection(
             .await?;
             ensure_authenticated_argument(&payload, "session_id", &session_id)?;
             ensure_authenticated_argument(&payload, "data", &data)?;
-            send_daemon_input(&context, &session_id, data).await
+            if submission_boundary {
+                ensure_authenticated_argument(
+                    &payload,
+                    "submission_boundary",
+                    &submission_boundary,
+                )?;
+            }
+            if control_input {
+                ensure_authenticated_argument(&payload, "control_input", &control_input)?;
+            }
+            send_daemon_input(
+                &context,
+                &session_id,
+                data,
+                submission_boundary,
+                control_input,
+            )
+            .await
         }
         .await
         {

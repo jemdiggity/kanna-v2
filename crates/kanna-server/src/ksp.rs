@@ -692,6 +692,7 @@ fn auth_ok_frame_for(companion_access: bool) -> ServerFrame {
         capabilities: vec![
             KspCapability::CompanionAttachmentEpoch,
             KspCapability::CompanionEventEpoch,
+            KspCapability::TermInputBoundary,
         ],
     }
 }
@@ -1602,6 +1603,7 @@ async fn handle_stream_channels(
         companion_events: None,
         authed: false,
         supports_companion_event_epoch: false,
+        supports_term_input_boundary: false,
         legacy_companion_tasks_on_connection: HashSet::new(),
         auth_mode,
         companion_access,
@@ -1654,6 +1656,7 @@ struct StreamConn {
     companion_events: Option<CompanionEventWorker>,
     authed: bool,
     supports_companion_event_epoch: bool,
+    supports_term_input_boundary: bool,
     legacy_companion_tasks_on_connection: HashSet<String>,
     auth_mode: AuthMode,
     companion_access: bool,
@@ -1749,14 +1752,35 @@ pub(crate) fn request_concurrency() -> usize {
 }
 
 enum TerminalControlCommand {
-    Input(Vec<u8>),
-    Resize { cols: u16, rows: u16 },
+    Input {
+        data: Vec<u8>,
+        kind: TerminalInputKind,
+    },
+    Resize {
+        cols: u16,
+        rows: u16,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum TerminalInputKind {
+    Draft,
+    Submission,
+    Control,
 }
 
 impl TerminalControlCommand {
     fn into_daemon_command(self, session_id: String) -> DaemonCommand {
         match self {
-            Self::Input(data) => DaemonCommand::InputNoReply { session_id, data },
+            Self::Input { data, kind } => match kind {
+                TerminalInputKind::Draft => DaemonCommand::InputNoReply { session_id, data },
+                TerminalInputKind::Submission => {
+                    DaemonCommand::InputBoundaryNoReply { session_id, data }
+                }
+                TerminalInputKind::Control => {
+                    DaemonCommand::InputControlNoReply { session_id, data }
+                }
+            },
             Self::Resize { cols, rows } => DaemonCommand::ResizeNoReply {
                 session_id,
                 cols,
@@ -2577,6 +2601,8 @@ impl StreamConn {
                 | ClientFrame::AgentInterrupt { task_id }
                 | ClientFrame::AgentSetModel { task_id, .. }
                 | ClientFrame::TermInput { task_id, .. }
+                | ClientFrame::TermInputBoundary { task_id, .. }
+                | ClientFrame::TermInputControl { task_id, .. }
                 | ClientFrame::TermResize { task_id, .. }
                 | ClientFrame::CompanionEvent { task_id, .. } => Some(task_id.clone()),
                 ClientFrame::Request { .. }
@@ -2725,7 +2751,30 @@ impl StreamConn {
             ClientFrame::AgentSetModel { task_id, model } => {
                 self.enqueue_agent_command(task_id, AgentControlCommand::SetModel(model));
             }
-            ClientFrame::TermInput { task_id, data_b64 } => {
+            frame @ (ClientFrame::TermInput { .. }
+            | ClientFrame::TermInputBoundary { .. }
+            | ClientFrame::TermInputControl { .. }) => {
+                let (task_id, data_b64, kind) = match frame {
+                    ClientFrame::TermInput { task_id, data_b64 } => {
+                        (task_id, data_b64, TerminalInputKind::Draft)
+                    }
+                    ClientFrame::TermInputBoundary { task_id, data_b64 } => {
+                        (task_id, data_b64, TerminalInputKind::Submission)
+                    }
+                    ClientFrame::TermInputControl { task_id, data_b64 } => {
+                        (task_id, data_b64, TerminalInputKind::Control)
+                    }
+                    _ => unreachable!("terminal input frame pattern already matched"),
+                };
+                if !self.supports_term_input_boundary {
+                    self.error(
+                        Some(task_id),
+                        "term_input_boundary_required",
+                        "terminal input requires negotiated term_input_boundary support".into(),
+                    )
+                    .await;
+                    return true;
+                }
                 let data = match base64::engine::general_purpose::STANDARD.decode(&data_b64) {
                     Ok(data) => data,
                     Err(error) => {
@@ -2734,7 +2783,10 @@ impl StreamConn {
                         return true;
                     }
                 };
-                self.enqueue_terminal_control(task_id, TerminalControlCommand::Input(data));
+                self.enqueue_terminal_control(
+                    task_id,
+                    TerminalControlCommand::Input { data, kind },
+                );
             }
             ClientFrame::TermResize {
                 task_id,
@@ -2853,6 +2905,8 @@ impl StreamConn {
         }
         self.supports_companion_event_epoch =
             capabilities.contains(&KspCapability::CompanionEventEpoch);
+        self.supports_term_input_boundary =
+            capabilities.contains(&KspCapability::TermInputBoundary);
         self.send(auth_ok_frame_for(self.companion_access)).await;
         true
     }
@@ -4236,7 +4290,10 @@ mod tests {
     fn client_auth_frame() -> ClientFrame {
         ClientFrame::Auth {
             credential: None,
-            capabilities: vec![KspCapability::CompanionEventEpoch],
+            capabilities: vec![
+                KspCapability::CompanionEventEpoch,
+                KspCapability::TermInputBoundary,
+            ],
         }
     }
 
@@ -4265,6 +4322,7 @@ mod tests {
                 companion_events: None,
                 authed: true,
                 supports_companion_event_epoch,
+                supports_term_input_boundary: true,
                 legacy_companion_tasks_on_connection: HashSet::new(),
                 auth_mode: AuthMode::AllowEmpty,
                 companion_access: true,
@@ -7243,6 +7301,7 @@ mod tests {
                 companion_events: Some(worker),
                 authed: true,
                 supports_companion_event_epoch: false,
+                supports_term_input_boundary: true,
                 legacy_companion_tasks_on_connection: HashSet::new(),
                 auth_mode: AuthMode::AllowEmpty,
                 companion_access: true,
@@ -7350,6 +7409,7 @@ mod tests {
             companion_events: None,
             authed: true,
             supports_companion_event_epoch: false,
+            supports_term_input_boundary: true,
             legacy_companion_tasks_on_connection: HashSet::new(),
             auth_mode: AuthMode::AllowEmpty,
             companion_access: true,
@@ -7715,7 +7775,7 @@ mod tests {
         config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
         let _db = Db::open_for_tests(&config.db_path).expect("open test db");
 
-        let (daemon, mut commands) = spawn_fake_control_daemon(config.daemon_dir.clone(), 3).await;
+        let (daemon, mut commands) = spawn_fake_control_daemon(config.daemon_dir.clone(), 4).await;
         let router = crate::http_api::router(Arc::new(AppState::new(config)));
         let url = serve_router(router).await;
         let mut socket = ws_connect(&url).await;
@@ -7743,9 +7803,17 @@ mod tests {
         .await;
         send_frame(
             &mut socket,
-            &ClientFrame::TermInput {
+            &ClientFrame::TermInputControl {
                 task_id: "shell-control-test".into(),
-                data_b64: b64(b"tail"),
+                data_b64: b64(b"\x1b[<65;1;1M"),
+            },
+        )
+        .await;
+        send_frame(
+            &mut socket,
+            &ClientFrame::TermInputBoundary {
+                task_id: "shell-control-test".into(),
+                data_b64: b64(b"\r"),
             },
         )
         .await;
@@ -7767,13 +7835,74 @@ mod tests {
         );
         assert_command(
             commands.recv().await,
-            DaemonCommand::InputNoReply {
+            DaemonCommand::InputControlNoReply {
                 session_id: "shell-control-test".into(),
-                data: b"tail".to_vec(),
+                data: b"\x1b[<65;1;1M".to_vec(),
+            },
+        );
+        assert_command(
+            commands.recv().await,
+            DaemonCommand::InputBoundaryNoReply {
+                session_id: "shell-control-test".into(),
+                data: b"\r".to_vec(),
             },
         );
         assert_eq!(daemon.await.expect("fake control daemon failed"), 1);
 
+        drop(socket);
+        let _ = std::fs::remove_dir_all(&daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn terminal_input_without_boundary_capability_fails_before_daemon_routing() {
+        let unique = format!(
+            "ksp-terminal-legacy-boundary-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+        let mut config = test_config(&unique, "KSP Legacy Terminal Boundary");
+        config.daemon_dir = daemon_dir.to_string_lossy().to_string();
+        config.db_path = Db::test_db_path(&unique);
+        config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+        let _db = Db::open_for_tests(&config.db_path).expect("open test db");
+
+        let (daemon, mut commands) = spawn_fake_control_daemon(config.daemon_dir.clone(), 1).await;
+        let url = serve_router(crate::http_api::router(Arc::new(AppState::new(config)))).await;
+        let mut socket = ws_connect(&url).await;
+        send_frame(&mut socket, &legacy_client_auth_frame()).await;
+        assert_eq!(recv_frame(&mut socket).await, auth_ok_frame_for(false));
+
+        for frame in [
+            ClientFrame::TermInput {
+                task_id: "shell-legacy-client".into(),
+                data_b64: b64(b"human draft"),
+            },
+            ClientFrame::TermInputBoundary {
+                task_id: "shell-legacy-client".into(),
+                data_b64: b64(b"\r"),
+            },
+        ] {
+            send_frame(&mut socket, &frame).await;
+            assert!(matches!(
+                recv_frame(&mut socket).await,
+                ServerFrame::Error { task_id, code, .. }
+                    if task_id.as_deref() == Some("shell-legacy-client")
+                        && code == "term_input_boundary_required"
+            ));
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), commands.recv())
+                .await
+                .is_err(),
+            "legacy terminal bytes reached the daemon without boundary negotiation"
+        );
+
+        daemon.abort();
         drop(socket);
         let _ = std::fs::remove_dir_all(&daemon_dir);
     }
@@ -8381,6 +8510,7 @@ mod tests {
             companion_events: None,
             authed: true,
             supports_companion_event_epoch: false,
+            supports_term_input_boundary: true,
             legacy_companion_tasks_on_connection: HashSet::new(),
             auth_mode: AuthMode::AllowEmpty,
             companion_access: true,
@@ -8390,7 +8520,10 @@ mod tests {
             .await;
         conn.enqueue_terminal_control(
             "task-route".into(),
-            TerminalControlCommand::Input(b"old".to_vec()),
+            TerminalControlCommand::Input {
+                data: b"old".to_vec(),
+                kind: TerminalInputKind::Draft,
+            },
         );
         assert_command(
             commands.recv().await,
@@ -8404,7 +8537,10 @@ mod tests {
             .await;
         conn.enqueue_terminal_control(
             "task-route".into(),
-            TerminalControlCommand::Input(b"new".to_vec()),
+            TerminalControlCommand::Input {
+                data: b"new".to_vec(),
+                kind: TerminalInputKind::Draft,
+            },
         );
         assert_command(
             commands.recv().await,
@@ -8450,6 +8586,7 @@ mod tests {
             companion_events: None,
             authed: true,
             supports_companion_event_epoch: false,
+            supports_term_input_boundary: true,
             legacy_companion_tasks_on_connection: HashSet::new(),
             auth_mode: AuthMode::AllowEmpty,
             companion_access: true,
@@ -8459,7 +8596,10 @@ mod tests {
             .await;
         conn.enqueue_terminal_control(
             "task-route".into(),
-            TerminalControlCommand::Input(b"stale".to_vec()),
+            TerminalControlCommand::Input {
+                data: b"stale".to_vec(),
+                kind: TerminalInputKind::Draft,
+            },
         );
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
@@ -8467,7 +8607,10 @@ mod tests {
             .await;
         conn.enqueue_terminal_control(
             "task-route".into(),
-            TerminalControlCommand::Input(b"fresh".to_vec()),
+            TerminalControlCommand::Input {
+                data: b"fresh".to_vec(),
+                kind: TerminalInputKind::Draft,
+            },
         );
         let (daemon, mut commands) =
             spawn_fake_control_daemon_across_connections(config.daemon_dir.clone()).await;
@@ -8507,6 +8650,7 @@ mod tests {
             companion_events: None,
             authed: true,
             supports_companion_event_epoch: false,
+            supports_term_input_boundary: true,
             legacy_companion_tasks_on_connection: HashSet::new(),
             auth_mode: AuthMode::AllowEmpty,
             companion_access: true,
@@ -8613,6 +8757,7 @@ mod tests {
             companion_events: None,
             authed: true,
             supports_companion_event_epoch: false,
+            supports_term_input_boundary: true,
             legacy_companion_tasks_on_connection: HashSet::new(),
             auth_mode: AuthMode::AllowEmpty,
             companion_access: true,
@@ -9985,7 +10130,7 @@ mod tests {
             &mut socket,
             &ClientFrame::Auth {
                 credential: None,
-                capabilities: vec![],
+                capabilities: vec![KspCapability::TermInputBoundary],
             },
         )
         .await;
@@ -10165,6 +10310,7 @@ mod tests {
                 capabilities: vec![
                     KspCapability::CompanionAttachmentEpoch,
                     KspCapability::CompanionEventEpoch,
+                    KspCapability::TermInputBoundary,
                 ],
             })
         );

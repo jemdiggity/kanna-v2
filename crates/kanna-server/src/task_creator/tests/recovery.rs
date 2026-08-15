@@ -220,17 +220,17 @@ async fn spawn_rejected_resume_fake_daemon(
                 return commands;
             }
             // A relaunch that could not start falls back to the ordinary
-            // completion path, which opens its own connection to deliver the
-            // notification (the message, then the discrete Enter).
+            // completion path, which opens its own connection to deliver one
+            // semantic notification message.
             drop(write_half);
             let (notify_stream, _) = listener.accept().await.unwrap();
             let (notify_read, mut notify_write) = notify_stream.into_split();
             let mut notify_reader = BufReader::new(notify_read);
             loop {
                 let command = read_fake_daemon_command(&mut notify_reader, &mut notify_write).await;
-                let enter = matches!(
+                let submitted = matches!(
                     &command,
-                    kanna_daemon::protocol::Command::Input { data, .. } if data == b"\r"
+                    kanna_daemon::protocol::Command::SubmitInput { .. }
                 );
                 commands.push(command);
                 notify_write
@@ -243,7 +243,7 @@ async fn spawn_rejected_resume_fake_daemon(
                     )
                     .await
                     .unwrap();
-                if enter {
+                if submitted {
                     return commands;
                 }
             }
@@ -267,10 +267,10 @@ async fn spawn_notification_only_fake_daemon(
         let mut inputs = Vec::new();
         loop {
             let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
-            let enter = match &command {
-                kanna_daemon::protocol::Command::Input { data, .. } => {
+            let submitted = match &command {
+                kanna_daemon::protocol::Command::SubmitInput { data, .. } => {
                     inputs.push(data.clone());
-                    data == b"\r"
+                    true
                 }
                 other => panic!("the rejected resume retried more than once: {other:?}"),
             };
@@ -284,7 +284,7 @@ async fn spawn_notification_only_fake_daemon(
                 )
                 .await
                 .unwrap();
-            if enter {
+            if submitted {
                 return inputs;
             }
         }
@@ -789,7 +789,7 @@ async fn failed_fresh_relaunch_reports_the_original_agent_failure() {
     let inputs = commands
         .iter()
         .filter_map(|command| match command {
-            kanna_daemon::protocol::Command::Input { data, .. } => Some(data.clone()),
+            kanna_daemon::protocol::Command::SubmitInput { data, .. } => Some(data.clone()),
             _ => None,
         })
         .collect::<Vec<_>>();

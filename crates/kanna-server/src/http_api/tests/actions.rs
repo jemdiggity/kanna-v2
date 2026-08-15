@@ -856,10 +856,10 @@ async fn close_pr_task_sends_blocker_close_instruction_with_renamed_branch_to_ru
         let (stream, _) = daemon_listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
-        for index in 0..5 {
+        for index in 0..4 {
             let command = read_test_daemon_command(&mut reader, &mut write_half).await;
             match (index, command) {
-                (0, DaemonCommand::Input { session_id, data }) => {
+                (0, DaemonCommand::SubmitInput { session_id, data }) => {
                     assert_eq!(session_id, "task-b-session");
                     let message = String::from_utf8(data).unwrap();
                     assert!(message.contains("has finished its workflow and closed"));
@@ -871,11 +871,7 @@ async fn close_pr_task_sends_blocker_close_instruction_with_renamed_branch_to_ru
                     assert!(!message.contains("`task-a-branch`"));
                     assert!(message.contains("main"));
                 }
-                (1, DaemonCommand::Input { session_id, data }) => {
-                    assert_eq!(session_id, "task-b-session");
-                    assert_eq!(data, vec![b'\r']);
-                }
-                (2..=4, DaemonCommand::Kill { .. }) => {}
+                (1..=3, DaemonCommand::Kill { .. }) => {}
                 (_, other) => panic!("unexpected daemon command at {index}: {:?}", other),
             }
             write_half
@@ -2514,7 +2510,7 @@ fn spawn_dependent_start_daemon(
                 {
                     let response = match command {
                         DaemonCommand::Kill { .. } => DaemonEvent::Ok,
-                        DaemonCommand::Input { .. } => DaemonEvent::Error {
+                        DaemonCommand::SubmitInput { .. } => DaemonEvent::Error {
                             code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
                             message: "session not found".to_string(),
                         },

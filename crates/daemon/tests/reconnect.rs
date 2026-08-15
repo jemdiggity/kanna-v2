@@ -57,9 +57,17 @@ enum Cmd {
         session_id: String,
         data: Vec<u8>,
     },
+    InputBoundary {
+        session_id: String,
+        data: Vec<u8>,
+    },
     InputIfSession {
         session_id: String,
         expected_pid: u32,
+        data: Vec<u8>,
+    },
+    SubmitInput {
+        session_id: String,
         data: Vec<u8>,
     },
     InputNoReply {
@@ -218,6 +226,70 @@ fn input_if_session_rejects_a_different_observed_pid() {
             }
             other => panic!("expected Snapshot, got: {other:?}"),
         }
+    }
+}
+
+#[test]
+fn logical_input_waits_for_partial_raw_input_and_submits_separately() {
+    let daemon = DaemonHandle::start();
+    let mut conn = daemon.connect();
+    let session_id = "draft-isolation";
+    spawn_shell_session(
+        &mut conn,
+        session_id,
+        "stty -echo; while IFS= read -r line; do printf 'LINE:<%s>\\n' \"$line\"; done",
+    );
+
+    conn.send(&Cmd::InputNoReply {
+        session_id: session_id.to_string(),
+        data: b"human draft".to_vec(),
+    });
+    conn.send(&Cmd::SubmitInput {
+        session_id: session_id.to_string(),
+        data: b"manager message".to_vec(),
+    });
+    expect_ok(&mut conn);
+
+    thread::sleep(Duration::from_millis(300));
+    conn.send(&Cmd::Snapshot {
+        session_id: session_id.to_string(),
+    });
+    match recv_snapshot(&mut conn, session_id) {
+        snapshot if !snapshot.vt.contains("LINE:<") => {}
+        snapshot => panic!(
+            "logical input submitted into the partial raw draft: {:?}",
+            snapshot.vt
+        ),
+    }
+
+    conn.send(&Cmd::InputBoundary {
+        session_id: session_id.to_string(),
+        data: b"\r".to_vec(),
+    });
+    expect_ok(&mut conn);
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        conn.send(&Cmd::Snapshot {
+            session_id: session_id.to_string(),
+        });
+        let snapshot = recv_snapshot(&mut conn, session_id);
+        let human = snapshot.vt.find("LINE:<human draft>");
+        let manager = snapshot.vt.find("LINE:<manager message>");
+        if let (Some(human), Some(manager)) = (human, manager) {
+            assert!(
+                human < manager,
+                "raw draft must submit before the queued message"
+            );
+            assert!(!snapshot.vt.contains("human draftmanager message"));
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "separate submissions did not reach the PTY: {:?}",
+            snapshot.vt
+        );
+        thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -799,6 +871,34 @@ fn expect_session_created(conn: &mut ClientConn, session_id: &str) {
     match conn.recv() {
         Evt::SessionCreated { session_id: sid } => assert_eq!(sid, session_id),
         other => panic!("expected SessionCreated, got: {:?}", other),
+    }
+}
+
+fn expect_ok(conn: &mut ClientConn) {
+    loop {
+        match conn.recv() {
+            Evt::Ok => return,
+            Evt::Output { .. } | Evt::StatusChanged { .. } => continue,
+            Evt::Error { code, message } => panic!("command failed: {code:?}: {message}"),
+            other => panic!("expected Ok, got: {other:?}"),
+        }
+    }
+}
+
+fn recv_snapshot(conn: &mut ClientConn, expected_session_id: &str) -> SnapshotPayload {
+    loop {
+        match conn.recv() {
+            Evt::Snapshot {
+                session_id,
+                snapshot,
+            } => {
+                assert_eq!(session_id, expected_session_id);
+                return snapshot;
+            }
+            Evt::Output { .. } | Evt::StatusChanged { .. } => continue,
+            Evt::Error { code, message } => panic!("snapshot failed: {code:?}: {message}"),
+            other => panic!("expected Snapshot, got: {other:?}"),
+        }
     }
 }
 

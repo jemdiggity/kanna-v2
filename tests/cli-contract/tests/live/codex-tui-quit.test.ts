@@ -12,7 +12,7 @@ import { SUBMIT_ENTER_DELAY_MS, sleep, startPtySession, type PtySession } from "
 // Codex tasks (Decision 3 step 3 — inject the provider quit command).
 //
 // kanna-server submits input as "write the whole message, wait 150 ms, send CR"
-// (task_input.rs, SUBMIT_ENTER_DELAY_MS). Codex's composer opens a command popup
+// (daemon/session.rs, LOGICAL_INPUT_SUBMIT_DELAY_MS). Codex's composer opens a command popup
 // on `/`, so the question is whether a burst-written slash command survives that
 // popup or lands on the model as chat text. It survives — the popup offers
 // `/quit  exit Codex` and the discrete CR executes it — which is what lets

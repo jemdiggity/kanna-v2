@@ -141,6 +141,67 @@ describe("LAN task loop E2E", () => {
     }
   }, 45_000);
 
+  it("keeps a LAN terminal draft separate from a simultaneous logical task message", async () => {
+    const task = await createScriptedTask(harness, {
+      displayName: "LAN raw draft and manager input isolation",
+      tracePartialInput: true
+    });
+    const transport = createLanClient(harness);
+    const events = collectLanTerminalEvents(transport, task.taskId);
+    const humanDraft = "human LAN draft in progress";
+    const managerMessage = "manager message stays separate over LAN";
+
+    try {
+      await events.waitForOutput("SCRIPT_INPUT_READY", 30_000);
+      events.sendInput(Buffer.from(humanDraft).toString("base64"));
+      await events.waitForOutput(`SCRIPT_PARTIAL:${humanDraft}`);
+
+      await transport.sendTaskInput(task.taskId, managerMessage);
+
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(events.outputText()).not.toContain(`SCRIPT_INPUT:${humanDraft}`);
+      expect(events.outputText()).not.toContain(`SCRIPT_INPUT:${managerMessage}`);
+
+      events.sendInput(Buffer.from("\r").toString("base64"), true);
+      const output = await events.waitForOutput(
+        `SCRIPT_INPUT:${managerMessage}`,
+        30_000
+      );
+      const humanIndex = output.indexOf(`SCRIPT_INPUT:${humanDraft}`);
+      const managerIndex = output.indexOf(`SCRIPT_INPUT:${managerMessage}`);
+      expect(humanIndex).toBeGreaterThanOrEqual(0);
+      expect(managerIndex).toBeGreaterThan(humanIndex);
+      expect(output).not.toContain(`${humanDraft}${managerMessage}`);
+    } finally {
+      events.close();
+    }
+  }, 45_000);
+
+  it("does not let production mobile scroll control strand a logical task message", async () => {
+    const task = await createScriptedTask(harness, {
+      displayName: "LAN mobile control and manager input",
+      tracePartialInput: true
+    });
+    const transport = createLanClient(harness);
+    const events = collectLanTerminalEvents(transport, task.taskId);
+    const managerMessage = "manager message after mobile scroll";
+
+    try {
+      await events.waitForOutput("SCRIPT_INPUT_READY", 30_000);
+      events.sendInput("G1s8NjU7MTsxTQ==", false, true);
+      await events.waitForOutput("SCRIPT_CONTROL:scroll", 30_000);
+
+      await transport.sendTaskInput(task.taskId, managerMessage);
+      const output = await events.waitForOutput(
+        `SCRIPT_INPUT:${managerMessage}`,
+        30_000
+      );
+      expect(output).not.toContain(`SCRIPT_PARTIAL:\u001b[<65;1;1M${managerMessage}`);
+    } finally {
+      events.close();
+    }
+  }, 45_000);
+
   it("retains authoritative no-echo input and a live PTY burst across a mobile terminal remount", async () => {
     const task = await createScriptedTask(harness, {
       displayName: "Mobile retained terminal input task",
@@ -337,6 +398,8 @@ function rawDataToString(data: RawData): string {
 interface LanTerminalCollector {
   close(): void;
   exitCode(): number | null;
+  outputText(): string;
+  sendInput(dataB64: string, submissionBoundary?: boolean, controlInput?: boolean): void;
   waitForReady(timeoutMs?: number): Promise<void>;
   waitForOutput(marker: string, timeoutMs?: number): Promise<string>;
   waitForExit(expectedCode: number, timeoutMs?: number): Promise<void>;
@@ -374,6 +437,14 @@ class LanTerminalCollectorImpl implements LanTerminalCollector {
 
   exitCode(): number | null {
     return this.code;
+  }
+
+  outputText(): string {
+    return this.chunks.join("");
+  }
+
+  sendInput(dataB64: string, submissionBoundary = false, controlInput = false): void {
+    this.subscription.sendInput?.(dataB64, submissionBoundary, controlInput);
   }
 
   async waitForReady(timeoutMs = 10_000): Promise<void> {
@@ -450,10 +521,6 @@ class LanTerminalCollectorImpl implements LanTerminalCollector {
         }
       });
     });
-  }
-
-  private outputText(): string {
-    return this.chunks.join("");
   }
 
   private onEvent(event: TaskTerminalStreamEvent): void {
