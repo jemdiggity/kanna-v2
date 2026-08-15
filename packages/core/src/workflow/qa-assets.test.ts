@@ -149,6 +149,22 @@ describe("QA workflow assets", () => {
     expect(agent.name).toBe("task-manager");
     expect(agent.agent_provider?.[0]).toBe("codex");
     expect(agent.prompt).toContain("kanna_wait_events");
+    expect(agent.prompt).toContain(
+      "If this task-manager instance is not running on the Claude provider"
+    );
+    expect(agent.prompt).toContain(
+      "never continuously re-arm an idle `kanna_wait_events` MCP call"
+    );
+    expect(agent.prompt).toContain("connection.effectiveBaseUrl");
+    expect(agent.prompt).toContain("serverStatus.desktop.id");
+    expect(agent.prompt).toContain("taskIds cursor is a multi-machine aggregate");
+    expect(agent.prompt).toContain('["repoId", "taskIds", "parentTaskId"]');
+    expect(agent.prompt).toContain(
+      'url.searchParams.set("timeoutSecs", String(timeoutSecs))'
+    );
+    expect(agent.prompt).toContain("25 * 60 * 1000");
+    expect(agent.prompt).toContain("run_in_background: true");
+    expect(agent.prompt).toContain("response body rather than silently restarting");
     expect(agent.prompt).toContain("kanna_set_task_notify");
     expect(agent.prompt).toContain(
       "Product work, bug fixes, investigations, releases, and other durable repository tasks"

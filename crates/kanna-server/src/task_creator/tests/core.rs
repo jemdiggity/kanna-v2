@@ -2864,6 +2864,28 @@ fn read_agent_definition_loads_builtin_task_manager_agent_with_codex_first() {
         Some("codex")
     );
     assert!(definition.prompt.contains("kanna_wait_events"));
+    assert!(definition
+        .prompt
+        .contains("If this task-manager instance is not running on the Claude provider"));
+    assert!(definition
+        .prompt
+        .contains("never continuously re-arm an idle `kanna_wait_events` MCP call"));
+    assert!(definition.prompt.contains("connection.effectiveBaseUrl"));
+    assert!(definition.prompt.contains("serverStatus.desktop.id"));
+    assert!(definition
+        .prompt
+        .contains("taskIds cursor is a multi-machine aggregate"));
+    assert!(definition
+        .prompt
+        .contains("[\"repoId\", \"taskIds\", \"parentTaskId\"]"));
+    assert!(definition
+        .prompt
+        .contains("url.searchParams.set(\"timeoutSecs\", String(timeoutSecs))"));
+    assert!(definition.prompt.contains("25 * 60 * 1000"));
+    assert!(definition.prompt.contains("run_in_background: true"));
+    assert!(definition
+        .prompt
+        .contains("response body rather than silently restarting"));
     assert!(definition.prompt.contains("task.awaiting_input"));
     assert!(definition.prompt.contains("task.activity_changed"));
     assert!(definition.prompt.contains("waitingPromptSnippet"));
