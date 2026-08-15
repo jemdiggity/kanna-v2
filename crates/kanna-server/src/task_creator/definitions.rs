@@ -163,8 +163,9 @@ pub(super) struct RepoWorkspacePathConfig {
 /// new-task picker, `kanna_list_agents`) because Kanna binds the definition
 /// itself and offering it only invites picking it by mistake. Visibility is
 /// not access control: resolution by explicit name never consults it, so the
-/// dispatcher naming `specialty-review` on create and a stage post binding
-/// `commit` keep working unchanged.
+/// dispatcher naming `specialty-review`, the task manager naming
+/// `architect-consultation`, and a stage post binding `commit` keep working
+/// unchanged.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum DefinitionVisibility {
@@ -1088,6 +1089,10 @@ const BUILTIN_AGENT_RESOURCES: &[(&str, &str)] = &[
         include_str!("../../../../.kanna/agents/approve/AGENT.md"),
     ),
     (
+        ".kanna/agents/architect/AGENT.md",
+        include_str!("../../../../.kanna/agents/architect/AGENT.md"),
+    ),
+    (
         ".kanna/agents/task-manager/AGENT.md",
         include_str!("../../../../.kanna/agents/task-manager/AGENT.md"),
     ),
@@ -1220,11 +1225,15 @@ pub(super) fn canonical_builtin_workflow_name(name: &str) -> &str {
 /// bundled definition: both `workflow_names()` and the compiled-resource
 /// fallback read this table, so a built-in can never be offered without
 /// shipping a definition. Whether a name is offered as a choice is declared by
-/// the definition itself, through its `visibility` field: `specialty-review`
-/// declares `"visibility": "internal"` because it is the single-stage  workflow
-/// `qa-dispatcher` gives each child task it fans out — one character away from
-/// the `specialized-reviewers` workflow an operator actually chooses.
+/// the definition itself, through its `visibility` field. Purpose-built child
+/// workflows such as `specialty-review` and `architect-consultation` declare
+/// `"visibility": "internal"`: their invoking agents bind them explicitly,
+/// while an operator chooses only complete product-work workflows.
 const BUILTIN_WORKFLOWS: &[(&str, &str)] = &[
+    (
+        "architect-consultation",
+        include_str!("../../../../.kanna/workflows/architect-consultation.json"),
+    ),
     (
         "no-review",
         include_str!("../../../../.kanna/workflows/no-review.json"),

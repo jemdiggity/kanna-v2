@@ -498,11 +498,20 @@ async fn list_agents_reports_the_resolved_repo_override_that_task_creation_uses(
         !agents.iter().any(|agent| agent["name"] == "approve"),
         "internal built-in approve must not be listed"
     );
+    assert!(
+        !agents.iter().any(|agent| agent["name"] == "architect"),
+        "internal built-in architect must not be listed"
+    );
     let (status, approve) =
         json_response(&app, "/v1/repos/repo-1/kanna-definitions/agents/approve").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(approve["definition"]["name"], "approve");
     assert_eq!(approve["definition"]["visibility"], "internal");
+    let (status, architect) =
+        json_response(&app, "/v1/repos/repo-1/kanna-definitions/agents/architect").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(architect["definition"]["name"], "architect");
+    assert_eq!(architect["definition"]["visibility"], "internal");
 
     let ship = agents
         .iter()
@@ -795,9 +804,9 @@ async fn repo_definition_routes_use_bundled_only_values_without_a_remote_ref() {
     assert_eq!(manifest["refName"], "origin/main");
     assert_eq!(manifest["config"], json!({}));
     assert_eq!(manifest["defaultWorkflow"], "no-review");
-    // The bundled built-ins, minus `specialty-review`: its definition declares
-    // `"visibility": "internal"` because the dispatcher binds it for its child
-    // tasks, so it is never a choice the caller makes.
+    // Purpose-built child workflows stay out of the public lineup: the QA
+    // dispatcher binds `specialty-review`, while the task manager binds
+    // `architect-consultation` for a bounded advisory child.
     assert_eq!(
         manifest["workflows"],
         json!(["no-review", "single-reviewer", "specialized-reviewers"])
@@ -821,6 +830,19 @@ async fn repo_definition_routes_use_bundled_only_values_without_a_remote_ref() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(workflow["definition"]["name"], "specialty-review");
+
+    let (status, consultation) = json_response(
+        &app,
+        "/v1/repos/repo-1/kanna-definitions/workflows/architect-consultation",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(consultation["definition"]["name"], "architect-consultation");
+    assert_eq!(
+        consultation["definition"]["stages"][0]["agent"],
+        "architect"
+    );
+    assert_eq!(consultation["definition"]["visibility"], "internal");
 }
 
 #[tokio::test]

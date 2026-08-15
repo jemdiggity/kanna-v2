@@ -1,0 +1,15 @@
+{
+  "$schema": "./schema.json",
+  "name": "architect-consultation",
+  "description": "Bounded, on-demand architecture consultation attached to the durable work item being assessed",
+  "visibility": "internal",
+  "stages": [
+    {
+      "name": "consultation",
+      "description": "Architect independently verifies the premise, evaluates approaches, and records one advisory verdict for the invoking manager",
+      "agent": "architect",
+      "prompt": "$TASK_PROMPT",
+      "policy": { "transition": "manual" }
+    }
+  ]
+}

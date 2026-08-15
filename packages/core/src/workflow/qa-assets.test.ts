@@ -163,7 +163,17 @@ describe("QA workflow assets", () => {
     expect(agent.prompt).toContain("ask the agent for one concise re-report");
     expect(agent.prompt).toContain("HOLD implementation and merge handoff");
     expect(agent.prompt).toContain("independent, bounded, on-demand architect consultation");
-    expect(agent.prompt).toContain("do not perform the architectural design yourself");
+    expect(agent.prompt).toContain('"workflow_name": "architect-consultation"');
+    expect(agent.prompt).toContain('"base_ref": "<assessed-work-item-branch>"');
+    expect(agent.prompt).toContain(
+      '"parent_task_id": "<assessed-durable-work-item-id>"'
+    );
+    expect(agent.prompt).toContain("Do not add an `agent` override");
+    expect(agent.prompt).toContain("singleton/perpetual architect");
+    expect(agent.prompt).toContain("consultation's `latestRun.summary`");
+    expect(agent.prompt).toContain(
+      "The manager remains accountable for scope, dependencies, budgets, holds, review coverage, and merge handoff"
+    );
     expect(agent.prompt).toContain(
       "Kanna's current task and log surfaces do not expose a reliable universal token counter"
     );
