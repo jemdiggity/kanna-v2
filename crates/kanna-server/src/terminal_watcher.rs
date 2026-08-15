@@ -302,11 +302,13 @@ async fn terminal_state_watcher_once(
                 killed,
                 resume_session_id,
             } => {
-                state.task_input.retire_session(&session_id);
                 // Consume the replacement entry even when the event is
                 // self-describing — a leftover entry would swallow a future
                 // legitimate Exit for the same session id.
                 let replaced = replacements.consume(&session_id);
+                if !replaced {
+                    state.task_input.retire_session(&session_id);
+                }
                 if replaced || killed {
                     // Orchestrated kill (stage swap, rerun, close) — not the
                     // agent finishing.
@@ -353,6 +355,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
+    use tokio::sync::oneshot;
     use tokio::time::{timeout, Duration};
 
     fn unique_name(prefix: &str) -> String {
@@ -690,6 +693,242 @@ mod tests {
         .unwrap();
         server.await.unwrap();
 
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn delayed_replacement_exit_does_not_retire_fresh_same_id_input_worker() {
+        let unique = unique_name("terminal-watcher-delayed-replacement-exit");
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        let config = test_config(&unique, &daemon_dir);
+        let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
+        let state = http_api::AppState::new(config);
+        let replacements = state.session_replacements();
+        let (old_seen_tx, old_seen_rx) = oneshot::channel();
+        let (fresh_seen_tx, fresh_seen_rx) = oneshot::channel();
+        let (ack_fresh_tx, ack_fresh_rx) = oneshot::channel();
+
+        let server = tokio::spawn(async move {
+            let mut ack_fresh_rx = Some(ack_fresh_rx);
+            for (seen, expected_data) in [
+                (old_seen_tx, b"old worker".as_slice()),
+                (fresh_seen_tx, b"fresh worker".as_slice()),
+            ] {
+                let (list_stream, _) = listener.accept().await.unwrap();
+                let (list_read, mut list_write) = list_stream.into_split();
+                let mut list_reader = BufReader::new(list_read);
+                let mut line = String::new();
+                list_reader.read_line(&mut line).await.unwrap();
+                assert!(matches!(
+                    serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                    DaemonCommand::List
+                ));
+                write_event(
+                    &mut list_write,
+                    &DaemonEvent::SessionList {
+                        sessions: vec![SessionInfo {
+                            session_id: "task-child".to_string(),
+                            pid: 4242,
+                            cwd: "/tmp".to_string(),
+                            state: SessionState::Active,
+                            idle_seconds: 0,
+                            status: kanna_daemon::protocol::SessionStatus::Idle,
+                            kind: kanna_daemon::protocol::SessionKind::Pty,
+                        }],
+                    },
+                )
+                .await;
+
+                let (input_stream, _) = listener.accept().await.unwrap();
+                let (input_read, input_write) = input_stream.into_split();
+                let mut input_reader = BufReader::new(input_read);
+                line.clear();
+                input_reader.read_line(&mut line).await.unwrap();
+                assert!(matches!(
+                    serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                    DaemonCommand::InputIfSession { data, .. } if data == expected_data
+                ));
+                seen.send(()).unwrap();
+
+                if expected_data == b"old worker" {
+                    line.clear();
+                    assert_eq!(
+                        timeout(Duration::from_secs(1), input_reader.read_line(&mut line))
+                            .await
+                            .expect("replacement begin did not close the old input socket")
+                            .unwrap(),
+                        0
+                    );
+                } else {
+                    let mut fresh_write = input_write;
+                    let mut subscriber = expect_subscribe(&listener).await;
+                    write_event(
+                        &mut subscriber,
+                        &DaemonEvent::Exit {
+                            session_id: "task-child".to_string(),
+                            code: -1,
+                            resume_session_id: None,
+                            killed: true,
+                        },
+                    )
+                    .await;
+                    write_event(&mut subscriber, &DaemonEvent::ShuttingDown).await;
+                    ack_fresh_rx.take().unwrap().await.unwrap();
+                    write_event(&mut fresh_write, &DaemonEvent::Ok).await;
+                }
+            }
+        });
+
+        let old_state = state.clone();
+        let old = tokio::spawn(async move {
+            old_state
+                .task_input
+                .send_operator_bytes("task-child", "task-child", b"old worker".to_vec())
+                .await
+        });
+        old_seen_rx.await.unwrap();
+
+        replacements.begin("task-child");
+
+        assert!(matches!(
+            timeout(Duration::from_secs(1), old)
+                .await
+                .expect("replacement begin did not retire the old input worker")
+                .unwrap(),
+            Err(crate::task_input_queue::TaskInputError::Uncertain(_))
+        ));
+        replacements.finish("task-child");
+
+        let fresh_state = state.clone();
+        let fresh = tokio::spawn(async move {
+            fresh_state
+                .task_input
+                .send_operator_bytes("task-child", "task-child", b"fresh worker".to_vec())
+                .await
+        });
+        fresh_seen_rx.await.unwrap();
+
+        timeout(
+            Duration::from_secs(2),
+            terminal_state_watcher_once(&state, &replacements),
+        )
+        .await
+        .expect("watcher did not finish")
+        .unwrap();
+        assert!(
+            !fresh.is_finished(),
+            "delayed replacement Exit retired the fresh same-ID worker"
+        );
+        assert_eq!(state.task_input.current_pid("task-child"), Some(4242));
+
+        ack_fresh_tx.send(()).unwrap();
+        assert!(matches!(fresh.await.unwrap(), Ok(())));
+        server.await.unwrap();
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn overlapping_replacement_exits_do_not_retire_latest_same_id_input_worker() {
+        let unique = unique_name("terminal-watcher-overlapping-replacement-exits");
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        let config = test_config(&unique, &daemon_dir);
+        let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
+        let state = http_api::AppState::new(config);
+        let replacements = state.session_replacements();
+        let (fresh_seen_tx, fresh_seen_rx) = oneshot::channel();
+        let (ack_fresh_tx, ack_fresh_rx) = oneshot::channel();
+
+        replacements.begin("task-child");
+        replacements.finish("task-child");
+        replacements.begin("task-child");
+        replacements.finish("task-child");
+
+        let server = tokio::spawn(async move {
+            let (list_stream, _) = listener.accept().await.unwrap();
+            let (list_read, mut list_write) = list_stream.into_split();
+            let mut list_reader = BufReader::new(list_read);
+            let mut line = String::new();
+            list_reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::List
+            ));
+            write_event(
+                &mut list_write,
+                &DaemonEvent::SessionList {
+                    sessions: vec![SessionInfo {
+                        session_id: "task-child".to_string(),
+                        pid: 6262,
+                        cwd: "/tmp".to_string(),
+                        state: SessionState::Active,
+                        idle_seconds: 0,
+                        status: kanna_daemon::protocol::SessionStatus::Idle,
+                        kind: kanna_daemon::protocol::SessionKind::Pty,
+                    }],
+                },
+            )
+            .await;
+
+            let (input_stream, _) = listener.accept().await.unwrap();
+            let (input_read, mut input_write) = input_stream.into_split();
+            let mut input_reader = BufReader::new(input_read);
+            line.clear();
+            input_reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::InputIfSession { data, .. } if data == b"latest worker"
+            ));
+            fresh_seen_tx.send(()).unwrap();
+
+            let mut subscriber = expect_subscribe(&listener).await;
+            for _ in 0..2 {
+                write_event(
+                    &mut subscriber,
+                    &DaemonEvent::Exit {
+                        session_id: "task-child".to_string(),
+                        code: -1,
+                        resume_session_id: None,
+                        killed: true,
+                    },
+                )
+                .await;
+            }
+            write_event(&mut subscriber, &DaemonEvent::ShuttingDown).await;
+            ack_fresh_rx.await.unwrap();
+            let _ = input_write
+                .write_all(
+                    format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap()).as_bytes(),
+                )
+                .await;
+        });
+
+        let fresh_state = state.clone();
+        let fresh = tokio::spawn(async move {
+            fresh_state
+                .task_input
+                .send_operator_bytes("task-child", "task-child", b"latest worker".to_vec())
+                .await
+        });
+        fresh_seen_rx.await.unwrap();
+
+        timeout(
+            Duration::from_secs(2),
+            terminal_state_watcher_once(&state, &replacements),
+        )
+        .await
+        .expect("watcher did not finish")
+        .unwrap();
+        assert!(
+            !fresh.is_finished(),
+            "a second delayed replacement Exit retired the latest worker"
+        );
+        assert_eq!(state.task_input.current_pid("task-child"), Some(6262));
+
+        ack_fresh_tx.send(()).unwrap();
+        assert!(matches!(fresh.await.unwrap(), Ok(())));
+        server.await.unwrap();
         let _ = std::fs::remove_file(socket_path);
         let _ = std::fs::remove_dir_all(daemon_dir);
     }

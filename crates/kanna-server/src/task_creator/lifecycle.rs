@@ -986,7 +986,10 @@ pub(crate) async fn kill_session_replacing(
             format!("daemon error: {}", e)
         })?;
     match kill {
-        DaemonEvent::Ok => Ok(()),
+        DaemonEvent::Ok => {
+            replacements.finish(session_id);
+            Ok(())
+        }
         DaemonEvent::Error {
             code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
             ..

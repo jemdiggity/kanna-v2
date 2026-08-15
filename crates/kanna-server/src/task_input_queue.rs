@@ -5,7 +5,7 @@ use kanna_daemon::protocol::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 #[cfg(test)]
@@ -74,6 +74,7 @@ struct OperatorRequest {
     data: Vec<u8>,
     source: TaskInputSource,
     response: oneshot::Sender<Result<(), TaskInputError>>,
+    ownership: Arc<AtomicU8>,
 }
 
 enum InputRequest {
@@ -91,6 +92,8 @@ struct SessionInputWorker {
 struct TaskInputRegistry {
     workers: HashMap<SessionIncarnation, SessionInputWorker>,
     current_pid: HashMap<String, u32>,
+    route_epochs: HashMap<String, u64>,
+    replacement_fences: HashSet<String>,
 }
 
 #[derive(Clone, Default)]
@@ -290,10 +293,21 @@ impl TaskInputCoordinator {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn live_pty_session(
         &self,
         session_id: &str,
     ) -> Result<(u32, SessionStatus), TaskInputError> {
+        self.discover_live_pty_session(session_id)
+            .await
+            .map(|(pid, status, _)| (pid, status))
+    }
+
+    async fn discover_live_pty_session(
+        &self,
+        session_id: &str,
+    ) -> Result<(u32, SessionStatus, u64), TaskInputError> {
+        let route_epoch = self.route_epoch(session_id);
         let mut daemon = DaemonClient::connect(&self.daemon_dir)
             .await
             .map_err(|error| TaskInputError::Other(format!("daemon unavailable: {error}")))?;
@@ -309,7 +323,7 @@ impl TaskInputCoordinator {
                         && session.kind == SessionKind::Pty
                         && matches!(session.state, SessionState::Active)
                 })
-                .map(|session| (session.pid, session.status))
+                .map(|session| (session.pid, session.status, route_epoch))
                 .ok_or(TaskInputError::SessionNotFound),
             DaemonEvent::Error {
                 code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
@@ -329,11 +343,19 @@ impl TaskInputCoordinator {
         source: TaskInputSource,
         input: &str,
     ) -> Result<(), TaskInputError> {
-        let (pid, _) = self.live_pty_session(session_id).await?;
-        self.submit_message_if_session(task_id, session_id, pid, source, input)
-            .await
+        let (pid, _, route_epoch) = self.discover_live_pty_session(session_id).await?;
+        self.submit_message_if_session_at_epoch(
+            task_id,
+            session_id,
+            pid,
+            source,
+            input,
+            Some(route_epoch),
+        )
+        .await
     }
 
+    #[cfg(test)]
     pub(crate) async fn submit_message_if_session(
         &self,
         task_id: &str,
@@ -341,6 +363,46 @@ impl TaskInputCoordinator {
         expected_pid: u32,
         source: TaskInputSource,
         input: &str,
+    ) -> Result<(), TaskInputError> {
+        self.submit_message_if_session_at_epoch(
+            task_id,
+            session_id,
+            expected_pid,
+            source,
+            input,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn submit_message_if_session_at_route_epoch(
+        &self,
+        task_id: &str,
+        session_id: &str,
+        expected_pid: u32,
+        source: TaskInputSource,
+        input: &str,
+        route_epoch: u64,
+    ) -> Result<(), TaskInputError> {
+        self.submit_message_if_session_at_epoch(
+            task_id,
+            session_id,
+            expected_pid,
+            source,
+            input,
+            Some(route_epoch),
+        )
+        .await
+    }
+
+    async fn submit_message_if_session_at_epoch(
+        &self,
+        task_id: &str,
+        session_id: &str,
+        expected_pid: u32,
+        source: TaskInputSource,
+        input: &str,
+        route_epoch: Option<u64>,
     ) -> Result<(), TaskInputError> {
         validate_task_input(source, input).map_err(TaskInputError::Other)?;
         let incarnation = SessionIncarnation {
@@ -360,20 +422,22 @@ impl TaskInputCoordinator {
             sequence: None,
         });
         let mut worker_id = None;
-        let result =
-            match tokio::time::timeout_at(deadline, self.enqueue(incarnation.clone(), request))
-                .await
-            {
-                Ok(Ok(admitted_worker_id)) => {
-                    worker_id = Some(admitted_worker_id);
-                    match tokio::time::timeout_at(deadline, &mut result_rx).await {
-                        Ok(result) => worker_response_result(result),
-                        Err(_) => finish_message_deadline(&ownership, result_rx).await,
-                    }
+        let result = match tokio::time::timeout_at(
+            deadline,
+            self.enqueue(incarnation.clone(), request, route_epoch),
+        )
+        .await
+        {
+            Ok(Ok(admitted_worker_id)) => {
+                worker_id = Some(admitted_worker_id);
+                match tokio::time::timeout_at(deadline, &mut result_rx).await {
+                    Ok(result) => worker_response_result(&ownership, result),
+                    Err(_) => finish_message_deadline(&ownership, result_rx).await,
                 }
-                Ok(Err(error)) => Err(error),
-                Err(_) => finish_message_deadline(&ownership, result_rx).await,
-            };
+            }
+            Ok(Err(error)) => Err(error),
+            Err(_) => finish_message_deadline(&ownership, result_rx).await,
+        };
         if let (Some(worker_id), Err(error)) = (worker_id, &result) {
             match error {
                 TaskInputError::SessionNotFound => {
@@ -422,6 +486,7 @@ impl TaskInputCoordinator {
                     ownership,
                     sequence: None,
                 }),
+                None,
             )
             .await?;
         Ok((incarnation, worker_id, result))
@@ -433,40 +498,58 @@ impl TaskInputCoordinator {
         session_id: &str,
         data: Vec<u8>,
     ) -> Result<(), TaskInputError> {
-        let incarnation = {
+        let cached_route = {
             let registry = self
                 .registry
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            registry
-                .current_pid
-                .get(session_id)
-                .map(|pid| SessionIncarnation {
-                    session_id: session_id.to_string(),
-                    pid: *pid,
-                })
+            registry.current_pid.get(session_id).map(|pid| {
+                (
+                    SessionIncarnation {
+                        session_id: session_id.to_string(),
+                        pid: *pid,
+                    },
+                    registry.route_epochs.get(session_id).copied().unwrap_or(0),
+                )
+            })
         };
-        let incarnation = match incarnation {
-            Some(incarnation) => incarnation,
+        let (incarnation, route_epoch) = match cached_route {
+            Some((incarnation, route_epoch)) => (incarnation, Some(route_epoch)),
             None => {
-                let (pid, _) = self.live_pty_session(session_id).await?;
-                SessionIncarnation {
-                    session_id: session_id.to_string(),
-                    pid,
-                }
+                let (pid, _, route_epoch) = self.discover_live_pty_session(session_id).await?;
+                (
+                    SessionIncarnation {
+                        session_id: session_id.to_string(),
+                        pid,
+                    },
+                    Some(route_epoch),
+                )
             }
         };
-        self.send_operator_bytes_if_session(task_id, incarnation, data)
+        self.send_operator_bytes_if_session_at_epoch(task_id, incarnation, data, route_epoch)
             .await
     }
 
+    #[cfg(test)]
     async fn send_operator_bytes_if_session(
         &self,
         task_id: &str,
         incarnation: SessionIncarnation,
         data: Vec<u8>,
     ) -> Result<(), TaskInputError> {
+        self.send_operator_bytes_if_session_at_epoch(task_id, incarnation, data, None)
+            .await
+    }
+
+    async fn send_operator_bytes_if_session_at_epoch(
+        &self,
+        task_id: &str,
+        incarnation: SessionIncarnation,
+        data: Vec<u8>,
+        route_epoch: Option<u64>,
+    ) -> Result<(), TaskInputError> {
         let (response, result) = oneshot::channel();
+        let ownership = Arc::new(AtomicU8::new(MESSAGE_PENDING));
         let worker_id = self
             .enqueue(
                 incarnation.clone(),
@@ -475,12 +558,12 @@ impl TaskInputCoordinator {
                     data,
                     source: TaskInputSource::Human,
                     response,
+                    ownership: Arc::clone(&ownership),
                 }),
+                route_epoch,
             )
             .await?;
-        let result = result
-            .await
-            .map_err(|_| TaskInputError::Other("task input worker stopped".to_string()))?;
+        let result = worker_response_result(&ownership, result.await);
         if let Err(error) = &result {
             let clear_current_pid = match error {
                 TaskInputError::SessionNotFound => true,
@@ -524,6 +607,48 @@ impl TaskInputCoordinator {
             .registry
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Self::advance_route_epoch(&mut registry, session_id);
+        Self::retire_session_workers(&mut registry, session_id);
+    }
+
+    pub(crate) fn begin_session_replacement(&self, session_id: &str) {
+        let mut registry = self
+            .registry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Self::advance_route_epoch(&mut registry, session_id);
+        registry.replacement_fences.insert(session_id.to_string());
+        Self::retire_session_workers(&mut registry, session_id);
+    }
+
+    pub(crate) fn finish_session_replacement(&self, session_id: &str) {
+        let mut registry = self
+            .registry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Self::advance_route_epoch(&mut registry, session_id);
+        registry.replacement_fences.remove(session_id);
+    }
+
+    pub(crate) fn route_epoch(&self, session_id: &str) -> u64 {
+        self.registry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .route_epochs
+            .get(session_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn advance_route_epoch(registry: &mut TaskInputRegistry, session_id: &str) {
+        let epoch = registry
+            .route_epochs
+            .entry(session_id.to_string())
+            .or_insert(0);
+        *epoch = epoch.wrapping_add(1);
+    }
+
+    fn retire_session_workers(registry: &mut TaskInputRegistry, session_id: &str) {
         registry.workers.retain(|incarnation, worker| {
             let keep = incarnation.session_id != session_id;
             if !keep {
@@ -538,12 +663,29 @@ impl TaskInputCoordinator {
         &self,
         incarnation: SessionIncarnation,
         request: InputRequest,
+        route_epoch: Option<u64>,
     ) -> Result<u64, TaskInputError> {
         let (worker_id, sender) = {
             let mut registry = self
                 .registry
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let current_route_epoch = registry
+                .route_epochs
+                .get(&incarnation.session_id)
+                .copied()
+                .unwrap_or(0);
+            if registry
+                .replacement_fences
+                .contains(&incarnation.session_id)
+                || route_epoch.is_some_and(|route_epoch| route_epoch != current_route_epoch)
+                || registry
+                    .current_pid
+                    .get(&incarnation.session_id)
+                    .is_some_and(|current_pid| *current_pid != incarnation.pid)
+            {
+                return Err(TaskInputError::SessionNotFound);
+            }
             registry
                 .current_pid
                 .insert(incarnation.session_id.clone(), incarnation.pid);
@@ -598,12 +740,28 @@ impl TaskInputCoordinator {
             notified.await;
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn current_pid(&self, session_id: &str) -> Option<u32> {
+        self.registry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .current_pid
+            .get(session_id)
+            .copied()
+    }
 }
 
 fn worker_response_result(
+    ownership: &AtomicU8,
     result: Result<Result<(), TaskInputError>, oneshot::error::RecvError>,
 ) -> Result<(), TaskInputError> {
-    result.map_err(|_| TaskInputError::Other("task input worker stopped".to_string()))?
+    result.map_err(|_| match ownership.load(Ordering::Acquire) {
+        MESSAGE_DELIVERING => TaskInputError::Uncertain(
+            "task input worker stopped after delivery started".to_string(),
+        ),
+        _ => TaskInputError::Other("task input worker stopped before delivery started".to_string()),
+    })?
 }
 
 async fn finish_message_deadline(
@@ -619,7 +777,7 @@ async fn finish_message_deadline(
         Ok(_) | Err(MESSAGE_CANCELED) => Err(TaskInputError::Other(format!(
             "task input delivery timed out after {INPUT_DELIVERY_TIMEOUT_SECS}s"
         ))),
-        Err(MESSAGE_DELIVERING) => worker_response_result(response.await),
+        Err(MESSAGE_DELIVERING) => worker_response_result(ownership, response.await),
         Err(state) => Err(TaskInputError::Other(format!(
             "task input request reached unknown ownership state {state}"
         ))),
@@ -899,6 +1057,9 @@ async fn deliver_operator_bytes(
         let _ = request.response.send(Ok(()));
         return None;
     }
+    request
+        .ownership
+        .store(MESSAGE_DELIVERING, Ordering::Release);
     let segments = parser.segments(&request.data);
     let mut delivered_segment = false;
     for segment in segments {
@@ -2449,7 +2610,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retiring_session_aborts_inflight_worker_and_fails_queued_requests() {
+    async fn retiring_session_reports_inflight_operator_as_uncertain_and_queued_as_definite() {
         let daemon_dir = tempfile::tempdir().unwrap();
         let socket_path = kanna_runtime_defaults::socket_path(daemon_dir.path());
         let listener = UnixListener::bind(&socket_path).unwrap();
@@ -2527,7 +2688,7 @@ mod tests {
                 .await
                 .expect("in-flight caller did not fail after retirement")
                 .unwrap(),
-            Err(TaskInputError::Other(message)) if message.contains("worker stopped")
+            Err(TaskInputError::Uncertain(message)) if message.contains("worker stopped")
         ));
         assert!(matches!(
             timeout(Duration::from_secs(1), second)
@@ -2558,7 +2719,70 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn different_pid_reconnect_aborts_inflight_old_worker() {
+    async fn retiring_session_after_message_text_ack_reports_uncertain_before_enter() {
+        let daemon_dir = tempfile::tempdir().unwrap();
+        let socket_path = kanna_runtime_defaults::socket_path(daemon_dir.path());
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let (text_acked_tx, text_acked_rx) = oneshot::channel();
+        let daemon = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::InputIfSession { data, .. } if data == b"accepted text"
+            ));
+            write_half
+                .write_all(
+                    format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap()).as_bytes(),
+                )
+                .await
+                .unwrap();
+            text_acked_tx.send(()).unwrap();
+            line.clear();
+            reader.read_line(&mut line).await.unwrap()
+        });
+        let coordinator = TaskInputCoordinator::new(
+            daemon_dir.path().to_string_lossy().to_string(),
+            Db::test_db_path("input-retire-message-after-text-ack"),
+        );
+        let submit_coordinator = coordinator.clone();
+        let submit = tokio::spawn(async move {
+            submit_coordinator
+                .submit_message_if_session(
+                    "task-retired",
+                    "task-retired",
+                    8181,
+                    TaskInputSource::Api,
+                    "accepted text",
+                )
+                .await
+        });
+        text_acked_rx.await.unwrap();
+
+        coordinator.retire_session("task-retired");
+
+        assert!(matches!(
+            timeout(Duration::from_secs(1), submit)
+                .await
+                .expect("message caller did not fail after retirement")
+                .unwrap(),
+            Err(TaskInputError::Uncertain(message)) if message.contains("worker stopped")
+        ));
+        assert_eq!(
+            timeout(Duration::from_secs(1), daemon)
+                .await
+                .expect("retired message worker kept its daemon socket open")
+                .unwrap(),
+            0,
+            "message worker sent Enter after retirement"
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_retirement_allows_different_pid_reconnect() {
         let daemon_dir = tempfile::tempdir().unwrap();
         let socket_path = kanna_runtime_defaults::socket_path(daemon_dir.path());
         let listener = UnixListener::bind(&socket_path).unwrap();
@@ -2613,6 +2837,7 @@ mod tests {
         });
         old_seen_rx.await.unwrap();
 
+        coordinator.retire_session("task-reconnect");
         coordinator
             .send_operator_bytes_if_session(
                 "task-reconnect",
@@ -2629,7 +2854,7 @@ mod tests {
                 .await
                 .expect("old caller did not fail after replacement")
                 .unwrap(),
-            Err(TaskInputError::Other(message)) if message.contains("worker stopped")
+            Err(TaskInputError::Uncertain(message)) if message.contains("worker stopped")
         ));
         assert_eq!(
             serde_json::to_value(daemon.await.unwrap()).unwrap(),
@@ -2639,6 +2864,241 @@ mod tests {
                 data: b"new".to_vec(),
             })
             .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_post_list_admission_does_not_replace_newer_pid_worker() {
+        let daemon_dir = tempfile::tempdir().unwrap();
+        let socket_path = kanna_runtime_defaults::socket_path(daemon_dir.path());
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let (newer_seen_tx, newer_seen_rx) = oneshot::channel();
+        let daemon = tokio::spawn(async move {
+            let (list_stream, _) = listener.accept().await.unwrap();
+            let (list_read, mut list_write) = list_stream.into_split();
+            let mut list_reader = BufReader::new(list_read);
+            let mut line = String::new();
+            list_reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::List
+            ));
+            list_write
+                .write_all(
+                    format!(
+                        "{}\n",
+                        serde_json::to_string(&DaemonEvent::SessionList {
+                            sessions: vec![kanna_daemon::protocol::SessionInfo {
+                                session_id: "task-reconnect".to_string(),
+                                pid: 1111,
+                                cwd: "/tmp".to_string(),
+                                state: SessionState::Active,
+                                idle_seconds: 0,
+                                status: SessionStatus::Idle,
+                                kind: SessionKind::Pty,
+                            }],
+                        })
+                        .unwrap()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+
+            let (newer_stream, _) = listener.accept().await.unwrap();
+            let (newer_read, mut newer_write) = newer_stream.into_split();
+            let mut newer_reader = BufReader::new(newer_read);
+            line.clear();
+            newer_reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::InputIfSession {
+                    expected_pid: 2222,
+                    data,
+                    ..
+                } if data == b"newer"
+            ));
+            newer_seen_tx.send(()).unwrap();
+
+            let stale_admission_connected =
+                match timeout(Duration::from_millis(200), listener.accept()).await {
+                    Ok(Ok((stale_stream, _))) => {
+                        let (stale_read, mut stale_write) = stale_stream.into_split();
+                        let mut stale_reader = BufReader::new(stale_read);
+                        line.clear();
+                        stale_reader.read_line(&mut line).await.unwrap();
+                        assert!(matches!(
+                            serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                            DaemonCommand::InputIfSession {
+                                expected_pid: 1111,
+                                data,
+                                ..
+                            } if data == b"stale"
+                        ));
+                        stale_write
+                            .write_all(
+                                format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap())
+                                    .as_bytes(),
+                            )
+                            .await
+                            .unwrap();
+                        true
+                    }
+                    Err(_) => false,
+                    Ok(Err(error)) => panic!("failed accepting stale admission: {error}"),
+                };
+            let _ = newer_write
+                .write_all(
+                    format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap()).as_bytes(),
+                )
+                .await;
+            stale_admission_connected
+        });
+        let coordinator = TaskInputCoordinator::new(
+            daemon_dir.path().to_string_lossy().to_string(),
+            Db::test_db_path("input-stale-post-list-admission"),
+        );
+
+        let (stale_pid, _) = coordinator
+            .live_pty_session("task-reconnect")
+            .await
+            .unwrap();
+        assert_eq!(stale_pid, 1111);
+        let newer_coordinator = coordinator.clone();
+        let newer = tokio::spawn(async move {
+            newer_coordinator
+                .send_operator_bytes_if_session(
+                    "task-reconnect",
+                    SessionIncarnation {
+                        session_id: "task-reconnect".to_string(),
+                        pid: 2222,
+                    },
+                    b"newer".to_vec(),
+                )
+                .await
+        });
+        newer_seen_rx.await.unwrap();
+
+        assert!(matches!(
+            coordinator
+                .send_operator_bytes_if_session(
+                    "task-reconnect",
+                    SessionIncarnation {
+                        session_id: "task-reconnect".to_string(),
+                        pid: stale_pid,
+                    },
+                    b"stale".to_vec(),
+                )
+                .await,
+            Err(TaskInputError::SessionNotFound)
+        ));
+        assert_eq!(coordinator.current_pid("task-reconnect"), Some(2222));
+        assert!(
+            !newer.is_finished(),
+            "stale admission aborted the newer-PID worker"
+        );
+        assert!(matches!(newer.await.unwrap(), Ok(())));
+        assert!(
+            !daemon.await.unwrap(),
+            "stale post-List admission reached the daemon"
+        );
+    }
+
+    #[tokio::test]
+    async fn replacement_epoch_rejects_route_captured_before_begin_after_kill_finishes() {
+        let daemon_dir = tempfile::tempdir().unwrap();
+        let socket_path = kanna_runtime_defaults::socket_path(daemon_dir.path());
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let (stale_checked_tx, stale_checked_rx) = oneshot::channel();
+        let daemon = tokio::spawn(async move {
+            let stale_connected = tokio::select! {
+                accepted = listener.accept() => {
+                    let (stream, _) = accepted.unwrap();
+                    let (read_half, mut write_half) = stream.into_split();
+                    let mut reader = BufReader::new(read_half);
+                    let mut line = String::new();
+                    reader.read_line(&mut line).await.unwrap();
+                    write_half
+                        .write_all(
+                            format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap())
+                                .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                    true
+                }
+                checked = stale_checked_rx => {
+                    checked.unwrap();
+                    false
+                }
+            };
+            if stale_connected {
+                return true;
+            }
+
+            let (fresh_stream, _) = listener.accept().await.unwrap();
+            let (fresh_read, mut fresh_write) = fresh_stream.into_split();
+            let mut fresh_reader = BufReader::new(fresh_read);
+            let mut line = String::new();
+            fresh_reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::InputIfSession {
+                    expected_pid: 2222,
+                    data,
+                    ..
+                } if data == b"fresh"
+            ));
+            fresh_write
+                .write_all(
+                    format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap()).as_bytes(),
+                )
+                .await
+                .unwrap();
+            false
+        });
+        let coordinator = TaskInputCoordinator::new(
+            daemon_dir.path().to_string_lossy().to_string(),
+            Db::test_db_path("input-replacement-route-epoch"),
+        );
+        let stale_epoch = coordinator.route_epoch("task-reconnect");
+
+        coordinator.begin_session_replacement("task-reconnect");
+        coordinator.finish_session_replacement("task-reconnect");
+
+        assert!(matches!(
+            coordinator
+                .send_operator_bytes_if_session_at_epoch(
+                    "task-reconnect",
+                    SessionIncarnation {
+                        session_id: "task-reconnect".to_string(),
+                        pid: 1111,
+                    },
+                    b"stale".to_vec(),
+                    Some(stale_epoch),
+                )
+                .await,
+            Err(TaskInputError::SessionNotFound)
+        ));
+        stale_checked_tx.send(()).unwrap();
+        let fresh_epoch = coordinator.route_epoch("task-reconnect");
+        assert!(matches!(
+            coordinator
+                .send_operator_bytes_if_session_at_epoch(
+                    "task-reconnect",
+                    SessionIncarnation {
+                        session_id: "task-reconnect".to_string(),
+                        pid: 2222,
+                    },
+                    b"fresh".to_vec(),
+                    Some(fresh_epoch),
+                )
+                .await,
+            Ok(())
+        ));
+        assert!(
+            !daemon.await.unwrap(),
+            "route captured before replacement begin reached the daemon"
         );
     }
 

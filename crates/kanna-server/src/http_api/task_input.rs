@@ -148,6 +148,7 @@ pub(super) async fn send_task_input(
             None,
         ));
     };
+    let route_epoch = state.task_input.route_epoch(&task_id);
     let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
         .await
         .map_err(|error| {
@@ -250,12 +251,13 @@ pub(super) async fn send_task_input(
 
     state
         .task_input
-        .submit_message_if_session(
+        .submit_message_if_session_at_route_epoch(
             &task_id,
             &task_id,
             live_session_pid,
             payload.source,
             &payload.input,
+            route_epoch,
         )
         .await
         .map_err(|error| {

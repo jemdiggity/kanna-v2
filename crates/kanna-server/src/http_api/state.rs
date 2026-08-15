@@ -293,6 +293,8 @@ impl AppState {
             config.daemon_dir.clone(),
             config.db_path.clone(),
         );
+        let session_replacements =
+            crate::session_replacements::SessionReplacements::with_task_input(task_input.clone());
         Self {
             config,
             task_input,
@@ -302,7 +304,7 @@ impl AppState {
             pairing_session: Arc::new(Mutex::new(None)),
             #[cfg(debug_assertions)]
             e2e_lan_http_enabled: Arc::new(AtomicBool::new(true)),
-            session_replacements: crate::session_replacements::SessionReplacements::default(),
+            session_replacements,
             terminal_attachments: crate::terminal_attachments::TerminalAttachments::default(),
             companion_resources: crate::ksp::CompanionResources::default(),
             repo_definitions: Arc::new(crate::task_creator::RepoDefinitionsCache::default()),
