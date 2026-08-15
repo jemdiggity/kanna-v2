@@ -142,6 +142,8 @@ describe("mergeCloudAndLanTasks", () => {
       waitingPromptSnippet: "cloud snippet",
       agentProvider: "claude",
       agentType: "pty",
+      activity: "unread",
+      activityRevision: 4,
       pinned: false,
       pinOrder: null,
       ownerDesktopId: "desktop-lan",
@@ -161,6 +163,8 @@ describe("mergeCloudAndLanTasks", () => {
       waitingPromptSnippet: "LAN snippet",
       agentProvider: "codex",
       agentType: "agent",
+      activity: "idle",
+      activityRevision: 5,
       pinned: true,
       pinOrder: 3
       }),
@@ -182,6 +186,8 @@ describe("mergeCloudAndLanTasks", () => {
         stage: "pr",
         waitingPromptSnippet: "LAN snippet",
         agentType: "agent",
+        activity: "idle",
+        activityRevision: 5,
         pinned: true,
         pinOrder: 3
       }

@@ -273,6 +273,7 @@ function parseCloudTaskSnapshot(value: unknown): CloudTaskSnapshot {
     displayName: optionalNullableString(value.displayName),
     stage: requiredString(value.stage, "stage"),
     activity: optionalNullableString(value.activity),
+    activityRevision: optionalNonNegativeInteger(value.activityRevision),
     status: optionalString(value.status),
     repo: {
       cloudRepoId: requiredString(value.repo.cloudRepoId, "repo.cloudRepoId"),
@@ -333,6 +334,14 @@ function optionalNullableString(value: unknown): string | null | undefined {
 
 function optionalBoolean(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
+}
+
+function optionalNonNegativeInteger(value: unknown): number | undefined {
+  return typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= 0
+    ? value
+    : undefined;
 }
 
 function optionalNullableNumber(value: unknown): number | null | undefined {

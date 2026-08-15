@@ -553,6 +553,29 @@ describe("cloud task index", () => {
     ]);
   });
 
+  it("forwards the owner activity revision from raw Firestore documents", () => {
+    const onUpdate = vi.fn();
+    const listeners = captureSnapshotListeners();
+    createFirestoreTaskIndex({ kind: "firestore" } as never).subscribeRecentTasks(
+      "user-1",
+      onUpdate,
+    );
+    listeners.root().onNext({ docs: [desktopDocument("desktop-a")] });
+
+    listeners.child("desktop-a").onNext(taskSnapshot(validTask({
+      activity: "unread",
+      activityRevision: 7,
+      ownerDesktopId: "desktop-a",
+    })));
+
+    expect(onUpdate).toHaveBeenCalledWith([
+      expect.objectContaining({
+        activity: "unread",
+        activityRevision: 7,
+      }),
+    ]);
+  });
+
   it("accepts task documents whose legacy status field is omitted", () => {
     const onUpdate = vi.fn();
     const onError = vi.fn<(error: CloudTaskIndexError) => void>();
