@@ -2190,6 +2190,89 @@ fn every_server_activity_write_advances_the_activity_revision() {
 }
 
 #[test]
+fn activity_changed_events_cover_working_to_stopped_edges_only() {
+    let path = temp_db_path();
+    let db = Db::open_for_tests(path.to_str().expect("utf8 path")).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One")
+        .expect("insert repo");
+    for task_id in ["empty", "prompted", "closed"] {
+        db.insert_test_pipeline_item(
+            task_id,
+            "repo-1",
+            "task prompt",
+            Some(task_id),
+            "in progress",
+            "2026-08-16 01:00:00",
+        )
+        .expect("insert task");
+        db.update_pipeline_item_activity(task_id, "working")
+            .expect("start working");
+    }
+
+    db.update_pipeline_item_activity("empty", "unread")
+        .expect("stop without prompt");
+    db.update_pipeline_item_waiting_prompt("prompted", "  Ready for review.  ")
+        .expect("persist prompt");
+    db.update_pipeline_item_activity("prompted", "idle")
+        .expect("stop with prompt");
+
+    // Read-state changes after the task stops are not new supervision signals.
+    assert!(db
+        .mark_pipeline_item_read_if_unchanged("empty", None)
+        .expect("mark read"));
+    db.update_pipeline_item_activity("empty", "unread")
+        .expect("mark unread again");
+    db.update_pipeline_item_activity("prompted", "unread")
+        .expect("mark prompted task unread");
+    db.update_pipeline_item_activity("prompted", "idle")
+        .expect("mark prompted task read");
+
+    db.close_pipeline_item("closed").expect("close task");
+    let cursor_after_close = db.latest_task_event_seq().expect("event cursor");
+    db.update_pipeline_item_activity("closed", "idle")
+        .expect("ignore closed task activity");
+    assert!(db
+        .list_task_events(
+            &super::TaskEventScope::Tasks(vec!["closed".to_string()]),
+            cursor_after_close,
+            i64::MAX,
+            10,
+        )
+        .expect("list closed task events")
+        .is_empty());
+
+    let events = db
+        .list_task_events(
+            &super::TaskEventScope::Tasks(vec!["empty".to_string(), "prompted".to_string()]),
+            0,
+            i64::MAX,
+            10,
+        )
+        .expect("list activity events");
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].event_type, "task.activity_changed");
+    assert_eq!(
+        events[0].payload,
+        serde_json::json!({
+            "previousActivity": "working",
+            "activity": "unread",
+        })
+    );
+    assert_eq!(events[1].event_type, "task.activity_changed");
+    assert_eq!(
+        events[1].payload,
+        serde_json::json!({
+            "previousActivity": "working",
+            "activity": "idle",
+            "waitingPromptSnippet": "Ready for review.",
+        })
+    );
+
+    drop(db);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn task_listing_queries_exclude_closed_items_even_when_stage_is_not_done() {
     let path = Db::test_db_path("closed-item-filtering");
     let db = Db::open_for_tests(&path).expect("open test db");

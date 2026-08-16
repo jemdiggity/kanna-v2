@@ -1494,16 +1494,23 @@ async fn a_task_parked_on_a_prompt_emits_awaiting_input_once_per_block() {
 /// the same transcript tail task detail exposes, without pretending it was a
 /// daemon-confirmed interactive prompt.
 #[tokio::test]
-async fn a_prompted_task_stopping_emits_activity_changed_for_idle_and_unread() {
+async fn every_working_task_stopping_emits_one_activity_changed_event() {
     let (router, db_path) = events_router();
     let db = Db::open(&db_path).expect("open db");
 
     for (task_id, activity, prompt) in [
-        ("child-a", "unread", "Does this design have your approval?"),
-        ("child-b", "idle", "Choose the deployment target."),
+        (
+            "child-a",
+            "unread",
+            Some("Does this design have your approval?"),
+        ),
+        ("child-b", "idle", Some("Choose the deployment target.")),
+        ("child-c", "unread", None),
     ] {
-        db.update_pipeline_item_waiting_prompt(task_id, prompt)
-            .expect("persist prompt");
+        if let Some(prompt) = prompt {
+            db.update_pipeline_item_waiting_prompt(task_id, prompt)
+                .expect("persist prompt");
+        }
         db.update_pipeline_item_activity(task_id, "working")
             .expect("working");
         db.update_pipeline_item_activity(task_id, activity)
@@ -1513,13 +1520,18 @@ async fn a_prompted_task_stopping_emits_activity_changed_for_idle_and_unread() {
             .expect("same stopped state");
     }
 
+    let started = std::time::Instant::now();
     let body = get_json_body(
         &router,
-        "/v1/task-events?taskIds=child-a,child-b&timeoutSecs=1",
+        "/v1/task-events?taskIds=child-a,child-b,child-c&timeoutSecs=15",
     )
     .await;
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "a cursor-less wait must drain retained stopped edges immediately"
+    );
     let events = body["events"].as_array().expect("events");
-    assert_eq!(events.len(), 2);
+    assert_eq!(events.len(), 3);
     assert_eq!(
         events[0]["type"],
         serde_json::json!("task.activity_changed")
@@ -1539,6 +1551,20 @@ async fn a_prompted_task_stopping_emits_activity_changed_for_idle_and_unread() {
     assert_eq!(
         events[1]["payload"]["waitingPromptSnippet"],
         "Choose the deployment target."
+    );
+    assert_eq!(
+        events[2]["type"],
+        serde_json::json!("task.activity_changed")
+    );
+    assert_eq!(events[2]["payload"]["previousActivity"], "working");
+    assert_eq!(events[2]["payload"]["activity"], "unread");
+    assert!(
+        events[2]["payload"]
+            .as_object()
+            .expect("activity payload")
+            .get("waitingPromptSnippet")
+            .is_none(),
+        "an empty prompt must be omitted rather than serialized as null"
     );
 }
 

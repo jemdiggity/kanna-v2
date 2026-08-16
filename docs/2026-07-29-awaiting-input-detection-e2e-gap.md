@@ -24,28 +24,32 @@ from a session going quiet or from elapsed idle time.
 appends `task.awaiting_input` on the edge into `waiting`, once per block.
 
 There is also a deliberately weaker fallback. When any provider moves a task
-from `working` to `idle` or `unread` with a non-empty
-`waitingPromptSnippet`, the same activity write appends
+from `working` to `idle` or `unread`, the same activity write appends
 `task.activity_changed`. Its payload contains `previousActivity`, `activity`,
-and `waitingPromptSnippet`. This catches provider questions that return to an
-ordinary idle prompt, including Codex design-approval checkpoints, without
-misrepresenting them as daemon-confirmed interactive prompts.
+and `waitingPromptSnippet` when the snippet is non-empty. This makes every
+working-to-stopped edge visible and also catches provider questions that return
+to an ordinary idle prompt, including Codex design-approval checkpoints,
+without misrepresenting them as daemon-confirmed interactive prompts.
 
 ## The reliability claim, precisely
 
-**False positives are the thing that would make the event worse than useless** —
-an orchestrator that abandons a task mid-`cargo build` because the feed called
-it blocked is worse off than one that polls. The design forecloses them: a
-running build renders `esc to interrupt` (or a subagent footer) and never
-matches, and no rule fires on silence. `claude_running_build_output_is_never_waiting`
-holds that line.
+**False positives are the thing that would make the strong event worse than
+useless** — an orchestrator that abandons a task mid-`cargo build` because the
+feed called it blocked is worse off than one that polls. The
+`task.awaiting_input` design forecloses them: a running build renders `esc to
+interrupt` (or a subagent footer) and never matches, and no rule fires on
+silence. `claude_running_build_output_is_never_waiting` holds that line. The
+weaker activity edge records the daemon's raw per-frame verdict and can wake on
+a transient idle classification; `kanna_get_task` owns the single confirmation
+debounce before an orchestrator acts.
 
 **False negatives remain for the strong signal.** The `task.awaiting_input`
 detection is still per-provider terminal-byte matching, so an agent CLI can
 render a prompt in a shape no rule recognizes. The provider-neutral
 `task.activity_changed` edge makes that stop visible, but an orchestrator must
-inspect `waitingPromptSnippet` and decide whether it is a question or ordinary
-final output. Known strong-signal coverage today:
+confirm the current task through `kanna_get_task`, which owns the activity
+debounce, then inspect `waitingPromptSnippet` when present and decide whether it
+is a question or ordinary final output. Known strong-signal coverage today:
 
 | Prompt shape | Detected |
 |---|---|
@@ -78,10 +82,10 @@ Covered by unit and integration tests:
 - `crates/kanna-server/src/terminal_watcher.rs` —
   `watcher_records_waiting_status_and_emits_awaiting_input` drives a real daemon
   socket and asserts both the persisted status and the appended event.
-- `crates/kanna-server/src/http_api/tests/task_events.rs` —
-  `a_task_parked_on_a_prompt_emits_awaiting_input_once_per_block` and
-  `a_prompted_task_stopping_emits_activity_changed_for_idle_and_unread` cover
-  the strong and fallback events through the real router and database.
+- `crates/kanna-server/src/http_api/tests/task_events.rs` covers the strong
+  event and both empty and populated prompt payloads for the fallback through
+  the real router and database. DB tests also pin stopped-state read flips and
+  closed-task suppression.
 
 **Not covered end-to-end:** a live Claude CLI actually rendering an
 AskUserQuestion menu into a real PTY. The repo's live-agent tests use opencode

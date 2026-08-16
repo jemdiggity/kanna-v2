@@ -287,10 +287,15 @@ appending it where the state already changes, not by diffing snapshots. The
 on prompt chrome, never inferred from a quiet session, because mislabelling a
 long build as blocked is worse than not reporting it at all.
 `task.activity_changed` is the provider-neutral fallback: it is appended when
-a task with a non-empty `waitingPromptSnippet` moves from `working` to `idle`
-or `unread`. That weaker edge makes unrecognized provider questions visible,
-but does not prove the snippet is a question. A prompt-only change while the
-task remains stopped is visible only by polling task detail. See
+a task moves from `working` to `idle` or `unread`, whether or not it has a
+waiting prompt snippet. The payload always carries `previousActivity` and
+`activity`, and carries `waitingPromptSnippet` only when non-empty. That weaker
+edge makes unrecognized provider questions and ordinary completion visible,
+but does not prove any included snippet is a question. Read-state-only
+`idle` ↔ `unread` changes do not emit. A prompt-only change while the task
+remains stopped is visible only by polling task detail. Treat the event as a
+wake-up and reconcile it through `kanna_get_task`, whose confirmation read is
+the single activity debounce, before acting. See
 `docs/kanna-server-boundary.md` and
 `docs/2026-07-29-awaiting-input-detection-e2e-gap.md`.
 
