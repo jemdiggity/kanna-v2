@@ -20,6 +20,7 @@
 //!   do not become eligible later, while events after it are included whenever
 //!   the child is in the parent scope at the next read.
 
+use super::lan_trust::AccountWideTaskEventAccess;
 use super::state::{AppState, TunneledHttpInvoke};
 use super::task_blockers::resolve_existing_task_id;
 use crate::db::{Db, TaskEventScope};
@@ -53,6 +54,7 @@ const LEGACY_CURSOR_SCAN_LIMIT: i64 = 500;
 const WAIT_RECHECK_SECS: u64 = 5;
 const AGGREGATE_CURSOR_PREFIX: &str = "ks1.";
 const AGGREGATE_WAIT_SESSION_TTL: Duration = Duration::from_secs(10 * 60);
+const MAX_AGGREGATE_WAIT_SESSIONS: usize = 256;
 const MAX_AGGREGATE_MACHINES: usize = 128;
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -109,6 +111,92 @@ struct AggregateWaitSession {
 #[derive(Default)]
 pub(super) struct AggregateWaitRegistry {
     sessions: HashMap<String, AggregateWaitSession>,
+    reaper_started: bool,
+}
+
+impl AggregateWaitRegistry {
+    fn abort_session(mut session: AggregateWaitSession) {
+        session.pending.abort_all();
+    }
+
+    fn evict_expired(&mut self, now: tokio::time::Instant) {
+        let expired = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| {
+                now.duration_since(session.last_touched) >= AGGREGATE_WAIT_SESSION_TTL
+            })
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        for key in expired {
+            if let Some(session) = self.sessions.remove(&key) {
+                Self::abort_session(session);
+            }
+        }
+    }
+
+    fn insert_bounded(&mut self, key: String, session: AggregateWaitSession) {
+        if let Some(replaced) = self.sessions.remove(&key) {
+            Self::abort_session(replaced);
+        }
+        while self.sessions.len() >= MAX_AGGREGATE_WAIT_SESSIONS {
+            let Some(oldest_key) = self
+                .sessions
+                .iter()
+                .min_by_key(|(_, session)| session.last_touched)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            if let Some(evicted) = self.sessions.remove(&oldest_key) {
+                Self::abort_session(evicted);
+            }
+        }
+        self.sessions.insert(key, session);
+    }
+}
+
+fn ensure_aggregate_wait_reaper(state: &Arc<AppState>) {
+    start_aggregate_wait_reaper(Arc::clone(&state.aggregate_task_event_waits));
+}
+
+fn start_aggregate_wait_reaper(registry: Arc<std::sync::Mutex<AggregateWaitRegistry>>) {
+    {
+        let mut registry = registry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if registry.reaper_started {
+            return;
+        }
+        registry.reaper_started = true;
+    }
+
+    let registry = Arc::downgrade(&registry);
+    tokio::spawn(async move {
+        loop {
+            let Some(registry) = registry.upgrade() else {
+                break;
+            };
+            let sleep_for = {
+                let mut registry = registry
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let now = tokio::time::Instant::now();
+                registry.evict_expired(now);
+                registry
+                    .sessions
+                    .values()
+                    .map(|session| {
+                        AGGREGATE_WAIT_SESSION_TTL
+                            .saturating_sub(now.duration_since(session.last_touched))
+                    })
+                    .min()
+                    .unwrap_or(AGGREGATE_WAIT_SESSION_TTL)
+            };
+            drop(registry);
+            tokio::time::sleep(sleep_for).await;
+        }
+    });
 }
 
 #[derive(Debug, Clone)]
@@ -898,7 +986,7 @@ fn apply_aggregate_completion(
     completed_machines: &mut HashSet<String>,
     failed_machines: &mut HashSet<String>,
     has_more: &mut bool,
-) -> Result<(), (axum::http::StatusCode, String)> {
+) -> Result<bool, (axum::http::StatusCode, String)> {
     session.pending_machines.remove(&completion.machine_id);
     completed_machines.insert(completion.machine_id.clone());
     let response = match completion.result {
@@ -910,7 +998,7 @@ fn apply_aggregate_completion(
                 "error": error,
                 "stale": true,
             }));
-            return Ok(());
+            return Ok(false);
         }
     };
     let cursor = response
@@ -961,7 +1049,7 @@ fn apply_aggregate_completion(
         );
         events.push(Value::Object(event));
     }
-    Ok(())
+    Ok(!returned_events.is_empty())
 }
 
 async fn wait_aggregate_task_events(
@@ -1022,15 +1110,14 @@ async fn wait_aggregate_task_events(
     let input_cursor_key = supplied_cursor
         .filter(|cursor| cursor.starts_with(AGGREGATE_CURSOR_PREFIX))
         .map(str::to_string);
+    ensure_aggregate_wait_reaper(&state);
     let mut session = {
         let mut registry = state
             .aggregate_task_event_waits
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let now = tokio::time::Instant::now();
-        registry.sessions.retain(|_, session| {
-            now.duration_since(session.last_touched) <= AGGREGATE_WAIT_SESSION_TTL
-        });
+        registry.evict_expired(now);
         input_cursor_key
             .as_ref()
             .and_then(|key| registry.sessions.remove(key))
@@ -1041,6 +1128,7 @@ async fn wait_aggregate_task_events(
                 last_touched: now,
             })
     };
+    let inherited_pending = !session.pending_machines.is_empty();
     let mut machine_errors = Vec::new();
     let mut active_machines = HashSet::from([local_machine_id.clone()]);
     match state.list_active_relay_desktops().await {
@@ -1112,7 +1200,9 @@ async fn wait_aggregate_task_events(
             );
         }
 
-        let joined = if timeout_secs == 0 {
+        let joined = if timeout_secs == 0 && inherited_pending {
+            session.pending.try_join_next()
+        } else if timeout_secs == 0 {
             session.pending.join_next().await
         } else {
             tokio::time::timeout_at(deadline, session.pending.join_next())
@@ -1128,7 +1218,8 @@ async fn wait_aggregate_task_events(
                 format!("machine wait task failed: {error}"),
             )
         })?;
-        apply_aggregate_completion(
+        let completed_machine_id = completion.machine_id.clone();
+        let completion_had_events = apply_aggregate_completion(
             &mut session,
             completion,
             &mut events,
@@ -1137,6 +1228,13 @@ async fn wait_aggregate_task_events(
             &mut failed_machines,
             &mut has_more,
         )?;
+        if !completion_had_events
+            && !failed_machines.contains(&completed_machine_id)
+            && timeout_secs > 0
+            && tokio::time::Instant::now() < deadline
+        {
+            completed_machines.remove(&completed_machine_id);
+        }
         if !events.is_empty() || has_more {
             break;
         }
@@ -1157,7 +1255,8 @@ async fn wait_aggregate_task_events(
             .aggregate_task_event_waits
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        registry.sessions.insert(output_cursor.clone(), session);
+        registry.evict_expired(tokio::time::Instant::now());
+        registry.insert_bounded(output_cursor.clone(), session);
     }
     let wait_outcome = if !events.is_empty() || has_more {
         "events"
@@ -1184,10 +1283,40 @@ async fn wait_aggregate_task_events(
 pub(super) async fn wait_task_events(
     State(state): State<Arc<AppState>>,
     Query(query): Query<TaskEventsQuery>,
+    account_wide_access: AccountWideTaskEventAccess,
     tunneled: Option<Extension<TunneledHttpInvoke>>,
 ) -> Result<Json<Value>, (axum::http::StatusCode, String)> {
     if tunneled.is_some() || query.local_only {
         return wait_local_task_events(state, query, tunneled.is_some()).await;
+    }
+
+    if !account_wide_access.is_authorized() {
+        let mut query = query;
+        if query
+            .cursor
+            .as_deref()
+            .is_some_and(|cursor| cursor.starts_with(AGGREGATE_CURSOR_PREFIX))
+        {
+            let db = Db::open(&state.config().db_path).map_err(db_error)?;
+            let requested_scope = resolve_aggregate_scope(&db, &query)?;
+            let cursor = decode_aggregate_cursor(
+                query
+                    .cursor
+                    .as_deref()
+                    .expect("aggregate cursor checked above"),
+            )?;
+            if cursor.local_machine_id != state.config().desktop_id
+                || cursor.scope != requested_scope
+            {
+                return Err(invalid_aggregate_cursor());
+            }
+            query.cursor = cursor
+                .cursors_by_machine
+                .get(&cursor.local_machine_id)
+                .cloned();
+        }
+        query.local_only = true;
+        return wait_local_task_events(state, query, false).await;
     }
 
     let aggregate_cursor = query
@@ -1213,4 +1342,95 @@ pub(super) async fn wait_task_events(
         );
     }
     Ok(Json(response))
+}
+
+#[cfg(test)]
+mod aggregate_wait_registry_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CancellationMarker(Arc<AtomicUsize>);
+
+    impl Drop for CancellationMarker {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    async fn pending_session(
+        key: &str,
+        last_touched: tokio::time::Instant,
+        cancellations: Arc<AtomicUsize>,
+    ) -> AggregateWaitSession {
+        let machine_id = format!("machine-{key}");
+        let mut pending = tokio::task::JoinSet::new();
+        pending.spawn(async move {
+            let _marker = CancellationMarker(cancellations);
+            std::future::pending::<AggregateWaitCompletion>().await
+        });
+        tokio::task::yield_now().await;
+        AggregateWaitSession {
+            cursor: AggregateCursor {
+                local_machine_id: machine_id.clone(),
+                scope: AggregateScope::Tasks {
+                    task_ids: vec![key.to_string()],
+                },
+                machine_ids: vec![machine_id.clone()],
+                cursors_by_machine: BTreeMap::new(),
+            },
+            pending,
+            pending_machines: HashSet::from([machine_id]),
+            last_touched,
+        }
+    }
+
+    #[tokio::test]
+    async fn registry_cap_evicts_and_aborts_the_oldest_session() {
+        let cancellations = Arc::new(AtomicUsize::new(0));
+        let mut registry = AggregateWaitRegistry::default();
+        let now = tokio::time::Instant::now();
+        for index in 0..=MAX_AGGREGATE_WAIT_SESSIONS {
+            let session = pending_session(
+                &index.to_string(),
+                now + Duration::from_nanos(index as u64),
+                Arc::clone(&cancellations),
+            )
+            .await;
+            registry.insert_bounded(index.to_string(), session);
+        }
+        tokio::task::yield_now().await;
+
+        assert_eq!(registry.sessions.len(), MAX_AGGREGATE_WAIT_SESSIONS);
+        assert!(!registry.sessions.contains_key("0"));
+        assert_eq!(cancellations.load(Ordering::SeqCst), 1);
+
+        for (_, session) in registry.sessions.drain() {
+            AggregateWaitRegistry::abort_session(session);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reaper_expires_abandoned_sessions_and_aborts_their_legs() {
+        let cancellations = Arc::new(AtomicUsize::new(0));
+        let registry = Arc::new(std::sync::Mutex::new(AggregateWaitRegistry::default()));
+        let session = pending_session(
+            "expired",
+            tokio::time::Instant::now(),
+            Arc::clone(&cancellations),
+        )
+        .await;
+        registry
+            .lock()
+            .expect("registry")
+            .insert_bounded("expired".to_string(), session);
+        start_aggregate_wait_reaper(Arc::clone(&registry));
+        tokio::task::yield_now().await;
+
+        tokio::time::advance(AGGREGATE_WAIT_SESSION_TTL).await;
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        assert!(registry.lock().expect("registry").sessions.is_empty());
+        assert_eq!(cancellations.load(Ordering::SeqCst), 1);
+    }
 }

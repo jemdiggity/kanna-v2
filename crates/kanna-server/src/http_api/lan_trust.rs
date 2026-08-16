@@ -38,6 +38,13 @@ pub(super) struct PrivilegedTaskAccess;
 #[derive(Debug, Clone, Copy)]
 pub(super) struct DesktopLocalAccess;
 
+/// Whether a task-event request may use this desktop's authenticated relay
+/// session to fan out across the account. Unlike the privileged control
+/// extractor, this never rejects the request: untrusted LAN callers retain
+/// access to the local-only event feed.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct AccountWideTaskEventAccess(bool);
+
 impl FromRequestParts<Arc<AppState>> for PrivilegedTaskAccess {
     type Rejection = (StatusCode, String);
 
@@ -68,6 +75,23 @@ impl FromRequestParts<Arc<AppState>> for DesktopLocalAccess {
             StatusCode::UNAUTHORIZED,
             "control requires a direct desktop loopback connection".into(),
         ))
+    }
+}
+
+impl FromRequestParts<Arc<AppState>> for AccountWideTaskEventAccess {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        _state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(Self(privileged_task_access(&parts.extensions).is_ok()))
+    }
+}
+
+impl AccountWideTaskEventAccess {
+    pub(super) fn is_authorized(self) -> bool {
+        self.0
     }
 }
 

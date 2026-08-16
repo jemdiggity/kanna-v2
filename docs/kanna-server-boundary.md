@@ -94,20 +94,26 @@ of being replayed after reconnect. Task waits retain the normal 240-second MCP
 window, with the server-side relay handoff bounded below the MCP client's
 300-second tool-call deadline.
 
-The local `GET /v1/task-events` surface is the account-wide event boundary.
-When desktop relay routing is available and `localOnly` is absent, the server
-starts one native wait for itself and every active sibling desktop returned by
-the existing authenticated relay session. Tunneled peer waits are marked by
-the HTTP dispatcher and stay native, so aggregation cannot recurse. Every
-event gains `machineId`; the `ks1.` cursor binds the scope and connected
-desktop identity and carries one opaque native cursor per machine. There is no
-fabricated global order across SQLite databases: order is exact within each
-`machineId` sequence space.
+The local `GET /v1/task-events` surface is the account-wide event boundary for
+a desktop-loopback or paired caller. When desktop relay routing is available
+and `localOnly` is absent, the server starts one native wait for itself and
+every active sibling desktop returned by the existing authenticated relay
+session. An unpaired, non-loopback LAN caller receives only the native local
+feed; it cannot spend the desktop's relay authority or read sibling task
+metadata. Tunneled peer waits are marked by the HTTP dispatcher and stay
+native, so aggregation cannot recurse. Every aggregated event gains
+`machineId`; the `ks1.` cursor binds the scope and connected desktop identity
+and carries one opaque native cursor per machine. There is no fabricated
+global order across SQLite databases: order is exact within each `machineId`
+sequence space.
 
 The server retains unfinished peer long-polls between calls, rather than
-cancelling quiet peers when another machine produces an event. A cursor also
-retains every machine observed during the wait. If a known peer is absent or a
-relay invoke fails, the response includes a `machineErrors` entry with
+cancelling quiet peers when another machine produces an event. Abandoned
+sessions expire after ten minutes even if no caller returns, and the registry
+holds at most 256 sessions; both expiry and capacity eviction actively abort
+their retained legs and buffered payloads. A cursor also retains every machine
+observed during the wait. If a known peer is absent or a relay invoke fails,
+the response includes a `machineErrors` entry with
 `machineId` and `stale: true`, does not advance that peer's cursor, and returns
 `waitOutcome: "partial"` when no events are ready. When the peer reconnects,
 the next call resumes from that native cursor and catches up wherever the
@@ -124,7 +130,8 @@ while aggregation is active rather than silently becoming local-only.
 Native numeric, p1, and p3 cursors remain accepted. A native cursor supplied
 as aggregation becomes available initializes the local watermark and starts
 new peers from retained history. A server that has no relay route keeps the
-native cursor shape and adds a relay-unavailable `machineErrors` warning.
+native cursor shape and, for an account-wide-authorized caller, adds a
+relay-unavailable `machineErrors` warning.
 `localOnly=true` is the explicit compatibility escape hatch used by adapters
 that already own a per-machine fan-in; inbound relay invokes are local-only by
 transport provenance regardless of the query.
