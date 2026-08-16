@@ -39,7 +39,7 @@ describe("terminalInputQueue", () => {
     expect(sendTermInput).toHaveBeenCalledWith("task-1", bytesToBase64(new TextEncoder().encode("abc")))
   })
 
-  it("keeps a producer-declared submission boundary and starts a new batch after it", async () => {
+  it("sends a producer-declared submission separately from a draft in the same batch window", async () => {
     const sendTermInput = vi.fn()
     const queue = createTerminalInputQueue({
       sessionId: "task-boundary",
@@ -56,11 +56,16 @@ describe("terminalInputQueue", () => {
     expect(sendTermInput).toHaveBeenNthCalledWith(
       1,
       "task-boundary",
-      bytesToBase64(new TextEncoder().encode("draft\r")),
-      true,
+      bytesToBase64(new TextEncoder().encode("draft")),
     )
     expect(sendTermInput).toHaveBeenNthCalledWith(
       2,
+      "task-boundary",
+      bytesToBase64(new TextEncoder().encode("\r")),
+      true,
+    )
+    expect(sendTermInput).toHaveBeenNthCalledWith(
+      3,
       "task-boundary",
       bytesToBase64(new TextEncoder().encode("next")),
     )

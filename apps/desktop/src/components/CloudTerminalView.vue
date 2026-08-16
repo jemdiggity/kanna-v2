@@ -181,9 +181,14 @@ function enqueueRemoteInput(data: string, submissionBoundary = false, controlInp
     return;
   }
   const last = queue.pending.at(-1);
-  if (last && !last.submissionBoundary && !last.controlInput && !controlInput) {
+  if (
+    last
+    && !last.submissionBoundary
+    && !last.controlInput
+    && !submissionBoundary
+    && !controlInput
+  ) {
     last.data += data;
-    last.submissionBoundary = submissionBoundary;
   } else {
     queue.pending.push({ data, submissionBoundary, controlInput });
   }

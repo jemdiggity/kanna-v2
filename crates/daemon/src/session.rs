@@ -158,6 +158,8 @@ pub struct PendingInput {
     pub data: Vec<u8>,
     pub kind: PendingInputKind,
     written: Option<oneshot::Sender<()>>,
+    #[cfg_attr(not(test), allow(dead_code))]
+    logical_after_write: Vec<Vec<u8>>,
 }
 
 impl PendingInput {
@@ -166,21 +168,37 @@ impl PendingInput {
             data,
             kind: PendingInputKind::Raw,
             written,
+            logical_after_write: Vec::new(),
         }
     }
 
-    fn logical(data: Vec<u8>) -> Self {
+    fn raw_submission(
+        data: Vec<u8>,
+        written: Option<oneshot::Sender<()>>,
+        logical_after_write: Vec<Vec<u8>>,
+    ) -> Self {
+        Self {
+            data,
+            kind: PendingInputKind::Raw,
+            written,
+            logical_after_write,
+        }
+    }
+
+    pub(crate) fn logical(data: Vec<u8>) -> Self {
         if data.is_empty() {
             Self {
                 data: vec![b'\r'],
                 kind: PendingInputKind::LogicalEnter,
                 written: None,
+                logical_after_write: Vec::new(),
             }
         } else {
             Self {
                 data,
                 kind: PendingInputKind::LogicalMessage,
                 written: None,
+                logical_after_write: Vec::new(),
             }
         }
     }
@@ -199,6 +217,11 @@ impl PendingInput {
         if let Some(written) = self.written.take() {
             let _ = written.send(());
         }
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn take_logical_after_write(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.logical_after_write)
     }
 }
 
@@ -378,23 +401,30 @@ impl SessionHandle {
             .input_coordination
             .lock()
             .map_err(|_| InputQueueError::CoordinationUnavailable)?;
-        let mut routed = vec![PendingInput::raw(data.clone(), written)];
+        let mut routed = Vec::new();
         match kind {
             RawInputKind::Submission => {
                 state.raw_input_draft_active = false;
                 state.raw_input_draft_state_known = true;
+                let mut logical_after_write = Vec::new();
                 for logical_input in &mut state.logical_inputs {
                     if !logical_input.dispatched {
-                        routed.push(PendingInput::logical(logical_input.data.clone()));
+                        logical_after_write.push(logical_input.data.clone());
                         logical_input.dispatched = true;
                     }
                 }
+                routed.push(PendingInput::raw_submission(
+                    data,
+                    written,
+                    logical_after_write,
+                ));
             }
             RawInputKind::Draft => {
                 state.raw_input_draft_active = true;
                 state.raw_input_draft_state_known = true;
+                routed.push(PendingInput::raw(data, written));
             }
-            RawInputKind::Control => {}
+            RawInputKind::Control => routed.push(PendingInput::raw(data, written)),
         }
         for input in routed {
             self.input_tx
@@ -1362,11 +1392,13 @@ mod tests {
         handle
             .enqueue_raw_input(b"\r".to_vec(), RawInputKind::Submission)
             .expect("enqueue raw submission boundary");
-        let boundary = input_rx.recv().await.expect("raw boundary");
-        let first = input_rx.recv().await.expect("first logical input");
-        let second = input_rx.recv().await.expect("second logical input");
+        let mut boundary = input_rx.recv().await.expect("raw boundary");
         assert_eq!(boundary.kind, super::PendingInputKind::Raw);
         assert_eq!(boundary.data, b"\r");
+        assert!(input_rx.try_recv().is_err());
+        let released = boundary.take_logical_after_write();
+        let first = super::PendingInput::logical(released[0].clone());
+        let second = super::PendingInput::logical(released[1].clone());
         assert_eq!(first.kind, super::PendingInputKind::LogicalMessage);
         assert_eq!(first.data, b"manager one");
         assert_eq!(second.kind, super::PendingInputKind::LogicalMessage);
@@ -1414,10 +1446,11 @@ mod tests {
         handle
             .enqueue_raw_input(b"\r".to_vec(), RawInputKind::Submission)
             .expect("enqueue producer-declared submission boundary");
-        assert_eq!(input_rx.recv().await.expect("boundary").data, b"\r");
+        let mut boundary = input_rx.recv().await.expect("boundary");
+        assert_eq!(boundary.data, b"\r");
         assert_eq!(
-            input_rx.recv().await.expect("logical message").data,
-            b"manager message"
+            boundary.take_logical_after_write(),
+            [b"manager message".to_vec()]
         );
         handle.kill().await.unwrap();
     }
@@ -1448,10 +1481,11 @@ mod tests {
         handle
             .enqueue_raw_input(b"\r".to_vec(), RawInputKind::Submission)
             .expect("enqueue submission boundary");
-        assert_eq!(input_rx.recv().await.expect("boundary").data, b"\r");
+        let mut boundary = input_rx.recv().await.expect("boundary");
+        assert_eq!(boundary.data, b"\r");
         assert_eq!(
-            input_rx.recv().await.expect("logical message").data,
-            b"manager message"
+            boundary.take_logical_after_write(),
+            [b"manager message".to_vec()]
         );
         handle.kill().await.unwrap();
     }

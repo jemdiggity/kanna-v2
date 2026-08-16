@@ -156,10 +156,10 @@ export function createTerminalInputQueue(params: {
       lastBatch?.sendTerminalInput === sendTerminalInput
       && !lastBatch.submissionBoundary
       && !lastBatch.controlInput
+      && !submissionBoundary
       && !controlInput
     ) {
       lastBatch.bytes.push(...bytes)
-      lastBatch.submissionBoundary = submissionBoundary
     } else {
       pendingInputBatches.push({
         bytes: Array.from(bytes),

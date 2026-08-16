@@ -254,9 +254,13 @@ pub(crate) async fn stream_output(
                                         + Duration::from_millis(LOGICAL_INPUT_SUBMIT_DELAY_MS),
                                 );
                             } else {
-                                let completed = pending_input
+                                let mut completed = pending_input
                                     .pop_front()
                                     .expect("pending input disappeared before completion");
+                                let logical_after_write = completed.take_logical_after_write();
+                                for data in logical_after_write.into_iter().rev() {
+                                    pending_input.push_front(PendingInput::logical(data));
+                                }
                                 if completed.kind == PendingInputKind::LogicalEnter
                                     && session.complete_logical_input().is_err()
                                 {
