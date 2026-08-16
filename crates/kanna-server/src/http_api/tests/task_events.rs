@@ -94,6 +94,32 @@ fn connect_test_relay_peer(
     })
 }
 
+fn connect_unresponsive_listed_peer(
+    source: &Arc<AppState>,
+    machine_id: &str,
+) -> tokio::task::JoinHandle<()> {
+    let mut requests = source
+        .take_desktop_relay_requests()
+        .expect("take source relay queue");
+    source.set_desktop_routing_available(true);
+    let machine_id = machine_id.to_string();
+    tokio::spawn(async move {
+        while let Some(request) = requests.recv().await {
+            match request {
+                crate::http_api::DesktopRelayRequest::ListActive { response, .. } => {
+                    let _ = response.send(Ok(vec![machine_id.clone()]));
+                }
+                crate::http_api::DesktopRelayRequest::Invoke { response, .. } => {
+                    tokio::spawn(async move {
+                        let _response = response;
+                        std::future::pending::<()>().await;
+                    });
+                }
+            }
+        }
+    })
+}
+
 async fn get_json_body(router: &Router, uri: &str) -> Value {
     let response = router
         .clone()
@@ -446,7 +472,7 @@ async fn local_surface_aggregates_peer_repo_events_and_resumes_after_reconnect()
     let caught_up = get_json_body(
         &source_router,
         &format!(
-            "/v1/task-events?repoId=repo-source-id&cursor={}&timeoutSecs=1",
+            "/v1/task-events?repoId=repo-source-id&cursor={}&timeoutSecs=0",
             cursor_of(&stale)
         ),
     )
@@ -593,6 +619,174 @@ async fn unpaired_non_loopback_lan_wait_never_uses_the_account_relay_feed() {
     relay.abort();
 }
 
+#[tokio::test]
+async fn loopback_browser_origin_wait_gets_only_the_local_feed() {
+    const REMOTE_HASH: &str = "sha256:browser-origin-repo";
+    let source = test_state_with_seed("desktop-browser-source", "Browser Source", |db| {
+        db.insert_test_repo("repo-browser-source", "Browser Source Repo")
+            .expect("insert source repo");
+        db.patch_repo(
+            "repo-browser-source",
+            None,
+            None,
+            Some(Some(REMOTE_HASH)),
+            None,
+        )
+        .expect("set source remote hash");
+        db.insert_test_pipeline_item(
+            "browser-local-child",
+            "repo-browser-source",
+            "local child",
+            Some("Local Child"),
+            "in progress",
+            "2026-08-16 00:00:00",
+        )
+        .expect("insert local task");
+        start_run(
+            db,
+            "browser-local-run",
+            "browser-local-child",
+            "in progress",
+        );
+    });
+    let peer = test_state_with_seed("desktop-browser-peer", "Browser Peer", |db| {
+        db.insert_test_repo("repo-browser-peer", "Browser Peer Repo")
+            .expect("insert peer repo");
+        db.patch_repo(
+            "repo-browser-peer",
+            None,
+            None,
+            Some(Some(REMOTE_HASH)),
+            None,
+        )
+        .expect("set peer remote hash");
+        db.insert_test_pipeline_item(
+            "browser-peer-child",
+            "repo-browser-peer",
+            "peer child",
+            Some("Peer Child"),
+            "in progress",
+            "2026-08-16 00:00:00",
+        )
+        .expect("insert peer task");
+        start_run(db, "browser-peer-run", "browser-peer-child", "in progress");
+    });
+    let relay = connect_test_relay_peer(&source, peer, Arc::new(AtomicBool::new(true)));
+    let app = router(source);
+    let mut request = Request::get("/v1/task-events?repoId=repo-browser-source&timeoutSecs=0")
+        .header(axum::http::header::ORIGIN, "https://attacker.example")
+        .body(Body::empty())
+        .expect("request");
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            49152,
+        ))));
+
+    let response = app.oneshot(request).await.expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body"),
+    )
+    .expect("json body");
+    assert_eq!(
+        event_pairs(&body),
+        vec![("browser-local-child".into(), "run.started".into())]
+    );
+    assert!(!cursor_of(&body).starts_with("ks1."));
+    assert!(body["events"][0].get("machineId").is_none());
+
+    relay.abort();
+}
+
+#[tokio::test]
+async fn unauthorized_resume_rejects_an_account_wide_cursor_without_losing_peer_state() {
+    let source = test_state_with_seed("desktop-downgrade-source", "Downgrade Source", |db| {
+        db.insert_test_repo("repo-downgrade", "Downgrade Repo")
+            .expect("insert source repo");
+        db.insert_test_pipeline_item(
+            "downgrade-child",
+            "repo-downgrade",
+            "local child",
+            Some("Local Child"),
+            "in progress",
+            "2026-08-16 00:00:00",
+        )
+        .expect("insert local task");
+        start_run(db, "downgrade-run", "downgrade-child", "in progress");
+    });
+    let peer = test_state_with_seed("desktop-downgrade-peer", "Downgrade Peer", |_| {});
+    let relay = connect_test_relay_peer(&source, peer, Arc::new(AtomicBool::new(true)));
+    let app = router(source);
+    let first = get_json_body(
+        &app,
+        "/v1/task-events?taskIds=downgrade-child&timeoutSecs=0",
+    )
+    .await;
+    let mut request = Request::get(format!(
+        "/v1/task-events?taskIds=downgrade-child&cursor={}&timeoutSecs=0",
+        cursor_of(&first)
+    ))
+    .header(axum::http::header::ORIGIN, "https://attacker.example")
+    .body(Body::empty())
+    .expect("request");
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            49153,
+        ))));
+
+    let response = app.oneshot(request).await.expect("response");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    assert!(String::from_utf8_lossy(&body).contains("not authorized to resume"));
+
+    relay.abort();
+}
+
+#[tokio::test]
+async fn fresh_zero_timeout_drains_local_events_without_waiting_for_an_unresponsive_peer() {
+    let source = test_state_with_seed("desktop-zero-source", "Zero Source", |db| {
+        db.insert_test_repo("repo-zero", "Zero Repo")
+            .expect("insert source repo");
+        db.insert_test_pipeline_item(
+            "zero-local-child",
+            "repo-zero",
+            "local child",
+            Some("Local Child"),
+            "in progress",
+            "2026-08-16 00:00:00",
+        )
+        .expect("insert local task");
+        start_run(db, "zero-local-run", "zero-local-child", "in progress");
+    });
+    let relay = connect_unresponsive_listed_peer(&source, "desktop-zero-unresponsive");
+    let app = router(source);
+
+    let body = tokio::time::timeout(
+        Duration::from_millis(500),
+        get_json_body(
+            &app,
+            "/v1/task-events?taskIds=zero-local-child&timeoutSecs=0",
+        ),
+    )
+    .await
+    .expect("zero-timeout drain must not await the relay invoke timeout");
+    assert_eq!(
+        event_pairs(&body),
+        vec![("zero-local-child".into(), "run.started".into())]
+    );
+    assert_eq!(body["events"][0]["machineId"], "desktop-zero-source");
+
+    relay.abort();
+}
+
 fn aggregate_pending_leg_states() -> (Arc<AppState>, Arc<AppState>) {
     let source = test_state_with_seed("desktop-pending-source", "Pending Source", |db| {
         db.insert_test_repo("repo-pending-source", "Pending Source Repo")
@@ -648,6 +842,72 @@ async fn zero_timeout_resume_does_not_await_an_inherited_long_poll() {
     .await
     .expect("zero-timeout resume must not await the inherited 30-second leg");
     assert!(event_pairs(&resumed).is_empty());
+
+    relay.abort();
+}
+
+#[tokio::test]
+async fn shrinking_limit_restarts_a_retained_leg_at_the_current_response_bound() {
+    let (source, peer) = aggregate_pending_leg_states();
+    let relay =
+        connect_test_relay_peer(&source, Arc::clone(&peer), Arc::new(AtomicBool::new(true)));
+    let app = router(source);
+    let scope = "/v1/task-events?taskIds=pending-local-child,pending-peer-child";
+    let first = get_json_body(&app, &format!("{scope}&limit=500&timeoutSecs=30")).await;
+    assert_eq!(event_pairs(&first).len(), 1);
+
+    let db = Db::open(&peer.config().db_path).expect("open peer db");
+    db.update_pipeline_item_stage("pending-peer-child", "review")
+        .expect("append first peer event");
+    db.update_pipeline_item_pr(
+        "pending-peer-child",
+        Some(1101),
+        "https://github.com/kanna/kanna/pull/1101",
+    )
+    .expect("append second peer event");
+    db.close_pipeline_item("pending-peer-child")
+        .expect("append third peer event");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let second = get_json_body(
+        &app,
+        &format!("{scope}&limit=1&cursor={}&timeoutSecs=0", cursor_of(&first)),
+    )
+    .await;
+    assert_eq!(event_pairs(&second).len(), 1);
+    assert_eq!(second["hasMore"], true);
+
+    let third = get_json_body(
+        &app,
+        &format!(
+            "{scope}&limit=1&cursor={}&timeoutSecs=0",
+            cursor_of(&second)
+        ),
+    )
+    .await;
+    assert_eq!(event_pairs(&third).len(), 1);
+    assert_eq!(third["hasMore"], true);
+
+    let fourth = get_json_body(
+        &app,
+        &format!("{scope}&limit=1&cursor={}&timeoutSecs=0", cursor_of(&third)),
+    )
+    .await;
+    assert_eq!(event_pairs(&fourth).len(), 1);
+    let peer_events = event_pairs(&second)
+        .into_iter()
+        .chain(event_pairs(&third))
+        .chain(event_pairs(&fourth))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        peer_events,
+        vec![
+            ("pending-peer-child".into(), "stage.changed".into()),
+            ("pending-peer-child".into(), "task.pr_created".into()),
+            ("pending-peer-child".into(), "task.closed".into()),
+        ],
+        "shrinking the limit must preserve every event behind the retained leg"
+    );
 
     relay.abort();
 }

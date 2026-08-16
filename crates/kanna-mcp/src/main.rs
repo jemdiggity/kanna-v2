@@ -427,6 +427,33 @@ async fn resolve_remote_machine_id(
     Ok((machine_id != identity.desktop_id).then(|| machine_id.to_string()))
 }
 
+fn prepare_wait_events_routing(
+    name: &str,
+    args: &mut Value,
+    declared_machine_id: Option<&str>,
+    routed_machine_id: Option<&str>,
+) -> bool {
+    if name != "kanna_wait_events" {
+        return false;
+    }
+
+    let explicitly_pinned_to_current = declared_machine_id.is_some() && routed_machine_id.is_none();
+    if explicitly_pinned_to_current {
+        if let Some(args) = args.as_object_mut() {
+            args.insert("local_only".to_string(), Value::Bool(true));
+        }
+    }
+
+    let local_only = args
+        .get("local_only")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    !local_only
+        && declared_machine_id.is_none()
+        && routed_machine_id.is_none()
+        && args.get("task_ids").is_some()
+}
+
 fn method_name(method: Method) -> &'static str {
     match method {
         Method::Get => "GET",
@@ -1145,7 +1172,7 @@ async fn handle_mcp_tool_call(
     catalog: &SharedCatalog,
     multi_machine_waits: &SharedMultiMachineWaits,
     name: &str,
-    args: Value,
+    mut args: Value,
 ) -> Result<Value, String> {
     if name == "kanna_complete_stage" && args.get("machine_id").is_some() {
         return Err(
@@ -1160,7 +1187,12 @@ async fn handle_mcp_tool_call(
         resolve_request(&catalog, name, &args)?.machine_id
     };
     let machine_id = resolve_remote_machine_id(base_url, declared_machine_id.as_deref()).await?;
-    if name == "kanna_wait_events" && machine_id.is_none() && args.get("task_ids").is_some() {
+    if prepare_wait_events_routing(
+        name,
+        &mut args,
+        declared_machine_id.as_deref(),
+        machine_id.as_deref(),
+    ) {
         return wait_events_across_machines(base_url, catalog, multi_machine_waits, args).await;
     }
     let args = maybe_augment_create_task_args(base_url, name, args, machine_id.as_deref()).await?;
@@ -1638,6 +1670,37 @@ mod tests {
             decode_multi_machine_cursor(&encoded).expect("decode cursor"),
             Some(cursor)
         );
+    }
+
+    #[test]
+    fn local_only_named_wait_bypasses_client_multi_machine_fan_in() {
+        let mut args = json!({
+            "task_ids": ["task-a", "task-b"],
+            "local_only": true,
+        });
+
+        let fan_in = prepare_wait_events_routing("kanna_wait_events", &mut args, None, None);
+
+        assert!(!fan_in);
+        assert_eq!(args["local_only"], true);
+    }
+
+    #[test]
+    fn explicit_current_machine_pin_forces_server_wait_to_stay_local() {
+        let mut args = json!({
+            "repo_id": "repo-local",
+            "machine_id": "desktop-local",
+        });
+
+        let fan_in = prepare_wait_events_routing(
+            "kanna_wait_events",
+            &mut args,
+            Some("desktop-local"),
+            None,
+        );
+
+        assert!(!fan_in);
+        assert_eq!(args["local_only"], true);
     }
 
     #[tokio::test]

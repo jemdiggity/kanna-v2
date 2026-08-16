@@ -2,9 +2,9 @@ use super::state::{AppState, AuthenticatedHttpInvoke, TunneledHttpInvoke};
 use crate::pairing::PairingStore;
 use axum::body::Body;
 use axum::extract::{ConnectInfo, FromRequestParts, State};
-use axum::http::header::{COOKIE, SET_COOKIE};
-use axum::http::HeaderValue;
+use axum::http::header::{COOKIE, ORIGIN, SET_COOKIE};
 use axum::http::{request::Parts, Request, StatusCode};
+use axum::http::{HeaderMap, HeaderValue};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
@@ -85,7 +85,10 @@ impl FromRequestParts<Arc<AppState>> for AccountWideTaskEventAccess {
         parts: &mut Parts,
         _state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
-        Ok(Self(privileged_task_access(&parts.extensions).is_ok()))
+        Ok(Self(
+            !is_browser_origin_request(&parts.headers)
+                && privileged_task_access(&parts.extensions).is_ok(),
+        ))
     }
 }
 
@@ -93,6 +96,30 @@ impl AccountWideTaskEventAccess {
     pub(super) fn is_authorized(self) -> bool {
         self.0
     }
+}
+
+fn is_browser_origin_request(headers: &HeaderMap) -> bool {
+    if headers.contains_key(ORIGIN) {
+        return true;
+    }
+
+    let fetch_site = headers
+        .get("sec-fetch-site")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim);
+    if fetch_site.is_some_and(|site| {
+        !site.eq_ignore_ascii_case("same-origin") && !site.eq_ignore_ascii_case("none")
+    }) {
+        return true;
+    }
+
+    headers
+        .get("sec-fetch-mode")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .is_some_and(|mode| {
+            !mode.eq_ignore_ascii_case("same-origin") && !mode.eq_ignore_ascii_case("navigate")
+        })
 }
 
 fn unauthorized_privileged_task() -> (StatusCode, String) {

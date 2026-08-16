@@ -54,6 +54,7 @@ const LEGACY_CURSOR_SCAN_LIMIT: i64 = 500;
 const WAIT_RECHECK_SECS: u64 = 5;
 const AGGREGATE_CURSOR_PREFIX: &str = "ks1.";
 const AGGREGATE_WAIT_SESSION_TTL: Duration = Duration::from_secs(10 * 60);
+const ZERO_TIMEOUT_DRAIN_BUDGET: Duration = Duration::from_millis(100);
 const MAX_AGGREGATE_WAIT_SESSIONS: usize = 256;
 const MAX_AGGREGATE_MACHINES: usize = 128;
 
@@ -105,6 +106,7 @@ struct AggregateWaitSession {
     cursor: AggregateCursor,
     pending: tokio::task::JoinSet<AggregateWaitCompletion>,
     pending_machines: HashSet<String>,
+    pending_limit: Option<i64>,
     last_touched: tokio::time::Instant,
 }
 
@@ -940,6 +942,7 @@ fn spawn_aggregate_wait(
     timeout_secs: u64,
     limit: i64,
 ) {
+    session.pending_limit = Some(limit);
     let query = local_query_for_aggregate(
         &session.cursor.scope,
         session.cursor.cursors_by_machine.get(&machine_id).cloned(),
@@ -983,12 +986,14 @@ fn apply_aggregate_completion(
     completion: AggregateWaitCompletion,
     events: &mut Vec<Value>,
     machine_errors: &mut Vec<Value>,
-    completed_machines: &mut HashSet<String>,
     failed_machines: &mut HashSet<String>,
     has_more: &mut bool,
+    limit: i64,
 ) -> Result<bool, (axum::http::StatusCode, String)> {
     session.pending_machines.remove(&completion.machine_id);
-    completed_machines.insert(completion.machine_id.clone());
+    if session.pending_machines.is_empty() {
+        session.pending_limit = None;
+    }
     let response = match completion.result {
         Ok(response) => response,
         Err(error) => {
@@ -1033,7 +1038,11 @@ fn apply_aggregate_completion(
                 ),
             )
         })?;
-    for event in returned_events {
+    let remaining = (limit as usize).saturating_sub(events.len());
+    if returned_events.len() > remaining {
+        *has_more = true;
+    }
+    for event in returned_events.iter().take(remaining) {
         let mut event = event.as_object().cloned().ok_or_else(|| {
             (
                 axum::http::StatusCode::BAD_GATEWAY,
@@ -1125,10 +1134,16 @@ async fn wait_aggregate_task_events(
                 cursor,
                 pending: tokio::task::JoinSet::new(),
                 pending_machines: HashSet::new(),
+                pending_limit: None,
                 last_touched: now,
             })
     };
-    let inherited_pending = !session.pending_machines.is_empty();
+    if !session.pending_machines.is_empty() && session.pending_limit != Some(limit) {
+        session.pending.abort_all();
+        session.pending = tokio::task::JoinSet::new();
+        session.pending_machines.clear();
+        session.pending_limit = None;
+    }
     let mut machine_errors = Vec::new();
     let mut active_machines = HashSet::from([local_machine_id.clone()]);
     match state.list_active_relay_desktops().await {
@@ -1167,6 +1182,7 @@ async fn wait_aggregate_task_events(
     }
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+    let zero_timeout_deadline = tokio::time::Instant::now() + ZERO_TIMEOUT_DRAIN_BUDGET;
     let mut events = Vec::new();
     let mut completed_machines = HashSet::new();
     let mut failed_machines = HashSet::new();
@@ -1200,10 +1216,10 @@ async fn wait_aggregate_task_events(
             );
         }
 
-        let joined = if timeout_secs == 0 && inherited_pending {
-            session.pending.try_join_next()
-        } else if timeout_secs == 0 {
-            session.pending.join_next().await
+        let joined = if timeout_secs == 0 {
+            tokio::time::timeout_at(zero_timeout_deadline, session.pending.join_next())
+                .await
+                .unwrap_or_default()
         } else {
             tokio::time::timeout_at(deadline, session.pending.join_next())
                 .await
@@ -1219,14 +1235,15 @@ async fn wait_aggregate_task_events(
             )
         })?;
         let completed_machine_id = completion.machine_id.clone();
+        completed_machines.insert(completed_machine_id.clone());
         let completion_had_events = apply_aggregate_completion(
             &mut session,
             completion,
             &mut events,
             &mut machine_errors,
-            &mut completed_machines,
             &mut failed_machines,
             &mut has_more,
+            limit,
         )?;
         if !completion_had_events
             && !failed_machines.contains(&completed_machine_id)
@@ -1297,23 +1314,10 @@ pub(super) async fn wait_task_events(
             .as_deref()
             .is_some_and(|cursor| cursor.starts_with(AGGREGATE_CURSOR_PREFIX))
         {
-            let db = Db::open(&state.config().db_path).map_err(db_error)?;
-            let requested_scope = resolve_aggregate_scope(&db, &query)?;
-            let cursor = decode_aggregate_cursor(
-                query
-                    .cursor
-                    .as_deref()
-                    .expect("aggregate cursor checked above"),
-            )?;
-            if cursor.local_machine_id != state.config().desktop_id
-                || cursor.scope != requested_scope
-            {
-                return Err(invalid_aggregate_cursor());
-            }
-            query.cursor = cursor
-                .cursors_by_machine
-                .get(&cursor.local_machine_id)
-                .cloned();
+            return Err((
+                axum::http::StatusCode::FORBIDDEN,
+                "this request is not authorized to resume an account-wide task-event cursor; retry from the trusted desktop client or start a new local-only wait".to_string(),
+            ));
         }
         query.local_only = true;
         return wait_local_task_events(state, query, false).await;
@@ -1380,6 +1384,7 @@ mod aggregate_wait_registry_tests {
             },
             pending,
             pending_machines: HashSet::from([machine_id]),
+            pending_limit: Some(DEFAULT_EVENT_LIMIT),
             last_touched,
         }
     }
