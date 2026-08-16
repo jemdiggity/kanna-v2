@@ -362,16 +362,33 @@ polling each child. It is cursor-based, not snapshot-diffed:
   never inferred from a session going quiet; see
   [2026-07-29-awaiting-input-detection-e2e-gap.md](2026-07-29-awaiting-input-detection-e2e-gap.md).
 - `task.activity_changed` is the provider-neutral fallback. It is appended on
-  a `working` → `idle`/`unread` activity edge when the task has a non-empty
-  `waitingPromptSnippet`, and carries `previousActivity`, `activity`, and that
-  snippet. It does not claim the snippet is a question: PTY providers also use
-  this edge after ordinary final output. A changed snippet while activity
-  remains stopped is task-detail state only and requires polling
-  `kanna_get_task`.
+  every `working` → `idle`/`unread` activity edge for an open task, and carries
+  `previousActivity` and `activity`. It also carries `waitingPromptSnippet`
+  when that value is non-empty, but does not claim the snippet is a question:
+  PTY providers also use this edge after ordinary final output. Transitions
+  into `working` and read-state-only `idle` ↔ `unread` changes do not append
+  this event. A changed snippet while activity remains stopped is task-detail
+  state only and requires polling `kanna_get_task`.
+  The event is a durable wake-up edge, not a second activity debounce: the
+  server records every daemon verdict, including a one-frame idle
+  classification. Before acting on this weaker event, an MCP orchestrator
+  reconciles with `kanna_get_task`, whose existing confirmation read is the
+  single debounce boundary.
 - `task.transfer_finalizing` reports each step of a cross-machine transfer
   shutting the task's agent down (`payload.phase`: `wrap-up-sent`, `idle`,
   `quit-sent`, `exited`, `already-exited`, `degraded`). See
   [Source finalization](#source-finalization).
+
+A cursor-less wait drains retained history, so every working-to-stopped edge
+recorded after this guarantee ships returns immediately even when the caller
+starts waiting later. One legacy gap remains: a task already stopped without a
+retained edge has no event to drain. Adoption must begin with `kanna_get_task`
+today. Making that case return from `kanna_wait_events` itself is a follow-up:
+the narrow design is an `initialActivities` snapshot on cursor-less
+`taskIds`-scoped waits, confirmed once by the existing MCP debounce before it is
+reported. It cannot be synthesized as a sequenced event without weakening the
+cursor contract, and adding the snapshot here alone would bypass multi-machine
+fan-in and create a second, server-side debounce.
 
 Three scopes, in precedence order: `taskIds`, then `parentTaskId`, then
 `repoId`. `parentTaskId` exists because the other two do not cover a fan-out

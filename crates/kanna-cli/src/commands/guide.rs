@@ -26,7 +26,7 @@ struct GuideTool<'a> {
 
 const EVENT_SUPERVISION_GUIDANCE: [&str; 3] = [
     "`task.awaiting_input` is a confirmed interactive prompt detected by the daemon; it is the strong signal that the agent needs an answer. `kanna_send_task_input` delivers only to a live session: `no_live_agent_session` requires resume or rerun recovery, while `delivery_uncertain` must not be retried blindly.",
-    "`task.activity_changed` is the provider-neutral fallback for a working task becoming idle or unread. Inspect its `waitingPromptSnippet`; this transition is not proof that the snippet is a question. Without MCP, long-poll with `kanna-cli tool call kanna_wait_events --json '<arguments>'`.",
+    "`task.activity_changed` is the provider-neutral fallback for a working task becoming idle or unread. Confirm the current task with `kanna_get_task`, then inspect `waitingPromptSnippet` when present; this transition is not proof that the snippet is a question. Without MCP, long-poll with `kanna-cli tool call kanna_wait_events --json '<arguments>'`.",
     "prompt-only changes while a task remains stopped are visible only by polling task detail with `kanna_get_task` (or its CLI equivalent); they do not append another event.",
 ];
 

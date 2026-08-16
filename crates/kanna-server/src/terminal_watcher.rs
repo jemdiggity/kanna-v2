@@ -1102,6 +1102,25 @@ mod tests {
             Some("working"),
             "the next frame carrying the busy marker should undo the misread"
         );
+        let events = Db::open(&config.db_path)
+            .unwrap()
+            .list_task_events(
+                &crate::db::TaskEventScope::Tasks(vec!["task-child".to_string()]),
+                0,
+                i64::MAX,
+                10,
+            )
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "task.activity_changed");
+        assert_eq!(
+            events[0].payload,
+            serde_json::json!({
+                "previousActivity": "working",
+                "activity": "unread",
+            }),
+            "the raw edge wakes event consumers; kanna_get_task owns the one confirmation debounce"
+        );
         let _ = std::fs::remove_file(socket_path);
         let _ = std::fs::remove_dir_all(daemon_dir);
     }

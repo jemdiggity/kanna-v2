@@ -753,19 +753,20 @@ impl Db {
             .as_deref()
             .map(str::trim)
             .filter(|snippet| !snippet.is_empty());
-        if previous_activity.as_deref() == Some("working")
-            && matches!(activity, "idle" | "unread")
-            && waiting_prompt_snippet.is_some()
+        if previous_activity.as_deref() == Some("working") && matches!(activity, "idle" | "unread")
         {
-            self.append_task_event(
-                id,
-                TaskEventKind::ActivityChanged,
-                json!({
+            let payload = match waiting_prompt_snippet {
+                Some(snippet) => json!({
                     "previousActivity": "working",
                     "activity": activity,
-                    "waitingPromptSnippet": waiting_prompt_snippet,
+                    "waitingPromptSnippet": snippet,
                 }),
-            )?;
+                None => json!({
+                    "previousActivity": "working",
+                    "activity": activity,
+                }),
+            };
+            self.append_task_event(id, TaskEventKind::ActivityChanged, payload)?;
         }
         Ok(())
     }
