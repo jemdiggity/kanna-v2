@@ -146,6 +146,48 @@ fn connect_test_relay_peer_with_long_poll_budget(
     })
 }
 
+fn connect_test_relay_peer_with_invoke_gate(
+    source: &Arc<AppState>,
+    peer: Arc<AppState>,
+    invoke_gate: Arc<tokio::sync::Semaphore>,
+    invoke_count: Arc<AtomicUsize>,
+) -> tokio::task::JoinHandle<()> {
+    let mut requests = source
+        .take_desktop_relay_requests()
+        .expect("take source relay queue");
+    source.set_desktop_routing_available(true);
+    tokio::spawn(async move {
+        while let Some(request) = requests.recv().await {
+            match request {
+                crate::http_api::DesktopRelayRequest::ListActive { response, .. } => {
+                    let _ = response.send(Ok(vec![peer.config().desktop_id.clone()]));
+                }
+                crate::http_api::DesktopRelayRequest::Invoke {
+                    method,
+                    path,
+                    body,
+                    response,
+                    ..
+                } => {
+                    invoke_count.fetch_add(1, Ordering::SeqCst);
+                    let peer = Arc::clone(&peer);
+                    let invoke_gate = Arc::clone(&invoke_gate);
+                    tokio::spawn(async move {
+                        let Ok(_permit) = invoke_gate.acquire_owned().await else {
+                            return;
+                        };
+                        let result = crate::http_api::dispatch_authenticated_http_invoke(
+                            peer, &method, &path, body,
+                        )
+                        .await;
+                        let _ = response.send(Ok(result));
+                    });
+                }
+            }
+        }
+    })
+}
+
 fn connect_unresponsive_listed_peer(
     source: &Arc<AppState>,
     machine_id: &str,
@@ -625,6 +667,21 @@ async fn truncated_peer_legacy_parent_batch_preserves_acknowledged_watermarks() 
     let source = test_state_with_seed("desktop-legacy-source", "Legacy Source", |db| {
         db.insert_test_repo("repo-legacy-source", "Legacy Source Repo")
             .expect("insert source repo");
+        for task_id in ["legacy-parent", "legacy-local"] {
+            db.insert_test_pipeline_item(
+                task_id,
+                "repo-legacy-source",
+                "local legacy cursor task",
+                Some(task_id),
+                "in progress",
+                "2026-08-16 00:00:00",
+            )
+            .expect("insert source task");
+        }
+        db.update_pipeline_item_parent("legacy-local", Some("legacy-parent"))
+            .expect("set local parent");
+        db.update_pipeline_item_stage("legacy-local", "review")
+            .expect("append local event");
     });
     let peer = test_state_with_seed("desktop-legacy-peer", "Legacy Peer", |db| {
         db.insert_test_repo("repo-legacy-peer", "Legacy Peer Repo")
@@ -679,34 +736,29 @@ async fn truncated_peer_legacy_parent_batch_preserves_acknowledged_watermarks() 
 
     // Establish the peer feed's exact non-replaying result for the same p1
     // cursor before comparing the aggregate surface with it.
-    let peer_first = get_json_body(
+    let peer_feed = get_json_body(
         &peer_router,
         &format!(
-            "/v1/task-events?parentTaskId=legacy-parent&localOnly=true&limit=1&cursor={legacy_cursor}&timeoutSecs=0"
-        ),
-    )
-    .await;
-    let peer_second = get_json_body(
-        &peer_router,
-        &format!(
-            "/v1/task-events?parentTaskId=legacy-parent&localOnly=true&limit=500&cursor={}&timeoutSecs=0",
-            cursor_of(&peer_first)
+            "/v1/task-events?parentTaskId=legacy-parent&localOnly=true&limit=500&cursor={legacy_cursor}&timeoutSecs=0"
         ),
     )
     .await;
     assert_eq!(
-        event_pairs(&peer_first)
-            .into_iter()
-            .chain(event_pairs(&peer_second))
-            .collect::<Vec<_>>(),
+        event_pairs(&peer_feed),
         vec![
             ("legacy-pending".into(), "stage.changed".into()),
             ("legacy-pending".into(), "task.pr_created".into()),
         ]
     );
 
-    let relay =
-        connect_test_relay_peer(&source, Arc::clone(&peer), Arc::new(AtomicBool::new(true)));
+    let invoke_gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let invoke_count = Arc::new(AtomicUsize::new(0));
+    let relay = connect_test_relay_peer_with_invoke_gate(
+        &source,
+        Arc::clone(&peer),
+        Arc::clone(&invoke_gate),
+        Arc::clone(&invoke_count),
+    );
     let source_router = router(Arc::clone(&source));
     let aggregate_cursor = aggregate_parent_cursor(
         "desktop-legacy-source",
@@ -718,29 +770,93 @@ async fn truncated_peer_legacy_parent_batch_preserves_acknowledged_watermarks() 
         &source_router,
         &source,
         &format!(
-            "/v1/task-events?parentTaskId=legacy-parent&limit=1&cursor={aggregate_cursor}&timeoutSecs=0"
+            "/v1/task-events?parentTaskId=legacy-parent&limit=500&cursor={aggregate_cursor}&timeoutSecs=30"
         ),
     )
     .await;
+    assert_eq!(
+        event_pairs(&first),
+        vec![("legacy-local".into(), "stage.changed".into())]
+    );
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while invoke_count.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the retained peer wait must start with the original large limit");
+    invoke_gate.add_permits(10);
+
     let second = get_account_json_body(
         &source_router,
         &source,
         &format!(
-            "/v1/task-events?parentTaskId=legacy-parent&limit=500&cursor={}&timeoutSecs=0",
+            "/v1/task-events?parentTaskId=legacy-parent&limit=1&cursor={}&timeoutSecs=5",
             cursor_of(&first)
         ),
     )
     .await;
-    let aggregate_events = event_pairs(&first)
+    assert_eq!(
+        event_pairs(&second),
+        vec![("legacy-pending".into(), "stage.changed".into())]
+    );
+    assert_eq!(second["hasMore"], true);
+
+    let last_emitted_seq = second["events"][0]["seq"]
+        .as_i64()
+        .expect("emitted peer sequence");
+    let second_cursor = cursor_of(&second);
+    let aggregate_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(
+            second_cursor
+                .strip_prefix("ks1.")
+                .expect("aggregate cursor"),
+        )
+        .expect("decode aggregate continuation");
+    let aggregate_continuation: Value =
+        serde_json::from_slice(&aggregate_bytes).expect("parse aggregate continuation");
+    let peer_continuation = aggregate_continuation["cursorsByMachine"]["desktop-legacy-peer"]
+        .as_str()
+        .expect("peer continuation");
+    let peer_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(
+            peer_continuation
+                .strip_prefix("p1.")
+                .expect("truncated legacy peer batch must retain a p1 continuation"),
+        )
+        .expect("decode peer continuation");
+    let peer_continuation: Value =
+        serde_json::from_slice(&peer_bytes).expect("parse peer continuation");
+    assert_eq!(peer_continuation["event_seq"], last_emitted_seq);
+    assert_eq!(
+        peer_continuation["watermarks"]["legacy-acknowledged"],
+        acknowledged_seq
+    );
+    assert!(acknowledged_seq > last_emitted_seq);
+
+    let third = get_account_json_body(
+        &source_router,
+        &source,
+        &format!(
+            "/v1/task-events?parentTaskId=legacy-parent&limit=500&cursor={}&timeoutSecs=0",
+            cursor_of(&second)
+        ),
+    )
+    .await;
+    assert_eq!(
+        event_pairs(&third),
+        vec![("legacy-pending".into(), "task.pr_created".into())],
+        "resuming the truncated cursor must not replay the acknowledged child"
+    );
+
+    let aggregate_events = event_pairs(&second)
         .into_iter()
-        .chain(event_pairs(&second))
+        .chain(event_pairs(&third))
         .collect::<Vec<_>>();
     assert_eq!(
         aggregate_events,
-        event_pairs(&peer_first)
-            .into_iter()
-            .chain(event_pairs(&peer_second))
-            .collect::<Vec<_>>()
+        event_pairs(&peer_feed),
+        "the aggregate peer sequence must exactly match the peer's own feed"
     );
     assert!(aggregate_events
         .iter()
