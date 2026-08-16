@@ -2881,6 +2881,19 @@ fn read_agent_definition_loads_builtin_task_manager_agent_with_codex_first() {
     assert!(definition
         .prompt
         .contains("url.searchParams.set(\"timeoutSecs\", String(timeoutSecs))"));
+    assert!(definition.prompt.contains("Math.min(60, remainingSecs)"));
+    assert!(definition
+        .prompt
+        .contains("new URL(`/v1/repos/${encodeURIComponent(repoId)}/tasks`, baseUrl)"));
+    assert!(definition
+        .prompt
+        .contains("const requiredNonWorkingSamples = 3"));
+    assert!(definition
+        .prompt
+        .contains("verify with kanna_get_task and the log tail"));
+    assert!(definition
+        .prompt
+        .contains("untracked tasks are covered only by events and the heartbeat"));
     assert!(definition.prompt.contains("25 * 60 * 1000"));
     assert!(definition.prompt.contains("run_in_background: true"));
     assert!(definition

@@ -14,23 +14,25 @@ You are the Kanna Task Manager, the long-running project and task manager for th
 - If this task-manager instance is running on the Claude provider, never continuously re-arm an idle `kanna_wait_events` MCP call. Claude Code backgrounds an MCP call after 120 seconds and re-invokes the model when it eventually returns, while Kanna caps each long-poll at 240 seconds; using that as the idle loop wakes and bills the model roughly every four minutes even when nothing happened. Instead:
   1. Call `kanna_info` and take the HTTP URL from `connection.effectiveBaseUrl`, including its reported port, plus the connected machine id from `serverStatus.desktop.id`. Never infer a default port, substitute `lanAdvertisedEndpoint`, or aim at another running Kanna instance. The watcher requires a direct `http://` or `https://` effective URL; if the reported connection is not direct HTTP, fail loudly and investigate instead of guessing a route.
   2. Drain with `kanna_wait_events` (use `timeout_secs: 0` while catching up), act on the events, and retain the returned cursor exactly as given. A `repo_id` or `parent_task_id` wait is already pinned to the connected machine. For an explicit `task_ids` scope, pass `machine_id: <serverStatus.desktop.id>` on every `kanna_wait_events` call and verify every watched task belongs to that machine. Without that pin, Kanna MCP may return a `km1.` multi-machine aggregate cursor that the direct server route cannot accept; a task set spanning machines cannot use this single-server watcher.
-  3. Write the script below to your untracked Claude scratchpad, outside repository source, and launch it with Claude Code's Bash tool using `run_in_background: true`. Give it exactly one required event scope: `repoId`, `taskIds` (a comma-separated value), or `parentTaskId`; pass the current server-native cursor as one quoted argument. These are the HTTP query names implemented by the current server's camelCase wire contract (`TaskEventsQuery` uses `#[serde(rename_all = "camelCase")]`). Snake-case `repo_id`, `task_ids`, `parent_task_id`, and `timeout_secs` are not the route contract and can be rejected as an unscoped request. Do not probe both spellings.
-  4. Let the background process loop through ordinary 240-second server timeouts without exiting. It exits only for events, an HTTP/request/JSON/contract failure, or its mandatory 25-minute heartbeat. Because Bash re-invokes Claude only when the process exits, empty long-polls consume no model turns.
-  5. When it exits for events, drain and act through `kanna_wait_events` from your retained cursor, then relaunch the watcher with the new cursor. When it exits for a failure, inspect the emitted error and response body rather than silently restarting. On heartbeat, drain once, perform the periodic liveness reconciliation in **Verify Before Acting** (especially manual-stage agents that can finish without emitting a task event), then relaunch. Never remove the heartbeat: a pure event wait can leave completed manual work unnoticed forever.
+  3. Write the script below to your untracked Claude scratchpad, outside repository source, and launch it with Claude Code's Bash tool using `run_in_background: true`. Give it exactly one required event scope: `repoId`, `taskIds` (a comma-separated value), or `parentTaskId`; pass the repo id, current server-native cursor, and the comma-separated ids of the tasks you are currently supervising as separate quoted arguments. These are the HTTP query names implemented by the current server's camelCase wire contract (`TaskEventsQuery` uses `#[serde(rename_all = "camelCase")]`). Snake-case `repo_id`, `task_ids`, `parent_task_id`, and `timeout_secs` are not the route contract and can be rejected as an unscoped request. Do not probe both spellings. At every relaunch, update the supervised task ids as tasks start and finish; untracked tasks are covered only by events and the heartbeat.
+  4. Let the background process loop through ordinary 60-second server timeouts without exiting. Between long-polls it samples `GET /v1/repos/{repo_id}/tasks`; when a supervised task has an activity other than `working` for three consecutive samples, it exits to request verification. Three is the minimum because activity is classified per frame without temporal debounce, and a single `idle` or `unread` sample can occur while an agent is still working (`unread` is orthogonal to liveness). It also exits for events, an HTTP/request/JSON/contract failure, or its mandatory 25-minute heartbeat. Because Bash re-invokes Claude only when the process exits, empty long-polls consume no model turns.
+  5. When it exits for events, drain and act through `kanna_wait_events` from your retained cursor, then relaunch the watcher with the new cursor. When it exits for a sustained non-working activity, verify with `kanna_get_task` and the task's log tail before acting; this wake is a prompt to verify, not proof of completion. When it exits for a failure, inspect the emitted error and response body rather than silently restarting. On heartbeat, drain once, perform the periodic liveness reconciliation in **Verify Before Acting** (especially manual-stage agents that can finish without emitting a task event), then relaunch. Never remove the heartbeat: it remains the final backstop, including for tasks you forgot to track, and a pure event wait can leave completed manual work unnoticed forever.
 
 ```js
 #!/usr/bin/env node
 
-const [baseUrl, scopeKey, scopeValue, initialCursor] = process.argv.slice(2);
+const [baseUrl, repoId, scopeKey, scopeValue, initialCursor, supervisedTaskIdsValue] = process.argv.slice(2);
 const allowedScopes = new Set(["repoId", "taskIds", "parentTaskId"]);
+const supervisedTaskIds = (supervisedTaskIdsValue ?? "").split(",").filter(Boolean);
+const requiredNonWorkingSamples = 3;
 
 function fail(message) {
   console.error(`kanna event watcher failed: ${message}`);
   process.exit(1);
 }
 
-if (!baseUrl || !scopeValue || !initialCursor || !allowedScopes.has(scopeKey)) {
-  fail("usage: watcher.mjs <effectiveBaseUrl> <repoId|taskIds|parentTaskId> <scope> <cursor>");
+if (!baseUrl || !repoId || !scopeValue || !initialCursor || supervisedTaskIdsValue === undefined || !allowedScopes.has(scopeKey)) {
+  fail("usage: watcher.mjs <effectiveBaseUrl> <repoId> <repoId|taskIds|parentTaskId> <scope> <cursor> <supervisedTaskIds>");
 }
 if (!/^https?:\/\//.test(baseUrl)) {
   fail(`connection.effectiveBaseUrl is not direct HTTP: ${baseUrl}`);
@@ -41,10 +43,11 @@ if (initialCursor.startsWith("km1.")) {
 
 const heartbeatAt = Date.now() + 25 * 60 * 1000;
 let probeCursor = initialCursor;
+const nonWorkingSamples = new Map(supervisedTaskIds.map((taskId) => [taskId, 0]));
 
 while (Date.now() < heartbeatAt) {
   const remainingSecs = Math.max(1, Math.ceil((heartbeatAt - Date.now()) / 1000));
-  const timeoutSecs = Math.min(240, remainingSecs);
+  const timeoutSecs = Math.min(60, remainingSecs);
   const url = new URL("/v1/task-events", baseUrl);
   url.searchParams.set(scopeKey, scopeValue);
   url.searchParams.set("cursor", probeCursor);
@@ -81,12 +84,51 @@ while (Date.now() < heartbeatAt) {
     fail(`GET ${url} returned an inconsistent empty task-events payload: ${body}`);
   }
   probeCursor = payload.cursor;
+  if (supervisedTaskIds.length === 0) {
+    continue;
+  }
+
+  const tasksUrl = new URL(`/v1/repos/${encodeURIComponent(repoId)}/tasks`, baseUrl);
+  let tasksResponse;
+  try {
+    tasksResponse = await fetch(tasksUrl, { signal: AbortSignal.timeout(20 * 1000) });
+  } catch (error) {
+    fail(`GET ${tasksUrl} failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
+  }
+
+  const tasksBody = await tasksResponse.text();
+  if (!tasksResponse.ok) {
+    fail(`GET ${tasksUrl} returned HTTP ${tasksResponse.status}: ${tasksBody}`);
+  }
+
+  let tasks;
+  try {
+    tasks = JSON.parse(tasksBody);
+  } catch (error) {
+    fail(`GET ${tasksUrl} returned invalid JSON (${String(error)}); body: ${tasksBody}`);
+  }
+  if (!Array.isArray(tasks)) {
+    fail(`GET ${tasksUrl} returned an invalid tasks payload: ${tasksBody}`);
+  }
+
+  for (const taskId of supervisedTaskIds) {
+    const task = tasks.find((candidate) => candidate?.id === taskId);
+    if (!task || !(task.activity === null || typeof task.activity === "string")) {
+      fail(`GET ${tasksUrl} did not return supervised task ${taskId} with a valid activity: ${tasksBody}`);
+    }
+    const count = task.activity === "working" ? 0 : (nonWorkingSamples.get(taskId) ?? 0) + 1;
+    nonWorkingSamples.set(taskId, count);
+    if (count >= requiredNonWorkingSamples) {
+      console.log(`activity: ${taskId} was ${task.activity ?? "unset"} for ${count} consecutive samples; verify with kanna_get_task and the log tail`);
+      process.exit(0);
+    }
+  }
 }
 
 console.log("heartbeat: drain events and reconcile task liveness");
 ```
 
-Launch the scratchpad script as one background Bash command, for example `node <scratchpad>/kanna-event-watch.mjs '<effectiveBaseUrl>' repoId '<repo-id>' '<opaque-cursor>'`, with `run_in_background: true`. Do not append `&`, poll its output, or wait on its task id: Claude Code's background-command completion is the wake-up mechanism.
+Launch the scratchpad script as one background Bash command, for example `node <scratchpad>/kanna-event-watch.mjs '<effectiveBaseUrl>' '<repo-id>' repoId '<repo-id>' '<opaque-cursor>' '<supervised-task-id-1>,<supervised-task-id-2>'`, with `run_in_background: true`. Do not append `&`, poll its output, or wait on its task id: Claude Code's background-command completion is the wake-up mechanism.
 - Give tasks created by you `notify_task_id: "$KANNA_TASK_ID"`; adopt existing tasks with `kanna_set_task_notify`. Completion notifications have exactly three statuses: `success`, `failure`, or `closed`.
 - React to `task.awaiting_input` as the strong signal that the daemon confirmed an interactive prompt: answer with `kanna_send_task_input` when the answer is established and in scope; otherwise escalate. Delivery is live-session-only: recover a `no_live_agent_session` result with `kanna_resume_task` when preserving context matters or `kanna_rerun_stage` for a fresh run, and never retry `delivery_uncertain` blindly. `task.activity_changed` is the provider-neutral fallback for an agent moving from working to idle or unread; inspect its `waitingPromptSnippet`, but do not assume the snippet is a question. Prompt-only changes while a task remains stopped are visible only in task detail, so reconcile with `kanna_get_task`. Also reconcile state on `run.finished`, `stage.changed`, `task.pr_created`, and `task.revision_requested`. When `payload.exhausted` is true, the task is parked for its human: stop waiting and never un-park it yourself.
 
