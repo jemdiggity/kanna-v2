@@ -129,6 +129,10 @@ impl Db {
             WHERE closed_at IS NULL;
             CREATE INDEX idx_pipeline_item_parent_created_id
             ON pipeline_item(parent_task_id, created_at, id);
+            CREATE INDEX idx_pipeline_item_repo_id_id
+            ON pipeline_item(repo_id, id);
+            CREATE INDEX idx_repo_remote_url_hash_id
+            ON repo(remote_url_hash, id);
 
             CREATE TABLE worktree (
                 id TEXT PRIMARY KEY,

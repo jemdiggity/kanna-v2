@@ -98,6 +98,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "048_pipeline_item_merge_signaled",
     "049_transfer_work_queue",
     "050_transfer_work_phase_value",
+    "051_repo_remote_hash_task_event_indexes",
 ];
 
 #[derive(Debug, Serialize)]
@@ -1684,6 +1685,15 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         // and the session id an import materialized. Recomputing either on
         // attempt 2 reads a world the first attempt already moved.
         add_column(conn, "transfer_work_phase", "value", "TEXT")
+    })?;
+
+    run_migration(conn, "051_repo_remote_hash_task_event_indexes", |conn| {
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_repo_remote_url_hash_id
+             ON repo(remote_url_hash, id);
+             CREATE INDEX IF NOT EXISTS idx_pipeline_item_repo_id_id
+             ON pipeline_item(repo_id, id);",
+        )
     })?;
 
     Ok(())

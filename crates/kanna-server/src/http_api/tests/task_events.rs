@@ -251,6 +251,29 @@ fn legacy_parent_cursor(
     )
 }
 
+fn aggregate_parent_cursor(
+    local_machine_id: &str,
+    peer_machine_id: &str,
+    parent_task_id: &str,
+    peer_cursor: &str,
+) -> String {
+    let payload = serde_json::json!({
+        "localMachineId": local_machine_id,
+        "scope": {
+            "kind": "children",
+            "parent_task_id": parent_task_id,
+        },
+        "machineIds": [local_machine_id, peer_machine_id],
+        "cursorsByMachine": {
+            (peer_machine_id): peer_cursor,
+        },
+    });
+    format!(
+        "ks1.{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.to_string())
+    )
+}
+
 fn start_run(db: &Db, run_id: &str, task_id: &str, stage: &str) {
     db.insert_stage_run(NewStageRun {
         id: run_id,
@@ -593,6 +616,135 @@ async fn local_surface_aggregates_peer_repo_events_and_resumes_after_reconnect()
         event_pairs(&peer_all),
         "the aggregate feed must neither duplicate nor lose peer events"
     );
+
+    relay.abort();
+}
+
+#[tokio::test]
+async fn truncated_peer_legacy_parent_batch_preserves_acknowledged_watermarks() {
+    let source = test_state_with_seed("desktop-legacy-source", "Legacy Source", |db| {
+        db.insert_test_repo("repo-legacy-source", "Legacy Source Repo")
+            .expect("insert source repo");
+    });
+    let peer = test_state_with_seed("desktop-legacy-peer", "Legacy Peer", |db| {
+        db.insert_test_repo("repo-legacy-peer", "Legacy Peer Repo")
+            .expect("insert peer repo");
+        for task_id in ["legacy-parent", "legacy-acknowledged", "legacy-pending"] {
+            db.insert_test_pipeline_item(
+                task_id,
+                "repo-legacy-peer",
+                "legacy cursor task",
+                Some(task_id),
+                "in progress",
+                "2026-08-16 00:00:00",
+            )
+            .expect("insert peer task");
+        }
+        for child in ["legacy-acknowledged", "legacy-pending"] {
+            db.update_pipeline_item_parent(child, Some("legacy-parent"))
+                .expect("set parent");
+        }
+        db.update_pipeline_item_stage("legacy-pending", "review")
+            .expect("append first pending event");
+        db.update_pipeline_item_pr(
+            "legacy-pending",
+            Some(1102),
+            "https://github.com/kanna/kanna/pull/1102",
+        )
+        .expect("append second pending event");
+        db.update_pipeline_item_stage("legacy-acknowledged", "review")
+            .expect("append acknowledged event after pending events");
+    });
+    let peer_router = router(Arc::clone(&peer));
+    let acknowledged = get_json_body(
+        &peer_router,
+        "/v1/task-events?taskIds=legacy-acknowledged&localOnly=true&timeoutSecs=0",
+    )
+    .await;
+    let acknowledged_seq = acknowledged["events"][0]["seq"]
+        .as_i64()
+        .expect("acknowledged event seq");
+    let legacy_cursor = legacy_parent_cursor(
+        "legacy-parent",
+        [
+            (
+                "legacy-acknowledged".to_string(),
+                serde_json::json!(acknowledged_seq),
+            ),
+            ("legacy-pending".to_string(), serde_json::json!(0)),
+        ]
+        .into_iter()
+        .collect(),
+    );
+
+    // Establish the peer feed's exact non-replaying result for the same p1
+    // cursor before comparing the aggregate surface with it.
+    let peer_first = get_json_body(
+        &peer_router,
+        &format!(
+            "/v1/task-events?parentTaskId=legacy-parent&localOnly=true&limit=1&cursor={legacy_cursor}&timeoutSecs=0"
+        ),
+    )
+    .await;
+    let peer_second = get_json_body(
+        &peer_router,
+        &format!(
+            "/v1/task-events?parentTaskId=legacy-parent&localOnly=true&limit=500&cursor={}&timeoutSecs=0",
+            cursor_of(&peer_first)
+        ),
+    )
+    .await;
+    assert_eq!(
+        event_pairs(&peer_first)
+            .into_iter()
+            .chain(event_pairs(&peer_second))
+            .collect::<Vec<_>>(),
+        vec![
+            ("legacy-pending".into(), "stage.changed".into()),
+            ("legacy-pending".into(), "task.pr_created".into()),
+        ]
+    );
+
+    let relay =
+        connect_test_relay_peer(&source, Arc::clone(&peer), Arc::new(AtomicBool::new(true)));
+    let source_router = router(Arc::clone(&source));
+    let aggregate_cursor = aggregate_parent_cursor(
+        "desktop-legacy-source",
+        "desktop-legacy-peer",
+        "legacy-parent",
+        &legacy_cursor,
+    );
+    let first = get_account_json_body(
+        &source_router,
+        &source,
+        &format!(
+            "/v1/task-events?parentTaskId=legacy-parent&limit=1&cursor={aggregate_cursor}&timeoutSecs=0"
+        ),
+    )
+    .await;
+    let second = get_account_json_body(
+        &source_router,
+        &source,
+        &format!(
+            "/v1/task-events?parentTaskId=legacy-parent&limit=500&cursor={}&timeoutSecs=0",
+            cursor_of(&first)
+        ),
+    )
+    .await;
+    let aggregate_events = event_pairs(&first)
+        .into_iter()
+        .chain(event_pairs(&second))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        aggregate_events,
+        event_pairs(&peer_first)
+            .into_iter()
+            .chain(event_pairs(&peer_second))
+            .collect::<Vec<_>>()
+    );
+    assert!(aggregate_events
+        .iter()
+        .all(|(task_id, _)| task_id != "legacy-acknowledged"));
 
     relay.abort();
 }
@@ -1050,6 +1202,28 @@ async fn shrinking_limit_retains_one_peer_leg_and_resumes_past_only_emitted_even
         get_account_json_body(&app, &source, &format!("{scope}&limit=500&timeoutSecs=30")).await;
     assert_eq!(event_pairs(&first).len(), 1);
 
+    // Resume with a different limit while the original peer long poll still
+    // owns the only peer permit. Restarting that retained leg would now hit a
+    // real 503, rather than racing a permit that the completed request already
+    // released.
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while invoke_count.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the retained peer long poll must acquire its permit");
+    assert_eq!(invoke_count.load(Ordering::SeqCst), 1);
+    let inherited = get_account_json_body(
+        &app,
+        &source,
+        &format!("{scope}&limit=1&cursor={}&timeoutSecs=0", cursor_of(&first)),
+    )
+    .await;
+    assert!(event_pairs(&inherited).is_empty());
+    assert_eq!(invoke_count.load(Ordering::SeqCst), 1);
+    assert_eq!(busy_count.load(Ordering::SeqCst), 0);
+
     let db = Db::open(&peer.config().db_path).expect("open peer db");
     db.update_pipeline_item_stage("pending-peer-child", "review")
         .expect("append first peer event");
@@ -1061,12 +1235,14 @@ async fn shrinking_limit_retains_one_peer_leg_and_resumes_past_only_emitted_even
     .expect("append second peer event");
     db.close_pipeline_item("pending-peer-child")
         .expect("append third peer event");
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let second = get_account_json_body(
         &app,
         &source,
-        &format!("{scope}&limit=1&cursor={}&timeoutSecs=0", cursor_of(&first)),
+        &format!(
+            "{scope}&limit=1&cursor={}&timeoutSecs=5",
+            cursor_of(&inherited)
+        ),
     )
     .await;
     assert_eq!(event_pairs(&second).len(), 1);

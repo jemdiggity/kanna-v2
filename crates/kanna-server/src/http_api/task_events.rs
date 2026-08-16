@@ -412,6 +412,41 @@ fn encode_v3_cursor(
     )
 }
 
+fn cursor_after_truncated_parent_batch(
+    parent_task_id: &str,
+    previous_cursor: Option<&str>,
+    event_seq: i64,
+) -> Result<String, (axum::http::StatusCode, String)> {
+    let Some(TaskEventsCursor::ParentV1(legacy)) = parse_cursor(previous_cursor)? else {
+        return encode_v3_cursor(parent_task_id, event_seq);
+    };
+    if legacy.parent_task_id != parent_task_id {
+        return Err((
+            axum::http::StatusCode::BAD_GATEWAY,
+            "peer returned events for a parent cursor with a different scope".to_string(),
+        ));
+    }
+
+    // The aggregate response emitted only a prefix of the peer's batch, so it
+    // cannot adopt the peer's returned cursor. Preserve acknowledgements above
+    // that prefix from a deployed p1 cursor; collapsing directly to p3 at the
+    // last emitted sequence would replay those already-acknowledged events.
+    let mut watermarks = legacy.watermarks;
+    watermarks.retain(|_, watermark| *watermark > event_seq);
+    if watermarks.is_empty() {
+        encode_v3_cursor(parent_task_id, event_seq)
+    } else {
+        encode_parent_cursor(
+            PARENT_CURSOR_V1_PREFIX,
+            &ParentTaskEventsCursorV1 {
+                parent_task_id: parent_task_id.to_string(),
+                watermarks,
+                event_seq: Some(event_seq),
+            },
+        )
+    }
+}
+
 /// Drain one bounded slice of a deployed p1 cursor. This path exists only for
 /// forward compatibility: stale map entries cannot widen the current-parent
 /// SQL scope, scans use the parent and per-task indexes, and the cursor
@@ -1067,9 +1102,15 @@ fn apply_aggregate_completion(
             )
         })?;
         Some(match &session.cursor.scope {
-            AggregateScope::Children { parent_task_id } => {
-                encode_v3_cursor(parent_task_id, event_seq)?
-            }
+            AggregateScope::Children { parent_task_id } => cursor_after_truncated_parent_batch(
+                parent_task_id,
+                session
+                    .cursor
+                    .cursors_by_machine
+                    .get(&completion.machine_id)
+                    .map(String::as_str),
+                event_seq,
+            )?,
             AggregateScope::Tasks { .. } | AggregateScope::Repo { .. } => event_seq.to_string(),
         })
     };

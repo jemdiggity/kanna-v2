@@ -237,11 +237,21 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "050_transfer_work_phase_value");
+    assert_eq!(latest_migration, "051_repo_remote_hash_task_event_indexes");
     assert_eq!(
         index_columns(&db.conn, "idx_pipeline_item_parent_created_id"),
         vec!["parent_task_id", "created_at", "id"],
         "the migrated schema must cover direct-child filtering and ordering"
+    );
+    assert_eq!(
+        index_columns(&db.conn, "idx_repo_remote_url_hash_id"),
+        vec!["remote_url_hash", "id"],
+        "the migrated schema must index repository identity lookup"
+    );
+    assert_eq!(
+        index_columns(&db.conn, "idx_pipeline_item_repo_id_id"),
+        vec!["repo_id", "id"],
+        "the migrated schema must index repository task membership"
     );
 
     let stage_run_sql: String = db
@@ -2908,6 +2918,46 @@ fn parent_event_query_plan_starts_from_the_global_sequence_range() {
     assert!(
         plan.contains("idx_pipeline_item_parent_created_id"),
         "parent membership must use the covering relationship index:\n{plan}"
+    );
+
+    drop(stmt);
+    drop(db);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn repo_remote_hash_event_query_uses_relationship_indexes() {
+    let path = Db::test_db_path("repo-remote-hash-event-query-plan");
+    let db = Db::open_for_tests(&path).expect("open db");
+    let sql = "EXPLAIN QUERY PLAN
+         SELECT seq, task_id, type, payload, created_at
+         FROM task_event
+         WHERE seq > ? AND seq <= ?
+           AND task_id IN (
+               SELECT pipeline_item.id
+               FROM pipeline_item
+               JOIN repo ON repo.id = pipeline_item.repo_id
+               WHERE repo.remote_url_hash = ?
+           )
+         ORDER BY seq ASC
+         LIMIT ?";
+    let mut stmt = db.conn.prepare(sql).expect("prepare query plan");
+    let details = stmt
+        .query_map(
+            rusqlite::params![10_i64, 20_i64, "remote-hash-plan", 100_i64],
+            |row| row.get::<_, String>(3),
+        )
+        .expect("read query plan")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect query plan");
+    let plan = details.join("\n");
+    assert!(
+        plan.contains("idx_repo_remote_url_hash_id"),
+        "repository hash lookup must use its covering index:\n{plan}"
+    );
+    assert!(
+        plan.contains("idx_pipeline_item_repo_id_id") && !plan.contains("SCAN pipeline_item"),
+        "repository task membership must use its covering index instead of scanning every task:\n{plan}"
     );
 
     drop(stmt);
