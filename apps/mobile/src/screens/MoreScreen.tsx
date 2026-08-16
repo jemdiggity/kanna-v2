@@ -132,6 +132,7 @@ export function MoreScreen({
                 styles.retryButton,
                 pressed ? styles.commandPressed : null
               ]}
+              testID={MOBILE_E2E_IDS.moreRetryButton}
             >
               <Text style={styles.retryLabel}>Try Again</Text>
             </Pressable>

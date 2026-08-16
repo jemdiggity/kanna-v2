@@ -788,6 +788,10 @@ describe("createMobileController", () => {
     const store = createSessionStore();
     const client = createClientMock();
     const controller = createMobileController(client, store);
+    const openedTaskIds: string[] = [];
+    controller.subscribeRepoCommandTaskOpen((taskId) => {
+      openedTaskIds.push(taskId);
+    });
     await controller.bootstrap();
     controller.setNavigationView("more");
     await flushMicrotasks();
@@ -824,7 +828,9 @@ describe("createMobileController", () => {
     const commandCatalogReads = client.listRepoCommands.mock.calls.length;
     const retriedTaskId = await controller.retryRepoCommand();
 
-    expect(client.listRepoCommands).toHaveBeenCalledTimes(commandCatalogReads);
+    expect(client.listRepoCommands).toHaveBeenCalledTimes(
+      commandCatalogReads + 1
+    );
     expect(store.getState()).toMatchObject({
       selectedTaskId: "task-command",
       activeView: "more",
@@ -838,6 +844,136 @@ describe("createMobileController", () => {
       "task-command",
       expect.any(Function)
     );
+    expect(openedTaskIds).toEqual([]);
+  });
+
+  it("opens a command task when a later collection refresh makes it visible", async () => {
+    vi.useFakeTimers();
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+    const openedTaskIds: string[] = [];
+    const unsubscribe = controller.subscribeRepoCommandTaskOpen((taskId) => {
+      openedTaskIds.push(taskId);
+    });
+    await controller.bootstrap();
+    controller.setNavigationView("more");
+    await flushMicrotasks();
+    client.listRecentTasks.mockResolvedValueOnce([]);
+    client.listRepoTasks.mockResolvedValueOnce([]);
+
+    await controller.runRepoCommand("factory:create-agent");
+
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: null,
+      repoCommandStatus: "error",
+      pendingRepoCommandTask: { taskId: "task-command" }
+    });
+
+    const canonicalTask: TaskSummary = {
+      id: "task-command",
+      repoId: "repo-1",
+      title: "Canonical command task",
+      stage: "in progress",
+      agentType: "agent"
+    };
+    client.listRecentTasks.mockResolvedValueOnce([canonicalTask]);
+    client.listRepoTasks.mockResolvedValueOnce([canonicalTask]);
+
+    await vi.advanceTimersByTimeAsync(3_000);
+
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: "task-command",
+      repoCommandErrorMessage: null,
+      pendingRepoCommandTask: null,
+      runningRepoCommandId: null
+    });
+    expect(client.observeTaskAgent).toHaveBeenCalledWith(
+      "task-command",
+      expect.any(Function)
+    );
+    expect(openedTaskIds).toEqual(["task-command"]);
+
+    unsubscribe();
+  });
+
+  it("retries both task resolution and the command catalog from a latched error", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+    await controller.bootstrap();
+    controller.setNavigationView("more");
+    await flushMicrotasks();
+    client.listRecentTasks.mockResolvedValueOnce([]);
+    client.listRepoTasks.mockResolvedValueOnce([]);
+
+    await controller.runRepoCommand("factory:create-agent");
+
+    store.markRepoCommandsUnavailable("repo-1");
+    const canonicalTask: TaskSummary = {
+      id: "task-command",
+      repoId: "repo-1",
+      title: "Canonical command task",
+      stage: "in progress",
+      agentType: "agent"
+    };
+    client.listRecentTasks.mockResolvedValueOnce([canonicalTask]);
+    client.listRepoTasks.mockResolvedValueOnce([canonicalTask]);
+    client.listRepoCommands.mockResolvedValueOnce({
+      repoId: "repo-1",
+      revision: "catalog-v2",
+      commands: []
+    });
+    const catalogReads = client.listRepoCommands.mock.calls.length;
+
+    await expect(controller.retryRepoCommand()).resolves.toBe("task-command");
+
+    expect(client.listRepoCommands).toHaveBeenCalledTimes(catalogReads + 1);
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: "task-command",
+      repoCommandCatalog: { revision: "catalog-v2" },
+      repoCommandStatus: "ready",
+      repoCommandErrorMessage: null,
+      pendingRepoCommandTask: null,
+      runningRepoCommandId: null,
+      unavailableRepoCommandIds: []
+    });
+  });
+
+  it("refreshes the command catalog when retry leaves the created task pending", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+    await controller.bootstrap();
+    controller.setNavigationView("more");
+    await flushMicrotasks();
+    client.listRecentTasks.mockResolvedValue([]);
+    client.listRepoTasks.mockResolvedValue([]);
+
+    await controller.runRepoCommand("factory:create-agent");
+
+    store.markRepoCommandsUnavailable("repo-1");
+    client.listRepoCommands.mockResolvedValueOnce({
+      repoId: "repo-1",
+      revision: "catalog-v2",
+      commands: []
+    });
+    const catalogReads = client.listRepoCommands.mock.calls.length;
+
+    await expect(controller.retryRepoCommand()).resolves.toBeNull();
+
+    expect(client.listRepoCommands).toHaveBeenCalledTimes(catalogReads + 1);
+    expect(store.getState()).toMatchObject({
+      repoCommandCatalog: {
+        repoId: "repo-1",
+        revision: "catalog-v2"
+      },
+      repoCommandStatus: "ready",
+      repoCommandErrorMessage: null,
+      pendingRepoCommandTask: { taskId: "task-command" },
+      runningRepoCommandId: null,
+      unavailableRepoCommandIds: []
+    });
   });
 
   it("does not let a catalog reload erase a command task loading failure", async () => {
@@ -935,7 +1071,7 @@ describe("createMobileController", () => {
     expect(store.getState().repoTasks.map((task) => task.id)).toEqual(["task-1"]);
   });
 
-  it("skips a stale selected repository when More opens", async () => {
+  it("does not switch repositories when the selected command catalog fails", async () => {
     const store = createSessionStore();
     const client = createClientMock();
     client.listRepoCommands
@@ -951,8 +1087,9 @@ describe("createMobileController", () => {
     controller.setNavigationView("more");
     await vi.waitFor(() => {
       expect(store.getState()).toMatchObject({
-        selectedRepoId: "repo-2",
-        repoCommandStatus: "ready",
+        selectedRepoId: "repo-1",
+        repoCommandStatus: "error",
+        repoCommandErrorMessage: "404 repo not found: repo-1",
         unavailableRepoCommandIds: ["repo-1"]
       });
     });
@@ -961,13 +1098,10 @@ describe("createMobileController", () => {
       "repo-1",
       "repo-2"
     ]);
-    expect(client.listRepoCommands.mock.calls).toEqual([
-      ["repo-1"],
-      ["repo-2"]
-    ]);
+    expect(client.listRepoCommands.mock.calls).toEqual([["repo-1"]]);
   });
 
-  it("reports an error only after every repository command catalog fails", async () => {
+  it("reports an error when the selected repository command catalog fails", async () => {
     const store = createSessionStore();
     const client = createClientMock();
     client.listRepoCommands.mockRejectedValue(new Error("repo unavailable"));
@@ -976,11 +1110,11 @@ describe("createMobileController", () => {
 
     await controller.loadRepoCommands();
 
-    expect(client.listRepoCommands).toHaveBeenCalledTimes(2);
+    expect(client.listRepoCommands).toHaveBeenCalledTimes(1);
     expect(store.getState()).toMatchObject({
       repoCommandStatus: "error",
       repoCommandErrorMessage: "repo unavailable",
-      unavailableRepoCommandIds: ["repo-1", "repo-2"]
+      unavailableRepoCommandIds: ["repo-1"]
     });
   });
 

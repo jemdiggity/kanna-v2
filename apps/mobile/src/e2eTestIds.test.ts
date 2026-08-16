@@ -118,6 +118,9 @@ describe("MOBILE_E2E_IDS", () => {
     expect(MOBILE_E2E_IDS.moreRepo("repo-1")).toBe(
       "mobile.more.repo.repo-1"
     );
+    expect(MOBILE_E2E_IDS.moreRetryButton).toBe(
+      "mobile.more-retry-button"
+    );
     expect(MOBILE_E2E_IDS.moreCommandGroup("configure")).toBe(
       "mobile.more.command-group.configure"
     );

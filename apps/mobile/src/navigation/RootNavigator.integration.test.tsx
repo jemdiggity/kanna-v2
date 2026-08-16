@@ -344,6 +344,7 @@ afterEach(async () => {
   navigationHarness.scrollCalls = [];
   keyboardHarness.dismiss.mockReset();
   keyboardHarness.listeners.clear();
+  vi.useRealTimers();
 });
 
 describe("RootNavigator tab reselection integration", () => {
@@ -978,7 +979,129 @@ describe("RootNavigator task Back integration", () => {
 });
 
 describe("RootNavigator More integration", () => {
-  it("falls through an unavailable repo and renders commands without removing it from shared state", async () => {
+  it("opens a command task that appears in a later collection refresh", async () => {
+    vi.useFakeTimers();
+    const client = createClientMock();
+    const delayedTask: TaskSummary = {
+      id: "task-command",
+      repoId: "repo-1",
+      title: "Delayed command task",
+      stage: "in progress"
+    };
+    client.listRepos = vi.fn().mockResolvedValue([
+      { id: "repo-1", name: "Repo One" },
+      { id: "repo-2", name: "Repo Two" }
+    ]);
+    client.listRepoCommands = vi.fn().mockResolvedValue({
+      repoId: "repo-1",
+      revision: "repo-1-catalog",
+      commands: [{
+        id: "custom:task-manager",
+        label: "Task Manager",
+        description: "Launch the task manager",
+        group: "automation"
+      }]
+    });
+    client.runRepoCommand = vi.fn().mockResolvedValue({
+      taskId: delayedTask.id,
+      reused: false
+    });
+    client.listRecentTasks = vi.fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([delayedTask]);
+    client.listRepoTasks = vi.fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([delayedTask]);
+    const store = createSessionStore();
+    controller = createMobileController(client, store);
+
+    await act(async () => {
+      rendered = create(
+        <NavigatorHarness activeController={controller!} store={store} />
+      );
+      await controller!.bootstrap();
+    });
+
+    await act(async () => {
+      rendered!.root.find(
+        (node) => node.props.testID === MOBILE_E2E_IDS.toolbarTab("more")
+      ).props.onPress();
+      await flushMicrotasks();
+    });
+    await act(async () => {
+      rendered!.root.find(
+        (node) =>
+          node.props.testID ===
+          MOBILE_E2E_IDS.moreCommand("custom:task-manager")
+      ).props.onPress();
+      await flushMicrotasks();
+    });
+
+    expect(visibleText()).toContain("Commands unavailable");
+    expect(store.getState()).toMatchObject({
+      selectedRepoId: "repo-1",
+      selectedTaskId: null,
+      pendingRepoCommandTask: { taskId: delayedTask.id },
+      repoCommandStatus: "error"
+    });
+    expect(
+      rendered!.root.findAll(
+        (node) => node.props.testID === MOBILE_E2E_IDS.taskDetailScreen
+      )
+    ).toHaveLength(0);
+
+    await act(async () => {
+      rendered!.root.find(
+        (node) => node.props.testID === MOBILE_E2E_IDS.moreRetryButton
+      ).props.onPress();
+      await flushMicrotasks();
+    });
+
+    expect(visibleText()).not.toContain("Commands unavailable");
+    expect(
+      rendered!.root.find(
+        (node) =>
+          node.props.testID ===
+          MOBILE_E2E_IDS.moreCommand("custom:task-manager")
+      )
+    ).toBeDefined();
+    expect(store.getState()).toMatchObject({
+      selectedRepoId: "repo-1",
+      selectedTaskId: null,
+      pendingRepoCommandTask: { taskId: delayedTask.id },
+      repoCommandCatalog: { revision: "repo-1-catalog" },
+      repoCommandStatus: "ready",
+      repoCommandErrorMessage: null,
+      unavailableRepoCommandIds: []
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_000);
+      await flushMicrotasks();
+    });
+
+    expect(
+      rendered!.root.findAll(
+        (node) => node.props.testID === MOBILE_E2E_IDS.taskDetailScreen
+      )
+    ).toHaveLength(1);
+    expect(visibleText()).toContain("Delayed command task");
+    expect(client.listRepoCommands).toHaveBeenCalledTimes(3);
+    expect(store.getState()).toMatchObject({
+      selectedRepoId: "repo-1",
+      selectedTaskId: delayedTask.id,
+      pendingRepoCommandTask: null,
+      repoCommandStatus: "ready",
+      repoCommandErrorMessage: null,
+      unavailableRepoCommandIds: []
+    });
+  });
+
+  it("keeps a command-unavailable repository selected and visible", async () => {
     const client = createClientMock();
     const store = createSessionStore();
     store.setRepos([
@@ -1002,30 +1125,25 @@ describe("RootNavigator More integration", () => {
     });
 
     expect(client.listRepoCommands).toHaveBeenNthCalledWith(1, "repo-1");
-    expect(client.listRepoCommands).toHaveBeenNthCalledWith(2, "repo-2");
     expect(
-      rendered.root.findAll(
+      rendered.root.find(
         (node) => node.props.testID === "mobile.more.repo.repo-1"
       )
-    ).toHaveLength(0);
+    ).toBeDefined();
     expect(
       rendered.root.find(
         (node) => node.props.testID === "mobile.more.repo.repo-2"
       )
     ).toBeDefined();
-    expect(
-      rendered.root.find(
-        (node) =>
-          node.props.testID === "mobile.more.command.custom:merge-master"
-      )
-    ).toBeDefined();
+    expect(visibleText()).toContain("Commands unavailable");
     expect(store.getState()).toMatchObject({
       repos: [
         { id: "repo-1", name: "Unavailable repo" },
         { id: "repo-2", name: "Working repo" }
       ],
-      selectedRepoId: "repo-2",
-      repoCommandStatus: "ready"
+      selectedRepoId: "repo-1",
+      repoCommandStatus: "error",
+      unavailableRepoCommandIds: ["repo-1"]
     });
   });
 

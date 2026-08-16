@@ -18,11 +18,14 @@ const GROUPS: Array<Pick<RepoCommandSection, "group" | "title">> = [
 
 export function filterCommandAvailableRepos(
   repos: readonly RepoSummary[],
-  unavailableRepoIds: readonly string[]
+  unavailableRepoIds: readonly string[],
+  selectedRepoId: string | null
 ): RepoSummary[] {
   if (unavailableRepoIds.length === 0) return [...repos];
   const unavailable = new Set(unavailableRepoIds);
-  return repos.filter((repo) => !unavailable.has(repo.id));
+  return repos.filter(
+    (repo) => repo.id === selectedRepoId || !unavailable.has(repo.id)
+  );
 }
 
 export function buildRepoCommandSections(

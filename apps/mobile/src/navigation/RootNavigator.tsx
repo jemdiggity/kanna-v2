@@ -186,6 +186,10 @@ export default function RootNavigator({
     controller.openTask(taskId);
     pushPreparedTask(taskId);
   }, [controller, pushPreparedTask]);
+  useEffect(
+    () => controller.subscribeRepoCommandTaskOpen(pushPreparedTask),
+    [controller, pushPreparedTask]
+  );
   useEffect(() => {
     if (
       !notificationTaskRequest ||
@@ -461,7 +465,8 @@ function MoreRouteContent({
   const { controller, pushPreparedTask, state } = useNavigationContent();
   const commandRepos = filterCommandAvailableRepos(
     state.repos,
-    state.unavailableRepoCommandIds
+    state.unavailableRepoCommandIds,
+    state.selectedRepoId
   );
 
   return (
