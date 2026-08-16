@@ -27,6 +27,10 @@ that neither create nor clear draft state. KSP peers must mutually advertise
 `term_input_boundary`; a mixed-version connection rejects all terminal input
 rather than accept bytes whose boundary meaning may be lost. CR/LF content is
 opaque and never used to infer submission, including inside multiline paste.
+Desktop-to-desktop LAN input has the same fail-closed rule at task-transfer
+protocol v5. A v4 peer may still be discovered and use unrelated compatible
+features, but a current sender refuses all terminal input to it and a current
+owner refuses its duplex observation/input before contacting the daemon.
 
 ## v1 LAN Surface
 

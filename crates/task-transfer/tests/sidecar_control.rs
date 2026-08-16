@@ -1,18 +1,21 @@
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use kanna_task_transfer::crypto::{public_key_to_string, TransferIdentity};
+use kanna_task_transfer::crypto::{
+    parse_public_key, public_key_to_string, seal_json, TransferIdentity,
+};
 use kanna_task_transfer::peer_store::{PeerRecord, PeerStore};
 use kanna_task_transfer::protocol::{
     ControlRequest, ControlResponse, PeerRegistryEntry, PeerRequest, PeerResponse,
+    CURRENT_PROTOCOL_VERSION,
 };
 use kanna_task_transfer::registry::PeerRegistry;
 use serde_json::json;
 use std::io::{BufRead, BufReader as StdBufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc as std_mpsc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Notify};
 
 struct SidecarProcess {
@@ -42,7 +45,7 @@ async fn stalled_mark_read_does_not_monopolize_sidecar_control() {
             endpoint: format!("127.0.0.1:{port}"),
             pid: std::process::id(),
             public_key: target_public_key.clone(),
-            protocol_version: 2,
+            protocol_version: CURRENT_PROTOCOL_VERSION,
             accepting_transfers: true,
         })
         .unwrap();
@@ -55,9 +58,12 @@ async fn stalled_mark_read_does_not_monopolize_sidecar_control() {
         peer_id: "peer-target".into(),
         display_name: "Target".into(),
         public_key: target_public_key,
-        capabilities_json:
-            "{\"protocolVersion\":2,\"authenticatedTaskRequests\":true,\"authenticatedTaskRequestVersion\":1}"
-                .into(),
+        capabilities_json: json!({
+            "protocolVersion": CURRENT_PROTOCOL_VERSION,
+            "authenticatedTaskRequests": true,
+            "authenticatedTaskRequestVersion": 1,
+        })
+        .to_string(),
         paired_at: "2026-07-26T00:00:00Z".into(),
         last_seen_at: None,
         revoked_at: None,
@@ -308,6 +314,209 @@ async fn stalled_mark_read_does_not_monopolize_sidecar_control() {
     peer_server.await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sidecar_fails_closed_in_both_shipped_v4_terminal_input_directions() {
+    let temp = tempfile::tempdir().unwrap();
+    let registry_dir = temp.path().join("registry");
+    let shipped_v4_target_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let target_identity = TransferIdentity::generate();
+    let target_public_key = public_key_to_string(&target_identity.public_key);
+    let viewer_identity = TransferIdentity::generate();
+    let viewer_public_key = public_key_to_string(&viewer_identity.public_key);
+    let registry = PeerRegistry::new(registry_dir.clone());
+    registry
+        .write_entry(&PeerRegistryEntry {
+            peer_id: "peer-v4-target".into(),
+            display_name: "Shipped v4 Target".into(),
+            endpoint: shipped_v4_target_listener.local_addr().unwrap().to_string(),
+            pid: std::process::id(),
+            public_key: target_public_key.clone(),
+            protocol_version: 4,
+            accepting_transfers: true,
+        })
+        .unwrap();
+    registry
+        .write_entry(&PeerRegistryEntry {
+            peer_id: "peer-v4-viewer".into(),
+            display_name: "Shipped v4 Viewer".into(),
+            endpoint: "127.0.0.1:9".into(),
+            pid: std::process::id(),
+            public_key: viewer_public_key.clone(),
+            protocol_version: 4,
+            accepting_transfers: true,
+        })
+        .unwrap();
+    let peer_store = PeerStore::new(
+        registry_dir
+            .join("trusted-peers")
+            .join(format!("{}.json", URL_SAFE_NO_PAD.encode("peer-primary"))),
+    );
+    for (peer_id, display_name, public_key) in [
+        ("peer-v4-target", "Shipped v4 Target", target_public_key),
+        ("peer-v4-viewer", "Shipped v4 Viewer", viewer_public_key),
+    ] {
+        peer_store
+            .upsert(PeerRecord {
+                peer_id: peer_id.into(),
+                display_name: display_name.into(),
+                public_key,
+                capabilities_json:
+                    "{\"protocolVersion\":4,\"authenticatedTaskRequests\":true,\"authenticatedTaskRequestVersion\":1}"
+                        .into(),
+                paired_at: "2026-08-16T00:00:00Z".into(),
+                last_seen_at: None,
+                revoked_at: None,
+            })
+            .unwrap();
+    }
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_kanna-task-transfer"))
+        .env("KANNA_TRANSFER_ROOT", temp.path())
+        .env("KANNA_TRANSFER_REGISTRY_DIR", &registry_dir)
+        .env("KANNA_TRANSFER_PEER_ID", "peer-primary")
+        .env("KANNA_TRANSFER_DISPLAY_NAME", "Primary")
+        .env("KANNA_TRANSFER_DISCOVERY", "registry")
+        .env("KANNA_TRANSFER_PORT", "0")
+        .env("KANNA_DAEMON_DIR", temp.path().join("no-daemon"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (response_tx, response_rx) = std_mpsc::channel();
+    std::thread::spawn(move || {
+        for line in StdBufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if let Ok(response) = serde_json::from_str::<ControlResponse>(&line) {
+                if response_tx.send(response).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+    let mut sidecar = SidecarProcess { child, stdin };
+
+    let primary_entry = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(entry) = registry
+                .list_peers("")
+                .unwrap()
+                .into_iter()
+                .find(|entry| entry.peer_id == "peer-primary")
+            {
+                break entry;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("current sidecar did not advertise its listener");
+
+    for (request_id, data, submission_boundary, control_input) in [
+        ("outbound-boundary", b"\r".to_vec(), true, false),
+        ("outbound-control", b"\x1b[<65;1;1M".to_vec(), false, true),
+    ] {
+        write_control(
+            &mut sidecar.stdin,
+            &ControlRequest::SendPeerSessionInput {
+                request_id: request_id.into(),
+                target_peer_id: "peer-v4-target".into(),
+                session_id: "task-with-draft".into(),
+                data,
+                submission_boundary,
+                control_input,
+            },
+        );
+        let response = response_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap_or_else(|error| panic!("no control response for {request_id}: {error}"));
+        assert!(
+            matches!(
+                response,
+                ControlResponse::Error { request_id: ref response_id, ref message }
+                    if response_id == request_id
+                        && message.contains("protocol v4")
+                        && message.contains("explicit terminal submission/control semantics")
+            ),
+            "current sidecar accepted outbound shipped-v4 terminal input: {response:?}",
+        );
+    }
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            shipped_v4_target_listener.accept(),
+        )
+        .await
+        .is_err(),
+        "current sidecar connected to the shipped-v4 target before refusing input",
+    );
+
+    let owner_epoch = authenticated_request_epoch(&primary_entry.endpoint).await;
+    let observe_payload = seal_sidecar_request(
+        &viewer_identity,
+        &primary_entry.public_key,
+        "observe_session",
+        "inbound-observe",
+        &owner_epoch,
+        json!({ "session_id": "task-with-draft" }),
+    );
+    let observe = send_raw_peer_value(
+        &primary_entry.endpoint,
+        &json!({
+            "type": "observe_session",
+            "request_id": "inbound-observe",
+            "requester_peer_id": "peer-v4-viewer",
+            "session_id": "task-with-draft",
+            "sealed_payload": observe_payload,
+        }),
+    )
+    .await;
+    assert!(
+        matches!(
+            observe,
+            PeerResponse::Error { ref message, .. }
+                if message.contains("protocol v4")
+                    && message.contains("duplex terminal control")
+        ),
+        "current owner sidecar admitted a shipped-v4 duplex observer: {observe:?}",
+    );
+
+    let input_payload = seal_sidecar_request(
+        &viewer_identity,
+        &primary_entry.public_key,
+        "send_session_input",
+        "inbound-input",
+        &owner_epoch,
+        json!({
+            "session_id": "task-with-draft",
+            "data": [13],
+        }),
+    );
+    let input = send_raw_peer_value(
+        &primary_entry.endpoint,
+        &json!({
+            "type": "send_session_input",
+            "request_id": "inbound-input",
+            "requester_peer_id": "peer-v4-viewer",
+            "session_id": "task-with-draft",
+            "data": [13],
+            "sealed_payload": input_payload,
+        }),
+    )
+    .await;
+    assert!(
+        matches!(
+            input,
+            PeerResponse::Error { ref message, .. }
+                if message.contains("protocol v4")
+                    && message.contains("explicit terminal submission/control semantics")
+        ),
+        "current owner sidecar admitted shipped-v4 fallback input: {input:?}",
+    );
+}
+
 /// The renderer only learns that a duplicate push left state on disk if the
 /// failure survives the control boundary. Anything the runtime swallows becomes
 /// a success on stdout, and the operator warning can never fire.
@@ -425,6 +634,63 @@ async fn abandoning_a_transfer_reports_cleanup_failure_over_the_control_channel(
 fn write_control(stdin: &mut ChildStdin, request: &ControlRequest) {
     writeln!(stdin, "{}", serde_json::to_string(request).unwrap()).unwrap();
     stdin.flush().unwrap();
+}
+
+async fn send_raw_peer_value(endpoint: &str, request: &serde_json::Value) -> PeerResponse {
+    let mut stream = TcpStream::connect(endpoint).await.unwrap();
+    stream
+        .write_all(format!("{}\n", serde_json::to_string(request).unwrap()).as_bytes())
+        .await
+        .unwrap();
+    stream.flush().await.unwrap();
+    let mut response = String::new();
+    BufReader::new(stream)
+        .read_line(&mut response)
+        .await
+        .unwrap();
+    serde_json::from_str(response.trim()).unwrap()
+}
+
+async fn authenticated_request_epoch(endpoint: &str) -> String {
+    match send_raw_peer_value(
+        endpoint,
+        &json!({
+            "type": "get_authenticated_request_epoch",
+            "request_id": "epoch-probe",
+        }),
+    )
+    .await
+    {
+        PeerResponse::AuthenticatedRequestEpoch { epoch, .. } => epoch,
+        response => panic!("expected authenticated request epoch, got {response:?}"),
+    }
+}
+
+fn seal_sidecar_request(
+    sender: &TransferIdentity,
+    receiver_public_key: &str,
+    action: &str,
+    request_id: &str,
+    owner_epoch: &str,
+    arguments: serde_json::Value,
+) -> String {
+    let mut payload = arguments.as_object().cloned().unwrap();
+    payload.insert("action".into(), json!(action));
+    payload.insert("request_id".into(), json!(request_id));
+    payload.insert("owner_epoch".into(), json!(owner_epoch));
+    payload.insert(
+        "issued_at_unix_ms".into(),
+        json!(SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64),
+    );
+    seal_json(
+        sender,
+        &parse_public_key(receiver_public_key).unwrap(),
+        &serde_json::Value::Object(payload),
+    )
+    .unwrap()
 }
 
 fn control_response_id(response: &ControlResponse) -> &str {

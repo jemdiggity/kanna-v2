@@ -756,8 +756,8 @@ mod tests {
         );
     }
 
-    /// The atomic cutover snapshot remains first while protocol-v4 input and
-    /// resize controls travel back over that same stream in FIFO order.
+    /// The atomic cutover snapshot remains first while input and resize controls
+    /// use the duplex framing introduced by protocol v4 in FIFO order.
     #[tokio::test]
     async fn observer_stream_is_duplex_and_preserves_snapshot_output_order() {
         let daemon_dir = std::env::temp_dir().join(format!(
