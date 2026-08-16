@@ -5,11 +5,26 @@ import { createDesktopStreamFrameDecoder } from "../services/desktopStreamFrameD
 
 type ConnectionListener = (connected: boolean) => void;
 
+export interface SharedStreamConnectionState {
+  connected: boolean;
+  revision: number;
+}
+
 let sharedClient: StreamClient | null = null;
 let sharedClientPromise: Promise<StreamClient> | null = null;
 const connectionListeners = new Set<ConnectionListener>();
+let sharedConnectionState: SharedStreamConnectionState = {
+  connected: false,
+  revision: 0,
+};
 
 function notifyConnectionListeners(connected: boolean): void {
+  if (connected !== sharedConnectionState.connected) {
+    sharedConnectionState = {
+      connected,
+      revision: sharedConnectionState.revision + (connected ? 1 : 0),
+    };
+  }
   for (const listener of [...connectionListeners]) {
     listener(connected);
   }
@@ -43,9 +58,17 @@ export function onSharedStreamConnectionChange(listener: ConnectionListener): ()
   };
 }
 
+export function getSharedStreamConnectionState(): SharedStreamConnectionState {
+  return { ...sharedConnectionState };
+}
+
 export function resetSharedStreamClientForTests(): void {
   sharedClient?.close();
   sharedClient = null;
   sharedClientPromise = null;
   connectionListeners.clear();
+  sharedConnectionState = {
+    connected: false,
+    revision: 0,
+  };
 }

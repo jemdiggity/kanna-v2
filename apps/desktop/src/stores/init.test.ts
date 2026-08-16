@@ -9,6 +9,7 @@ import type { TaskUiSlot } from "../types/taskUi";
 import { createStoreContext, createStoreState } from "./state";
 import { createInitApi } from "./init";
 import { applySnapshotSettingsToState } from "./snapshotSettings";
+import { reconcileTaskUiSlots, taskUiSlotToSidebarItem } from "./taskUiSlots";
 import { updateDesktopServerClientHandlersForTests } from "../services/desktopServerClient";
 
 const setTitleMock = vi.hoisted(() => vi.fn(async () => {}));
@@ -72,6 +73,11 @@ const mockState = vi.hoisted(() => {
   let unblockedItems: PipelineItem[] = [];
   const listenMock = vi.fn(async () => () => {});
   const stateChangedListeners: Array<(scope: string) => void> = [];
+  const connectionListeners: Array<(connected: boolean) => void> = [];
+  let sharedConnectionState = {
+    connected: false,
+    revision: 0,
+  };
   const streamClientMock = {
     onStateChanged: vi.fn((listener: (scope: string) => void) => {
       stateChangedListeners.push(listener);
@@ -124,6 +130,11 @@ const mockState = vi.hoisted(() => {
     unblockedItems = [];
     listenMock.mockClear();
     stateChangedListeners.length = 0;
+    connectionListeners.length = 0;
+    sharedConnectionState = {
+      connected: false,
+      revision: 0,
+    };
     streamClientMock.onStateChanged.mockClear();
     getSharedStreamClientMock.mockClear();
     updatePipelineItemActivityMock.mockClear();
@@ -161,6 +172,18 @@ const mockState = vi.hoisted(() => {
     },
     listenMock,
     stateChangedListeners,
+    connectionListeners,
+    get sharedConnectionState() {
+      return sharedConnectionState;
+    },
+    setSharedConnection(connected: boolean) {
+      if (connected !== sharedConnectionState.connected) {
+        sharedConnectionState = {
+          connected,
+          revision: sharedConnectionState.revision + (connected ? 1 : 0),
+        };
+      }
+    },
     streamClientMock,
     getSharedStreamClientMock,
     updatePipelineItemActivityMock,
@@ -218,6 +241,14 @@ vi.mock("@tauri-apps/api/window", () => ({
 
 vi.mock("../composables/desktopStreamClient", () => ({
   getSharedStreamClient: mockState.getSharedStreamClientMock,
+  getSharedStreamConnectionState: vi.fn(() => ({ ...mockState.sharedConnectionState })),
+  onSharedStreamConnectionChange: vi.fn((listener: (connected: boolean) => void) => {
+    mockState.connectionListeners.push((connected: boolean) => {
+      mockState.setSharedConnection(connected);
+      listener(connected);
+    });
+    return vi.fn();
+  }),
 }));
 
 function createDb(): DbHandle {
@@ -1262,6 +1293,99 @@ describe("createInitApi", () => {
 
     expect(services.reloadSnapshot).toHaveBeenCalled();
     expect(state.selectedItemId.value).toBe("create:stable-current");
+  });
+
+  it("refreshes an unselected sidebar task through missed and live activity changes", async () => {
+    mockState.tauri = true;
+    const selectedTask = mockState.makeItem({ id: "task-selected", activity: "idle" });
+    let backgroundActivity: PipelineItem["activity"] = "unread";
+    const backgroundTask = () => mockState.makeItem({
+      id: "task-background",
+      activity: backgroundActivity,
+    });
+
+    const state = createStoreState();
+    state.repos.value = [...mockState.repos];
+    state.items.value = [selectedTask, backgroundTask()];
+    state.taskUiSlots.value = [
+      makeReadyTaskSlot(selectedTask, selectedTask.id),
+      makeReadyTaskSlot(backgroundTask(), "stable-background-slot"),
+    ];
+    state.selectedRepoId.value = selectedTask.repo_id;
+    state.selectedItemId.value = selectedTask.id;
+
+    const reloadSnapshot = vi.fn(async () => {
+      state.items.value = [selectedTask, backgroundTask()];
+      state.taskUiSlots.value = reconcileTaskUiSlots(
+        state.taskUiSlots.value,
+        state.items.value,
+        { authoritative: true },
+      );
+    });
+    const services = {
+      loadInitialData: vi.fn(async () => {}),
+      reloadSnapshot,
+      selectedTaskId: computed(() => selectedTask.id),
+      currentTaskSlot: computed(() =>
+        state.taskUiSlots.value.find((slot) => slot.task_id === selectedTask.id) ?? null),
+      currentItem: computed(() =>
+        state.items.value.find((item) => item.id === selectedTask.id) ?? null),
+      restoreSelection: vi.fn((taskId: string) => {
+        state.selectedItemId.value = taskId;
+      }),
+      prewarmWorktreeShellSession: vi.fn(async () => {}),
+      spawnShellSession: vi.fn(async () => {}),
+      windowWorkspace: {
+        onSharedInvalidation: vi.fn(async () => () => undefined),
+        persistSelection: vi.fn(async () => {}),
+      },
+    };
+    const context = createStoreContext(state, {
+      toasts: ref([]),
+      dismiss: vi.fn(),
+      info: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+    }, services);
+    const initApi = createInitApi(context, {
+      closeTaskAndReleasePorts: vi.fn(async () => {}),
+    } as unknown as import("./ports").PortsStore, {
+      checkUnblocked: vi.fn(async () => {}),
+      handleAgentFinished: vi.fn(),
+      restoreUnblockedTask: vi.fn(async () => {}),
+    });
+
+    await initApi.init(createDb());
+    await flushAsync();
+
+    expect(mockState.connectionListeners).toHaveLength(1);
+    mockState.connectionListeners[0](true);
+    await flushAsync();
+    reloadSnapshot.mockClear();
+
+    mockState.connectionListeners[0](false);
+    backgroundActivity = "working";
+    mockState.connectionListeners[0](true);
+    await flushAsync();
+
+    const workingSlot = state.taskUiSlots.value.find(
+      (slot) => slot.task_id === "task-background",
+    );
+    if (!workingSlot) throw new Error("background task slot disappeared");
+    expect(taskUiSlotToSidebarItem(workingSlot).activity).toBe("working");
+    expect(state.selectedItemId.value).toBe(selectedTask.id);
+    expect(reloadSnapshot).toHaveBeenCalledTimes(1);
+
+    backgroundActivity = "unread";
+    mockState.stateChangedListeners[0]("tasks");
+    await flushAsync();
+
+    const unreadSlot = state.taskUiSlots.value.find(
+      (slot) => slot.task_id === "task-background",
+    );
+    if (!unreadSlot) throw new Error("background task slot disappeared");
+    expect(taskUiSlotToSidebarItem(unreadSlot).activity).toBe("unread");
+    expect(state.selectedItemId.value).toBe(selectedTask.id);
   });
 
   it("coalesces KSP state change bursts into one active and one trailing refresh", async () => {

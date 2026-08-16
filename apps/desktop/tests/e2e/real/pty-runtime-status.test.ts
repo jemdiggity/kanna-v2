@@ -62,6 +62,47 @@ async function waitForActivity(
   );
 }
 
+async function waitForUnselectedSidebarActivity(
+  client: WebDriverClient,
+  taskId: string,
+  activity: "working" | "unread",
+  timeoutMs = 10_000,
+): Promise<void> {
+  const expectedFontStyle = activity === "working" ? "italic" : "normal";
+  const expectedFontWeight = activity === "unread" ? "bold" : "normal";
+  const deadline = Date.now() + timeoutMs;
+  let latest: unknown = null;
+  while (Date.now() < deadline) {
+    latest = await client.executeSync<{
+      selected: boolean;
+      fontStyle: string;
+      fontWeight: string;
+    } | null>(`
+      const row = document.querySelector(
+        '.workflow-item[data-task-id=' + ${JSON.stringify(JSON.stringify(taskId))} + ']'
+      );
+      const title = row?.querySelector('.item-title');
+      return row && title ? {
+        selected: row.classList.contains('selected'),
+        fontStyle: title.style.fontStyle,
+        fontWeight: title.style.fontWeight,
+      } : null;
+    `);
+    if (
+      latest
+      && latest.selected === false
+      && latest.fontStyle === expectedFontStyle
+      && latest.fontWeight === expectedFontWeight
+    ) {
+      return;
+    }
+    await sleep(100);
+  }
+  throw new Error(
+    `timed out waiting for unselected sidebar ${taskId} activity=${activity}; latest=${JSON.stringify(latest)}`,
+  );
+}
+
 async function waitForTerminalRegistration(
   client: WebDriverClient,
   sessionId: string,
@@ -202,7 +243,9 @@ describe("PTY runtime status over KSP", () => {
 
     await waitForDaemonStatus(client, unselectedTaskId, "busy");
     await waitForActivity(client, unselectedTaskId, "working");
+    await waitForUnselectedSidebarActivity(client, unselectedTaskId, "working");
     await waitForActivity(client, unselectedTaskId, "unread");
+    await waitForUnselectedSidebarActivity(client, unselectedTaskId, "unread");
     await waitForDaemonStatus(client, unselectedTaskId, "idle");
 
     // The task began and finished before its terminal ever mounted. Its first
