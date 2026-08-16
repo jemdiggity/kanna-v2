@@ -162,6 +162,15 @@ describe("QA workflow assets", () => {
     expect(agent.prompt).toContain(
       'url.searchParams.set("timeoutSecs", String(timeoutSecs))'
     );
+    expect(agent.prompt).toContain("Math.min(60, remainingSecs)");
+    expect(agent.prompt).toContain(
+      "new URL(`/v1/repos/${encodeURIComponent(repoId)}/tasks`, baseUrl)"
+    );
+    expect(agent.prompt).toContain("const requiredNonWorkingSamples = 3");
+    expect(agent.prompt).toContain("verify with kanna_get_task and the log tail");
+    expect(agent.prompt).toContain(
+      "untracked tasks are covered only by events and the heartbeat"
+    );
     expect(agent.prompt).toContain("25 * 60 * 1000");
     expect(agent.prompt).toContain("run_in_background: true");
     expect(agent.prompt).toContain("response body rather than silently restarting");
