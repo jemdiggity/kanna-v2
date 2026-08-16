@@ -84,3 +84,12 @@ disconnect and reconnect one real relay WebSocket, and drive the source's LAN
 `/v1/task-events` endpoint. When the durable desktop-inventory capability
 exists, that test must also begin while the second desktop is already offline
 and assert its identity appears as stale on the first cursor-less response.
+
+## Known limitation: legacy-p1 continuation vs deployed peers
+
+2026-08-16 — Finding: a truncated remote p1 continuation is unreadable by an
+already-deployed peer; Compatibility FAIL, review child 4cfd4046, round 6.
+Jeremy accepted this limitation for the current single-operator fleet because
+the error is visible and fail-closed, with duplicate wake-ups as the worst
+case. If the user base grows, drain legacy-p1 legs fully within the bounded
+batch instead of truncating them, eliminating the continuation artifact.
