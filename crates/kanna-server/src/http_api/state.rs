@@ -21,6 +21,7 @@ pub(super) struct AuthenticatedHttpInvoke;
 #[derive(Clone)]
 pub struct AppState {
     pub(super) config: Config,
+    pub(super) local_task_events_token: Option<String>,
     pub(super) pairing_session: Arc<Mutex<Option<ActivePairingSession>>>,
     #[cfg(debug_assertions)]
     pub(super) e2e_lan_http_enabled: Arc<AtomicBool>,
@@ -37,6 +38,8 @@ pub struct AppState {
     relay_desktop_routing_generation: Arc<AtomicU64>,
     desktop_relay_tx: mpsc::Sender<DesktopRelayRequest>,
     desktop_relay_rx: Arc<StdMutex<Option<mpsc::Receiver<DesktopRelayRequest>>>>,
+    pub(super) aggregate_task_event_waits:
+        Arc<StdMutex<crate::http_api::task_events::AggregateWaitRegistry>>,
     relay_mobile_notifications_available: Arc<AtomicBool>,
     mobile_notification_tx: mpsc::Sender<MobileNotificationRequest>,
     mobile_notification_rx: Arc<StdMutex<Option<mpsc::Receiver<MobileNotificationRequest>>>>,
@@ -252,6 +255,18 @@ impl AppState {
                 err
             );
         }
+        let local_task_events_token = config.task_events_token_path().and_then(|path| {
+            match super::lan_trust::load_or_create_task_events_token(&path) {
+                Ok(token) => Some(token),
+                Err(error) => {
+                    log::error!(
+                        "failed to initialize local task-event credential {}: {error}",
+                        path.display()
+                    );
+                    None
+                }
+            }
+        });
 
         let (mobile_notification_tx, mobile_notification_rx) = mpsc::channel(16);
         let (desktop_relay_tx, desktop_relay_rx) = mpsc::channel(32);
@@ -263,6 +278,7 @@ impl AppState {
         ));
         Self {
             config,
+            local_task_events_token,
             transfer_sidecar,
             transfer_work,
             cloud_transfer_proxies: Arc::new(Mutex::new(HashMap::new())),
@@ -279,6 +295,7 @@ impl AppState {
             relay_desktop_routing_generation: Arc::new(AtomicU64::new(0)),
             desktop_relay_tx,
             desktop_relay_rx: Arc::new(StdMutex::new(Some(desktop_relay_rx))),
+            aggregate_task_event_waits: Arc::new(StdMutex::new(Default::default())),
             relay_mobile_notifications_available: Arc::new(AtomicBool::new(false)),
             mobile_notification_tx,
             mobile_notification_rx: Arc::new(StdMutex::new(Some(mobile_notification_rx))),

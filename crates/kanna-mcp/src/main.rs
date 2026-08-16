@@ -21,6 +21,7 @@ const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const MULTI_MACHINE_CURSOR_PREFIX: &str = "km1.";
 const MAX_MULTI_MACHINE_CURSOR_LEN: usize = 64 * 1024;
 const MULTI_MACHINE_WAIT_SESSION_TTL: Duration = Duration::from_secs(10 * 60);
+const TASK_EVENTS_TOKEN_PATH_ENV: &str = "KANNA_TASK_EVENTS_TOKEN_PATH";
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -337,8 +338,13 @@ async fn require_success(
 }
 
 async fn get_json<T: DeserializeOwned>(base_url: &str, path: &str) -> Result<T, String> {
-    let response = reqwest::Client::new()
-        .get(join_server_url(base_url, path))
+    let mut request = reqwest::Client::new().get(join_server_url(base_url, path));
+    if path.split('?').next() == Some("/v1/task-events") {
+        if let Some(token) = read_task_events_token_from_env()? {
+            request = request.bearer_auth(token);
+        }
+    }
+    let response = request
         .send()
         .await
         .map_err(|e| format!("GET {path} failed: {e}"))?;
@@ -347,6 +353,22 @@ async fn get_json<T: DeserializeOwned>(base_url: &str, path: &str) -> Result<T, 
         .json::<T>()
         .await
         .map_err(|e| format!("GET {path} returned invalid JSON: {e}"))
+}
+
+fn read_task_events_token_from_env() -> Result<Option<String>, String> {
+    let Some(path) = env::var(TASK_EVENTS_TOKEN_PATH_ENV)
+        .ok()
+        .filter(|path| !path.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+    let token = std::fs::read_to_string(&path)
+        .map_err(|error| format!("failed to read {TASK_EVENTS_TOKEN_PATH_ENV} {path}: {error}"))?;
+    let token = token.trim();
+    if token.is_empty() {
+        return Err(format!("{TASK_EVENTS_TOKEN_PATH_ENV} {path} is empty"));
+    }
+    Ok(Some(token.to_string()))
 }
 
 async fn get_text(base_url: &str, path: &str) -> Result<String, String> {
@@ -425,6 +447,33 @@ async fn resolve_remote_machine_id(
     };
     let identity: LocalMachineIdentity = get_json(base_url, "/v1/status").await?;
     Ok((machine_id != identity.desktop_id).then(|| machine_id.to_string()))
+}
+
+fn prepare_wait_events_routing(
+    name: &str,
+    args: &mut Value,
+    declared_machine_id: Option<&str>,
+    routed_machine_id: Option<&str>,
+) -> bool {
+    if name != "kanna_wait_events" {
+        return false;
+    }
+
+    let explicitly_pinned_to_current = declared_machine_id.is_some() && routed_machine_id.is_none();
+    if explicitly_pinned_to_current {
+        if let Some(args) = args.as_object_mut() {
+            args.insert("local_only".to_string(), Value::Bool(true));
+        }
+    }
+
+    let local_only = args
+        .get("local_only")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    !local_only
+        && declared_machine_id.is_none()
+        && routed_machine_id.is_none()
+        && args.get("task_ids").is_some()
 }
 
 fn method_name(method: Method) -> &'static str {
@@ -861,6 +910,11 @@ fn spawn_machine_event_wait(
         Value::Array(task_ids.iter().cloned().map(Value::String).collect()),
     );
     machine_args.insert("timeout_secs".to_string(), Value::from(timeout_secs));
+    // The server now offers its own multi-machine feed for direct HTTP
+    // watchers. Keep km1's already-issued per-machine native cursors native:
+    // otherwise its local leg would recursively fan out and duplicate the
+    // remote legs that kanna-mcp is deliberately retaining here.
+    machine_args.insert("local_only".to_string(), Value::Bool(true));
     match session.cursor.cursors_by_machine.get(machine_id) {
         Some(cursor) => {
             machine_args.insert("cursor".to_string(), Value::String(cursor.clone()));
@@ -1140,7 +1194,7 @@ async fn handle_mcp_tool_call(
     catalog: &SharedCatalog,
     multi_machine_waits: &SharedMultiMachineWaits,
     name: &str,
-    args: Value,
+    mut args: Value,
 ) -> Result<Value, String> {
     if name == "kanna_complete_stage" && args.get("machine_id").is_some() {
         return Err(
@@ -1155,7 +1209,12 @@ async fn handle_mcp_tool_call(
         resolve_request(&catalog, name, &args)?.machine_id
     };
     let machine_id = resolve_remote_machine_id(base_url, declared_machine_id.as_deref()).await?;
-    if name == "kanna_wait_events" && machine_id.is_none() && args.get("task_ids").is_some() {
+    if prepare_wait_events_routing(
+        name,
+        &mut args,
+        declared_machine_id.as_deref(),
+        machine_id.as_deref(),
+    ) {
         return wait_events_across_machines(base_url, catalog, multi_machine_waits, args).await;
     }
     let args = maybe_augment_create_task_args(base_url, name, args, machine_id.as_deref()).await?;
@@ -1633,6 +1692,37 @@ mod tests {
             decode_multi_machine_cursor(&encoded).expect("decode cursor"),
             Some(cursor)
         );
+    }
+
+    #[test]
+    fn local_only_named_wait_bypasses_client_multi_machine_fan_in() {
+        let mut args = json!({
+            "task_ids": ["task-a", "task-b"],
+            "local_only": true,
+        });
+
+        let fan_in = prepare_wait_events_routing("kanna_wait_events", &mut args, None, None);
+
+        assert!(!fan_in);
+        assert_eq!(args["local_only"], true);
+    }
+
+    #[test]
+    fn explicit_current_machine_pin_forces_server_wait_to_stay_local() {
+        let mut args = json!({
+            "repo_id": "repo-local",
+            "machine_id": "desktop-local",
+        });
+
+        let fan_in = prepare_wait_events_routing(
+            "kanna_wait_events",
+            &mut args,
+            Some("desktop-local"),
+            None,
+        );
+
+        assert!(!fan_in);
+        assert_eq!(args["local_only"], true);
     }
 
     #[tokio::test]

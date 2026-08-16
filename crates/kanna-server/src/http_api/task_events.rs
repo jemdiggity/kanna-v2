@@ -20,15 +20,17 @@
 //!   do not become eligible later, while events after it are included whenever
 //!   the child is in the parent scope at the next read.
 
-use super::state::AppState;
+use super::lan_trust::AccountWideTaskEventAccess;
+use super::state::{AppState, TunneledHttpInvoke};
 use super::task_blockers::resolve_existing_task_id;
 use crate::db::{Db, TaskEventScope};
-use axum::extract::{Query, State};
+use axum::extract::{Extension, Query, State};
 use axum::Json;
 use base64::Engine;
+use kanna_tool_catalog::encode_path_segment;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -50,8 +52,13 @@ const LEGACY_CURSOR_SCAN_LIMIT: i64 = 500;
 /// writer that is not this process — the debug-only E2E SQL route, a test
 /// harness writing the database directly.
 const WAIT_RECHECK_SECS: u64 = 5;
+const AGGREGATE_CURSOR_PREFIX: &str = "ks1.";
+const AGGREGATE_WAIT_SESSION_TTL: Duration = Duration::from_secs(10 * 60);
+const ZERO_TIMEOUT_DRAIN_BUDGET: Duration = Duration::from_millis(100);
+const MAX_AGGREGATE_WAIT_SESSIONS: usize = 256;
+const MAX_AGGREGATE_MACHINES: usize = 128;
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct TaskEventsQuery {
     cursor: Option<String>,
@@ -61,8 +68,136 @@ pub(super) struct TaskEventsQuery {
     /// scope a fan-out can still express after losing the ids it created.
     parent_task_id: Option<String>,
     repo_id: Option<String>,
+    /// Machine-independent repository identity. The public catalog exposes it
+    /// for callers that already have the hash; aggregate repo-id waits resolve
+    /// their local row to this value before contacting peers.
+    repo_remote_url_hash: Option<String>,
     timeout_secs: Option<u64>,
     limit: Option<i64>,
+    /// Used by kanna-mcp's existing km1 fan-in so its native local sub-wait
+    /// does not recursively start the server-side fan-in too.
+    #[serde(default)]
+    local_only: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+enum AggregateScope {
+    Tasks { task_ids: Vec<String> },
+    Children { parent_task_id: String },
+    Repo { remote_url_hash: String },
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AggregateCursor {
+    local_machine_id: String,
+    scope: AggregateScope,
+    machine_ids: Vec<String>,
+    cursors_by_machine: BTreeMap<String, String>,
+}
+
+struct AggregateWaitCompletion {
+    machine_id: String,
+    result: Result<Value, String>,
+}
+
+struct AggregateWaitSession {
+    cursor: AggregateCursor,
+    pending: tokio::task::JoinSet<AggregateWaitCompletion>,
+    pending_machines: HashSet<String>,
+    last_touched: tokio::time::Instant,
+}
+
+#[derive(Default)]
+pub(super) struct AggregateWaitRegistry {
+    sessions: HashMap<String, AggregateWaitSession>,
+    reaper_started: bool,
+}
+
+impl AggregateWaitRegistry {
+    fn abort_session(mut session: AggregateWaitSession) {
+        session.pending.abort_all();
+    }
+
+    fn evict_expired(&mut self, now: tokio::time::Instant) {
+        let expired = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| {
+                now.duration_since(session.last_touched) >= AGGREGATE_WAIT_SESSION_TTL
+            })
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        for key in expired {
+            if let Some(session) = self.sessions.remove(&key) {
+                Self::abort_session(session);
+            }
+        }
+    }
+
+    fn insert_bounded(&mut self, key: String, session: AggregateWaitSession) {
+        if let Some(replaced) = self.sessions.remove(&key) {
+            Self::abort_session(replaced);
+        }
+        while self.sessions.len() >= MAX_AGGREGATE_WAIT_SESSIONS {
+            let Some(oldest_key) = self
+                .sessions
+                .iter()
+                .min_by_key(|(_, session)| session.last_touched)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            if let Some(evicted) = self.sessions.remove(&oldest_key) {
+                Self::abort_session(evicted);
+            }
+        }
+        self.sessions.insert(key, session);
+    }
+}
+
+fn ensure_aggregate_wait_reaper(state: &Arc<AppState>) {
+    start_aggregate_wait_reaper(Arc::clone(&state.aggregate_task_event_waits));
+}
+
+fn start_aggregate_wait_reaper(registry: Arc<std::sync::Mutex<AggregateWaitRegistry>>) {
+    {
+        let mut registry = registry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if registry.reaper_started {
+            return;
+        }
+        registry.reaper_started = true;
+    }
+
+    let registry = Arc::downgrade(&registry);
+    tokio::spawn(async move {
+        loop {
+            let Some(registry) = registry.upgrade() else {
+                break;
+            };
+            let sleep_for = {
+                let mut registry = registry
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let now = tokio::time::Instant::now();
+                registry.evict_expired(now);
+                registry
+                    .sessions
+                    .values()
+                    .map(|session| {
+                        AGGREGATE_WAIT_SESSION_TTL
+                            .saturating_sub(now.duration_since(session.last_touched))
+                    })
+                    .min()
+                    .unwrap_or(AGGREGATE_WAIT_SESSION_TTL)
+            };
+            drop(registry);
+            tokio::time::sleep(sleep_for).await;
+        }
+    });
 }
 
 #[derive(Debug, Clone)]
@@ -169,6 +304,7 @@ fn encode_parent_cursor<T: Serialize>(
 fn resolve_scope(
     db: &Db,
     query: &TaskEventsQuery,
+    tolerate_missing_tasks: bool,
 ) -> Result<TaskEventScope, (axum::http::StatusCode, String)> {
     let task_ids: Vec<String> = query
         .task_ids
@@ -185,10 +321,20 @@ fn resolve_scope(
     if !task_ids.is_empty() {
         // Branch names are accepted everywhere else a task id is; a watcher
         // must not silently observe nothing because it passed one here.
-        let resolved = task_ids
-            .iter()
-            .map(|task_id| resolve_existing_task_id(db, task_id))
-            .collect::<Result<Vec<_>, _>>()?;
+        let resolved = if tolerate_missing_tasks {
+            let mut resolved = Vec::new();
+            for task_id in &task_ids {
+                if let Some(task_id) = db.resolve_pipeline_item_id(task_id).map_err(db_error)? {
+                    resolved.push(task_id);
+                }
+            }
+            resolved
+        } else {
+            task_ids
+                .iter()
+                .map(|task_id| resolve_existing_task_id(db, task_id))
+                .collect::<Result<Vec<_>, _>>()?
+        };
         return Ok(TaskEventScope::Tasks(resolved));
     }
 
@@ -202,7 +348,13 @@ fn resolve_scope(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        let resolved = resolve_existing_task_id(db, parent_task_id)?;
+        let resolved = if tolerate_missing_tasks {
+            db.resolve_pipeline_item_id(parent_task_id)
+                .map_err(db_error)?
+                .unwrap_or_else(|| parent_task_id.to_string())
+        } else {
+            resolve_existing_task_id(db, parent_task_id)?
+        };
         return Ok(TaskEventScope::Children(resolved));
     }
 
@@ -215,9 +367,20 @@ fn resolve_scope(
         return Ok(TaskEventScope::Repo(repo_id.to_string()));
     }
 
+    if let Some(remote_url_hash) = query
+        .repo_remote_url_hash
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(TaskEventScope::RepoRemoteUrlHash(
+            remote_url_hash.to_string(),
+        ));
+    }
+
     Err((
         axum::http::StatusCode::BAD_REQUEST,
-        "task_ids, parent_task_id or repo_id is required: an unscoped event feed \
+        "task_ids, parent_task_id, repo_id or repo_remote_url_hash is required: an unscoped event feed \
          would hand an orchestrator every other task's events too"
             .to_string(),
     ))
@@ -247,6 +410,41 @@ fn encode_v3_cursor(
             event_seq,
         },
     )
+}
+
+fn cursor_after_truncated_parent_batch(
+    parent_task_id: &str,
+    previous_cursor: Option<&str>,
+    event_seq: i64,
+) -> Result<String, (axum::http::StatusCode, String)> {
+    let Some(TaskEventsCursor::ParentV1(legacy)) = parse_cursor(previous_cursor)? else {
+        return encode_v3_cursor(parent_task_id, event_seq);
+    };
+    if legacy.parent_task_id != parent_task_id {
+        return Err((
+            axum::http::StatusCode::BAD_GATEWAY,
+            "peer returned events for a parent cursor with a different scope".to_string(),
+        ));
+    }
+
+    // The aggregate response emitted only a prefix of the peer's batch, so it
+    // cannot adopt the peer's returned cursor. Preserve acknowledgements above
+    // that prefix from a deployed p1 cursor; collapsing directly to p3 at the
+    // last emitted sequence would replay those already-acknowledged events.
+    let mut watermarks = legacy.watermarks;
+    watermarks.retain(|_, watermark| *watermark > event_seq);
+    if watermarks.is_empty() {
+        encode_v3_cursor(parent_task_id, event_seq)
+    } else {
+        encode_parent_cursor(
+            PARENT_CURSOR_V1_PREFIX,
+            &ParentTaskEventsCursorV1 {
+                parent_task_id: parent_task_id.to_string(),
+                watermarks,
+                event_seq: Some(event_seq),
+            },
+        )
+    }
 }
 
 /// Drain one bounded slice of a deployed p1 cursor. This path exists only for
@@ -512,9 +710,10 @@ fn read_batch(
     read_sequence_batch(&db, scope, after_seq, limit, None)
 }
 
-pub(super) async fn wait_task_events(
-    State(state): State<Arc<AppState>>,
-    Query(query): Query<TaskEventsQuery>,
+async fn wait_local_task_events(
+    state: Arc<AppState>,
+    query: TaskEventsQuery,
+    tolerate_missing_tasks: bool,
 ) -> Result<Json<Value>, (axum::http::StatusCode, String)> {
     let mut cursor = parse_cursor(query.cursor.as_deref())?;
     let limit = query
@@ -537,7 +736,7 @@ pub(super) async fn wait_task_events(
                 format!("db error: {e}"),
             )
         })?;
-        resolve_scope(&db, &query)?
+        resolve_scope(&db, &query, tolerate_missing_tasks)?
     };
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
@@ -581,5 +780,716 @@ pub(super) async fn wait_task_events(
             appended,
         )
         .await;
+    }
+}
+
+fn invalid_aggregate_cursor() -> (axum::http::StatusCode, String) {
+    (
+        axum::http::StatusCode::BAD_REQUEST,
+        "cursor is not a valid multi-machine cursor returned by this endpoint".to_string(),
+    )
+}
+
+fn decode_aggregate_cursor(
+    cursor: &str,
+) -> Result<AggregateCursor, (axum::http::StatusCode, String)> {
+    if cursor.len() > MAX_CURSOR_LEN {
+        return Err(invalid_aggregate_cursor());
+    }
+    let encoded = cursor
+        .strip_prefix(AGGREGATE_CURSOR_PREFIX)
+        .ok_or_else(invalid_aggregate_cursor)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|_| invalid_aggregate_cursor())?;
+    let mut cursor: AggregateCursor =
+        serde_json::from_slice(&bytes).map_err(|_| invalid_aggregate_cursor())?;
+    if cursor.local_machine_id.trim().is_empty()
+        || cursor
+            .machine_ids
+            .iter()
+            .any(|machine_id| machine_id.trim().is_empty())
+        || cursor.machine_ids.len() > MAX_AGGREGATE_MACHINES
+        || cursor
+            .cursors_by_machine
+            .keys()
+            .any(|machine_id| !cursor.machine_ids.contains(machine_id))
+    {
+        return Err(invalid_aggregate_cursor());
+    }
+    cursor.machine_ids.sort();
+    cursor.machine_ids.dedup();
+    Ok(cursor)
+}
+
+fn encode_aggregate_cursor(
+    cursor: &AggregateCursor,
+) -> Result<String, (axum::http::StatusCode, String)> {
+    let bytes = serde_json::to_vec(cursor).map_err(|error| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to encode multi-machine task event cursor: {error}"),
+        )
+    })?;
+    let encoded = format!(
+        "{AGGREGATE_CURSOR_PREFIX}{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+    );
+    if encoded.len() > MAX_CURSOR_LEN {
+        return Err((
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to encode a bounded multi-machine task event cursor".to_string(),
+        ));
+    }
+    Ok(encoded)
+}
+
+fn normalized_values(raw: Option<&str>) -> Vec<String> {
+    let mut values = raw
+        .map(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    values.sort();
+    values.dedup();
+    values
+}
+
+fn resolve_aggregate_scope(
+    db: &Db,
+    query: &TaskEventsQuery,
+) -> Result<AggregateScope, (axum::http::StatusCode, String)> {
+    let task_ids = normalized_values(query.task_ids.as_deref());
+    if !task_ids.is_empty() {
+        return Ok(AggregateScope::Tasks { task_ids });
+    }
+    if let Some(parent_task_id) = query
+        .parent_task_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let parent_task_id = db
+            .resolve_pipeline_item_id(parent_task_id)
+            .map_err(db_error)?
+            .unwrap_or_else(|| parent_task_id.to_string());
+        return Ok(AggregateScope::Children { parent_task_id });
+    }
+    if let Some(repo_id) = query
+        .repo_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let repo = db.get_repo(repo_id).map_err(db_error)?.ok_or_else(|| {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                format!("repo not found: {repo_id}"),
+            )
+        })?;
+        let remote_url_hash = repo.remote_url_hash.ok_or_else(|| {
+            (
+                axum::http::StatusCode::CONFLICT,
+                format!(
+                    "repository {repo_id} has no remote URL hash, so it cannot be matched across machines"
+                ),
+            )
+        })?;
+        return Ok(AggregateScope::Repo { remote_url_hash });
+    }
+    if let Some(remote_url_hash) = query
+        .repo_remote_url_hash
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(AggregateScope::Repo {
+            remote_url_hash: remote_url_hash.to_string(),
+        });
+    }
+    Err((
+        axum::http::StatusCode::BAD_REQUEST,
+        "task_ids, parent_task_id, repo_id or repo_remote_url_hash is required: an unscoped event feed would hand an orchestrator every other task's events too".to_string(),
+    ))
+}
+
+fn local_query_for_aggregate(
+    scope: &AggregateScope,
+    cursor: Option<String>,
+    timeout_secs: u64,
+    limit: i64,
+) -> TaskEventsQuery {
+    let mut query = TaskEventsQuery {
+        cursor,
+        timeout_secs: Some(timeout_secs),
+        limit: Some(limit),
+        local_only: true,
+        ..TaskEventsQuery::default()
+    };
+    match scope {
+        AggregateScope::Tasks { task_ids } => query.task_ids = Some(task_ids.join(",")),
+        AggregateScope::Children { parent_task_id } => {
+            query.parent_task_id = Some(parent_task_id.clone());
+        }
+        AggregateScope::Repo { remote_url_hash } => {
+            query.repo_remote_url_hash = Some(remote_url_hash.clone());
+        }
+    }
+    query
+}
+
+fn aggregate_query_path(query: &TaskEventsQuery) -> String {
+    let mut params = vec![
+        format!("timeoutSecs={}", query.timeout_secs.unwrap_or_default()),
+        format!("limit={}", query.limit.unwrap_or(DEFAULT_EVENT_LIMIT)),
+        "localOnly=true".to_string(),
+    ];
+    if let Some(task_ids) = query.task_ids.as_deref() {
+        params.push(format!("taskIds={}", encode_path_segment(task_ids)));
+    }
+    if let Some(parent_task_id) = query.parent_task_id.as_deref() {
+        params.push(format!(
+            "parentTaskId={}",
+            encode_path_segment(parent_task_id)
+        ));
+    }
+    if let Some(remote_url_hash) = query.repo_remote_url_hash.as_deref() {
+        params.push(format!(
+            "repoRemoteUrlHash={}",
+            encode_path_segment(remote_url_hash)
+        ));
+    }
+    if let Some(cursor) = query.cursor.as_deref() {
+        params.push(format!("cursor={}", encode_path_segment(cursor)));
+    }
+    format!("/v1/task-events?{}", params.join("&"))
+}
+
+fn spawn_aggregate_wait(
+    session: &mut AggregateWaitSession,
+    state: Arc<AppState>,
+    machine_id: String,
+    timeout_secs: u64,
+    limit: i64,
+) {
+    let query = local_query_for_aggregate(
+        &session.cursor.scope,
+        session.cursor.cursors_by_machine.get(&machine_id).cloned(),
+        timeout_secs,
+        limit,
+    );
+    let local_machine_id = session.cursor.local_machine_id.clone();
+    let completed_machine_id = machine_id.clone();
+    let waited_machine_id = machine_id.clone();
+    session.pending.spawn(async move {
+        let result = if waited_machine_id == local_machine_id {
+            wait_local_task_events(state, query, true)
+                .await
+                .map(|Json(value)| value)
+                .map_err(|(_, error)| error)
+        } else {
+            let path = aggregate_query_path(&query);
+            match state
+                .invoke_relay_desktop(waited_machine_id, "GET".to_string(), path, Value::Null)
+                .await
+            {
+                Ok(response) if (200..300).contains(&response.status) => response
+                    .body
+                    .ok_or_else(|| "peer returned an empty task-event response".to_string()),
+                Ok(response) => Err(response.error.unwrap_or_else(|| {
+                    format!("peer task-event wait failed with HTTP {}", response.status)
+                })),
+                Err(error) => Err(error),
+            }
+        };
+        AggregateWaitCompletion {
+            machine_id: completed_machine_id,
+            result,
+        }
+    });
+    session.pending_machines.insert(machine_id);
+}
+
+fn apply_aggregate_completion(
+    session: &mut AggregateWaitSession,
+    completion: AggregateWaitCompletion,
+    events: &mut Vec<Value>,
+    machine_errors: &mut Vec<Value>,
+    failed_machines: &mut HashSet<String>,
+    has_more: &mut bool,
+    limit: i64,
+) -> Result<bool, (axum::http::StatusCode, String)> {
+    session.pending_machines.remove(&completion.machine_id);
+    let response = match completion.result {
+        Ok(response) => response,
+        Err(error) => {
+            failed_machines.insert(completion.machine_id.clone());
+            machine_errors.push(json!({
+                "machineId": completion.machine_id,
+                "error": error,
+                "stale": true,
+            }));
+            return Ok(false);
+        }
+    };
+    let cursor = response
+        .get("cursor")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::BAD_GATEWAY,
+                format!(
+                    "machine {} returned a task-event response without a cursor",
+                    completion.machine_id
+                ),
+            )
+        })?;
+    *has_more |= response
+        .get("hasMore")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let returned_events = response
+        .get("events")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::BAD_GATEWAY,
+                format!(
+                    "machine {} returned a task-event response without events",
+                    completion.machine_id
+                ),
+            )
+        })?;
+    let remaining = (limit as usize).saturating_sub(events.len());
+    if returned_events.len() > remaining {
+        *has_more = true;
+    }
+    let emitted_count = returned_events.len().min(remaining);
+    let mut emitted_cursor = None;
+    for event in returned_events.iter().take(emitted_count) {
+        let mut event = event.as_object().cloned().ok_or_else(|| {
+            (
+                axum::http::StatusCode::BAD_GATEWAY,
+                format!(
+                    "machine {} returned a non-object task event",
+                    completion.machine_id
+                ),
+            )
+        })?;
+        event.insert(
+            "machineId".to_string(),
+            Value::String(completion.machine_id.clone()),
+        );
+        emitted_cursor = event.get("seq").and_then(Value::as_i64);
+        events.push(Value::Object(event));
+    }
+    let next_cursor = if emitted_count == returned_events.len() {
+        Some(cursor.to_string())
+    } else if emitted_count == 0 {
+        None
+    } else {
+        let event_seq = emitted_cursor.ok_or_else(|| {
+            (
+                axum::http::StatusCode::BAD_GATEWAY,
+                format!(
+                    "machine {} returned a truncated task event without a numeric seq",
+                    completion.machine_id
+                ),
+            )
+        })?;
+        Some(match &session.cursor.scope {
+            AggregateScope::Children { parent_task_id } => cursor_after_truncated_parent_batch(
+                parent_task_id,
+                session
+                    .cursor
+                    .cursors_by_machine
+                    .get(&completion.machine_id)
+                    .map(String::as_str),
+                event_seq,
+            )?,
+            AggregateScope::Tasks { .. } | AggregateScope::Repo { .. } => event_seq.to_string(),
+        })
+    };
+    if let Some(next_cursor) = next_cursor {
+        session
+            .cursor
+            .cursors_by_machine
+            .insert(completion.machine_id.clone(), next_cursor);
+    }
+    Ok(!returned_events.is_empty())
+}
+
+async fn wait_aggregate_task_events(
+    state: Arc<AppState>,
+    query: TaskEventsQuery,
+) -> Result<Json<Value>, (axum::http::StatusCode, String)> {
+    let timeout_secs = kanna_tool_catalog::clamp_wait_timeout_secs(
+        query
+            .timeout_secs
+            .unwrap_or(kanna_tool_catalog::DEFAULT_WAIT_TIMEOUT_SECS),
+    );
+    let limit = query
+        .limit
+        .unwrap_or(DEFAULT_EVENT_LIMIT)
+        .clamp(1, MAX_EVENT_LIMIT);
+    let db = Db::open(&state.config().db_path).map_err(db_error)?;
+    let requested_scope = resolve_aggregate_scope(&db, &query)?;
+    let supplied_cursor = query.cursor.as_deref();
+    let decoded = supplied_cursor
+        .filter(|cursor| cursor.starts_with(AGGREGATE_CURSOR_PREFIX))
+        .map(decode_aggregate_cursor)
+        .transpose()?;
+    let local_machine_id = state.config().desktop_id.clone();
+    let cursor = match decoded {
+        Some(cursor) => {
+            if cursor.local_machine_id != local_machine_id {
+                return Err((
+                    axum::http::StatusCode::BAD_REQUEST,
+                    format!(
+                        "multi-machine event cursor belongs to local machine {}, but this server is {}",
+                        cursor.local_machine_id, local_machine_id
+                    ),
+                ));
+            }
+            if cursor.scope != requested_scope {
+                return Err((
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "cursor belongs to a different task-event scope".to_string(),
+                ));
+            }
+            cursor
+        }
+        None => {
+            let mut cursors_by_machine = BTreeMap::new();
+            if let Some(native_cursor) = supplied_cursor {
+                cursors_by_machine.insert(local_machine_id.clone(), native_cursor.to_string());
+            }
+            AggregateCursor {
+                local_machine_id: local_machine_id.clone(),
+                scope: requested_scope,
+                machine_ids: vec![local_machine_id.clone()],
+                cursors_by_machine,
+            }
+        }
+    };
+    drop(db);
+
+    let input_cursor_key = supplied_cursor
+        .filter(|cursor| cursor.starts_with(AGGREGATE_CURSOR_PREFIX))
+        .map(str::to_string);
+    ensure_aggregate_wait_reaper(&state);
+    let mut session = {
+        let mut registry = state
+            .aggregate_task_event_waits
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let now = tokio::time::Instant::now();
+        registry.evict_expired(now);
+        input_cursor_key
+            .as_ref()
+            .and_then(|key| registry.sessions.remove(key))
+            .unwrap_or_else(|| AggregateWaitSession {
+                cursor,
+                pending: tokio::task::JoinSet::new(),
+                pending_machines: HashSet::new(),
+                last_touched: now,
+            })
+    };
+    let mut machine_errors = Vec::new();
+    let mut active_machines = HashSet::from([local_machine_id.clone()]);
+    match state.list_active_relay_desktops().await {
+        Ok(machine_ids) => {
+            active_machines.extend(machine_ids);
+        }
+        Err(error) => {
+            machine_errors.push(json!({
+                "machineId": Value::Null,
+                "error": error,
+                "stale": true,
+            }));
+        }
+    }
+    for machine_id in &active_machines {
+        if !session.cursor.machine_ids.contains(machine_id) {
+            session.cursor.machine_ids.push(machine_id.clone());
+        }
+    }
+    session.cursor.machine_ids.sort();
+    session.cursor.machine_ids.dedup();
+    if session.cursor.machine_ids.len() > MAX_AGGREGATE_MACHINES {
+        return Err((
+            axum::http::StatusCode::BAD_GATEWAY,
+            "relay returned too many machines for one task-event cursor".to_string(),
+        ));
+    }
+    for machine_id in &session.cursor.machine_ids {
+        if !active_machines.contains(machine_id) {
+            machine_errors.push(json!({
+                "machineId": machine_id,
+                "error": "machine is unreachable through the relay",
+                "stale": true,
+            }));
+        }
+    }
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+    let zero_timeout_deadline = tokio::time::Instant::now() + ZERO_TIMEOUT_DRAIN_BUDGET;
+    let mut events = Vec::new();
+    let mut completed_machines = HashSet::new();
+    let mut failed_machines = HashSet::new();
+    let mut has_more = false;
+    loop {
+        let remaining_secs = if timeout_secs == 0 {
+            0
+        } else {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            remaining
+                .as_secs()
+                .saturating_add(u64::from(remaining.subsec_nanos() > 0))
+                .max(1)
+        };
+        let machines_to_start = active_machines
+            .iter()
+            .filter(|machine_id| {
+                !(session.pending_machines.contains(*machine_id)
+                    || completed_machines.contains(*machine_id)
+                    || failed_machines.contains(*machine_id))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for machine_id in machines_to_start {
+            spawn_aggregate_wait(
+                &mut session,
+                Arc::clone(&state),
+                machine_id,
+                remaining_secs,
+                limit,
+            );
+        }
+
+        let joined = if timeout_secs == 0 {
+            tokio::time::timeout_at(zero_timeout_deadline, session.pending.join_next())
+                .await
+                .unwrap_or_default()
+        } else {
+            tokio::time::timeout_at(deadline, session.pending.join_next())
+                .await
+                .unwrap_or_default()
+        };
+        let Some(joined) = joined else {
+            break;
+        };
+        let completion = joined.map_err(|error| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("machine wait task failed: {error}"),
+            )
+        })?;
+        let completed_machine_id = completion.machine_id.clone();
+        completed_machines.insert(completed_machine_id.clone());
+        let completion_had_events = apply_aggregate_completion(
+            &mut session,
+            completion,
+            &mut events,
+            &mut machine_errors,
+            &mut failed_machines,
+            &mut has_more,
+            limit,
+        )?;
+        if !completion_had_events
+            && !failed_machines.contains(&completed_machine_id)
+            && timeout_secs > 0
+            && tokio::time::Instant::now() < deadline
+        {
+            completed_machines.remove(&completed_machine_id);
+        }
+        if !events.is_empty() || has_more {
+            break;
+        }
+        if !machine_errors.is_empty() && completed_machines.len() >= active_machines.len() {
+            break;
+        }
+        if completed_machines.len() >= active_machines.len()
+            || (timeout_secs > 0 && tokio::time::Instant::now() >= deadline)
+        {
+            break;
+        }
+    }
+
+    session.last_touched = tokio::time::Instant::now();
+    let output_cursor = encode_aggregate_cursor(&session.cursor)?;
+    {
+        let mut registry = state
+            .aggregate_task_event_waits
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        registry.evict_expired(tokio::time::Instant::now());
+        registry.insert_bounded(output_cursor.clone(), session);
+    }
+    let wait_outcome = if !events.is_empty() || has_more {
+        "events"
+    } else if !machine_errors.is_empty() {
+        "partial"
+    } else {
+        "timeout"
+    };
+    Ok(Json(json!({
+        "waitOutcome": wait_outcome,
+        "cursor": output_cursor,
+        "events": events,
+        "hasMore": has_more,
+        "machineErrors": machine_errors,
+        "waitTimeoutSecs": timeout_secs,
+        "waitHint": if wait_outcome == "events" {
+            Value::Null
+        } else {
+            Value::String("Pass the cursor back unchanged to keep watching every known machine. A stale machine keeps its previous native cursor and catches up after reconnect while retained history remains available.".to_string())
+        },
+    })))
+}
+
+pub(super) async fn wait_task_events(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<TaskEventsQuery>,
+    account_wide_access: AccountWideTaskEventAccess,
+    tunneled: Option<Extension<TunneledHttpInvoke>>,
+) -> Result<Json<Value>, (axum::http::StatusCode, String)> {
+    if tunneled.is_some() || query.local_only {
+        return wait_local_task_events(state, query, tunneled.is_some()).await;
+    }
+
+    if !account_wide_access.is_authorized() {
+        let mut query = query;
+        if query
+            .cursor
+            .as_deref()
+            .is_some_and(|cursor| cursor.starts_with(AGGREGATE_CURSOR_PREFIX))
+        {
+            return Err((
+                axum::http::StatusCode::FORBIDDEN,
+                "this request is not authorized to resume an account-wide task-event cursor; retry with the local task-event bearer credential or start a new local-only wait".to_string(),
+            ));
+        }
+        query.local_only = true;
+        return wait_local_task_events(state, query, false).await;
+    }
+
+    let aggregate_cursor = query
+        .cursor
+        .as_deref()
+        .is_some_and(|cursor| cursor.starts_with(AGGREGATE_CURSOR_PREFIX));
+    if state.desktop_routing_available() || aggregate_cursor {
+        return wait_aggregate_task_events(state, query).await;
+    }
+
+    // Preserve native numeric/p3 cursors when this server has never had a
+    // relay route. The explicit error makes the incompleteness visible without
+    // forcing every single-machine caller into a composite cursor.
+    let Json(mut response) = wait_local_task_events(Arc::clone(&state), query, false).await?;
+    if let Some(response) = response.as_object_mut() {
+        response.insert(
+            "machineErrors".to_string(),
+            json!([{
+                "machineId": Value::Null,
+                "error": "desktop relay routing is unavailable; sibling machines were not observed",
+                "stale": true,
+            }]),
+        );
+    }
+    Ok(Json(response))
+}
+
+#[cfg(test)]
+mod aggregate_wait_registry_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CancellationMarker(Arc<AtomicUsize>);
+
+    impl Drop for CancellationMarker {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    async fn pending_session(
+        key: &str,
+        last_touched: tokio::time::Instant,
+        cancellations: Arc<AtomicUsize>,
+    ) -> AggregateWaitSession {
+        let machine_id = format!("machine-{key}");
+        let mut pending = tokio::task::JoinSet::new();
+        pending.spawn(async move {
+            let _marker = CancellationMarker(cancellations);
+            std::future::pending::<AggregateWaitCompletion>().await
+        });
+        tokio::task::yield_now().await;
+        AggregateWaitSession {
+            cursor: AggregateCursor {
+                local_machine_id: machine_id.clone(),
+                scope: AggregateScope::Tasks {
+                    task_ids: vec![key.to_string()],
+                },
+                machine_ids: vec![machine_id.clone()],
+                cursors_by_machine: BTreeMap::new(),
+            },
+            pending,
+            pending_machines: HashSet::from([machine_id]),
+            last_touched,
+        }
+    }
+
+    #[tokio::test]
+    async fn registry_cap_evicts_and_aborts_the_oldest_session() {
+        let cancellations = Arc::new(AtomicUsize::new(0));
+        let mut registry = AggregateWaitRegistry::default();
+        let now = tokio::time::Instant::now();
+        for index in 0..=MAX_AGGREGATE_WAIT_SESSIONS {
+            let session = pending_session(
+                &index.to_string(),
+                now + Duration::from_nanos(index as u64),
+                Arc::clone(&cancellations),
+            )
+            .await;
+            registry.insert_bounded(index.to_string(), session);
+        }
+        tokio::task::yield_now().await;
+
+        assert_eq!(registry.sessions.len(), MAX_AGGREGATE_WAIT_SESSIONS);
+        assert!(!registry.sessions.contains_key("0"));
+        assert_eq!(cancellations.load(Ordering::SeqCst), 1);
+
+        for (_, session) in registry.sessions.drain() {
+            AggregateWaitRegistry::abort_session(session);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reaper_expires_abandoned_sessions_and_aborts_their_legs() {
+        let cancellations = Arc::new(AtomicUsize::new(0));
+        let registry = Arc::new(std::sync::Mutex::new(AggregateWaitRegistry::default()));
+        let session = pending_session(
+            "expired",
+            tokio::time::Instant::now(),
+            Arc::clone(&cancellations),
+        )
+        .await;
+        registry
+            .lock()
+            .expect("registry")
+            .insert_bounded("expired".to_string(), session);
+        start_aggregate_wait_reaper(Arc::clone(&registry));
+        tokio::task::yield_now().await;
+
+        tokio::time::advance(AGGREGATE_WAIT_SESSION_TTL).await;
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        assert!(registry.lock().expect("registry").sessions.is_empty());
+        assert_eq!(cancellations.load(Ordering::SeqCst), 1);
     }
 }

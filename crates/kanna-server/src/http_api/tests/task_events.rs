@@ -10,8 +10,8 @@ use super::*;
 use crate::db::NewStageRun;
 use axum::Router;
 use base64::Engine;
-use serde_json::Value;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use serde_json::{json, Value};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -48,10 +48,204 @@ fn events_router() -> (Router, String) {
     (router(state), db_path)
 }
 
+fn connect_test_relay_peer(
+    source: &Arc<AppState>,
+    peer: Arc<AppState>,
+    connected: Arc<AtomicBool>,
+) -> tokio::task::JoinHandle<()> {
+    let mut requests = source
+        .take_desktop_relay_requests()
+        .expect("take source relay queue");
+    source.set_desktop_routing_available(true);
+    tokio::spawn(async move {
+        while let Some(request) = requests.recv().await {
+            match request {
+                crate::http_api::DesktopRelayRequest::ListActive { response, .. } => {
+                    let machine_ids = if connected.load(Ordering::SeqCst) {
+                        vec![peer.config().desktop_id.clone()]
+                    } else {
+                        Vec::new()
+                    };
+                    let _ = response.send(Ok(machine_ids));
+                }
+                crate::http_api::DesktopRelayRequest::Invoke {
+                    method,
+                    path,
+                    body,
+                    response,
+                    ..
+                } => {
+                    let peer = Arc::clone(&peer);
+                    let connected = Arc::clone(&connected);
+                    tokio::spawn(async move {
+                        if !connected.load(Ordering::SeqCst) {
+                            let _ = response.send(Err("peer disconnected".to_string()));
+                            return;
+                        }
+                        let result = crate::http_api::dispatch_authenticated_http_invoke(
+                            peer, &method, &path, body,
+                        )
+                        .await;
+                        let _ = response.send(Ok(result));
+                    });
+                }
+            }
+        }
+    })
+}
+
+fn connect_test_relay_peer_with_long_poll_budget(
+    source: &Arc<AppState>,
+    peer: Arc<AppState>,
+    invoke_count: Arc<AtomicUsize>,
+    busy_count: Arc<AtomicUsize>,
+) -> tokio::task::JoinHandle<()> {
+    let mut requests = source
+        .take_desktop_relay_requests()
+        .expect("take source relay queue");
+    source.set_desktop_routing_available(true);
+    let permits = Arc::new(crate::relay::RelayHttpInvokePermits::new(1));
+    tokio::spawn(async move {
+        while let Some(request) = requests.recv().await {
+            match request {
+                crate::http_api::DesktopRelayRequest::ListActive { response, .. } => {
+                    let _ = response.send(Ok(vec![peer.config().desktop_id.clone()]));
+                }
+                crate::http_api::DesktopRelayRequest::Invoke {
+                    method,
+                    path,
+                    body,
+                    response,
+                    ..
+                } => {
+                    invoke_count.fetch_add(1, Ordering::SeqCst);
+                    let permit = match permits.for_path(&path).try_acquire_owned() {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            busy_count.fetch_add(1, Ordering::SeqCst);
+                            let _ = response.send(Ok(crate::http_api::HttpInvokeResponse {
+                                status: 503,
+                                body: None,
+                                error: Some("desktop is busy; too many concurrent requests".into()),
+                            }));
+                            continue;
+                        }
+                    };
+                    let peer = Arc::clone(&peer);
+                    tokio::spawn(async move {
+                        let _permit = permit;
+                        let result = crate::http_api::dispatch_authenticated_http_invoke(
+                            peer, &method, &path, body,
+                        )
+                        .await;
+                        let _ = response.send(Ok(result));
+                    });
+                }
+            }
+        }
+    })
+}
+
+fn connect_test_relay_peer_with_invoke_gate(
+    source: &Arc<AppState>,
+    peer: Arc<AppState>,
+    invoke_gate: Arc<tokio::sync::Semaphore>,
+    invoke_count: Arc<AtomicUsize>,
+) -> tokio::task::JoinHandle<()> {
+    let mut requests = source
+        .take_desktop_relay_requests()
+        .expect("take source relay queue");
+    source.set_desktop_routing_available(true);
+    tokio::spawn(async move {
+        while let Some(request) = requests.recv().await {
+            match request {
+                crate::http_api::DesktopRelayRequest::ListActive { response, .. } => {
+                    let _ = response.send(Ok(vec![peer.config().desktop_id.clone()]));
+                }
+                crate::http_api::DesktopRelayRequest::Invoke {
+                    method,
+                    path,
+                    body,
+                    response,
+                    ..
+                } => {
+                    invoke_count.fetch_add(1, Ordering::SeqCst);
+                    let peer = Arc::clone(&peer);
+                    let invoke_gate = Arc::clone(&invoke_gate);
+                    tokio::spawn(async move {
+                        let Ok(_permit) = invoke_gate.acquire_owned().await else {
+                            return;
+                        };
+                        let result = crate::http_api::dispatch_authenticated_http_invoke(
+                            peer, &method, &path, body,
+                        )
+                        .await;
+                        let _ = response.send(Ok(result));
+                    });
+                }
+            }
+        }
+    })
+}
+
+fn connect_unresponsive_listed_peer(
+    source: &Arc<AppState>,
+    machine_id: &str,
+) -> tokio::task::JoinHandle<()> {
+    let mut requests = source
+        .take_desktop_relay_requests()
+        .expect("take source relay queue");
+    source.set_desktop_routing_available(true);
+    let machine_id = machine_id.to_string();
+    tokio::spawn(async move {
+        while let Some(request) = requests.recv().await {
+            match request {
+                crate::http_api::DesktopRelayRequest::ListActive { response, .. } => {
+                    let _ = response.send(Ok(vec![machine_id.clone()]));
+                }
+                crate::http_api::DesktopRelayRequest::Invoke { response, .. } => {
+                    tokio::spawn(async move {
+                        let _response = response;
+                        std::future::pending::<()>().await;
+                    });
+                }
+            }
+        }
+    })
+}
+
 async fn get_json_body(router: &Router, uri: &str) -> Value {
     let response = router
         .clone()
         .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+        .await
+        .expect("request");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "GET {uri}: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+    from_slice(&bytes).expect("json body")
+}
+
+async fn get_account_json_body(router: &Router, state: &AppState, uri: &str) -> Value {
+    let token = state
+        .local_task_events_token
+        .as_deref()
+        .expect("test task-event credential");
+    let response = router
+        .clone()
+        .oneshot(
+            Request::get(uri)
+                .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
         .await
         .expect("request");
     let status = response.status();
@@ -95,6 +289,29 @@ fn legacy_parent_cursor(
     });
     format!(
         "p1.{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.to_string())
+    )
+}
+
+fn aggregate_parent_cursor(
+    local_machine_id: &str,
+    peer_machine_id: &str,
+    parent_task_id: &str,
+    peer_cursor: &str,
+) -> String {
+    let payload = serde_json::json!({
+        "localMachineId": local_machine_id,
+        "scope": {
+            "kind": "children",
+            "parent_task_id": parent_task_id,
+        },
+        "machineIds": [local_machine_id, peer_machine_id],
+        "cursorsByMachine": {
+            (peer_machine_id): peer_cursor,
+        },
+    });
+    format!(
+        "ks1.{}",
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.to_string())
     )
 }
@@ -308,6 +525,922 @@ async fn repo_scope_watches_tasks_the_caller_did_not_name() {
         event_pairs(&body),
         vec![("child-b".to_string(), "stage.changed".to_string())]
     );
+}
+
+/// The public local surface is the watcher boundary: it fans a repository
+/// wait through the already-authenticated relay bridge, while the peer's
+/// tunneled sub-wait remains native and cannot recurse. The two repositories
+/// deliberately have different row ids; only their remote URL hash agrees.
+///
+/// This is also the causal reconnect proof. The source retains the peer's
+/// native cursor while the peer is absent, reports that gap, then catches up
+/// from the peer's append-only feed without replaying the event already seen.
+#[tokio::test]
+async fn local_surface_aggregates_peer_repo_events_and_resumes_after_reconnect() {
+    const REMOTE_HASH: &str = "sha256:same-origin-on-two-machines";
+    let source = test_state_with_seed("desktop-source-events", "Source Mac", |db| {
+        db.insert_test_repo("repo-source-id", "Kanna Source")
+            .expect("insert source repo");
+        db.patch_repo("repo-source-id", None, None, Some(Some(REMOTE_HASH)), None)
+            .expect("set source remote hash");
+    });
+    let peer = test_state_with_seed("desktop-peer-events", "Peer Mac", |db| {
+        db.insert_test_repo("repo-peer-different-id", "Kanna Peer")
+            .expect("insert peer repo");
+        db.patch_repo(
+            "repo-peer-different-id",
+            None,
+            None,
+            Some(Some(REMOTE_HASH)),
+            None,
+        )
+        .expect("set peer remote hash");
+        db.insert_test_pipeline_item(
+            "remote-child",
+            "repo-peer-different-id",
+            "remote child",
+            Some("Remote Child"),
+            "in progress",
+            "2026-08-16 00:00:00",
+        )
+        .expect("insert peer task");
+        start_run(db, "remote-run", "remote-child", "in progress");
+    });
+    let connected = Arc::new(AtomicBool::new(true));
+    let relay = connect_test_relay_peer(&source, Arc::clone(&peer), Arc::clone(&connected));
+    let source_router = router(Arc::clone(&source));
+    let peer_router = router(Arc::clone(&peer));
+
+    let first = get_account_json_body(
+        &source_router,
+        &source,
+        "/v1/task-events?repoId=repo-source-id&timeoutSecs=1",
+    )
+    .await;
+    assert_eq!(first["waitOutcome"], "events");
+    assert!(cursor_of(&first).starts_with("ks1."));
+    assert_eq!(
+        event_pairs(&first),
+        vec![("remote-child".into(), "run.started".into())]
+    );
+    assert_eq!(first["events"][0]["machineId"], "desktop-peer-events");
+    assert_eq!(first["machineErrors"], json!([]));
+    let first_cursor = cursor_of(&first);
+
+    // The same event is present on the peer's own native feed. This compares
+    // the aggregate output against its source of truth rather than a fixture.
+    let peer_first = get_json_body(
+        &peer_router,
+        "/v1/task-events?repoId=repo-peer-different-id&localOnly=true&timeoutSecs=0",
+    )
+    .await;
+    assert_eq!(event_pairs(&peer_first), event_pairs(&first));
+
+    connected.store(false, Ordering::SeqCst);
+    Db::open(&peer.config().db_path)
+        .expect("open peer db")
+        .update_pipeline_item_stage("remote-child", "review")
+        .expect("append event while peer is disconnected");
+    let stale = get_account_json_body(
+        &source_router,
+        &source,
+        &format!("/v1/task-events?repoId=repo-source-id&cursor={first_cursor}&timeoutSecs=0"),
+    )
+    .await;
+    assert_eq!(stale["waitOutcome"], "partial");
+    assert_eq!(event_pairs(&stale), Vec::new());
+    assert_eq!(
+        stale["machineErrors"][0]["machineId"],
+        "desktop-peer-events"
+    );
+    assert_eq!(stale["machineErrors"][0]["stale"], true);
+
+    connected.store(true, Ordering::SeqCst);
+    let caught_up = get_account_json_body(
+        &source_router,
+        &source,
+        &format!(
+            "/v1/task-events?repoId=repo-source-id&cursor={}&timeoutSecs=0",
+            cursor_of(&stale)
+        ),
+    )
+    .await;
+    assert_eq!(caught_up["waitOutcome"], "events");
+    assert_eq!(
+        event_pairs(&caught_up),
+        vec![("remote-child".into(), "stage.changed".into())]
+    );
+    assert_eq!(caught_up["events"][0]["machineId"], "desktop-peer-events");
+
+    let drained = get_account_json_body(
+        &source_router,
+        &source,
+        &format!(
+            "/v1/task-events?repoId=repo-source-id&cursor={}&timeoutSecs=0",
+            cursor_of(&caught_up)
+        ),
+    )
+    .await;
+    assert_eq!(drained["waitOutcome"], "timeout");
+    assert_eq!(event_pairs(&drained), Vec::new());
+
+    let peer_all = get_json_body(
+        &peer_router,
+        "/v1/task-events?repoRemoteUrlHash=sha256%3Asame-origin-on-two-machines&localOnly=true&timeoutSecs=0",
+    )
+    .await;
+    let aggregate_events = event_pairs(&first)
+        .into_iter()
+        .chain(event_pairs(&caught_up))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        aggregate_events,
+        event_pairs(&peer_all),
+        "the aggregate feed must neither duplicate nor lose peer events"
+    );
+
+    relay.abort();
+}
+
+#[tokio::test]
+async fn truncated_peer_legacy_parent_batch_preserves_acknowledged_watermarks() {
+    let source = test_state_with_seed("desktop-legacy-source", "Legacy Source", |db| {
+        db.insert_test_repo("repo-legacy-source", "Legacy Source Repo")
+            .expect("insert source repo");
+        for task_id in ["legacy-parent", "legacy-local"] {
+            db.insert_test_pipeline_item(
+                task_id,
+                "repo-legacy-source",
+                "local legacy cursor task",
+                Some(task_id),
+                "in progress",
+                "2026-08-16 00:00:00",
+            )
+            .expect("insert source task");
+        }
+        db.update_pipeline_item_parent("legacy-local", Some("legacy-parent"))
+            .expect("set local parent");
+        db.update_pipeline_item_stage("legacy-local", "review")
+            .expect("append local event");
+    });
+    let peer = test_state_with_seed("desktop-legacy-peer", "Legacy Peer", |db| {
+        db.insert_test_repo("repo-legacy-peer", "Legacy Peer Repo")
+            .expect("insert peer repo");
+        for task_id in ["legacy-parent", "legacy-acknowledged", "legacy-pending"] {
+            db.insert_test_pipeline_item(
+                task_id,
+                "repo-legacy-peer",
+                "legacy cursor task",
+                Some(task_id),
+                "in progress",
+                "2026-08-16 00:00:00",
+            )
+            .expect("insert peer task");
+        }
+        for child in ["legacy-acknowledged", "legacy-pending"] {
+            db.update_pipeline_item_parent(child, Some("legacy-parent"))
+                .expect("set parent");
+        }
+        db.update_pipeline_item_stage("legacy-pending", "review")
+            .expect("append first pending event");
+        db.update_pipeline_item_pr(
+            "legacy-pending",
+            Some(1102),
+            "https://github.com/kanna/kanna/pull/1102",
+        )
+        .expect("append second pending event");
+        db.update_pipeline_item_stage("legacy-acknowledged", "review")
+            .expect("append acknowledged event after pending events");
+    });
+    let peer_router = router(Arc::clone(&peer));
+    let acknowledged = get_json_body(
+        &peer_router,
+        "/v1/task-events?taskIds=legacy-acknowledged&localOnly=true&timeoutSecs=0",
+    )
+    .await;
+    let acknowledged_seq = acknowledged["events"][0]["seq"]
+        .as_i64()
+        .expect("acknowledged event seq");
+    let legacy_cursor = legacy_parent_cursor(
+        "legacy-parent",
+        [
+            (
+                "legacy-acknowledged".to_string(),
+                serde_json::json!(acknowledged_seq),
+            ),
+            ("legacy-pending".to_string(), serde_json::json!(0)),
+        ]
+        .into_iter()
+        .collect(),
+    );
+
+    // Establish the peer feed's exact non-replaying result for the same p1
+    // cursor before comparing the aggregate surface with it.
+    let peer_feed = get_json_body(
+        &peer_router,
+        &format!(
+            "/v1/task-events?parentTaskId=legacy-parent&localOnly=true&limit=500&cursor={legacy_cursor}&timeoutSecs=0"
+        ),
+    )
+    .await;
+    assert_eq!(
+        event_pairs(&peer_feed),
+        vec![
+            ("legacy-pending".into(), "stage.changed".into()),
+            ("legacy-pending".into(), "task.pr_created".into()),
+        ]
+    );
+
+    let invoke_gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let invoke_count = Arc::new(AtomicUsize::new(0));
+    let relay = connect_test_relay_peer_with_invoke_gate(
+        &source,
+        Arc::clone(&peer),
+        Arc::clone(&invoke_gate),
+        Arc::clone(&invoke_count),
+    );
+    let source_router = router(Arc::clone(&source));
+    let aggregate_cursor = aggregate_parent_cursor(
+        "desktop-legacy-source",
+        "desktop-legacy-peer",
+        "legacy-parent",
+        &legacy_cursor,
+    );
+    let first = get_account_json_body(
+        &source_router,
+        &source,
+        &format!(
+            "/v1/task-events?parentTaskId=legacy-parent&limit=500&cursor={aggregate_cursor}&timeoutSecs=30"
+        ),
+    )
+    .await;
+    assert_eq!(
+        event_pairs(&first),
+        vec![("legacy-local".into(), "stage.changed".into())]
+    );
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while invoke_count.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the retained peer wait must start with the original large limit");
+    invoke_gate.add_permits(10);
+
+    let second = get_account_json_body(
+        &source_router,
+        &source,
+        &format!(
+            "/v1/task-events?parentTaskId=legacy-parent&limit=1&cursor={}&timeoutSecs=5",
+            cursor_of(&first)
+        ),
+    )
+    .await;
+    assert_eq!(
+        event_pairs(&second),
+        vec![("legacy-pending".into(), "stage.changed".into())]
+    );
+    assert_eq!(second["hasMore"], true);
+
+    let last_emitted_seq = second["events"][0]["seq"]
+        .as_i64()
+        .expect("emitted peer sequence");
+    let second_cursor = cursor_of(&second);
+    let aggregate_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(
+            second_cursor
+                .strip_prefix("ks1.")
+                .expect("aggregate cursor"),
+        )
+        .expect("decode aggregate continuation");
+    let aggregate_continuation: Value =
+        serde_json::from_slice(&aggregate_bytes).expect("parse aggregate continuation");
+    let peer_continuation = aggregate_continuation["cursorsByMachine"]["desktop-legacy-peer"]
+        .as_str()
+        .expect("peer continuation");
+    let peer_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(
+            peer_continuation
+                .strip_prefix("p1.")
+                .expect("truncated legacy peer batch must retain a p1 continuation"),
+        )
+        .expect("decode peer continuation");
+    let peer_continuation: Value =
+        serde_json::from_slice(&peer_bytes).expect("parse peer continuation");
+    assert_eq!(peer_continuation["event_seq"], last_emitted_seq);
+    assert_eq!(
+        peer_continuation["watermarks"]["legacy-acknowledged"],
+        acknowledged_seq
+    );
+    assert!(acknowledged_seq > last_emitted_seq);
+
+    let third = get_account_json_body(
+        &source_router,
+        &source,
+        &format!(
+            "/v1/task-events?parentTaskId=legacy-parent&limit=500&cursor={}&timeoutSecs=0",
+            cursor_of(&second)
+        ),
+    )
+    .await;
+    assert_eq!(
+        event_pairs(&third),
+        vec![("legacy-pending".into(), "task.pr_created".into())],
+        "resuming the truncated cursor must not replay the acknowledged child"
+    );
+
+    let aggregate_events = event_pairs(&second)
+        .into_iter()
+        .chain(event_pairs(&third))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        aggregate_events,
+        event_pairs(&peer_feed),
+        "the aggregate peer sequence must exactly match the peer's own feed"
+    );
+    assert!(aggregate_events
+        .iter()
+        .all(|(task_id, _)| task_id != "legacy-acknowledged"));
+
+    relay.abort();
+}
+
+#[tokio::test]
+async fn local_surface_aggregates_named_and_parent_scopes_when_tasks_live_only_on_peer() {
+    let source = test_state_with_seed("desktop-source-scopes", "Source Mac", |db| {
+        db.insert_test_repo("repo-source-scopes", "Source")
+            .expect("insert source repo");
+        db.insert_test_pipeline_item(
+            "durable-parent",
+            "repo-source-scopes",
+            "parent",
+            Some("Durable Parent"),
+            "in progress",
+            "2026-08-16 00:00:00",
+        )
+        .expect("insert source parent");
+    });
+    let peer = test_state_with_seed("desktop-peer-scopes", "Peer Mac", |db| {
+        db.insert_test_repo("repo-peer-scopes", "Peer")
+            .expect("insert peer repo");
+        db.insert_test_pipeline_item(
+            "peer-only-child",
+            "repo-peer-scopes",
+            "child",
+            Some("Peer Child"),
+            "in progress",
+            "2026-08-16 00:00:00",
+        )
+        .expect("insert peer child");
+        db.update_pipeline_item_parent("peer-only-child", Some("durable-parent"))
+            .expect("attach cross-machine parent identity");
+        start_run(db, "peer-only-run", "peer-only-child", "in progress");
+    });
+    let connected = Arc::new(AtomicBool::new(true));
+    let relay = connect_test_relay_peer(&source, Arc::clone(&peer), connected);
+    let source_router = router(Arc::clone(&source));
+
+    let named = get_account_json_body(
+        &source_router,
+        &source,
+        "/v1/task-events?taskIds=peer-only-child&timeoutSecs=0",
+    )
+    .await;
+    assert_eq!(event_pairs(&named).len(), 1);
+    assert_eq!(named["events"][0]["machineId"], "desktop-peer-scopes");
+
+    let children = get_account_json_body(
+        &source_router,
+        &source,
+        "/v1/task-events?parentTaskId=durable-parent&timeoutSecs=0",
+    )
+    .await;
+    assert_eq!(event_pairs(&children), event_pairs(&named));
+    assert_eq!(children["events"][0]["machineId"], "desktop-peer-scopes");
+
+    relay.abort();
+}
+
+#[tokio::test]
+async fn documented_node_fetch_watcher_authorizes_its_first_aggregate_poll() {
+    let source = test_state_with_seed("desktop-node-source", "Node Source", |db| {
+        db.insert_test_repo("repo-node-source", "Node Source")
+            .expect("insert source repo");
+    });
+    let peer = test_state_with_seed("desktop-node-peer", "Node Peer", |db| {
+        db.insert_test_repo("repo-node-peer", "Node Peer")
+            .expect("insert peer repo");
+        db.insert_test_pipeline_item(
+            "node-peer-child",
+            "repo-node-peer",
+            "node watcher child",
+            Some("Node Watcher Child"),
+            "in progress",
+            "2026-08-16 00:00:00",
+        )
+        .expect("insert peer task");
+        start_run(db, "node-peer-run", "node-peer-child", "in progress");
+    });
+    let relay = connect_test_relay_peer(&source, peer, Arc::new(AtomicBool::new(true)));
+    let token_path = source
+        .config()
+        .task_events_token_path()
+        .expect("task-event credential path");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&token_path)
+                .expect("task-event credential metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind Node watcher server");
+    let address = listener.local_addr().expect("Node watcher address");
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router(source).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve Node watcher request");
+    });
+    let script = r#"
+import { readFile } from "node:fs/promises";
+const token = (await readFile(process.env.KANNA_TASK_EVENTS_TOKEN_PATH, "utf8")).trim();
+const url = new URL("/v1/task-events", process.env.KANNA_SERVER_BASE_URL);
+url.searchParams.set("taskIds", "node-peer-child");
+url.searchParams.set("timeoutSecs", "0");
+const response = await fetch(url, {
+  headers: { authorization: `Bearer ${token}` },
+  signal: AbortSignal.timeout(20000),
+});
+const body = await response.text();
+if (!response.ok) throw new Error(`HTTP ${response.status}: ${body}`);
+process.stdout.write(body);
+"#;
+    let output = tokio::process::Command::new("node")
+        .args(["--input-type=module", "-e", script])
+        .env("KANNA_SERVER_BASE_URL", format!("http://{address}"))
+        .env("KANNA_TASK_EVENTS_TOKEN_PATH", &token_path)
+        .output()
+        .await
+        .expect("run documented Node watcher client");
+    assert!(
+        output.status.success(),
+        "Node watcher failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let body: Value = from_slice(&output.stdout).expect("Node watcher JSON response");
+    assert!(cursor_of(&body).starts_with("ks1."));
+    assert_eq!(
+        event_pairs(&body),
+        vec![("node-peer-child".into(), "run.started".into())]
+    );
+    assert_eq!(body["events"][0]["machineId"], "desktop-node-peer");
+
+    server.abort();
+    relay.abort();
+}
+
+#[tokio::test]
+async fn unpaired_non_loopback_lan_wait_never_uses_the_account_relay_feed() {
+    const REMOTE_HASH: &str = "sha256:lan-authority-repo";
+    let source = test_state_with_seed("desktop-lan-source", "LAN Source", |db| {
+        db.insert_test_repo("repo-lan-source", "LAN Source Repo")
+            .expect("insert source repo");
+        db.patch_repo("repo-lan-source", None, None, Some(Some(REMOTE_HASH)), None)
+            .expect("set source remote hash");
+    });
+    let peer = test_state_with_seed("desktop-lan-peer", "LAN Peer", |db| {
+        db.insert_test_repo("repo-lan-peer", "LAN Peer Repo")
+            .expect("insert peer repo");
+        db.patch_repo("repo-lan-peer", None, None, Some(Some(REMOTE_HASH)), None)
+            .expect("set peer remote hash");
+        db.insert_test_pipeline_item(
+            "lan-peer-child",
+            "repo-lan-peer",
+            "peer child",
+            Some("Peer Child"),
+            "in progress",
+            "2026-08-16 00:00:00",
+        )
+        .expect("insert peer task");
+        start_run(db, "lan-peer-run", "lan-peer-child", "in progress");
+    });
+    let relay = connect_test_relay_peer(&source, peer, Arc::new(AtomicBool::new(true)));
+    let app = router(Arc::clone(&source));
+    let mut request = Request::get("/v1/task-events?repoId=repo-lan-source&timeoutSecs=0")
+        .body(Body::empty())
+        .expect("request");
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [192, 168, 1, 42],
+            49152,
+        ))));
+
+    let response = app.oneshot(request).await.expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body"),
+    )
+    .expect("json body");
+    assert_eq!(event_pairs(&body), Vec::new());
+    assert!(!cursor_of(&body).starts_with("ks1."));
+    assert!(body.get("machineErrors").is_none());
+
+    relay.abort();
+}
+
+#[tokio::test]
+async fn unauthenticated_loopback_waits_get_only_the_local_feed_for_all_browser_metadata() {
+    const REMOTE_HASH: &str = "sha256:browser-origin-repo";
+    let source = test_state_with_seed("desktop-browser-source", "Browser Source", |db| {
+        db.insert_test_repo("repo-browser-source", "Browser Source Repo")
+            .expect("insert source repo");
+        db.patch_repo(
+            "repo-browser-source",
+            None,
+            None,
+            Some(Some(REMOTE_HASH)),
+            None,
+        )
+        .expect("set source remote hash");
+        db.insert_test_pipeline_item(
+            "browser-local-child",
+            "repo-browser-source",
+            "local child",
+            Some("Local Child"),
+            "in progress",
+            "2026-08-16 00:00:00",
+        )
+        .expect("insert local task");
+        start_run(
+            db,
+            "browser-local-run",
+            "browser-local-child",
+            "in progress",
+        );
+    });
+    let peer = test_state_with_seed("desktop-browser-peer", "Browser Peer", |db| {
+        db.insert_test_repo("repo-browser-peer", "Browser Peer Repo")
+            .expect("insert peer repo");
+        db.patch_repo(
+            "repo-browser-peer",
+            None,
+            None,
+            Some(Some(REMOTE_HASH)),
+            None,
+        )
+        .expect("set peer remote hash");
+        db.insert_test_pipeline_item(
+            "browser-peer-child",
+            "repo-browser-peer",
+            "peer child",
+            Some("Peer Child"),
+            "in progress",
+            "2026-08-16 00:00:00",
+        )
+        .expect("insert peer task");
+        start_run(db, "browser-peer-run", "browser-peer-child", "in progress");
+    });
+    let relay = connect_test_relay_peer(&source, peer, Arc::new(AtomicBool::new(true)));
+    let app = router(source);
+    for headers in [
+        Vec::new(),
+        vec![
+            ("sec-fetch-site", "same-origin"),
+            ("sec-fetch-mode", "same-origin"),
+        ],
+        vec![("origin", "https://attacker.example")],
+    ] {
+        let mut builder = Request::get("/v1/task-events?repoId=repo-browser-source&timeoutSecs=0");
+        for (name, value) in headers {
+            builder = builder.header(name, value);
+        }
+        let mut request = builder.body(Body::empty()).expect("request");
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                49152,
+            ))));
+
+        let response = app.clone().oneshot(request).await.expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value = from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body"),
+        )
+        .expect("json body");
+        assert_eq!(
+            event_pairs(&body),
+            vec![("browser-local-child".into(), "run.started".into())]
+        );
+        assert!(!cursor_of(&body).starts_with("ks1."));
+        assert!(body["events"][0].get("machineId").is_none());
+    }
+
+    relay.abort();
+}
+
+#[tokio::test]
+async fn unauthorized_resume_rejects_an_account_wide_cursor_without_losing_peer_state() {
+    let source = test_state_with_seed("desktop-downgrade-source", "Downgrade Source", |db| {
+        db.insert_test_repo("repo-downgrade", "Downgrade Repo")
+            .expect("insert source repo");
+        db.insert_test_pipeline_item(
+            "downgrade-child",
+            "repo-downgrade",
+            "local child",
+            Some("Local Child"),
+            "in progress",
+            "2026-08-16 00:00:00",
+        )
+        .expect("insert local task");
+        start_run(db, "downgrade-run", "downgrade-child", "in progress");
+    });
+    let peer = test_state_with_seed("desktop-downgrade-peer", "Downgrade Peer", |_| {});
+    let relay = connect_test_relay_peer(&source, peer, Arc::new(AtomicBool::new(true)));
+    let app = router(Arc::clone(&source));
+    let first = get_account_json_body(
+        &app,
+        &source,
+        "/v1/task-events?taskIds=downgrade-child&timeoutSecs=0",
+    )
+    .await;
+    let mut request = Request::get(format!(
+        "/v1/task-events?taskIds=downgrade-child&cursor={}&timeoutSecs=0",
+        cursor_of(&first)
+    ))
+    .header(axum::http::header::ORIGIN, "https://attacker.example")
+    .body(Body::empty())
+    .expect("request");
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            49153,
+        ))));
+
+    let response = app.oneshot(request).await.expect("response");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    assert!(String::from_utf8_lossy(&body).contains("not authorized to resume"));
+
+    relay.abort();
+}
+
+#[tokio::test]
+async fn fresh_zero_timeout_drains_local_events_without_waiting_for_an_unresponsive_peer() {
+    let source = test_state_with_seed("desktop-zero-source", "Zero Source", |db| {
+        db.insert_test_repo("repo-zero", "Zero Repo")
+            .expect("insert source repo");
+        db.insert_test_pipeline_item(
+            "zero-local-child",
+            "repo-zero",
+            "local child",
+            Some("Local Child"),
+            "in progress",
+            "2026-08-16 00:00:00",
+        )
+        .expect("insert local task");
+        start_run(db, "zero-local-run", "zero-local-child", "in progress");
+    });
+    let relay = connect_unresponsive_listed_peer(&source, "desktop-zero-unresponsive");
+    let app = router(Arc::clone(&source));
+
+    let body = tokio::time::timeout(
+        Duration::from_millis(500),
+        get_account_json_body(
+            &app,
+            &source,
+            "/v1/task-events?taskIds=zero-local-child&timeoutSecs=0",
+        ),
+    )
+    .await
+    .expect("zero-timeout drain must not await the relay invoke timeout");
+    assert_eq!(
+        event_pairs(&body),
+        vec![("zero-local-child".into(), "run.started".into())]
+    );
+    assert_eq!(body["events"][0]["machineId"], "desktop-zero-source");
+
+    relay.abort();
+}
+
+fn aggregate_pending_leg_states() -> (Arc<AppState>, Arc<AppState>) {
+    let source = test_state_with_seed("desktop-pending-source", "Pending Source", |db| {
+        db.insert_test_repo("repo-pending-source", "Pending Source Repo")
+            .expect("insert source repo");
+        db.insert_test_pipeline_item(
+            "pending-local-child",
+            "repo-pending-source",
+            "local child",
+            Some("Local Child"),
+            "in progress",
+            "2026-08-16 00:00:00",
+        )
+        .expect("insert source task");
+        start_run(
+            db,
+            "pending-local-run",
+            "pending-local-child",
+            "in progress",
+        );
+    });
+    let peer = test_state_with_seed("desktop-pending-peer", "Pending Peer", |db| {
+        db.insert_test_repo("repo-pending-peer", "Pending Peer Repo")
+            .expect("insert peer repo");
+        db.insert_test_pipeline_item(
+            "pending-peer-child",
+            "repo-pending-peer",
+            "peer child",
+            Some("Peer Child"),
+            "in progress",
+            "2026-08-16 00:00:00",
+        )
+        .expect("insert peer task");
+    });
+    (source, peer)
+}
+
+#[tokio::test]
+async fn zero_timeout_resume_does_not_await_an_inherited_long_poll() {
+    let (source, peer) = aggregate_pending_leg_states();
+    let relay = connect_test_relay_peer(&source, peer, Arc::new(AtomicBool::new(true)));
+    let app = router(Arc::clone(&source));
+    let scope = "/v1/task-events?taskIds=pending-local-child,pending-peer-child";
+    let first = get_account_json_body(&app, &source, &format!("{scope}&timeoutSecs=30")).await;
+    assert_eq!(event_pairs(&first).len(), 1);
+
+    let resumed = tokio::time::timeout(
+        Duration::from_millis(500),
+        get_account_json_body(
+            &app,
+            &source,
+            &format!("{scope}&cursor={}&timeoutSecs=0", cursor_of(&first)),
+        ),
+    )
+    .await
+    .expect("zero-timeout resume must not await the inherited 30-second leg");
+    assert!(event_pairs(&resumed).is_empty());
+
+    relay.abort();
+}
+
+#[tokio::test]
+async fn shrinking_limit_retains_one_peer_leg_and_resumes_past_only_emitted_events() {
+    let (source, peer) = aggregate_pending_leg_states();
+    let invoke_count = Arc::new(AtomicUsize::new(0));
+    let busy_count = Arc::new(AtomicUsize::new(0));
+    let relay = connect_test_relay_peer_with_long_poll_budget(
+        &source,
+        Arc::clone(&peer),
+        Arc::clone(&invoke_count),
+        Arc::clone(&busy_count),
+    );
+    let app = router(Arc::clone(&source));
+    let scope = "/v1/task-events?taskIds=pending-local-child,pending-peer-child";
+    let first =
+        get_account_json_body(&app, &source, &format!("{scope}&limit=500&timeoutSecs=30")).await;
+    assert_eq!(event_pairs(&first).len(), 1);
+
+    // Resume with a different limit while the original peer long poll still
+    // owns the only peer permit. Restarting that retained leg would now hit a
+    // real 503, rather than racing a permit that the completed request already
+    // released.
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while invoke_count.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the retained peer long poll must acquire its permit");
+    assert_eq!(invoke_count.load(Ordering::SeqCst), 1);
+    let inherited = get_account_json_body(
+        &app,
+        &source,
+        &format!("{scope}&limit=1&cursor={}&timeoutSecs=0", cursor_of(&first)),
+    )
+    .await;
+    assert!(event_pairs(&inherited).is_empty());
+    assert_eq!(invoke_count.load(Ordering::SeqCst), 1);
+    assert_eq!(busy_count.load(Ordering::SeqCst), 0);
+
+    let db = Db::open(&peer.config().db_path).expect("open peer db");
+    db.update_pipeline_item_stage("pending-peer-child", "review")
+        .expect("append first peer event");
+    db.update_pipeline_item_pr(
+        "pending-peer-child",
+        Some(1101),
+        "https://github.com/kanna/kanna/pull/1101",
+    )
+    .expect("append second peer event");
+    db.close_pipeline_item("pending-peer-child")
+        .expect("append third peer event");
+
+    let second = get_account_json_body(
+        &app,
+        &source,
+        &format!(
+            "{scope}&limit=1&cursor={}&timeoutSecs=5",
+            cursor_of(&inherited)
+        ),
+    )
+    .await;
+    assert_eq!(event_pairs(&second).len(), 1);
+    assert_eq!(second["hasMore"], true);
+    assert_eq!(busy_count.load(Ordering::SeqCst), 0);
+
+    let third = get_account_json_body(
+        &app,
+        &source,
+        &format!(
+            "{scope}&limit=1&cursor={}&timeoutSecs=0",
+            cursor_of(&second)
+        ),
+    )
+    .await;
+    assert_eq!(event_pairs(&third).len(), 1);
+    assert_eq!(third["hasMore"], true);
+
+    let fourth = get_account_json_body(
+        &app,
+        &source,
+        &format!("{scope}&limit=1&cursor={}&timeoutSecs=0", cursor_of(&third)),
+    )
+    .await;
+    assert_eq!(event_pairs(&fourth).len(), 1);
+    let peer_events = event_pairs(&second)
+        .into_iter()
+        .chain(event_pairs(&third))
+        .chain(event_pairs(&fourth))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        peer_events,
+        vec![
+            ("pending-peer-child".into(), "stage.changed".into()),
+            ("pending-peer-child".into(), "task.pr_created".into()),
+            ("pending-peer-child".into(), "task.closed".into()),
+        ],
+        "shrinking the limit must preserve every event behind the retained leg"
+    );
+    assert_eq!(busy_count.load(Ordering::SeqCst), 0);
+    assert_eq!(invoke_count.load(Ordering::SeqCst), 3);
+
+    relay.abort();
+}
+
+#[tokio::test]
+async fn empty_inherited_leg_is_rearmed_and_wakes_the_same_long_poll() {
+    let (source, peer) = aggregate_pending_leg_states();
+    let relay =
+        connect_test_relay_peer(&source, Arc::clone(&peer), Arc::new(AtomicBool::new(true)));
+    let app = router(Arc::clone(&source));
+    let scope = "/v1/task-events?taskIds=pending-local-child,pending-peer-child";
+    let first = get_account_json_body(&app, &source, &format!("{scope}&timeoutSecs=1")).await;
+    assert_eq!(event_pairs(&first).len(), 1);
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+
+    let peer_db_path = peer.config().db_path.clone();
+    let writer = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        Db::open(&peer_db_path)
+            .expect("open peer db")
+            .update_pipeline_item_stage("pending-peer-child", "review")
+            .expect("append peer event");
+    });
+    let resumed = tokio::time::timeout(
+        Duration::from_secs(2),
+        get_account_json_body(
+            &app,
+            &source,
+            &format!("{scope}&cursor={}&timeoutSecs=5", cursor_of(&first)),
+        ),
+    )
+    .await
+    .expect("rearmed peer leg must wake this call, not the next outer poll");
+    writer.await.expect("writer");
+    assert_eq!(
+        event_pairs(&resumed),
+        vec![("pending-peer-child".into(), "stage.changed".into())]
+    );
+    assert_eq!(resumed["events"][0]["machineId"], "desktop-pending-peer");
+
+    relay.abort();
 }
 
 /// One orchestrator, its own children, and nobody else's. Everything here is

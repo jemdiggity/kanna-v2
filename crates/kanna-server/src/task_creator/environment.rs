@@ -130,6 +130,7 @@ pub(super) fn build_spawn_env(
         "KANNA_TASK_ID",
         "KANNA_SOCKET_PATH",
         "KANNA_SERVER_BASE_URL",
+        "KANNA_TASK_EVENTS_TOKEN_PATH",
         "KANNA_CLI_PATH",
         "KANNA_MCP_PATH",
         "KANNA_MCP_CONFIG",
@@ -148,6 +149,12 @@ pub(super) fn build_spawn_env(
         "KANNA_SERVER_BASE_URL".to_string(),
         kanna_server_base_url(config),
     );
+    if let Some(path) = config.task_events_token_path() {
+        env.insert(
+            "KANNA_TASK_EVENTS_TOKEN_PATH".to_string(),
+            path.to_string_lossy().to_string(),
+        );
+    }
 
     if let Some(path) = kanna_cli_path {
         env.insert("KANNA_CLI_PATH".to_string(), path);
@@ -176,14 +183,22 @@ pub(super) fn write_kanna_mcp_config(
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("failed to create Kanna MCP config directory: {e}"))?;
     }
+    let mut mcp_env = serde_json::Map::from_iter([(
+        "KANNA_SERVER_BASE_URL".to_string(),
+        serde_json::Value::String(server_base_url.to_string()),
+    )]);
+    if let Some(token_path) = env.get("KANNA_TASK_EVENTS_TOKEN_PATH") {
+        mcp_env.insert(
+            "KANNA_TASK_EVENTS_TOKEN_PATH".to_string(),
+            serde_json::Value::String(token_path.clone()),
+        );
+    }
     let config = serde_json::json!({
         "mcpServers": {
             "kanna-mcp": {
                 "command": mcp_path,
                 "args": ["serve"],
-                "env": {
-                    "KANNA_SERVER_BASE_URL": server_base_url
-                }
+                "env": mcp_env
             }
         }
     });

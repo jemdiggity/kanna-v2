@@ -126,6 +126,8 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
                     ("task_ids", "task_id"),
                     ("parent_task_id", "parent_task_id"),
                     ("repo_id", "repo_id"),
+                    ("repo_remote_url_hash", "repo_remote_url_hash"),
+                    ("local_only", "local_only"),
                     ("cursor", "cursor"),
                     ("timeout_secs", "timeout_secs"),
                     ("limit", "limit"),

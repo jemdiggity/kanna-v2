@@ -537,6 +537,14 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         repo_id: Option<String>,
 
+        /// Watch every task in repository clones with this remote URL hash
+        #[arg(long)]
+        repo_remote_url_hash: Option<String>,
+
+        /// Restrict the wait to the connected server instead of aggregating peers
+        #[arg(long)]
+        local_only: bool,
+
         /// Cursor from the previous call; omit to receive retained history
         #[arg(long)]
         cursor: Option<String>,

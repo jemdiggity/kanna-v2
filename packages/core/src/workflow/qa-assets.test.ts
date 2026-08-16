@@ -157,7 +157,12 @@ describe("QA workflow assets", () => {
     );
     expect(agent.prompt).toContain("connection.effectiveBaseUrl");
     expect(agent.prompt).toContain("serverStatus.desktop.id");
-    expect(agent.prompt).toContain("taskIds cursor is a multi-machine aggregate");
+    expect(agent.prompt).toContain("km1 is an MCP client cursor");
+    expect(agent.prompt).toContain("server `ks1.` cursor");
+    expect(agent.prompt).toContain("machines are stale or unreachable");
+    expect(agent.prompt).toContain("const observedMachineErrors = new Map()");
+    expect(agent.prompt).toContain('["timeout", "partial"].includes(payload.waitOutcome)');
+    expect(agent.prompt).toContain("staleness observed");
     expect(agent.prompt).toContain('["repoId", "taskIds", "parentTaskId"]');
     expect(agent.prompt).toContain(
       'url.searchParams.set("timeoutSecs", String(timeoutSecs))'

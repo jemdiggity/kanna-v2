@@ -4,6 +4,7 @@ use kanna_tool_catalog::{
 };
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
+use std::env;
 
 use crate::models::{
     AddRepoRequest, BlockTaskRequest, CompleteStageRequest, CreateTaskRequest, CreateTaskResponse,
@@ -69,37 +70,50 @@ pub(crate) fn dependent_tasks_exist_path(task_id: &str) -> String {
 
 /// Query for the multi-task event wait. Keys are camelCase because the server
 /// deserializes them with the same casing the MCP catalog sends.
-pub(crate) fn task_events_path(
-    task_ids: &[String],
-    parent_task_id: Option<&str>,
-    repo_id: Option<&str>,
-    cursor: Option<&str>,
-    timeout_secs: u64,
-    limit: Option<i64>,
-) -> String {
+pub(crate) struct TaskEventsParams<'a> {
+    pub(crate) task_ids: &'a [String],
+    pub(crate) parent_task_id: Option<&'a str>,
+    pub(crate) repo_id: Option<&'a str>,
+    pub(crate) repo_remote_url_hash: Option<&'a str>,
+    pub(crate) local_only: bool,
+    pub(crate) cursor: Option<&'a str>,
+    pub(crate) timeout_secs: u64,
+    pub(crate) limit: Option<i64>,
+}
+
+pub(crate) fn task_events_path(params: &TaskEventsParams<'_>) -> String {
     let mut query = vec![format!(
         "timeoutSecs={}",
-        clamp_wait_timeout_secs(timeout_secs)
+        clamp_wait_timeout_secs(params.timeout_secs)
     )];
-    if !task_ids.is_empty() {
+    if !params.task_ids.is_empty() {
         query.push(format!(
             "taskIds={}",
-            encode_path_segment(&task_ids.join(","))
+            encode_path_segment(&params.task_ids.join(","))
         ));
     }
-    if let Some(parent_task_id) = parent_task_id {
+    if let Some(parent_task_id) = params.parent_task_id {
         query.push(format!(
             "parentTaskId={}",
             encode_path_segment(parent_task_id)
         ));
     }
-    if let Some(repo_id) = repo_id {
+    if let Some(repo_id) = params.repo_id {
         query.push(format!("repoId={}", encode_path_segment(repo_id)));
     }
-    if let Some(cursor) = cursor {
+    if let Some(repo_remote_url_hash) = params.repo_remote_url_hash {
+        query.push(format!(
+            "repoRemoteUrlHash={}",
+            encode_path_segment(repo_remote_url_hash)
+        ));
+    }
+    if params.local_only {
+        query.push("localOnly=true".to_string());
+    }
+    if let Some(cursor) = params.cursor {
         query.push(format!("cursor={}", encode_path_segment(cursor)));
     }
-    if let Some(limit) = limit {
+    if let Some(limit) = params.limit {
         query.push(format!("limit={limit}"));
     }
     format!("/v1/task-events?{}", query.join("&"))
@@ -114,8 +128,13 @@ pub(crate) fn task_logs_path(task_id: &str, tail: Option<usize>) -> String {
 }
 
 pub(crate) async fn get_json<T: DeserializeOwned>(base_url: &str, path: &str) -> Result<T, String> {
-    let response = reqwest::Client::new()
-        .get(join_server_url(base_url, path))
+    let mut request = reqwest::Client::new().get(join_server_url(base_url, path));
+    if path.split('?').next() == Some("/v1/task-events") {
+        if let Some(token) = read_task_events_token_from_env()? {
+            request = request.bearer_auth(token);
+        }
+    }
+    let response = request
         .send()
         .await
         .map_err(|e| format!("request failed: {e}"))?;
@@ -124,6 +143,23 @@ pub(crate) async fn get_json<T: DeserializeOwned>(base_url: &str, path: &str) ->
         .json::<T>()
         .await
         .map_err(|e| format!("failed to decode response: {e}"))
+}
+
+fn read_task_events_token_from_env() -> Result<Option<String>, String> {
+    const TOKEN_PATH_ENV: &str = "KANNA_TASK_EVENTS_TOKEN_PATH";
+    let Some(path) = env::var(TOKEN_PATH_ENV)
+        .ok()
+        .filter(|path| !path.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+    let token = std::fs::read_to_string(&path)
+        .map_err(|error| format!("failed to read {TOKEN_PATH_ENV} {path}: {error}"))?;
+    let token = token.trim();
+    if token.is_empty() {
+        return Err(format!("{TOKEN_PATH_ENV} {path} is empty"));
+    }
+    Ok(Some(token.to_string()))
 }
 
 /// Surface the response body on HTTP errors — the server puts its actual
@@ -472,25 +508,9 @@ pub(crate) async fn rename_task_via_api(
 
 pub(crate) async fn wait_task_events_via_api(
     base_url: &str,
-    task_ids: &[String],
-    parent_task_id: Option<&str>,
-    repo_id: Option<&str>,
-    cursor: Option<&str>,
-    timeout_secs: u64,
-    limit: Option<i64>,
+    params: &TaskEventsParams<'_>,
 ) -> Result<Value, String> {
-    get_json(
-        base_url,
-        &task_events_path(
-            task_ids,
-            parent_task_id,
-            repo_id,
-            cursor,
-            timeout_secs,
-            limit,
-        ),
-    )
-    .await
+    get_json(base_url, &task_events_path(params)).await
 }
 
 pub(crate) async fn set_task_notify_via_api(
