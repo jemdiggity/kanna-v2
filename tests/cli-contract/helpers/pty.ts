@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
  * (`Command::Input` — no per-source transformation), and `kanna-server`'s
  * submission policy is "write the message, wait 150 ms, then send CR as a
  * discrete keystroke" (`crates/kanna-server/src/http_api/task_input.rs`,
- * `SUBMIT_ENTER_DELAY_MS`). {@link PtySession.submit} reproduces that exactly,
+ * `LOGICAL_INPUT_SUBMIT_DELAY_MS`). {@link PtySession.submit} reproduces that exactly,
  * so a test that passes here is evidence about the real injection path rather
  * than about an approximation of it.
  *
@@ -21,7 +21,7 @@ import { dirname, join } from "node:path";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const BRIDGE = join(HERE, "pty-bridge.py");
 
-/** Mirrors SUBMIT_ENTER_DELAY_MS in crates/kanna-server/src/http_api/task_input.rs. */
+/** Mirrors LOGICAL_INPUT_SUBMIT_DELAY_MS in crates/daemon/src/session.rs. */
 export const SUBMIT_ENTER_DELAY_MS = 150;
 
 export function sleep(ms: number): Promise<void> {

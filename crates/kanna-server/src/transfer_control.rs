@@ -181,18 +181,10 @@ pub async fn dispatch(
             Ok(with_incarnation(response, client))
         }
         "send-peer-session-input" => {
-            let data = params
-                .get("data")
-                .and_then(Value::as_str)
-                .ok_or("send-peer-session-input requires data")?;
             client
                 .request(
                     "send_peer_session_input",
-                    json!({
-                        "target_peer_id": required_string(&params, &["peerId"])?,
-                        "session_id": required_string(&params, &["sessionId"])?,
-                        "data": data.as_bytes().to_vec(),
-                    }),
+                    build_peer_session_input_request(&params)?,
                 )
                 .await
         }
@@ -549,6 +541,20 @@ fn transfer_transport(value: &Value) -> Result<String, String> {
     }
 }
 
+fn build_peer_session_input_request(params: &Value) -> Result<Value, String> {
+    let data = params
+        .get("data")
+        .and_then(Value::as_str)
+        .ok_or("send-peer-session-input requires data")?;
+    Ok(json!({
+        "target_peer_id": required_string(params, &["peerId"])?,
+        "session_id": required_string(params, &["sessionId"])?,
+        "data": data.as_bytes().to_vec(),
+        "submission_boundary": required_bool(params, &["submissionBoundary"])?,
+        "control_input": required_bool(params, &["controlInput"])?,
+    }))
+}
+
 fn required_string(value: &Value, keys: &[&str]) -> Result<String, String> {
     for key in keys {
         if let Some(result) = value.get(key).and_then(Value::as_str) {
@@ -633,6 +639,23 @@ mod tests {
             "cloud"
         );
         assert!(transfer_transport(&json!({ "transport": "carrier-pigeon" })).is_err());
+    }
+
+    #[test]
+    fn send_peer_session_input_dispatch_preserves_declared_terminal_semantics() {
+        for (submission_boundary, control_input) in [(true, false), (false, true)] {
+            let request = build_peer_session_input_request(&json!({
+                "peerId": "peer-secondary",
+                "sessionId": "task-1",
+                "data": "input",
+                "submissionBoundary": submission_boundary,
+                "controlInput": control_input,
+            }))
+            .expect("dispatch request");
+
+            assert_eq!(request["submission_boundary"], submission_boundary);
+            assert_eq!(request["control_input"], control_input);
+        }
     }
 }
 

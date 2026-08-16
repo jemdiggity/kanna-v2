@@ -235,6 +235,8 @@ pub(super) async fn send_daemon_input(
     context: &ListenerContext,
     session_id: &str,
     data: Vec<u8>,
+    submission_boundary: bool,
+    control_input: bool,
 ) -> Result<(), RuntimeError> {
     let daemon_dir = context
         .daemon_dir
@@ -243,9 +245,21 @@ pub(super) async fn send_daemon_input(
     let mut daemon = connect_daemon(daemon_dir).await?;
     send_daemon_command(
         &mut daemon,
-        &DaemonCommand::Input {
-            session_id: session_id.to_owned(),
-            data,
+        &if control_input {
+            DaemonCommand::InputControl {
+                session_id: session_id.to_owned(),
+                data,
+            }
+        } else if submission_boundary {
+            DaemonCommand::InputBoundary {
+                session_id: session_id.to_owned(),
+                data,
+            }
+        } else {
+            DaemonCommand::Input {
+                session_id: session_id.to_owned(),
+                data,
+            }
         },
     )
     .await?;
@@ -617,15 +631,29 @@ where
         PeerTerminalControl::Input {
             session_id: control_session_id,
             data,
+            submission_boundary,
+            control_input,
         } if control_session_id == session_id => {
             if data.len() > max_input_bytes {
                 return Err(RuntimeError::Protocol(format!(
                     "terminal input exceeds {max_input_bytes} bytes"
                 )));
             }
-            DaemonCommand::InputNoReply {
-                session_id: control_session_id,
-                data,
+            if control_input {
+                DaemonCommand::InputControlNoReply {
+                    session_id: control_session_id,
+                    data,
+                }
+            } else if submission_boundary {
+                DaemonCommand::InputBoundaryNoReply {
+                    session_id: control_session_id,
+                    data,
+                }
+            } else {
+                DaemonCommand::InputNoReply {
+                    session_id: control_session_id,
+                    data,
+                }
             }
         }
         PeerTerminalControl::Resize {
@@ -728,8 +756,8 @@ mod tests {
         );
     }
 
-    /// The atomic cutover snapshot remains first while protocol-v4 input and
-    /// resize controls travel back over that same stream in FIFO order.
+    /// The atomic cutover snapshot remains first while input and resize controls
+    /// use the duplex framing introduced by protocol v4 in FIFO order.
     #[tokio::test]
     async fn observer_stream_is_duplex_and_preserves_snapshot_output_order() {
         let daemon_dir = std::env::temp_dir().join(format!(
@@ -841,6 +869,8 @@ mod tests {
                 PeerTerminalControl::Input {
                     session_id: "sess-duplex".to_string(),
                     data: b"abc\x7f".to_vec(),
+                    submission_boundary: false,
+                    control_input: false,
                 },
                 PeerTerminalControl::Resize {
                     session_id: "sess-duplex".to_string(),

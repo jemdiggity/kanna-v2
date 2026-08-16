@@ -62,12 +62,29 @@ const MAX_PENDING_REMOTE_INPUT_CHARS = 64 * 1024;
 const MAX_REMOTE_INPUT_FRAME_BYTES = 4 * 1024;
 let lifecycleGeneration = 0;
 let unmounted = false;
+type ProducerInputKind = "draft" | "submission" | "control";
+let producerInputKind: ProducerInputKind = "draft";
+let producerInputGeneration = 0;
+const controlInputEvents = ["mousedown", "mouseup", "mousemove", "wheel", "focus", "blur"];
+
+function declareProducerInput(kind: ProducerInputKind) {
+  producerInputKind = kind;
+  const generation = ++producerInputGeneration;
+  queueMicrotask(() => {
+    if (producerInputGeneration === generation) producerInputKind = "draft";
+  });
+}
+
+function declareControlInput() {
+  declareProducerInput("control");
+}
 
 interface RemoteInputQueue {
   client: DesktopRemoteTaskClient;
   desktopId: string;
   taskId: string;
-  pending: string;
+  pending: Array<{ data: string; submissionBoundary: boolean; controlInput: boolean }>;
+  pendingChars: number;
   inFlight: boolean;
   closed: boolean;
 }
@@ -94,23 +111,36 @@ function writeRemoteTerminalError(message: string) {
 function closeInputQueue() {
   if (!inputQueue) return;
   inputQueue.closed = true;
-  inputQueue.pending = "";
+  inputQueue.pending = [];
+  inputQueue.pendingChars = 0;
   inputQueue = null;
 }
 
 function drainRemoteInput(queue: RemoteInputQueue) {
   if (queue.closed || queue.inFlight || queue.pending.length === 0) return;
-  const [data, remaining] = takeRemoteInputChunk(queue.pending);
-  queue.pending = remaining;
+  const pending = queue.pending[0];
+  if (!pending) return;
+  const [data, remaining] = takeRemoteInputChunk(pending.data);
+  const submissionBoundary = pending.submissionBoundary && remaining.length === 0;
+  const controlInput = pending.controlInput;
+  queue.pendingChars -= data.length;
+  if (remaining.length === 0) {
+    queue.pending.shift();
+  } else {
+    pending.data = remaining;
+  }
   queue.inFlight = true;
   void queue.client.sendInput({
     desktopId: queue.desktopId,
     taskId: queue.taskId,
     data,
+    ...(submissionBoundary ? { submissionBoundary: true } : {}),
+    ...(controlInput ? { controlInput: true } : {}),
   }).catch((error: unknown) => {
     if (inputQueue !== queue || queue.closed) return;
     queue.closed = true;
-    queue.pending = "";
+    queue.pending = [];
+    queue.pendingChars = 0;
     const message = error instanceof Error ? error.message : "Failed to send remote input.";
     writeRemoteTerminalError(message);
   }).finally(() => {
@@ -140,16 +170,29 @@ function takeRemoteInputChunk(data: string): [string, string] {
   return [data.slice(0, end), data.slice(end)];
 }
 
-function enqueueRemoteInput(data: string) {
+function enqueueRemoteInput(data: string, submissionBoundary = false, controlInput = false) {
   const queue = inputQueue;
   if (!queue || queue.closed) return;
-  if (queue.pending.length + data.length > MAX_PENDING_REMOTE_INPUT_CHARS) {
+  if (queue.pendingChars + data.length > MAX_PENDING_REMOTE_INPUT_CHARS) {
     queue.closed = true;
-    queue.pending = "";
+    queue.pending = [];
+    queue.pendingChars = 0;
     writeRemoteTerminalError("Remote terminal input buffer is full.");
     return;
   }
-  queue.pending += data;
+  const last = queue.pending.at(-1);
+  if (
+    last
+    && !last.submissionBoundary
+    && !last.controlInput
+    && !submissionBoundary
+    && !controlInput
+  ) {
+    last.data += data;
+  } else {
+    queue.pending.push({ data, submissionBoundary, controlInput });
+  }
+  queue.pendingChars += data.length;
   drainRemoteInput(queue);
 }
 
@@ -224,7 +267,8 @@ async function start() {
       client,
       desktopId,
       taskId,
-      pending: "",
+      pending: [],
+      pendingChars: 0,
       inFlight: false,
       closed: false,
     };
@@ -361,6 +405,18 @@ onMounted(() => {
     theme: getTerminalTheme(effectiveCodeTheme.value),
   });
   terminal.attachCustomKeyEventHandler((event: KeyboardEvent) => {
+    if (event.type === "keydown") {
+      declareProducerInput(
+        event.key === "Enter"
+          && !event.isComposing
+          && !event.shiftKey
+          && !event.altKey
+          && !event.ctrlKey
+          && !event.metaKey
+          ? "submission"
+          : "draft",
+      );
+    }
     if (isShiftEnter(event)) {
       event.preventDefault();
       enqueueRemoteInput(SHIFT_ENTER_CSI_U);
@@ -385,13 +441,20 @@ onMounted(() => {
   });
   terminal.onData((data) => {
     if (unmounted || !relayClient || status.value !== "live") return;
-    enqueueRemoteInput(data);
+    enqueueRemoteInput(
+      data,
+      producerInputKind === "submission",
+      producerInputKind === "control",
+    );
   });
   fitAddon = new FitAddon();
   terminal.loadAddon(fitAddon);
   terminal.loadAddon(new WebLinksAddon(handleLinkActivate));
   if (containerRef.value) {
     terminal.open(containerRef.value);
+    for (const eventName of controlInputEvents) {
+      containerRef.value.addEventListener(eventName, declareControlInput, true);
+    }
     registerTerminalBufferForE2E();
     fileLinkProvider = createRemoteTerminalFileLinkProvider({
       term: terminal,
@@ -437,6 +500,11 @@ onUnmounted(() => {
   unregisterE2ETerminalBuffer?.();
   unregisterE2ETerminalBuffer = null;
   resizeObserver?.disconnect();
+  if (containerRef.value) {
+    for (const eventName of controlInputEvents) {
+      containerRef.value.removeEventListener(eventName, declareControlInput, true);
+    }
+  }
   terminal?.dispose();
   terminal = null;
   fitAddon = null;

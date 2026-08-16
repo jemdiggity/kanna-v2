@@ -319,16 +319,30 @@ Before serving HTTP, the authenticated server classifies inherited PTYs as
 ordinary input, including merge singletons adopted from a protected release.
 The same replay runs after daemon replacement so restart and handoff cannot
 restore the retired native-terminal-only merge policy.
-`NegotiateProtectedInput` version 2 must be acknowledged by the active daemon
+`NegotiateProtectedInput` version 3 must be acknowledged by the active daemon
 before the server exposes HTTP/relay or creates a merge PTY. Version 2 includes
-the observed-PTY-process-ID `InputIfSession` fence used by task input delivery, so a
-new server paired with a previous daemon generation waits for the supporting
-successor before serving. The daemon records the exact negotiating server
+the observed-PTY-process-ID `InputIfSession` fence; version 3 adds daemon-owned
+logical input coordination. `SubmitInput` accepts a complete logical message,
+keeps it out of the PTY while an explicitly declared raw draft is active, then
+writes the message and its delayed Enter after the terminal producer declares a
+submission boundary. `Input`, `InputBoundary`, and `InputControl` (plus their
+one-way forms) classify raw bytes as draft, submission, or non-composer control;
+the daemon never infers a boundary from CR/LF bytes. A new server paired with a
+previous daemon generation therefore waits for the supporting successor before
+serving. The daemon records the exact negotiating server
 process and refuses server-originated PTY spawns from an unnegotiated process,
 making unsupported server/daemon pairings fail closed. `ClassifyInput` shares the daemon lifecycle fence with the handoff
 snapshot; a command that loses that race receives `RetryOnSuccessor`, and the
 server repeats negotiation plus the complete classification pass on every
 published daemon generation.
+
+Draft state and accepted logical messages are part of transactional-v3 handoff
+state. A sender refuses a legacy-v2 adopter while that state is unknown, a draft
+is active, or any logical message remains queued. A current daemon adopting a
+legacy payload treats draft state as unknown and refuses logical input until a
+producer-declared submission boundary resolves it. This preserves accepted
+messages across normal handoff without guessing from terminal bytes or rendered
+provider UI.
 
 | Env Var | Description | Default |
 |---------|-------------|---------|

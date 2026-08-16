@@ -325,11 +325,16 @@ describe("createRelayDesktopClient", () => {
       3,
       JSON.stringify({
         type: "auth",
-        capabilities: ["companion_event_epoch"],
+        capabilities: ["companion_event_epoch", "term_input_boundary"],
         credential: "id-token-1"
       })
     );
-    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "auth_ok",
+        capabilities: ["term_input_boundary"],
+      }),
+    });
     await flushPromises();
     expect(socket.send).toHaveBeenNthCalledWith(
       4,
@@ -377,7 +382,14 @@ describe("createRelayDesktopClient", () => {
       { type: "exit", taskId: "task-1", code: 0 }
     ]);
 
-    subscription.sendInput?.("G1s8NjU7MTsxTQ==");
+    subscription.sendInput?.("G1s8NjU7MTsxTQ==", false, true);
+    expect(socket.send).toHaveBeenCalledWith(
+      JSON.stringify({
+        type: "term_input_control",
+        task_id: "task-1",
+        data_b64: "G1s8NjU7MTsxTQ=="
+      })
+    );
     subscription.resize?.(80, 48);
     await flushPromises();
     expect(socket.send).toHaveBeenLastCalledWith(

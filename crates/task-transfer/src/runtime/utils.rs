@@ -18,6 +18,7 @@ pub(super) const AUTHENTICATED_TASK_REQUEST_PROTOCOL_VERSION: u32 = 2;
 pub(super) const AUTHENTICATED_TASK_REQUEST_VERSION: u32 = 1;
 pub(super) const STREAMED_ARTIFACT_PROTOCOL_VERSION: u32 = 3;
 pub(super) const DUPLEX_TERMINAL_PROTOCOL_VERSION: u32 = 4;
+pub(super) const TERMINAL_INPUT_SEMANTICS_PROTOCOL_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ArtifactFraming {
@@ -809,6 +810,10 @@ pub(super) fn supports_duplex_terminal(protocol_version: u32) -> bool {
     protocol_version >= DUPLEX_TERMINAL_PROTOCOL_VERSION
 }
 
+pub(super) fn supports_terminal_input_semantics(protocol_version: u32) -> bool {
+    protocol_version >= TERMINAL_INPUT_SEMANTICS_PROTOCOL_VERSION
+}
+
 pub(super) fn ensure_peer_is_trusted_for(
     root: &Path,
     self_peer_id: &str,
@@ -1021,6 +1026,12 @@ mod tests {
     fn duplex_terminal_controls_start_at_protocol_v4() {
         assert!(!supports_duplex_terminal(3));
         assert!(supports_duplex_terminal(4));
+    }
+
+    #[test]
+    fn explicit_terminal_input_semantics_start_at_protocol_v5() {
+        assert!(!supports_terminal_input_semantics(4));
+        assert!(supports_terminal_input_semantics(5));
     }
 
     #[tokio::test]

@@ -36,6 +36,7 @@ pub enum ErrorCode {
     RetryOnSuccessor,
     InputUnauthorized,
     ProtectedInputProtocolRequired,
+    InheritedDraftStateUnknown,
 }
 
 /// Whether a session is a PTY terminal or a headless agent (NDJSON pipes).
@@ -125,6 +126,20 @@ pub struct HandoffSession {
     /// classifies the adopted session from durable task state.
     #[serde(default)]
     pub input_policy_classified: bool,
+    /// Whether raw terminal input has started a composer draft that has not
+    /// yet crossed an explicit producer-declared submission boundary.
+    #[serde(default)]
+    pub raw_input_draft_active: bool,
+    /// Current senders always set this. Its absence identifies a legacy
+    /// sender whose payload cannot distinguish an empty composer from a real
+    /// inherited draft; successors reject logical input observably until a
+    /// producer-declared boundary resolves the ambiguity.
+    #[serde(default)]
+    pub raw_input_draft_state_known: bool,
+    /// Logical messages accepted but not yet submitted through the PTY. The
+    /// adopting daemon keeps their order and any raw-draft boundary.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_logical_inputs: Vec<Vec<u8>>,
 }
 
 /// Everything needed to (re)build a provider adapter spawn for an agent
@@ -206,6 +221,18 @@ pub enum Command {
         session_id: String,
         data: Vec<u8>,
     },
+    /// Acknowledged raw input carrying an explicit producer-known composer
+    /// submission boundary.
+    InputBoundary {
+        session_id: String,
+        data: Vec<u8>,
+    },
+    /// Acknowledged producer-declared terminal control that neither edits nor
+    /// submits the task composer (for example a mouse wheel report).
+    InputControl {
+        session_id: String,
+        data: Vec<u8>,
+    },
     /// Acknowledged terminal input fenced to the PTY process ID observed
     /// by a preceding `List`. This prevents normal task-id reuse between discovery
     /// and delivery from redirecting input into a replacement stage or rerun.
@@ -214,10 +241,35 @@ pub enum Command {
         expected_pid: u32,
         data: Vec<u8>,
     },
+    /// One logical message for a PTY session. Unlike raw terminal input, the
+    /// daemon keeps the message and its synthesized Enter atomic and defers
+    /// both while a raw composer draft is active.
+    SubmitInput {
+        session_id: String,
+        data: Vec<u8>,
+    },
+    /// Logical input fenced to the PTY process ID observed by `List`.
+    SubmitInputIfSession {
+        session_id: String,
+        expected_pid: u32,
+        data: Vec<u8>,
+    },
     /// Latency-sensitive terminal input. Success is deliberately not
     /// acknowledged, so callers can pipeline ordered bytes without waiting.
     /// Failures are still emitted as asynchronous `Event::Error` values.
     InputNoReply {
+        session_id: String,
+        data: Vec<u8>,
+    },
+    /// `InputNoReply` whose terminal producer explicitly knows the event
+    /// submits the current composer. Embedded CR/LF bytes never imply this.
+    InputBoundaryNoReply {
+        session_id: String,
+        data: Vec<u8>,
+    },
+    /// Latency-sensitive producer-declared terminal control. It preserves the
+    /// current draft state and cannot release queued logical messages.
+    InputControlNoReply {
         session_id: String,
         data: Vec<u8>,
     },
@@ -837,6 +889,9 @@ mod tests {
                 agent_spawn: None,
                 operator_input_only: false,
                 input_policy_classified: true,
+                raw_input_draft_active: true,
+                raw_input_draft_state_known: true,
+                pending_logical_inputs: vec![b"manager message".to_vec()],
             }],
         };
 
@@ -850,6 +905,37 @@ mod tests {
                 assert_eq!(sessions[0].rows, 24);
                 assert_eq!(sessions[0].cols, 80);
                 assert!(sessions[0].snapshot.is_none());
+                assert!(sessions[0].raw_input_draft_active);
+                assert!(sessions[0].raw_input_draft_state_known);
+                assert_eq!(
+                    sessions[0].pending_logical_inputs,
+                    [b"manager message".to_vec()]
+                );
+            }
+            other => panic!("wrong variant: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_older_handoff_payload_marks_raw_draft_state_unknown() {
+        let json = r#"{
+            "type":"HandoffReady",
+            "sessions":[{
+                "session_id":"sess-1",
+                "pid":42,
+                "cwd":"/tmp",
+                "rows":24,
+                "cols":80,
+                "snapshot":null
+            }]
+        }"#;
+
+        let decoded: Event = serde_json::from_str(json).unwrap();
+        match decoded {
+            Event::HandoffReady { sessions } => {
+                assert!(!sessions[0].raw_input_draft_active);
+                assert!(!sessions[0].raw_input_draft_state_known);
+                assert!(sessions[0].pending_logical_inputs.is_empty());
             }
             other => panic!("wrong variant: {:?}", other),
         }

@@ -3,16 +3,26 @@ import type { StreamClient } from "@kanna/stream-client"
 const INPUT_BATCH_WINDOW_MS = 8
 
 export interface TerminalInputQueue {
-  sendInputBytes(bytes: Uint8Array, config?: { immediate?: boolean }): Promise<void>
+  sendInputBytes(
+    bytes: Uint8Array,
+    config?: { immediate?: boolean; submissionBoundary?: boolean; controlInput?: boolean },
+  ): Promise<void>
   flushQueuedInput(): Promise<void>
   clearPendingInputFlushTimer(): void
 }
 
-type SendTerminalInput = (taskId: string, dataB64: string) => Promise<void>
+type SendTerminalInput = (
+  taskId: string,
+  dataB64: string,
+  submissionBoundary?: boolean,
+  controlInput?: boolean,
+) => Promise<void>
 
 interface PendingInputBatch {
   bytes: number[]
   sendTerminalInput: SendTerminalInput
+  submissionBoundary: boolean
+  controlInput: boolean
 }
 
 export function bytesToBase64(bytes: Uint8Array): string {
@@ -43,34 +53,61 @@ export function createTerminalInputQueue(params: {
   let inputWriteChain: Promise<void> = Promise.resolve()
   let inputWriteInFlight = false
 
-  const defaultSendTerminalInput: SendTerminalInput = async (taskId, dataB64) => {
+  const defaultSendTerminalInput: SendTerminalInput = async (
+    taskId,
+    dataB64,
+    submissionBoundary,
+    controlInput,
+  ) => {
     if (params.sendTerminalInput) {
-      await params.sendTerminalInput(taskId, dataB64)
+      if (controlInput) {
+        await params.sendTerminalInput(taskId, dataB64, false, true)
+      } else if (submissionBoundary) {
+        await params.sendTerminalInput(taskId, dataB64, true)
+      } else {
+        await params.sendTerminalInput(taskId, dataB64)
+      }
       return
     }
     if (!params.getTerminalStreamClient) {
       throw new Error("terminal input has no configured transport")
     }
     const client = await params.getTerminalStreamClient()
-    client.sendTermInput(taskId, dataB64)
+    if (controlInput) {
+      client.sendTermInput(taskId, dataB64, false, true)
+    } else if (submissionBoundary) {
+      client.sendTermInput(taskId, dataB64, true)
+    } else {
+      client.sendTermInput(taskId, dataB64)
+    }
   }
 
   async function sendInputBytesNow(
     bytes: Uint8Array,
     sendTerminalInput: SendTerminalInput,
+    submissionBoundary: boolean,
+    controlInput: boolean,
   ) {
     const dataB64 = bytesToBase64(bytes)
-    await sendTerminalInput(params.sessionId, dataB64)
+    if (controlInput) {
+      await sendTerminalInput(params.sessionId, dataB64, false, true)
+    } else if (submissionBoundary) {
+      await sendTerminalInput(params.sessionId, dataB64, true)
+    } else {
+      await sendTerminalInput(params.sessionId, dataB64)
+    }
   }
 
   function queueInputWrite(
     bytes: Uint8Array,
     sendTerminalInput: SendTerminalInput,
+    submissionBoundary: boolean,
+    controlInput: boolean,
   ): Promise<void> {
     const runWrite = async () => {
       inputWriteInFlight = true
       try {
-        await sendInputBytesNow(bytes, sendTerminalInput)
+        await sendInputBytesNow(bytes, sendTerminalInput, submissionBoundary, controlInput)
       } finally {
         inputWriteInFlight = false
       }
@@ -101,17 +138,35 @@ export function createTerminalInputQueue(params: {
       inputWriteChain = queueInputWrite(
         new Uint8Array(batch.bytes),
         batch.sendTerminalInput,
+        batch.submissionBoundary,
+        batch.controlInput,
       )
     }
     return inputWriteChain
   }
 
-  function queueInputBytes(bytes: Uint8Array, sendTerminalInput: SendTerminalInput): void {
+  function queueInputBytes(
+    bytes: Uint8Array,
+    sendTerminalInput: SendTerminalInput,
+    submissionBoundary: boolean,
+    controlInput: boolean,
+  ): void {
     const lastBatch = pendingInputBatches.at(-1)
-    if (lastBatch?.sendTerminalInput === sendTerminalInput) {
+    if (
+      lastBatch?.sendTerminalInput === sendTerminalInput
+      && !lastBatch.submissionBoundary
+      && !lastBatch.controlInput
+      && !submissionBoundary
+      && !controlInput
+    ) {
       lastBatch.bytes.push(...bytes)
     } else {
-      pendingInputBatches.push({ bytes: Array.from(bytes), sendTerminalInput })
+      pendingInputBatches.push({
+        bytes: Array.from(bytes),
+        sendTerminalInput,
+        submissionBoundary,
+        controlInput,
+      })
     }
     if (pendingInputFlushTimer) {
       return
@@ -122,17 +177,30 @@ export function createTerminalInputQueue(params: {
     }, INPUT_BATCH_WINDOW_MS)
   }
 
-  async function sendInputBytes(bytes: Uint8Array, config?: { immediate?: boolean }) {
+  async function sendInputBytes(
+    bytes: Uint8Array,
+    config?: { immediate?: boolean; submissionBoundary?: boolean; controlInput?: boolean },
+  ) {
     // Resolve the transport before any await. A retained terminal may switch
     // policy while this write is batched or queued behind an acknowledgement;
     // those bytes must retain the authority under which xterm captured them.
     const sendTerminalInput = params.getSendTerminalInput?.() ?? defaultSendTerminalInput
     if (config?.immediate) {
       await flushQueuedInput()
-      await queueInputWrite(bytes, sendTerminalInput)
+      await queueInputWrite(
+        bytes,
+        sendTerminalInput,
+        config.submissionBoundary ?? false,
+        config.controlInput ?? false,
+      )
       return
     }
-    queueInputBytes(bytes, sendTerminalInput)
+    queueInputBytes(
+      bytes,
+      sendTerminalInput,
+      config?.submissionBoundary ?? false,
+      config?.controlInput ?? false,
+    )
   }
 
   function clearPendingInputFlushTimer(): void {

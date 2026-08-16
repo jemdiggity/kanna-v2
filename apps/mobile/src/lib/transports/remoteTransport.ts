@@ -920,10 +920,16 @@ export function createRemoteTransport({
             pendingCommands.length = 0;
             activeSubscription?.close();
           },
-          sendInput(dataB64: string) {
-            withSubscription((subscription) =>
-              subscription.sendInput?.(dataB64)
-            );
+          sendInput(dataB64: string, submissionBoundary = false, controlInput = false) {
+            withSubscription((subscription) => {
+              if (controlInput) {
+                subscription.sendInput?.(dataB64, false, true);
+              } else if (submissionBoundary) {
+                subscription.sendInput?.(dataB64, true);
+              } else {
+                subscription.sendInput?.(dataB64);
+              }
+            });
           },
           resize(cols: number, rows: number) {
             withSubscription((subscription) =>

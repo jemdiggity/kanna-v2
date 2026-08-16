@@ -43,7 +43,11 @@ export interface TaskTerminalSubscription {
   /** Raw PTY bytes (base64) written to the task's terminal, e.g. scroll
    * sequences replayed from the mobile terminal view. Optional because some
    * transports are read-only. */
-  sendInput?(dataB64: string): void;
+  sendInput?(
+    dataB64: string,
+    submissionBoundary?: boolean,
+    controlInput?: boolean
+  ): void;
   /** Resize both the observer's xterm grid and the owning PTY. The transport
    * keeps this scoped to the attached task session. */
   resize?(cols: number, rows: number): void;

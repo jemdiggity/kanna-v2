@@ -58,9 +58,14 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     return state.streamClient
   }
 
-  const sendGenericTerminalInput = async (nativeSessionId: string, dataB64: string) => {
+  const sendGenericTerminalInput = async (
+    nativeSessionId: string,
+    dataB64: string,
+    submissionBoundary = false,
+    controlInput = false,
+  ) => {
     const client = await getTerminalStreamClient()
-    client.sendTermInput(nativeSessionId, dataB64)
+    client.sendTermInput(nativeSessionId, dataB64, submissionBoundary, controlInput)
   }
   const inputQueue = createTerminalInputQueue({
     sessionId,

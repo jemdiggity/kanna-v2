@@ -101,7 +101,12 @@ describe("configured desktop relay helpers", () => {
       data: "hello\n",
     });
     await openRelayTunnel(socket);
-    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "auth_ok",
+        capabilities: ["term_input_boundary"],
+      }),
+    });
     await Promise.resolve();
 
     expect(webSocketMock).toHaveBeenCalledWith(PRODUCTION_CLOUD_TRANSPORT_URL);
@@ -113,7 +118,7 @@ describe("configured desktop relay helpers", () => {
     }));
     expect(sent).toContainEqual({
       type: "auth",
-      capabilities: ["companion_event_epoch"],
+      capabilities: ["companion_event_epoch", "term_input_boundary"],
       credential: "id-token",
     });
     expect(sent).toContainEqual({
@@ -211,7 +216,7 @@ describe("createDesktopRelayTerminalClient", () => {
     });
     expect(refreshedSocket.sent.map((entry) => JSON.parse(entry))).toContainEqual({
       type: "auth",
-      capabilities: ["companion_event_epoch"],
+      capabilities: ["companion_event_epoch", "term_input_boundary"],
       credential: "refreshed-token",
     });
     expect(refreshedSocket.sent.map((entry) => JSON.parse(entry))).toContainEqual({
@@ -423,7 +428,7 @@ describe("createDesktopRelayTerminalClient", () => {
 
     expect(JSON.parse(socket.sent[2])).toEqual({
       type: "auth",
-      capabilities: ["companion_event_epoch"],
+      capabilities: ["companion_event_epoch", "term_input_boundary"],
       credential: "id-token",
     });
     socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
@@ -499,7 +504,12 @@ describe("createDesktopRelayTerminalClient", () => {
     });
 
     await openRelayTunnel(socket);
-    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "auth_ok",
+        capabilities: ["term_input_boundary"],
+      }),
+    });
     await Promise.resolve();
 
     const sent = socket.sent.map((entry) => JSON.parse(entry));

@@ -1,7 +1,7 @@
 use kanna_agent_protocol::{CompanionEvent, ServerFrame};
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_PROTOCOL_VERSION: u32 = 4;
+pub const CURRENT_PROTOCOL_VERSION: u32 = 5;
 pub const COMPANION_PROTOCOL_VERSION: u32 = 2;
 
 /// Maximum peer request line. Large repository/session artifacts are staged
@@ -69,6 +69,10 @@ pub enum ControlRequest {
         target_peer_id: String,
         session_id: String,
         data: Vec<u8>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        submission_boundary: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        control_input: bool,
     },
     ResizePeerSession {
         request_id: String,
@@ -438,6 +442,10 @@ pub enum PeerRequest {
         requester_peer_id: String,
         session_id: String,
         data: Vec<u8>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        submission_boundary: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        control_input: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sealed_payload: Option<String>,
     },
@@ -594,12 +602,18 @@ pub enum PeerTerminalEvent {
 /// Commands sent back to the owner over an authenticated terminal observation
 /// stream. Protocol v4 makes that stream duplex so interactive input does not
 /// pay for a new peer connection and authentication exchange per keystroke.
+/// Protocol v5 adds producer-declared submission and control semantics; input
+/// must not cross this wire unless both peers advertise v5 or newer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PeerTerminalControl {
     Input {
         session_id: String,
         data: Vec<u8>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        submission_boundary: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        control_input: bool,
     },
     Resize {
         session_id: String,

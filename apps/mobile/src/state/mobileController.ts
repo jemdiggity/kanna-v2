@@ -2519,7 +2519,10 @@ export function createMobileController(
       if (!dataB64 || activeTaskTerminal?.taskId !== taskId) {
         return;
       }
-      activeTaskTerminal.subscription.sendInput?.(dataB64);
+      // The production mobile terminal currently emits only alt-screen
+      // mouse/scroll reports. Declare them as controls so they cannot create
+      // a phantom composer draft and strand a queued logical message.
+      activeTaskTerminal.subscription.sendInput?.(dataB64, false, true);
     },
 
     resizeTaskTerminal(taskId, cols, rows) {

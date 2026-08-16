@@ -373,8 +373,14 @@ export function createRelayDesktopClient({
         close() {
           client.detach(taskId, "terminal");
         },
-        sendInput(dataB64: string) {
-          client.sendTermInput(taskId, dataB64);
+        sendInput(dataB64: string, submissionBoundary = false, controlInput = false) {
+          if (controlInput) {
+            client.sendTermInput(taskId, dataB64, false, true);
+          } else if (submissionBoundary) {
+            client.sendTermInput(taskId, dataB64, true);
+          } else {
+            client.sendTermInput(taskId, dataB64);
+          }
         },
         resize(cols: number, rows: number) {
           client.sendTermResize(taskId, cols, rows);

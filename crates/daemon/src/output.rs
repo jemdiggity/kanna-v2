@@ -18,8 +18,8 @@ use crate::fanout::{
     SessionFanouts,
 };
 use crate::session::{
-    MirrorResult, PendingInput, SessionHandle, SessionManager, StreamControl,
-    STATUS_DETECTION_THROTTLE_MS,
+    MirrorResult, PendingInput, PendingInputKind, SessionHandle, SessionManager, StreamControl,
+    LOGICAL_INPUT_SUBMIT_DELAY_MS, STATUS_DETECTION_THROTTLE_MS,
 };
 
 const STATUS_IDLE_FLUSH_MS: u64 = STATUS_DETECTION_THROTTLE_MS;
@@ -145,16 +145,40 @@ pub(crate) async fn stream_output(
     let mut previous_slow_stage = None;
     let mut pending_input: VecDeque<PendingInput> = VecDeque::new();
     let mut pending_offset = 0usize;
+    let mut logical_submit_at: Option<Instant> = None;
     let mut status_interval =
         tokio::time::interval(std::time::Duration::from_millis(STATUS_IDLE_FLUSH_MS));
     let session_fanout = session_fanout(&fanouts, &session_id).await;
     log::info!("[stream] start session={}", session_id);
+
+    #[cfg(debug_assertions)]
+    if let Some(delay_ms) = std::env::var("KANNA_TEST_PTY_INPUT_READER_PAUSE_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|delay_ms| *delay_ms > 0)
+    {
+        log::warn!(
+            "[stream] TEST HOOK: pausing PTY input reader session={} delay_ms={}",
+            session_id,
+            delay_ms
+        );
+        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+    }
 
     loop {
         if stream_control.stop_requested() || session.is_retired() {
             log::info!("[stream] stopped retired reader session={}", session_id);
             stream_control.mark_stopped();
             return;
+        }
+        if stream_control.quiesce_requested() {
+            while let Ok(input) = input_rx.try_recv() {
+                if input.data.is_empty() && input.kind == PendingInputKind::Raw {
+                    input.acknowledge_written();
+                } else {
+                    pending_input.push_back(input);
+                }
+            }
         }
         if stream_control.quiesce_requested() && pending_input.is_empty() {
             stream_control.mark_quiesced();
@@ -175,7 +199,7 @@ pub(crate) async fn stream_output(
 
             maybe_input = input_rx.recv(), if !stream_control.quiesce_requested() => {
                 if let Some(input) = maybe_input {
-                    if input.data.is_empty() {
+                    if input.data.is_empty() && input.kind == PendingInputKind::Raw {
                         input.acknowledge_written();
                     } else {
                         pending_input.push_back(input);
@@ -183,7 +207,13 @@ pub(crate) async fn stream_output(
                 }
             }
 
-            writable = async_fd.writable(), if !pending_input.is_empty() => {
+            _ = tokio::time::sleep_until(
+                logical_submit_at.unwrap_or_else(Instant::now).into()
+            ), if logical_submit_at.is_some() => {
+                logical_submit_at = None;
+            }
+
+            writable = async_fd.writable(), if !pending_input.is_empty() && logical_submit_at.is_none() => {
                 let Ok(mut guard) = writable else {
                     log::error!("[stream] writable readiness failed session={}", session_id);
                     break;
@@ -214,11 +244,35 @@ pub(crate) async fn stream_output(
                         session.mark_active().await;
                         pending_offset += n;
                         if pending_offset >= front.data.len() {
-                            let completed = pending_input
-                                .pop_front()
-                                .expect("pending input disappeared before completion");
-                            completed.acknowledge_written();
-                            pending_offset = 0;
+                            let advanced_to_enter = pending_input
+                                .front_mut()
+                                .is_some_and(PendingInput::advance_logical_message_to_enter);
+                            if advanced_to_enter {
+                                pending_offset = 0;
+                                logical_submit_at = Some(
+                                    Instant::now()
+                                        + Duration::from_millis(LOGICAL_INPUT_SUBMIT_DELAY_MS),
+                                );
+                            } else {
+                                let mut completed = pending_input
+                                    .pop_front()
+                                    .expect("pending input disappeared before completion");
+                                let logical_after_write = completed.take_logical_after_write();
+                                for data in logical_after_write.into_iter().rev() {
+                                    pending_input.push_front(PendingInput::logical(data));
+                                }
+                                if completed.kind == PendingInputKind::LogicalEnter
+                                    && session.complete_logical_input().is_err()
+                                {
+                                    log::error!(
+                                        "[stream] logical input coordination failed session={}",
+                                        session_id
+                                    );
+                                    break;
+                                }
+                                completed.acknowledge_written();
+                                pending_offset = 0;
+                            }
                         }
                     }
                     Ok(Err(error)) if error.kind() == std::io::ErrorKind::WouldBlock => {}
@@ -599,7 +653,7 @@ pub(crate) async fn handle_output_chunk(
     match mirror_result {
         Ok(MirrorResult { status, replies }) => {
             for reply in replies {
-                if session.enqueue_input(reply).is_err() {
+                if session.enqueue_terminal_reply(reply).is_err() {
                     log::warn!(
                         "[stream] dropped terminal reply because input queue is closed session={}",
                         session_id

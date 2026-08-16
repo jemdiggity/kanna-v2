@@ -3,8 +3,9 @@ pub mod session_id;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// Version of the server/daemon contract that fences protected terminal input.
-pub const PROTECTED_INPUT_PROTOCOL_VERSION: u32 = 2;
+/// Version of the server/daemon contract that fences protected terminal input
+/// and accepts semantic logical messages separately from raw terminal bytes.
+pub const PROTECTED_INPUT_PROTOCOL_VERSION: u32 = 3;
 
 /// How long a transfer's destination may wait for the source to answer the
 /// finalization request — the one peer request whose answer waits on a person's

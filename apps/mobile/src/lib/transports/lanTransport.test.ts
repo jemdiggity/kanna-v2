@@ -623,7 +623,7 @@ describe("createLanTransport", () => {
           deviceId: "phone-1",
           deviceSecret: "lan-secret"
         }),
-        capabilities: ["companion_event_epoch"]
+        capabilities: ["companion_event_epoch", "term_input_boundary"]
       },
       { type: "attach", task_id: "task-1", kind: "terminal", from_seq: 0 }
     ]);
@@ -695,7 +695,7 @@ describe("createLanTransport", () => {
     subscription.close();
   });
 
-  it("sends alt-screen scroll bytes as term_input frames over the LAN KSP route", () => {
+  it("sends ordinary and explicit-boundary terminal input over the LAN KSP route", () => {
     const fetchImpl = vi.fn<FetchLike>();
     const sent: ClientFrame[] = [];
     const socket: WebSocketLike = {
@@ -716,14 +716,23 @@ describe("createLanTransport", () => {
 
     const subscription = transport.observeTaskTerminal("task-1", () => {});
     socket.onopen?.();
-    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" } satisfies ServerFrame) });
-    subscription.sendInput?.("G1s8NjU7MTsxTQ==");
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "auth_ok",
+        capabilities: ["term_input_boundary"],
+      } satisfies ServerFrame),
+    });
+    subscription.sendInput?.("G1s8NjU7MTsxTQ==", false, true);
+    subscription.sendInput?.("aHVtYW4gZHJhZnQ=", false);
+    subscription.sendInput?.("DQ==", true);
     subscription.resize?.(80, 48);
 
     expect(sent).toEqual([
-      { type: "auth", capabilities: ["companion_event_epoch"] },
+      { type: "auth", capabilities: ["companion_event_epoch", "term_input_boundary"] },
       { type: "attach", task_id: "task-1", kind: "terminal", from_seq: 0 },
-      { type: "term_input", task_id: "task-1", data_b64: "G1s8NjU7MTsxTQ==" },
+      { type: "term_input_control", task_id: "task-1", data_b64: "G1s8NjU7MTsxTQ==" },
+      { type: "term_input", task_id: "task-1", data_b64: "aHVtYW4gZHJhZnQ=" },
+      { type: "term_input_boundary", task_id: "task-1", data_b64: "DQ==" },
       { type: "term_resize", task_id: "task-1", cols: 80, rows: 48 }
     ]);
   });
@@ -786,7 +795,7 @@ describe("createLanTransport", () => {
 
     expect(socketFactory).toHaveBeenCalledWith("ws://127.0.0.1:48120/v1/stream");
     expect(sent).toEqual([
-      { type: "auth", capabilities: ["companion_event_epoch"] },
+      { type: "auth", capabilities: ["companion_event_epoch", "term_input_boundary"] },
       { type: "attach", task_id: "task-1", kind: "agent", from_seq: 0 },
       { type: "agent_input", task_id: "task-1", text: "continue" },
       {
@@ -981,7 +990,7 @@ describe("createLanTransport", () => {
     });
 
     expect(sent).toEqual([
-      { type: "auth", capabilities: ["companion_event_epoch"] }
+      { type: "auth", capabilities: ["companion_event_epoch", "term_input_boundary"] }
     ]);
     expect(events).toContainEqual({
       type: "unavailable",

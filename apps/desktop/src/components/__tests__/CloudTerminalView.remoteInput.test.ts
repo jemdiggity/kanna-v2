@@ -207,6 +207,77 @@ describe("CloudTerminalView", () => {
     wrapper.unmount();
   });
 
+  it("declares an unmodified Enter as a submission boundary", async () => {
+    harness.sendInput.mockResolvedValue(undefined);
+    const { default: CloudTerminalView } = await import("../CloudTerminalView.vue");
+    const wrapper = mount(CloudTerminalView, {
+      props: {
+        ownerDesktopId: "desktop-1",
+        ownerTaskId: "task-1",
+        transport: "cloud",
+      },
+    });
+    await flushPromises();
+
+    harness.keyHandler?.(new KeyboardEvent("keydown", { key: "Enter" }));
+    harness.dataListener?.("\r");
+    await flushPromises();
+
+    expect(harness.sendInput).toHaveBeenCalledWith({
+      desktopId: "desktop-1",
+      taskId: "task-1",
+      data: "\r",
+      submissionBoundary: true,
+    });
+    wrapper.unmount();
+  });
+
+  it("keeps a queued draft separate from Enter in the remote input backlog", async () => {
+    const first = deferred();
+    const draft = deferred();
+    harness.sendInput
+      .mockImplementationOnce(() => first.promise)
+      .mockImplementationOnce(() => draft.promise)
+      .mockResolvedValue(undefined);
+    const { default: CloudTerminalView } = await import("../CloudTerminalView.vue");
+    const wrapper = mount(CloudTerminalView, {
+      props: {
+        ownerDesktopId: "desktop-1",
+        ownerTaskId: "task-1",
+        transport: "cloud",
+      },
+    });
+    await flushPromises();
+
+    harness.dataListener?.("in-flight");
+    harness.dataListener?.("draft");
+    harness.keyHandler?.(new KeyboardEvent("keydown", { key: "Enter" }));
+    harness.dataListener?.("\r");
+    await flushPromises();
+
+    expect(harness.sendInput).toHaveBeenCalledTimes(1);
+    first.resolve();
+    await flushPromises();
+
+    expect(harness.sendInput).toHaveBeenCalledTimes(2);
+    expect(harness.sendInput).toHaveBeenNthCalledWith(2, {
+      desktopId: "desktop-1",
+      taskId: "task-1",
+      data: "draft",
+    });
+
+    draft.resolve();
+    await flushPromises();
+
+    expect(harness.sendInput).toHaveBeenNthCalledWith(3, {
+      desktopId: "desktop-1",
+      taskId: "task-1",
+      data: "\r",
+      submissionBoundary: true,
+    });
+    wrapper.unmount();
+  });
+
   it("chunks the largest accepted paste into wire-safe UTF-8 input frames", async () => {
     harness.sendInput.mockResolvedValue(undefined);
     const { default: CloudTerminalView } = await import("../CloudTerminalView.vue");

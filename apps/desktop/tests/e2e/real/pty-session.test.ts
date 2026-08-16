@@ -16,6 +16,7 @@ import {
 } from "../helpers/terminalInput";
 import { waitForTaskCreated } from "../helpers/taskCreation";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
+import { resolveAppKannaServer } from "../helpers/kannaServer";
 import { callVueMethod, execDb, getVueState, tauriInvoke } from "../helpers/vue";
 
 interface WebDriverErrorValue {
@@ -96,6 +97,37 @@ async function switchToWindow(client: WebDriverClient, handle: string): Promise<
     `window.dispatchEvent(new FocusEvent("focus"));
      return true;`,
   );
+}
+
+async function sendRapidTailAndEnter(
+  client: WebDriverClient,
+  tail: string,
+): Promise<void> {
+  const sessionId = getClientSessionId(client);
+  const response = await fetch(`${client.getBaseUrl()}/session/${sessionId}/actions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      actions: [{
+        type: "key",
+        id: "rapid-terminal-input",
+        actions: [
+          { type: "keyDown", value: tail },
+          { type: "keyDown", value: "\uE007" },
+          { type: "keyUp", value: "\uE007" },
+          { type: "keyUp", value: tail },
+        ],
+      }],
+    }),
+  });
+  const body = await response.json() as WebDriverResponse<null>;
+  if (
+    typeof body.value === "object"
+    && body.value !== null
+    && "error" in body.value
+  ) {
+    throw new Error(`WebDriver error: ${body.value.message ?? "unknown error"}`);
+  }
 }
 
 async function waitForFocusedTerminalReady(
@@ -895,6 +927,87 @@ describe("pty session (real CLI)", () => {
     }
     await waitForSessionRecoveryText(client, sessionId, `ECHO:${inputMarker}`, 10_000);
   });
+
+  it("keeps rapid UI draft submission separate from queued logical API input", async () => {
+    const sessionId = trackSessionId(
+      deterministicSessionIds,
+      `pty-draft-boundary-${randomUUID()}`,
+    );
+    const readyMarker = `KBOUNDARY_READY_${randomUUID().replaceAll("-", "")}`;
+    const humanPrefix = "human-";
+    const humanTail = "x";
+    const humanInput = `${humanPrefix}${humanTail}`;
+    const managerInput = "manager-message";
+    const script = [
+      "select(STDOUT); $| = 1;",
+      "system('stty raw -echo');",
+      `print ${JSON.stringify(`${readyMarker}\r\n`)};`,
+      "my $composer = '';",
+      "while (1) {",
+      "  my $read = sysread(STDIN, my $chunk, 1);",
+      "  last unless defined($read) && $read > 0;",
+      "  if ($chunk eq qq{\\r}) {",
+      "    print qq{SUBMIT:<$composer>\\r\\n};",
+      "    $composer = '';",
+      "    next;",
+      "  }",
+      "  $composer .= $chunk;",
+      "  print qq{DRAFT_READY\\r\\n};",
+      "}",
+    ].join("\n");
+
+    await execDb(
+      client,
+      "INSERT INTO pipeline_item (id, repo_id, prompt, stage, agent_type) VALUES (?, ?, ?, ?, ?)",
+      [sessionId, repoId, "Rapid PTY draft boundary fixture", "in progress", "pty"],
+    );
+    await invokeOrThrow(client, "spawn_session", {
+      sessionId,
+      cwd: testRepoPath,
+      executable: "/usr/bin/perl",
+      args: ["-e", script],
+      env: { TERM: "xterm-256color" },
+      cols: 80,
+      rows: 24,
+    });
+    await callVueMethod(client, "loadItems", repoId);
+    await setSelectedItem(client, sessionId);
+    await waitForCurrentItemId(client, sessionId);
+    await waitForTerminalBufferText(client, sessionId, readyMarker, 15_000);
+    await waitForFocusedTerminalReady(client, sessionId);
+
+    await sendKeysToActiveTerminal(client, humanPrefix);
+    await waitForTerminalBufferText(client, sessionId, "DRAFT_READY", 10_000);
+
+    const { baseUrl } = await resolveAppKannaServer(client);
+    const response = await fetch(
+      `${baseUrl}/v1/tasks/${encodeURIComponent(sessionId)}/input`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ input: managerInput }),
+      },
+    );
+    if (!response.ok) {
+      throw new Error(`logical task input failed: ${response.status} ${await response.text()}`);
+    }
+
+    await sendRapidTailAndEnter(client, humanTail);
+    await waitForTerminalBufferMatch(
+      client,
+      sessionId,
+      `SUBMIT:<${managerInput}>`,
+      10_000,
+    );
+    const submittedLines = await client.executeSync<string[]>(
+      `const hook = window.__KANNA_E2E__?.terminalBuffers;
+       if (!hook) throw new Error("terminal buffer hook unavailable");
+       return hook.lines(${JSON.stringify(sessionId)});`,
+    );
+    expect(
+      submittedLines.filter((line) => /SUBMIT:/.test(line)),
+    ).toEqual([`SUBMIT:<${humanInput}>`, `SUBMIT:<${managerInput}>`]);
+  }, 45_000);
 
   it("routes focused-window keyboard input to that window's selected PTY task", async () => {
     const taskAId = `pty-focus-a-${randomUUID()}`;

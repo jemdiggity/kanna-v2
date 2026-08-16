@@ -51,6 +51,22 @@ enum Cmd {
         session_id: String,
         data: Vec<u8>,
     },
+    InputBoundary {
+        session_id: String,
+        data: Vec<u8>,
+    },
+    InputNoReply {
+        session_id: String,
+        data: Vec<u8>,
+    },
+    InputBoundaryNoReply {
+        session_id: String,
+        data: Vec<u8>,
+    },
+    SubmitInput {
+        session_id: String,
+        data: Vec<u8>,
+    },
     ClassifyInput {
         session_id: String,
         operator_input_only: bool,
@@ -112,6 +128,7 @@ enum ErrorCode {
     UnknownPermissionRequest,
     RetryOnSuccessor,
     InputUnauthorized,
+    InheritedDraftStateUnknown,
 }
 
 #[allow(dead_code)]
@@ -581,6 +598,25 @@ fn send_input(conn: &mut ClientConn, id: &str, data: &[u8]) -> Vec<u8> {
     }
 }
 
+fn send_input_boundary(conn: &mut ClientConn, id: &str, data: &[u8]) -> Vec<u8> {
+    conn.send(&Cmd::InputBoundary {
+        session_id: id.to_string(),
+        data: data.to_vec(),
+    });
+    let mut output = Vec::new();
+    loop {
+        match conn.recv() {
+            Evt::Ok => break output,
+            Evt::Output { data, .. } => output.extend_from_slice(&data),
+            Evt::StatusChanged { .. } => continue,
+            Evt::Error { code, message } => {
+                panic!("boundary input failed: {:?}: {}", code, message)
+            }
+            other => panic!("expected Ok, got: {:?}", other),
+        }
+    }
+}
+
 fn send_input_and_wait_for_echo(conn: &mut ClientConn, id: &str, data: &[u8], expected: &str) {
     let mut output = send_input(conn, id, data);
     while !String::from_utf8_lossy(&output).contains(expected) {
@@ -601,6 +637,24 @@ fn send_input_and_wait_for_echo(conn: &mut ClientConn, id: &str, data: &[u8], ex
         expected,
         output_str
     );
+}
+
+fn send_input_boundary_and_wait_for_echo(
+    conn: &mut ClientConn,
+    id: &str,
+    data: &[u8],
+    expected: &str,
+) {
+    let mut output = send_input_boundary(conn, id, data);
+    while !String::from_utf8_lossy(&output).contains(expected) {
+        match conn.recv() {
+            Evt::Output { data, .. } => output.extend_from_slice(&data),
+            Evt::StatusChanged { .. } => continue,
+            Evt::Exit { .. } => break,
+            other => panic!("expected Output while waiting for {expected:?}, got: {other:?}"),
+        }
+    }
+    assert!(String::from_utf8_lossy(&output).contains(expected));
 }
 
 fn request_snapshot(conn: &mut ClientConn, id: &str) -> SnapshotPayload {
@@ -1152,6 +1206,96 @@ fn shipped_v2_hands_stable_pty_and_agent_to_v3_during_lifecycle_churn() {
 }
 
 #[test]
+fn shipped_v2_adoption_refuses_ambiguous_logical_input_until_explicit_boundary() {
+    let Some(previous) = support::previous_daemon::binary_or_skip(
+        "shipped_v2_adoption_refuses_ambiguous_logical_input_until_explicit_boundary",
+    ) else {
+        return;
+    };
+    let dir = test_dir("v2-unknown-draft");
+    cleanup(&dir);
+    std::fs::create_dir_all(&dir).expect("create cross-version daemon directory");
+    let mut old = DaemonHandle::start_binary_in(&previous, &dir);
+
+    for session_id in ["legacy-empty", "legacy-draft"] {
+        spawn_echo(&mut old.connect(), session_id);
+    }
+    let mut old_draft = old.connect();
+    attach(&mut old_draft, "legacy-draft");
+    send_input(&mut old_draft, "legacy-draft", b"protected draft");
+    drop(old_draft);
+
+    let server_executable = std::fs::canonicalize(std::env::current_exe().unwrap())
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let current = DaemonHandle::start_in_with_env(
+        &dir,
+        &[("KANNA_SERVER_EXECUTABLE", server_executable.as_str())],
+    );
+    assert!(
+        wait_for_child_exit(&mut old.child, Duration::from_secs(10)).is_some(),
+        "v2 incumbent should exit after adoption"
+    );
+
+    let mut control = current.connect();
+    control.send(&Cmd::AuthorizeServer {
+        pid: std::process::id(),
+    });
+    assert!(matches!(control.recv(), Evt::Ok));
+    for session_id in ["legacy-empty", "legacy-draft"] {
+        control.send(&Cmd::ClassifyInput {
+            session_id: session_id.to_string(),
+            operator_input_only: false,
+        });
+        assert!(matches!(control.recv(), Evt::Ok));
+        control.send(&Cmd::SubmitInput {
+            session_id: session_id.to_string(),
+            data: b"manager message".to_vec(),
+        });
+        assert!(matches!(
+            control.recv(),
+            Evt::Error {
+                code: Some(ErrorCode::InheritedDraftStateUnknown),
+                ..
+            }
+        ));
+    }
+
+    let mut adopted = current.connect();
+    attach(&mut adopted, "legacy-draft");
+    send_input_boundary(&mut adopted, "legacy-draft", b"\r");
+    control.send(&Cmd::SubmitInput {
+        session_id: "legacy-draft".to_string(),
+        data: b"manager message".to_vec(),
+    });
+    assert!(matches!(control.recv(), Evt::Ok));
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let snapshot = loop {
+        let snapshot = request_snapshot(&mut adopted, "legacy-draft");
+        if snapshot.vt.contains("manager message") {
+            break snapshot;
+        }
+        assert!(Instant::now() < deadline, "logical retry was not delivered");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let draft = snapshot.vt.find("protected draft").expect("draft survived");
+    let manager = snapshot
+        .vt
+        .find("manager message")
+        .expect("manager delivered");
+    assert!(draft < manager);
+    assert!(!snapshot.vt.contains("protected draftmanager message"));
+
+    drop(adopted);
+    drop(control);
+    drop(current);
+    drop(old);
+    cleanup(&dir);
+}
+
+#[test]
 fn current_v3_stable_path_hands_pty_and_agent_to_shipped_v2_adopter() {
     let Some(previous) = support::previous_daemon::binary_or_skip(
         "current_v3_stable_path_hands_pty_and_agent_to_shipped_v2_adopter",
@@ -1178,7 +1322,7 @@ fn current_v3_stable_path_hands_pty_and_agent_to_shipped_v2_adopter() {
     );
     let mut current_pty = current.connect();
     attach(&mut current_pty, "stable-pty");
-    send_input_and_wait_for_echo(&mut current_pty, "stable-pty", b"before\n", "before");
+    send_input_boundary_and_wait_for_echo(&mut current_pty, "stable-pty", b"before\n", "before");
     wait_for_agent_turn(&mut current.connect(), "stable-agent");
 
     drop(current_pty);
@@ -1196,6 +1340,111 @@ fn current_v3_stable_path_hands_pty_and_agent_to_shipped_v2_adopter() {
 
     drop(adopted_pty);
     drop(old_adopter);
+    drop(current);
+    cleanup(&dir);
+}
+
+#[test]
+fn current_v3_refuses_shipped_v2_adopter_while_draft_coordination_is_active() {
+    let Some(previous) = support::previous_daemon::binary_or_skip(
+        "current_v3_refuses_shipped_v2_adopter_while_draft_coordination_is_active",
+    ) else {
+        return;
+    };
+    let dir = test_dir("v3-v2-draft-coordination-refusal");
+    cleanup(&dir);
+    std::fs::create_dir_all(&dir).expect("create cross-version daemon directory");
+    let stable_daemon = dir.join("stable-kanna-daemon");
+    install_test_daemon_at(
+        Path::new(env!("CARGO_BIN_EXE_kanna-daemon")),
+        &stable_daemon,
+    );
+    let mut current = DaemonHandle::start_binary_in(&stable_daemon, &dir);
+    let session_id = "draft-coordination-pty";
+    let mut connection = current.connect();
+    connection.send(&Cmd::Spawn {
+        session_id: session_id.to_string(),
+        executable: "/bin/sh".to_string(),
+        args: vec![
+            "-c".to_string(),
+            "while IFS= read -r line; do printf 'LINE:<%s>\\n' \"$line\"; done".to_string(),
+        ],
+        cwd: "/tmp".to_string(),
+        env: HashMap::new(),
+        cols: 80,
+        rows: 24,
+        agent_provider: None,
+        operator_input_only: false,
+    });
+    assert!(matches!(connection.recv(), Evt::SessionCreated { .. }));
+    attach(&mut connection, session_id);
+    send_input(&mut connection, session_id, b"human draft");
+    connection.send(&Cmd::SubmitInput {
+        session_id: session_id.to_string(),
+        data: b"manager message".to_vec(),
+    });
+    loop {
+        match connection.recv() {
+            Evt::Ok => break,
+            Evt::Output { .. } | Evt::StatusChanged { .. } => continue,
+            other => panic!("expected logical input acceptance, got: {other:?}"),
+        }
+    }
+
+    install_test_daemon_at(&previous, &stable_daemon);
+    let mut legacy = Command::new(&stable_daemon)
+        .env("KANNA_DAEMON_DIR", dir.to_str().unwrap())
+        .spawn()
+        .expect("start shipped v2 adopter");
+    let status = wait_for_child_exit(&mut legacy, Duration::from_secs(10))
+        .expect("legacy adopter should fail instead of discarding draft coordination");
+    assert!(!status.success());
+    assert!(
+        current.child.try_wait().unwrap().is_none(),
+        "current daemon must retain lifecycle ownership after refusing v2"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("daemon.pid"))
+            .unwrap()
+            .trim(),
+        current.child.id().to_string()
+    );
+    let audit = std::fs::read_to_string(dir.join("kanna-daemon-lifecycle.log")).unwrap();
+    assert!(
+        audit.contains(
+            "event=handoff_refused reason=draft_coordination_requires_v3 session=draft-coordination-pty"
+        ),
+        "draft-coordination legacy refusal should be audited: {audit}"
+    );
+
+    send_input_boundary(&mut connection, session_id, b"\r");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let snapshot = loop {
+        let snapshot = request_snapshot(&mut connection, session_id);
+        if snapshot.vt.contains("LINE:<manager message>") {
+            break snapshot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "manager message was not delivered"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let human = snapshot
+        .vt
+        .find("LINE:<human draft>")
+        .expect("human draft remained available on the current daemon");
+    let manager = snapshot
+        .vt
+        .find("LINE:<manager message>")
+        .expect("accepted manager message remained queued on the current daemon");
+    assert!(
+        human < manager,
+        "draft must complete before the manager message"
+    );
+    assert!(!snapshot.vt.contains("human draftmanager message"));
+
+    drop(connection);
     drop(current);
     cleanup(&dir);
 }
@@ -2007,6 +2256,155 @@ fn test_handoff_transfers_session() {
         b"after-handoff\n",
         "after-handoff",
     );
+
+    drop(daemon_b);
+    cleanup(&dir);
+}
+
+#[test]
+fn test_handoff_preserves_a_logical_message_queued_behind_a_raw_draft_using_echo_wait() {
+    let dir = test_dir("queued-logical-input");
+    let session_id = "queued-logical-input";
+    let daemon_a = DaemonHandle::start_in(&dir);
+    let mut conn_a = daemon_a.connect();
+    conn_a.send(&Cmd::Spawn {
+        session_id: session_id.to_string(),
+        executable: "/bin/sh".to_string(),
+        args: vec![
+            "-c".to_string(),
+            "while IFS= read -r line; do printf 'LINE:<%s>\\n' \"$line\"; done".to_string(),
+        ],
+        cwd: "/tmp".to_string(),
+        env: HashMap::new(),
+        cols: 80,
+        rows: 24,
+        agent_provider: None,
+        operator_input_only: false,
+    });
+    loop {
+        match conn_a.recv() {
+            Evt::SessionCreated {
+                session_id: created,
+            } => {
+                assert_eq!(created, session_id);
+                break;
+            }
+            Evt::Output { .. } | Evt::StatusChanged { .. } => continue,
+            other => panic!("expected SessionCreated, got: {other:?}"),
+        }
+    }
+    attach(&mut conn_a, session_id);
+    send_input(&mut conn_a, session_id, b"human draft");
+    conn_a.send(&Cmd::SubmitInput {
+        session_id: session_id.to_string(),
+        data: b"manager message".to_vec(),
+    });
+    loop {
+        match conn_a.recv() {
+            Evt::Ok => break,
+            Evt::Output { .. } | Evt::StatusChanged { .. } => continue,
+            other => panic!("expected logical input acceptance, got: {other:?}"),
+        }
+    }
+
+    drop(conn_a);
+    let daemon_b = DaemonHandle::start_in(&dir);
+    let mut conn_b = daemon_b.connect();
+    attach(&mut conn_b, session_id);
+    send_input_boundary(&mut conn_b, session_id, b"\r");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let snapshot = request_snapshot(&mut conn_b, session_id);
+        if snapshot.vt.contains("LINE:<manager message>") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "manager message was not delivered"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let snapshot = request_snapshot(&mut conn_b, session_id);
+    let human = snapshot
+        .vt
+        .find("LINE:<human draft>")
+        .expect("raw draft should submit as its own line after handoff");
+    let manager = snapshot
+        .vt
+        .find("LINE:<manager message>")
+        .expect("queued logical message should survive handoff");
+    assert!(
+        human < manager,
+        "raw draft must stay ahead of the queued message"
+    );
+    assert!(!snapshot.vt.contains("human draftmanager message"));
+
+    drop(daemon_b);
+    cleanup(&dir);
+}
+
+#[test]
+fn test_handoff_drains_unread_no_reply_raw_input_before_snapshot() {
+    let dir = test_dir("unread-raw-input");
+    let session_id = "unread-raw-input";
+    let daemon_a =
+        DaemonHandle::start_in_with_env(&dir, &[("KANNA_TEST_PTY_INPUT_READER_PAUSE_MS", "750")]);
+    let mut conn_a = daemon_a.connect();
+    conn_a.send(&Cmd::Spawn {
+        session_id: session_id.to_string(),
+        executable: "/bin/sh".to_string(),
+        args: vec![
+            "-c".to_string(),
+            "while IFS= read -r line; do printf 'LINE:<%s>\\n' \"$line\"; done".to_string(),
+        ],
+        cwd: "/tmp".to_string(),
+        env: HashMap::new(),
+        cols: 80,
+        rows: 24,
+        agent_provider: None,
+        operator_input_only: false,
+    });
+    assert!(matches!(conn_a.recv(), Evt::SessionCreated { .. }));
+    assert!(daemon_a
+        .wait_for_log("TEST HOOK: pausing PTY input reader")
+        .contains("TEST HOOK: pausing PTY input reader"));
+
+    conn_a.send(&Cmd::InputNoReply {
+        session_id: session_id.to_string(),
+        data: b"human draft".to_vec(),
+    });
+    conn_a.send(&Cmd::SubmitInput {
+        session_id: session_id.to_string(),
+        data: b"manager message".to_vec(),
+    });
+    assert!(matches!(conn_a.recv(), Evt::Ok));
+
+    drop(conn_a);
+    let daemon_b = DaemonHandle::start_in(&dir);
+    let mut conn_b = daemon_b.connect();
+    attach(&mut conn_b, session_id);
+    send_input_boundary(&mut conn_b, session_id, b"\r");
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let snapshot = loop {
+        let snapshot = request_snapshot(&mut conn_b, session_id);
+        if snapshot.vt.contains("LINE:<manager message>") {
+            break snapshot;
+        }
+        assert!(Instant::now() < deadline, "handoff input was not delivered");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let human = snapshot
+        .vt
+        .find("LINE:<human draft>")
+        .expect("raw draft survived");
+    let manager = snapshot
+        .vt
+        .find("LINE:<manager message>")
+        .expect("logical message survived");
+    assert!(human < manager);
+    assert!(!snapshot.vt.contains("human draftmanager message"));
 
     drop(daemon_b);
     cleanup(&dir);

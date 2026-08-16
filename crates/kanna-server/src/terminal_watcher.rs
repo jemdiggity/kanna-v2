@@ -489,15 +489,15 @@ mod tests {
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         let mut inputs = Vec::new();
-        for _ in 0..2 {
+        for _ in 0..1 {
             let mut line = String::new();
             reader.read_line(&mut line).await.unwrap();
             match serde_json::from_str::<DaemonCommand>(line.trim()).unwrap() {
-                DaemonCommand::Input { session_id, data } => {
+                DaemonCommand::SubmitInput { session_id, data } => {
                     assert_eq!(session_id, "task-parent");
                     inputs.push(data);
                 }
-                other => panic!("expected Input command, got {other:?}"),
+                other => panic!("expected SubmitInput command, got {other:?}"),
             }
             write_event(&mut write_half, &DaemonEvent::Ok).await;
         }
@@ -751,10 +751,7 @@ mod tests {
 
         assert_eq!(
             inputs,
-            vec![
-                b"TASK task-child DONE [success]: Child Display".to_vec(),
-                vec![b'\r']
-            ]
+            vec![b"TASK task-child DONE [success]: Child Display".to_vec()]
         );
         assert_task_completed(&config);
         assert!(
@@ -908,10 +905,7 @@ mod tests {
 
         assert_eq!(
             inputs,
-            vec![
-                b"TASK task-child DONE [success]: Child Display".to_vec(),
-                vec![b'\r']
-            ]
+            vec![b"TASK task-child DONE [success]: Child Display".to_vec()]
         );
         let _ = std::fs::remove_file(socket_path);
         let _ = std::fs::remove_dir_all(daemon_dir);

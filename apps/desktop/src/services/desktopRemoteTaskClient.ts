@@ -57,6 +57,8 @@ export interface AdvanceRemoteTaskStageOptions extends RemoteTaskActionOptions {
 
 export interface SendRemoteTerminalInputOptions extends RemoteTaskActionOptions {
   data: string;
+  submissionBoundary?: boolean;
+  controlInput?: boolean;
 }
 
 export interface ResizeRemoteTerminalOptions extends RemoteTaskActionOptions {

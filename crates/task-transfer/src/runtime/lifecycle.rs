@@ -17,8 +17,8 @@ use super::state::{
 };
 use super::utils::{
     load_or_create_identity, registry_entry_path, remove_managed_artifact_root,
-    supports_duplex_terminal, terminal_observer_key, unexpected_peer_response,
-    CURRENT_PROTOCOL_VERSION,
+    supports_duplex_terminal, supports_terminal_input_semantics, terminal_observer_key,
+    unexpected_peer_response, CURRENT_PROTOCOL_VERSION,
 };
 use crate::crypto::{parse_public_key, public_key_to_string, seal_json};
 use crate::discovery::encode_txt_record;
@@ -1355,7 +1355,16 @@ impl TransferRuntime {
         target_peer_id: &str,
         session_id: &str,
         data: Vec<u8>,
+        submission_boundary: bool,
+        control_input: bool,
     ) -> Result<(), RuntimeError> {
+        let target_peer = self.find_peer(target_peer_id).await?;
+        if !supports_terminal_input_semantics(target_peer.protocol_version) {
+            return Err(RuntimeError::Protocol(format!(
+                "peer {target_peer_id} uses task-transfer protocol v{} without explicit terminal submission/control semantics; upgrade the peer before sending terminal input",
+                target_peer.protocol_version,
+            )));
+        }
         if self
             .send_observed_terminal_control(
                 target_peer_id,
@@ -1363,13 +1372,14 @@ impl TransferRuntime {
                 PeerTerminalControl::Input {
                     session_id: session_id.to_owned(),
                     data: data.clone(),
+                    submission_boundary,
+                    control_input,
                 },
             )
             .await
         {
             return Ok(());
         }
-        let target_peer = self.find_peer(target_peer_id).await?;
         self.ensure_peer_is_durably_trusted(&target_peer.peer_id, &target_peer.public_key)?;
         let request_id = self.next_request_id("send-input");
         let sealed_payload = self
@@ -1380,6 +1390,8 @@ impl TransferRuntime {
                 serde_json::json!({
                     "session_id": session_id,
                     "data": data,
+                    "submission_boundary": submission_boundary,
+                    "control_input": control_input,
                 }),
             )
             .await?;
@@ -1391,6 +1403,8 @@ impl TransferRuntime {
                     requester_peer_id: self.config.peer_id.clone(),
                     session_id: session_id.to_owned(),
                     data,
+                    submission_boundary,
+                    control_input,
                     sealed_payload: Some(sealed_payload),
                 },
             )

@@ -2778,8 +2778,9 @@ async fn dispatch_post_injects_message_into_live_session_and_records_post_run() 
         _ => panic!("expected post dispatch"),
     };
 
-    // Message write + discrete Enter: exactly two Input commands.
-    let fake_daemon = spawn_fake_daemon_input_ok(config.daemon_dir.clone(), 2).await;
+    // The daemon owns the draft-safe submission boundary, so the post is one
+    // semantic command rather than two raw terminal writes.
+    let fake_daemon = spawn_fake_daemon_input_ok(config.daemon_dir.clone(), 1).await;
     let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
     let response = crate::task_creator::dispatch_prepared_post_for_api(
         &config.db_path,
@@ -2793,20 +2794,13 @@ async fn dispatch_post_injects_message_into_live_session_and_records_post_run() 
 
     assert_eq!(response.task_id, "task-1");
     match &commands[0] {
-        kanna_daemon::protocol::Command::Input { session_id, data } => {
+        kanna_daemon::protocol::Command::SubmitInput { session_id, data } => {
             assert_eq!(session_id, "task-1");
             let text = String::from_utf8(data.clone()).unwrap();
             assert!(text.contains("Commit agent."), "input: {text}");
             assert!(text.contains("Commit Fix it"), "input: {text}");
         }
-        other => panic!("expected Input, got {other:?}"),
-    }
-    match &commands[1] {
-        kanna_daemon::protocol::Command::Input { session_id, data } => {
-            assert_eq!(session_id, "task-1");
-            assert_eq!(data, &vec![b'\r']);
-        }
-        other => panic!("expected Enter Input, got {other:?}"),
+        other => panic!("expected SubmitInput, got {other:?}"),
     }
 
     // The task never left its stage; the post run is attributed to the
@@ -2862,7 +2856,7 @@ async fn dispatch_post_falls_back_to_fresh_session_when_session_is_dead() {
         loop {
             let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
             let response = match &command {
-                kanna_daemon::protocol::Command::Input { .. }
+                kanna_daemon::protocol::Command::SubmitInput { .. }
                 | kanna_daemon::protocol::Command::Kill { .. } => {
                     kanna_daemon::protocol::Event::Error {
                         code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
@@ -2974,7 +2968,7 @@ async fn prompt_only_post_provider_overrides_source_task_provider_in_fallback_da
         loop {
             let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
             let response = match &command {
-                kanna_daemon::protocol::Command::Input { .. }
+                kanna_daemon::protocol::Command::SubmitInput { .. }
                 | kanna_daemon::protocol::Command::Kill { .. } => {
                     kanna_daemon::protocol::Event::Error {
                         code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),

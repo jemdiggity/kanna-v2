@@ -319,6 +319,9 @@ pub(crate) async fn run_daemon() {
                 operator_input_only: handoff.operator_input_only
                     || !handoff.input_policy_classified,
                 input_policy_classified: handoff.input_policy_classified,
+                raw_input_draft_active: handoff.raw_input_draft_active,
+                raw_input_draft_state_known: handoff.raw_input_draft_state_known,
+                pending_logical_inputs: handoff.pending_logical_inputs,
             }));
             let reader = match handle.try_clone_io_fd().await {
                 Ok(io_fd) => match handle.take_input_rx().await {

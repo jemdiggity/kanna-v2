@@ -38,7 +38,10 @@ export function initializeTerminalView(params: {
   isAttached: () => boolean
   getStreamClient: () => StreamClient | null
   handleLinkActivate: (event: MouseEvent, uri: string) => void
-  sendInputBytes: (bytes: Uint8Array, config?: { immediate?: boolean }) => Promise<void>
+  sendInputBytes: (
+    bytes: Uint8Array,
+    config?: { immediate?: boolean; submissionBoundary?: boolean; controlInput?: boolean },
+  ) => Promise<void>
   maybeReadClipboardImage: () => Promise<void>
   sendDroppedPaths: (paths: string[]) => void
   onNativeDropCleanupReady: (cleanup: () => void) => void
@@ -98,7 +101,28 @@ export function initializeTerminalView(params: {
     sendDroppedPaths: params.sendDroppedPaths,
     onNativeDropCleanupReady: params.onNativeDropCleanupReady,
   })
-  const cleanupContainerEvents = dropBridge.registerContainerDropHandlers()
+  const cleanupDropEvents = dropBridge.registerContainerDropHandlers()
+  type ProducerInputKind = "draft" | "submission" | "control"
+  let producerInputKind: ProducerInputKind = "draft"
+  let producerInputGeneration = 0
+  const declareProducerInput = (kind: ProducerInputKind) => {
+    producerInputKind = kind
+    const generation = ++producerInputGeneration
+    queueMicrotask(() => {
+      if (producerInputGeneration === generation) producerInputKind = "draft"
+    })
+  }
+  const declareControlInput = () => declareProducerInput("control")
+  const controlEvents = ["mousedown", "mouseup", "mousemove", "wheel", "focus", "blur"]
+  for (const eventName of controlEvents) {
+    params.el.addEventListener(eventName, declareControlInput, true)
+  }
+  const cleanupContainerEvents = () => {
+    cleanupDropEvents?.()
+    for (const eventName of controlEvents) {
+      params.el.removeEventListener(eventName, declareControlInput, true)
+    }
+  }
 
   if (params.el.offsetWidth > 0 && params.el.offsetHeight > 0) {
     params.fitAddon.fit()
@@ -114,6 +138,18 @@ export function initializeTerminalView(params: {
   // and sent to the PTY instead of triggering clipboard operations —
   // intercept Cmd+C here and let Cmd+V fall through to the native paste event.
   term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
+    if (e.type === "keydown") {
+      declareProducerInput(
+        e.key === "Enter"
+          && !e.isComposing
+          && !e.shiftKey
+          && !e.altKey
+          && !e.ctrlKey
+          && !e.metaKey
+          ? "submission"
+          : "draft",
+      )
+    }
     if (
       params.options?.agentTerminal &&
       isShiftEnter(e)
@@ -149,7 +185,10 @@ export function initializeTerminalView(params: {
 
   // Send keystrokes to daemon
   term.onData((data) => {
-    void params.sendInputBytes(new TextEncoder().encode(data))
+    void params.sendInputBytes(new TextEncoder().encode(data), {
+      submissionBoundary: producerInputKind === "submission",
+      controlInput: producerInputKind === "control",
+    })
   })
 
   // Handle resize — only forward to daemon after session is attached,

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -13,6 +13,7 @@ use kanna_daemon::terminal_perf::{self, TerminalPerfContext};
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
 pub const STATUS_DETECTION_THROTTLE_MS: u64 = 500;
+pub const LOGICAL_INPUT_SUBMIT_DELAY_MS: u64 = 150;
 
 #[derive(Clone)]
 pub struct StreamControl {
@@ -120,6 +121,9 @@ pub struct SessionRecord {
     pub last_status_check_at: Option<Instant>,
     pub operator_input_only: bool,
     pub input_policy_classified: bool,
+    pub raw_input_draft_active: bool,
+    pub raw_input_draft_state_known: bool,
+    pub pending_logical_inputs: Vec<Vec<u8>>,
 }
 
 pub struct SessionRuntimeState {
@@ -133,33 +137,126 @@ pub struct SessionRuntimeState {
     pub input_policy_classified: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingInputKind {
+    Raw,
+    LogicalMessage,
+    LogicalEnter,
+}
+
+/// Meaning declared by the terminal input producer. Submission is never
+/// inferred from PTY bytes: pasted newlines and control sequences may contain
+/// the same bytes as an Enter key without ending the active composer draft.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RawInputKind {
+    Draft,
+    Submission,
+    Control,
+}
+
 pub struct PendingInput {
     pub data: Vec<u8>,
+    pub kind: PendingInputKind,
     written: Option<oneshot::Sender<()>>,
+    #[cfg_attr(not(test), allow(dead_code))]
+    logical_after_write: Vec<Vec<u8>>,
 }
 
 impl PendingInput {
-    fn unacknowledged(data: Vec<u8>) -> Self {
+    fn raw(data: Vec<u8>, written: Option<oneshot::Sender<()>>) -> Self {
         Self {
             data,
-            written: None,
+            kind: PendingInputKind::Raw,
+            written,
+            logical_after_write: Vec::new(),
         }
     }
 
-    fn acknowledged(data: Vec<u8>) -> (Self, oneshot::Receiver<()>) {
-        let (written, receiver) = oneshot::channel();
-        (
+    fn raw_submission(
+        data: Vec<u8>,
+        written: Option<oneshot::Sender<()>>,
+        logical_after_write: Vec<Vec<u8>>,
+    ) -> Self {
+        Self {
+            data,
+            kind: PendingInputKind::Raw,
+            written,
+            logical_after_write,
+        }
+    }
+
+    pub(crate) fn logical(data: Vec<u8>) -> Self {
+        if data.is_empty() {
+            Self {
+                data: vec![b'\r'],
+                kind: PendingInputKind::LogicalEnter,
+                written: None,
+                logical_after_write: Vec::new(),
+            }
+        } else {
             Self {
                 data,
-                written: Some(written),
-            },
-            receiver,
-        )
+                kind: PendingInputKind::LogicalMessage,
+                written: None,
+                logical_after_write: Vec::new(),
+            }
+        }
+    }
+
+    pub fn advance_logical_message_to_enter(&mut self) -> bool {
+        if self.kind != PendingInputKind::LogicalMessage {
+            return false;
+        }
+        self.data.clear();
+        self.data.push(b'\r');
+        self.kind = PendingInputKind::LogicalEnter;
+        true
     }
 
     pub fn acknowledge_written(mut self) {
         if let Some(written) = self.written.take() {
             let _ = written.send(());
+        }
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn take_logical_after_write(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.logical_after_write)
+    }
+}
+
+#[derive(Debug)]
+pub enum InputQueueError {
+    Closed,
+    CoordinationUnavailable,
+    InheritedDraftStateUnknown,
+}
+
+struct InputCoordinationState {
+    raw_input_draft_active: bool,
+    raw_input_draft_state_known: bool,
+    logical_inputs: VecDeque<QueuedLogicalInput>,
+}
+
+struct QueuedLogicalInput {
+    data: Vec<u8>,
+    dispatched: bool,
+}
+
+impl InputCoordinationState {
+    fn from_record(record: &SessionRecord) -> Self {
+        Self {
+            raw_input_draft_active: record.raw_input_draft_active,
+            raw_input_draft_state_known: record.raw_input_draft_state_known,
+            logical_inputs: record
+                .pending_logical_inputs
+                .iter()
+                .cloned()
+                .map(|data| QueuedLogicalInput {
+                    data,
+                    dispatched: false,
+                })
+                .collect(),
         }
     }
 }
@@ -222,6 +319,7 @@ pub struct SessionHandle {
     state: Mutex<SessionRuntimeState>,
     input_tx: mpsc::UnboundedSender<PendingInput>,
     input_rx: Mutex<Option<mpsc::UnboundedReceiver<PendingInput>>>,
+    input_coordination: std::sync::Mutex<InputCoordinationState>,
     /// Permanently fences an outgoing incarnation from publishing output or
     /// mutating id-keyed state after a same-id replacement is allowed.
     retired: AtomicBool,
@@ -230,6 +328,17 @@ pub struct SessionHandle {
 impl SessionHandle {
     pub fn new(record: SessionRecord) -> Self {
         let (input_tx, input_rx) = mpsc::unbounded_channel();
+        let mut input_coordination = InputCoordinationState::from_record(&record);
+        if input_coordination.raw_input_draft_state_known
+            && !input_coordination.raw_input_draft_active
+        {
+            for logical_input in &mut input_coordination.logical_inputs {
+                input_tx
+                    .send(PendingInput::logical(logical_input.data.clone()))
+                    .expect("new session input receiver must be open");
+                logical_input.dispatched = true;
+            }
+        }
         Self {
             pty: Mutex::new(record.pty),
             teardown_claimed: std::sync::atomic::AtomicBool::new(false),
@@ -245,6 +354,7 @@ impl SessionHandle {
             }),
             input_tx,
             input_rx: Mutex::new(Some(input_rx)),
+            input_coordination: std::sync::Mutex::new(input_coordination),
             retired: AtomicBool::new(false),
         }
     }
@@ -257,21 +367,123 @@ impl SessionHandle {
         self.retired.load(Ordering::SeqCst)
     }
 
-    pub fn enqueue_input(&self, data: Vec<u8>) -> Result<(), mpsc::error::SendError<Vec<u8>>> {
+    pub fn enqueue_terminal_reply(&self, data: Vec<u8>) -> Result<(), InputQueueError> {
         self.input_tx
-            .send(PendingInput::unacknowledged(data))
-            .map_err(|error| mpsc::error::SendError(error.0.data))
+            .send(PendingInput::raw(data, None))
+            .map_err(|_| InputQueueError::Closed)
     }
 
-    pub fn enqueue_acknowledged_input(
+    pub fn enqueue_raw_input(
         &self,
         data: Vec<u8>,
-    ) -> Result<oneshot::Receiver<()>, mpsc::error::SendError<Vec<u8>>> {
-        let (input, written) = PendingInput::acknowledged(data);
-        self.input_tx
-            .send(input)
-            .map_err(|error| mpsc::error::SendError(error.0.data))?;
+        kind: RawInputKind,
+    ) -> Result<(), InputQueueError> {
+        self.enqueue_raw_input_with_ack(data, kind, None)
+    }
+
+    pub fn enqueue_acknowledged_raw_input(
+        &self,
+        data: Vec<u8>,
+        kind: RawInputKind,
+    ) -> Result<oneshot::Receiver<()>, InputQueueError> {
+        let (written_tx, written) = oneshot::channel();
+        self.enqueue_raw_input_with_ack(data, kind, Some(written_tx))?;
         Ok(written)
+    }
+
+    fn enqueue_raw_input_with_ack(
+        &self,
+        data: Vec<u8>,
+        kind: RawInputKind,
+        written: Option<oneshot::Sender<()>>,
+    ) -> Result<(), InputQueueError> {
+        let mut state = self
+            .input_coordination
+            .lock()
+            .map_err(|_| InputQueueError::CoordinationUnavailable)?;
+        let mut routed = Vec::new();
+        match kind {
+            RawInputKind::Submission => {
+                state.raw_input_draft_active = false;
+                state.raw_input_draft_state_known = true;
+                let mut logical_after_write = Vec::new();
+                for logical_input in &mut state.logical_inputs {
+                    if !logical_input.dispatched {
+                        logical_after_write.push(logical_input.data.clone());
+                        logical_input.dispatched = true;
+                    }
+                }
+                routed.push(PendingInput::raw_submission(
+                    data,
+                    written,
+                    logical_after_write,
+                ));
+            }
+            RawInputKind::Draft => {
+                state.raw_input_draft_active = true;
+                state.raw_input_draft_state_known = true;
+                routed.push(PendingInput::raw(data, written));
+            }
+            RawInputKind::Control => routed.push(PendingInput::raw(data, written)),
+        }
+        for input in routed {
+            self.input_tx
+                .send(input)
+                .map_err(|_| InputQueueError::Closed)?;
+        }
+        Ok(())
+    }
+
+    /// Accept one logical message. It is submitted atomically now when no raw
+    /// draft exists, or retained until the next producer-declared submission
+    /// boundary otherwise.
+    pub fn enqueue_logical_input(&self, data: Vec<u8>) -> Result<(), InputQueueError> {
+        let mut state = self
+            .input_coordination
+            .lock()
+            .map_err(|_| InputQueueError::CoordinationUnavailable)?;
+        if !state.raw_input_draft_state_known {
+            return Err(InputQueueError::InheritedDraftStateUnknown);
+        }
+        state.logical_inputs.push_back(QueuedLogicalInput {
+            data: data.clone(),
+            dispatched: false,
+        });
+        if state.raw_input_draft_active {
+            return Ok(());
+        }
+        if self.input_tx.send(PendingInput::logical(data)).is_err() {
+            state.logical_inputs.pop_back();
+            return Err(InputQueueError::Closed);
+        }
+        if let Some(logical_input) = state.logical_inputs.back_mut() {
+            logical_input.dispatched = true;
+        }
+        Ok(())
+    }
+
+    pub fn complete_logical_input(&self) -> Result<(), InputQueueError> {
+        let mut state = self
+            .input_coordination
+            .lock()
+            .map_err(|_| InputQueueError::CoordinationUnavailable)?;
+        state.logical_inputs.pop_front();
+        Ok(())
+    }
+
+    /// Legacy-v2 handoff payloads cannot preserve terminal draft coordination.
+    /// A v2 adopter may ignore the newer wire fields while still acknowledging
+    /// adoption, so the current daemon must retain ownership until inherited
+    /// draft state is known, the raw draft is inactive, and the accepted
+    /// logical-input queue is empty.
+    pub fn input_coordination_requires_v3(&self) -> Result<bool, InputQueueError> {
+        let state = self
+            .input_coordination
+            .lock()
+            .map_err(|_| InputQueueError::CoordinationUnavailable)?;
+        Ok(!state.raw_input_draft_state_known
+            || state.raw_input_draft_active
+            || !state.logical_inputs.is_empty())
     }
 
     pub async fn try_clone_io_fd(&self) -> std::io::Result<std::os::fd::OwnedFd> {
@@ -572,6 +784,10 @@ impl SessionHandle {
 
         let mut state = self.state.lock().await;
         let snapshot = state.headless_terminal.snapshot().ok();
+        let input_coordination = self
+            .input_coordination
+            .lock()
+            .map_err(|_| "terminal input coordination lock was poisoned")?;
         Ok(Some(SessionHandoffParts {
             pid,
             child_start,
@@ -583,6 +799,13 @@ impl SessionHandle {
             status: state.status,
             operator_input_only: state.operator_input_only,
             input_policy_classified: state.input_policy_classified,
+            raw_input_draft_active: input_coordination.raw_input_draft_active,
+            raw_input_draft_state_known: input_coordination.raw_input_draft_state_known,
+            pending_logical_inputs: input_coordination
+                .logical_inputs
+                .iter()
+                .map(|logical_input| logical_input.data.clone())
+                .collect(),
             fd,
         }))
     }
@@ -601,6 +824,9 @@ pub struct SessionHandoffParts {
     pub status: SessionStatus,
     pub operator_input_only: bool,
     pub input_policy_classified: bool,
+    pub raw_input_draft_active: bool,
+    pub raw_input_draft_state_known: bool,
+    pub pending_logical_inputs: Vec<Vec<u8>>,
     pub fd: std::os::fd::OwnedFd,
 }
 
@@ -924,6 +1150,9 @@ pub mod test_support {
             last_status_check_at: None,
             operator_input_only: false,
             input_policy_classified: true,
+            raw_input_draft_active: false,
+            raw_input_draft_state_known: true,
+            pending_logical_inputs: Vec::new(),
         })
     }
 
@@ -948,6 +1177,9 @@ pub mod test_support {
             last_status_check_at: None,
             operator_input_only: false,
             input_policy_classified: true,
+            raw_input_draft_active: false,
+            raw_input_draft_state_known: true,
+            pending_logical_inputs: Vec::new(),
         })
     }
 }
@@ -1053,7 +1285,8 @@ mod tests {
 
     use super::{
         replay_headless_terminal_for_benchmark, BenchmarkStatusState, PtyMasterAttribution,
-        PtyOccupancySnapshot, SessionHandle, SessionManager, SessionRecord, StreamControl,
+        PtyOccupancySnapshot, RawInputKind, SessionHandle, SessionManager, SessionRecord,
+        StreamControl,
     };
     use crate::bench::transcript::{BenchmarkMode, BenchmarkProvider, TranscriptSpec};
     use crate::headless_terminal::{initial_session_status, HeadlessTerminal};
@@ -1083,6 +1316,9 @@ mod tests {
             last_status_check_at: None,
             operator_input_only: false,
             input_policy_classified: true,
+            raw_input_draft_active: false,
+            raw_input_draft_state_known: true,
+            pending_logical_inputs: Vec::new(),
         })
     }
 
@@ -1111,7 +1347,7 @@ mod tests {
         let handle = spawn_test_handle(AgentProvider::Codex, SessionStatus::Idle).unwrap();
         let mut input_rx = handle.take_input_rx().await.expect("input queue");
         let mut written = handle
-            .enqueue_acknowledged_input(b"merge request".to_vec())
+            .enqueue_acknowledged_raw_input(b"merge request".to_vec(), RawInputKind::Draft)
             .expect("enqueue input");
 
         assert!(
@@ -1127,6 +1363,203 @@ mod tests {
 
         pending.acknowledge_written();
         written.await.expect("PTY writer acknowledgement");
+        handle.kill().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn logical_input_waits_for_a_raw_draft_boundary_and_keeps_fifo_order() {
+        let handle = spawn_test_handle(AgentProvider::Codex, SessionStatus::Idle).unwrap();
+        let mut input_rx = handle.take_input_rx().await.expect("input queue");
+
+        handle
+            .enqueue_raw_input(b"human draft".to_vec(), RawInputKind::Draft)
+            .expect("enqueue raw draft");
+        let draft = input_rx.recv().await.expect("raw draft input");
+        assert_eq!(draft.kind, super::PendingInputKind::Raw);
+        assert_eq!(draft.data, b"human draft");
+
+        handle
+            .enqueue_logical_input(b"manager one".to_vec())
+            .expect("queue first logical input");
+        handle
+            .enqueue_logical_input(b"manager two".to_vec())
+            .expect("queue second logical input");
+        assert!(
+            input_rx.try_recv().is_err(),
+            "logical messages must stay out of the PTY writer while the draft is active"
+        );
+
+        handle
+            .enqueue_raw_input(b"\r".to_vec(), RawInputKind::Submission)
+            .expect("enqueue raw submission boundary");
+        let mut boundary = input_rx.recv().await.expect("raw boundary");
+        assert_eq!(boundary.kind, super::PendingInputKind::Raw);
+        assert_eq!(boundary.data, b"\r");
+        assert!(input_rx.try_recv().is_err());
+        let released = boundary.take_logical_after_write();
+        let first = super::PendingInput::logical(released[0].clone());
+        let second = super::PendingInput::logical(released[1].clone());
+        assert_eq!(first.kind, super::PendingInputKind::LogicalMessage);
+        assert_eq!(first.data, b"manager one");
+        assert_eq!(second.kind, super::PendingInputKind::LogicalMessage);
+        assert_eq!(second.data, b"manager two");
+
+        handle
+            .enqueue_raw_input(b"next draft".to_vec(), RawInputKind::Draft)
+            .expect("enqueue next raw draft");
+        let next_draft = input_rx.recv().await.expect("next raw draft");
+        assert_eq!(next_draft.kind, super::PendingInputKind::Raw);
+        assert_eq!(next_draft.data, b"next draft");
+
+        handle
+            .enqueue_logical_input(b"manager three".to_vec())
+            .expect("queue behind the next draft");
+        assert!(input_rx.try_recv().is_err());
+        handle.kill().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn embedded_newlines_in_bracketed_paste_are_not_submission_boundaries() {
+        let handle = spawn_test_handle(AgentProvider::Codex, SessionStatus::Idle).unwrap();
+        let mut input_rx = handle.take_input_rx().await.expect("input queue");
+
+        handle
+            .enqueue_raw_input(b"human draft".to_vec(), RawInputKind::Draft)
+            .expect("enqueue raw draft");
+        let _draft = input_rx.recv().await.expect("raw draft input");
+        handle
+            .enqueue_logical_input(b"manager message".to_vec())
+            .expect("queue logical input");
+
+        let paste = b"\x1b[200~ continued\nsecond line\x1b[201~".to_vec();
+        handle
+            .enqueue_raw_input(paste.clone(), RawInputKind::Draft)
+            .expect("enqueue multiline paste continuation");
+        let continuation = input_rx.recv().await.expect("paste continuation");
+        assert_eq!(continuation.kind, super::PendingInputKind::Raw);
+        assert_eq!(continuation.data, paste);
+        assert!(
+            input_rx.try_recv().is_err(),
+            "embedded paste newline must not release the logical message"
+        );
+
+        handle
+            .enqueue_raw_input(b"\r".to_vec(), RawInputKind::Submission)
+            .expect("enqueue producer-declared submission boundary");
+        let mut boundary = input_rx.recv().await.expect("boundary");
+        assert_eq!(boundary.data, b"\r");
+        assert_eq!(
+            boundary.take_logical_after_write(),
+            [b"manager message".to_vec()]
+        );
+        handle.kill().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn terminal_control_does_not_create_or_clear_a_draft_or_strand_logical_input() {
+        let handle = spawn_test_handle(AgentProvider::Codex, SessionStatus::Idle).unwrap();
+        let mut input_rx = handle.take_input_rx().await.expect("input queue");
+
+        handle
+            .enqueue_raw_input(b"human draft".to_vec(), RawInputKind::Draft)
+            .expect("enqueue raw draft");
+        assert_eq!(input_rx.recv().await.expect("draft").data, b"human draft");
+        handle
+            .enqueue_logical_input(b"manager message".to_vec())
+            .expect("queue logical input");
+
+        let mouse_report = b"\x1b[<65;1;1M".to_vec();
+        handle
+            .enqueue_raw_input(mouse_report.clone(), RawInputKind::Control)
+            .expect("enqueue terminal control");
+        assert_eq!(input_rx.recv().await.expect("control").data, mouse_report);
+        assert!(
+            input_rx.try_recv().is_err(),
+            "control input must not clear the real human draft"
+        );
+
+        handle
+            .enqueue_raw_input(b"\r".to_vec(), RawInputKind::Submission)
+            .expect("enqueue submission boundary");
+        let mut boundary = input_rx.recv().await.expect("boundary");
+        assert_eq!(boundary.data, b"\r");
+        assert_eq!(
+            boundary.take_logical_after_write(),
+            [b"manager message".to_vec()]
+        );
+        handle.kill().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn terminal_control_on_a_clear_composer_cannot_strand_the_next_logical_input() {
+        let handle = spawn_test_handle(AgentProvider::Codex, SessionStatus::Idle).unwrap();
+        let mut input_rx = handle.take_input_rx().await.expect("input queue");
+
+        let mouse_report = b"\x1b[<65;1;1M".to_vec();
+        handle
+            .enqueue_raw_input(mouse_report.clone(), RawInputKind::Control)
+            .expect("enqueue mobile terminal control");
+        assert_eq!(input_rx.recv().await.expect("control").data, mouse_report);
+
+        handle
+            .enqueue_logical_input(b"manager message".to_vec())
+            .expect("accept logical input after control");
+        let logical = input_rx
+            .try_recv()
+            .expect("control input must not strand logical delivery behind a phantom draft");
+        assert_eq!(logical.kind, super::PendingInputKind::LogicalMessage);
+        assert_eq!(logical.data, b"manager message");
+        handle.kill().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn accepted_logical_input_remains_in_the_handoff_snapshot_until_written() {
+        let handle = spawn_test_handle(AgentProvider::Codex, SessionStatus::Idle).unwrap();
+
+        handle
+            .enqueue_logical_input(b"manager message".to_vec())
+            .expect("accept logical input");
+        let parts = handle
+            .handoff_parts()
+            .await
+            .expect("snapshot session")
+            .expect("live session");
+        assert_eq!(parts.pending_logical_inputs, [b"manager message".to_vec()]);
+
+        handle.complete_logical_input().expect("complete input");
+        let parts = handle
+            .handoff_parts()
+            .await
+            .expect("snapshot session")
+            .expect("live session");
+        assert!(parts.pending_logical_inputs.is_empty());
+        handle.kill().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_unknown_draft_state_refuses_logical_input_until_explicit_boundary() {
+        let mut record = spawn_test_record(AgentProvider::Codex, SessionStatus::Idle).unwrap();
+        record.raw_input_draft_state_known = false;
+        let handle = Arc::new(SessionHandle::new(record));
+        let mut input_rx = handle.take_input_rx().await.expect("input queue");
+
+        assert!(matches!(
+            handle.enqueue_logical_input(b"manager message".to_vec()),
+            Err(super::InputQueueError::InheritedDraftStateUnknown)
+        ));
+        assert!(input_rx.try_recv().is_err());
+
+        handle
+            .enqueue_raw_input(b"\r".to_vec(), RawInputKind::Submission)
+            .expect("explicit producer boundary");
+        assert_eq!(input_rx.recv().await.expect("boundary").data, b"\r");
+        handle
+            .enqueue_logical_input(b"manager message".to_vec())
+            .expect("logical retry after boundary");
+        assert_eq!(
+            input_rx.recv().await.expect("logical retry").data,
+            b"manager message"
+        );
         handle.kill().await.unwrap();
     }
 

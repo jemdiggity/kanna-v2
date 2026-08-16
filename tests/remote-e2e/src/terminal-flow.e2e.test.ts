@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import WebSocket, { type RawData } from "ws";
 import { createRemoteTransport } from "../../../apps/mobile/src/lib/transports/remoteTransport";
 import { startRemoteHarness, type RemoteHarness } from "./harness";
 import {
@@ -12,6 +13,50 @@ import {
   waitForRelayEvent,
   waitForTerminalOutput
 } from "./terminalFlowTestUtils";
+
+interface KspTestFrame extends Record<string, unknown> {
+  type?: unknown;
+  code?: unknown;
+  task_id?: unknown;
+}
+
+function rawDataToString(data: RawData): string {
+  if (typeof data === "string") return data;
+  if (Buffer.isBuffer(data)) return data.toString();
+  if (Array.isArray(data)) return Buffer.concat(data).toString();
+  return Buffer.from(data).toString();
+}
+
+async function openWebSocket(url: string): Promise<WebSocket> {
+  const socket = new WebSocket(url);
+  await new Promise<void>((resolve, reject) => {
+    socket.once("open", resolve);
+    socket.once("error", reject);
+  });
+  return socket;
+}
+
+async function nextKspFrame(socket: WebSocket): Promise<KspTestFrame> {
+  return await new Promise<KspTestFrame>((resolve, reject) => {
+    const timeout = setTimeout(
+      () => reject(new Error("timed out waiting for KSP frame")),
+      5_000,
+    );
+    socket.once("message", (data: RawData) => {
+      clearTimeout(timeout);
+      const parsed = JSON.parse(rawDataToString(data)) as unknown;
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        reject(new Error("KSP frame was not an object"));
+        return;
+      }
+      resolve(parsed as KspTestFrame);
+    });
+    socket.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+  });
+}
 
 describe("remote task terminal flow E2E", () => {
   let harness: RemoteHarness;
@@ -179,6 +224,138 @@ describe("remote task terminal flow E2E", () => {
         path: `/v1/tasks/${task.taskId}/input`,
         body: { input: "too late" }
       })).rejects.toThrow(/daemon|session|not found|failed/i);
+    } finally {
+      events.close();
+    }
+  }, 45_000);
+
+  it("keeps a partial raw draft separate from a simultaneous logical task message", async () => {
+    const task = await createScriptedTask(harness, {
+      displayName: "Raw draft and manager input isolation",
+      tracePartialInput: true,
+    });
+    const events = collectTerminalEvents(harness, task.taskId);
+    const humanDraft = "human draft in progress";
+    const managerMessage = "manager message stays separate";
+
+    try {
+      await waitForTerminalOutput(events, "SCRIPT_INPUT_READY");
+      events.sendInput(Buffer.from(humanDraft).toString("base64"));
+      await waitForTerminalOutput(events, `SCRIPT_PARTIAL:${humanDraft}`);
+
+      await harness.client.invokeDesktop({
+        desktopId: harness.desktopId,
+        method: "POST",
+        path: `/v1/tasks/${task.taskId}/input`,
+        body: { input: managerMessage }
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(events.outputText()).not.toContain(`SCRIPT_INPUT:${humanDraft}`);
+      expect(events.outputText()).not.toContain(`SCRIPT_INPUT:${managerMessage}`);
+
+      events.sendInput(Buffer.from("\r").toString("base64"), true);
+      const output = await waitForTerminalOutput(
+        events,
+        `SCRIPT_INPUT:${managerMessage}`,
+      );
+      const humanIndex = output.indexOf(`SCRIPT_INPUT:${humanDraft}`);
+      const managerIndex = output.indexOf(`SCRIPT_INPUT:${managerMessage}`);
+      expect(humanIndex).toBeGreaterThanOrEqual(0);
+      expect(managerIndex).toBeGreaterThan(humanIndex);
+      expect(output).not.toContain(`${humanDraft}${managerMessage}`);
+    } finally {
+      events.close();
+    }
+  }, 45_000);
+
+  it("rejects no-capability terminal drafts before logical input can be stranded", async () => {
+    const task = await createScriptedTask(harness, {
+      displayName: "Legacy KSP terminal boundary refusal",
+      tracePartialInput: true,
+    });
+    const events = collectTerminalEvents(harness, task.taskId);
+    const socket = await openWebSocket(
+      `${harness.lanBaseUrl.replace(/^http/, "ws")}/v1/stream`,
+    );
+    const rejectedDraft = "legacy client draft must be rejected";
+    const managerMessage = "manager message must not be stranded";
+
+    try {
+      await waitForTerminalOutput(events, "SCRIPT_INPUT_READY");
+      const authReply = nextKspFrame(socket);
+      socket.send(JSON.stringify({ type: "auth", capabilities: [] }));
+      expect(await authReply).toMatchObject({ type: "auth_ok" });
+
+      const inputReply = nextKspFrame(socket);
+      socket.send(JSON.stringify({
+        type: "term_input",
+        task_id: task.taskId,
+        data_b64: Buffer.from(rejectedDraft).toString("base64"),
+      }));
+      expect(await inputReply).toMatchObject({
+        type: "error",
+        task_id: task.taskId,
+        code: "term_input_boundary_required",
+      });
+
+      await harness.client.invokeDesktop({
+        desktopId: harness.desktopId,
+        method: "POST",
+        path: `/v1/tasks/${task.taskId}/input`,
+        body: { input: managerMessage },
+      });
+      const output = await waitForTerminalOutput(
+        events,
+        `SCRIPT_INPUT:${managerMessage}`,
+      );
+      expect(output).not.toContain(`SCRIPT_PARTIAL:${rejectedDraft}`);
+      expect(output).not.toContain(`SCRIPT_INPUT:${rejectedDraft}`);
+    } finally {
+      socket.close();
+      events.close();
+    }
+  }, 45_000);
+
+  it("keeps a queued logical message behind a multiline bracketed-paste continuation", async () => {
+    const task = await createScriptedTask(harness, {
+      displayName: "Multiline paste and manager input isolation",
+      tracePartialInput: true,
+    });
+    const events = collectTerminalEvents(harness, task.taskId);
+    const firstDraft = "human draft";
+    const pasteContinuation = " continued\nsecond pasted line";
+    const completeDraft = `${firstDraft}${pasteContinuation}`;
+    const managerMessage = "manager message after multiline paste";
+
+    try {
+      await waitForTerminalOutput(events, "SCRIPT_INPUT_READY");
+      events.sendInput(Buffer.from(firstDraft).toString("base64"));
+      await waitForTerminalOutput(events, `SCRIPT_PARTIAL:${firstDraft}`);
+
+      await harness.client.invokeDesktop({
+        desktopId: harness.desktopId,
+        method: "POST",
+        path: `/v1/tasks/${task.taskId}/input`,
+        body: { input: managerMessage }
+      });
+
+      const bracketedPaste = `\u001b[200~${pasteContinuation}\u001b[201~`;
+      events.sendInput(Buffer.from(bracketedPaste).toString("base64"));
+      await waitForTerminalOutput(events, "second pasted line");
+      expect(events.outputText()).not.toContain(`SCRIPT_INPUT:${managerMessage}`);
+
+      events.sendInput(Buffer.from("\r").toString("base64"), true);
+      const output = await waitForTerminalOutput(
+        events,
+        `SCRIPT_INPUT:${managerMessage}`,
+      );
+      const normalizedOutput = output.replaceAll("\r", "");
+      const humanIndex = normalizedOutput.indexOf(`SCRIPT_INPUT:${completeDraft}`);
+      const managerIndex = normalizedOutput.indexOf(`SCRIPT_INPUT:${managerMessage}`);
+      expect(humanIndex).toBeGreaterThanOrEqual(0);
+      expect(managerIndex).toBeGreaterThan(humanIndex);
+      expect(normalizedOutput).not.toContain(`${completeDraft}${managerMessage}`);
     } finally {
       events.close();
     }

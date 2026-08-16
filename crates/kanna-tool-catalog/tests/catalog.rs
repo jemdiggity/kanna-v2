@@ -182,7 +182,9 @@ fn task_input_and_resume_descriptions_document_delivery_and_recovery_contracts()
     for required in [
         "live daemon PTY session",
         "PTY process ID",
-        "not queued",
+        "queues the logical message FIFO",
+        "daemon handoff",
+        "never carried into a later run or stage",
         "no_live_agent_session",
         "kanna_resume_task",
         "kanna_rerun_stage",

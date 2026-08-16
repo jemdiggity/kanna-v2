@@ -434,7 +434,16 @@ describe("useTerminal", () => {
     expect(onData).toBeDefined();
     onData("x");
     await waitForQueuedInputFlush();
-    expect(sendTermInput).toHaveBeenCalledWith("session-1", btoa("x"));
+    expect(sendTermInput).toHaveBeenCalledWith("session-1", btoa("x"), false, false);
+
+    const keyHandler = terminal.attachCustomKeyEventHandler.mock.calls[0]?.[0] as
+      | ((event: KeyboardEvent) => boolean)
+      | undefined;
+    expect(keyHandler).toBeDefined();
+    keyHandler?.(new KeyboardEvent("keydown", { key: "Enter" }));
+    onData("\r");
+    await waitForQueuedInputFlush();
+    expect(sendTermInput).toHaveBeenLastCalledWith("session-1", btoa("\r"), true, false);
 
     const onResize = terminal.onResize.mock.calls[0]?.[0];
     expect(onResize).toBeDefined();

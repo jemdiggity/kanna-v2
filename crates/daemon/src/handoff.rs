@@ -963,6 +963,35 @@ pub(crate) async fn handle_handoff(
                 let _ = write_event(&mut *writer.lock().await, &event).await;
                 return false;
             }
+            match handle.input_coordination_requires_v3() {
+                Ok(true) => {
+                    lifecycle_audit(format_args!(
+                        "event=handoff_refused reason=draft_coordination_requires_v3 session={session_id}"
+                    ));
+                    let event = error_event(
+                        Some(protocol::ErrorCode::HandoffVersionMismatch),
+                        format!(
+                            "legacy-v2 handoff cannot transfer terminal draft coordination: {session_id}"
+                        ),
+                    );
+                    let _ = write_event(&mut *writer.lock().await, &event).await;
+                    return false;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    lifecycle_audit(format_args!(
+                        "event=handoff_refused reason=draft_coordination_unavailable session={session_id}"
+                    ));
+                    let event = error_event(
+                        None,
+                        format!(
+                            "legacy-v2 handoff could not inspect terminal draft coordination for {session_id}: {error:?}"
+                        ),
+                    );
+                    let _ = write_event(&mut *writer.lock().await, &event).await;
+                    return false;
+                }
+            }
         }
     }
 
@@ -1092,6 +1121,9 @@ pub(crate) async fn handle_handoff(
                     agent_spawn: None,
                     operator_input_only: parts.operator_input_only,
                     input_policy_classified: parts.input_policy_classified,
+                    raw_input_draft_active: parts.raw_input_draft_active,
+                    raw_input_draft_state_known: parts.raw_input_draft_state_known,
+                    pending_logical_inputs: parts.pending_logical_inputs,
                 });
                 fds.push(fd);
                 cloned_pty_fds.push(fd);
@@ -1184,6 +1216,9 @@ pub(crate) async fn handle_handoff(
             agent_spawn: Some(record.params.clone()),
             operator_input_only: false,
             input_policy_classified: true,
+            raw_input_draft_active: false,
+            raw_input_draft_state_known: true,
+            pending_logical_inputs: Vec::new(),
         });
         fds.extend(session_fds);
     }

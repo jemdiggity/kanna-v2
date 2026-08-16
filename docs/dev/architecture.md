@@ -162,9 +162,11 @@ never the Firebase CLI directly.
 
 Direct LAN terminal observation is duplex from task-transfer protocol v4: once
 the authenticated observation stream is live, ordered input and resize controls
-travel back over that same socket. This avoids a fresh authenticated peer
-request for every keystroke. A viewer connected to a protocol-v3 or older peer
-keeps using the request-per-control path for rolling-upgrade compatibility.
+travel back over that same socket. Protocol v5 adds explicit producer-declared
+submission and control semantics. Terminal input fails closed across a v4/v5
+rolling upgrade because v4 cannot preserve those fields; current peers retain
+read-only observation of protocol-v3 and older peers, but reject terminal input
+there for the same reason.
 
 ## Core data flow
 

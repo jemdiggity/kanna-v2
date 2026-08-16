@@ -208,7 +208,15 @@ export function createDesktopRelayTerminalClient({
       };
     },
     async sendInput(options) {
-      clientForDesktop(options.desktopId).sendTermInput(options.taskId, encodeBase64(options.data));
+      const client = clientForDesktop(options.desktopId);
+      const dataB64 = encodeBase64(options.data);
+      if (options.controlInput) {
+        client.sendTermInput(options.taskId, dataB64, false, true);
+      } else if (options.submissionBoundary) {
+        client.sendTermInput(options.taskId, dataB64, true);
+      } else {
+        client.sendTermInput(options.taskId, dataB64);
+      }
     },
     async resize(options) {
       clientForDesktop(options.desktopId).sendTermResize(options.taskId, options.cols, options.rows);

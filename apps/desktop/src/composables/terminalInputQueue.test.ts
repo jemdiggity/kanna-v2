@@ -39,6 +39,65 @@ describe("terminalInputQueue", () => {
     expect(sendTermInput).toHaveBeenCalledWith("task-1", bytesToBase64(new TextEncoder().encode("abc")))
   })
 
+  it("sends a producer-declared submission separately from a draft in the same batch window", async () => {
+    const sendTermInput = vi.fn()
+    const queue = createTerminalInputQueue({
+      sessionId: "task-boundary",
+      getTerminalStreamClient: async () => fakeClient(sendTermInput),
+    })
+
+    void queue.sendInputBytes(new TextEncoder().encode("draft"))
+    void queue.sendInputBytes(new TextEncoder().encode("\r"), {
+      submissionBoundary: true,
+    })
+    void queue.sendInputBytes(new TextEncoder().encode("next"))
+    await queue.flushQueuedInput()
+
+    expect(sendTermInput).toHaveBeenNthCalledWith(
+      1,
+      "task-boundary",
+      bytesToBase64(new TextEncoder().encode("draft")),
+    )
+    expect(sendTermInput).toHaveBeenNthCalledWith(
+      2,
+      "task-boundary",
+      bytesToBase64(new TextEncoder().encode("\r")),
+      true,
+    )
+    expect(sendTermInput).toHaveBeenNthCalledWith(
+      3,
+      "task-boundary",
+      bytesToBase64(new TextEncoder().encode("next")),
+    )
+  })
+
+  it("keeps producer-declared controls separate from draft batches", async () => {
+    const sendTermInput = vi.fn()
+    const queue = createTerminalInputQueue({
+      sessionId: "task-control",
+      getTerminalStreamClient: async () => fakeClient(sendTermInput),
+    })
+
+    void queue.sendInputBytes(new TextEncoder().encode("draft"))
+    void queue.sendInputBytes(new TextEncoder().encode("\x1b[<65;1;1M"), {
+      controlInput: true,
+    })
+    await queue.flushQueuedInput()
+
+    expect(sendTermInput).toHaveBeenNthCalledWith(
+      1,
+      "task-control",
+      bytesToBase64(new TextEncoder().encode("draft")),
+    )
+    expect(sendTermInput).toHaveBeenNthCalledWith(
+      2,
+      "task-control",
+      bytesToBase64(new TextEncoder().encode("\x1b[<65;1;1M")),
+      false,
+      true,
+    )
+  })
+
   it("preserves Kitty and bracketed-paste bytes exactly", async () => {
     const frames: Uint8Array[] = []
     const sendTermInput = vi.fn((_taskId: string, dataB64: string) => {

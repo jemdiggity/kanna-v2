@@ -26,7 +26,10 @@ export function createTerminalClipboardBridge(params: {
   instanceId: string
   options?: TerminalOptions
   outputDecoder: TextDecoder
-  sendInputBytes: (bytes: Uint8Array, config?: { immediate?: boolean }) => Promise<void>
+  sendInputBytes: (
+    bytes: Uint8Array,
+    config?: { immediate?: boolean; submissionBoundary?: boolean; controlInput?: boolean },
+  ) => Promise<void>
 }): TerminalClipboardBridge {
   let bracketedPasteMode = false
   let hasObservedBracketedPasteMode = false
@@ -121,7 +124,10 @@ export function createTerminalClipboardBridge(params: {
 
     clearPendingClipboardImage()
     const response = buildKittyClipboardResponse(payload)
-    await params.sendInputBytes(new TextEncoder().encode(response), { immediate: true })
+    await params.sendInputBytes(new TextEncoder().encode(response), {
+      immediate: true,
+      controlInput: true,
+    })
   }
 
   function handleTerminalOutputControlSequences(bytes: Uint8Array) {

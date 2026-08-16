@@ -406,8 +406,21 @@ export class StreamClient {
     this.sendFrame({ type: "agent_set_model", task_id: taskId, model });
   }
 
-  sendTermInput(taskId: string, dataB64: string): void {
-    this.sendFrame({ type: "term_input", task_id: taskId, data_b64: dataB64 });
+  sendTermInput(
+    taskId: string,
+    dataB64: string,
+    submissionBoundary = false,
+    controlInput = false,
+  ): void {
+    if (this.authed && !this.supportsCapability("term_input_boundary")) {
+      this.reportUnsupportedTerminalInput(taskId);
+      return;
+    }
+    this.sendFrame(controlInput
+      ? { type: "term_input_control", task_id: taskId, data_b64: dataB64 }
+      : submissionBoundary
+        ? { type: "term_input_boundary", task_id: taskId, data_b64: dataB64 }
+        : { type: "term_input", task_id: taskId, data_b64: dataB64 });
   }
 
   sendTermResize(taskId: string, cols: number, rows: number): void {
@@ -617,7 +630,7 @@ export class StreamClient {
     this.rawSend({
       type: "auth",
       ...(credential ? { credential } : {}),
-      capabilities: ["companion_event_epoch"],
+      capabilities: ["companion_event_epoch", "term_input_boundary"],
     }, socket);
   }
 
@@ -671,6 +684,15 @@ export class StreamClient {
         const queued = this.sendQueue;
         this.sendQueue = [];
         for (const frame of queued) {
+          if (
+            (frame.type === "term_input"
+              || frame.type === "term_input_boundary"
+              || frame.type === "term_input_control") &&
+            !this.supportsCapability("term_input_boundary")
+          ) {
+            this.reportUnsupportedTerminalInput(frame.task_id);
+            continue;
+          }
           this.rawSend(frame);
         }
         return;
@@ -1212,6 +1234,13 @@ export class StreamClient {
 
   private supportsCapability(capability: KspCapability): boolean {
     return this.supportedCapabilities.has(capability);
+  }
+
+  private reportUnsupportedTerminalInput(taskId: string): void {
+    this.terminalAttachment(taskId)?.handlers.onError?.(
+      "term_input_boundary_required",
+      "The server does not support safe terminal input boundaries.",
+    );
   }
 
   private retireLegacyCompanionSocket(): void {

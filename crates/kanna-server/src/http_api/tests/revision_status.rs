@@ -445,28 +445,20 @@ async fn automatic_revision_completion_dispatches_commit_post_through_http_route
         let (stream, _) = daemon_listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
-        for input_index in 0..2 {
-            let command = read_test_daemon_command(&mut reader, &mut write_half).await;
-            match command {
-                DaemonCommand::Input { session_id, data } => {
-                    assert_eq!(session_id, revision_session_id);
-                    if input_index == 0 {
-                        let message = String::from_utf8(data).unwrap();
-                        assert!(message.contains("Commit changes for"));
-                        assert!(message.contains("record stage completion"));
-                    } else {
-                        assert_eq!(data, vec![b'\r']);
-                    }
-                }
-                other => panic!("expected commit post input, got {other:?}"),
+        let command = read_test_daemon_command(&mut reader, &mut write_half).await;
+        match command {
+            DaemonCommand::SubmitInput { session_id, data } => {
+                assert_eq!(session_id, revision_session_id);
+                let message = String::from_utf8(data).unwrap();
+                assert!(message.contains("Commit changes for"));
+                assert!(message.contains("record stage completion"));
             }
-            write_half
-                .write_all(
-                    format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap()).as_bytes(),
-                )
-                .await
-                .unwrap();
+            other => panic!("expected semantic commit post input, got {other:?}"),
         }
+        write_half
+            .write_all(format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap()).as_bytes())
+            .await
+            .unwrap();
         sync_tx.send("commit dispatched").unwrap();
     });
 

@@ -7,7 +7,7 @@ use kanna_task_transfer::crypto::{
 };
 use kanna_task_transfer::peer_store::{PeerRecord, PeerStore};
 use kanna_task_transfer::protocol::{
-    PeerRequest, PeerResponse, PeerTerminalControl, PeerTerminalEvent,
+    PeerRequest, PeerResponse, PeerTerminalControl, PeerTerminalEvent, CURRENT_PROTOCOL_VERSION,
     MAX_COMPANION_REQUEST_LINE_BYTES, MAX_PEER_REQUEST_LINE_BYTES,
 };
 use kanna_task_transfer::registry::{PeerRegistry, PeerRegistryEntry};
@@ -21,7 +21,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, TcpSocket, TcpStream};
+use tokio::net::{TcpListener, TcpSocket, TcpStream, UnixListener};
 use tokio::sync::{mpsc, oneshot};
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -137,7 +137,7 @@ async fn runtime_with_trusted_hostile_peer(root: &Path, listener: &TcpListener) 
             endpoint: listener.local_addr().unwrap().to_string(),
             pid: std::process::id(),
             public_key: target_public_key.clone(),
-            protocol_version: 2,
+            protocol_version: CURRENT_PROTOCOL_VERSION,
             accepting_transfers: true,
         })
         .unwrap();
@@ -147,7 +147,7 @@ async fn runtime_with_trusted_hostile_peer(root: &Path, listener: &TcpListener) 
             display_name: "Hostile".into(),
             public_key: target_public_key,
             capabilities_json: json!({
-                "protocolVersion": 2,
+                "protocolVersion": CURRENT_PROTOCOL_VERSION,
                 "authenticatedTaskRequests": true,
                 "authenticatedTaskRequestVersion": 1,
             })
@@ -345,7 +345,13 @@ async fn terminal_input_chunk_at_the_ui_boundary_fits_the_authenticated_peer_fra
     });
 
     runtime
-        .send_peer_session_input("peer-hostile", "task-boundary", vec![u8::MAX; 4 * 1024])
+        .send_peer_session_input(
+            "peer-hostile",
+            "task-boundary",
+            vec![u8::MAX; 4 * 1024],
+            false,
+            false,
+        )
         .await
         .unwrap();
     server.await.unwrap();
@@ -3736,7 +3742,150 @@ async fn observe_peer_session_reports_empty_peer_response_with_peer_context() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn protocol_v4_terminal_input_uses_the_authenticated_observer_stream() {
+async fn current_sender_refuses_terminal_input_on_an_active_shipped_v4_observer_stream() {
+    let temp = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let target_identity = TransferIdentity::generate();
+    let target_public_key = public_key_to_string(&target_identity.public_key);
+    PeerRegistry::new(temp.path().to_path_buf())
+        .write_entry(&PeerRegistryEntry {
+            peer_id: "peer-target".into(),
+            display_name: "Shipped v4 Target".into(),
+            endpoint: format!("127.0.0.1:{port}"),
+            pid: std::process::id(),
+            public_key: target_public_key.clone(),
+            protocol_version: 4,
+            accepting_transfers: true,
+        })
+        .unwrap();
+    PeerStore::new(trusted_peer_store_path(temp.path(), "peer-primary"))
+        .upsert(PeerRecord {
+            peer_id: "peer-target".into(),
+            display_name: "Shipped v4 Target".into(),
+            public_key: target_public_key,
+            capabilities_json:
+                "{\"protocolVersion\":4,\"authenticatedTaskRequests\":true,\"authenticatedTaskRequestVersion\":1}"
+                    .into(),
+            paired_at: "2026-08-11T00:00:00Z".into(),
+            last_seen_at: None,
+            revoked_at: None,
+        })
+        .unwrap();
+
+    let server = tokio::spawn(async move {
+        let (mut reader, request) =
+            accept_authenticated_request(&listener, "v4-duplex-owner-epoch").await;
+        let PeerRequest::ObserveSession {
+            request_id,
+            session_id,
+            ..
+        } = request
+        else {
+            panic!("expected observe session request");
+        };
+        reader
+            .get_mut()
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&PeerResponse::ObserveSession {
+                        request_id,
+                        session_id: session_id.clone(),
+                    })
+                    .unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        reader
+            .get_mut()
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&PeerTerminalEvent::Snapshot {
+                        session_id,
+                        snapshot: json!({ "vt": "READY", "cols": 80, "rows": 24 }),
+                    })
+                    .unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+
+        let mut control_line = String::new();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(250),
+                reader.read_line(&mut control_line),
+            )
+            .await
+            .is_err(),
+            "current sender wrote terminal control onto a shipped-v4 observer stream: {control_line}",
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), listener.accept())
+                .await
+                .is_err(),
+            "current sender fell back to a per-request shipped-v4 terminal input",
+        );
+    });
+
+    let primary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-primary",
+        "Primary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    primary
+        .observe_peer_session("peer-target", "task-1", "lease-task-1")
+        .await
+        .unwrap();
+    let ready = tokio::time::timeout(Duration::from_secs(1), primary.next_event())
+        .await
+        .expect("timed out waiting for shipped-v4 terminal snapshot")
+        .unwrap();
+    assert!(matches!(
+        ready,
+        RuntimeEvent::TerminalEvent {
+            event: PeerTerminalEvent::Snapshot { .. },
+            ..
+        }
+    ));
+
+    for (data, submission_boundary, control_input) in [
+        (b"human draft".to_vec(), false, false),
+        (b"\r".to_vec(), true, false),
+        (b"\x1b[<65;1;1M".to_vec(), false, true),
+    ] {
+        let error = primary
+            .send_peer_session_input(
+                "peer-target",
+                "task-1",
+                data,
+                submission_boundary,
+                control_input,
+            )
+            .await
+            .expect_err("shipped-v4 terminal input was accepted");
+        assert!(
+            error.to_string().contains("protocol v4")
+                && error
+                    .to_string()
+                    .contains("explicit terminal submission/control semantics"),
+            "unexpected mixed-version error: {error}",
+        );
+    }
+
+    server.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn protocol_v5_terminal_input_uses_the_authenticated_observer_stream() {
     let temp = tempfile::tempdir().unwrap();
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -3749,7 +3898,7 @@ async fn protocol_v4_terminal_input_uses_the_authenticated_observer_stream() {
             endpoint: format!("127.0.0.1:{port}"),
             pid: std::process::id(),
             public_key: target_public_key.clone(),
-            protocol_version: 4,
+            protocol_version: CURRENT_PROTOCOL_VERSION,
             accepting_transfers: true,
         })
         .unwrap();
@@ -3758,9 +3907,12 @@ async fn protocol_v4_terminal_input_uses_the_authenticated_observer_stream() {
             peer_id: "peer-target".into(),
             display_name: "Target".into(),
             public_key: target_public_key,
-            capabilities_json:
-                "{\"protocolVersion\":4,\"authenticatedTaskRequests\":true,\"authenticatedTaskRequestVersion\":1}"
-                    .into(),
+            capabilities_json: json!({
+                "protocolVersion": CURRENT_PROTOCOL_VERSION,
+                "authenticatedTaskRequests": true,
+                "authenticatedTaskRequestVersion": 1,
+            })
+            .to_string(),
             paired_at: "2026-08-11T00:00:00Z".into(),
             last_seen_at: None,
             revoked_at: None,
@@ -3797,14 +3949,18 @@ async fn protocol_v4_terminal_input_uses_the_authenticated_observer_stream() {
             .await
             .unwrap();
 
-        let mut control_line = String::new();
-        reader.read_line(&mut control_line).await.unwrap();
-        let control: PeerTerminalControl = serde_json::from_str(control_line.trim()).unwrap();
+        let mut controls = Vec::new();
+        for _ in 0..3 {
+            let mut control_line = String::new();
+            reader.read_line(&mut control_line).await.unwrap();
+            controls
+                .push(serde_json::from_str::<PeerTerminalControl>(control_line.trim()).unwrap());
+        }
         let opened_another_connection =
             tokio::time::timeout(Duration::from_millis(200), listener.accept())
                 .await
                 .is_ok();
-        (control, opened_another_connection)
+        (controls, opened_another_connection)
     });
 
     let primary = TransferRuntime::spawn(RuntimeConfig::for_tests(
@@ -3831,26 +3987,285 @@ async fn protocol_v4_terminal_input_uses_the_authenticated_observer_stream() {
         }
     ));
 
-    tokio::time::timeout(
-        Duration::from_millis(250),
-        primary.send_peer_session_input("peer-target", "task-1", b"typed\x7f".to_vec()),
-    )
+    tokio::time::timeout(Duration::from_millis(250), async {
+        primary
+            .send_peer_session_input(
+                "peer-target",
+                "task-1",
+                b"human draft".to_vec(),
+                false,
+                false,
+            )
+            .await?;
+        primary
+            .send_peer_session_input("peer-target", "task-1", b"\r".to_vec(), true, false)
+            .await?;
+        primary
+            .send_peer_session_input(
+                "peer-target",
+                "task-1",
+                b"\x1b[<65;1;1M".to_vec(),
+                false,
+                true,
+            )
+            .await
+    })
     .await
     .expect("duplex terminal input waited for a remote acknowledgement")
     .unwrap();
 
-    let (control, opened_another_connection) = server.await.unwrap();
+    let (controls, opened_another_connection) = server.await.unwrap();
     assert_eq!(
-        control,
-        PeerTerminalControl::Input {
-            session_id: "task-1".into(),
-            data: b"typed\x7f".to_vec(),
-        }
+        controls,
+        vec![
+            PeerTerminalControl::Input {
+                session_id: "task-1".into(),
+                data: b"human draft".to_vec(),
+                submission_boundary: false,
+                control_input: false,
+            },
+            PeerTerminalControl::Input {
+                session_id: "task-1".into(),
+                data: b"\r".to_vec(),
+                submission_boundary: true,
+                control_input: false,
+            },
+            PeerTerminalControl::Input {
+                session_id: "task-1".into(),
+                data: b"\x1b[<65;1;1M".to_vec(),
+                submission_boundary: false,
+                control_input: true,
+            },
+        ]
     );
     assert!(
         !opened_another_connection,
         "terminal input opened a per-keystroke peer request instead of using the observer stream"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn current_owner_refuses_shipped_v4_duplex_and_fallback_input_before_daemon_access() {
+    let temp = tempfile::tempdir().unwrap();
+    let owner = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-owner",
+        "Owner",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let legacy = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-legacy",
+        "Shipped v4 Viewer",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&legacy, &owner, "peer-owner").await;
+
+    let owner_peer = legacy
+        .list_peers()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|peer| peer.peer_id == "peer-owner")
+        .unwrap();
+    let legacy_peer = owner
+        .list_peers()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|peer| peer.peer_id == "peer-legacy")
+        .unwrap();
+    PeerRegistry::new(temp.path().to_path_buf())
+        .write_entry(&PeerRegistryEntry {
+            peer_id: legacy_peer.peer_id,
+            display_name: legacy_peer.display_name,
+            endpoint: legacy_peer.endpoint,
+            pid: legacy_peer.pid,
+            public_key: legacy_peer.public_key,
+            protocol_version: 4,
+            accepting_transfers: legacy_peer.accepting_transfers,
+        })
+        .unwrap();
+
+    let owner_epoch = authenticated_request_epoch(&owner_peer.endpoint).await;
+    let legacy_identity = stored_runtime_identity(temp.path(), "peer-legacy");
+    let observe_payload = seal_authenticated_transfer_request(
+        &legacy_identity,
+        &owner_peer.public_key,
+        "observe_session",
+        "legacy-observe",
+        &owner_epoch,
+        current_unix_ms(),
+        json!({ "session_id": "task-with-draft" }),
+    );
+    let observe = send_raw_peer_value(
+        &owner_peer.endpoint,
+        &json!({
+            "type": "observe_session",
+            "request_id": "legacy-observe",
+            "requester_peer_id": "peer-legacy",
+            "session_id": "task-with-draft",
+            "sealed_payload": observe_payload,
+        }),
+    )
+    .await;
+    assert!(
+        matches!(
+            observe,
+            PeerResponse::Error { ref message, .. }
+                if message.contains("protocol v4")
+                    && message.contains("duplex terminal control")
+        ),
+        "shipped-v4 duplex observation reached the daemon boundary: {observe:?}",
+    );
+
+    let input_payload = seal_authenticated_transfer_request(
+        &legacy_identity,
+        &owner_peer.public_key,
+        "send_session_input",
+        "legacy-input",
+        &owner_epoch,
+        current_unix_ms(),
+        json!({
+            "session_id": "task-with-draft",
+            "data": [13],
+        }),
+    );
+    let input = send_raw_peer_value(
+        &owner_peer.endpoint,
+        &json!({
+            "type": "send_session_input",
+            "request_id": "legacy-input",
+            "requester_peer_id": "peer-legacy",
+            "session_id": "task-with-draft",
+            "data": [13],
+            "sealed_payload": input_payload,
+        }),
+    )
+    .await;
+    assert!(
+        matches!(
+            input,
+            PeerResponse::Error { ref message, .. }
+                if message.contains("protocol v4")
+                    && message.contains("explicit terminal submission/control semantics")
+        ),
+        "shipped-v4 fallback input reached the daemon boundary: {input:?}",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_input_rejects_authenticated_true_to_false_semantics_before_daemon_access() {
+    let temp = tempfile::tempdir().unwrap();
+    let daemon_dir = temp.path().join("daemon");
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let daemon_socket = kanna_runtime_defaults::socket_path(&daemon_dir);
+    let daemon_listener = UnixListener::bind(&daemon_socket).unwrap();
+    let daemon_contacts = std::sync::Arc::new(AtomicU64::new(0));
+    let observed_contacts = std::sync::Arc::clone(&daemon_contacts);
+    let daemon_probe = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = daemon_listener.accept().await else {
+                return;
+            };
+            observed_contacts.fetch_add(1, Ordering::Relaxed);
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut command = String::new();
+            reader.read_line(&mut command).await.unwrap();
+            write_half
+                .write_all(
+                    format!(
+                        "{}\n",
+                        serde_json::to_string(&kanna_daemon::protocol::Event::Ok).unwrap()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        }
+    });
+
+    let owner = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-owner", "Owner", temp.path(), 0)
+            .with_daemon_dir(&daemon_dir),
+    )
+    .await
+    .unwrap();
+    let viewer = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-viewer",
+        "Viewer",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&viewer, &owner, "peer-owner").await;
+    let owner_peer = viewer
+        .list_peers()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|peer| peer.peer_id == "peer-owner")
+        .unwrap();
+    let owner_epoch = authenticated_request_epoch(&owner_peer.endpoint).await;
+    let viewer_identity = stored_runtime_identity(temp.path(), "peer-viewer");
+
+    for (request_id, authenticated_submission, authenticated_control, field) in [
+        ("downgrade-submission", true, false, "submission_boundary"),
+        ("downgrade-control", false, true, "control_input"),
+    ] {
+        let sealed_payload = seal_authenticated_transfer_request(
+            &viewer_identity,
+            &owner_peer.public_key,
+            "send_session_input",
+            request_id,
+            &owner_epoch,
+            current_unix_ms(),
+            json!({
+                "session_id": "task-with-draft",
+                "data": [13],
+                "submission_boundary": authenticated_submission,
+                "control_input": authenticated_control,
+            }),
+        );
+        let response = send_raw_peer_value(
+            &owner_peer.endpoint,
+            &json!({
+                "type": "send_session_input",
+                "request_id": request_id,
+                "requester_peer_id": "peer-viewer",
+                "session_id": "task-with-draft",
+                "data": [13],
+                "submission_boundary": false,
+                "control_input": false,
+                "sealed_payload": sealed_payload,
+            }),
+        )
+        .await;
+
+        assert!(
+            matches!(
+                response,
+                PeerResponse::Error { ref message, .. }
+                    if message.contains(field)
+                        && message.contains("does not match authenticated payload")
+            ),
+            "authenticated {field}:true was downgraded before dispatch: {response:?}",
+        );
+    }
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        daemon_contacts.load(Ordering::Relaxed),
+        0,
+        "forged terminal semantics reached the daemon",
+    );
+    daemon_probe.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4902,7 +5317,7 @@ async fn stalled_mark_read_is_bounded_without_blocking_terminal_control_or_snaps
             endpoint: format!("127.0.0.1:{port}"),
             pid: std::process::id(),
             public_key: target_public_key.clone(),
-            protocol_version: 2,
+            protocol_version: CURRENT_PROTOCOL_VERSION,
             accepting_transfers: true,
         })
         .unwrap();
@@ -4911,9 +5326,12 @@ async fn stalled_mark_read_is_bounded_without_blocking_terminal_control_or_snaps
             peer_id: "peer-target".into(),
             display_name: "Target".into(),
             public_key: target_public_key,
-            capabilities_json:
-                "{\"protocolVersion\":2,\"authenticatedTaskRequests\":true,\"authenticatedTaskRequestVersion\":1}"
-                    .into(),
+            capabilities_json: json!({
+                "protocolVersion": CURRENT_PROTOCOL_VERSION,
+                "authenticatedTaskRequests": true,
+                "authenticatedTaskRequestVersion": 1,
+            })
+            .to_string(),
             paired_at: "2026-07-26T00:00:00Z".into(),
             last_seen_at: None,
             revoked_at: None,
@@ -5019,7 +5437,13 @@ async fn stalled_mark_read_is_bounded_without_blocking_terminal_control_or_snaps
 
     let controls = tokio::time::timeout(Duration::from_millis(250), async {
         let (input, snapshots) = tokio::join!(
-            runtime.send_peer_session_input("peer-target", "task-unread", b"x".to_vec()),
+            runtime.send_peer_session_input(
+                "peer-target",
+                "task-unread",
+                b"x".to_vec(),
+                false,
+                false,
+            ),
             runtime.list_peer_task_snapshots(),
         );
         input.unwrap();
@@ -5840,7 +6264,7 @@ async fn requester_restart_does_not_reuse_ids_for_authenticated_task_operations(
 
         for result in [
             runtime
-                .send_peer_session_input("peer-owner", "owner-task-1", b"x".to_vec())
+                .send_peer_session_input("peer-owner", "owner-task-1", b"x".to_vec(), false, false)
                 .await,
             runtime
                 .resize_peer_session("peer-owner", "owner-task-1", 100, 40)
@@ -5940,7 +6364,7 @@ async fn repeated_terminal_input_replay_records_stay_memory_only() {
 
     for _ in 0..32 {
         let error = requester
-            .send_peer_session_input("peer-owner", "owner-task-1", b"x".to_vec())
+            .send_peer_session_input("peer-owner", "owner-task-1", b"x".to_vec(), false, false)
             .await
             .expect_err("owner daemon is intentionally absent");
         assert!(!error.to_string().contains("replayed authenticated"));

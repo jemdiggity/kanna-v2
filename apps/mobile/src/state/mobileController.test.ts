@@ -7028,7 +7028,9 @@ describe("createMobileController", () => {
     controller.sendTaskTerminalInput("task-1", "G1s8NjU7MTsxTQ==");
 
     expect(client.__terminalStream.subscription.sendInput).toHaveBeenCalledWith(
-      "G1s8NjU7MTsxTQ=="
+      "G1s8NjU7MTsxTQ==",
+      false,
+      true
     );
   });
 

@@ -197,9 +197,18 @@ pub async fn send_input(
     state: tauri::State<'_, DaemonState>,
     session_id: String,
     data: Vec<u8>,
+    submission_boundary: Option<bool>,
+    control_input: Option<bool>,
 ) -> Result<(), DaemonCommandError> {
+    let command_type = if control_input.unwrap_or(false) {
+        "InputControl"
+    } else if submission_boundary.unwrap_or(false) {
+        "InputBoundary"
+    } else {
+        "Input"
+    };
     let cmd = serde_json::json!({
-        "type": "Input",
+        "type": command_type,
         "session_id": session_id,
         "data": data,
     });

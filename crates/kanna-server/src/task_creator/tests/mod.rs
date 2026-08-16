@@ -263,8 +263,8 @@ fn install_test_provider_binaries(repo_root: &std::path::Path) {
 }
 
 /// Fake daemon for post dispatch into a live session: replies `Ok` to each
-/// Input command (message, then the discrete Enter) and returns every
-/// received command once `expected_commands` have arrived.
+/// semantic input command and returns every received command once
+/// `expected_commands` have arrived.
 async fn spawn_fake_daemon_input_ok(
     daemon_dir: String,
     expected_commands: usize,

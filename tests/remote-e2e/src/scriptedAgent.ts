@@ -2,6 +2,7 @@ import { chmod, writeFile } from "node:fs/promises";
 
 export interface ScriptedAgentOptions {
   redactInput?: boolean;
+  tracePartialInput?: boolean;
   snapshotHistory?: {
     sentinel: string;
   };
@@ -30,6 +31,40 @@ export function scriptedAgentSource(options: ScriptedAgentOptions = {}): string 
 case "$*" in
   *${SCRIPTED_AGENT_SNAPSHOT_HISTORY_SENTINEL}*) snapshot_history_enabled=1 ;;
 esac`;
+  const partialInputTrace = options.tracePartialInput
+    ? "printf 'SCRIPT_PARTIAL:%s\\n' \"$line\""
+    : ":";
+  const bracketedPasteHandling = options.tracePartialInput
+    ? `if [ "$char" = "$escape" ]; then
+    paste_marker=""
+    marker_index=0
+    while [ "$marker_index" -lt 5 ]; do
+      read_char
+      paste_marker="\${paste_marker}\${char}"
+      marker_index=$((marker_index + 1))
+    done
+    if [ "$paste_marker" = "[200~" ] || [ "$paste_marker" = "[201~" ]; then
+      continue
+    fi
+    if [ "$paste_marker" = "[<65;" ]; then
+      mouse_suffix=""
+      suffix_index=0
+      while [ "$suffix_index" -lt 4 ]; do
+        read_char
+        mouse_suffix="\${mouse_suffix}\${char}"
+        suffix_index=$((suffix_index + 1))
+      done
+      if [ "$mouse_suffix" = "1;1M" ]; then
+        printf 'SCRIPT_CONTROL:scroll\\n'
+        continue
+      fi
+      paste_marker="\${paste_marker}\${mouse_suffix}"
+    fi
+    line="\${line}\${escape}\${paste_marker}"
+    ${partialInputTrace}
+    continue
+  fi`
+    : "";
   const snapshotHistory = `${snapshotHistoryTrigger}
 if [ "$snapshot_history_enabled" -eq 1 ]; then
   history_line=1
@@ -81,6 +116,7 @@ printf 'SCRIPT_INPUT_READY\\n'
 line=""
 menu_choice=""
 carriage_return=$(printf '\\r')
+escape=$(printf '\\033')
 
 read_char() {
   # The sentinel prevents command substitution from stripping newline-only bytes.
@@ -90,6 +126,7 @@ read_char() {
 
 while :; do
   read_char
+  ${bracketedPasteHandling}
   if [ "$char" = "$carriage_return" ]; then
     if [ "$menu_choice" = "1" ]; then
       printf 'SCRIPT_MENU_SELECTED:1\\n'
@@ -123,6 +160,7 @@ while :; do
     printf 'SCRIPT_MENU_OPTION_1_HIGHLIGHTED\\n'
   else
     line="\${line}\${char}"
+    ${partialInputTrace}
   fi
 done
 

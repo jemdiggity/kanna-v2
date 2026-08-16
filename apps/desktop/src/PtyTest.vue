@@ -55,11 +55,27 @@ onMounted(async () => {
     }
   })
 
-  // 3. Send keystrokes to daemon
+  let submissionBoundary = false
+  term.attachCustomKeyEventHandler((event: KeyboardEvent) => {
+    submissionBoundary = event.type === "keydown"
+      && event.key === "Enter"
+      && !event.isComposing
+      && !event.shiftKey
+      && !event.altKey
+      && !event.ctrlKey
+      && !event.metaKey
+    queueMicrotask(() => {
+      submissionBoundary = false
+    })
+    return true
+  })
+
+  // 3. Send producer-classified keystrokes to daemon
   term.onData((data) => {
     invoke("send_input", {
       sessionId,
       data: Array.from(new TextEncoder().encode(data)),
+      submissionBoundary,
     }).catch((error) => {
       console.debug("[pty-test] failed to send input:", error)
     })

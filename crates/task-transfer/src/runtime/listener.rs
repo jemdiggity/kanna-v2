@@ -28,7 +28,8 @@ use super::utils::{
     extract_request_id, load_or_create_identity, local_capabilities_json,
     pairing_verification_code, peer_store, prune_outgoing_transfers, prune_transfer_artifacts,
     read_bounded_json_line_with_type_limits, remove_owned_artifact_paths,
-    supports_authenticated_task_requests, take_transfer_artifacts, write_bounded_legacy_json_line,
+    supports_authenticated_task_requests, supports_duplex_terminal,
+    supports_terminal_input_semantics, take_transfer_artifacts, write_bounded_legacy_json_line,
     write_json_line, ArtifactFraming,
 };
 use crate::crypto::{
@@ -1323,6 +1324,8 @@ async fn handle_connection(
                 )
                 .await?;
                 ensure_authenticated_argument(&payload, "session_id", &session_id)?;
+                require_observer_terminal_input_compatibility(&context, &requester_peer_id)
+                    .await?;
                 prepare_session_observer(&context, &session_id).await
             }
             .await
@@ -1496,6 +1499,8 @@ async fn handle_connection(
             requester_peer_id,
             session_id,
             data,
+            submission_boundary,
+            control_input,
             sealed_payload,
         }) => match async {
             let payload = authenticate_peer_request(
@@ -1508,7 +1513,21 @@ async fn handle_connection(
             .await?;
             ensure_authenticated_argument(&payload, "session_id", &session_id)?;
             ensure_authenticated_argument(&payload, "data", &data)?;
-            send_daemon_input(&context, &session_id, data).await
+            require_terminal_input_semantics(&context, &requester_peer_id).await?;
+            ensure_authenticated_argument(
+                &payload,
+                "submission_boundary",
+                &submission_boundary,
+            )?;
+            ensure_authenticated_argument(&payload, "control_input", &control_input)?;
+            send_daemon_input(
+                &context,
+                &session_id,
+                data,
+                submission_boundary,
+                control_input,
+            )
+            .await
         }
         .await
         {
@@ -1882,6 +1901,49 @@ async fn authenticate_peer_request(
         }
     }
     Ok(payload)
+}
+
+async fn requester_protocol_version(
+    context: &ListenerContext,
+    requester_peer_id: &str,
+) -> Result<u32, RuntimeError> {
+    Ok(find_peer(
+        &context.discovery,
+        &context.external_peers,
+        &context.self_peer_id,
+        requester_peer_id,
+        TransferTransport::Auto,
+    )
+    .await?
+    .protocol_version)
+}
+
+async fn require_terminal_input_semantics(
+    context: &ListenerContext,
+    requester_peer_id: &str,
+) -> Result<(), RuntimeError> {
+    let protocol_version = requester_protocol_version(context, requester_peer_id).await?;
+    if supports_terminal_input_semantics(protocol_version) {
+        return Ok(());
+    }
+    Err(RuntimeError::Protocol(format!(
+        "peer {requester_peer_id} uses task-transfer protocol v{protocol_version} without explicit terminal submission/control semantics; upgrade the peer before sending terminal input",
+    )))
+}
+
+async fn require_observer_terminal_input_compatibility(
+    context: &ListenerContext,
+    requester_peer_id: &str,
+) -> Result<(), RuntimeError> {
+    let protocol_version = requester_protocol_version(context, requester_peer_id).await?;
+    if !supports_duplex_terminal(protocol_version)
+        || supports_terminal_input_semantics(protocol_version)
+    {
+        return Ok(());
+    }
+    Err(RuntimeError::Protocol(format!(
+        "peer {requester_peer_id} uses task-transfer protocol v{protocol_version} duplex terminal control without explicit submission/control semantics; upgrade the peer before observing terminal sessions",
+    )))
 }
 
 fn authenticated_argument<T>(payload: &Value, name: &str) -> Result<T, RuntimeError>

@@ -79,12 +79,12 @@ describe("StreamClient", () => {
     socket.open();
     expect(socket.sent[0]).toEqual({
       type: "auth",
-      capabilities: ["companion_event_epoch"],
+      capabilities: ["companion_event_epoch", "term_input_boundary"],
     });
     socket.receive({
       type: "auth_ok",
       ...(streamKinds ? { stream_kinds: streamKinds } : {}),
-      ...(capabilities ? { capabilities } : {}),
+      capabilities: capabilities ?? ["term_input_boundary"],
     });
     return { client, socket };
   }
@@ -102,7 +102,7 @@ describe("StreamClient", () => {
     socket.receive({ type: "auth_ok" });
 
     expect(socket.sent).toEqual([
-      { type: "auth", capabilities: ["companion_event_epoch"] },
+      { type: "auth", capabilities: ["companion_event_epoch", "term_input_boundary"] },
       { type: "agent_input", task_id: "task-1", text: "hello" },
     ]);
     client.close();
@@ -163,7 +163,7 @@ describe("StreamClient", () => {
     socket2.open();
     socket2.receive({ type: "auth_ok" });
     expect(socket2.sent).toEqual([
-      { type: "auth", capabilities: ["companion_event_epoch"] },
+      { type: "auth", capabilities: ["companion_event_epoch", "term_input_boundary"] },
       { type: "attach", task_id: "task-1", kind: "agent", from_seq: 3 },
     ]);
     client.close();
@@ -279,7 +279,7 @@ describe("StreamClient", () => {
     socket2.receive({ type: "auth_ok" });
 
     expect(socket2.sent).toEqual([
-      { type: "auth", capabilities: ["companion_event_epoch"] },
+      { type: "auth", capabilities: ["companion_event_epoch", "term_input_boundary"] },
       { type: "attach", task_id: "task-pty", kind: "terminal", from_seq: 0 },
     ]);
     client.close();
@@ -771,7 +771,7 @@ describe("StreamClient", () => {
     socket.receive({ type: "auth_ok" });
 
     expect(socket.sent).toEqual([
-      { type: "auth", capabilities: ["companion_event_epoch"] },
+      { type: "auth", capabilities: ["companion_event_epoch", "term_input_boundary"] },
       { type: "attach", task_id: "task-1", kind: "terminal", from_seq: 0 },
     ]);
     expect(unavailable).toEqual(["unavailable"]);
@@ -808,7 +808,7 @@ describe("StreamClient", () => {
       stream_kinds: ["agent", "terminal", "companion"],
     });
     expect(upgradedSocket.sent).toEqual([
-      { type: "auth", capabilities: ["companion_event_epoch"] },
+      { type: "auth", capabilities: ["companion_event_epoch", "term_input_boundary"] },
       { type: "attach", task_id: "task-1", kind: "terminal", from_seq: 0 },
       {
         type: "attach",
@@ -852,7 +852,7 @@ describe("StreamClient", () => {
       stream_kinds: ["terminal"],
     });
     expect(replacementSocket.sent).toEqual([
-      { type: "auth", capabilities: ["companion_event_epoch"] },
+      { type: "auth", capabilities: ["companion_event_epoch", "term_input_boundary"] },
       {
         type: "attach",
         task_id: "task-offline",
@@ -884,7 +884,7 @@ describe("StreamClient", () => {
       stream_kinds: ["agent"],
     });
     expect(replacementSocket.sent).toEqual([
-      { type: "auth", capabilities: ["companion_event_epoch"] },
+      { type: "auth", capabilities: ["companion_event_epoch", "term_input_boundary"] },
       {
         type: "attach",
         task_id: "task-duplicate",
@@ -2217,7 +2217,7 @@ describe("StreamClient", () => {
     expect(replacementSocket.sent).toEqual([
       {
         type: "auth",
-        capabilities: ["companion_event_epoch"],
+        capabilities: ["companion_event_epoch", "term_input_boundary"],
       },
     ]);
     replacementSocket.receive({
@@ -2514,7 +2514,7 @@ describe("StreamClient", () => {
 
     expect(connectionChanges).toEqual([false, true]);
     expect(socket2.sent).toEqual([
-      { type: "auth", capabilities: ["companion_event_epoch"] },
+      { type: "auth", capabilities: ["companion_event_epoch", "term_input_boundary"] },
       {
         type: "attach",
         task_id: "task-1",
@@ -2540,16 +2540,82 @@ describe("StreamClient", () => {
     client.close();
   });
 
-  it("sends terminal input and resize frames over the stream", () => {
+  it("sends terminal input and resize frames when boundary support is negotiated", () => {
     const { client, socket } = connectedClient();
 
     client.sendTermInput("task-pty", "YQ==");
+    client.sendTermInput("task-pty", "DQ==", true);
+    client.sendTermInput("task-pty", "G1s8NjU7MTsxTQ==", false, true);
     client.sendTermResize("task-pty", 120, 40);
 
     expect(socket.sent.slice(1)).toEqual([
       { type: "term_input", task_id: "task-pty", data_b64: "YQ==" },
+      { type: "term_input_boundary", task_id: "task-pty", data_b64: "DQ==" },
+      { type: "term_input_control", task_id: "task-pty", data_b64: "G1s8NjU7MTsxTQ==" },
       { type: "term_resize", task_id: "task-pty", cols: 120, rows: 40 },
     ]);
+    client.close();
+  });
+
+  it("fails closed without server boundary support and never emits terminal input", () => {
+    const errors: Array<{ code: string; message: string }> = [];
+    const client = new StreamClient({
+      url: "ws://test/v1/stream",
+      webSocketFactory: factory,
+    });
+    client.attachTerminal("task-pty", {
+      onOutput() {},
+      onError(code, message) {
+        errors.push({ code, message });
+      },
+    });
+    const socket = sockets[0];
+    socket.open();
+    socket.receive({ type: "auth_ok" });
+
+    client.sendTermInput("task-pty", "YQ==");
+    client.sendTermInput("task-pty", "DQ==", true);
+
+    expect(socket.sent).not.toContainEqual(
+      expect.objectContaining({ type: "term_input" }),
+    );
+    expect(socket.sent).not.toContainEqual(
+      expect.objectContaining({ type: "term_input_boundary" }),
+    );
+    expect(errors).toEqual([
+      {
+        code: "term_input_boundary_required",
+        message: "The server does not support safe terminal input boundaries.",
+      },
+      {
+        code: "term_input_boundary_required",
+        message: "The server does not support safe terminal input boundaries.",
+      },
+    ]);
+    client.close();
+  });
+
+  it("drops terminal input queued before an incompatible auth_ok", () => {
+    const errors: string[] = [];
+    const client = new StreamClient({
+      url: "ws://test/v1/stream",
+      webSocketFactory: factory,
+    });
+    client.attachTerminal("task-pty", {
+      onOutput() {},
+      onError(code) {
+        errors.push(code);
+      },
+    });
+    client.sendTermInput("task-pty", "DQ==", true);
+    const socket = sockets[0];
+    socket.open();
+    socket.receive({ type: "auth_ok" });
+
+    expect(socket.sent).not.toContainEqual(
+      expect.objectContaining({ type: "term_input_boundary" }),
+    );
+    expect(errors).toEqual(["term_input_boundary_required"]);
     client.close();
   });
 
@@ -2591,7 +2657,7 @@ describe("StreamClient", () => {
     expect(socket2.sent).toEqual([{
       type: "auth",
       credential: "current-token",
-      capabilities: ["companion_event_epoch"],
+      capabilities: ["companion_event_epoch", "term_input_boundary"],
     }]);
     client.close();
   });
@@ -2635,7 +2701,7 @@ describe("StreamClient", () => {
     expect(socket.sent.at(-1)).toEqual({
       type: "auth",
       credential: "id-token",
-      capabilities: ["companion_event_epoch"],
+      capabilities: ["companion_event_epoch", "term_input_boundary"],
     });
     socket.receive({ type: "auth_ok" });
     client.close();
@@ -2673,7 +2739,7 @@ describe("StreamClient", () => {
     expect(socket.sent.at(-1)).toEqual({
       type: "auth",
       credential: "relay-id-token",
-      capabilities: ["companion_event_epoch"],
+      capabilities: ["companion_event_epoch", "term_input_boundary"],
     });
     client.close();
   });

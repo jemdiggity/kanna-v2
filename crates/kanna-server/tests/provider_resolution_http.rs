@@ -379,7 +379,7 @@ async fn serve_fake_daemon_connection(
             | DaemonCommand::SpawnAgent { session_id, .. } => DaemonEvent::SessionCreated {
                 session_id: session_id.clone(),
             },
-            DaemonCommand::Kill { .. } | DaemonCommand::Input { .. } => DaemonEvent::Error {
+            DaemonCommand::Kill { .. } | DaemonCommand::SubmitInput { .. } => DaemonEvent::Error {
                 code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
                 message: "session not found".to_string(),
             },
@@ -725,7 +725,7 @@ async fn durable_pipeline_provider_lists_fall_back_for_reloaded_stages_and_posts
         .error_for_status()
         .expect("post advance should reload the durable snapshot");
     match next_daemon_command(&mut commands).await {
-        DaemonCommand::Input { session_id, .. } => assert_eq!(session_id, task_id),
+        DaemonCommand::SubmitInput { session_id, .. } => assert_eq!(session_id, task_id),
         other => panic!("expected post input, got {other:?}"),
     }
     match next_daemon_command(&mut commands).await {
