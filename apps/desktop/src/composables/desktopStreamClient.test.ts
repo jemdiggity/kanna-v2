@@ -59,4 +59,32 @@ describe("desktopStreamClient", () => {
       url: "ws://127.0.0.1:48121/v1/stream",
     }));
   });
+
+  it("tracks authenticated connection generations for snapshot catch-up", async () => {
+    const {
+      getSharedStreamClient,
+      getSharedStreamConnectionState,
+      onSharedStreamConnectionChange,
+    } = await import("./desktopStreamClient");
+    const connectionChanges: boolean[] = [];
+    const unsubscribe = onSharedStreamConnectionChange((connected) => {
+      connectionChanges.push(connected);
+    });
+
+    await getSharedStreamClient();
+    const options = mocks.streamClient.mock.calls[0]?.[0] as {
+      onConnectionChange: (connected: boolean) => void;
+    };
+
+    expect(getSharedStreamConnectionState()).toEqual({ connected: false, revision: 0 });
+    options.onConnectionChange(true);
+    expect(getSharedStreamConnectionState()).toEqual({ connected: true, revision: 1 });
+    options.onConnectionChange(false);
+    expect(getSharedStreamConnectionState()).toEqual({ connected: false, revision: 1 });
+    options.onConnectionChange(true);
+    expect(getSharedStreamConnectionState()).toEqual({ connected: true, revision: 2 });
+    expect(connectionChanges).toEqual([true, false, true]);
+
+    unsubscribe();
+  });
 });

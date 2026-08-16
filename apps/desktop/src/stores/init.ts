@@ -2,7 +2,11 @@ import type { DbHandle, PipelineItem, TaskBlocker } from "../types/kanna";
 import { invoke } from "../invoke";
 import { isTauri } from "../tauri-mock";
 import { listen } from "../listen";
-import { getSharedStreamClient } from "../composables/desktopStreamClient";
+import {
+  getSharedStreamConnectionState,
+  getSharedStreamClient,
+  onSharedStreamConnectionChange,
+} from "../composables/desktopStreamClient";
 import { clearCachedTerminalState } from "../composables/terminalStateCache";
 import { markDaemonReadyObserved } from "../composables/daemonReadyState";
 import { registerTerminalRuntimeStatusSink } from "../composables/terminalRuntimeStatusSink";
@@ -402,9 +406,28 @@ export function createInitApi(
     );
 
     if (isTauri) {
+      let stateChangeSubscriptionReady = false;
+      let lastQueuedConnectionRevision = 0;
+      const catchUpAuthenticatedRevision = () => {
+        if (!stateChangeSubscriptionReady) return;
+        const connection = getSharedStreamConnectionState();
+        if (!connection.connected || connection.revision <= lastQueuedConnectionRevision) return;
+        lastQueuedConnectionRevision = connection.revision;
+        refreshAfterKspStateChange();
+      };
+      onSharedStreamConnectionChange((connected) => {
+        if (connected) catchUpAuthenticatedRevision();
+      });
       getSharedStreamClient().then((client) => {
         client.onStateChanged(refreshAfterKspStateChange);
+        stateChangeSubscriptionReady = true;
+        // StateChanged is intentionally coarse and has no replay cursor. Once
+        // its listener is installed, reconcile every authenticated connection
+        // generation so activity changes emitted during startup or a network
+        // gap cannot leave an unselected sidebar row stale.
+        catchUpAuthenticatedRevision();
       }).catch((error) => {
+        stateChangeSubscriptionReady = true;
         console.warn("[store] failed to subscribe to KSP state changes:", error);
       });
     }
