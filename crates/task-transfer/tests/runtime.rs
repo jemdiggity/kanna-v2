@@ -21,7 +21,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, TcpSocket, TcpStream};
+use tokio::net::{TcpListener, TcpSocket, TcpStream, UnixListener};
 use tokio::sync::{mpsc, oneshot};
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -4156,6 +4156,116 @@ async fn current_owner_refuses_shipped_v4_duplex_and_fallback_input_before_daemo
         ),
         "shipped-v4 fallback input reached the daemon boundary: {input:?}",
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_input_rejects_authenticated_true_to_false_semantics_before_daemon_access() {
+    let temp = tempfile::tempdir().unwrap();
+    let daemon_dir = temp.path().join("daemon");
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let daemon_socket = kanna_runtime_defaults::socket_path(&daemon_dir);
+    let daemon_listener = UnixListener::bind(&daemon_socket).unwrap();
+    let daemon_contacts = std::sync::Arc::new(AtomicU64::new(0));
+    let observed_contacts = std::sync::Arc::clone(&daemon_contacts);
+    let daemon_probe = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = daemon_listener.accept().await else {
+                return;
+            };
+            observed_contacts.fetch_add(1, Ordering::Relaxed);
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut command = String::new();
+            reader.read_line(&mut command).await.unwrap();
+            write_half
+                .write_all(
+                    format!(
+                        "{}\n",
+                        serde_json::to_string(&kanna_daemon::protocol::Event::Ok).unwrap()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        }
+    });
+
+    let owner = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-owner", "Owner", temp.path(), 0)
+            .with_daemon_dir(&daemon_dir),
+    )
+    .await
+    .unwrap();
+    let viewer = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-viewer",
+        "Viewer",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&viewer, &owner, "peer-owner").await;
+    let owner_peer = viewer
+        .list_peers()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|peer| peer.peer_id == "peer-owner")
+        .unwrap();
+    let owner_epoch = authenticated_request_epoch(&owner_peer.endpoint).await;
+    let viewer_identity = stored_runtime_identity(temp.path(), "peer-viewer");
+
+    for (request_id, authenticated_submission, authenticated_control, field) in [
+        ("downgrade-submission", true, false, "submission_boundary"),
+        ("downgrade-control", false, true, "control_input"),
+    ] {
+        let sealed_payload = seal_authenticated_transfer_request(
+            &viewer_identity,
+            &owner_peer.public_key,
+            "send_session_input",
+            request_id,
+            &owner_epoch,
+            current_unix_ms(),
+            json!({
+                "session_id": "task-with-draft",
+                "data": [13],
+                "submission_boundary": authenticated_submission,
+                "control_input": authenticated_control,
+            }),
+        );
+        let response = send_raw_peer_value(
+            &owner_peer.endpoint,
+            &json!({
+                "type": "send_session_input",
+                "request_id": request_id,
+                "requester_peer_id": "peer-viewer",
+                "session_id": "task-with-draft",
+                "data": [13],
+                "submission_boundary": false,
+                "control_input": false,
+                "sealed_payload": sealed_payload,
+            }),
+        )
+        .await;
+
+        assert!(
+            matches!(
+                response,
+                PeerResponse::Error { ref message, .. }
+                    if message.contains(field)
+                        && message.contains("does not match authenticated payload")
+            ),
+            "authenticated {field}:true was downgraded before dispatch: {response:?}",
+        );
+    }
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        daemon_contacts.load(Ordering::Relaxed),
+        0,
+        "forged terminal semantics reached the daemon",
+    );
+    daemon_probe.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

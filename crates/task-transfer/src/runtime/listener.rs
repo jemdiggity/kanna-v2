@@ -1514,16 +1514,12 @@ async fn handle_connection(
             ensure_authenticated_argument(&payload, "session_id", &session_id)?;
             ensure_authenticated_argument(&payload, "data", &data)?;
             require_terminal_input_semantics(&context, &requester_peer_id).await?;
-            if submission_boundary {
-                ensure_authenticated_argument(
-                    &payload,
-                    "submission_boundary",
-                    &submission_boundary,
-                )?;
-            }
-            if control_input {
-                ensure_authenticated_argument(&payload, "control_input", &control_input)?;
-            }
+            ensure_authenticated_argument(
+                &payload,
+                "submission_boundary",
+                &submission_boundary,
+            )?;
+            ensure_authenticated_argument(&payload, "control_input", &control_input)?;
             send_daemon_input(
                 &context,
                 &session_id,

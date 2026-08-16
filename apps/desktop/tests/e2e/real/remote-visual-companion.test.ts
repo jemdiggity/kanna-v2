@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
@@ -16,9 +17,10 @@ import {
   type RemoteCompanionOwner,
 } from "../helpers/remoteCompanion";
 import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
+import { resolveAppKannaServer } from "../helpers/kannaServer";
 import { createPrimaryAndSecondaryClients } from "../helpers/twoInstance";
 import { pairWithPeerThroughUi } from "../helpers/transferFlow";
-import { callVueMethod, queryDb, tauriInvoke } from "../helpers/vue";
+import { callVueMethod, execDb, queryDb, tauriInvoke } from "../helpers/vue";
 import type { WebDriverClient } from "../helpers/webdriver";
 
 const { primary, secondary } = createPrimaryAndSecondaryClients();
@@ -29,6 +31,7 @@ let primaryRepoId = "";
 let secondaryRepoId = "";
 let primaryDesktopId = "";
 let relayConnected = true;
+let lanPairReady = false;
 let sharedOwnerTask: {
   taskId: string;
   prompt: string;
@@ -142,6 +145,36 @@ async function signIn(client: WebDriverClient): Promise<void> {
   await setSetupState(client, "showPreferencesPanel", false);
   await setSetupState(client, "maximized", false);
   await setSetupState(client, "sidebarHidden", false);
+}
+
+async function signOut(client: WebDriverClient): Promise<void> {
+  const alreadySignedOut = await client.executeSync<boolean>(`
+    const value = window.__KANNA_E2E__.setupState.desktopAuthSession;
+    const session = value?.__v_isRef ? value.value : value;
+    return session?.getState?.().status !== "signedIn";
+  `);
+  if (alreadySignedOut) return;
+  await setSetupState(client, "showPreferencesPanel", true);
+  await client.click(await client.waitForElement(
+    '[data-testid="preferences-account-tab"]',
+  ));
+  await client.click(await client.waitForText(
+    ".account-signed-in button",
+    "Sign out",
+    10_000,
+  ));
+  await client.waitForElement('[data-testid="account-sign-in"]', 15_000);
+  await setSetupState(client, "showPreferencesPanel", false);
+}
+
+async function ensureLanPair(): Promise<void> {
+  if (lanPairReady) return;
+  await Promise.all([signOut(primary), signOut(secondary)]);
+  await pairWithPeerThroughUi(primary, "Secondary", "peer-secondary", {
+    promptClient: secondary,
+    promptPeerId: "peer-primary",
+  });
+  lanPairReady = true;
 }
 
 async function waitForPrimaryDesktopId(): Promise<string> {
@@ -497,6 +530,20 @@ async function waitForTerminalSource(
         ${JSON.stringify(ownerTaskId)},
         ${JSON.stringify(sourceUrl)}
       ));
+    `),
+    { timeout: 30_000, interval: 100 },
+  ).toBe(true);
+}
+
+async function waitForRemoteTerminalLine(
+  ownerTaskId: string,
+  expectedLine: string,
+): Promise<void> {
+  await expect.poll(
+    () => secondary.executeSync<boolean>(`
+      const buffers = window.__KANNA_E2E__?.terminalBuffers;
+      return buffers?.lines(${JSON.stringify(ownerTaskId)})
+        .some((line) => line === ${JSON.stringify(expectedLine)}) ?? false;
     `),
     { timeout: 30_000, interval: 100 },
   ).toBe(true);
@@ -1124,4 +1171,171 @@ describe("remote desktop visual companion", () => {
       await fixture.stop();
     }
   }, 180_000);
+
+});
+
+async function runCausalRemoteInputTest(): Promise<void> {
+    await ensureLanPair();
+    const taskId = `remote-lan-draft-${randomUUID()}`;
+    const prompt = `Remote LAN draft boundary ${randomUUID()}`;
+    const readyMarker = `REMOTE_BOUNDARY_READY_${randomUUID().replaceAll("-", "")}`;
+    const humanInput = "human-draft";
+    const managerInput = "manager-message";
+    const script = [
+      "select(STDOUT); $| = 1;",
+      "system('stty raw -echo');",
+      `print qq{\\e[?1004h${readyMarker}\\r\\n};`,
+      "my $composer = '';",
+      "while (1) {",
+      "  my $read = sysread(STDIN, my $chunk, 1);",
+      "  last unless defined($read) && $read > 0;",
+      "  if ($chunk eq qq{\\e}) {",
+      "    my $tail = '';",
+      "    my $tail_read = sysread(STDIN, $tail, 2);",
+      "    last unless defined($tail_read) && $tail_read == 2;",
+      "    if ($tail eq '[I' || $tail eq '[O') {",
+      "      print qq{CONTROL:<$composer>\\r\\n};",
+      "      next;",
+      "    }",
+      "    $composer .= $chunk . $tail;",
+      "    next;",
+      "  }",
+      "  if ($chunk eq qq{\\r}) {",
+      "    print qq{SUBMIT:<$composer>\\r\\n};",
+      "    $composer = '';",
+      "    next;",
+      "  }",
+      "  $composer .= $chunk;",
+      "  print qq{DRAFT:<$composer>\\r\\n};",
+      "}",
+    ].join("\n");
+
+    await execDb(
+      primary,
+      "INSERT INTO pipeline_item (id, repo_id, prompt, stage, agent_type) VALUES (?, ?, ?, ?, ?)",
+      [taskId, primaryRepoId, prompt, "in progress", "pty"],
+    );
+    await tauriInvoke(primary, "spawn_session", {
+      sessionId: taskId,
+      cwd: fixtureRepoPath,
+      executable: "/usr/bin/perl",
+      args: ["-e", script],
+      env: { TERM: "xterm-256color" },
+      cols: 80,
+      rows: 24,
+    });
+    await callVueMethod(primary, "loadItems", primaryRepoId);
+
+    try {
+      const remote = await waitForRemoteTask({
+        prompt,
+        transport: "lan",
+        expectedOwnerDesktopId: "peer-primary",
+        expectedOwnerTaskId: taskId,
+      });
+      await selectRemoteTask({
+        ...remote,
+        prompt,
+        transport: "lan",
+      });
+      await waitForRemoteTerminalLine(taskId, readyMarker);
+
+      const terminalTextarea = await secondary.waitForElement(
+        ".main-panel .cloud-terminal-shell .xterm-helper-textarea",
+      );
+      await secondary.sendKeys(terminalTextarea, humanInput);
+      await waitForRemoteTerminalLine(taskId, `DRAFT:<${humanInput}>`);
+
+      const { baseUrl } = await resolveAppKannaServer(primary);
+      const response = await fetch(
+        `${baseUrl}/v1/tasks/${encodeURIComponent(taskId)}/input`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ input: managerInput }),
+        },
+      );
+      if (!response.ok) {
+        throw new Error(
+          `logical task input failed: ${response.status} ${await response.text()}`,
+        );
+      }
+
+      await secondary.executeSync(`
+        const input = document.querySelector(
+          ".main-panel .cloud-terminal-shell .xterm-helper-textarea"
+        );
+        if (!(input instanceof HTMLTextAreaElement)) {
+          throw new Error("remote terminal textarea unavailable");
+        }
+        input.blur();
+      `);
+      await waitForRemoteTerminalLine(taskId, `CONTROL:<${humanInput}>`);
+      await secondary.executeSync(`
+        const input = document.querySelector(
+          ".main-panel .cloud-terminal-shell .xterm-helper-textarea"
+        );
+        if (!(input instanceof HTMLTextAreaElement)) {
+          throw new Error("remote terminal textarea unavailable");
+        }
+        input.focus();
+      `);
+      await secondary.pressKey("\uE007");
+      await waitForRemoteTerminalLine(taskId, `SUBMIT:<${managerInput}>`);
+
+      const submittedLines = await secondary.executeSync<string[]>(`
+        const buffers = window.__KANNA_E2E__?.terminalBuffers;
+        if (!buffers) throw new Error("terminal buffer hook unavailable");
+        return buffers.lines(${JSON.stringify(taskId)})
+          .filter((line) => line.startsWith("SUBMIT:"));
+      `);
+      expect(submittedLines).toEqual([
+        `SUBMIT:<${humanInput}>`,
+        `SUBMIT:<${managerInput}>`,
+      ]);
+    } finally {
+      await tauriInvoke(primary, "kill_session", { sessionId: taskId })
+        .catch(() => undefined);
+    }
+}
+
+describe("remote desktop LAN input semantics", () => {
+  beforeAll(async () => {
+    await primary.createSession();
+    await secondary.createSession();
+    await resetDatabase(primary);
+    await resetDatabase(secondary);
+    fixtureRepoPath = await createFixtureRepo("remote-lan-input-semantics");
+    primaryRepoId = await importTestRepo(
+      primary,
+      fixtureRepoPath,
+      "remote-input-primary",
+    );
+    secondaryRepoId = await importTestRepo(
+      secondary,
+      fixtureRepoPath,
+      "remote-input-secondary",
+    );
+    expect(primaryRepoId).toBeTruthy();
+    expect(secondaryRepoId).toBeTruthy();
+    lanPairReady = false;
+    await ensureLanPair();
+  }, 120_000);
+
+  afterAll(async () => {
+    await cleanupWorktrees(primary, fixtureRepoPath).catch(() => undefined);
+    await cleanupWorktrees(secondary, fixtureRepoPath).catch(() => undefined);
+    await cleanupFixtureRepos(
+      fixtureRepoPath ? [fixtureRepoPath] : [],
+    ).catch(() => undefined);
+    await primary.deleteSession().catch(() => undefined);
+    await secondary.deleteSession().catch(() => undefined);
+    lanPairReady = false;
+  });
+
+  it(
+    "keeps remote LAN draft, control, submission, and logical API input separate and ordered",
+    runCausalRemoteInputTest,
+    120_000,
+  );
 });

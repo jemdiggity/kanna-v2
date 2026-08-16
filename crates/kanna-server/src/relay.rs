@@ -445,6 +445,11 @@ pub(crate) async fn run_relay_loop(
                                     continue;
                                 }
 
+                                if let Some(error) = commands::legacy_command_rejection(&command) {
+                                    send_response(&sink, id, Err(error)).await;
+                                    continue;
+                                }
+
                                 // Normal commands: short-lived daemon connection
                                 let daemon_result =
                                     daemon_client::DaemonClient::connect(&config.daemon_dir).await;
@@ -1384,6 +1389,123 @@ mod tests {
 
         relay_server.await.expect("relay server");
         let _ = std::fs::remove_file(database_path);
+    }
+
+    #[tokio::test]
+    async fn legacy_relay_send_input_fails_closed_before_daemon_access() {
+        use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
+
+        let relay_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind relay stand-in");
+        let relay_address = relay_listener.local_addr().expect("relay address");
+        let unique = format!(
+            "relay-legacy-input-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        );
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+        let daemon_socket = kanna_runtime_defaults::socket_path(&daemon_dir);
+        let _ = std::fs::remove_file(&daemon_socket);
+        let daemon_listener =
+            tokio::net::UnixListener::bind(&daemon_socket).expect("bind daemon probe");
+        let database_path = crate::db::Db::test_db_path(&unique);
+        let config = Config {
+            relay_url: format!("ws://{relay_address}"),
+            device_token: "device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
+            daemon_dir: daemon_dir.to_string_lossy().into_owned(),
+            db_path: database_path.clone(),
+            kanna_cli_path: None,
+            desktop_id: "desktop-owner".to_string(),
+            desktop_secret: None,
+            desktop_name: "Owner Mac".to_string(),
+            version: "test-version".to_string(),
+            environment: "development".to_string(),
+            lan_host: "127.0.0.1".to_string(),
+            lan_port: 48120,
+            transfer_port: 4455,
+            pairing_store_path: format!("/tmp/{unique}-pairings.json"),
+        };
+        let database = crate::db::Db::open_for_tests(&database_path).expect("open test db");
+        let state = Arc::new(http_api::AppState::new(config.clone()));
+
+        let relay_server = tokio::spawn(async move {
+            let (stream, _) = relay_listener.accept().await.expect("accept relay");
+            let mut socket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("accept websocket");
+            let _auth = socket
+                .next()
+                .await
+                .expect("auth message")
+                .expect("auth frame");
+            socket
+                .send(TungsteniteMessage::Text(
+                    serde_json::json!({
+                        "type": "auth_ok",
+                        "userId": "operator-1",
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .expect("send auth ack");
+            socket
+                .send(TungsteniteMessage::Text(
+                    serde_json::json!({
+                        "type": "invoke",
+                        "id": "legacy-input",
+                        "command": "send_input",
+                        "args": {
+                            "session_id": "task-with-draft",
+                            "data": "\r",
+                        },
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .expect("send legacy input");
+
+            while let Some(message) = socket.next().await {
+                let TungsteniteMessage::Text(text) = message.expect("relay frame") else {
+                    continue;
+                };
+                let value: serde_json::Value =
+                    serde_json::from_str(&text).expect("parse relay response");
+                if value["type"] == "response" && value["id"] == "legacy-input" {
+                    return value["error"]
+                        .as_str()
+                        .expect("legacy input must return an error")
+                        .to_string();
+                }
+            }
+            panic!("relay disconnected before legacy input rejection");
+        });
+
+        let relay_loop = run_relay_loop(config, database, state);
+        tokio::pin!(relay_loop);
+        let error = tokio::select! {
+            accepted = daemon_listener.accept() => {
+                panic!("legacy relay input reached the daemon: {accepted:?}")
+            }
+            result = relay_server => result.expect("relay server"),
+            result = &mut relay_loop => panic!("relay loop exited early: {result:?}"),
+        };
+        assert!(
+            error.contains("upgrade the client") && error.contains("explicit input semantics"),
+            "unexpected legacy input rejection: {error}",
+        );
+
+        let _ = std::fs::remove_file(database_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
     }
 
     #[tokio::test]

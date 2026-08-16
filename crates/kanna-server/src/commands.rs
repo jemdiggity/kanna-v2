@@ -7,6 +7,12 @@ use crate::task_creator;
 use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
 use serde_json::Value;
 
+const LEGACY_SEND_INPUT_UPGRADE_ERROR: &str = "legacy relay send_input is no longer supported because it cannot declare terminal submission/control boundaries; upgrade the client to use the task input HTTP API or a terminal stream with explicit input semantics";
+
+pub(crate) fn legacy_command_rejection(command: &str) -> Option<String> {
+    (command == "send_input").then(|| LEGACY_SEND_INPUT_UPGRADE_ERROR.to_string())
+}
+
 pub async fn handle_invoke(
     command: &str,
     args: &Value,
@@ -78,28 +84,7 @@ pub async fn handle_invoke(
                 other => Err(format!("unexpected daemon response: {:?}", other)),
             }
         }
-        "send_input" => {
-            let session_id = args
-                .get("session_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| "missing required arg: session_id".to_string())?;
-            let data = args
-                .get("data")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| "missing required arg: data".to_string())?;
-            let event = daemon
-                .send_command(&DaemonCommand::Input {
-                    session_id: session_id.to_string(),
-                    data: data.as_bytes().to_vec(),
-                })
-                .await
-                .map_err(|e| format!("daemon error: {}", e))?;
-            match event {
-                DaemonEvent::Ok => Ok(Value::Null),
-                DaemonEvent::Error { message, .. } => Err(format!("daemon error: {}", message)),
-                other => Err(format!("unexpected daemon response: {:?}", other)),
-            }
-        }
+        "send_input" => Err(LEGACY_SEND_INPUT_UPGRADE_ERROR.to_string()),
         "resize_session" => {
             let session_id = args
                 .get("session_id")
