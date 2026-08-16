@@ -200,7 +200,8 @@ export async function buildMobileIosArchivePlan(input: {
         "-exportPath",
         exportPath,
         "-exportOptionsPlist",
-        exportOptionsPlistPath
+        exportOptionsPlistPath,
+        "-allowProvisioningUpdates"
       ],
       cwd: input.repoRoot,
       streamOutput: true

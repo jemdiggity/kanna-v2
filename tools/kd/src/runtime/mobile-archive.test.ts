@@ -65,7 +65,7 @@ describe("kd mobile archive", () => {
     );
   });
 
-  it("builds a local Expo CNG, Xcode archive, export, and optional Transporter upload plan", async () => {
+  it("builds an archive and export plan that allows automatic provisioning updates", async () => {
     const repoRoot = await mkdtemp(join(tmpdir(), "kanna-mobile-archive-plan-"));
     await writeMinimalRepo(repoRoot);
 
@@ -108,7 +108,8 @@ describe("kd mobile archive", () => {
         "-exportArchive",
         `-archivePath ${repoRoot}/.build/mobile-release/Kanna.xcarchive`,
         `-exportPath ${repoRoot}/.build/mobile-release/export`,
-        `-exportOptionsPlist ${repoRoot}/.build/mobile-release/ExportOptions.plist`
+        `-exportOptionsPlist ${repoRoot}/.build/mobile-release/ExportOptions.plist`,
+        "-allowProvisioningUpdates"
       ].join(" "),
       `xcrun iTMSTransporter -m upload -assetFile ${repoRoot}/.build/mobile-release/export/Kanna.ipa -apiKey <APP_STORE_CONNECT_API_KEY_ID> -apiIssuer <APP_STORE_CONNECT_API_ISSUER_ID>`
     ]);
