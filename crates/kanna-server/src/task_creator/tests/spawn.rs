@@ -604,6 +604,10 @@ async fn prepared_agent_task_spawn_includes_task_specific_kanna_context() {
                 mcp_config_json["mcpServers"]["kanna-mcp"]["env"]["KANNA_SERVER_BASE_URL"],
                 params.env["KANNA_SERVER_BASE_URL"]
             );
+            assert_eq!(
+                mcp_config_json["mcpServers"]["kanna-mcp"]["env"]["KANNA_TASK_EVENTS_TOKEN_PATH"],
+                params.env["KANNA_TASK_EVENTS_TOKEN_PATH"]
+            );
             let system_prompt = params.system_prompt.expect("system prompt should be sent");
             assert!(system_prompt.contains(&format!("task `{task_id}`")));
             assert!(system_prompt.contains("stage `verify`"));

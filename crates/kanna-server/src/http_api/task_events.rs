@@ -106,7 +106,6 @@ struct AggregateWaitSession {
     cursor: AggregateCursor,
     pending: tokio::task::JoinSet<AggregateWaitCompletion>,
     pending_machines: HashSet<String>,
-    pending_limit: Option<i64>,
     last_touched: tokio::time::Instant,
 }
 
@@ -942,7 +941,6 @@ fn spawn_aggregate_wait(
     timeout_secs: u64,
     limit: i64,
 ) {
-    session.pending_limit = Some(limit);
     let query = local_query_for_aggregate(
         &session.cursor.scope,
         session.cursor.cursors_by_machine.get(&machine_id).cloned(),
@@ -991,9 +989,6 @@ fn apply_aggregate_completion(
     limit: i64,
 ) -> Result<bool, (axum::http::StatusCode, String)> {
     session.pending_machines.remove(&completion.machine_id);
-    if session.pending_machines.is_empty() {
-        session.pending_limit = None;
-    }
     let response = match completion.result {
         Ok(response) => response,
         Err(error) => {
@@ -1018,10 +1013,6 @@ fn apply_aggregate_completion(
                 ),
             )
         })?;
-    session
-        .cursor
-        .cursors_by_machine
-        .insert(completion.machine_id.clone(), cursor.to_string());
     *has_more |= response
         .get("hasMore")
         .and_then(Value::as_bool)
@@ -1042,7 +1033,9 @@ fn apply_aggregate_completion(
     if returned_events.len() > remaining {
         *has_more = true;
     }
-    for event in returned_events.iter().take(remaining) {
+    let emitted_count = returned_events.len().min(remaining);
+    let mut emitted_cursor = None;
+    for event in returned_events.iter().take(emitted_count) {
         let mut event = event.as_object().cloned().ok_or_else(|| {
             (
                 axum::http::StatusCode::BAD_GATEWAY,
@@ -1056,7 +1049,35 @@ fn apply_aggregate_completion(
             "machineId".to_string(),
             Value::String(completion.machine_id.clone()),
         );
+        emitted_cursor = event.get("seq").and_then(Value::as_i64);
         events.push(Value::Object(event));
+    }
+    let next_cursor = if emitted_count == returned_events.len() {
+        Some(cursor.to_string())
+    } else if emitted_count == 0 {
+        None
+    } else {
+        let event_seq = emitted_cursor.ok_or_else(|| {
+            (
+                axum::http::StatusCode::BAD_GATEWAY,
+                format!(
+                    "machine {} returned a truncated task event without a numeric seq",
+                    completion.machine_id
+                ),
+            )
+        })?;
+        Some(match &session.cursor.scope {
+            AggregateScope::Children { parent_task_id } => {
+                encode_v3_cursor(parent_task_id, event_seq)?
+            }
+            AggregateScope::Tasks { .. } | AggregateScope::Repo { .. } => event_seq.to_string(),
+        })
+    };
+    if let Some(next_cursor) = next_cursor {
+        session
+            .cursor
+            .cursors_by_machine
+            .insert(completion.machine_id.clone(), next_cursor);
     }
     Ok(!returned_events.is_empty())
 }
@@ -1134,16 +1155,9 @@ async fn wait_aggregate_task_events(
                 cursor,
                 pending: tokio::task::JoinSet::new(),
                 pending_machines: HashSet::new(),
-                pending_limit: None,
                 last_touched: now,
             })
     };
-    if !session.pending_machines.is_empty() && session.pending_limit != Some(limit) {
-        session.pending.abort_all();
-        session.pending = tokio::task::JoinSet::new();
-        session.pending_machines.clear();
-        session.pending_limit = None;
-    }
     let mut machine_errors = Vec::new();
     let mut active_machines = HashSet::from([local_machine_id.clone()]);
     match state.list_active_relay_desktops().await {
@@ -1316,7 +1330,7 @@ pub(super) async fn wait_task_events(
         {
             return Err((
                 axum::http::StatusCode::FORBIDDEN,
-                "this request is not authorized to resume an account-wide task-event cursor; retry from the trusted desktop client or start a new local-only wait".to_string(),
+                "this request is not authorized to resume an account-wide task-event cursor; retry with the local task-event bearer credential or start a new local-only wait".to_string(),
             ));
         }
         query.local_only = true;
@@ -1384,7 +1398,6 @@ mod aggregate_wait_registry_tests {
             },
             pending,
             pending_machines: HashSet::from([machine_id]),
-            pending_limit: Some(DEFAULT_EVENT_LIMIT),
             last_touched,
         }
     }

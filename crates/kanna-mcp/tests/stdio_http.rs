@@ -29,6 +29,7 @@ struct ObservedRequest {
     method: String,
     path: String,
     body: Option<Value>,
+    authorization: Option<String>,
 }
 
 fn read_http_request(stream: &mut TcpStream) -> ObservedRequest {
@@ -60,6 +61,11 @@ fn read_http_request(stream: &mut TcpStream) -> ObservedRequest {
                 .then(|| value.trim().parse::<usize>().expect("content length"))
         })
         .unwrap_or(0);
+    let authorization = headers.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("authorization")
+            .then(|| value.trim().to_string())
+    });
 
     while bytes.len() < header_end + content_length {
         let read = stream.read(&mut buffer).expect("read body");
@@ -76,7 +82,12 @@ fn read_http_request(stream: &mut TcpStream) -> ObservedRequest {
         )
     };
 
-    ObservedRequest { method, path, body }
+    ObservedRequest {
+        method,
+        path,
+        body,
+        authorization,
+    }
 }
 
 fn start_http_fixture(
@@ -1141,6 +1152,51 @@ fn wait_events_discovers_task_owners_and_waits_across_machines() {
                     .is_some_and(|path| path.starts_with("/v1/task-events?taskIds=task-remote"))
             })
     }));
+}
+
+#[test]
+fn repo_wait_reads_the_local_credential_file_and_sends_bearer_authorization() {
+    let (base_url, server) = start_http_fixture(vec![ExpectedRequest {
+        method: "GET",
+        path: "/v1/task-events?repoId=repo-1&timeoutSecs=0",
+        body: None,
+        response_status: "200 OK",
+        response_body: json!({
+            "waitOutcome": "timeout",
+            "cursor": "ks1.fixture",
+            "events": [],
+            "hasMore": false,
+            "machineErrors": []
+        }),
+    }]);
+    let token_path = std::env::temp_dir().join(format!(
+        "kanna-mcp-task-events-token-{}",
+        std::process::id()
+    ));
+    std::fs::write(&token_path, "fixture-local-token\n").expect("write token fixture");
+    let token_path_string = token_path.to_string_lossy().to_string();
+    let responses = run_kanna_mcp_with_env(
+        &base_url,
+        &[json!({
+            "jsonrpc": "2.0",
+            "id": 341,
+            "method": "tools/call",
+            "params": {
+                "name": "kanna_wait_events",
+                "arguments": { "repo_id": "repo-1", "timeout_secs": 0 }
+            }
+        })],
+        &[("KANNA_TASK_EVENTS_TOKEN_PATH", token_path_string.as_str())],
+    );
+
+    let observed = server.join().expect("fixture server");
+    let _ = std::fs::remove_file(token_path);
+    assert_eq!(tool_text(&responses[0])["cursor"], "ks1.fixture");
+    assert_eq!(observed.len(), 1);
+    assert_eq!(
+        observed[0].authorization.as_deref(),
+        Some("Bearer fixture-local-token")
+    );
 }
 
 #[test]

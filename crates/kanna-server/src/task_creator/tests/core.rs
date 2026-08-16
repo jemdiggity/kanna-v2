@@ -1055,6 +1055,19 @@ fn task_creation_uses_one_remote_default_branch_definition_context() {
         Some("http://127.0.0.1:48120")
     );
     assert_eq!(
+        prepared
+            .env
+            .get("KANNA_TASK_EVENTS_TOKEN_PATH")
+            .map(String::as_str),
+        Some(
+            config
+                .task_events_token_path()
+                .unwrap()
+                .to_string_lossy()
+                .as_ref(),
+        )
+    );
+    assert_eq!(
         prepared.env.get("KANNA_CLI_PATH").map(String::as_str),
         Some(kanna_cli_sidecar.path().to_string_lossy().as_ref())
     );
@@ -1097,6 +1110,14 @@ fn task_creation_uses_one_remote_default_branch_definition_context() {
     assert_eq!(
         mcp_config["mcpServers"]["kanna-mcp"]["env"]["KANNA_SERVER_BASE_URL"],
         "http://127.0.0.1:48120"
+    );
+    assert_eq!(
+        mcp_config["mcpServers"]["kanna-mcp"]["env"]["KANNA_TASK_EVENTS_TOKEN_PATH"],
+        config
+            .task_events_token_path()
+            .unwrap()
+            .to_string_lossy()
+            .as_ref()
     );
     assert!(std::path::Path::new(&prepared.cwd)
         .join("remote-setup.marker")

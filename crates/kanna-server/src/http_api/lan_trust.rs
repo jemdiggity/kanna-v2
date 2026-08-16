@@ -2,9 +2,9 @@ use super::state::{AppState, AuthenticatedHttpInvoke, TunneledHttpInvoke};
 use crate::pairing::PairingStore;
 use axum::body::Body;
 use axum::extract::{ConnectInfo, FromRequestParts, State};
-use axum::http::header::{COOKIE, ORIGIN, SET_COOKIE};
+use axum::http::header::{AUTHORIZATION, COOKIE, SET_COOKIE};
+use axum::http::HeaderValue;
 use axum::http::{request::Parts, Request, StatusCode};
-use axum::http::{HeaderMap, HeaderValue};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
@@ -39,9 +39,11 @@ pub(super) struct PrivilegedTaskAccess;
 pub(super) struct DesktopLocalAccess;
 
 /// Whether a task-event request may use this desktop's authenticated relay
-/// session to fan out across the account. Unlike the privileged control
-/// extractor, this never rejects the request: untrusted LAN callers retain
-/// access to the local-only event feed.
+/// session to fan out across the account. A loopback address is deliberately
+/// insufficient because a rebound browser origin can reach it; callers need
+/// the owner-only local bearer credential or an already-paired device marker.
+/// This never rejects the request: unauthenticated callers retain the native
+/// local-only event feed.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct AccountWideTaskEventAccess(bool);
 
@@ -83,12 +85,18 @@ impl FromRequestParts<Arc<AppState>> for AccountWideTaskEventAccess {
 
     async fn from_request_parts(
         parts: &mut Parts,
-        _state: &Arc<AppState>,
+        state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
-        Ok(Self(
-            !is_browser_origin_request(&parts.headers)
-                && privileged_task_access(&parts.extensions).is_ok(),
-        ))
+        let bearer = parts
+            .headers
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().strip_prefix("Bearer "));
+        let local_credential_matches = bearer
+            .zip(state.local_task_events_token.as_deref())
+            .is_some_and(|(presented, expected)| secret_matches(presented, expected));
+        let paired_device = parts.extensions.get::<TrustedLanDeviceAccess>().is_some();
+        Ok(Self(local_credential_matches || paired_device))
     }
 }
 
@@ -98,28 +106,85 @@ impl AccountWideTaskEventAccess {
     }
 }
 
-fn is_browser_origin_request(headers: &HeaderMap) -> bool {
-    if headers.contains_key(ORIGIN) {
-        return true;
+fn secret_matches(presented: &str, expected: &str) -> bool {
+    use sha2::{Digest, Sha256};
+
+    Sha256::digest(presented.as_bytes()) == Sha256::digest(expected.as_bytes())
+}
+
+pub(super) fn load_or_create_task_events_token(path: &Path) -> Result<String, String> {
+    match read_task_events_token(path) {
+        Ok(token) => return Ok(token),
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            return Err(format!("failed to read {}: {error}", path.display()));
+        }
+        Err(_) => {}
     }
 
-    let fetch_site = headers
-        .get("sec-fetch-site")
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim);
-    if fetch_site.is_some_and(|site| {
-        !site.eq_ignore_ascii_case("same-origin") && !site.eq_ignore_ascii_case("none")
-    }) {
-        return true;
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("credential path has no parent: {}", path.display()))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+    let token = generate_task_events_token()?;
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true).mode(0o600);
+    match options.open(path) {
+        Ok(mut file) => {
+            if let Err(error) = file
+                .write_all(format!("{token}\n").as_bytes())
+                .and_then(|_| file.sync_all())
+            {
+                drop(file);
+                let _ = std::fs::remove_file(path);
+                return Err(format!("failed to write {}: {error}", path.display()));
+            }
+            Ok(token)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            read_task_events_token(path)
+                .map_err(|error| format!("failed to read {}: {error}", path.display()))
+        }
+        Err(error) => Err(format!("failed to create {}: {error}", path.display())),
     }
+}
 
-    headers
-        .get("sec-fetch-mode")
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .is_some_and(|mode| {
-            !mode.eq_ignore_ascii_case("same-origin") && !mode.eq_ignore_ascii_case("navigate")
-        })
+fn read_task_events_token(path: &Path) -> Result<String, std::io::Error> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "credential is not a regular file",
+        ));
+    }
+    if metadata.permissions().mode() & 0o077 != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "credential must not grant group or other permissions",
+        ));
+    }
+    let token = std::fs::read_to_string(path)?.trim().to_string();
+    if token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "credential must contain a 32-byte hexadecimal token",
+        ));
+    }
+    Ok(token)
+}
+
+fn generate_task_events_token() -> Result<String, String> {
+    use std::io::Read;
+
+    let mut bytes = [0_u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut random| random.read_exact(&mut bytes))
+        .map_err(|error| format!("failed to read operating-system randomness: {error}"))?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 fn unauthorized_privileged_task() -> (StatusCode, String) {

@@ -4,6 +4,7 @@ use kanna_tool_catalog::{
 };
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
+use std::env;
 
 use crate::models::{
     AddRepoRequest, BlockTaskRequest, CompleteStageRequest, CreateTaskRequest, CreateTaskResponse,
@@ -127,8 +128,13 @@ pub(crate) fn task_logs_path(task_id: &str, tail: Option<usize>) -> String {
 }
 
 pub(crate) async fn get_json<T: DeserializeOwned>(base_url: &str, path: &str) -> Result<T, String> {
-    let response = reqwest::Client::new()
-        .get(join_server_url(base_url, path))
+    let mut request = reqwest::Client::new().get(join_server_url(base_url, path));
+    if path.split('?').next() == Some("/v1/task-events") {
+        if let Some(token) = read_task_events_token_from_env()? {
+            request = request.bearer_auth(token);
+        }
+    }
+    let response = request
         .send()
         .await
         .map_err(|e| format!("request failed: {e}"))?;
@@ -137,6 +143,23 @@ pub(crate) async fn get_json<T: DeserializeOwned>(base_url: &str, path: &str) ->
         .json::<T>()
         .await
         .map_err(|e| format!("failed to decode response: {e}"))
+}
+
+fn read_task_events_token_from_env() -> Result<Option<String>, String> {
+    const TOKEN_PATH_ENV: &str = "KANNA_TASK_EVENTS_TOKEN_PATH";
+    let Some(path) = env::var(TOKEN_PATH_ENV)
+        .ok()
+        .filter(|path| !path.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+    let token = std::fs::read_to_string(&path)
+        .map_err(|error| format!("failed to read {TOKEN_PATH_ENV} {path}: {error}"))?;
+    let token = token.trim();
+    if token.is_empty() {
+        return Err(format!("{TOKEN_PATH_ENV} {path} is empty"));
+    }
+    Ok(Some(token.to_string()))
 }
 
 /// Surface the response body on HTTP errors — the server puts its actual

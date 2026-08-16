@@ -95,20 +95,31 @@ window, with the server-side relay handoff bounded below the MCP client's
 300-second tool-call deadline.
 
 The local `GET /v1/task-events` surface is the account-wide event boundary for
-a desktop-loopback or paired caller. When desktop relay routing is available
+a caller presenting the server's local task-event bearer credential or a
+paired device credential. The server creates `task-events.token` beside its
+pairing store with mode 0600; task sessions receive only its path through
+`KANNA_TASK_EVENTS_TOKEN_PATH`, and Kanna MCP/CLI plus the documented Node
+watcher read it and attach `Authorization: Bearer ...` to the local request.
+Loopback peer addresses and browser metadata grant no account-wide authority:
+an unauthenticated request, including one arriving through DNS rebinding,
+receives only the native local feed. When desktop relay routing is available
 and `localOnly` is absent, the server starts one native wait for itself and
 every active sibling desktop returned by the existing authenticated relay
-session. An unpaired, non-loopback LAN caller receives only the native local
-feed; it cannot spend the desktop's relay authority or read sibling task
-metadata. Tunneled peer waits are marked by the HTTP dispatcher and stay
+session. An unpaired LAN caller receives only the native local feed; it cannot
+spend the desktop's relay authority or read sibling task metadata. Tunneled
+peer waits are marked by the HTTP dispatcher and stay
 native, so aggregation cannot recurse. Every aggregated event gains
 `machineId`; the `ks1.` cursor binds the scope and connected desktop identity
 and carries one opaque native cursor per machine. There is no fabricated
 global order across SQLite databases: order is exact within each `machineId`
 sequence space.
 
-The server retains unfinished peer long-polls between calls, rather than
-cancelling quiet peers when another machine produces an event. Abandoned
+The server retains unfinished peer long-polls between calls, including when a
+caller changes its response limit, rather than cancelling the local receiver
+while the peer still holds a long-poll permit. A response larger than the
+current aggregate limit advances that machine's native cursor only through the
+last event actually emitted; the remainder is fetched on subsequent calls.
+Abandoned
 sessions expire after ten minutes even if no caller returns, and the registry
 holds at most 256 sessions; both expiry and capacity eviction actively abort
 their retained legs and buffered payloads. A cursor also retains every machine

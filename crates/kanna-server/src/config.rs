@@ -181,6 +181,18 @@ fn load_from_path(
 }
 
 impl Config {
+    pub(crate) fn task_events_token_path(&self) -> Option<PathBuf> {
+        if self.pairing_store_path.is_empty() {
+            return None;
+        }
+        Some(
+            Path::new(&self.pairing_store_path)
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("task-events.token"),
+        )
+    }
+
     pub fn load() -> Result<Self, Box<dyn std::error::Error>> {
         let data_root = app_data_dir();
         let config_path = match std::env::var("KANNA_SERVER_CONFIG") {

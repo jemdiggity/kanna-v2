@@ -21,6 +21,7 @@ const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const MULTI_MACHINE_CURSOR_PREFIX: &str = "km1.";
 const MAX_MULTI_MACHINE_CURSOR_LEN: usize = 64 * 1024;
 const MULTI_MACHINE_WAIT_SESSION_TTL: Duration = Duration::from_secs(10 * 60);
+const TASK_EVENTS_TOKEN_PATH_ENV: &str = "KANNA_TASK_EVENTS_TOKEN_PATH";
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -337,8 +338,13 @@ async fn require_success(
 }
 
 async fn get_json<T: DeserializeOwned>(base_url: &str, path: &str) -> Result<T, String> {
-    let response = reqwest::Client::new()
-        .get(join_server_url(base_url, path))
+    let mut request = reqwest::Client::new().get(join_server_url(base_url, path));
+    if path.split('?').next() == Some("/v1/task-events") {
+        if let Some(token) = read_task_events_token_from_env()? {
+            request = request.bearer_auth(token);
+        }
+    }
+    let response = request
         .send()
         .await
         .map_err(|e| format!("GET {path} failed: {e}"))?;
@@ -347,6 +353,22 @@ async fn get_json<T: DeserializeOwned>(base_url: &str, path: &str) -> Result<T, 
         .json::<T>()
         .await
         .map_err(|e| format!("GET {path} returned invalid JSON: {e}"))
+}
+
+fn read_task_events_token_from_env() -> Result<Option<String>, String> {
+    let Some(path) = env::var(TASK_EVENTS_TOKEN_PATH_ENV)
+        .ok()
+        .filter(|path| !path.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+    let token = std::fs::read_to_string(&path)
+        .map_err(|error| format!("failed to read {TASK_EVENTS_TOKEN_PATH_ENV} {path}: {error}"))?;
+    let token = token.trim();
+    if token.is_empty() {
+        return Err(format!("{TASK_EVENTS_TOKEN_PATH_ENV} {path} is empty"));
+    }
+    Ok(Some(token.to_string()))
 }
 
 async fn get_text(base_url: &str, path: &str) -> Result<String, String> {

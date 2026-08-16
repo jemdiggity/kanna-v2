@@ -9,7 +9,9 @@ session, tags peer events with `machineId`, maps repositories by
 `remote_url_hash`, retains per-machine cursors across disconnects, and reports
 known unreachable peers in `machineErrors` without advancing their cursors.
 The task-manager's direct background HTTP watcher can therefore observe peer
-work without owning a relay credential or waking the model on empty polls.
+work without owning a relay credential or waking the model on empty polls. A
+local owner-only credential file explicitly authorizes that aggregated read;
+loopback addressing and browser metadata do not grant cross-machine access.
 
 ## Account inventory gap
 
@@ -65,6 +67,13 @@ queue and authenticated tunneled HTTP dispatcher. They prove:
 - the stale interval produces a visible per-machine error; and
 - aggregate output exactly equals the peer's native feed with no duplicate or
   missing events.
+
+Narrower regressions also run the documented Node `fetch` watcher against a
+live HTTP listener with the mode-0600 credential, prove requests with no
+browser headers or same-origin metadata remain local-only without it, model a
+peer's one-permit long-poll budget across aggregate limit changes, and verify
+an oversized peer batch advances its cursor only through the events actually
+emitted.
 
 This is causal cross-boundary coverage inside the server process, but it does
 not boot two signed-in `kanna-server` binaries against the relay emulator. The

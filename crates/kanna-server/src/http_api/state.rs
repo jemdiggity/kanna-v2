@@ -21,6 +21,7 @@ pub(super) struct AuthenticatedHttpInvoke;
 #[derive(Clone)]
 pub struct AppState {
     pub(super) config: Config,
+    pub(super) local_task_events_token: Option<String>,
     pub(super) pairing_session: Arc<Mutex<Option<ActivePairingSession>>>,
     #[cfg(debug_assertions)]
     pub(super) e2e_lan_http_enabled: Arc<AtomicBool>,
@@ -254,6 +255,18 @@ impl AppState {
                 err
             );
         }
+        let local_task_events_token = config.task_events_token_path().and_then(|path| {
+            match super::lan_trust::load_or_create_task_events_token(&path) {
+                Ok(token) => Some(token),
+                Err(error) => {
+                    log::error!(
+                        "failed to initialize local task-event credential {}: {error}",
+                        path.display()
+                    );
+                    None
+                }
+            }
+        });
 
         let (mobile_notification_tx, mobile_notification_rx) = mpsc::channel(16);
         let (desktop_relay_tx, desktop_relay_rx) = mpsc::channel(32);
@@ -265,6 +278,7 @@ impl AppState {
         ));
         Self {
             config,
+            local_task_events_token,
             transfer_sidecar,
             transfer_work,
             cloud_transfer_proxies: Arc::new(Mutex::new(HashMap::new())),
