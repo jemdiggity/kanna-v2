@@ -314,6 +314,7 @@ struct SafeWritePathHealth {
 pub enum ParamType {
     String,
     Integer,
+    Boolean,
     StringArray,
     Object,
 }
@@ -720,6 +721,11 @@ impl ParamDef {
                 .parse::<u64>()
                 .map(|number| Value::Number(number.into()))
                 .map_err(|_| format!("{} must be an unsigned integer, got {raw}", self.name)),
+            ParamType::Boolean => raw
+                .trim()
+                .parse::<bool>()
+                .map(Value::Bool)
+                .map_err(|_| format!("{} must be true or false, got {raw}", self.name)),
             ParamType::StringArray => parse_cli_string_array(&self.name, raw),
             ParamType::Object => {
                 let parsed = serde_json::from_str::<Value>(raw)
@@ -762,6 +768,7 @@ fn input_schema(tool: &ToolDef) -> Value {
         let mut property = match param.param_type {
             ParamType::String => serde_json::json!({ "type": "string" }),
             ParamType::Integer => serde_json::json!({ "type": "integer" }),
+            ParamType::Boolean => serde_json::json!({ "type": "boolean" }),
             ParamType::StringArray => {
                 serde_json::json!({ "type": "array", "items": { "type": "string" } })
             }
@@ -928,6 +935,11 @@ fn value_for_param(
         ParamType::Integer => {
             Value::Number(integer_value(&value, &param.name, param.min, param.max)?.into())
         }
+        ParamType::Boolean => Value::Bool(
+            value
+                .as_bool()
+                .ok_or_else(|| format!("{} must be a boolean", param.name))?,
+        ),
         ParamType::StringArray => Value::Array(
             string_array_value(&value, &param.name)?
                 .into_iter()
@@ -1010,10 +1022,11 @@ fn query_value(value: &Value, name: &str) -> Result<String, String> {
     match value {
         Value::String(value) => Ok(value.clone()),
         Value::Number(value) => Ok(value.to_string()),
+        Value::Bool(value) => Ok(value.to_string()),
         // A list in a query string is comma-joined, so an agent passes the
         // array its schema declares rather than pre-joining ids itself.
         Value::Array(_) => Ok(string_array_value(value, name)?.join(",")),
-        _ => Err(format!("{name} must be an unsigned integer")),
+        _ => Err(format!("{name} must be a scalar or string array")),
     }
 }
 

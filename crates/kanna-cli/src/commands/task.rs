@@ -603,26 +603,30 @@ pub(crate) async fn run(command: TaskCommands) {
             task_id,
             parent_task_id,
             repo_id,
+            repo_remote_url_hash,
+            local_only,
             cursor,
             timeout_secs,
             limit,
             server_url,
         } => {
             let base_url = resolve_server_base_url_from_env(server_url.as_deref());
-            let events = wait_task_events_via_api(
-                &base_url,
-                &task_id,
-                parent_task_id.as_deref(),
-                repo_id.as_deref(),
-                cursor.as_deref(),
+            let params = crate::api::TaskEventsParams {
+                task_ids: &task_id,
+                parent_task_id: parent_task_id.as_deref(),
+                repo_id: repo_id.as_deref(),
+                repo_remote_url_hash: repo_remote_url_hash.as_deref(),
+                local_only,
+                cursor: cursor.as_deref(),
                 timeout_secs,
                 limit,
-            )
-            .await
-            .unwrap_or_else(|e| {
-                eprintln!("Error: {e}");
-                process::exit(1);
-            });
+            };
+            let events = wait_task_events_via_api(&base_url, &params)
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                });
             if let Err(e) = print_json(&events) {
                 eprintln!("Error: {e}");
                 process::exit(1);

@@ -1162,7 +1162,7 @@ fn all_local_event_wait_does_not_require_relay_discovery() {
         },
         ExpectedRequest {
             method: "GET",
-            path: "/v1/task-events?taskIds=task-local&timeoutSecs=5",
+            path: "/v1/task-events?taskIds=task-local&localOnly=true&timeoutSecs=5",
             body: None,
             response_status: "200 OK",
             response_body: json!({

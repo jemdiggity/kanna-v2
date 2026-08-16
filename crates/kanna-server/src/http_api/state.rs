@@ -37,6 +37,8 @@ pub struct AppState {
     relay_desktop_routing_generation: Arc<AtomicU64>,
     desktop_relay_tx: mpsc::Sender<DesktopRelayRequest>,
     desktop_relay_rx: Arc<StdMutex<Option<mpsc::Receiver<DesktopRelayRequest>>>>,
+    pub(super) aggregate_task_event_waits:
+        Arc<StdMutex<crate::http_api::task_events::AggregateWaitRegistry>>,
     relay_mobile_notifications_available: Arc<AtomicBool>,
     mobile_notification_tx: mpsc::Sender<MobileNotificationRequest>,
     mobile_notification_rx: Arc<StdMutex<Option<mpsc::Receiver<MobileNotificationRequest>>>>,
@@ -279,6 +281,7 @@ impl AppState {
             relay_desktop_routing_generation: Arc::new(AtomicU64::new(0)),
             desktop_relay_tx,
             desktop_relay_rx: Arc::new(StdMutex::new(Some(desktop_relay_rx))),
+            aggregate_task_event_waits: Arc::new(StdMutex::new(Default::default())),
             relay_mobile_notifications_available: Arc::new(AtomicBool::new(false)),
             mobile_notification_tx,
             mobile_notification_rx: Arc::new(StdMutex::new(Some(mobile_notification_rx))),

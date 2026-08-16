@@ -1414,6 +1414,7 @@ fn every_declared_parameter_round_trips_a_cli_spelling() {
                     .and_then(|values| values.first().cloned())
                     .unwrap_or_else(|| "57808275".to_string()),
                 ParamType::Integer => "7".to_string(),
+                ParamType::Boolean => "true".to_string(),
                 ParamType::StringArray => "57808275".to_string(),
                 ParamType::Object => "{}".to_string(),
             };
@@ -1423,6 +1424,7 @@ fn every_declared_parameter_round_trips_a_cli_spelling() {
             let expected_type_ok = match param.param_type {
                 ParamType::String => value.is_string(),
                 ParamType::Integer => value.is_u64(),
+                ParamType::Boolean => value.is_boolean(),
                 ParamType::StringArray => value.is_array(),
                 ParamType::Object => value.is_object(),
             };
@@ -1444,6 +1446,7 @@ fn every_declared_parameter_round_trips_a_cli_spelling() {
                         .and_then(|values| values.first().cloned())
                         .unwrap_or_else(|| "57808275".to_string()),
                     ParamType::Integer => "7".to_string(),
+                    ParamType::Boolean => "true".to_string(),
                     ParamType::StringArray => "57808275".to_string(),
                     ParamType::Object => "{}".to_string(),
                 };

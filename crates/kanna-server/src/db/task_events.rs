@@ -177,6 +177,10 @@ pub enum TaskEventScope {
     /// reconcile against each other without a second rule.
     Children(String),
     Repo(String),
+    /// Every task in the repository identified by its normalized remote URL
+    /// hash. Repository row ids are installation-local, while this hash is the
+    /// identity shared by copies of the same repository on sibling machines.
+    RepoRemoteUrlHash(String),
 }
 
 impl TaskEventScope {
@@ -195,6 +199,13 @@ impl TaskEventScope {
             Self::Repo(_) => {
                 "task_id IN (SELECT id FROM pipeline_item WHERE repo_id = ?)".to_string()
             }
+            Self::RepoRemoteUrlHash(_) => "task_id IN (
+                    SELECT pipeline_item.id
+                    FROM pipeline_item
+                    JOIN repo ON repo.id = pipeline_item.repo_id
+                    WHERE repo.remote_url_hash = ?
+                )"
+            .to_string(),
         }
     }
 
@@ -206,6 +217,9 @@ impl TaskEventScope {
                 .collect(),
             Self::Children(parent_task_id) => vec![SqlValue::Text(parent_task_id.clone())],
             Self::Repo(repo_id) => vec![SqlValue::Text(repo_id.clone())],
+            Self::RepoRemoteUrlHash(remote_url_hash) => {
+                vec![SqlValue::Text(remote_url_hash.clone())]
+            }
         }
     }
 }

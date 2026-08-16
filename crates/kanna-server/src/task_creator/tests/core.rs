@@ -2874,7 +2874,7 @@ fn read_agent_definition_loads_builtin_task_manager_agent_with_codex_first() {
     assert!(definition.prompt.contains("serverStatus.desktop.id"));
     assert!(definition
         .prompt
-        .contains("taskIds cursor is a multi-machine aggregate"));
+        .contains("server `ks1.` cursor that the direct route accepts"));
     assert!(definition
         .prompt
         .contains("[\"repoId\", \"taskIds\", \"parentTaskId\"]"));

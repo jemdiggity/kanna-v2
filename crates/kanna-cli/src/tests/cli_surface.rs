@@ -739,6 +739,8 @@ fn parses_wait_events_and_set_notify_commands() {
                     task_id,
                     parent_task_id,
                     repo_id,
+                    repo_remote_url_hash,
+                    local_only,
                     cursor,
                     timeout_secs,
                     limit,
@@ -748,6 +750,8 @@ fn parses_wait_events_and_set_notify_commands() {
             assert_eq!(task_id, vec!["child-a", "child-b", "child-c"]);
             assert_eq!(parent_task_id, None);
             assert_eq!(repo_id, None);
+            assert_eq!(repo_remote_url_hash, None);
+            assert!(!local_only);
             assert_eq!(cursor.as_deref(), Some("42"));
             assert_eq!(timeout_secs, 30);
             assert_eq!(limit, Some(10));
@@ -794,14 +798,17 @@ fn typed_wait_events_path_matches_the_catalog_tool_path() {
     .unwrap();
 
     // The typed CLI orders its query differently; compare the parsed pairs.
-    let typed = crate::api::task_events_path(
-        &["child-a".to_string(), "child-b".to_string()],
-        None,
-        None,
-        Some("42"),
-        30,
-        Some(10),
-    );
+    let task_ids = ["child-a".to_string(), "child-b".to_string()];
+    let typed = crate::api::task_events_path(&crate::api::TaskEventsParams {
+        task_ids: &task_ids,
+        parent_task_id: None,
+        repo_id: None,
+        repo_remote_url_hash: None,
+        local_only: false,
+        cursor: Some("42"),
+        timeout_secs: 30,
+        limit: Some(10),
+    });
     let query_pairs = |path: &str| {
         let mut pairs = path
             .split_once('?')
@@ -827,7 +834,16 @@ fn typed_wait_events_path_matches_the_catalog_tool_path() {
         &json!({ "parent_task_id": "parent-1", "timeout_secs": 30 }),
     )
     .unwrap();
-    let typed_parent = crate::api::task_events_path(&[], Some("parent-1"), None, None, 30, None);
+    let typed_parent = crate::api::task_events_path(&crate::api::TaskEventsParams {
+        task_ids: &[],
+        parent_task_id: Some("parent-1"),
+        repo_id: None,
+        repo_remote_url_hash: None,
+        local_only: false,
+        cursor: None,
+        timeout_secs: 30,
+        limit: None,
+    });
     assert_eq!(
         query_pairs(&resolved_parent.path),
         query_pairs(&typed_parent)

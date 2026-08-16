@@ -861,6 +861,11 @@ fn spawn_machine_event_wait(
         Value::Array(task_ids.iter().cloned().map(Value::String).collect()),
     );
     machine_args.insert("timeout_secs".to_string(), Value::from(timeout_secs));
+    // The server now offers its own multi-machine feed for direct HTTP
+    // watchers. Keep km1's already-issued per-machine native cursors native:
+    // otherwise its local leg would recursively fan out and duplicate the
+    // remote legs that kanna-mcp is deliberately retaining here.
+    machine_args.insert("local_only".to_string(), Value::Bool(true));
     match session.cursor.cursors_by_machine.get(machine_id) {
         Some(cursor) => {
             machine_args.insert("cursor".to_string(), Value::String(cursor.clone()));

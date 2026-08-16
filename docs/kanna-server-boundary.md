@@ -45,7 +45,7 @@ owner refuses its duplex observation/input before contacting the daemon.
 - `GET /v1/tasks/recent`
 - `GET /v1/tasks/search?query=...`
 - `GET /v1/tasks/{task_id}/children` (durable direct-child fan-out history; includes closed children)
-- `GET /v1/task-events?taskIds=...|parentTaskId=...|repoId=...&cursor=...&timeoutSecs=...&limit=...` (multi-task event feed; blocks server-side until an event arrives or the window elapses)
+- `GET /v1/task-events?taskIds=...|parentTaskId=...|repoId=...|repoRemoteUrlHash=...&cursor=...&timeoutSecs=...&limit=...` (multi-task, multi-machine event feed; blocks server-side until an event arrives or the window elapses)
 - `POST /v1/tasks`
 - `POST /v1/tasks/{task_id}/input`
 - `POST /v1/tasks/{task_id}/actions/complete-stage`
@@ -94,7 +94,42 @@ of being replayed after reconnect. Task waits retain the normal 240-second MCP
 window, with the server-side relay handoff bounded below the MCP client's
 300-second tool-call deadline.
 
-`kanna_wait_events` has one additional MCP-side fan-in behavior. When its
+The local `GET /v1/task-events` surface is the account-wide event boundary.
+When desktop relay routing is available and `localOnly` is absent, the server
+starts one native wait for itself and every active sibling desktop returned by
+the existing authenticated relay session. Tunneled peer waits are marked by
+the HTTP dispatcher and stay native, so aggregation cannot recurse. Every
+event gains `machineId`; the `ks1.` cursor binds the scope and connected
+desktop identity and carries one opaque native cursor per machine. There is no
+fabricated global order across SQLite databases: order is exact within each
+`machineId` sequence space.
+
+The server retains unfinished peer long-polls between calls, rather than
+cancelling quiet peers when another machine produces an event. A cursor also
+retains every machine observed during the wait. If a known peer is absent or a
+relay invoke fails, the response includes a `machineErrors` entry with
+`machineId` and `stale: true`, does not advance that peer's cursor, and returns
+`waitOutcome: "partial"` when no events are ready. When the peer reconnects,
+the next call resumes from that native cursor and catches up wherever the
+peer's 14-day retained history still covers the gap. Thus a quiet reachable
+peer (no error) is distinguishable from an unreachable peer.
+
+Repository rows are installation-local, so aggregate repo waits never send the
+caller's `repoId` to peers. The source resolves it to `repo.remote_url_hash` and
+every native sub-wait filters by that hash. `repoRemoteUrlHash` exposes the
+same canonical scope directly for a caller that has no local row. A repository
+without a remote URL hash cannot be matched across machines and is rejected
+while aggregation is active rather than silently becoming local-only.
+
+Native numeric, p1, and p3 cursors remain accepted. A native cursor supplied
+as aggregation becomes available initializes the local watermark and starts
+new peers from retained history. A server that has no relay route keeps the
+native cursor shape and adds a relay-unavailable `machineErrors` warning.
+`localOnly=true` is the explicit compatibility escape hatch used by adapters
+that already own a per-machine fan-in; inbound relay invokes are local-only by
+transport provenance regardless of the query.
+
+`kanna_wait_events` retains its earlier MCP-side fan-in behavior. When its
 explicit `task_ids` belong to several reachable machines and `machine_id` is
 omitted, MCP discovers each task's owner, starts one native cursor wait per
 owner, and returns as soon as any owner has events. Every returned event gains
@@ -114,10 +149,12 @@ identity change, or tampered to relabel the local sequence space is rejected.
 Local-versus-remote event routing uses that same live identity, never the
 cursor's self-asserted value.
 
-This automatic fan-in applies only to `task_ids`, whose ownership can be
-resolved exactly. `parent_task_id` and `repo_id` remain scopes on one machine:
-they use the local machine by default or the explicit `machine_id`. Passing
-`machine_id` with `task_ids` likewise pins the whole wait to that machine.
+MCP marks each of those native sub-waits `localOnly=true`, so its established
+`km1.` sessions do not recursively enter the server `ks1.` fan-in or duplicate
+remote events. New `repo_id`, `repo_remote_url_hash`, and `parent_task_id`
+calls flow through the local server and therefore use `ks1.` aggregation.
+Passing `machine_id` pins any scope to that one machine and returns its native
+cursor.
 There is no global ordering between independent SQLite sequence spaces;
 ordering remains exact within each machine and `machineId` identifies the
 sequence space for every aggregated event.
@@ -361,7 +398,8 @@ does not reject them as first-stage bindings.
 ## Task Event Feed
 
 `GET /v1/task-events` is the surface an orchestrating agent watches instead of
-polling each child. It is cursor-based, not snapshot-diffed:
+polling each child. Its outer account feed and each native machine feed are
+cursor-based, not snapshot-diffed:
 
 - Event order is `task_event.seq` (`INTEGER PRIMARY KEY AUTOINCREMENT`). SQLite
   allows one writer at a time, so a `seq` cannot be committed out of order.
@@ -411,8 +449,8 @@ reported. It cannot be synthesized as a sequenced event without weakening the
 cursor contract, and adding the snapshot here alone would bypass multi-machine
 fan-in and create a second, server-side debounce.
 
-Three scopes, in precedence order: `taskIds`, then `parentTaskId`, then
-`repoId`. `parentTaskId` exists because the other two do not cover a fan-out
+Four scopes, in precedence order: `taskIds`, then `parentTaskId`, then
+`repoId`, then `repoRemoteUrlHash`. `parentTaskId` exists because the other two do not cover a fan-out
 that lost the ids it created — an id list dies with the context that held it,
 and a repo scope hands the caller every other task's events to filter.
 It is evaluated per read against `pipeline_item.parent_task_id`, so a task
@@ -578,6 +616,18 @@ and every direct close — report `DONE [failure]`.
 Delivery is claimed once via `pipeline_item.notified_at` and goes through the
 same logical-input helper as `POST /v1/tasks/{task_id}/input`. All of it is
 server/daemon-side; it must not depend on the desktop event bridge being open.
+
+Completion notification remains machine-local in this version. Both
+creation-time `notify_task_id` and `kanna_set_task_notify` resolve the target in
+the child's SQLite database, and `notified_at` is claimed before direct daemon
+delivery. Routing it cross-machine would require persisting a target machine
+identity and a durable remote-delivery outbox/acknowledgement; opportunistically
+probing active peers after the one-shot claim would lose messages on disconnect
+and violate the guarantee above. The account-wide event feed is therefore the
+reliable cross-machine wake-up: task managers must watch `run.finished`,
+`task.closed`, and related events, while `TASK ... DONE` remains an additional
+same-machine fast path. The staged durability work is recorded in
+[2026-08-16 cross-machine event waiting gaps](2026-08-16-cross-machine-event-waiting-e2e-gap.md).
 
 ## Merge Handoff
 

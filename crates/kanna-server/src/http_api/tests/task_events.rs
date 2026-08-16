@@ -10,8 +10,8 @@ use super::*;
 use crate::db::NewStageRun;
 use axum::Router;
 use base64::Engine;
-use serde_json::Value;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use serde_json::{json, Value};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -46,6 +46,51 @@ fn events_router() -> (Router, String) {
     let state = test_state_with_seed("desktop-task-events", "Task Events", seed_orchestration);
     let db_path = state.config().db_path.clone();
     (router(state), db_path)
+}
+
+fn connect_test_relay_peer(
+    source: &Arc<AppState>,
+    peer: Arc<AppState>,
+    connected: Arc<AtomicBool>,
+) -> tokio::task::JoinHandle<()> {
+    let mut requests = source
+        .take_desktop_relay_requests()
+        .expect("take source relay queue");
+    source.set_desktop_routing_available(true);
+    tokio::spawn(async move {
+        while let Some(request) = requests.recv().await {
+            match request {
+                crate::http_api::DesktopRelayRequest::ListActive { response, .. } => {
+                    let machine_ids = if connected.load(Ordering::SeqCst) {
+                        vec![peer.config().desktop_id.clone()]
+                    } else {
+                        Vec::new()
+                    };
+                    let _ = response.send(Ok(machine_ids));
+                }
+                crate::http_api::DesktopRelayRequest::Invoke {
+                    method,
+                    path,
+                    body,
+                    response,
+                    ..
+                } => {
+                    if !connected.load(Ordering::SeqCst) {
+                        let _ = response.send(Err("peer disconnected".to_string()));
+                        continue;
+                    }
+                    let result = crate::http_api::dispatch_authenticated_http_invoke(
+                        Arc::clone(&peer),
+                        &method,
+                        &path,
+                        body,
+                    )
+                    .await;
+                    let _ = response.send(Ok(result));
+                }
+            }
+        }
+    })
 }
 
 async fn get_json_body(router: &Router, uri: &str) -> Value {
@@ -308,6 +353,191 @@ async fn repo_scope_watches_tasks_the_caller_did_not_name() {
         event_pairs(&body),
         vec![("child-b".to_string(), "stage.changed".to_string())]
     );
+}
+
+/// The public local surface is the watcher boundary: it fans a repository
+/// wait through the already-authenticated relay bridge, while the peer's
+/// tunneled sub-wait remains native and cannot recurse. The two repositories
+/// deliberately have different row ids; only their remote URL hash agrees.
+///
+/// This is also the causal reconnect proof. The source retains the peer's
+/// native cursor while the peer is absent, reports that gap, then catches up
+/// from the peer's append-only feed without replaying the event already seen.
+#[tokio::test]
+async fn local_surface_aggregates_peer_repo_events_and_resumes_after_reconnect() {
+    const REMOTE_HASH: &str = "sha256:same-origin-on-two-machines";
+    let source = test_state_with_seed("desktop-source-events", "Source Mac", |db| {
+        db.insert_test_repo("repo-source-id", "Kanna Source")
+            .expect("insert source repo");
+        db.patch_repo("repo-source-id", None, None, Some(Some(REMOTE_HASH)), None)
+            .expect("set source remote hash");
+    });
+    let peer = test_state_with_seed("desktop-peer-events", "Peer Mac", |db| {
+        db.insert_test_repo("repo-peer-different-id", "Kanna Peer")
+            .expect("insert peer repo");
+        db.patch_repo(
+            "repo-peer-different-id",
+            None,
+            None,
+            Some(Some(REMOTE_HASH)),
+            None,
+        )
+        .expect("set peer remote hash");
+        db.insert_test_pipeline_item(
+            "remote-child",
+            "repo-peer-different-id",
+            "remote child",
+            Some("Remote Child"),
+            "in progress",
+            "2026-08-16 00:00:00",
+        )
+        .expect("insert peer task");
+        start_run(db, "remote-run", "remote-child", "in progress");
+    });
+    let connected = Arc::new(AtomicBool::new(true));
+    let relay = connect_test_relay_peer(&source, Arc::clone(&peer), Arc::clone(&connected));
+    let source_router = router(Arc::clone(&source));
+    let peer_router = router(Arc::clone(&peer));
+
+    let first = get_json_body(
+        &source_router,
+        "/v1/task-events?repoId=repo-source-id&timeoutSecs=1",
+    )
+    .await;
+    assert_eq!(first["waitOutcome"], "events");
+    assert!(cursor_of(&first).starts_with("ks1."));
+    assert_eq!(
+        event_pairs(&first),
+        vec![("remote-child".into(), "run.started".into())]
+    );
+    assert_eq!(first["events"][0]["machineId"], "desktop-peer-events");
+    assert_eq!(first["machineErrors"], json!([]));
+    let first_cursor = cursor_of(&first);
+
+    // The same event is present on the peer's own native feed. This compares
+    // the aggregate output against its source of truth rather than a fixture.
+    let peer_first = get_json_body(
+        &peer_router,
+        "/v1/task-events?repoId=repo-peer-different-id&localOnly=true&timeoutSecs=0",
+    )
+    .await;
+    assert_eq!(event_pairs(&peer_first), event_pairs(&first));
+
+    connected.store(false, Ordering::SeqCst);
+    Db::open(&peer.config().db_path)
+        .expect("open peer db")
+        .update_pipeline_item_stage("remote-child", "review")
+        .expect("append event while peer is disconnected");
+    let stale = get_json_body(
+        &source_router,
+        &format!("/v1/task-events?repoId=repo-source-id&cursor={first_cursor}&timeoutSecs=0"),
+    )
+    .await;
+    assert_eq!(stale["waitOutcome"], "partial");
+    assert_eq!(event_pairs(&stale), Vec::new());
+    assert_eq!(
+        stale["machineErrors"][0]["machineId"],
+        "desktop-peer-events"
+    );
+    assert_eq!(stale["machineErrors"][0]["stale"], true);
+
+    connected.store(true, Ordering::SeqCst);
+    let caught_up = get_json_body(
+        &source_router,
+        &format!(
+            "/v1/task-events?repoId=repo-source-id&cursor={}&timeoutSecs=0",
+            cursor_of(&stale)
+        ),
+    )
+    .await;
+    assert_eq!(caught_up["waitOutcome"], "events");
+    assert_eq!(
+        event_pairs(&caught_up),
+        vec![("remote-child".into(), "stage.changed".into())]
+    );
+    assert_eq!(caught_up["events"][0]["machineId"], "desktop-peer-events");
+
+    let drained = get_json_body(
+        &source_router,
+        &format!(
+            "/v1/task-events?repoId=repo-source-id&cursor={}&timeoutSecs=0",
+            cursor_of(&caught_up)
+        ),
+    )
+    .await;
+    assert_eq!(drained["waitOutcome"], "timeout");
+    assert_eq!(event_pairs(&drained), Vec::new());
+
+    let peer_all = get_json_body(
+        &peer_router,
+        "/v1/task-events?repoRemoteUrlHash=sha256%3Asame-origin-on-two-machines&localOnly=true&timeoutSecs=0",
+    )
+    .await;
+    let aggregate_events = event_pairs(&first)
+        .into_iter()
+        .chain(event_pairs(&caught_up))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        aggregate_events,
+        event_pairs(&peer_all),
+        "the aggregate feed must neither duplicate nor lose peer events"
+    );
+
+    relay.abort();
+}
+
+#[tokio::test]
+async fn local_surface_aggregates_named_and_parent_scopes_when_tasks_live_only_on_peer() {
+    let source = test_state_with_seed("desktop-source-scopes", "Source Mac", |db| {
+        db.insert_test_repo("repo-source-scopes", "Source")
+            .expect("insert source repo");
+        db.insert_test_pipeline_item(
+            "durable-parent",
+            "repo-source-scopes",
+            "parent",
+            Some("Durable Parent"),
+            "in progress",
+            "2026-08-16 00:00:00",
+        )
+        .expect("insert source parent");
+    });
+    let peer = test_state_with_seed("desktop-peer-scopes", "Peer Mac", |db| {
+        db.insert_test_repo("repo-peer-scopes", "Peer")
+            .expect("insert peer repo");
+        db.insert_test_pipeline_item(
+            "peer-only-child",
+            "repo-peer-scopes",
+            "child",
+            Some("Peer Child"),
+            "in progress",
+            "2026-08-16 00:00:00",
+        )
+        .expect("insert peer child");
+        db.update_pipeline_item_parent("peer-only-child", Some("durable-parent"))
+            .expect("attach cross-machine parent identity");
+        start_run(db, "peer-only-run", "peer-only-child", "in progress");
+    });
+    let connected = Arc::new(AtomicBool::new(true));
+    let relay = connect_test_relay_peer(&source, Arc::clone(&peer), connected);
+    let source_router = router(source);
+
+    let named = get_json_body(
+        &source_router,
+        "/v1/task-events?taskIds=peer-only-child&timeoutSecs=0",
+    )
+    .await;
+    assert_eq!(event_pairs(&named).len(), 1);
+    assert_eq!(named["events"][0]["machineId"], "desktop-peer-scopes");
+
+    let children = get_json_body(
+        &source_router,
+        "/v1/task-events?parentTaskId=durable-parent&timeoutSecs=0",
+    )
+    .await;
+    assert_eq!(event_pairs(&children), event_pairs(&named));
+    assert_eq!(children["events"][0]["machineId"], "desktop-peer-scopes");
+
+    relay.abort();
 }
 
 /// One orchestrator, its own children, and nobody else's. Everything here is
