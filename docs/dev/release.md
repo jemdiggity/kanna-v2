@@ -230,6 +230,9 @@ relay endpoints `wss://relay.kanna.build` / `wss://relay-staging.kanna.build`.
 Runs Expo prebuild (CNG) with `KANNA_APP_ENV=prod`, archives the generated
 workspace, and exports an IPA under `.build/mobile/ios-production/`. Bundle
 ids: `build.kanna.app` (prod), `build.kanna.app.staging`, `build.kanna.app.dev`.
+The archive and export steps allow automatic provisioning updates, so Xcode can
+mint or refresh the required App Store provisioning profile. An Apple ID for
+team `EA4J68749Z` must be configured in Xcode → Settings → Accounts.
 The default `CFBundleShortVersionString` comes from `apps/mobile/VERSION`.
 `--version <version>` is an explicit one-build override; if the mobile file is
 absent, the root desktop `VERSION` remains a compatibility fallback. Always
