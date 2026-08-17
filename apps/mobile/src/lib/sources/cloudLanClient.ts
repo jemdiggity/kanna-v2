@@ -7,6 +7,7 @@ import type {
   TaskTerminalStreamEvent,
   TaskTerminalSubscription
 } from "../api/client";
+import { RepoNotRegisteredError } from "../api/client";
 import type {
   CreateTaskRequest,
   DesktopSummary,
@@ -455,10 +456,8 @@ export function createCloudLanClient(
     account: null,
     local: null
   };
-  const lanRepoOwners = new Map<
-    string,
-    { desktopId: string; localRepoId: string }
-  >();
+  const lanRepoOwners = new Map<string, Map<string, string>>();
+  const lanRepoSnapshots = new Map<string, RepoSummary[]>();
   // Desktop-local repo id -> canonical display id (`git:<hash>`) for LAN
   // repos with a remote URL hash, so LAN-only tasks list under the same
   // repository entry as their cloud-published siblings from other machines.
@@ -466,12 +465,18 @@ export function createCloudLanClient(
 
   const rememberLanRepos = (snapshot: LanRepoSnapshot) => {
     let displayIdsChanged = false;
+    lanRepoSnapshots.set(snapshot.desktopId, snapshot.repos);
+    for (const [displayRepoId, owners] of lanRepoOwners) {
+      owners.delete(snapshot.desktopId);
+      if (owners.size === 0) {
+        lanRepoOwners.delete(displayRepoId);
+      }
+    }
     for (const repo of snapshot.repos) {
       const displayRepoId = canonicalRepoId(repo);
-      lanRepoOwners.set(displayRepoId, {
-        desktopId: snapshot.desktopId,
-        localRepoId: repo.id
-      });
+      const owners = lanRepoOwners.get(displayRepoId) ?? new Map<string, string>();
+      owners.set(snapshot.desktopId, repo.id);
+      lanRepoOwners.set(displayRepoId, owners);
       if (displayRepoId === repo.id) {
         displayIdsChanged = lanRepoDisplayIds.delete(repo.id) || displayIdsChanged;
       } else if (lanRepoDisplayIds.get(repo.id) !== displayRepoId) {
@@ -926,21 +931,22 @@ export function createCloudLanClient(
       (candidate) => candidate.repoId === repoId
     );
     if (!sourceTask) {
-      const owner = lanRepoOwners.get(repoId);
+      const owner = lanRepoOwners.get(repoId)?.entries().next().value;
       if (owner && options.isLanEnabled()) {
-        const ownerClient = lanClientForDesktop(owner.desktopId);
+        const [desktopId, localRepoId] = owner;
+        const ownerClient = lanClientForDesktop(desktopId);
         if (ownerClient) {
           return {
             source: "lan" as const,
             client: ownerClient,
-            repoId: owner.localRepoId,
-            desktopId: owner.desktopId
+            repoId: localRepoId,
+            desktopId
           };
         }
         return {
           source: "unavailable" as const,
           taskId: repoId,
-          desktopId: owner.desktopId,
+          desktopId,
           message: `LAN route for repository "${repoId}" is unavailable.`
         };
       }
@@ -1119,10 +1125,19 @@ export function createCloudLanClient(
 
     const cloudRepos =
       cloudResult.status === "fulfilled" ? cloudResult.value : lastCloudRepos;
+    const fallbackLanRepoSnapshot = lastLanRepoSnapshot;
     const lanRepos = lanStillEnabled
       ? lanResult?.status === "fulfilled"
-        ? lanResult.value.repos
-        : lastLanRepoSnapshot?.repos
+        ? lanResult.value.repos.map((repo) => ({
+            ...repo,
+            registeredDesktopIds: [lanResult.value.desktopId]
+          }))
+        : fallbackLanRepoSnapshot
+          ? fallbackLanRepoSnapshot.repos.map((repo) => ({
+              ...repo,
+              registeredDesktopIds: [fallbackLanRepoSnapshot.desktopId]
+            }))
+          : undefined
       : undefined;
     const derivedRepos =
       tasksResult.status === "fulfilled"
@@ -1224,8 +1239,9 @@ export function createCloudLanClient(
       ) {
         const destinationLan = lanClientForDesktop(status.desktopId);
         if (destinationLan) {
-          const lanRepoOwner = lanRepoOwners.get(input.repoId);
-          const localRepoId = [
+          const destinationRepos = await destinationLan.listRepos();
+          rememberLanRepos({ desktopId: status.desktopId, repos: destinationRepos });
+          const snapshotLocalRepoId = [
             ...(acceptedTaskSnapshot?.tasks ?? []),
             ...(lastCloudTasks ?? [])
           ].find(
@@ -1233,11 +1249,39 @@ export function createCloudLanClient(
               task.repoId === input.repoId &&
               task.ownerDesktopId === status.desktopId &&
               task.ownerLocalRepoId
-          )?.ownerLocalRepoId ??
-            (lanRepoOwner?.desktopId === status.desktopId
-              ? lanRepoOwner.localRepoId
-              : undefined) ??
-            input.repoId;
+          )?.ownerLocalRepoId;
+          const knownMember = [...lanRepoSnapshots.values()]
+            .flat()
+            .find((repo) => repo.id === input.repoId);
+          const logicalRepoId = knownMember
+            ? canonicalRepoId(knownMember)
+            : input.repoId;
+          const destinationRepo = destinationRepos.find(
+            (repo) =>
+              repo.id === snapshotLocalRepoId ||
+              repo.id === input.repoId ||
+              canonicalRepoId(repo) === logicalRepoId
+          );
+          if (!destinationRepo) {
+            const knownRepo = [
+              ...(lastCloudRepos ?? []),
+              ...[...lanRepoSnapshots.values()].flat()
+            ].find(
+              (repo) =>
+                repo.id === input.repoId ||
+                canonicalRepoId(repo) === input.repoId
+            );
+            const desktopName = [
+              ...(lastLanDesktops ?? []),
+              ...(lastCloudDesktops ?? [])
+            ].find((desktop) => desktop.id === status.desktopId)?.name ??
+              status.desktopName;
+            throw new RepoNotRegisteredError(
+              knownRepo?.name ?? input.repoId,
+              desktopName
+            );
+          }
+          const localRepoId = destinationRepo.id;
           const createdTask = await destinationLan.createTask({
             ...input,
             repoId: localRepoId
@@ -1522,7 +1566,10 @@ export function createCloudLanClient(
 function reposFromTasks(tasks: TaskSummary[]): RepoSummary[] {
   return tasks.map((task) => ({
     id: task.repoId,
-    name: task.repoName?.trim() || task.repoId
+    name: task.repoName?.trim() || task.repoId,
+    ...(task.ownerDesktopId
+      ? { registeredDesktopIds: [task.ownerDesktopId] }
+      : {})
   }));
 }
 

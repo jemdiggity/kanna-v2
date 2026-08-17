@@ -583,7 +583,6 @@ describe("createAppModel cloud routing", () => {
     app.controller.openComposer();
     app.controller.updateComposerPrompt("Create from mobile");
     await app.controller.createTask();
-
     const canonicalTaskId = "cloud:desktop-owner:repo-1:task-created";
     const stableSlotId = app.sessionStore.getState().taskUiSlots[0]?.slotId;
     expect(app.sessionStore.getState()).toMatchObject({
@@ -682,6 +681,9 @@ describe("createAppModel cloud routing", () => {
     const observeTaskAgent = vi.fn(() => mergeAgentSubscription);
     const invokeDesktop = vi.fn<RelayDesktopClient["invokeDesktop"]>(
       async (request) => {
+        if (request.method === "GET" && request.path === "/v1/repos") {
+          return [{ id: "repo-1", name: "Repo One" }];
+        }
         if (
           request.method === "PUT" &&
           /^\/v1\/tasks\/[0-9a-f]{32}$/.test(request.path)
@@ -930,7 +932,8 @@ describe("createAppModel cloud routing", () => {
     await app.initialize();
     await expect(app.client.listRepos()).resolves.toContainEqual({
       id: "repo-a",
-      name: "Repository A"
+      name: "Repository A",
+      registeredDesktopIds: ["desktop-a"]
     });
     app.sessionStore.selectDesktop("desktop-b");
     await expect(app.client.listRepoCommands("repo-a")).resolves.toMatchObject({
@@ -1044,7 +1047,8 @@ describe("createAppModel cloud routing", () => {
     await vi.waitFor(() => {
       expect(app.sessionStore.getState().repos).toContainEqual({
         id: "repo-fresh",
-        name: "Fresh Repo"
+        name: "Fresh Repo",
+        registeredDesktopIds: ["desktop-owner"]
       });
     });
 
@@ -1166,7 +1170,8 @@ describe("createAppModel cloud routing", () => {
     await vi.waitFor(() => {
       expect(app.sessionStore.getState().repos).toContainEqual({
         id: "repo-fresh",
-        name: "Fresh Repo"
+        name: "Fresh Repo",
+        registeredDesktopIds: ["desktop-owner"]
       });
     });
     expect(invokeDesktop).toHaveBeenCalledWith(
@@ -1293,7 +1298,8 @@ describe("createAppModel cloud routing", () => {
     await vi.waitFor(() => {
       expect(app.sessionStore.getState().repos).toContainEqual({
         id: "repo-fresh",
-        name: "Fresh Repo"
+        name: "Fresh Repo",
+        registeredDesktopIds: ["desktop-owner"]
       });
     });
 

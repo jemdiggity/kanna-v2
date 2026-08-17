@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { RepoNotRegisteredError } from "../api/client";
 import {
   createRemoteTransport,
   RemoteTransportError,
@@ -1022,12 +1023,16 @@ describe("remote transport", () => {
   });
 
   it("maps a cloud repo to its owner-local repo on an explicit desktop", async () => {
-    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue({
-      taskId: "task-created",
-      repoId: "repo-local",
-      title: "Ship it",
-      stage: "in progress"
-    });
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>(async (request) =>
+      request.path === "/v1/repos"
+        ? [{ id: "repo-local", name: "Cloud Repo" }]
+        : {
+            taskId: "task-created",
+            repoId: "repo-local",
+            title: "Ship it",
+            stage: "in progress"
+          }
+    );
     const transport = createRemoteTransport({
       listDesktopRecords: async () => [],
       getSelectedDesktopId: () => null,
@@ -1131,12 +1136,16 @@ describe("remote transport", () => {
   });
 
   it("preserves an identified task while mapping a cloud repo to its owner", async () => {
-    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue({
-      taskId: "a1b2c3d4",
-      repoId: "repo-local",
-      title: "Ship it",
-      stage: "in progress"
-    });
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>(async (request) =>
+      request.path === "/v1/repos"
+        ? [{ id: "repo-local", name: "Cloud Repo" }]
+        : {
+            taskId: "a1b2c3d4",
+            repoId: "repo-local",
+            title: "Ship it",
+            stage: "in progress"
+          }
+    );
     const transport = createRemoteTransport({
       listDesktopRecords: async () => [],
       getSelectedDesktopId: () => null,
@@ -1228,7 +1237,9 @@ describe("remote transport", () => {
 
   it("routes an explicitly targeted created task before its cloud snapshot arrives", async () => {
     const invokeDesktop = vi.fn<RemoteDesktopInvoker>(async (request) =>
-      request.path === "/v1/tasks"
+      request.path === "/v1/repos"
+        ? [{ id: "repo-1", name: "Repo One" }]
+        : request.path === "/v1/tasks"
         ? {
             taskId: "task-created",
             repoId: "repo-1",
@@ -1328,7 +1339,9 @@ describe("remote transport", () => {
       .mockReturnValueOnce(olderTasks.promise)
       .mockResolvedValue([]);
     const invokeDesktop = vi.fn<RemoteDesktopInvoker>(async (request) =>
-      request.path === "/v1/tasks"
+      request.path === "/v1/repos"
+        ? [{ id: "repo-1", name: "Repo One" }]
+        : request.path === "/v1/tasks"
         ? {
             taskId: "task-created",
             repoId: "repo-1",
@@ -1383,7 +1396,9 @@ describe("remote transport", () => {
 
   it("replaces a provisional created route with its canonical cloud route", async () => {
     const invokeDesktop = vi.fn<RemoteDesktopInvoker>(async (request) =>
-      request.path === "/v1/tasks"
+      request.path === "/v1/repos"
+        ? [{ id: "repo-1", name: "Repo One" }]
+        : request.path === "/v1/tasks"
         ? {
             taskId: "task-created",
             repoId: "repo-1",
@@ -1450,7 +1465,9 @@ describe("remote transport", () => {
     ];
     const listCloudTasks = vi.fn(async () => cloudTasks);
     const invokeDesktop = vi.fn<RemoteDesktopInvoker>(async (request) =>
-      request.path === "/v1/tasks"
+      request.path === "/v1/repos"
+        ? [{ id: "repo-local", name: "Cloud Repo" }]
+        : request.path === "/v1/tasks"
         ? {
             taskId: "task-created",
             repoId: "repo-local",
@@ -1502,7 +1519,9 @@ describe("remote transport", () => {
 
   it("retires a created task route after successfully closing it", async () => {
     const invokeDesktop = vi.fn<RemoteDesktopInvoker>(async (request) =>
-      request.path === "/v1/tasks"
+      request.path === "/v1/repos"
+        ? [{ id: "repo-1", name: "Repo One" }]
+        : request.path === "/v1/tasks"
         ? {
             taskId: "task-created",
             repoId: "repo-1",
@@ -1576,7 +1595,9 @@ describe("remote transport", () => {
       ])
       .mockResolvedValue([]);
     const invokeDesktop = vi.fn<RemoteDesktopInvoker>(async (request) =>
-      request.path === "/v1/tasks"
+      request.path === "/v1/repos"
+        ? [{ id: "repo-1", name: "Repo One" }]
+        : request.path === "/v1/tasks"
         ? {
             taskId: "task-created",
             repoId: "repo-1",
@@ -2230,8 +2251,16 @@ describe("remote transport", () => {
     });
 
     await expect(transport.listRepos()).resolves.toEqual([
-      { id: "local-repo-1", name: "Repo One" },
-      { id: "repo-empty", name: "Fresh Repo" }
+      {
+        id: "local-repo-1",
+        name: "Repo One",
+        registeredDesktopIds: ["desktop-owner"]
+      },
+      {
+        id: "repo-empty",
+        name: "Fresh Repo",
+        registeredDesktopIds: ["desktop-owner"]
+      }
     ]);
 
     expect(invokeDesktop).toHaveBeenCalledTimes(1);
@@ -2283,8 +2312,14 @@ describe("remote transport", () => {
     });
 
     await expect(transport.listRepos()).resolves.toEqual([
-      { id: "git:hash-kanna", name: "kanna", remoteUrlHash: "hash-kanna" }
+      {
+        id: "git:hash-kanna",
+        name: "kanna",
+        remoteUrlHash: "hash-kanna",
+        registeredDesktopIds: ["desktop-a", "desktop-b"]
+      }
     ]);
+    invokeDesktop.mockClear();
 
     // Creating a task under the canonical repo id targets the requested
     // desktop's own local repo id.
@@ -2293,7 +2328,13 @@ describe("remote transport", () => {
       prompt: "Fix bug",
       desktopId: "desktop-b"
     });
-    expect(invokeDesktop).toHaveBeenCalledWith({
+    expect(invokeDesktop).toHaveBeenNthCalledWith(1, {
+      desktopId: "desktop-b",
+      method: "GET",
+      path: "/v1/repos",
+      body: null
+    });
+    expect(invokeDesktop).toHaveBeenNthCalledWith(2, {
       desktopId: "desktop-b",
       method: "POST",
       path: "/v1/tasks",
@@ -2306,6 +2347,131 @@ describe("remote transport", () => {
       ownerLocalRepoId: "repo-b",
       ownerLocalTaskId: "local-task-created"
     });
+  });
+
+  it("rejects a stale task-snapshot repo removed from the requested desktop without creating", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>(async (request) => {
+      if (request.method === "GET" && request.path === "/v1/repos") {
+        return request.desktopId === "desktop-macbook"
+          ? [
+              {
+                id: "repo-macbook",
+                name: "kanji-kongbu",
+                remoteUrlHash: "hash-kanji"
+              }
+            ]
+          : [{ id: "repo-kanna", name: "kanna", remoteUrlHash: "hash-kanna" }];
+      }
+      throw new Error(`unexpected request ${request.method} ${request.path}`);
+    });
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [
+        {
+          desktopId: "desktop-macbook",
+          displayName: "MacBook Pro",
+          online: true,
+          reachableViaRelay: true,
+          connectionMode: "internet"
+        },
+        {
+          desktopId: "desktop-studio",
+          displayName: "Mac Studio",
+          online: true,
+          reachableViaRelay: true,
+          connectionMode: "internet"
+        }
+      ],
+      getSelectedDesktopId: () => null,
+      invokeDesktop,
+      listCloudTasks: async () => [
+        {
+          id: "cloud:desktop-studio:repo-studio:task-old",
+          repoId: "git:hash-kanji",
+          repoName: "kanji-kongbu",
+          title: "Old kanji task",
+          stage: "in progress",
+          ownerDesktopId: "desktop-studio",
+          ownerLocalRepoId: "repo-studio",
+          ownerLocalTaskId: "task-old"
+        }
+      ]
+    });
+
+    await transport.listRepos();
+    invokeDesktop.mockClear();
+
+    const creation = transport.createTask({
+      repoId: "git:hash-kanji",
+      prompt: "Study kanji",
+      desktopId: "desktop-studio"
+    });
+
+    await expect(creation).rejects.toEqual(
+      new RepoNotRegisteredError("kanji-kongbu", "Mac Studio")
+    );
+    expect(invokeDesktop).toHaveBeenCalledTimes(1);
+    expect(invokeDesktop).toHaveBeenCalledWith({
+      desktopId: "desktop-studio",
+      method: "GET",
+      path: "/v1/repos",
+      body: null
+    });
+    expect(invokeDesktop).not.toHaveBeenCalledWith(
+      expect.objectContaining({ method: "POST" })
+    );
+  });
+
+  it("rejects a requested-desktop snapshot without an owner-local repo id after a fresh read", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>(async (request) => {
+      if (request.method === "GET" && request.path === "/v1/repos") {
+        return [];
+      }
+      throw new Error(`unexpected request ${request.method} ${request.path}`);
+    });
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [
+        {
+          desktopId: "desktop-studio",
+          displayName: "Mac Studio",
+          online: true,
+          reachableViaRelay: true,
+          connectionMode: "internet"
+        }
+      ],
+      getSelectedDesktopId: () => null,
+      invokeDesktop,
+      listCloudTasks: async () => [
+        {
+          id: "cloud-task-old",
+          repoId: "git:hash-kanji",
+          repoName: "kanji-kongbu",
+          title: "Old kanji task",
+          stage: "in progress",
+          ownerDesktopId: "desktop-studio",
+          ownerLocalTaskId: "task-old"
+        }
+      ]
+    });
+
+    await expect(
+      transport.createTask({
+        repoId: "git:hash-kanji",
+        prompt: "Study kanji",
+        desktopId: "desktop-studio"
+      })
+    ).rejects.toEqual(
+      new RepoNotRegisteredError("kanji-kongbu", "Mac Studio")
+    );
+    expect(invokeDesktop).toHaveBeenCalledTimes(1);
+    expect(invokeDesktop).toHaveBeenCalledWith({
+      desktopId: "desktop-studio",
+      method: "GET",
+      path: "/v1/repos",
+      body: null
+    });
+    expect(invokeDesktop).not.toHaveBeenCalledWith(
+      expect.objectContaining({ method: "POST" })
+    );
   });
 
   it("lists tasks from both machines under the canonical repo id and routes through the owner", async () => {
@@ -2369,7 +2535,11 @@ describe("remote transport", () => {
 
   it("reuses the desktop repo snapshot within the refresh interval", async () => {
     const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue([
-      { id: "repo-empty", name: "Fresh Repo" }
+      {
+        id: "repo-empty",
+        name: "Fresh Repo",
+        registeredDesktopIds: ["desktop-owner"]
+      }
     ]);
     const transport = createRemoteTransport({
       listDesktopRecords: async () => [
@@ -2387,10 +2557,18 @@ describe("remote transport", () => {
     });
 
     await expect(transport.listRepos()).resolves.toEqual([
-      { id: "repo-empty", name: "Fresh Repo" }
+      {
+        id: "repo-empty",
+        name: "Fresh Repo",
+        registeredDesktopIds: ["desktop-owner"]
+      }
     ]);
     await expect(transport.listRepos()).resolves.toEqual([
-      { id: "repo-empty", name: "Fresh Repo" }
+      {
+        id: "repo-empty",
+        name: "Fresh Repo",
+        registeredDesktopIds: ["desktop-owner"]
+      }
     ]);
 
     expect(invokeDesktop).toHaveBeenCalledTimes(1);
@@ -2421,7 +2599,11 @@ describe("remote transport", () => {
 
     online = true;
     await expect(transport.listRepos()).resolves.toEqual([
-      { id: "repo-empty", name: "Fresh Repo" }
+      {
+        id: "repo-empty",
+        name: "Fresh Repo",
+        registeredDesktopIds: ["desktop-owner"]
+      }
     ]);
     expect(invokeDesktop).toHaveBeenCalledTimes(1);
     expect(invokeDesktop).toHaveBeenCalledWith({
@@ -2468,7 +2650,11 @@ describe("remote transport", () => {
     });
 
     await expect(transport.listRepos()).resolves.toEqual([
-      { id: "repo-healthy", name: "Healthy Repo" }
+      {
+        id: "repo-healthy",
+        name: "Healthy Repo",
+        registeredDesktopIds: ["desktop-healthy"]
+      }
     ]);
     expect(invokeDesktop).toHaveBeenCalledTimes(2);
     expect(invokeDesktop).toHaveBeenLastCalledWith({

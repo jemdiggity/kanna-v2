@@ -5,6 +5,7 @@ import type {
   TaskCompanionSubscription,
   TaskTerminalSubscription
 } from "../api/client";
+import { RepoNotRegisteredError } from "../api/client";
 import type {
   DesktopSummary,
   MobileServerStatus,
@@ -464,7 +465,11 @@ describe("createCloudLanClient", () => {
     });
 
     await expect(client.listRepos()).resolves.toEqual([
-      { id: "repo-empty", name: "Empty repository" }
+      {
+        id: "repo-empty",
+        name: "Empty repository",
+        registeredDesktopIds: ["desktop-owner"]
+      }
     ]);
     await expect(client.listRepoCommands("repo-empty")).resolves.toEqual({
       repoId: "repo-empty",
@@ -2000,7 +2005,10 @@ describe("createCloudLanClient", () => {
   it("routes task creation to LAN only for its currently reachable desktop", async () => {
     const cloud = createClientMock();
     const lan = createClientMock({
-      getStatus: vi.fn().mockResolvedValue(runningStatus("desktop-lan"))
+      getStatus: vi.fn().mockResolvedValue(runningStatus("desktop-lan")),
+      listRepos: vi.fn().mockResolvedValue([
+        { id: "repo-1", name: "Repo One" }
+      ])
     });
     const client = createCloudLanClient(cloud, lan, {
       isLanEnabled: () => true
@@ -2031,6 +2039,9 @@ describe("createCloudLanClient", () => {
     const cloud = createClientMock();
     const lan = createClientMock({
       getStatus: vi.fn().mockResolvedValue(runningStatus("desktop-lan")),
+      listRepos: vi.fn().mockResolvedValue([
+        { id: "repo-1", name: "Repo One" }
+      ]),
       createTask: vi.fn().mockRejectedValue(failure)
     });
     const client = createCloudLanClient(cloud, lan, {
@@ -2047,6 +2058,45 @@ describe("createCloudLanClient", () => {
     expect(cloud.createTask).not.toHaveBeenCalled();
   });
 
+  it("rejects a repo absent from the LAN destination without sending create", async () => {
+    const cloud = createClientMock({
+      listRepos: vi.fn().mockResolvedValue([
+        {
+          id: "git:hash-kanji",
+          name: "kanji-kongbu",
+          remoteUrlHash: "hash-kanji",
+          registeredDesktopIds: ["desktop-macbook"]
+        }
+      ])
+    });
+    const destinationLan = createClientMock({
+      getStatus: vi.fn().mockResolvedValue({
+        ...runningStatus("desktop-studio"),
+        desktopName: "Mac Studio"
+      }),
+      listRepos: vi.fn().mockResolvedValue([
+        { id: "repo-kanna", name: "kanna", remoteUrlHash: "hash-kanna" }
+      ])
+    });
+    const client = createCloudLanClient(cloud, destinationLan, {
+      isLanEnabled: () => true
+    });
+
+    await client.listRepos();
+    vi.mocked(destinationLan.listRepos).mockClear();
+
+    await expect(client.createTask({
+      repoId: "git:hash-kanji",
+      prompt: "Study kanji",
+      desktopId: "desktop-studio"
+    })).rejects.toEqual(
+      new RepoNotRegisteredError("kanji-kongbu", "Mac Studio")
+    );
+    expect(destinationLan.listRepos).toHaveBeenCalledTimes(1);
+    expect(destinationLan.createTask).not.toHaveBeenCalled();
+    expect(cloud.createTask).not.toHaveBeenCalled();
+  });
+
   it("uses the destination desktop client for LAN creation and immediately routes the created task", async () => {
     const cloud = createClientMock();
     const probeLan = createClientMock({
@@ -2054,6 +2104,9 @@ describe("createCloudLanClient", () => {
     });
     const createdAgentSubscription = agentSubscription();
     const desktopALan = createClientMock({
+      listRepos: vi.fn().mockResolvedValue([
+        { id: "repo-1", name: "Repo One" }
+      ]),
       createTask: vi.fn().mockResolvedValue({
         taskId: "created-on-a",
         repoId: "repo-1",
@@ -2152,6 +2205,9 @@ describe("createCloudLanClient", () => {
     });
     const terminalSubscription: TaskTerminalSubscription = { close: vi.fn() };
     const desktopALan = createClientMock({
+      listRepos: vi.fn().mockResolvedValue([
+        { id: "repo-local", name: "Cloud Repo" }
+      ]),
       createTask: vi.fn().mockImplementation(async () => {
         created = true;
         return {
@@ -2307,6 +2363,9 @@ describe("createCloudLanClient", () => {
         .mockResolvedValueOnce(runningStatus("desktop-a"))
     });
     const desktopALan = createClientMock({
+      listRepos: vi.fn().mockResolvedValue([
+        { id: "repo-1", name: "Repo One" }
+      ]),
       listRecentTasks: vi.fn().mockResolvedValue([]),
       createTask: vi.fn().mockResolvedValue({
         taskId: "created-on-a",
@@ -2350,6 +2409,9 @@ describe("createCloudLanClient", () => {
       getStatus: vi.fn().mockResolvedValue(runningStatus("desktop-a"))
     });
     const desktopALan = createClientMock({
+      listRepos: vi.fn().mockResolvedValue([
+        { id: "repo-1", name: "Repo One" }
+      ]),
       listRecentTasks: vi.fn().mockResolvedValue([]),
       createTask: vi.fn().mockResolvedValue({
         taskId: sharedTaskId,
@@ -2400,6 +2462,9 @@ describe("createCloudLanClient", () => {
       getStatus: vi.fn().mockResolvedValue(runningStatus("desktop-a"))
     });
     const desktopALan = createClientMock({
+      listRepos: vi.fn().mockResolvedValue([
+        { id: "repo-local", name: "Local Repo" }
+      ]),
       createTask: vi.fn().mockResolvedValue({
         taskId: "created-on-a",
         repoId: "repo-local",
@@ -2457,6 +2522,9 @@ describe("createCloudLanClient", () => {
       getStatus: vi.fn().mockResolvedValue(runningStatus("desktop-a"))
     });
     const desktopALan = createClientMock({
+      listRepos: vi.fn().mockResolvedValue([
+        { id: "repo-1", name: "Repo One" }
+      ]),
       createTask: vi.fn().mockResolvedValue({
         taskId: "created-on-a",
         repoId: "repo-1",
@@ -2769,10 +2837,26 @@ describe("createCloudLanClient", () => {
 
     await expect(client.listRepos()).resolves.toEqual([
       { id: "cloud-explicit", name: "Cloud Explicit" },
-      { id: "cloud-repo", name: "Cloud Repo Explicit" },
-      { id: "lan-explicit", name: "LAN Explicit" },
-      { id: "local-repo", name: "Local Repo Explicit" },
-      { id: "cloud-only-repo", name: "Cloud Only Repo" },
+      {
+        id: "cloud-repo",
+        name: "Cloud Repo Explicit",
+        registeredDesktopIds: ["desktop-lan"]
+      },
+      {
+        id: "lan-explicit",
+        name: "LAN Explicit",
+        registeredDesktopIds: ["desktop-lan"]
+      },
+      {
+        id: "local-repo",
+        name: "Local Repo Explicit",
+        registeredDesktopIds: ["desktop-lan"]
+      },
+      {
+        id: "cloud-only-repo",
+        name: "Cloud Only Repo",
+        registeredDesktopIds: ["desktop-cloud"]
+      },
       { id: "lan-only-repo", name: "LAN Only Repo" }
     ]);
     await expect(client.listRepoTasks("cloud-repo")).resolves.toEqual([
@@ -2838,7 +2922,12 @@ describe("createCloudLanClient", () => {
     });
 
     await expect(client.listRepos()).resolves.toEqual([
-      { id: "git:hash-kanna", name: "kanna", remoteUrlHash: "hash-kanna" }
+      {
+        id: "git:hash-kanna",
+        name: "kanna",
+        remoteUrlHash: "hash-kanna",
+        registeredDesktopIds: ["desktop-lan", "desktop-cloud"]
+      }
     ]);
 
     // The LAN-only task lists under the canonical repo entry while keeping
@@ -2882,7 +2971,12 @@ describe("createCloudLanClient", () => {
     const taskRead = client.listRecentTasks();
     const tasks = await taskRead;
     cloudRepoRead.resolve([
-      { id: "git:hash-kanna", name: "kanna", remoteUrlHash: "hash-kanna" }
+      {
+        id: "git:hash-kanna",
+        name: "kanna",
+        remoteUrlHash: "hash-kanna",
+        registeredDesktopIds: ["desktop-lan"]
+      }
     ]);
     const repos = await repoRead;
 
@@ -2890,7 +2984,12 @@ describe("createCloudLanClient", () => {
       { ...lanTask, repoId: "git:hash-kanna", ownerLocalRepoId: "repo-lan" }
     ]);
     expect(repos).toEqual([
-      { id: "git:hash-kanna", name: "kanna", remoteUrlHash: "hash-kanna" }
+      {
+        id: "git:hash-kanna",
+        name: "kanna",
+        remoteUrlHash: "hash-kanna",
+        registeredDesktopIds: ["desktop-lan"]
+      }
     ]);
     // The canonical repo id still routes to the LAN task.
     await expect(client.listRepoTasks("git:hash-kanna")).resolves.toEqual([
@@ -2931,7 +3030,12 @@ describe("createCloudLanClient", () => {
     // A later successful repo read merges the entries and reprojects the
     // accepted snapshot in place — the derived duplicate never surfaces.
     await expect(client.listRepos()).resolves.toEqual([
-      { id: "git:hash-kanna", name: "kanna", remoteUrlHash: "hash-kanna" }
+      {
+        id: "git:hash-kanna",
+        name: "kanna",
+        remoteUrlHash: "hash-kanna",
+        registeredDesktopIds: ["desktop-lan"]
+      }
     ]);
     await expect(client.getTask("lan-only-task")).resolves.toMatchObject({
       repoId: "git:hash-kanna",
@@ -2961,7 +3065,11 @@ describe("createCloudLanClient", () => {
     await client.listRepos();
     await expect(client.listRepos()).resolves.toEqual([
       { id: "cloud-repo", name: "Cloud Repo" },
-      { id: "lan-new", name: "LAN New" }
+      {
+        id: "lan-new",
+        name: "LAN New",
+        registeredDesktopIds: ["desktop-lan"]
+      }
     ]);
   });
 

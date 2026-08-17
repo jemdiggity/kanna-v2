@@ -209,6 +209,22 @@ export class TaskCreationError extends Error {
   }
 }
 
+export class RepoNotRegisteredError extends TaskCreationError {
+  readonly code = "repo_not_registered" as const;
+  readonly repoName: string;
+  readonly desktopName: string;
+
+  constructor(repoName: string, desktopName: string) {
+    super(
+      "not-created",
+      `${repoName} is not registered on ${desktopName}. Register it on that machine before creating a task.`
+    );
+    this.name = "RepoNotRegisteredError";
+    this.repoName = repoName;
+    this.desktopName = desktopName;
+  }
+}
+
 export function createKannaClient(transport: KannaTransport): KannaClient {
   return {
     ...(transport.getTaskRouteIdentity

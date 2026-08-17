@@ -86,6 +86,8 @@ function findNodeByTestId(node: ElementNode, testID: string): ElementNode | null
 function renderComposer(
   overrides: Partial<{
     prompt: string;
+    repos: Parameters<NonNullable<typeof CreateTaskComposer>>[0]["repos"];
+    desktops: Parameters<NonNullable<typeof CreateTaskComposer>>[0]["desktops"];
     selectedRepoId: string | null;
     selectedDesktopId: string | null;
     selectedAgentProvider: string;
@@ -105,8 +107,8 @@ function renderComposer(
   return CreateTaskComposer({
     isOpen: true,
     prompt: overrides.prompt ?? "Ship mobile shell",
-    repos: [{ id: "repo-1", name: "Repo One" }],
-    desktops: [
+    repos: overrides.repos ?? [{ id: "repo-1", name: "Repo One" }],
+    desktops: overrides.desktops ?? [
       { id: "desktop-1", name: "Studio Mac", online: true, mode: "lan" },
       { id: "desktop-2", name: "Laptop", online: false, mode: "remote" }
     ],
@@ -232,6 +234,31 @@ describe("CreateTaskComposer", () => {
     expect(onSelectDesktop).toHaveBeenCalledWith("desktop-2");
     expect(onSelectAgentProvider).toHaveBeenCalledWith("copilot");
     expect(AGENT_PROVIDERS).toHaveLength(5);
+  });
+
+  it("offers only machines where the selected canonical repo is registered", () => {
+    const tree = renderComposer({
+      isOptionsExpanded: true,
+      repos: [
+        {
+          id: "git:hash-kanji",
+          name: "kanji-kongbu",
+          remoteUrlHash: "hash-kanji",
+          registeredDesktopIds: ["desktop-1", "desktop-2"]
+        }
+      ],
+      desktops: [
+        { id: "desktop-1", name: "MacBook Pro", online: true, mode: "lan" },
+        { id: "desktop-2", name: "Mac mini", online: true, mode: "remote" },
+        { id: "desktop-3", name: "Mac Studio", online: true, mode: "remote" }
+      ],
+      selectedRepoId: "git:hash-kanji",
+      selectedDesktopId: "desktop-1"
+    });
+
+    expect(findNodeByText(tree, "MacBook Pro")).not.toBeNull();
+    expect(findNodeByText(tree, "Mac mini")).not.toBeNull();
+    expect(findNodeByText(tree, "Mac Studio")).toBeNull();
   });
 
   it("calls submit when the create button is enabled", () => {
