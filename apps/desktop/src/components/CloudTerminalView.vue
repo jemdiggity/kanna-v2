@@ -70,14 +70,22 @@ type ProducerInputKind = "draft" | "submission" | "control";
 let producerInputKind: ProducerInputKind = "control";
 let producerInputGeneration = 0;
 const controlInputEvents = ["mousedown", "mouseup", "mousemove", "wheel", "focus", "blur"];
-const draftInputEvents = ["beforeinput", "paste", "compositionstart", "compositionupdate", "compositionend"];
+const draftInputEvents = ["beforeinput", "paste", "compositionstart", "compositionupdate"];
 
-function declareProducerInput(kind: ProducerInputKind) {
+function declareProducerInput(kind: ProducerInputKind, delayed = false) {
   producerInputKind = kind;
   const generation = ++producerInputGeneration;
-  queueMicrotask(() => {
+  const reset = () => {
     if (producerInputGeneration === generation) producerInputKind = "control";
-  });
+  };
+  if (delayed) {
+    // CompositionHelper queues the committed composition from its
+    // compositionend listener. Our capture listener runs first, so queue the
+    // fallback timer from a microtask, after xterm has queued its own timer.
+    queueMicrotask(() => setTimeout(reset, 0));
+  } else {
+    queueMicrotask(reset);
+  }
 }
 
 function declareControlInput() {
@@ -86,6 +94,10 @@ function declareControlInput() {
 
 function declareDraftInput() {
   declareProducerInput("draft");
+}
+
+function declareCompositionInput() {
+  declareProducerInput("draft", true);
 }
 
 interface RemoteInputQueue {
@@ -450,10 +462,13 @@ onMounted(() => {
   });
   terminal.onData((data) => {
     if (unmounted || !relayClient || status.value !== "live") return;
+    const inputKind = producerInputKind;
+    producerInputKind = "control";
+    producerInputGeneration += 1;
     enqueueRemoteInput(
       data,
-      producerInputKind === "submission",
-      producerInputKind === "control",
+      inputKind === "submission",
+      inputKind === "control",
     );
   });
   fitAddon = new FitAddon();
@@ -468,6 +483,7 @@ onMounted(() => {
     for (const eventName of draftInputEvents) {
       inputEventContainer.addEventListener(eventName, declareDraftInput, true);
     }
+    inputEventContainer.addEventListener("compositionend", declareCompositionInput, true);
     registerTerminalBufferForE2E();
     fileLinkProvider = createRemoteTerminalFileLinkProvider({
       term: terminal,
@@ -520,6 +536,7 @@ onUnmounted(() => {
     for (const eventName of draftInputEvents) {
       inputEventContainer.removeEventListener(eventName, declareDraftInput, true);
     }
+    inputEventContainer.removeEventListener("compositionend", declareCompositionInput, true);
     inputEventContainer = null;
   }
   terminal?.dispose();

@@ -108,23 +108,33 @@ export function initializeTerminalView(params: {
   // below declares itself before xterm emits its bytes.
   let producerInputKind: ProducerInputKind = "control"
   let producerInputGeneration = 0
-  const declareProducerInput = (kind: ProducerInputKind) => {
+  const declareProducerInput = (kind: ProducerInputKind, delayed = false) => {
     producerInputKind = kind
     const generation = ++producerInputGeneration
-    queueMicrotask(() => {
+    const reset = () => {
       if (producerInputGeneration === generation) producerInputKind = "control"
-    })
+    }
+    if (delayed) {
+      // CompositionHelper queues the committed composition from its
+      // compositionend listener. Our capture listener runs first, so queue the
+      // fallback timer from a microtask, after xterm has queued its own timer.
+      queueMicrotask(() => setTimeout(reset, 0))
+    } else {
+      queueMicrotask(reset)
+    }
   }
   const declareControlInput = () => declareProducerInput("control")
   const declareDraftInput = () => declareProducerInput("draft")
+  const declareCompositionInput = () => declareProducerInput("draft", true)
   const controlEvents = ["mousedown", "mouseup", "mousemove", "wheel", "focus", "blur"]
-  const draftEvents = ["beforeinput", "paste", "compositionstart", "compositionupdate", "compositionend"]
+  const draftEvents = ["beforeinput", "paste", "compositionstart", "compositionupdate"]
   for (const eventName of controlEvents) {
     params.el.addEventListener(eventName, declareControlInput, true)
   }
   for (const eventName of draftEvents) {
     params.el.addEventListener(eventName, declareDraftInput, true)
   }
+  params.el.addEventListener("compositionend", declareCompositionInput, true)
   const cleanupContainerEvents = () => {
     cleanupDropEvents?.()
     for (const eventName of controlEvents) {
@@ -133,6 +143,7 @@ export function initializeTerminalView(params: {
     for (const eventName of draftEvents) {
       params.el.removeEventListener(eventName, declareDraftInput, true)
     }
+    params.el.removeEventListener("compositionend", declareCompositionInput, true)
   }
 
   if (params.el.offsetWidth > 0 && params.el.offsetHeight > 0) {
@@ -196,9 +207,12 @@ export function initializeTerminalView(params: {
 
   // Send keystrokes to daemon
   term.onData((data) => {
+    const inputKind = producerInputKind
+    producerInputKind = "control"
+    producerInputGeneration += 1
     void params.sendInputBytes(new TextEncoder().encode(data), {
-      submissionBoundary: producerInputKind === "submission",
-      controlInput: producerInputKind === "control",
+      submissionBoundary: inputKind === "submission",
+      controlInput: inputKind === "control",
     })
   })
 

@@ -254,7 +254,6 @@ describe("CloudTerminalView", () => {
     "paste",
     "compositionstart",
     "compositionupdate",
-    "compositionend",
   ])("classifies %s-produced xterm data as draft", async (eventName) => {
     harness.sendInput.mockResolvedValue(undefined);
     const { default: CloudTerminalView } = await import("../CloudTerminalView.vue");
@@ -275,6 +274,31 @@ describe("CloudTerminalView", () => {
       desktopId: "desktop-1",
       taskId: "task-1",
       data: "human-input",
+    });
+    wrapper.unmount();
+  });
+
+  it("keeps delayed compositionend data classified as draft", async () => {
+    harness.sendInput.mockResolvedValue(undefined);
+    const { default: CloudTerminalView } = await import("../CloudTerminalView.vue");
+    const wrapper = mount(CloudTerminalView, {
+      props: {
+        ownerDesktopId: "desktop-1",
+        ownerTaskId: "task-1",
+        transport: "cloud",
+      },
+    });
+    await flushPromises();
+
+    wrapper.get(".terminal-container").element.dispatchEvent(new Event("compositionend"));
+    await Promise.resolve();
+    harness.dataListener?.("界");
+    await flushPromises();
+
+    expect(harness.sendInput).toHaveBeenCalledWith({
+      desktopId: "desktop-1",
+      taskId: "task-1",
+      data: "界",
     });
     wrapper.unmount();
   });

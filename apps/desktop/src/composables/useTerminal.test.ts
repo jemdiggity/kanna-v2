@@ -441,6 +441,19 @@ describe("useTerminal", () => {
     await waitForQueuedInputFlush();
     expect(sendTermInput).toHaveBeenCalledWith("session-1", btoa("x"), false, false);
 
+    // CompositionHelper emits the committed IME text from setTimeout(0),
+    // after the compositionend event and its microtask checkpoint.
+    terminalElement.dispatchEvent(new Event("compositionend"));
+    await Promise.resolve();
+    onData("界");
+    await waitForQueuedInputFlush();
+    expect(sendTermInput).toHaveBeenLastCalledWith(
+      "session-1",
+      bytesToBase64(new TextEncoder().encode("界")),
+      false,
+      false,
+    );
+
     keyHandler?.(new KeyboardEvent("keydown", { key: "Enter" }));
     onData("\r");
     await waitForQueuedInputFlush();
