@@ -117,8 +117,14 @@ async function waitForSourceOpencodeSession(
     const sessionId = await waitForOpencodeSessionInDirectory(worktreePath, 5_000, 1_000)
       .catch(() => null);
     if (sessionId) return sessionId;
-    // 13 is carriage return: the key the trust prompt is waiting for.
-    await tauriInvoke(primary, "send_input", { sessionId: taskId, data: [13] })
+    // 13 is carriage return: the key the trust prompt is waiting for. This
+    // direct producer must declare the Enter boundary so later logical input
+    // does not remain queued behind a phantom draft.
+    await tauriInvoke(primary, "send_input", {
+      sessionId: taskId,
+      data: [13],
+      submissionBoundary: true,
+    })
       .catch(() => undefined);
     await sleep(2_000);
   }

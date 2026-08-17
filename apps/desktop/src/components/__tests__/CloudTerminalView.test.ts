@@ -550,6 +550,7 @@ describe("CloudTerminalView remote visual companion links", () => {
       desktopId: "peer-1",
       taskId: "task-2",
       data: "hello",
+      controlInput: true,
     });
     expect(client.resize).toHaveBeenCalledWith({
       desktopId: "peer-1",
@@ -699,6 +700,7 @@ describe("CloudTerminalView remote visual companion links", () => {
       desktopId: "desktop-old",
       taskId: "task-old",
       data: "old input",
+      controlInput: true,
     });
     expect(wrapper.attributes("data-status")).toBe("connecting");
     expect(testState.terminals[0]?.write).not.toHaveBeenCalledWith(

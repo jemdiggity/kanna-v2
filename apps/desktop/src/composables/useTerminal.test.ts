@@ -48,6 +48,20 @@ async function waitForQueuedInputFlush() {
   await Promise.resolve();
 }
 
+function terminalKeydown(
+  key: string,
+  options: { isComposing?: boolean; keyCode?: number } = {},
+): KeyboardEvent {
+  const event = new KeyboardEvent("keydown", {
+    key,
+    isComposing: options.isComposing ?? false,
+  });
+  if (options.keyCode !== undefined) {
+    Object.defineProperty(event, "keyCode", { value: options.keyCode });
+  }
+  return event;
+}
+
 function emitTerminalSnapshot(
   sessionId: string,
   vt = "restored scrollback",
@@ -432,18 +446,81 @@ describe("useTerminal", () => {
 
     const onData = terminal.onData.mock.calls[0]?.[0];
     expect(onData).toBeDefined();
-    onData("x");
-    await waitForQueuedInputFlush();
-    expect(sendTermInput).toHaveBeenCalledWith("session-1", btoa("x"), false, false);
-
     const keyHandler = terminal.attachCustomKeyEventHandler.mock.calls[0]?.[0] as
       | ((event: KeyboardEvent) => boolean)
       | undefined;
     expect(keyHandler).toBeDefined();
-    keyHandler?.(new KeyboardEvent("keydown", { key: "Enter" }));
+    keyHandler?.(new KeyboardEvent("keydown", { key: "x" }));
+    onData("x");
+    await waitForQueuedInputFlush();
+    expect(sendTermInput).toHaveBeenCalledWith("session-1", btoa("x"), false, false);
+
+    // CompositionHelper emits the committed IME text from setTimeout(0),
+    // after the compositionend event and its microtask checkpoint. An Enter
+    // after that completed commit is a separate submission boundary.
+    terminalElement.dispatchEvent(new Event("compositionstart"));
+    terminalElement.dispatchEvent(new Event("compositionend"));
+    await Promise.resolve();
+    onData("界");
+    await waitForQueuedInputFlush();
+    expect(sendTermInput).toHaveBeenLastCalledWith(
+      "session-1",
+      bytesToBase64(new TextEncoder().encode("界")),
+      false,
+      false,
+    );
+
+    keyHandler?.(terminalKeydown("Enter", { keyCode: 13 }));
     onData("\r");
     await waitForQueuedInputFlush();
     expect(sendTermInput).toHaveBeenLastCalledWith("session-1", btoa("\r"), true, false);
+
+    // A non-process Enter (keyCode 13) while composition is active makes
+    // CompositionHelper synchronously emit two onData events: committed text,
+    // then CR. The Enter finalizes the draft; it does not submit it.
+    terminalElement.dispatchEvent(new Event("compositionstart"));
+    keyHandler?.(terminalKeydown("Enter", { keyCode: 13 }));
+    onData("候補");
+    onData("\r");
+    await waitForQueuedInputFlush();
+    expect(sendTermInput).toHaveBeenLastCalledWith(
+      "session-1",
+      bytesToBase64(new TextEncoder().encode("候補\r")),
+      false,
+      false,
+    );
+
+    // The following ordinary Enter owns the boundary.
+    keyHandler?.(terminalKeydown("Enter", { keyCode: 13 }));
+    onData("\r");
+    await waitForQueuedInputFlush();
+    expect(sendTermInput).toHaveBeenLastCalledWith("session-1", btoa("\r"), true, false);
+
+    // A compositionend commit and the following Enter can occur in the same
+    // tick. Consuming the committed text returns the lifecycle to idle before
+    // the Enter is classified, so the boundary is not lost to a timer.
+    terminalElement.dispatchEvent(new Event("compositionstart"));
+    terminalElement.dispatchEvent(new Event("compositionend"));
+    onData("即");
+    keyHandler?.(terminalKeydown("Enter", { keyCode: 13 }));
+    onData("\r");
+    await waitForQueuedInputFlush();
+    expect(sendTermInput).toHaveBeenNthCalledWith(
+      sendTermInput.mock.calls.length - 1,
+      "session-1",
+      bytesToBase64(new TextEncoder().encode("即")),
+      false,
+      false,
+    );
+    expect(sendTermInput).toHaveBeenLastCalledWith("session-1", btoa("\r"), true, false);
+
+    // Parser-generated terminal replies have no preceding DOM producer event.
+    // They are control input, not a human composer draft that may fence later
+    // logical messages such as transfer wrap-up and quit submissions.
+    await Promise.resolve();
+    onData("\x1b[?1;2c");
+    await waitForQueuedInputFlush();
+    expect(sendTermInput).toHaveBeenLastCalledWith("session-1", btoa("\x1b[?1;2c"), false, true);
 
     const onResize = terminal.onResize.mock.calls[0]?.[0];
     expect(onResize).toBeDefined();
@@ -2902,9 +2979,14 @@ describe("useTerminal", () => {
 
     const terminal = terminals[0];
     const onData = terminal.onData.mock.calls[0][0] as (data: string) => void;
+    const keyHandler = terminal.attachCustomKeyEventHandler.mock.calls[0][0] as
+      (event: KeyboardEvent) => boolean;
 
+    keyHandler(new KeyboardEvent("keydown", { key: "a" }));
     onData("a");
+    keyHandler(new KeyboardEvent("keydown", { key: "b" }));
     onData("b");
+    keyHandler(new KeyboardEvent("keydown", { key: "c" }));
     onData("c");
 
     expect(invokeMock).not.toHaveBeenCalledWith("send_input", expect.anything());

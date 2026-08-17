@@ -14,6 +14,7 @@ import { createTerminalFileLinkProvider, type TerminalFileLinkProvider } from ".
 import { registerTerminalFileLinkProvider } from "./terminalFileLinkRegistry"
 import { createTerminalDropBridge, type TerminalDropBridge } from "./terminalDropBridge"
 import { isShiftEnter, SHIFT_ENTER_CSI_U } from "./terminalKeyboard"
+import { createTerminalInputProducerClassifier } from "./terminalInputProducer"
 
 export interface InitializedTerminalView {
   term: Terminal
@@ -102,26 +103,29 @@ export function initializeTerminalView(params: {
     onNativeDropCleanupReady: params.onNativeDropCleanupReady,
   })
   const cleanupDropEvents = dropBridge.registerContainerDropHandlers()
-  type ProducerInputKind = "draft" | "submission" | "control"
-  let producerInputKind: ProducerInputKind = "draft"
-  let producerInputGeneration = 0
-  const declareProducerInput = (kind: ProducerInputKind) => {
-    producerInputKind = kind
-    const generation = ++producerInputGeneration
-    queueMicrotask(() => {
-      if (producerInputGeneration === generation) producerInputKind = "draft"
-    })
-  }
-  const declareControlInput = () => declareProducerInput("control")
+  const inputProducer = createTerminalInputProducerClassifier()
   const controlEvents = ["mousedown", "mouseup", "mousemove", "wheel", "focus", "blur"]
+  const draftEvents = ["beforeinput", "paste"]
   for (const eventName of controlEvents) {
-    params.el.addEventListener(eventName, declareControlInput, true)
+    params.el.addEventListener(eventName, inputProducer.declareControlInput, true)
   }
+  for (const eventName of draftEvents) {
+    params.el.addEventListener(eventName, inputProducer.declareDraftInput, true)
+  }
+  params.el.addEventListener("compositionstart", inputProducer.handleCompositionStart, true)
+  params.el.addEventListener("compositionupdate", inputProducer.handleCompositionUpdate, true)
+  params.el.addEventListener("compositionend", inputProducer.handleCompositionEnd, true)
   const cleanupContainerEvents = () => {
     cleanupDropEvents?.()
     for (const eventName of controlEvents) {
-      params.el.removeEventListener(eventName, declareControlInput, true)
+      params.el.removeEventListener(eventName, inputProducer.declareControlInput, true)
     }
+    for (const eventName of draftEvents) {
+      params.el.removeEventListener(eventName, inputProducer.declareDraftInput, true)
+    }
+    params.el.removeEventListener("compositionstart", inputProducer.handleCompositionStart, true)
+    params.el.removeEventListener("compositionupdate", inputProducer.handleCompositionUpdate, true)
+    params.el.removeEventListener("compositionend", inputProducer.handleCompositionEnd, true)
   }
 
   if (params.el.offsetWidth > 0 && params.el.offsetHeight > 0) {
@@ -138,18 +142,7 @@ export function initializeTerminalView(params: {
   // and sent to the PTY instead of triggering clipboard operations —
   // intercept Cmd+C here and let Cmd+V fall through to the native paste event.
   term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
-    if (e.type === "keydown") {
-      declareProducerInput(
-        e.key === "Enter"
-          && !e.isComposing
-          && !e.shiftKey
-          && !e.altKey
-          && !e.ctrlKey
-          && !e.metaKey
-          ? "submission"
-          : "draft",
-      )
-    }
+    inputProducer.handleKeyEvent(e)
     if (
       params.options?.agentTerminal &&
       isShiftEnter(e)
@@ -185,9 +178,10 @@ export function initializeTerminalView(params: {
 
   // Send keystrokes to daemon
   term.onData((data) => {
+    const classification = inputProducer.classifyData()
     void params.sendInputBytes(new TextEncoder().encode(data), {
-      submissionBoundary: producerInputKind === "submission",
-      controlInput: producerInputKind === "control",
+      submissionBoundary: classification.submissionBoundary,
+      controlInput: classification.controlInput,
     })
   })
 
