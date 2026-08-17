@@ -274,12 +274,7 @@ describe("mobile pairing UI", () => {
   it("starts pairing and registers this desktop online with the relay", async () => {
     await setSetupState("showPreferencesPanel", true);
     await client.waitForElement(".prefs-panel");
-    await client.executeSync(`
-      const tabs = Array.from(document.querySelectorAll(".prefs-panel .tab"));
-      const developer = tabs.find((tab) => tab.textContent?.includes("Developer"));
-      developer?.click();
-      return Boolean(developer);
-    `);
+    await client.click(await client.waitForElement('[data-testid="preferences-mobile-tab"]'));
 
     const panel = await client.waitForElement('[data-testid="mobile-access-panel"]');
     expect(await client.getText(panel)).toContain("Mobile Access");
@@ -294,7 +289,9 @@ describe("mobile pairing UI", () => {
 
     const status = await tauriInvoke(client, "mobile_server_status") as MobileServerStatus;
     expect(status.state).toBe("running");
-    expect(status.pairingCode).toBe(pairingCode);
+    // The one-time code is held by the Preferences pairing session, not
+    // re-exposed by the general server-status surface.
+    expect(status.pairingCode).toBeNull();
     expect(status.desktopId).toEqual(expect.any(String));
 
     const auth = await signInForAuthSession();

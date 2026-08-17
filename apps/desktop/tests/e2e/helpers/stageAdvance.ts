@@ -13,7 +13,7 @@ async function waitForSelectedTask(
   while (Date.now() < deadline) {
     const selectedTaskId = await client.executeSync<string | null>(
       `const ctx = window.__KANNA_E2E__?.setupState;
-       const selected = ctx?.store?.selectedItemId;
+       const selected = ctx?.store?.selectedTaskId;
        return selected && selected.__v_isRef ? selected.value : selected ?? null;`,
     );
     lastSelectedTaskId = selectedTaskId;

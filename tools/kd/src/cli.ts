@@ -713,6 +713,12 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   if (group === "test" && command === "rust") {
     return { taskId: "test.rust", input: {} };
   }
+  if (group === "test" && command === "desktop-e2e") {
+    return { taskId: "test.desktop-e2e", input: {} };
+  }
+  if (group === "test" && command === "desktop-e2e-operator") {
+    return { taskId: "test.desktop-e2e-operator", input: {} };
+  }
   if (group === "test" && command === "app-update-bundle") {
     return { taskId: "test.app-update-bundle", input: {} };
   }
@@ -830,6 +836,8 @@ const helpTopics: Record<string, string[]> = {
     "  cloud relay-provision --staging|--production",
     "  pages build-schema --out-dir <dir>",
     "  test rust",
+    "  test desktop-e2e",
+    "  test desktop-e2e-operator",
     "  test app-update-bundle",
     "  test cloud-emulator",
     "  test cloud-staging",
@@ -1260,6 +1268,8 @@ const helpTopics: Record<string, string[]> = {
     "Commands:",
     "  test all",
     "  test rust",
+    "  test desktop-e2e",
+    "  test desktop-e2e-operator",
     "  test app-update-bundle",
     "  test cloud-emulator",
     "  test cloud-staging",
@@ -1277,6 +1287,16 @@ const helpTopics: Record<string, string[]> = {
     "Usage: kd test rust",
     "",
     "Run workspace Rust tests with daemon integration tests serialized."
+  ],
+  "test desktop-e2e": [
+    "Usage: kd test desktop-e2e",
+    "",
+    "Run the unattended desktop real E2E tier.",
+  ],
+  "test desktop-e2e-operator": [
+    "Usage: kd test desktop-e2e-operator",
+    "",
+    "Run credentialed and operator-only desktop real E2E files.",
   ],
   "test app-update-bundle": [
     "Usage: kd test app-update-bundle",

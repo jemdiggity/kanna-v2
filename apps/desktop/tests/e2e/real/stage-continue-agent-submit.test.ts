@@ -4,7 +4,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
+import { cleanupFixtureRepos, createFixtureRepo, publishFixtureChanges } from "../helpers/fixture-repo";
 import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
 import { pressAdvanceStageShortcut } from "../helpers/stageAdvance";
 import { nudgeTerminalTrustPrompt } from "../helpers/terminalInput";
@@ -100,7 +100,7 @@ describe("real post injection into a live agent session", () => {
             post: {
               name: "commit",
               agent: "commit-real",
-              prompt: "Create a file named continue-stage-real-submit.txt in the current directory containing exactly the text submitted with no punctuation. Then run: kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\" --status success --summary 'continue submitted'. Do not wait for any additional input.",
+              prompt: "Run exactly: printf 'submitted\\n' > continue-stage-real-submit.txt. Then run: kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\" --status success --summary 'continue submitted'. Do not wait for any additional input.",
             },
           },
           { name: "holding", policy: { transition: "manual" } },
@@ -117,6 +117,7 @@ describe("real post injection into a live agent session", () => {
         "",
       ].join("\n"),
     );
+    await publishFixtureChanges(testRepoPath, "test: add real continue workflow");
 
     repoId = await importTestRepo(client, testRepoPath, "stage-continue-real-agent-test");
   });

@@ -167,7 +167,11 @@ async function acceptRelayTunnel(input: {
   await ready;
 
   const kspAuth = await waitForRelayMessage(tunnel, (message) => message.type === "auth");
-  expect(kspAuth).toEqual({ type: "auth", credential: input.expectedCredential });
+  expect(kspAuth).toMatchObject({
+    type: "auth",
+    credential: input.expectedCredential,
+    capabilities: ["companion_event_epoch", "term_input_boundary"],
+  });
   tunnel.send(JSON.stringify({ type: "auth_ok" }));
 
   const attach = await waitForRelayMessage(
@@ -184,10 +188,8 @@ async function acceptRelayTunnel(input: {
     from_seq: 0,
   });
   tunnel.send(JSON.stringify({
-    type: "term_snapshot",
+    type: "term_output",
     task_id: input.taskId,
-    cols: 80,
-    rows: 24,
     data_b64: Buffer.from("relay auth recovered").toString("base64"),
   }));
   return tunnel;
@@ -234,8 +236,9 @@ describe("mobile relay auth recovery", () => {
           event !== null &&
           "type" in event &&
           event.type === "output" &&
-          "text" in event &&
-          event.text === "relay auth recovered"
+          "dataB64" in event &&
+          typeof event.dataB64 === "string" &&
+          Buffer.from(event.dataB64, "base64").toString("utf8") === "relay auth recovered"
         ),
         `timed out waiting for recovered relay terminal output: ${JSON.stringify(terminalEvents)}`,
       );

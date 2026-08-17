@@ -549,6 +549,7 @@ describe("kd CLI", () => {
     await expect(runCli(["test", "--help"])).resolves.toBe(0);
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("test all"));
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("test rust"));
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("test desktop-e2e"));
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("test staging-smoke"));
 
     await expect(runCli(["test", "all", "--help"])).resolves.toBe(0);
@@ -556,6 +557,12 @@ describe("kd CLI", () => {
 
     await expect(runCli(["test", "rust", "--help"])).resolves.toBe(0);
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd test rust"));
+
+    await expect(runCli(["test", "desktop-e2e", "--help"])).resolves.toBe(0);
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd test desktop-e2e"));
+
+    await expect(runCli(["test", "desktop-e2e-operator", "--help"])).resolves.toBe(0);
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd test desktop-e2e-operator"));
 
     await expect(runCli(["test", "staging-smoke", "--help"])).resolves.toBe(0);
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd test staging-smoke"));
@@ -1115,6 +1122,14 @@ describe("kd CLI", () => {
     expect(getTaskDefinition("test.rust").description).toBe(
       "Run workspace Rust tests with daemon integration tests serialized.",
     );
+    expect(parseCliArgs(["test", "desktop-e2e"])).toEqual({
+      taskId: "test.desktop-e2e",
+      input: {},
+    });
+    expect(parseCliArgs(["test", "desktop-e2e-operator"])).toEqual({
+      taskId: "test.desktop-e2e-operator",
+      input: {},
+    });
     expect(parseCliArgs(["test", "cloud-emulator"])).toEqual({
       taskId: "test.cloud-emulator",
       input: {},

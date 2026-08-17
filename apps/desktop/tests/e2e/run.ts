@@ -8,6 +8,7 @@ import { homedir } from "node:os";
 import { dirname, basename, join, posix, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import { realE2eTierFiles } from "./realTiers";
 import { buildRealE2eAgentEnv } from "./runEnv";
 import { createInstanceConfig, type InstanceConfig } from "./runConfig";
 import {
@@ -147,6 +148,10 @@ async function resolveTestTargets(
       ...(await resolveTestTargets(e2eRoot, "mock/")),
       ...(await resolveTestTargets(e2eRoot, "real/")),
     ];
+  }
+  if (normalized === "real-unattended" || normalized === "real-operator") {
+    const tier = normalized === "real-unattended" ? "unattended" : "operator";
+    return realE2eTierFiles(tier).map((file) => toDesktopRelativeTarget(`real/${file}`));
   }
   if (normalized.endsWith(".test.ts")) {
     return [toDesktopRelativeTarget(normalized)];
@@ -402,7 +407,7 @@ async function main(): Promise<void> {
   const primaryCloudTransferRegistryDir = join(transferRegistryDir, "primary");
   const secondaryCloudTransferRegistryDir = join(transferRegistryDir, "secondary");
   const ports = createPortAllocator();
-  const primaryDevPort = await ports.allocate("primary dev server");
+  const primaryDevPort = await ports.allocate("primary dev server", { reserveNextPort: true });
   const primaryWebDriverPort = await ports.allocate("primary webdriver");
   const primaryTransferPort = await ports.allocate("primary transfer");
   const primaryMobileServerPort = await ports.allocate("primary mobile server");
@@ -467,7 +472,9 @@ async function main(): Promise<void> {
     webDriverPortEnvValue: primaryWebDriverPort,
   });
 
-  const secondaryDevPort = enableSecondary ? await ports.allocate("secondary dev server") : null;
+  const secondaryDevPort = enableSecondary
+    ? await ports.allocate("secondary dev server", { reserveNextPort: true })
+    : null;
   const secondaryWebDriverPort = enableSecondary ? await ports.allocate("secondary webdriver") : null;
   const secondaryTransferPort = enableSecondary ? await ports.allocate("secondary transfer") : null;
   const secondaryMobileServerPort = enableSecondary
@@ -566,6 +573,12 @@ async function main(): Promise<void> {
     isolateAgentProviders = false,
     secondaryRuntimeEnv: Record<string, string> = runtimeEnv,
   ): Promise<RunningInstances> {
+    await Promise.all([
+      ports.handoff(primary.devPort),
+      ports.handoff(primary.webDriverPort),
+      ports.handoff(primary.transferPort),
+      ports.handoff(primary.mobileServerPort),
+    ]);
     await runCommand(primary.startCommand, {
       cwd: repoRoot,
       env: composeInstanceStartEnv({
@@ -584,6 +597,12 @@ async function main(): Promise<void> {
 
     const secondaryInstance = withSecondary ? secondary : null;
     if (secondaryInstance) {
+      await Promise.all([
+        ports.handoff(secondaryInstance.devPort),
+        ports.handoff(secondaryInstance.webDriverPort),
+        ports.handoff(secondaryInstance.transferPort),
+        ports.handoff(secondaryInstance.mobileServerPort),
+      ]);
       await runCommand(secondaryInstance.startCommand, {
         cwd: repoRoot,
         env: composeInstanceStartEnv({
@@ -628,6 +647,13 @@ async function main(): Promise<void> {
 
   async function startFirebaseEmulators(): Promise<void> {
     if (firebaseEmulatorProcess) return;
+
+    await Promise.all([
+      ports.handoff(firebaseAuthPort),
+      ports.handoff(firebaseFirestorePort),
+      ports.handoff(firebaseFunctionsPort),
+      ports.handoff(firebaseUiPort),
+    ]);
 
     firebaseEmulatorOutput = "";
     const configPath = buildFirebaseEmulatorConfigPath(repoRoot, firebaseFirestorePort);
@@ -785,6 +811,8 @@ async function main(): Promise<void> {
   async function startRelay(): Promise<void> {
     if (relayProcess) return;
 
+    await ports.handoff(relayPort);
+
     relayOutput = "";
     let startupOutput = "";
     const proc = spawn("pnpm", ["--dir", "services/relay", "run", "dev"], {
@@ -858,9 +886,9 @@ async function main(): Promise<void> {
     const proc = relayProcess;
     relayProcess = null;
     if (!proc?.pid) {
-      if (await relayPortOpen()) {
-        throw new Error("relay listener is open without a managed process");
-      }
+      // Before the relay is started this port is intentionally open through
+      // the allocator's reservation. No managed child means there is nothing
+      // for this lifecycle hook to stop.
       return;
     }
 
@@ -933,6 +961,7 @@ async function main(): Promise<void> {
     })
     : null;
   if (relayControlServer) {
+    await ports.handoff(relayControlPort);
     await new Promise<void>((resolveListen, reject) => {
       relayControlServer.once("error", reject);
       relayControlServer.listen(relayControlPort, "127.0.0.1", resolveListen);
@@ -945,10 +974,6 @@ async function main(): Promise<void> {
   const cleanupAppDataHooks: Array<() => Promise<void>> = [];
 
   try {
-    // Hand the reserved ports back to the OS only now that setup is done, so the
-    // processes that need them bind moments after the harness picked them.
-    await ports.releaseAll();
-
     if (shouldStartInitialInstances(testTargets[0])) {
       const isolateAgentProviders = targetNeedsIsolatedAgentProviders(testTargets[0] ?? "");
       runningInstances = await startInstances(false, true, realE2eRuntimeEnv, isolateAgentProviders);
@@ -1060,6 +1085,7 @@ async function main(): Promise<void> {
     }
     await rm(primary.daemonDir, { recursive: true, force: true }).catch(() => undefined);
     await rm(transferRegistryDir, { recursive: true, force: true }).catch(() => undefined);
+    await ports.releaseAll();
   }
 }
 

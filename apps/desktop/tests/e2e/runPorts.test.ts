@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  claimE2ePort,
   createPortAllocator,
   reserveLoopbackPort,
   E2E_PORT_RANGE_END,
@@ -17,8 +18,10 @@ function fractionFor(port: number, rangeStart = E2E_PORT_RANGE_START, rangeEnd =
 }
 
 describe("createPortAllocator", () => {
+  const noClaim = async () => async () => undefined;
+
   it("allocates below the ephemeral range the kernel reassigns", async () => {
-    const allocator = createPortAllocator({ reserve: async () => async () => undefined });
+    const allocator = createPortAllocator({ claim: noClaim, reserve: async () => async () => undefined });
 
     for (let i = 0; i < 50; i += 1) {
       const port = await allocator.allocate("dev");
@@ -30,6 +33,7 @@ describe("createPortAllocator", () => {
   it("skips ports that cannot be reserved", async () => {
     const busy = new Set([25000]);
     const allocator = createPortAllocator({
+      claim: noClaim,
       random: sequenceRandom([fractionFor(25000), fractionFor(25500)]),
       reserve: async (port) => (busy.has(port) ? null : async () => undefined),
     });
@@ -39,6 +43,7 @@ describe("createPortAllocator", () => {
 
   it("never hands out a port adjacent to an earlier allocation", async () => {
     const allocator = createPortAllocator({
+      claim: noClaim,
       random: sequenceRandom([fractionFor(25000), fractionFor(25001), fractionFor(24999), fractionFor(26000)]),
       reserve: async () => async () => undefined,
     });
@@ -50,7 +55,7 @@ describe("createPortAllocator", () => {
   });
 
   it("reports which port it failed to allocate", async () => {
-    const allocator = createPortAllocator({ reserve: async () => null, maxAttempts: 3 });
+    const allocator = createPortAllocator({ claim: noClaim, reserve: async () => null, maxAttempts: 3 });
 
     await expect(allocator.allocate("relay")).rejects.toThrow(/free port for relay/);
   });
@@ -64,6 +69,7 @@ describe("createPortAllocator", () => {
   it("releases every reservation so the processes that need them can bind", async () => {
     const released: number[] = [];
     const allocator = createPortAllocator({
+      claim: noClaim,
       reserve: async (port) => async () => {
         released.push(port);
       },
@@ -76,6 +82,37 @@ describe("createPortAllocator", () => {
     expect(released.sort()).toEqual([first, second].sort());
     await allocator.releaseAll();
     expect(released).toHaveLength(2);
+  });
+
+  it("hands a reservation to its service without releasing the cross-run claim", async () => {
+    const released: string[] = [];
+    const allocator = createPortAllocator({
+      claim: async (port) => async () => { released.push(`claim:${port}`); },
+      reserve: async (port) => async () => { released.push(`reservation:${port}`); },
+    });
+
+    const port = await allocator.allocate("relay control");
+    await allocator.handoff(port);
+    expect(released).toEqual([`reservation:${port}`]);
+
+    await allocator.releaseAll();
+    expect(released).toEqual([`reservation:${port}`, `claim:${port}`]);
+  });
+
+  it("reserves a dev server's HMR neighbour as one allocation", async () => {
+    const reserved: number[] = [];
+    const allocator = createPortAllocator({
+      claim: noClaim,
+      random: sequenceRandom([fractionFor(25000), fractionFor(26000)]),
+      reserve: async (port) => {
+        reserved.push(port);
+        return async () => undefined;
+      },
+    });
+
+    expect(await allocator.allocate("dev", { reserveNextPort: true })).toBe(25000);
+    expect(reserved).toEqual([25000, 25001]);
+    expect(await allocator.allocate("webdriver")).toBe(26000);
   });
 });
 
@@ -90,5 +127,18 @@ describe("reserveLoopbackPort", () => {
     const release = await reserveLoopbackPort(port);
     expect(release).not.toBeNull();
     await release?.();
+  });
+});
+
+describe("claimE2ePort", () => {
+  it("keeps another allocator process claim from taking the same port", async () => {
+    const port = 20000 + (process.pid % 15000);
+    const release = await claimE2ePort(port);
+    expect(release).not.toBeNull();
+    try {
+      expect(await claimE2ePort(port)).toBeNull();
+    } finally {
+      await release?.();
+    }
   });
 });

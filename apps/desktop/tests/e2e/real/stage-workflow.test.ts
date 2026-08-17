@@ -1,15 +1,14 @@
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
-import { cleanupWorktrees, resetDatabase } from "../helpers/reset";
+import { cleanupFixtureRepos, createFixtureRepo, publishFixtureChanges } from "../helpers/fixture-repo";
+import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
 import { callVueMethod, execDb, queryDb, tauriInvoke } from "../helpers/vue";
 import { advanceStageWithShortcut } from "../helpers/stageAdvance";
 import { WebDriverClient } from "../helpers/webdriver";
-import { waitForFile } from "../helpers/worktreeFs";
 
 function isVueCallError(value: unknown): value is { __error: string } {
   return Boolean(
@@ -84,34 +83,25 @@ describe("real stage workflow", () => {
     await mkdir(join(kannaDir, "workflows"), { recursive: true });
     await mkdir(join(kannaDir, "agents", "commit-e2e"), { recursive: true });
     await mkdir(join(kannaDir, "agents", "review-e2e"), { recursive: true });
-    await mkdir(join(kannaDir, "fake-bin"), { recursive: true });
 
-    // Durable model: every stage runs in place on the same task/worktree with
-    // a fresh agent session. The auto stages bind a fake `codex` (via the
-    // stage environment PATH) that records its prompt and reports completion
-    // through kanna-cli, driving the server's auto-advance.
+    // Durable model: every stage runs on the same task with a fresh workspace
+    // and agent session. Live-agent real E2E is always pinned to OpenCode's
+    // free model; never drive Claude or a paid provider programmatically.
     await writeFile(
       join(kannaDir, "workflows", `${workflowName}.json`),
       JSON.stringify({
         name: workflowName,
-        environments: {
-          "fake-bin": {
-            setup: [`export PATH="${join(kannaDir, "fake-bin")}:$PATH"`],
-          },
-        },
         stages: [
           { name: "in progress", policy: { transition: "manual" } },
           {
             name: "commit",
             agent: "commit-e2e",
-            environment: "fake-bin",
             prompt: "Commit marker for $TASK_PROMPT",
             policy: { transition: "auto" },
           },
           {
             name: "review",
             agent: "review-e2e",
-            environment: "fake-bin",
             prompt: "Review previous result: $PREV_RESULT",
             policy: { transition: "auto" },
           },
@@ -125,9 +115,11 @@ describe("real stage workflow", () => {
         "---",
         "name: commit-e2e",
         "description: Real E2E commit stage.",
-        "agent_provider: codex",
+        "agent_provider: opencode",
+        "model: opencode/big-pickle",
         "---",
-        "Commit stage prompt marker.",
+        "Create e2e-workflow-marker.txt containing exactly `implemented` followed by a newline.",
+        "Commit that file to git, then record successful stage completion as instructed.",
         "",
       ].join("\n"),
     );
@@ -137,44 +129,17 @@ describe("real stage workflow", () => {
         "---",
         "name: review-e2e",
         "description: Real E2E review stage.",
-        "agent_provider: codex",
+        "agent_provider: opencode",
+        "model: opencode/big-pickle",
         "---",
-        "Review stage prompt marker.",
+        "Verify that e2e-workflow-marker.txt is committed and contains exactly `implemented`.",
+        "Do not modify the worktree. Record successful stage completion as instructed.",
         "",
       ].join("\n"),
     );
-    // Each stage runs in its own forked worktree, so the fake agent logs to a
-    // fixed absolute path and the commit stage creates (and commits) its own
-    // marker file inside whichever worktree it was spawned in.
-    await writeFile(
-      join(kannaDir, "fake-bin", "codex"),
-      [
-        "#!/bin/sh",
-        "set -eu",
-        'prompt=""',
-        'for arg in "$@"; do prompt="$arg"; done',
-        `printf '%s\\n---\\n' "$prompt" >> "${join(kannaDir, "stage-prompts.log")}"`,
-        'case "$prompt" in',
-        '  *"Commit stage prompt marker."*)',
-        "    printf 'implemented\\n' > e2e-workflow-marker.txt",
-        "    git add e2e-workflow-marker.txt",
-        "    git commit -m 'test: commit e2e workflow marker'",
-        "    kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\" --status success --summary 'committed e2e workflow marker'",
-        "    ;;",
-        '  *"Review stage prompt marker."*)',
-        "    kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\" --status success --summary 'reviewed e2e workflow marker'",
-        "    ;;",
-        "esac",
-        "sleep 30",
-        "",
-      ].join("\n"),
-    );
-    await chmod(join(kannaDir, "fake-bin", "codex"), 0o755);
+    await publishFixtureChanges(testRepoPath, "test: add real stage workflow fixture");
 
-    const importResult = await callVueMethod(client, "store.importRepo", testRepoPath, "stage-workflow-real-test", "main");
-    if (isVueCallError(importResult)) throw new Error(importResult.__error);
-    if (typeof importResult !== "string") throw new Error(`unexpected import result: ${JSON.stringify(importResult)}`);
-    repoId = importResult;
+    repoId = await importTestRepo(client, testRepoPath, "stage-workflow-real-test");
   });
 
   afterAll(async () => {
@@ -209,7 +174,7 @@ describe("real stage workflow", () => {
         "in progress",
         branch,
         "pty",
-        "codex",
+        "opencode",
         "idle",
         null,
       ],
@@ -227,7 +192,9 @@ describe("real stage workflow", () => {
     // task, each stage in a freshly forked branch + worktree.
     await advanceStageWithShortcut(client, "exercise the real stage workflow", taskId);
 
-    await waitForTaskStage(client, taskId, "pr", 90_000);
+    // Each real auto transition waits for the live stage process teardown;
+    // two transitions can legitimately exceed the old 90-second deadline.
+    await waitForTaskStage(client, taskId, "pr", 180_000);
 
     // Durable task: no next-stage tasks were created along the way.
     const openTasks = (await queryDb(
@@ -237,8 +204,8 @@ describe("real stage workflow", () => {
     )) as Array<{ id: string }>;
     expect(openTasks.map((row) => row.id)).toEqual([taskId]);
 
-    // Each transition forked: the task's current branch is a fresh random
-    // name, not the seeded one.
+    // Each transition forked by appending the workspace counter to the
+    // durable task branch rather than replacing it with a random name.
     const branchRows = (await queryDb(
       client,
       "SELECT branch FROM pipeline_item WHERE id = ?",
@@ -246,16 +213,8 @@ describe("real stage workflow", () => {
     )) as Array<{ branch: string | null }>;
     const finalBranch = branchRows[0]?.branch ?? "";
     expect(finalBranch).not.toBe(branch);
-    expect(finalBranch).toMatch(/^task-[0-9a-f]{8}$/);
+    expect(finalBranch).toBe("task-stage-workflow-real-task-4");
 
-    const promptsLogPath = join(kannaDir, "stage-prompts.log");
-    await waitForFile(promptsLogPath, 5_000, 100);
-    const promptsLog = await readFile(promptsLogPath, "utf8");
-    expect(promptsLog).toContain("Commit stage prompt marker.");
-    expect(promptsLog).toContain("Commit marker for exercise the real stage workflow");
-    expect(promptsLog).toContain("Review stage prompt marker.");
-    // $PREV_RESULT substitution carries the commit stage's recorded result.
-    expect(promptsLog).toContain("committed e2e workflow marker");
     // The commit made in the commit stage's fork crossed the boundary into
     // the final stage's fork: only committed work travels between stages.
     const finalWorktree = join(testRepoPath, ".kanna-worktrees", finalBranch);
@@ -270,5 +229,5 @@ describe("real stage workflow", () => {
     expect(runs.filter((run) => run.stage === "commit" && run.status === "succeeded")).toHaveLength(1);
     expect(runs.filter((run) => run.stage === "review" && run.status === "succeeded")).toHaveLength(1);
     expect(runs.filter((run) => run.stage === "pr" && run.status === "running")).toHaveLength(1);
-  }, 120_000);
+  }, 240_000);
 });

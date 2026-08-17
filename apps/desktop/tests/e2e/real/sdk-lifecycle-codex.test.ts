@@ -70,7 +70,9 @@ async function readTaskWorktreeNames(repoPath: string): Promise<string[]> {
     .catch(() => []);
 }
 
-describe("real Codex SDK lifecycle commands", () => {
+// Codex account/quota state makes this an explicit operator lane. The default
+// real runner uses OpenCode's free model and must never launch this test.
+describe.skipIf(process.env.KANNA_E2E_REAL_AGENT_PROVIDER !== "codex")("real Codex SDK lifecycle commands", () => {
   const client = new WebDriverClient();
   let repoId = "";
   let taskId = "";

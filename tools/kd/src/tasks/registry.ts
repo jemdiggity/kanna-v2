@@ -25,6 +25,7 @@ import { checkRequiredCommands } from "../runtime/doctor";
 import { syncMachineLocalConfig, writeCargoConfig } from "../runtime/env-sync";
 import { buildFirebaseCommandEnv, buildFirebaseEmulatorArgs, formatMissingFirebaseEmulators, resolveFirebaseEnvFromReference, writeFirebaseEmulatorConfig, type FirebasePortInput } from "../runtime/firebase";
 import { resolveMobileServerUrl } from "../runtime/mobile";
+import { buildDesktopRealE2eCommand } from "../runtime/desktop-e2e";
 import { buildMobileDeviceSmokeCommand, buildMobileTestCommand } from "../runtime/mobile-commands";
 import { executeMobileIosArchiveWithContext } from "../runtime/mobile-archive";
 import {
@@ -2512,6 +2513,26 @@ export const taskDefinitions = [
         env: context.env,
         runner: nodeCommandRunner
       });
+    },
+  },
+  {
+    id: "test.desktop-e2e",
+    description: "Run the unattended desktop real E2E tier.",
+    inputSchema: emptyInputSchema,
+    execute: async () => {
+      const context = await resolveDefaultContext(process.env);
+      const [command, args] = buildDesktopRealE2eCommand("unattended");
+      return runBuiltCommand(command, args, context.repoRoot, context.env);
+    },
+  },
+  {
+    id: "test.desktop-e2e-operator",
+    description: "Run credentialed and operator-only desktop real E2E files.",
+    inputSchema: emptyInputSchema,
+    execute: async () => {
+      const context = await resolveDefaultContext(process.env);
+      const [command, args] = buildDesktopRealE2eCommand("operator");
+      return runBuiltCommand(command, args, context.repoRoot, context.env);
     },
   },
   {

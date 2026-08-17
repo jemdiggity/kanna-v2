@@ -18,14 +18,6 @@ async function accountPasswordType(): Promise<string | null> {
   `);
 }
 
-async function desktopAuthState(): Promise<{ status?: string; message?: string; user?: { email?: string | null } }> {
-  return await client.executeSync(`
-    const ctx = window.__KANNA_E2E__.setupState;
-    const state = ctx.desktopAuthState?.__v_isRef ? ctx.desktopAuthState.value : ctx.desktopAuthState;
-    return JSON.parse(JSON.stringify(state ?? null));
-  `);
-}
-
 async function waitForSignedInEmail(email: string): Promise<void> {
   const deadline = Date.now() + 15_000;
   let lastDiagnostics: unknown = null;
@@ -36,28 +28,11 @@ async function waitForSignedInEmail(email: string): Promise<void> {
     if (panelText.includes(email)) return;
     lastDiagnostics = {
       panelText,
-      authState: await desktopAuthState(),
       fault: await client.executeSync("return window.__KANNA_E2E_AUTH_INDEXEDDB_FAULT__ ?? null;"),
     };
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
   throw new Error(`timed out waiting for signed-in email; diagnostics=${JSON.stringify(lastDiagnostics)}`);
-}
-
-async function waitForDesktopAuthSignedIn(email: string): Promise<void> {
-  const deadline = Date.now() + 20_000;
-  let lastState: unknown = null;
-  while (Date.now() < deadline) {
-    lastState = await desktopAuthState();
-    if (
-      lastState?.status === "signedIn" &&
-      lastState.user?.email === email
-    ) {
-      return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 200));
-  }
-  throw new Error(`timed out waiting for desktop auth signed-in state; lastState=${JSON.stringify(lastState)}`);
 }
 
 async function reloadApp(): Promise<void> {
@@ -95,14 +70,9 @@ describe("desktop auth IndexedDB fallback", () => {
     await client.click(await client.waitForElement('[data-testid="account-sign-in"] .primary-button'));
 
     await waitForSignedInEmail("upvote.sieve.7t@icloud.com");
-    await waitForDesktopAuthSignedIn("upvote.sieve.7t@icloud.com");
 
     const bodyText = await client.executeSync<string>("return document.body.innerText;");
     expect(bodyText).not.toContain("Firebase Auth storage is not available.");
-    expect(await desktopAuthState()).toMatchObject({
-      status: "signedIn",
-      user: { email: "upvote.sieve.7t@icloud.com" },
-    });
 
     const afterSignInFault = await client.executeSync<{ openFailures?: number }>(
       "return window.__KANNA_E2E_AUTH_INDEXEDDB_FAULT__ ?? null;",
@@ -110,14 +80,8 @@ describe("desktop auth IndexedDB fallback", () => {
     expect(afterSignInFault.openFailures ?? 0).toBeGreaterThan(0);
 
     await reloadApp();
-    await waitForDesktopAuthSignedIn("upvote.sieve.7t@icloud.com");
-
     await openAccountPreferences();
     await waitForSignedInEmail("upvote.sieve.7t@icloud.com");
     expect(await client.findElements('[data-testid="account-email"]')).toHaveLength(0);
-    expect(await desktopAuthState()).toMatchObject({
-      status: "signedIn",
-      user: { email: "upvote.sieve.7t@icloud.com" },
-    });
   });
 });

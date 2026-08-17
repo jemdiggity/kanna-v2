@@ -5,10 +5,13 @@ export interface InstanceConfig {
   daemonDir: string;
   /** The dev server this instance's window must load — see `runStartup`. */
   devUrl: string;
+  devPort: number;
   env: Record<string, string>;
+  mobileServerPort: number;
   sessionName: string;
   startCommand: string[];
   stopCommand: string[];
+  transferPort: number;
   webDriverPort: number;
 }
 
@@ -30,7 +33,9 @@ export function createInstanceConfig(input: CreateInstanceConfigInput): Instance
     daemonDir: input.daemonDir,
     // `kd dev up` writes this URL into tauri.conf.local.json for `tauri dev`.
     devUrl: `http://localhost:${input.devPortEnvValue}`,
+    devPort: input.devPortEnvValue,
     env: input.env,
+    mobileServerPort: input.mobileServerPortEnvValue,
     sessionName: input.sessionName,
     startCommand: [
       "./kd",
@@ -50,6 +55,7 @@ export function createInstanceConfig(input: CreateInstanceConfigInput): Instance
       "down",
       "--kill-daemon",
     ],
+    transferPort: input.transferPortEnvValue,
     webDriverPort: input.effectiveWebDriverPort,
   };
 }
