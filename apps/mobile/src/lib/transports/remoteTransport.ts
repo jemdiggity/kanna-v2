@@ -212,13 +212,11 @@ export function createRemoteTransport({
     repoId: string,
     requestedDesktopId?: string
   ): Promise<CloudRepoRoute | null> => {
-    if (!listCloudTasks) {
-      return requestedDesktopId
-        ? { desktopId: requestedDesktopId, localRepoId: repoId }
-        : null;
+    if (listCloudTasks) {
+      await listFreshCloudTasks();
+    } else if (!requestedDesktopId) {
+      return null;
     }
-
-    await listFreshCloudTasks();
     const routeTask = latestAcceptedCloudTasks.find(
       (
         task
@@ -230,12 +228,6 @@ export function createRemoteTransport({
         isCloudTaskRoute(task) &&
         (!requestedDesktopId || task.ownerDesktopId === requestedDesktopId)
     );
-    if (routeTask) {
-      return {
-        desktopId: routeTask.ownerDesktopId,
-        localRepoId: routeTask.ownerLocalRepoId ?? repoId
-      };
-    }
     if (requestedDesktopId) {
       if (
         !latestDesktopRecords.some(
@@ -249,7 +241,19 @@ export function createRemoteTransport({
         }
       }
       await readDesktopRepos(requestedDesktopId);
-      const localRepoId = desktopLocalRepoId(requestedDesktopId, repoId);
+      const logicalRepoId = logicalRepoIdFor(repoId);
+      const hintedMember = routeTask?.ownerLocalRepoId
+        ? desktopRepoSnapshots
+            .get(requestedDesktopId)
+            ?.find(
+              (repo) =>
+                repo.id === routeTask.ownerLocalRepoId &&
+                (!isRemoteRepoId(logicalRepoId) ||
+                  canonicalRepoId(repo) === logicalRepoId)
+            )
+        : undefined;
+      const localRepoId =
+        desktopLocalRepoId(requestedDesktopId, repoId) ?? hintedMember?.id;
       if (!localRepoId) {
         throw new RepoNotRegisteredError(
           repoDisplayName(repoId),
@@ -258,24 +262,34 @@ export function createRemoteTransport({
       }
       return { desktopId: requestedDesktopId, localRepoId };
     }
+    if (routeTask) {
+      return {
+        desktopId: routeTask.ownerDesktopId,
+        localRepoId: routeTask.ownerLocalRepoId ?? repoId
+      };
+    }
     if (!cloudRepoOwners.has(repoId)) {
       await listReachableDesktopRepos();
     }
     return cloudRepoOwners.get(repoId) ?? null;
   };
 
-  const desktopLocalRepoId = (
-    desktopId: string,
-    repoId: string
-  ): string | null => {
+  const logicalRepoIdFor = (repoId: string): string => {
     const knownMember = [...desktopRepoSnapshots.values()]
       .flat()
       .find((repo) => repo.id === repoId);
-    const logicalRepoId = isRemoteRepoId(repoId)
+    return isRemoteRepoId(repoId)
       ? repoId
       : knownMember
         ? canonicalRepoId(knownMember)
         : repoId;
+  };
+
+  const desktopLocalRepoId = (
+    desktopId: string,
+    repoId: string
+  ): string | null => {
+    const logicalRepoId = logicalRepoIdFor(repoId);
     const member = desktopRepoSnapshots
       .get(desktopId)
       ?.find(

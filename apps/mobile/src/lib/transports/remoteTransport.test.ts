@@ -1023,12 +1023,16 @@ describe("remote transport", () => {
   });
 
   it("maps a cloud repo to its owner-local repo on an explicit desktop", async () => {
-    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue({
-      taskId: "task-created",
-      repoId: "repo-local",
-      title: "Ship it",
-      stage: "in progress"
-    });
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>(async (request) =>
+      request.path === "/v1/repos"
+        ? [{ id: "repo-local", name: "Cloud Repo" }]
+        : {
+            taskId: "task-created",
+            repoId: "repo-local",
+            title: "Ship it",
+            stage: "in progress"
+          }
+    );
     const transport = createRemoteTransport({
       listDesktopRecords: async () => [],
       getSelectedDesktopId: () => null,
@@ -1132,12 +1136,16 @@ describe("remote transport", () => {
   });
 
   it("preserves an identified task while mapping a cloud repo to its owner", async () => {
-    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue({
-      taskId: "a1b2c3d4",
-      repoId: "repo-local",
-      title: "Ship it",
-      stage: "in progress"
-    });
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>(async (request) =>
+      request.path === "/v1/repos"
+        ? [{ id: "repo-local", name: "Cloud Repo" }]
+        : {
+            taskId: "a1b2c3d4",
+            repoId: "repo-local",
+            title: "Ship it",
+            stage: "in progress"
+          }
+    );
     const transport = createRemoteTransport({
       listDesktopRecords: async () => [],
       getSelectedDesktopId: () => null,
@@ -2311,6 +2319,7 @@ describe("remote transport", () => {
         registeredDesktopIds: ["desktop-a", "desktop-b"]
       }
     ]);
+    invokeDesktop.mockClear();
 
     // Creating a task under the canonical repo id targets the requested
     // desktop's own local repo id.
@@ -2319,7 +2328,13 @@ describe("remote transport", () => {
       prompt: "Fix bug",
       desktopId: "desktop-b"
     });
-    expect(invokeDesktop).toHaveBeenCalledWith({
+    expect(invokeDesktop).toHaveBeenNthCalledWith(1, {
+      desktopId: "desktop-b",
+      method: "GET",
+      path: "/v1/repos",
+      body: null
+    });
+    expect(invokeDesktop).toHaveBeenNthCalledWith(2, {
       desktopId: "desktop-b",
       method: "POST",
       path: "/v1/tasks",
@@ -2334,7 +2349,7 @@ describe("remote transport", () => {
     });
   });
 
-  it("rejects an absent destination repo without sending a foreign create request", async () => {
+  it("rejects a stale task-snapshot repo removed from the requested desktop without creating", async () => {
     const invokeDesktop = vi.fn<RemoteDesktopInvoker>(async (request) => {
       if (request.method === "GET" && request.path === "/v1/repos") {
         return request.desktopId === "desktop-macbook"
@@ -2368,7 +2383,18 @@ describe("remote transport", () => {
       ],
       getSelectedDesktopId: () => null,
       invokeDesktop,
-      listCloudTasks: async () => []
+      listCloudTasks: async () => [
+        {
+          id: "cloud:desktop-studio:repo-studio:task-old",
+          repoId: "git:hash-kanji",
+          repoName: "kanji-kongbu",
+          title: "Old kanji task",
+          stage: "in progress",
+          ownerDesktopId: "desktop-studio",
+          ownerLocalRepoId: "repo-studio",
+          ownerLocalTaskId: "task-old"
+        }
+      ]
     });
 
     await transport.listRepos();
@@ -2381,6 +2407,59 @@ describe("remote transport", () => {
     });
 
     await expect(creation).rejects.toEqual(
+      new RepoNotRegisteredError("kanji-kongbu", "Mac Studio")
+    );
+    expect(invokeDesktop).toHaveBeenCalledTimes(1);
+    expect(invokeDesktop).toHaveBeenCalledWith({
+      desktopId: "desktop-studio",
+      method: "GET",
+      path: "/v1/repos",
+      body: null
+    });
+    expect(invokeDesktop).not.toHaveBeenCalledWith(
+      expect.objectContaining({ method: "POST" })
+    );
+  });
+
+  it("rejects a requested-desktop snapshot without an owner-local repo id after a fresh read", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>(async (request) => {
+      if (request.method === "GET" && request.path === "/v1/repos") {
+        return [];
+      }
+      throw new Error(`unexpected request ${request.method} ${request.path}`);
+    });
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [
+        {
+          desktopId: "desktop-studio",
+          displayName: "Mac Studio",
+          online: true,
+          reachableViaRelay: true,
+          connectionMode: "internet"
+        }
+      ],
+      getSelectedDesktopId: () => null,
+      invokeDesktop,
+      listCloudTasks: async () => [
+        {
+          id: "cloud-task-old",
+          repoId: "git:hash-kanji",
+          repoName: "kanji-kongbu",
+          title: "Old kanji task",
+          stage: "in progress",
+          ownerDesktopId: "desktop-studio",
+          ownerLocalTaskId: "task-old"
+        }
+      ]
+    });
+
+    await expect(
+      transport.createTask({
+        repoId: "git:hash-kanji",
+        prompt: "Study kanji",
+        desktopId: "desktop-studio"
+      })
+    ).rejects.toEqual(
       new RepoNotRegisteredError("kanji-kongbu", "Mac Studio")
     );
     expect(invokeDesktop).toHaveBeenCalledTimes(1);

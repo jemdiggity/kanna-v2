@@ -681,6 +681,9 @@ describe("createAppModel cloud routing", () => {
     const observeTaskAgent = vi.fn(() => mergeAgentSubscription);
     const invokeDesktop = vi.fn<RelayDesktopClient["invokeDesktop"]>(
       async (request) => {
+        if (request.method === "GET" && request.path === "/v1/repos") {
+          return [{ id: "repo-1", name: "Repo One" }];
+        }
         if (
           request.method === "PUT" &&
           /^\/v1\/tasks\/[0-9a-f]{32}$/.test(request.path)
