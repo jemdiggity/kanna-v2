@@ -583,7 +583,6 @@ describe("createAppModel cloud routing", () => {
     app.controller.openComposer();
     app.controller.updateComposerPrompt("Create from mobile");
     await app.controller.createTask();
-
     const canonicalTaskId = "cloud:desktop-owner:repo-1:task-created";
     const stableSlotId = app.sessionStore.getState().taskUiSlots[0]?.slotId;
     expect(app.sessionStore.getState()).toMatchObject({
@@ -930,7 +929,8 @@ describe("createAppModel cloud routing", () => {
     await app.initialize();
     await expect(app.client.listRepos()).resolves.toContainEqual({
       id: "repo-a",
-      name: "Repository A"
+      name: "Repository A",
+      registeredDesktopIds: ["desktop-a"]
     });
     app.sessionStore.selectDesktop("desktop-b");
     await expect(app.client.listRepoCommands("repo-a")).resolves.toMatchObject({
@@ -1044,7 +1044,8 @@ describe("createAppModel cloud routing", () => {
     await vi.waitFor(() => {
       expect(app.sessionStore.getState().repos).toContainEqual({
         id: "repo-fresh",
-        name: "Fresh Repo"
+        name: "Fresh Repo",
+        registeredDesktopIds: ["desktop-owner"]
       });
     });
 
@@ -1166,7 +1167,8 @@ describe("createAppModel cloud routing", () => {
     await vi.waitFor(() => {
       expect(app.sessionStore.getState().repos).toContainEqual({
         id: "repo-fresh",
-        name: "Fresh Repo"
+        name: "Fresh Repo",
+        registeredDesktopIds: ["desktop-owner"]
       });
     });
     expect(invokeDesktop).toHaveBeenCalledWith(
@@ -1293,7 +1295,8 @@ describe("createAppModel cloud routing", () => {
     await vi.waitFor(() => {
       expect(app.sessionStore.getState().repos).toContainEqual({
         id: "repo-fresh",
-        name: "Fresh Repo"
+        name: "Fresh Repo",
+        registeredDesktopIds: ["desktop-owner"]
       });
     });
 

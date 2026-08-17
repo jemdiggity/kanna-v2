@@ -13,6 +13,7 @@ import {
 } from "react-native";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { DesktopSummary, RepoSummary } from "../lib/api/types";
+import { repoIsRegisteredOnDesktop } from "../lib/api/repoIdentity";
 import type {
   ComposerAgentProvider
 } from "../state/sessionStore";
@@ -66,8 +67,13 @@ export function CreateTaskComposer({
   onSubmit
 }: CreateTaskComposerProps) {
   const selectedRepo = repos.find((repo) => repo.id === selectedRepoId) ?? null;
+  const eligibleDesktops = selectedRepo
+    ? desktops.filter((desktop) =>
+        repoIsRegisteredOnDesktop(selectedRepo, desktop.id)
+      )
+    : desktops;
   const selectedDesktop =
-    desktops.find((desktop) => desktop.id === selectedDesktopId) ?? null;
+    eligibleDesktops.find((desktop) => desktop.id === selectedDesktopId) ?? null;
   const selectedAgentLabel =
     AGENT_OPTIONS.find((option) => option.provider === selectedAgentProvider)?.label ??
     selectedAgentProvider;
@@ -124,7 +130,7 @@ export function CreateTaskComposer({
                 <View style={styles.optionSection}>
                   <Text style={styles.optionLabel}>Machine</Text>
                   <View style={styles.choiceGroup}>
-                    {desktops.map((desktop) => {
+                    {eligibleDesktops.map((desktop) => {
                       const selected = desktop.id === selectedDesktop?.id;
                       return (
                         <Pressable

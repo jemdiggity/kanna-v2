@@ -7,6 +7,7 @@ import type {
   TaskTerminalStreamEvent,
   TaskTerminalSubscription,
 } from "../api/client";
+import { RepoNotRegisteredError } from "../api/client";
 import type {
   CreateTaskRequest,
   CreateTaskResponse,
@@ -143,6 +144,7 @@ export function createRemoteTransport({
   const desktopRepoSnapshots = new Map<string, RepoSummary[]>();
   const desktopRepoFetchedAt = new Map<string, number>();
   const desktopRepoReads = new Map<string, Promise<void>>();
+  let latestDesktopRecords: RemoteDesktopRecord[] = [];
 
   const taskRouteForId = (taskId: string): CloudTaskRoute | null =>
     provisionalTaskRoutes.get(taskId) ?? cloudTaskRoutes.get(taskId) ?? null;
@@ -235,13 +237,26 @@ export function createRemoteTransport({
       };
     }
     if (requestedDesktopId) {
-      return {
-        desktopId: requestedDesktopId,
-        localRepoId: isRemoteRepoId(repoId)
-          ? (await resolveDesktopLocalRepoId(requestedDesktopId, repoId)) ??
-            repoId
-          : repoId
-      };
+      if (
+        !latestDesktopRecords.some(
+          (desktop) => desktop.desktopId === requestedDesktopId
+        )
+      ) {
+        try {
+          latestDesktopRecords = await listDesktopRecords();
+        } catch {
+          // The destination repo read below remains authoritative for routing.
+        }
+      }
+      await readDesktopRepos(requestedDesktopId);
+      const localRepoId = desktopLocalRepoId(requestedDesktopId, repoId);
+      if (!localRepoId) {
+        throw new RepoNotRegisteredError(
+          repoDisplayName(repoId),
+          desktopDisplayName(requestedDesktopId)
+        );
+      }
+      return { desktopId: requestedDesktopId, localRepoId };
     }
     if (!cloudRepoOwners.has(repoId)) {
       await listReachableDesktopRepos();
@@ -253,25 +268,36 @@ export function createRemoteTransport({
     desktopId: string,
     repoId: string
   ): string | null => {
+    const knownMember = [...desktopRepoSnapshots.values()]
+      .flat()
+      .find((repo) => repo.id === repoId);
+    const logicalRepoId = isRemoteRepoId(repoId)
+      ? repoId
+      : knownMember
+        ? canonicalRepoId(knownMember)
+        : repoId;
     const member = desktopRepoSnapshots
       .get(desktopId)
-      ?.find((repo) => canonicalRepoId(repo) === repoId);
+      ?.find(
+        (repo) => repo.id === repoId || canonicalRepoId(repo) === logicalRepoId
+      );
     return member?.id ?? null;
   };
 
-  // A canonical repo id (`git:<hash>`) is machine-independent; the desktop
-  // needs its own local repo id, resolved from that desktop's repo snapshot.
-  const resolveDesktopLocalRepoId = async (
-    desktopId: string,
-    repoId: string
-  ): Promise<string | null> => {
-    const localRepoId = desktopLocalRepoId(desktopId, repoId);
-    if (localRepoId || desktopRepoSnapshots.has(desktopId)) {
-      return localRepoId;
-    }
-    await listReachableDesktopRepos();
-    return desktopLocalRepoId(desktopId, repoId);
+  const repoDisplayName = (repoId: string): string => {
+    const member = [...desktopRepoSnapshots.values()]
+      .flat()
+      .find(
+        (repo) => repo.id === repoId || canonicalRepoId(repo) === repoId
+      );
+    return member?.name ??
+      latestAcceptedCloudTasks.find((task) => task.repoId === repoId)?.repoName?.trim() ??
+      repoId;
   };
+
+  const desktopDisplayName = (desktopId: string): string =>
+    latestDesktopRecords.find((desktop) => desktop.desktopId === desktopId)
+      ?.displayName ?? desktopId;
 
   const requestDesktop = async <T>(
     desktopId: string,
@@ -310,6 +336,14 @@ export function createRemoteTransport({
     }
   };
 
+  const readDesktopRepos = async (desktopId: string): Promise<void> => {
+    const repos = parseRepoSummaries(
+      await requestDesktop<unknown>(desktopId, "GET", "/v1/repos", null)
+    );
+    rememberDesktopRepos(desktopId, repos);
+    desktopRepoFetchedAt.set(desktopId, Date.now());
+  };
+
   const forgetDesktopRepos = (desktopId: string) => {
     desktopRepoSnapshots.delete(desktopId);
     desktopRepoFetchedAt.delete(desktopId);
@@ -327,10 +361,7 @@ export function createRemoteTransport({
     }
     const read = (async () => {
       try {
-        const repos = parseRepoSummaries(
-          await requestDesktop<unknown>(desktopId, "GET", "/v1/repos", null)
-        );
-        rememberDesktopRepos(desktopId, repos);
+        await readDesktopRepos(desktopId);
       } catch {
         // Keep the last snapshot for this desktop; a transiently
         // unreachable desktop's repos still merge from the cache below.
@@ -353,6 +384,7 @@ export function createRemoteTransport({
     } catch {
       return;
     }
+    latestDesktopRecords = records;
     const recordIds = new Set(records.map((record) => record.desktopId));
     for (const desktopId of [...desktopRepoSnapshots.keys()]) {
       if (!recordIds.has(desktopId)) {
@@ -388,7 +420,12 @@ export function createRemoteTransport({
   // the snapshot cache for the next listing.
   const listReachableDesktopRepos = (): Promise<RepoSummary[]> => {
     const collectDesktopRepos = () =>
-      [...desktopRepoSnapshots.values()].flat();
+      [...desktopRepoSnapshots.entries()].flatMap(([desktopId, repos]) =>
+        repos.map((repo) => ({
+          ...repo,
+          registeredDesktopIds: [desktopId]
+        }))
+      );
     return awaitWithFallback(
       refreshDesktopRepos().then(collectDesktopRepos),
       desktopRepoWaitMs,
@@ -548,6 +585,7 @@ export function createRemoteTransport({
     },
     async listDesktops(): Promise<DesktopSummary[]> {
       const records = await listDesktopRecords();
+      latestDesktopRecords = records;
       return records.map((record) => ({
         id: record.desktopId,
         name: record.displayName,
@@ -571,7 +609,10 @@ export function createRemoteTransport({
         if (!taskRepos.has(task.repoId)) {
           taskRepos.set(task.repoId, {
             id: task.repoId,
-            name: task.repoName?.trim() || task.repoId
+            name: task.repoName?.trim() || task.repoId,
+            ...(task.ownerDesktopId
+              ? { registeredDesktopIds: [task.ownerDesktopId] }
+              : {})
           });
         }
       }

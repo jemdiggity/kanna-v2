@@ -28,6 +28,13 @@ export function canonicalRepoId(repo: {
     : repo.id;
 }
 
+export function repoIsRegisteredOnDesktop(
+  repo: RepoSummary,
+  desktopId: string
+): boolean {
+  return repo.registeredDesktopIds?.includes(desktopId) ?? true;
+}
+
 /**
  * Merges repo summaries from several sources (task-derived, per-desktop repo
  * lists, LAN snapshots) into one entry per logical repository.
@@ -56,12 +63,23 @@ export function mergeRepoSummaries(repos: RepoSummary[]): RepoSummary[] {
       merged.set(id, {
         id,
         name: repo.name,
-        ...(repo.remoteUrlHash ? { remoteUrlHash: repo.remoteUrlHash } : {})
+        ...(repo.remoteUrlHash ? { remoteUrlHash: repo.remoteUrlHash } : {}),
+        ...(repo.registeredDesktopIds
+          ? { registeredDesktopIds: [...new Set(repo.registeredDesktopIds)] }
+          : {})
       });
       continue;
     }
     if (!existing.remoteUrlHash && repo.remoteUrlHash) {
       existing.remoteUrlHash = repo.remoteUrlHash;
+    }
+    if (repo.registeredDesktopIds) {
+      existing.registeredDesktopIds = [
+        ...new Set([
+          ...(existing.registeredDesktopIds ?? []),
+          ...repo.registeredDesktopIds
+        ])
+      ];
     }
   }
   return Array.from(merged.values());

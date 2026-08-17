@@ -18,6 +18,11 @@ import type {
 } from "../lib/api/client";
 import type { CompanionEvent } from "@kanna/agent-protocol";
 import { TaskCreationError } from "../lib/api/client";
+import { RepoNotRegisteredError } from "../lib/api/client";
+import {
+  mergeRepoSummaries,
+  repoIsRegisteredOnDesktop
+} from "../lib/api/repoIdentity";
 import type { MachinePairingService } from "../lib/pairing/machinePairing";
 import type { MobileAuthSession } from "../lib/firebase/auth";
 import {
@@ -1384,26 +1389,24 @@ export function createMobileController(
   };
 
   const reposFromTasks = (tasks: TaskSummary[]): RepoSummary[] => {
-    const reposById = new Map<string, string>();
+    const reposById = new Map<string, RepoSummary>();
     for (const task of tasks) {
       if (reposById.has(task.repoId)) continue;
-      reposById.set(task.repoId, task.repoName?.trim() || task.repoId);
+      reposById.set(task.repoId, {
+        id: task.repoId,
+        name: task.repoName?.trim() || task.repoId,
+        ...(task.ownerDesktopId
+          ? { registeredDesktopIds: [task.ownerDesktopId] }
+          : {})
+      });
     }
-    return Array.from(reposById, ([id, name]) => ({ id, name }));
+    return Array.from(reposById.values());
   };
 
   const mergeReposWithTaskRepos = (
     repos: RepoSummary[],
     tasks: TaskSummary[]
-  ): RepoSummary[] => {
-    const mergedRepos = new Map(repos.map((repo) => [repo.id, repo.name]));
-    for (const repo of reposFromTasks(tasks)) {
-      if (!mergedRepos.has(repo.id)) {
-        mergedRepos.set(repo.id, repo.name);
-      }
-    }
-    return Array.from(mergedRepos, ([id, name]) => ({ id, name }));
-  };
+  ): RepoSummary[] => mergeRepoSummaries([...repos, ...reposFromTasks(tasks)]);
 
   const uniqueTasksById = (tasks: TaskSummary[]): TaskSummary[] => {
     const seen = new Set<string>();
@@ -1432,6 +1435,19 @@ export function createMobileController(
 
   const inferComposerDesktopId = (repoId: string): string | null => {
     const state = store.getState();
+    const repo = state.repos.find((candidate) => candidate.id === repoId);
+    if (repo?.registeredDesktopIds) {
+      const knownDesktopIds = repo.registeredDesktopIds
+        .map(resolveKnownDesktopId)
+        .filter((desktopId): desktopId is string => desktopId !== null);
+      if (
+        state.selectedDesktopId &&
+        knownDesktopIds.includes(state.selectedDesktopId)
+      ) {
+        return state.selectedDesktopId;
+      }
+      return knownDesktopIds.length === 1 ? knownDesktopIds[0] : null;
+    }
     const ownerIds = new Set<string>();
     for (const task of [
       ...state.repoTasks,
@@ -2031,11 +2047,15 @@ export function createMobileController(
     openComposer() {
       const state = store.getState();
       const selectedRepoId = state.selectedRepoId;
+      const selectedRepo = selectedRepoId
+        ? state.repos.find((repo) => repo.id === selectedRepoId)
+        : null;
       const profile = selectedRepoId
         ? state.repoCreationProfiles.find((candidate) => candidate.repoId === selectedRepoId)
         : null;
       const composerDesktopId =
-        profile
+        profile &&
+        (!selectedRepo || repoIsRegisteredOnDesktop(selectedRepo, profile.desktopId))
           ? resolveKnownDesktopId(profile.desktopId)
           : selectedRepoId
             ? inferComposerDesktopId(selectedRepoId)
@@ -2178,6 +2198,23 @@ export function createMobileController(
       if (!composerDesktopId) {
         store.setComposerDesktop(null);
         store.setComposerErrorMessage("Choose a machine for this repo first.");
+        store.setComposerOptionsExpanded(true);
+        return Promise.resolve(null);
+      }
+
+      const composerRepo = state.repos.find(
+        (repo) => repo.id === state.composerRepoId
+      );
+      if (
+        composerRepo &&
+        !repoIsRegisteredOnDesktop(composerRepo, composerDesktopId)
+      ) {
+        const desktopName = state.desktops.find(
+          (desktop) => desktop.id === composerDesktopId
+        )?.name ?? composerDesktopId;
+        store.setComposerErrorMessage(
+          new RepoNotRegisteredError(composerRepo.name, desktopName).message
+        );
         store.setComposerOptionsExpanded(true);
         return Promise.resolve(null);
       }

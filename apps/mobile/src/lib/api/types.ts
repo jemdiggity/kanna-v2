@@ -50,6 +50,10 @@ export interface RepoSummary {
    * repository registered on several desktops shares this hash while each
    * desktop mints its own local id. */
   remoteUrlHash?: string | null;
+  /** Desktop ids whose latest repository inventory contains this logical
+   * repository. Mobile derives this from per-desktop `/v1/repos` reads; it is
+   * not a server-persisted repository identity. */
+  registeredDesktopIds?: string[];
 }
 
 export type RepoCommandGroup = "automation" | "configure";

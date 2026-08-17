@@ -15,7 +15,7 @@ import type {
   TaskTerminalSubscription
 } from "../lib/api/client";
 import { createKannaClient, TaskCreationError } from "../lib/api/client";
-import type { TaskSummary } from "../lib/api/types";
+import type { RepoSummary, TaskSummary } from "../lib/api/types";
 import { createCloudLanClient } from "../lib/sources/cloudLanClient";
 import { createRemoteTransport, type RemoteDesktopInvoker } from "../lib/transports/remoteTransport";
 import { mapCloudTaskSnapshot } from "../lib/firebase/taskIndex";
@@ -3525,6 +3525,37 @@ describe("createMobileController", () => {
     expect(store.getState().composerPrompt).toBe("");
   });
 
+  it("preserves repo registration inventory and blocks an invalid composer machine", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const repo: RepoSummary = {
+      id: "git:hash-kanji",
+      name: "kanji-kongbu",
+      remoteUrlHash: "hash-kanji",
+      registeredDesktopIds: ["desktop-1"]
+    };
+    client.listRepos.mockResolvedValue([repo]);
+    client.listRecentTasks.mockResolvedValue([]);
+    client.listRepoTasks.mockResolvedValue([]);
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+
+    expect(store.getState().repos).toEqual([repo]);
+    controller.openComposer();
+    controller.selectComposerDesktop("desktop-2");
+    controller.updateComposerPrompt("Study kanji");
+
+    await expect(controller.createTask()).resolves.toBeNull();
+    expect(client.createTask).not.toHaveBeenCalled();
+    expect(store.getState()).toMatchObject({
+      isComposerOpen: true,
+      composerDesktopId: "desktop-2",
+      composerErrorMessage:
+        "kanji-kongbu is not registered on Laptop. Register it on that machine before creating a task."
+    });
+  });
+
   it("opens a fresh composer and starts another task while an earlier creation is uncertain", async () => {
     const store = createSessionStore();
     const client = createClientMock();
@@ -6465,7 +6496,11 @@ describe("createMobileController", () => {
     await controller.bootstrap();
 
     expect(store.getState().repos).toEqual([
-      { id: "repo-cloud-1", name: "Cloud Repo" }
+      {
+        id: "repo-cloud-1",
+        name: "Cloud Repo",
+        registeredDesktopIds: ["desktop-owner"]
+      }
     ]);
   });
 
