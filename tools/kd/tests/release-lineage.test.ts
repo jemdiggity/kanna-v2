@@ -3,16 +3,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  composePostPromotionTrunkBody,
   composeStagingChannelBody,
   evaluateCandidateLineage,
   evaluatePromotionGate,
   evaluateSoak,
   evaluateStagingPublishGate,
   formatLineageResetBlock,
+  formatPostPromotionTrunkBlock,
   isReleaseBranchName,
   parseLineageResetRecord,
+  parsePostPromotionTrunkRecord,
+  promotionAuthorizes,
   resetAuthorizes,
   type LineageResetRecord,
+  type PostPromotionTrunkRecord,
   type StagingCandidate
 } from "../src/runtime/release-lineage";
 import { hasProductionTagForSeries, parseUnmergedReleaseCommits } from "../src/runtime/release";
@@ -35,6 +40,16 @@ const RESET: LineageResetRecord = {
   reason: "hotfix the 0.1 series"
 };
 
+const POST_PROMOTION: PostPromotionTrunkRecord = {
+  resumedAt: "2026-08-17T03:00:00Z",
+  promotedVersion: "0.1.0",
+  promotedTag: "v0.1.0",
+  promotedCommit: ACTIVE.commit ?? "",
+  productionTagCommit: ACTIVE.commit ?? "",
+  newCommit: "8888888888888888888888888888888888888888",
+  newBranch: "main"
+};
+
 function gate(overrides: Partial<Parameters<typeof evaluateStagingPublishGate>[0]> = {}) {
   return evaluateStagingPublishGate({
     proposedSourceBranch: "main",
@@ -44,6 +59,7 @@ function gate(overrides: Partial<Parameters<typeof evaluateStagingPublishGate>[0
     activeProductionTagExists: false,
     activeMetadataError: null,
     reset: null,
+    postPromotion: null,
     ...overrides
   });
 }
@@ -78,6 +94,26 @@ describe("staging publish gate", () => {
       activeProductionTagExists: true
     });
     expect(thawed.allowed).toBe(true);
+  });
+
+  it("allows only a recorded promoted divergence back to forward main", () => {
+    const resumed = gate({
+      active: { ...ACTIVE, sourceBranch: "release/0.1" },
+      relationship: "diverged",
+      activeProductionTagExists: true,
+      postPromotion: POST_PROMOTION
+    });
+    expect(resumed).toMatchObject({ allowed: true, authorizedByPromotion: true, waivedByReset: false });
+
+    expect(gate({ relationship: "diverged", activeProductionTagExists: true, postPromotion: null }).allowed).toBe(false);
+    expect(
+      gate({
+        active: { ...ACTIVE, sourceBranch: "release/0.1" },
+        relationship: "diverged",
+        activeProductionTagExists: true,
+        postPromotion: { ...POST_PROMOTION, promotedCommit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+      }).allowed
+    ).toBe(false);
   });
 
   it("keeps shipping the release branch itself during a freeze", () => {
@@ -138,6 +174,35 @@ describe("lineage reset records", () => {
   });
 });
 
+describe("post-promotion trunk records", () => {
+  it("round-trips a resumption record and keeps earlier audit history", () => {
+    const resetBody = composeStagingChannelBody("Pointer-only desktop staging updater channel.", RESET);
+    const body = composePostPromotionTrunkBody(resetBody, POST_PROMOTION);
+    expect(parsePostPromotionTrunkRecord(body)).toEqual(POST_PROMOTION);
+    expect(parseLineageResetRecord(body)).toEqual(RESET);
+    expect(formatPostPromotionTrunkBlock(POST_PROMOTION)).toContain("Promoted-Tag: v0.1.0");
+  });
+
+  it("matches every endpoint of the recorded transition", () => {
+    expect(
+      promotionAuthorizes(POST_PROMOTION, {
+        fromVersion: ACTIVE.version,
+        fromCommit: ACTIVE.commit,
+        toCommit: POST_PROMOTION.newCommit,
+        toBranch: "main"
+      })
+    ).toBe(true);
+    expect(
+      promotionAuthorizes(POST_PROMOTION, {
+        fromVersion: ACTIVE.version,
+        fromCommit: ACTIVE.commit,
+        toCommit: POST_PROMOTION.newCommit,
+        toBranch: "release/0.2"
+      })
+    ).toBe(false);
+  });
+});
+
 describe("candidate lineage", () => {
   const candidate: StagingCandidate = {
     version: "0.1.0-staging.8",
@@ -149,25 +214,38 @@ describe("candidate lineage", () => {
   const previous = { version: ACTIVE.version, tag: ACTIVE.tag, commit: ACTIVE.commit };
 
   it("treats a first candidate as valid", () => {
-    const lineage = evaluateCandidateLineage({ candidate, previous: null, relationship: "descendant", reset: null });
+    const lineage = evaluateCandidateLineage({ candidate, previous: null, relationship: "descendant", reset: null, postPromotion: null });
     expect(lineage).toMatchObject({ relationship: "initial", valid: true });
   });
 
   it("marks an unauthorized divergence invalid", () => {
-    const lineage = evaluateCandidateLineage({ candidate, previous, relationship: "diverged", reset: null });
+    const lineage = evaluateCandidateLineage({ candidate, previous, relationship: "diverged", reset: null, postPromotion: null });
     expect(lineage.valid).toBe(false);
     expect(lineage.authorizedByReset).toBe(false);
   });
 
   it("marks a recorded divergence valid", () => {
-    const lineage = evaluateCandidateLineage({ candidate, previous, relationship: "diverged", reset: RESET });
+    const lineage = evaluateCandidateLineage({ candidate, previous, relationship: "diverged", reset: RESET, postPromotion: null });
     expect(lineage.valid).toBe(true);
     expect(lineage.authorizedByReset).toBe(true);
     expect(lineage.detail).toContain("authorized by the recorded lineage reset");
   });
 
+  it("marks a recorded post-promotion trunk divergence valid", () => {
+    const mainCandidate = { ...candidate, sourceBranch: "main" };
+    const lineage = evaluateCandidateLineage({
+      candidate: mainCandidate,
+      previous,
+      relationship: "diverged",
+      reset: null,
+      postPromotion: POST_PROMOTION
+    });
+    expect(lineage).toMatchObject({ valid: true, authorizedByReset: false, authorizedByPromotion: true });
+    expect(lineage.detail).toContain("resumed trunk");
+  });
+
   it("fails closed on an unresolvable comparison", () => {
-    const lineage = evaluateCandidateLineage({ candidate, previous, relationship: "unknown", reset: RESET });
+    const lineage = evaluateCandidateLineage({ candidate, previous, relationship: "unknown", reset: RESET, postPromotion: null });
     expect(lineage.valid).toBe(false);
   });
 });
@@ -212,7 +290,8 @@ describe("promotion gate", () => {
     candidate: { ...ACTIVE, version: "1.2.4-staging.3", tag: "v1.2.4-staging.3" },
     previous: { version: "1.2.4-staging.2", tag: "v1.2.4-staging.2", commit: "aaaa" },
     relationship: "descendant",
-    reset: null
+    reset: null,
+    postPromotion: null
   });
   const soak = evaluateSoak({
     requiredHours: 24,

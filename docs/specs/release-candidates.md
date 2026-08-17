@@ -24,7 +24,9 @@ channel. Instead it names the pattern and closes the loop:
 - **Every staging ship is a release candidate.** `vX.Y.Z-staging.N` is an
   immutable prerelease whose `targetCommitish` records exactly which commit was
   built. `X.Y.Z` is the production version it is a candidate *for* (the base
-  version is derived by bumping `VERSION`); `N` is the candidate number.
+  version on main is derived by bumping the greater of `VERSION` and the latest
+  production release, so stale trunk metadata cannot create a downgrade); `N`
+  is the candidate number.
 - **Soaking is using staging as a daily driver.** That is not a failure mode —
   it is the validation step. What was missing is the exit.
 - **Promotion is the exit.** `kd release promote X.Y.Z-staging.N` turns the
@@ -69,6 +71,7 @@ the commit about to be built:
 | same commit (a rebuild) | allowed |
 | descendant | allowed |
 | ancestor (a rollback) | refused — use `--rollback-to` or a reset |
+| diverged, promoted release-branch RC → forward main | allowed — promotion identity and branch-point ancestry verified; provenance recorded |
 | diverged (the incident) | refused — ship a descendant, or record a reset |
 | unresolvable / active candidate metadata unreadable | refused — fail closed |
 | channel unreadable (network, rate limit, 5xx, bad manifest) | refused — fail closed |
@@ -111,22 +114,39 @@ git fetch origin release/1.3 && git checkout --detach FETCH_HEAD
 While the channel serves an *unpromoted* `release/X.Y` candidate — its production
 tag `vX.Y.Z` does not exist yet — a main staging publish is refused. It would
 repoint the one staging channel away from the RC mid-soak. Main resumes
-automatically once the RC is promoted (the production tag appears), or through
-the explicit reset below. Shipping the release branch itself is never frozen.
+automatically after promotion only when `vX.Y.Z` is a real GitHub production
+release whose remote and freshly fetched tag resolve either to the active
+candidate's recorded commit or to kd's single-parent `release: vX.Y.Z` version
+bump directly atop it, and the proposed main commit descends from the merge-base
+of `origin/main` and the candidate's resolved source branch. (GitHub records
+`targetCommitish: "main"` for the existing-tag release, so the immutable proof
+comes from both git tag resolutions.) That verified hand-back records a
+`Post-Promotion-Trunk-Resumption:` audit block on `desktop-staging`.
+A merely present or mismatched tag does not lift the lineage gate. The explicit
+reset below remains available for an actual abandonment. Shipping the release
+branch itself is never frozen.
 
-### 4. Only rollback and reset move a channel non-linearly
+### 4. Every non-linear move is narrow and recorded
 
-Two operations may move the channel against its own history, and both are
-explicit:
+Three paths may move the channel against raw commit ancestry:
 
 - `kd release ship --staging --rollback-to X.Y.Z-staging.N` repoints the manifest
   to an existing prerelease. It builds nothing and it is already deliberate.
+- The first forward-main publish after a release-branch RC was genuinely
+  promoted may diverge because backports have different SHAs. It is automatic
+  only after the promotion/tag and branch-point proofs above, and records the
+  promoted version, RC commit, production tag commit, plus the new branch,
+  commit, and timestamp.
 - `kd release reset-staging` abandons the current lineage so the *next* publish
   may diverge.
 
 Nothing else may. There is no flag on an ordinary ship that weakens the gates.
 
 ## The reset / abandon operation
+
+Reset is exceptional abandonment, not a routine series hand-back. A normal
+post-promotion transition from `release/X.Y` to forward `main` uses the verified,
+recorded path above and does not require `reset-staging`.
 
 ```sh
 ./kd release reset-staging \
@@ -159,6 +179,11 @@ A divergence that a reset authorized is reported by `kd release status` as
 `relationship: "diverged"` with `valid: true` and `authorizedByReset: true`, and
 it is promotable. That is the point: the deliberate path stays open, and the
 record says who decided and why.
+
+A verified post-promotion hand-back is likewise reported with
+`relationship: "diverged"`, `valid: true`, and `authorizedByPromotion: true`,
+with the parsed `postPromotion` record and an explicit human-readable reason.
+This is the only automatic divergent move.
 
 ## Promotion contract
 
@@ -251,8 +276,8 @@ Safety state is separate from mechanics. The result carries:
   commits behind `origin/main`, publication time, and age in hours.
 - `lineage` — `relationship` (`initial` / `same-commit` / `descendant` /
   `behind` / `diverged` / `unknown`), the `previous` candidate it is compared
-  against, `valid`, `authorizedByReset`, the parsed `reset` record, and a
-  human-readable `detail`.
+  against, `valid`, `authorizedByReset`, `authorizedByPromotion`, the parsed
+  `reset` / `postPromotion` audit records, and a human-readable `detail`.
 - `releaseBranch` — the series branch when one exists, plus `unmergedCommits` /
   `unmergedCommitCount` (below).
 - `freeze` — whether main staging publishes are currently frozen, by which
@@ -297,7 +322,9 @@ bugfixes.
 - **Promote from the branch.** Guard 4 pins the branch tip instead of main, so
   main can run arbitrarily far ahead during the soak. The version bump commit
   lands on the branch; after promoting, merge `release/X.Y` back into main so
-  `VERSION` and the tag history reach main.
+  `VERSION` and the tag history reach main. Until that merge lands, a main RC
+  uses the latest production release as its version floor and reports
+  `versionFloor` in the ship result when that floor overrides stale `VERSION`.
 - **The branch goes dormant after release.** Reuse it for `X.Y.1` hotfix RCs
   (the series versioning picks the next patch automatically); cut `release/X.(Y+1)`
   for the next feature release.
@@ -380,10 +407,12 @@ owner: `origin/main:VERSION` (`0.0.68`) is what trunk last released;
 `0.2.Z-staging.N` from the branch series rather than from `VERSION`; production
 is whatever `vX.Y.Z` was last tagged. Promotion pushes the `0.2.0` version-file
 bump to `release/0.2`, and merging the branch back to main is what finally moves
-trunk's `VERSION` to `0.2.0`. Main RCs shipped before that merge still number
-themselves from trunk's `VERSION` (`0.0.69-staging.N`) — lower than the series
-being stabilized, which is expected, and moot in practice because the freeze
-rule refuses main RCs while an unpromoted release-branch candidate is active.
+trunk's `VERSION` to `0.2.0`. Before promotion, the freeze rule refuses main RCs.
+After promotion, a main ship compares `VERSION` with the latest non-prerelease
+GitHub release, takes the greater version, and applies the requested bump. Thus
+stale `VERSION` at `0.0.68` with production at `v0.2.0` derives
+`v0.2.1-staging.N`, never `v0.0.69-staging.N`; the returned `versionFloor`
+record calls out the lag until the branch merge synchronizes the file.
 
 ### Branch hygiene: enforced vs. documented
 
@@ -488,8 +517,8 @@ five-minute decision about a build that already proved itself, not a project.
   `kd release ship --release`.
 - `kd release reset-staging --to main|release/X.Y --reason <why>
   --confirm-abandon <staging-version> [--dry-run]` / MCP
-  `release_reset_staging` — the only non-linear lifecycle transition besides
-  rollback.
+  `release_reset_staging` — explicitly abandon lineage for an exceptional
+  non-linear transition; routine post-promotion return to main does not use it.
 - `kd release ship` stays the way candidates are cut. It becomes branch-aware
   automatically on a `release/X.Y` checkout, and takes
   `--branch main|release/X.Y` to declare RC provenance explicitly from Kanna

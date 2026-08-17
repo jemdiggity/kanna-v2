@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CommandRunner } from "./process";
 import {
+  composePostPromotionTrunkBody,
   composeStagingChannelBody,
   evaluateCandidateLineage,
   evaluatePromotionGate,
@@ -11,8 +12,10 @@ import {
   isReleaseBranchName,
   normalizeStagingVersion,
   parseLineageResetRecord,
+  parsePostPromotionTrunkRecord,
   type CandidateLineage,
   type LineageResetRecord,
+  type PostPromotionTrunkRecord,
   type SoakEvaluation,
   type StagingCandidate,
   type StagingLineageRelationship
@@ -62,6 +65,8 @@ export interface ReleaseShipResult {
   dmgPaths: string[];
   updaterPaths: string[];
   latestJson: string;
+  /** Present when stale trunk VERSION was raised to the production floor. */
+  versionFloor?: MainStagingVersionFloor;
 }
 
 const STAGING_CHANNEL_TAG = "desktop-staging";
@@ -295,6 +300,80 @@ interface StagingContext {
   baseVersion: string;
   sourceBranch: string;
   commit: string;
+  versionFloor: MainStagingVersionFloor | null;
+}
+
+export interface MainStagingVersionFloor {
+  versionFile: string;
+  latestProduction: string;
+  baseVersion: string;
+  detail: string;
+}
+
+export function deriveMainStagingBaseVersion(
+  versionFile: string,
+  latestProduction: string | null,
+  bump: ReleaseBump
+): { baseVersion: string; versionFloor: MainStagingVersionFloor | null } {
+  const floorApplied = latestProduction !== null && compareVersions(versionFile, latestProduction) < 0;
+  const sourceVersion = floorApplied ? latestProduction : versionFile;
+  const baseVersion = bumpVersion(sourceVersion, bump);
+  return {
+    baseVersion,
+    versionFloor: floorApplied && latestProduction
+      ? {
+          versionFile,
+          latestProduction,
+          baseVersion,
+          detail:
+            `VERSION ${versionFile} lags latest production v${latestProduction}; ` +
+            `derived main staging version ${baseVersion} from the production floor.`
+        }
+      : null
+  };
+}
+
+function parseLatestProductionVersion(raw: string): string | null {
+  const parsed = JSON.parse(raw) as unknown;
+  if (!Array.isArray(parsed)) throw new Error("Could not parse the latest production release from gh output.");
+  if (parsed.length === 0) return null;
+  const first = parsed[0];
+  if (typeof first !== "object" || first === null) {
+    throw new Error("Could not parse the latest production release from gh output.");
+  }
+  const record = first as { tagName?: unknown; isPrerelease?: unknown };
+  if (
+    record.isPrerelease !== false ||
+    typeof record.tagName !== "string" ||
+    !/^v\d+\.\d+\.\d+$/.test(record.tagName)
+  ) {
+    throw new Error(`Latest production release metadata is invalid: ${raw}`);
+  }
+  return record.tagName.slice(1);
+}
+
+async function readLatestProductionVersion(input: ReleaseShipInput): Promise<string | null> {
+  const remoteUrl = await mustRun(input.runner, "git", ["remote", "get-url", "origin"], input.repoRoot, input.env);
+  const repoSlug = releaseRepoSlug(remoteUrl);
+  const raw = await mustRun(
+    input.runner,
+    "gh",
+    [
+      "release",
+      "list",
+      "--repo",
+      repoSlug,
+      "--limit",
+      "1",
+      "--exclude-drafts",
+      "--exclude-pre-releases",
+      "--json",
+      "tagName,isPrerelease"
+    ],
+    input.repoRoot,
+    input.env
+  );
+  return parseLatestProductionVersion(raw);
 }
 
 async function resolveStagingContext(input: ReleaseShipInput): Promise<StagingContext> {
@@ -314,7 +393,8 @@ async function resolveStagingContext(input: ReleaseShipInput): Promise<StagingCo
 
   if (branchName === "main") {
     const sourceVersion = readCurrentVersion(input.repoRoot);
-    return { baseVersion: bumpVersion(sourceVersion, input.bump), sourceBranch: "main", commit: head };
+    const derivation = deriveMainStagingBaseVersion(sourceVersion, await readLatestProductionVersion(input), input.bump);
+    return { ...derivation, sourceBranch: "main", commit: head };
   }
 
   const series = parseReleaseBranchSeries(branchName);
@@ -347,7 +427,7 @@ async function resolveStagingContext(input: ReleaseShipInput): Promise<StagingCo
     );
   }
   const tags = await mustRun(input.runner, "git", ["ls-remote", "--tags", "origin", `v${series.major}.${series.minor}.*`], input.repoRoot, input.env);
-  return { baseVersion: nextSeriesPatchVersion(tags, series), sourceBranch: branchName, commit: head };
+  return { baseVersion: nextSeriesPatchVersion(tags, series), sourceBranch: branchName, commit: head, versionFloor: null };
 }
 
 const SOURCE_BRANCH_TRAILER = "Source-Branch:";
@@ -515,6 +595,17 @@ async function readStagingChannelBody(context: ReleaseCommandContext, repoSlug: 
 
 async function readLineageReset(context: ReleaseCommandContext, repoSlug: string): Promise<LineageResetRecord | null> {
   return parseLineageResetRecord(await readStagingChannelBody(context, repoSlug));
+}
+
+async function readLineageAudit(
+  context: ReleaseCommandContext,
+  repoSlug: string
+): Promise<{ reset: LineageResetRecord | null; postPromotion: PostPromotionTrunkRecord | null }> {
+  const body = await readStagingChannelBody(context, repoSlug);
+  return {
+    reset: parseLineageResetRecord(body),
+    postPromotion: parsePostPromotionTrunkRecord(body)
+  };
 }
 
 interface CandidateLookup {
@@ -725,10 +816,158 @@ async function productionTagExists(context: ReleaseCommandContext, productionVer
  * and is reported as unpromoted so the freeze rule stays conservative.
  */
 async function activeProductionTagExists(context: ReleaseCommandContext, stagingVersion: string): Promise<boolean> {
-  const match = /^(\d+\.\d+\.\d+)-staging\.\d+$/.exec(stagingVersion.trim().replace(/^v/, ""));
-  const productionVersion = match?.[1];
+  const productionVersion = productionVersionForStaging(stagingVersion);
   if (!productionVersion) return false;
   return productionTagExists(context, productionVersion);
+}
+
+function productionVersionForStaging(stagingVersion: string): string | null {
+  return /^(\d+\.\d+\.\d+)-staging\.\d+$/.exec(stagingVersion.trim().replace(/^v/, ""))?.[1] ?? null;
+}
+
+/**
+ * Resolve the narrow post-promotion hand-back to main. Every fact is checked
+ * here before the pure lineage gate receives an authorization record:
+ * production release metadata and both tag resolutions prove the tag is the RC
+ * promotion (directly, or at kd's exact version-bump child), the recorded
+ * release branch still resolves, and the proposed trunk commit is forward of
+ * that branch's merge-base with origin/main.
+ */
+async function resolvePostPromotionTrunkRecord(
+  context: ReleaseCommandContext & { now?: number },
+  repoSlug: string,
+  active: StagingCandidate,
+  proposed: { sourceBranch: string; commit: string }
+): Promise<PostPromotionTrunkRecord | null> {
+  const activeSourceBranch = active.sourceBranch;
+  if (proposed.sourceBranch !== "main" || !active.commit || !activeSourceBranch || !isReleaseBranchName(activeSourceBranch)) {
+    return null;
+  }
+  const productionVersion = productionVersionForStaging(active.version);
+  if (!productionVersion) return null;
+  const productionTag = `v${productionVersion}`;
+
+  try {
+    const releaseView = await context.runner.run(
+      "gh",
+      ["release", "view", productionTag, "--repo", repoSlug, "--json", "tagName,targetCommitish,isPrerelease"],
+      { cwd: context.repoRoot, env: context.env }
+    );
+    if (releaseView.exitCode !== 0) return null;
+    const parsed = JSON.parse(releaseView.stdout) as unknown;
+    if (typeof parsed !== "object" || parsed === null) return null;
+    const metadata = parsed as { tagName?: unknown; targetCommitish?: unknown; isPrerelease?: unknown };
+    if (
+      metadata.tagName !== productionTag ||
+      metadata.isPrerelease !== false ||
+      typeof metadata.targetCommitish !== "string" ||
+      metadata.targetCommitish.trim().length === 0
+    ) {
+      return null;
+    }
+
+    const tagRefs = await mustRun(
+      context.runner,
+      "git",
+      ["ls-remote", "--tags", "origin", `refs/tags/${productionTag}`, `refs/tags/${productionTag}^{}`],
+      context.repoRoot,
+      context.env
+    );
+    const productionTagCommit = parseRemoteTagCommit(tagRefs, productionTag)?.toLowerCase() ?? null;
+    if (!productionTagCommit) return null;
+    await mustRun(
+      context.runner,
+      "git",
+      ["fetch", "--no-tags", "origin", `refs/tags/${productionTag}`],
+      context.repoRoot,
+      context.env
+    );
+    const fetchedCommit = await mustRun(
+      context.runner,
+      "git",
+      ["rev-parse", "FETCH_HEAD^{commit}"],
+      context.repoRoot,
+      context.env
+    );
+    if (fetchedCommit.toLowerCase() !== productionTagCommit) return null;
+    if (productionTagCommit !== active.commit.toLowerCase()) {
+      const parentLine = await mustRun(
+        context.runner,
+        "git",
+        ["show", "-s", "--format=%P", "FETCH_HEAD"],
+        context.repoRoot,
+        context.env
+      );
+      const parents = parentLine.split(/\s+/).filter(Boolean);
+      const subject = await mustRun(
+        context.runner,
+        "git",
+        ["show", "-s", "--format=%s", "FETCH_HEAD"],
+        context.repoRoot,
+        context.env
+      );
+      if (parents.length !== 1 || parents[0]?.toLowerCase() !== active.commit.toLowerCase() || subject !== `release: ${productionTag}`) {
+        return null;
+      }
+    }
+
+    await mustRun(
+      context.runner,
+      "git",
+      ["fetch", "origin", "main", activeSourceBranch],
+      context.repoRoot,
+      context.env
+    );
+    const originMain = await mustRun(context.runner, "git", ["rev-parse", "origin/main"], context.repoRoot, context.env);
+    const originRelease = await mustRun(
+      context.runner,
+      "git",
+      ["rev-parse", `origin/${activeSourceBranch}`],
+      context.repoRoot,
+      context.env
+    );
+    const mergeBase = await mustRun(
+      context.runner,
+      "git",
+      ["merge-base", originMain, originRelease],
+      context.repoRoot,
+      context.env
+    );
+    if (!/^[0-9a-f]{40}$/i.test(mergeBase)) return null;
+    const releaseContainsCandidate = await context.runner.run(
+      "git",
+      ["merge-base", "--is-ancestor", active.commit, originRelease],
+      { cwd: context.repoRoot, env: context.env }
+    );
+    if (releaseContainsCandidate.exitCode !== 0) return null;
+    const mainContainsBase = await context.runner.run(
+      "git",
+      ["merge-base", "--is-ancestor", mergeBase, originMain],
+      { cwd: context.repoRoot, env: context.env }
+    );
+    if (mainContainsBase.exitCode !== 0) return null;
+    const proposedDescendsFromBase = await context.runner.run(
+      "git",
+      ["merge-base", "--is-ancestor", mergeBase, proposed.commit],
+      { cwd: context.repoRoot, env: context.env }
+    );
+    if (proposedDescendsFromBase.exitCode !== 0) return null;
+
+    return {
+      resumedAt: new Date(context.now ?? Date.now()).toISOString(),
+      promotedVersion: productionVersion,
+      promotedTag: productionTag,
+      promotedCommit: active.commit.toLowerCase(),
+      productionTagCommit,
+      newCommit: proposed.commit.toLowerCase(),
+      newBranch: proposed.sourceBranch
+    };
+  } catch (error) {
+    throw new Error(
+      `Could not verify whether ${productionTag} authorizes post-promotion trunk resumption: ` +
+        (error instanceof Error ? error.message : String(error))
+    );
+  }
 }
 
 async function listStagingCandidateTags(context: ReleaseCommandContext, repoSlug: string): Promise<string[]> {
@@ -765,7 +1004,8 @@ async function resolveCandidateLineage(
   context: ReleaseCommandContext,
   repoSlug: string,
   candidate: StagingCandidate,
-  reset: LineageResetRecord | null
+  reset: LineageResetRecord | null,
+  postPromotion: PostPromotionTrunkRecord | null = null
 ): Promise<CandidateLineage> {
   const { previous, found } = await resolvePreviousCandidate(context, repoSlug, candidate.tag);
   if (!found) {
@@ -774,19 +1014,22 @@ async function resolveCandidateLineage(
       previous: null,
       valid: false,
       authorizedByReset: false,
+      authorizedByPromotion: false,
       reset,
+      postPromotion,
       detail: `${candidate.tag} is not listed among this repository's staging prereleases, so its lineage cannot be established.`
     };
   }
   if (!previous) {
-    return evaluateCandidateLineage({ candidate, previous: null, relationship: "initial", reset });
+    return evaluateCandidateLineage({ candidate, previous: null, relationship: "initial", reset, postPromotion });
   }
   const relationship = await commitRelationship(context, previous.commit, candidate.commit);
   return evaluateCandidateLineage({
     candidate,
     previous: { version: previous.version, tag: previous.tag, commit: previous.commit },
     relationship,
-    reset
+    reset,
+    postPromotion
   });
 }
 
@@ -798,32 +1041,39 @@ async function resolveCandidateLineage(
 async function assertStagingPublishAllowed(
   input: ReleaseShipInput,
   proposed: { sourceBranch: string; commit: string }
-): Promise<void> {
+): Promise<PostPromotionTrunkRecord | null> {
   const remoteUrl = await mustRun(input.runner, "git", ["remote", "get-url", "origin"], input.repoRoot, input.env);
   const repoSlug = releaseRepoSlug(remoteUrl);
   const active = await resolveActiveStagingCandidate(input, repoSlug);
   // A candidate we could not read still has to reach the gate: only a channel
   // positively known to be empty skips the comparison.
-  if (!active.candidate && !active.error) return;
+  if (!active.candidate && !active.error) return null;
 
   if (active.candidate) await fetchStagingHistory(input);
   const relationship = active.candidate
     ? await commitRelationship(input, active.candidate.commit, proposed.commit)
     : "unknown";
+  const productionTagPresent = active.candidate
+    ? await activeProductionTagExists(input, active.candidate.version)
+    : false;
+  const postPromotion = active.candidate && relationship === "diverged" && productionTagPresent
+    ? await resolvePostPromotionTrunkRecord(input, repoSlug, active.candidate, proposed)
+    : null;
+  const audit = active.candidate ? await readLineageAudit(input, repoSlug) : { reset: null, postPromotion: null };
   const decision = evaluateStagingPublishGate({
     proposedSourceBranch: proposed.sourceBranch,
     proposedCommit: proposed.commit,
     active: active.candidate,
     relationship,
-    activeProductionTagExists: active.candidate
-      ? await activeProductionTagExists(input, active.candidate.version)
-      : false,
+    activeProductionTagExists: productionTagPresent,
     activeMetadataError: active.error,
-    reset: active.candidate ? await readLineageReset(input, repoSlug) : null
+    reset: audit.reset,
+    postPromotion
   });
   if (!decision.allowed) {
     throw new Error(decision.reason ?? `Refusing to repoint ${STAGING_CHANNEL_TAG}.`);
   }
+  return decision.authorizedByPromotion ? postPromotion : null;
 }
 
 interface ResolvedPromotion {
@@ -1195,6 +1445,8 @@ export async function shipRelease(input: ReleaseShipInput): Promise<ReleaseShipR
   let version: string;
   let pushBranch = "main";
   let stagingSourceBranch = "main";
+  let postPromotionTrunk: PostPromotionTrunkRecord | null = null;
+  let versionFloor: MainStagingVersionFloor | null = null;
   if (input.promoteFrom) {
     const promotion = await resolvePromotion(input, input.promoteFrom);
     version = promotion.version;
@@ -1202,7 +1454,8 @@ export async function shipRelease(input: ReleaseShipInput): Promise<ReleaseShipR
   } else if (environment === "staging") {
     const stagingContext = await resolveStagingContext(input);
     stagingSourceBranch = stagingContext.sourceBranch;
-    await assertStagingPublishAllowed(input, {
+    versionFloor = stagingContext.versionFloor;
+    postPromotionTrunk = await assertStagingPublishAllowed(input, {
       sourceBranch: stagingContext.sourceBranch,
       commit: stagingContext.commit
     });
@@ -1290,6 +1543,19 @@ export async function shipRelease(input: ReleaseShipInput): Promise<ReleaseShipR
       latestJson
     ], input.repoRoot, input.env);
     await ensureStagingGithubRelease(input, repoSlug);
+    if (postPromotionTrunk) {
+      const channelBody = composePostPromotionTrunkBody(
+        await readStagingChannelBody(input, repoSlug),
+        postPromotionTrunk
+      );
+      await mustRun(
+        input.runner,
+        "gh",
+        ["release", "edit", STAGING_CHANNEL_TAG, "--repo", repoSlug, "--notes", channelBody],
+        input.repoRoot,
+        input.env
+      );
+    }
     await mustRun(input.runner, "gh", ["release", "upload", STAGING_CHANNEL_TAG, latestJson, "--repo", repoSlug, "--clobber"], input.repoRoot, input.env);
     await pruneStagingChannelAssets(input, repoSlug);
     await pruneOldStagingPrereleases(input, repoSlug, `v${version}`);
@@ -1302,7 +1568,13 @@ export async function shipRelease(input: ReleaseShipInput): Promise<ReleaseShipR
     await mustRun(input.runner, "gh", ["release", "upload", `v${version}`, latestJson, "--clobber"], input.repoRoot, input.env);
   }
 
-  return { version, dmgPaths, updaterPaths, latestJson };
+  return {
+    version,
+    dmgPaths,
+    updaterPaths,
+    latestJson,
+    ...(versionFloor ? { versionFloor } : {})
+  };
 }
 
 export interface ReleaseCutInput {
@@ -1766,7 +2038,9 @@ export interface ReleaseStatusLineage {
   previous: { version: string; tag: string; commit: string | null } | null;
   valid: boolean;
   authorizedByReset: boolean;
+  authorizedByPromotion: boolean;
   reset: LineageResetRecord | null;
+  postPromotion: PostPromotionTrunkRecord | null;
   detail: string;
 }
 
@@ -2062,8 +2336,8 @@ export async function releaseStatus(input: ReleaseStatusInput): Promise<ReleaseS
 
   if (staging && activeCandidate) {
     await fetchStagingHistory(input);
-    const reset = await readLineageReset(input, repoSlug);
-    lineage = await resolveCandidateLineage(input, repoSlug, activeCandidate, reset);
+    const audit = await readLineageAudit(input, repoSlug);
+    lineage = await resolveCandidateLineage(input, repoSlug, activeCandidate, audit.reset, audit.postPromotion);
 
     if (isReleaseBranchName(staging.sourceBranch)) {
       const promoted = await activeProductionTagExists(input, staging.version);

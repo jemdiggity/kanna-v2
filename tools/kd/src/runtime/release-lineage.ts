@@ -43,7 +43,23 @@ export interface LineageResetRecord {
   reason: string;
 }
 
+/**
+ * Audit evidence for the one ordinary divergence caused by the release-branch
+ * model: after an RC is promoted, trunk may resume from the branch point even
+ * though it cannot contain the branch's cherry-picked commit SHAs.
+ */
+export interface PostPromotionTrunkRecord {
+  resumedAt: string;
+  promotedVersion: string;
+  promotedTag: string;
+  promotedCommit: string;
+  productionTagCommit: string;
+  newCommit: string;
+  newBranch: string;
+}
+
 export const LINEAGE_RESET_MARKER = "Lineage-Reset:";
+export const POST_PROMOTION_TRUNK_MARKER = "Post-Promotion-Trunk-Resumption:";
 export const STAGING_CHANNEL_BODY_HEADER = "Pointer-only desktop staging updater channel.";
 
 export function isReleaseBranchName(branch: string | null | undefined): boolean {
@@ -60,6 +76,17 @@ export function formatLineageResetBlock(record: LineageResetRecord): string {
     `Reset-From: ${record.fromVersion} (${record.fromCommit ?? "unknown-commit"}) source ${record.fromSourceBranch ?? "unknown"}`,
     `Reset-To: ${record.toBranch}`,
     `Reset-Reason: ${record.reason}`
+  ].join("\n");
+}
+
+export function formatPostPromotionTrunkBlock(record: PostPromotionTrunkRecord): string {
+  return [
+    `${POST_PROMOTION_TRUNK_MARKER} ${record.resumedAt}`,
+    `Promoted-Version: ${record.promotedVersion}`,
+    `Promoted-Tag: ${record.promotedTag}`,
+    `Promoted-Commit: ${record.promotedCommit}`,
+    `Production-Tag-Commit: ${record.productionTagCommit}`,
+    `Resumed-To: ${record.newCommit} source ${record.newBranch}`
   ].join("\n");
 }
 
@@ -89,14 +116,46 @@ export function parseLineageResetRecord(body: string): LineageResetRecord | null
   };
 }
 
-export function composeStagingChannelBody(existingBody: string, record: LineageResetRecord): string {
+/** Reads the newest post-promotion trunk-resumption audit block. */
+export function parsePostPromotionTrunkRecord(body: string): PostPromotionTrunkRecord | null {
+  const lines = body.split(/\r?\n/);
+  const start = lines.findIndex((line) => line.trim().startsWith(POST_PROMOTION_TRUNK_MARKER));
+  if (start < 0) return null;
+  const resumedAt = lines[start]?.trim().slice(POST_PROMOTION_TRUNK_MARKER.length).trim() ?? "";
+  const block = lines.slice(start + 1, start + 6).join("\n");
+  const version = /^Promoted-Version:[ \t]*(\S+)[ \t]*$/m.exec(block);
+  const tag = /^Promoted-Tag:[ \t]*(\S+)[ \t]*$/m.exec(block);
+  const commit = /^Promoted-Commit:[ \t]*([0-9a-f]{40})[ \t]*$/im.exec(block);
+  const tagCommit = /^Production-Tag-Commit:[ \t]*([0-9a-f]{40})[ \t]*$/im.exec(block);
+  const resumed = /^Resumed-To:[ \t]*([0-9a-f]{40})[ \t]*source[ \t]*(\S+)[ \t]*$/im.exec(block);
+  if (!resumedAt || !version?.[1] || !tag?.[1] || !commit?.[1] || !tagCommit?.[1] || !resumed?.[1] || !resumed[2]) return null;
+  return {
+    resumedAt,
+    promotedVersion: normalizeStagingVersion(version[1]),
+    promotedTag: tag[1],
+    promotedCommit: commit[1].toLowerCase(),
+    productionTagCommit: tagCommit[1].toLowerCase(),
+    newCommit: resumed[1].toLowerCase(),
+    newBranch: resumed[2]
+  };
+}
+
+function composeStagingChannelAuditBlock(existingBody: string, block: string): string {
   const trimmed = existingBody.trim();
   const history = trimmed.length > 0 && trimmed !== STAGING_CHANNEL_BODY_HEADER
     ? trimmed.replace(new RegExp(`^${STAGING_CHANNEL_BODY_HEADER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*`), "").trim()
     : "";
-  return [STAGING_CHANNEL_BODY_HEADER, "", formatLineageResetBlock(record), ...(history ? ["", history] : [])]
+  return [STAGING_CHANNEL_BODY_HEADER, "", block, ...(history ? ["", history] : [])]
     .join("\n")
     .trimEnd() + "\n";
+}
+
+export function composeStagingChannelBody(existingBody: string, record: LineageResetRecord): string {
+  return composeStagingChannelAuditBlock(existingBody, formatLineageResetBlock(record));
+}
+
+export function composePostPromotionTrunkBody(existingBody: string, record: PostPromotionTrunkRecord): string {
+  return composeStagingChannelAuditBlock(existingBody, formatPostPromotionTrunkBlock(record));
 }
 
 /**
@@ -114,6 +173,26 @@ export function resetAuthorizes(
   return reset.toBranch === args.toBranch;
 }
 
+export function promotionAuthorizes(
+  record: PostPromotionTrunkRecord | null,
+  args: {
+    fromVersion: string;
+    fromCommit: string | null;
+    toCommit: string | null;
+    toBranch: string | null;
+  }
+): boolean {
+  if (!record || !args.fromCommit || !args.toCommit || !args.toBranch) return false;
+  const fromProductionVersion = normalizeStagingVersion(args.fromVersion).replace(/-staging\.\d+$/, "");
+  return (
+    normalizeStagingVersion(record.promotedVersion) === fromProductionVersion &&
+    record.promotedTag === `v${fromProductionVersion}` &&
+    record.promotedCommit.toLowerCase() === args.fromCommit.toLowerCase() &&
+    record.newCommit.toLowerCase() === args.toCommit.toLowerCase() &&
+    record.newBranch === args.toBranch
+  );
+}
+
 export interface StagingPublishGateInput {
   /** `main` or `release/X.Y` — the branch the proposed RC is being built from. */
   proposedSourceBranch: string;
@@ -127,12 +206,15 @@ export interface StagingPublishGateInput {
   /** Whether the active candidate's metadata could be resolved at all. */
   activeMetadataError: string | null;
   reset: LineageResetRecord | null;
+  /** Present only after GitHub/tag identity and forward-trunk ancestry were verified. */
+  postPromotion: PostPromotionTrunkRecord | null;
 }
 
 export interface StagingPublishGateDecision {
   allowed: boolean;
   reason: string | null;
   waivedByReset: boolean;
+  authorizedByPromotion: boolean;
   frozenBy: string | null;
 }
 
@@ -149,6 +231,7 @@ export function evaluateStagingPublishGate(input: StagingPublishGateInput): Stag
     return {
       allowed: false,
       waivedByReset: false,
+      authorizedByPromotion: false,
       frozenBy: null,
       reason:
         `Cannot verify staging lineage: ${active ? `the active candidate ${active.tag}` : "the staging channel"} ` +
@@ -158,7 +241,7 @@ export function evaluateStagingPublishGate(input: StagingPublishGateInput): Stag
   }
 
   if (!active) {
-    return { allowed: true, reason: null, waivedByReset: false, frozenBy: null };
+    return { allowed: true, reason: null, waivedByReset: false, authorizedByPromotion: false, frozenBy: null };
   }
 
   const waived = resetAuthorizes(input.reset, {
@@ -166,7 +249,7 @@ export function evaluateStagingPublishGate(input: StagingPublishGateInput): Stag
     toBranch: input.proposedSourceBranch
   });
   if (waived) {
-    return { allowed: true, reason: null, waivedByReset: true, frozenBy: null };
+    return { allowed: true, reason: null, waivedByReset: true, authorizedByPromotion: false, frozenBy: null };
   }
 
   if (
@@ -177,6 +260,7 @@ export function evaluateStagingPublishGate(input: StagingPublishGateInput): Stag
     return {
       allowed: false,
       waivedByReset: false,
+      authorizedByPromotion: false,
       frozenBy: active.sourceBranch,
       reason:
         `${active.tag} is an unpromoted ${active.sourceBranch} release candidate, so staging is frozen to that branch. ` +
@@ -189,11 +273,12 @@ export function evaluateStagingPublishGate(input: StagingPublishGateInput): Stag
   switch (input.relationship) {
     case "same-commit":
     case "descendant":
-      return { allowed: true, reason: null, waivedByReset: false, frozenBy: null };
+      return { allowed: true, reason: null, waivedByReset: false, authorizedByPromotion: false, frozenBy: null };
     case "behind":
       return {
         allowed: false,
         waivedByReset: false,
+        authorizedByPromotion: false,
         frozenBy: null,
         reason:
           `Refusing to roll the staging channel back. ${input.proposedCommit} is an ancestor of the active candidate ` +
@@ -202,9 +287,27 @@ export function evaluateStagingPublishGate(input: StagingPublishGateInput): Stag
           `kd release ship --staging --rollback-to <version>, or abandon the lineage: ${RESET_HINT}.`
       };
     case "diverged":
+      if (
+        input.activeProductionTagExists &&
+        promotionAuthorizes(input.postPromotion, {
+          fromVersion: active.version,
+          fromCommit: active.commit,
+          toCommit: input.proposedCommit,
+          toBranch: input.proposedSourceBranch
+        })
+      ) {
+        return {
+          allowed: true,
+          reason: null,
+          waivedByReset: false,
+          authorizedByPromotion: true,
+          frozenBy: null
+        };
+      }
       return {
         allowed: false,
         waivedByReset: false,
+        authorizedByPromotion: false,
         frozenBy: null,
         reason:
           `Refusing to publish a staging candidate whose history diverged from the active channel. ` +
@@ -219,6 +322,7 @@ export function evaluateStagingPublishGate(input: StagingPublishGateInput): Stag
       return {
         allowed: false,
         waivedByReset: false,
+        authorizedByPromotion: false,
         frozenBy: null,
         reason:
           `Cannot compare ${input.proposedCommit} with the active candidate ${active.tag} ` +
@@ -233,28 +337,34 @@ export interface CandidateLineage {
   previous: { version: string; tag: string; commit: string | null } | null;
   valid: boolean;
   authorizedByReset: boolean;
+  authorizedByPromotion: boolean;
   reset: LineageResetRecord | null;
+  postPromotion: PostPromotionTrunkRecord | null;
   detail: string;
 }
 
 /**
- * Whether a candidate reached the channel by a legal move. A divergence is only
- * valid when a recorded reset authorized exactly that move.
+ * Whether a candidate reached the channel by a legal move. A divergence is
+ * valid only when a reset or verified post-promotion record authorized exactly
+ * that move.
  */
 export function evaluateCandidateLineage(args: {
   candidate: StagingCandidate;
   previous: { version: string; tag: string; commit: string | null } | null;
   relationship: StagingLineageRelationship;
   reset: LineageResetRecord | null;
+  postPromotion: PostPromotionTrunkRecord | null;
 }): CandidateLineage {
-  const { candidate, previous, relationship, reset } = args;
+  const { candidate, previous, relationship, reset, postPromotion } = args;
   if (!previous) {
     return {
       relationship: "initial",
       previous: null,
       valid: true,
       authorizedByReset: false,
+      authorizedByPromotion: false,
       reset,
+      postPromotion,
       detail: `${candidate.tag} is the first staging candidate on this channel; there is no prior lineage to compare.`
     };
   }
@@ -262,6 +372,14 @@ export function evaluateCandidateLineage(args: {
   const authorizedByReset =
     (relationship === "diverged" || relationship === "behind") &&
     resetAuthorizes(reset, { fromVersion: previous.version, toBranch: candidate.sourceBranch ?? "" });
+  const authorizedByPromotion =
+    relationship === "diverged" &&
+    promotionAuthorizes(postPromotion, {
+      fromVersion: previous.version,
+      fromCommit: previous.commit,
+      toCommit: candidate.commit,
+      toBranch: candidate.sourceBranch
+    });
 
   switch (relationship) {
     case "same-commit":
@@ -270,7 +388,9 @@ export function evaluateCandidateLineage(args: {
         previous,
         valid: true,
         authorizedByReset: false,
+        authorizedByPromotion: false,
         reset,
+        postPromotion,
         detail: `${candidate.tag} rebuilt the same commit as ${previous.tag}.`
       };
     case "descendant":
@@ -279,7 +399,9 @@ export function evaluateCandidateLineage(args: {
         previous,
         valid: true,
         authorizedByReset: false,
+        authorizedByPromotion: false,
         reset,
+        postPromotion,
         detail: `${candidate.tag} (${candidate.commit ?? "unknown"}) is a descendant of ${previous.tag} (${previous.commit ?? "unknown"}).`
       };
     case "behind":
@@ -288,7 +410,9 @@ export function evaluateCandidateLineage(args: {
         previous,
         valid: authorizedByReset,
         authorizedByReset,
+        authorizedByPromotion: false,
         reset,
+        postPromotion,
         detail: authorizedByReset
           ? `${candidate.tag} moved the channel backwards from ${previous.tag}, authorized by the recorded lineage reset of ${reset?.resetAt}.`
           : `${candidate.tag} (${candidate.commit ?? "unknown"}) is an ancestor of ${previous.tag} (${previous.commit ?? "unknown"}): the channel moved backwards with no recorded reset.`
@@ -297,12 +421,16 @@ export function evaluateCandidateLineage(args: {
       return {
         relationship,
         previous,
-        valid: authorizedByReset,
+        valid: authorizedByReset || authorizedByPromotion,
         authorizedByReset,
+        authorizedByPromotion,
         reset,
+        postPromotion,
         detail: authorizedByReset
           ? `${candidate.tag} diverged from ${previous.tag}, authorized by the recorded lineage reset of ${reset?.resetAt}.`
-          : `${candidate.tag} (${candidate.commit ?? "unknown"}) and ${previous.tag} (${previous.commit ?? "unknown"}) share only an older merge base: the channel moved non-linearly with no recorded reset.`
+          : authorizedByPromotion
+          ? `${candidate.tag} resumed trunk after ${previous.tag} was promoted, authorized by the recorded post-promotion transition of ${postPromotion?.resumedAt}.`
+          : `${candidate.tag} (${candidate.commit ?? "unknown"}) and ${previous.tag} (${previous.commit ?? "unknown"}) share only an older merge base: the channel moved non-linearly with no recorded authorization.`
       };
     case "initial":
     case "unknown":
@@ -312,7 +440,9 @@ export function evaluateCandidateLineage(args: {
         previous,
         valid: false,
         authorizedByReset: false,
+        authorizedByPromotion: false,
         reset,
+        postPromotion,
         detail: `Could not compare ${candidate.tag} with ${previous.tag}; one of the commits is unavailable locally.`
       };
   }

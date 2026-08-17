@@ -2270,7 +2270,7 @@ export const taskDefinitions = [
   },
   {
     id: "release.ship",
-    description: "Build, sign, notarize, and optionally publish a Kanna release.",
+    description: "Build, sign, notarize, and optionally publish a Kanna release, flooring main staging versions above latest production.",
     inputSchema: releaseShipInputSchema,
     execute: async (_context, input) => {
       const parsed = releaseShipInputSchema.parse(input);
@@ -2350,7 +2350,7 @@ export const taskDefinitions = [
   {
     id: "release.reset-staging",
     description:
-      "Abandon the active staging lineage so the next publish may move the channel non-linearly. Records old/new provenance; never runs implicitly.",
+      "Abandon the active staging lineage for an exceptional non-linear publish. Records old/new provenance and never runs implicitly; routine post-promotion return to main is verified automatically.",
     inputSchema: releaseResetStagingInputSchema,
     execute: async (_context, input) => {
       const parsed = releaseResetStagingInputSchema.parse(input);
@@ -2423,7 +2423,7 @@ export const taskDefinitions = [
   {
     id: "release.status",
     description:
-      "Show the production release and the staging channel pointer, separating mechanical promotability from lineage validity, soak age, release freeze, and promotion blockers.",
+      "Show the production release and staging pointer, including reset- or promotion-authorized lineage, soak age, release freeze, and promotion blockers.",
     inputSchema: releaseStatusInputSchema,
     execute: async (_context, input) => {
       releaseStatusInputSchema.parse(input);
