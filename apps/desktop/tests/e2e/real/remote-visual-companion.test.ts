@@ -1253,14 +1253,60 @@ async function runCausalRemoteInputTest(): Promise<void> {
       });
       await waitForRemoteTerminalLine(taskId, readyMarker);
 
-      const terminalTextarea = await secondary.waitForElement(
-        ".main-panel .cloud-terminal-shell .xterm-helper-textarea",
-      );
-      await secondary.sendKeys(terminalTextarea, humanInput);
+      // WKWebView's element-value sendKeys bypasses the DOM producer events.
+      // Drive the ordinary beforeinput -> input path that real typing uses so
+      // this assertion covers the terminal's draft classification as well.
+      await secondary.executeSync(`
+        const input = document.querySelector(
+          ".main-panel .cloud-terminal-shell .xterm-helper-textarea"
+        );
+        if (!(input instanceof HTMLTextAreaElement)) {
+          throw new Error("remote xterm textarea unavailable");
+        }
+        input.focus();
+        input.dispatchEvent(new InputEvent("beforeinput", {
+          bubbles: true,
+          composed: true,
+          data: ${JSON.stringify(humanInput)},
+          inputType: "insertText",
+        }));
+        input.dispatchEvent(new InputEvent("input", {
+          bubbles: true,
+          composed: true,
+          data: ${JSON.stringify(humanInput)},
+          inputType: "insertText",
+        }));
+      `);
       await waitForRemoteTerminalLine(taskId, `DRAFT:<${humanInput}>`);
+
+      const { baseUrl } = await resolveAppKannaServer(primary);
+      const response = await fetch(
+        `${baseUrl}/v1/tasks/${encodeURIComponent(taskId)}/input`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ input: managerInput }),
+        },
+      );
+      if (!response.ok) {
+        throw new Error(
+          `logical task input failed: ${response.status} ${await response.text()}`,
+        );
+      }
+
+      await sleep(250);
+      const submittedBeforeBoundary = await secondary.executeSync<string[]>(`
+        const buffers = window.__KANNA_E2E__?.terminalBuffers;
+        if (!buffers) throw new Error("terminal buffer hook unavailable");
+        return buffers.lines(${JSON.stringify(taskId)})
+          .filter((line) => line.startsWith("SUBMIT:"));
+      `);
+      expect(submittedBeforeBoundary).toEqual([]);
+
       await secondary.pressKey("\uE007");
       await waitForRemoteTerminalLine(taskId, `SUBMIT:<${humanInput}>`);
       await waitForRemoteTerminalLine(taskId, "PARSER_CONTROL:<>");
+      await waitForRemoteTerminalLine(taskId, `SUBMIT:<${managerInput}>`);
 
       // Exercise xterm's real CompositionHelper ordering. Its custom key
       // handler runs first; keyCode 13 then finalizes the active composition
@@ -1313,23 +1359,6 @@ async function runCausalRemoteInputTest(): Promise<void> {
       await waitForRemoteTerminalLine(taskId, "SUBMIT:<>");
       await waitForRemoteTerminalLine(taskId, "PARSER_CONTROL:<>");
 
-      const { baseUrl } = await resolveAppKannaServer(primary);
-      const response = await fetch(
-        `${baseUrl}/v1/tasks/${encodeURIComponent(taskId)}/input`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ input: managerInput }),
-        },
-      );
-      if (!response.ok) {
-        throw new Error(
-          `logical task input failed: ${response.status} ${await response.text()}`,
-        );
-      }
-
-      await waitForRemoteTerminalLine(taskId, `SUBMIT:<${managerInput}>`);
-
       const submittedLines = await secondary.executeSync<string[]>(`
         const buffers = window.__KANNA_E2E__?.terminalBuffers;
         if (!buffers) throw new Error("terminal buffer hook unavailable");
@@ -1338,9 +1367,9 @@ async function runCausalRemoteInputTest(): Promise<void> {
       `);
       expect(submittedLines).toEqual([
         `SUBMIT:<${humanInput}>`,
+        `SUBMIT:<${managerInput}>`,
         `SUBMIT:<${compositionInput}>`,
         "SUBMIT:<>",
-        `SUBMIT:<${managerInput}>`,
       ]);
     } finally {
       await tauriInvoke(primary, "kill_session", { sessionId: taskId })
