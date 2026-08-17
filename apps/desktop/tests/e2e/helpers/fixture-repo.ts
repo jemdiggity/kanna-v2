@@ -261,6 +261,19 @@ export async function createSeedFixtureRepo(
   });
 }
 
+/**
+ * Publish fixture mutations before importing the repo. Kanna resolves repo
+ * definitions from the origin snapshot, just as it does for a real task.
+ */
+export async function publishFixtureChanges(
+  repoPath: string,
+  message: string,
+): Promise<void> {
+  await runCommand(["git", "add", "."], { cwd: repoPath });
+  await runCommand(["git", "commit", "-m", message], { cwd: repoPath });
+  await runCommand(["git", "push", "origin", "main"], { cwd: repoPath });
+}
+
 export async function cleanupFixtureRepos(repoPaths: string[]): Promise<void> {
   const targets: string[] = [];
   const refusals: string[] = [];

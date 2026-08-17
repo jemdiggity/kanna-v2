@@ -656,7 +656,14 @@ describe("cloud task ownership transfer", () => {
 
     await signOut(secondary);
     await Promise.all([
-      waitForTransferMachineMatching(primary, "Secondary", (machine) => machine === null),
+      waitForTransferMachineMatching(
+        primary,
+        "Secondary",
+        (machine) =>
+          machine?.trustSource === "paired-lan"
+          && machine.preferredTransport === "lan"
+          && machine.relayDesktopId === null,
+      ),
       waitForTransferMachineMatching(secondary, "Primary", (machine) => machine === null),
       waitForRemotePullEligibility(secondary, "Cloud sign-out pull eligibility", null),
     ]);
@@ -667,7 +674,10 @@ describe("cloud task ownership transfer", () => {
 
     const removeRealLanRoutes = await exposeRealLanRoutesBetweenInstances();
     try {
-      expect(await listPairMachineRows(primary)).toContain("Secondary");
+      await expect.poll(
+        () => listPairMachineRows(primary),
+        { timeout: 30_000, interval: 100 },
+      ).toContain("Secondary");
       await pairWithPeerThroughUi(primary, "Secondary", "peer-secondary", {
         promptClient: secondary,
         promptPeerId: "peer-primary",
@@ -676,6 +686,13 @@ describe("cloud task ownership transfer", () => {
         waitForTransferPeerTrusted(primary, "peer-secondary"),
         waitForTransferPeerTrusted(secondary, "peer-primary"),
       ]);
+      // Pairing is accepted by the destination sidecar without opening its
+      // picker. Refresh both renderers through the same on-demand discovery
+      // path an operator uses before asserting that sign-out preserves LAN
+      // eligibility; otherwise the destination can retain its pre-pairing
+      // untrusted snapshot until another picker happens to open.
+      expect(await listTransferPickerRows(primary)).toContain("Secondary");
+      expect(await listTransferPickerRows(secondary)).toContain("Primary");
 
       await Promise.all([signIn(primary), signIn(secondary)]);
       await waitForBidirectionalCloudReadiness();

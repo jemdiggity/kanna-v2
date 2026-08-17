@@ -8,23 +8,48 @@ import { WebDriverClient } from "../helpers/webdriver";
 const client = new WebDriverClient();
 const terminalSelector = ".terminal-panel .xterm-helper-textarea";
 
-async function waitForSelectedTask(taskId: string, timeoutMs = 15_000): Promise<void> {
+async function waitForSelectedTask(
+  taskId: string,
+  timeoutMs = 15_000,
+  reselect = false,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
+  let lastState: unknown = null;
   while (Date.now() < deadline) {
-    const selected = await client.executeSync<string | null>(
-      "return window.__KANNA_E2E__?.setupState?.store?.selectedItemId ?? null;",
+    if (reselect) {
+      await callVueMethod(client, "selectSidebarItemById", taskId);
+    }
+    lastState = await client.executeSync(
+      `const store = window.__KANNA_E2E__?.setupState?.store;
+       const read = (value) => value?.__v_isRef ? value.value : value;
+       return JSON.parse(JSON.stringify({
+         selectedItemId: read(store?.selectedItemId) ?? null,
+         selectedTaskId: read(store?.selectedTaskId) ?? null,
+         itemIds: (read(store?.items) ?? []).map((item) => item.id),
+         slots: (read(store?.taskUiSlots) ?? []).map((slot) => ({
+           slotId: slot.slot_id,
+           taskId: slot.task_id,
+         })),
+       }));`,
     );
-    if (selected === taskId) return;
+    if ((lastState as { selectedTaskId?: string | null }).selectedTaskId === taskId) return;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  throw new Error(`Timed out waiting for selected task ${taskId}`);
+  throw new Error(`Timed out waiting for selected task ${taskId}; state=${JSON.stringify(lastState)}`);
 }
 
 async function selectTask(taskId: string): Promise<string> {
-  await callVueMethod(client, "loadItems");
-  await callVueMethod(client, "store.selectRepo", SEED.repos.app.id);
-  await callVueMethod(client, "store.selectItem", taskId);
-  await waitForSelectedTask(taskId);
+  for (const [method, ...args] of [
+    ["store.reloadSnapshot"],
+    ["store.selectRepo", SEED.repos.app.id],
+    ["selectSidebarItemById", taskId],
+  ] as const) {
+    const result = await callVueMethod(client, method, ...args);
+    if (result && typeof result === "object" && "__error" in result) {
+      throw new Error(String((result as { __error: unknown }).__error));
+    }
+  }
+  await waitForSelectedTask(taskId, 15_000, true);
   return client.waitForElement(terminalSelector, 20_000);
 }
 
@@ -154,7 +179,7 @@ describe("native approval control", () => {
       `);
       await client.sendKeys(replacementTextarea, `${afterMarker}\n`);
 
-      await callVueMethod(client, "loadItems");
+      await callVueMethod(client, "store.reloadSnapshot");
       await waitForSelectedTask(taskId);
       const continuity = await client.executeSync<{ marker: string | null; focused: boolean }>(`
         const terminal = document.querySelector(${JSON.stringify(terminalSelector)});

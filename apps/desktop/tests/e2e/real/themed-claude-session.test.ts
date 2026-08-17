@@ -6,7 +6,10 @@ import { waitForTaskCreated } from "../helpers/taskCreation";
 import { callVueMethod } from "../helpers/vue";
 import { WebDriverClient } from "../helpers/webdriver";
 
-describe("themed Claude session (real CLI)", () => {
+// Claude is never driven by an unattended runner. Keep this coverage visible
+// in the operator tier, but skipped unless a human deliberately configures a
+// Claude-only run.
+describe.skipIf(process.env.KANNA_E2E_REAL_AGENT_PROVIDER !== "claude")("themed Claude session (real CLI)", () => {
   const client = new WebDriverClient();
   let testRepoPath = "";
 

@@ -10,6 +10,7 @@ import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/rese
 import { callVueMethod, queryDb, tauriInvoke } from "../helpers/vue";
 import { WebDriverClient } from "../helpers/webdriver";
 import { waitForFile } from "../helpers/worktreeFs";
+import { resolveAppKannaServer } from "../helpers/kannaServer";
 
 const execFileAsync = promisify(execFile);
 
@@ -52,6 +53,7 @@ describe("kanna-cli PATH in spawned tasks", () => {
   let cliCreatedTaskId = "";
   let worktreePath = "";
   let shellSessionId = "";
+  let repoId = "";
 
   beforeAll(async () => {
     await client.createSession();
@@ -72,7 +74,7 @@ describe("kanna-cli PATH in spawned tasks", () => {
     await git(testRepoPath, ["commit", "-m", "test: add kanna-cli path setup"]);
     await git(testRepoPath, ["push", "origin", "main"]);
 
-    await importTestRepo(client, testRepoPath, "kanna-cli-path-real-test");
+    repoId = await importTestRepo(client, testRepoPath, "kanna-cli-path-real-test");
   });
 
   afterAll(async () => {
@@ -95,7 +97,6 @@ describe("kanna-cli PATH in spawned tasks", () => {
   async function createTaskAndWaitForWorktree(): Promise<string> {
     if (worktreePath) return worktreePath;
 
-    const repoId = await importedRepoId();
     const createResult = await callVueMethod(
       client,
       "store.createItem",
@@ -117,31 +118,11 @@ describe("kanna-cli PATH in spawned tasks", () => {
     return worktreePath;
   }
 
-  async function importedRepoId(): Promise<string> {
-    const rows = (await queryDb(
-      client,
-      "SELECT id FROM repo WHERE path = ?",
-      [testRepoPath],
-    )) as Array<{ id: string }>;
-    const repoId = rows[0]?.id;
-    if (!repoId) throw new Error("fixture repo was not imported");
-    return repoId;
-  }
-
   async function startLocalServer(): Promise<string> {
-    const pairing = await tauriInvoke(client, "create_mobile_pairing_session");
-    if (!pairing || typeof pairing !== "object") {
-      throw new Error(`unexpected pairing response: ${JSON.stringify(pairing)}`);
-    }
-    const port = (pairing as { lanPort?: unknown }).lanPort;
-    if (typeof port !== "number") {
-      throw new Error(`pairing response did not include lanPort: ${JSON.stringify(pairing)}`);
-    }
-    return `http://127.0.0.1:${port}`;
+    return (await resolveAppKannaServer(client)).baseUrl;
   }
 
   async function createTaskThroughKannaCli(kannaCliPath: string): Promise<string> {
-    const repoId = await importedRepoId();
     const serverUrl = await startLocalServer();
     const { stdout } = await execFileAsync(kannaCliPath, [
       "task",

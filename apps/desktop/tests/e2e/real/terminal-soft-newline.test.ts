@@ -8,8 +8,6 @@ import { pressShiftEnterInActiveTerminal } from "../helpers/terminalInput";
 import { callVueMethod, getVueState, queryDb, tauriInvoke } from "../helpers/vue";
 import { WebDriverClient } from "../helpers/webdriver";
 
-const SHIFT_ENTER_CSI_U = [27, 91, 49, 51, 59, 50, 117];
-
 interface DaemonSessionInfo {
   session_id?: string;
   state?: unknown;
@@ -50,32 +48,22 @@ async function waitForDaemonSession(
   throw new Error(`Timed out waiting for daemon session ${sessionId}; latest=${JSON.stringify(latest)}`);
 }
 
-async function clearE2EInvokes(client: WebDriverClient): Promise<void> {
-  await client.executeSync("window.__KANNA_E2E__.invokes.clear();");
-}
-
-async function waitForShiftEnterSendInput(
+async function waitForTerminalText(
   client: WebDriverClient,
   sessionId: string,
+  expected: string,
   timeoutMs = 5_000,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
-  let calls: unknown[] = [];
+  let lines: string[] = [];
   while (Date.now() < deadline) {
-    const result = await client.executeSync<{ found: boolean; calls: unknown[] }>(
-      `const calls = window.__KANNA_E2E__.invokes.getAll();
-       const found = calls.some((call) =>
-         call.cmd === "send_input" &&
-         call.args?.sessionId === ${JSON.stringify(sessionId)} &&
-         JSON.stringify(call.args?.data) === ${JSON.stringify(JSON.stringify(SHIFT_ENTER_CSI_U))}
-       );
-       return { found, calls };`,
+    lines = await client.executeSync<string[]>(
+      `return window.__KANNA_E2E__?.terminalBuffers?.lines?.(${JSON.stringify(sessionId)}) ?? [];`,
     );
-    calls = result.calls;
-    if (result.found) return;
+    if (lines.some((line) => line.includes(expected))) return;
     await sleep(100);
   }
-  throw new Error(`Timed out waiting for OpenCode Shift+Enter send_input; calls=${JSON.stringify(calls)}`);
+  throw new Error(`Timed out waiting for terminal text ${expected}; lines=${JSON.stringify(lines.slice(-20))}`);
 }
 
 describe("opencode soft newline (real CLI)", () => {
@@ -129,7 +117,22 @@ describe("opencode soft newline (real CLI)", () => {
     expect(rows[0]?.agent_provider).toBe("opencode");
 
     await waitForDaemonSession(client, taskId);
-    await client.waitForElement(".terminal-container", 15_000);
+    await tauriInvoke(client, "kill_session", { sessionId: taskId });
+    await tauriInvoke(client, "spawn_session", {
+      sessionId: taskId,
+      cwd: testRepoPath,
+      executable: "/bin/zsh",
+      args: [
+        "--no-rcs",
+        "-c",
+        "printf 'SHIFT_ENTER_READY\\r\\n'; stty raw -echo; bytes=$(dd bs=1 count=7 2>/dev/null | od -An -tx1 | tr -d ' \\n'); stty sane; printf '\\r\\nSHIFT_ENTER_BYTES:%s\\r\\n' \"$bytes\"; sleep 30",
+      ],
+      env: {},
+      cols: 80,
+      rows: 24,
+      agentProvider: "opencode",
+    });
+    await waitForDaemonSession(client, taskId);
 
     await client.reload();
     await callVueMethod(client, "store.selectRepo", repoId);
@@ -137,10 +140,10 @@ describe("opencode soft newline (real CLI)", () => {
     await waitForCurrentItemId(client, taskId);
     await waitForDaemonSession(client, taskId);
     await client.waitForElement(".terminal-container", 15_000);
+    await waitForTerminalText(client, taskId, "SHIFT_ENTER_READY");
 
-    await clearE2EInvokes(client);
     await pressShiftEnterInActiveTerminal(client);
 
-    await waitForShiftEnterSendInput(client, taskId);
+    await waitForTerminalText(client, taskId, "SHIFT_ENTER_BYTES:1b5b31333b3275");
   }, 60_000);
 });

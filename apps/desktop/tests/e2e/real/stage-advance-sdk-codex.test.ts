@@ -4,7 +4,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
+import { cleanupFixtureRepos, createFixtureRepo, publishFixtureChanges } from "../helpers/fixture-repo";
 import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
 import { advanceStageWithShortcut } from "../helpers/stageAdvance";
 import { callVueMethod, queryDb, tauriInvoke } from "../helpers/vue";
@@ -51,7 +51,9 @@ async function waitForTaskStage(
   throw new Error(`timed out waiting for ${taskId} to reach ${expectedStage}; last: ${JSON.stringify(last)}`);
 }
 
-describe("real Codex SDK stage advance", () => {
+// Codex account/quota state makes this an explicit operator lane. The default
+// real runner uses OpenCode's free model and must never launch this test.
+describe.skipIf(process.env.KANNA_E2E_REAL_AGENT_PROVIDER !== "codex")("real Codex SDK stage advance", () => {
   const client = new WebDriverClient();
   const workflowName = "codex-sdk-stage-advance";
   let repoId = "";
@@ -94,6 +96,7 @@ describe("real Codex SDK stage advance", () => {
         "",
       ].join("\n"),
     );
+    await publishFixtureChanges(testRepoPath, "test: add Codex SDK stage workflow");
 
     repoId = await importTestRepo(client, testRepoPath, "codex-sdk-stage-advance-real-test");
   });

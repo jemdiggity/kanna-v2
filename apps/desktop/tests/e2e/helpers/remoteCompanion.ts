@@ -186,7 +186,11 @@ export async function clickRemoteCompanionLink(
   uri: string,
 ): Promise<void> {
   const point = await client.executeSync<{ x: number; y: number } | null>(`
-    const shell = document.querySelector(".cloud-terminal-shell");
+    const shell = Array.from(document.querySelectorAll(".cloud-terminal-shell"))
+      .find((candidate) => {
+        const rect = candidate.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      });
     const screen = shell?.querySelector(".xterm-screen");
     const cell = window.__KANNA_E2E__?.terminalBuffers?.findTextCell(
       ${JSON.stringify(sessionId)},

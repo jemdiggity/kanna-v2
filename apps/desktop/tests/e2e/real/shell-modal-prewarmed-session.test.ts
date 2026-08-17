@@ -141,6 +141,7 @@ describe("task shell modal", () => {
   const client = new WebDriverClient();
   let testRepoPath = "";
   let taskId = "";
+  let repoId = "";
   const taskIds: string[] = [];
 
   beforeAll(async () => {
@@ -149,7 +150,7 @@ describe("task shell modal", () => {
     await client.reload();
 
     testRepoPath = await createFixtureRepo("shell-modal-prewarmed-session-real-test");
-    await importTestRepo(client, testRepoPath, "shell-modal-prewarmed-session-real-test");
+    repoId = await importTestRepo(client, testRepoPath, "shell-modal-prewarmed-session-real-test");
   });
 
   afterAll(async () => {
@@ -165,14 +166,6 @@ describe("task shell modal", () => {
   });
 
   it("attaches the shell modal to the pre-warmed worktree PTY session", async () => {
-    const repoRows = (await queryDb(
-      client,
-      "SELECT id FROM repo WHERE path = ?",
-      [testRepoPath],
-    )) as Array<{ id: string }>;
-    const repoId = repoRows[0]?.id;
-    if (!repoId) throw new Error("fixture repo was not imported");
-
     const createResult = await callVueMethod(
       client,
       "store.createItem",
@@ -189,6 +182,9 @@ describe("task shell modal", () => {
     taskId = createResult;
     taskIds.push(taskId);
     await waitForTaskBranch(client, taskId);
+    // Worktree shells are prewarmed by startup snapshot hydration. Reload so
+    // this newly created task follows that production lifecycle.
+    await client.reload();
 
     const shellSessionId = `shell-wt-${taskId}`;
     await waitForDaemonSession(client, shellSessionId, 30_000);
@@ -219,14 +215,6 @@ describe("task shell modal", () => {
   }, 90_000);
 
   it("sets the task worktree shell terminal environment inside the spawned PTY process", async () => {
-    const repoRows = (await queryDb(
-      client,
-      "SELECT id FROM repo WHERE path = ?",
-      [testRepoPath],
-    )) as Array<{ id: string }>;
-    const repoId = repoRows[0]?.id;
-    if (!repoId) throw new Error("fixture repo was not imported");
-
     const createResult = await callVueMethod(
       client,
       "store.createItem",
@@ -245,6 +233,7 @@ describe("task shell modal", () => {
 
     const branch = await waitForTaskBranch(client, taskId);
     const worktreePath = join(testRepoPath, ".kanna-worktrees", branch);
+    await client.reload();
 
     const shellSessionId = `shell-wt-${taskId}`;
     await waitForDaemonSession(client, shellSessionId, 30_000);

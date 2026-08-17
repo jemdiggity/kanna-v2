@@ -1,6 +1,8 @@
+import { networkInterfaces } from "node:os";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { resolveAppKannaServer } from "../helpers/kannaServer";
+import { tauriInvoke } from "../helpers/vue";
 import { WebDriverClient } from "../helpers/webdriver";
 
 type KspFrame = Record<string, unknown> & { type?: unknown };
@@ -9,9 +11,21 @@ const client = new WebDriverClient();
 
 function streamUrl(baseUrl: string): string {
   const url = new URL(baseUrl);
+  url.hostname = lanAddress();
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   url.pathname = "/v1/stream";
   return url.toString();
+}
+
+function lanAddress(): string {
+  const interfaces = networkInterfaces();
+  for (const name of ["en0", "en1", ...Object.keys(interfaces).sort()]) {
+    const address = interfaces[name]?.find((candidate) =>
+      candidate.family === "IPv4" && !candidate.internal
+    );
+    if (address) return address.address;
+  }
+  throw new Error("no non-loopback IPv4 address is available for the paired-device KSP test");
 }
 
 function waitForSocketOpen(socket: WebSocket): Promise<void> {
@@ -91,6 +105,25 @@ describe("app kanna-server KSP capabilities", () => {
 
   it("ships a sidecar that advertises and accepts the visual companion stream", async () => {
     const server = await resolveAppKannaServer(client);
+    const pairing = await tauriInvoke(client, "create_mobile_pairing_session") as {
+      code?: unknown;
+    };
+    if (typeof pairing.code !== "string") {
+      throw new Error(`pairing session did not return a code: ${JSON.stringify(pairing)}`);
+    }
+    const claimResponse = await fetch(`${server.baseUrl}/v1/pairing/sessions/claim`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        code: pairing.code,
+        deviceId: "mobile-server-ksp-capabilities-e2e",
+        deviceName: "Kanna E2E",
+      }),
+    });
+    const claim = await claimResponse.json().catch(() => null) as { deviceSecret?: unknown } | null;
+    if (!claimResponse.ok || typeof claim?.deviceSecret !== "string") {
+      throw new Error(`pairing claim failed: ${claimResponse.status} ${JSON.stringify(claim)}`);
+    }
     const socket = new WebSocket(streamUrl(server.baseUrl));
 
     try {
@@ -99,7 +132,13 @@ describe("app kanna-server KSP capabilities", () => {
         socket,
         (frame) => frame.type === "auth_ok" || frame.type === "error",
       );
-      socket.send(JSON.stringify({ type: "auth" }));
+      socket.send(JSON.stringify({
+        type: "auth",
+        credential: JSON.stringify({
+          deviceId: "mobile-server-ksp-capabilities-e2e",
+          deviceSecret: claim.deviceSecret,
+        }),
+      }));
       const authFrame = await authReply;
 
       expect(authFrame).toMatchObject({

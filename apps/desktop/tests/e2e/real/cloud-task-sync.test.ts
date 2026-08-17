@@ -205,6 +205,7 @@ async function signOut(client: typeof primary): Promise<void> {
 
 async function sidebarItemsForPrompt(client: typeof primary, prompt: string): Promise<Array<{
   id: string;
+  selectionId: string;
   prompt: string;
   repo_id: string;
   stage: string;
@@ -216,6 +217,7 @@ async function sidebarItemsForPrompt(client: typeof primary, prompt: string): Pr
     const value = ctx.sidebarItems?.__v_isRef ? ctx.sidebarItems.value : ctx.sidebarItems;
     return JSON.parse(JSON.stringify(value.filter((item) => item.prompt === ${JSON.stringify(prompt)}).map((item) => ({
       id: item.task_id,
+      selectionId: item.slot_id,
       prompt: item.prompt,
       repo_id: item.repo_id,
       stage: item.stage,
@@ -929,6 +931,7 @@ describe("cloud task sync", () => {
       selectedTerminalTransport: "cloud",
       sources: expect.arrayContaining(["cloud"]),
     }));
+    await waitForSidebarTask(secondary, "Stale offline task");
     const secondaryTextAfterSync = await secondary.executeSync<string>("return document.body.innerText;");
     expect(secondaryTextAfterSync).toContain("Stale offline task");
     expect(await sidebarItemsForPrompt(secondary, "Stale offline task")).toEqual([
@@ -1000,7 +1003,9 @@ describe("cloud task sync", () => {
     expect(observeResponse.error ?? "").not.toContain("Desktop offline");
     expect(observeResponse.observedText ?? "").toContain("Cloud terminal ready from primary");
 
-    await callVueMethod(secondary, "handleSelectItem", synced.item.id);
+    const [secondarySidebarItem] = await sidebarItemsForPrompt(secondary, "Cloud sync visible task");
+    if (!secondarySidebarItem) throw new Error("cloud task was missing from the secondary sidebar");
+    await callVueMethod(secondary, "selectSidebarItemById", secondarySidebarItem.selectionId);
     await waitForBodyText(secondary, "Cloud terminal ready from primary");
     const terminalTextarea = await secondary.waitForElement(".xterm-helper-textarea");
     await secondary.sendKeys(terminalTextarea, "hello through cloud\n");
@@ -1081,7 +1086,9 @@ describe("cloud task sync", () => {
       }),
     );
 
-    await callVueMethod(secondary, "handleSelectItem", synced.item.id);
+    const [secondarySidebarItem] = await sidebarItemsForPrompt(secondary, prompt);
+    if (!secondarySidebarItem) throw new Error("relay task was missing from the secondary sidebar");
+    await callVueMethod(secondary, "selectSidebarItemById", secondarySidebarItem.selectionId);
     await waitForBodyText(secondary, "Relay stream attach marker");
 
     // Produce NEW output on the owning desktop only after the secondary has
