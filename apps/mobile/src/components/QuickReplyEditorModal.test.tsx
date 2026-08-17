@@ -6,11 +6,15 @@ import { QuickReplyEditorModal } from "./QuickReplyEditorModal";
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true;
 
-const editorHarness = vi.hoisted(() => ({ focus: vi.fn() }));
+const editorHarness = vi.hoisted(() => ({
+  alert: vi.fn(),
+  focus: vi.fn()
+}));
 
 vi.mock("react-native", async () => {
   const ReactModule = await import("react");
   return {
+    Alert: { alert: editorHarness.alert },
     KeyboardAvoidingView: "KeyboardAvoidingView",
     Modal: ({
       children,
@@ -44,6 +48,7 @@ vi.mock("react-native", async () => {
 const mounted: ReactTestRenderer[] = [];
 
 beforeEach(() => {
+  editorHarness.alert.mockReset();
   editorHarness.focus.mockReset();
 });
 
@@ -120,10 +125,13 @@ describe("QuickReplyEditorModal", () => {
       await flushMicrotasks();
     });
 
-    expect(onSave).toHaveBeenCalledWith([
-      { id: "first", text: "Updated" },
-      expect.objectContaining({ text: "Third" })
-    ]);
+    expect(onSave).toHaveBeenCalledWith(
+      [
+        { id: "first", text: "Updated" },
+        expect.objectContaining({ text: "Third" })
+      ],
+      false
+    );
     expect(onClose).toHaveBeenCalledOnce();
   });
 
@@ -221,6 +229,62 @@ describe("QuickReplyEditorModal", () => {
       }).props.value
     ).toBe("One");
     expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("does not replace a failed baseline until the user confirms", async () => {
+    const { onClose, onSave, renderer } = renderEditor({
+      replacementConfirmationRequired: true
+    });
+
+    act(() =>
+      renderer.root
+        .findByProps({ testID: "mobile.quick-replies.done" })
+        .props.onPress()
+    );
+    expect(editorHarness.alert).toHaveBeenCalledWith(
+      "Replace quick replies?",
+      expect.stringMatching(/could not be loaded/i),
+      expect.any(Array),
+      expect.objectContaining({ cancelable: true })
+    );
+    const buttons = editorHarness.alert.mock.calls[0]?.[2] as
+      | Array<{ text: string; onPress?: () => void }>
+      | undefined;
+    await act(async () => {
+      buttons?.find((button) => button.text === "Cancel")?.onPress?.();
+      await flushMicrotasks();
+    });
+
+    expect(onSave).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("confirms replacement with the complete loaded ordered list", async () => {
+    const replies = [
+      { id: "first", text: "One" },
+      { id: "second", text: "Two" },
+      { id: "third", text: "Three" }
+    ];
+    const { onClose, onSave, renderer } = renderEditor({
+      replies,
+      replacementConfirmationRequired: true
+    });
+
+    act(() =>
+      renderer.root
+        .findByProps({ testID: "mobile.quick-replies.done" })
+        .props.onPress()
+    );
+    const buttons = editorHarness.alert.mock.calls[0]?.[2] as
+      | Array<{ text: string; onPress?: () => void }>
+      | undefined;
+    await act(async () => {
+      buttons?.find((button) => button.text === "Replace")?.onPress?.();
+      await flushMicrotasks();
+    });
+
+    expect(onSave).toHaveBeenCalledWith(replies, true);
+    expect(onClose).toHaveBeenCalledOnce();
   });
 
   it("cancels without saving", () => {

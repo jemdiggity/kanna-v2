@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
+  Alert,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -24,15 +25,20 @@ import {
 
 interface QuickReplyEditorModalProps {
   replies: readonly TaskQuickReply[];
+  replacementConfirmationRequired?: boolean;
   visible: boolean;
   onClose(): void;
-  onSave(replies: readonly TaskQuickReply[]): Promise<void>;
+  onSave(
+    replies: readonly TaskQuickReply[],
+    confirmReplacement?: boolean
+  ): Promise<void>;
 }
 
 let generatedReplySequence = 0;
 
 export function QuickReplyEditorModal({
   replies,
+  replacementConfirmationRequired = false,
   visible,
   onClose,
   onSave
@@ -121,9 +127,15 @@ export function QuickReplyEditorModal({
     }
 
     const normalized = normalizeTaskQuickReplies(draftReplies);
+    const confirmReplacement = replacementConfirmationRequired
+      ? await confirmQuickReplyReplacement()
+      : false;
+    if (replacementConfirmationRequired && !confirmReplacement) {
+      return;
+    }
     setSaving(true);
     try {
-      await onSave(normalized);
+      await onSave(normalized, confirmReplacement);
       onClose();
     } catch {
       setSaveError("Could not save quick replies. Try again.");
@@ -288,6 +300,28 @@ export function QuickReplyEditorModal({
       </KeyboardAvoidingView>
     </Modal>
   );
+}
+
+function confirmQuickReplyReplacement(): Promise<boolean> {
+  return new Promise((resolve) => {
+    Alert.alert(
+      "Replace quick replies?",
+      "Your saved quick replies could not be loaded. Continuing will replace the active stored copy with the defaults and edits shown here.",
+      [
+        {
+          style: "cancel",
+          text: "Cancel",
+          onPress: () => resolve(false)
+        },
+        {
+          style: "destructive",
+          text: "Replace",
+          onPress: () => resolve(true)
+        }
+      ],
+      { cancelable: true, onDismiss: () => resolve(false) }
+    );
+  });
 }
 
 function copyReplies(replies: readonly TaskQuickReply[]): TaskQuickReply[] {

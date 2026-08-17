@@ -181,6 +181,25 @@ describe("QuickReplySendControl", () => {
     ).toHaveLength(0);
   });
 
+  it("drag-selects from the complete loaded list without mutating it", () => {
+    const replies = [
+      { id: "first", text: "First" },
+      { id: "second", text: "Second" },
+      { id: "third", text: "Third" }
+    ];
+    const original = replies.map((reply) => ({ ...reply }));
+    const { onSelectReply } = renderControl({ replies });
+
+    act(() => panResponder().onPanResponderGrant?.(event, displacement()));
+    act(() => vi.advanceTimersByTime(400));
+    act(() =>
+      panResponder().onPanResponderRelease?.(event, displacement(0, -164))
+    );
+
+    expect(onSelectReply).toHaveBeenCalledWith("third");
+    expect(replies).toEqual(original);
+  });
+
   it("cancels an active release outside every card", () => {
     const { onPress, onSelectReply } = renderControl();
 

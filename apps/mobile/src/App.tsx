@@ -82,12 +82,16 @@ function AppContent() {
       createDefaultTaskQuickReplyPreferences();
   }
   const quickReplyMutationVersionRef = useRef(0);
+  const quickReplyLoadStatusRef = useRef<"pending" | "loaded" | "failed">(
+    "pending"
+  );
   const [accountSheetVisible, setAccountSheetVisible] = useState(false);
   const [quickReplyEditorVisible, setQuickReplyEditorVisible] = useState(false);
   const [quickReplies, setQuickReplies] = useState<TaskQuickReply[]>(() =>
     DEFAULT_TASK_QUICK_REPLIES.map((reply) => ({ ...reply }))
   );
   const [quickRepliesHydrated, setQuickRepliesHydrated] = useState(false);
+  const [quickReplyLoadFailed, setQuickReplyLoadFailed] = useState(false);
   const [forceCloudEnabled, setForceCloudEnabled] = useState(resolveForceCloud());
   updateMobileCrashContext({
     appState: AppState.currentState,
@@ -154,16 +158,22 @@ function AppContent() {
     const hydrationMutationVersion = quickReplyMutationVersionRef.current;
     void quickReplyPreferencesRef.current
       ?.then((preferences) => preferences.load())
-      .then((loadedReplies) => {
+      .then((loadResult) => {
         if (
           !cancelled &&
-          loadedReplies &&
           quickReplyMutationVersionRef.current === hydrationMutationVersion
         ) {
-          setQuickReplies(loadedReplies);
+          setQuickReplies(loadResult.replies);
+          quickReplyLoadStatusRef.current = loadResult.status;
+          setQuickReplyLoadFailed(loadResult.status === "failed");
         }
       })
-      .catch(() => undefined)
+      .catch(() => {
+        if (!cancelled) {
+          quickReplyLoadStatusRef.current = "failed";
+          setQuickReplyLoadFailed(true);
+        }
+      })
       .finally(() => {
         if (!cancelled) {
           setQuickRepliesHydrated(true);
@@ -176,14 +186,34 @@ function AppContent() {
   }, []);
 
   const saveQuickReplies = useCallback(
-    async (replies: readonly TaskQuickReply[]) => {
+    async (
+      replies: readonly TaskQuickReply[],
+      confirmReplacement = false
+    ) => {
+      if (quickReplyLoadStatusRef.current === "pending") {
+        throw new Error(
+          "Quick replies cannot be saved before preferences finish loading."
+        );
+      }
+      if (
+        quickReplyLoadStatusRef.current === "failed" &&
+        !confirmReplacement
+      ) {
+        throw new Error(
+          "Quick replies cannot be replaced without confirmation."
+        );
+      }
       const preferences = await quickReplyPreferencesRef.current;
       if (!preferences) {
         throw new Error("Quick reply preferences are unavailable.");
       }
-      const savedReplies = await preferences.save(replies);
+      const savedReplies = await preferences.save(replies, {
+        confirmReplacement
+      });
       quickReplyMutationVersionRef.current += 1;
+      quickReplyLoadStatusRef.current = "loaded";
       setQuickReplies(savedReplies);
+      setQuickReplyLoadFailed(false);
     },
     []
   );
@@ -341,6 +371,16 @@ function AppContent() {
             </Text>
           </View>
         ) : null}
+        {quickReplyLoadFailed ? (
+          <View
+            style={styles.quickReplyLoadNotice}
+            testID={MOBILE_E2E_IDS.quickReplyLoadNotice}
+          >
+            <Text style={styles.quickReplyLoadNoticeText}>
+              Quick replies could not be loaded; defaults shown.
+            </Text>
+          </View>
+        ) : null}
         <AccountSheet
           auth={state.auth}
           machineCount={machineSummary.total}
@@ -368,6 +408,7 @@ function AppContent() {
         />
         <QuickReplyEditorModal
           replies={quickReplies}
+          replacementConfirmationRequired={quickReplyLoadFailed}
           visible={quickReplyEditorVisible}
           onClose={() => setQuickReplyEditorVisible(false)}
           onSave={saveQuickReplies}
@@ -423,6 +464,20 @@ const styles = StyleSheet.create({
   },
   initializationErrorText: {
     color: "#FFC7CE",
+    fontSize: 14
+  },
+  quickReplyLoadNotice: {
+    backgroundColor: "#6A4B12",
+    borderRadius: 12,
+    bottom: 16,
+    left: 16,
+    padding: 12,
+    position: "absolute",
+    right: 16,
+    zIndex: 10
+  },
+  quickReplyLoadNoticeText: {
+    color: "#FFE5A3",
     fontSize: 14
   }
 });
