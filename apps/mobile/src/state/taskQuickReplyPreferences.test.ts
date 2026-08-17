@@ -2,11 +2,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_TASK_QUICK_REPLIES } from "../screens/taskQuickReplies";
 import {
   createTaskQuickReplyPreferences,
+  TASK_QUICK_REPLY_BACKUP_STORAGE_KEY,
+  TASK_QUICK_REPLY_RECOVERY_STORAGE_KEY,
+  TaskQuickReplySaveBlockedError,
   TASK_QUICK_REPLY_STORAGE_KEY
 } from "./taskQuickReplyPreferences";
 
 const storage = {
-  getItem: vi.fn<() => Promise<string | null>>(),
+  getItem: vi.fn<(key: string) => Promise<string | null>>(),
   setItem: vi.fn<(key: string, value: string) => Promise<void>>()
 };
 
@@ -16,30 +19,152 @@ describe("task quick reply preferences", () => {
     storage.setItem.mockReset().mockResolvedValue(undefined);
   });
 
-  it.each([
-    null,
-    "not json",
-    JSON.stringify({ version: 2, replies: [] }),
-    JSON.stringify({ version: 1, replies: [] })
-  ])("falls back to the default for unsupported data %#", async (raw) => {
-    storage.getItem.mockResolvedValue(raw);
+  it("treats a missing key as a resolved default baseline", async () => {
+    storage.getItem.mockResolvedValue(null);
     const repository = createTaskQuickReplyPreferences(storage);
 
     const loaded = await repository.load();
 
-    expect(loaded).toEqual(DEFAULT_TASK_QUICK_REPLIES);
-    expect(loaded).not.toBe(DEFAULT_TASK_QUICK_REPLIES);
+    expect(loaded).toEqual({
+      status: "loaded",
+      replies: DEFAULT_TASK_QUICK_REPLIES
+    });
+    expect(loaded.replies).not.toBe(DEFAULT_TASK_QUICK_REPLIES);
     expect(storage.getItem).toHaveBeenCalledWith(
       TASK_QUICK_REPLY_STORAGE_KEY
     );
+    expect(storage.setItem).not.toHaveBeenCalled();
   });
 
-  it("falls back when storage cannot be read", async () => {
+  it("preserves malformed data and refuses a save until replacement is confirmed", async () => {
+    const raw = "not json";
+    storage.getItem.mockResolvedValue(raw);
+    const repository = createTaskQuickReplyPreferences(storage);
+
+    await expect(repository.load()).resolves.toEqual({
+      status: "failed",
+      replies: DEFAULT_TASK_QUICK_REPLIES
+    });
+    expect(storage.setItem).toHaveBeenCalledWith(
+      TASK_QUICK_REPLY_RECOVERY_STORAGE_KEY,
+      raw
+    );
+
+    await expect(
+      repository.save([{ id: "custom", text: "Ship it" }])
+    ).rejects.toMatchObject<TaskQuickReplySaveBlockedError>({
+      reason: "load-failed"
+    });
+    expect(storage.setItem).not.toHaveBeenCalledWith(
+      TASK_QUICK_REPLY_STORAGE_KEY,
+      expect.any(String)
+    );
+
+    await expect(
+      repository.save(
+        [{ id: "custom", text: "Ship it" }],
+        { confirmReplacement: true }
+      )
+    ).resolves.toEqual([{ id: "custom", text: "Ship it" }]);
+    expect(storage.setItem).toHaveBeenCalledWith(
+      TASK_QUICK_REPLY_STORAGE_KEY,
+      envelope([{ id: "custom", text: "Ship it" }])
+    );
+    expect(storage.setItem).not.toHaveBeenCalledWith(
+      TASK_QUICK_REPLY_BACKUP_STORAGE_KEY,
+      raw
+    );
+  });
+
+  it("preserves a non-empty envelope that normalizes to no replies", async () => {
+    const raw = JSON.stringify({
+      version: 1,
+      replies: [{ id: "blank", text: "   " }]
+    });
+    storage.getItem.mockResolvedValue(raw);
+    const repository = createTaskQuickReplyPreferences(storage);
+
+    await expect(repository.load()).resolves.toMatchObject({ status: "failed" });
+    expect(storage.setItem).toHaveBeenCalledWith(
+      TASK_QUICK_REPLY_RECOVERY_STORAGE_KEY,
+      raw
+    );
+    await expect(
+      repository.save(DEFAULT_TASK_QUICK_REPLIES)
+    ).rejects.toMatchObject({ reason: "load-failed" });
+    expect(storage.setItem).not.toHaveBeenCalledWith(
+      TASK_QUICK_REPLY_STORAGE_KEY,
+      expect.any(String)
+    );
+  });
+
+  it("preserves an unknown-version envelope instead of discarding it", async () => {
+    const raw = JSON.stringify({
+      version: 2,
+      replies: [{ id: "future", text: "Future reply" }]
+    });
+    storage.getItem.mockResolvedValue(raw);
+
+    await expect(
+      createTaskQuickReplyPreferences(storage).load()
+    ).resolves.toMatchObject({ status: "failed" });
+    expect(storage.setItem).toHaveBeenCalledWith(
+      TASK_QUICK_REPLY_RECOVERY_STORAGE_KEY,
+      raw
+    );
+  });
+
+  it("surfaces an adapter read failure as a failed baseline", async () => {
     storage.getItem.mockRejectedValue(new Error("storage unavailable"));
 
     await expect(
       createTaskQuickReplyPreferences(storage).load()
-    ).resolves.toEqual(DEFAULT_TASK_QUICK_REPLIES);
+    ).resolves.toEqual({
+      status: "failed",
+      replies: DEFAULT_TASK_QUICK_REPLIES
+    });
+    expect(storage.setItem).not.toHaveBeenCalled();
+  });
+
+  it("refuses a save before an unresolved load has read the baseline", async () => {
+    let resolveRead: ((value: string | null) => void) | undefined;
+    storage.getItem.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveRead = resolve;
+        })
+    );
+    const repository = createTaskQuickReplyPreferences(storage);
+    const loading = repository.load();
+
+    await expect(
+      repository.save([{ id: "custom", text: "Ship it" }])
+    ).rejects.toMatchObject({ reason: "baseline-unresolved" });
+    expect(storage.setItem).not.toHaveBeenCalled();
+
+    resolveRead?.(envelope([{ id: "stored", text: "Stored" }]));
+    await expect(loading).resolves.toEqual({
+      status: "loaded",
+      replies: [{ id: "stored", text: "Stored" }]
+    });
+  });
+
+  it("does not replace malformed data when its recovery copy cannot be written", async () => {
+    storage.getItem.mockResolvedValue("not json");
+    storage.setItem.mockRejectedValueOnce(new Error("disk full"));
+    const repository = createTaskQuickReplyPreferences(storage);
+    await repository.load();
+
+    await expect(
+      repository.save(
+        [{ id: "custom", text: "Ship it" }],
+        { confirmReplacement: true }
+      )
+    ).rejects.toMatchObject({ reason: "recovery-not-preserved" });
+    expect(storage.setItem).not.toHaveBeenCalledWith(
+      TASK_QUICK_REPLY_STORAGE_KEY,
+      expect.any(String)
+    );
   });
 
   it("keeps the valid ordered subset of a version-one envelope", async () => {
@@ -57,10 +182,13 @@ describe("task quick reply preferences", () => {
 
     await expect(
       createTaskQuickReplyPreferences(storage).load()
-    ).resolves.toEqual([
-      { id: "custom", text: "Ship it" },
-      { id: "second", text: "Add tests" }
-    ]);
+    ).resolves.toEqual({
+      status: "loaded",
+      replies: [
+        { id: "custom", text: "Ship it" },
+        { id: "second", text: "Add tests" }
+      ]
+    });
   });
 
   it("finds valid replies after more than five overlong stored entries", async () => {
@@ -79,21 +207,42 @@ describe("task quick reply preferences", () => {
 
     await expect(
       createTaskQuickReplyPreferences(storage).load()
-    ).resolves.toEqual([{ id: "valid", text: "Ship it" }]);
+    ).resolves.toEqual({
+      status: "loaded",
+      replies: [{ id: "valid", text: "Ship it" }]
+    });
   });
 
-  it("normalizes and round-trips valid replies", async () => {
+  it("rotates the previous good envelope before every successful save", async () => {
+    const first = [{ id: "first", text: "First" }];
+    const second = [{ id: "second", text: "Second" }];
+    const third = [{ id: "third", text: "Third" }];
+    storage.getItem.mockResolvedValue(envelope(first));
     const repository = createTaskQuickReplyPreferences(storage);
+    await repository.load();
 
-    await expect(
-      repository.save([{ id: "custom", text: "  Ship it  " }])
-    ).resolves.toEqual([{ id: "custom", text: "Ship it" }]);
-    expect(storage.setItem).toHaveBeenCalledWith(
+    await expect(repository.save(second)).resolves.toEqual(second);
+    expect(storage.setItem).toHaveBeenNthCalledWith(
+      1,
+      TASK_QUICK_REPLY_BACKUP_STORAGE_KEY,
+      envelope(first)
+    );
+    expect(storage.setItem).toHaveBeenNthCalledWith(
+      2,
       TASK_QUICK_REPLY_STORAGE_KEY,
-      JSON.stringify({
-        version: 1,
-        replies: [{ id: "custom", text: "Ship it" }]
-      })
+      envelope(second)
+    );
+
+    await expect(repository.save(third)).resolves.toEqual(third);
+    expect(storage.setItem).toHaveBeenNthCalledWith(
+      3,
+      TASK_QUICK_REPLY_BACKUP_STORAGE_KEY,
+      envelope(second)
+    );
+    expect(storage.setItem).toHaveBeenNthCalledWith(
+      4,
+      TASK_QUICK_REPLY_STORAGE_KEY,
+      envelope(third)
     );
   });
 
@@ -105,18 +254,33 @@ describe("task quick reply preferences", () => {
     ] as const,
     [{ id: "blank", text: "   " }] as const
   ])("rejects an invalid list without writing %#", async (replies) => {
+    storage.getItem.mockResolvedValue(null);
     const repository = createTaskQuickReplyPreferences(storage);
+    await repository.load();
+    storage.setItem.mockClear();
 
     await expect(repository.save(replies)).rejects.toThrow();
     expect(storage.setItem).not.toHaveBeenCalled();
   });
 
-  it("propagates a storage write failure", async () => {
-    storage.setItem.mockRejectedValue(new Error("disk full"));
+  it("propagates a backup write failure without overwriting the active value", async () => {
+    storage.getItem.mockResolvedValue(
+      envelope([{ id: "stored", text: "Stored" }])
+    );
     const repository = createTaskQuickReplyPreferences(storage);
+    await repository.load();
+    storage.setItem.mockRejectedValueOnce(new Error("disk full"));
 
     await expect(
       repository.save([{ id: "custom", text: "Ship it" }])
     ).rejects.toThrow("disk full");
+    expect(storage.setItem).not.toHaveBeenCalledWith(
+      TASK_QUICK_REPLY_STORAGE_KEY,
+      expect.any(String)
+    );
   });
 });
+
+function envelope(replies: readonly { id: string; text: string }[]): string {
+  return JSON.stringify({ version: 1, replies });
+}

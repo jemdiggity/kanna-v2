@@ -12,6 +12,7 @@ import { MOBILE_E2E_IDS } from "./e2eTestIds";
 vi.mock("expo-clipboard", () => ({ setStringAsync: vi.fn() }));
 
 const harness = vi.hoisted(() => ({
+  alert: vi.fn(),
   appStateListener: null as ((state: string) => void) | null,
   addMobileCrashBreadcrumb: vi.fn(),
   checkAndFetchUpdate: vi.fn().mockResolvedValue({ state: "up-to-date" }),
@@ -29,6 +30,7 @@ const harness = vi.hoisted(() => ({
 vi.mock("react-native", async () => {
   const ReactModule = await import("react");
   return {
+    Alert: { alert: harness.alert },
     AppState: {
       get currentState() {
         return harness.currentAppState;
@@ -120,6 +122,7 @@ let mounted: ReactTestRenderer | null = null;
 
 beforeEach(() => {
   vi.stubGlobal("__DEV__", false);
+  harness.alert.mockReset();
   harness.appStateListener = null;
   harness.addMobileCrashBreadcrumb.mockReset();
   harness.checkAndFetchUpdate.mockReset().mockResolvedValue({ state: "up-to-date" });
@@ -127,7 +130,10 @@ beforeEach(() => {
   harness.currentModel = null;
   harness.quickReplyPreferences.load
     .mockReset()
-    .mockResolvedValue([{ id: "sgtm-proceed", text: "SGTM. Proceed." }]);
+    .mockResolvedValue({
+      status: "loaded",
+      replies: [{ id: "sgtm-proceed", text: "SGTM. Proceed." }]
+    });
   harness.quickReplyPreferences.save.mockReset().mockImplementation(
     async (replies: Array<{ id: string; text: string }>) => replies
   );
@@ -329,7 +335,10 @@ describe("App component wiring", () => {
   });
 
   it("keeps quick replies gated until device preferences hydrate", async () => {
-    const loaded = deferred<Array<{ id: string; text: string }>>();
+    const loaded = deferred<{
+      status: "loaded";
+      replies: Array<{ id: string; text: string }>;
+    }>();
     harness.quickReplyPreferences.load.mockReturnValueOnce(loaded.promise);
     const { model } = createModel();
     const renderer = await mountModel(model);
@@ -342,7 +351,10 @@ describe("App component wiring", () => {
       .toBe(false);
 
     await act(async () => {
-      loaded.resolve([{ id: "custom", text: "Ship it." }]);
+      loaded.resolve({
+        status: "loaded",
+        replies: [{ id: "custom", text: "Ship it." }]
+      });
       await flushMicrotasks();
     });
 
@@ -376,38 +388,74 @@ describe("App component wiring", () => {
     });
 
     expect(harness.quickReplyPreferences.save).toHaveBeenCalledWith(
-      editedReplies
+      editedReplies,
+      { confirmReplacement: false }
     );
     expect(renderer.root.findByType("RootNavigator").props.quickReplies).toEqual(
       editedReplies
     );
   });
 
-  it("does not let a late preference load overwrite a completed save", async () => {
-    const loaded = deferred<Array<{ id: string; text: string }>>();
+  it("saves the complete loaded quick-reply list without narrowing it", async () => {
+    const loadedReplies = [
+      { id: "first", text: "First" },
+      { id: "second", text: "Second" },
+      { id: "third", text: "Third" }
+    ];
+    harness.quickReplyPreferences.load.mockResolvedValueOnce({
+      status: "loaded",
+      replies: loadedReplies
+    });
+    const { model } = createModel();
+    const renderer = await mountModel(model);
+    const editor = renderer.root.findByType("QuickReplyEditorModal");
+
+    expect(editor.props.replies).toEqual(loadedReplies);
+    await act(async () => {
+      await editor.props.onSave(loadedReplies);
+      await flushMicrotasks();
+    });
+
+    expect(harness.quickReplyPreferences.save).toHaveBeenCalledWith(
+      loadedReplies,
+      { confirmReplacement: false }
+    );
+    expect(renderer.root.findByType("RootNavigator").props.quickReplies).toEqual(
+      loadedReplies
+    );
+  });
+
+  it("refuses to save before preference hydration resolves", async () => {
+    const loaded = deferred<{
+      status: "loaded";
+      replies: Array<{ id: string; text: string }>;
+    }>();
     harness.quickReplyPreferences.load.mockReturnValueOnce(loaded.promise);
     const { model } = createModel();
     const renderer = await mountModel(model);
     const editor = renderer.root.findByType("QuickReplyEditorModal");
     const editedReplies = [{ id: "custom", text: "Ship it." }];
 
+    await expect(editor.props.onSave(editedReplies)).rejects.toThrow(
+      /before preferences finish loading/i
+    );
+    expect(harness.quickReplyPreferences.save).not.toHaveBeenCalled();
     await act(async () => {
-      await editor.props.onSave(editedReplies);
-      await flushMicrotasks();
-    });
-    await act(async () => {
-      loaded.resolve([{ id: "old", text: "Old stored reply" }]);
+      loaded.resolve({
+        status: "loaded",
+        replies: [{ id: "old", text: "Old stored reply" }]
+      });
       await flushMicrotasks();
     });
 
     expect(renderer.root.findByType("RootNavigator").props.quickReplies).toEqual(
-      editedReplies
+      [{ id: "old", text: "Old stored reply" }]
     );
     expect(renderer.root.findByType("RootNavigator").props.quickRepliesHydrated)
       .toBe(true);
   });
 
-  it("falls back to the default when preference hydration rejects", async () => {
+  it("shows a non-blocking notice when preference hydration rejects", async () => {
     harness.quickReplyPreferences.load.mockRejectedValueOnce(
       new Error("storage unavailable")
     );
@@ -418,6 +466,46 @@ describe("App component wiring", () => {
       quickReplies: [{ id: "sgtm-proceed", text: "SGTM. Proceed." }],
       quickRepliesHydrated: true
     });
+    expect(
+      renderer.root.findByProps({
+        testID: "mobile.quick-replies.load-notice"
+      }).props.children.props.children
+    ).toBe("Quick replies could not be loaded; defaults shown.");
+    expect(
+      renderer.root.findByType("QuickReplyEditorModal").props
+        .replacementConfirmationRequired
+    ).toBe(true);
+  });
+
+  it("requires confirmation after a failed load and clears the notice after replacement", async () => {
+    harness.quickReplyPreferences.load.mockResolvedValueOnce({
+      status: "failed",
+      replies: [{ id: "sgtm-proceed", text: "SGTM. Proceed." }]
+    });
+    const { model } = createModel();
+    const renderer = await mountModel(model);
+    const editor = renderer.root.findByType("QuickReplyEditorModal");
+    const editedReplies = [{ id: "custom", text: "Ship it." }];
+
+    await expect(editor.props.onSave(editedReplies)).rejects.toThrow(
+      /without confirmation/i
+    );
+    expect(harness.quickReplyPreferences.save).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await editor.props.onSave(editedReplies, true);
+      await flushMicrotasks();
+    });
+
+    expect(harness.quickReplyPreferences.save).toHaveBeenCalledWith(
+      editedReplies,
+      { confirmReplacement: true }
+    );
+    expect(
+      renderer.root.findAllByProps({
+        testID: "mobile.quick-replies.load-notice"
+      })
+    ).toHaveLength(0);
   });
 
   it("keeps the live list unchanged when preference save rejects", async () => {

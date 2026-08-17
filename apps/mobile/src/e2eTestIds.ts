@@ -144,6 +144,7 @@ export const MOBILE_E2E_IDS = {
   quickReplyEditorDone: "mobile.quick-replies.done",
   quickReplyEditorCancel: "mobile.quick-replies.cancel",
   quickReplyEditorSaveError: "mobile.quick-replies.save-error",
+  quickReplyLoadNotice: "mobile.quick-replies.load-notice",
   buildInfoToggle: "mobile.build-info.toggle",
   buildInfoDetails: "mobile.build-info.details",
   buildInfoNative: "mobile.build-info.native",
