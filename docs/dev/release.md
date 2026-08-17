@@ -257,6 +257,20 @@ The default `CFBundleShortVersionString` comes from `apps/mobile/VERSION`.
 absent, the root desktop `VERSION` remains a compatibility fallback. Always
 pass a monotonically increasing `--build-number`; it controls
 `CFBundleVersion` independently.
+The command only builds when it has to. If the export IPA already exists and the
+archive on disk records exactly the requested version and build number, the
+prebuild, archive, and export steps are skipped and only `--upload` runs; the
+result says `Reused existing mobile production archive`. This is safe because
+App Store Connect refuses a repeated build number for a version, so changed
+source obliges a new build number, which misses the match and rebuilds. Pass
+`--force-rebuild` to rebuild a matching archive anyway.
+
+`--upload` needs [Transporter](https://apps.apple.com/app/transporter/id1450874784)
+installed: `xcrun iTMSTransporter` is a shim that delegates to Transporter.app
+and prints an install notice instead of uploading when it is missing. The
+command checks for this before building rather than after, so a missing uploader
+fails in seconds instead of after a full archive.
+
 Run the [mobile production QA gate](../testing/mobile-production-qa-gate.md)
 before TestFlight external testing or App Store submission.
 

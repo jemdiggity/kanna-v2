@@ -255,12 +255,26 @@ function parseMobileQaInput(rest: string[]): ParsedCliCommand {
 }
 
 function parseMobileArchiveInput(rest: string[]): ParsedCliCommand {
-  const input = parseFlagInput(rest, { production: false, dryRun: false, upload: false });
-  const allowedKeys = new Set(["production", "dryRun", "upload", "buildNumber", "version", "outDir", "ref"]);
+  const input = parseFlagInput(rest, {
+    production: false,
+    dryRun: false,
+    upload: false,
+    forceRebuild: false
+  }, { "--force-rebuild": "forceRebuild" });
+  const allowedKeys = new Set([
+    "production",
+    "dryRun",
+    "upload",
+    "buildNumber",
+    "version",
+    "outDir",
+    "ref",
+    "forceRebuild"
+  ]);
   const unsupportedKeys = Object.keys(input).filter((key) => !allowedKeys.has(key));
   if (unsupportedKeys.length > 0) {
     throw new Error(
-      "mobile archive only accepts --production, --ref, --build-number, --version, --out-dir, --upload, or --dry-run"
+      "mobile archive only accepts --production, --ref, --build-number, --version, --out-dir, --upload, --force-rebuild, or --dry-run"
     );
   }
   return {
@@ -997,7 +1011,7 @@ const helpTopics: Record<string, string[]> = {
     "  --confirm-production           Additionally required before uninstalling production."
   ],
   "mobile archive": [
-    "Usage: kd mobile archive --production --ref <branch|tag|sha> --build-number <number> [--version <version>] [--out-dir <dir>] [--upload] [--dry-run]",
+    "Usage: kd mobile archive --production --ref <branch|tag|sha> --build-number <number> [--version <version>] [--out-dir <dir>] [--upload] [--force-rebuild] [--dry-run]",
     "",
     "Build a production iOS archive and IPA through local Expo CNG and Xcode.",
     "",

@@ -212,6 +212,7 @@ const mobileArchiveInputSchema = z.object({
   dryRun: z.boolean().default(false),
   upload: z.boolean().default(false),
   ref: z.string().optional(),
+  forceRebuild: z.boolean().default(false),
   buildNumber: z.string().optional(),
   version: z.string().optional(),
   outDir: z.string().optional()

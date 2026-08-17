@@ -6,6 +6,8 @@ import { parseCliArgs } from "../cli";
 import {
   buildMobileIosArchivePlan,
   executeMobileIosArchiveWithContext,
+  isTransporterUnavailable,
+  parseArchiveIdentity,
   parseXcodeMajorVersion,
   type MobileIosArchivePlan
 } from "./mobile-archive";
@@ -94,7 +96,8 @@ describe("kd mobile archive", () => {
         version: "1.2.3",
         outDir: ".build/mobile-release",
         upload: true,
-        dryRun: true
+        dryRun: true,
+        forceRebuild: false
       }
     });
     expect(() => parseCliArgs(["mobile", "archive", "--production", "--rollback-to", "1"])).toThrow(
@@ -268,4 +271,162 @@ describe("kd mobile archive", () => {
       buildMobileIosArchivePlan({ repoRoot, buildNumber: "45" })
     ).rejects.toThrow(/is malformed/);
   });
+
+  // --- only build when required -------------------------------------------
+
+  async function seedArtifacts(
+    repoRoot: string,
+    version: string,
+    buildNumber: string
+  ): Promise<void> {
+    const outDir = join(repoRoot, ".build/mobile/ios-production");
+    await mkdir(join(outDir, "Kanna.xcarchive"), { recursive: true });
+    await mkdir(join(outDir, "export"), { recursive: true });
+    await writeFile(join(outDir, "export/Kanna.ipa"), "not-a-real-ipa");
+    await writeFile(
+      join(outDir, "Kanna.xcarchive/Info.plist"),
+      `<plist><dict><key>ApplicationProperties</key><dict>` +
+        `<key>CFBundleShortVersionString</key><string>${version}</string>` +
+        `<key>CFBundleVersion</key><string>${buildNumber}</string>` +
+        `</dict></dict></plist>`
+    );
+  }
+
+  function archiveRunner(calls: string[], identity: { version: string; buildNumber: string } | null): CommandRunner {
+    return {
+      async run(command, args) {
+        calls.push(`${command} ${args.join(" ")}`);
+        if (command === "xcodebuild" && args[0] === "-version") {
+          return { exitCode: 0, stdout: "Xcode 26.0\nBuild version 17A123\n", stderr: "" };
+        }
+        if (command === "xcrun" && args[0] === "iTMSTransporter" && args[1] === "-version") {
+          return { exitCode: 0, stdout: "Running iTMSTransporter...", stderr: "" };
+        }
+        if (command === "plutil") {
+          if (!identity) return { exitCode: 1, stdout: "", stderr: "unreadable" };
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              ApplicationProperties: {
+                CFBundleShortVersionString: identity.version,
+                CFBundleVersion: identity.buildNumber
+              }
+            }),
+            stderr: ""
+          };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+  }
+
+  it("reuses a matching archive instead of rebuilding", async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-mobile-archive-reuse-"));
+    await writeMinimalRepo(repoRoot);
+    await seedArtifacts(repoRoot, "1.0.0", "7");
+    const calls: string[] = [];
+    const result = await executeMobileIosArchiveWithContext(
+      { production: true, buildNumber: "7" },
+      { repoRoot, env: {}, runner: archiveRunner(calls, { version: "1.0.0", buildNumber: "7" }) }
+    );
+    expect(result.ok).toBe(true);
+    expect(result.message).toContain("Reused existing mobile production archive 1.0.0 (7)");
+    expect(calls.some((call) => call.includes("prebuild"))).toBe(false);
+    expect(calls.some((call) => call.startsWith("xcodebuild -workspace"))).toBe(false);
+    expect(calls.some((call) => call.includes("-exportArchive"))).toBe(false);
+  });
+
+  it("rebuilds when the existing archive is a different build number", async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-mobile-archive-stale-"));
+    await writeMinimalRepo(repoRoot);
+    await seedArtifacts(repoRoot, "1.0.0", "6");
+    const calls: string[] = [];
+    const result = await executeMobileIosArchiveWithContext(
+      { production: true, buildNumber: "7" },
+      { repoRoot, env: {}, runner: archiveRunner(calls, { version: "1.0.0", buildNumber: "6" }) }
+    );
+    expect(result.ok).toBe(true);
+    expect(result.message).toContain("Built mobile production archive");
+    expect(calls.some((call) => call.includes("prebuild"))).toBe(true);
+  });
+
+  it("rebuilds when no artifacts exist", async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-mobile-archive-fresh-"));
+    await writeMinimalRepo(repoRoot);
+    const calls: string[] = [];
+    const result = await executeMobileIosArchiveWithContext(
+      { production: true, buildNumber: "7" },
+      { repoRoot, env: {}, runner: archiveRunner(calls, null) }
+    );
+    expect(result.ok).toBe(true);
+    expect(calls.some((call) => call.includes("prebuild"))).toBe(true);
+  });
+
+  it("rebuilds a matching archive when --force-rebuild is passed", async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-mobile-archive-force-"));
+    await writeMinimalRepo(repoRoot);
+    await seedArtifacts(repoRoot, "1.0.0", "7");
+    const calls: string[] = [];
+    const result = await executeMobileIosArchiveWithContext(
+      { production: true, buildNumber: "7", forceRebuild: true },
+      { repoRoot, env: {}, runner: archiveRunner(calls, { version: "1.0.0", buildNumber: "7" }) }
+    );
+    expect(result.ok).toBe(true);
+    expect(result.message).toContain("Built mobile production archive");
+    expect(calls.some((call) => call.includes("prebuild"))).toBe(true);
+  });
+
+  it("fails before building when Transporter is unavailable for --upload", async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-mobile-archive-notransporter-"));
+    await writeMinimalRepo(repoRoot);
+    const calls: string[] = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push(`${command} ${args.join(" ")}`);
+        if (command === "xcodebuild" && args[0] === "-version") {
+          return { exitCode: 0, stdout: "Xcode 26.0\nBuild version 17A123\n", stderr: "" };
+        }
+        if (command === "xcrun" && args[0] === "iTMSTransporter") {
+          return {
+            exitCode: 0,
+            stdout: "iTMSTransporter is now part of Transporter.\nPlease install Transporter from the Mac App Store",
+            stderr: ""
+          };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+    await expect(
+      executeMobileIosArchiveWithContext(
+        { production: true, buildNumber: "7", upload: true },
+        {
+          repoRoot,
+          env: {
+            APP_STORE_CONNECT_API_KEY_ID: "KEY",
+            APP_STORE_CONNECT_API_ISSUER_ID: "ISSUER"
+          },
+          runner
+        }
+      )
+    ).rejects.toThrow("needs Transporter");
+    expect(calls.some((call) => call.includes("prebuild"))).toBe(false);
+  });
+
+  it("detects the Transporter shim notice", () => {
+    expect(isTransporterUnavailable("iTMSTransporter is now part of Transporter.", "")).toBe(true);
+    expect(isTransporterUnavailable("Running iTMSTransporter at path ...", "")).toBe(false);
+  });
+
+  it("parses archive identity from plist json", () => {
+    expect(
+      parseArchiveIdentity(
+        JSON.stringify({
+          ApplicationProperties: { CFBundleShortVersionString: "1.2.3", CFBundleVersion: "9" }
+        })
+      )
+    ).toEqual({ version: "1.2.3", buildNumber: "9" });
+    expect(parseArchiveIdentity("not json")).toBeNull();
+    expect(parseArchiveIdentity(JSON.stringify({}))).toBeNull();
+  });
+
 });
