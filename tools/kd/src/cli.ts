@@ -1173,8 +1173,9 @@ const helpTopics: Record<string, string[]> = {
     "Usage: kd release ship [--staging|--production] [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64] [--rollback-to <version>] [--branch main|release/X.Y]",
     "",
     "Build, sign, notarize, and optionally publish a Kanna release.",
-    "A staging publish must be a descendant of the candidate the channel already serves, and a release/X.Y RC must build that branch's remote tip exactly.",
-    "While an unpromoted release/X.Y candidate is soaking, main staging publishes are refused; promote it or run kd release reset-staging.",
+    "A staging publish must be a descendant of the candidate the channel already serves, except for a verified and recorded forward-main resumption after promotion; a release/X.Y RC must build that branch's remote tip exactly.",
+    "Main staging versions bump the greater of VERSION and the greatest production semantic version; the result reports versionFloor when stale VERSION was raised.",
+    "While an unpromoted release/X.Y candidate is soaking, main staging publishes are refused; a genuine matching promotion resumes forward main automatically, while abandonment requires kd release reset-staging.",
     "Use --staging --rollback-to <version> to repoint the staging channel manifest without building."
   ],
   "release promote": [
@@ -1189,7 +1190,7 @@ const helpTopics: Record<string, string[]> = {
   "release reset-staging": [
     "Usage: kd release reset-staging --to main|release/X.Y --reason <why> --confirm-abandon <staging-version> [--dry-run]",
     "",
-    "Abandon the active staging lineage so the next publish may move the channel non-linearly (a stale release soak, a hand-back to main, an older series hotfix).",
+    "Abandon the active staging lineage so the next publish may move the channel non-linearly (a stale release soak or an older-series hotfix). Routine post-promotion return to main is automatic after verification.",
     "Builds nothing, publishes nothing, and leaves the channel pointer where it is: it records old/new provenance on the desktop-staging release.",
     "--confirm-abandon must name the exact active staging version (kd release status prints it), and the record authorizes only the next publish from --to."
   ],
@@ -1216,7 +1217,7 @@ const helpTopics: Record<string, string[]> = {
     "",
     "Show the latest production release, the staging channel pointer, its release branch (if cut), and lag vs origin/main.",
     "Separates mechanical promotability (the RC still matches its promotion branch tip) from safety state: the candidate's",
-    "lineage relationship to the previous candidate, whether that lineage is valid, soak age against the policy window,",
+    "lineage relationship to the previous candidate, whether it is valid or promotion-authorized, soak age against the policy window,",
     "any active release-branch freeze, release-branch commits not retained on main, and every blocker to production promotion.",
     "Prints the promote command only when all of those gates pass."
   ],

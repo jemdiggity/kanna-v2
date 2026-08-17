@@ -22,8 +22,10 @@ vi.mock("../src/runtime/updater-key", async (importOriginal) => {
 });
 import {
   bazelTargetForLabel,
+  compareVersions,
   createUpdaterBundle,
   cutReleaseBranch,
+  deriveMainStagingBaseVersion,
   nextSeriesPatchVersion,
   parsePromotionVersions,
   parseReleaseBranchSeries,
@@ -128,6 +130,15 @@ function isStagingChannelAssetsQuery(command: string, args: string[]): boolean {
     args[2] === "desktop-staging" &&
     args.includes("--json") &&
     args.includes("assets")
+  );
+}
+
+function isProductionReleaseListQuery(command: string, args: string[]): boolean {
+  return (
+    command === "gh" &&
+    args[0] === "release" &&
+    args[1] === "list" &&
+    args.includes("--exclude-pre-releases")
   );
 }
 
@@ -384,6 +395,9 @@ describe("release shipping", () => {
           }
           if (command === "git" && args.join(" ") === "remote get-url origin") {
             return { exitCode: 0, stdout: "git@github.com:jemdiggity/kanna.git\n", stderr: "" };
+          }
+          if (isProductionReleaseListQuery(command, args)) {
+            return { exitCode: 0, stdout: "[]", stderr: "" };
           }
           if (command === "bazel" && args[0] === "cquery") {
             return { exitCode: 0, stdout: `${outputs.get(args[3]) ?? ""}\n`, stderr: "" };
@@ -760,6 +774,9 @@ describe("release shipping", () => {
           if (command === "gh" && args[0] === "release" && args[1] === "delete-asset") {
             return { exitCode: 0, stdout: "", stderr: "" };
           }
+          if (isProductionReleaseListQuery(command, args)) {
+            return { exitCode: 0, stdout: "[]", stderr: "" };
+          }
           if (command === "gh" && args[0] === "release" && args[1] === "list") {
             return {
               exitCode: 0,
@@ -892,6 +909,9 @@ describe("release shipping", () => {
               stdout: JSON.stringify({ assets: [{ name: "latest-staging.json" }] }),
               stderr: ""
             };
+          }
+          if (isProductionReleaseListQuery(command, args)) {
+            return { exitCode: 0, stdout: "[]", stderr: "" };
           }
           if (command === "gh" && args[0] === "release" && args[1] === "list") {
             return {
@@ -1928,6 +1948,20 @@ describe("release series", () => {
     ].join("\n");
     expect(nextSeriesPatchVersion(tags, { major: 1, minor: 3 })).toBe("1.3.3");
   });
+
+  it("floors a main staging version above the greatest production semantic version when VERSION is stale", () => {
+    const derivation = deriveMainStagingBaseVersion("0.0.68", "0.2.0", "patch");
+    expect(derivation.baseVersion).toBe("0.2.1");
+    expect(compareVersions(derivation.baseVersion, "0.2.0")).toBeGreaterThan(0);
+    expect(derivation.versionFloor?.detail).toMatch(
+      /VERSION 0\.0\.68 lags greatest production semantic version v0\.2\.0/
+    );
+
+    expect(deriveMainStagingBaseVersion("0.3.0", "0.2.0", "patch")).toEqual({
+      baseVersion: "0.3.1",
+      versionFloor: null
+    });
+  });
 });
 
 describe("release cut", () => {
@@ -2693,6 +2727,52 @@ describe("release status", () => {
     }
   });
 
+  it("reports a recorded post-promotion trunk resumption as valid", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const runner = statusRunner({
+        activeVersion: "1.4.0-staging.1",
+        activeCommit: MAIN_COMMIT,
+        activeSourceBranch: "main",
+        candidateTags: ["v1.4.0-staging.1", "v1.3.0-staging.2"],
+        previousCommit: PREVIOUS_RC_COMMIT,
+        previousIsAncestor: 1,
+        activeIsAncestor: 1,
+        productionTag: "v1.3.0",
+        channelBody: [
+          "Pointer-only desktop staging updater channel.",
+          "",
+          "Post-Promotion-Trunk-Resumption: 2026-08-17T03:00:00.000Z",
+          "Promoted-Version: 1.3.0",
+          "Promoted-Tag: v1.3.0",
+          `Promoted-Commit: ${PREVIOUS_RC_COMMIT}`,
+          `Production-Tag-Commit: ${PREVIOUS_RC_COMMIT}`,
+          `Resumed-To: ${MAIN_COMMIT} source main`
+        ].join("\n")
+      });
+
+      const result = await releaseStatus({ repoRoot: root, env: {}, runner, now: NOW });
+
+      expect(result.lineage).toMatchObject({
+        relationship: "diverged",
+        valid: true,
+        authorizedByReset: false,
+        authorizedByPromotion: true,
+        postPromotion: {
+          promotedVersion: "1.3.0",
+          promotedTag: "v1.3.0",
+          promotedCommit: PREVIOUS_RC_COMMIT,
+          productionTagCommit: PREVIOUS_RC_COMMIT,
+          newCommit: MAIN_COMMIT,
+          newBranch: "main"
+        }
+      });
+      expect(result.lineage?.detail).toContain("resumed trunk");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("reports an unpromoted release-branch candidate as freezing main staging publishes", async () => {
     const root = await mkdtemp(join(tmpdir(), "kd-release-"));
     try {
@@ -2965,6 +3045,8 @@ describe("staging publish lineage gates", () => {
   const ACTIVE_COMMIT = "7777777777777777777777777777777777777777";
   const DESCENDANT_COMMIT = "8888888888888888888888888888888888888888";
   const DIVERGED_COMMIT = "beef000000000000000000000000000000000000";
+  const BRANCH_POINT = "1111111111111111111111111111111111111111";
+  const PRODUCTION_TAG_COMMIT = "4444444444444444444444444444444444444444";
 
   interface ShipGateFixture {
     head: string;
@@ -2978,8 +3060,22 @@ describe("staging publish lineage gates", () => {
     /** `git merge-base --is-ancestor <head> <active>` exit code. */
     headIsAncestorOfActive?: number;
     existingProductionTags?: string[];
+    productionReleaseTargetCommit?: string;
+    productionTagCommit?: string;
+    productionTagParent?: string;
+    originMain?: string;
+    originRelease?: string;
+    mergeBase?: string;
+    /** Result of proving the merge-base is contained by origin/main. */
+    mainContainsMergeBase?: number;
+    /** Result of proving the candidate remains in its recorded source branch. */
+    releaseContainsCandidate?: number;
+    /** Result of proving HEAD descends from the main/release branch point. */
+    headDescendsFromMergeBase?: number;
     channelBody?: string;
     releaseBranchSha?: string;
+    /** Production releases in GitHub's newest-created-first response order. */
+    productionReleasesInCreationOrder?: string[];
     /** Series carrying an abandonment tag, as `X.Y` -> annotated tag message. */
     abandonedSeries?: Record<string, string>;
     /** Simulates a transient GitHub failure reading the channel itself. */
@@ -3005,6 +3101,22 @@ describe("staging publish lineage gates", () => {
           return { exitCode: 0, stdout: `${fixture.branch ?? "main"}\n`, stderr: "" };
         }
         if (key === "git rev-parse HEAD") return { exitCode: 0, stdout: `${fixture.head}\n`, stderr: "" };
+        if (key === "git rev-parse FETCH_HEAD^{commit}") {
+          return { exitCode: 0, stdout: `${fixture.productionTagCommit ?? activeCommit ?? ""}\n`, stderr: "" };
+        }
+        if (key === "git show -s --format=%P FETCH_HEAD") {
+          return { exitCode: 0, stdout: `${fixture.productionTagParent ?? activeCommit ?? ""}\n`, stderr: "" };
+        }
+        if (key === "git show -s --format=%s FETCH_HEAD") {
+          const productionVersion = activeVersion?.replace(/-staging\.\d+$/, "") ?? "";
+          return { exitCode: 0, stdout: `release: v${productionVersion}\n`, stderr: "" };
+        }
+        if (key === "git rev-parse origin/main") {
+          return { exitCode: 0, stdout: `${fixture.originMain ?? fixture.head}\n`, stderr: "" };
+        }
+        if (fixture.activeSourceBranch && key === `git rev-parse origin/${fixture.activeSourceBranch}`) {
+          return { exitCode: 0, stdout: `${fixture.originRelease ?? activeCommit ?? ""}\n`, stderr: "" };
+        }
         if (command === "git" && args[0] === "ls-remote" && args[1] === "origin") {
           const sha = fixture.releaseBranchSha ?? "";
           return { exitCode: 0, stdout: sha ? `${sha}\t${args[2]}\n` : "", stderr: "" };
@@ -3036,10 +3148,27 @@ describe("staging publish lineage gates", () => {
             stderr: ""
           };
         }
+        const productionVersion = activeVersion?.replace(/-staging\.\d+$/, "");
+        if (productionVersion && key.startsWith(`gh release view v${productionVersion} `)) {
+          const exists = (fixture.existingProductionTags ?? []).includes(productionVersion);
+          if (!exists) return { exitCode: 1, stdout: "", stderr: "release not found" };
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              tagName: `v${productionVersion}`,
+              targetCommitish: fixture.productionReleaseTargetCommit ?? activeCommit,
+              isPrerelease: false
+            }),
+            stderr: ""
+          };
+        }
         if (command === "gh" && args[0] === "release" && args[1] === "view" && args[2] === "desktop-staging") {
           return { exitCode: 0, stdout: JSON.stringify({ body: fixture.channelBody ?? "" }), stderr: "" };
         }
         if (command === "git" && args[0] === "merge-base") {
+          if (args[1] !== "--is-ancestor") {
+            return { exitCode: 0, stdout: `${fixture.mergeBase ?? BRANCH_POINT}\n`, stderr: "" };
+          }
           const [, , base, candidate] = args;
           if (base === activeCommit && candidate === fixture.head) {
             return { exitCode: fixture.activeIsAncestorOfHead ?? 0, stdout: "", stderr: "" };
@@ -3047,10 +3176,29 @@ describe("staging publish lineage gates", () => {
           if (base === fixture.head && candidate === activeCommit) {
             return { exitCode: fixture.headIsAncestorOfActive ?? 1, stdout: "", stderr: "" };
           }
+          if (base === activeCommit && candidate === (fixture.originRelease ?? activeCommit)) {
+            return { exitCode: fixture.releaseContainsCandidate ?? 0, stdout: "", stderr: "" };
+          }
+          if (base === (fixture.mergeBase ?? BRANCH_POINT) && candidate === (fixture.originMain ?? fixture.head)) {
+            return { exitCode: fixture.mainContainsMergeBase ?? 0, stdout: "", stderr: "" };
+          }
+          if (base === (fixture.mergeBase ?? BRANCH_POINT) && candidate === fixture.head) {
+            return { exitCode: fixture.headDescendsFromMergeBase ?? 0, stdout: "", stderr: "" };
+          }
           return { exitCode: 1, stdout: "", stderr: "" };
         }
         if (command === "git" && args[0] === "ls-remote" && args[1] === "--tags") {
           const pattern = args[3] ?? "";
+          if (pattern.startsWith("refs/tags/v") && !pattern.includes("staging") && !pattern.includes("abandoned")) {
+            const wanted = pattern.replace(/^refs\/tags\/v/, "");
+            const exists = (fixture.existingProductionTags ?? []).includes(wanted);
+            const tagCommit = fixture.productionTagCommit ?? activeCommit ?? "";
+            return {
+              exitCode: 0,
+              stdout: exists && tagCommit ? `${tagCommit}\trefs/tags/v${wanted}\n` : "",
+              stderr: ""
+            };
+          }
           const abandoned = /^refs\/tags\/abandoned\/release\/(\d+\.\d+)$/.exec(pattern);
           if (abandoned) {
             const has = Boolean(fixture.abandonedSeries?.[abandoned[1] ?? ""]);
@@ -3074,20 +3222,41 @@ describe("staging publish lineage gates", () => {
           writeFileSync(`${args.at(-1)}.sig`, "staging signature\n");
           return { exitCode: 0, stdout: "", stderr: "" };
         }
+        if (command === "gh" && args[0] === "release" && ["create", "edit", "upload"].includes(args[1] ?? "")) {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (isProductionReleaseListQuery(command, args)) {
+          const versions = fixture.productionReleasesInCreationOrder ?? fixture.existingProductionTags ?? [];
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify(versions.map((version) => ({ tagName: `v${version}`, isPrerelease: false }))),
+            stderr: ""
+          };
+        }
+        if (command === "gh" && args[0] === "release" && args[1] === "list") {
+          return { exitCode: 0, stdout: "[]", stderr: "" };
+        }
         return { exitCode: 1, stdout: "", stderr: `unexpected command ${key}` };
       }
     };
   }
 
-  function shipGateInput(repoRoot: string, privateKeyPath: string, runner: CommandRunner, sourceBranch?: string): ReleaseShipInput {
+  function shipGateInput(
+    repoRoot: string,
+    privateKeyPath: string,
+    runner: CommandRunner,
+    sourceBranch?: string,
+    release = false
+  ): ReleaseShipInput {
     return {
       repoRoot,
       bump: "patch",
-      archLabels: ["arm64"],
-      release: false,
-      dryRun: true,
+      archLabels: release ? ["arm64", "x86_64"] : ["arm64"],
+      release,
+      dryRun: !release,
       environment: "staging",
       sourceBranch,
+      now: Date.parse("2026-08-17T03:00:00Z"),
       env: releaseEnv(privateKeyPath),
       runner
     };
@@ -3105,6 +3274,44 @@ describe("staging publish lineage gates", () => {
 
       expect(result.version).toBe("1.2.4-staging.1");
       expect(calls.some((call) => call.command === "bazel" && call.args[0] === "build")).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("floors main staging against the greatest production version regardless of release creation order", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot, privateKeyPath } = createReleaseRepo(root);
+      const outputs = writeStagingReleaseBuildOutputs(repoRoot, ["arm64"]);
+      const calls: CommandCall[] = [];
+      const runner = shipGateRunner(
+        {
+          head: DESCENDANT_COMMIT,
+          activeVersion: null,
+          productionReleasesInCreationOrder: ["1.2.5", "1.3.0"]
+        },
+        repoRoot,
+        outputs,
+        calls
+      );
+
+      const result = await shipRelease(shipGateInput(repoRoot, privateKeyPath, runner));
+
+      expect(result.version).toBe("1.3.1-staging.1");
+      expect(result.version).not.toBe("1.2.6-staging.1");
+      expect(result.versionFloor).toEqual({
+        versionFile: "1.2.3",
+        greatestProductionVersion: "1.3.0",
+        baseVersion: "1.3.1",
+        detail:
+          "VERSION 1.2.3 lags greatest production semantic version v1.3.0; " +
+          "derived main staging version 1.3.1 from the production floor."
+      });
+      const query = calls.find((call) => isProductionReleaseListQuery(call.command, call.args));
+      const limitIndex = query?.args.indexOf("--limit") ?? -1;
+      expect(limitIndex).toBeGreaterThanOrEqual(0);
+      expect(query?.args[limitIndex + 1]).toBe("1000");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -3237,27 +3444,113 @@ describe("staging publish lineage gates", () => {
     }
   });
 
-  it("resumes main staging publishes once the release-branch RC has been promoted", async () => {
+  it("allows promoted divergent RC lineage to resume on forward main and records provenance", async () => {
     const root = await mkdtemp(join(tmpdir(), "kd-release-"));
     try {
       const { repoRoot, privateKeyPath } = createReleaseRepo(root);
-      const outputs = writeStagingReleaseBuildOutputs(repoRoot, ["arm64"]);
+      const outputs = writeStagingReleaseBuildOutputs(repoRoot, ["arm64", "x86_64"]);
       const calls: CommandCall[] = [];
       const runner = shipGateRunner(
         {
-          head: DESCENDANT_COMMIT,
+          head: DIVERGED_COMMIT,
           activeVersion: "1.3.0-staging.2",
           activeSourceBranch: "release/1.3",
-          existingProductionTags: ["1.3.0"]
+          activeIsAncestorOfHead: 1,
+          headIsAncestorOfActive: 1,
+          existingProductionTags: ["1.3.0"],
+          productionReleaseTargetCommit: "main",
+          productionTagCommit: PRODUCTION_TAG_COMMIT,
+          productionTagParent: ACTIVE_COMMIT,
+          originMain: DIVERGED_COMMIT,
+          originRelease: ACTIVE_COMMIT
         },
         repoRoot,
         outputs,
         calls
       );
 
-      const result = await shipRelease(shipGateInput(repoRoot, privateKeyPath, runner));
+      const result = await shipRelease(shipGateInput(repoRoot, privateKeyPath, runner, undefined, true));
 
-      expect(result.version).toBe("1.2.4-staging.1");
+      expect(result.version).toBe("1.3.1-staging.1");
+      expect(result.versionFloor).toEqual({
+        versionFile: "1.2.3",
+        greatestProductionVersion: "1.3.0",
+        baseVersion: "1.3.1",
+        detail:
+          "VERSION 1.2.3 lags greatest production semantic version v1.3.0; " +
+          "derived main staging version 1.3.1 from the production floor."
+      });
+      const edit = calls.find(
+        (call) => call.command === "gh" && call.args[0] === "release" && call.args[1] === "edit"
+      );
+      const body = edit?.args[edit.args.indexOf("--notes") + 1] ?? "";
+      expect(body).toContain("Post-Promotion-Trunk-Resumption: 2026-08-17T03:00:00.000Z");
+      expect(body).toContain("Promoted-Version: 1.3.0");
+      expect(body).toContain("Promoted-Tag: v1.3.0");
+      expect(body).toContain(`Promoted-Commit: ${ACTIVE_COMMIT}`);
+      expect(body).toContain(`Production-Tag-Commit: ${PRODUCTION_TAG_COMMIT}`);
+      expect(body).toContain(`Resumed-To: ${DIVERGED_COMMIT} source main`);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses promoted but stale main that does not descend from the release branch point", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot, privateKeyPath } = createReleaseRepo(root);
+      const calls: CommandCall[] = [];
+      const runner = shipGateRunner(
+        {
+          head: DIVERGED_COMMIT,
+          activeVersion: "1.3.0-staging.2",
+          activeSourceBranch: "release/1.3",
+          activeIsAncestorOfHead: 1,
+          headIsAncestorOfActive: 1,
+          existingProductionTags: ["1.3.0"],
+          originMain: "2222222222222222222222222222222222222222",
+          headDescendsFromMergeBase: 1
+        },
+        repoRoot,
+        new Map(),
+        calls
+      );
+
+      await expect(shipRelease(shipGateInput(repoRoot, privateKeyPath, runner))).rejects.toThrow(
+        /diverged from the active channel/
+      );
+      expect(calls.some((call) => call.command === "bazel")).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses promoted divergence when the production tag targets another commit", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot, privateKeyPath } = createReleaseRepo(root);
+      const calls: CommandCall[] = [];
+      const runner = shipGateRunner(
+        {
+          head: DIVERGED_COMMIT,
+          activeVersion: "1.3.0-staging.2",
+          activeSourceBranch: "release/1.3",
+          activeIsAncestorOfHead: 1,
+          headIsAncestorOfActive: 1,
+          existingProductionTags: ["1.3.0"],
+          productionReleaseTargetCommit: "main",
+          productionTagCommit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          productionTagParent: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        repoRoot,
+        new Map(),
+        calls
+      );
+
+      await expect(shipRelease(shipGateInput(repoRoot, privateKeyPath, runner))).rejects.toThrow(
+        /diverged from the active channel/
+      );
+      expect(calls.some((call) => call.command === "bazel")).toBe(false);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
