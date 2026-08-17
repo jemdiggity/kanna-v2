@@ -9,6 +9,7 @@ import {
 } from "../helpers/fixture-repo";
 import { buildGlobalKeydownScript, buildHandledGlobalKeydownScript } from "../helpers/keyboard";
 import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
+import { dragSortableTaskToTarget } from "../helpers/sidebarDrag";
 import { createPrimaryAndSecondaryClients } from "../helpers/twoInstance";
 import { pairWithPeerThroughUi } from "../helpers/transferFlow";
 import { callVueMethod, execDb, queryDb, tauriInvoke } from "../helpers/vue";
@@ -46,6 +47,16 @@ async function callVueMethodOrThrow(
   const result = await callVueMethod(client, method, ...args);
   if (isVueCallError(result)) throw new Error(result.__error);
   return result;
+}
+
+/**
+ * A remote sidebar id is a JSON array — `cloud:lan:["peer","repo","task"]` — so
+ * its quotes have to be escaped before the id can address an element through a
+ * CSS attribute selector.
+ */
+function taskSubtreeSelector(zoneSelector: string, taskId: string): string {
+  const value = taskId.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+  return `${zoneSelector} .task-subtree[data-task-id="${value}"]`;
 }
 
 function readPeerId(peer: TransferPeer): string | null {
@@ -785,7 +796,18 @@ describe("local transfer task sync", () => {
     ]);
   });
 
-  it("pins a remote-only LAN task on the viewer, persists it across reload, and never mutates the owner", async () => {
+  interface RemotePinFixture {
+    anchorTaskId: string;
+    ownerTaskId: string;
+    remoteItemId: string;
+    repoSelector: string;
+  }
+
+  /**
+   * Leaves the viewer holding exactly one pinned local anchor and one unpinned
+   * remote-only LAN task, which is the state both pin cases start from.
+   */
+  async function prepareRemotePinFixture(prompt: string): Promise<RemotePinFixture> {
     // The published LAN snapshot derives one synthetic id per peer task
     // stream, so keep a single open owner task while this test drives pins.
     // Close every open owner task, including leftovers from earlier tests.
@@ -799,7 +821,9 @@ describe("local transfer task sync", () => {
 
     // Seed a pinned local anchor on the viewer: it gives the pinned zone a
     // real drop rect for the drag gesture and makes the reorder path persist
-    // a mixed local/remote pinned list.
+    // a mixed local/remote pinned list. Reused across pin cases, so drop any
+    // row an earlier case left behind.
+    await execDb(secondary, "DELETE FROM pipeline_item WHERE id = ?", ["lan-pin-local-anchor"]);
     const anchorTaskId = "lan-pin-local-anchor";
     await execDb(
       secondary,
@@ -833,7 +857,7 @@ describe("local transfer task sync", () => {
       "store.createItem",
       repoId,
       testRepoPath,
-      "LAN pin persistence task",
+      prompt,
       "agent",
       { agentProvider: "codex", baseRef: "origin/main" },
     );
@@ -842,9 +866,9 @@ describe("local transfer task sync", () => {
     }
     const ownerTaskId = String(createResult);
 
-    await waitForSidebarTask("LAN pin persistence task");
-    await waitForSidebarTaskGroupedUnderRepo("LAN pin persistence task", secondaryRepoId);
-    const remoteItems = await sidebarItemsForPrompt(secondary, "LAN pin persistence task");
+    await waitForSidebarTask(prompt);
+    await waitForSidebarTaskGroupedUnderRepo(prompt, secondaryRepoId);
+    const remoteItems = await sidebarItemsForPrompt(secondary, prompt);
     expect(remoteItems).toEqual([
       expect.objectContaining({
         id: expect.stringMatching(/^cloud:lan:/),
@@ -856,10 +880,21 @@ describe("local transfer task sync", () => {
     expect(await remoteTaskPinsSetting(secondary)).toEqual({});
     await waitForPinnedZoneMembership(secondaryRepoId, remoteItemId, false);
 
-    // Exercise the App-level pin contract directly. SortableJS fallback drag
-    // synthesis is covered by Sidebar's component tests and is not stable
-    // across WebKit versions; this real test owns the remote overlay, DB, and
-    // reload wiring.
+    return {
+      anchorTaskId,
+      ownerTaskId,
+      remoteItemId,
+      repoSelector: `.sidebar .repo-section[data-repo-id="${secondaryRepoId}"]`,
+    };
+  }
+
+  it("pins a remote-only LAN task on the viewer, persists it across reload, and never mutates the owner", async () => {
+    const { anchorTaskId, ownerTaskId, remoteItemId } =
+      await prepareRemotePinFixture("LAN pin persistence task");
+
+    // The pin action itself, at the App boundary the sidebar's drop handler
+    // emits into. The drag gesture that reaches it is the quarantined case
+    // below — see docs/2026-08-17-sidebar-pin-drag-synthesis-e2e-gap.md.
     await callVueMethodOrThrow(secondary, "pinSidebarTask", remoteItemId, 0);
     await callVueMethodOrThrow(
       secondary,
@@ -927,5 +962,42 @@ describe("local transfer task sync", () => {
       [ownerTaskId],
     )).toEqual([{ pinned: 0, pin_order: null }]);
     expect(await remoteTaskPinsSetting(primary)).toEqual({});
+  });
+
+  // Quarantined until docs/2026-08-17-sidebar-pin-drag-synthesis-e2e-gap.md is
+  // resolved: `tauri-plugin-webdriver` synthesizes pointer input as JavaScript
+  // `MouseEvent`s, and SortableJS's fallback drag starts from them but never
+  // registers the drop into the pinned zone. Retained verbatim — this is the
+  // only coverage of pinning a remote-only row through the real gesture.
+  it.skip("pins and unpins a remote-only LAN task through the sidebar drag gesture", async () => {
+    const { anchorTaskId, ownerTaskId, remoteItemId, repoSelector } =
+      await prepareRemotePinFixture("LAN pin drag task");
+
+    // Drag the remote task from its stage group into the pinned zone. The
+    // gesture is the subject: pinning a remote-only task is SortableJS wiring
+    // over an overlay row with no local `pipeline_item`, and calling the pin
+    // methods directly skips exactly that.
+    const remoteStageRowSelector = taskSubtreeSelector(`${repoSelector} .type-zone`, remoteItemId);
+    const pinnedAnchorSelector = taskSubtreeSelector(`${repoSelector} .pinned-zone`, anchorTaskId);
+    await secondary.waitForElement(remoteStageRowSelector, 10_000);
+    await secondary.waitForElement(pinnedAnchorSelector, 10_000);
+    // Cross-list drops must land off the target's exact vertical center or
+    // SortableJS treats the hover as a no-op; bias into the lower half.
+    await dragSortableTaskToTarget(secondary, remoteStageRowSelector, pinnedAnchorSelector, {
+      targetVerticalBias: 0.25,
+    });
+
+    await waitForRemoteTaskPinSetting(ownerTaskId, true);
+    await waitForPinnedZoneMembership(secondaryRepoId, remoteItemId, true);
+
+    // Unpin by dragging back out of the pinned zone into the unpin receiver.
+    const pinnedRemoteSelector = taskSubtreeSelector(`${repoSelector} .pinned-zone`, remoteItemId);
+    const unpinReceiverSelector = `${repoSelector} .empty-unpin-zone`;
+    await secondary.waitForElement(pinnedRemoteSelector, 10_000);
+    await secondary.waitForElement(unpinReceiverSelector, 10_000);
+    await dragSortableTaskToTarget(secondary, pinnedRemoteSelector, unpinReceiverSelector);
+
+    await waitForRemoteTaskPinSetting(ownerTaskId, false);
+    await waitForPinnedZoneMembership(secondaryRepoId, remoteItemId, false);
   });
 });

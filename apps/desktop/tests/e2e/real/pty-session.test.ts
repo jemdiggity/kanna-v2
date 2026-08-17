@@ -99,6 +99,62 @@ async function switchToWindow(client: WebDriverClient, handle: string): Promise<
   );
 }
 
+/**
+ * Types a draft through WebDriver *key* actions, one keydown per character.
+ *
+ * `sendKeysToActiveTerminal` goes through Element Send Keys, which the plugin
+ * implements by writing the textarea's value and dispatching `input` alone. No
+ * keydown means the frontend's producer classifier never leaves `control`, so
+ * the daemon is never told a draft is open and a queued logical message is
+ * written straight into the composer. A key action dispatches the keydown a
+ * user's draft depends on.
+ */
+async function typeDraftKeysToActiveTerminal(
+  client: WebDriverClient,
+  text: string,
+): Promise<void> {
+  for (const character of text) {
+    await client.pressKey(character);
+  }
+}
+
+/**
+ * The user path: a key press whose tail character and Enter arrive in one
+ * WebDriver action sequence, the way a fast typist finishes a line. The test
+ * stands in for nothing — xterm's own key handler and the frontend's producer
+ * classifier both see the keydown and decide from it.
+ */
+async function sendRapidTailAndEnter(
+  client: WebDriverClient,
+  tail: string,
+): Promise<void> {
+  const sessionId = getClientSessionId(client);
+  const response = await fetch(`${client.getBaseUrl()}/session/${sessionId}/actions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      actions: [{
+        type: "key",
+        id: "rapid-terminal-input",
+        actions: [
+          { type: "keyDown", value: tail },
+          { type: "keyDown", value: "\uE007" },
+          { type: "keyUp", value: "\uE007" },
+          { type: "keyUp", value: tail },
+        ],
+      }],
+    }),
+  });
+  const body = await response.json() as WebDriverResponse<null>;
+  if (
+    typeof body.value === "object"
+    && body.value !== null
+    && "error" in body.value
+  ) {
+    throw new Error(`WebDriver error: ${body.value.message ?? "unknown error"}`);
+  }
+}
+
 async function sendUiTextInput(
   client: WebDriverClient,
   text: string,
@@ -230,6 +286,46 @@ async function waitForCurrentItemId(
     await sleep(200);
   }
   throw new Error(`Timed out waiting for current item ${itemId}`);
+}
+
+/**
+ * Selects a freshly inserted task and waits for the app to make it current,
+ * reissuing the selection while it does not take.
+ *
+ * A single `selectItem` does not always take on a row this test inserted a
+ * moment ago, and the case before this one leaves the app busy. Nothing here
+ * asserts selection latency, so re-issuing is the fixture's job, and the
+ * diagnostics name what the app was holding when it never took.
+ */
+async function selectItemUntilCurrent(
+  client: WebDriverClient,
+  itemId: string,
+  timeoutMs = 30_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastError: unknown = null;
+  while (Date.now() < deadline) {
+    await setSelectedItem(client, itemId);
+    try {
+      await waitForCurrentItemId(client, itemId, 2_000);
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  const diagnostics = await client.executeSync(
+    `const ctx = window.__KANNA_E2E__?.setupState;
+     const read = (value) => value?.__v_isRef ? value.value : value;
+     const store = read(ctx?.store);
+     return JSON.parse(JSON.stringify({
+       selectedItemId: store?.selectedItemId,
+       currentItemId: read(ctx?.currentItem)?.id ?? null,
+       itemIds: (read(store?.items) ?? []).map((item) => item.id),
+     }));`,
+  ).catch((error: unknown) => ({ diagnosticError: String(error) }));
+  throw new Error(
+    `${String(lastError)}; diagnostics=${JSON.stringify(diagnostics)}`,
+  );
 }
 
 async function closeFocusedWindowThroughAppAction(client: WebDriverClient): Promise<void> {
@@ -573,8 +669,16 @@ async function waitForTerminalBufferMatch(
     await sleep(200);
   }
 
+  // What the session did print is the whole diagnosis for an input test: an
+  // absent pattern says nothing about whether the input arrived misclassified,
+  // late, or not at all.
+  const buffer = await client.executeSync<string[]>(
+    `const hook = window.__KANNA_E2E__?.terminalBuffers;
+     if (!hook) throw new Error("terminal buffer hook unavailable");
+     return hook.lines(${JSON.stringify(sessionId)});`,
+  ).catch(() => [] as string[]);
   throw new Error(
-    `Timed out waiting for terminal buffer pattern "${pattern}" in ${sessionId}: ${String(lastError)}`,
+    `Timed out waiting for terminal buffer pattern "${pattern}" in ${sessionId}: ${String(lastError)}; buffer=${JSON.stringify(buffer)}`,
   );
 }
 
@@ -916,9 +1020,13 @@ describe("pty session (real CLI)", () => {
     await waitForTerminalBufferText(client, sessionId, readyMarker, 15_000);
     await waitForSessionRecoveryText(client, sessionId, readyMarker, 10_000);
 
+    // A sample only proves anything while the CPU work is still running: an
+    // echo slower than the work window reports `serverWorkActive: false`, which
+    // says nothing about contended latency. Resample until one lands inside the
+    // window and assert on those.
     const measurements: Array<{ latencyMs: number; serverWorkActive: boolean }> = [];
     let lastEcho = "";
-    for (let sample = 0; sample < 3; sample += 1) {
+    for (let sample = 0; sample < 5; sample += 1) {
       const inputMarker = `ki${randomUUID().replaceAll("-", "").slice(0, 10)}`;
       lastEcho = `ECHO:${inputMarker}`;
       try {
@@ -933,21 +1041,29 @@ describe("pty session (real CLI)", () => {
       } finally {
         await waitForConcurrentServerWork(client);
       }
-      if (measurements.at(-1)?.latencyMs < 500) break;
+      const latest = measurements.at(-1);
+      if (latest?.serverWorkActive && latest.latencyMs < 500) break;
     }
-    expect(measurements.every(({ serverWorkActive }) => serverWorkActive)).toBe(true);
-    expect(Math.min(...measurements.map(({ latencyMs }) => latencyMs))).toBeLessThan(500);
+    const contended = measurements.filter(({ serverWorkActive }) => serverWorkActive);
+    expect(contended, `no sample echoed while server work was active: ${JSON.stringify(measurements)}`)
+      .not.toHaveLength(0);
+    expect(Math.min(...contended.map(({ latencyMs }) => latencyMs))).toBeLessThan(500);
     await waitForSessionRecoveryText(client, sessionId, lastEcho, 10_000);
   });
 
-  it("keeps a UI draft submission separate from queued logical API input", async () => {
+  const MANAGER_INPUT = "manager-message";
+
+  /**
+   * A raw-mode composer: every byte extends the draft and prints DRAFT_READY,
+   * and a CR prints the draft it submitted. That makes the daemon's ordering of
+   * a draft against a queued logical message observable from the buffer.
+   */
+  async function startDraftBoundaryFixture(): Promise<string> {
     const sessionId = trackSessionId(
       deterministicSessionIds,
       `pty-draft-boundary-${randomUUID()}`,
     );
     const readyMarker = `KBOUNDARY_READY_${randomUUID().replaceAll("-", "")}`;
-    const humanInput = "human-input";
-    const managerInput = "manager-message";
     const script = [
       "select(STDOUT); $| = 1;",
       "system('stty raw -echo');",
@@ -981,42 +1097,95 @@ describe("pty session (real CLI)", () => {
       rows: 24,
     });
     await callVueMethod(client, "loadItems", repoId);
-    await setSelectedItem(client, sessionId);
-    await waitForCurrentItemId(client, sessionId);
+    await selectItemUntilCurrent(client, sessionId);
     await waitForTerminalBufferText(client, sessionId, readyMarker, 15_000);
     await waitForFocusedTerminalReady(client, sessionId);
+    return sessionId;
+  }
 
-    await sendUiTextInput(client, humanInput);
-    await waitForTerminalBufferText(client, sessionId, "DRAFT_READY", 10_000);
-
+  async function queueLogicalTaskInput(sessionId: string, input: string): Promise<void> {
     const { baseUrl } = await resolveAppKannaServer(client);
     const response = await fetch(
       `${baseUrl}/v1/tasks/${encodeURIComponent(sessionId)}/input`,
       {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ input: managerInput }),
+        body: JSON.stringify({ input }),
       },
     );
     if (!response.ok) {
       throw new Error(`logical task input failed: ${response.status} ${await response.text()}`);
     }
+  }
+
+  async function submittedDraftsFor(sessionId: string): Promise<string[]> {
+    const lines = await client.executeSync<string[]>(
+      `const hook = window.__KANNA_E2E__?.terminalBuffers;
+       if (!hook) throw new Error("terminal buffer hook unavailable");
+       return hook.lines(${JSON.stringify(sessionId)});`,
+    );
+    return lines.filter((line) => /SUBMIT:/.test(line));
+  }
+
+  // The user's own path, and the only case that covers it end to end: a real
+  // DOM key event through xterm, the frontend's producer classification, the
+  // input queue, server input and the daemon's draft ordering. A test that
+  // reaches for `send_input` with an explicit boundary still passes when a
+  // user's Enter is misclassified, which is the defect this owns.
+  it("submits a rapid UI draft tail and Enter ahead of queued logical input", async () => {
+    const sessionId = await startDraftBoundaryFixture();
+    const humanPrefix = "human-";
+    const humanTail = "x";
+
+    await typeDraftKeysToActiveTerminal(client, humanPrefix);
+    await waitForTerminalBufferText(client, sessionId, "DRAFT_READY", 10_000);
+
+    await queueLogicalTaskInput(sessionId, MANAGER_INPUT);
+
+    await sendRapidTailAndEnter(client, humanTail);
+    await waitForTerminalBufferMatch(
+      client,
+      sessionId,
+      `SUBMIT:<${MANAGER_INPUT}>`,
+      10_000,
+    );
+    // A typed character reaches xterm twice through this harness — once from
+    // the keydown and once from the textarea value the plugin also writes — so
+    // how many times each letter repeats is a synthesis artifact, not a
+    // contract. What this case owns is the boundary: the human draft submits
+    // whole and first, with the queued logical message behind it rather than
+    // spliced into it.
+    const [draftSubmission, logicalSubmission] = await submittedDraftsFor(sessionId);
+    expect(draftSubmission).toMatch(
+      new RegExp(`^SUBMIT:<${[...humanPrefix].map((character) => `${character}+`).join("")}${humanTail}>$`),
+    );
+    expect(logicalSubmission).toBe(`SUBMIT:<${MANAGER_INPUT}>`);
+    expect(await submittedDraftsFor(sessionId)).toHaveLength(2);
+  }, 45_000);
+
+  // The same ordering contract at the acknowledged desktop boundary. It is
+  // deterministic where the key event above depends on WebDriver's synthesis,
+  // so it stays as the narrower proof rather than as a replacement for it.
+  it("keeps a UI draft submission separate from queued logical API input", async () => {
+    const sessionId = await startDraftBoundaryFixture();
+    const humanInput = "human-input";
+
+    await sendUiTextInput(client, humanInput);
+    await waitForTerminalBufferText(client, sessionId, "DRAFT_READY", 10_000);
+
+    await queueLogicalTaskInput(sessionId, MANAGER_INPUT);
 
     await sendSubmissionBoundary(client, sessionId);
     await waitForTerminalBufferMatch(
       client,
       sessionId,
-      `SUBMIT:<${managerInput}>`,
+      `SUBMIT:<${MANAGER_INPUT}>`,
       10_000,
     );
-    const submittedLines = await client.executeSync<string[]>(
-      `const hook = window.__KANNA_E2E__?.terminalBuffers;
-       if (!hook) throw new Error("terminal buffer hook unavailable");
-       return hook.lines(${JSON.stringify(sessionId)});`,
-    );
-    expect(
-      submittedLines.filter((line) => /SUBMIT:/.test(line)),
-    ).toEqual([`SUBMIT:<${humanInput}>`, `SUBMIT:<${managerInput}>`]);
+    expect(await submittedDraftsFor(sessionId)).toEqual([
+      `SUBMIT:<${humanInput}>`,
+      `SUBMIT:<${MANAGER_INPUT}>`,
+    ]);
   }, 45_000);
 
   it("routes focused-window keyboard input to that window's selected PTY task", async () => {

@@ -1,5 +1,5 @@
 import { createServer } from "node:net";
-import { open, readFile, rename, unlink } from "node:fs/promises";
+import { mkdir, open, readdir, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -24,6 +24,15 @@ export const E2E_PORT_RANGE_END = 39998;
 export type ReleasePort = () => Promise<void>;
 export type ReleasePortClaim = () => Promise<void>;
 
+export interface ClaimE2ePortOptions {
+  /**
+   * Awaited after this run's claim is visible to other processes and before the
+   * claim resolves contention. A test seam: it is the only way to hold the
+   * window open across a process boundary.
+   */
+  onClaimPublished?: () => Promise<void>;
+}
+
 export interface PortAllocator {
   allocate(label: string, options?: { reserveNextPort?: boolean }): Promise<number>;
   handoff(port: number): Promise<void>;
@@ -42,8 +51,23 @@ export interface PortAllocatorOptions {
   maxAttempts?: number;
 }
 
-function portClaimPath(port: number): string {
-  return join(tmpdir(), `kanna-desktop-e2e-port-${port}.lock`);
+export const PORT_CLAIM_DIR = join(tmpdir(), "kanna-desktop-e2e-port-claims");
+
+function portClaimPrefix(port: number): string {
+  return `port-${port}.claim-`;
+}
+
+/**
+ * The owner pid lives in the claim's file name, so creating the file publishes
+ * the whole claim in one atomic step. Reading ownership out of file *contents*
+ * is what made claims collide: `open(path, "wx")` publishes an empty file
+ * first, and a competing runner that read it before the token was written saw
+ * an ownerless claim, removed it as stale, and took the same port.
+ */
+function parseClaimOwnerPid(entry: string): number | null {
+  const owner = /^port-\d+\.claim-(\d+)-[0-9a-f-]+$/.exec(entry)?.[1];
+  const pid = Number.parseInt(owner ?? "", 10);
+  return Number.isInteger(pid) && pid > 0 ? pid : null;
 }
 
 function processIsAlive(pid: number): boolean {
@@ -60,40 +84,47 @@ function processIsAlive(pid: number): boolean {
  * Keep a cross-process claim after the listening reservation is handed to the
  * owning service. This closes the restart gap where another E2E runner could
  * select a port while the first runner is between app instances.
+ *
+ * Every claim owns a file name no other claim can hold, so a claim is never a
+ * shared path two runners take turns creating and deleting: publishing is one
+ * atomic `open(…, "wx")`, and removing an abandoned runner's claim cannot
+ * remove a live one. Contention is then resolved by reading the directory —
+ * a claim that finds any other live claim for its port stands down, so a
+ * simultaneous race ends with at most one owner and the allocator simply tries
+ * another port.
  */
-export async function claimE2ePort(port: number): Promise<ReleasePortClaim | null> {
-  const path = portClaimPath(port);
-  const ownerToken = `${process.pid}:${randomUUID()}`;
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    try {
-      const handle = await open(path, "wx");
-      await handle.writeFile(`${ownerToken}\n`);
-      await handle.close();
-      return async () => {
-        const currentOwner = (await readFile(path, "utf8").catch(() => "")).trim();
-        if (currentOwner !== ownerToken) return;
-        await unlink(path).catch((error: NodeJS.ErrnoException) => {
-          if (error.code !== "ENOENT") throw error;
-        });
-      };
-    } catch (error) {
-      const fsError = error as NodeJS.ErrnoException;
-      if (fsError.code !== "EEXIST") throw error;
-      const owner = Number.parseInt((await readFile(path, "utf8").catch(() => "")).split(":")[0] ?? "", 10);
-      if (processIsAlive(owner)) return null;
-      // Rename the stale claim before deleting it. An unlink of the shared
-      // path can otherwise remove a fresh claim won by another runner between
-      // our liveness check and cleanup.
-      const stalePath = `${path}.stale-${process.pid}-${randomUUID()}`;
-      try {
-        await rename(path, stalePath);
-        await unlink(stalePath).catch(() => undefined);
-      } catch (renameError) {
-        if ((renameError as NodeJS.ErrnoException).code !== "ENOENT") throw renameError;
-      }
+export async function claimE2ePort(
+  port: number,
+  options: ClaimE2ePortOptions = {},
+): Promise<ReleasePortClaim | null> {
+  await mkdir(PORT_CLAIM_DIR, { recursive: true });
+  const prefix = portClaimPrefix(port);
+  const name = `${prefix}${process.pid}-${randomUUID()}`;
+  const path = join(PORT_CLAIM_DIR, name);
+  await (await open(path, "wx")).close();
+  const release: ReleasePortClaim = async () => {
+    await unlink(path).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+    });
+  };
+
+  await options.onClaimPublished?.();
+
+  for (const entry of await readdir(PORT_CLAIM_DIR)) {
+    if (entry === name) continue;
+    const owner = parseClaimOwnerPid(entry);
+    if (owner === null) continue;
+    if (!processIsAlive(owner)) {
+      // An abandoned runner's claim, on this port or any other. Sweeping it
+      // here is safe precisely because the name is unique to that runner.
+      await unlink(join(PORT_CLAIM_DIR, entry)).catch(() => undefined);
+      continue;
     }
+    if (!entry.startsWith(prefix)) continue;
+    await release();
+    return null;
   }
-  return null;
+  return release;
 }
 
 async function listen(port: number, host: string): Promise<ReleasePort | null> {

@@ -672,19 +672,15 @@ async function runCompanionJourney(input: {
     input.fixture.sourceUrl,
   );
   // Arm only the one-time capability capture. Both activations below use a
-  // physical WebDriver pointer at the observed URL cell in xterm.
-  await captureNextRemoteCompanionOpen(secondary, input.owner);
-  await clickRemoteCompanionLink(
-    secondary,
-    input.owner.ownerTaskId,
-    input.fixture.sourceUrl,
-  );
-  const initial = await waitForRemoteCompanionSnapshot(
+  // physical WebDriver pointer at the observed URL cell in xterm. The first one
+  // goes through `activateRemoteCompanionLink`, which re-aims the pointer until
+  // the capability is captured: a single click lands on a cell whose position
+  // the terminal may still be settling, and a missed click is not an absent
+  // capability.
+  const initial = await activateRemoteCompanionLink(
     secondary,
     input.owner,
-    (snapshot) =>
-      snapshot.status === "available" &&
-      Boolean(snapshot.sessionId && snapshot.revision && snapshot.entryUrl),
+    input.fixture.sourceUrl,
   );
   const browser = await RemoteCompanionBrowser.open(initial.entryUrl!);
   try {
