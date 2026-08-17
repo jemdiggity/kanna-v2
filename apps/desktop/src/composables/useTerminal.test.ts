@@ -432,18 +432,27 @@ describe("useTerminal", () => {
 
     const onData = terminal.onData.mock.calls[0]?.[0];
     expect(onData).toBeDefined();
-    onData("x");
-    await waitForQueuedInputFlush();
-    expect(sendTermInput).toHaveBeenCalledWith("session-1", btoa("x"), false, false);
-
     const keyHandler = terminal.attachCustomKeyEventHandler.mock.calls[0]?.[0] as
       | ((event: KeyboardEvent) => boolean)
       | undefined;
     expect(keyHandler).toBeDefined();
+    keyHandler?.(new KeyboardEvent("keydown", { key: "x" }));
+    onData("x");
+    await waitForQueuedInputFlush();
+    expect(sendTermInput).toHaveBeenCalledWith("session-1", btoa("x"), false, false);
+
     keyHandler?.(new KeyboardEvent("keydown", { key: "Enter" }));
     onData("\r");
     await waitForQueuedInputFlush();
     expect(sendTermInput).toHaveBeenLastCalledWith("session-1", btoa("\r"), true, false);
+
+    // Parser-generated terminal replies have no preceding DOM producer event.
+    // They are control input, not a human composer draft that may fence later
+    // logical messages such as transfer wrap-up and quit submissions.
+    await Promise.resolve();
+    onData("\x1b[?1;2c");
+    await waitForQueuedInputFlush();
+    expect(sendTermInput).toHaveBeenLastCalledWith("session-1", btoa("\x1b[?1;2c"), false, true);
 
     const onResize = terminal.onResize.mock.calls[0]?.[0];
     expect(onResize).toBeDefined();
@@ -2902,9 +2911,14 @@ describe("useTerminal", () => {
 
     const terminal = terminals[0];
     const onData = terminal.onData.mock.calls[0][0] as (data: string) => void;
+    const keyHandler = terminal.attachCustomKeyEventHandler.mock.calls[0][0] as
+      (event: KeyboardEvent) => boolean;
 
+    keyHandler(new KeyboardEvent("keydown", { key: "a" }));
     onData("a");
+    keyHandler(new KeyboardEvent("keydown", { key: "b" }));
     onData("b");
+    keyHandler(new KeyboardEvent("keydown", { key: "c" }));
     onData("c");
 
     expect(invokeMock).not.toHaveBeenCalledWith("send_input", expect.anything());

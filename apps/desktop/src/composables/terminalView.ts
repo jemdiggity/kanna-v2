@@ -103,24 +103,35 @@ export function initializeTerminalView(params: {
   })
   const cleanupDropEvents = dropBridge.registerContainerDropHandlers()
   type ProducerInputKind = "draft" | "submission" | "control"
-  let producerInputKind: ProducerInputKind = "draft"
+  // xterm emits protocol replies through `onData` without a DOM input event.
+  // Treat that unclassified path as terminal control; every human input path
+  // below declares itself before xterm emits its bytes.
+  let producerInputKind: ProducerInputKind = "control"
   let producerInputGeneration = 0
   const declareProducerInput = (kind: ProducerInputKind) => {
     producerInputKind = kind
     const generation = ++producerInputGeneration
     queueMicrotask(() => {
-      if (producerInputGeneration === generation) producerInputKind = "draft"
+      if (producerInputGeneration === generation) producerInputKind = "control"
     })
   }
   const declareControlInput = () => declareProducerInput("control")
+  const declareDraftInput = () => declareProducerInput("draft")
   const controlEvents = ["mousedown", "mouseup", "mousemove", "wheel", "focus", "blur"]
+  const draftEvents = ["beforeinput", "paste", "compositionstart", "compositionupdate", "compositionend"]
   for (const eventName of controlEvents) {
     params.el.addEventListener(eventName, declareControlInput, true)
+  }
+  for (const eventName of draftEvents) {
+    params.el.addEventListener(eventName, declareDraftInput, true)
   }
   const cleanupContainerEvents = () => {
     cleanupDropEvents?.()
     for (const eventName of controlEvents) {
       params.el.removeEventListener(eventName, declareControlInput, true)
+    }
+    for (const eventName of draftEvents) {
+      params.el.removeEventListener(eventName, declareDraftInput, true)
     }
   }
 
