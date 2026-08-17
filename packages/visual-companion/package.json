@@ -13,6 +13,7 @@
     "@kanna/stream-client": "workspace:*"
   },
   "devDependencies": {
+    "happy-dom": "^20.8.4",
     "typescript": "^5",
     "vitest": "^4.1.4"
   }

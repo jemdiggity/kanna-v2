@@ -14,6 +14,14 @@ pub const MAX_COMPANION_ASSET_COUNT: usize = 32;
 pub const MAX_COMPANION_ASSET_BYTES: u64 = 4 * 1024 * 1024;
 /// Maximum total unencoded size of all assets in one companion bundle.
 pub const MAX_COMPANION_ASSET_TOTAL_BYTES: u64 = 16 * 1024 * 1024;
+/// Maximum raw bytes in local images inlined into one companion document.
+///
+/// Base64 expands this to at most 1 MiB. The bound covers the reported
+/// approximately 528 KiB screenshot gallery with headroom while keeping the
+/// prepared HTML comfortably below the companion transport limits.
+pub const MAX_COMPANION_INLINE_IMAGE_TOTAL_BYTES: u64 = 768 * 1024;
+/// Maximum UTF-8 bytes in a document after local image preparation.
+pub const MAX_COMPANION_PREPARED_HTML_BYTES: usize = 1536 * 1024;
 /// Maximum cumulative entries enumerated across one companion tree scan.
 pub const MAX_COMPANION_DIRECTORY_ENTRIES: usize = 4096;
 /// Maximum cumulative basename bytes enumerated across one companion tree scan.
@@ -22,10 +30,13 @@ pub const MAX_COMPANION_DIRECTORY_NAME_BYTES: usize = 256 * 1024;
 /// including base64 expansion and metadata.
 pub const MAX_COMPANION_MATERIALIZED_BYTES: usize = MAX_COMPANION_HTML_BYTES as usize
     + (MAX_COMPANION_ASSET_TOTAL_BYTES as usize * 4).div_ceil(3)
+    + (MAX_COMPANION_INLINE_IMAGE_TOTAL_BYTES as usize * 4).div_ceil(3)
     + 1024 * 1024;
 /// Conservative retained bytes for a materialized companion without assets.
-pub const MAX_COMPANION_ASSETLESS_MATERIALIZED_BYTES: usize =
-    MAX_COMPANION_HTML_BYTES as usize + 1024 * 1024;
+pub const MAX_COMPANION_ASSETLESS_MATERIALIZED_BYTES: usize = MAX_COMPANION_HTML_BYTES as usize
+    + (MAX_COMPANION_INLINE_IMAGE_TOTAL_BYTES as usize * 4).div_ceil(3)
+    + MAX_COMPANION_INLINE_IMAGE_TOTAL_BYTES as usize
+    + 1024 * 1024;
 
 // server-info contains only small JSON metadata. Bounding it independently
 // prevents malformed source metadata from competing with document/asset memory.
@@ -587,8 +598,10 @@ fn materialize_scan(
     if bytes.len() as u64 > MAX_COMPANION_HTML_BYTES {
         return Err(CompanionError::TooLarge);
     }
-    let html = String::from_utf8(bytes).map_err(|_| CompanionError::UnsupportedContent)?;
-    let document_kind = classify_document(&html);
+    let source_html = String::from_utf8(bytes).map_err(|_| CompanionError::UnsupportedContent)?;
+    let document_kind = classify_document(&source_html);
+    let prepared_html =
+        inline_local_images(&source_html, &selected.content, &selected.content_names);
     let source_origin = discover_source_origin(selected.state.as_raw_fd());
     let assets = if include_assets {
         discover_assets(&selected.content, &selected.content_names)?
@@ -602,16 +615,387 @@ fn materialize_scan(
         ));
     }
     Ok(MaterializedScan {
-        cacheable: source_origin.cacheable && assets.cacheable,
+        cacheable: source_origin.cacheable && assets.cacheable && prepared_html.cacheable,
         bundle: Some(CompanionBundle {
             session_id: selected.session_id,
             revision,
             document_kind,
-            html,
+            html: prepared_html.value,
             source_origin: source_origin.value,
             assets: assets.value.unwrap_or_default(),
         }),
     })
+}
+
+#[cfg(unix)]
+struct PreparedHtml {
+    value: String,
+    cacheable: bool,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+struct ImageSourceAttribute {
+    value_start: usize,
+    value_end: usize,
+}
+
+#[cfg(unix)]
+fn inline_local_images(
+    html: &str,
+    content: &std::os::fd::OwnedFd,
+    content_names: &[std::ffi::OsString],
+) -> PreparedHtml {
+    let mut output = String::with_capacity(html.len());
+    let mut copied_until = 0;
+    let mut search_from = 0;
+    let mut remaining_image_bytes = MAX_COMPANION_INLINE_IMAGE_TOTAL_BYTES;
+    let mut cacheable = true;
+
+    while let Some(relative_start) = html[search_from..].find('<') {
+        let tag_start = search_from + relative_start;
+        if html[tag_start..].starts_with("<!--") {
+            search_from = html[tag_start + 4..]
+                .find("-->")
+                .map_or(html.len(), |end| tag_start + 4 + end + 3);
+            continue;
+        }
+        let Some((name_end, tag_end)) = html_start_tag(html, tag_start) else {
+            search_from = tag_start + 1;
+            continue;
+        };
+        let tag_name = &html[tag_start + 1..name_end];
+        if tag_name.eq_ignore_ascii_case("script")
+            || tag_name.eq_ignore_ascii_case("style")
+            || tag_name.eq_ignore_ascii_case("textarea")
+            || tag_name.eq_ignore_ascii_case("title")
+        {
+            let closing = format!("</{tag_name}");
+            search_from = find_ascii_case_insensitive(html, tag_end, &closing).unwrap_or(tag_end);
+            continue;
+        }
+        search_from = tag_end;
+        if !tag_name.eq_ignore_ascii_case("img") {
+            continue;
+        }
+        let Some(source) = image_source_attribute(html, name_end, tag_end) else {
+            continue;
+        };
+        let raw_source = &html[source.value_start..source.value_end];
+        let local_source = classify_local_image_source(raw_source);
+        let LocalImageSource::Sibling(file_name) = local_source else {
+            if matches!(local_source, LocalImageSource::OutsideContent) {
+                let placeholder =
+                    local_image_placeholder(raw_source, "path is outside companion content");
+                output.push_str(&html[copied_until..tag_start]);
+                output.push_str(&placeholder);
+                copied_until = tag_end;
+            }
+            continue;
+        };
+
+        let resolution =
+            inline_image_data(content, content_names, file_name, remaining_image_bytes);
+        cacheable &= resolution.cacheable;
+        let replacement = match resolution.value {
+            Ok((data_uri, raw_bytes)) => LocalImageReplacement::Source {
+                data_uri,
+                raw_bytes,
+            },
+            Err(reason) => {
+                LocalImageReplacement::Placeholder(local_image_placeholder(raw_source, reason))
+            }
+        };
+        let replacement_len = match &replacement {
+            LocalImageReplacement::Source { data_uri, .. } => source
+                .value_start
+                .saturating_sub(tag_start)
+                .saturating_add(data_uri.len())
+                .saturating_add(tag_end.saturating_sub(source.value_end)),
+            LocalImageReplacement::Placeholder(placeholder) => placeholder.len(),
+        };
+        let projected_size = output
+            .len()
+            .saturating_add(tag_start.saturating_sub(copied_until))
+            .saturating_add(replacement_len)
+            .saturating_add(html.len().saturating_sub(tag_end));
+        if projected_size > MAX_COMPANION_PREPARED_HTML_BYTES {
+            // Leave the original tag for the browser sanitizer, which will
+            // replace the rejected source with the same visible placeholder.
+            continue;
+        }
+        output.push_str(&html[copied_until..tag_start]);
+        match replacement {
+            LocalImageReplacement::Source {
+                data_uri,
+                raw_bytes,
+            } => {
+                output.push_str(&html[tag_start..source.value_start]);
+                output.push_str(&data_uri);
+                output.push_str(&html[source.value_end..tag_end]);
+                remaining_image_bytes = remaining_image_bytes.saturating_sub(raw_bytes);
+            }
+            LocalImageReplacement::Placeholder(placeholder) => output.push_str(&placeholder),
+        }
+        copied_until = tag_end;
+    }
+    output.push_str(&html[copied_until..]);
+    PreparedHtml {
+        value: output,
+        cacheable,
+    }
+}
+
+#[cfg(unix)]
+enum LocalImageReplacement {
+    Source { data_uri: String, raw_bytes: u64 },
+    Placeholder(String),
+}
+
+#[cfg(unix)]
+enum LocalImageSource<'a> {
+    Passthrough,
+    Sibling(&'a str),
+    OutsideContent,
+}
+
+#[cfg(unix)]
+fn classify_local_image_source(source: &str) -> LocalImageSource<'_> {
+    if source.starts_with("data:")
+        || source
+            .get(..8)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"))
+    {
+        return LocalImageSource::Passthrough;
+    }
+    let candidate = source
+        .strip_prefix("/files/")
+        .or_else(|| source.strip_prefix("./"))
+        .unwrap_or(source);
+    if is_normal_component(candidate) && !candidate.contains(['/', '\\']) {
+        LocalImageSource::Sibling(candidate)
+    } else {
+        LocalImageSource::OutsideContent
+    }
+}
+
+#[cfg(unix)]
+struct InlineImageResolution {
+    value: Result<(String, u64), &'static str>,
+    cacheable: bool,
+}
+
+#[cfg(unix)]
+fn inline_image_data(
+    content: &std::os::fd::OwnedFd,
+    content_names: &[std::ffi::OsString],
+    file_name: &str,
+    remaining_bytes: u64,
+) -> InlineImageResolution {
+    use std::os::fd::AsRawFd;
+
+    let content_type = companion_asset_content_type(file_name);
+    if !matches!(
+        content_type,
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/avif"
+    ) {
+        return InlineImageResolution {
+            value: Err("file type is not a supported passive image"),
+            cacheable: true,
+        };
+    }
+    let Some(name) = content_names.iter().find(|name| name == &file_name) else {
+        return InlineImageResolution {
+            value: Err("file is missing from companion content"),
+            cacheable: true,
+        };
+    };
+    let opened = open_optional_materialization_file(content.as_raw_fd(), name);
+    let Some(mut file) = opened.value else {
+        return InlineImageResolution {
+            value: Err("file is unavailable or unsafe"),
+            cacheable: opened.cacheable,
+        };
+    };
+    let metadata = match optional_file_metadata(&file, name) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            let classified = classify_optional_error::<()>(&error);
+            return InlineImageResolution {
+                value: Err("file is unavailable or unsafe"),
+                cacheable: classified.cacheable,
+            };
+        }
+    };
+    if metadata.len() > remaining_bytes {
+        return InlineImageResolution {
+            value: Err("768 KiB document image budget is exhausted"),
+            cacheable: true,
+        };
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    if let Err(error) = optional_read_to_end(
+        &mut file,
+        name,
+        remaining_bytes.saturating_add(1),
+        &mut bytes,
+    ) {
+        let classified = classify_optional_error::<()>(&error);
+        return InlineImageResolution {
+            value: Err("file could not be read safely"),
+            cacheable: classified.cacheable,
+        };
+    }
+    if bytes.len() as u64 > remaining_bytes {
+        return InlineImageResolution {
+            value: Err("768 KiB document image budget is exhausted"),
+            cacheable: true,
+        };
+    }
+    let raw_bytes = bytes.len() as u64;
+    InlineImageResolution {
+        value: Ok((
+            format!(
+                "data:{content_type};base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(bytes)
+            ),
+            raw_bytes,
+        )),
+        cacheable: true,
+    }
+}
+
+#[cfg(unix)]
+fn local_image_placeholder(source: &str, reason: &str) -> String {
+    let label = format!("Image unavailable: {source} ({reason}).");
+    let escaped = escape_html_text(&label);
+    format!(
+        r#"<span class="kanna-companion-image-placeholder" role="img" aria-label="{escaped}">{escaped}</span>"#
+    )
+}
+
+#[cfg(unix)]
+fn escape_html_text(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
+}
+
+#[cfg(unix)]
+fn html_start_tag(html: &str, start: usize) -> Option<(usize, usize)> {
+    let bytes = html.as_bytes();
+    let mut cursor = start.checked_add(1)?;
+    let first = *bytes.get(cursor)?;
+    if !first.is_ascii_alphabetic() {
+        return None;
+    }
+    while bytes
+        .get(cursor)
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b':'))
+    {
+        cursor += 1;
+    }
+    let name_end = cursor;
+    let mut quote = None;
+    while let Some(byte) = bytes.get(cursor).copied() {
+        match (quote, byte) {
+            (Some(expected), current) if current == expected => quote = None,
+            (None, b'\'' | b'"') => quote = Some(byte),
+            (None, b'>') => return Some((name_end, cursor + 1)),
+            _ => {}
+        }
+        cursor += 1;
+    }
+    None
+}
+
+#[cfg(unix)]
+fn image_source_attribute(
+    html: &str,
+    name_end: usize,
+    tag_end: usize,
+) -> Option<ImageSourceAttribute> {
+    let bytes = html.as_bytes();
+    let mut cursor = name_end;
+    while cursor + 1 < tag_end {
+        while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+            cursor += 1;
+        }
+        if matches!(bytes.get(cursor), Some(b'/') | Some(b'>')) {
+            cursor += 1;
+            continue;
+        }
+        let attribute_start = cursor;
+        while bytes
+            .get(cursor)
+            .is_some_and(|byte| !byte.is_ascii_whitespace() && !matches!(byte, b'=' | b'/' | b'>'))
+        {
+            cursor += 1;
+        }
+        if cursor == attribute_start {
+            cursor += 1;
+            continue;
+        }
+        let name = &html[attribute_start..cursor];
+        while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+            cursor += 1;
+        }
+        if bytes.get(cursor) != Some(&b'=') {
+            continue;
+        }
+        cursor += 1;
+        while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+            cursor += 1;
+        }
+        let quote = bytes
+            .get(cursor)
+            .copied()
+            .filter(|byte| matches!(byte, b'\'' | b'"'));
+        if quote.is_some() {
+            cursor += 1;
+        }
+        let value_start = cursor;
+        while let Some(byte) = bytes.get(cursor).copied() {
+            if quote.is_some_and(|expected| byte == expected)
+                || (quote.is_none() && (byte.is_ascii_whitespace() || byte == b'>'))
+            {
+                break;
+            }
+            cursor += 1;
+        }
+        let value_end = cursor;
+        if quote.is_some() && cursor < tag_end {
+            cursor += 1;
+        }
+        if name.eq_ignore_ascii_case("src") {
+            return Some(ImageSourceAttribute {
+                value_start,
+                value_end,
+            });
+        }
+    }
+    None
+}
+
+#[cfg(unix)]
+fn find_ascii_case_insensitive(html: &str, start: usize, needle: &str) -> Option<usize> {
+    let needle_len = needle.len();
+    html.get(start..)?
+        .char_indices()
+        .map(|(offset, _)| start + offset)
+        .find(|candidate| {
+            html.get(*candidate..candidate.saturating_add(needle_len))
+                .is_some_and(|value| value.eq_ignore_ascii_case(needle))
+        })
 }
 
 #[cfg(unix)]

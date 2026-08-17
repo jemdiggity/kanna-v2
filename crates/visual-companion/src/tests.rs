@@ -110,6 +110,100 @@ fn discovers_current_document_from_explicit_workspace() {
 }
 
 #[test]
+fn prepares_sibling_and_files_image_sources_as_bounded_data_uris() {
+    let fixture = Fixture::new();
+    fixture.active_session(
+        "session-a",
+        "screen.html",
+        r#"<img id="relative" src="01.png"><img id="files" src="/files/02.jpg">"#,
+    );
+    fixture.content("session-a", "01.png", b"PNG");
+    fixture.content("session-a", "02.jpg", b"JPEG");
+
+    let mut scanner = CompanionScanner::new();
+    let CompanionScan::Changed(Some(bundle)) =
+        scanner.scan_with_assets(fixture.worktree(), false).unwrap()
+    else {
+        panic!("expected prepared companion");
+    };
+
+    assert!(bundle
+        .html
+        .contains(r#"id="relative" src="data:image/png;base64,UE5H""#));
+    assert!(bundle
+        .html
+        .contains(r#"id="files" src="data:image/jpeg;base64,SlBFRw==""#));
+    assert!(bundle.assets.is_empty());
+}
+
+#[test]
+fn local_image_preparation_rejects_out_of_tree_and_hostile_sources_visibly() {
+    let fixture = Fixture::new();
+    fixture.active_session(
+        "session-a",
+        "screen.html",
+        concat!(
+            r#"<img src="../secret.png">"#,
+            r#"<img src="/tmp/secret.png">"#,
+            r#"<img src="javascript:alert(1)">"#,
+        ),
+    );
+    fixture.write("secret.png", b"outside");
+
+    let bundle = current_bundle(fixture.worktree()).unwrap().unwrap();
+
+    assert!(!bundle.html.contains("data:image"));
+    assert!(bundle
+        .html
+        .contains("Image unavailable: ../secret.png (path is outside companion content)."));
+    assert!(bundle
+        .html
+        .contains("Image unavailable: /tmp/secret.png (path is outside companion content)."));
+    assert!(bundle.html.contains(
+        "Image unavailable: javascript:alert(1) (file type is not a supported passive image)."
+    ));
+    assert!(!bundle.html.contains("b3V0c2lkZQ=="));
+}
+
+#[test]
+fn local_image_preparation_degrades_oversized_references_visibly() {
+    let fixture = Fixture::new();
+    fixture.active_session("session-a", "screen.html", r#"<img src="gallery.png">"#);
+    fixture.content(
+        "session-a",
+        "gallery.png",
+        vec![b'x'; MAX_COMPANION_INLINE_IMAGE_TOTAL_BYTES as usize + 1],
+    );
+
+    let bundle = current_bundle(fixture.worktree()).unwrap().unwrap();
+
+    assert!(!bundle.html.contains("data:image"));
+    assert!(bundle
+        .html
+        .contains("Image unavailable: gallery.png (768 KiB document image budget is exhausted)."));
+}
+
+#[cfg(unix)]
+#[test]
+fn local_image_preparation_never_follows_sibling_symlinks() {
+    let fixture = Fixture::new();
+    fixture.active_session("session-a", "screen.html", r#"<img src="linked.png">"#);
+    let outside = fixture.write("outside.png", b"outside");
+    std::os::unix::fs::symlink(
+        outside,
+        fixture.session_path("session-a").join("content/linked.png"),
+    )
+    .unwrap();
+
+    let bundle = current_bundle(fixture.worktree()).unwrap().unwrap();
+
+    assert!(!bundle.html.contains("data:image"));
+    assert!(bundle
+        .html
+        .contains("Image unavailable: linked.png (file is unavailable or unsafe)."));
+}
+
+#[test]
 fn returns_none_without_a_brainstorm_directory() {
     let fixture = Fixture::new();
     assert_eq!(current_bundle(fixture.worktree()).unwrap(), None);
