@@ -1174,7 +1174,7 @@ const helpTopics: Record<string, string[]> = {
     "",
     "Build, sign, notarize, and optionally publish a Kanna release.",
     "A staging publish must be a descendant of the candidate the channel already serves, except for a verified and recorded forward-main resumption after promotion; a release/X.Y RC must build that branch's remote tip exactly.",
-    "Main staging versions bump the greater of VERSION and the latest production release; the result reports versionFloor when stale VERSION was raised.",
+    "Main staging versions bump the greater of VERSION and the greatest production semantic version; the result reports versionFloor when stale VERSION was raised.",
     "While an unpromoted release/X.Y candidate is soaking, main staging publishes are refused; a genuine matching promotion resumes forward main automatically, while abandonment requires kd release reset-staging.",
     "Use --staging --rollback-to <version> to repoint the staging channel manifest without building."
   ],

@@ -305,54 +305,60 @@ interface StagingContext {
 
 export interface MainStagingVersionFloor {
   versionFile: string;
-  latestProduction: string;
+  greatestProductionVersion: string;
   baseVersion: string;
   detail: string;
 }
 
 export function deriveMainStagingBaseVersion(
   versionFile: string,
-  latestProduction: string | null,
+  greatestProductionVersion: string | null,
   bump: ReleaseBump
 ): { baseVersion: string; versionFloor: MainStagingVersionFloor | null } {
-  const floorApplied = latestProduction !== null && compareVersions(versionFile, latestProduction) < 0;
-  const sourceVersion = floorApplied ? latestProduction : versionFile;
+  const floorApplied =
+    greatestProductionVersion !== null && compareVersions(versionFile, greatestProductionVersion) < 0;
+  const sourceVersion = floorApplied ? greatestProductionVersion : versionFile;
   const baseVersion = bumpVersion(sourceVersion, bump);
   return {
     baseVersion,
-    versionFloor: floorApplied && latestProduction
+    versionFloor: floorApplied && greatestProductionVersion
       ? {
           versionFile,
-          latestProduction,
+          greatestProductionVersion,
           baseVersion,
           detail:
-            `VERSION ${versionFile} lags latest production v${latestProduction}; ` +
+            `VERSION ${versionFile} lags greatest production semantic version v${greatestProductionVersion}; ` +
             `derived main staging version ${baseVersion} from the production floor.`
         }
       : null
   };
 }
 
-function parseLatestProductionVersion(raw: string): string | null {
+function parseGreatestProductionVersion(raw: string): string | null {
   const parsed = JSON.parse(raw) as unknown;
-  if (!Array.isArray(parsed)) throw new Error("Could not parse the latest production release from gh output.");
+  if (!Array.isArray(parsed)) throw new Error("Could not parse production releases from gh output.");
   if (parsed.length === 0) return null;
-  const first = parsed[0];
-  if (typeof first !== "object" || first === null) {
-    throw new Error("Could not parse the latest production release from gh output.");
+
+  let greatest: string | null = null;
+  for (const item of parsed) {
+    if (typeof item !== "object" || item === null) {
+      throw new Error("Could not parse production releases from gh output.");
+    }
+    const record = item as { tagName?: unknown; isPrerelease?: unknown };
+    if (
+      record.isPrerelease !== false ||
+      typeof record.tagName !== "string" ||
+      !/^v\d+\.\d+\.\d+$/.test(record.tagName)
+    ) {
+      throw new Error(`Production release metadata is invalid: ${raw}`);
+    }
+    const version = record.tagName.slice(1);
+    if (greatest === null || compareVersions(version, greatest) > 0) greatest = version;
   }
-  const record = first as { tagName?: unknown; isPrerelease?: unknown };
-  if (
-    record.isPrerelease !== false ||
-    typeof record.tagName !== "string" ||
-    !/^v\d+\.\d+\.\d+$/.test(record.tagName)
-  ) {
-    throw new Error(`Latest production release metadata is invalid: ${raw}`);
-  }
-  return record.tagName.slice(1);
+  return greatest;
 }
 
-async function readLatestProductionVersion(input: ReleaseShipInput): Promise<string | null> {
+async function readGreatestProductionVersion(input: ReleaseShipInput): Promise<string | null> {
   const remoteUrl = await mustRun(input.runner, "git", ["remote", "get-url", "origin"], input.repoRoot, input.env);
   const repoSlug = releaseRepoSlug(remoteUrl);
   const raw = await mustRun(
@@ -364,7 +370,7 @@ async function readLatestProductionVersion(input: ReleaseShipInput): Promise<str
       "--repo",
       repoSlug,
       "--limit",
-      "1",
+      "1000",
       "--exclude-drafts",
       "--exclude-pre-releases",
       "--json",
@@ -373,7 +379,7 @@ async function readLatestProductionVersion(input: ReleaseShipInput): Promise<str
     input.repoRoot,
     input.env
   );
-  return parseLatestProductionVersion(raw);
+  return parseGreatestProductionVersion(raw);
 }
 
 async function resolveStagingContext(input: ReleaseShipInput): Promise<StagingContext> {
@@ -393,7 +399,7 @@ async function resolveStagingContext(input: ReleaseShipInput): Promise<StagingCo
 
   if (branchName === "main") {
     const sourceVersion = readCurrentVersion(input.repoRoot);
-    const derivation = deriveMainStagingBaseVersion(sourceVersion, await readLatestProductionVersion(input), input.bump);
+    const derivation = deriveMainStagingBaseVersion(sourceVersion, await readGreatestProductionVersion(input), input.bump);
     return { ...derivation, sourceBranch: "main", commit: head };
   }
 

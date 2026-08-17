@@ -24,9 +24,10 @@ channel. Instead it names the pattern and closes the loop:
 - **Every staging ship is a release candidate.** `vX.Y.Z-staging.N` is an
   immutable prerelease whose `targetCommitish` records exactly which commit was
   built. `X.Y.Z` is the production version it is a candidate *for* (the base
-  version on main is derived by bumping the greater of `VERSION` and the latest
-  production release, so stale trunk metadata cannot create a downgrade); `N`
-  is the candidate number.
+  version on main is derived by bumping the greater of `VERSION` and the
+  greatest valid production semantic version reported by GitHub, so release
+  creation order and stale trunk metadata cannot create a downgrade); `N` is
+  the candidate number.
 - **Soaking is using staging as a daily driver.** That is not a failure mode —
   it is the validation step. What was missing is the exit.
 - **Promotion is the exit.** `kd release promote X.Y.Z-staging.N` turns the
@@ -323,7 +324,8 @@ bugfixes.
   main can run arbitrarily far ahead during the soak. The version bump commit
   lands on the branch; after promoting, merge `release/X.Y` back into main so
   `VERSION` and the tag history reach main. Until that merge lands, a main RC
-  uses the latest production release as its version floor and reports
+  uses the greatest valid production semantic version reported by GitHub as its
+  version floor and reports
   `versionFloor` in the ship result when that floor overrides stale `VERSION`.
 - **The branch goes dormant after release.** Reuse it for `X.Y.1` hotfix RCs
   (the series versioning picks the next patch automatically); cut `release/X.(Y+1)`
@@ -408,8 +410,9 @@ owner: `origin/main:VERSION` (`0.0.68`) is what trunk last released;
 is whatever `vX.Y.Z` was last tagged. Promotion pushes the `0.2.0` version-file
 bump to `release/0.2`, and merging the branch back to main is what finally moves
 trunk's `VERSION` to `0.2.0`. Before promotion, the freeze rule refuses main RCs.
-After promotion, a main ship compares `VERSION` with the latest non-prerelease
-GitHub release, takes the greater version, and applies the requested bump. Thus
+After promotion, a main ship compares `VERSION` with the greatest valid semantic
+version across all non-prerelease GitHub releases, takes the greater version,
+and applies the requested bump. Thus
 stale `VERSION` at `0.0.68` with production at `v0.2.0` derives
 `v0.2.1-staging.N`, never `v0.0.69-staging.N`; the returned `versionFloor`
 record calls out the lag until the branch merge synchronizes the file.

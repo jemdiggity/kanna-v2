@@ -133,7 +133,7 @@ function isStagingChannelAssetsQuery(command: string, args: string[]): boolean {
   );
 }
 
-function isLatestProductionReleaseQuery(command: string, args: string[]): boolean {
+function isProductionReleaseListQuery(command: string, args: string[]): boolean {
   return (
     command === "gh" &&
     args[0] === "release" &&
@@ -396,7 +396,7 @@ describe("release shipping", () => {
           if (command === "git" && args.join(" ") === "remote get-url origin") {
             return { exitCode: 0, stdout: "git@github.com:jemdiggity/kanna.git\n", stderr: "" };
           }
-          if (isLatestProductionReleaseQuery(command, args)) {
+          if (isProductionReleaseListQuery(command, args)) {
             return { exitCode: 0, stdout: "[]", stderr: "" };
           }
           if (command === "bazel" && args[0] === "cquery") {
@@ -774,7 +774,7 @@ describe("release shipping", () => {
           if (command === "gh" && args[0] === "release" && args[1] === "delete-asset") {
             return { exitCode: 0, stdout: "", stderr: "" };
           }
-          if (isLatestProductionReleaseQuery(command, args)) {
+          if (isProductionReleaseListQuery(command, args)) {
             return { exitCode: 0, stdout: "[]", stderr: "" };
           }
           if (command === "gh" && args[0] === "release" && args[1] === "list") {
@@ -910,7 +910,7 @@ describe("release shipping", () => {
               stderr: ""
             };
           }
-          if (isLatestProductionReleaseQuery(command, args)) {
+          if (isProductionReleaseListQuery(command, args)) {
             return { exitCode: 0, stdout: "[]", stderr: "" };
           }
           if (command === "gh" && args[0] === "release" && args[1] === "list") {
@@ -1949,11 +1949,13 @@ describe("release series", () => {
     expect(nextSeriesPatchVersion(tags, { major: 1, minor: 3 })).toBe("1.3.3");
   });
 
-  it("floors a main staging version above production when VERSION is stale", () => {
+  it("floors a main staging version above the greatest production semantic version when VERSION is stale", () => {
     const derivation = deriveMainStagingBaseVersion("0.0.68", "0.2.0", "patch");
     expect(derivation.baseVersion).toBe("0.2.1");
     expect(compareVersions(derivation.baseVersion, "0.2.0")).toBeGreaterThan(0);
-    expect(derivation.versionFloor?.detail).toMatch(/VERSION 0\.0\.68 lags latest production v0\.2\.0/);
+    expect(derivation.versionFloor?.detail).toMatch(
+      /VERSION 0\.0\.68 lags greatest production semantic version v0\.2\.0/
+    );
 
     expect(deriveMainStagingBaseVersion("0.3.0", "0.2.0", "patch")).toEqual({
       baseVersion: "0.3.1",
@@ -3072,6 +3074,8 @@ describe("staging publish lineage gates", () => {
     headDescendsFromMergeBase?: number;
     channelBody?: string;
     releaseBranchSha?: string;
+    /** Production releases in GitHub's newest-created-first response order. */
+    productionReleasesInCreationOrder?: string[];
     /** Series carrying an abandonment tag, as `X.Y` -> annotated tag message. */
     abandonedSeries?: Record<string, string>;
     /** Simulates a transient GitHub failure reading the channel itself. */
@@ -3221,12 +3225,11 @@ describe("staging publish lineage gates", () => {
         if (command === "gh" && args[0] === "release" && ["create", "edit", "upload"].includes(args[1] ?? "")) {
           return { exitCode: 0, stdout: "", stderr: "" };
         }
-        if (isLatestProductionReleaseQuery(command, args)) {
-          const versions = fixture.existingProductionTags ?? [];
-          const latest = [...versions].sort((left, right) => -compareVersions(left, right))[0];
+        if (isProductionReleaseListQuery(command, args)) {
+          const versions = fixture.productionReleasesInCreationOrder ?? fixture.existingProductionTags ?? [];
           return {
             exitCode: 0,
-            stdout: latest ? JSON.stringify([{ tagName: `v${latest}`, isPrerelease: false }]) : "[]",
+            stdout: JSON.stringify(versions.map((version) => ({ tagName: `v${version}`, isPrerelease: false }))),
             stderr: ""
           };
         }
@@ -3271,6 +3274,44 @@ describe("staging publish lineage gates", () => {
 
       expect(result.version).toBe("1.2.4-staging.1");
       expect(calls.some((call) => call.command === "bazel" && call.args[0] === "build")).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("floors main staging against the greatest production version regardless of release creation order", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot, privateKeyPath } = createReleaseRepo(root);
+      const outputs = writeStagingReleaseBuildOutputs(repoRoot, ["arm64"]);
+      const calls: CommandCall[] = [];
+      const runner = shipGateRunner(
+        {
+          head: DESCENDANT_COMMIT,
+          activeVersion: null,
+          productionReleasesInCreationOrder: ["1.2.5", "1.3.0"]
+        },
+        repoRoot,
+        outputs,
+        calls
+      );
+
+      const result = await shipRelease(shipGateInput(repoRoot, privateKeyPath, runner));
+
+      expect(result.version).toBe("1.3.1-staging.1");
+      expect(result.version).not.toBe("1.2.6-staging.1");
+      expect(result.versionFloor).toEqual({
+        versionFile: "1.2.3",
+        greatestProductionVersion: "1.3.0",
+        baseVersion: "1.3.1",
+        detail:
+          "VERSION 1.2.3 lags greatest production semantic version v1.3.0; " +
+          "derived main staging version 1.3.1 from the production floor."
+      });
+      const query = calls.find((call) => isProductionReleaseListQuery(call.command, call.args));
+      const limitIndex = query?.args.indexOf("--limit") ?? -1;
+      expect(limitIndex).toBeGreaterThanOrEqual(0);
+      expect(query?.args[limitIndex + 1]).toBe("1000");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -3433,9 +3474,11 @@ describe("staging publish lineage gates", () => {
       expect(result.version).toBe("1.3.1-staging.1");
       expect(result.versionFloor).toEqual({
         versionFile: "1.2.3",
-        latestProduction: "1.3.0",
+        greatestProductionVersion: "1.3.0",
         baseVersion: "1.3.1",
-        detail: "VERSION 1.2.3 lags latest production v1.3.0; derived main staging version 1.3.1 from the production floor."
+        detail:
+          "VERSION 1.2.3 lags greatest production semantic version v1.3.0; " +
+          "derived main staging version 1.3.1 from the production floor."
       });
       const edit = calls.find(
         (call) => call.command === "gh" && call.args[0] === "release" && call.args[1] === "edit"
