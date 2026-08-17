@@ -44,6 +44,15 @@ interface StoredTaskQuickReplies {
   replies: unknown;
 }
 
+interface FailedBaselineState {
+  status: "failed";
+  recoveryState:
+    | "active-payload-unknown"
+    | "active-payload-absent"
+    | "active-payload-preserved"
+    | "preservation-failed";
+}
+
 type BaselineState =
   | { status: "unresolved" }
   | {
@@ -51,11 +60,7 @@ type BaselineState =
       envelopeRaw: string;
       replies: TaskQuickReply[];
     }
-  | {
-      status: "failed";
-      recoveryRequired: boolean;
-      recoveryPreserved: boolean;
-    };
+  | FailedBaselineState;
 
 export class TaskQuickReplySaveBlockedError extends Error {
   constructor(
@@ -118,7 +123,17 @@ export function createTaskQuickReplyPreferences(
         if (!options.confirmReplacement) {
           throw new TaskQuickReplySaveBlockedError("load-failed");
         }
-        if (baseline.recoveryRequired && !baseline.recoveryPreserved) {
+        let recoveryState = baseline.recoveryState;
+        if (recoveryState === "active-payload-unknown") {
+          const recoveredBaseline =
+            await retryRecoveryBeforeReplacement(storage);
+          baseline = recoveredBaseline;
+          recoveryState = recoveredBaseline.recoveryState;
+        }
+        if (
+          recoveryState === "active-payload-unknown" ||
+          recoveryState === "preservation-failed"
+        ) {
           throw new TaskQuickReplySaveBlockedError("recovery-not-preserved");
         }
       }
@@ -157,7 +172,7 @@ async function loadBaseline(
   try {
     raw = await storage.getItem(TASK_QUICK_REPLY_STORAGE_KEY);
   } catch {
-    return failedBaseline(false, false);
+    return failedBaseline("active-payload-unknown");
   }
 
   if (raw === null) {
@@ -196,20 +211,35 @@ async function loadBaseline(
 async function preserveFailedBaseline(
   storage: TaskQuickReplyStorageAdapter,
   raw: string
-): Promise<BaselineState> {
+): Promise<FailedBaselineState> {
   try {
     await storage.setItem(TASK_QUICK_REPLY_RECOVERY_STORAGE_KEY, raw);
-    return failedBaseline(true, true);
+    return failedBaseline("active-payload-preserved");
   } catch {
-    return failedBaseline(true, false);
+    return failedBaseline("preservation-failed");
   }
 }
 
+async function retryRecoveryBeforeReplacement(
+  storage: TaskQuickReplyStorageAdapter
+): Promise<FailedBaselineState> {
+  let raw: string | null;
+  try {
+    raw = await storage.getItem(TASK_QUICK_REPLY_STORAGE_KEY);
+  } catch {
+    return failedBaseline("active-payload-unknown");
+  }
+
+  if (raw === null) {
+    return failedBaseline("active-payload-absent");
+  }
+  return preserveFailedBaseline(storage, raw);
+}
+
 function failedBaseline(
-  recoveryRequired: boolean,
-  recoveryPreserved: boolean
-): BaselineState {
-  return { status: "failed", recoveryRequired, recoveryPreserved };
+  recoveryState: FailedBaselineState["recoveryState"]
+): FailedBaselineState {
+  return { status: "failed", recoveryState };
 }
 
 function failedLoadResult(): TaskQuickReplyLoadResult {

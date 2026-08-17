@@ -114,16 +114,104 @@ describe("task quick reply preferences", () => {
     );
   });
 
-  it("surfaces an adapter read failure as a failed baseline", async () => {
-    storage.getItem.mockRejectedValue(new Error("storage unavailable"));
+  it("recovers the active payload before a confirmed replacement after an adapter read failure", async () => {
+    const raw = "existing raw payload";
+    storage.getItem
+      .mockRejectedValueOnce(new Error("storage unavailable"))
+      .mockResolvedValueOnce(raw);
+    const repository = createTaskQuickReplyPreferences(storage);
 
-    await expect(
-      createTaskQuickReplyPreferences(storage).load()
-    ).resolves.toEqual({
+    await expect(repository.load()).resolves.toEqual({
       status: "failed",
       replies: DEFAULT_TASK_QUICK_REPLIES
     });
     expect(storage.setItem).not.toHaveBeenCalled();
+
+    await expect(
+      repository.save(
+        [{ id: "custom", text: "Ship it" }],
+        { confirmReplacement: true }
+      )
+    ).resolves.toEqual([{ id: "custom", text: "Ship it" }]);
+    expect(storage.getItem).toHaveBeenCalledTimes(2);
+    expect(storage.setItem).toHaveBeenNthCalledWith(
+      1,
+      TASK_QUICK_REPLY_RECOVERY_STORAGE_KEY,
+      raw
+    );
+    expect(storage.setItem).toHaveBeenNthCalledWith(
+      2,
+      TASK_QUICK_REPLY_STORAGE_KEY,
+      envelope([{ id: "custom", text: "Ship it" }])
+    );
+    expect(storage.getItem.mock.invocationCallOrder[1]).toBeLessThan(
+      storage.setItem.mock.invocationCallOrder[0]
+    );
+    expect(storage.setItem.mock.invocationCallOrder[0]).toBeLessThan(
+      storage.setItem.mock.invocationCallOrder[1]
+    );
+  });
+
+  it("allows a confirmed replacement only after a retry proves the active key is absent", async () => {
+    storage.getItem
+      .mockRejectedValueOnce(new Error("storage unavailable"))
+      .mockResolvedValueOnce(null);
+    const repository = createTaskQuickReplyPreferences(storage);
+    await repository.load();
+
+    await expect(
+      repository.save(
+        [{ id: "custom", text: "Ship it" }],
+        { confirmReplacement: true }
+      )
+    ).resolves.toEqual([{ id: "custom", text: "Ship it" }]);
+    expect(storage.getItem).toHaveBeenCalledTimes(2);
+    expect(storage.setItem).toHaveBeenCalledTimes(1);
+    expect(storage.setItem).toHaveBeenCalledWith(
+      TASK_QUICK_REPLY_STORAGE_KEY,
+      envelope([{ id: "custom", text: "Ship it" }])
+    );
+  });
+
+  it("does not write the active key when the recovery retry also fails", async () => {
+    storage.getItem.mockRejectedValue(new Error("storage unavailable"));
+    const repository = createTaskQuickReplyPreferences(storage);
+    await repository.load();
+
+    await expect(
+      repository.save(
+        [{ id: "custom", text: "Ship it" }],
+        { confirmReplacement: true }
+      )
+    ).rejects.toMatchObject({ reason: "recovery-not-preserved" });
+    expect(storage.getItem).toHaveBeenCalledTimes(2);
+    expect(storage.setItem).not.toHaveBeenCalled();
+  });
+
+  it("does not write the active key when recovery after a read failure cannot be preserved", async () => {
+    storage.getItem
+      .mockRejectedValueOnce(new Error("storage unavailable"))
+      .mockResolvedValueOnce("existing raw payload");
+    storage.setItem.mockRejectedValueOnce(new Error("disk full"));
+    const repository = createTaskQuickReplyPreferences(storage);
+    await repository.load();
+
+    await expect(
+      repository.save(
+        [{ id: "custom", text: "Ship it" }],
+        { confirmReplacement: true }
+      )
+    ).rejects.toMatchObject({ reason: "recovery-not-preserved" });
+    expect(storage.getItem).toHaveBeenCalledTimes(2);
+    expect(storage.setItem).toHaveBeenCalledTimes(1);
+    expect(storage.setItem).toHaveBeenCalledWith(
+      TASK_QUICK_REPLY_RECOVERY_STORAGE_KEY,
+      "existing raw payload"
+    );
+    expect(storage.setItem).not.toHaveBeenCalledWith(
+      TASK_QUICK_REPLY_STORAGE_KEY,
+      expect.any(String)
+    );
   });
 
   it("refuses a save before an unresolved load has read the baseline", async () => {
