@@ -140,9 +140,11 @@ describe("CloudTerminalView", () => {
   it("keeps one terminal input request in flight and preserves FIFO bytes", async () => {
     const first = deferred();
     const second = deferred();
+    const third = deferred();
     harness.sendInput
       .mockImplementationOnce(() => first.promise)
-      .mockImplementation(() => second.promise);
+      .mockImplementationOnce(() => second.promise)
+      .mockImplementation(() => third.promise);
     const { default: CloudTerminalView } = await import("../CloudTerminalView.vue");
     const wrapper = mount(CloudTerminalView, {
       props: {
@@ -167,9 +169,17 @@ describe("CloudTerminalView", () => {
     expect(harness.sendInput).toHaveBeenCalledTimes(2);
     expect(
       harness.sendInput.mock.calls.map(([request]) => request.data).join(""),
-    ).toBe("abc");
+    ).toBe("ab");
 
     second.resolve();
+    await flushPromises();
+
+    expect(harness.sendInput).toHaveBeenCalledTimes(3);
+    expect(
+      harness.sendInput.mock.calls.map(([request]) => request.data).join(""),
+    ).toBe("abc");
+
+    third.resolve();
     wrapper.unmount();
   });
 
@@ -203,6 +213,68 @@ describe("CloudTerminalView", () => {
       desktopId: "desktop-1",
       taskId: "task-1",
       data: "\x1b[13;2u",
+    });
+    wrapper.unmount();
+  });
+
+  it("classifies unclassified xterm data as control and keyboard data as draft", async () => {
+    harness.sendInput.mockResolvedValue(undefined);
+    const { default: CloudTerminalView } = await import("../CloudTerminalView.vue");
+    const wrapper = mount(CloudTerminalView, {
+      props: {
+        ownerDesktopId: "desktop-1",
+        ownerTaskId: "task-1",
+        transport: "cloud",
+      },
+    });
+    await flushPromises();
+
+    harness.keyHandler?.(new KeyboardEvent("keydown", { key: "x" }));
+    harness.dataListener?.("x");
+    await flushPromises();
+    expect(harness.sendInput).toHaveBeenNthCalledWith(1, {
+      desktopId: "desktop-1",
+      taskId: "task-1",
+      data: "x",
+    });
+
+    harness.dataListener?.("\x1b[0n");
+    await flushPromises();
+    expect(harness.sendInput).toHaveBeenNthCalledWith(2, {
+      desktopId: "desktop-1",
+      taskId: "task-1",
+      data: "\x1b[0n",
+      controlInput: true,
+    });
+    wrapper.unmount();
+  });
+
+  it.each([
+    "beforeinput",
+    "paste",
+    "compositionstart",
+    "compositionupdate",
+    "compositionend",
+  ])("classifies %s-produced xterm data as draft", async (eventName) => {
+    harness.sendInput.mockResolvedValue(undefined);
+    const { default: CloudTerminalView } = await import("../CloudTerminalView.vue");
+    const wrapper = mount(CloudTerminalView, {
+      props: {
+        ownerDesktopId: "desktop-1",
+        ownerTaskId: "task-1",
+        transport: "cloud",
+      },
+    });
+    await flushPromises();
+
+    wrapper.get(".terminal-container").element.dispatchEvent(new Event(eventName));
+    harness.dataListener?.("human-input");
+    await flushPromises();
+
+    expect(harness.sendInput).toHaveBeenCalledWith({
+      desktopId: "desktop-1",
+      taskId: "task-1",
+      data: "human-input",
     });
     wrapper.unmount();
   });
@@ -250,6 +322,7 @@ describe("CloudTerminalView", () => {
     await flushPromises();
 
     harness.dataListener?.("in-flight");
+    harness.keyHandler?.(new KeyboardEvent("keydown", { key: "d" }));
     harness.dataListener?.("draft");
     harness.keyHandler?.(new KeyboardEvent("keydown", { key: "Enter" }));
     harness.dataListener?.("\r");
@@ -291,6 +364,7 @@ describe("CloudTerminalView", () => {
     await flushPromises();
     const paste = "界".repeat(64 * 1024);
 
+    wrapper.get(".terminal-container").element.dispatchEvent(new Event("paste"));
     harness.dataListener?.(paste);
     await vi.waitFor(() => {
       const sent = harness.sendInput.mock.calls
@@ -320,6 +394,7 @@ describe("CloudTerminalView", () => {
     });
     await flushPromises();
 
+    harness.keyHandler?.(new KeyboardEvent("keydown", { key: "f" }));
     harness.dataListener?.("first");
     await flushPromises();
     expect(wrapper.attributes("data-status")).toBe("error");
@@ -335,6 +410,7 @@ describe("CloudTerminalView", () => {
     await wrapper.setProps({ ownerTaskId: "task-2" });
     await flushPromises();
     expect(wrapper.attributes("data-status")).toBe("live");
+    harness.keyHandler?.(new KeyboardEvent("keydown", { key: "r" }));
     harness.dataListener?.("retry");
     await flushPromises();
 
@@ -397,5 +473,37 @@ describe("CloudTerminalView", () => {
 
     expect(staleClient.close).toHaveBeenCalledOnce();
     expect(staleClient.observeTerminal).not.toHaveBeenCalled();
+  });
+
+  it("removes remote input producer listeners on unmount", async () => {
+    const { default: CloudTerminalView } = await import("../CloudTerminalView.vue");
+    const wrapper = mount(CloudTerminalView, {
+      props: {
+        ownerDesktopId: "desktop-1",
+        ownerTaskId: "task-1",
+        transport: "cloud",
+      },
+    });
+    await flushPromises();
+    const container = wrapper.get(".terminal-container").element;
+    const removeEventListener = vi.spyOn(container, "removeEventListener");
+
+    wrapper.unmount();
+
+    for (const eventName of [
+      "mousedown",
+      "mouseup",
+      "mousemove",
+      "wheel",
+      "focus",
+      "blur",
+      "beforeinput",
+      "paste",
+      "compositionstart",
+      "compositionupdate",
+      "compositionend",
+    ]) {
+      expect(removeEventListener).toHaveBeenCalledWith(eventName, expect.any(Function), true);
+    }
   });
 });

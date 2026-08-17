@@ -48,6 +48,7 @@ const companionBridge = getDesktopCompanionBridgeManager();
 let terminal: Terminal | null = null;
 let fitAddon: FitAddon | null = null;
 let resizeObserver: ResizeObserver | null = null;
+let inputEventContainer: HTMLElement | null = null;
 let relayClient: DesktopRemoteTaskClient | null = null;
 let subscription: DesktopRemoteTerminalSubscription | null = null;
 let companionOwnership: DesktopCompanionRemoteOwnership | null = null;
@@ -63,20 +64,28 @@ const MAX_REMOTE_INPUT_FRAME_BYTES = 4 * 1024;
 let lifecycleGeneration = 0;
 let unmounted = false;
 type ProducerInputKind = "draft" | "submission" | "control";
-let producerInputKind: ProducerInputKind = "draft";
+// xterm emits protocol replies through `onData` without a DOM input event.
+// Treat that unclassified path as terminal control; every human input path
+// below declares itself before xterm emits its bytes.
+let producerInputKind: ProducerInputKind = "control";
 let producerInputGeneration = 0;
 const controlInputEvents = ["mousedown", "mouseup", "mousemove", "wheel", "focus", "blur"];
+const draftInputEvents = ["beforeinput", "paste", "compositionstart", "compositionupdate", "compositionend"];
 
 function declareProducerInput(kind: ProducerInputKind) {
   producerInputKind = kind;
   const generation = ++producerInputGeneration;
   queueMicrotask(() => {
-    if (producerInputGeneration === generation) producerInputKind = "draft";
+    if (producerInputGeneration === generation) producerInputKind = "control";
   });
 }
 
 function declareControlInput() {
   declareProducerInput("control");
+}
+
+function declareDraftInput() {
+  declareProducerInput("draft");
 }
 
 interface RemoteInputQueue {
@@ -452,8 +461,12 @@ onMounted(() => {
   terminal.loadAddon(new WebLinksAddon(handleLinkActivate));
   if (containerRef.value) {
     terminal.open(containerRef.value);
+    inputEventContainer = containerRef.value;
     for (const eventName of controlInputEvents) {
-      containerRef.value.addEventListener(eventName, declareControlInput, true);
+      inputEventContainer.addEventListener(eventName, declareControlInput, true);
+    }
+    for (const eventName of draftInputEvents) {
+      inputEventContainer.addEventListener(eventName, declareDraftInput, true);
     }
     registerTerminalBufferForE2E();
     fileLinkProvider = createRemoteTerminalFileLinkProvider({
@@ -500,10 +513,14 @@ onUnmounted(() => {
   unregisterE2ETerminalBuffer?.();
   unregisterE2ETerminalBuffer = null;
   resizeObserver?.disconnect();
-  if (containerRef.value) {
+  if (inputEventContainer) {
     for (const eventName of controlInputEvents) {
-      containerRef.value.removeEventListener(eventName, declareControlInput, true);
+      inputEventContainer.removeEventListener(eventName, declareControlInput, true);
     }
+    for (const eventName of draftInputEvents) {
+      inputEventContainer.removeEventListener(eventName, declareDraftInput, true);
+    }
+    inputEventContainer = null;
   }
   terminal?.dispose();
   terminal = null;

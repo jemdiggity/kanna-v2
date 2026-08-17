@@ -1194,7 +1194,18 @@ async function runCausalRemoteInputTest(): Promise<void> {
       "    my $tail_read = sysread(STDIN, $tail, 2);",
       "    last unless defined($tail_read) && $tail_read == 2;",
       "    if ($tail eq '[I' || $tail eq '[O') {",
-      "      print qq{CONTROL:<$composer>\\r\\n};",
+      "      print qq{FOCUS_CONTROL:<$composer>\\r\\n};",
+      "      next;",
+      "    }",
+      "    if ($tail eq '[0') {",
+      "      my $final = '';",
+      "      my $final_read = sysread(STDIN, $final, 1);",
+      "      last unless defined($final_read) && $final_read == 1;",
+      "      if ($final eq 'n') {",
+      "        print qq{PARSER_CONTROL:<$composer>\\r\\n};",
+      "        next;",
+      "      }",
+      "      $composer .= $chunk . $tail . $final;",
       "      next;",
       "    }",
       "    $composer .= $chunk . $tail;",
@@ -1203,6 +1214,7 @@ async function runCausalRemoteInputTest(): Promise<void> {
       "  if ($chunk eq qq{\\r}) {",
       "    print qq{SUBMIT:<$composer>\\r\\n};",
       "    $composer = '';",
+      "    print qq{\\e[5n};",
       "    next;",
       "  }",
       "  $composer .= $chunk;",
@@ -1245,6 +1257,9 @@ async function runCausalRemoteInputTest(): Promise<void> {
       );
       await secondary.sendKeys(terminalTextarea, humanInput);
       await waitForRemoteTerminalLine(taskId, `DRAFT:<${humanInput}>`);
+      await secondary.pressKey("\uE007");
+      await waitForRemoteTerminalLine(taskId, `SUBMIT:<${humanInput}>`);
+      await waitForRemoteTerminalLine(taskId, "PARSER_CONTROL:<>");
 
       const { baseUrl } = await resolveAppKannaServer(primary);
       const response = await fetch(
@@ -1261,26 +1276,6 @@ async function runCausalRemoteInputTest(): Promise<void> {
         );
       }
 
-      await secondary.executeSync(`
-        const input = document.querySelector(
-          ".main-panel .cloud-terminal-shell .xterm-helper-textarea"
-        );
-        if (!(input instanceof HTMLTextAreaElement)) {
-          throw new Error("remote terminal textarea unavailable");
-        }
-        input.blur();
-      `);
-      await waitForRemoteTerminalLine(taskId, `CONTROL:<${humanInput}>`);
-      await secondary.executeSync(`
-        const input = document.querySelector(
-          ".main-panel .cloud-terminal-shell .xterm-helper-textarea"
-        );
-        if (!(input instanceof HTMLTextAreaElement)) {
-          throw new Error("remote terminal textarea unavailable");
-        }
-        input.focus();
-      `);
-      await secondary.pressKey("\uE007");
       await waitForRemoteTerminalLine(taskId, `SUBMIT:<${managerInput}>`);
 
       const submittedLines = await secondary.executeSync<string[]>(`
