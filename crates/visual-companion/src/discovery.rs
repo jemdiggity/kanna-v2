@@ -720,8 +720,19 @@ fn inline_local_images(
             .saturating_add(replacement_len)
             .saturating_add(html.len().saturating_sub(tag_end));
         if projected_size > MAX_COMPANION_PREPARED_HTML_BYTES {
-            // Leave the original tag for the browser sanitizer, which will
-            // replace the rejected source with the same visible placeholder.
+            if let LocalImageReplacement::Source { raw_bytes, .. } = replacement {
+                // Resolution already paid the file-read and base64-encoding
+                // cost. Debit that work even though the data URI cannot be
+                // retained so repeated references cannot repeat it beyond the
+                // per-document raw-image budget.
+                remaining_image_bytes = remaining_image_bytes.saturating_sub(raw_bytes);
+            }
+            output.push_str(&html[copied_until..tag_start]);
+            output.push_str(&local_image_placeholder(
+                raw_source,
+                "1.5 MiB prepared document size limit is exhausted",
+            ));
+            copied_until = tag_end;
             continue;
         }
         output.push_str(&html[copied_until..tag_start]);

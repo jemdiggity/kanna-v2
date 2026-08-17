@@ -183,6 +183,38 @@ fn local_image_preparation_degrades_oversized_references_visibly() {
         .contains("Image unavailable: gallery.png (768 KiB document image budget is exhausted)."));
 }
 
+#[test]
+fn prepared_size_rejection_debits_repeated_image_work_and_names_the_reason() {
+    const REFERENCE_COUNT: usize = 2_048;
+
+    let fixture = Fixture::new();
+    let image_tag = r#"<img src="gallery.png">"#;
+    let mut html = image_tag.repeat(REFERENCE_COUNT);
+    html.extend(std::iter::repeat_n(
+        'x',
+        MAX_COMPANION_HTML_BYTES as usize - html.len(),
+    ));
+    fixture.active_session("session-a", "screen.html", html);
+    fixture.content("session-a", "gallery.png", vec![b'x'; 700 * 1024]);
+
+    let bundle = current_bundle(fixture.worktree()).unwrap().unwrap();
+
+    let prepared_size_reason =
+        "Image unavailable: gallery.png (1.5 MiB prepared document size limit is exhausted).";
+    let raw_image_budget_reason =
+        "Image unavailable: gallery.png (768 KiB document image budget is exhausted).";
+    // Each placeholder repeats its label in aria-label and visible text. The
+    // first reference consumes the 700 KiB raw-image work budget even though
+    // its encoded form cannot fit; all remaining references are rejected from
+    // metadata without rereading or encoding that file.
+    assert_eq!(bundle.html.matches(prepared_size_reason).count(), 2);
+    assert_eq!(
+        bundle.html.matches(raw_image_budget_reason).count(),
+        (REFERENCE_COUNT - 1) * 2
+    );
+    assert!(!bundle.html.contains("data:image"));
+}
+
 #[cfg(unix)]
 #[test]
 fn local_image_preparation_never_follows_sibling_symlinks() {
