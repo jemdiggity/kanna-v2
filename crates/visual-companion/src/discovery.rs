@@ -682,73 +682,92 @@ fn inline_local_images(
             continue;
         };
         let raw_source = &html[source.value_start..source.value_end];
-        let local_source = classify_local_image_source(raw_source);
-        let LocalImageSource::Sibling(file_name) = local_source else {
-            if matches!(local_source, LocalImageSource::OutsideContent) {
-                let placeholder =
-                    local_image_placeholder(raw_source, "path is outside companion content");
-                output.push_str(&html[copied_until..tag_start]);
-                output.push_str(&placeholder);
-                copied_until = tag_end;
+        let replacement = match classify_local_image_source(raw_source) {
+            LocalImageSource::Passthrough => continue,
+            LocalImageSource::OutsideContent => {
+                LocalImageReplacement::Rejected("path is outside companion content")
             }
-            continue;
+            LocalImageSource::Sibling(file_name) => {
+                let resolution =
+                    inline_image_data(content, content_names, file_name, remaining_image_bytes);
+                cacheable &= resolution.cacheable;
+                match resolution.value {
+                    Ok((data_uri, raw_bytes)) => LocalImageReplacement::Source {
+                        data_uri,
+                        raw_bytes,
+                    },
+                    Err(reason) => LocalImageReplacement::Rejected(reason),
+                }
+            }
         };
 
-        let resolution =
-            inline_image_data(content, content_names, file_name, remaining_image_bytes);
-        cacheable &= resolution.cacheable;
-        let replacement = match resolution.value {
-            Ok((data_uri, raw_bytes)) => LocalImageReplacement::Source {
+        // Every rewrite is admitted only when the document still fits the cap
+        // with the untouched remainder appended, so no path can grow the
+        // prepared document past MAX_COMPANION_PREPARED_HTML_BYTES. The source
+        // is at most MAX_COMPANION_HTML_BYTES, which is below the cap, so the
+        // invariant holds from the first tag onwards. Per-image rewrites keep
+        // summary headroom in reserve so the terminal notice below still has
+        // room to explain the degradation.
+        let pending = output
+            .len()
+            .saturating_add(tag_start.saturating_sub(copied_until));
+        let trailing = html.len().saturating_sub(tag_end);
+        let fits = |replacement_len: usize| {
+            pending
+                .saturating_add(replacement_len)
+                .saturating_add(trailing)
+                <= MAX_COMPANION_PREPARED_HTML_BYTES
+        };
+        let fits_reserved = |replacement_len: usize| {
+            fits(replacement_len.saturating_add(REMAINING_IMAGES_PLACEHOLDER_RESERVE_BYTES))
+        };
+
+        let reason = match replacement {
+            LocalImageReplacement::Source {
                 data_uri,
                 raw_bytes,
-            },
-            Err(reason) => {
-                LocalImageReplacement::Placeholder(local_image_placeholder(raw_source, reason))
-            }
-        };
-        let replacement_len = match &replacement {
-            LocalImageReplacement::Source { data_uri, .. } => source
-                .value_start
-                .saturating_sub(tag_start)
-                .saturating_add(data_uri.len())
-                .saturating_add(tag_end.saturating_sub(source.value_end)),
-            LocalImageReplacement::Placeholder(placeholder) => placeholder.len(),
-        };
-        let projected_size = output
-            .len()
-            .saturating_add(tag_start.saturating_sub(copied_until))
-            .saturating_add(replacement_len)
-            .saturating_add(html.len().saturating_sub(tag_end));
-        if projected_size > MAX_COMPANION_PREPARED_HTML_BYTES {
-            if let LocalImageReplacement::Source { raw_bytes, .. } = replacement {
+            } => {
+                let inlined_len = source
+                    .value_start
+                    .saturating_sub(tag_start)
+                    .saturating_add(data_uri.len())
+                    .saturating_add(tag_end.saturating_sub(source.value_end));
+                if fits_reserved(inlined_len) {
+                    output.push_str(&html[copied_until..tag_start]);
+                    output.push_str(&html[tag_start..source.value_start]);
+                    output.push_str(&data_uri);
+                    output.push_str(&html[source.value_end..tag_end]);
+                    copied_until = tag_end;
+                    remaining_image_bytes = remaining_image_bytes.saturating_sub(raw_bytes);
+                    continue;
+                }
                 // Resolution already paid the file-read and base64-encoding
                 // cost. Debit that work even though the data URI cannot be
                 // retained so repeated references cannot repeat it beyond the
                 // per-document raw-image budget.
                 remaining_image_bytes = remaining_image_bytes.saturating_sub(raw_bytes);
+                PREPARED_SIZE_EXHAUSTED_REASON
             }
+            LocalImageReplacement::Rejected(reason) => reason,
+        };
+
+        let placeholder = local_image_placeholder(raw_source, reason);
+        if fits_reserved(placeholder.len()) {
             output.push_str(&html[copied_until..tag_start]);
-            output.push_str(&local_image_placeholder(
-                raw_source,
-                "1.5 MiB prepared document size limit is exhausted",
-            ));
+            output.push_str(&placeholder);
             copied_until = tag_end;
             continue;
         }
-        output.push_str(&html[copied_until..tag_start]);
-        match replacement {
-            LocalImageReplacement::Source {
-                data_uri,
-                raw_bytes,
-            } => {
-                output.push_str(&html[tag_start..source.value_start]);
-                output.push_str(&data_uri);
-                output.push_str(&html[source.value_end..tag_end]);
-                remaining_image_bytes = remaining_image_bytes.saturating_sub(raw_bytes);
-            }
-            LocalImageReplacement::Placeholder(placeholder) => output.push_str(&placeholder),
+        // Per-image notices no longer fit. Degrade once, in a bounded form
+        // that still names why images are missing, and leave the rest of the
+        // source untouched rather than growing past the cap.
+        let summary = remaining_images_placeholder(reason);
+        if fits(summary.len()) {
+            output.push_str(&html[copied_until..tag_start]);
+            output.push_str(&summary);
+            copied_until = tag_end;
         }
-        copied_until = tag_end;
+        break;
     }
     output.push_str(&html[copied_until..]);
     PreparedHtml {
@@ -760,8 +779,17 @@ fn inline_local_images(
 #[cfg(unix)]
 enum LocalImageReplacement {
     Source { data_uri: String, raw_bytes: u64 },
-    Placeholder(String),
+    Rejected(&'static str),
 }
+
+#[cfg(unix)]
+const PREPARED_SIZE_EXHAUSTED_REASON: &str = "1.5 MiB prepared document size limit is exhausted";
+
+/// Headroom held back from per-image rewrites so the bounded summary notice
+/// still fits once per-image notices do not. Emitting the summary is itself
+/// conditional, so an under-estimate can only cost visibility, never the cap.
+#[cfg(unix)]
+const REMAINING_IMAGES_PLACEHOLDER_RESERVE_BYTES: usize = 512;
 
 #[cfg(unix)]
 enum LocalImageSource<'a> {
@@ -878,8 +906,26 @@ fn inline_image_data(
 
 #[cfg(unix)]
 fn local_image_placeholder(source: &str, reason: &str) -> String {
-    let label = format!("Image unavailable: {source} ({reason}).");
-    let escaped = escape_html_text(&label);
+    image_placeholder(&format!("Image unavailable: {source} ({reason})."))
+}
+
+/// A single, source-independent notice standing in for every image left
+/// unprepared once per-image notices no longer fit the prepared document.
+/// Reasons are a closed set of static strings, so this is bounded regardless
+/// of the document it degrades.
+#[cfg(unix)]
+fn remaining_images_placeholder(reason: &str) -> String {
+    let label = if reason == PREPARED_SIZE_EXHAUSTED_REASON {
+        format!("Remaining images unavailable: {reason}.")
+    } else {
+        format!("Remaining images unavailable: {reason}, and {PREPARED_SIZE_EXHAUSTED_REASON}.")
+    };
+    image_placeholder(&label)
+}
+
+#[cfg(unix)]
+fn image_placeholder(label: &str) -> String {
+    let escaped = escape_html_text(label);
     format!(
         r#"<span class="kanna-companion-image-placeholder" role="img" aria-label="{escaped}">{escaped}</span>"#
     )

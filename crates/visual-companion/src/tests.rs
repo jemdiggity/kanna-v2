@@ -213,6 +213,70 @@ fn prepared_size_rejection_debits_repeated_image_work_and_names_the_reason() {
         (REFERENCE_COUNT - 1) * 2
     );
     assert!(!bundle.html.contains("data:image"));
+    assert!(bundle.html.len() <= MAX_COMPANION_PREPARED_HTML_BYTES);
+}
+
+#[test]
+fn repeated_out_of_tree_references_degrade_within_the_prepared_document_cap() {
+    const REFERENCE_COUNT: usize = 8_192;
+
+    let fixture = Fixture::new();
+    let image_tag = r#"<img src="../secret.png">"#;
+    let mut html = image_tag.repeat(REFERENCE_COUNT);
+    html.extend(std::iter::repeat_n(
+        'x',
+        MAX_COMPANION_HTML_BYTES as usize - html.len(),
+    ));
+    fixture.active_session("session-a", "screen.html", html);
+    fixture.write("secret.png", b"outside");
+
+    let bundle = current_bundle(fixture.worktree()).unwrap().unwrap();
+
+    // Per-image notices are larger than the tags they replace, so a legal
+    // source packed with them would expand past the cap without accounting.
+    assert!(bundle.html.len() <= MAX_COMPANION_PREPARED_HTML_BYTES);
+    assert!(bundle
+        .html
+        .contains("Image unavailable: ../secret.png (path is outside companion content)."));
+    // Degradation stays visible and reason-bearing once per-image notices no
+    // longer fit: one bounded summary stands in for every remaining image.
+    assert!(bundle.html.contains(
+        "Remaining images unavailable: path is outside companion content, \
+         and 1.5 MiB prepared document size limit is exhausted."
+    ));
+    assert!(!bundle.html.contains("b3V0c2lkZQ=="));
+}
+
+#[test]
+fn repeated_rejected_references_degrade_within_the_prepared_document_cap() {
+    const REFERENCE_COUNT: usize = 8_192;
+
+    let fixture = Fixture::new();
+    let image_tag = r#"<img src="gallery.png">"#;
+    let mut html = image_tag.repeat(REFERENCE_COUNT);
+    html.extend(std::iter::repeat_n(
+        'x',
+        MAX_COMPANION_HTML_BYTES as usize - html.len(),
+    ));
+    fixture.active_session("session-a", "screen.html", html);
+    fixture.content("session-a", "gallery.png", vec![b'x'; 700 * 1024]);
+
+    let bundle = current_bundle(fixture.worktree()).unwrap().unwrap();
+
+    assert!(bundle.html.len() <= MAX_COMPANION_PREPARED_HTML_BYTES);
+    // The first reference spends the raw-image work budget without fitting its
+    // data URI; the rest are rejected against the exhausted budget.
+    assert!(bundle.html.contains(
+        "Image unavailable: gallery.png (1.5 MiB prepared document size limit is exhausted)."
+    ));
+    assert!(bundle
+        .html
+        .contains("Image unavailable: gallery.png (768 KiB document image budget is exhausted)."));
+    assert!(bundle.html.contains(
+        "Remaining images unavailable: 768 KiB document image budget is exhausted, \
+         and 1.5 MiB prepared document size limit is exhausted."
+    ));
+    assert!(!bundle.html.contains("data:image"));
 }
 
 #[cfg(unix)]
