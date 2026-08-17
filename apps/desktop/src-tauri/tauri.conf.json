@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Kanna",
-  "version": "0.0.68",
+  "version": "0.2.0",
   "identifier": "build.kanna",
   "build": {
     "beforeDevCommand": "pnpm run dev",
