@@ -28,6 +28,7 @@ import { useThemeRuntime } from "../theme/runtime";
 import { registerE2ETerminalBuffer } from "../e2eTerminalBuffers";
 import { useToast } from "../composables/useToast";
 import { isShiftEnter, SHIFT_ENTER_CSI_U } from "../composables/terminalKeyboard";
+import { createTerminalInputProducerClassifier } from "../composables/terminalInputProducer";
 
 const props = withDefaults(defineProps<{
   active?: boolean;
@@ -63,42 +64,9 @@ const MAX_PENDING_REMOTE_INPUT_CHARS = 64 * 1024;
 const MAX_REMOTE_INPUT_FRAME_BYTES = 4 * 1024;
 let lifecycleGeneration = 0;
 let unmounted = false;
-type ProducerInputKind = "draft" | "submission" | "control";
-// xterm emits protocol replies through `onData` without a DOM input event.
-// Treat that unclassified path as terminal control; every human input path
-// below declares itself before xterm emits its bytes.
-let producerInputKind: ProducerInputKind = "control";
-let producerInputGeneration = 0;
+const inputProducer = createTerminalInputProducerClassifier();
 const controlInputEvents = ["mousedown", "mouseup", "mousemove", "wheel", "focus", "blur"];
-const draftInputEvents = ["beforeinput", "paste", "compositionstart", "compositionupdate"];
-
-function declareProducerInput(kind: ProducerInputKind, delayed = false) {
-  producerInputKind = kind;
-  const generation = ++producerInputGeneration;
-  const reset = () => {
-    if (producerInputGeneration === generation) producerInputKind = "control";
-  };
-  if (delayed) {
-    // CompositionHelper queues the committed composition from its
-    // compositionend listener. Our capture listener runs first, so queue the
-    // fallback timer from a microtask, after xterm has queued its own timer.
-    queueMicrotask(() => setTimeout(reset, 0));
-  } else {
-    queueMicrotask(reset);
-  }
-}
-
-function declareControlInput() {
-  declareProducerInput("control");
-}
-
-function declareDraftInput() {
-  declareProducerInput("draft");
-}
-
-function declareCompositionInput() {
-  declareProducerInput("draft", true);
-}
+const draftInputEvents = ["beforeinput", "paste"];
 
 interface RemoteInputQueue {
   client: DesktopRemoteTaskClient;
@@ -426,18 +394,7 @@ onMounted(() => {
     theme: getTerminalTheme(effectiveCodeTheme.value),
   });
   terminal.attachCustomKeyEventHandler((event: KeyboardEvent) => {
-    if (event.type === "keydown") {
-      declareProducerInput(
-        event.key === "Enter"
-          && !event.isComposing
-          && !event.shiftKey
-          && !event.altKey
-          && !event.ctrlKey
-          && !event.metaKey
-          ? "submission"
-          : "draft",
-      );
-    }
+    inputProducer.handleKeyEvent(event);
     if (isShiftEnter(event)) {
       event.preventDefault();
       enqueueRemoteInput(SHIFT_ENTER_CSI_U);
@@ -462,13 +419,11 @@ onMounted(() => {
   });
   terminal.onData((data) => {
     if (unmounted || !relayClient || status.value !== "live") return;
-    const inputKind = producerInputKind;
-    producerInputKind = "control";
-    producerInputGeneration += 1;
+    const classification = inputProducer.classifyData();
     enqueueRemoteInput(
       data,
-      inputKind === "submission",
-      inputKind === "control",
+      classification.submissionBoundary,
+      classification.controlInput,
     );
   });
   fitAddon = new FitAddon();
@@ -478,12 +433,14 @@ onMounted(() => {
     terminal.open(containerRef.value);
     inputEventContainer = containerRef.value;
     for (const eventName of controlInputEvents) {
-      inputEventContainer.addEventListener(eventName, declareControlInput, true);
+      inputEventContainer.addEventListener(eventName, inputProducer.declareControlInput, true);
     }
     for (const eventName of draftInputEvents) {
-      inputEventContainer.addEventListener(eventName, declareDraftInput, true);
+      inputEventContainer.addEventListener(eventName, inputProducer.declareDraftInput, true);
     }
-    inputEventContainer.addEventListener("compositionend", declareCompositionInput, true);
+    inputEventContainer.addEventListener("compositionstart", inputProducer.handleCompositionStart, true);
+    inputEventContainer.addEventListener("compositionupdate", inputProducer.handleCompositionUpdate, true);
+    inputEventContainer.addEventListener("compositionend", inputProducer.handleCompositionEnd, true);
     registerTerminalBufferForE2E();
     fileLinkProvider = createRemoteTerminalFileLinkProvider({
       term: terminal,
@@ -531,12 +488,14 @@ onUnmounted(() => {
   resizeObserver?.disconnect();
   if (inputEventContainer) {
     for (const eventName of controlInputEvents) {
-      inputEventContainer.removeEventListener(eventName, declareControlInput, true);
+      inputEventContainer.removeEventListener(eventName, inputProducer.declareControlInput, true);
     }
     for (const eventName of draftInputEvents) {
-      inputEventContainer.removeEventListener(eventName, declareDraftInput, true);
+      inputEventContainer.removeEventListener(eventName, inputProducer.declareDraftInput, true);
     }
-    inputEventContainer.removeEventListener("compositionend", declareCompositionInput, true);
+    inputEventContainer.removeEventListener("compositionstart", inputProducer.handleCompositionStart, true);
+    inputEventContainer.removeEventListener("compositionupdate", inputProducer.handleCompositionUpdate, true);
+    inputEventContainer.removeEventListener("compositionend", inputProducer.handleCompositionEnd, true);
     inputEventContainer = null;
   }
   terminal?.dispose();

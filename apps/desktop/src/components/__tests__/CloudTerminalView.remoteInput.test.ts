@@ -105,6 +105,20 @@ function deferred<T = void>() {
   return { promise, resolve };
 }
 
+function terminalKeydown(
+  key: string,
+  options: { isComposing?: boolean; keyCode?: number } = {},
+): KeyboardEvent {
+  const event = new KeyboardEvent("keydown", {
+    key,
+    isComposing: options.isComposing ?? false,
+  });
+  if (options.keyCode !== undefined) {
+    Object.defineProperty(event, "keyCode", { value: options.keyCode });
+  }
+  return event;
+}
+
 function terminalClient(sendInput = harness.sendInput) {
   return {
     close: vi.fn(),
@@ -299,6 +313,109 @@ describe("CloudTerminalView", () => {
       desktopId: "desktop-1",
       taskId: "task-1",
       data: "界",
+    });
+    wrapper.unmount();
+  });
+
+  it("keeps both onData emissions from a composition-finalizing Enter as draft", async () => {
+    harness.sendInput.mockResolvedValue(undefined);
+    const { default: CloudTerminalView } = await import("../CloudTerminalView.vue");
+    const wrapper = mount(CloudTerminalView, {
+      props: {
+        ownerDesktopId: "desktop-1",
+        ownerTaskId: "task-1",
+        transport: "cloud",
+      },
+    });
+    await flushPromises();
+
+    wrapper.get(".terminal-container").element.dispatchEvent(new Event("compositionstart"));
+    harness.keyHandler?.(terminalKeydown("Enter", { keyCode: 13 }));
+    harness.dataListener?.("候補");
+    harness.dataListener?.("\r");
+    await flushPromises();
+
+    expect(harness.sendInput).toHaveBeenNthCalledWith(1, {
+      desktopId: "desktop-1",
+      taskId: "task-1",
+      data: "候補",
+    });
+    expect(harness.sendInput).toHaveBeenNthCalledWith(2, {
+      desktopId: "desktop-1",
+      taskId: "task-1",
+      data: "\r",
+    });
+    wrapper.unmount();
+  });
+
+  it("treats an IME process Enter as draft and boundaries only the Enter after commit", async () => {
+    harness.sendInput.mockResolvedValue(undefined);
+    const { default: CloudTerminalView } = await import("../CloudTerminalView.vue");
+    const wrapper = mount(CloudTerminalView, {
+      props: {
+        ownerDesktopId: "desktop-1",
+        ownerTaskId: "task-1",
+        transport: "cloud",
+      },
+    });
+    await flushPromises();
+    const container = wrapper.get(".terminal-container").element;
+
+    container.dispatchEvent(new Event("compositionstart"));
+    harness.keyHandler?.(terminalKeydown("Enter", { isComposing: true, keyCode: 229 }));
+    container.dispatchEvent(new Event("compositionend"));
+    await Promise.resolve();
+    harness.dataListener?.("確定");
+    await flushPromises();
+
+    harness.keyHandler?.(terminalKeydown("Enter", { keyCode: 13 }));
+    harness.dataListener?.("\r");
+    await flushPromises();
+
+    expect(harness.sendInput).toHaveBeenNthCalledWith(1, {
+      desktopId: "desktop-1",
+      taskId: "task-1",
+      data: "確定",
+    });
+    expect(harness.sendInput).toHaveBeenNthCalledWith(2, {
+      desktopId: "desktop-1",
+      taskId: "task-1",
+      data: "\r",
+      submissionBoundary: true,
+    });
+    wrapper.unmount();
+  });
+
+  it("preserves the boundary when composition commit and Enter occur in the same tick", async () => {
+    harness.sendInput.mockResolvedValue(undefined);
+    const { default: CloudTerminalView } = await import("../CloudTerminalView.vue");
+    const wrapper = mount(CloudTerminalView, {
+      props: {
+        ownerDesktopId: "desktop-1",
+        ownerTaskId: "task-1",
+        transport: "cloud",
+      },
+    });
+    await flushPromises();
+    const container = wrapper.get(".terminal-container").element;
+
+    container.dispatchEvent(new Event("compositionstart"));
+    container.dispatchEvent(new Event("compositionend"));
+    harness.dataListener?.("即");
+    harness.keyHandler?.(terminalKeydown("Enter", { keyCode: 13 }));
+    harness.dataListener?.("\r");
+    await flushPromises();
+
+    expect(harness.sendInput).toHaveBeenNthCalledWith(1, {
+      desktopId: "desktop-1",
+      taskId: "task-1",
+      data: "即",
+    });
+    expect(harness.sendInput).toHaveBeenNthCalledWith(2, {
+      desktopId: "desktop-1",
+      taskId: "task-1",
+      data: "\r",
+      submissionBoundary: true,
     });
     wrapper.unmount();
   });

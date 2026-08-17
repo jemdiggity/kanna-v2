@@ -1180,6 +1180,7 @@ async function runCausalRemoteInputTest(): Promise<void> {
     const prompt = `Remote LAN draft boundary ${randomUUID()}`;
     const readyMarker = `REMOTE_BOUNDARY_READY_${randomUUID().replaceAll("-", "")}`;
     const humanInput = "human-draft";
+    const compositionInput = "ime-commit";
     const managerInput = "manager-message";
     const script = [
       "select(STDOUT); $| = 1;",
@@ -1261,6 +1262,57 @@ async function runCausalRemoteInputTest(): Promise<void> {
       await waitForRemoteTerminalLine(taskId, `SUBMIT:<${humanInput}>`);
       await waitForRemoteTerminalLine(taskId, "PARSER_CONTROL:<>");
 
+      // Exercise xterm's real CompositionHelper ordering. Its custom key
+      // handler runs first; keyCode 13 then finalizes the active composition
+      // synchronously through one onData and emits CR through a second onData.
+      // That Enter commits the draft but is not a daemon submission boundary.
+      await secondary.executeSync(`
+        const input = document.querySelector(
+          ".main-panel .cloud-terminal-shell .xterm-helper-textarea"
+        );
+        if (!(input instanceof HTMLTextAreaElement)) {
+          throw new Error("remote xterm textarea unavailable");
+        }
+        input.focus();
+        input.value = "";
+        input.setSelectionRange(0, 0);
+        input.dispatchEvent(new CompositionEvent("compositionstart", {
+          bubbles: true,
+          data: "",
+        }));
+        input.value = ${JSON.stringify(compositionInput)};
+        input.setSelectionRange(input.value.length, input.value.length);
+        input.dispatchEvent(new CompositionEvent("compositionupdate", {
+          bubbles: true,
+          data: ${JSON.stringify(compositionInput)},
+        }));
+      `);
+      await sleep(50);
+      await secondary.executeSync(`
+        const input = document.querySelector(
+          ".main-panel .cloud-terminal-shell .xterm-helper-textarea"
+        );
+        if (!(input instanceof HTMLTextAreaElement)) {
+          throw new Error("remote xterm textarea unavailable");
+        }
+        const enter = new KeyboardEvent("keydown", {
+          bubbles: true,
+          cancelable: true,
+          code: "Enter",
+          key: "Enter",
+        });
+        Object.defineProperty(enter, "keyCode", { value: 13 });
+        input.dispatchEvent(enter);
+      `);
+      await waitForRemoteTerminalLine(taskId, `SUBMIT:<${compositionInput}>`);
+
+      // The next ordinary Enter is the boundary that releases later logical
+      // input. If the composition commit consumed this declaration, the
+      // manager message below remains queued behind a phantom draft.
+      await secondary.pressKey("\uE007");
+      await waitForRemoteTerminalLine(taskId, "SUBMIT:<>");
+      await waitForRemoteTerminalLine(taskId, "PARSER_CONTROL:<>");
+
       const { baseUrl } = await resolveAppKannaServer(primary);
       const response = await fetch(
         `${baseUrl}/v1/tasks/${encodeURIComponent(taskId)}/input`,
@@ -1286,6 +1338,8 @@ async function runCausalRemoteInputTest(): Promise<void> {
       `);
       expect(submittedLines).toEqual([
         `SUBMIT:<${humanInput}>`,
+        `SUBMIT:<${compositionInput}>`,
+        "SUBMIT:<>",
         `SUBMIT:<${managerInput}>`,
       ]);
     } finally {
@@ -1329,7 +1383,7 @@ describe("remote desktop LAN input semantics", () => {
   });
 
   it(
-    "keeps remote LAN draft, control, submission, and logical API input separate and ordered",
+    "keeps remote LAN draft, composition commit, control, submission, and logical API input separate and ordered",
     runCausalRemoteInputTest,
     120_000,
   );
