@@ -161,6 +161,20 @@ h3 { font-size: 1.05rem; margin: 0 0 0.25rem; }
 }
 </style>`;
 
+const IMAGE_PLACEHOLDER_STYLE = `<style id="kanna-companion-image-style">
+.kanna-companion-image-placeholder {
+  align-items: center;
+  background: rgba(255, 116, 108, 0.08);
+  border: 1px dashed rgba(255, 116, 108, 0.55);
+  border-radius: 8px;
+  color: #ffaaa5;
+  display: flex;
+  min-height: 72px;
+  overflow-wrap: anywhere;
+  padding: 12px;
+}
+</style>`;
+
 const WEBSOCKET_STATUS_STYLE = `<style id="kanna-companion-status-style">
 #kanna-companion-indicator {
   align-items: center;
@@ -791,6 +805,7 @@ function sanitizedSourceDocument(
       node.remove();
       return;
     }
+    var rejectedImageSource = null;
     Array.from(node.attributes).forEach(function(attribute) {
       var name = attribute.name.toLowerCase();
       var value = attribute.value;
@@ -811,9 +826,22 @@ function sanitizedSourceDocument(
           /url\\s*\\(/i.test(value) &&
           !/^url\\(#[A-Za-z0-9_-]+\\)$/i.test(value))
       ) {
+        if (name === 'src' && elementName === 'img') {
+          rejectedImageSource = value;
+        }
         node.removeAttribute(attribute.name);
       }
     });
+    if (elementName === 'img' && rejectedImageSource !== null) {
+      var placeholder = parsed.createElement('span');
+      var placeholderText = 'Image unavailable: ' + rejectedImageSource
+        + ' (local image was not prepared safely).';
+      placeholder.className = 'kanna-companion-image-placeholder';
+      placeholder.setAttribute('role', 'img');
+      placeholder.setAttribute('aria-label', placeholderText);
+      placeholder.textContent = placeholderText;
+      node.replaceWith(placeholder);
+    }
   });
   Array.from(parsed.head.children).forEach(function(node) {
     document.head.appendChild(node);
@@ -855,6 +883,7 @@ export function buildCompanionDocument({
       : undefined;
   const head = [
     securityHead(target, scriptNonce),
+    IMAGE_PLACEHOLDER_STYLE,
     target.kind === "websocket" ? WEBSOCKET_STATUS_STYLE : ""
   ].join("");
   const bridge =

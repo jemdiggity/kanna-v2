@@ -110,6 +110,196 @@ fn discovers_current_document_from_explicit_workspace() {
 }
 
 #[test]
+fn prepares_sibling_and_files_image_sources_as_bounded_data_uris() {
+    let fixture = Fixture::new();
+    fixture.active_session(
+        "session-a",
+        "screen.html",
+        r#"<img id="relative" src="01.png"><img id="files" src="/files/02.jpg">"#,
+    );
+    fixture.content("session-a", "01.png", b"PNG");
+    fixture.content("session-a", "02.jpg", b"JPEG");
+
+    let mut scanner = CompanionScanner::new();
+    let CompanionScan::Changed(Some(bundle)) =
+        scanner.scan_with_assets(fixture.worktree(), false).unwrap()
+    else {
+        panic!("expected prepared companion");
+    };
+
+    assert!(bundle
+        .html
+        .contains(r#"id="relative" src="data:image/png;base64,UE5H""#));
+    assert!(bundle
+        .html
+        .contains(r#"id="files" src="data:image/jpeg;base64,SlBFRw==""#));
+    assert!(bundle.assets.is_empty());
+}
+
+#[test]
+fn local_image_preparation_rejects_out_of_tree_and_hostile_sources_visibly() {
+    let fixture = Fixture::new();
+    fixture.active_session(
+        "session-a",
+        "screen.html",
+        concat!(
+            r#"<img src="../secret.png">"#,
+            r#"<img src="/tmp/secret.png">"#,
+            r#"<img src="javascript:alert(1)">"#,
+        ),
+    );
+    fixture.write("secret.png", b"outside");
+
+    let bundle = current_bundle(fixture.worktree()).unwrap().unwrap();
+
+    assert!(!bundle.html.contains("data:image"));
+    assert!(bundle
+        .html
+        .contains("Image unavailable: ../secret.png (path is outside companion content)."));
+    assert!(bundle
+        .html
+        .contains("Image unavailable: /tmp/secret.png (path is outside companion content)."));
+    assert!(bundle.html.contains(
+        "Image unavailable: javascript:alert(1) (file type is not a supported passive image)."
+    ));
+    assert!(!bundle.html.contains("b3V0c2lkZQ=="));
+}
+
+#[test]
+fn local_image_preparation_degrades_oversized_references_visibly() {
+    let fixture = Fixture::new();
+    fixture.active_session("session-a", "screen.html", r#"<img src="gallery.png">"#);
+    fixture.content(
+        "session-a",
+        "gallery.png",
+        vec![b'x'; MAX_COMPANION_INLINE_IMAGE_TOTAL_BYTES as usize + 1],
+    );
+
+    let bundle = current_bundle(fixture.worktree()).unwrap().unwrap();
+
+    assert!(!bundle.html.contains("data:image"));
+    assert!(bundle
+        .html
+        .contains("Image unavailable: gallery.png (768 KiB document image budget is exhausted)."));
+}
+
+#[test]
+fn prepared_size_rejection_debits_repeated_image_work_and_names_the_reason() {
+    const REFERENCE_COUNT: usize = 2_048;
+
+    let fixture = Fixture::new();
+    let image_tag = r#"<img src="gallery.png">"#;
+    let mut html = image_tag.repeat(REFERENCE_COUNT);
+    html.extend(std::iter::repeat_n(
+        'x',
+        MAX_COMPANION_HTML_BYTES as usize - html.len(),
+    ));
+    fixture.active_session("session-a", "screen.html", html);
+    fixture.content("session-a", "gallery.png", vec![b'x'; 700 * 1024]);
+
+    let bundle = current_bundle(fixture.worktree()).unwrap().unwrap();
+
+    let prepared_size_reason =
+        "Image unavailable: gallery.png (1.5 MiB prepared document size limit is exhausted).";
+    let raw_image_budget_reason =
+        "Image unavailable: gallery.png (768 KiB document image budget is exhausted).";
+    // Each placeholder repeats its label in aria-label and visible text. The
+    // first reference consumes the 700 KiB raw-image work budget even though
+    // its encoded form cannot fit; all remaining references are rejected from
+    // metadata without rereading or encoding that file.
+    assert_eq!(bundle.html.matches(prepared_size_reason).count(), 2);
+    assert_eq!(
+        bundle.html.matches(raw_image_budget_reason).count(),
+        (REFERENCE_COUNT - 1) * 2
+    );
+    assert!(!bundle.html.contains("data:image"));
+    assert!(bundle.html.len() <= MAX_COMPANION_PREPARED_HTML_BYTES);
+}
+
+#[test]
+fn repeated_out_of_tree_references_degrade_within_the_prepared_document_cap() {
+    const REFERENCE_COUNT: usize = 8_192;
+
+    let fixture = Fixture::new();
+    let image_tag = r#"<img src="../secret.png">"#;
+    let mut html = image_tag.repeat(REFERENCE_COUNT);
+    html.extend(std::iter::repeat_n(
+        'x',
+        MAX_COMPANION_HTML_BYTES as usize - html.len(),
+    ));
+    fixture.active_session("session-a", "screen.html", html);
+    fixture.write("secret.png", b"outside");
+
+    let bundle = current_bundle(fixture.worktree()).unwrap().unwrap();
+
+    // Per-image notices are larger than the tags they replace, so a legal
+    // source packed with them would expand past the cap without accounting.
+    assert!(bundle.html.len() <= MAX_COMPANION_PREPARED_HTML_BYTES);
+    assert!(bundle
+        .html
+        .contains("Image unavailable: ../secret.png (path is outside companion content)."));
+    // Degradation stays visible and reason-bearing once per-image notices no
+    // longer fit: one bounded summary stands in for every remaining image.
+    assert!(bundle.html.contains(
+        "Remaining images unavailable: path is outside companion content, \
+         and 1.5 MiB prepared document size limit is exhausted."
+    ));
+    assert!(!bundle.html.contains("b3V0c2lkZQ=="));
+}
+
+#[test]
+fn repeated_rejected_references_degrade_within_the_prepared_document_cap() {
+    const REFERENCE_COUNT: usize = 8_192;
+
+    let fixture = Fixture::new();
+    let image_tag = r#"<img src="gallery.png">"#;
+    let mut html = image_tag.repeat(REFERENCE_COUNT);
+    html.extend(std::iter::repeat_n(
+        'x',
+        MAX_COMPANION_HTML_BYTES as usize - html.len(),
+    ));
+    fixture.active_session("session-a", "screen.html", html);
+    fixture.content("session-a", "gallery.png", vec![b'x'; 700 * 1024]);
+
+    let bundle = current_bundle(fixture.worktree()).unwrap().unwrap();
+
+    assert!(bundle.html.len() <= MAX_COMPANION_PREPARED_HTML_BYTES);
+    // The first reference spends the raw-image work budget without fitting its
+    // data URI; the rest are rejected against the exhausted budget.
+    assert!(bundle.html.contains(
+        "Image unavailable: gallery.png (1.5 MiB prepared document size limit is exhausted)."
+    ));
+    assert!(bundle
+        .html
+        .contains("Image unavailable: gallery.png (768 KiB document image budget is exhausted)."));
+    assert!(bundle.html.contains(
+        "Remaining images unavailable: 768 KiB document image budget is exhausted, \
+         and 1.5 MiB prepared document size limit is exhausted."
+    ));
+    assert!(!bundle.html.contains("data:image"));
+}
+
+#[cfg(unix)]
+#[test]
+fn local_image_preparation_never_follows_sibling_symlinks() {
+    let fixture = Fixture::new();
+    fixture.active_session("session-a", "screen.html", r#"<img src="linked.png">"#);
+    let outside = fixture.write("outside.png", b"outside");
+    std::os::unix::fs::symlink(
+        outside,
+        fixture.session_path("session-a").join("content/linked.png"),
+    )
+    .unwrap();
+
+    let bundle = current_bundle(fixture.worktree()).unwrap().unwrap();
+
+    assert!(!bundle.html.contains("data:image"));
+    assert!(bundle
+        .html
+        .contains("Image unavailable: linked.png (file is unavailable or unsafe)."));
+}
+
+#[test]
 fn returns_none_without_a_brainstorm_directory() {
     let fixture = Fixture::new();
     assert_eq!(current_bundle(fixture.worktree()).unwrap(), None);

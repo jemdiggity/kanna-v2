@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { Window } from "happy-dom";
 import { buildCompanionDocument } from "./index";
 
 const browserStrings = {
@@ -31,6 +32,17 @@ function bridgeSource(document: string): string {
   );
   if (!match) throw new Error("companion bridge script is missing");
   return match[1]!;
+}
+
+function renderSanitizedDocument(document: string): Window {
+  const window = new Window();
+  window.document.write(document);
+  const render = window.document.querySelector("#kanna-companion-render") as unknown as {
+    textContent: string | null;
+  } | null;
+  expect(render).not.toBeNull();
+  window.eval(render?.textContent ?? "");
+  return window;
 }
 
 function runWebsocketBridge(
@@ -259,6 +271,48 @@ describe("buildCompanionDocument", () => {
       "window.ReactNativeWebView.postMessage(JSON.stringify(message))"
     );
     expect(document).not.toContain("new WebSocket");
+  });
+
+  it.each([
+    ["mobile", { kind: "react-native" } as const],
+    ["desktop", websocketTarget("/bridge")]
+  ])("renders server-prepared local images on %s", (_name, target) => {
+    const document = buildCompanionDocument({
+      documentKind: "fragment",
+      html: '<img id="gallery-image" src="data:image/png;base64,UE5H">',
+      target
+    });
+
+    const window = renderSanitizedDocument(document);
+    const image = window.document.querySelector("#gallery-image") as unknown as {
+      src: string;
+    } | null;
+    expect(image?.src).toBe("data:image/png;base64,UE5H");
+    expect(
+      window.document.querySelector(".kanna-companion-image-placeholder")
+    ).toBeNull();
+  });
+
+  it.each([
+    ["relative", "01.png"],
+    ["out-of-tree", "../secret.png"],
+    ["hostile", "javascript:alert(1)"]
+  ])("degrades an unprepared %s image visibly", (_name, source) => {
+    const document = buildCompanionDocument({
+      documentKind: "fragment",
+      html: `<img id="unsafe-image" src="${source}">`,
+      target: { kind: "react-native" }
+    });
+
+    const window = renderSanitizedDocument(document);
+    const placeholder = window.document.querySelector(
+      ".kanna-companion-image-placeholder"
+    );
+    expect(window.document.querySelector("#unsafe-image")).toBeNull();
+    expect(placeholder?.textContent).toBe(
+      `Image unavailable: ${source} (local image was not prepared safely).`
+    );
+    expect(placeholder?.getAttribute("role")).toBe("img");
   });
 
   it("sanitizes a full mobile document while preserving its passive content", () => {

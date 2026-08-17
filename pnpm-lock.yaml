@@ -352,6 +352,9 @@ importers:
         specifier: workspace:*
         version: link:../stream-client
     devDependencies:
+      happy-dom:
+        specifier: ^20.8.4
+        version: 20.8.9
       typescript:
         specifier: ^5
         version: 5.9.3

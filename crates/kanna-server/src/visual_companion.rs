@@ -178,6 +178,37 @@ mod tests {
     }
 
     #[test]
+    fn server_scan_prepares_sibling_images_for_assetless_clients() {
+        let fixture = Fixture::new();
+        fixture.active_session(
+            "session-a",
+            "screen.html",
+            r#"<figure><img src="01.png"></figure>"#,
+        );
+        std::fs::write(
+            fixture
+                .worktree
+                .join(".superpowers/brainstorm/session-a/content/01.png"),
+            b"PNG",
+        )
+        .unwrap();
+        let mut scanner = CompanionScanner::new();
+
+        let kanna_visual_companion::CompanionScan::Changed(Some(bundle)) = scanner
+            .scan_with_assets(fixture.db_path(), "task-1", false)
+            .unwrap()
+        else {
+            panic!("expected prepared companion snapshot");
+        };
+
+        assert_eq!(
+            bundle.html,
+            r#"<figure><img src="data:image/png;base64,UE5H"></figure>"#
+        );
+        assert!(bundle.assets.is_empty());
+    }
+
+    #[test]
     fn reports_tasks_without_a_current_workspace() {
         let fixture = Fixture::new();
         fixture
