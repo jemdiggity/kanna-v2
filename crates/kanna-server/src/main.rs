@@ -1,3 +1,4 @@
+mod agent_inventory;
 mod bonjour;
 mod cloud_task_publisher;
 mod cloud_transfer_proxy;
