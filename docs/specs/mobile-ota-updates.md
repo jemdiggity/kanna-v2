@@ -39,6 +39,7 @@ Objects live in the environment bucket under `ota/`:
 ```text
 ota/ios/<runtimeVersion>/updates/<updateId>/metadata.json
 ota/ios/<runtimeVersion>/updates/<updateId>/expoConfig.json
+ota/ios/<runtimeVersion>/updates/<updateId>/kanna-source.json
 ota/ios/<runtimeVersion>/updates/<updateId>/bundles/<sha256-base64url>.hbc
 ota/ios/<runtimeVersion>/updates/<updateId>/assets/<sha256-base64url>
 ota/ios/<runtimeVersion>/channels/<channel>.json
@@ -47,11 +48,32 @@ ota/ios/<runtimeVersion>/channels/<channel>.json
 The channel pointer is the commit point:
 
 ```json
-{ "currentUpdateId": "<updateId>", "createdAt": "...", "runtimeVersion": "2.1.1" }
+{
+  "currentUpdateId": "<updateId>",
+  "createdAt": "...",
+  "runtimeVersion": "2.1.1",
+  "sourceRef": "release/0.2",
+  "sourceCommit": "<40-hex sha>"
+}
 ```
 
 `updateId` is deterministic: SHA-256 of `metadata.json`, converted to the Expo
 UUID shape using the first 32 hex characters.
+
+`kanna-source.json` records the git source the update was exported from:
+
+```json
+{ "updateId": "<updateId>", "ref": "release/0.2", "commit": "<40-hex sha>", "shortCommit": "<12-hex sha>" }
+```
+
+The pointer's `sourceRef`/`sourceCommit` answer "what is this channel serving
+right now"; `kanna-source.json` stays with the update, so an update a later
+rollback re-points to is still traceable after the pointer has been rewritten.
+Neither is part of `metadata.json` — `updateId` is that file's hash and Expo
+clients parse it — and the relay reads only `metadata.json`, `expoConfig.json`,
+and the content-addressed artifacts, so both records are inert to the client.
+A rollback pointer carries no source fields: it publishes no new source, and
+the update it names carries its own.
 
 ## Relay
 
@@ -114,8 +136,31 @@ Publish a JS/asset update:
 
 ```bash
 ./kd mobile ota publish --staging
-./kd mobile ota publish --production
+./kd mobile ota publish --production --ref release/0.2
 ```
+
+`publish` exports whatever the working tree contains, so the source is a guard
+rather than a parameter — the same treatment `kd cloud deploy` and `kd mobile
+archive` apply:
+
+- `--ref <branch|tag|sha>` is **required** with `--production`. An OTA publish
+  pushes JS straight to installed apps, so the source commit must be named
+  rather than inferred from whatever happens to be checked out.
+- A dirty worktree is refused; so is a `--ref` that is not the checked-out
+  commit (`git checkout` it first).
+- Without `--ref`, staging resolves `HEAD` and reports it, so the output still
+  records what shipped.
+- `--rollback-to` re-points the channel at an already-published update and
+  exports nothing, so it needs no `--ref`. It still refuses a dirty worktree.
+
+The resolved commit appears in the command output (`Source: <ref> (<short
+sha>)`), in the result data as `source`, and in the two GCS records described
+under [GCS Layout](#gcs-layout). `kd mobile ota status` prints the raw pointer,
+so it shows the source of the update the channel currently serves.
+
+`--ref` narrows what a publish can ship; it does not change the approval
+policy. Production publishes and rollbacks still require an explicit human
+request (see [release.md](../dev/release.md#mobile-ota)).
 
 `publish` validates the committed certificate and its validity window before
 Expo export or cloud upload.

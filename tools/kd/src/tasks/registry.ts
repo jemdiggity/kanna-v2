@@ -221,7 +221,8 @@ const mobileOtaPublishInputSchema = z.object({
   production: z.boolean().default(false),
   staging: z.boolean().default(false),
   dryRun: z.boolean().default(false),
-  rollbackTo: z.string().optional()
+  rollbackTo: z.string().optional(),
+  ref: z.string().optional()
 });
 
 const mobileOtaStatusInputSchema = z.object({
@@ -1969,7 +1970,7 @@ export const taskDefinitions = [
   },
   {
     id: "mobile.ota.publish",
-    description: "Publish or roll back a Kanna mobile OTA update.",
+    description: "Publish a Kanna mobile OTA update from an explicit source ref, or roll a channel back.",
     inputSchema: mobileOtaPublishInputSchema,
     execute: async (_context, input) => {
       const context = await resolveDefaultContext(process.env);

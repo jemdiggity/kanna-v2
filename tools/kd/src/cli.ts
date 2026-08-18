@@ -612,6 +612,7 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
           production: false,
           dryRun: false,
           rollbackTo: undefined,
+          ref: undefined,
         }),
       };
     }
@@ -819,7 +820,7 @@ const helpTopics: Record<string, string[]> = {
     "  mobile archive --production --ref <branch|tag|sha> --build-number <number> [--version <version>] [--out-dir <dir>] [--upload] [--dry-run]",
     "  mobile doctor --device",
     "  mobile qa --production [--ota]",
-    "  mobile ota publish --staging|--production [--dry-run] [--rollback-to <updateId>]",
+    "  mobile ota publish --staging|--production [--ref <branch|tag|sha>] [--dry-run] [--rollback-to <updateId>]",
     "  mobile ota status --staging|--production",
     "  mobile ota doctor|preflight --staging|--production",
     "  mobile ota provision --staging|--production",
@@ -1034,16 +1035,25 @@ const helpTopics: Record<string, string[]> = {
     "Usage: kd mobile ota <command>",
     "",
     "Commands:",
-    "  mobile ota publish --staging|--production [--dry-run] [--rollback-to <updateId>]",
+    "  mobile ota publish --staging|--production [--ref <branch|tag|sha>] [--dry-run] [--rollback-to <updateId>]",
     "  mobile ota status --staging|--production",
     "  mobile ota doctor|preflight --staging|--production",
     "  mobile ota provision --staging|--production",
     "  mobile ota provision-secret --staging|--production --key-path <path>"
   ],
   "mobile ota publish": [
-    "Usage: kd mobile ota publish --staging|--production [--dry-run] [--rollback-to <updateId>]",
+    "Usage: kd mobile ota publish --staging|--production [--ref <branch|tag|sha>] [--dry-run] [--rollback-to <updateId>]",
     "",
-    "Publish or roll back a Kanna mobile OTA update."
+    "Publish or roll back a Kanna mobile OTA update.",
+    "",
+    "Options:",
+    "  --ref <branch|tag|sha>    Source ref the update is exported from. Required with",
+    "                            --production. The export consumes the working tree, so the",
+    "                            ref must be checked out and the tree clean. Omitted elsewhere,",
+    "                            HEAD is resolved and reported. Not required for --rollback-to,",
+    "                            which exports nothing.",
+    "  --dry-run                 Export and stage without writing to GCS.",
+    "  --rollback-to <updateId>  Repoint the channel at an already-published update."
   ],
   "mobile ota status": [
     "Usage: kd mobile ota status --staging|--production",

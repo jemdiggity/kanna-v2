@@ -92,6 +92,58 @@ async function makeRepoFixture(
   return repoRoot;
 }
 
+const HEAD_COMMIT = "9".repeat(40);
+const SHORT_HEAD_COMMIT = HEAD_COMMIT.slice(0, 12);
+
+/**
+ * `resolveSourceRef` runs `git status --porcelain` then `git rev-parse` per ref,
+ * so the publish tests have to answer both rather than a blanket exit 0.
+ */
+function gitResult(
+  args: string[],
+  options: { status?: string; commits?: Record<string, string> } = {}
+): { exitCode: number; stdout: string; stderr: string } {
+  if (args[0] === "status") {
+    return { exitCode: 0, stdout: options.status ?? "", stderr: "" };
+  }
+  if (args[0] === "rev-parse") {
+    const ref = args[args.length - 1].replace("^{commit}", "");
+    const commit = (options.commits ?? { HEAD: HEAD_COMMIT })[ref];
+    return commit
+      ? { exitCode: 0, stdout: `${commit}\n`, stderr: "" }
+      : { exitCode: 1, stdout: "", stderr: "" };
+  }
+  return { exitCode: 0, stdout: "", stderr: "" };
+}
+
+/** A runner that answers git, the Expo export, and the Expo public config. */
+function publishRunner(
+  repoRoot: string,
+  options: {
+    commits?: Record<string, string>;
+    onGcloud?: (args: string[]) => { exitCode: number; stdout: string; stderr: string };
+  } = {}
+): CommandRunner {
+  return {
+    async run(command, args) {
+      if (command === "git") return gitResult(args, { commits: options.commits });
+      if (command === "pnpm" && args.includes("export")) {
+        await writeMinimalSdk57Export(repoRoot);
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+      if (command === "pnpm" && args.includes("config")) {
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({ name: "Kanna", runtimeVersion: "1.0.0" }),
+          stderr: "",
+        };
+      }
+      if (command === "gcloud" && options.onGcloud) return options.onGcloud(args);
+      return { exitCode: 0, stdout: "", stderr: "" };
+    },
+  };
+}
+
 async function writeMinimalSdk57Export(repoRoot: string): Promise<void> {
   await mkdir(join(repoRoot, "apps/mobile/dist/bundles"), { recursive: true });
   await writeFile(
@@ -107,8 +159,21 @@ describe("kd mobile OTA", () => {
   it("parses publish, status, doctor, and preflight commands under mobile ota", () => {
     expect(parseCliArgs(["mobile", "ota", "publish", "--staging", "--dry-run"])).toEqual({
       taskId: "mobile.ota.publish",
-      input: { staging: true, production: false, dryRun: true, rollbackTo: undefined },
+      input: { staging: true, production: false, dryRun: true, rollbackTo: undefined, ref: undefined },
     });
+    expect(parseCliArgs(["mobile", "ota", "publish", "--production", "--ref", "release/0.2"])).toEqual({
+      taskId: "mobile.ota.publish",
+      input: {
+        staging: false,
+        production: true,
+        dryRun: false,
+        rollbackTo: undefined,
+        ref: "release/0.2",
+      },
+    });
+    expect(() => parseCliArgs(["mobile", "ota", "publish", "--production", "--ref"])).toThrow(
+      "--ref requires a value"
+    );
     expect(parseCliArgs(["mobile", "ota", "status", "--production"])).toEqual({
       taskId: "mobile.ota.status",
       input: { staging: false, production: true },
@@ -215,7 +280,7 @@ describe("kd mobile OTA", () => {
     const runner: CommandRunner = {
       async run(command, args, options) {
         calls.push({ command, args, cwd: options?.cwd, env: options?.env });
-        if (command === "git") return { exitCode: 0, stdout: "", stderr: "" };
+        if (command === "git") return gitResult(args);
         if (command === "pnpm" && args.includes("export")) {
           await mkdir(join(repoRoot, "apps/mobile/dist/bundles"), { recursive: true });
           await writeFile(
@@ -250,8 +315,13 @@ describe("kd mobile OTA", () => {
 
     expect(result.ok).toBe(true);
     expect(calls[0]).toMatchObject({ command: "git", args: ["status", "--porcelain"], cwd: repoRoot });
-    expect(calls[1]).toMatchObject({ command: "pnpm", cwd: join(repoRoot, "apps/mobile") });
-    expect(calls[2]).toMatchObject({
+    expect(calls[1]).toMatchObject({
+      command: "git",
+      args: ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+      cwd: repoRoot,
+    });
+    expect(calls[2]).toMatchObject({ command: "pnpm", cwd: join(repoRoot, "apps/mobile") });
+    expect(calls[3]).toMatchObject({
       command: "pnpm",
       args: ["exec", "expo", "config", "--type", "public", "--json"],
       cwd: join(repoRoot, "apps/mobile"),
@@ -259,6 +329,7 @@ describe("kd mobile OTA", () => {
     });
     expect(calls.some((call) => call.command === "gcloud")).toBe(false);
     expect(result.message).toContain("Dry run: mobile OTA update");
+    expect(result.message).toContain(`Source: HEAD (${SHORT_HEAD_COMMIT})`);
     expect(result.message).toContain("curl -H 'expo-protocol-version: 1'");
   });
 
@@ -268,7 +339,7 @@ describe("kd mobile OTA", () => {
     const runner: CommandRunner = {
       async run(command, args) {
         calls.push({ command, args });
-        return { exitCode: 0, stdout: "", stderr: "" };
+        return command === "git" ? gitResult(args) : { exitCode: 0, stdout: "", stderr: "" };
       },
     };
 
@@ -276,7 +347,10 @@ describe("kd mobile OTA", () => {
       { staging: true, production: false, dryRun: true },
       { repoRoot, env: {}, runner }
     )).rejects.toThrow("not valid X.509");
-    expect(calls).toEqual([{ command: "git", args: ["status", "--porcelain"] }]);
+    expect(calls).toEqual([
+      { command: "git", args: ["status", "--porcelain"] },
+      { command: "git", args: ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"] },
+    ]);
   });
 
   it("surfaces Expo public config command failures before cloud access", async () => {
@@ -285,7 +359,7 @@ describe("kd mobile OTA", () => {
     const runner: CommandRunner = {
       async run(command, args) {
         calls.push({ command, args });
-        if (command === "git") return { exitCode: 0, stdout: "", stderr: "" };
+        if (command === "git") return gitResult(args);
         if (command === "pnpm" && args.includes("export")) {
           await writeMinimalSdk57Export(repoRoot);
           return { exitCode: 0, stdout: "", stderr: "" };
@@ -312,7 +386,7 @@ describe("kd mobile OTA", () => {
     const runner: CommandRunner = {
       async run(command, args) {
         calls.push({ command, args });
-        if (command === "git") return { exitCode: 0, stdout: "", stderr: "" };
+        if (command === "git") return gitResult(args);
         if (command === "pnpm" && args.includes("export")) {
           await writeMinimalSdk57Export(repoRoot);
           return { exitCode: 0, stdout: "", stderr: "" };
@@ -356,7 +430,7 @@ describe("kd mobile OTA", () => {
     const expectedUpdateId = computeExpoUpdateId(Buffer.from(expectedStagedMetadata));
     const runner: CommandRunner = {
       async run(command, args) {
-        if (command === "git") return { exitCode: 0, stdout: "", stderr: "" };
+        if (command === "git") return gitResult(args);
         if (command === "pnpm" && args.includes("export")) {
           await mkdir(join(repoRoot, "apps/mobile/dist/_expo/static/js/ios"), { recursive: true });
           await mkdir(join(repoRoot, "apps/mobile/dist/assets"), { recursive: true });
@@ -401,8 +475,148 @@ describe("kd mobile OTA", () => {
       updateId: expectedUpdateId,
       runtimeVersion: "1.0.0",
       channel: "staging",
+      source: { ref: "HEAD", commit: HEAD_COMMIT, shortCommit: SHORT_HEAD_COMMIT },
     });
     expect(result.message).toContain(`Dry run: mobile OTA update ${expectedUpdateId}`);
+  });
+
+  it("requires an explicit --ref to publish to the production channel", async () => {
+    const repoRoot = await makeRepoFixture();
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push({ command, args });
+        return command === "git" ? gitResult(args) : { exitCode: 0, stdout: "", stderr: "" };
+      },
+    };
+
+    await expect(
+      executeMobileOtaPublishWithContext(
+        { staging: false, production: true, dryRun: true },
+        { repoRoot, env: {}, runner }
+      )
+    ).rejects.toThrow("mobile ota publish --production requires --ref <branch|tag|sha>");
+    expect(calls).toEqual([]);
+  });
+
+  it("publishes to staging without a --ref and reports the resolved HEAD", async () => {
+    const repoRoot = await makeRepoFixture();
+    const runner = publishRunner(repoRoot);
+
+    const result = await executeMobileOtaPublishWithContext(
+      { staging: true, production: false, dryRun: true },
+      { repoRoot, env: {}, runner }
+    );
+
+    expect(result.message).toContain(`Source: HEAD (${SHORT_HEAD_COMMIT})`);
+    expect(result.data).toMatchObject({
+      source: { ref: "HEAD", commit: HEAD_COMMIT, shortCommit: SHORT_HEAD_COMMIT },
+    });
+  });
+
+  it("rolls a production channel back without a --ref", async () => {
+    const repoRoot = await makeRepoFixture();
+    const runner = publishRunner(repoRoot);
+
+    const result = await executeMobileOtaPublishWithContext(
+      {
+        staging: false,
+        production: true,
+        dryRun: true,
+        rollbackTo: "11111111-2222-3333-4444-555555555555",
+      },
+      { repoRoot, env: {}, runner }
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.message).toContain("Dry run: mobile OTA rollback");
+  });
+
+  it("refuses to publish from a dirty git worktree", async () => {
+    const repoRoot = await makeRepoFixture();
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push({ command, args });
+        return command === "git"
+          ? gitResult(args, { status: " M apps/mobile/src/App.tsx\n" })
+          : { exitCode: 0, stdout: "", stderr: "" };
+      },
+    };
+
+    await expect(
+      executeMobileOtaPublishWithContext(
+        { staging: true, production: false, dryRun: true },
+        { repoRoot, env: {}, runner }
+      )
+    ).rejects.toThrow("Refusing to run mobile ota publish from a dirty git worktree");
+    expect(calls).toEqual([{ command: "git", args: ["status", "--porcelain"] }]);
+  });
+
+  it("refuses a --ref that is not the checked-out commit", async () => {
+    const repoRoot = await makeRepoFixture();
+    const runner: CommandRunner = {
+      async run(command, args) {
+        return command === "git"
+          ? gitResult(args, { commits: { HEAD: HEAD_COMMIT, "release/0.2": "1".repeat(40) } })
+          : { exitCode: 0, stdout: "", stderr: "" };
+      },
+    };
+
+    await expect(
+      executeMobileOtaPublishWithContext(
+        { staging: false, production: true, dryRun: true, ref: "release/0.2" },
+        { repoRoot, env: {}, runner }
+      )
+    ).rejects.toThrow("--ref release/0.2");
+  });
+
+  it("records the resolved source commit in the channel pointer and the update itself", async () => {
+    const repoRoot = await makeRepoFixture();
+    const uploads: Array<{ args: string[] }> = [];
+    const runner = publishRunner(repoRoot, {
+      commits: { HEAD: HEAD_COMMIT, "release/0.2": HEAD_COMMIT },
+      onGcloud: (args) => {
+        uploads.push({ args });
+        // A missing metadata.json is what makes the publish upload the update.
+        if (args[1] === "ls") return { exitCode: 1, stdout: "", stderr: "not found" };
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    });
+
+    const result = await executeMobileOtaPublishWithContext(
+      { staging: false, production: true, ref: "release/0.2" },
+      { repoRoot, env: {}, runner }
+    );
+
+    expect(result.message).toContain(`Source: release/0.2 (${SHORT_HEAD_COMMIT})`);
+    expect(result.data).toMatchObject({
+      source: { ref: "release/0.2", commit: HEAD_COMMIT, shortCommit: SHORT_HEAD_COMMIT },
+    });
+
+    const rsync = uploads.find((call) => call.args[1] === "rsync");
+    expect(rsync).toBeDefined();
+    const sourceRecord = JSON.parse(
+      await readFile(join(rsync?.args[3] ?? "", "kanna-source.json"), "utf8")
+    ) as Record<string, unknown>;
+    expect(sourceRecord).toEqual({
+      updateId: (result.data as { updateId: string }).updateId,
+      ref: "release/0.2",
+      commit: HEAD_COMMIT,
+      shortCommit: SHORT_HEAD_COMMIT,
+    });
+
+    const pointerUpload = uploads.find((call) => call.args[1] === "cp");
+    expect(pointerUpload).toBeDefined();
+    const pointer = JSON.parse(
+      await readFile(pointerUpload?.args[2] ?? "", "utf8")
+    ) as Record<string, unknown>;
+    expect(pointer).toMatchObject({
+      currentUpdateId: (result.data as { updateId: string }).updateId,
+      runtimeVersion: "1.0.0",
+      sourceRef: "release/0.2",
+      sourceCommit: HEAD_COMMIT,
+    });
   });
 
   it("provisions a missing staging OTA bucket and relay storage access", async () => {
