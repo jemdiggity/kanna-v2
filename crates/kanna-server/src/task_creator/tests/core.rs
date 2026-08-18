@@ -4578,7 +4578,10 @@ fn prepare_task_binds_bounded_architect_consultation_to_assessed_work_item() {
     match prepared.session {
         PreparedSessionSpawn::Pty { args, .. } => {
             let command = args.join(" ");
-            assert!(command.contains("Kanna Architect"));
+            // The architect advises on whatever project the repository holds:
+            // its identity must stay generic even though the platform is Kanna.
+            assert!(command.contains("You are a software architect"));
+            assert!(!command.contains("Kanna Architect"));
             assert!(command.contains("choose the lifecycle owner"));
             assert!(command.contains("Artifact requested: none"));
         }
