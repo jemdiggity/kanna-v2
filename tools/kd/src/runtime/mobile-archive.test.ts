@@ -6,7 +6,7 @@ import { parseCliArgs } from "../cli";
 import {
   buildMobileIosArchivePlan,
   executeMobileIosArchiveWithContext,
-  isTransporterUnavailable,
+  isUploaderUnavailable,
   parseArchiveIdentity,
   parseXcodeMajorVersion,
   type MobileIosArchivePlan
@@ -151,7 +151,7 @@ describe("kd mobile archive", () => {
         `-exportOptionsPlist ${repoRoot}/.build/mobile-release/ExportOptions.plist`,
         "-allowProvisioningUpdates"
       ].join(" "),
-      `xcrun iTMSTransporter -m upload -assetFile ${repoRoot}/.build/mobile-release/export/Kanna.ipa -apiKey <APP_STORE_CONNECT_API_KEY_ID> -apiIssuer <APP_STORE_CONNECT_API_ISSUER_ID>`
+      `xcrun altool --upload-app -f ${repoRoot}/.build/mobile-release/export/Kanna.ipa -t ios --apiKey <APP_STORE_CONNECT_API_KEY_ID> --apiIssuer <APP_STORE_CONNECT_API_ISSUER_ID>`
     ]);
     expect(plan.commands[0]?.env).toMatchObject({
       KANNA_APP_ENV: "prod",
@@ -299,8 +299,8 @@ describe("kd mobile archive", () => {
         if (command === "xcodebuild" && args[0] === "-version") {
           return { exitCode: 0, stdout: "Xcode 26.0\nBuild version 17A123\n", stderr: "" };
         }
-        if (command === "xcrun" && args[0] === "iTMSTransporter" && args[1] === "-version") {
-          return { exitCode: 0, stdout: "Running iTMSTransporter...", stderr: "" };
+        if (command === "xcrun" && args[0] === "--find") {
+          return { exitCode: 0, stdout: "/Applications/Xcode.app/Contents/Developer/usr/bin/altool", stderr: "" };
         }
         if (command === "plutil") {
           if (!identity) return { exitCode: 1, stdout: "", stderr: "unreadable" };
@@ -376,7 +376,7 @@ describe("kd mobile archive", () => {
     expect(calls.some((call) => call.includes("prebuild"))).toBe(true);
   });
 
-  it("fails before building when Transporter is unavailable for --upload", async () => {
+  it("fails before building when the uploader is unavailable for --upload", async () => {
     const repoRoot = await mkdtemp(join(tmpdir(), "kanna-mobile-archive-notransporter-"));
     await writeMinimalRepo(repoRoot);
     const calls: string[] = [];
@@ -386,12 +386,8 @@ describe("kd mobile archive", () => {
         if (command === "xcodebuild" && args[0] === "-version") {
           return { exitCode: 0, stdout: "Xcode 26.0\nBuild version 17A123\n", stderr: "" };
         }
-        if (command === "xcrun" && args[0] === "iTMSTransporter") {
-          return {
-            exitCode: 0,
-            stdout: "iTMSTransporter is now part of Transporter.\nPlease install Transporter from the Mac App Store",
-            stderr: ""
-          };
+        if (command === "xcrun" && args[0] === "--find") {
+          return { exitCode: 1, stdout: "", stderr: "xcrun: error: unable to find utility \"altool\"" };
         }
         return { exitCode: 0, stdout: "", stderr: "" };
       }
@@ -408,13 +404,23 @@ describe("kd mobile archive", () => {
           runner
         }
       )
-    ).rejects.toThrow("needs Transporter");
+    ).rejects.toThrow("needs altool");
     expect(calls.some((call) => call.includes("prebuild"))).toBe(false);
   });
 
-  it("detects the Transporter shim notice", () => {
-    expect(isTransporterUnavailable("iTMSTransporter is now part of Transporter.", "")).toBe(true);
-    expect(isTransporterUnavailable("Running iTMSTransporter at path ...", "")).toBe(false);
+  it("detects a missing uploader", () => {
+    expect(isUploaderUnavailable("", 'xcrun: error: unable to find utility "altool"')).toBe(true);
+    expect(isUploaderUnavailable("/Applications/Xcode.app/.../altool", "")).toBe(false);
+  });
+
+  it("uploads with altool rather than iTMSTransporter", async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-mobile-archive-uploader-"));
+    await writeMinimalRepo(repoRoot);
+    const plan = await buildMobileIosArchivePlan({ repoRoot, buildNumber: "3", upload: true });
+    const upload = plan.commands.find((command) => command.kind === "upload");
+    expect(upload?.args[0]).toBe("altool");
+    expect(upload?.args).toContain("--upload-app");
+    expect(plan.commands.some((command) => command.args.includes("iTMSTransporter"))).toBe(false);
   });
 
   it("parses archive identity from plist json", () => {

@@ -225,14 +225,15 @@ export async function buildMobileIosArchivePlan(input: {
       kind: "upload",
       command: "xcrun",
       args: [
-        "iTMSTransporter",
-        "-m",
-        "upload",
-        "-assetFile",
+        "altool",
+        "--upload-app",
+        "-f",
         ipaPath,
-        "-apiKey",
+        "-t",
+        "ios",
+        "--apiKey",
         UPLOAD_API_KEY_PLACEHOLDER,
-        "-apiIssuer",
+        "--apiIssuer",
         UPLOAD_API_ISSUER_PLACEHOLDER
       ],
       cwd: input.repoRoot,
@@ -365,22 +366,30 @@ export async function resolveReusableArchive(input: {
 }
 
 /**
- * `xcrun iTMSTransporter` is a shim that delegates to Transporter.app. Without
- * that app it prints an install notice instead of uploading, so check before
- * spending a full archive build on an upload that cannot land.
+ * Uploads go through `xcrun altool --upload-app`.
+ *
+ * The obvious alternative, `xcrun iTMSTransporter -m upload -assetFile`, does
+ * not work here: it authenticates, reports "Creating reservations for build",
+ * then fails with an undiagnosable `Could not upload file`. altool accepted the
+ * identical IPA seconds later. Verified on 2026-08-18 against Kanna Mobile
+ * 1.0.0 build 2 — same artifact, credentials, and machine.
+ *
+ * Watch item: Apple is moving Transporter toward `-assetFile` and away from
+ * `-f` during 2026. If altool's `-f` is withdrawn, revisit the Transporter
+ * invocation rather than assuming this one still holds.
  */
-export function isTransporterUnavailable(stdout: string, stderr: string): boolean {
+export function isUploaderUnavailable(stdout: string, stderr: string): boolean {
   const combined = `${stdout}\n${stderr}`;
-  return /now part of Transporter|Please install Transporter/i.test(combined);
+  return /command not found|unable to find utility|no such file/i.test(combined);
 }
 
 export async function assertUploaderAvailable(runner: CommandRunner): Promise<void> {
-  const result = await runner.run("xcrun", ["iTMSTransporter", "-version"]);
-  if (isTransporterUnavailable(result.stdout, result.stderr)) {
+  const result = await runner.run("xcrun", ["--find", "altool"]);
+  if (result.exitCode !== 0 || isUploaderUnavailable(result.stdout, result.stderr)) {
     throw new Error(
-      "mobile archive --upload needs Transporter. `xcrun iTMSTransporter` is a shim that " +
-        "delegates to Transporter.app, which is not installed. Install Transporter from the " +
-        "Mac App Store (https://apps.apple.com/app/transporter/id1450874784), then retry."
+      "mobile archive --upload needs altool, which ships with Xcode. `xcrun --find altool` " +
+        "did not resolve it. Confirm Xcode is installed and selected " +
+        "(`xcode-select -p`), then retry."
     );
   }
 }

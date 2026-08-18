@@ -265,11 +265,16 @@ App Store Connect refuses a repeated build number for a version, so changed
 source obliges a new build number, which misses the match and rebuilds. Pass
 `--force-rebuild` to rebuild a matching archive anyway.
 
-`--upload` needs [Transporter](https://apps.apple.com/app/transporter/id1450874784)
-installed: `xcrun iTMSTransporter` is a shim that delegates to Transporter.app
-and prints an install notice instead of uploading when it is missing. The
-command checks for this before building rather than after, so a missing uploader
+`--upload` delivers with `xcrun altool --upload-app`, which ships with Xcode.
+The command checks the uploader resolves before building, so a broken toolchain
 fails in seconds instead of after a full archive.
+
+`xcrun iTMSTransporter -m upload -assetFile` is deliberately not used. It
+authenticates, reports "Creating reservations for build", then fails with an
+undiagnosable `Could not upload file`; altool accepted the identical IPA
+seconds later (verified 2026-08-18 on Kanna Mobile 1.0.0 build 2). Apple is
+moving Transporter toward `-assetFile` and away from altool's `-f` during 2026,
+so revisit this if `-f` is withdrawn.
 
 Run the [mobile production QA gate](../testing/mobile-production-qa-gate.md)
 before TestFlight external testing or App Store submission.
