@@ -2,9 +2,9 @@ use base64::Engine;
 use clap::{Parser, Subcommand};
 use kanna_tool_catalog::{
     clamp_wait_timeout_secs, encode_path_segment, load_catalog, resolve_request,
-    runtime_info_snapshot, task_value_matches_wait_until, wait_match_is_database_fact,
-    wait_resolved_result, wait_timeout_result, Catalog, Method, ResolvedRequest, ResponseKind,
-    RuntimeAdapterIdentity, WaitUntil, DEFAULT_WAIT_TIMEOUT_SECS,
+    runtime_info_snapshot, task_value_matches_wait_until, wait_resolved_result,
+    wait_timeout_result, Catalog, Method, ResolvedRequest, ResponseKind, RuntimeAdapterIdentity,
+    WaitUntil, DEFAULT_WAIT_TIMEOUT_SECS,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
@@ -563,27 +563,18 @@ async fn wait_task(
     let path = format!("/v1/tasks/{}", encode_path_segment(task_id));
     loop {
         let task = get_routed_json(base_url, &path, machine_id).await?;
-        // A match resting on a database fact — the task is closed, or its latest
-        // `stage_run` reached a terminal status — resolves immediately: there is
-        // no per-frame verdict to misread, and making it depend on a confirming
-        // re-read would let a transient GET failure fail a wait whose answer was
-        // already recorded. A match read off `activity` alone is still confirmed
-        // exactly like a task read before the caller is told its child stopped:
-        // if the stop does not hold, the fresher sample keeps the wait running;
-        // if it cannot be confirmed at all, the `?` fails the call rather than
-        // resolving the wait on an unconfirmed stop.
-        let task = if task_matches_wait_until(&task, until) {
-            if wait_match_is_database_fact(&task) {
-                return Ok(wait_resolved_result(task));
-            }
-            let task = confirm_stopped_activity(base_url, &path, task, machine_id).await?;
-            if task_matches_wait_until(&task, until) {
-                return Ok(wait_resolved_result(task));
-            }
-            task
-        } else {
-            task
-        };
+        // Every wait match now rests on a durable record — the task is closed,
+        // its latest `stage_run` reached a terminal status, or its agent
+        // session exited — so it resolves immediately. The confirming re-read
+        // this loop used to perform existed only for matches read off
+        // `activity`, a per-frame daemon classification that could report a
+        // working agent as stopped for one frame; the predicate no longer
+        // reads it. Detail and list *responses* are still debounced (see
+        // `confirm_stopped_activity`), because `activity` is still what those
+        // surfaces display.
+        if task_matches_wait_until(&task, until) {
+            return Ok(wait_resolved_result(task));
+        }
         let now = tokio::time::Instant::now();
         if now >= deadline {
             return Ok(wait_timeout_result(task, task_id, timeout_secs));
@@ -2130,8 +2121,12 @@ mod activity_debounce_tests {
         assert_eq!(reads.load(Ordering::SeqCst), 1);
     }
 
+    /// The wait no longer reads `activity` at all, so no sequence of frame
+    /// classifications can resolve it. `unread` is read state: a working agent
+    /// whose output nobody read carries it, which is exactly the false stop
+    /// the confirmation used to chase.
     #[tokio::test(start_paused = true)]
-    async fn waiting_on_a_task_does_not_resolve_on_a_single_stopped_looking_read() {
+    async fn waiting_on_a_task_never_resolves_on_read_state() {
         let (base_url, _) = spawn_scripted_task_server(serving(vec![
             task_with_activity("unread"),
             task_with_activity("working"),
@@ -2151,10 +2146,35 @@ mod activity_debounce_tests {
 
         assert_eq!(
             result["waitOutcome"],
-            json!("resolved"),
-            "the wait should still resolve once a stop holds: {result}"
+            json!("timeout"),
+            "unread output is not a finished agent: {result}"
         );
-        assert_eq!(result["activity"], json!("unread"));
+    }
+
+    /// What does resolve it: the runtime dimension's terminal value, which the
+    /// server writes when a session ends without a replacement.
+    #[tokio::test(start_paused = true)]
+    async fn waiting_on_a_task_resolves_when_its_session_exits() {
+        let mut exited = task_with_activity("unread");
+        exited["runtimeState"] = json!("exited");
+        let (base_url, _) =
+            spawn_scripted_task_server(serving(vec![task_with_activity("unread"), exited])).await;
+        let catalog = shared_bundled_catalog();
+
+        let result = call_tool(
+            &base_url,
+            &catalog,
+            "kanna_wait_task",
+            json!({ "task_id": "child-1", "timeout_secs": 30, "poll_secs": 1 }),
+        )
+        .await;
+
+        assert_eq!(
+            result["waitOutcome"],
+            json!("resolved"),
+            "a session that ended is a finished task: {result}"
+        );
+        assert_eq!(result["runtimeState"], json!("exited"));
     }
 
     #[tokio::test(start_paused = true)]
@@ -2300,14 +2320,22 @@ mod wait_tests {
             "title": "Specialty review",
             "stage": "review",
             "branch": "task-child-1",
-            "activity": "running",
+            "activity": "working",
+            "runtimeState": "busy",
+            "readState": "read",
             "closedAt": null
         })
     }
 
+    /// A finished task the way the server records one: its agent session ended
+    /// and its output is unread. `unread` alone is not what makes it finished —
+    /// a working task carries that too — so the fixture must move the runtime
+    /// dimension for the wait to see anything.
     fn finished_task() -> Value {
         let mut task = running_task();
         task["activity"] = json!("unread");
+        task["readState"] = json!("unread");
+        task["runtimeState"] = json!("exited");
         task
     }
 
@@ -2411,7 +2439,7 @@ mod wait_tests {
         assert_eq!(first["waitTimeoutSecs"], json!(5));
         assert_eq!(first["stage"], json!("review"));
         assert_eq!(first["branch"], json!("task-child-1"));
-        assert_eq!(first["activity"], json!("running"));
+        assert_eq!(first["activity"], json!("working"));
         assert!(first["waitHint"]
             .as_str()
             .is_some_and(|hint| hint.contains("call kanna_wait_task again")));
@@ -2422,7 +2450,7 @@ mod wait_tests {
         assert_eq!(second["waitOutcome"], json!("resolved"));
         assert_eq!(second["id"], json!("child-1"));
         assert_eq!(second["stage"], json!("review"));
-        assert_eq!(second["activity"], json!("unread"));
+        assert_eq!(second["runtimeState"], json!("exited"));
         assert!(second["waitHint"].is_null());
     }
 

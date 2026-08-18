@@ -1,13 +1,50 @@
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
+import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
+import { resolveAppKannaServer } from "../helpers/kannaServer";
 import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
 import { dismissStartupShortcutsModal } from "../helpers/startupOverlays";
 import { waitForTaskCreated } from "../helpers/taskCreation";
 import { WebDriverClient } from "../helpers/webdriver";
 import { callVueMethod, execDb, getVueState, tauriInvoke } from "../helpers/vue";
+
+const execFileAsync = promisify(execFile);
+
+interface TaskDimensions {
+  activity?: string | null;
+  runtimeState?: string | null;
+  readState?: string | null;
+}
+
+async function fetchTaskDetail(baseUrl: string, taskId: string): Promise<TaskDimensions> {
+  const response = await fetch(`${baseUrl}/v1/tasks/${taskId}`);
+  if (!response.ok) {
+    throw new Error(`GET /v1/tasks/${taskId} failed with ${response.status}`);
+  }
+  return await response.json() as TaskDimensions;
+}
+
+async function waitForRuntimeState(
+  baseUrl: string,
+  taskId: string,
+  runtimeState: string,
+  timeoutMs = 15_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let latest: TaskDimensions | null = null;
+  while (Date.now() < deadline) {
+    latest = await fetchTaskDetail(baseUrl, taskId);
+    if (latest.runtimeState === runtimeState) return;
+    await sleep(100);
+  }
+  throw new Error(
+    `timed out waiting for ${taskId} runtimeState=${runtimeState}; latest=${JSON.stringify(latest)}`,
+  );
+}
 
 const falseCodexFixture = fileURLToPath(
   new URL("../fixtures/false-codex-runtime-status.sh", import.meta.url),
@@ -254,6 +291,57 @@ describe("PTY runtime status over KSP", () => {
     await waitForTerminalRegistration(client, unselectedTaskId);
     await waitForActivity(client, unselectedTaskId, "idle");
   }, 45_000);
+
+  // The reported defect, end to end through the real daemon: a task whose
+  // agent is running while its latest output is unread reads identically to a
+  // finished one through `activity`. The runtime dimension is what tells them
+  // apart, and it is what a wait for the task to finish must key on.
+  it("reports a running agent as busy while its output is unread, and does not finish a wait", async () => {
+    const baseUrl = (await resolveAppKannaServer(client)).baseUrl;
+    const kannaCliPath = await tauriInvoke(client, "which_binary", { name: "kanna-cli" });
+    if (typeof kannaCliPath !== "string" || kannaCliPath.length === 0) {
+      throw new Error(`unexpected kanna-cli path: ${JSON.stringify(kannaCliPath)}`);
+    }
+
+    const busyTaskId = await createFalseAgentTask("Busy false Codex with unread output");
+    await callVueMethod(client, "loadItems", repoId);
+    await startFalseAgent(client, busyTaskId);
+    await waitForDaemonStatus(client, busyTaskId, "busy");
+    await waitForRuntimeState(baseUrl, busyTaskId, "busy");
+
+    // Several server writes flag output unread without consulting the runtime
+    // dimension — a parked revision, an orphaned workspace, a cross-machine
+    // transfer. Any of them leaves a working agent displaying `unread`.
+    await execDb(
+      client,
+      "UPDATE pipeline_item SET activity = 'unread' WHERE id = ?",
+      [busyTaskId],
+    );
+
+    const detail = await fetchTaskDetail(baseUrl, busyTaskId);
+    expect(detail.activity).toBe("unread");
+    expect(detail.readState).toBe("unread");
+    expect(detail.runtimeState).toBe("busy");
+
+    // The wait a fan-out owner blocks on runs through the shared predicate in
+    // kanna-tool-catalog, so driving the real CLI proves the whole path.
+    const { stdout } = await execFileAsync(kannaCliPath, [
+      "task",
+      "wait",
+      "--task-id",
+      busyTaskId,
+      "--until",
+      "finished",
+      "--timeout-secs",
+      "3",
+      "--poll-secs",
+      "1",
+      "--server-url",
+      baseUrl,
+    ]);
+    const waited = JSON.parse(stdout) as { waitOutcome?: string };
+    expect(waited.waitOutcome).toBe("timeout");
+  }, 60_000);
 
   it("replays current idle status after a dropped stream reconnects", async () => {
     const reconnectTaskId = await createFalseAgentTask("Reconnect false Codex runtime status");

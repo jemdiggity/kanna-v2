@@ -268,6 +268,36 @@ pub async fn stored_activity(server: &RunningServer, task_id: &str) -> String {
         .to_string()
 }
 
+/// The runtime dimension as the server reports it, straight off the HTTP
+/// surface. `Value::Null` before any session has been classified.
+pub async fn stored_runtime_state(server: &RunningServer, task_id: &str) -> Value {
+    let task = reqwest::Client::new()
+        .get(format!("{}/v1/tasks/{task_id}", server.base_url))
+        .send()
+        .await
+        .expect("get task")
+        .json::<Value>()
+        .await
+        .expect("task json");
+    task["runtimeState"].clone()
+}
+
+/// Daemon events are applied by the watcher on its own task, so a test that
+/// wants to act on a stored runtime state has to wait for it rather than
+/// assume the write already landed.
+pub async fn await_stored_runtime_state(server: &RunningServer, task_id: &str, expected: &str) {
+    for _ in 0..400 {
+        if stored_runtime_state(server, task_id).await == json!(expected) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!(
+        "runtimeState never became {expected}; it is {}",
+        stored_runtime_state(server, task_id).await
+    );
+}
+
 /// Daemon events are applied by the watcher on its own task, so a test that
 /// wants to act on a stored activity has to wait for it rather than assume the
 /// write already landed.
@@ -329,6 +359,18 @@ impl FakeDaemon {
                 "{{\"type\":\"StatusChanged\",\"session_id\":\"{task_id}\",\"status\":\"{status}\"}}"
             ))
             .expect("send status event");
+    }
+
+    /// Ends a task's agent session the way a real one ends when the process
+    /// exits on its own: not an orchestrated `Kill`, so the server treats it
+    /// as the session terminating rather than being replaced.
+    pub fn exit(&self, task_id: &str, code: i32) {
+        self.events
+            .send(format!(
+                "{{\"type\":\"Exit\",\"session_id\":\"{task_id}\",\"code\":{code},\
+                 \"resume_session_id\":null,\"killed\":false}}"
+            ))
+            .expect("send exit event");
     }
 
     pub fn await_subscription(&self) {

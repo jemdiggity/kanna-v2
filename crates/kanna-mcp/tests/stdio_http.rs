@@ -1327,13 +1327,22 @@ fn start_task_detail_fixture(state: Arc<Mutex<Value>>) -> (String, Arc<AtomicUsi
     (base_url, polls)
 }
 
-fn child_task(activity: &str) -> Value {
+/// A child task in one runtime state. `activity` follows it the way the server
+/// derives the display value, so the fixture stays the shape a real response
+/// has — but the wait reads `runtimeState`.
+fn child_task(runtime_state: &str) -> Value {
+    let (activity, read_state) = match runtime_state {
+        "busy" => ("working", "read"),
+        _ => ("unread", "unread"),
+    };
     json!({
         "id": "child-1",
         "repoId": "repo-1",
         "title": "Specialty review",
         "stage": "review",
         "activity": activity,
+        "runtimeState": runtime_state,
+        "readState": read_state,
         "branch": "task-child-1",
         "prUrl": null,
         "closedAt": null
@@ -1345,7 +1354,7 @@ fn child_task(activity: &str) -> Value {
 /// normal result carrying the task state, so the next call resumes the loop.
 #[test]
 fn serve_returns_wait_timeouts_as_results_the_agent_can_call_again() {
-    let state = Arc::new(Mutex::new(child_task("running")));
+    let state = Arc::new(Mutex::new(child_task("busy")));
     let (base_url, polls) = start_task_detail_fixture(state.clone());
     let wait_call = json!({
         "jsonrpc": "2.0",
@@ -1371,19 +1380,19 @@ fn serve_returns_wait_timeouts_as_results_the_agent_can_call_again() {
     assert_eq!(timed_out["waitTimeoutSecs"], json!(2));
     assert_eq!(timed_out["id"], json!("child-1"));
     assert_eq!(timed_out["stage"], json!("review"));
-    assert_eq!(timed_out["activity"], json!("running"));
+    assert_eq!(timed_out["runtimeState"], json!("busy"));
     assert!(timed_out["waitHint"]
         .as_str()
         .is_some_and(|hint| hint.contains("call kanna_wait_task again")));
 
-    *state.lock().expect("state lock") = child_task("unread");
+    *state.lock().expect("state lock") = child_task("exited");
     let responses = run_kanna_mcp(&base_url, &[wait_call]);
 
     let resolved = tool_text(&responses[0]);
     assert_eq!(resolved["waitOutcome"], json!("resolved"));
     assert_eq!(resolved["id"], json!("child-1"));
     assert_eq!(resolved["stage"], json!("review"));
-    assert_eq!(resolved["activity"], json!("unread"));
+    assert_eq!(resolved["runtimeState"], json!("exited"));
     assert!(resolved["waitHint"].is_null());
     assert!(
         polls.load(Ordering::SeqCst) >= 2,

@@ -477,14 +477,20 @@ cursor-based, not snapshot-diffed:
   is a positive match on a prompt the agent CLI rendered. It is deliberately
   never inferred from a session going quiet; see
   [2026-07-29-awaiting-input-detection-e2e-gap.md](2026-07-29-awaiting-input-detection-e2e-gap.md).
-- `task.activity_changed` is the provider-neutral fallback. It is appended on
-  every `working` → `idle`/`unread` activity edge for an open task, and carries
-  `previousActivity` and `activity`. It also carries `waitingPromptSnippet`
-  when that value is non-empty, but does not claim the snippet is a question:
-  PTY providers also use this edge after ordinary final output. Transitions
-  into `working` and read-state-only `idle` ↔ `unread` changes do not append
-  this event. A changed snippet while activity remains stopped is task-detail
-  state only and requires polling `kanna_get_task`.
+- `task.activity_changed` is the provider-neutral fallback, and it fires on the
+  **display dimension's** edges, not the runtime dimension's: it is appended on
+  every `working` → `idle`/`unread` `activity` edge for an open task, and
+  carries `previousActivity` and `activity`. Because `activity` is only written
+  `working` by a `busy` runtime verdict, that edge tracks the agent stopping —
+  but it is a projection of it, taken through read state and desktop selection,
+  not the verdict itself. The authoritative runtime dimension is `runtimeState`
+  on `GET /v1/tasks/{task_id}`; `task.awaiting_input` is the runtime
+  dimension's own edge into `waiting`. The event also carries
+  `waitingPromptSnippet` when that value is non-empty, but does not claim the
+  snippet is a question: PTY providers also use this edge after ordinary final
+  output. Transitions into `working` and read-state-only `idle` ↔ `unread`
+  changes do not append this event. A changed snippet while activity remains
+  stopped is task-detail state only and requires polling `kanna_get_task`.
   The event is a durable wake-up edge, not a second activity debounce: the
   server records every daemon verdict, including a one-frame idle
   classification. Before acting on this weaker event, an MCP orchestrator
@@ -549,6 +555,73 @@ parentage or verdict deletion. This route is scoped reconstruction for one
 parent's fan-out/join. It is not a general endpoint for listing closed tasks;
 repository task listing and search keep their existing open-task semantics.
 
+## Task State: Runtime and Read Are Two Dimensions
+
+A task carries two orthogonal facts, and conflating them is what made a busy
+agent indistinguishable from a finished one:
+
+| Dimension | Field | Values | Source of truth |
+|---|---|---|---|
+| Runtime — what the agent process is doing | `runtimeState` | `busy`, `waiting`, `idle`, `exited`, or absent | the daemon's terminal-state detection, plus `exited` written by the server when a session ends |
+| Read — whether a human has seen the latest output | `readState` | `read`, `unread` | the operator: selection, `mark-read`, and the writes that flag new output |
+
+`GET /v1/tasks/{task_id}` and the task-listing routes report both, alongside
+the pre-existing `activity`.
+
+`activity` (`working` \| `idle` \| `unread`) is **kept, unchanged in meaning**:
+it is the desktop's derived display value, blending both dimensions, and every
+existing consumer — the sidebar, mobile, the event feed, external supervisors —
+keeps reading exactly what it read before. What changed is that the two
+dimensions it blends are now also reported on their own, because `activity`
+cannot answer either question by itself:
+
+- A task working inside a long tool or MCP call, whose latest output nobody has
+  read, carries `activity: "unread"` — the same value a finished task carries.
+  `runtimeState: "busy"` is what separates them, and it is `busy` for the whole
+  call: Claude's `esc to interrupt` chrome stays on screen while an MCP request
+  is outstanding.
+- A run wedged on a provider error settles to `activity: "idle"` with a running
+  `stage_run`, which reads no differently from a task thinking between turns.
+  `runtimeState` distinguishes `idle` (parked at its composer) from `exited`
+  (the session is gone).
+
+Which dimension each consumer reads:
+
+- **Waits** (`kanna_wait_task`, `kanna-cli task wait`) read terminations only —
+  `closedAt`, a terminal `stage_run`, or `runtimeState: "exited"`. `unread` used
+  to resolve `until: finished`, which meant an unread working task could satisfy
+  a wait for it to finish.
+
+  Know what that costs. Three things record a termination: the task closes, its
+  agent records a verdict (`kanna_complete_stage`, or any write that finishes
+  the run), or its **process exits**. A PTY agent that finishes its turn and
+  parks at its composer without recording a verdict does none of them — its
+  daemon session survives, since sessions die only at a stage transition, a
+  rerun, or a close — so it reports `runtimeState: "idle"` with a `running`
+  `latestRun`, and `until: "finished"` does not resolve for it. `unread` used to
+  resolve that case, at the cost of also resolving on every busy task nobody had
+  read.
+
+  This is deliberate: a parked agent has not finished, and a wait that says it
+  has is the defect this predicate was changed to remove. But a caller that
+  waits on an agent which may park without a verdict — the specialty-review join
+  in [qa-dispatch-review.md](specs/qa-dispatch-review.md) is the one in-tree
+  case — must carry its own bounded terminating condition rather than looping on
+  `waitOutcome: "timeout"` forever. The signature to bound on is a
+  non-`busy` `runtimeState` alongside a `running` `latestRun`.
+- **Supervisors and orchestrators** read `runtimeState` to decide whether a task
+  is alive. A quiet-task alarm keyed on `activity` fires on tasks whose agents
+  are demonstrably running.
+- **The desktop sidebar and mobile** read `activity`: the operator's view is
+  exactly the blend, and it is unchanged.
+
+`runtimeState` is stored on `pipeline_item.runtime_status`. `exited` is written
+when a task's daemon session exits without a replacement — the same signal that
+finalizes the run and delivers the completion notification, so it never fires
+for the orchestrated kills behind a stage swap, rerun, or close. Starting a new
+running `stage_run` clears a stale `exited` back to absent, so a fresh session
+is never reported as already gone.
+
 ## Activity Confirmation in `kanna-mcp`
 
 `pipeline_item.activity` is written from the daemon's per-frame verdict, and
@@ -586,7 +659,7 @@ route plus 1s, never one request per task:
 | Tool | When the confirmation fires |
 |---|---|
 | `kanna_get_task` | Only when that task already looked stopped. |
-| `kanna_wait_task` | Once per candidate stop, before resolving `until: finished`. Its deadline can overshoot by up to 1s, inside the 60s of headroom between `MAX_WAIT_TIMEOUT_SECS` and `CLIENT_TOOL_CALL_BUDGET_SECS`. |
+| `kanna_wait_task` | Never. Its predicate reads recorded terminations, not `activity`, so there is no frame classification to confirm. |
 | `kanna_list_recent_tasks`, `kanna_search_tasks`, `kanna_list_repo_tasks` | Whenever **any** task in the response looks stopped. For a repo listing that is the common case, so budget these at roughly +1s per call regardless of how many tasks come back. |
 
 The event feed is not debounced: events are appended by the writes that change

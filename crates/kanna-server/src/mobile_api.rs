@@ -99,7 +99,18 @@ pub struct TaskSummary {
     pub prompt: Option<String>,
     pub stage: Option<String>,
     pub created_at: Option<String>,
+    /// Derived display value blending both dimensions below: `working` |
+    /// `idle` | `unread`. Kept for every existing consumer; read
+    /// `runtimeState`/`readState` when you need one dimension on its own.
     pub activity: Option<String>,
+    /// Runtime dimension — the daemon's verdict on the agent session:
+    /// `busy` | `waiting` | `idle` | `exited`, or absent when no session has
+    /// reported one yet.
+    pub runtime_state: Option<String>,
+    /// Read dimension — `read` | `unread`. Optional only so a payload from a
+    /// peer that predates the split still deserializes; this server always
+    /// reports it.
+    pub read_state: Option<String>,
     pub activity_revision: i64,
     pub snippet: Option<String>,
     pub waiting_prompt_snippet: Option<String>,
@@ -123,7 +134,21 @@ pub struct TaskDetail {
     #[serde(rename = "pipelineName")]
     pub legacy_pipeline_name: Option<String>,
     pub stage_transition: Option<String>,
+    /// Derived display value blending both dimensions below: `working` |
+    /// `idle` | `unread`. Kept for every existing consumer; read
+    /// `runtimeState`/`readState` when you need one dimension on its own.
     pub activity: Option<String>,
+    /// Runtime dimension — the daemon's verdict on the agent session:
+    /// `busy` | `waiting` | `idle` | `exited`, or absent when no session has
+    /// reported one yet. This is the field that answers "is the agent
+    /// working?"; `activity` cannot, because a busy agent whose last output
+    /// nobody read and a finished one look alike through it.
+    pub runtime_state: Option<String>,
+    /// Read dimension — `read` | `unread`. Whether a human has seen the
+    /// latest output; says nothing about whether the agent is running.
+    /// Optional only so a payload from a peer that predates the split still
+    /// deserializes; this server always reports it.
+    pub read_state: Option<String>,
     pub snippet: Option<String>,
     pub waiting_prompt_snippet: Option<String>,
     pub agent_type: Option<String>,
@@ -763,6 +788,19 @@ impl AddRepoError {
     }
 }
 
+/// The read dimension of a task, derived from the `activity` display value:
+/// `unread` while the latest output is unread, `read` otherwise.
+///
+/// It is a projection rather than its own column because that is exactly what
+/// the operator dimension has always been — `activity == "unread"`. Naming it
+/// separately is what lets a consumer say which dimension it is reading.
+fn read_state_for_activity(activity: Option<&str>) -> &'static str {
+    match activity {
+        Some("unread") => "unread",
+        _ => "read",
+    }
+}
+
 fn map_task_summary(
     item: crate::db::PipelineItem,
     repo_name: Option<String>,
@@ -783,6 +821,8 @@ fn map_task_summary(
         prompt,
         stage: item.stage,
         created_at: item.created_at,
+        runtime_state: item.runtime_status,
+        read_state: Some(read_state_for_activity(item.activity.as_deref()).to_string()),
         activity: item.activity,
         activity_revision: item.activity_revision,
         snippet: waiting_prompt_snippet.clone(),
@@ -878,6 +918,8 @@ fn map_task_detail(
         workflow_name: workflow_name.clone(),
         legacy_pipeline_name: workflow_name,
         stage_transition,
+        runtime_state: item.runtime_status,
+        read_state: Some(read_state_for_activity(item.activity.as_deref()).to_string()),
         activity: item.activity,
         snippet: waiting_prompt_snippet.clone(),
         waiting_prompt_snippet,

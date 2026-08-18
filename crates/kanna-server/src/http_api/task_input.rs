@@ -481,6 +481,12 @@ pub(crate) fn mark_task_session_interrupted(
     };
     db.update_pipeline_item_activity(&task_id, "unread")
         .map_err(|error| format!("db error: {error}"))?;
+    // The runtime dimension's terminal value. The daemon only classifies live
+    // sessions, so without this the last live verdict — usually `busy` —
+    // would outlive the process that earned it, and a wait for the task to
+    // finish would have nothing but read state to key on.
+    db.update_pipeline_item_runtime_status(&task_id, "exited", None)
+        .map_err(|error| format!("db error: {error}"))?;
     db.finish_latest_running_stage_run(
         &task_id,
         status,
@@ -491,6 +497,20 @@ pub(crate) fn mark_task_session_interrupted(
     Ok(Some(task_id))
 }
 
+/// Reconcile a task whose daemon session the caller has just proven still
+/// alive: reopen the run a terminal-loss path interrupted, and drop the
+/// `exited` runtime verdict that path recorded.
+///
+/// The two are cleared independently on purpose. The return value still means
+/// "an interrupted run was reopened" — the resume and requested-id-repair
+/// routes branch on it, and a live session with nothing to restore must keep
+/// reporting a conflict rather than a restore. But the stale `exited` has to
+/// go either way: it says the agent process is gone, `WaitUntil::Finished`
+/// resolves on it, and nothing self-heals it, because the daemon only writes a
+/// runtime status when a session's classification *changes* and a live session
+/// that keeps working emits no such change. The watcher's own restore call
+/// pairs with `apply_watcher_runtime_status`, which then writes the live
+/// verdict over the cleared value; the HTTP callers have no such pairing.
 pub(crate) fn restore_task_run_for_live_session(
     db_path: &str,
     task_or_session_id: &str,
@@ -502,6 +522,8 @@ pub(crate) fn restore_task_run_for_live_session(
     else {
         return Ok(false);
     };
+    db.clear_exited_runtime_status(&task_id)
+        .map_err(|error| format!("db error: {error}"))?;
     db.restore_latest_interrupted_stage_run(&task_id, SESSION_INTERRUPTION_FEEDBACK)
         .map_err(|error| format!("db error: {error}"))
 }

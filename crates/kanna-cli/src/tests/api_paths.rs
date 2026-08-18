@@ -82,7 +82,15 @@ fn wait_until_matches_finished_and_closed_states() {
     assert_eq!(parse_wait_until("finished"), Ok(WaitUntil::Finished));
     assert_eq!(parse_wait_until("closed"), Ok(WaitUntil::Closed));
     assert!(!task_matches_wait_until(&task, WaitUntil::Finished));
+
+    // Read state is not a termination: a working agent whose output nobody
+    // read carries `unread` too.
     task.activity = Some("unread".to_string());
+    task.read_state = Some("unread".to_string());
+    task.runtime_state = Some("busy".to_string());
+    assert!(!task_matches_wait_until(&task, WaitUntil::Finished));
+
+    task.runtime_state = Some("exited".to_string());
     assert!(task_matches_wait_until(&task, WaitUntil::Finished));
     assert!(!task_matches_wait_until(&task, WaitUntil::Closed));
     task.closed_at = Some("2026-06-13 00:00:00".to_string());

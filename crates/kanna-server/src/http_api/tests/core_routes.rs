@@ -1496,6 +1496,99 @@ async fn task_agent_session_route_persists_provider_session_id() {
     );
 }
 
+/// `activity` blends two orthogonal facts, so task detail reports each one on
+/// its own. The combination that motivated the split — an agent busy inside a
+/// long tool or MCP call whose latest output nobody has read — is
+/// indistinguishable from a finished task through `activity` alone.
+#[tokio::test]
+async fn task_detail_reports_the_runtime_and_read_dimensions_separately() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "prompt",
+            Some("Task One"),
+            "in progress",
+            "2026-08-18 08:00:00",
+        )
+        .unwrap();
+        db.update_pipeline_item_runtime_status("task-1", "busy", None)
+            .unwrap();
+        db.update_pipeline_item_activity("task-1", "unread")
+            .unwrap();
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/tasks/task-1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let detail: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(detail["activity"], serde_json::json!("unread"));
+    assert_eq!(detail["runtimeState"], serde_json::json!("busy"));
+    assert_eq!(detail["readState"], serde_json::json!("unread"));
+
+    // Reading the task moves the read dimension and nothing else.
+    let mark_read = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/mark-read")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(mark_read.status(), StatusCode::OK);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/tasks/task-1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let detail: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(detail["readState"], serde_json::json!("read"));
+    assert_eq!(
+        detail["runtimeState"],
+        serde_json::json!("busy"),
+        "reading a task says nothing about whether its agent is running"
+    );
+
+    // The listing surface an external supervisor sweeps carries the same two
+    // dimensions, so a quiet-task alarm never has to key on the blend.
+    let listing = app
+        .oneshot(
+            Request::get("/v1/repos/repo-1/tasks")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(listing.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(listing.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let tasks: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(tasks[0]["id"], serde_json::json!("task-1"));
+    assert_eq!(tasks[0]["runtimeState"], serde_json::json!("busy"));
+    assert_eq!(tasks[0]["readState"], serde_json::json!("read"));
+}
+
 #[tokio::test]
 async fn task_activity_routes_persist_runtime_status_and_mark_read() {
     let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {

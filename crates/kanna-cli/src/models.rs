@@ -88,7 +88,18 @@ pub(crate) struct TaskDetail {
     pub(crate) stage: Option<String>,
     pub(crate) workflow_name: Option<String>,
     pub(crate) stage_transition: Option<String>,
+    /// Derived display value blending the runtime and read dimensions:
+    /// `working` | `idle` | `unread`.
     pub(crate) activity: Option<String>,
+    /// Runtime dimension — the daemon's verdict on the agent session
+    /// (`busy` | `waiting` | `idle` | `exited`). Optional so a CLI talking to
+    /// a server that predates the split still deserializes; a wait against
+    /// such a server then falls back to the terminal-`stage_run` fact alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) runtime_state: Option<String>,
+    /// Read dimension — `read` | `unread`. Optional for the same reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) read_state: Option<String>,
     pub(crate) snippet: Option<String>,
     pub(crate) agent_type: Option<String>,
     pub(crate) agent_provider: Option<String>,

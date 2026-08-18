@@ -78,7 +78,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, pipeline, stage,
              pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at,
-             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision, cloud_task_id, revision_rounds
+             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision, cloud_task_id, revision_rounds, runtime_status
              FROM pipeline_item
              WHERE closed_at IS NULL
              ORDER BY updated_at DESC, created_at DESC",
@@ -114,6 +114,7 @@ impl Db {
                 activity_revision: row.get(26)?,
                 cloud_task_id: row.get(27)?,
                 revision_rounds: row.get(28)?,
+                runtime_status: row.get(29)?,
             })
         })?;
         rows.collect()
@@ -124,7 +125,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, pipeline, stage,
              pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at,
-             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision, cloud_task_id, revision_rounds
+             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision, cloud_task_id, revision_rounds, runtime_status
              FROM pipeline_item
              WHERE closed_at IS NULL
                AND (
@@ -164,6 +165,7 @@ impl Db {
                 activity_revision: row.get(26)?,
                 cloud_task_id: row.get(27)?,
                 revision_rounds: row.get(28)?,
+                runtime_status: row.get(29)?,
             })
         })?;
         rows.collect()
@@ -173,7 +175,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, pipeline, stage, \
              pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at, \
-             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision, cloud_task_id, revision_rounds \
+             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision, cloud_task_id, revision_rounds, runtime_status \
              FROM pipeline_item WHERE repo_id = ? AND closed_at IS NULL \
              ORDER BY pin_order ASC, created_at DESC",
         )?;
@@ -208,6 +210,7 @@ impl Db {
                 activity_revision: row.get(26)?,
                 cloud_task_id: row.get(27)?,
                 revision_rounds: row.get(28)?,
+                runtime_status: row.get(29)?,
             })
         })?;
         rows.collect()
@@ -245,7 +248,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, pipeline, stage, \
              pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at, \
-             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision, cloud_task_id, revision_rounds \
+             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision, cloud_task_id, revision_rounds, runtime_status \
              FROM pipeline_item WHERE id = ?",
         )?;
         let mut rows = stmt.query_map([id], |row| {
@@ -279,6 +282,7 @@ impl Db {
                 activity_revision: row.get(26)?,
                 cloud_task_id: row.get(27)?,
                 revision_rounds: row.get(28)?,
+                runtime_status: row.get(29)?,
             })
         })?;
         match rows.next() {
