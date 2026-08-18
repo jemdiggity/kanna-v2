@@ -5095,6 +5095,135 @@ describe("createMobileController", () => {
     });
   });
 
+  it("defaults the composer to a provider the selected machine can actually run", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    client.listDesktops.mockResolvedValue([
+      {
+        id: "desktop-1",
+        name: "Studio Mac",
+        online: true,
+        mode: "lan",
+        agentProviders: ["opencode"]
+      }
+    ]);
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    store.selectRepo("repo-1");
+    controller.openComposer();
+    controller.updateComposerPrompt("Ship mobile shell");
+    await controller.createTask();
+
+    // Claude is Kanna's first supported provider, but this machine cannot run
+    // it: the task must be created for what the machine actually has.
+    expect(store.getState().composerAgentProvider).toBe("opencode");
+    expect(client.createTask).toHaveBeenCalledWith(
+      expect.objectContaining({ desktopId: "desktop-1", agentProvider: "opencode" })
+    );
+  });
+
+  it("drops a saved provider the newly selected machine cannot run", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    client.listDesktops.mockResolvedValue([
+      {
+        id: "desktop-1",
+        name: "Studio Mac",
+        online: true,
+        mode: "lan",
+        agentProviders: ["claude", "opencode"]
+      },
+      {
+        id: "desktop-2",
+        name: "Laptop",
+        online: true,
+        mode: "lan",
+        agentProviders: ["opencode"]
+      }
+    ]);
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    store.selectRepo("repo-1");
+    store.upsertRepoCreationProfile({
+      repoId: "repo-1",
+      desktopId: "desktop-1",
+      agentProvider: "claude",
+      updatedAt: "2026-07-06T00:00:00.000Z"
+    });
+    controller.openComposer();
+    expect(store.getState().composerAgentProvider).toBe("claude");
+
+    controller.selectComposerDesktop("desktop-2");
+
+    expect(store.getState().composerAgentProvider).toBe("opencode");
+
+    controller.updateComposerPrompt("Ship mobile shell");
+    await controller.createTask();
+
+    expect(client.createTask).toHaveBeenCalledWith(
+      expect.objectContaining({ desktopId: "desktop-2", agentProvider: "opencode" })
+    );
+  });
+
+  it("refuses to create a task on a machine that reports no agent CLI", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    client.listDesktops.mockResolvedValue([
+      {
+        id: "desktop-1",
+        name: "Studio Mac",
+        online: true,
+        mode: "lan",
+        agentProviders: []
+      }
+    ]);
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    store.selectRepo("repo-1");
+    controller.openComposer();
+    controller.updateComposerPrompt("Ship mobile shell");
+    await controller.createTask();
+
+    expect(client.createTask).not.toHaveBeenCalled();
+    expect(store.getState()).toMatchObject({
+      isComposerOpen: true,
+      composerAgentProvider: null,
+      composerErrorMessage:
+        "Studio Mac has no agent CLI installed. Install one on that machine, then try again.",
+      isComposerOptionsExpanded: true
+    });
+  });
+
+  it("re-resolves the open composer when a refresh brings the machine's inventory", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    client.listDesktops.mockResolvedValue([
+      { id: "desktop-1", name: "Studio Mac", online: true, mode: "lan" }
+    ]);
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    store.selectRepo("repo-1");
+    controller.openComposer();
+    expect(store.getState().composerAgentProvider).toBe("claude");
+
+    client.listDesktops.mockResolvedValue([
+      {
+        id: "desktop-1",
+        name: "Studio Mac",
+        online: true,
+        mode: "lan",
+        agentProviders: ["opencode"]
+      }
+    ]);
+    await controller.refresh();
+
+    expect(store.getState().composerAgentProvider).toBe("opencode");
+  });
+
   it("treats a saved machine that is no longer listed as unselected", async () => {
     const store = createSessionStore();
     const client = createClientMock();

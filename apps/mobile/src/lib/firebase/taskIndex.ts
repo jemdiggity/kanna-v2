@@ -8,7 +8,9 @@ import {
   where,
   type Firestore,
 } from "firebase/firestore";
+import type { AgentProvider } from "@kanna/agent-protocol";
 import type { TaskActivity, TaskSummary } from "../api/types";
+import { parseAgentProviderInventory } from "../api/agentProviders";
 import { buildCloudTaskId } from "../api/taskIdentity";
 import { canonicalRepoIdForHash } from "../api/repoIdentity";
 import {
@@ -58,6 +60,9 @@ export interface CloudDesktopRecord {
   desktopId: string;
   displayName: string;
   updatedAt: string | null;
+  /** Agent provider CLIs the desktop published with its task snapshot. Absent
+   * from desktops that predate provider inventory publication. */
+  agentProviders?: AgentProvider[];
 }
 
 export interface CloudTaskIndex {
@@ -400,10 +405,13 @@ function mapCloudDesktopRecord(
       ? data.displayName.trim()
       : desktopId;
 
+  const agentProviders = parseAgentProviderInventory(data.agentProviders);
+
   return {
     desktopId,
     displayName,
-    updatedAt: normalizeCloudTimestamp(data.updatedAt)
+    updatedAt: normalizeCloudTimestamp(data.updatedAt),
+    ...(agentProviders ? { agentProviders } : {})
   };
 }
 

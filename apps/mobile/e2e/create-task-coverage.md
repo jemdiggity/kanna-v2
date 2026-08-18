@@ -119,3 +119,26 @@ The focused command also retains the editable drawer coverage in
 ```bash
 pnpm --dir apps/mobile test -- src/App.component.test.tsx src/appModel.cloudFallback.test.ts src/components/CreateTaskComposer.test.tsx src/navigation/RootNavigator.integration.test.tsx src/navigation/RootNavigator.component.test.tsx src/screens/TaskScreen.test.tsx src/screens/TasksScreen.test.tsx src/screens/taskActionMenu.test.ts src/state/mobileController.test.ts src/state/sessionPersistence.test.ts src/state/sessionStore.test.ts src/state/taskUiSlots.test.ts src/lib/transports/lanTransport.test.ts src/lib/transports/remoteTransport.test.ts src/lib/sources/cloudLanClient.test.ts src/e2eTestIds.test.ts
 ```
+
+## Agent provider options
+
+The composer's *agent* choices are covered end to end by
+`e2e/agentProviderInventory.integration.test.tsx`, which does not need Appium: it
+runs a real `kanna-daemon` and `kanna-server` on an isolated PATH holding exactly
+one agent CLI, then drives the app's real LAN transport, client, session store,
+controller, and `CreateTaskComposer` against it. It asserts that the desktop
+reports only the installed provider, that the composer defaults to it instead of
+a constant, and that the providers the machine cannot run have no option in the
+rendered sheet.
+
+It is opt-in because it needs Rust binaries built first:
+
+```
+cargo build -p kanna-server -p kanna-daemon
+pnpm --dir apps/mobile run test:integration:agent-provider-inventory
+```
+
+The server side of the same contract runs in the ordinary Rust test suite
+(`crates/kanna-server/tests/agent_provider_inventory_http.rs`), which boots the
+real server process against a restricted PATH and asserts what `/v1/status` and
+`/v1/desktops` report.

@@ -39,6 +39,39 @@ describe("trusted Bonjour discovery", () => {
     });
   });
 
+  it("carries the desktop's agent provider inventory off its status probe", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        desktopId: "desktop-1",
+        desktopName: "Studio Mac",
+        agentProviders: ["opencode", "not-a-provider"]
+      })
+    }));
+    const service: BonjourService = {
+      name: "desktop-1",
+      type: "_kanna-mobile._tcp.",
+      host: "studio.local",
+      port: 48120,
+      txt: { desktopId: "desktop-1" }
+    };
+
+    await expect(
+      resolveTrustedBonjourEndpoint({
+        fetchImpl,
+        services: [service],
+        trustedDesktopIds,
+        preferredDesktopId: null
+      })
+    ).resolves.toEqual({
+      baseUrl: "http://studio.local:48120",
+      desktopId: "desktop-1",
+      displayName: "Studio Mac",
+      agentProviders: ["opencode"]
+    });
+  });
+
   it("ignores untrusted Bonjour services without probing them", async () => {
     const fetchImpl = vi.fn();
 

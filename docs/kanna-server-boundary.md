@@ -413,6 +413,45 @@ definition declares none. Role-specific agents can still fail their own
 preconditions—for example, `pr` needs committed task work to publish—but Kanna
 does not reject them as first-stage bindings.
 
+## Agent Provider Inventory
+
+A desktop reports which agent provider CLIs it can actually run. Kanna supports
+a fixed provider set, but a given Mac usually has only some of them installed,
+and a task created for a provider whose executable does not resolve there is
+accepted, gets a worktree and a branch, and then never connects — the spawn
+wraps a command that does not exist. Any client that offers a *choice* of
+provider for a remote machine therefore needs the machine's own answer, not the
+registry.
+
+The inventory is computed with the same resolution a spawn uses
+(`task_creator::resolve_agent_executable`: process PATH, then the cached
+login-shell PATH, then live user install locations), memoized for 30 seconds. It
+rides on the payloads that already describe a desktop, so no client needs an
+extra round trip:
+
+- `GET /v1/status` → `agentProviders` — what a paired LAN client sees, because
+  it learns a desktop through its Bonjour status probe and never reads
+  `/v1/desktops`.
+- `GET /v1/desktops` → `agentProviders` — the directly addressed LAN desktop.
+- the cloud task snapshot's `desktop.agentProviders`, which the relay
+  shape-validates and stores on the desktop document — the WAN path, read by
+  mobile with the rest of the desktop record.
+
+The field is advisory and its three states are distinct. **Absent** means the
+desktop predates the field or the record could not carry it: clients fall back
+to offering every supported provider, which is the behaviour that shipped before
+inventory existed, so a stale or missing inventory never blocks task creation.
+**Non-empty** narrows the offer to that list. **Empty** is a reported answer —
+that machine can run nothing — and a client should refuse creation with an
+explanation rather than offer a choice that will fail. The relay validates
+shape, not provider names: it ships separately from the desktop, and a desktop
+that learns a new provider must not need a relay deploy.
+
+Mobile's create-task composer consumes it: options come from the selected
+machine, the default is that machine's first available provider rather than a
+constant, and a selection made for one machine is re-resolved when the machine
+changes or a refresh brings a newer inventory.
+
 ## Task Event Feed
 
 `GET /v1/task-events` is the surface an orchestrating agent watches instead of

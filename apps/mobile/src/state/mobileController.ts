@@ -1,5 +1,6 @@
 import type {
   CreateTaskResponse,
+  DesktopSummary,
   RepoCommandCatalog,
   RepoSummary,
   TaskActivity,
@@ -39,6 +40,7 @@ import type {
 } from "./sessionStore";
 import type { PersistedSessionContext } from "./sessionPersistence";
 import { isTaskBlocked } from "../lib/api/taskIdentity";
+import { resolveAgentProviderForDesktop } from "../lib/api/agentProviders";
 import {
   buildCreatingTaskUiSlot,
   taskUiSlotForSelection,
@@ -1216,6 +1218,7 @@ export function createMobileController(
           const desktops = await client.listDesktops();
           if (desktopCollectionsRevision === readRevision) {
             store.setDesktops(desktops);
+            reconcileComposerAgentProvider();
             desktopMetadataError = null;
             publishOwnedErrorMessage();
           }
@@ -1431,6 +1434,42 @@ export function createMobileController(
     return store.getState().desktops.some((desktop) => desktop.id === desktopId)
       ? desktopId
       : null;
+  };
+
+  const knownDesktop = (desktopId: string | null): DesktopSummary | null =>
+    (desktopId
+      ? store.getState().desktops.find((desktop) => desktop.id === desktopId)
+      : null) ?? null;
+
+  /**
+   * The provider a task for this machine should be created with. Falls back to
+   * the machine's own first choice when the preferred provider is not installed
+   * there, and to `null` when that machine reported it can run none — offering
+   * a provider the desktop cannot spawn creates a task whose session never
+   * connects.
+   */
+  const composerAgentProviderFor = (
+    desktopId: string | null,
+    preferred: ComposerAgentProvider | null
+  ): ComposerAgentProvider | null =>
+    resolveAgentProviderForDesktop(preferred, knownDesktop(desktopId));
+
+  /**
+   * Re-resolve the open composer's provider against the latest machine
+   * inventory. A refresh can be the first read that carries an inventory at
+   * all, so a selection made while the machine looked unrestricted must not
+   * survive into a task the machine cannot run.
+   */
+  const reconcileComposerAgentProvider = (): void => {
+    const state = store.getState();
+    if (!state.isComposerOpen) return;
+    const resolved = composerAgentProviderFor(
+      state.composerDesktopId,
+      state.composerAgentProvider
+    );
+    if (resolved !== state.composerAgentProvider) {
+      store.setComposerAgentProvider(resolved);
+    }
   };
 
   const inferComposerDesktopId = (repoId: string): string | null => {
@@ -2063,7 +2102,9 @@ export function createMobileController(
 
       store.setComposerRepo(selectedRepoId);
       store.setComposerDesktop(composerDesktopId);
-      store.setComposerAgentProvider(profile?.agentProvider ?? "claude");
+      store.setComposerAgentProvider(
+        composerAgentProviderFor(composerDesktopId, profile?.agentProvider ?? null)
+      );
       store.setComposerOptionsExpanded(!composerDesktopId);
       lastSubmittedTaskCreationId = null;
       store.setComposerState(true, "");
@@ -2078,7 +2119,13 @@ export function createMobileController(
     },
 
     selectComposerDesktop(desktopId) {
+      const previous = store.getState().composerAgentProvider;
       store.setComposerDesktop(desktopId);
+      // A provider chosen for another machine must not follow the selection
+      // onto a machine that cannot run it.
+      store.setComposerAgentProvider(
+        composerAgentProviderFor(desktopId, previous)
+      );
     },
 
     setComposerOptionsExpanded(isExpanded) {
@@ -2219,6 +2266,23 @@ export function createMobileController(
         return Promise.resolve(null);
       }
 
+      const agentProvider = composerAgentProviderFor(
+        composerDesktopId,
+        state.composerAgentProvider
+      );
+      if (!agentProvider) {
+        const desktopName =
+          knownDesktop(composerDesktopId)?.name ?? composerDesktopId;
+        store.setComposerErrorMessage(
+          `${desktopName} has no agent CLI installed. Install one on that machine, then try again.`
+        );
+        store.setComposerOptionsExpanded(true);
+        return Promise.resolve(null);
+      }
+      if (agentProvider !== state.composerAgentProvider) {
+        store.setComposerAgentProvider(agentProvider);
+      }
+
       const { cols, rows } =
         terminalGeometry ?? DEFAULT_MOBILE_TERMINAL_GEOMETRY;
       const attempt: PendingTaskCreation = {
@@ -2229,7 +2293,7 @@ export function createMobileController(
         repoId: state.composerRepoId,
         prompt: state.composerPrompt.trim(),
         desktopId: composerDesktopId,
-        agentProvider: state.composerAgentProvider,
+        agentProvider,
         terminalCols: cols,
         terminalRows: rows
       };

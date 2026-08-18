@@ -121,6 +121,43 @@ describe("cloud task publication validation", () => {
     expect(parsed.transfer).toBeNull();
   });
 
+  it("carries the publishing desktop's agent provider inventory", () => {
+    const parsed = validateCloudTaskPublication(
+      publication([], {
+        displayName: "Studio Mac",
+        agentProviders: ["opencode"],
+      }),
+      "desktop-1",
+    );
+
+    expect(parsed.agentProviders).toEqual(["opencode"]);
+  });
+
+  it("keeps an empty inventory distinct from a desktop that reports none", () => {
+    const empty = validateCloudTaskPublication(
+      publication([], { displayName: "Studio Mac", agentProviders: [] }),
+      "desktop-1",
+    );
+    const legacy = validateCloudTaskPublication(
+      publication([], { displayName: "Studio Mac" }),
+      "desktop-1",
+    );
+
+    expect(empty.agentProviders).toEqual([]);
+    expect(legacy.agentProviders).toBeNull();
+  });
+
+  it.each([
+    ["not-an-array", "opencode"],
+    ["blank entry", [" "]],
+    ["non-string entry", [7]],
+  ])("rejects an invalid agent provider inventory (%s)", (_label, agentProviders) => {
+    expect(() => validateCloudTaskPublication(
+      publication([], { displayName: "Studio Mac", agentProviders }),
+      "desktop-1",
+    )).toThrow(/desktop\.agentProviders/);
+  });
+
   it("requires schema v1 publishers to down-convert widened transfer states", () => {
     expect(() => validateCloudTaskPublication(
       publication([task({
@@ -414,6 +451,7 @@ describe("cloud task publication reconciliation", () => {
       desktopId: "desktop-1",
       generation: { session: 4, sequence: 2 },
       displayName: "Studio Mac",
+      agentProviders: null,
       transfer: {
         peerId: "peer-a",
         publicKey: "base64-key",

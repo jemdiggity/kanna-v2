@@ -257,6 +257,16 @@ async fn production_and_staging_processes_report_exact_build_identity_over_http(
             advertised.is_some_and(|tools| tools.as_array().is_some_and(|tools| !tools.is_empty())),
             "{label} status must advertise the agent-API surface"
         );
+        // Likewise the agent provider inventory: which CLIs resolve depends on
+        // the machine running the test, and its contents are asserted against a
+        // controlled PATH in `agent_provider_inventory_http.rs`.
+        let inventory = status
+            .as_object_mut()
+            .and_then(|status| status.remove("agentProviders"));
+        assert!(
+            inventory.is_some_and(|providers| providers.is_array()),
+            "{label} status must report which agent providers the machine can run"
+        );
     }
 
     assert_eq!(

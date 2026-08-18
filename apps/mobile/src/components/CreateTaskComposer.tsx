@@ -14,6 +14,10 @@ import {
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { DesktopSummary, RepoSummary } from "../lib/api/types";
 import { repoIsRegisteredOnDesktop } from "../lib/api/repoIdentity";
+import {
+  agentProviderOptionsForDesktop,
+  desktopReportsNoAgentProvider
+} from "../lib/api/agentProviders";
 import type {
   ComposerAgentProvider
 } from "../state/sessionStore";
@@ -25,7 +29,7 @@ interface CreateTaskComposerProps {
   desktops: DesktopSummary[];
   selectedRepoId: string | null;
   selectedDesktopId: string | null;
-  selectedAgentProvider: ComposerAgentProvider;
+  selectedAgentProvider: ComposerAgentProvider | null;
   isOptionsExpanded: boolean;
   errorMessage: string | null;
   onClose(): void;
@@ -44,10 +48,18 @@ const AGENT_LABELS: Record<AgentProvider, string> = {
   antigravity: "Antigravity"
 };
 
-const AGENT_OPTIONS = AGENT_PROVIDERS.map((provider) => ({
-  provider,
-  label: AGENT_LABELS[provider]
-}));
+/** Named in the "nothing installed" explanation, so the advice cannot drift
+ * away from the providers Kanna actually supports. */
+const INSTALLABLE_AGENT_NAMES = AGENT_PROVIDERS
+  .map((provider) => AGENT_LABELS[provider])
+  .join(", ");
+
+function agentOptionsForDesktop(desktop: DesktopSummary | null) {
+  return agentProviderOptionsForDesktop(desktop).map((provider) => ({
+    provider,
+    label: AGENT_LABELS[provider]
+  }));
+}
 
 export function CreateTaskComposer({
   isOpen,
@@ -56,7 +68,7 @@ export function CreateTaskComposer({
   desktops = [],
   selectedRepoId,
   selectedDesktopId,
-  selectedAgentProvider = "claude",
+  selectedAgentProvider = null,
   isOptionsExpanded = false,
   errorMessage = null,
   onClose,
@@ -74,11 +86,18 @@ export function CreateTaskComposer({
     : desktops;
   const selectedDesktop =
     eligibleDesktops.find((desktop) => desktop.id === selectedDesktopId) ?? null;
+  // Only the providers the selected machine can actually run. A machine that
+  // reported no inventory (an older desktop) still offers everything Kanna
+  // supports, which is the behaviour that shipped before inventory existed.
+  const agentOptions = agentOptionsForDesktop(selectedDesktop);
+  const machineHasNoAgent =
+    selectedDesktop !== null && desktopReportsNoAgentProvider(selectedDesktop);
   const selectedAgentLabel =
-    AGENT_OPTIONS.find((option) => option.provider === selectedAgentProvider)?.label ??
-    selectedAgentProvider;
-  const canSubmit =
-    Boolean(selectedRepoId && selectedDesktop && prompt.trim());
+    agentOptions.find((option) => option.provider === selectedAgentProvider)?.label ??
+    (machineHasNoAgent ? "No agent installed" : "Choose agent");
+  const canSubmit = Boolean(
+    selectedRepoId && selectedDesktop && prompt.trim() && !machineHasNoAgent
+  );
   const selectedDesktopLabel = selectedDesktop
     ? `${selectedDesktop.name} (${selectedDesktop.online ? "online" : "offline"})`
     : "Choose machine";
@@ -169,8 +188,15 @@ export function CreateTaskComposer({
 
                 <View style={styles.optionSection}>
                   <Text style={styles.optionLabel}>Agent</Text>
+                  {machineHasNoAgent ? (
+                    <Text style={styles.helperText}>
+                      {selectedDesktop?.name} has no agent CLI installed. Install
+                      one of {INSTALLABLE_AGENT_NAMES} on that machine to create
+                      tasks there.
+                    </Text>
+                  ) : null}
                   <View style={styles.choiceGroup}>
-                    {AGENT_OPTIONS.map((option) => {
+                    {agentOptions.map((option) => {
                       const selected = option.provider === selectedAgentProvider;
                       return (
                         <Pressable
