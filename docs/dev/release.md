@@ -273,10 +273,11 @@ compatibility: bump it for any native code/config/SDK/dependency change
 JS-only changes keep the runtime and are OTA-deliverable.
 
 Every OTA command requires an explicit `--staging` or `--production` flag;
-the examples below use staging:
+the examples below use staging except where the production gate is the point:
 
 ```sh
 ./kd mobile ota publish --staging                     # publish signed update
+./kd mobile ota publish --production --ref release/0.2  # production needs a named source
 ./kd mobile ota publish --staging --rollback-to <id>  # repoint the channel
 ./kd mobile ota status --staging                      # channel pointer
 ./kd mobile ota doctor --staging                      # read-only preflight
@@ -284,6 +285,16 @@ the examples below use staging:
 ./kd mobile ota provision-secret --staging --key-path <pem>  # key → Secret Manager
 ```
 
+A publish exports the working tree, so — as with `kd cloud deploy` and `kd
+mobile archive` — it refuses a dirty worktree, requires `--ref
+<branch|tag|sha>` for `--production`, and refuses a `--ref` that is not the
+checked-out commit. Without `--ref`, staging resolves and reports `HEAD`. The
+resolved commit is printed, returned as `source`, and recorded in both the
+channel pointer and the update's own `kanna-source.json`, so a live OTA update
+traces back to the commit it shipped from. `--rollback-to` exports nothing and
+so needs no `--ref`; it still refuses a dirty worktree.
+
 **Approval policy:** staging publish/rollback is self-serve (including for
 agents). Production publish/rollback requires explicit human approval per
-operation; read-only production `status`/`doctor` does not.
+operation; read-only production `status`/`doctor` does not. `--ref` narrows
+what a publish can ship — it does not replace that approval.

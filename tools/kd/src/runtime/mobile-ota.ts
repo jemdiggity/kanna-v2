@@ -8,12 +8,19 @@ import {
   validateMobileOtaCertificate,
 } from "./mobile-ota-certificate";
 import type { CommandRunner } from "./process";
+import { formatSourceRef, resolveSourceRef, type ResolvedSourceRef } from "./source-ref";
 
 export interface MobileOtaInput {
   staging: boolean;
   production: boolean;
   dryRun?: boolean;
   rollbackTo?: string;
+  /**
+   * Branch, tag, or sha the update is exported from. Required for the
+   * production channel: a publish ships the working tree's JS straight to
+   * installed apps, so the source has to be named rather than inferred.
+   */
+  ref?: string;
 }
 
 export interface MobileOtaProvisionSecretInput {
@@ -53,6 +60,8 @@ export interface MobileOtaCommandPlan {
 
 export interface MobileOtaPublishPlan {
   environment: CloudEnvironmentName;
+  /** Resolved source the update was exported from. */
+  source?: ResolvedSourceRef;
   bucket: string;
   channel: string;
   runtimeVersion: string;
@@ -101,6 +110,23 @@ interface OtaChannelPointer {
   currentUpdateId?: string;
   createdAt?: string;
   runtimeVersion?: string;
+  /** Source ref the update the channel points at was published from. */
+  sourceRef?: string;
+  /** Full source commit, so `kd mobile ota status` traces the live update back to a commit. */
+  sourceCommit?: string;
+}
+
+/**
+ * Per-update source record, written alongside the update's Expo artifacts as
+ * `kanna-source.json`. The channel pointer is overwritten by every publish and
+ * rollback; this copy stays with the update it describes, so an update that a
+ * rollback later re-points to can still be traced to its commit.
+ */
+interface OtaSourceRecord {
+  updateId: string;
+  ref: string;
+  commit: string;
+  shortCommit: string;
 }
 
 interface OtaDoctorCheck {
@@ -116,6 +142,7 @@ interface IamPolicy {
   }>;
 }
 
+const OTA_SOURCE_OBJECT = "kanna-source.json";
 const OTA_SECRET_NAME = "kanna-mobile-ota-private-key-pem";
 const OTA_KEY_ID = "kanna-mobile-ota-v1";
 
@@ -151,6 +178,7 @@ export async function buildMobileOtaPublishPlan(input: {
   distDir?: string;
   dryRun?: boolean;
   updateId?: string;
+  source?: ResolvedSourceRef;
 }): Promise<MobileOtaPublishPlan> {
   const identity = resolveKdEnvironment(cloudEnvironmentToKdEnvironment(input.environment));
   if (!identity.otaBucket || !identity.otaChannel) {
@@ -170,6 +198,7 @@ export async function buildMobileOtaPublishPlan(input: {
 
   return {
     environment: input.environment,
+    source: input.source,
     bucket: identity.otaBucket,
     channel: identity.otaChannel,
     runtimeVersion,
@@ -214,7 +243,19 @@ export async function executeMobileOtaPublishWithContext(
   context: MobileOtaContext
 ): Promise<{ ok: boolean; message: string; data?: unknown }> {
   const environment = resolveMobileOtaEnvironment(input, "publish");
-  await assertCleanGitWorktree(context.repoRoot, context.runner);
+  // A publish exports the working tree, so the source is a guard, not a
+  // parameter: the tree must be clean and a named --ref must be the checked-out
+  // commit. A rollback only re-points the channel at an already-published
+  // update and exports nothing, so it keeps the clean-tree refusal but does not
+  // demand a ref it would have no source to record.
+  const source = await resolveSourceRef({
+    repoRoot: context.repoRoot,
+    runner: context.runner,
+    env: context.env,
+    ref: input.ref,
+    requireRef: environment === "production" && !input.rollbackTo,
+    command: "mobile ota publish"
+  });
   const validateCertificate = context.validateOtaCertificate ?? validateMobileOtaCertificate;
   await validateCertificate({
     certificatePath: join(context.repoRoot, OTA_CERTIFICATE_RELATIVE_PATH),
@@ -231,7 +272,7 @@ export async function executeMobileOtaPublishWithContext(
   const runtimeVersion = await resolveMobileRuntimeVersion(context.repoRoot, kdEnvironmentName);
 
   if (input.rollbackTo) {
-    const pointer = await writePointerFile(input.rollbackTo, runtimeVersion);
+    const pointer = await writePointerFile({ updateId: input.rollbackTo, runtimeVersion });
     const pointerObject = `ota/ios/${runtimeVersion}/channels/${identity.otaChannel}.json`;
     if (input.dryRun !== true) {
       await mustRun(context.runner, "gcloud", [
@@ -273,15 +314,20 @@ export async function executeMobileOtaPublishWithContext(
     context.runner,
     context.env
   );
-  const staged = await stageOtaUpdate({ distDir, expoConfigBytes });
+  const staged = await stageOtaUpdate({ distDir, expoConfigBytes, source });
   const plan = await buildMobileOtaPublishPlan({
     repoRoot: context.repoRoot,
     environment,
     distDir,
     updateId: staged.updateId,
     dryRun: input.dryRun === true,
+    source,
   });
-  const pointer = await writePointerFile(plan.updateId, plan.runtimeVersion);
+  const pointer = await writePointerFile({
+    updateId: plan.updateId,
+    runtimeVersion: plan.runtimeVersion,
+    source,
+  });
 
   if (input.dryRun !== true) {
     const exists = await context.runner.run("gcloud", [
@@ -315,6 +361,7 @@ export async function executeMobileOtaPublishWithContext(
       channel: plan.channel,
       bucket: plan.bucket,
       dryRun: plan.dryRun,
+      source,
     },
   };
 }
@@ -941,6 +988,7 @@ async function readExpoPublicConfig(
 async function stageOtaUpdate(input: {
   distDir: string;
   expoConfigBytes: Buffer;
+  source: ResolvedSourceRef;
 }): Promise<{ path: string; updateId: string }> {
   const stagedMetadata = await buildStagedExpoMetadata(input.distDir);
   const stageRoot = await mkdtemp(join(tmpdir(), "kanna-ota-stage-"));
@@ -954,6 +1002,15 @@ async function stageOtaUpdate(input: {
   }
   await writeFile(join(output, "metadata.json"), stagedMetadata.metadataBytes);
   await writeFile(join(output, "expoConfig.json"), input.expoConfigBytes);
+  // Deliberately not part of metadata.json: updateId is the SHA-256 of that
+  // file, and Expo clients read it, so the source record rides beside it.
+  const sourceRecord: OtaSourceRecord = {
+    updateId: stagedMetadata.updateId,
+    ref: input.source.ref,
+    commit: input.source.commit,
+    shortCommit: input.source.shortCommit,
+  };
+  await writeFile(join(output, OTA_SOURCE_OBJECT), JSON.stringify(sourceRecord));
   return { path: output, updateId: stagedMetadata.updateId };
 }
 
@@ -1009,14 +1066,22 @@ async function buildStagedExpoMetadata(distDir: string): Promise<StagedExpoMetad
   };
 }
 
-async function writePointerFile(updateId: string, runtimeVersion: string): Promise<{ path: string }> {
+async function writePointerFile(input: {
+  updateId: string;
+  runtimeVersion: string;
+  source?: ResolvedSourceRef;
+}): Promise<{ path: string }> {
   const dir = await mkdtemp(join(tmpdir(), "kanna-ota-pointer-"));
   const path = join(dir, "channel.json");
-  await writeFile(path, JSON.stringify({
-    currentUpdateId: updateId,
+  const pointer: OtaChannelPointer = {
+    currentUpdateId: input.updateId,
     createdAt: new Date().toISOString(),
-    runtimeVersion,
-  }));
+    runtimeVersion: input.runtimeVersion,
+    ...(input.source
+      ? { sourceRef: input.source.ref, sourceCommit: input.source.commit }
+      : {}),
+  };
+  await writeFile(path, JSON.stringify(pointer));
   return { path };
 }
 
@@ -1025,16 +1090,6 @@ function normalizeAssetExtension(path: string): string | undefined {
   if (extension) return extension.slice(1);
   const name = basename(path);
   return name.includes(".") ? name.split(".").pop() : undefined;
-}
-
-async function assertCleanGitWorktree(repoRoot: string, runner: CommandRunner): Promise<void> {
-  const status = await runner.run("git", ["status", "--porcelain"], { cwd: repoRoot });
-  if (status.exitCode !== 0) {
-    throw new Error(status.stderr || status.stdout || "Failed to inspect git worktree status.");
-  }
-  if (status.stdout.trim().length > 0) {
-    throw new Error("Refusing to publish mobile OTA from a dirty git worktree. Commit or stash changes first.");
-  }
 }
 
 function resolveMobileOtaEnvironment(
@@ -1066,6 +1121,7 @@ async function mustRun(
 function formatPublishMessage(plan: MobileOtaPublishPlan): string {
   return [
     `${plan.dryRun ? "Dry run: mobile OTA update" : "Published mobile OTA update"} ${plan.updateId}`,
+    ...(plan.source ? [formatSourceRef(plan.source)] : []),
     `runtimeVersion: ${plan.runtimeVersion}`,
     `channel: ${plan.channel}`,
     `bucket: gs://${plan.bucket}/${plan.updateObjectPrefix}`,
