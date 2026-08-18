@@ -315,23 +315,38 @@ interface EmbeddedExpoConfig {
 }
 
 /**
- * Locate the Expo config expo-constants bakes into the bundle. It normally
- * lands at `EXConstants.bundle/app.config`, but the resource bundle name is an
- * expo-constants implementation detail, so fall back to scanning `*.bundle`.
+ * Locate the Expo config expo-constants bakes into the bundle.
+ *
+ * `EXConstantsService.appConfig` reads `EXConstants.bundle/app.config` from the
+ * resource directory of the bundle its class lives in. This repo pins static
+ * pod linkage, so that is the `.app` root — but a dynamic-framework build would
+ * put it under `Frameworks/*.framework/`, and the resource bundle name is an
+ * expo-constants implementation detail either way. Scan rather than assume: a
+ * wrong path here would fail an otherwise correct release build.
  */
 async function findEmbeddedAppConfig(appPath: string): Promise<string | null> {
   const preferred = join(appPath, "EXConstants.bundle", "app.config");
   if (existsSync(preferred)) return preferred;
-  let entries: string[];
+  const roots = [appPath];
   try {
-    entries = await readdir(appPath);
+    for (const entry of await readdir(join(appPath, "Frameworks"))) {
+      if (entry.endsWith(".framework")) roots.push(join(appPath, "Frameworks", entry));
+    }
   } catch {
-    return null;
+    // No Frameworks directory: a statically linked build, which is the norm here.
   }
-  for (const entry of entries) {
-    if (!entry.endsWith(".bundle")) continue;
-    const candidate = join(appPath, entry, "app.config");
-    if (existsSync(candidate)) return candidate;
+  for (const root of roots) {
+    let entries: string[];
+    try {
+      entries = await readdir(root);
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.endsWith(".bundle")) continue;
+      const candidate = join(root, entry, "app.config");
+      if (existsSync(candidate)) return candidate;
+    }
   }
   return null;
 }
