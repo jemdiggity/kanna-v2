@@ -257,6 +257,25 @@ The default `CFBundleShortVersionString` comes from `apps/mobile/VERSION`.
 absent, the root desktop `VERSION` remains a compatibility fallback. Always
 pass a monotonically increasing `--build-number`; it controls
 `CFBundleVersion` independently.
+The command only builds when it has to. If the export IPA already exists and the
+archive on disk records exactly the requested version and build number, the
+prebuild, archive, and export steps are skipped and only `--upload` runs; the
+result says `Reused existing mobile production archive`. This is safe because
+App Store Connect refuses a repeated build number for a version, so changed
+source obliges a new build number, which misses the match and rebuilds. Pass
+`--force-rebuild` to rebuild a matching archive anyway.
+
+`--upload` delivers with `xcrun altool --upload-app`, which ships with Xcode.
+The command checks the uploader resolves before building, so a broken toolchain
+fails in seconds instead of after a full archive.
+
+`xcrun iTMSTransporter -m upload -assetFile` is deliberately not used. It
+authenticates, reports "Creating reservations for build", then fails with an
+undiagnosable `Could not upload file`; altool accepted the identical IPA
+seconds later (verified 2026-08-18 on Kanna Mobile 1.0.0 build 2). Apple is
+moving Transporter toward `-assetFile` and away from altool's `-f` during 2026,
+so revisit this if `-f` is withdrawn.
+
 Run the [mobile production QA gate](../testing/mobile-production-qa-gate.md)
 before TestFlight external testing or App Store submission.
 

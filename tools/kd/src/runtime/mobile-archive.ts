@@ -10,6 +10,7 @@ export interface MobileIosArchiveInput {
   ref?: string;
   dryRun?: boolean;
   upload?: boolean;
+  forceRebuild?: boolean;
   buildNumber?: string;
   version?: string;
   outDir?: string;
@@ -21,7 +22,10 @@ export interface MobileIosArchiveContext {
   runner: CommandRunner;
 }
 
+export type MobileIosArchiveCommandKind = "prebuild" | "archive" | "export" | "upload";
+
 export interface MobileIosArchiveCommand {
+  kind: MobileIosArchiveCommandKind;
   command: string;
   args: string[];
   cwd: string;
@@ -167,6 +171,7 @@ export async function buildMobileIosArchivePlan(input: {
   };
   const commands: MobileIosArchiveCommand[] = [
     {
+      kind: "prebuild",
       command: "pnpm",
       args: ["--dir", join(input.repoRoot, "apps/mobile"), "exec", "expo", "prebuild", "--platform", "ios", "--clean"],
       cwd: input.repoRoot,
@@ -174,6 +179,7 @@ export async function buildMobileIosArchivePlan(input: {
       streamOutput: true
     },
     {
+      kind: "archive",
       command: "xcodebuild",
       args: [
         "-workspace",
@@ -198,6 +204,7 @@ export async function buildMobileIosArchivePlan(input: {
       streamOutput: true
     },
     {
+      kind: "export",
       command: "xcodebuild",
       args: [
         "-exportArchive",
@@ -215,16 +222,18 @@ export async function buildMobileIosArchivePlan(input: {
   ];
   if (input.upload === true) {
     commands.push({
+      kind: "upload",
       command: "xcrun",
       args: [
-        "iTMSTransporter",
-        "-m",
-        "upload",
-        "-assetFile",
+        "altool",
+        "--upload-app",
+        "-f",
         ipaPath,
-        "-apiKey",
+        "-t",
+        "ios",
+        "--apiKey",
         UPLOAD_API_KEY_PLACEHOLDER,
-        "-apiIssuer",
+        "--apiIssuer",
         UPLOAD_API_ISSUER_PLACEHOLDER
       ],
       cwd: input.repoRoot,
@@ -295,6 +304,96 @@ function formatPlanCommands(plan: MobileIosArchivePlan): string {
   return plan.commands.map((command) => `${command.command} ${command.args.join(" ")}`).join("\n");
 }
 
+export interface ArchiveIdentity {
+  version: string;
+  buildNumber: string;
+}
+
+/**
+ * Read the marketing version and build number recorded inside an existing
+ * .xcarchive. The archive is a plain directory, so this avoids unzipping the
+ * IPA just to learn what it contains.
+ */
+export function parseArchiveIdentity(rawPlistJson: string): ArchiveIdentity | null {
+  try {
+    const parsed = JSON.parse(rawPlistJson) as {
+      ApplicationProperties?: { CFBundleShortVersionString?: string; CFBundleVersion?: string };
+    };
+    const version = parsed.ApplicationProperties?.CFBundleShortVersionString?.trim();
+    const buildNumber = parsed.ApplicationProperties?.CFBundleVersion?.trim();
+    if (!version || !buildNumber) return null;
+    return { version, buildNumber };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Decide whether the artifacts already on disk are exactly the ones the plan
+ * asks for. Reuse is safe here because App Store Connect rejects a repeated
+ * build number for a version, so changed source obliges a new build number,
+ * which misses this check and rebuilds.
+ */
+export async function resolveReusableArchive(input: {
+  runner: CommandRunner;
+  plan: MobileIosArchivePlan;
+}): Promise<{ reusable: boolean; reason: string }> {
+  const { plan, runner } = input;
+  if (!existsSync(plan.ipaPath)) {
+    return { reusable: false, reason: `no IPA at ${plan.ipaPath}` };
+  }
+  const archiveInfoPlist = join(plan.archivePath, "Info.plist");
+  if (!existsSync(archiveInfoPlist)) {
+    return { reusable: false, reason: `no archive Info.plist at ${archiveInfoPlist}` };
+  }
+  const result = await runner.run("plutil", ["-convert", "json", "-o", "-", archiveInfoPlist]);
+  if (result.exitCode !== 0) {
+    return { reusable: false, reason: "could not read the existing archive Info.plist" };
+  }
+  const identity = parseArchiveIdentity(result.stdout);
+  if (!identity) {
+    return { reusable: false, reason: "existing archive has no readable version/build number" };
+  }
+  if (identity.version !== plan.version || identity.buildNumber !== plan.buildNumber) {
+    return {
+      reusable: false,
+      reason:
+        `existing archive is ${identity.version} (${identity.buildNumber}), ` +
+        `wanted ${plan.version} (${plan.buildNumber})`
+    };
+  }
+  return { reusable: true, reason: `existing ${identity.version} (${identity.buildNumber}) matches` };
+}
+
+/**
+ * Uploads go through `xcrun altool --upload-app`.
+ *
+ * The obvious alternative, `xcrun iTMSTransporter -m upload -assetFile`, does
+ * not work here: it authenticates, reports "Creating reservations for build",
+ * then fails with an undiagnosable `Could not upload file`. altool accepted the
+ * identical IPA seconds later. Verified on 2026-08-18 against Kanna Mobile
+ * 1.0.0 build 2 — same artifact, credentials, and machine.
+ *
+ * Watch item: Apple is moving Transporter toward `-assetFile` and away from
+ * `-f` during 2026. If altool's `-f` is withdrawn, revisit the Transporter
+ * invocation rather than assuming this one still holds.
+ */
+export function isUploaderUnavailable(stdout: string, stderr: string): boolean {
+  const combined = `${stdout}\n${stderr}`;
+  return /command not found|unable to find utility|no such file/i.test(combined);
+}
+
+export async function assertUploaderAvailable(runner: CommandRunner): Promise<void> {
+  const result = await runner.run("xcrun", ["--find", "altool"]);
+  if (result.exitCode !== 0 || isUploaderUnavailable(result.stdout, result.stderr)) {
+    throw new Error(
+      "mobile archive --upload needs altool, which ships with Xcode. `xcrun --find altool` " +
+        "did not resolve it. Confirm Xcode is installed and selected " +
+        "(`xcode-select -p`), then retry."
+    );
+  }
+}
+
 export async function executeMobileIosArchiveWithContext(
   input: MobileIosArchiveInput,
   context: MobileIosArchiveContext
@@ -337,10 +436,27 @@ export async function executeMobileIosArchiveWithContext(
   }
 
   const uploadCredentials = input.upload ? resolveUploadCredentials(context.env) : null;
-  await mkdir(plan.outDir, { recursive: true });
-  await writeFile(plan.exportOptionsPlistPath, plan.exportOptionsPlist);
+  if (input.upload === true) {
+    // Fail before the build rather than after 15 minutes of compiling.
+    await assertUploaderAvailable(context.runner);
+  }
 
-  for (const plannedCommand of plan.commands) {
+  // Only build when the artifacts on disk are not already exactly this
+  // version and build number.
+  const reuse =
+    input.forceRebuild === true
+      ? { reusable: false, reason: "--force-rebuild requested" }
+      : await resolveReusableArchive({ runner: context.runner, plan });
+  const commands = reuse.reusable
+    ? plan.commands.filter((command) => command.kind === "upload")
+    : plan.commands;
+
+  await mkdir(plan.outDir, { recursive: true });
+  if (!reuse.reusable) {
+    await writeFile(plan.exportOptionsPlistPath, plan.exportOptionsPlist);
+  }
+
+  for (const plannedCommand of commands) {
     const command = commandWithUploadCredentials(plannedCommand, uploadCredentials);
     const result = await context.runner.run(command.command, command.args, {
       cwd: command.cwd,
@@ -359,13 +475,15 @@ export async function executeMobileIosArchiveWithContext(
   return {
     ok: true,
     message: [
-      `Built mobile production archive ${plan.version} (${plan.buildNumber}).`,
+      reuse.reusable
+        ? `Reused existing mobile production archive ${plan.version} (${plan.buildNumber}) — ${reuse.reason}. Pass --force-rebuild to rebuild.`
+        : `Built mobile production archive ${plan.version} (${plan.buildNumber}).`,
       formatSourceRef(source),
       `Bundle ID: ${plan.bundleId}`,
       `Archive: ${plan.archivePath}`,
       `IPA: ${plan.ipaPath}`,
       input.upload ? "Uploaded to App Store Connect with Transporter." : "Upload skipped; rerun with --upload to submit."
     ].join("\n"),
-    data: plan
+    data: { ...plan, reused: reuse.reusable, reuseReason: reuse.reason }
   };
 }
