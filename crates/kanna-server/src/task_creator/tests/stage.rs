@@ -1687,6 +1687,98 @@ async fn stage_transition_rolls_back_fork_when_daemon_command_times_out() {
     let _ = std::fs::remove_dir_all(&repo_root);
 }
 
+/// What a machine-local `agentProviders` entry does to a task that already
+/// carries a provider stamp, pinned because the two halves are easy to state
+/// wrongly (and were, in this feature's first docs).
+///
+/// A stage advance is not a respawn of a recorded run: it passes
+/// `SpawnAgentOverrides::default()`, so the task's stamp arrives only as the
+/// *last* fallback in the candidate chain, below the repo's (locally merged)
+/// `agentProviders` entry. A codex-stamped task therefore does move to the
+/// local entry's claude at its next stage boundary — that is how an operator
+/// routes an in-flight task around a wedged provider without a commit. What
+/// must hold either way is that the model and effort come from the layer that
+/// actually selected the provider, so the spawn is never `codex -m opus`.
+#[test]
+fn stage_advance_takes_the_local_entry_over_the_stamp_with_a_coherent_pair() {
+    let repo_root = init_git_repo("advance-local-entry-over-stamp");
+    std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/agents/reviewer")).unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/workflows/default.json"),
+        serde_json::json!({
+            "stages": [
+                { "name": "in progress", "prompt": "$TASK_PROMPT", "transition": "manual" },
+                {
+                    "name": "review",
+                    "agent": "reviewer",
+                    "prompt": "Review $TASK_PROMPT",
+                    "transition": "manual"
+                }
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/agents/reviewer/AGENT.md"),
+        "---\nname: reviewer\ndescription: Review changes\nagent_provider: opencode\nmodel: agent-model\n---\nReview agent.",
+    )
+    .unwrap();
+    publish_origin_main(&repo_root, "publish advance provider fixture");
+    // Uncommitted, machine-local, and read from the working tree.
+    std::fs::write(
+        repo_root.join(".kanna/config.local.json"),
+        serde_json::json!({
+            "agentProviders": {
+                "reviewer": {"provider": "claude", "model": "opus", "effort": "xhigh"}
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let config = test_config("advance-local-entry-over-stamp");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    seed_stage_advance_task(&db, &repo_root, "codex");
+
+    let run = match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
+        PreparedStageTransition::Run(run) => run,
+        PreparedStageTransition::Post(_) => panic!("expected stage swap, got post dispatch"),
+        PreparedStageTransition::Close { .. } => panic!("expected stage swap, got close"),
+    };
+
+    // The local entry outranks both the agent definition and the task's stamp.
+    assert_eq!(run.agent_provider, "claude");
+    // … and the pair travels with it, rather than being composed from a layer
+    // that lost provider selection.
+    assert_eq!(run.model.as_deref(), Some("opus"));
+    assert_eq!(run.effort.as_deref(), Some("xhigh"));
+    match &run.session {
+        PreparedSessionSpawn::Pty { args, .. } => {
+            let shell_command = args.last().expect("PTY spawn should carry a shell command");
+            assert!(
+                shell_command.contains("--model 'opus'"),
+                "claude spawn should carry the local entry's model: {shell_command}"
+            );
+            assert!(
+                !shell_command.contains("-m 'opus'"),
+                "the codex model flag must never appear: {shell_command}"
+            );
+        }
+        PreparedSessionSpawn::Agent { .. } => panic!("expected a PTY stage run"),
+    }
+
+    let _ = super::super::worktree::remove_prepared_worktree(
+        &run.cwd,
+        match &run.workspace {
+            super::super::types::PreparedRunWorkspace::Forked(workspace) => &workspace.branch,
+            _ => "task-source",
+        },
+    );
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
 #[tokio::test]
 async fn prompt_only_stage_provider_overrides_source_task_provider_in_daemon_spawn() {
     let repo_root = init_git_repo("prompt-only-stage-provider");
@@ -2433,7 +2525,9 @@ fn write_post_workflow_fixtures(repo_root: &std::path::Path) {
     publish_origin_main(repo_root, "publish post workflow definitions");
 }
 
-fn seed_post_workflow_task(config: &Config, db: &Db, repo_root: &std::path::Path) {
+/// A task parked at the workflow's first stage with a worktree of its own and
+/// an explicit provider stamp, ready to be advanced.
+fn seed_stage_advance_task(db: &Db, repo_root: &std::path::Path, stamped_provider: &str) {
     assert!(Command::new("git")
         .args(["branch", "task-source"])
         .current_dir(repo_root)
@@ -2464,8 +2558,18 @@ fn seed_post_workflow_task(config: &Config, db: &Db, repo_root: &std::path::Path
         "2026-07-02 00:00:00",
     )
     .unwrap();
-    db.update_test_pipeline_item_stage_context("task-1", "task-source", "default", None, "claude")
-        .unwrap();
+    db.update_test_pipeline_item_stage_context(
+        "task-1",
+        "task-source",
+        "default",
+        None,
+        stamped_provider,
+    )
+    .unwrap();
+}
+
+fn seed_post_workflow_task(config: &Config, db: &Db, repo_root: &std::path::Path) {
+    seed_stage_advance_task(db, repo_root, "claude");
     let _ = config;
 }
 

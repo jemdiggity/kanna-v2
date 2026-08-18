@@ -258,6 +258,16 @@ pub(super) struct AgentTuningLayer {
 /// the local entry still supplied the model, and every respawn died on
 /// `The 'opus' model is not supported when using Codex with a ChatGPT
 /// account.`
+///
+/// **A layer's model and effort belong to its first-named provider only.** A
+/// layer may name an ordered candidate list (`{"provider": ["codex",
+/// "claude"], "model": "gpt-5"}` — the shape `config.schema.json` itself
+/// gives as an example), and a list carries no way to say which candidate a
+/// single model id was written for. The leading entry is the one the author
+/// preferred and wrote the model beside; the rest are outage fallbacks, and
+/// they run on their own stamped or default model. Applying the value to
+/// every candidate reintroduces exactly this bug the moment the leading
+/// provider is unavailable — which is the case the escape hatch exists for.
 #[derive(Clone, Debug, Default)]
 pub(super) struct AgentTuningPlan {
     layers: Vec<AgentTuningLayer>,
@@ -288,18 +298,20 @@ impl AgentTuningPlan {
     }
 }
 
-/// Whether a layer's own provider selection would have produced `provider`.
-/// Entries are the same shape provider resolution accepts, including the
-/// legacy comma-separated form an explicit override may still use.
+/// Whether a layer's model/effort was written for `provider`: true when the
+/// layer names no provider at all (the caller gave a bare value, so it
+/// applies to whatever resolution lands on), and otherwise only for the
+/// layer's *first* named provider. Entries are the same shape provider
+/// resolution accepts, including the legacy comma-separated form an explicit
+/// override may still use.
 fn layer_selects_provider(providers: &[String], provider: AgentProvider) -> bool {
     let mut named = providers
         .iter()
         .flat_map(|entry| entry.split(','))
         .map(str::trim)
-        .filter(|entry| !entry.is_empty())
-        .peekable();
-    if named.peek().is_none() {
-        return true;
+        .filter(|entry| !entry.is_empty());
+    match named.next() {
+        None => true,
+        Some(preferred) => preferred == provider.as_str(),
     }
-    named.any(|entry| entry == provider.as_str())
 }

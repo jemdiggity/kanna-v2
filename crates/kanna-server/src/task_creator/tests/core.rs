@@ -946,15 +946,80 @@ fn model_resolution_skips_layers_written_for_another_provider() {
         Some("opencode-model"),
     );
 
-    // A legacy comma-separated explicit selection is matched entry by entry.
+    // A layer that names an ordered candidate list wrote its model beside the
+    // leading candidate; the trailing fallbacks run on their own defaults.
+    // `{"provider": ["claude", "codex"], "model": "opus"}` is schema-valid and
+    // is the natural "prefer claude on opus, fall back to codex" shape, so
+    // letting the model reach every candidate would rebuild `codex -m opus`
+    // the moment claude — the provider the escape hatch is routing around — is
+    // unavailable.
+    let ordered_preference = super::super::definitions::AgentProviderPreference {
+        providers: vec!["claude".to_string(), "codex".to_string()],
+        model: Some("opus".to_string()),
+        effort: Some("xhigh".to_string()),
+    };
+    let ordered =
+        super::super::agent_tuning_plan(None, None, None, Some(&ordered_preference), None);
+    assert_eq!(
+        ordered.model_for(AgentProvider::Claude).as_deref(),
+        Some("opus")
+    );
+    assert_eq!(
+        ordered.effort_for(AgentProvider::Claude).as_deref(),
+        Some("xhigh")
+    );
+    assert_eq!(
+        ordered.model_for(AgentProvider::Codex),
+        None,
+        "a fallback candidate must not inherit the leading candidate's model",
+    );
+    assert_eq!(
+        ordered.effort_for(AgentProvider::Codex),
+        None,
+        "a fallback candidate must not inherit the leading candidate's effort",
+    );
+
+    // The same rule applies to an agent definition's ordered frontmatter …
+    let ordered_agent = AgentDefinition {
+        name: "implement".to_string(),
+        description: "Implement".to_string(),
+        prompt: String::new(),
+        agent_providers: vec!["codex".to_string(), "opencode".to_string()],
+        model: Some("gpt-5-codex".to_string()),
+        effort: Some("high".to_string()),
+        permission_mode: None,
+        allowed_tools: Vec::new(),
+        visibility: DefinitionVisibility::Public,
+    };
+    let ordered_agent_plan =
+        super::super::agent_tuning_plan(None, None, None, None, Some(&ordered_agent));
+    assert_eq!(
+        ordered_agent_plan
+            .model_for(AgentProvider::Codex)
+            .as_deref(),
+        Some("gpt-5-codex"),
+    );
+    assert_eq!(ordered_agent_plan.model_for(AgentProvider::Opencode), None);
+    assert_eq!(ordered_agent_plan.effort_for(AgentProvider::Opencode), None);
+
+    // … and to the legacy comma-separated form an explicit override may use.
     let stamped_list = super::super::agent_tuning_plan(
         Some("codex,claude"),
-        None,
-        None,
+        Some("gpt-5-codex".to_string()),
+        Some("high".to_string()),
         Some(&preference),
         Some(&agent),
     );
-    assert_eq!(stamped_list.model_for(AgentProvider::Codex), None);
+    assert_eq!(
+        stamped_list.model_for(AgentProvider::Codex).as_deref(),
+        Some("gpt-5-codex"),
+    );
+    assert_eq!(
+        stamped_list.effort_for(AgentProvider::Codex).as_deref(),
+        Some("high"),
+    );
+    // claude is a trailing candidate of the explicit layer, so that layer's
+    // model does not reach it; the repo layer, written for claude, does.
     assert_eq!(
         stamped_list.model_for(AgentProvider::Claude).as_deref(),
         Some("opus"),

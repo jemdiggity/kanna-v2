@@ -812,7 +812,8 @@ async fn a_machine_local_agent_provider_reorder_reaches_a_spawn_without_any_comm
             "agentProviders": {
                 // codex leads and is not installed here, so the ordered
                 // fallback lands on claude — the reorder an operator reaches
-                // for when the leading provider is the wedged one.
+                // for when the leading provider is the wedged one. The model
+                // belongs to codex, the candidate it was written beside.
                 "implement": {"provider": ["codex", "claude"], "model": "local-model"}
             }
         })
@@ -887,9 +888,12 @@ async fn a_machine_local_agent_provider_reorder_reaches_a_spawn_without_any_comm
         } => {
             assert_eq!(session_id, task_id);
             assert_eq!(params.agent_provider, DaemonAgentProvider::Claude);
-            // The committed config says `repo-model`; only the uncommitted
-            // file says this.
-            assert_eq!(params.model.as_deref(), Some("local-model"));
+            // The local entry wrote `local-model` beside its leading
+            // candidate, codex; claude is the outage fallback behind it and
+            // runs on its own default. That the model is absent rather than
+            // the committed `repo-model` is what proves the uncommitted file
+            // replaced the committed entry.
+            assert_eq!(params.model, None);
         }
         other => panic!("expected machine-local headless spawn, got {other:?}"),
     }
@@ -905,7 +909,7 @@ async fn a_machine_local_agent_provider_reorder_reaches_a_spawn_without_any_comm
         .await
         .expect("task detail should be JSON");
     assert_eq!(task["agentProvider"], "claude");
-    assert_eq!(task["model"], "local-model");
+    assert_eq!(task["model"], Value::Null);
 
     stop_server(&mut server).await;
     std::fs::remove_dir_all(root).expect("test root should be removed");

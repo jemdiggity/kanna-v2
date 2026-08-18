@@ -178,28 +178,41 @@ definitions fresh, so an edit reaches the next spawn; the read-only definition
 lookups behind the desktop's pickers are cached per repo for 30 seconds.
 Already-running agent sessions keep the configuration they started with.
 
-**What it does *not* do: rebind an already-stamped task.** A task's provider is
-stamped when it is created (an explicit `agentProvider`) and reproduced on every
-respawn from the run being re-run, resumed, or revised — both of which sit above
-`agentProviders` in the precedence chain. A local reorder therefore moves *future*
-spawns, not tasks already pinned elsewhere; that is deliberate, because silently
-moving a running task's provider would break `--resume` (transcripts are
-per-provider, per-worktree) and change what the task is mid-flight. To move an
-existing task off a wedged provider, finish or close it and create the follow-up
-from its branch.
+**What it does to an already-stamped task.** A task's provider is stamped when
+it is created and recorded on every run, and whether a local entry can move it
+depends on what the next spawn is:
 
-What a local entry must never do is hand a stamped task a model written for
-*its* provider. A local `{"provider": "claude", "model": "opus"}` entry, applied
-to tasks stamped `codex`, produced `codex -m opus` — which the Codex CLI rejects
+| Next spawn | Provider it uses | Why |
+|---|---|---|
+| Rerun, resume, revision, recovery | the stamp | These reproduce a *recorded run*; its provider is fed back as an explicit override, which outranks `agentProviders`. Re-resolving would break `--resume` — agent-CLI transcripts are per-provider and per-worktree — and silently change what the run is continuing. |
+| Stage advance (and the fallback spawn of a stage's post, when the live session is gone) | re-resolved from the chain, with the stamp only as the final fallback | A transition is a new run of a stage, so it resolves that stage's own bindings: stage `agent_provider`, then this map (locally merged), then the agent definition, then the task's stamp. A local entry therefore does move an in-flight task at its next stage boundary — which is how a task is routed around a wedged provider without a commit. |
+
+Nothing rebinds a task in place: the move happens when the task next spawns, and
+never mid-run.
+
+**What a local entry must never do is hand a task a model written for another
+provider.** A local `{"provider": "claude", "model": "opus"}` entry, applied to
+tasks stamped `codex`, produced `codex -m opus` — which the Codex CLI rejects
 outright (`The 'opus' model is not supported when using Codex with a ChatGPT
 account.`), parking the task unread with raw JSON in its terminal (2026-08-17).
-Resolution now takes the model and effort from the first layer that would itself
-have selected the resolved provider, so a stamped `codex` task keeps codex and
-its own model, and the local entry's model applies only where the local entry's
-provider does. Coverage:
-`a_stamped_provider_never_takes_a_local_model_written_for_another_provider` in
-`crates/kanna-server/tests/provider_resolution_http.rs` drives it from HTTP task
-creation through to the daemon spawn command.
+Model and effort now come from the first layer that both names a value and would
+itself have selected the resolved provider, so whichever provider wins above, its
+model comes from the layer that chose it. Two consequences worth knowing:
+
+- A stamped `codex` task that keeps codex runs on codex's own model, not the
+  local entry's.
+- In `{"provider": ["claude", "codex"], "model": "opus"}` the model belongs to
+  `claude`, the leading candidate it was written beside. When claude is
+  unavailable and resolution falls through to codex, codex runs on its own
+  default rather than inheriting `opus` — otherwise the outage this file exists
+  for would rebuild the same broken invocation. Name the model in an entry whose
+  provider is a single id when you want it pinned.
+
+Coverage: `a_stamped_provider_never_takes_a_local_model_written_for_another_provider`
+in `crates/kanna-server/tests/provider_resolution_http.rs` drives the defect from
+HTTP task creation through to the daemon spawn command, and
+`stage_advance_takes_the_local_entry_over_the_stamp_with_a_coherent_pair` in
+`crates/kanna-server/src/task_creator/tests/stage.rs` pins the table above.
 
 **Provenance.** When the layer is active, `kanna-server` logs the file and the
 overridden keys at resolution, the repo's definition manifest carries them as
