@@ -467,6 +467,35 @@ describe("cloud task index", () => {
     expect(firestoreMocks.getDocs).toHaveBeenCalledTimes(2);
   });
 
+  it("carries a published agent provider inventory onto the desktop record", async () => {
+    firestoreMocks.getDocs.mockResolvedValueOnce({
+      docs: [
+        {
+          id: "desktop-doc-id",
+          data: () => ({
+            desktopId: "desktop-owner",
+            displayName: "Staging Mac",
+            agentProviders: ["opencode", "made-up"],
+            updatedAt: {
+              toDate: () => new Date("2026-07-06T12:30:00.000Z")
+            }
+          })
+        }
+      ],
+    });
+
+    const desktops = await createFirestoreTaskIndex({ kind: "firestore" } as never).listDesktops("user-1");
+
+    expect(desktops).toEqual([
+      {
+        desktopId: "desktop-owner",
+        displayName: "Staging Mac",
+        updatedAt: "2026-07-06T12:30:00.000Z",
+        agentProviders: ["opencode"]
+      }
+    ]);
+  });
+
   it("lists desktop records published under the signed-in user", async () => {
     firestoreMocks.getDocs.mockResolvedValueOnce({
       docs: [

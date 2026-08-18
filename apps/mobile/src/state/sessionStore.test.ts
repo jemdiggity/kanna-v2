@@ -479,7 +479,9 @@ describe("createSessionStore", () => {
       composerRepoId: null,
       composerPrompt: "",
       composerDesktopId: null,
-      composerAgentProvider: "claude",
+      // Hydration leaves the provider unresolved: it is only knowable once a
+      // machine is selected and its inventory is known.
+      composerAgentProvider: null,
       pendingTaskCreation,
       taskUiSlots: [
         {

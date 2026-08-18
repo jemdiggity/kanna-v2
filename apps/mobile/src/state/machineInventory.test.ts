@@ -73,6 +73,51 @@ describe("buildMachineInventory", () => {
     ]);
   });
 
+  it("prefers the live LAN agent inventory and leaves manual-only machines unknown", () => {
+    const machines = buildMachineInventory({
+      accountDesktops: [
+        {
+          id: "desktop-1",
+          name: "Studio Mac",
+          online: true,
+          mode: "remote",
+          reachableViaRelay: true,
+          agentProviders: ["claude", "opencode"]
+        },
+        {
+          id: "desktop-2",
+          name: "Travel Mac",
+          online: true,
+          mode: "remote",
+          reachableViaRelay: true,
+          agentProviders: []
+        }
+      ],
+      manualDesktops: [
+        {
+          desktopId: "desktop-3",
+          displayName: "Paired Mac",
+          lanEndpoints: [],
+          lastSeenAt: "2026-07-15T00:00:00Z"
+        }
+      ],
+      liveLanDesktops: [
+        {
+          id: "desktop-1",
+          name: "Studio Mac",
+          online: true,
+          mode: "lan",
+          agentProviders: ["opencode"]
+        }
+      ]
+    });
+    const byId = new Map(machines.map((machine) => [machine.desktopId, machine]));
+
+    expect(byId.get("desktop-1")?.agentProviders).toEqual(["opencode"]);
+    expect(byId.get("desktop-2")?.agentProviders).toEqual([]);
+    expect(byId.get("desktop-3")?.agentProviders).toBeUndefined();
+  });
+
   it("sorts available machines before offline machines and then by name", () => {
     const machines = buildMachineInventory({
       accountDesktops: [

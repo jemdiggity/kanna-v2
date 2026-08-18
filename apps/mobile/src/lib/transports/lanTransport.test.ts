@@ -34,6 +34,47 @@ describe("createLanTransport", () => {
     );
   });
 
+  it("carries the desktop's reported agent provider inventory", async () => {
+    const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ([
+        {
+          id: "desktop-1",
+          name: "Studio Mac",
+          connectionMode: "both",
+          agentProviders: ["opencode"]
+        }
+      ])
+    });
+    const transport = createLanTransport("http://127.0.0.1:48120", fetchImpl);
+
+    await expect(transport.listDesktops()).resolves.toEqual([
+      {
+        id: "desktop-1",
+        name: "Studio Mac",
+        online: true,
+        mode: "lan",
+        agentProviders: ["opencode"]
+      }
+    ]);
+  });
+
+  it("reports no inventory for a desktop that predates provider reporting", async () => {
+    const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ([
+        { id: "desktop-1", name: "Studio Mac", connectionMode: "both" }
+      ])
+    });
+    const transport = createLanTransport("http://127.0.0.1:48120", fetchImpl);
+
+    await expect(transport.listDesktops()).resolves.toEqual([
+      { id: "desktop-1", name: "Studio Mac", online: true, mode: "lan" }
+    ]);
+  });
+
   it("lists and runs encoded repository commands over LAN", async () => {
     const fetchImpl = vi.fn<FetchLike>()
       .mockResolvedValueOnce({

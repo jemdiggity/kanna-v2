@@ -1,3 +1,5 @@
+import type { AgentProvider } from "@kanna/agent-protocol";
+import { parseAgentProviderInventory } from "../api/agentProviders";
 import type { FetchLike } from "../transports/lanTransport";
 import type { BonjourService } from "./bonjour";
 
@@ -5,6 +7,9 @@ export interface TrustedBonjourEndpoint {
   baseUrl: string;
   desktopId: string;
   displayName: string;
+  /** Agent provider CLIs the desktop reported on its status probe. Absent from
+   * desktops that predate provider inventory. */
+  agentProviders?: AgentProvider[];
 }
 
 export async function resolveTrustedBonjourEndpoint(input: {
@@ -69,9 +74,14 @@ async function validateTrustedService(
     typeof status?.desktopName === "string"
       ? status.desktopName.trim()
       : "";
-  return status?.desktopId === desktopId && displayName
-    ? { baseUrl, desktopId, displayName }
-    : null;
+  if (status?.desktopId !== desktopId || !displayName) return null;
+  const agentProviders = parseAgentProviderInventory(status.agentProviders);
+  return {
+    baseUrl,
+    desktopId,
+    displayName,
+    ...(agentProviders ? { agentProviders } : {})
+  };
 }
 
 function orderServices(
@@ -92,6 +102,7 @@ async function fetchStatus(
 ): Promise<{
   desktopId?: unknown;
   desktopName?: unknown;
+  agentProviders?: unknown;
 } | null> {
   const controller = new AbortController();
   let timeout: ReturnType<typeof setTimeout> | null = null;
@@ -110,7 +121,11 @@ async function fetchStatus(
     }
     const body = await response.json();
     return body && typeof body === "object"
-      ? (body as { desktopId?: unknown; desktopName?: unknown })
+      ? (body as {
+          desktopId?: unknown;
+          desktopName?: unknown;
+          agentProviders?: unknown;
+        })
       : null;
   } catch {
     return null;

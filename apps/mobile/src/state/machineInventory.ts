@@ -1,3 +1,4 @@
+import type { AgentProvider } from "@kanna/agent-protocol";
 import type { DesktopSummary } from "../lib/api/types";
 import type {
   TrustedDesktopLanEndpoint,
@@ -16,6 +17,10 @@ export interface MobileMachine {
     cloud: boolean;
     lastSeenAt: string | null;
   };
+  /** Agent provider CLIs the machine reported. Absent when neither source
+   * carried one — an older desktop, or a machine known only from the manual
+   * pairing record — which callers read as "unknown", not "none". */
+  agentProviders?: AgentProvider[];
   lanEndpoints: TrustedDesktopLanEndpoint[];
 }
 
@@ -43,6 +48,9 @@ export function buildMachineInventory(input: {
     const manual = manualById.get(desktopId);
     const liveLan = liveLanById.get(desktopId);
     const lan = liveLan?.online === true;
+    // The live LAN read came from the machine itself; the account record is a
+    // published snapshot that can lag it.
+    const agentProviders = liveLan?.agentProviders ?? account?.agentProviders;
     const cloud = Boolean(
       account?.reachableViaRelay === true ||
       (account?.mode === "remote" && account.online)
@@ -64,6 +72,7 @@ export function buildMachineInventory(input: {
           manual?.lastSeenAt
         )
       },
+      ...(agentProviders ? { agentProviders } : {}),
       lanEndpoints: manual?.lanEndpoints ?? []
     };
   });
