@@ -257,13 +257,29 @@ The default `CFBundleShortVersionString` comes from `apps/mobile/VERSION`.
 absent, the root desktop `VERSION` remains a compatibility fallback. Always
 pass a monotonically increasing `--build-number`; it controls
 `CFBundleVersion` independently.
-The command only builds when it has to. If the export IPA already exists and the
-archive on disk records exactly the requested version and build number, the
-prebuild, archive, and export steps are skipped and only `--upload` runs; the
-result says `Reused existing mobile production archive`. This is safe because
-App Store Connect refuses a repeated build number for a version, so changed
-source obliges a new build number, which misses the match and rebuilds. Pass
-`--force-rebuild` to rebuild a matching archive anyway.
+The command only builds when it has to, and reuse is keyed on the **commit**,
+not on the version and build number alone. The prebuild, archive, and export
+steps are skipped — leaving only `--upload` to run, with the result reading
+`Reused existing mobile production archive` — when all of the following hold:
+
+- the export IPA exists;
+- the archive on disk records exactly the requested version and build number; and
+- the commit baked into the archived app (`extra.kanna.source.commit`, written
+  at prebuild) equals the commit `--ref` resolved to.
+
+Any mismatch rebuilds, and so does an archive that bakes in no commit at all —
+which means **every archive produced before this rule existed rebuilds once**.
+The result's `reuseReason` says which of the three gates decided it.
+
+The commit gate is what makes reuse safe. Version and build number do not
+identify a source: an attempt that archives and then stops before Apple accepts
+the binary — a failed verification, a failed upload, a Ctrl-C — leaves an
+archive on disk under a build number that is still free, so a rerun at a
+different commit with that same number would otherwise reuse it and ship the
+earlier commit's code.
+
+`--force-rebuild` skips the reuse check entirely and rebuilds unconditionally,
+even when all three gates pass.
 
 `--upload` delivers with `xcrun altool --upload-app`, which ships with Xcode.
 The command checks the uploader resolves before building, so a broken toolchain
