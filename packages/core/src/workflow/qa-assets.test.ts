@@ -226,6 +226,37 @@ describe("QA workflow assets", () => {
     expect(dispatcher.prompt).toContain("Create all children before waiting");
   });
 
+  it("keeps the architect a generic software architect rather than a Kanna-specific one", () => {
+    const file = readRepoFile(".kanna/agents/architect/AGENT.md");
+    const architect = parseAgentDefinition(file);
+    const phrases = readRepoPhrases(".kanna/agents/architect/AGENT.md");
+
+    // Any repository orchestrated by Kanna can invoke this agent, so the
+    // project under consultation is arbitrary: only the platform is Kanna.
+    expect(file).not.toContain("Kanna Architect");
+    expect(architect.prompt).toContain("You are a software architect");
+    expect(phrases).toContain(
+      "The project you are advising on is whatever software this repository holds"
+    );
+    // The coverage-gap record is conditioned on the repository declaring that
+    // convention, never asserted as universal law (nor tied to `AGENTS.md`).
+    expect(phrases).toContain("the repository's conventions document requires");
+    expect(file).not.toContain("AGENTS.md");
+
+    // Platform mechanics stay: they describe how any agent runs here.
+    expect(architect.name).toBe("architect");
+    expect(file).toContain("visibility: internal");
+    expect(architect.prompt).toContain("kanna_get_task");
+    expect(architect.prompt).toContain(
+      'kanna_complete_stage {"task_id": "$KANNA_TASK_ID"'
+    );
+    expect(architect.prompt).toContain("kanna-cli stage-complete");
+    expect(architect.prompt).toContain("The task manager remains accountable");
+    expect(architect.prompt).toContain(
+      "must begin with exactly one of `APPROVE`, `REVISE`, or `STOP-and-escalate`"
+    );
+  });
+
   it("keeps the workflow provider schema aligned with the generated registry", () => {
     const schema = JSON.parse(readRepoFile(".kanna/workflows/schema.json")) as {
       $defs?: { agentProvider?: { enum?: string[] } };

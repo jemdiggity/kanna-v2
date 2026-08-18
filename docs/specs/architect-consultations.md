@@ -25,7 +25,7 @@ The internal `architect-consultation` workflow binds `architect` itself. Callers
 
 ## Role boundary
 
-The architect is invoked for changes across process/component boundaries; protocols, persistence, security, native/release lifecycle, or migrations; disputed sources of truth; uncertain premises; unexpected scope growth; and repeated findings that show an approach is structurally wrong.
+The architect is invoked for changes across process/component boundaries; protocols, persistence, security, packaging/release lifecycle, or migrations; disputed sources of truth; uncertain premises; unexpected scope growth; and repeated findings that show an approach is structurally wrong. Only the orchestration platform is Kanna: any repository Kanna orchestrates can invoke this agent, so the definition stays project-neutral and defers to the assessed repository's own conventions — its test taxonomy, and its coverage-gap record where it declares one — instead of assuming Kanna's.
 
 It must independently verify the original objective and problem evidence, trace producers, consumers, persisted forms, versioned peers, and lifecycle owners, identify invariants and failure modes, compare viable alternatives, and return one of:
 
