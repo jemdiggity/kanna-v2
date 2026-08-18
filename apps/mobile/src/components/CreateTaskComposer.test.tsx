@@ -86,9 +86,11 @@ function findNodeByTestId(node: ElementNode, testID: string): ElementNode | null
 function renderComposer(
   overrides: Partial<{
     prompt: string;
+    repos: Parameters<NonNullable<typeof CreateTaskComposer>>[0]["repos"];
+    desktops: Parameters<NonNullable<typeof CreateTaskComposer>>[0]["desktops"];
     selectedRepoId: string | null;
     selectedDesktopId: string | null;
-    selectedAgentProvider: string;
+    selectedAgentProvider: string | null;
     isOptionsExpanded: boolean;
     errorMessage: string | null;
     onClose: () => void;
@@ -105,8 +107,8 @@ function renderComposer(
   return CreateTaskComposer({
     isOpen: true,
     prompt: overrides.prompt ?? "Ship mobile shell",
-    repos: [{ id: "repo-1", name: "Repo One" }],
-    desktops: [
+    repos: overrides.repos ?? [{ id: "repo-1", name: "Repo One" }],
+    desktops: overrides.desktops ?? [
       { id: "desktop-1", name: "Studio Mac", online: true, mode: "lan" },
       { id: "desktop-2", name: "Laptop", online: false, mode: "remote" }
     ],
@@ -114,7 +116,10 @@ function renderComposer(
       overrides.selectedRepoId === undefined ? "repo-1" : overrides.selectedRepoId,
     selectedDesktopId:
       overrides.selectedDesktopId === undefined ? "desktop-1" : overrides.selectedDesktopId,
-    selectedAgentProvider: overrides.selectedAgentProvider ?? "claude",
+    selectedAgentProvider:
+      overrides.selectedAgentProvider === undefined
+        ? "claude"
+        : overrides.selectedAgentProvider,
     isOptionsExpanded: overrides.isOptionsExpanded ?? false,
     errorMessage:
       overrides.errorMessage === undefined ? null : overrides.errorMessage,
@@ -125,7 +130,7 @@ function renderComposer(
     onToggleOptions: overrides.onToggleOptions ?? vi.fn(),
     onSubmit: overrides.onSubmit ?? vi.fn()
   } as Parameters<NonNullable<typeof CreateTaskComposer>>[0] & {
-    selectedAgentProvider: string;
+    selectedAgentProvider: string | null;
     errorMessage: string | null;
     onSelectDesktop(desktopId: string): void;
     onSelectAgentProvider(provider: string): void;
@@ -232,6 +237,79 @@ describe("CreateTaskComposer", () => {
     expect(onSelectDesktop).toHaveBeenCalledWith("desktop-2");
     expect(onSelectAgentProvider).toHaveBeenCalledWith("copilot");
     expect(AGENT_PROVIDERS).toHaveLength(5);
+  });
+
+  it("offers only the agent providers the selected machine reports", () => {
+    const tree = renderComposer({
+      isOptionsExpanded: true,
+      selectedAgentProvider: "opencode",
+      desktops: [
+        {
+          id: "desktop-1",
+          name: "Studio Mac",
+          online: true,
+          mode: "lan",
+          agentProviders: ["opencode"]
+        }
+      ]
+    });
+
+    expect(
+      findNodeByTestId(tree, "mobile.create-task.agent.opencode")
+    ).not.toBeNull();
+    for (const missing of ["claude", "copilot", "codex", "antigravity"]) {
+      expect(
+        findNodeByTestId(tree, `mobile.create-task.agent.${missing}`)
+      ).toBeNull();
+    }
+    expect(findNodeByText(tree, "Studio Mac (online) · OpenCode")).not.toBeNull();
+  });
+
+  it("still offers every provider for a machine that reports no inventory", () => {
+    const tree = renderComposer({
+      isOptionsExpanded: true,
+      desktops: [{ id: "desktop-1", name: "Studio Mac", online: true, mode: "lan" }]
+    });
+
+    for (const provider of AGENT_PROVIDERS) {
+      expect(
+        findNodeByTestId(tree, `mobile.create-task.agent.${provider}`)
+      ).not.toBeNull();
+    }
+  });
+
+  it("blocks creation on a machine that reports no agent CLI at all", () => {
+    const onSubmit = vi.fn();
+    const tree = renderComposer({
+      isOptionsExpanded: true,
+      selectedAgentProvider: null,
+      onSubmit,
+      desktops: [
+        {
+          id: "desktop-1",
+          name: "Studio Mac",
+          online: true,
+          mode: "lan",
+          agentProviders: []
+        }
+      ]
+    });
+    const submit = findNodeByTestId(tree, "mobile.create-task.submit");
+
+    expect(submit?.props?.disabled).toBe(true);
+    expect(submit?.props?.onPress).toBeUndefined();
+    for (const provider of AGENT_PROVIDERS) {
+      expect(
+        findNodeByTestId(tree, `mobile.create-task.agent.${provider}`)
+      ).toBeNull();
+    }
+    expect(
+      findNodeByText(
+        tree,
+        "Studio Mac has no agent CLI installed. Install one of Claude, Copilot, Codex, OpenCode, Antigravity on that machine to create tasks there."
+      )
+    ).not.toBeNull();
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 
   it("calls submit when the create button is enabled", () => {

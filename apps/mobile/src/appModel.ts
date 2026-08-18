@@ -1178,7 +1178,10 @@ function createTrustedLanFallbackClient({
         mode: "lan",
         reachableViaRelay: false,
         connectionMode: "lan",
-        lastSeenAt: new Date().toISOString()
+        lastSeenAt: new Date().toISOString(),
+        ...(endpoint.agentProviders
+          ? { agentProviders: endpoint.agentProviders }
+          : {})
       }));
     }
   };
@@ -1315,7 +1318,10 @@ function mapCloudDesktopRecord(
     online,
     reachableViaRelay: online,
     connectionMode: "internet",
-    lastSeenAt: desktop.updatedAt
+    lastSeenAt: desktop.updatedAt,
+    ...(desktop.agentProviders
+      ? { agentProviders: desktop.agentProviders }
+      : {})
   };
 }
 

@@ -416,7 +416,8 @@ describe("remote transport", () => {
           online: true,
           reachableViaRelay: true,
           connectionMode: "both",
-          lastSeenAt: "2026-05-08T12:00:00.000Z"
+          lastSeenAt: "2026-05-08T12:00:00.000Z",
+          agentProviders: ["opencode"]
         },
         {
           desktopId: "desktop-2",
@@ -445,7 +446,8 @@ describe("remote transport", () => {
         mode: "remote",
         reachableViaRelay: true,
         connectionMode: "both",
-        lastSeenAt: "2026-05-08T12:00:00.000Z"
+        lastSeenAt: "2026-05-08T12:00:00.000Z",
+        agentProviders: ["opencode"]
       },
       {
         id: "desktop-2",

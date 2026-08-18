@@ -143,7 +143,11 @@ export interface SessionState {
   composerPrompt: string;
   composerRepoId: string | null;
   composerDesktopId: string | null;
-  composerAgentProvider: ComposerAgentProvider;
+  /** The agent provider a submitted task would use, or `null` until the
+   * composer has resolved one against the selected machine's inventory. There
+   * is no safe hardcoded default: a provider that is not installed on the
+   * selected machine creates a task whose session never connects. */
+  composerAgentProvider: ComposerAgentProvider | null;
   isComposerOptionsExpanded: boolean;
   composerErrorMessage: string | null;
   taskCreationAttempts: TaskCreationAttempt[];
@@ -246,7 +250,7 @@ export interface SessionStore {
   setComposerState(isOpen: boolean, prompt: string): void;
   setComposerRepo(repoId: string | null): void;
   setComposerDesktop(desktopId: string | null): void;
-  setComposerAgentProvider(provider: ComposerAgentProvider): void;
+  setComposerAgentProvider(provider: ComposerAgentProvider | null): void;
   setComposerOptionsExpanded(isExpanded: boolean): void;
   setComposerErrorMessage(message: string | null): void;
   setTaskCreationState(taskCreationState: TaskCreationState): void;
@@ -336,7 +340,7 @@ export function createSessionStore(): SessionStore {
     composerPrompt: "",
     composerRepoId: null,
     composerDesktopId: null,
-    composerAgentProvider: "claude",
+    composerAgentProvider: null,
     isComposerOptionsExpanded: true,
     composerErrorMessage: null,
     taskCreationAttempts: [],
@@ -552,7 +556,7 @@ export function createSessionStore(): SessionStore {
         composerPrompt: "",
         composerRepoId: null,
         composerDesktopId: null,
-        composerAgentProvider: "claude",
+        composerAgentProvider: null,
         composerErrorMessage: null,
         taskCreationAttempts,
         pendingTaskCreation,

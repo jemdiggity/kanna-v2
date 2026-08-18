@@ -24,6 +24,7 @@ import type {
   TaskDetail,
   TaskSummary
 } from "../api/types";
+import { parseAgentProviderInventory } from "../api/agentProviders";
 
 export interface FetchResponseLike {
   ok: boolean;
@@ -359,10 +360,12 @@ function buildKspWebSocketUrl(
 }
 
 function mapDesktopSummary(desktop: DesktopDescriptor): DesktopSummary {
+  const agentProviders = parseAgentProviderInventory(desktop.agentProviders);
   return {
     id: desktop.id,
     name: desktop.name,
     online: true,
-    mode: desktop.connectionMode === "remote" ? "remote" : "lan"
+    mode: desktop.connectionMode === "remote" ? "remote" : "lan",
+    ...(agentProviders ? { agentProviders } : {})
   };
 }

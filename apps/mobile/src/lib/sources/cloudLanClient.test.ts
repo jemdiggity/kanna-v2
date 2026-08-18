@@ -2470,6 +2470,57 @@ describe("createCloudLanClient", () => {
     expect(probeLan.closeTask).not.toHaveBeenCalled();
   });
 
+  it("prefers the direct LAN agent inventory over the published cloud one", async () => {
+    const cloud = createClientMock({
+      listDesktops: vi.fn().mockResolvedValue([
+        {
+          id: "desktop-1",
+          name: "Studio Mac",
+          online: false,
+          mode: "remote",
+          connectionMode: "internet",
+          agentProviders: ["claude", "opencode"]
+        },
+        {
+          id: "desktop-2",
+          name: "Laptop",
+          online: true,
+          mode: "remote",
+          connectionMode: "internet",
+          agentProviders: ["codex"]
+        }
+      ])
+    });
+    const lan = createClientMock({
+      listDesktops: vi.fn().mockResolvedValue([
+        {
+          id: "desktop-1",
+          name: "Studio Mac",
+          online: true,
+          mode: "lan",
+          connectionMode: "lan",
+          agentProviders: ["opencode"]
+        }
+      ])
+    });
+    const client = createCloudLanClient(cloud, lan, { isLanEnabled: () => true });
+
+    const desktops = await client.listDesktops();
+
+    // The LAN read came from the machine itself; the published record can lag
+    // an uninstall. A machine only reachable through the relay keeps its
+    // published inventory.
+    expect(desktops[0]).toMatchObject({
+      id: "desktop-1",
+      connectionMode: "both",
+      agentProviders: ["opencode"]
+    });
+    expect(desktops[1]).toMatchObject({
+      id: "desktop-2",
+      agentProviders: ["codex"]
+    });
+  });
+
   it("keeps disabled composition entirely off LAN", async () => {
     const cloud = createClientMock();
     const lan = createClientMock();

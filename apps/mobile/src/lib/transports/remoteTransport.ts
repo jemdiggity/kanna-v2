@@ -1,3 +1,4 @@
+import type { AgentProvider } from "@kanna/agent-protocol";
 import type {
   KannaTransport,
   TaskAgentStreamEvent,
@@ -44,6 +45,9 @@ export interface RemoteDesktopRecord {
   reachableViaRelay: boolean;
   connectionMode: "lan" | "internet" | "both";
   lastSeenAt?: string | null;
+  /** Agent provider CLIs the desktop published. Absent from desktops that
+   * predate provider inventory publication. */
+  agentProviders?: AgentProvider[];
 }
 
 export interface RemoteDesktopInvocationRequest {
@@ -556,6 +560,9 @@ export function createRemoteTransport({
         reachableViaRelay: record.reachableViaRelay,
         connectionMode: record.connectionMode,
         lastSeenAt: record.lastSeenAt ?? null,
+        ...(record.agentProviders
+          ? { agentProviders: record.agentProviders }
+          : {}),
       }));
     },
     listRepos: async () => {

@@ -1510,10 +1510,16 @@ function mergeDesktops(
       return cloudDesktop;
     }
     usedLanIds.add(lanDesktop.id);
+    // The LAN read came straight from the machine; the cloud record is a
+    // published snapshot that can lag it. Prefer the direct inventory, and keep
+    // the published one when the LAN read carried none.
+    const agentProviders =
+      lanDesktop.agentProviders ?? cloudDesktop.agentProviders;
     return {
       ...cloudDesktop,
       online: cloudDesktop.online || lanDesktop.online,
-      connectionMode: "both" as const
+      connectionMode: "both" as const,
+      ...(agentProviders ? { agentProviders } : {})
     };
   });
 

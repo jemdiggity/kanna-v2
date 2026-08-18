@@ -139,6 +139,65 @@ describe("RootNavigator", () => {
     });
   });
 
+  it("hands the composer each machine's reported agent inventory", async () => {
+    await act(async () => {
+      rendered = create(
+        <RootNavigator
+          controller={{
+            subscribeRepoCommandTaskOpen: () => () => undefined
+          } as never}
+          forceCloudEnabled={false}
+          initialState={{
+            index: 0,
+            key: "root",
+            routeNames: ["MainTabs"],
+            routes: [{ key: "main-tabs", name: "MainTabs" }],
+            stale: false,
+            type: "stack"
+          } as never}
+          onForceCloudChange={vi.fn()}
+          onOpenAccount={vi.fn()}
+          openMachinesRequestKey={0}
+          quickReplies={DEFAULT_TASK_QUICK_REPLIES}
+          quickRepliesHydrated
+          state={{
+            accountDesktops: [],
+            composerAgentProvider: "opencode",
+            composerDesktopId: "desktop-1",
+            composerErrorMessage: null,
+            composerPrompt: "",
+            composerRepoId: null,
+            isComposerOpen: true,
+            isComposerOptionsExpanded: true,
+            liveLanDesktops: [
+              {
+                id: "desktop-1",
+                name: "Studio Mac",
+                online: true,
+                mode: "lan",
+                agentProviders: ["opencode"]
+              }
+            ],
+            pendingTaskCreation: null,
+            repos: [],
+            selectedTaskId: null,
+            trustedDesktops: []
+          } as never}
+        />
+      );
+    });
+
+    const composer = rendered.root.findByType("CreateTaskComposer" as never);
+
+    expect(composer.props.desktops).toEqual([
+      expect.objectContaining({
+        id: "desktop-1",
+        agentProviders: ["opencode"]
+      })
+    ]);
+    expect(composer.props.selectedAgentProvider).toBe("opencode");
+  });
+
   it("gives navigation-managed surfaces the Kanna dark background", async () => {
     await act(async () => {
       rendered = create(

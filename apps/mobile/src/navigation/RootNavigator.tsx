@@ -730,7 +730,10 @@ function ComposerOverlay() {
           : machine.availability.lan
             ? "lan" as const
             : "internet" as const,
-      lastSeenAt: machine.availability.lastSeenAt
+      lastSeenAt: machine.availability.lastSeenAt,
+      ...(machine.agentProviders
+        ? { agentProviders: machine.agentProviders }
+        : {})
     })),
     [machines]
   );

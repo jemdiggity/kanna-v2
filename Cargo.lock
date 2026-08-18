@@ -2913,7 +2913,7 @@ dependencies = [
 
 [[package]]
 name = "kanna-desktop"
-version = "0.0.68"
+version = "0.2.0"
 dependencies = [
  "arboard",
  "axum",

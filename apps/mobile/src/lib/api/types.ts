@@ -1,3 +1,5 @@
+import type { AgentProvider } from "@kanna/agent-protocol";
+
 export type DesktopMode = "lan" | "remote";
 
 export interface MobileServerStatus {
@@ -16,6 +18,9 @@ export interface MobileServerStatus {
   /** Absent from desktops that predate write-path health reporting; absence
    * means the health is unknown, not unhealthy. */
   writePathHealth?: WritePathHealth;
+  /** Agent provider CLIs installed on the desktop. See
+   * {@link DesktopSummary.agentProviders}. */
+  agentProviders?: AgentProvider[];
 }
 
 export interface WritePathHealth {
@@ -31,6 +36,7 @@ export interface DesktopDescriptor {
   id: string;
   name: string;
   connectionMode: string;
+  agentProviders?: AgentProvider[];
 }
 
 export interface DesktopSummary {
@@ -41,6 +47,14 @@ export interface DesktopSummary {
   reachableViaRelay?: boolean;
   connectionMode?: "lan" | "internet" | "both";
   lastSeenAt?: string | null;
+  /** Agent provider CLIs whose executable resolves on that machine, as the
+   * machine itself reported them.
+   *
+   * Advisory: `undefined` means "not reported" — an older desktop, or a record
+   * this transport cannot carry it on — and callers must fall back to offering
+   * every provider Kanna supports rather than blocking task creation. An empty
+   * array is a reported answer: that machine can run nothing. */
+  agentProviders?: AgentProvider[];
 }
 
 export interface RepoSummary {
