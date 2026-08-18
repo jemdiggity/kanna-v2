@@ -832,7 +832,8 @@ async fn a_machine_local_agent_provider_reorder_reaches_a_spawn_without_any_comm
 
     let ports = ServerPortReservations::new();
     let port = ports.lan_port();
-    let (config_path, daemon_dir, _) = write_server_config(&root, port, ports.transfer_port());
+    let (config_path, daemon_dir, db_path) =
+        write_server_config(&root, port, ports.transfer_port());
     let ServerPortReservations { lan, transfer } = ports;
     let daemon = tokio::spawn(fake_daemon_until_spawn(daemon_dir));
     let mut server = start_server(&config_path, &root, port, lan, transfer).await;
@@ -910,6 +911,37 @@ async fn a_machine_local_agent_provider_reorder_reaches_a_spawn_without_any_comm
         .expect("task detail should be JSON");
     assert_eq!(task["agentProvider"], "claude");
     assert_eq!(task["model"], Value::Null);
+
+    // The persisted spawn options have to agree with the stamp. The row is
+    // first written with the *leading* candidate's pair (codex, here, with
+    // `local-model`), and only availability decides that the task actually
+    // binds to claude — so without a restamp the column would keep a model
+    // belonging to a provider the task is not running. No HTTP surface
+    // exposes the column once the task has a run (task detail answers from
+    // the latest `stage_run`), so it is read from the server's database
+    // directly. The desktop's recover-session action reads exactly this pair
+    // (`apps/desktop/src/stores/sessions.ts`) and would rebuild
+    // `codex -m local-model` from a mismatched row.
+    let (stamped_provider, spawn_options): (String, Option<String>) =
+        Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("server database should open read-only")
+            .query_row(
+                "SELECT agent_provider, agent_spawn_options FROM pipeline_item WHERE id = ?1",
+                [&task_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("created task should persist its agent binding");
+    assert_eq!(stamped_provider, "claude");
+    let spawn_options: Value = serde_json::from_str(
+        &spawn_options.expect("created task should persist its spawn options"),
+    )
+    .expect("stored spawn options should be JSON");
+    assert_eq!(
+        spawn_options["model"],
+        Value::Null,
+        "persisted spawn options must not carry a model written for another provider"
+    );
+    assert_eq!(spawn_options["effort"], Value::Null);
 
     stop_server(&mut server).await;
     std::fs::remove_dir_all(root).expect("test root should be removed");

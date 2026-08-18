@@ -1123,17 +1123,31 @@ impl Db {
         Ok(())
     }
 
+    /// Record what a task actually bound to once its workspace is prepared and
+    /// provider availability has been probed.
+    ///
+    /// `agent_spawn_options_json` travels in the same statement as the
+    /// provider deliberately: the column holds that provider's model and
+    /// effort, and the desktop's recover-session action reads the two together
+    /// (`apps/desktop/src/stores/sessions.ts`) to rebuild the invocation. The
+    /// row is first written with the *leading* candidate's options, so a task
+    /// that falls through to a later candidate has to restamp them here or the
+    /// stored pair is one a CLI would reject (`codex -m opus`). `None` leaves
+    /// the column as it is, for callers that only rebind the provider.
     pub fn update_pipeline_item_agent_binding(
         &self,
         id: &str,
         agent_provider: &str,
         agent_type: &str,
+        agent_spawn_options_json: Option<&str>,
     ) -> Result<(), rusqlite::Error> {
         let rows_affected = self.conn.execute(
             "UPDATE pipeline_item
-             SET agent_provider = ?, agent_type = ?, updated_at = datetime('now')
+             SET agent_provider = ?, agent_type = ?,
+                 agent_spawn_options = COALESCE(?, agent_spawn_options),
+                 updated_at = datetime('now')
              WHERE id = ? AND closed_at IS NULL",
-            (agent_provider, agent_type, id),
+            (agent_provider, agent_type, agent_spawn_options_json, id),
         )?;
         if rows_affected == 0 {
             return Err(rusqlite::Error::QueryReturnedNoRows);

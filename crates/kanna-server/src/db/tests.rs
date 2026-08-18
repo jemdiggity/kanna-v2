@@ -622,7 +622,7 @@ fn snapshot_reports_the_latest_stage_run_provider_for_terminal_rendering() {
         "2026-08-12 00:00:00",
     )
     .expect("insert task");
-    db.update_pipeline_item_agent_binding("task-provider", "codex", "pty")
+    db.update_pipeline_item_agent_binding("task-provider", "codex", "pty", None)
         .expect("retain task provider fallback");
     db.insert_stage_run(NewStageRun {
         id: "run-pr",

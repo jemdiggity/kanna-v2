@@ -2724,8 +2724,18 @@ fn prepare_task_spawn_with_error(
         db.update_create_task_intent(&task_id, request_json)
             .map_err(|error| format!("db error: {error}"))?;
     }
-    db.update_pipeline_item_agent_binding(&task_id, provider.as_str(), agent_type.as_str())
-        .map_err(|error| format!("db error: {error}"))?;
+    // The row was inserted with the leading candidate's options; availability
+    // may have landed the spawn on a later one, so the stored model and effort
+    // are restamped for the provider actually bound. The desktop's
+    // recover-session action rebuilds an invocation from this pair, and a pair
+    // drawn from two providers is one the CLI rejects.
+    db.update_pipeline_item_agent_binding(
+        &task_id,
+        provider.as_str(),
+        agent_type.as_str(),
+        Some(&agent_spawn_options_json(&resolved, provider)?),
+    )
+    .map_err(|error| format!("db error: {error}"))?;
     let title = resolved
         .display_name
         .clone()
