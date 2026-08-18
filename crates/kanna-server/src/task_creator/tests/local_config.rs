@@ -185,7 +185,9 @@ fn local_provider_preference_beats_the_repo_and_agent_but_loses_to_a_task_overri
         AgentProvider::Opencode,
     );
     assert_eq!(
-        super::super::resolve_agent_model(None, Some(&preference), Some(&agent)).as_deref(),
+        super::super::agent_tuning_plan(None, None, None, Some(&preference), Some(&agent))
+            .model_for(AgentProvider::Opencode)
+            .as_deref(),
         Some("local-model"),
     );
 
@@ -216,13 +218,30 @@ fn local_provider_preference_beats_the_repo_and_agent_but_loses_to_a_task_overri
         AgentProvider::Copilot,
     );
     assert_eq!(
-        super::super::resolve_agent_model(
+        super::super::agent_tuning_plan(
+            Some("claude"),
             Some("explicit-model".to_string()),
+            None,
             Some(&preference),
             Some(&agent),
         )
+        .model_for(AgentProvider::Claude)
         .as_deref(),
         Some("explicit-model"),
+    );
+    // The local entry's model belongs to the provider it names, so a task
+    // override onto another provider takes that provider's own default
+    // rather than the local layer's claude/opencode model.
+    assert_eq!(
+        super::super::agent_tuning_plan(
+            Some("claude"),
+            None,
+            None,
+            Some(&preference),
+            Some(&agent),
+        )
+        .model_for(AgentProvider::Claude),
+        None,
     );
 
     let _ = std::fs::remove_dir_all(&repo.path);

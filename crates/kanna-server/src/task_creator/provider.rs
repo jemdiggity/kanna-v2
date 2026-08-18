@@ -227,3 +227,79 @@ pub(super) fn resolve_agent_provider_with(
         .find(|provider| is_available(*provider))
         .ok_or_else(|| unavailable_provider_error(&candidates))
 }
+
+/// One layer of the model/effort chain together with the provider selection
+/// it was written beside. An empty `providers` list is provider-agnostic —
+/// the caller named a value without naming a provider, so it applies to
+/// whichever provider resolution lands on.
+#[derive(Clone, Debug, Default)]
+pub(super) struct AgentTuningLayer {
+    pub(super) providers: Vec<String>,
+    pub(super) model: Option<String>,
+    pub(super) effort: Option<String>,
+}
+
+/// The model and effort a spawn may draw from, left unresolved until the
+/// provider is finally chosen.
+///
+/// Model and effort values belong to the provider they were written for:
+/// `codex -m opus` is rejected outright by the Codex CLI, and no two provider
+/// CLIs share an effort vocabulary. Resolution therefore must not compose a
+/// model from one layer onto a provider chosen by a higher-precedence layer.
+/// This walks the same ordered chain as provider resolution and takes the
+/// first layer that both names a value *and* would itself have selected the
+/// resolved provider; layers written for some other provider are skipped, and
+/// the pair falls back to that provider's own stamped or default model.
+///
+/// The alternative — composing across layers — is what let a machine-local
+/// `.kanna/config.local.json` entry pointing an agent at
+/// `{"provider": "claude", "model": "opus"}` poison the respawn of a task
+/// already stamped `codex` (2026-08-17): the stamp won provider selection,
+/// the local entry still supplied the model, and every respawn died on
+/// `The 'opus' model is not supported when using Codex with a ChatGPT
+/// account.`
+#[derive(Clone, Debug, Default)]
+pub(super) struct AgentTuningPlan {
+    layers: Vec<AgentTuningLayer>,
+}
+
+impl AgentTuningPlan {
+    pub(super) fn new(layers: Vec<AgentTuningLayer>) -> Self {
+        Self { layers }
+    }
+
+    pub(super) fn model_for(&self, provider: AgentProvider) -> Option<String> {
+        self.layers_for(provider)
+            .find_map(|layer| layer.model.clone())
+    }
+
+    pub(super) fn effort_for(&self, provider: AgentProvider) -> Option<String> {
+        self.layers_for(provider)
+            .find_map(|layer| layer.effort.clone())
+    }
+
+    fn layers_for(
+        &self,
+        provider: AgentProvider,
+    ) -> impl Iterator<Item = &AgentTuningLayer> + use<'_> {
+        self.layers
+            .iter()
+            .filter(move |layer| layer_selects_provider(&layer.providers, provider))
+    }
+}
+
+/// Whether a layer's own provider selection would have produced `provider`.
+/// Entries are the same shape provider resolution accepts, including the
+/// legacy comma-separated form an explicit override may still use.
+fn layer_selects_provider(providers: &[String], provider: AgentProvider) -> bool {
+    let mut named = providers
+        .iter()
+        .flat_map(|entry| entry.split(','))
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .peekable();
+    if named.peek().is_none() {
+        return true;
+    }
+    named.any(|entry| entry == provider.as_str())
+}

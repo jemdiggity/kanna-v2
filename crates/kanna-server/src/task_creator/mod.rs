@@ -37,7 +37,8 @@ use prompt::{build_stage_prompt, PromptContext};
 use provider::{
     normalize_agent_type, resolve_agent_provider, resolve_agent_provider_candidates,
     resolve_agent_type, validate_effort_shape, validate_model_shape, validate_provider_effort,
-    validate_provider_model, AgentProvider, AgentSessionType, ResolveProviderCandidatesError,
+    validate_provider_model, AgentProvider, AgentSessionType, AgentTuningLayer, AgentTuningPlan,
+    ResolveProviderCandidatesError,
 };
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -385,6 +386,10 @@ impl std::fmt::Display for DormantStartError {
 /// existing task — rerun, resume, revision — therefore has to feed the pinned
 /// values back in; resolving from scratch silently re-runs the chain and
 /// lands on whatever the repo's default happens to be.
+///
+/// Provider and model travel together here on purpose: they are one layer of
+/// the chain (`agent_tuning_plan`), so a stamped provider is never handed a
+/// model some lower layer wrote for a different CLI.
 #[derive(Debug, Default, Clone)]
 pub(in crate::task_creator) struct SpawnAgentOverrides {
     pub(in crate::task_creator) provider: Option<String>,
@@ -542,8 +547,15 @@ pub(crate) fn prepare_rerun_stage_for_api(
         provider_search_path.as_deref(),
         provider_workspace_root,
     )?;
-    let model = resolve_agent_model(overrides.model, repo_preference, agent.as_ref());
-    let effort = resolve_agent_effort(overrides.effort, repo_preference, agent.as_ref());
+    let tuning = agent_tuning_plan(
+        overrides.provider.as_deref(),
+        overrides.model,
+        overrides.effort,
+        repo_preference,
+        agent.as_ref(),
+    );
+    let model = tuning.model_for(provider);
+    let effort = tuning.effort_for(provider);
     // A pinned model the resolved provider cannot take would make the spawn
     // silently wrong; drop it rather than fail the rerun.
     let model = match validate_provider_model(provider, model.as_deref()) {
@@ -855,6 +867,10 @@ pub(crate) fn prepare_create_task_repair_for_api(
     )?;
     let setup = new_task_setup_cmds(repo_config, &resolved.stage_setup, &resolved.setup_cmds);
     let defer_headless_setup = agent_type == AgentSessionType::Agent && !setup.is_empty();
+    // The task's stored provider stamp wins here, so the pair is resolved for
+    // it rather than composed from a layer written for another provider.
+    let model = resolved.model_for(provider);
+    let effort = resolved.effort_for(provider);
     let (mut session, provider_session_id) = build_prepared_session(
         provider,
         agent_type,
@@ -863,8 +879,8 @@ pub(crate) fn prepare_create_task_repair_for_api(
         &resolved.workflow_name,
         Some(resolved.stage_transition.as_str()),
         resolved.final_prompt,
-        resolved.model.clone(),
-        resolved.effort.clone(),
+        model.clone(),
+        effort.clone(),
         resolved.permission_mode,
         resolved.allowed_tools,
         resolved.disallowed_tools,
@@ -897,8 +913,8 @@ pub(crate) fn prepare_create_task_repair_for_api(
         run_kind: "main",
         stage_agent: resolved.stage_agent,
         agent_provider: provider.as_str().to_string(),
-        model: resolved.model,
-        effort: resolved.effort,
+        model,
+        effort,
         completion_transition: resolved.stage_transition,
         provider_session_id,
         cwd: worktree_path,
@@ -964,6 +980,13 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
         fallback_provider,
     )
     .map_err(|error| error.to_string())?;
+    let tuning = agent_tuning_plan(
+        overrides.provider.as_deref(),
+        overrides.model.clone(),
+        overrides.effort.clone(),
+        repo_preference,
+        agent.as_ref(),
+    );
     if provider_candidates.len() == 1 {
         // Session-type compatibility is configuration validation, not an
         // availability probe. Keep this early rejection for a fixed provider
@@ -1041,9 +1064,6 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
                     .unwrap_or_default(),
             );
         }
-        let model = resolve_agent_model(overrides.model.clone(), repo_preference, agent.as_ref());
-        let effort =
-            resolve_agent_effort(overrides.effort.clone(), repo_preference, agent.as_ref());
         let permission_mode = agent
             .as_ref()
             .and_then(|agent| agent.permission_mode.clone());
@@ -1051,7 +1071,6 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
             .as_ref()
             .map(|agent| agent.allowed_tools.clone())
             .unwrap_or_default();
-        let stage_run_model = model.clone();
         let provider = if setup.is_empty() {
             provider_candidates
                 .iter()
@@ -1076,6 +1095,11 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
                 .ok_or_else(|| unavailable_provider_error(&provider_candidates))?
         };
         let agent_type = resolve_agent_type(source_agent_type, provider)?;
+        // Model and effort are resolved for the provider actually chosen, so
+        // a layer written for another provider never attaches to this spawn.
+        let model = tuning.model_for(provider);
+        let effort = tuning.effort_for(provider);
+        let stage_run_model = model.clone();
         let (session, provider_session_id) = build_prepared_session(
             provider,
             agent_type,
@@ -1106,8 +1130,10 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
             source_agent_type: source_agent_type.map(str::to_string),
             workflow_name: workflow_name.to_string(),
             final_prompt: final_prompt.clone(),
-            model: stage_run_model.clone(),
-            effort: effort.clone(),
+            // The deferred worker re-resolves availability after setup and
+            // may land on a later candidate, so it re-derives the pair for
+            // whichever provider it ends up spawning.
+            tuning: tuning.clone(),
             permission_mode,
             allowed_tools,
             mcp_config_path,
@@ -1231,6 +1257,11 @@ pub(crate) fn finish_deferred_stage_setup(
         })
         .ok_or_else(|| unavailable_provider_error(&deferred.provider_candidates))?;
     let agent_type = resolve_agent_type(deferred.source_agent_type.as_deref(), provider)?;
+    // Setup may have installed a later candidate than the one this spawn was
+    // provisionally bound to, so the model/effort pair is derived here, for
+    // the provider actually being spawned, and the run is stamped with it.
+    let model = deferred.tuning.model_for(provider);
+    let effort = deferred.tuning.effort_for(provider);
     let (session, provider_session_id) = build_prepared_session(
         provider,
         agent_type,
@@ -1239,8 +1270,8 @@ pub(crate) fn finish_deferred_stage_setup(
         &deferred.workflow_name,
         Some(prepared.completion_transition.as_str()),
         deferred.final_prompt,
-        deferred.model,
-        deferred.effort,
+        model.clone(),
+        effort.clone(),
         deferred.permission_mode,
         deferred.allowed_tools,
         Vec::new(),
@@ -1256,6 +1287,8 @@ pub(crate) fn finish_deferred_stage_setup(
         deferred.local_config_override.as_ref(),
     )?;
     prepared.agent_provider = provider.as_str().to_string();
+    prepared.model = model;
+    prepared.effort = effort;
     prepared.provider_session_id = provider_session_id;
     prepared.session = session;
     Ok(())
@@ -2023,10 +2056,17 @@ pub(crate) fn create_dormant_task_for_api_with_error(
         &repo.path,
     )?;
     let agent_type = resolve_agent_type(request.agent_type.as_deref(), provider)?;
-    let model = resolve_agent_model(request.model.clone(), repo_preference, agent.as_ref());
+    let tuning = agent_tuning_plan(
+        explicit_provider.as_deref(),
+        request.model.clone(),
+        request.effort.clone(),
+        repo_preference,
+        agent.as_ref(),
+    );
+    let model = tuning.model_for(provider);
     validate_provider_model(provider, model.as_deref())
         .map_err(PrepareTaskError::InvalidRequest)?;
-    let effort = resolve_agent_effort(request.effort.clone(), repo_preference, agent.as_ref());
+    let effort = tuning.effort_for(provider);
     validate_provider_effort(provider, effort.as_deref())
         .map_err(PrepareTaskError::InvalidRequest)?;
     let permission_mode = request.permission_mode.clone().or_else(|| {
@@ -2223,20 +2263,21 @@ pub(crate) fn prepare_start_dormant_task_for_api(
         },
     );
 
-    let model = resolve_agent_model(
+    let tuning = agent_tuning_plan(
+        create_request
+            .as_ref()
+            .and_then(|request| request.agent_provider.as_deref()),
         create_request
             .as_ref()
             .and_then(|request| request.model.clone()),
-        repo_preference,
-        agent.as_ref(),
-    );
-    let effort = resolve_agent_effort(
         create_request
             .as_ref()
             .and_then(|request| request.effort.clone()),
         repo_preference,
         agent.as_ref(),
     );
+    let model = tuning.model_for(provider);
+    let effort = tuning.effort_for(provider);
     let permission_mode = create_request
         .as_ref()
         .and_then(|request| request.permission_mode.clone())
@@ -2457,8 +2498,9 @@ struct ResolvedTaskSpawn {
     initial_terminal_geometry: Option<(u16, u16)>,
     stage_setup: Vec<String>,
     final_prompt: String,
-    model: Option<String>,
-    effort: Option<String>,
+    /// Model/effort layers, resolved against whichever candidate the spawn
+    /// finally binds to (`ResolvedTaskSpawn::model_for`).
+    tuning: AgentTuningPlan,
     permission_mode: Option<String>,
     allowed_tools: Vec<String>,
     disallowed_tools: Vec<String>,
@@ -2473,6 +2515,24 @@ struct ResolvedTaskSpawn {
     stored_base_ref: Option<String>,
     notify_task_id: Option<String>,
     parent_task_id: Option<String>,
+}
+
+impl ResolvedTaskSpawn {
+    /// The model this spawn uses once it binds to `provider`. Layers written
+    /// for a different provider do not apply — see `AgentTuningPlan`.
+    fn model_for(&self, provider: AgentProvider) -> Option<String> {
+        self.tuning.model_for(provider)
+    }
+
+    fn effort_for(&self, provider: AgentProvider) -> Option<String> {
+        self.tuning.effort_for(provider)
+    }
+
+    /// The provider a task record is stamped with before the workspace has
+    /// been prepared: the configured first choice.
+    fn provisional_provider(&self) -> Option<AgentProvider> {
+        self.provider_candidates.first().copied()
+    }
 }
 
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
@@ -2524,8 +2584,8 @@ fn resolved_create_task_intent_json(
             agent_type: agent_type.as_str().to_string(),
             initial_terminal_geometry: resolved.initial_terminal_geometry,
             setup: new_task_setup_cmds(repo_config, &resolved.stage_setup, &resolved.setup_cmds),
-            model: resolved.model.clone(),
-            effort: resolved.effort.clone(),
+            model: resolved.model_for(provider),
+            effort: resolved.effort_for(provider),
             permission_mode: resolved.permission_mode.clone(),
             allowed_tools: resolved.allowed_tools.clone(),
             disallowed_tools: resolved.disallowed_tools.clone(),
@@ -2571,11 +2631,8 @@ fn prepare_task_spawn_with_error(
             }
             other => other,
         })?;
-    let stage_run_model = resolved.model.clone();
-    let stage_run_effort = resolved.effort.clone();
-    let provisional_provider = *resolved
-        .provider_candidates
-        .first()
+    let provisional_provider = resolved
+        .provisional_provider()
         .ok_or_else(|| "No agent provider configured for this request.".to_string())?;
     // This binding exists only while the workspace and its setup are being
     // prepared. Do not validate the requested session type against the first
@@ -2647,6 +2704,8 @@ fn prepare_task_spawn_with_error(
         provider_session_id,
         provider,
         agent_type,
+        model: stage_run_model,
+        effort: stage_run_effort,
     } = match prepared {
         Ok(prepared) => prepared,
         Err(err) => {
@@ -2705,6 +2764,9 @@ fn record_task_prepare_failure(
     error: &str,
 ) -> Result<(), String> {
     let result = format!("failed to prepare task {task_id}: {error}");
+    let provisional_provider = resolved.provisional_provider();
+    let model = provisional_provider.and_then(|provider| resolved.model_for(provider));
+    let effort = provisional_provider.and_then(|provider| resolved.effort_for(provider));
     db.cancel_running_stage_runs(task_id)
         .map_err(|e| format!("db error: {}", e))?;
     db.update_pipeline_item_activity(task_id, "unread")
@@ -2716,12 +2778,9 @@ fn record_task_prepare_failure(
         stage: &resolved.stage_name,
         kind: "main",
         agent: resolved.stage_agent.as_deref(),
-        agent_provider: resolved
-            .provider_candidates
-            .first()
-            .map(|provider| provider.as_str()),
-        model: resolved.model.as_deref(),
-        effort: resolved.effort.as_deref(),
+        agent_provider: provisional_provider.map(|provider| provider.as_str()),
+        model: model.as_deref(),
+        effort: effort.as_deref(),
         status: "failed",
         result: Some(&result),
         feedback: Some("task preparation failed"),
@@ -2742,14 +2801,46 @@ fn generate_failure_run_id(task_id: &str) -> String {
     format!("run-{task_id}-{nanos}")
 }
 
-fn resolve_agent_model(
+/// Assemble the model/effort chain for a spawn, remembering which providers
+/// each layer was written for so the pair can only resolve coherently.
+///
+/// The layers are the ones AGENTS.md ("Provider/model precedence") names, in
+/// the same order provider resolution walks them: the explicit task or stage
+/// override (or, for a respawn, the values stamped on the run being
+/// reproduced), then the repo's matching `agentProviders` entry, then the
+/// layered agent definition's frontmatter. `explicit_provider` is the
+/// provider selection that travelled with the explicit values — a run stamp
+/// carries both, so reproducing one never crosses layers.
+fn agent_tuning_plan(
+    explicit_provider: Option<&str>,
     explicit_model: Option<String>,
+    explicit_effort: Option<String>,
     repo_preference: Option<&definitions::AgentProviderPreference>,
     agent: Option<&definitions::AgentDefinition>,
-) -> Option<String> {
-    explicit_model
-        .or_else(|| repo_preference.and_then(|preference| preference.model.clone()))
-        .or_else(|| agent.and_then(|agent| agent.model.clone()))
+) -> AgentTuningPlan {
+    AgentTuningPlan::new(vec![
+        AgentTuningLayer {
+            providers: explicit_provider
+                .map(|provider| vec![provider.to_string()])
+                .unwrap_or_default(),
+            model: explicit_model,
+            effort: explicit_effort,
+        },
+        AgentTuningLayer {
+            providers: repo_preference
+                .map(|preference| preference.providers.clone())
+                .unwrap_or_default(),
+            model: repo_preference.and_then(|preference| preference.model.clone()),
+            effort: repo_preference.and_then(|preference| preference.effort.clone()),
+        },
+        AgentTuningLayer {
+            providers: agent
+                .map(|agent| agent.agent_providers.clone())
+                .unwrap_or_default(),
+            model: agent.and_then(|agent| agent.model.clone()),
+            effort: agent.and_then(|agent| agent.effort.clone()),
+        },
+    ])
 }
 
 fn pin_task_workflow_definition(
@@ -2761,16 +2852,6 @@ fn pin_task_workflow_definition(
     let definition_json =
         serde_json::to_string(&workflow).map_err(|e| format!("serialize error: {e}"))?;
     Ok((workflow, definition_json))
-}
-
-fn resolve_agent_effort(
-    explicit_effort: Option<String>,
-    repo_preference: Option<&definitions::AgentProviderPreference>,
-    agent: Option<&definitions::AgentDefinition>,
-) -> Option<String> {
-    explicit_effort
-        .or_else(|| repo_preference.and_then(|preference| preference.effort.clone()))
-        .or_else(|| agent.and_then(|agent| agent.effort.clone()))
 }
 
 fn resolve_task_spawn(
@@ -2856,31 +2937,29 @@ fn resolve_task_spawn(
     if provider_candidates.len() == 1 {
         resolve_agent_type(request.agent_type.as_deref(), provider_candidates[0])?;
     }
-    let model = resolve_agent_model(
+    // Which candidate this task spawns with is only settled once setup has
+    // run and availability is probed, so the model/effort chain stays a plan
+    // until then; every candidate's own pair is validated up front.
+    let tuning = agent_tuning_plan(
+        request.explicit_provider.as_deref(),
         request.model,
-        repo_config.agent_provider_preference(stage_agent.as_deref()),
-        agent.as_ref(),
-    );
-    let effort = resolve_agent_effort(
         request.effort,
         repo_config.agent_provider_preference(stage_agent.as_deref()),
         agent.as_ref(),
     );
-    validate_model_shape(model.as_deref())?;
-    validate_effort_shape(effort.as_deref())?;
-    if provider_candidates.len() == 1 {
-        validate_provider_effort(provider_candidates[0], effort.as_deref())?;
+    for candidate in &provider_candidates {
+        validate_model_shape(tuning.model_for(*candidate).as_deref())?;
+        validate_effort_shape(tuning.effort_for(*candidate).as_deref())?;
     }
-    if model.is_some()
-        && provider_candidates
-            .iter()
-            .all(|provider| provider.model_override_flag().is_none())
-    {
-        return Err(format!(
-            "model overrides are not supported for agent provider '{}'",
-            provider_candidates[0]
-        )
-        .into());
+    if provider_candidates.len() == 1 {
+        validate_provider_effort(
+            provider_candidates[0],
+            tuning.effort_for(provider_candidates[0]).as_deref(),
+        )?;
+        validate_provider_model(
+            provider_candidates[0],
+            tuning.model_for(provider_candidates[0]).as_deref(),
+        )?;
     }
     let permission_mode = request.permission_mode.or_else(|| {
         agent
@@ -2924,8 +3003,7 @@ fn resolve_task_spawn(
             .and_then(|environment| environment.setup.clone())
             .unwrap_or_default(),
         final_prompt,
-        model,
-        effort,
+        tuning,
         permission_mode,
         allowed_tools,
         disallowed_tools,
@@ -2953,7 +3031,7 @@ fn insert_new_task_record(
     agent_type: AgentSessionType,
     has_requested_task_id: bool,
 ) -> Result<(), PrepareTaskError> {
-    let agent_spawn_options_json = agent_spawn_options_json(resolved)?;
+    let agent_spawn_options_json = agent_spawn_options_json(resolved, provider)?;
     let result = db.insert_pipeline_item(NewPipelineItem {
         id: task_id,
         repo_id: &repo.id,
@@ -3002,10 +3080,13 @@ fn is_pipeline_item_primary_key_violation(error: &rusqlite::Error) -> bool {
     )
 }
 
-fn agent_spawn_options_json(resolved: &ResolvedTaskSpawn) -> Result<String, String> {
+fn agent_spawn_options_json(
+    resolved: &ResolvedTaskSpawn,
+    provider: AgentProvider,
+) -> Result<String, String> {
     serde_json::to_string(&serde_json::json!({
-        "model": resolved.model,
-        "effort": resolved.effort,
+        "model": resolved.model_for(provider),
+        "effort": resolved.effort_for(provider),
         "permissionMode": resolved.permission_mode,
         "allowedTools": resolved.allowed_tools,
         "disallowedTools": resolved.disallowed_tools,
@@ -3146,6 +3227,10 @@ struct PreparedNewTaskSession {
     provider_session_id: Option<String>,
     provider: AgentProvider,
     agent_type: AgentSessionType,
+    /// Resolved for `provider`, which is only settled here — the task record
+    /// and the create intent are stamped with these values afterwards.
+    model: Option<String>,
+    effort: Option<String>,
 }
 
 fn prepare_new_task_session(
@@ -3219,6 +3304,8 @@ fn prepare_new_task_session(
         let agent_type = resolve_agent_type(resolved.requested_agent_type.as_deref(), provider)?;
         (provider, agent_type, setup.as_slice())
     };
+    let model = resolved.model_for(provider);
+    let effort = resolved.effort_for(provider);
     let (mut session, provider_session_id) = build_prepared_session(
         provider,
         agent_type,
@@ -3227,8 +3314,8 @@ fn prepare_new_task_session(
         &resolved.workflow_name,
         Some(resolved.stage_transition.as_str()),
         resolved.final_prompt.clone(),
-        resolved.model.clone(),
-        resolved.effort.clone(),
+        model.clone(),
+        effort.clone(),
         resolved.permission_mode.clone(),
         resolved.allowed_tools.clone(),
         resolved.disallowed_tools.clone(),
@@ -3255,6 +3342,8 @@ fn prepare_new_task_session(
         provider_session_id,
         provider,
         agent_type,
+        model,
+        effort,
     })
 }
 

@@ -207,13 +207,23 @@ acknowledging transferred descriptors.
   repo's matching `agentProviders` entry, then layered `AGENT.md`/`EXTEND.md`
   frontmatter, then the global default provider setting. Exact map keys beat
   globs; among globs, the most non-`*` characters wins and lexical order breaks
-  ties.
+  ties. **A provider and its model/effort must come from coherent layers.**
+  Model and effort ids are provider-specific — `codex -m opus` is rejected by
+  the Codex CLI, and no two CLIs share an effort vocabulary — so resolution
+  never composes them across layers: it walks the same chain and takes the
+  first layer that both names a value *and* would itself have selected the
+  resolved provider. A layer written for another provider is skipped, and the
+  spawn falls back to the resolved provider's own stamped or default model.
 - `config.json` has a machine-local companion, `.kanna/config.local.json`:
   gitignored, read from the **open repo's working tree** rather than the origin
   snapshot, and deep-merged over the committed config with local winning — so a
   wedged provider is reordered on one machine in seconds instead of through a
   merge to `origin/main`. It occupies the `agentProviders` slot in the
   precedence chain above, so an explicit task or stage override still wins.
+  A local `agentProviders` entry binds *future* spawns; it never rebinds a task
+  whose provider is already stamped (an explicit creation override, or the run
+  a rerun/revision reproduces). Stamps win, and the stamped provider keeps its
+  own model rather than the local entry's — see `docs/dev/dev-workflow.md`.
   Only `agentProviders`, `workflow`, `ports`, `setup`, `teardown`, and `test`
   may be set; `vars`, `flavors`, `workspace`, `stage_order`, and the
   `reserved_port*` keys are deliberately excluded, because they change what a

@@ -178,6 +178,29 @@ definitions fresh, so an edit reaches the next spawn; the read-only definition
 lookups behind the desktop's pickers are cached per repo for 30 seconds.
 Already-running agent sessions keep the configuration they started with.
 
+**What it does *not* do: rebind an already-stamped task.** A task's provider is
+stamped when it is created (an explicit `agentProvider`) and reproduced on every
+respawn from the run being re-run, resumed, or revised — both of which sit above
+`agentProviders` in the precedence chain. A local reorder therefore moves *future*
+spawns, not tasks already pinned elsewhere; that is deliberate, because silently
+moving a running task's provider would break `--resume` (transcripts are
+per-provider, per-worktree) and change what the task is mid-flight. To move an
+existing task off a wedged provider, finish or close it and create the follow-up
+from its branch.
+
+What a local entry must never do is hand a stamped task a model written for
+*its* provider. A local `{"provider": "claude", "model": "opus"}` entry, applied
+to tasks stamped `codex`, produced `codex -m opus` — which the Codex CLI rejects
+outright (`The 'opus' model is not supported when using Codex with a ChatGPT
+account.`), parking the task unread with raw JSON in its terminal (2026-08-17).
+Resolution now takes the model and effort from the first layer that would itself
+have selected the resolved provider, so a stamped `codex` task keeps codex and
+its own model, and the local entry's model applies only where the local entry's
+provider does. Coverage:
+`a_stamped_provider_never_takes_a_local_model_written_for_another_provider` in
+`crates/kanna-server/tests/provider_resolution_http.rs` drives it from HTTP task
+creation through to the daemon spawn command.
+
 **Provenance.** When the layer is active, `kanna-server` logs the file and the
 overridden keys at resolution, the repo's definition manifest carries them as
 `config.localOverride`, and every PTY spawn it touched prints them before setup

@@ -735,6 +735,92 @@ fn rerun_reproduces_the_recorded_run_of_the_stage() {
     let _ = std::fs::remove_dir_all(&repo_root);
 }
 
+/// A task's provider stamp is immutable and a machine-local `agentProviders`
+/// entry deliberately does not rebind it. The stamp must not, however, be
+/// handed the *model* that entry wrote for its own provider: that is how
+/// codex-stamped tasks started respawning as `codex -m opus`, which the Codex
+/// CLI rejects outright (2026-08-17). The stamped provider survives with a
+/// valid invocation instead.
+#[test]
+fn rerun_of_a_stamped_provider_drops_a_model_written_for_another_provider() {
+    let repo_root = init_git_repo("rerun-foreign-local-model");
+    let config = test_config("rerun-foreign-local-model");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Stamped provider work",
+        Some("Stamped provider work"),
+        "in progress",
+        "2026-08-17 00:00:00",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context("task-1", "task-task-1", "default", None, "codex")
+        .unwrap();
+    db.insert_stage_run(NewStageRun {
+        id: "run-existing",
+        task_id: "task-1",
+        stage: "in progress",
+        kind: "main",
+        agent: Some("implement"),
+        agent_provider: Some("codex"),
+        model: None,
+        effort: None,
+        status: "cancelled",
+        result: None,
+        feedback: None,
+        session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    // The incident's machine-local layer: this machine's claude, named with a
+    // claude-only model and effort. It is read from the working tree, so no
+    // commit is involved.
+    std::fs::write(
+        repo_root.join(".kanna/config.local.json"),
+        serde_json::json!({
+            "agentProviders": {
+                "*": {"provider": "claude", "model": "opus", "effort": "xhigh"}
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let prepared = prepare_rerun_stage_for_api(&db, &config, "task-1").unwrap();
+
+    assert_eq!(prepared.agent_provider, "codex");
+    assert_eq!(prepared.model, None);
+    assert_eq!(prepared.effort, None);
+    match &prepared.session {
+        PreparedSessionSpawn::Pty { args, .. } => {
+            let shell_command = args.last().expect("PTY spawn should carry a shell command");
+            assert!(
+                !shell_command.contains("-m "),
+                "rerun passed a foreign model to the stamped provider: {shell_command}"
+            );
+            assert!(
+                !shell_command.contains("opus"),
+                "rerun leaked the claude-targeted model: {shell_command}"
+            );
+        }
+        PreparedSessionSpawn::Agent { .. } => panic!("expected a PTY rerun"),
+    }
+
+    let _ = super::super::worktree::remove_prepared_worktree(
+        repo_root
+            .join(".kanna-worktrees/task-task-1")
+            .to_string_lossy()
+            .as_ref(),
+        "task-task-1",
+    );
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
 #[test]
 fn prepare_advance_stage_uses_stored_workflow_snapshot_for_existing_task() {
     let repo_root =
