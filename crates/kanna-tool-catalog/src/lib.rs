@@ -381,13 +381,21 @@ pub struct WaitTaskState<'a> {
 /// It used to also resolve on `activity == "unread"`, which is a read-state
 /// value, not a termination: an actively working task whose last output nobody
 /// has read carries `unread` too, so a wait could report a busy agent as
-/// finished. The session-exit case that clause was standing in for — an agent
-/// that ends without recording a verdict, which every manual-transition stage
-/// does — is now covered positively by `exited`.
+/// finished. An agent whose *process* ends without recording a verdict is
+/// covered positively by `exited`.
 ///
 /// `idle` deliberately does not resolve: the daemon reports `idle` for a task
 /// parked at its composer between turns and for one that never started, and
 /// neither has finished anything. Termination, not quiet, is the signal.
+///
+/// The case that leaves behind: a PTY agent that finishes its turn and parks
+/// without recording a verdict keeps its daemon session — sessions die at a
+/// stage transition, a rerun, or a close — so nothing records a termination
+/// and this never resolves for it, where `unread` used to. That is the correct
+/// answer to "has it finished?", but it means a caller waiting on an agent
+/// which may park must bound its own retry loop rather than re-calling on
+/// `timeout` forever; a non-`busy` `runtime_state` with a `running` latest run
+/// is the signature to bound on. See `docs/kanna-server-boundary.md`.
 pub fn task_state_matches_wait_until(state: WaitTaskState<'_>, until: WaitUntil) -> bool {
     match until {
         WaitUntil::Closed => state.closed,

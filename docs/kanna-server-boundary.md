@@ -590,9 +590,25 @@ Which dimension each consumer reads:
 - **Waits** (`kanna_wait_task`, `kanna-cli task wait`) read terminations only —
   `closedAt`, a terminal `stage_run`, or `runtimeState: "exited"`. `unread` used
   to resolve `until: finished`, which meant an unread working task could satisfy
-  a wait for it to finish. The case that clause was standing in for — an agent
-  ending without recording a verdict, which every manual-transition stage does —
-  is now covered positively by `exited`.
+  a wait for it to finish.
+
+  Know what that costs. Three things record a termination: the task closes, its
+  agent records a verdict (`kanna_complete_stage`, or any write that finishes
+  the run), or its **process exits**. A PTY agent that finishes its turn and
+  parks at its composer without recording a verdict does none of them — its
+  daemon session survives, since sessions die only at a stage transition, a
+  rerun, or a close — so it reports `runtimeState: "idle"` with a `running`
+  `latestRun`, and `until: "finished"` does not resolve for it. `unread` used to
+  resolve that case, at the cost of also resolving on every busy task nobody had
+  read.
+
+  This is deliberate: a parked agent has not finished, and a wait that says it
+  has is the defect this predicate was changed to remove. But a caller that
+  waits on an agent which may park without a verdict — the specialty-review join
+  in [qa-dispatch-review.md](specs/qa-dispatch-review.md) is the one in-tree
+  case — must carry its own bounded terminating condition rather than looping on
+  `waitOutcome: "timeout"` forever. The signature to bound on is a
+  non-`busy` `runtimeState` alongside a `running` `latestRun`.
 - **Supervisors and orchestrators** read `runtimeState` to decide whether a task
   is alive. A quiet-task alarm keyed on `activity` fires on tasks whose agents
   are demonstrably running.

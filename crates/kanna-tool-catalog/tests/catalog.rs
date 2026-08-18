@@ -1578,9 +1578,10 @@ fn finished_is_decided_by_a_recorded_termination_not_the_activity_flag() {
         "unread is read state; a busy agent has not finished"
     );
 
-    // An agent session that ended without recording a verdict — what every
-    // manual-transition stage does — is a termination, and is what the old
-    // `unread` clause was standing in for.
+    // An agent session that ended without recording a verdict is a
+    // termination, and is what the old `unread` clause was standing in for. An
+    // agent that parks without its process ending is not covered by it — see
+    // `task_state_matches_wait_until`.
     let session_exited = json!({
         "activity": "unread",
         "runtimeState": "exited",

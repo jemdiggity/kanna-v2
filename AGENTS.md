@@ -329,7 +329,11 @@ session ends unreplaced) and `readState` (`read` | `unread`). Anything asking
 reads `runtimeState`; the desktop sidebar and mobile keep reading `activity`,
 whose meaning is unchanged. `WaitUntil::Finished` resolves only on a recorded
 termination (closed, terminal `stage_run`, or `runtimeState: "exited"`), never
-on `unread`. See `docs/kanna-server-boundary.md`.
+on `unread`. A PTY agent that parks without recording a verdict records none of
+the three — its session survives — so a caller waiting on an agent that may
+park must bound its own retry loop on a non-`busy` `runtimeState` with a
+`running` `latestRun` instead of re-calling on `timeout` forever. See
+`docs/kanna-server-boundary.md`.
 
 ## E2E coverage expectation
 

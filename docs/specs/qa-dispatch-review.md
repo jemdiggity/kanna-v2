@@ -54,10 +54,15 @@ server-side infers it: `display_name` is the only title input the fan-out has.
   engine only auto-advances on `success`, so an auto stage would close PASS
   children while FAIL children parked — two lifecycles for one kind of
   child, and dispatcher logic that branches on outcome. With manual, both
-  verdicts park the child unread (which `kanna_wait_task`
-  `until: "finished"` observes) and the dispatcher owns the whole child
-  lifecycle: it created every child, and it closes every child after
-  collecting its verdict.
+  verdicts leave the child parked at its stage for the dispatcher, which owns
+  the whole child lifecycle: it created every child, and it closes every child
+  after collecting its verdict. What resolves the dispatcher's
+  `kanna_wait_task` `until: "finished"` is the **terminal `stage_run` the
+  reviewer's own `kanna_complete_stage` writes** — `succeeded` for PASS,
+  `failed` for FAIL — not the child's read state. A reviewer that stops without
+  calling `kanna_complete_stage` records no termination at all and never
+  resolves the join, which is why step 4 of the dispatcher bounds its retry
+  loop and falls through to the no-verdict path.
 - **`qa-dispatcher` agent** — characterizes the diff, selects specialties,
   creates the children, joins, and records the aggregate verdict:
   all PASS → `kanna_complete_stage success` (auto-advances to `pr`); any
