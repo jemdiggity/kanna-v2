@@ -211,6 +211,7 @@ const mobileArchiveInputSchema = z.object({
   production: z.boolean().default(false),
   dryRun: z.boolean().default(false),
   upload: z.boolean().default(false),
+  ref: z.string().optional(),
   buildNumber: z.string().optional(),
   version: z.string().optional(),
   outDir: z.string().optional()
@@ -354,7 +355,8 @@ const releaseSetupNotarizationInputSchema = z.object({
 const cloudDeployInputSchema = z.object({
   staging: z.boolean().default(false),
   production: z.boolean().default(false),
-  relay: z.boolean().default(false)
+  relay: z.boolean().default(false),
+  ref: z.string().optional()
 });
 
 const cloudRelayProvisionInputSchema = z.object({
@@ -1942,7 +1944,7 @@ export const taskDefinitions = [
   },
   {
     id: "mobile.archive",
-    description: "Build and optionally upload a production iOS archive for App Store Connect.",
+    description: "Build and optionally upload a production iOS archive for App Store Connect from an explicit source ref.",
     inputSchema: mobileArchiveInputSchema,
     execute: async (_context, input) => {
       const context = await resolveDefaultContext(process.env);
@@ -2439,7 +2441,7 @@ export const taskDefinitions = [
   },
   {
     id: "cloud.deploy",
-    description: "Deploy Kanna Firebase cloud services.",
+    description: "Deploy Kanna Firebase cloud services from an explicit source ref.",
     inputSchema: cloudDeployInputSchema,
     execute: async (_context, input) => {
       const parsed = cloudDeployInputSchema.parse(input);
@@ -2457,9 +2459,17 @@ export const taskDefinitions = [
           env: context.env,
           runner: nodeCommandRunner,
           environment,
-          relay: parsed.relay
+          relay: parsed.relay,
+          ref: parsed.ref
         });
-        return { ok: true, message: formatJsonResult(result), data: result };
+        return {
+          ok: true,
+          message: [
+            `Deployed ${environment} cloud services to ${result.projectId} from ${result.source.ref} (${result.source.shortCommit}).`,
+            formatJsonResult(result)
+          ].join("\n"),
+          data: result
+        };
       } catch (error) {
         return {
           ok: false,

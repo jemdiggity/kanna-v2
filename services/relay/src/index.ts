@@ -23,6 +23,7 @@ import {
   isTunnelSocket,
 } from "./router.js";
 import { handleOtaRequest } from "./ota.js";
+import { resolveBuildCommit } from "./buildInfo.js";
 import {
   beginCloudTaskPublicationSession,
   endCloudTaskPublicationSession,
@@ -39,6 +40,7 @@ import {
 } from "./webSocketMessageLifecycle.js";
 
 const PORT = parseInt(process.env.PORT || "8080", 10);
+const BUILD_COMMIT = resolveBuildCommit(process.env);
 const AUTH_TIMEOUT_MS = 10_000;
 const E2E_SHUTDOWN_TOKEN =
   process.env.KANNA_E2E_RELAY_SHUTDOWN_TOKEN?.trim() || null;
@@ -93,6 +95,7 @@ export const server = createServer(async (req, res) => {
     if (req.method === "GET" && req.url === "/health") {
       jsonResponse(res, 200, {
         status: "ok",
+        commit: BUILD_COMMIT,
         connections: getConnectionCount(),
         tunnelFlow: getTunnelFlowStats(),
       });

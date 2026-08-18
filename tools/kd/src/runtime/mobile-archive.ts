@@ -2,9 +2,12 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import type { CommandRunner } from "./process";
+import { formatSourceRef, resolveSourceRef, type ResolvedSourceRef } from "./source-ref";
 
 export interface MobileIosArchiveInput {
   production: boolean;
+  /** Branch, tag, or sha the archive is built from; required because it is a production build. */
+  ref?: string;
   dryRun?: boolean;
   upload?: boolean;
   buildNumber?: string;
@@ -28,6 +31,8 @@ export interface MobileIosArchiveCommand {
 
 export interface MobileIosArchivePlan {
   appEnv: "prod";
+  /** Resolved source the archive was built from; absent only for plans built outside a checkout. */
+  source?: ResolvedSourceRef;
   bundleId: string;
   displayName: string;
   teamId: string;
@@ -144,6 +149,7 @@ export async function buildMobileIosArchivePlan(input: {
   version?: string;
   outDir?: string;
   upload?: boolean;
+  source?: ResolvedSourceRef;
 }): Promise<MobileIosArchivePlan> {
   const buildNumber = requireBuildNumber(input.buildNumber);
   const version = input.version?.trim() || await readCurrentVersion(input.repoRoot);
@@ -228,6 +234,7 @@ export async function buildMobileIosArchivePlan(input: {
 
   return {
     appEnv,
+    source: input.source,
     bundleId: identity.bundleId,
     displayName: identity.displayName,
     teamId: APPLE_TEAM_ID,
@@ -296,13 +303,22 @@ export async function executeMobileIosArchiveWithContext(
     throw new Error("mobile archive requires --production.");
   }
 
+  const source = await resolveSourceRef({
+    repoRoot: context.repoRoot,
+    runner: context.runner,
+    env: context.env,
+    ref: input.ref,
+    requireRef: true,
+    command: "mobile archive"
+  });
   await assertXcodeUploadRequirement(context.runner);
   const plan = await buildMobileIosArchivePlan({
     repoRoot: context.repoRoot,
     buildNumber: input.buildNumber,
     version: input.version,
     outDir: input.outDir,
-    upload: input.upload
+    upload: input.upload,
+    source
   });
 
   if (input.dryRun === true) {
@@ -310,6 +326,7 @@ export async function executeMobileIosArchiveWithContext(
       ok: true,
       message: [
         `Dry run: mobile production archive ${plan.version} (${plan.buildNumber})`,
+        formatSourceRef(source),
         `Bundle ID: ${plan.bundleId}`,
         `Archive: ${plan.archivePath}`,
         `IPA: ${plan.ipaPath}`,
@@ -343,6 +360,7 @@ export async function executeMobileIosArchiveWithContext(
     ok: true,
     message: [
       `Built mobile production archive ${plan.version} (${plan.buildNumber}).`,
+      formatSourceRef(source),
       `Bundle ID: ${plan.bundleId}`,
       `Archive: ${plan.archivePath}`,
       `IPA: ${plan.ipaPath}`,

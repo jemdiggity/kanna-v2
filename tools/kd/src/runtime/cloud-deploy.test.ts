@@ -6,6 +6,7 @@ describe("relay deploy plan", () => {
     const plan = buildRelayDeployPlan({
       repoRoot: "/repo",
       environment: "staging",
+      commit: "1f2e3d4c5b6a",
     });
 
     const remote = plan.commands.at(-1);

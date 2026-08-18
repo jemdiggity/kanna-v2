@@ -209,9 +209,9 @@ release path does not forward direct Apple credential variables into Bazel.
 ## Cloud services
 
 ```sh
-./kd cloud deploy --staging            # Firebase (functions, rules, …)
-./kd cloud deploy --production
-./kd cloud deploy --staging --relay    # + relay (Cloud Run)
+./kd cloud deploy --staging                              # Firebase (functions, rules, …)
+./kd cloud deploy --production --ref release/0.2
+./kd cloud deploy --staging --relay                      # + relay VM
 ```
 
 Never run `firebase deploy` directly. If `kd cloud deploy` misbehaves, fix the
@@ -219,15 +219,34 @@ Never run `firebase deploy` directly. If `kd cloud deploy` misbehaves, fix the
 (production), `kanna-staging` (staging), `kanna-local` (emulators);
 relay endpoints `wss://relay.kanna.build` / `wss://relay-staging.kanna.build`.
 
+**`--ref <branch|tag|sha>` names the source the deploy builds.** It is required
+with `--production` and optional elsewhere; when omitted, kd resolves and reports
+the current `HEAD` so the output still records what shipped. The deploy consumes
+the *working tree* — Cloud Build uploads the directory, it does not check the ref
+out — so kd refuses a dirty worktree and refuses a `--ref` that is not the
+checked-out commit. Fetch and check the ref out first:
+
+```sh
+git fetch origin && git checkout release/0.2 && git pull --ff-only
+./kd cloud deploy --production --relay --ref release/0.2
+```
+
+The resolved commit appears in the command result (`source`, and `relay.commit`
+for a relay deploy) and is baked into the relay image, which reports it as
+`commit` on `GET /health` — see [relay VM operations](../relay-vm-operations.md).
+
 ## Mobile
 
 ### App Store builds
 
 ```sh
-./kd mobile archive --production --build-number <n>
+./kd mobile archive --production --ref release/0.2 --build-number <n>
 ```
 
-Runs Expo prebuild (CNG) with `KANNA_APP_ENV=prod`, archives the generated
+`--ref <branch|tag|sha>` is required: the archive is built from the working tree,
+so kd refuses a dirty worktree or a ref that is not the checked-out commit, and
+reports the resolved commit in the archive output. Runs Expo prebuild (CNG) with
+`KANNA_APP_ENV=prod`, archives the generated
 workspace, and exports an IPA under `.build/mobile/ios-production/`. Bundle
 ids: `build.kanna.app` (prod), `build.kanna.app.staging`, `build.kanna.app.dev`.
 The archive and export steps allow automatic provisioning updates, so Xcode can

@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { parseCliArgs } from "../src/cli";
 import {
   buildRelayDeployPlan,
   buildRelayProvisionPlan,
@@ -11,6 +12,22 @@ import {
   resolveProductionFirebaseProject
 } from "../src/runtime/cloud-deploy";
 import type { CommandRunner } from "../src/runtime/process";
+
+const HEAD_COMMIT = "1f2e3d4c5b6a79880123456789abcdef01234567";
+const SHORT_COMMIT = HEAD_COMMIT.slice(0, 12);
+const SOURCE = { ref: "release/0.2", commit: HEAD_COMMIT, shortCommit: SHORT_COMMIT };
+
+/** Answers the git probes `resolveSourceRef` makes before a deploy touches anything. */
+function gitSourceResult(
+  command: string,
+  args: string[],
+  status = ""
+): { exitCode: number; stdout: string; stderr: string } | null {
+  if (command !== "git") return null;
+  if (args[0] === "status") return { exitCode: 0, stdout: status, stderr: "" };
+  if (args[0] === "rev-parse") return { exitCode: 0, stdout: `${HEAD_COMMIT}\n`, stderr: "" };
+  return null;
+}
 
 describe("cloud deploy runtime", () => {
   it("includes workspace patched dependencies in the relay Docker build context", () => {
@@ -110,7 +127,7 @@ describe("cloud deploy runtime", () => {
           cwd: options?.cwd,
           ...(options?.streamOutput === undefined ? {} : { streamOutput: options.streamOutput })
         });
-        return { exitCode: 0, stdout: "", stderr: "" };
+        return gitSourceResult(command, args) ?? { exitCode: 0, stdout: "", stderr: "" };
       }
     };
 
@@ -119,14 +136,25 @@ describe("cloud deploy runtime", () => {
         repoRoot,
         env: { KANNA_FIREBASE_PRODUCTION_PROJECT: "prod-project" },
         runner,
-        environment: "production"
+        environment: "production",
+        ref: "release/0.2"
       });
 
-      expect(result).toEqual({ projectId: "prod-project", deployed: true });
+      expect(result).toEqual({ projectId: "prod-project", deployed: true, source: SOURCE });
       expect(calls).toEqual([
         {
           command: "git",
           args: ["status", "--porcelain"],
+          cwd: repoRoot
+        },
+        {
+          command: "git",
+          args: ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+          cwd: repoRoot
+        },
+        {
+          command: "git",
+          args: ["rev-parse", "--verify", "--quiet", "release/0.2^{commit}"],
           cwd: repoRoot
         },
         {
@@ -165,10 +193,10 @@ describe("cloud deploy runtime", () => {
           args,
           cwd: options?.cwd
         });
-        if (command === "git" && args.join(" ") === "status --porcelain") {
-          return { exitCode: 0, stdout: " M tools/kd/src/runtime/cloud-deploy.ts\n", stderr: "" };
-        }
-        return { exitCode: 0, stdout: "", stderr: "" };
+        return (
+          gitSourceResult(command, args, " M tools/kd/src/runtime/cloud-deploy.ts\n") ??
+          { exitCode: 0, stdout: "", stderr: "" }
+        );
       }
     };
 
@@ -178,9 +206,10 @@ describe("cloud deploy runtime", () => {
           repoRoot,
           env: { KANNA_FIREBASE_PRODUCTION_PROJECT: "prod-project" },
           runner,
-          environment: "production"
+          environment: "production",
+          ref: "release/0.2"
         })
-      ).rejects.toThrow("Refusing to deploy cloud services from a dirty git worktree");
+      ).rejects.toThrow("Refusing to run cloud deploy from a dirty git worktree");
 
       expect(calls).toEqual([
         {
@@ -279,7 +308,7 @@ describe("cloud deploy runtime", () => {
   });
 
   it("builds a production relay VM deploy plan", () => {
-    const plan = buildRelayDeployPlan({ repoRoot: "/repo", environment: "production" });
+    const plan = buildRelayDeployPlan({ repoRoot: "/repo", environment: "production", commit: SHORT_COMMIT });
 
     expect(plan.projectId).toBe("kanna-build");
     expect(plan.relayUrl).toBe("wss://relay.kanna.build");
@@ -295,7 +324,7 @@ describe("cloud deploy runtime", () => {
           "--config",
           "services/relay/cloudbuild.yaml",
           "--substitutions",
-          "_IMAGE=us-central1-docker.pkg.dev/kanna-build/kanna-relay/relay:latest",
+          `_IMAGE=us-central1-docker.pkg.dev/kanna-build/kanna-relay/relay:latest,_COMMIT=${SHORT_COMMIT}`,
           "."
         ],
         cwd: "/repo",
@@ -394,14 +423,16 @@ describe("cloud deploy runtime", () => {
         repoRoot,
         env: {},
         runner,
-        environment: "production"
+        environment: "production",
+        source: SOURCE
       });
 
       expect(result).toEqual({
         projectId: "kanna-build",
         vmName: "kanna-relay-vm",
         zone: "us-central1-a",
-        relayUrl: "wss://relay.kanna.build"
+        relayUrl: "wss://relay.kanna.build",
+        commit: SHORT_COMMIT
       });
       expect(calls).toEqual([
         {
@@ -414,7 +445,7 @@ describe("cloud deploy runtime", () => {
             "--config",
             "services/relay/cloudbuild.yaml",
             "--substitutions",
-            "_IMAGE=us-central1-docker.pkg.dev/kanna-build/kanna-relay/relay:latest",
+            `_IMAGE=us-central1-docker.pkg.dev/kanna-build/kanna-relay/relay:latest,_COMMIT=${SHORT_COMMIT}`,
             "."
           ],
           cwd: repoRoot,
@@ -511,8 +542,90 @@ describe("cloud deploy runtime", () => {
         repoRoot: "/repo",
         env: {},
         runner,
-        environment: "staging"
+        environment: "staging",
+        source: SOURCE
       })
     ).rejects.toThrow("cloud build failed");
+  });
+
+  it("parses --ref for cloud deploy", () => {
+    expect(parseCliArgs(["cloud", "deploy", "--production", "--relay", "--ref", "release/0.2"])).toEqual({
+      taskId: "cloud.deploy",
+      input: { staging: false, production: true, relay: true, ref: "release/0.2" }
+    });
+    expect(() => parseCliArgs(["cloud", "deploy", "--production", "--ref"])).toThrow("--ref requires a value");
+  });
+
+  it("requires an explicit --ref for a production deploy", async () => {
+    const calls: string[] = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push(`${command} ${args.join(" ")}`);
+        return gitSourceResult(command, args) ?? { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+
+    await expect(
+      deployFirebaseCloud({
+        repoRoot: "/repo",
+        env: { KANNA_FIREBASE_PRODUCTION_PROJECT: "prod-project" },
+        runner,
+        environment: "production",
+        relay: true
+      })
+    ).rejects.toThrow("cloud deploy --production requires --ref <branch|tag|sha>");
+    expect(calls).toEqual([]);
+  });
+
+  it("refuses a --ref that is not the checked-out commit", async () => {
+    const otherCommit = "b".repeat(40);
+    const runner: CommandRunner = {
+      async run(command, args) {
+        if (command === "git" && args[0] === "status") return { exitCode: 0, stdout: "", stderr: "" };
+        if (command === "git" && args[0] === "rev-parse") {
+          const resolved = args[args.length - 1].startsWith("HEAD") ? HEAD_COMMIT : otherCommit;
+          return { exitCode: 0, stdout: `${resolved}\n`, stderr: "" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+
+    await expect(
+      deployFirebaseCloud({
+        repoRoot: "/repo",
+        env: { KANNA_FIREBASE_PRODUCTION_PROJECT: "prod-project" },
+        runner,
+        environment: "production",
+        ref: "release/0.2"
+      })
+    ).rejects.toThrow(`--ref release/0.2 (${otherCommit}) is not checked out; HEAD is ${HEAD_COMMIT}`);
+  });
+
+  it("reports the resolved source commit and bakes it into the relay image", async () => {
+    const calls: string[] = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push(`${command} ${args.join(" ")}`);
+        return gitSourceResult(command, args) ?? { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+
+    const result = await deployFirebaseCloud({
+      repoRoot: "/repo",
+      env: { KANNA_FIREBASE_STAGING_PROJECT: "kanna-staging" },
+      runner,
+      environment: "staging",
+      relay: true
+    });
+
+    expect(result.source).toEqual({ ref: "HEAD", commit: HEAD_COMMIT, shortCommit: SHORT_COMMIT });
+    expect(result.relay?.commit).toBe(SHORT_COMMIT);
+    expect(calls.some((call) => call.includes(`_COMMIT=${SHORT_COMMIT}`))).toBe(true);
+  });
+
+  it("refuses to plan a relay deploy without a resolved source commit", () => {
+    expect(() =>
+      buildRelayDeployPlan({ repoRoot: "/repo", environment: "staging", commit: "HEAD" })
+    ).toThrow("Relay VM deploy requires a resolved source commit");
   });
 });
