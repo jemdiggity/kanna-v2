@@ -359,36 +359,42 @@ pub fn run_status_is_terminal(status: &str) -> bool {
 /// `kanna-mcp`, the typed `kanna-cli` wait, and the catalog-driven `kanna-cli`
 /// wait — reads the same fields the same way. The three used to carry their own
 /// copy of the predicate, which is how they drifted.
+///
+/// `activity` is deliberately absent. It is a display value blending the
+/// runtime and read dimensions, so `unread` means "a human has not read the
+/// latest output" — which a *working* task satisfies. Waits read
+/// `runtimeState`, the runtime dimension, instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct WaitTaskState<'a> {
     pub closed: bool,
-    pub activity: Option<&'a str>,
+    pub runtime_state: Option<&'a str>,
     pub latest_run_status: Option<&'a str>,
 }
 
 /// Whether a task has reached the state a wait was asked to block for.
 ///
-/// `Finished` is decided by the task's **terminal `stage_run`** first, because
-/// that is a database fact written when the run recorded its verdict. The
-/// `activity` flag is a per-frame daemon classification and is only a secondary
-/// signal here: an agent that finishes and settles to `idle` never flips to
-/// `unread`, so keying `Finished` on `unread` alone left an already-finished
-/// task waiting out its entire window and then reporting a timeout — for a task
-/// that had carried a terminal run for minutes. A caller looping on that
-/// predicate waits forever and cannot tell "still working" from "finished".
+/// `Finished` means the work stopped: the task closed, its latest `stage_run`
+/// recorded a terminal verdict, or its agent session ended without a
+/// replacement (`runtimeState == "exited"`). All three are durable records of
+/// a termination, written where the termination happens.
 ///
-/// `idle` on its own deliberately still does not resolve: a task that has not
-/// started its first run yet is also `idle`, and resolving on that would report
-/// a task as finished before its agent ever ran. The terminal run is exactly
-/// what separates the two, which is why it — not a widened activity set — is
-/// the authority.
+/// It used to also resolve on `activity == "unread"`, which is a read-state
+/// value, not a termination: an actively working task whose last output nobody
+/// has read carries `unread` too, so a wait could report a busy agent as
+/// finished. The session-exit case that clause was standing in for — an agent
+/// that ends without recording a verdict, which every manual-transition stage
+/// does — is now covered positively by `exited`.
+///
+/// `idle` deliberately does not resolve: the daemon reports `idle` for a task
+/// parked at its composer between turns and for one that never started, and
+/// neither has finished anything. Termination, not quiet, is the signal.
 pub fn task_state_matches_wait_until(state: WaitTaskState<'_>, until: WaitUntil) -> bool {
     match until {
         WaitUntil::Closed => state.closed,
         WaitUntil::Finished => {
             state.closed
                 || state.latest_run_status.is_some_and(run_status_is_terminal)
-                || state.activity == Some("unread")
+                || state.runtime_state == Some("exited")
         }
     }
 }
@@ -397,7 +403,7 @@ pub fn task_state_matches_wait_until(state: WaitTaskState<'_>, until: WaitUntil)
 pub fn wait_task_state(task: &Value) -> WaitTaskState<'_> {
     WaitTaskState {
         closed: task.get("closedAt").is_some_and(|value| !value.is_null()),
-        activity: task.get("activity").and_then(Value::as_str),
+        runtime_state: task.get("runtimeState").and_then(Value::as_str),
         latest_run_status: task
             .get("latestRun")
             .and_then(|run| run.get("status"))
@@ -408,17 +414,6 @@ pub fn wait_task_state(task: &Value) -> WaitTaskState<'_> {
 /// `task_state_matches_wait_until` for a raw task-detail JSON body.
 pub fn task_value_matches_wait_until(task: &Value, until: WaitUntil) -> bool {
     task_state_matches_wait_until(wait_task_state(task), until)
-}
-
-/// Whether a wait match rests on a database fact — the task is closed, or its
-/// latest `stage_run` reached a terminal status — rather than on the daemon's
-/// per-frame `activity` verdict.
-///
-/// Only an activity-driven match needs the confirming re-read that guards
-/// against a mid-redraw misread; a database fact has no frame to misread.
-pub fn wait_match_is_database_fact(task: &Value) -> bool {
-    let state = wait_task_state(task);
-    state.closed || state.latest_run_status.is_some_and(run_status_is_terminal)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

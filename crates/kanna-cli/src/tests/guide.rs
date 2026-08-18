@@ -27,6 +27,8 @@ fn guide_markdown_includes_live_context_and_all_catalog_tools() {
         workflow_name: Some("qa".to_string()),
         stage_transition: Some("auto".to_string()),
         activity: Some("working".to_string()),
+        runtime_state: Some("busy".to_string()),
+        read_state: Some("read".to_string()),
         snippet: None,
         agent_type: Some("pty".to_string()),
         agent_provider: Some("claude".to_string()),
@@ -61,6 +63,7 @@ fn guide_markdown_includes_live_context_and_all_catalog_tools() {
     assert!(guide.contains("Advancing follows the next stage policy"));
     assert!(guide.contains("`task.awaiting_input` is a confirmed interactive prompt"));
     assert!(guide.contains("`task.activity_changed` is the provider-neutral fallback"));
+    assert!(guide.contains("a task's state has two dimensions"));
     assert!(guide.contains("prompt-only changes while a task remains stopped are visible only"));
     assert!(guide.contains("kanna-cli tool call kanna_wait_events"));
     assert!(guide.contains("no_live_agent_session"));
@@ -84,6 +87,8 @@ fn guide_markdown_tells_manual_stages_the_user_advances_the_workflow() {
         workflow_name: Some("default".to_string()),
         stage_transition: Some("manual".to_string()),
         activity: Some("working".to_string()),
+        runtime_state: Some("busy".to_string()),
+        read_state: Some("read".to_string()),
         snippet: None,
         agent_type: Some("pty".to_string()),
         agent_provider: Some("claude".to_string()),
@@ -289,7 +294,7 @@ async fn guide_json_command_fetches_env_task_id_and_prints_workflow_context_and_
         .contains("stage-complete"));
     assert!(guide["workflow"]["eventSupervision"]
         .as_array()
-        .is_some_and(|lines| lines.len() == 3));
+        .is_some_and(|lines| lines.len() == 4));
     let tool_names = guide["tools"]
         .as_array()
         .unwrap()

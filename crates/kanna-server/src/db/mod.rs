@@ -116,9 +116,17 @@ pub struct PipelineItem {
     pub branch: Option<String>,
     pub agent_type: Option<String>,
     pub agent_provider: Option<String>,
+    /// Derived display value blending the runtime and read dimensions:
+    /// `working` | `idle` | `unread`. Read `runtime_status` for what the agent
+    /// process is doing and `activity == "unread"` for whether a human has
+    /// read the latest output; neither is recoverable from this field alone.
     pub activity: Option<String>,
     pub activity_revision: i64,
     pub activity_changed_at: Option<String>,
+    /// The runtime dimension: the daemon's selection-independent verdict on
+    /// the task's agent session — `busy` | `waiting` | `idle` | `exited`, or
+    /// `None` when no session has ever reported one.
+    pub runtime_status: Option<String>,
     pub closed_at: Option<String>,
     pub pinned: Option<i64>,
     pub pin_order: Option<i64>,

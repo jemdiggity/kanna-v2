@@ -481,6 +481,12 @@ pub(crate) fn mark_task_session_interrupted(
     };
     db.update_pipeline_item_activity(&task_id, "unread")
         .map_err(|error| format!("db error: {error}"))?;
+    // The runtime dimension's terminal value. The daemon only classifies live
+    // sessions, so without this the last live verdict — usually `busy` —
+    // would outlive the process that earned it, and a wait for the task to
+    // finish would have nothing but read state to key on.
+    db.update_pipeline_item_runtime_status(&task_id, "exited", None)
+        .map_err(|error| format!("db error: {error}"))?;
     db.finish_latest_running_stage_run(
         &task_id,
         status,

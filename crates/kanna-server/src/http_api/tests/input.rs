@@ -1421,6 +1421,10 @@ async fn terminal_state_notification_sends_once_to_notify_target() {
     let db = Db::open(&config.db_path).unwrap();
     let task = db.get_pipeline_item("task-child").unwrap().unwrap();
     assert_eq!(task.activity.as_deref(), Some("unread"));
+    // The runtime dimension's terminal value. `unread` is read state and a
+    // busy agent carries it too, so this — not that — is what a wait for the
+    // task to finish resolves on when no verdict was recorded.
+    assert_eq!(task.runtime_status.as_deref(), Some("exited"));
     assert!(task.notified_at.is_some());
 
     let _ = std::fs::remove_file(socket_path);

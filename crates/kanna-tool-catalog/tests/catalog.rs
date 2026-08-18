@@ -1,9 +1,8 @@
 use kanna_tool_catalog::{
     bundled_catalog, clamp_wait_timeout_secs, resolve_request, runtime_info_snapshot,
-    task_value_matches_wait_until, wait_match_is_database_fact, wait_resolved_result,
-    wait_timeout_result, Catalog, Method, ParamLoc, ParamType, ResponseKind,
-    RuntimeAdapterIdentity, WaitUntil, CLIENT_TOOL_CALL_BUDGET_SECS, DEFAULT_WAIT_TIMEOUT_SECS,
-    MAX_WAIT_TIMEOUT_SECS,
+    task_value_matches_wait_until, wait_resolved_result, wait_timeout_result, Catalog, Method,
+    ParamLoc, ParamType, ResponseKind, RuntimeAdapterIdentity, WaitUntil,
+    CLIENT_TOOL_CALL_BUDGET_SECS, DEFAULT_WAIT_TIMEOUT_SECS, MAX_WAIT_TIMEOUT_SECS,
 };
 use serde_json::json;
 use std::fs;
@@ -862,6 +861,37 @@ fn get_task_documents_the_downward_view_of_parentage() {
     );
 }
 
+/// An agent supervising tasks reads only the tool description before deciding
+/// which field answers "is this task alive?". Naming `activity` without saying
+/// what it blends is what produced false quiet alarms against running agents.
+#[test]
+fn get_task_documents_both_state_dimensions_and_which_one_means_alive() {
+    let catalog = bundled_catalog();
+    let description = &catalog
+        .tools
+        .iter()
+        .find(|tool| tool.name == "kanna_get_task")
+        .expect("get task tool")
+        .description;
+
+    for field in ["runtimeState", "readState", "activity"] {
+        assert!(
+            description.contains(field),
+            "kanna_get_task must document {field}: {description}"
+        );
+    }
+    for value in ["busy", "waiting", "idle", "exited"] {
+        assert!(
+            description.contains(value),
+            "kanna_get_task must name the runtime value {value}: {description}"
+        );
+    }
+    assert!(
+        description.contains("blend"),
+        "kanna_get_task must say activity blends the two dimensions rather than          reporting either: {description}"
+    );
+}
+
 /// The tool description is the only documentation an agent reads before
 /// deciding whether the feed answers its question, so every event type the
 /// server can emit has to be named there.
@@ -1465,14 +1495,15 @@ fn every_declared_parameter_round_trips_a_cli_spelling() {
     }
 }
 
-/// The wait predicate that `kanna_wait_task` resolves on. Its `Finished` arm
-/// used to read `activity == "unread"` and nothing else, so a task whose agent
-/// finished and settled to `idle` never resolved and every wait on it ran out
-/// its window reporting a timeout.
+/// The wait predicate that `kanna_wait_task` resolves on. `Finished` means a
+/// termination was recorded — never that a display value happens to read
+/// `unread`, which an actively working task whose output nobody read also
+/// carries.
 #[test]
-fn finished_is_decided_by_the_terminal_stage_run_not_the_activity_flag() {
+fn finished_is_decided_by_a_recorded_termination_not_the_activity_flag() {
     let finished_but_idle = json!({
         "activity": "idle",
+        "runtimeState": "idle",
         "closedAt": null,
         "latestRun": { "status": "failed" },
     });
@@ -1486,16 +1517,31 @@ fn finished_is_decided_by_the_terminal_stage_run_not_the_activity_flag() {
     );
 
     // `idle` on its own is also what a task that has not started its first run
-    // looks like, so it must not resolve by itself — that is precisely why the
-    // fix keys on the run rather than widening the activity set.
-    let never_started = json!({ "activity": "idle", "closedAt": null, "latestRun": null });
+    // looks like, so it must not resolve by itself — on either dimension.
+    let never_started = json!({
+        "activity": "idle",
+        "runtimeState": null,
+        "closedAt": null,
+        "latestRun": null,
+    });
     assert!(!task_value_matches_wait_until(
         &never_started,
+        WaitUntil::Finished
+    ));
+    let parked_at_composer = json!({
+        "activity": "idle",
+        "runtimeState": "idle",
+        "closedAt": null,
+        "latestRun": null,
+    });
+    assert!(!task_value_matches_wait_until(
+        &parked_at_composer,
         WaitUntil::Finished
     ));
 
     let still_running = json!({
         "activity": "working",
+        "runtimeState": "busy",
         "closedAt": null,
         "latestRun": { "status": "running" },
     });
@@ -1508,6 +1554,7 @@ fn finished_is_decided_by_the_terminal_stage_run_not_the_activity_flag() {
     // through on the way to a replacement run, so it is not terminal.
     let cancelled = json!({
         "activity": "idle",
+        "runtimeState": "busy",
         "closedAt": null,
         "latestRun": { "status": "cancelled" },
     });
@@ -1516,32 +1563,63 @@ fn finished_is_decided_by_the_terminal_stage_run_not_the_activity_flag() {
         WaitUntil::Finished
     ));
 
-    // The settling path that always worked keeps working.
-    let unread = json!({ "activity": "unread", "closedAt": null, "latestRun": null });
-    assert!(task_value_matches_wait_until(&unread, WaitUntil::Finished));
+    // The regression this predicate exists to prevent: an agent that is busy
+    // inside a long call, whose latest output the operator has not read. The
+    // display value says `unread` on both, and only the runtime dimension
+    // tells them apart.
+    let busy_but_unread = json!({
+        "activity": "unread",
+        "runtimeState": "busy",
+        "closedAt": null,
+        "latestRun": { "status": "running" },
+    });
+    assert!(
+        !task_value_matches_wait_until(&busy_but_unread, WaitUntil::Finished),
+        "unread is read state; a busy agent has not finished"
+    );
+
+    // An agent session that ended without recording a verdict — what every
+    // manual-transition stage does — is a termination, and is what the old
+    // `unread` clause was standing in for.
+    let session_exited = json!({
+        "activity": "unread",
+        "runtimeState": "exited",
+        "closedAt": null,
+        "latestRun": { "status": "cancelled" },
+    });
+    assert!(task_value_matches_wait_until(
+        &session_exited,
+        WaitUntil::Finished
+    ));
+    assert!(!task_value_matches_wait_until(
+        &session_exited,
+        WaitUntil::Closed
+    ));
 
     let closed = json!({ "activity": "idle", "closedAt": "2026-08-13T22:00:00Z" });
     assert!(task_value_matches_wait_until(&closed, WaitUntil::Finished));
     assert!(task_value_matches_wait_until(&closed, WaitUntil::Closed));
 }
 
-/// Only an `activity`-driven match needs the confirming re-read; a database
-/// fact has no frame to misread, and making it depend on a second GET would let
-/// a transient failure fail a wait whose answer was already recorded.
+/// A server that predates the split sends no `runtimeState`. The wait must
+/// still work off the terminal `stage_run`, and must not start resolving on
+/// read state again to compensate.
 #[test]
-fn a_database_fact_match_is_exempt_from_the_activity_confirmation() {
-    assert!(wait_match_is_database_fact(&json!({
-        "activity": "idle",
-        "latestRun": { "status": "succeeded" },
-    })));
-    assert!(wait_match_is_database_fact(&json!({
-        "closedAt": "2026-08-13T22:00:00Z",
-    })));
-    assert!(!wait_match_is_database_fact(&json!({
+fn a_detail_without_the_runtime_dimension_falls_back_to_the_terminal_run() {
+    let unread_only = json!({ "activity": "unread", "closedAt": null, "latestRun": null });
+    assert!(!task_value_matches_wait_until(
+        &unread_only,
+        WaitUntil::Finished
+    ));
+    let terminal_run = json!({
         "activity": "unread",
         "closedAt": null,
-        "latestRun": null,
-    })));
+        "latestRun": { "status": "succeeded" },
+    });
+    assert!(task_value_matches_wait_until(
+        &terminal_run,
+        WaitUntil::Finished
+    ));
 }
 
 fn skew_info(server_status: serde_json::Value, client_tools: &[String]) -> serde_json::Value {

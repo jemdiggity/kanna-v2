@@ -220,13 +220,21 @@ async fn list_task_children_via_api_fetches_and_preserves_verdicts() {
     assert!(request.starts_with("GET /v1/tasks/task%20123/children HTTP/1.1"));
 }
 
-fn child_task_body(activity: &str) -> String {
+fn child_task_body(runtime_state: &str) -> String {
+    // A wait reads the runtime dimension; `activity` follows it here only so
+    // the body stays the shape the server actually sends.
+    let activity = match runtime_state {
+        "busy" => "working",
+        _ => "unread",
+    };
     json!({
         "id": "child-1",
         "repoId": "repo-1",
         "title": "Specialty review",
         "stage": "review",
         "activity": activity,
+        "runtimeState": runtime_state,
+        "readState": if activity == "unread" { "unread" } else { "read" },
         "snippet": null,
         "agentType": "pty",
         "agentProvider": "claude",
@@ -246,7 +254,7 @@ fn child_task_body(activity: &str) -> String {
 /// calling again picks the task up where it was left.
 #[tokio::test(start_paused = true)]
 async fn wait_task_via_api_clamps_its_window_and_resumes_after_a_timeout() {
-    let body = std::sync::Arc::new(std::sync::Mutex::new(child_task_body("working")));
+    let body = std::sync::Arc::new(std::sync::Mutex::new(child_task_body("busy")));
     let base_url = serve_repeating_http_response(body.clone()).await;
 
     let started = tokio::time::Instant::now();
@@ -269,7 +277,7 @@ async fn wait_task_via_api_clamps_its_window_and_resumes_after_a_timeout() {
         "a 600s request must still answer inside the {CLIENT_TOOL_CALL_BUDGET_SECS}s client budget"
     );
 
-    *body.lock().unwrap() = child_task_body("unread");
+    *body.lock().unwrap() = child_task_body("exited");
     let outcome = wait_task_via_api(&base_url, "child-1", 600, 3, WaitUntil::Finished)
         .await
         .unwrap();
@@ -278,7 +286,7 @@ async fn wait_task_via_api_clamps_its_window_and_resumes_after_a_timeout() {
         WaitTaskOutcome::Resolved(task) => {
             assert_eq!(task.id, "child-1");
             assert_eq!(task.stage.as_deref(), Some("review"));
-            assert_eq!(task.activity.as_deref(), Some("unread"));
+            assert_eq!(task.runtime_state.as_deref(), Some("exited"));
         }
         WaitTaskOutcome::TimedOut { task, .. } => panic!("unexpected timeout: {task:?}"),
     }

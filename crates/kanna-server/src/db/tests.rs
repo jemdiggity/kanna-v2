@@ -2283,6 +2283,93 @@ fn activity_changed_events_cover_working_to_stopped_edges_only() {
 }
 
 #[test]
+fn the_runtime_dimension_survives_read_state_and_is_reset_by_a_new_run() {
+    let path = Db::test_db_path("runtime-dimension-independence");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One")
+        .expect("insert repo");
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "task prompt",
+        Some("Task One"),
+        "in progress",
+        "2026-08-18 01:00:00",
+    )
+    .expect("insert task");
+
+    // The reported defect: an agent busy inside a long tool or MCP call whose
+    // latest output nobody has read. The display value collapses to `unread`
+    // and the runtime dimension must not follow it.
+    db.update_pipeline_item_runtime_status("task-1", "busy", None)
+        .expect("record busy");
+    db.update_pipeline_item_activity("task-1", "unread")
+        .expect("mark unread");
+    let item = db.get_pipeline_item("task-1").expect("read task").unwrap();
+    assert_eq!(item.activity.as_deref(), Some("unread"));
+    assert_eq!(item.runtime_status.as_deref(), Some("busy"));
+
+    assert!(db
+        .mark_pipeline_item_read_if_unchanged("task-1", None)
+        .expect("mark read"));
+    assert_eq!(
+        db.get_pipeline_item("task-1")
+            .expect("read task")
+            .unwrap()
+            .runtime_status
+            .as_deref(),
+        Some("busy"),
+        "reading a task changes nothing about whether its agent is running"
+    );
+
+    // A session that ends without a replacement is the runtime dimension's
+    // terminal value, and the one thing a wait for `finished` may resolve on
+    // when no verdict was recorded.
+    db.update_pipeline_item_runtime_status("task-1", "exited", None)
+        .expect("record exit");
+    assert_eq!(
+        db.get_pipeline_item("task-1")
+            .expect("read task")
+            .unwrap()
+            .runtime_status
+            .as_deref(),
+        Some("exited")
+    );
+
+    // A fresh running run means that verdict describes a session that no
+    // longer exists; leaving it would resolve a wait on the new run's agent.
+    db.insert_stage_run(NewStageRun {
+        id: "run-2",
+        task_id: "task-1",
+        stage: "in progress",
+        kind: "main",
+        agent: Some("implement"),
+        agent_provider: Some("claude"),
+        model: None,
+        effort: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
+    })
+    .expect("insert replacement run");
+    assert_eq!(
+        db.get_pipeline_item("task-1")
+            .expect("read task")
+            .unwrap()
+            .runtime_status,
+        None,
+        "a new session has not been classified yet, and is not an exited one"
+    );
+
+    drop(db);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn task_listing_queries_exclude_closed_items_even_when_stage_is_not_done() {
     let path = Db::test_db_path("closed-item-filtering");
     let db = Db::open_for_tests(&path).expect("open test db");

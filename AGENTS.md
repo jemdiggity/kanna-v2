@@ -304,18 +304,32 @@ appending it where the state already changes, not by diffing snapshots. The
 `task.awaiting_input` event is the daemon's `Waiting` status — a positive match
 on prompt chrome, never inferred from a quiet session, because mislabelling a
 long build as blocked is worse than not reporting it at all.
-`task.activity_changed` is the provider-neutral fallback: it is appended when
-a task moves from `working` to `idle` or `unread`, whether or not it has a
-waiting prompt snippet. The payload always carries `previousActivity` and
+`task.activity_changed` is the provider-neutral fallback, and it fires on the
+**display dimension's** edges, not the runtime dimension's: it is appended when
+`activity` moves from `working` to `idle` or `unread`, whether or not the task
+has a waiting prompt snippet. The payload always carries `previousActivity` and
 `activity`, and carries `waitingPromptSnippet` only when non-empty. That weaker
 edge makes unrecognized provider questions and ordinary completion visible,
 but does not prove any included snippet is a question. Read-state-only
 `idle` ↔ `unread` changes do not emit. A prompt-only change while the task
 remains stopped is visible only by polling task detail. Treat the event as a
-wake-up and reconcile it through `kanna_get_task`, whose confirmation read is
-the single activity debounce, before acting. See
-`docs/kanna-server-boundary.md` and
+wake-up and reconcile it through `kanna_get_task` — reading `runtimeState`, not
+`activity` — before acting; that confirmation read is the single activity
+debounce. See `docs/kanna-server-boundary.md` and
 `docs/2026-07-29-awaiting-input-detection-e2e-gap.md`.
+
+**Runtime and read state are two dimensions.** `activity` (`working` | `idle` |
+`unread`) is a *derived display value* that blends them, and it cannot answer
+either question alone: a task busy inside a long MCP call whose output nobody
+read carries `unread`, exactly like a finished one. Task detail therefore also
+reports `runtimeState` (`busy` | `waiting` | `idle` | `exited` — the daemon's
+verdict on the agent session, with `exited` written by the server when a
+session ends unreplaced) and `readState` (`read` | `unread`). Anything asking
+"is this agent alive?" — supervisors, quiet-task alarms, `kanna_wait_task` —
+reads `runtimeState`; the desktop sidebar and mobile keep reading `activity`,
+whose meaning is unchanged. `WaitUntil::Finished` resolves only on a recorded
+termination (closed, terminal `stage_run`, or `runtimeState: "exited"`), never
+on `unread`. See `docs/kanna-server-boundary.md`.
 
 ## E2E coverage expectation
 

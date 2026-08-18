@@ -377,13 +377,14 @@ pub(crate) fn parse_wait_until(value: &str) -> Result<WaitUntil, String> {
     }
 }
 
-/// Shares `kanna-tool-catalog`'s predicate rather than restating it: a terminal
-/// `stage_run`, not the per-frame `activity` flag, decides `Finished`.
+/// Shares `kanna-tool-catalog`'s predicate rather than restating it: a
+/// termination — a terminal `stage_run`, an exited agent session, or a closed
+/// task — decides `Finished`, never the blended `activity` display value.
 pub(crate) fn task_matches_wait_until(task: &TaskDetail, until: WaitUntil) -> bool {
     task_state_matches_wait_until(
         WaitTaskState {
             closed: task.closed_at.is_some(),
-            activity: task.activity.as_deref(),
+            runtime_state: task.runtime_state.as_deref(),
             latest_run_status: task
                 .latest_run
                 .as_ref()

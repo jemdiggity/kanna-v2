@@ -154,7 +154,25 @@ export interface TaskActionResponse {
   task?: TaskSummary;
 }
 
+/**
+ * The desktop's derived display value, blending the two dimensions below.
+ * Mobile deliberately renders this: an operator's view of a task is exactly
+ * the blend. Anything deciding whether an agent is *running* must read
+ * {@link TaskRuntimeState} instead — a task busy inside a long tool or MCP
+ * call whose output nobody has read reports "unread" here, exactly like a
+ * finished one.
+ */
 export type TaskActivity = "idle" | "working" | "unread";
+
+/**
+ * The runtime dimension: the daemon's verdict on the task's agent session,
+ * independent of selection and of read state. "exited" is written by the
+ * server when a session ends without a replacement.
+ */
+export type TaskRuntimeState = "busy" | "waiting" | "idle" | "exited";
+
+/** The read dimension: whether a human has seen the task's latest output. */
+export type TaskReadState = "read" | "unread";
 
 export interface TaskActivityResponse {
   taskId: string;
@@ -220,6 +238,10 @@ export interface TaskSummary {
   ownerLocalTaskId?: string;
   ownerOnline?: boolean;
   activity?: TaskActivity | null;
+  /** What the task's agent session is doing; absent on a server predating the split. */
+  runtimeState?: TaskRuntimeState | null;
+  /** Whether a human has read the task's latest output. */
+  readState?: TaskReadState | null;
   /** Owner-side activity generation used to acknowledge exactly one notification. */
   activityRevision?: number;
   /** Owner-local id of the parent task when this task is a subtask. */

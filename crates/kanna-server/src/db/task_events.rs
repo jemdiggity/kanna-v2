@@ -402,10 +402,17 @@ impl Db {
         Ok(())
     }
 
-    /// Record the daemon's view of a task session: busy, waiting (parked on an
-    /// interactive prompt), or idle. Unlike `activity` this is
+    /// Record the runtime dimension of a task: what its agent session is
+    /// doing, independent of whether a human has read its output.
+    ///
+    /// The vocabulary is the daemon's own — `busy`, `waiting` (parked on an
+    /// interactive prompt), `idle` — plus `exited`, which the server writes
+    /// when a session ends without being replaced (see
+    /// `mark_task_session_interrupted`). Unlike `activity` this is
     /// selection-independent and never collapses waiting into idle, which is
-    /// what makes a blocked agent visible at all.
+    /// what makes a blocked agent visible at all, and it never encodes read
+    /// state, which is what lets a wait tell a working task from a finished
+    /// one it happens to have read.
     ///
     /// Returns whether the stored status changed. Crossing into `waiting`
     /// appends the `task.awaiting_input` event exactly once per block.

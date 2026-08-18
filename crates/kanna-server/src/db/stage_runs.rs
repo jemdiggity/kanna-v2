@@ -78,6 +78,19 @@ impl Db {
         // A pending run has not started anything yet; the watcher wants the
         // moment an agent is actually working.
         if run.status == "running" {
+            // A previous session's `exited` verdict describes a session that
+            // no longer exists. Clear it so the runtime dimension reads
+            // "unknown until the daemon classifies this session" rather than
+            // reporting the new run's agent as already gone — which is what a
+            // wait keyed on session termination would resolve on. Only the
+            // terminal value is cleared: a post run is injected into the same
+            // live session, whose `busy` verdict is still current.
+            self.conn.execute(
+                "UPDATE pipeline_item
+                 SET runtime_status = NULL, updated_at = datetime('now')
+                 WHERE id = ? AND runtime_status = 'exited'",
+                [run.task_id],
+            )?;
             self.append_task_event(
                 run.task_id,
                 TaskEventKind::RunStarted,
