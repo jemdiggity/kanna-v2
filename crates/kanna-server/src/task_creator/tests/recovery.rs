@@ -858,6 +858,84 @@ async fn ordinary_agent_failure_in_a_resumed_run_is_not_retried_fresh() {
     let _ = std::fs::remove_dir_all(&repo_root);
 }
 
+/// A terminal-loss path records `runtime_status = 'exited'` alongside the
+/// interrupted run. When the recovery it tells the operator to run finds the
+/// session still alive and restores the run instead of spawning, that verdict
+/// describes a process that is demonstrably still there — and it does not
+/// self-heal, because the daemon writes a runtime status only when a session's
+/// classification changes.
+///
+/// Left behind it is worse than a stale display value: `runtimeState:
+/// "exited"` is one of the three terminations `kanna_wait_task`'s
+/// `until: "finished"` resolves on, so every waiter on a live task would be
+/// told it had finished, and the task-manager watcher would count the task as
+/// parked.
+#[tokio::test]
+async fn resuming_into_a_live_session_clears_the_exited_runtime_verdict() {
+    let (repo_root, config, db) = init_recovery_fixture("task-recovery-live-runtime");
+    // What `ErrorCode::HandoffLost` leaves behind: the run failed with the
+    // interruption feedback, and the runtime dimension marked terminal.
+    crate::http_api::mark_task_session_interrupted(
+        &config.db_path,
+        "recovery-task",
+        "failed",
+        "session lost during daemon handoff; use kanna_resume_task to recover",
+    )
+    .unwrap();
+    assert_eq!(
+        db.get_pipeline_item_runtime_status("recovery-task")
+            .unwrap(),
+        Some("exited".to_string()),
+        "the interruption must record the terminal runtime verdict this test then clears"
+    );
+
+    let daemon = spawn_listing_fake_daemon(config.daemon_dir.clone()).await;
+    let app = crate::http_api::router(std::sync::Arc::new(crate::http_api::AppState::new(
+        config.clone(),
+    )));
+    let response = tower::ServiceExt::oneshot(
+        app.clone(),
+        axum::http::Request::post("/v1/tasks/recovery-task/actions/resume")
+            .body(axum::body::Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    assert!(matches!(
+        daemon.await.unwrap(),
+        kanna_daemon::protocol::Command::List
+    ));
+
+    // Read it back the way a supervisor does, over HTTP, rather than off the
+    // column: the point is what the task serves after the restore.
+    let detail = tower::ServiceExt::oneshot(
+        app,
+        axum::http::Request::get("/v1/tasks/recovery-task")
+            .body(axum::body::Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(detail.status(), axum::http::StatusCode::OK);
+    let body = axum::body::to_bytes(detail.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let detail: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_ne!(
+        detail["runtimeState"],
+        serde_json::json!("exited"),
+        "the session is live; reporting it as exited finishes every wait on it: {detail}"
+    );
+    assert_eq!(
+        detail["latestRun"]["status"],
+        serde_json::json!("running"),
+        "the restore itself must still have happened: {detail}"
+    );
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
 #[tokio::test]
 async fn live_daemon_session_restores_a_false_interruption_instead_of_spawning() {
     let (repo_root, config, db) = init_recovery_fixture("task-recovery-live");

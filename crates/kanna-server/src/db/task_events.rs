@@ -454,6 +454,27 @@ impl Db {
         })
     }
 
+    /// Drop a stale `exited` verdict for a task whose session has been proven
+    /// live again — a new running run, or a daemon that still lists the
+    /// session. Returns whether anything was cleared.
+    ///
+    /// Only the terminal value is cleared, and it is cleared to "no verdict
+    /// yet" rather than to an invented live one: the daemon owns `busy` /
+    /// `waiting` / `idle`, and guessing one here would put a value on the
+    /// record that no rendered frame produced. `exited`, by contrast, is a
+    /// statement about a process that demonstrably no longer describes this
+    /// task, and leaving it would report a running agent as gone — which
+    /// `WaitUntil::Finished` resolves on.
+    pub fn clear_exited_runtime_status(&self, task_id: &str) -> Result<bool, rusqlite::Error> {
+        let rows_affected = self.conn.execute(
+            "UPDATE pipeline_item
+             SET runtime_status = NULL, updated_at = datetime('now')
+             WHERE id = ? AND runtime_status = 'exited'",
+            [task_id],
+        )?;
+        Ok(rows_affected > 0)
+    }
+
     #[cfg(test)]
     pub fn get_pipeline_item_runtime_status(
         &self,
