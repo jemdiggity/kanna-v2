@@ -3025,6 +3025,16 @@ describe("createMobileController", () => {
     store.setDesktops([
       { id: "desktop-a", name: "User A Mac", online: true, mode: "remote" }
     ]);
+    store.setMachineSourceDesktops({
+      account: [
+        { id: "desktop-a", name: "User A Mac", online: true, mode: "remote" }
+      ],
+      local: [
+        { id: "desktop-a", name: "User A Mac", online: true, mode: "lan" },
+        { id: "trusted-local", name: "Trusted Local Mac", online: true, mode: "lan" }
+      ]
+    });
+    store.setMachineSourceWarnings({ account: "Cloud unavailable", local: null });
     store.setRepos([{ id: "repo-a", name: "Repo A" }]);
     store.setRecentTasks([taskA]);
     store.setRepoTasks([taskA]);
@@ -3062,6 +3072,11 @@ describe("createMobileController", () => {
     expect(store.getState()).toMatchObject({
       auth: authState,
       desktops: [],
+      accountDesktops: [],
+      liveLanDesktops: [
+        { id: "trusted-local", name: "Trusted Local Mac", online: true, mode: "lan" }
+      ],
+      machineSourceWarnings: { account: null, local: null },
       selectedDesktopId: null,
       repos: [],
       selectedRepoId: null,
@@ -3094,6 +3109,7 @@ describe("createMobileController", () => {
     for (const publication of userBPublications) {
       expect(publication).toMatchObject({
         desktops: [],
+        accountDesktops: [],
         repos: [],
         recentTasks: [],
         repoTasks: [],
@@ -3201,6 +3217,18 @@ describe("createMobileController", () => {
     store.setComposerState(true, "Keep draft");
     store.setComposerDesktop("desktop-a");
     store.setComposerAgentProvider("codex");
+    store.setDesktops([
+      { id: "desktop-a", name: "User A Mac", online: true, mode: "remote" }
+    ]);
+    store.setMachineSourceDesktops({
+      account: [
+        { id: "desktop-a", name: "User A Mac", online: true, mode: "remote" }
+      ],
+      local: [
+        { id: "desktop-a", name: "User A Mac", online: true, mode: "lan" },
+        { id: "trusted-local", name: "Trusted Local Mac", online: true, mode: "lan" }
+      ]
+    });
 
     authState = { status: "signedOut" };
     authListener?.(authState);
@@ -3210,6 +3238,12 @@ describe("createMobileController", () => {
     expect(store.getState()).toMatchObject({
       auth: { status: "signedOut" },
       desktops: [],
+      // No machine may still read as available through an account the phone
+      // is no longer signed in to; the manually paired one keeps its row.
+      accountDesktops: [],
+      liveLanDesktops: [
+        { id: "trusted-local", name: "Trusted Local Mac", online: true, mode: "lan" }
+      ],
       repos: [],
       recentTasks: [],
       repoTasks: [],
