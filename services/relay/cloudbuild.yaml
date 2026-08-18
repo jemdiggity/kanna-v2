@@ -4,8 +4,13 @@ steps:
       - build
       - -f
       - services/relay/Dockerfile
+      - --build-arg
+      - KANNA_RELAY_COMMIT=$_COMMIT
       - -t
       - $_IMAGE
       - .
+substitutions:
+  # kd passes the resolved source commit; a manual build without it reports "unknown".
+  _COMMIT: unknown
 images:
   - $_IMAGE

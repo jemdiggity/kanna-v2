@@ -17,6 +17,10 @@ RUN pnpm --config.allowUnusedPatches=true --filter kanna-relay deploy --prod --l
 
 FROM node:22-alpine
 
+# Source commit the image was built from; reported by GET /health.
+ARG KANNA_RELAY_COMMIT=unknown
+ENV KANNA_RELAY_COMMIT=$KANNA_RELAY_COMMIT
+
 WORKDIR /app
 
 COPY --from=build /relay ./
