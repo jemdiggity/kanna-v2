@@ -142,3 +142,15 @@ The server side of the same contract runs in the ordinary Rust test suite
 (`crates/kanna-server/tests/agent_provider_inventory_http.rs`), which boots the
 real server process against a restricted PATH and asserts what `/v1/status` and
 `/v1/desktops` report.
+
+Both of those cover the LAN path. The relay path — a phone off the LAN, which is
+how App Review reached the machine — is covered in `tests/remote-e2e`
+(`pnpm test:remote-e2e`), whose harness runs a real `kanna-server`, the real
+relay, and the Firebase emulators. `src/cloud-pairing-auth-discovery.e2e.test.ts`
+follows one desktop's real inventory from the snapshot the server publishes,
+through relay validation, into the Firestore desktop record the phone reads, and
+on into the composer's agent options; `src/lan-layer.e2e.test.ts` asserts the
+same inventory on the LAN desktop listing. Both rely on `serverProviderPath` in
+the harness, which strips the host's own agent CLIs from the PATH the harness
+server inherits so the reported inventory is the fixture's rather than the
+developer machine's.
