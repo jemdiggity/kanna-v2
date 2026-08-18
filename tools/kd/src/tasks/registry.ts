@@ -29,6 +29,10 @@ import { buildDesktopRealE2eCommand } from "../runtime/desktop-e2e";
 import { buildMobileDeviceSmokeCommand, buildMobileTestCommand } from "../runtime/mobile-commands";
 import { executeMobileIosArchiveWithContext } from "../runtime/mobile-archive";
 import {
+  executeMobilePublishWithContext,
+  executeMobileVerifyWithContext
+} from "../runtime/mobile-publish";
+import {
   buildMobileDeviceInstallAppCommand,
   buildMobileDeviceLaunchAppCommand,
   buildMobileDeviceListAppsCommand,
@@ -216,6 +220,24 @@ const mobileArchiveInputSchema = z.object({
   buildNumber: z.string().optional(),
   version: z.string().optional(),
   outDir: z.string().optional()
+});
+
+const mobilePublishInputSchema = z.object({
+  production: z.boolean().default(false),
+  dryRun: z.boolean().default(false),
+  allowNonReleaseRef: z.boolean().default(false),
+  forceRebuild: z.boolean().default(false),
+  ref: z.string().optional(),
+  buildNumber: z.string().optional(),
+  version: z.string().optional(),
+  outDir: z.string().optional(),
+  releaseType: z.string().optional()
+});
+
+const mobileVerifyInputSchema = z.object({
+  ipa: z.string().optional(),
+  version: z.string().optional(),
+  buildNumber: z.string().optional()
 });
 
 const mobileOtaPublishInputSchema = z.object({
@@ -1951,6 +1973,33 @@ export const taskDefinitions = [
     execute: async (_context, input) => {
       const context = await resolveDefaultContext(process.env);
       return executeMobileIosArchiveWithContext(mobileArchiveInputSchema.parse(input), {
+        repoRoot: context.repoRoot,
+        env: context.env,
+        runner: nodeCommandRunner
+      });
+    }
+  },
+  {
+    id: "mobile.publish",
+    description:
+      "Ship a production iOS build to App Store Connect: archive, verify, upload, wait, attach, and record it.",
+    inputSchema: mobilePublishInputSchema,
+    execute: async (_context, input) => {
+      const context = await resolveDefaultContext(process.env);
+      return executeMobilePublishWithContext(mobilePublishInputSchema.parse(input), {
+        repoRoot: context.repoRoot,
+        env: context.env,
+        runner: nodeCommandRunner
+      });
+    }
+  },
+  {
+    id: "mobile.verify",
+    description: "Run the pre-upload App Store checks against an iOS IPA and print its SHA-256.",
+    inputSchema: mobileVerifyInputSchema,
+    execute: async (_context, input) => {
+      const context = await resolveDefaultContext(process.env);
+      return executeMobileVerifyWithContext(mobileVerifyInputSchema.parse(input), {
         repoRoot: context.repoRoot,
         env: context.env,
         runner: nodeCommandRunner

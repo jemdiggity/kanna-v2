@@ -279,6 +279,90 @@ so revisit this if `-f` is withdrawn.
 Run the [mobile production QA gate](../testing/mobile-production-qa-gate.md)
 before TestFlight external testing or App Store submission.
 
+### App Store publish
+
+```sh
+./kd mobile publish --production --ref release/0.2 --build-number 4 --dry-run
+./kd mobile publish --production --ref release/0.2 --build-number 4
+```
+
+`kd mobile publish` is the whole shipping operation, staged and resumable:
+
+| stage | what it does |
+|---|---|
+| resolve | Resolves `--ref` the same way `kd mobile archive` does, **and requires a `release/X.Y` branch.** |
+| build-number | Asks App Store Connect for the highest `CFBundleVersion` already used for this marketing version, and refuses anything at or below it. |
+| archive | Runs `kd mobile archive` (including its reuse semantics) without uploading. |
+| verify | Runs every pre-upload check and hard-fails before the upload. Records the IPA sha256. |
+| upload | `xcrun altool --upload-app`. Records the delivery UUID when altool reports one. |
+| wait | Polls App Store Connect until the build's `processingState` is `VALID`, or a bounded timeout elapses. |
+| attach | Attaches the processed build to the `appStoreVersion` for this marketing version. |
+| tag | Writes the publish record and pushes an annotated `mobile-v<version>-<build>` tag at the resolved commit. |
+
+**The release-branch requirement encodes a real incident.** The first Kanna
+Mobile 1.0.0 submission was built from `main`, carried an unreleased feature,
+and had to be withdrawn. `--allow-non-release-ref` bypasses it deliberately.
+
+**Auto build numbers are opt-in.** `--build-number auto` takes the next number
+after the highest already uploaded; the default is an explicit number, because
+a build number is irreversibly consumed the moment Apple accepts the binary.
+
+**Three things stay human and are only printed, never performed.** Export
+compliance is a legal attestation. The release type is a judgement call, set
+only when you pass `--release-type MANUAL|AFTER_APPROVAL|SCHEDULED`; unset means
+untouched. Submit-for-review is an irreversible external action.
+
+**Resuming.** Every stage writes `.build/mobile/ios-production/publish-<version>.json`,
+so a rerun with the same ref skips what already succeeded — most importantly the
+upload and the processing wait. `--build-number auto` on a resume keeps the
+number the record already chose rather than consuming another. Verification is
+re-run every time (it is the guard, not the work), and the run refuses to
+continue if the IPA on disk no longer hashes to the value the record signed off
+on. If App Store Connect has no App Store version for the marketing version
+yet, publish stops after `wait` with instructions; create it and rerun.
+
+**Provenance has two channels**, because an IPA in Apple's hands cannot be
+queried the way the relay's `/health` can. The resolved ref and commit are baked
+into `expoConfig.extra.kanna.source` at prebuild (JS config, so no
+`runtimeVersion` bump), and the same facts plus the IPA sha256, delivery UUID,
+and App Store Connect build id go into the publish record and into the annotated
+git tag, which is the durable ledger.
+
+Credentials are the same two variables `kd mobile archive --upload` uses —
+`APP_STORE_CONNECT_API_KEY_ID` and `APP_STORE_CONNECT_API_ISSUER_ID` — plus
+`~/.appstoreconnect/private_keys/AuthKey_<key id>.p8`, which kd reads to sign
+the ES256 JWT the App Store Connect REST API expects. There is no fastlane and
+no Ruby toolchain: the durable Apple interface is that REST API, and a Ruby
+dependency would break the repo's vendored-dependency rule while duplicating
+identity config kd already owns.
+
+### Verifying an IPA on its own
+
+```sh
+./kd mobile verify --ipa .build/mobile/ios-production/export/Kanna.ipa --build-number 4
+```
+
+The same five checks publish runs, each of which was hand-run three times during
+the 1.0.0 release and two of which caught real defects:
+
+1. the `codesign` leaf authority is an `Apple Distribution` certificate;
+2. `embedded.mobileprovision` has no `ProvisionedDevices` and matches the app id;
+3. the IPA's `CFBundleIdentifier`, `CFBundleShortVersionString`, and
+   `CFBundleVersion` agree with the plan;
+4. the 1024 marketing icon is 1024x1024 with no alpha channel;
+5. the embedded Expo config declares `appEnv: prod` and OTA channel
+   `production`, and the native `Info.plist` OTA channel agrees with it.
+
+It also prints the IPA sha256. `--build-number` is optional; when omitted, the
+build number is reported but not asserted.
+
+Relatedly, `apps/mobile/app.config.ts` now **throws** on an unset or
+unrecognised `KANNA_APP_ENV` rather than mapping it to production. Doing the
+latter once produced a staging native shell wrapping production JS, whose only
+symptom was an authentication failure indistinguishable from a wrong password.
+kd always sets the variable explicitly, so only hand-rolled builds are affected
+— and those are the unsafe ones.
+
 ### Mobile OTA
 
 Self-hosted OTA updates are served by the relay (`/ota/manifest`,
