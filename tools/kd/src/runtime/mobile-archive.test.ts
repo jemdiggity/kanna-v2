@@ -11,6 +11,40 @@ import {
 } from "./mobile-archive";
 import type { CommandRunner } from "./process";
 
+const HEAD_COMMIT = "9c8b7a6d5e4f30210123456789abcdef01234567";
+const SHORT_COMMIT = HEAD_COMMIT.slice(0, 12);
+
+/**
+ * Mock runner that answers the git source-ref probes plus whatever the caller
+ * stubs for the archive toolchain.
+ */
+function archiveRunner(options: {
+  calls?: string[];
+  status?: string;
+  xcodeVersion?: string;
+} = {}): CommandRunner {
+  const calls = options.calls ?? [];
+  return {
+    async run(command, args) {
+      calls.push(`${command} ${args.join(" ")}`);
+      if (command === "git" && args[0] === "status") {
+        return { exitCode: 0, stdout: options.status ?? "", stderr: "" };
+      }
+      if (command === "git" && args[0] === "rev-parse") {
+        return { exitCode: 0, stdout: `${HEAD_COMMIT}\n`, stderr: "" };
+      }
+      if (command === "xcodebuild" && args[0] === "-version") {
+        return {
+          exitCode: 0,
+          stdout: options.xcodeVersion ?? "Xcode 26.0\nBuild version 17A123\n",
+          stderr: ""
+        };
+      }
+      return { exitCode: 0, stdout: "", stderr: "" };
+    }
+  };
+}
+
 async function writeMinimalRepo(
   root: string,
   mobileVersion: string | null = "1.0.0"
@@ -40,6 +74,8 @@ describe("kd mobile archive", () => {
         "mobile",
         "archive",
         "--production",
+        "--ref",
+        "release/0.2",
         "--build-number",
         "45",
         "--version",
@@ -53,6 +89,7 @@ describe("kd mobile archive", () => {
       taskId: "mobile.archive",
       input: {
         production: true,
+        ref: "release/0.2",
         buildNumber: "45",
         version: "1.2.3",
         outDir: ".build/mobile-release",
@@ -127,50 +164,68 @@ describe("kd mobile archive", () => {
     const repoRoot = await mkdtemp(join(tmpdir(), "kanna-mobile-archive-xcode-"));
     await writeMinimalRepo(repoRoot);
     const calls: string[] = [];
-    const runner: CommandRunner = {
-      async run(command, args) {
-        calls.push(`${command} ${args.join(" ")}`);
-        if (command === "xcodebuild" && args[0] === "-version") {
-          return { exitCode: 0, stdout: "Xcode 25.4\nBuild version 16F6\n", stderr: "" };
-        }
-        return { exitCode: 0, stdout: "", stderr: "" };
-      }
-    };
+    const runner = archiveRunner({ calls, xcodeVersion: "Xcode 25.4\nBuild version 16F6\n" });
 
     await expect(
       executeMobileIosArchiveWithContext(
-        { production: true, buildNumber: "45" },
+        { production: true, ref: "release/0.2", buildNumber: "45" },
         { repoRoot, env: {}, runner }
       )
     ).rejects.toThrow("Xcode 26 or later is required");
-    expect(calls).toEqual(["xcodebuild -version"]);
+    expect(calls).toEqual([
+      "git status --porcelain",
+      "git rev-parse --verify --quiet HEAD^{commit}",
+      "git rev-parse --verify --quiet release/0.2^{commit}",
+      "xcodebuild -version"
+    ]);
+  });
+
+  it("requires an explicit --ref and a clean worktree", async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-mobile-archive-ref-"));
+    await writeMinimalRepo(repoRoot);
+
+    await expect(
+      executeMobileIosArchiveWithContext(
+        { production: true, buildNumber: "45", dryRun: true },
+        { repoRoot, env: {}, runner: archiveRunner() }
+      )
+    ).rejects.toThrow("mobile archive --production requires --ref <branch|tag|sha>");
+
+    await expect(
+      executeMobileIosArchiveWithContext(
+        { production: true, ref: "release/0.2", buildNumber: "45", dryRun: true },
+        { repoRoot, env: {}, runner: archiveRunner({ status: " M apps/mobile/app.json\n" }) }
+      )
+    ).rejects.toThrow("Refusing to run mobile archive from a dirty git worktree");
   });
 
   it("dry-runs without invoking archive or upload commands", async () => {
     const repoRoot = await mkdtemp(join(tmpdir(), "kanna-mobile-archive-dry-"));
     await writeMinimalRepo(repoRoot);
     const calls: string[] = [];
-    const runner: CommandRunner = {
-      async run(command, args) {
-        calls.push(`${command} ${args.join(" ")}`);
-        return { exitCode: 0, stdout: "Xcode 26.0\nBuild version 17A123\n", stderr: "" };
-      }
-    };
+    const runner = archiveRunner({ calls });
 
     const result = await executeMobileIosArchiveWithContext(
-      { production: true, buildNumber: "45", dryRun: true },
+      { production: true, ref: "release/0.2", buildNumber: "45", dryRun: true },
       { repoRoot, env: {}, runner }
     );
 
     expect(result.ok).toBe(true);
     expect(result.message).toContain("Dry run: mobile production archive 1.0.0 (45)");
+    expect(result.message).toContain(`Source: release/0.2 (${SHORT_COMMIT})`);
     const plan = result.data as MobileIosArchivePlan;
+    expect(plan.source).toEqual({ ref: "release/0.2", commit: HEAD_COMMIT, shortCommit: SHORT_COMMIT });
     expect(plan.version).toBe("1.0.0");
     expect(plan.commands[0]?.env).toMatchObject({
       KANNA_APP_VERSION: "1.0.0",
       KANNA_IOS_BUILD_NUMBER: "45"
     });
-    expect(calls).toEqual(["xcodebuild -version"]);
+    expect(calls).toEqual([
+      "git status --porcelain",
+      "git rev-parse --verify --quiet HEAD^{commit}",
+      "git rev-parse --verify --quiet release/0.2^{commit}",
+      "xcodebuild -version"
+    ]);
   });
 
   it("falls back to the repository VERSION when apps/mobile/VERSION is absent", async () => {

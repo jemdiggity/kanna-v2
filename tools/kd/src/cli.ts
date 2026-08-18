@@ -256,11 +256,11 @@ function parseMobileQaInput(rest: string[]): ParsedCliCommand {
 
 function parseMobileArchiveInput(rest: string[]): ParsedCliCommand {
   const input = parseFlagInput(rest, { production: false, dryRun: false, upload: false });
-  const allowedKeys = new Set(["production", "dryRun", "upload", "buildNumber", "version", "outDir"]);
+  const allowedKeys = new Set(["production", "dryRun", "upload", "buildNumber", "version", "outDir", "ref"]);
   const unsupportedKeys = Object.keys(input).filter((key) => !allowedKeys.has(key));
   if (unsupportedKeys.length > 0) {
     throw new Error(
-      "mobile archive only accepts --production, --build-number, --version, --out-dir, --upload, or --dry-run"
+      "mobile archive only accepts --production, --ref, --build-number, --version, --out-dir, --upload, or --dry-run"
     );
   }
   return {
@@ -387,6 +387,15 @@ function parseFlagInput(
         throw new Error("--out-dir requires a value");
       }
       input.outDir = value;
+      index += 1;
+      continue;
+    }
+    if (arg === "--ref") {
+      const value = rest[index + 1];
+      if (!value || value.startsWith("--")) {
+        throw new Error("--ref requires a value");
+      }
+      input.ref = value;
       index += 1;
       continue;
     }
@@ -807,7 +816,7 @@ const helpTopics: Record<string, string[]> = {
     "  mobile up [--production|--staging] [--with-credentials]",
     "  mobile run --device [--production|--staging] [--install] [--with-credentials]",
     "  mobile uninstall --device --staging|--production --confirm-bundle <bundle-id> [--confirm-production]",
-    "  mobile archive --production --build-number <number> [--version <version>] [--out-dir <dir>] [--upload] [--dry-run]",
+    "  mobile archive --production --ref <branch|tag|sha> --build-number <number> [--version <version>] [--out-dir <dir>] [--upload] [--dry-run]",
     "  mobile doctor --device",
     "  mobile qa --production [--ota]",
     "  mobile ota publish --staging|--production [--dry-run] [--rollback-to <updateId>]",
@@ -832,7 +841,7 @@ const helpTopics: Record<string, string[]> = {
     "  release cut [--major|--minor|--patch] [--version X.Y.0] [--abandon-series X.Y[,X.Y]] [--reason <why>]",
     "  release reset-staging --to main|release/X.Y --reason <why> --confirm-abandon <staging-version> [--dry-run]",
     "  release status",
-    "  cloud deploy --staging|--production [--relay]",
+    "  cloud deploy --staging|--production [--ref <branch|tag|sha>] [--relay]",
     "  cloud relay-provision --staging|--production",
     "  pages build-schema --out-dir <dir>",
     "  test rust",
@@ -944,7 +953,7 @@ const helpTopics: Record<string, string[]> = {
     "  mobile up [--production|--staging] [--with-credentials]",
     "  mobile run --device [--production|--staging] [--install] [--with-credentials]",
     "  mobile uninstall --device --staging|--production --confirm-bundle <bundle-id> [--confirm-production]",
-    "  mobile archive --production --build-number <number> [--version <version>] [--out-dir <dir>] [--upload] [--dry-run]",
+    "  mobile archive --production --ref <branch|tag|sha> --build-number <number> [--version <version>] [--out-dir <dir>] [--upload] [--dry-run]",
     "  mobile doctor --device",
     "  mobile qa --production [--ota]",
     "  mobile ota <command>",
@@ -987,12 +996,13 @@ const helpTopics: Record<string, string[]> = {
     "  --confirm-production           Additionally required before uninstalling production."
   ],
   "mobile archive": [
-    "Usage: kd mobile archive --production --build-number <number> [--version <version>] [--out-dir <dir>] [--upload] [--dry-run]",
+    "Usage: kd mobile archive --production --ref <branch|tag|sha> --build-number <number> [--version <version>] [--out-dir <dir>] [--upload] [--dry-run]",
     "",
     "Build a production iOS archive and IPA through local Expo CNG and Xcode.",
     "",
     "Options:",
     "  --production              Required. Use the production Kanna mobile identity.",
+    "  --ref <branch|tag|sha>    Required. Source ref to archive; must be the checked-out commit.",
     "  --build-number <number>   Required. App Store Connect build number (CFBundleVersion).",
     "  --version <version>       Marketing version (defaults to apps/mobile/VERSION).",
     "  --out-dir <dir>           Archive output directory (defaults to .build/mobile/ios-production).",
@@ -1233,13 +1243,17 @@ const helpTopics: Record<string, string[]> = {
     "Usage: kd cloud <command>",
     "",
     "Commands:",
-    "  cloud deploy --staging|--production [--relay]",
+    "  cloud deploy --staging|--production [--ref <branch|tag|sha>] [--relay]",
     "  cloud relay-provision --staging|--production"
   ],
   "cloud deploy": [
-    "Usage: kd cloud deploy --staging|--production [--relay]",
+    "Usage: kd cloud deploy --staging|--production [--ref <branch|tag|sha>] [--relay]",
     "",
-    "Deploy Kanna Firebase cloud services."
+    "Deploy Kanna Firebase cloud services.",
+    "",
+    "  --ref <branch|tag|sha>  Source ref the deploy builds from. Required with --production.",
+    "                          The build consumes the working tree, so the ref must be checked",
+    "                          out and the tree clean."
   ],
   "cloud relay-provision": [
     "Usage: kd cloud relay-provision --staging|--production",

@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { cloudEnvironmentToKdEnvironment, resolveKdEnvironment } from "./environment";
 import type { CommandRunner } from "./process";
+import { resolveSourceRef, type ResolvedSourceRef } from "./source-ref";
 
 interface Firebaserc {
   projects?: {
@@ -17,11 +18,14 @@ export interface CloudDeployInput {
   env: NodeJS.ProcessEnv;
   runner: CommandRunner;
   environment: CloudDeployEnvironment;
+  /** Branch, tag, or sha the deploy builds from; required for production. */
+  ref?: string;
 }
 
 export interface CloudDeployResult {
   projectId: string;
   deployed: boolean;
+  source: ResolvedSourceRef;
   relay?: RelayDeployResult;
 }
 
@@ -30,6 +34,8 @@ export interface RelayDeployResult {
   vmName: string;
   zone: string;
   relayUrl: string;
+  /** Short sha baked into the relay image and reported by its /health endpoint. */
+  commit: string;
 }
 
 export interface RelayCommandPlanStep {
@@ -55,6 +61,8 @@ export interface RelayDeployPlan {
   zone: string;
   relayUrl: string;
   artifactRegistryImage: string;
+  /** Short source sha baked into the image, reported by the relay's /health endpoint. */
+  commit: string;
   commands: RelayCommandPlanStep[];
 }
 
@@ -99,23 +107,18 @@ export function resolveProductionFirebaseProject(
   return resolveFirebaseProject(repoRoot, env, "production");
 }
 
-async function assertCleanGitWorktree(repoRoot: string, runner: CommandRunner): Promise<void> {
-  const status = await runner.run("git", ["status", "--porcelain"], { cwd: repoRoot });
-  if (status.exitCode !== 0) {
-    throw new Error(status.stderr || status.stdout || "Failed to inspect git worktree status.");
-  }
-  if (status.stdout.trim().length > 0) {
-    throw new Error(
-      "Refusing to deploy cloud services from a dirty git worktree. Commit or stash changes first."
-    );
-  }
-}
-
 export async function deployFirebaseCloud(input: CloudDeployInput & { relay?: boolean }): Promise<CloudDeployResult> {
   assertCloudDeployEnvironment(input.environment);
 
   const projectId = resolveFirebaseProject(input.repoRoot, input.env, input.environment);
-  await assertCleanGitWorktree(input.repoRoot, input.runner);
+  const source = await resolveSourceRef({
+    repoRoot: input.repoRoot,
+    runner: input.runner,
+    env: input.env,
+    ref: input.ref,
+    requireRef: input.environment === "production",
+    command: "cloud deploy"
+  });
   const build = await input.runner.run("pnpm", ["--dir", "services/firebase-functions", "build"], {
     cwd: input.repoRoot,
     env: input.env
@@ -142,19 +145,22 @@ export async function deployFirebaseCloud(input: CloudDeployInput & { relay?: bo
     throw new Error(deploy.stderr || deploy.stdout || "Firebase deploy failed.");
   }
 
-  const result: CloudDeployResult = { projectId, deployed: true };
+  const result: CloudDeployResult = { projectId, deployed: true, source };
   if (input.relay) {
-    result.relay = await deployRelayCloud(input);
+    result.relay = await deployRelayCloud({ ...input, source });
   }
   return result;
 }
 
-export async function deployRelayCloud(input: CloudDeployInput): Promise<RelayDeployResult> {
+export async function deployRelayCloud(
+  input: CloudDeployInput & { source: ResolvedSourceRef }
+): Promise<RelayDeployResult> {
   assertCloudDeployEnvironment(input.environment);
 
   const plan = buildRelayDeployPlan({
     repoRoot: input.repoRoot,
-    environment: input.environment
+    environment: input.environment,
+    commit: input.source.shortCommit
   });
   for (const step of plan.commands) {
     const result = await input.runner.run(step.command, step.args, {
@@ -170,7 +176,8 @@ export async function deployRelayCloud(input: CloudDeployInput): Promise<RelayDe
     projectId: plan.projectId,
     vmName: plan.vmName,
     zone: plan.zone,
-    relayUrl: plan.relayUrl
+    relayUrl: plan.relayUrl,
+    commit: plan.commit
   };
 }
 
@@ -307,12 +314,19 @@ export function buildRelayProvisionPlan(input: { environment: CloudDeployEnviron
 export function buildRelayDeployPlan(input: {
   repoRoot: string;
   environment: CloudDeployEnvironment;
+  /** Short source sha, baked into the image so the relay can report what it runs. */
+  commit: string;
 }): RelayDeployPlan {
   assertCloudDeployEnvironment(input.environment);
 
   const identity = resolveKdEnvironment(cloudEnvironmentToKdEnvironment(input.environment));
   if (!identity.relayDomain || !identity.gceVmName || !identity.artifactRegistryImage) {
     throw new Error(`Relay VM deploy is not configured for ${input.environment}.`);
+  }
+
+  const commit = input.commit.trim();
+  if (!/^[0-9a-f]{7,40}$/.test(commit)) {
+    throw new Error(`Relay VM deploy requires a resolved source commit, got: ${input.commit}`);
   }
 
   const projectId = identity.firebaseProjectId;
@@ -330,6 +344,7 @@ export function buildRelayDeployPlan(input: {
     zone,
     relayUrl: identity.relayUrl,
     artifactRegistryImage: identity.artifactRegistryImage,
+    commit,
     commands: [
       {
         command: "gcloud",
@@ -341,7 +356,7 @@ export function buildRelayDeployPlan(input: {
           "--config",
           "services/relay/cloudbuild.yaml",
           "--substitutions",
-          `_IMAGE=${identity.artifactRegistryImage}`,
+          `_IMAGE=${identity.artifactRegistryImage},_COMMIT=${commit}`,
           "."
         ],
         cwd: input.repoRoot,
