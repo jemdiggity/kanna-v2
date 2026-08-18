@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
+import { readEmbeddedSource } from "./mobile-verify";
 import type { CommandRunner } from "./process";
 import { formatSourceRef, resolveSourceRef, type ResolvedSourceRef } from "./source-ref";
 
@@ -69,7 +70,7 @@ export function parseXcodeMajorVersion(stdout: string): number | null {
   return match ? Number.parseInt(match[1], 10) : null;
 }
 
-async function readMobileProductionIdentity(repoRoot: string): Promise<{ bundleId: string; displayName: string }> {
+export async function readMobileProductionIdentity(repoRoot: string): Promise<{ bundleId: string; displayName: string }> {
   const configPath = join(repoRoot, "apps/mobile/src/mobileEnvironments.json");
   const parsed = JSON.parse(await readFile(configPath, "utf8")) as Record<string, MobileEnvironmentRecord | undefined>;
   const prod = parsed.prod;
@@ -82,7 +83,7 @@ async function readMobileProductionIdentity(repoRoot: string): Promise<{ bundleI
   };
 }
 
-async function readCurrentVersion(repoRoot: string): Promise<string> {
+export async function readCurrentVersion(repoRoot: string): Promise<string> {
   const mobileVersionPath = join(repoRoot, "apps/mobile/VERSION");
   if (existsSync(mobileVersionPath)) {
     const mobileVersion = (await readFile(mobileVersionPath, "utf8")).trim();
@@ -120,7 +121,7 @@ function requireBuildNumber(rawBuildNumber: string | undefined): string {
   return buildNumber;
 }
 
-function resolveOutDir(repoRoot: string, outDir: string | undefined): string {
+export function resolveOutDir(repoRoot: string, outDir: string | undefined): string {
   const archiveOutDir = outDir?.trim() || ".build/mobile/ios-production";
   return isAbsolute(archiveOutDir) ? archiveOutDir : resolve(repoRoot, archiveOutDir);
 }
@@ -164,10 +165,17 @@ export async function buildMobileIosArchivePlan(input: {
   const ipaPath = join(exportPath, "Kanna.ipa");
   const identity = await readMobileProductionIdentity(input.repoRoot);
   const appEnv = APP_ENV;
+  // Provenance is baked into expoConfig.extra at prebuild so the shipped
+  // binary is self-describing: an IPA in Apple's hands cannot be queried the
+  // way the relay's /health can. This is JS config only, so it does not oblige
+  // a runtimeVersion bump.
   const appBuildEnv = {
     KANNA_APP_ENV: appEnv,
     KANNA_APP_VERSION: version,
-    KANNA_IOS_BUILD_NUMBER: buildNumber
+    KANNA_IOS_BUILD_NUMBER: buildNumber,
+    ...(input.source
+      ? { KANNA_SOURCE_REF: input.source.ref, KANNA_SOURCE_COMMIT: input.source.commit }
+      : {})
   };
   const commands: MobileIosArchiveCommand[] = [
     {
@@ -221,24 +229,14 @@ export async function buildMobileIosArchivePlan(input: {
     }
   ];
   if (input.upload === true) {
-    commands.push({
-      kind: "upload",
-      command: "xcrun",
-      args: [
-        "altool",
-        "--upload-app",
-        "-f",
+    commands.push(
+      buildAltoolUploadCommand({
+        repoRoot: input.repoRoot,
         ipaPath,
-        "-t",
-        "ios",
-        "--apiKey",
-        UPLOAD_API_KEY_PLACEHOLDER,
-        "--apiIssuer",
-        UPLOAD_API_ISSUER_PLACEHOLDER
-      ],
-      cwd: input.repoRoot,
-      streamOutput: true
-    });
+        apiKey: UPLOAD_API_KEY_PLACEHOLDER,
+        apiIssuer: UPLOAD_API_ISSUER_PLACEHOLDER
+      })
+    );
   }
 
   return {
@@ -279,7 +277,7 @@ function resolveUploadCredentials(env: NodeJS.ProcessEnv): { apiKey: string; api
   if (!apiKey || !apiIssuer) {
     throw new Error(
       "mobile archive --upload requires APP_STORE_CONNECT_API_KEY_ID and APP_STORE_CONNECT_API_ISSUER_ID. " +
-        "Place AuthKey_<key id>.p8 in ~/.appstoreconnect/private_keys/ for Transporter."
+        "Place AuthKey_<key id>.p8 in ~/.appstoreconnect/private_keys/ for altool."
     );
   }
   return { apiKey, apiIssuer };
@@ -329,10 +327,32 @@ export function parseArchiveIdentity(rawPlistJson: string): ArchiveIdentity | nu
 }
 
 /**
+ * The `.app` inside an `.xcarchive`. The archive is a plain directory, so this
+ * needs no unzipping.
+ */
+async function resolveArchivedAppPath(archivePath: string): Promise<string | null> {
+  const applications = join(archivePath, "Products", "Applications");
+  try {
+    const entries = await readdir(applications);
+    const appName = entries.find((entry) => entry.endsWith(".app"));
+    return appName ? join(applications, appName) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Decide whether the artifacts already on disk are exactly the ones the plan
- * asks for. Reuse is safe here because App Store Connect rejects a repeated
- * build number for a version, so changed source obliges a new build number,
- * which misses this check and rebuilds.
+ * asks for.
+ *
+ * Version and build number are not enough on their own. App Store Connect
+ * rejects a repeated build number, so *once Apple has consumed one* changed
+ * source obliges a new number — but an attempt that archives and then stops
+ * before uploading (a failed verification, a failed upload, a Ctrl-C) leaves an
+ * archive behind under a number Apple never saw. A rerun at a different commit
+ * with the same number would otherwise reuse it and ship the earlier commit's
+ * binary. So when the plan names a source, the commit baked into the archived
+ * app must match it.
  */
 export async function resolveReusableArchive(input: {
   runner: CommandRunner;
@@ -362,6 +382,24 @@ export async function resolveReusableArchive(input: {
         `wanted ${plan.version} (${plan.buildNumber})`
     };
   }
+  if (plan.source) {
+    const appPath = await resolveArchivedAppPath(plan.archivePath);
+    const embedded = appPath ? await readEmbeddedSource(appPath) : null;
+    if (!embedded?.commit) {
+      return {
+        reusable: false,
+        reason: "existing archive bakes in no source commit, so it cannot be matched to this ref"
+      };
+    }
+    if (embedded.commit !== plan.source.commit) {
+      return {
+        reusable: false,
+        reason:
+          `existing archive was built from ${embedded.commit.slice(0, 12)}, ` +
+          `wanted ${plan.source.shortCommit}`
+      };
+    }
+  }
   return { reusable: true, reason: `existing ${identity.version} (${identity.buildNumber}) matches` };
 }
 
@@ -378,6 +416,45 @@ export async function resolveReusableArchive(input: {
  * `-f` during 2026. If altool's `-f` is withdrawn, revisit the Transporter
  * invocation rather than assuming this one still holds.
  */
+export function buildAltoolUploadCommand(input: {
+  repoRoot: string;
+  ipaPath: string;
+  apiKey: string;
+  apiIssuer: string;
+}): MobileIosArchiveCommand {
+  return {
+    kind: "upload",
+    command: "xcrun",
+    args: [
+      "altool",
+      "--upload-app",
+      "-f",
+      input.ipaPath,
+      "-t",
+      "ios",
+      "--apiKey",
+      input.apiKey,
+      "--apiIssuer",
+      input.apiIssuer
+    ],
+    cwd: input.repoRoot,
+    streamOutput: true
+  };
+}
+
+/**
+ * altool reports the delivery it created; the UUID is the only handle Apple's
+ * support tooling accepts for a specific upload, so the publish record keeps
+ * it. The label has moved between altool releases, so match either spelling
+ * and treat its absence as unknown rather than as a failure.
+ */
+export function parseAltoolDeliveryUuid(output: string): string | null {
+  const match = output.match(
+    /delivery[ _]?uuid\s*[:=]?\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i
+  );
+  return match ? match[1].toLowerCase() : null;
+}
+
 export function isUploaderUnavailable(stdout: string, stderr: string): boolean {
   const combined = `${stdout}\n${stderr}`;
   return /command not found|unable to find utility|no such file/i.test(combined);
@@ -482,7 +559,7 @@ export async function executeMobileIosArchiveWithContext(
       `Bundle ID: ${plan.bundleId}`,
       `Archive: ${plan.archivePath}`,
       `IPA: ${plan.ipaPath}`,
-      input.upload ? "Uploaded to App Store Connect with Transporter." : "Upload skipped; rerun with --upload to submit."
+      input.upload ? "Uploaded to App Store Connect with altool." : "Upload skipped; rerun with --upload to submit."
     ].join("\n"),
     data: { ...plan, reused: reuse.reusable, reuseReason: reuse.reason }
   };

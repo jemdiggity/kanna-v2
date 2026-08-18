@@ -9,8 +9,8 @@ import {
 } from "../app.config";
 
 describe("mobile app config", () => {
-  it("uses production identity by default", () => {
-    const config = createExpoConfig({});
+  it("produces the production identity from KANNA_APP_ENV", () => {
+    const config = createExpoConfig({ KANNA_APP_ENV: "prod" });
 
     expect(config.version).toBe("1.0.0");
     expect(config.name).toBe("Kanna");
@@ -137,8 +137,53 @@ describe("mobile app config", () => {
     });
   });
 
-  it("falls back to prod for unknown KANNA_APP_ENV values", () => {
-    expect(resolveMobileAppEnvironment("qa").name).toBe("prod");
+  it("accepts \"production\", the value kd itself emits for prod", () => {
+    // productionMobileEnv in tools/kd/src/runtime/dev-plan.ts sets
+    // KANNA_APP_ENV='production', and resolveMobileAppEnv in
+    // tools/kd/src/runtime/mobile-device.ts carries the same alias. Rejecting
+    // it would break `kd mobile up --production` and `kd mobile run --device
+    // --production`.
+    expect(resolveMobileAppEnvironment("production").name).toBe("prod");
+
+    const config = createExpoConfig({ KANNA_APP_ENV: "production" });
+    expect(config.name).toBe("Kanna");
+    expect(config.ios?.bundleIdentifier).toBe("build.kanna.app");
+    expect(config.extra.kanna.appEnv).toBe("prod");
+    expect(config.extra.kanna.ota.channel).toBe("production");
+  });
+
+  it("refuses to guess an environment rather than silently shipping production", () => {
+    // A staging native shell wrapping production JS fails only at
+    // authentication, with a message indistinguishable from a wrong password.
+    expect(() => resolveMobileAppEnvironment("qa")).toThrow(
+      /KANNA_APP_ENV must be one of dev, staging, prod/
+    );
+    expect(() => resolveMobileAppEnvironment("prd")).toThrow(/KANNA_APP_ENV/);
+    expect(() => resolveMobileAppEnvironment("qa")).toThrow(/"qa"/);
+    expect(() => resolveMobileAppEnvironment(undefined)).toThrow(/got unset/);
+    expect(() => resolveMobileAppEnvironment("   ")).toThrow(/KANNA_APP_ENV/);
+    expect(() => createExpoConfig({})).toThrow(/KANNA_APP_ENV must be one of/);
+  });
+
+  it("bakes the source ref and commit into extra.kanna for a named build", () => {
+    const config = createExpoConfig({
+      KANNA_APP_ENV: "prod",
+      KANNA_SOURCE_REF: "release/0.2",
+      KANNA_SOURCE_COMMIT: "9c8b7a6d5e4f30210123456789abcdef01234567"
+    });
+
+    expect(config.extra.kanna.source).toEqual({
+      ref: "release/0.2",
+      commit: "9c8b7a6d5e4f30210123456789abcdef01234567"
+    });
+  });
+
+  it("omits the source record when the build did not name one", () => {
+    expect(createExpoConfig({ KANNA_APP_ENV: "prod" }).extra.kanna.source).toBeUndefined();
+    expect(
+      createExpoConfig({ KANNA_APP_ENV: "prod", KANNA_SOURCE_REF: "release/0.2" }).extra.kanna
+        .source
+    ).toBeUndefined();
   });
 
   it("defaults the dev native version from the injected fallback source", () => {
@@ -163,7 +208,10 @@ describe("mobile app config", () => {
   });
 
   it("treats a blank KANNA_APP_VERSION as unset", () => {
-    const config = createExpoConfig({ KANNA_APP_VERSION: "   " }, () => "3.4.5");
+    const config = createExpoConfig(
+      { KANNA_APP_ENV: "prod", KANNA_APP_VERSION: "   " },
+      () => "3.4.5"
+    );
 
     expect(config.version).toBe("3.4.5");
   });
@@ -172,7 +220,7 @@ describe("mobile app config", () => {
     const mobileVersion = readRepoVersion();
 
     expect(mobileVersion).toBe("1.0.0");
-    expect(createExpoConfig({}).version).toBe(mobileVersion);
+    expect(createExpoConfig({ KANNA_APP_ENV: "prod" }).version).toBe(mobileVersion);
   });
 
   it("prefers apps/mobile/VERSION while walking up from a nested directory", async () => {

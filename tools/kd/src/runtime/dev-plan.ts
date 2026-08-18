@@ -226,6 +226,10 @@ export function buildDevPlan(input: BuildDevPlanInput): DevPlan {
 
   if (input.mobile) {
     const mobileEnv = shellEnvPrefix({
+      // Expo config resolution refuses to guess an environment, so the window
+      // has to name one. The registry sets this to "staging" for the staging
+      // path and passes its own env through otherwise, which is the dev path.
+      KANNA_APP_ENV: input.env.KANNA_APP_ENV ?? "dev",
       EXPO_PUBLIC_KANNA_SERVER_URL: resolveMobileServerUrlEnv(input),
       EXPO_PUBLIC_KANNA_RELAY_URL: resolveRelayUrl(input),
       REACT_NATIVE_PACKAGER_HOSTNAME: resolveReactNativePackagerHostname(input),

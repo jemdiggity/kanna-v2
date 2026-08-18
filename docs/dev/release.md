@@ -257,13 +257,29 @@ The default `CFBundleShortVersionString` comes from `apps/mobile/VERSION`.
 absent, the root desktop `VERSION` remains a compatibility fallback. Always
 pass a monotonically increasing `--build-number`; it controls
 `CFBundleVersion` independently.
-The command only builds when it has to. If the export IPA already exists and the
-archive on disk records exactly the requested version and build number, the
-prebuild, archive, and export steps are skipped and only `--upload` runs; the
-result says `Reused existing mobile production archive`. This is safe because
-App Store Connect refuses a repeated build number for a version, so changed
-source obliges a new build number, which misses the match and rebuilds. Pass
-`--force-rebuild` to rebuild a matching archive anyway.
+The command only builds when it has to, and reuse is keyed on the **commit**,
+not on the version and build number alone. The prebuild, archive, and export
+steps are skipped — leaving only `--upload` to run, with the result reading
+`Reused existing mobile production archive` — when all of the following hold:
+
+- the export IPA exists;
+- the archive on disk records exactly the requested version and build number; and
+- the commit baked into the archived app (`extra.kanna.source.commit`, written
+  at prebuild) equals the commit `--ref` resolved to.
+
+Any mismatch rebuilds, and so does an archive that bakes in no commit at all —
+which means **every archive produced before this rule existed rebuilds once**.
+The result's `reuseReason` says which of the three gates decided it.
+
+The commit gate is what makes reuse safe. Version and build number do not
+identify a source: an attempt that archives and then stops before Apple accepts
+the binary — a failed verification, a failed upload, a Ctrl-C — leaves an
+archive on disk under a build number that is still free, so a rerun at a
+different commit with that same number would otherwise reuse it and ship the
+earlier commit's code.
+
+`--force-rebuild` skips the reuse check entirely and rebuilds unconditionally,
+even when all three gates pass.
 
 `--upload` delivers with `xcrun altool --upload-app`, which ships with Xcode.
 The command checks the uploader resolves before building, so a broken toolchain
@@ -278,6 +294,105 @@ so revisit this if `-f` is withdrawn.
 
 Run the [mobile production QA gate](../testing/mobile-production-qa-gate.md)
 before TestFlight external testing or App Store submission.
+
+### App Store publish
+
+```sh
+./kd mobile publish --production --ref release/0.2 --build-number 4 --dry-run
+./kd mobile publish --production --ref release/0.2 --build-number 4
+```
+
+`kd mobile publish` is the whole shipping operation, staged and resumable:
+
+| stage | what it does |
+|---|---|
+| resolve | Resolves `--ref` the same way `kd mobile archive` does, **and requires a `release/X.Y` branch.** |
+| build-number | Asks App Store Connect for the highest `CFBundleVersion` already used for this marketing version, and refuses anything at or below it. |
+| archive | Runs `kd mobile archive` (including its reuse semantics) without uploading. |
+| verify | Runs every pre-upload check and hard-fails before the upload. Records the IPA sha256. |
+| upload | `xcrun altool --upload-app`. Records the delivery UUID when altool reports one. |
+| wait | Polls App Store Connect until the build's `processingState` is `VALID`, or a bounded timeout elapses. |
+| attach | Attaches the processed build to the `appStoreVersion` for this marketing version. |
+| tag | Writes the publish record and pushes an annotated `mobile-v<version>-<build>` tag at the resolved commit. |
+
+**The release-branch requirement encodes a real incident.** The first Kanna
+Mobile 1.0.0 submission was built from `main`, carried an unreleased feature,
+and had to be withdrawn. `--allow-non-release-ref` bypasses it deliberately.
+
+**Auto build numbers are opt-in.** `--build-number auto` takes the next number
+after the highest already uploaded; the default is an explicit number, because
+a build number is irreversibly consumed the moment Apple accepts the binary.
+
+**Three things stay human and are only printed, never performed.** Export
+compliance is a legal attestation. The release type is a judgement call, set
+only when you pass `--release-type MANUAL|AFTER_APPROVAL|SCHEDULED`; unset means
+untouched. Submit-for-review is an irreversible external action.
+
+**Resuming.** Every stage writes `.build/mobile/ios-production/publish-<version>.json`,
+so a rerun with the same ref skips what already succeeded — most importantly the
+upload and the processing wait. `--build-number auto` on a resume keeps the
+number the record already chose rather than consuming another. Verification is
+re-run every time (it is the guard, not the work), and the run refuses to
+continue if the IPA on disk no longer hashes to the value the record signed off
+on. If App Store Connect has no App Store version for the marketing version
+yet, publish stops after `wait` with instructions; create it and rerun.
+
+**Reuse is keyed on the commit, not just the version and build number.** An
+attempt that archives and then stops before Apple consumes the number — a failed
+verification, a failed upload, a Ctrl-C — leaves an archive on disk under a
+number that is still free. A rerun at a different commit with that same number
+must not ship it. Two things prevent that: `kd mobile archive` compares the
+commit baked into the archived app against the resolved ref and rebuilds on a
+mismatch, and the verify stage hard-fails if the IPA's baked commit is not the
+one this publish resolved.
+
+**Provenance has two channels**, because an IPA in Apple's hands cannot be
+queried the way the relay's `/health` can. The resolved ref and commit are baked
+into `expoConfig.extra.kanna.source` at prebuild (JS config, so no
+`runtimeVersion` bump), and the same facts plus the IPA sha256, delivery UUID,
+and App Store Connect build id go into the publish record and into the annotated
+git tag, which is the durable ledger.
+
+Credentials are the same two variables `kd mobile archive --upload` uses —
+`APP_STORE_CONNECT_API_KEY_ID` and `APP_STORE_CONNECT_API_ISSUER_ID` — plus
+`~/.appstoreconnect/private_keys/AuthKey_<key id>.p8`, which kd reads to sign
+the ES256 JWT the App Store Connect REST API expects. There is no fastlane and
+no Ruby toolchain: the durable Apple interface is that REST API, and a Ruby
+dependency would break the repo's vendored-dependency rule while duplicating
+identity config kd already owns.
+
+### Verifying an IPA on its own
+
+```sh
+./kd mobile verify --ipa .build/mobile/ios-production/export/Kanna.ipa --build-number 4
+```
+
+The same five checks publish runs, each of which was hand-run three times during
+the 1.0.0 release and two of which caught real defects:
+
+1. the `codesign` leaf authority is an `Apple Distribution` certificate;
+2. `embedded.mobileprovision` has no `ProvisionedDevices` and matches the app id;
+3. the IPA's `CFBundleIdentifier`, `CFBundleShortVersionString`, and
+   `CFBundleVersion` agree with the plan;
+4. the 1024 marketing icon is 1024x1024 with no alpha channel;
+5. the embedded Expo config declares `appEnv: prod` and OTA channel
+   `production`, and the native `Info.plist` OTA channel agrees with it.
+
+It also prints the IPA sha256. `--build-number` is optional; when omitted, the
+build number is reported but not asserted.
+
+Relatedly, `apps/mobile/app.config.ts` now **throws** on an unset or
+unrecognised `KANNA_APP_ENV` rather than mapping it to production. Doing the
+latter once produced a staging native shell wrapping production JS, whose only
+symptom was an authentication failure indistinguishable from a wrong password.
+
+Naming an environment explicitly is always honoured — only guessing is refused.
+`dev`, `staging`, and `prod` are the canonical values, and `production` is
+accepted as an alias for `prod` because that is what kd itself emits
+(`productionMobileEnv` in `tools/kd/src/runtime/dev-plan.ts`, matching the alias
+`resolveMobileAppEnv` in `tools/kd/src/runtime/mobile-device.ts` already
+carried). Every kd path that starts Metro or prebuilds sets the variable, so in
+practice the throw reaches a build that bypassed kd.
 
 ### Mobile OTA
 

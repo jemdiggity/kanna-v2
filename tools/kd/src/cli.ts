@@ -283,6 +283,46 @@ function parseMobileArchiveInput(rest: string[]): ParsedCliCommand {
   };
 }
 
+function parseMobilePublishInput(rest: string[]): ParsedCliCommand {
+  const input = parseFlagInput(
+    rest,
+    { production: false, dryRun: false, forceRebuild: false, allowNonReleaseRef: false },
+    { "--force-rebuild": "forceRebuild", "--allow-non-release-ref": "allowNonReleaseRef" }
+  );
+  const allowedKeys = new Set([
+    "production",
+    "dryRun",
+    "ref",
+    "buildNumber",
+    "version",
+    "outDir",
+    "releaseType",
+    "allowNonReleaseRef",
+    "forceRebuild"
+  ]);
+  const unsupportedKeys = Object.keys(input).filter((key) => !allowedKeys.has(key));
+  if (unsupportedKeys.length > 0) {
+    throw new Error(
+      "mobile publish only accepts --production, --ref, --build-number, --version, --out-dir, " +
+        "--release-type, --allow-non-release-ref, --force-rebuild, or --dry-run"
+    );
+  }
+  return { taskId: "mobile.publish", input };
+}
+
+function parseMobileVerifyInput(rest: string[]): ParsedCliCommand {
+  const input = parseFlagInput(rest, {});
+  const allowedKeys = new Set(["ipa", "version", "buildNumber"]);
+  const unsupportedKeys = Object.keys(input).filter((key) => !allowedKeys.has(key));
+  if (unsupportedKeys.length > 0) {
+    throw new Error("mobile verify only accepts --ipa, --version, or --build-number");
+  }
+  if (typeof input.ipa !== "string") {
+    throw new Error("mobile verify requires --ipa <path>");
+  }
+  return { taskId: "mobile.verify", input };
+}
+
 function parseRemoteE2eInput(rest: string[]): ParsedCliCommand {
   const input = parseFlagInput(rest, {
     dev: false,
@@ -410,6 +450,24 @@ function parseFlagInput(
         throw new Error("--ref requires a value");
       }
       input.ref = value;
+      index += 1;
+      continue;
+    }
+    if (arg === "--release-type") {
+      const value = rest[index + 1];
+      if (!value || value.startsWith("--")) {
+        throw new Error("--release-type requires a value");
+      }
+      input.releaseType = value;
+      index += 1;
+      continue;
+    }
+    if (arg === "--ipa") {
+      const value = rest[index + 1];
+      if (!value || value.startsWith("--")) {
+        throw new Error("--ipa requires a value");
+      }
+      input.ipa = value;
       index += 1;
       continue;
     }
@@ -612,6 +670,12 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   }
   if (group === "mobile" && command === "archive") {
     return parseMobileArchiveInput(rest);
+  }
+  if (group === "mobile" && command === "publish") {
+    return parseMobilePublishInput(rest);
+  }
+  if (group === "mobile" && command === "verify") {
+    return parseMobileVerifyInput(rest);
   }
   if (group === "mobile" && command === "doctor") {
     return parseMobileDoctorInput(rest);
@@ -832,6 +896,8 @@ const helpTopics: Record<string, string[]> = {
     "  mobile run --device [--production|--staging] [--install] [--with-credentials]",
     "  mobile uninstall --device --staging|--production --confirm-bundle <bundle-id> [--confirm-production]",
     "  mobile archive --production --ref <branch|tag|sha> --build-number <number> [--version <version>] [--out-dir <dir>] [--upload] [--dry-run]",
+    "  mobile publish --production --ref release/X.Y [--build-number <number>|auto] [--release-type <type>] [--dry-run]",
+    "  mobile verify --ipa <path> [--version <version>] [--build-number <number>]",
     "  mobile doctor --device",
     "  mobile qa --production [--ota]",
     "  mobile ota publish --staging|--production [--ref <branch|tag|sha>] [--dry-run] [--rollback-to <updateId>]",
@@ -1021,8 +1087,42 @@ const helpTopics: Record<string, string[]> = {
     "  --build-number <number>   Required. App Store Connect build number (CFBundleVersion).",
     "  --version <version>       Marketing version (defaults to apps/mobile/VERSION).",
     "  --out-dir <dir>           Archive output directory (defaults to .build/mobile/ios-production).",
-    "  --upload                  Upload the exported IPA with xcrun iTMSTransporter.",
+    "  --force-rebuild           Rebuild even when the artifacts already match the version and build number.",
+    "  --upload                  Upload the exported IPA with xcrun altool.",
     "  --dry-run                 Print the archive/upload plan without building or uploading."
+  ],
+  "mobile publish": [
+    "Usage: kd mobile publish --production --ref release/X.Y [--build-number <number>|auto] [--release-type <type>] [--dry-run]",
+    "",
+    "One staged, resumable operation for shipping an iOS build to App Store Connect:",
+    "resolve the ref, pick and guard the build number, archive, verify the IPA, upload,",
+    "wait for processing, attach the build, then record the publish and tag the commit.",
+    "",
+    "Export compliance, the release type, and submit-for-review stay human and are only printed.",
+    "",
+    "Options:",
+    "  --production                Required. Publish the production Kanna mobile identity.",
+    "  --ref <release/X.Y>         Required. Must be a release branch and the checked-out commit.",
+    "  --build-number <number>     Required (or auto). Refused when App Store Connect already has it.",
+    "  --build-number auto         Take the next number after the highest already uploaded.",
+    "  --version <version>         Marketing version (defaults to apps/mobile/VERSION).",
+    "  --out-dir <dir>             Archive output directory (defaults to .build/mobile/ios-production).",
+    "  --release-type <type>       MANUAL, AFTER_APPROVAL, or SCHEDULED. Unset means untouched.",
+    "  --allow-non-release-ref     Publish from a ref that is not release/X.Y. Deliberate override.",
+    "  --force-rebuild             Rebuild the archive even when it already matches.",
+    "  --dry-run                   Resolve everything and print the plan without building or uploading."
+  ],
+  "mobile verify": [
+    "Usage: kd mobile verify --ipa <path> [--version <version>] [--build-number <number>]",
+    "",
+    "Run the pre-upload IPA checks on their own: Apple Distribution signing authority,",
+    "an App Store provisioning profile, plan/IPA agreement, an opaque 1024 marketing icon,",
+    "and a production embedded environment. Also prints the IPA SHA-256.",
+    "",
+    "Options:",
+    "  --ipa <path>              Required. The IPA to check.",
+    "  --version <version>       Expected marketing version (defaults to apps/mobile/VERSION).",
+    "  --build-number <number>   Expected build number. Not asserted when omitted."
   ],
   "mobile doctor": [
     "Usage: kd mobile doctor --device [--production|--staging]",

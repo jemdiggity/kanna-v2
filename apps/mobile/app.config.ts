@@ -37,6 +37,17 @@ const registry = environments as Record<
   MobileAppEnvironment
 >;
 
+// Build time refuses to guess. Mapping an unset or unrecognised KANNA_APP_ENV
+// to production once produced a staging native shell wrapping production JS,
+// and the only symptom was an authentication failure indistinguishable from a
+// wrong password. Naming an environment explicitly is always honoured; only
+// guessing is refused. The runtime resolver in src/mobileEnvironment.ts still
+// falls back, because there it reads a value a build already baked in.
+//
+// "production" is an accepted alias for "prod" because kd emits exactly that:
+// see resolveMobileAppEnv in tools/kd/src/runtime/mobile-device.ts, which
+// carries the same alias, and productionMobileEnv in
+// tools/kd/src/runtime/dev-plan.ts, which produces it.
 export function resolveMobileAppEnvironment(
   rawName: string | undefined
 ): MobileAppEnvironment {
@@ -44,8 +55,16 @@ export function resolveMobileAppEnvironment(
   if (name === "dev" || name === "staging" || name === "prod") {
     return registry[name];
   }
+  if (name === "production") {
+    return registry.prod;
+  }
 
-  return registry.prod;
+  throw new Error(
+    `KANNA_APP_ENV must be one of dev, staging, prod (or the alias production); got ${
+      rawName === undefined ? "unset" : JSON.stringify(rawName)
+    }. Build through kd (\`./kd dev up --mobile\`, \`./kd mobile run --device\`, ` +
+      "`./kd mobile publish`), which always sets it."
+  );
 }
 
 interface ExpoConfig {
@@ -87,6 +106,16 @@ interface ExpoConfig {
       ota: {
         channel: OtaChannel | null;
         manifestUrl: string | null;
+      };
+      /**
+       * Provenance baked in at prebuild by `kd mobile archive`/`kd mobile
+       * publish`. An IPA in Apple's hands cannot be queried the way the relay's
+       * /health can, so the binary has to describe itself. Absent for builds
+       * that did not name a source ref.
+       */
+      source?: {
+        ref: string;
+        commit: string;
       };
     };
   };
@@ -149,6 +178,8 @@ export function createExpoConfig(
     KANNA_APP_ENV?: string;
     KANNA_APP_VERSION?: string;
     KANNA_IOS_BUILD_NUMBER?: string;
+    KANNA_SOURCE_REF?: string;
+    KANNA_SOURCE_COMMIT?: string;
   },
   readNativeVersionFallback: () => string = readRepoVersion
 ): ExpoConfig {
@@ -156,6 +187,10 @@ export function createExpoConfig(
   const explicitVersion = env.KANNA_APP_VERSION?.trim();
   const version = explicitVersion || readNativeVersionFallback();
   const buildNumber = env.KANNA_IOS_BUILD_NUMBER?.trim();
+  const sourceRef = env.KANNA_SOURCE_REF?.trim();
+  const sourceCommit = env.KANNA_SOURCE_COMMIT?.trim();
+  const source =
+    sourceRef && sourceCommit ? { ref: sourceRef, commit: sourceCommit } : undefined;
   const otaManifestUrl = resolveOtaManifestUrl(appEnvironment);
   const updates =
     appEnvironment.otaChannel && otaManifestUrl
@@ -233,7 +268,8 @@ export function createExpoConfig(
         ota: {
           channel: appEnvironment.otaChannel,
           manifestUrl: otaManifestUrl
-        }
+        },
+        ...(source ? { source } : {})
       }
     }
   };
@@ -262,6 +298,9 @@ function resolveOtaManifestUrl(
   return baseUrl ? `${baseUrl}${OTA_MANIFEST_PATH}` : null;
 }
 
-export default createExpoConfig(
-  process.env as Parameters<typeof createExpoConfig>[0]
-);
+// Exported as a function, not an object: resolution now throws on an unset or
+// unrecognised KANNA_APP_ENV, and a module that throws at import time cannot be
+// imported by tests or by the e2e helpers that read a named export from here.
+// Expo calls this during config resolution, which is where the throw belongs.
+export default (): ExpoConfig =>
+  createExpoConfig(process.env as Parameters<typeof createExpoConfig>[0]);
