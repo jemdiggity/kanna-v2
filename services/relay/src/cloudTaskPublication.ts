@@ -20,6 +20,11 @@ export interface CloudTransferIdentity {
 
 export interface ValidatedCloudTaskPublication {
   displayName: string;
+  /** Agent provider CLIs installed on the publishing desktop, or null from a
+   * desktop build that predates the field. Stored verbatim (shape-validated,
+   * not enum-validated): the relay ships separately from the desktop, so a
+   * desktop that learns a new provider must not need a relay deploy. */
+  agentProviders: string[] | null;
   transfer: CloudTransferIdentity | null;
   tasks: CloudTaskDocument[];
 }
@@ -35,6 +40,7 @@ export interface CloudTaskPublicationStore {
     desktopId: string;
     generation: CloudTaskPublicationGeneration;
     displayName: string;
+    agentProviders: string[] | null;
     transfer: CloudTransferIdentity | null;
     tasks: CloudTaskDocument[];
   }): Promise<void>;
@@ -81,6 +87,7 @@ export function validateCloudTaskPublication(
   const schemaVersion = root.schemaVersion;
   const desktop = requiredRecord(root.desktop, "task snapshot desktop");
   const displayName = requiredString(desktop.displayName, "desktop.displayName", 256);
+  const agentProviders = validateAgentProviders(desktop.agentProviders);
   const transfer = desktop.transfer === undefined || desktop.transfer === null
     ? null
     : validateCloudTransferIdentity(desktop.transfer);
@@ -101,7 +108,20 @@ export function validateCloudTaskPublication(
     identities.add(key);
     return task;
   });
-  return { displayName, transfer, tasks };
+  return { displayName, agentProviders, transfer, tasks };
+}
+
+const MAX_AGENT_PROVIDERS = 32;
+
+function validateAgentProviders(value: unknown): string[] | null {
+  if (value === undefined || value === null) return null;
+  if (!Array.isArray(value) || value.length > MAX_AGENT_PROVIDERS) {
+    throw new Error(
+      `desktop.agentProviders must be an array of at most ${MAX_AGENT_PROVIDERS} provider names`,
+    );
+  }
+  return value.map((provider, index) =>
+    requiredNonblankString(provider, `desktop.agentProviders[${index}]`, 64));
 }
 
 function validateCloudTransferIdentity(value: unknown): CloudTransferIdentity {
@@ -313,6 +333,7 @@ export async function handleCloudTaskPublication(input: {
     desktopId: input.desktopId,
     generation: input.generation,
     displayName: publication.displayName,
+    agentProviders: publication.agentProviders,
     transfer: publication.transfer,
     tasks: publication.tasks,
   });
@@ -390,7 +411,15 @@ export function createFirestoreCloudTaskPublicationStore(
       });
     },
 
-    async reconcile({ userId, desktopId, generation, displayName, transfer, tasks }) {
+    async reconcile({
+      userId,
+      desktopId,
+      generation,
+      displayName,
+      agentProviders,
+      transfer,
+      tasks,
+    }) {
       validatePublicationGeneration(generation);
       const desktopDocId = cloudDesktopDocumentId(desktopId);
       const desktopsRef = db.collection(`users/${userId}/desktops`);
@@ -407,6 +436,7 @@ export function createFirestoreCloudTaskPublicationStore(
         transaction.set(desktopRef, {
           desktopId,
           displayName,
+          agentProviders: agentProviders ?? FieldValue.delete(),
           transfer: transfer ?? FieldValue.delete(),
           publicationSequence: generation.sequence,
           updatedAt: FieldValue.serverTimestamp(),

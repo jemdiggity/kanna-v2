@@ -219,6 +219,17 @@ async fn e2e_mobile_controls_gate_direct_lan_but_preserve_tunneled_transport() {
         advertised.is_some_and(|tools| tools.as_array().is_some_and(|tools| !tools.is_empty())),
         "status must advertise the agent-API surface so clients can detect version skew"
     );
+    // Same for the agent provider inventory: which CLIs resolve depends on the
+    // machine running the test, and its contents are asserted against a
+    // controlled PATH in `tests/agent_provider_inventory_http.rs`.
+    let inventory = tunneled_body
+        .as_mut()
+        .and_then(|body| body.as_object_mut())
+        .and_then(|body| body.remove("agentProviders"));
+    assert!(
+        inventory.is_some_and(|providers| providers.is_array()),
+        "status must report which agent providers this machine can run"
+    );
     assert_eq!(
         tunneled_body,
         Some(json!({

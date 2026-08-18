@@ -128,6 +128,7 @@ pub(crate) async fn run_relay_loop(
                         Ok(snapshot) => publisher.observe(map_ui_snapshot(
                             &config.desktop_id,
                             &config.desktop_name,
+                            crate::agent_inventory::installed_agent_providers(),
                             snapshot,
                         )),
                         Err(error) => log::warn!("Failed to build cloud task snapshot: {error}"),

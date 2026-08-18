@@ -1,5 +1,6 @@
 use crate::db::{SnapshotPipelineItem, UiSnapshot};
 use crate::http_api::settings::{CloudTransferIdentity, CLOUD_TRANSFER_IDENTITY_SETTING};
+use kanna_agent_protocol::AgentProvider;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::time::{Duration, Instant};
@@ -39,6 +40,13 @@ impl CloudTaskSnapshotEnvelope {
 #[serde(rename_all = "camelCase")]
 struct CloudDesktopSnapshot {
     display_name: String,
+    /// Agent provider CLIs installed on this desktop, in registry order. The
+    /// relay stores it on the desktop document so a phone off the LAN learns
+    /// the machine's inventory from the record that already describes the
+    /// machine, without a round trip to it. Absent from desktops that predate
+    /// the field, which mobile reads as "unknown", not "none".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent_providers: Option<Vec<AgentProvider>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     transfer: Option<CloudDesktopTransferSnapshot>,
 }
@@ -124,6 +132,7 @@ impl CloudTransferSnapshot {
 pub(crate) fn map_ui_snapshot(
     desktop_id: &str,
     desktop_name: &str,
+    agent_providers: Vec<AgentProvider>,
     snapshot: UiSnapshot,
 ) -> CloudTaskSnapshotEnvelope {
     let desktop_transfer = snapshot
@@ -172,6 +181,7 @@ pub(crate) fn map_ui_snapshot(
         schema_version: CLOUD_TASK_SCHEMA_V2,
         desktop: CloudDesktopSnapshot {
             display_name: truncate(desktop_name, 256),
+            agent_providers: Some(agent_providers),
             transfer: desktop_transfer,
         },
         tasks,
@@ -467,6 +477,11 @@ impl PublisherState {
 #[cfg(test)]
 mod tests {
     use super::{map_ui_snapshot, PublisherState, PublisherStep};
+    use kanna_agent_protocol::AgentProvider;
+
+    fn test_agent_providers() -> Vec<AgentProvider> {
+        vec![AgentProvider::Opencode]
+    }
     use crate::db::{
         SnapshotBlockerTaskState, SnapshotEntry, SnapshotPipelineItem, SnapshotRepo,
         SnapshotTaskBlocker, UiSnapshot,
@@ -549,11 +564,20 @@ mod tests {
 
     #[test]
     fn snapshot_mapping_preserves_mobile_cloud_schema_and_activity() {
-        let snapshot = map_ui_snapshot("desktop-1", "Studio Mac", ui_snapshot("working"));
+        let snapshot = map_ui_snapshot(
+            "desktop-1",
+            "Studio Mac",
+            test_agent_providers(),
+            ui_snapshot("working"),
+        );
         let json = serde_json::to_value(snapshot).unwrap();
 
         assert_eq!(json["schemaVersion"], 2);
         assert_eq!(json["desktop"]["displayName"], "Studio Mac");
+        assert_eq!(
+            json["desktop"]["agentProviders"],
+            serde_json::json!(["opencode"])
+        );
         assert_eq!(json["tasks"][0]["ownerDesktopId"], "desktop-1");
         assert_eq!(json["tasks"][0]["ownerLocalTaskId"], "task-1");
         assert_eq!(json["tasks"][0]["cloudTaskId"], "cloud-stable");
@@ -604,7 +628,7 @@ mod tests {
             .to_string(),
         );
 
-        let mapped = map_ui_snapshot("desktop-1", "Studio Mac", source);
+        let mapped = map_ui_snapshot("desktop-1", "Studio Mac", test_agent_providers(), source);
         let json = serde_json::to_value(mapped).unwrap();
 
         assert_eq!(
@@ -642,7 +666,8 @@ mod tests {
             item.transfer_source_desktop_id = Some("desktop-a".into());
             item.transfer_target_desktop_id = Some("desktop-b".into());
 
-            let snapshot = map_ui_snapshot("desktop-1", "Studio Mac", source);
+            let snapshot =
+                map_ui_snapshot("desktop-1", "Studio Mac", test_agent_providers(), source);
             let json = serde_json::to_value(snapshot).unwrap();
 
             assert_eq!(json["tasks"][0]["transfer"]["state"], expected_state);
@@ -661,7 +686,8 @@ mod tests {
         item.transfer_status = Some("completed".into());
         item.transfer_source_desktop_id = Some("desktop-a".into());
         item.transfer_target_desktop_id = Some("desktop-b".into());
-        let snapshot = map_ui_snapshot("desktop-1", "Studio Mac", completed);
+        let snapshot =
+            map_ui_snapshot("desktop-1", "Studio Mac", test_agent_providers(), completed);
         let json = serde_json::to_value(snapshot).unwrap();
         assert_eq!(json["tasks"][0]["transfer"]["state"], "none");
     }
@@ -676,7 +702,7 @@ mod tests {
         item.transfer_source_peer_id = Some("peer-a".into());
         item.transfer_target_peer_id = Some("peer-b".into());
 
-        let snapshot = map_ui_snapshot("desktop-1", "Studio Mac", source);
+        let snapshot = map_ui_snapshot("desktop-1", "Studio Mac", test_agent_providers(), source);
         let json = serde_json::to_value(snapshot).unwrap();
 
         assert_eq!(
@@ -695,7 +721,7 @@ mod tests {
         let mut source = ui_snapshot("working");
         source.entries[0].items[0].has_running_post = 1;
 
-        let snapshot = map_ui_snapshot("desktop-1", "Studio Mac", source);
+        let snapshot = map_ui_snapshot("desktop-1", "Studio Mac", test_agent_providers(), source);
         let json = serde_json::to_value(snapshot).unwrap();
 
         assert_eq!(json["tasks"][0]["hasRunningPost"], true);
@@ -706,7 +732,7 @@ mod tests {
         let mut source = ui_snapshot("idle");
         source.entries[0].items[0].parent_task_id = Some("task-parent".into());
 
-        let snapshot = map_ui_snapshot("desktop-1", "Studio Mac", source);
+        let snapshot = map_ui_snapshot("desktop-1", "Studio Mac", test_agent_providers(), source);
         let json = serde_json::to_value(snapshot).unwrap();
 
         assert_eq!(json["tasks"][0]["parentTaskId"], "task-parent");
@@ -724,7 +750,7 @@ mod tests {
             },
         );
 
-        let snapshot = map_ui_snapshot("desktop-1", "Studio Mac", source);
+        let snapshot = map_ui_snapshot("desktop-1", "Studio Mac", test_agent_providers(), source);
         let json = serde_json::to_value(snapshot).unwrap();
 
         assert_eq!(json["tasks"][0]["status"], "active");
@@ -737,7 +763,7 @@ mod tests {
         let mut snapshot = ui_snapshot("working");
         snapshot.entries[0].items[0].prompt = Some(full_prompt);
 
-        let mapped = map_ui_snapshot("desktop-1", "Studio Mac", snapshot);
+        let mapped = map_ui_snapshot("desktop-1", "Studio Mac", test_agent_providers(), snapshot);
         let json = serde_json::to_value(mapped).unwrap();
         let prompt_snippet = json["tasks"][0]["promptSnippet"].as_str().unwrap();
 
@@ -747,8 +773,18 @@ mod tests {
 
     #[test]
     fn activity_only_change_changes_snapshot_fingerprint() {
-        let idle = map_ui_snapshot("desktop-1", "Studio Mac", ui_snapshot("idle"));
-        let working = map_ui_snapshot("desktop-1", "Studio Mac", ui_snapshot("working"));
+        let idle = map_ui_snapshot(
+            "desktop-1",
+            "Studio Mac",
+            test_agent_providers(),
+            ui_snapshot("idle"),
+        );
+        let working = map_ui_snapshot(
+            "desktop-1",
+            "Studio Mac",
+            test_agent_providers(),
+            ui_snapshot("working"),
+        );
         assert_ne!(idle.fingerprint(), working.fingerprint());
     }
 
@@ -759,8 +795,8 @@ mod tests {
         let mut second = ui_snapshot("idle");
         second.entries[0].items[0].last_output_preview = Some("Second answer".into());
 
-        let first = map_ui_snapshot("desktop-1", "Studio Mac", first);
-        let second = map_ui_snapshot("desktop-1", "Studio Mac", second);
+        let first = map_ui_snapshot("desktop-1", "Studio Mac", test_agent_providers(), first);
+        let second = map_ui_snapshot("desktop-1", "Studio Mac", test_agent_providers(), second);
 
         assert_ne!(first.fingerprint(), second.fingerprint());
     }
@@ -771,7 +807,12 @@ mod tests {
         source.entries[0].repo.name = "r".repeat(300);
         source.entries[0].items[0].display_name = Some("t".repeat(600));
         source.entries[0].items[0].stage = "s".repeat(100);
-        let snapshot = map_ui_snapshot("desktop-1", &"d".repeat(300), source);
+        let snapshot = map_ui_snapshot(
+            "desktop-1",
+            &"d".repeat(300),
+            test_agent_providers(),
+            source,
+        );
         let json = serde_json::to_value(snapshot).unwrap();
 
         assert_eq!(
@@ -811,8 +852,18 @@ mod tests {
     #[test]
     fn publisher_coalesces_to_latest_snapshot_with_one_in_flight() {
         let now = Instant::now();
-        let idle = map_ui_snapshot("desktop-1", "Studio Mac", ui_snapshot("idle"));
-        let working = map_ui_snapshot("desktop-1", "Studio Mac", ui_snapshot("working"));
+        let idle = map_ui_snapshot(
+            "desktop-1",
+            "Studio Mac",
+            test_agent_providers(),
+            ui_snapshot("idle"),
+        );
+        let working = map_ui_snapshot(
+            "desktop-1",
+            "Studio Mac",
+            test_agent_providers(),
+            ui_snapshot("working"),
+        );
         let mut state = PublisherState::new();
         state.on_authenticated(Some(2));
         state.observe(idle);
@@ -843,7 +894,12 @@ mod tests {
             item.transfer_target_desktop_id = Some("desktop-b".into());
             let mut state = PublisherState::new();
             state.on_authenticated(advertised_version);
-            state.observe(map_ui_snapshot("desktop-1", "Studio Mac", source));
+            state.observe(map_ui_snapshot(
+                "desktop-1",
+                "Studio Mac",
+                test_agent_providers(),
+                source,
+            ));
             let PublisherStep::Publish(request) = state.next_step(now) else {
                 panic!("expected compatibility publication");
             };
@@ -854,6 +910,17 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_publishes_an_empty_inventory_as_an_empty_list() {
+        let snapshot = map_ui_snapshot("desktop-1", "Studio Mac", Vec::new(), ui_snapshot("idle"));
+        let json = serde_json::to_value(snapshot).unwrap();
+
+        // A machine with no agent CLI must be distinguishable from a desktop
+        // too old to report one: mobile blocks creation on the first and falls
+        // back to offering everything on the second.
+        assert_eq!(json["desktop"]["agentProviders"], serde_json::json!([]));
+    }
+
+    #[test]
     fn publisher_retries_with_backoff_then_requests_reconnect() {
         let now = Instant::now();
         let mut state = PublisherState::new();
@@ -861,6 +928,7 @@ mod tests {
         state.observe(map_ui_snapshot(
             "desktop-1",
             "Studio Mac",
+            test_agent_providers(),
             ui_snapshot("idle"),
         ));
 
@@ -883,7 +951,12 @@ mod tests {
     #[test]
     fn authenticated_reconnect_forces_reconciliation_of_unchanged_snapshot() {
         let now = Instant::now();
-        let snapshot = map_ui_snapshot("desktop-1", "Studio Mac", ui_snapshot("idle"));
+        let snapshot = map_ui_snapshot(
+            "desktop-1",
+            "Studio Mac",
+            test_agent_providers(),
+            ui_snapshot("idle"),
+        );
         let mut state = PublisherState::new();
         state.on_authenticated(Some(2));
         state.observe(snapshot.clone());
@@ -907,6 +980,7 @@ mod tests {
         state.observe(map_ui_snapshot(
             "desktop-1",
             "Studio Mac",
+            test_agent_providers(),
             ui_snapshot("idle"),
         ));
         assert!(matches!(state.next_step(now), PublisherStep::Publish(_)));
@@ -923,8 +997,18 @@ mod tests {
     #[test]
     fn publisher_reconciles_latest_snapshot_after_timeout_and_disconnect() {
         let now = Instant::now();
-        let idle = map_ui_snapshot("desktop-1", "Studio Mac", ui_snapshot("idle"));
-        let working = map_ui_snapshot("desktop-1", "Studio Mac", ui_snapshot("working"));
+        let idle = map_ui_snapshot(
+            "desktop-1",
+            "Studio Mac",
+            test_agent_providers(),
+            ui_snapshot("idle"),
+        );
+        let working = map_ui_snapshot(
+            "desktop-1",
+            "Studio Mac",
+            test_agent_providers(),
+            ui_snapshot("working"),
+        );
         let mut state = PublisherState::new();
         state.on_authenticated(Some(2));
         state.observe(idle);

@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::db::{Db, NewRepo, NewStageRun};
+use kanna_agent_protocol::AgentProvider;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -12,6 +13,14 @@ pub struct DesktopDescriptor {
     pub id: String,
     pub name: String,
     pub connection_mode: String,
+    /// Agent provider CLIs installed on this machine, in registry order.
+    ///
+    /// Advisory, and absent on builds older than this field — a client that
+    /// sees no inventory must fall back to offering everything Kanna supports
+    /// rather than refusing to create tasks. An empty list is a *reported*
+    /// empty machine, which is not the same as an unknown one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_providers: Option<Vec<AgentProvider>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -65,6 +74,13 @@ pub struct MobileServerStatus {
     /// itself the signal that the server predates capability advertisement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_api_tools: Option<Vec<String>>,
+    /// Agent provider CLIs installed on this machine, in registry order.
+    /// Carried here as well as on [`DesktopDescriptor`] because a paired LAN
+    /// client learns a desktop through its `/v1/status` discovery probe and
+    /// never reads `/v1/desktops`. Absent on older builds; see
+    /// [`DesktopDescriptor::agent_providers`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_providers: Option<Vec<AgentProvider>>,
     pub write_path_health: crate::workspace_commands::WritePathHealth,
 }
 
@@ -429,6 +445,7 @@ impl MobileApi {
             id: self.config.desktop_id.clone(),
             name: self.config.desktop_name.clone(),
             connection_mode: "both".to_string(),
+            agent_providers: Some(crate::agent_inventory::installed_agent_providers()),
         }])
     }
 
@@ -1072,6 +1089,7 @@ pub fn build_mobile_server_status(
         lan_port: config.lan_port,
         pairing_code,
         ksp_stream_version: Some(2),
+        agent_providers: Some(crate::agent_inventory::installed_agent_providers()),
         agent_api_tools: Some(
             kanna_tool_catalog::bundled_catalog()
                 .tools
