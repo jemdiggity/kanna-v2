@@ -415,7 +415,12 @@ export async function executeMobilePublishWithContext(
     expected: {
       bundleId: record.bundleId,
       version: record.version,
-      buildNumber: record.buildNumber
+      buildNumber: record.buildNumber,
+      // Version and build number do not identify a commit, and reuse keys on
+      // exactly those two. Without this an archive left by an earlier attempt
+      // at another commit would pass every other check and ship under this
+      // publish's ref — the wrong-source incident, silently.
+      sourceCommit: record.commit
     },
     runner: context.runner
   });

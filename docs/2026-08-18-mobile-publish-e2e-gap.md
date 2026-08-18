@@ -73,8 +73,9 @@ each refusal: a development signing authority; a profile with
 `ProvisionedDevices`; a profile for another app id; a missing profile;
 version/build/bundle-id disagreement; an icon with alpha; a 512px icon; a
 missing icon; staging JS; a native shell whose OTA channel disagrees with the
-JS bundle's; and a missing embedded `app.config`. Plus IPA extraction refusals
-and sha256 hashing.
+JS bundle's; a missing embedded `app.config`; an IPA built from a different
+commit than the publish resolved; and an IPA that bakes in no commit when one
+is expected. Plus IPA extraction refusals and sha256 hashing.
 
 **`mobile-publish.test.ts`** — the orchestration with the archive, verify, and
 App Store Connect layers injected:
@@ -95,12 +96,21 @@ App Store Connect layers injected:
   a resume keeps the recorded number instead of consuming another; a recorded
   `upload`/`wait` is skipped; a different explicit build number starts a fresh
   record; an existing tag is not re-created but is still pushed.
+- The wrong-source path: the resolved commit is passed to both the archive and
+  the verify layers, and a verification that rejects the baked commit stops the
+  run before it uploads or tags.
 
 **`mobile-archive.test.ts`** covers the archive reuse semantics publish delegates
-to, and `apps/mobile/src/mobileAppConfig.test.ts` covers the config hardening
-that publish depends on: an unset or unrecognised `KANNA_APP_ENV` throws rather
-than resolving to production, and `KANNA_SOURCE_REF`/`KANNA_SOURCE_COMMIT` are
-baked into `extra.kanna.source`.
+to, including the three cases that decide reuse on provenance rather than on
+version and build number alone: a matching commit reuses, a different commit
+rebuilds, and an archive with no baked commit rebuilds.
+
+**`apps/mobile/src/mobileAppConfig.test.ts`** covers the config hardening publish
+depends on: an unset or unrecognised `KANNA_APP_ENV` throws rather than
+resolving to production, `production` is accepted as the alias kd itself emits,
+and `KANNA_SOURCE_REF`/`KANNA_SOURCE_COMMIT` are baked into `extra.kanna.source`.
+**`tools/kd/tests/dev-plan.test.ts`** asserts every Metro-starting window names
+an environment, so the throw cannot fire on a kd-driven run.
 
 ## Manual verification performed
 

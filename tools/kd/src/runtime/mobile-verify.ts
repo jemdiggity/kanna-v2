@@ -26,6 +26,13 @@ export interface MobileVerifyExpectation {
   version: string;
   /** Omitted by standalone `kd mobile verify` when the operator did not name one. */
   buildNumber?: string;
+  /**
+   * The commit the publish resolved. When named, the source baked into the IPA
+   * must match it: version and build number alone do not identify a commit, so
+   * without this an archive left behind by an earlier attempt at a different
+   * commit passes every other check and ships under the new commit's name.
+   */
+  sourceCommit?: string;
 }
 
 export interface MobileVerifyResult {
@@ -361,6 +368,8 @@ async function findEmbeddedAppConfig(appPath: string): Promise<string | null> {
 export async function checkEmbeddedEnvironment(input: {
   appPath: string;
   runner: CommandRunner;
+  /** When named, the commit the IPA must have been built from. */
+  sourceCommit?: string;
 }): Promise<MobileVerifyCheck> {
   const name = "embedded environment";
   const configPath = await findEmbeddedAppConfig(input.appPath);
@@ -398,11 +407,50 @@ export async function checkEmbeddedEnvironment(input: {
         "the native shell and the JS bundle came from different environments."
     );
   }
+  // The baked source is evidence, not decoration: it is the only thing in the
+  // binary that identifies the commit, and reuse keys on version and build
+  // number, which a rerun at a different commit keeps.
   const source = kanna.source;
+  if (input.sourceCommit) {
+    if (!source?.commit) {
+      return fail(
+        name,
+        `${configPath} bakes in no source commit, so the IPA cannot be proven to come from ` +
+          `${input.sourceCommit.slice(0, 12)}. Rebuild with --force-rebuild.`
+      );
+    }
+    if (source.commit !== input.sourceCommit) {
+      return fail(
+        name,
+        `the IPA was built from ${source.ref ?? "unknown ref"} ${source.commit.slice(0, 12)}, but this ` +
+          `publish resolved ${input.sourceCommit.slice(0, 12)}. Artifacts from an earlier attempt at ` +
+          "another commit are on disk; rebuild with --force-rebuild."
+      );
+    }
+  }
   const provenance = source?.commit
     ? ` (built from ${source.ref ?? "unknown ref"} ${source.commit.slice(0, 12)})`
     : "";
   return pass(name, `appEnv prod, OTA channel production${provenance}`);
+}
+
+/**
+ * Read the provenance `kd mobile archive` bakes into a built `.app`.
+ *
+ * Exported so the archive layer can decide whether artifacts on disk came from
+ * the commit being published, which version and build number cannot tell it.
+ */
+export async function readEmbeddedSource(
+  appPath: string
+): Promise<{ ref?: string; commit?: string } | null> {
+  const configPath = await findEmbeddedAppConfig(appPath);
+  if (!configPath) return null;
+  try {
+    const config = JSON.parse(await readFile(configPath, "utf8")) as EmbeddedExpoConfig;
+    return config.extra?.kanna?.source ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /** Run every check against an already-extracted `.app`. */
@@ -424,7 +472,11 @@ export async function verifyExtractedApp(input: {
       runner: input.runner
     }),
     await checkMarketingIcon({ appPath: input.appPath, runner: input.runner }),
-    await checkEmbeddedEnvironment({ appPath: input.appPath, runner: input.runner })
+    await checkEmbeddedEnvironment({
+      appPath: input.appPath,
+      runner: input.runner,
+      sourceCommit: input.expected.sourceCommit
+    })
   ];
 }
 

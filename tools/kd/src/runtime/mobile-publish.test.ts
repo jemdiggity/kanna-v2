@@ -27,6 +27,9 @@ interface PublishFixture {
   outDir: string;
   calls: string[];
   apiCalls: string[];
+  /** What publish asked the archive and verify layers for, in order. */
+  archiveInputs: Array<Record<string, unknown>>;
+  verifyExpectations: Array<Record<string, unknown>>;
   context: MobilePublishContext;
   cleanup: () => Promise<void>;
 }
@@ -89,6 +92,8 @@ async function publishFixture(options: FixtureOptions = {}): Promise<PublishFixt
   };
 
   const apiCalls: string[] = [];
+  const archiveInputs: Array<Record<string, unknown>> = [];
+  const verifyExpectations: Array<Record<string, unknown>> = [];
   let pollIndex = 0;
   const processingStates = options.processingStates ?? ["VALID"];
   const api: AppStoreConnectApi = {
@@ -128,20 +133,29 @@ async function publishFixture(options: FixtureOptions = {}): Promise<PublishFixt
     },
     runner,
     createAppStoreConnectApi: async () => api,
-    archive: async () => ({
-      ok: options.archiveOk !== false,
-      message: options.archiveOk === false ? "xcodebuild failed" : "Built mobile production archive 1.0.0 (3)."
-    }),
-    verify: async ({ ipaPath }) => ({
-      ok: options.verifyOk !== false,
-      ipaPath,
-      sha256: await hashOf(ipaPath),
-      appPath: join(ipaPath, "Payload/Kanna.app"),
-      checks:
-        options.verifyOk === false
-          ? [{ status: "FAIL" as const, name: "1024 marketing icon", detail: "has an alpha channel" }]
-          : [{ status: "PASS" as const, name: "codesign authority", detail: "Apple Distribution" }]
-    }),
+    archive: async (archiveInput) => {
+      archiveInputs.push({ ...archiveInput });
+      return {
+        ok: options.archiveOk !== false,
+        message:
+          options.archiveOk === false
+            ? "xcodebuild failed"
+            : "Built mobile production archive 1.0.0 (3)."
+      };
+    },
+    verify: async ({ ipaPath, expected }) => {
+      verifyExpectations.push({ ...expected });
+      return {
+        ok: options.verifyOk !== false,
+        ipaPath,
+        sha256: await hashOf(ipaPath),
+        appPath: join(ipaPath, "Payload/Kanna.app"),
+        checks:
+          options.verifyOk === false
+            ? [{ status: "FAIL" as const, name: "1024 marketing icon", detail: "has an alpha channel" }]
+            : [{ status: "PASS" as const, name: "codesign authority", detail: "Apple Distribution" }]
+      };
+    },
     sleep: async () => undefined,
     now: () => new Date("2026-08-18T12:00:00.000Z"),
     processingTimeoutMs: 1000,
@@ -153,6 +167,8 @@ async function publishFixture(options: FixtureOptions = {}): Promise<PublishFixt
     outDir,
     calls,
     apiCalls,
+    archiveInputs,
+    verifyExpectations,
     context,
     cleanup: () => rm(repoRoot, { recursive: true, force: true })
   };
@@ -354,6 +370,68 @@ describe("kd mobile publish — refusals", () => {
       expect(result.ok).toBe(false);
       expect(result.message).toContain("A different binary is on disk");
       expect(fixture.calls.some((call) => call.startsWith("xcrun altool"))).toBe(false);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("holds the IPA to the commit it resolved, not just the version and build number", async () => {
+    // The wrong-source scenario: an earlier attempt archives at commit A and
+    // stops before Apple consumes the number; a rerun at commit B with the same
+    // number produces a fresh, non-resumable record, so the ipaSha256 guard
+    // does not apply. The expected source commit is what closes it.
+    const fixture = await publishFixture();
+    try {
+      await executeMobilePublishWithContext(publishInput(), fixture.context);
+
+      expect(fixture.verifyExpectations).toEqual([
+        {
+          bundleId: BUNDLE_ID,
+          version: "1.0.0",
+          buildNumber: "3",
+          sourceCommit: HEAD_COMMIT
+        }
+      ]);
+      // The archive layer gets the ref too, so its own reuse check can see the
+      // commit rather than reusing another attempt's artifacts.
+      expect(fixture.archiveInputs[0]).toMatchObject({
+        production: true,
+        ref: "release/0.2",
+        buildNumber: "3",
+        upload: false
+      });
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("refuses to upload an IPA built from another commit", async () => {
+    const fixture = await publishFixture({ verifyOk: false });
+    try {
+      // Stand in for the real embedded-environment failure.
+      fixture.context.verify = async ({ ipaPath, expected }) => ({
+        ok: false,
+        ipaPath,
+        sha256: await hashOf(ipaPath),
+        appPath: join(ipaPath, "Payload/Kanna.app"),
+        checks: [
+          {
+            status: "FAIL" as const,
+            name: "embedded environment",
+            detail:
+              "the IPA was built from release/0.2 111111111111, but this publish resolved " +
+              `${String(expected.sourceCommit).slice(0, 12)}`
+          }
+        ]
+      });
+
+      const result = await executeMobilePublishWithContext(publishInput(), fixture.context);
+
+      expect(result.ok).toBe(false);
+      expect(result.message).toContain("FAIL embedded environment");
+      expect(result.message).toContain("built from release/0.2 111111111111");
+      expect(fixture.calls.some((call) => call.startsWith("xcrun altool"))).toBe(false);
+      expect(fixture.calls.some((call) => call.startsWith("git tag"))).toBe(false);
     } finally {
       await fixture.cleanup();
     }

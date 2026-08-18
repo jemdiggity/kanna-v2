@@ -321,6 +321,15 @@ continue if the IPA on disk no longer hashes to the value the record signed off
 on. If App Store Connect has no App Store version for the marketing version
 yet, publish stops after `wait` with instructions; create it and rerun.
 
+**Reuse is keyed on the commit, not just the version and build number.** An
+attempt that archives and then stops before Apple consumes the number — a failed
+verification, a failed upload, a Ctrl-C — leaves an archive on disk under a
+number that is still free. A rerun at a different commit with that same number
+must not ship it. Two things prevent that: `kd mobile archive` compares the
+commit baked into the archived app against the resolved ref and rebuilds on a
+mismatch, and the verify stage hard-fails if the IPA's baked commit is not the
+one this publish resolved.
+
 **Provenance has two channels**, because an IPA in Apple's hands cannot be
 queried the way the relay's `/health` can. The resolved ref and commit are baked
 into `expoConfig.extra.kanna.source` at prebuild (JS config, so no
@@ -360,8 +369,14 @@ Relatedly, `apps/mobile/app.config.ts` now **throws** on an unset or
 unrecognised `KANNA_APP_ENV` rather than mapping it to production. Doing the
 latter once produced a staging native shell wrapping production JS, whose only
 symptom was an authentication failure indistinguishable from a wrong password.
-kd always sets the variable explicitly, so only hand-rolled builds are affected
-— and those are the unsafe ones.
+
+Naming an environment explicitly is always honoured — only guessing is refused.
+`dev`, `staging`, and `prod` are the canonical values, and `production` is
+accepted as an alias for `prod` because that is what kd itself emits
+(`productionMobileEnv` in `tools/kd/src/runtime/dev-plan.ts`, matching the alias
+`resolveMobileAppEnv` in `tools/kd/src/runtime/mobile-device.ts` already
+carried). Every kd path that starts Metro or prebuilds sets the variable, so in
+practice the throw reaches a build that bypassed kd.
 
 ### Mobile OTA
 

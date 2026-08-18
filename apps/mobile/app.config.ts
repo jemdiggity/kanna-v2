@@ -40,10 +40,14 @@ const registry = environments as Record<
 // Build time refuses to guess. Mapping an unset or unrecognised KANNA_APP_ENV
 // to production once produced a staging native shell wrapping production JS,
 // and the only symptom was an authentication failure indistinguishable from a
-// wrong password. kd always sets this variable explicitly, so the throw only
-// reaches hand-rolled builds — which are exactly the unsafe ones. The runtime
-// resolver in src/mobileEnvironment.ts still falls back, because there it reads
-// a value a build already baked in.
+// wrong password. Naming an environment explicitly is always honoured; only
+// guessing is refused. The runtime resolver in src/mobileEnvironment.ts still
+// falls back, because there it reads a value a build already baked in.
+//
+// "production" is an accepted alias for "prod" because kd emits exactly that:
+// see resolveMobileAppEnv in tools/kd/src/runtime/mobile-device.ts, which
+// carries the same alias, and productionMobileEnv in
+// tools/kd/src/runtime/dev-plan.ts, which produces it.
 export function resolveMobileAppEnvironment(
   rawName: string | undefined
 ): MobileAppEnvironment {
@@ -51,9 +55,12 @@ export function resolveMobileAppEnvironment(
   if (name === "dev" || name === "staging" || name === "prod") {
     return registry[name];
   }
+  if (name === "production") {
+    return registry.prod;
+  }
 
   throw new Error(
-    `KANNA_APP_ENV must be one of dev, staging, prod; got ${
+    `KANNA_APP_ENV must be one of dev, staging, prod (or the alias production); got ${
       rawName === undefined ? "unset" : JSON.stringify(rawName)
     }. Build through kd (\`./kd dev up --mobile\`, \`./kd mobile run --device\`, ` +
       "`./kd mobile publish`), which always sets it."

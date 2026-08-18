@@ -8,6 +8,7 @@ import {
   hashFile,
   parseProvisioningProfile,
   parseSipsProperties,
+  readEmbeddedSource,
   verifyExtractedApp,
   verifyMobileIpa,
   type MobileVerifyCheck
@@ -387,6 +388,71 @@ describe("kd mobile verify", () => {
     }
   });
 
+  it("fails when the IPA was built from a different commit than the publish resolved", async () => {
+    // Reuse keys on version and build number, which a rerun at another commit
+    // keeps, so this is the only thing in the binary that catches it.
+    const fixture = await appFixture();
+    try {
+      const result = check(
+        await verifyExtractedApp({
+          appPath: fixture.appPath,
+          expected: { ...EXPECTED, sourceCommit: "1".repeat(40) },
+          runner: fixture.runner
+        }),
+        "embedded environment"
+      );
+
+      expect(result.status).toBe("FAIL");
+      expect(result.detail).toContain("built from release/0.2 9c8b7a6d5e4f");
+      expect(result.detail).toContain("this publish resolved 111111111111");
+      expect(result.detail).toContain("--force-rebuild");
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("passes when the IPA was built from the commit the publish resolved", async () => {
+    const fixture = await appFixture();
+    try {
+      const result = check(
+        await verifyExtractedApp({
+          appPath: fixture.appPath,
+          expected: {
+            ...EXPECTED,
+            sourceCommit: "9c8b7a6d5e4f30210123456789abcdef01234567"
+          },
+          runner: fixture.runner
+        }),
+        "embedded environment"
+      );
+
+      expect(result.status).toBe("PASS");
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("fails when a commit is expected but the IPA bakes none in", async () => {
+    const fixture = await appFixture({
+      appConfig: { extra: { kanna: { appEnv: "prod", ota: { channel: "production" } } } }
+    });
+    try {
+      const result = check(
+        await verifyExtractedApp({
+          appPath: fixture.appPath,
+          expected: { ...EXPECTED, sourceCommit: "1".repeat(40) },
+          runner: fixture.runner
+        }),
+        "embedded environment"
+      );
+
+      expect(result.status).toBe("FAIL");
+      expect(result.detail).toContain("bakes in no source commit");
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   it("fails when the embedded app config is missing rather than assuming production", async () => {
     const fixture = await appFixture({ omitAppConfig: true });
     try {
@@ -464,6 +530,29 @@ describe("IPA extraction and hashing", () => {
       expect(formatMobileVerifyResult(result)).toContain(result.sha256);
     } finally {
       await rm(root, { recursive: true, force: true });
+      await fixture.cleanup();
+    }
+  });
+});
+
+describe("embedded provenance", () => {
+  it("reads the source the archive baked in", async () => {
+    const fixture = await appFixture();
+    try {
+      expect(await readEmbeddedSource(fixture.appPath)).toEqual({
+        ref: "release/0.2",
+        commit: "9c8b7a6d5e4f30210123456789abcdef01234567"
+      });
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("returns null when there is no embedded config to read", async () => {
+    const fixture = await appFixture({ omitAppConfig: true });
+    try {
+      expect(await readEmbeddedSource(fixture.appPath)).toBeNull();
+    } finally {
       await fixture.cleanup();
     }
   });

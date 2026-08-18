@@ -137,12 +137,28 @@ describe("mobile app config", () => {
     });
   });
 
+  it("accepts \"production\", the value kd itself emits for prod", () => {
+    // productionMobileEnv in tools/kd/src/runtime/dev-plan.ts sets
+    // KANNA_APP_ENV='production', and resolveMobileAppEnv in
+    // tools/kd/src/runtime/mobile-device.ts carries the same alias. Rejecting
+    // it would break `kd mobile up --production` and `kd mobile run --device
+    // --production`.
+    expect(resolveMobileAppEnvironment("production").name).toBe("prod");
+
+    const config = createExpoConfig({ KANNA_APP_ENV: "production" });
+    expect(config.name).toBe("Kanna");
+    expect(config.ios?.bundleIdentifier).toBe("build.kanna.app");
+    expect(config.extra.kanna.appEnv).toBe("prod");
+    expect(config.extra.kanna.ota.channel).toBe("production");
+  });
+
   it("refuses to guess an environment rather than silently shipping production", () => {
     // A staging native shell wrapping production JS fails only at
     // authentication, with a message indistinguishable from a wrong password.
     expect(() => resolveMobileAppEnvironment("qa")).toThrow(
       /KANNA_APP_ENV must be one of dev, staging, prod/
     );
+    expect(() => resolveMobileAppEnvironment("prd")).toThrow(/KANNA_APP_ENV/);
     expect(() => resolveMobileAppEnvironment("qa")).toThrow(/"qa"/);
     expect(() => resolveMobileAppEnvironment(undefined)).toThrow(/got unset/);
     expect(() => resolveMobileAppEnvironment("   ")).toThrow(/KANNA_APP_ENV/);

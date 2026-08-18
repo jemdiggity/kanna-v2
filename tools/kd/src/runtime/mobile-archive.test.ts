@@ -274,13 +274,20 @@ describe("kd mobile archive", () => {
 
   // --- only build when required -------------------------------------------
 
+  /**
+   * Seed an archive and IPA on disk. `sourceCommit` is the commit the archive
+   * was built from, baked in exactly where `expo prebuild` puts it; pass null
+   * to model an archive predating that provenance.
+   */
   async function seedArtifacts(
     repoRoot: string,
     version: string,
-    buildNumber: string
+    buildNumber: string,
+    sourceCommit: string | null = HEAD_COMMIT
   ): Promise<void> {
     const outDir = join(repoRoot, ".build/mobile/ios-production");
-    await mkdir(join(outDir, "Kanna.xcarchive"), { recursive: true });
+    const appDir = join(outDir, "Kanna.xcarchive/Products/Applications/Kanna.app");
+    await mkdir(join(appDir, "EXConstants.bundle"), { recursive: true });
     await mkdir(join(outDir, "export"), { recursive: true });
     await writeFile(join(outDir, "export/Kanna.ipa"), "not-a-real-ipa");
     await writeFile(
@@ -290,6 +297,20 @@ describe("kd mobile archive", () => {
         `<key>CFBundleVersion</key><string>${buildNumber}</string>` +
         `</dict></dict></plist>`
     );
+    if (sourceCommit !== null) {
+      await writeFile(
+        join(appDir, "EXConstants.bundle/app.config"),
+        JSON.stringify({
+          extra: {
+            kanna: {
+              appEnv: "prod",
+              ota: { channel: "production" },
+              source: { ref: "release/0.2", commit: sourceCommit }
+            }
+          }
+        })
+      );
+    }
   }
 
   function reuseArchiveRunner(calls: string[], identity: { version: string; buildNumber: string } | null): CommandRunner {
@@ -334,6 +355,7 @@ describe("kd mobile archive", () => {
     );
     expect(result.ok).toBe(true);
     expect(result.message).toContain("Reused existing mobile production archive 1.0.0 (7)");
+    expect(calls.some((call) => call.startsWith("git rev-parse"))).toBe(true);
     expect(calls.some((call) => call.includes("prebuild"))).toBe(false);
     expect(calls.some((call) => call.startsWith("xcodebuild -workspace"))).toBe(false);
     expect(calls.some((call) => call.includes("-exportArchive"))).toBe(false);
@@ -351,6 +373,43 @@ describe("kd mobile archive", () => {
     expect(result.ok).toBe(true);
     expect(result.message).toContain("Built mobile production archive");
     expect(calls.some((call) => call.includes("prebuild"))).toBe(true);
+  });
+
+  it("rebuilds when the existing archive was built from a different commit", async () => {
+    // Version and build number do not identify a commit. An attempt that
+    // archives and then stops before Apple consumes the number leaves an
+    // archive behind under a number that is still free, so a rerun at another
+    // commit with the same number must not reuse it.
+    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-mobile-archive-othercommit-"));
+    await writeMinimalRepo(repoRoot);
+    await seedArtifacts(repoRoot, "1.0.0", "7", "1111111111111111111111111111111111111111");
+    const calls: string[] = [];
+    const result = await executeMobileIosArchiveWithContext(
+      { production: true, ref: "release/0.2", buildNumber: "7" },
+      { repoRoot, env: {}, runner: reuseArchiveRunner(calls, { version: "1.0.0", buildNumber: "7" }) }
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.message).toContain("Built mobile production archive");
+    expect(calls.some((call) => call.includes("prebuild"))).toBe(true);
+    expect((result.data as { reuseReason: string }).reuseReason).toContain(
+      "was built from 111111111111"
+    );
+  });
+
+  it("rebuilds when the existing archive bakes in no source commit at all", async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-mobile-archive-nocommit-"));
+    await writeMinimalRepo(repoRoot);
+    await seedArtifacts(repoRoot, "1.0.0", "7", null);
+    const calls: string[] = [];
+    const result = await executeMobileIosArchiveWithContext(
+      { production: true, ref: "release/0.2", buildNumber: "7" },
+      { repoRoot, env: {}, runner: reuseArchiveRunner(calls, { version: "1.0.0", buildNumber: "7" }) }
+    );
+
+    expect(result.ok).toBe(true);
+    expect(calls.some((call) => call.includes("prebuild"))).toBe(true);
+    expect((result.data as { reuseReason: string }).reuseReason).toContain("no source commit");
   });
 
   it("rebuilds when no artifacts exist", async () => {

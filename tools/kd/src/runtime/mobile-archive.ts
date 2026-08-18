@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
+import { readEmbeddedSource } from "./mobile-verify";
 import type { CommandRunner } from "./process";
 import { formatSourceRef, resolveSourceRef, type ResolvedSourceRef } from "./source-ref";
 
@@ -326,10 +327,32 @@ export function parseArchiveIdentity(rawPlistJson: string): ArchiveIdentity | nu
 }
 
 /**
+ * The `.app` inside an `.xcarchive`. The archive is a plain directory, so this
+ * needs no unzipping.
+ */
+async function resolveArchivedAppPath(archivePath: string): Promise<string | null> {
+  const applications = join(archivePath, "Products", "Applications");
+  try {
+    const entries = await readdir(applications);
+    const appName = entries.find((entry) => entry.endsWith(".app"));
+    return appName ? join(applications, appName) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Decide whether the artifacts already on disk are exactly the ones the plan
- * asks for. Reuse is safe here because App Store Connect rejects a repeated
- * build number for a version, so changed source obliges a new build number,
- * which misses this check and rebuilds.
+ * asks for.
+ *
+ * Version and build number are not enough on their own. App Store Connect
+ * rejects a repeated build number, so *once Apple has consumed one* changed
+ * source obliges a new number — but an attempt that archives and then stops
+ * before uploading (a failed verification, a failed upload, a Ctrl-C) leaves an
+ * archive behind under a number Apple never saw. A rerun at a different commit
+ * with the same number would otherwise reuse it and ship the earlier commit's
+ * binary. So when the plan names a source, the commit baked into the archived
+ * app must match it.
  */
 export async function resolveReusableArchive(input: {
   runner: CommandRunner;
@@ -358,6 +381,24 @@ export async function resolveReusableArchive(input: {
         `existing archive is ${identity.version} (${identity.buildNumber}), ` +
         `wanted ${plan.version} (${plan.buildNumber})`
     };
+  }
+  if (plan.source) {
+    const appPath = await resolveArchivedAppPath(plan.archivePath);
+    const embedded = appPath ? await readEmbeddedSource(appPath) : null;
+    if (!embedded?.commit) {
+      return {
+        reusable: false,
+        reason: "existing archive bakes in no source commit, so it cannot be matched to this ref"
+      };
+    }
+    if (embedded.commit !== plan.source.commit) {
+      return {
+        reusable: false,
+        reason:
+          `existing archive was built from ${embedded.commit.slice(0, 12)}, ` +
+          `wanted ${plan.source.shortCommit}`
+      };
+    }
   }
   return { reusable: true, reason: `existing ${identity.version} (${identity.buildNumber}) matches` };
 }

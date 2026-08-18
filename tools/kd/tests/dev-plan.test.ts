@@ -150,6 +150,9 @@ Run '\\''copilot update'\\'' to check for updates.
     });
 
     expect(plan.windows.map((window) => window.name)).toEqual(["desktop", "mobile"]);
+    // Without this the mobile window starts Metro with KANNA_APP_ENV unset and
+    // Expo config resolution throws.
+    expect(plan.windows[1]?.command).toContain("KANNA_APP_ENV='dev'");
     expect(plan.windows[0]?.env.KANNA_DESKTOP_AUTO_SIGN_IN_EMAIL).toBe("dev@example.com");
     expect(plan.windows[0]?.env.KANNA_DESKTOP_AUTO_SIGN_IN_PASSWORD).toBe("do-not-print");
     expect(plan.windows[1]?.env.KANNA_DESKTOP_AUTO_SIGN_IN_EMAIL).toBeUndefined();
@@ -268,6 +271,10 @@ Run '\\''copilot update'\\'' to check for updates.
 
     expect(plan.windows.map((window) => window.name)).toEqual(["mobile"]);
     expect(plan.windows[0]?.cwd).toBe("/repo/apps/mobile");
+    // Expo config resolution refuses to guess, so the window must name an
+    // environment. "production" is kd's spelling of "prod"; app.config.ts and
+    // mobile-device.ts both accept it as an alias.
+    expect(plan.windows[0]?.command).toContain("KANNA_APP_ENV='production'");
     expect(plan.windows[0]?.command).not.toContain("EXPO_PUBLIC_KANNA_SERVER_URL");
     expect(plan.windows[0]?.command).toContain("EXPO_PUBLIC_KANNA_RELAY_URL='wss://relay.prod.example'");
     expect(plan.windows[0]?.command).toContain("EXPO_PUBLIC_FIREBASE_PROJECT_ID='kanna-prod'");
@@ -292,6 +299,25 @@ Run '\\''copilot update'\\'' to check for updates.
     expect(plan.windows[0]?.command).toContain("EXPO_PUBLIC_FIREBASE_PROJECT_ID='kanna-staging'");
     expect(plan.windows[0]?.command).toContain("EXPO_PUBLIC_FIREBASE_API_KEY='staging-api-key'");
     expect(plan.windows[0]?.command).toContain("RCT_METRO_PORT='8084'");
+  });
+
+  it("passes a staging KANNA_APP_ENV through to the dev-up mobile window", () => {
+    // The registry's staging branch sets this on the env it hands the plan.
+    const plan = buildDevPlan({
+      repoRoot: "/repo",
+      env: {
+        KANNA_APP_ENV: "staging",
+        KANNA_MOBILE_SERVER_PORT: "48120",
+        KANNA_MOBILE_PORT: "8082"
+      },
+      mobile: true,
+      emulators: false,
+      firebaseConfigPath: "/repo/.firebase-8080.kanna.json",
+      mobileServerUrl: "http://127.0.0.1:48120"
+    });
+
+    expect(plan.windows[1]?.command).toContain("KANNA_APP_ENV='staging'");
+    expect(plan.windows[1]?.command).not.toContain("KANNA_APP_ENV='dev'");
   });
 
   it("exports staging desktop relay settings when KANNA_CLOUD_ENV is staging", () => {
