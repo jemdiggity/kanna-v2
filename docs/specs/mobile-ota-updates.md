@@ -129,7 +129,7 @@ Deploy relay support through the normal cloud deploy flow:
 
 ```bash
 ./kd cloud deploy --staging --relay
-./kd cloud deploy --production --relay
+./kd cloud deploy --production --relay --ref release/0.2
 ```
 
 Publish a JS/asset update:

@@ -50,8 +50,13 @@ runtime version, or signing behavior.
 Use the repo-native wrapper for App Store Connect builds:
 
 ```bash
-./kd mobile archive --production --build-number <next-app-store-build-number>
+./kd mobile archive --production --ref release/0.2 --build-number <next-app-store-build-number>
 ```
+
+`--ref <branch|tag|sha>` is required: the archive is built from the working
+tree, so `kd` refuses a dirty worktree or a ref that is not the checked-out
+commit, and prints the resolved commit as `Source: <ref> (<short sha>)` so a
+submitted build traces back to its source.
 
 The command runs Expo CNG locally with `KANNA_APP_ENV=prod`, keeps the generated
 `apps/mobile/ios/` directory uncommitted, archives the generated Xcode workspace,
@@ -74,7 +79,8 @@ run:
 ```bash
 APP_STORE_CONNECT_API_KEY_ID=<key-id> \
 APP_STORE_CONNECT_API_ISSUER_ID=<issuer-id> \
-./kd mobile archive --production --build-number <next-build-number> --upload
+./kd mobile archive --production --ref release/0.2 \
+  --build-number <next-build-number> --upload
 ```
 
 Transporter expects the matching private key at

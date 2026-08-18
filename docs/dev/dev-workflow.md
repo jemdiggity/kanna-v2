@@ -92,7 +92,7 @@ identity are documented in detail in
 
 ```sh
 ./kd cloud deploy --staging            # Firebase; add --relay for the relay
-./kd cloud deploy --production
+./kd cloud deploy --production --ref release/0.2   # --ref required for production
 ./kd release ship --dry-run            # build/sign without publishing
 ./kd release ship --release            # tag, publish, upload manifest
 ./kd release ship --staging --release  # staging channel prerelease
