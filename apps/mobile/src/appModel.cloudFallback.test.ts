@@ -15,6 +15,10 @@ import type {
 } from "./lib/firebase/taskIndex";
 import type { FetchLike } from "./lib/transports/lanTransport";
 import type { RelayDesktopClient } from "./lib/transports/relayClient";
+import {
+  buildMachineInventory,
+  summarizeMachines
+} from "./state/machineInventory";
 import { buildCreatingTaskUiSlot } from "./state/taskUiSlots";
 
 afterEach(() => {
@@ -4349,6 +4353,155 @@ describe("createAppModel cloud routing", () => {
     expect(taskIndex.listDesktops).toHaveBeenCalledWith("user-1");
   });
 
+  it("stops reporting the account's machines on sign-out, including a desktop read still in flight", async () => {
+    const auth = createMutableAuthSession(signedInState("user-a"));
+    const accountRecords = [
+      {
+        desktopId: "desktop-a",
+        displayName: "Account Mac",
+        updatedAt: "2026-08-19T10:00:00.000Z"
+      }
+    ];
+    const taskIndex: CloudTaskIndex = {
+      listDesktops: vi.fn().mockResolvedValue(accountRecords),
+      listRecentTasks: vi.fn().mockResolvedValue([]),
+      subscribeRecentTasks: vi.fn((_uid, onUpdate) => {
+        onUpdate([]);
+        return vi.fn();
+      })
+    };
+    const relayClients: RelayDesktopClient[] = [];
+    const app = createAppModel({
+      authSession: auth.authSession,
+      persistence: {
+        load: vi.fn().mockResolvedValue(null),
+        save: vi.fn().mockResolvedValue(undefined)
+      },
+      options: {
+        forceCloud: true,
+        relayUrl: "wss://relay.test",
+        taskIndex,
+        bonjourBrowser: createStaticBonjourBrowser([]),
+        createRelayClient: () => {
+          const relay = createRelayClientMock(
+            vi.fn().mockResolvedValue(new Set(["desktop-a"]))
+          );
+          relayClients.push(relay);
+          return relay;
+        }
+      }
+    });
+
+    await app.initialize();
+    await vi.waitFor(() => {
+      expect(machinesOf(app)).toEqual([
+        expect.objectContaining({
+          desktopId: "desktop-a",
+          availability: expect.objectContaining({ cloud: true })
+        })
+      ]);
+    });
+
+    // The phone refreshes machines every few seconds, so sign-out almost
+    // always races a desktop read that already left for Firestore.
+    const inFlightRead = deferred<typeof accountRecords>();
+    vi.mocked(taskIndex.listDesktops).mockReturnValueOnce(inFlightRead.promise);
+    const pendingRead = app.client.listDesktops().catch(() => undefined);
+    await flushAsyncWork();
+
+    await app.controller.signOut();
+
+    expect(machinesOf(app)).toEqual([]);
+    for (const relay of relayClients) {
+      expect(relay.close).toHaveBeenCalledOnce();
+    }
+
+    inFlightRead.resolve(accountRecords);
+    await pendingRead;
+    await flushAsyncWork(20);
+
+    expect(app.sessionStore.getState().accountDesktops).toEqual([]);
+    expect(machinesOf(app)).toEqual([]);
+    expect(summarizeMachines(machinesOf(app))).toEqual({
+      total: 0,
+      available: 0
+    });
+  });
+
+  it("shows only the newly signed-in account's machines across an account switch", async () => {
+    const auth = createMutableAuthSession(signedInState("user-a"));
+    const userARecords = [
+      {
+        desktopId: "desktop-a",
+        displayName: "User A Mac",
+        updatedAt: "2026-08-19T10:00:00.000Z"
+      }
+    ];
+    const userBRecords = [
+      {
+        desktopId: "desktop-b",
+        displayName: "User B Mac",
+        updatedAt: "2026-08-19T11:00:00.000Z"
+      }
+    ];
+    const taskIndex: CloudTaskIndex = {
+      listDesktops: vi.fn().mockResolvedValue(userARecords),
+      listRecentTasks: vi.fn().mockResolvedValue([]),
+      subscribeRecentTasks: vi.fn((_uid, onUpdate) => {
+        onUpdate([]);
+        return vi.fn();
+      })
+    };
+    const app = createAppModel({
+      authSession: auth.authSession,
+      persistence: {
+        load: vi.fn().mockResolvedValue(null),
+        save: vi.fn().mockResolvedValue(undefined)
+      },
+      options: {
+        forceCloud: true,
+        relayUrl: "wss://relay.test",
+        taskIndex,
+        bonjourBrowser: createStaticBonjourBrowser([]),
+        createRelayClient: () =>
+          createRelayClientMock(
+            vi.fn().mockResolvedValue(new Set(["desktop-a", "desktop-b"]))
+          )
+      }
+    });
+
+    await app.initialize();
+    await vi.waitFor(() => {
+      expect(machinesOf(app)).toEqual([
+        expect.objectContaining({ desktopId: "desktop-a" })
+      ]);
+    });
+
+    const inFlightRead = deferred<typeof userARecords>();
+    vi.mocked(taskIndex.listDesktops).mockReturnValueOnce(inFlightRead.promise);
+    const pendingRead = app.client.listDesktops().catch(() => undefined);
+    await flushAsyncWork();
+
+    vi.mocked(taskIndex.listDesktops).mockResolvedValue(userBRecords);
+    auth.setState(signedInState("user-b"));
+    expect(machinesOf(app)).toEqual([]);
+    await vi.waitFor(() => {
+      expect(machinesOf(app)).toEqual([
+        expect.objectContaining({ desktopId: "desktop-b" })
+      ]);
+    });
+
+    // User A's read finishes after user B's machines are on screen; it must
+    // not put the previous account's machine back into the list.
+    inFlightRead.resolve(userARecords);
+    await pendingRead;
+    await flushAsyncWork(20);
+    expect(machinesOf(app)).toEqual([
+      expect.objectContaining({ desktopId: "desktop-b" })
+    ]);
+    expect(taskIndex.listDesktops).toHaveBeenCalledWith("user-b");
+  });
+
   it("keeps an unpaired account task stream on relay when its LAN projection is available", async () => {
     const accountTask = cloudTask({
       id: "cloud:desktop-lan:repo-lan:local-task",
@@ -4587,3 +4740,13 @@ describe("createAppModel cloud routing", () => {
     }
   });
 });
+
+/** The machine list the Machines screen renders, from the same sources. */
+function machinesOf(app: ReturnType<typeof createAppModel>) {
+  const state = app.sessionStore.getState();
+  return buildMachineInventory({
+    accountDesktops: state.accountDesktops,
+    manualDesktops: state.trustedDesktops,
+    liveLanDesktops: state.liveLanDesktops
+  });
+}

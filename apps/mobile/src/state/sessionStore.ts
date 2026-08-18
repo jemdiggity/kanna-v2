@@ -215,6 +215,14 @@ export interface SessionStore {
     account: string | null;
     local: string | null;
   }): void;
+  /**
+   * Drop every machine source the signed-in account contributed: its published
+   * desktop records, the account's own source warning, and the live LAN reads
+   * that only account trust made reachable. Manually paired machines survive —
+   * QR pairing carries its own device credential and is account-independent —
+   * so their rows stay, and any LAN availability they still have is theirs.
+   */
+  resetAccountScopedMachines(): void;
   upsertRepoCreationProfile(profile: RepoCreationProfile): void;
   selectDesktop(desktopId: string): void;
   setRepos(repos: RepoSummary[]): void;
@@ -708,6 +716,31 @@ export function createSessionStore(): SessionStore {
         return;
       }
       state = { ...state, machineSourceWarnings };
+      publish();
+    },
+    resetAccountScopedMachines() {
+      const manualIds = new Set(
+        state.trustedDesktops.map((desktop) => desktop.desktopId)
+      );
+      const liveLanDesktops = state.liveLanDesktops.filter((desktop) =>
+        manualIds.has(desktop.id)
+      );
+      if (
+        state.accountDesktops.length === 0 &&
+        liveLanDesktops.length === state.liveLanDesktops.length &&
+        state.machineSourceWarnings.account === null
+      ) {
+        return;
+      }
+      state = {
+        ...state,
+        accountDesktops: [],
+        liveLanDesktops,
+        machineSourceWarnings: {
+          ...state.machineSourceWarnings,
+          account: null
+        }
+      };
       publish();
     },
     upsertRepoCreationProfile(profile) {
