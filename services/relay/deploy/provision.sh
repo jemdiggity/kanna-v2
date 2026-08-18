@@ -61,4 +61,4 @@ fi'
 echo ""
 echo "Provisioned. Static IP: $IP"
 echo "Next: add DNS A record  relay.kanna.build -> $IP  at your DNS provider,"
-echo "then run: ./kd cloud deploy --production --relay"
+echo "then run: ./kd cloud deploy --production --relay --ref <branch|tag|sha>"
