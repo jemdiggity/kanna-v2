@@ -46,7 +46,7 @@
     },
     "agentProviders": {
       "type": "object",
-      "description": "Repo-level provider, model, and effort preferences by agent name or * glob. Exact names win; otherwise the matching glob with the most non-* characters wins, with lexical order breaking ties. Provider/model/effort resolution is explicit task or stage override, then this map, then layered AGENT.md/EXTEND.md frontmatter, then the global default. A machine-local .kanna/config.local.json replaces individual entries of this map for that checkout only, which is how one machine reorders providers around an outage without a commit.",
+      "description": "Repo-level provider, model, and effort preferences by agent name or * glob. Exact names win; otherwise the matching glob with the most non-* characters wins, with lexical order breaking ties. Provider/model/effort resolution is explicit task or stage override, then this map, then layered AGENT.md/EXTEND.md frontmatter, then the global default. A machine-local .kanna/config.local.json replaces individual entries of this map for that checkout only, which is how one machine reorders providers around an outage without a commit. An entry's model and effort belong to the provider that entry selects, which is the first name in its provider list: ordered fallbacks behind that name are outage alternates and run on their own default model, and an entry is skipped entirely when a higher-precedence layer (an explicit task or stage override, or the provider a running task is already stamped with) chose the provider. Model and effort ids are provider-specific, so they are never composed across layers.",
       "propertyNames": {
         "type": "string",
         "minLength": 1
@@ -78,11 +78,13 @@
               },
               "model": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "description": "Model id for the provider this entry selects — the first name in `provider`. It never reaches a fallback candidate listed behind that name, nor a provider chosen by a higher-precedence layer."
               },
               "effort": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "description": "Reasoning effort for the provider this entry selects — the first name in `provider`. Effort vocabularies are provider-specific and are not shared with fallback candidates listed behind it."
               }
             }
           }
