@@ -808,43 +808,222 @@ fn model_resolution_prefers_explicit_then_repo_then_layered_agent_definition() {
         model: Some("repo-model".to_string()),
         effort: Some("repo-effort".to_string()),
     };
-
-    assert_eq!(
-        super::super::resolve_agent_model(
-            Some("explicit-model".to_string()),
+    let plan = |explicit_provider, explicit_model: Option<&str>, explicit_effort: Option<&str>| {
+        super::super::agent_tuning_plan(
+            explicit_provider,
+            explicit_model.map(str::to_string),
+            explicit_effort.map(str::to_string),
             Some(&preference),
             Some(&agent),
         )
-        .as_deref(),
+    };
+
+    // An explicit override that names no provider of its own applies to
+    // whichever provider resolution lands on.
+    assert_eq!(
+        plan(None, Some("explicit-model"), None)
+            .model_for(AgentProvider::Codex)
+            .as_deref(),
         Some("explicit-model"),
     );
     assert_eq!(
-        super::super::resolve_agent_model(None, Some(&preference), Some(&agent)).as_deref(),
+        plan(None, None, Some("explicit-effort"))
+            .effort_for(AgentProvider::Claude)
+            .as_deref(),
+        Some("explicit-effort"),
+    );
+    // The repo entry supplies the pair for the provider it selects …
+    assert_eq!(
+        plan(None, None, None)
+            .model_for(AgentProvider::Codex)
+            .as_deref(),
         Some("repo-model"),
     );
     assert_eq!(
-        super::super::resolve_agent_model(None, None, Some(&agent)).as_deref(),
-        Some("agent-model"),
-    );
-    assert_eq!(super::super::resolve_agent_model(None, None, None), None);
-    assert_eq!(
-        super::super::resolve_agent_effort(
-            Some("explicit-effort".to_string()),
-            Some(&preference),
-            Some(&agent),
-        )
-        .as_deref(),
-        Some("explicit-effort"),
-    );
-    assert_eq!(
-        super::super::resolve_agent_effort(None, Some(&preference), Some(&agent)).as_deref(),
+        plan(None, None, None)
+            .effort_for(AgentProvider::Codex)
+            .as_deref(),
         Some("repo-effort"),
     );
+    // … and the agent definition supplies it for the provider it selects.
     assert_eq!(
-        super::super::resolve_agent_effort(None, None, Some(&agent)).as_deref(),
+        plan(None, None, None)
+            .model_for(AgentProvider::Claude)
+            .as_deref(),
+        Some("agent-model"),
+    );
+    assert_eq!(
+        plan(None, None, None)
+            .effort_for(AgentProvider::Claude)
+            .as_deref(),
         Some("agent-effort"),
     );
-    assert_eq!(super::super::resolve_agent_effort(None, None, None), None);
+    // No layer was written for a provider neither of them names.
+    assert_eq!(
+        plan(None, None, None).model_for(AgentProvider::Opencode),
+        None
+    );
+    assert_eq!(
+        plan(None, None, None).effort_for(AgentProvider::Opencode),
+        None
+    );
+    assert_eq!(
+        super::super::agent_tuning_plan(None, None, None, None, None)
+            .model_for(AgentProvider::Claude),
+        None,
+    );
+    assert_eq!(
+        super::super::agent_tuning_plan(None, None, None, None, None)
+            .effort_for(AgentProvider::Claude),
+        None,
+    );
+}
+
+/// A model belongs to the provider it was written for. Composing one layer's
+/// model onto a provider a higher-precedence layer stamped is what produced
+/// `codex -m opus` — which the Codex CLI rejects outright — after a
+/// machine-local `agentProviders` entry pointed the agent at claude/opus
+/// while existing tasks stayed stamped `codex` (2026-08-17).
+#[test]
+fn model_resolution_skips_layers_written_for_another_provider() {
+    let agent = AgentDefinition {
+        name: "implement".to_string(),
+        description: "Implement".to_string(),
+        prompt: String::new(),
+        agent_providers: vec!["opencode".to_string()],
+        model: Some("opencode-model".to_string()),
+        effort: Some("opencode-effort".to_string()),
+        permission_mode: None,
+        allowed_tools: Vec::new(),
+        visibility: DefinitionVisibility::Public,
+    };
+    // The shape of the machine-local override in the incident.
+    let preference = super::super::definitions::AgentProviderPreference {
+        providers: vec!["claude".to_string()],
+        model: Some("opus".to_string()),
+        effort: Some("xhigh".to_string()),
+    };
+
+    // A task already stamped `codex` keeps codex, and gets neither the
+    // claude-targeted model nor the opencode-targeted one.
+    let stamped_codex =
+        super::super::agent_tuning_plan(Some("codex"), None, None, Some(&preference), Some(&agent));
+    assert_eq!(stamped_codex.model_for(AgentProvider::Codex), None);
+    assert_eq!(stamped_codex.effort_for(AgentProvider::Codex), None);
+
+    // The same run stamped with its own model reproduces that model.
+    let stamped_pair = super::super::agent_tuning_plan(
+        Some("codex"),
+        Some("gpt-5-codex".to_string()),
+        Some("high".to_string()),
+        Some(&preference),
+        Some(&agent),
+    );
+    assert_eq!(
+        stamped_pair.model_for(AgentProvider::Codex).as_deref(),
+        Some("gpt-5-codex"),
+    );
+    assert_eq!(
+        stamped_pair.effort_for(AgentProvider::Codex).as_deref(),
+        Some("high"),
+    );
+
+    // When the local entry does win provider selection, its pair applies.
+    let unstamped =
+        super::super::agent_tuning_plan(None, None, None, Some(&preference), Some(&agent));
+    assert_eq!(
+        unstamped.model_for(AgentProvider::Claude).as_deref(),
+        Some("opus"),
+    );
+    assert_eq!(
+        unstamped.effort_for(AgentProvider::Claude).as_deref(),
+        Some("xhigh"),
+    );
+    // A lower layer written for the resolved provider is still reached past a
+    // higher layer that was not.
+    assert_eq!(
+        unstamped.model_for(AgentProvider::Opencode).as_deref(),
+        Some("opencode-model"),
+    );
+
+    // A layer that names an ordered candidate list wrote its model beside the
+    // leading candidate; the trailing fallbacks run on their own defaults.
+    // `{"provider": ["claude", "codex"], "model": "opus"}` is schema-valid and
+    // is the natural "prefer claude on opus, fall back to codex" shape, so
+    // letting the model reach every candidate would rebuild `codex -m opus`
+    // the moment claude — the provider the escape hatch is routing around — is
+    // unavailable.
+    let ordered_preference = super::super::definitions::AgentProviderPreference {
+        providers: vec!["claude".to_string(), "codex".to_string()],
+        model: Some("opus".to_string()),
+        effort: Some("xhigh".to_string()),
+    };
+    let ordered =
+        super::super::agent_tuning_plan(None, None, None, Some(&ordered_preference), None);
+    assert_eq!(
+        ordered.model_for(AgentProvider::Claude).as_deref(),
+        Some("opus")
+    );
+    assert_eq!(
+        ordered.effort_for(AgentProvider::Claude).as_deref(),
+        Some("xhigh")
+    );
+    assert_eq!(
+        ordered.model_for(AgentProvider::Codex),
+        None,
+        "a fallback candidate must not inherit the leading candidate's model",
+    );
+    assert_eq!(
+        ordered.effort_for(AgentProvider::Codex),
+        None,
+        "a fallback candidate must not inherit the leading candidate's effort",
+    );
+
+    // The same rule applies to an agent definition's ordered frontmatter …
+    let ordered_agent = AgentDefinition {
+        name: "implement".to_string(),
+        description: "Implement".to_string(),
+        prompt: String::new(),
+        agent_providers: vec!["codex".to_string(), "opencode".to_string()],
+        model: Some("gpt-5-codex".to_string()),
+        effort: Some("high".to_string()),
+        permission_mode: None,
+        allowed_tools: Vec::new(),
+        visibility: DefinitionVisibility::Public,
+    };
+    let ordered_agent_plan =
+        super::super::agent_tuning_plan(None, None, None, None, Some(&ordered_agent));
+    assert_eq!(
+        ordered_agent_plan
+            .model_for(AgentProvider::Codex)
+            .as_deref(),
+        Some("gpt-5-codex"),
+    );
+    assert_eq!(ordered_agent_plan.model_for(AgentProvider::Opencode), None);
+    assert_eq!(ordered_agent_plan.effort_for(AgentProvider::Opencode), None);
+
+    // … and to the legacy comma-separated form an explicit override may use.
+    let stamped_list = super::super::agent_tuning_plan(
+        Some("codex,claude"),
+        Some("gpt-5-codex".to_string()),
+        Some("high".to_string()),
+        Some(&preference),
+        Some(&agent),
+    );
+    assert_eq!(
+        stamped_list.model_for(AgentProvider::Codex).as_deref(),
+        Some("gpt-5-codex"),
+    );
+    assert_eq!(
+        stamped_list.effort_for(AgentProvider::Codex).as_deref(),
+        Some("high"),
+    );
+    // claude is a trailing candidate of the explicit layer, so that layer's
+    // model does not reach it; the repo layer, written for claude, does.
+    assert_eq!(
+        stamped_list.model_for(AgentProvider::Claude).as_deref(),
+        Some("opus"),
+    );
 }
 
 #[test]

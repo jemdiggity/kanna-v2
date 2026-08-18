@@ -2683,7 +2683,7 @@ async fn get_task_route_returns_full_task_detail_by_id() {
             "2026-04-18 10:00:00",
         )
         .unwrap();
-        db.update_pipeline_item_agent_binding("task-1", "codex", "pty")
+        db.update_pipeline_item_agent_binding("task-1", "codex", "pty", None)
             .unwrap();
         db.insert_stage_run(crate::db::NewStageRun {
             id: "run-task-1",

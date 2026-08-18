@@ -203,6 +203,21 @@ fn init_provider_repo(root: &Path) -> PathBuf {
     repo
 }
 
+fn publish_origin_main(repo: &Path, message: &str) {
+    for args in [
+        vec!["add", "."],
+        vec!["commit", "-m", message],
+        vec!["update-ref", "refs/remotes/origin/main", "HEAD"],
+    ] {
+        let status = StdCommand::new("git")
+            .args(args)
+            .current_dir(repo)
+            .status()
+            .expect("git command should run");
+        assert!(status.success(), "git fixture command should succeed");
+    }
+}
+
 fn write_server_config(root: &Path, port: u16, transfer_port: u16) -> (PathBuf, PathBuf, PathBuf) {
     let config_path = root.join("server.toml");
     let daemon_dir = root.join("daemon");
@@ -430,6 +445,48 @@ async fn next_daemon_command(
         .await
         .expect("daemon command should arrive before timeout")
         .expect("fake daemon command channel should remain open")
+}
+
+async fn next_daemon_spawn(commands: &mut mpsc::UnboundedReceiver<DaemonCommand>) -> DaemonCommand {
+    loop {
+        let command = next_daemon_command(commands).await;
+        if matches!(
+            command,
+            DaemonCommand::Spawn { .. } | DaemonCommand::SpawnAgent { .. }
+        ) {
+            return command;
+        }
+    }
+}
+
+/// The spawn a codex-stamped task must produce: the codex executable, and no
+/// model flag carrying a model written for some other provider.
+fn assert_codex_spawn_without_a_foreign_model(
+    command: DaemonCommand,
+    expected_session_id: &str,
+    phase: &str,
+) {
+    match command {
+        DaemonCommand::Spawn {
+            session_id, args, ..
+        } => {
+            assert_eq!(session_id, expected_session_id, "{phase} session id");
+            let shell_command = args.last().expect("PTY spawn should carry a shell command");
+            assert!(
+                shell_command.contains("/.kanna/provider-bin/codex"),
+                "{phase} should spawn codex: {shell_command}"
+            );
+            assert!(
+                !shell_command.contains("-m "),
+                "{phase} passed a model the stamped provider never asked for: {shell_command}"
+            );
+            assert!(
+                !shell_command.contains("opus"),
+                "{phase} leaked the claude-targeted model: {shell_command}"
+            );
+        }
+        other => panic!("expected a codex PTY spawn for {phase}, got {other:?}"),
+    }
 }
 
 fn assert_claude_agent_spawn(command: DaemonCommand, expected_session_id: &str) {
@@ -755,7 +812,8 @@ async fn a_machine_local_agent_provider_reorder_reaches_a_spawn_without_any_comm
             "agentProviders": {
                 // codex leads and is not installed here, so the ordered
                 // fallback lands on claude — the reorder an operator reaches
-                // for when the leading provider is the wedged one.
+                // for when the leading provider is the wedged one. The model
+                // belongs to codex, the candidate it was written beside.
                 "implement": {"provider": ["codex", "claude"], "model": "local-model"}
             }
         })
@@ -774,7 +832,8 @@ async fn a_machine_local_agent_provider_reorder_reaches_a_spawn_without_any_comm
 
     let ports = ServerPortReservations::new();
     let port = ports.lan_port();
-    let (config_path, daemon_dir, _) = write_server_config(&root, port, ports.transfer_port());
+    let (config_path, daemon_dir, db_path) =
+        write_server_config(&root, port, ports.transfer_port());
     let ServerPortReservations { lan, transfer } = ports;
     let daemon = tokio::spawn(fake_daemon_until_spawn(daemon_dir));
     let mut server = start_server(&config_path, &root, port, lan, transfer).await;
@@ -830,9 +889,12 @@ async fn a_machine_local_agent_provider_reorder_reaches_a_spawn_without_any_comm
         } => {
             assert_eq!(session_id, task_id);
             assert_eq!(params.agent_provider, DaemonAgentProvider::Claude);
-            // The committed config says `repo-model`; only the uncommitted
-            // file says this.
-            assert_eq!(params.model.as_deref(), Some("local-model"));
+            // The local entry wrote `local-model` beside its leading
+            // candidate, codex; claude is the outage fallback behind it and
+            // runs on its own default. That the model is absent rather than
+            // the committed `repo-model` is what proves the uncommitted file
+            // replaced the committed entry.
+            assert_eq!(params.model, None);
         }
         other => panic!("expected machine-local headless spawn, got {other:?}"),
     }
@@ -848,9 +910,205 @@ async fn a_machine_local_agent_provider_reorder_reaches_a_spawn_without_any_comm
         .await
         .expect("task detail should be JSON");
     assert_eq!(task["agentProvider"], "claude");
-    assert_eq!(task["model"], "local-model");
+    assert_eq!(task["model"], Value::Null);
+
+    // The persisted spawn options have to agree with the stamp. The row is
+    // first written with the *leading* candidate's pair (codex, here, with
+    // `local-model`), and only availability decides that the task actually
+    // binds to claude — so without a restamp the column would keep a model
+    // belonging to a provider the task is not running. No HTTP surface
+    // exposes the column once the task has a run (task detail answers from
+    // the latest `stage_run`), so it is read from the server's database
+    // directly. The desktop's recover-session action reads exactly this pair
+    // (`apps/desktop/src/stores/sessions.ts`) and would rebuild
+    // `codex -m local-model` from a mismatched row.
+    let (stamped_provider, spawn_options): (String, Option<String>) =
+        Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("server database should open read-only")
+            .query_row(
+                "SELECT agent_provider, agent_spawn_options FROM pipeline_item WHERE id = ?1",
+                [&task_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("created task should persist its agent binding");
+    assert_eq!(stamped_provider, "claude");
+    let spawn_options: Value = serde_json::from_str(
+        &spawn_options.expect("created task should persist its spawn options"),
+    )
+    .expect("stored spawn options should be JSON");
+    assert_eq!(
+        spawn_options["model"],
+        Value::Null,
+        "persisted spawn options must not carry a model written for another provider"
+    );
+    assert_eq!(spawn_options["effort"], Value::Null);
 
     stop_server(&mut server).await;
+    std::fs::remove_dir_all(root).expect("test root should be removed");
+}
+
+/// A task's provider stamp is immutable, and a machine-local
+/// `agentProviders` entry deliberately does not rebind an already-stamped
+/// open task. What it must never do is hand that task a *foreign model*: a
+/// local entry pointing `implement` at claude/opus respawned codex-stamped
+/// tasks as `codex -m opus`, which the Codex CLI rejects outright
+/// ("The 'opus' model is not supported when using Codex with a ChatGPT
+/// account."), parking them unread with raw JSON in the terminal
+/// (2026-08-17). The pair has to resolve from coherent layers, at creation
+/// and at every respawn.
+#[tokio::test(flavor = "current_thread")]
+async fn a_stamped_provider_never_takes_a_local_model_written_for_another_provider() {
+    let _fixture_guard = PROCESS_FIXTURE_LOCK.lock().await;
+    let root = unique_test_root("stamped-provider-foreign-model");
+    std::fs::create_dir_all(&root).expect("test root should be created");
+    // The committed config prefers claude with `repo-model` for `implement`.
+    let repo = init_provider_repo(&root);
+    // Task worktrees are cut from `origin/main`, so the second provider
+    // executable has to be published there like the first one.
+    write_executable(&repo.join(".kanna/provider-bin/codex"));
+    publish_origin_main(&repo, "publish the codex provider fixture");
+    // The incident's machine-local override: this machine's claude, with a
+    // claude model id.
+    std::fs::write(
+        repo.join(".kanna/config.local.json"),
+        json!({
+            "agentProviders": {
+                "implement": {"provider": "claude", "model": "opus"}
+            }
+        })
+        .to_string(),
+    )
+    .expect("machine-local repo config should be written");
+
+    let ports = ServerPortReservations::new();
+    let port = ports.lan_port();
+    let (config_path, daemon_dir, _) = write_server_config(&root, port, ports.transfer_port());
+    let ServerPortReservations { lan, transfer } = ports;
+    let (command_tx, mut commands) = mpsc::unbounded_channel();
+    let daemon = tokio::spawn(fake_daemon_persistent(daemon_dir, command_tx));
+    let mut server = start_server(&config_path, &root, port, lan, transfer).await;
+    let client = Client::new();
+    let repo_id = register_repo(&client, port, &repo).await;
+
+    let manifest = client
+        .get(format!(
+            "http://127.0.0.1:{port}/v1/repos/{repo_id}/kanna-definitions"
+        ))
+        .send()
+        .await
+        .expect("definition manifest should reach kanna-server")
+        .error_for_status()
+        .expect("definition manifest should succeed")
+        .json::<Value>()
+        .await
+        .expect("definition manifest should be JSON");
+    assert_eq!(
+        manifest["config"]["localOverride"]["keys"],
+        json!(["agentProviders"]),
+        "the local layer must be in force for this test to mean anything"
+    );
+
+    let created = client
+        .post(format!("http://127.0.0.1:{port}/v1/tasks"))
+        .json(&json!({
+            "repoId": repo_id,
+            "prompt": "Stay on the stamped provider",
+            "agent": "implement",
+            "agentProvider": "codex",
+            "agentType": "pty"
+        }))
+        .send()
+        .await
+        .expect("task creation should reach kanna-server")
+        .error_for_status()
+        .expect("an explicitly stamped provider should still create a task")
+        .json::<Value>()
+        .await
+        .expect("task response should be JSON");
+    let task_id = created["taskId"]
+        .as_str()
+        .expect("task response should include an id")
+        .to_string();
+
+    assert_codex_spawn_without_a_foreign_model(
+        next_daemon_spawn(&mut commands).await,
+        &task_id,
+        "task creation",
+    );
+
+    // The respawn: same stamp, same local override, still a valid codex
+    // invocation rather than `codex -m 'opus'`.
+    client
+        .post(format!(
+            "http://127.0.0.1:{port}/v1/tasks/{task_id}/actions/rerun-stage"
+        ))
+        .send()
+        .await
+        .expect("stage rerun should reach kanna-server")
+        .error_for_status()
+        .expect("stage rerun should be accepted");
+
+    assert_codex_spawn_without_a_foreign_model(
+        next_daemon_spawn(&mut commands).await,
+        &task_id,
+        "stage rerun",
+    );
+
+    let task = client
+        .get(format!("http://127.0.0.1:{port}/v1/tasks/{task_id}"))
+        .send()
+        .await
+        .expect("task detail should reach kanna-server")
+        .error_for_status()
+        .expect("task detail should succeed")
+        .json::<Value>()
+        .await
+        .expect("task detail should be JSON");
+    assert_eq!(task["agentProvider"], "codex");
+    assert_eq!(task["model"], Value::Null);
+
+    // The same local entry still binds a task that has no stamp of its own —
+    // the fix narrows nothing about how the escape hatch works.
+    let unstamped = client
+        .post(format!("http://127.0.0.1:{port}/v1/tasks"))
+        .json(&json!({
+            "repoId": repo_id,
+            "prompt": "Take the machine-local preference",
+            "agent": "implement",
+            "agentType": "pty"
+        }))
+        .send()
+        .await
+        .expect("task creation should reach kanna-server")
+        .error_for_status()
+        .expect("the machine-local preference should resolve")
+        .json::<Value>()
+        .await
+        .expect("task response should be JSON");
+    let unstamped_id = unstamped["taskId"]
+        .as_str()
+        .expect("task response should include an id")
+        .to_string();
+    match next_daemon_spawn(&mut commands).await {
+        DaemonCommand::Spawn {
+            session_id, args, ..
+        } => {
+            assert_eq!(session_id, unstamped_id);
+            let shell_command = args.last().expect("PTY spawn should carry a shell command");
+            assert!(
+                shell_command.contains("/.kanna/provider-bin/claude"),
+                "unstamped task should take the local provider: {shell_command}"
+            );
+            assert!(
+                shell_command.contains("--model 'opus'"),
+                "unstamped task should take the local model: {shell_command}"
+            );
+        }
+        other => panic!("expected an unstamped PTY spawn, got {other:?}"),
+    }
+
+    stop_server(&mut server).await;
+    daemon.abort();
     std::fs::remove_dir_all(root).expect("test root should be removed");
 }
 
