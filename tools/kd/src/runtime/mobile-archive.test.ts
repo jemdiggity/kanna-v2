@@ -292,12 +292,15 @@ describe("kd mobile archive", () => {
     );
   }
 
-  function archiveRunner(calls: string[], identity: { version: string; buildNumber: string } | null): CommandRunner {
+  function reuseArchiveRunner(calls: string[], identity: { version: string; buildNumber: string } | null): CommandRunner {
     return {
       async run(command, args) {
         calls.push(`${command} ${args.join(" ")}`);
         if (command === "xcodebuild" && args[0] === "-version") {
           return { exitCode: 0, stdout: "Xcode 26.0\nBuild version 17A123\n", stderr: "" };
+        }
+        if (command === "git" && args[0] === "rev-parse") {
+          return { exitCode: 0, stdout: `${HEAD_COMMIT}\n`, stderr: "" };
         }
         if (command === "xcrun" && args[0] === "--find") {
           return { exitCode: 0, stdout: "/Applications/Xcode.app/Contents/Developer/usr/bin/altool", stderr: "" };
@@ -326,8 +329,8 @@ describe("kd mobile archive", () => {
     await seedArtifacts(repoRoot, "1.0.0", "7");
     const calls: string[] = [];
     const result = await executeMobileIosArchiveWithContext(
-      { production: true, buildNumber: "7" },
-      { repoRoot, env: {}, runner: archiveRunner(calls, { version: "1.0.0", buildNumber: "7" }) }
+      { production: true, ref: "release/0.2", buildNumber: "7" },
+      { repoRoot, env: {}, runner: reuseArchiveRunner(calls, { version: "1.0.0", buildNumber: "7" }) }
     );
     expect(result.ok).toBe(true);
     expect(result.message).toContain("Reused existing mobile production archive 1.0.0 (7)");
@@ -342,8 +345,8 @@ describe("kd mobile archive", () => {
     await seedArtifacts(repoRoot, "1.0.0", "6");
     const calls: string[] = [];
     const result = await executeMobileIosArchiveWithContext(
-      { production: true, buildNumber: "7" },
-      { repoRoot, env: {}, runner: archiveRunner(calls, { version: "1.0.0", buildNumber: "6" }) }
+      { production: true, ref: "release/0.2", buildNumber: "7" },
+      { repoRoot, env: {}, runner: reuseArchiveRunner(calls, { version: "1.0.0", buildNumber: "6" }) }
     );
     expect(result.ok).toBe(true);
     expect(result.message).toContain("Built mobile production archive");
@@ -355,8 +358,8 @@ describe("kd mobile archive", () => {
     await writeMinimalRepo(repoRoot);
     const calls: string[] = [];
     const result = await executeMobileIosArchiveWithContext(
-      { production: true, buildNumber: "7" },
-      { repoRoot, env: {}, runner: archiveRunner(calls, null) }
+      { production: true, ref: "release/0.2", buildNumber: "7" },
+      { repoRoot, env: {}, runner: reuseArchiveRunner(calls, null) }
     );
     expect(result.ok).toBe(true);
     expect(calls.some((call) => call.includes("prebuild"))).toBe(true);
@@ -368,8 +371,8 @@ describe("kd mobile archive", () => {
     await seedArtifacts(repoRoot, "1.0.0", "7");
     const calls: string[] = [];
     const result = await executeMobileIosArchiveWithContext(
-      { production: true, buildNumber: "7", forceRebuild: true },
-      { repoRoot, env: {}, runner: archiveRunner(calls, { version: "1.0.0", buildNumber: "7" }) }
+      { production: true, ref: "release/0.2", buildNumber: "7", forceRebuild: true },
+      { repoRoot, env: {}, runner: reuseArchiveRunner(calls, { version: "1.0.0", buildNumber: "7" }) }
     );
     expect(result.ok).toBe(true);
     expect(result.message).toContain("Built mobile production archive");
@@ -386,6 +389,9 @@ describe("kd mobile archive", () => {
         if (command === "xcodebuild" && args[0] === "-version") {
           return { exitCode: 0, stdout: "Xcode 26.0\nBuild version 17A123\n", stderr: "" };
         }
+        if (command === "git" && args[0] === "rev-parse") {
+          return { exitCode: 0, stdout: `${HEAD_COMMIT}\n`, stderr: "" };
+        }
         if (command === "xcrun" && args[0] === "--find") {
           return { exitCode: 1, stdout: "", stderr: "xcrun: error: unable to find utility \"altool\"" };
         }
@@ -394,7 +400,7 @@ describe("kd mobile archive", () => {
     };
     await expect(
       executeMobileIosArchiveWithContext(
-        { production: true, buildNumber: "7", upload: true },
+        { production: true, ref: "release/0.2", buildNumber: "7", upload: true },
         {
           repoRoot,
           env: {
