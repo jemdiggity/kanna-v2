@@ -1594,6 +1594,7 @@ export function createMobileController(
     stopTaskSession();
     store.setSelectedTask(null);
     store.setDesktops([]);
+    store.resetAccountScopedMachines();
     lastExplicitRepos = [];
     store.setRepos([]);
     store.setRecentTasks([]);

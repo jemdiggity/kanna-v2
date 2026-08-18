@@ -246,9 +246,19 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
         }
       },
       onMachineSourceWarnings: (warnings) => {
+        if (generation !== clientGeneration) {
+          return;
+        }
         sessionStore.setMachineSourceWarnings(warnings);
       },
+      // A superseded client can still have a desktop read in flight, and its
+      // result describes the account (or trust set) we just left. Only the
+      // current client may write the machine list, or a read that started
+      // before sign-out lands after it and restores the account's machines.
       onMachineSourcesChanged: (sources) => {
+        if (generation !== clientGeneration) {
+          return;
+        }
         sessionStore.setMachineSourceDesktops(sources);
       },
       onTaskRoutesChanged: publishTaskRouteChange,
@@ -275,11 +285,13 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
       });
     }
     const previousClient = activeClient;
-    const nextGeneration = clientGeneration + 1;
     currentLiveTaskRecoveryInvalidation?.();
     currentLiveTaskRepublish = null;
+    // The generation advances before the client is built: a client publishes
+    // machine sources while it is being constructed, and those publications
+    // belong to the incoming generation, not the one being replaced.
+    const nextGeneration = ++clientGeneration;
     const nextClient = resolveClient(nextGeneration);
-    clientGeneration = nextGeneration;
     activeClient = nextClient;
     previousClient.dispose();
     publishTaskRouteChange();
@@ -620,16 +632,10 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
     if (nextAuthUid !== activeAuthUid) {
       invalidateLiveCloudState();
       activeAuthUid = nextAuthUid;
-      const currentState = sessionStore.getState();
-      const manualIds = new Set(
-        currentState.trustedDesktops.map((desktop) => desktop.desktopId)
-      );
-      sessionStore.setMachineSourceDesktops({
-        account: [],
-        local: currentState.liveLanDesktops.filter((desktop) =>
-          manualIds.has(desktop.id)
-        )
-      });
+      // Clear before the client is rebuilt: the next client seeds its desktop
+      // sources from the store, so the account's machines must already be gone
+      // or it republishes them as its own.
+      sessionStore.resetAccountScopedMachines();
       replaceActiveClient();
     }
   });

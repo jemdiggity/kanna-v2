@@ -8,7 +8,30 @@ import {
   agentProviderOptionsForDesktop,
   parseAgentProviderInventory
 } from "../../../apps/mobile/src/lib/api/agentProviders";
-import { BUFFY_UID } from "./firebaseAuth";
+import { createAppModel, type AppModel } from "../../../apps/mobile/src/appModel";
+import { createStaticBonjourBrowser } from "../../../apps/mobile/src/lib/discovery/bonjour";
+import {
+  createMobileAuthSession,
+  type MobileAuthSdk,
+  type MobileAuthSession,
+  type MobileAuthUser
+} from "../../../apps/mobile/src/lib/firebase/auth";
+import type {
+  CloudDesktopRecord,
+  CloudTaskIndex
+} from "../../../apps/mobile/src/lib/firebase/taskIndex";
+import {
+  buildMachineInventory,
+  summarizeMachines,
+  type MobileMachine
+} from "../../../apps/mobile/src/state/machineInventory";
+import {
+  BUFFY_EMAIL,
+  BUFFY_PASSWORD,
+  BUFFY_UID,
+  signInWithPassword
+} from "./firebaseAuth";
+import { createNodeRelayDesktopClient } from "./nodeRelayClient";
 import {
   hostInstalledAgentProviders,
   startRemoteHarness,
@@ -27,6 +50,7 @@ interface FirestoreDocument {
 
 interface FirestoreValue {
   stringValue?: string;
+  timestampValue?: string;
   nullValue?: null;
   arrayValue?: { values?: FirestoreValue[] };
 }
@@ -269,7 +293,228 @@ describe("remote desktop credential auth and discovery E2E", () => {
     await harness.waitForDesktop(desktopId);
     await expectActiveDesktopIds(harness, [desktopId]);
   }, 90_000);
+
+  it("stops reporting the account's machines once the phone signs out", async () => {
+    const desktopId = `desktop-signout-${Date.now()}`;
+    const desktopSecret = sha256Hex(`${desktopId}:secret`);
+    await publishDesktopCredentialAsBuffy(harness, {
+      desktopId,
+      desktopSecret,
+      displayName: DESKTOP_NAME
+    });
+    await harness.restartServerWithIdentity({ desktopId, desktopSecret });
+    await harness.waitForDesktop(desktopId);
+
+    const authSession = createEmulatorAuthSession(harness);
+    await authSession.signInWithEmailPassword({
+      email: BUFFY_EMAIL,
+      password: BUFFY_PASSWORD
+    });
+    expect(authSession.getState()).toMatchObject({
+      status: "signedIn",
+      user: { uid: BUFFY_UID }
+    });
+
+    // A desktop read can be held open here, the way a Firestore read that
+    // left before sign-out is still in flight when the account goes away.
+    let holdDesktopRead: Promise<void> | null = null;
+    const app = createAppModel({
+      authSession,
+      persistence: {
+        load: async () => null,
+        save: async () => undefined
+      },
+      options: {
+        forceCloud: true,
+        relayUrl: harness.relayUrl,
+        taskIndex: createAccountDesktopIndex(harness, authSession, () => holdDesktopRead),
+        bonjourBrowser: createStaticBonjourBrowser([]),
+        createRelayClient: ({ relayUrl, getIdToken }) =>
+          createNodeRelayDesktopClient({ relayUrl, getIdToken })
+      }
+    });
+
+    try {
+      await app.initialize();
+      await waitForMachines(app, (machines) =>
+        machines.some(
+          (machine) =>
+            machine.desktopId === desktopId &&
+            machine.origins.account &&
+            machine.availability.cloud
+        )
+      );
+
+      let releaseDesktopRead!: () => void;
+      holdDesktopRead = new Promise<void>((resolve) => {
+        releaseDesktopRead = resolve;
+      });
+      const heldRead = app.client.listDesktops().catch(() => undefined);
+
+      await app.controller.signOut();
+
+      expect(machinesOf(app)).toEqual([]);
+      expect(summarizeMachines(machinesOf(app))).toEqual({
+        total: 0,
+        available: 0
+      });
+
+      releaseDesktopRead();
+      await heldRead;
+      await sleep(500);
+
+      expect(app.sessionStore.getState().accountDesktops).toEqual([]);
+      expect(machinesOf(app)).toEqual([]);
+      expect(summarizeMachines(machinesOf(app))).toEqual({
+        total: 0,
+        available: 0
+      });
+    } finally {
+      app.controller.dispose();
+    }
+  }, 90_000);
 });
+
+/**
+ * The phone's Firebase auth session, backed by the emulator's real Buffy
+ * credentials: sign-in mints a real ID token, and sign-out drops it exactly
+ * the way the shipped Firebase SDK adapter does.
+ */
+function createEmulatorAuthSession(harness: RemoteHarness): MobileAuthSession {
+  const listeners = new Set<(user: MobileAuthUser | null) => void>();
+  let user: MobileAuthUser | null = null;
+  let idToken: string | null = null;
+  const publish = () => {
+    for (const listener of listeners) listener(user);
+  };
+  const sdk: MobileAuthSdk = {
+    getCurrentUser: () => user,
+    onAuthStateChanged(listener) {
+      listeners.add(listener);
+      listener(user);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    async signInWithEmailPassword(email, password) {
+      const signIn = await signInWithPassword({
+        authPort: harness.ports.auth,
+        email,
+        password
+      });
+      if (!signIn?.idToken) {
+        throw new Error("Firebase Auth emulator rejected the phone's sign-in");
+      }
+      idToken = signIn.idToken;
+      user = { uid: signIn.localId ?? BUFFY_UID, email, displayName: null };
+      publish();
+      return user;
+    },
+    async signOut() {
+      user = null;
+      idToken = null;
+      publish();
+    },
+    async getIdToken() {
+      return idToken;
+    }
+  };
+  return createMobileAuthSession({ sdk });
+}
+
+/**
+ * The desktop records the relay published for this account, read from
+ * Firestore with the phone's own ID token. `hold` models a read that is
+ * already in flight: the credential is captured when the read starts, and the
+ * request completes whenever the test releases it.
+ */
+function createAccountDesktopIndex(
+  harness: RemoteHarness,
+  authSession: MobileAuthSession,
+  hold: () => Promise<void> | null
+): CloudTaskIndex {
+  return {
+    async listDesktops(uid) {
+      const idToken = await authSession.getIdToken();
+      await hold();
+      if (!idToken) {
+        throw new Error("the phone holds no account credential");
+      }
+      const response = await fetch(
+        `${firestoreBaseUrl(harness)}/users/${uid}/desktops`,
+        { headers: { Authorization: `Bearer ${idToken}` } }
+      );
+      const body = await response.json().catch(() => null) as unknown;
+      if (!response.ok) {
+        throw new Error(
+          `failed to list account desktops: ${response.status} ${JSON.stringify(body)}`
+        );
+      }
+      return asCloudDesktopRecords(body);
+    },
+    async listRecentTasks() {
+      return [];
+    },
+    subscribeRecentTasks(_uid, onUpdate) {
+      onUpdate([]);
+      return () => undefined;
+    }
+  };
+}
+
+function asCloudDesktopRecords(value: unknown): CloudDesktopRecord[] {
+  if (!isRecord(value) || !Array.isArray(value.documents)) {
+    return [];
+  }
+  return value.documents.flatMap((entry): CloudDesktopRecord[] => {
+    if (!isRecord(entry)) return [];
+    const document = entry as FirestoreDocument;
+    const desktopId = stringField(document, "desktopId");
+    if (!desktopId) return [];
+    const agentProviders = parseAgentProviderInventory(
+      stringArrayField(document, "agentProviders") ?? undefined
+    );
+    return [{
+      desktopId,
+      displayName: stringField(document, "displayName") ?? desktopId,
+      updatedAt: timestampField(document, "updatedAt"),
+      ...(agentProviders ? { agentProviders } : {})
+    }];
+  });
+}
+
+/** The machine list the phone's Machines screen renders, from its own state. */
+function machinesOf(app: AppModel): MobileMachine[] {
+  const state = app.sessionStore.getState();
+  return buildMachineInventory({
+    accountDesktops: state.accountDesktops,
+    manualDesktops: state.trustedDesktops,
+    liveLanDesktops: state.liveLanDesktops
+  });
+}
+
+/**
+ * Poll the machine list, re-reading desktops the way the app's own refresh
+ * does: relay presence settles after the first read, so the account record
+ * only reports as reachable once a later read maps it.
+ */
+async function waitForMachines(
+  app: AppModel,
+  predicate: (machines: MobileMachine[]) => boolean,
+  timeoutMs = 30_000
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastMachines: MobileMachine[] = [];
+  while (Date.now() < deadline) {
+    lastMachines = machinesOf(app);
+    if (predicate(lastMachines)) return;
+    await app.client.listDesktops().catch(() => undefined);
+    await sleep(250);
+  }
+  throw new Error(
+    `timed out waiting for the expected machine list: ${JSON.stringify(lastMachines)}`
+  );
+}
 
 async function readFirestoreDocument(
   harness: RemoteHarness,
@@ -481,6 +726,11 @@ function requiredString(record: Record<string, unknown>, field: string): string 
 function stringField(document: FirestoreDocument, field: string): string | null {
   const value = document.fields?.[field];
   return value?.stringValue ?? null;
+}
+
+function timestampField(document: FirestoreDocument, field: string): string | null {
+  const value = document.fields?.[field];
+  return value?.timestampValue ?? value?.stringValue ?? null;
 }
 
 function sha256Hex(value: string): string {

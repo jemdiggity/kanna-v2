@@ -327,6 +327,68 @@ describe("createSessionStore", () => {
     expect(store.getPersistedContext()).not.toHaveProperty("machineSourceWarnings");
   });
 
+  it("drops account machine sources but keeps manually paired machines", () => {
+    const store = createSessionStore();
+    store.setTrustedDesktops([
+      {
+        desktopId: "desktop-paired",
+        displayName: "Paired Mac",
+        lanEndpoints: [],
+        lastSeenAt: "2026-08-19T00:00:00.000Z"
+      }
+    ]);
+    store.setMachineSourceDesktops({
+      account: [
+        { id: "desktop-account", name: "Account Mac", online: true, mode: "remote" }
+      ],
+      local: [
+        { id: "desktop-paired", name: "Paired Mac", online: true, mode: "lan" },
+        { id: "desktop-account", name: "Account Mac", online: true, mode: "lan" }
+      ]
+    });
+    store.setMachineSourceWarnings({
+      account: "Cloud unavailable",
+      local: "LAN unavailable"
+    });
+
+    store.resetAccountScopedMachines();
+
+    expect(store.getState()).toMatchObject({
+      accountDesktops: [],
+      // Only account trust made the account-only machine readable over the
+      // LAN; the paired machine's own credential outlives the account.
+      liveLanDesktops: [
+        { id: "desktop-paired", name: "Paired Mac", online: true, mode: "lan" }
+      ],
+      machineSourceWarnings: { account: null, local: "LAN unavailable" },
+      trustedDesktops: [expect.objectContaining({ desktopId: "desktop-paired" })]
+    });
+  });
+
+  it("publishes nothing when there is no account machine state to drop", () => {
+    const store = createSessionStore();
+    store.setTrustedDesktops([
+      {
+        desktopId: "desktop-paired",
+        displayName: "Paired Mac",
+        lanEndpoints: [],
+        lastSeenAt: "2026-08-19T00:00:00.000Z"
+      }
+    ]);
+    store.setMachineSourceDesktops({
+      account: [],
+      local: [
+        { id: "desktop-paired", name: "Paired Mac", online: true, mode: "lan" }
+      ]
+    });
+    const publications: number[] = [];
+    store.subscribe(() => publications.push(publications.length));
+
+    store.resetAccountScopedMachines();
+
+    expect(publications).toEqual([]);
+  });
+
   it("starts with an idle task creation state and no composer repo", () => {
     const store = createSessionStore();
 
