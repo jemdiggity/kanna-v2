@@ -3,8 +3,17 @@ import { readFile } from "node:fs/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import WebSocket, { type RawData } from "ws";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { createRemoteTransport } from "../../../apps/mobile/src/lib/transports/remoteTransport";
+import {
+  agentProviderOptionsForDesktop,
+  parseAgentProviderInventory
+} from "../../../apps/mobile/src/lib/api/agentProviders";
 import { BUFFY_UID } from "./firebaseAuth";
-import { startRemoteHarness, type RemoteHarness } from "./harness";
+import {
+  hostInstalledAgentProviders,
+  startRemoteHarness,
+  type RemoteHarness
+} from "./harness";
 
 interface PairingSessionResponse {
   code: string;
@@ -19,12 +28,14 @@ interface FirestoreDocument {
 interface FirestoreValue {
   stringValue?: string;
   nullValue?: null;
+  arrayValue?: { values?: FirestoreValue[] };
 }
 
 interface DesktopDescriptor {
   id: string;
   name: string;
   connectionMode: string;
+  agentProviders?: string[];
 }
 
 interface AuthAttempt {
@@ -173,6 +184,57 @@ describe("remote desktop credential auth and discovery E2E", () => {
     expect(badPhone).toEqual({ outcome: "closed", closeCode: 4005 });
   }, 90_000);
 
+  // The transport App Review actually used: a phone off the LAN, reaching a Mac
+  // through the relay. Nothing else runs this chain end to end — the desktop
+  // publishing its real inventory, the relay validating and storing it, and the
+  // phone's machine record carrying it into the composer's agent options. Each
+  // hop has a unit test; none of them proves they agree.
+  it("carries the desktop's real agent inventory through the relay into the phone's machine record", async () => {
+    const desktopId = `desktop-inventory-${Date.now()}`;
+    const desktopSecret = sha256Hex(`${desktopId}:secret`);
+    await publishDesktopCredentialAsBuffy(harness, {
+      desktopId,
+      desktopSecret,
+      displayName: DESKTOP_NAME
+    });
+    // Cloud task publication only runs for a desktop-secret identity, which is
+    // what a phone-paired Mac has.
+    await harness.restartServerWithIdentity({ desktopId, desktopSecret });
+    await harness.waitForDesktop(desktopId);
+
+    const published = await waitForPublishedAgentProviders(harness, desktopId);
+    expectHarnessAgentProviders(published);
+
+    // From here on it is the phone's own code, over the record the relay wrote:
+    // the same parse the Firestore desktop index applies, the real remote
+    // transport, and the composer's option list.
+    const agentProviders = parseAgentProviderInventory(published);
+    expect(agentProviders).toEqual(published);
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [
+        {
+          desktopId,
+          displayName: DESKTOP_NAME,
+          online: true,
+          reachableViaRelay: true,
+          connectionMode: "internet",
+          ...(agentProviders ? { agentProviders } : {})
+        }
+      ],
+      getSelectedDesktopId: () => desktopId,
+      invokeDesktop: (request) => harness.client.invokeDesktop(request)
+    });
+    const [machine] = await transport.listDesktops();
+    expect(machine.agentProviders).toEqual(agentProviders);
+
+    const offered = agentProviderOptionsForDesktop(machine);
+    expect(offered).toContain("codex");
+    // The reviewer's failure: a machine without Claude must not offer Claude.
+    if (!published.includes("claude")) {
+      expect(offered).not.toContain("claude");
+    }
+  }, 90_000);
+
   it("lists desktops through the relay and observes relay presence flip as kanna-server disconnects and reconnects", async () => {
     const desktopId = `desktop-discovery-${Date.now()}`;
     const desktopSecret = sha256Hex(`${desktopId}:secret`);
@@ -190,13 +252,13 @@ describe("remote desktop credential auth and discovery E2E", () => {
       path: "/v1/desktops",
       body: null
     }));
-    expect(descriptors).toEqual([
-      {
-        id: desktopId,
-        name: DESKTOP_NAME,
-        connectionMode: "both"
-      }
-    ]);
+    expect(descriptors).toHaveLength(1);
+    expect(descriptors[0]).toMatchObject({
+      id: desktopId,
+      name: DESKTOP_NAME,
+      connectionMode: "both"
+    });
+    expectHarnessAgentProviders(descriptors[0].agentProviders);
 
     await expectActiveDesktopIds(harness, [desktopId]);
 
@@ -341,8 +403,70 @@ function asDesktopDescriptors(value: unknown): DesktopDescriptor[] {
     return {
       id: requiredString(entry, "id"),
       name: requiredString(entry, "name"),
-      connectionMode: requiredString(entry, "connectionMode")
+      connectionMode: requiredString(entry, "connectionMode"),
+      ...(Array.isArray(entry.agentProviders)
+        ? { agentProviders: entry.agentProviders.map(String) }
+        : {})
     };
+  });
+}
+
+/**
+ * The harness server runs with only its stub `codex` reachable
+ * (`serverProviderPath`), so anything describing it must name codex and must
+ * not name a provider this host does not also expose in the directories
+ * executable resolution probes globally.
+ */
+function expectHarnessAgentProviders(reported: string[] | undefined): void {
+  expect(reported).toBeDefined();
+  expect(reported).toContain("codex");
+  const unavoidable = new Set(["codex", ...hostInstalledAgentProviders()]);
+  expect(
+    (reported ?? []).filter((provider) => !unavoidable.has(provider))
+  ).toEqual([]);
+}
+
+/**
+ * The relay writes the desktop document from the snapshot `kanna-server`
+ * publishes, on a 500ms poll, so the first read can land before the first
+ * publication.
+ */
+async function waitForPublishedAgentProviders(
+  harness: RemoteHarness,
+  desktopId: string,
+  timeoutMs = 30_000
+): Promise<string[]> {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = "no cloud desktop document was published";
+  while (Date.now() < deadline) {
+    try {
+      const document = await readFirestoreDocument(
+        harness,
+        `users/${BUFFY_UID}/desktops/${desktopDocId(desktopId)}`,
+        await harness.getIdToken()
+      );
+      const published = stringArrayField(document, "agentProviders");
+      if (published) return published;
+      lastError = "the published desktop document carried no agentProviders";
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+    await sleep(500);
+  }
+  throw new Error(`timed out waiting for a published agent inventory: ${lastError}`);
+}
+
+function stringArrayField(
+  document: FirestoreDocument,
+  field: string
+): string[] | null {
+  const values = document.fields?.[field]?.arrayValue?.values;
+  if (!values) return null;
+  return values.map((value) => {
+    if (typeof value.stringValue !== "string") {
+      throw new Error(`${field} held a non-string entry`);
+    }
+    return value.stringValue;
   });
 }
 

@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -24,6 +25,7 @@ import {
   type DesktopPairingSession
 } from "./desktopPairing";
 import { writeScriptedAgentBinary } from "./scriptedAgent";
+import { AGENT_PROVIDER_SPECS } from "../../../packages/agent-protocol/src/index";
 import type { RelayDesktopClient } from "../../../apps/mobile/src/lib/transports/relayClient";
 
 export type RemoteHarnessEnvironment = "dev" | "staging";
@@ -72,6 +74,10 @@ export interface RemoteHarness {
 
 const DEVICE_TOKEN = "e2e-token";
 const DESKTOP_NAME = "Remote E2E Desktop";
+/** Every provider executable `kanna-server` probes; see `serverProviderPath`. */
+const AGENT_PROVIDER_EXECUTABLES = AGENT_PROVIDER_SPECS.map(
+  (spec) => spec.executable
+);
 
 function defaultRepoRoot(): string {
   return resolve(fileURLToPath(new URL("../../..", import.meta.url)));
@@ -196,6 +202,55 @@ export async function writeRemoteHarnessZshStartupFiles(zshStartupDir: string): 
 
 function prependPath(pathEntry: string, existingPath: string | undefined): string {
   return existingPath ? `${pathEntry}:${existingPath}` : pathEntry;
+}
+
+/**
+ * PATH for the harness's `kanna-server`, with the host's own agent CLIs
+ * removed.
+ *
+ * The server reports which providers it can spawn by resolving each provider
+ * executable, and mobile builds its agent picker from that report. Inherited
+ * unchanged, a developer's Homebrew or `~/.local/bin` Claude would make the
+ * reported inventory depend on the machine running the suite, so the one thing
+ * these specs assert would be untestable. Only directories that actually hold a
+ * provider CLI are dropped, so ordinary tooling on the same PATH survives.
+ */
+export function serverProviderPath(
+  fakeAgentBinDir: string,
+  existingPath: string | undefined,
+  isProviderExecutable: (candidate: string) => boolean = (candidate) =>
+    existsSync(candidate)
+): string {
+  const hostEntries = (existingPath ?? "")
+    .split(":")
+    .filter((entry) => entry.length > 0 && entry !== fakeAgentBinDir)
+    .filter((entry) =>
+      !AGENT_PROVIDER_EXECUTABLES.some((executable) =>
+        isProviderExecutable(join(entry, executable))
+      )
+    );
+  return [fakeAgentBinDir, ...hostEntries].join(":");
+}
+
+/**
+ * Providers the harness server will find no matter what PATH it is given.
+ *
+ * Executable resolution deliberately also probes `/usr/local/bin` and
+ * `/opt/homebrew/bin` (`kanna_runtime_defaults::find_user_binary`), because a
+ * Finder-launched Kanna must find CLIs installed there. A spawn would use them,
+ * so the reported inventory must include them — which means a spec cannot
+ * assert an exact inventory. It asserts the harness stub is present and that
+ * providers *outside* this set are absent.
+ */
+export function hostInstalledAgentProviders(
+  isProviderExecutable: (candidate: string) => boolean = (candidate) =>
+    existsSync(candidate)
+): string[] {
+  return AGENT_PROVIDER_SPECS.filter((spec) =>
+    ["/usr/local/bin", "/opt/homebrew/bin"].some((directory) =>
+      isProviderExecutable(join(directory, spec.executable))
+    )
+  ).map((spec) => spec.id);
 }
 
 async function writeServerConfig(input: {
@@ -325,7 +380,7 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
           : {}),
         KANNA_E2E_TEST_SQL: "1",
         HOME: zshStartupDir,
-        PATH: prependPath(fakeAgentBinDir, process.env.PATH),
+        PATH: serverProviderPath(fakeAgentBinDir, process.env.PATH),
         RUST_LOG: process.env.RUST_LOG ?? "info",
         ZDOTDIR: zshStartupDir
       }

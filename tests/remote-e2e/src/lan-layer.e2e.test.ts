@@ -1,7 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import WebSocket, { type RawData } from "ws";
 import { createKannaClient } from "../../../apps/mobile/src/lib/api/client";
-import type { TaskSummary } from "../../../apps/mobile/src/lib/api/types";
+import type { AgentProvider } from "../../../packages/agent-protocol/src/index";
+import type {
+  DesktopDescriptor,
+  TaskSummary
+} from "../../../apps/mobile/src/lib/api/types";
 import type { TaskTerminalStreamEvent, TaskTerminalSubscription } from "../../../apps/mobile/src/lib/api/client";
 import { createLanTransport, type FetchLike, type WebSocketLike } from "../../../apps/mobile/src/lib/transports/lanTransport";
 import { createMobileController } from "../../../apps/mobile/src/state/mobileController";
@@ -13,7 +17,11 @@ import {
   terminalOutputToString,
   type TerminalOutputLike
 } from "../../../apps/mobile/src/state/terminalOutputBuffer";
-import { startRemoteHarness, type RemoteHarness } from "./harness";
+import {
+  hostInstalledAgentProviders,
+  startRemoteHarness,
+  type RemoteHarness
+} from "./harness";
 import {
   collectTerminalEvents,
   createScriptedTask,
@@ -48,21 +56,25 @@ describe("LAN task loop E2E", () => {
       lanPort: harness.ports.server,
       state: "running"
     });
-    await expect(transport.listDesktops()).resolves.toEqual([
-      {
-        id: harness.desktopId,
-        name: "Remote E2E Desktop",
-        online: true,
-        mode: "lan"
-      }
-    ]);
-    await expect(fetchJson(`${harness.lanBaseUrl}/v1/desktops`)).resolves.toEqual([
-      {
-        id: harness.desktopId,
-        name: "Remote E2E Desktop",
-        connectionMode: "both"
-      }
-    ]);
+    // Both desktop descriptions carry the machine's provider inventory, so the
+    // exact shape is asserted around it rather than against it.
+    const [lanDesktop] = await transport.listDesktops();
+    expect(lanDesktop).toMatchObject({
+      id: harness.desktopId,
+      name: "Remote E2E Desktop",
+      online: true,
+      mode: "lan"
+    });
+    expectHarnessAgentProviders(lanDesktop.agentProviders);
+    const [descriptor] = await fetchJson<DesktopDescriptor[]>(
+      `${harness.lanBaseUrl}/v1/desktops`
+    );
+    expect(descriptor).toMatchObject({
+      id: harness.desktopId,
+      name: "Remote E2E Desktop",
+      connectionMode: "both"
+    });
+    expectHarnessAgentProviders(descriptor.agentProviders);
 
     const repos = await transport.listRepos();
     expect(repos).toContainEqual(expect.objectContaining({
@@ -354,12 +366,28 @@ async function waitForStoreTerminalOutput(
   });
 }
 
-async function fetchJson(url: string): Promise<unknown> {
+async function fetchJson<T = unknown>(url: string): Promise<T> {
   const response = await fetch(url);
   if (!response.ok) {
     throw new Error(`request failed (${response.status}) for ${url}`);
   }
-  return response.json() as Promise<unknown>;
+  return response.json() as Promise<T>;
+}
+
+/**
+ * The harness server runs with only its stub `codex` reachable
+ * (`serverProviderPath`), so its inventory must name codex and must not name a
+ * provider this host does not also expose in the globally probed directories.
+ */
+function expectHarnessAgentProviders(
+  reported: readonly AgentProvider[] | undefined
+): void {
+  expect(reported).toBeDefined();
+  expect(reported).toContain("codex");
+  const unavoidable = new Set(["codex", ...hostInstalledAgentProviders()]);
+  expect(
+    (reported ?? []).filter((provider) => !unavoidable.has(provider))
+  ).toEqual([]);
 }
 
 class NodeWebSocketAdapter implements WebSocketLike {
