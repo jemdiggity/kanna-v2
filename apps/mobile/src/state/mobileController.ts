@@ -36,6 +36,7 @@ import type {
 import type { PersistedSessionContext } from "./sessionPersistence";
 import { isTaskBlocked } from "../lib/api/taskIdentity";
 import { resolveAgentProviderForDesktop } from "../lib/api/agentProviders";
+import { buildMachineInventory } from "./machineInventory";
 import {
   buildCreatingTaskUiSlot,
   taskUiSlotForSelection,
@@ -1365,10 +1366,38 @@ export function createMobileController(
       : null;
   };
 
-  const knownDesktop = (desktopId: string | null): DesktopSummary | null =>
-    (desktopId
-      ? store.getState().desktops.find((desktop) => desktop.id === desktopId)
-      : null) ?? null;
+  /**
+   * The machine a composer selection refers to, resolved against the same
+   * inventory the composer renders its machine list from.
+   *
+   * `desktops` is the merged desktop read; the composer's machine list is built
+   * from the account/LAN/manual sources. A late LAN read republishes those
+   * sources without the merged read resolving again, so for up to one refresh
+   * cycle a machine can carry an inventory in the list the user is looking at
+   * and not in `desktops`. Resolving the provider from the other list is how a
+   * task gets created for a provider the machine cannot spawn — the exact
+   * failure this inventory exists to prevent.
+   */
+  const knownDesktop = (
+    desktopId: string | null
+  ): Pick<DesktopSummary, "name" | "agentProviders"> | null => {
+    if (!desktopId) return null;
+    const state = store.getState();
+    const machine = buildMachineInventory({
+      accountDesktops: state.accountDesktops,
+      manualDesktops: state.trustedDesktops,
+      liveLanDesktops: state.liveLanDesktops
+    }).find((candidate) => candidate.desktopId === desktopId);
+    const desktop = state.desktops.find(
+      (candidate) => candidate.id === desktopId
+    );
+    if (!machine && !desktop) return null;
+    const agentProviders = machine?.agentProviders ?? desktop?.agentProviders;
+    return {
+      name: machine?.displayName ?? desktop?.name ?? desktopId,
+      ...(agentProviders ? { agentProviders } : {})
+    };
+  };
 
   /**
    * The provider a task for this machine should be created with. Falls back to

@@ -4956,6 +4956,44 @@ describe("createMobileController", () => {
     expect(store.getState().composerAgentProvider).toBe("opencode");
   });
 
+  // A late LAN read republishes the machine sources without the merged desktop
+  // list being re-read, so the machine the composer renders can carry an
+  // inventory that `desktops` does not yet have. Resolving the provider from
+  // the other list creates exactly the task this feature exists to prevent.
+  it("resolves the provider from the machine list the composer renders", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    client.listDesktops.mockResolvedValue([
+      { id: "desktop-1", name: "Reviewer Mac", online: true, mode: "lan" }
+    ]);
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    store.setMachineSourceDesktops({
+      account: [],
+      local: [
+        {
+          id: "desktop-1",
+          name: "Reviewer Mac",
+          online: true,
+          mode: "lan",
+          agentProviders: ["opencode"]
+        }
+      ]
+    });
+    store.selectRepo("repo-1");
+
+    controller.openComposer();
+    controller.selectComposerDesktop("desktop-1");
+    controller.updateComposerPrompt("Ship mobile shell");
+    await controller.createTask();
+
+    expect(store.getState().composerAgentProvider).toBe("opencode");
+    expect(client.createTask).toHaveBeenCalledWith(
+      expect.objectContaining({ agentProvider: "opencode" })
+    );
+  });
+
   it("treats a saved machine that is no longer listed as unselected", async () => {
     const store = createSessionStore();
     const client = createClientMock();
