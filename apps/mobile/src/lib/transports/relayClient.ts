@@ -1,3 +1,4 @@
+import { readServerRefusal, ServerRefusalError } from "./serverRefusal";
 import type {
   TaskAgentSubscription,
   TaskCompanionSubscription,
@@ -241,13 +242,18 @@ export function createRelayDesktopClient({
       return;
     }
     if (status >= 400) {
-      // Carry the desktop's own explanation. A refusal a person has to act on
-      // — a task input held behind an unsent line at that terminal — names the
-      // terminal to go press Enter at; a bare status code names nothing.
-      const detail = failureMessage(message.body ?? message.data);
+      // Carry the desktop's own explanation and reason. A refusal a person has
+      // to act on — a task input held behind an unsent line at that terminal —
+      // names the terminal to go press Enter at; a bare status code names
+      // nothing, and the reason lets a caller tell it from a broken link.
+      const refusal = readServerRefusal(message.body ?? message.data);
       pending.reject(
-        new Error(
-          `Remote desktop request failed with status ${status}.${detail ? ` ${detail}` : ""}`
+        new ServerRefusalError(
+          `Remote desktop request failed with status ${status}.${
+            refusal.message ? ` ${refusal.message}` : ""
+          }`,
+          refusal.reason,
+          status
         )
       );
       return;
@@ -256,13 +262,6 @@ export function createRelayDesktopClient({
     pending.resolve(message.body ?? message.data ?? null);
   };
 
-  /** The desktop's own explanation for a failed invocation, when it sent one. */
-  const failureMessage = (body: unknown): string | null => {
-    if (isRecord(body) && typeof body.message === "string" && body.message) {
-      return body.message;
-    }
-    return null;
-  };
 
   const handleRelayEvent = (message: RelayEventMessage) => {
     if (!isRecord(message.payload)) {

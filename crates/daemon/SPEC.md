@@ -370,6 +370,21 @@ at that terminal. Both are resolved by the same two things:
 - **Composer attestation** — a positive match on the provider's own idle
   composer chrome, rendered empty, in the daemon's headless terminal.
 
+**Attestation is evidence from a rendered frame, and the frame must be proven
+newer than the draft it is used against.** A frame says only what was on screen
+when it was rendered. A declared byte still queued in the writer, or written but
+not yet echoed by the provider, leaves a composer that renders empty because the
+keystroke has not landed on it yet — not because there is no draft — and
+clearing on that frame would write the queued message and its Enter behind the
+human's first typed character. So an **active** declared draft is cleared only
+when every declared-draft write has completed at the PTY *and* at least one
+output chunk has been mirrored since the last one did; the mirrored-chunk count
+is sampled before the frame is read, so the frame is at least that new. Anything
+short of that leaves the message held and answers
+`logical_input_held_by_draft`. The **unknown** state has no such write to wait
+for — nothing here declared a draft — so it resolves from the current frame
+alone, exactly as before.
+
 Attestation answers exactly the question both guards ask — whether an
 unsubmitted draft is sitting at the prompt — and answers it more directly than
 the keystroke: an empty composer holds no draft, so there is nothing a logical

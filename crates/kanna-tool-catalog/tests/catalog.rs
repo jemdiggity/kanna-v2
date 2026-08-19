@@ -192,10 +192,24 @@ fn task_input_and_resume_descriptions_document_delivery_and_recovery_contracts()
         // that retries forever against a session only a human can unblock.
         "input_blocked",
         "retrying changes nothing",
+        // A held message was accepted but not delivered. A caller that cannot
+        // name this outcome resends and queues a second copy of a message the
+        // daemon already holds.
+        "input_held_by_draft",
+        "do not send it again",
     ] {
         assert!(
             send_input.contains(required),
             "send-task-input must document `{required}`"
+        );
+    }
+
+    // Both signal tools reach the same daemon refusal through
+    // signal_agent.rs, so both have to name it where they name their others.
+    for name in ["kanna_signal_agent", "kanna_signal_merge_handoff"] {
+        assert!(
+            description(name).contains("input_held_by_draft"),
+            "{name} must document `input_held_by_draft`"
         );
     }
 

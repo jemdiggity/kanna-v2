@@ -15,6 +15,10 @@ import type {
   TaskTerminalSubscription
 } from "../lib/api/client";
 import { createKannaClient, TaskCreationError } from "../lib/api/client";
+import {
+  INPUT_HELD_BY_DRAFT_REASON,
+  ServerRefusalError
+} from "../lib/transports/serverRefusal";
 import type { RepoSummary, TaskSummary } from "../lib/api/types";
 import { createCloudLanClient } from "../lib/sources/cloudLanClient";
 import { createRemoteTransport, type RemoteDesktopInvoker } from "../lib/transports/remoteTransport";
@@ -2232,6 +2236,60 @@ describe("createMobileController", () => {
       errorMessage: sharedError.message,
       recentTasks: [task]
     });
+  });
+
+  it("keeps the connection healthy when a task input is held at that terminal", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    const task: TaskSummary = {
+      id: "task-1",
+      repoId: "repo-1",
+      title: "Cloud task",
+      stage: "in progress"
+    };
+    // The desktop is fine and connected; a human simply has an unsent line at
+    // that terminal. Reported 2026-08-20: before this, one held reply put the
+    // whole app into its error state.
+    const held = new ServerRefusalError(
+      "logical input for session task-1 was not submitted: a human has an unsent line at that terminal",
+      INPUT_HELD_BY_DRAFT_REASON,
+      409
+    );
+    vi.mocked(auth.getState).mockReturnValue({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    });
+    client.getStatus.mockResolvedValue({
+      state: "running",
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud",
+      lanHost: "cloud",
+      lanPort: 0,
+      pairingCode: null
+    });
+    client.sendTaskInput.mockRejectedValueOnce(held);
+    let liveUpdate: ((tasks: TaskSummary[]) => void) | null = null;
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks: vi.fn((_uid, onUpdate) => {
+        liveUpdate = onUpdate;
+        return vi.fn();
+      })
+    });
+
+    await controller.bootstrap();
+    liveUpdate?.([task]);
+    const connectedState = store.getState().connectionState;
+    const taskCollectionStatus = store.getState().taskCollectionStatus;
+
+    await controller.sendTaskInput(task.id, "please also update the docs");
+
+    expect(store.getState()).toMatchObject({
+      connectionState: connectedState,
+      taskCollectionStatus,
+      errorMessage: held.message
+    });
+    expect(store.getState().connectionState).not.toBe("error");
   });
 
   it("does not start a persisted unresolved task stream before its live snapshot", async () => {

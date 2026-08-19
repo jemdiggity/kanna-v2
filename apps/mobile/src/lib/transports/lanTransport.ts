@@ -1,3 +1,4 @@
+import { readServerRefusal, ServerRefusalError } from "./serverRefusal";
 import type {
   KannaTransport,
   TaskAgentSubscription,
@@ -90,21 +91,15 @@ export function createLanTransport(
     deviceCredentials
       ? createSocket(url, credentialHeaders())
       : createSocket(url);
-  // The server's own explanation for a failed request, when it sent one.
-  const readFailureMessage = async (response: {
+  // The server's own explanation and machine-readable reason for a failed
+  // request, when it sent them.
+  const readFailure = async (response: {
     json: () => Promise<unknown>;
-  }): Promise<string | null> => {
+  }): Promise<{ reason: string | null; message: string | null }> => {
     try {
-      const body = await response.json();
-      if (body && typeof body === "object" && "message" in body) {
-        const message = (body as { message?: unknown }).message;
-        if (typeof message === "string" && message.length > 0) {
-          return message;
-        }
-      }
-      return null;
+      return readServerRefusal(await response.json());
     } catch {
-      return null;
+      return { reason: null, message: null };
     }
   };
 
@@ -126,10 +121,13 @@ export function createLanTransport(
     if (!response.ok) {
       // The server explains refusals it expects a person to act on — a task
       // input held behind someone's unsent line names the terminal to go
-      // press Enter at. A status code alone sends that person nowhere.
-      const detail = await readFailureMessage(response);
-      throw new Error(
-        `LAN request failed (${response.status}) for ${path}${detail ? `: ${detail}` : ""}`
+      // press Enter at. A status code alone sends that person nowhere, and the
+      // reason lets a caller tell that refusal from a broken connection.
+      const { reason, message } = await readFailure(response);
+      throw new ServerRefusalError(
+        `LAN request failed (${response.status}) for ${path}${message ? `: ${message}` : ""}`,
+        reason,
+        response.status
       );
     }
 

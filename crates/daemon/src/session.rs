@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Weak,
 };
 use std::time::{Duration, Instant};
@@ -157,6 +157,10 @@ pub enum RawInputKind {
 pub struct PendingInput {
     pub data: Vec<u8>,
     pub kind: PendingInputKind,
+    /// Set for bytes a producer declared a draft. The writer reports these
+    /// back when their PTY write completes, so attestation can tell a frame
+    /// that post-dates the draft from one that merely predates it.
+    declared_draft: bool,
     written: Option<oneshot::Sender<()>>,
     #[cfg_attr(not(test), allow(dead_code))]
     logical_after_write: Vec<(Vec<u8>, Option<oneshot::Sender<()>>)>,
@@ -167,6 +171,17 @@ impl PendingInput {
         Self {
             data,
             kind: PendingInputKind::Raw,
+            declared_draft: false,
+            written,
+            logical_after_write: Vec::new(),
+        }
+    }
+
+    fn raw_draft(data: Vec<u8>, written: Option<oneshot::Sender<()>>) -> Self {
+        Self {
+            data,
+            kind: PendingInputKind::Raw,
+            declared_draft: true,
             written,
             logical_after_write: Vec::new(),
         }
@@ -180,6 +195,7 @@ impl PendingInput {
         Self {
             data,
             kind: PendingInputKind::Raw,
+            declared_draft: false,
             written,
             logical_after_write,
         }
@@ -198,6 +214,7 @@ impl PendingInput {
             Self {
                 data: vec![b'\r'],
                 kind: PendingInputKind::LogicalEnter,
+                declared_draft: false,
                 written,
                 logical_after_write: Vec::new(),
             }
@@ -205,6 +222,7 @@ impl PendingInput {
             Self {
                 data,
                 kind: PendingInputKind::LogicalMessage,
+                declared_draft: false,
                 written,
                 logical_after_write: Vec::new(),
             }
@@ -219,6 +237,11 @@ impl PendingInput {
         self.data.push(b'\r');
         self.kind = PendingInputKind::LogicalEnter;
         true
+    }
+
+    /// Whether these bytes were declared a draft by their producer.
+    pub fn is_declared_draft(&self) -> bool {
+        self.declared_draft
     }
 
     pub fn acknowledge_written(mut self) {
@@ -259,6 +282,17 @@ pub struct LogicalInputAccepted {
 struct InputCoordinationState {
     raw_input_draft_active: bool,
     raw_input_draft_state_known: bool,
+    /// Producer-declared draft writes accepted, and how many have finished
+    /// reaching the PTY. Attestation may clear an *active* draft only when
+    /// these agree: a declared byte still queued in the writer, or written but
+    /// not yet echoed, leaves a frame that renders the composer empty because
+    /// the draft has not landed on it yet — not because there is no draft.
+    declared_draft_writes_enqueued: u64,
+    declared_draft_writes_completed: u64,
+    /// Mirrored output chunks observed when the last declared-draft write
+    /// completed. A frame proves it post-dates the draft only if at least one
+    /// chunk has been mirrored since that moment.
+    mirrored_chunks_at_last_draft_write: u64,
     logical_inputs: VecDeque<QueuedLogicalInput>,
     /// The blocked value already published to subscribers. Every cause of a
     /// change — adoption, a human keystroke, composer attestation — lands in
@@ -282,6 +316,9 @@ impl InputCoordinationState {
         Self {
             raw_input_draft_active: record.raw_input_draft_active,
             raw_input_draft_state_known: record.raw_input_draft_state_known,
+            declared_draft_writes_enqueued: 0,
+            declared_draft_writes_completed: 0,
+            mirrored_chunks_at_last_draft_write: 0,
             published_input_blocked: !record.raw_input_draft_state_known,
             logical_inputs: record
                 .pending_logical_inputs
@@ -356,6 +393,10 @@ pub struct SessionHandle {
     input_tx: mpsc::UnboundedSender<PendingInput>,
     input_rx: Mutex<Option<mpsc::UnboundedReceiver<PendingInput>>>,
     input_coordination: std::sync::Mutex<InputCoordinationState>,
+    /// Output chunks mirrored into the headless terminal, counted so a reader
+    /// of that terminal can tell how old the frame it just read is relative to
+    /// a declared-draft write.
+    mirrored_chunks: AtomicU64,
     /// Permanently fences an outgoing incarnation from publishing output or
     /// mutating id-keyed state after a same-id replacement is allowed.
     retired: AtomicBool,
@@ -410,6 +451,7 @@ impl SessionHandle {
             input_tx,
             input_rx: Mutex::new(Some(input_rx)),
             input_coordination: std::sync::Mutex::new(input_coordination),
+            mirrored_chunks: AtomicU64::new(0),
             retired: AtomicBool::new(false),
         }
     }
@@ -478,7 +520,8 @@ impl SessionHandle {
             RawInputKind::Draft => {
                 state.raw_input_draft_active = true;
                 state.raw_input_draft_state_known = true;
-                routed.push(PendingInput::raw(data, written));
+                state.declared_draft_writes_enqueued += 1;
+                routed.push(PendingInput::raw_draft(data, written));
             }
             RawInputKind::Control => routed.push(PendingInput::raw(data, written)),
         }
@@ -560,6 +603,23 @@ impl SessionHandle {
             .unwrap_or(true)
     }
 
+    /// Record that one producer-declared draft write finished reaching the
+    /// PTY, and how much output had been mirrored at that moment.
+    ///
+    /// Called by the writer, which is the only place that knows a declared
+    /// byte actually left the queue. Until this catches up with what was
+    /// enqueued, no rendered frame can be evidence about that draft.
+    pub fn complete_declared_draft_write(&self) -> Result<(), InputQueueError> {
+        let mirrored_chunks = self.mirrored_chunks.load(Ordering::SeqCst);
+        let mut state = self
+            .input_coordination
+            .lock()
+            .map_err(|_| InputQueueError::CoordinationUnavailable)?;
+        state.declared_draft_writes_completed += 1;
+        state.mirrored_chunks_at_last_draft_write = mirrored_chunks;
+        Ok(())
+    }
+
     /// Resolve draft state from the terminal itself.
     ///
     /// Two things withhold a logical message, and one piece of evidence
@@ -573,6 +633,19 @@ impl SessionHandle {
     /// composer proves there is no such line: an empty composer holds no
     /// draft, so there is nothing to concatenate onto and nothing to protect.
     ///
+    /// **The frame must be newer than the draft.** A rendered frame is
+    /// evidence about the moment it was rendered, and a declared byte that is
+    /// still queued in the writer — or written but not yet echoed by the
+    /// provider — leaves a composer that renders empty because the draft has
+    /// not landed on it yet. Clearing on that frame would write the queued
+    /// message and its Enter behind the human's first typed character, which
+    /// is the concatenated submission this guard exists to prevent. So an
+    /// *active* declared draft is cleared only when every declared write has
+    /// completed and at least one output chunk has been mirrored since the
+    /// last one did. The *inherited-unknown* state carries no such write to
+    /// wait for and is unchanged: nothing here declared a draft, so the
+    /// current frame is the only evidence there is.
+    ///
     /// Nothing is written to the PTY, nothing on screen is discarded, and the
     /// transition stays one-way — towards "no draft is here", never towards
     /// "a draft is present", and never into a submission this daemon inferred
@@ -584,6 +657,10 @@ impl SessionHandle {
         if !self.logical_input_withheld() {
             return Ok(false);
         }
+        // Sampled before the frame is read, so the frame is at least this new.
+        // A draft that lands between this and the read only raises the
+        // enqueued count, which the check below then refuses on.
+        let mirrored_chunks_before_read = self.mirrored_chunks.load(Ordering::SeqCst);
         let composer = {
             let mut state = self.state.lock().await;
             let provider = state.agent_provider;
@@ -596,8 +673,17 @@ impl SessionHandle {
             .input_coordination
             .lock()
             .map_err(|_| "terminal input coordination lock was poisoned")?;
-        if state.raw_input_draft_state_known && !state.raw_input_draft_active {
-            return Ok(false);
+        if state.raw_input_draft_state_known {
+            if !state.raw_input_draft_active {
+                return Ok(false);
+            }
+            let every_declared_write_landed =
+                state.declared_draft_writes_completed == state.declared_draft_writes_enqueued;
+            let frame_post_dates_the_draft =
+                mirrored_chunks_before_read > state.mirrored_chunks_at_last_draft_write;
+            if !every_declared_write_landed || !frame_post_dates_the_draft {
+                return Ok(false);
+            }
         }
         state.raw_input_draft_state_known = true;
         state.raw_input_draft_active = false;
@@ -705,6 +791,10 @@ impl SessionHandle {
     ) -> Result<MirrorResult, Box<dyn std::error::Error + Send + Sync>> {
         let mut state = self.state.lock().await;
         state.headless_terminal.write(data);
+        // Counted before the frame is read back, so a reader that samples this
+        // first and then reads the terminal knows its frame includes at least
+        // that many chunks.
+        self.mirrored_chunks.fetch_add(1, Ordering::SeqCst);
         let replies = if allow_terminal_replies {
             state.headless_terminal.drain_pty_writes()
         } else {
@@ -1769,7 +1859,9 @@ mod tests {
         handle
             .enqueue_raw_input(b"\x1b[A".to_vec(), RawInputKind::Draft)
             .expect("declare a draft from a navigation key");
-        assert_eq!(input_rx.recv().await.expect("draft").data, b"\x1b[A");
+        let draft = input_rx.recv().await.expect("draft");
+        assert_eq!(draft.data, b"\x1b[A");
+        assert!(draft.is_declared_draft());
 
         let accepted = handle
             .enqueue_logical_input(b"owner reply".to_vec())
@@ -1777,6 +1869,11 @@ mod tests {
         assert!(accepted.held_by_raw_draft);
         assert!(input_rx.try_recv().is_err());
 
+        // The writer lands the declared byte, and the provider then repaints.
+        // Only a frame from after both is evidence about this draft.
+        handle
+            .complete_declared_draft_write()
+            .expect("the declared draft reaches the PTY");
         handle
             .mirror_output(b"\x1b[2J\x1b[H* Done.\r\n\xe2\x9d\xaf \r\n", false)
             .await
@@ -1796,6 +1893,102 @@ mod tests {
             .written
             .await
             .expect("the released message keeps its own acknowledgement");
+        handle.kill().await.unwrap();
+    }
+
+    /// A frame can only be evidence about a draft it post-dates. While the
+    /// declared byte is still queued in the writer, the composer renders empty
+    /// because the keystroke has not landed on it yet — attesting on that
+    /// frame would write the queued message behind the human's first typed
+    /// character, which is the concatenated submission the guard exists to
+    /// prevent.
+    #[tokio::test]
+    async fn a_declared_draft_still_queued_for_the_pty_is_never_attested_away() {
+        let handle = spawn_test_handle(AgentProvider::Claude, SessionStatus::Idle).unwrap();
+        let mut input_rx = handle.take_input_rx().await.expect("input queue");
+
+        handle
+            .enqueue_raw_input(b"h".to_vec(), RawInputKind::Draft)
+            .expect("declare a raw draft");
+        let accepted = handle
+            .enqueue_logical_input(b"owner reply".to_vec())
+            .expect("accept logical input");
+        assert!(accepted.held_by_raw_draft);
+
+        // The frame is from before the keystroke reached the terminal: the
+        // writer has not completed that write.
+        handle
+            .mirror_output(b"\x1b[2J\x1b[H* Done.\r\n\xe2\x9d\xaf \r\n", false)
+            .await
+            .expect("render a composer that predates the draft");
+
+        assert!(
+            !handle
+                .attest_empty_composer()
+                .await
+                .expect("attest the rendered composer"),
+            "a frame older than the declared draft is not evidence about it"
+        );
+        assert_eq!(input_rx.recv().await.expect("draft").data, b"h");
+        assert!(
+            input_rx.try_recv().is_err(),
+            "the message must stay held while the draft is unaccounted for"
+        );
+        handle.kill().await.unwrap();
+    }
+
+    /// The declared byte has landed, but nothing has been rendered since. The
+    /// provider has not echoed it yet, so the last frame still shows the
+    /// composer as it was before the keystroke.
+    #[tokio::test]
+    async fn a_declared_draft_with_no_frame_rendered_since_is_never_attested_away() {
+        let handle = spawn_test_handle(AgentProvider::Claude, SessionStatus::Idle).unwrap();
+        let mut input_rx = handle.take_input_rx().await.expect("input queue");
+
+        handle
+            .enqueue_raw_input(b"h".to_vec(), RawInputKind::Draft)
+            .expect("declare a raw draft");
+        assert_eq!(input_rx.recv().await.expect("draft").data, b"h");
+        let accepted = handle
+            .enqueue_logical_input(b"owner reply".to_vec())
+            .expect("accept logical input");
+        assert!(accepted.held_by_raw_draft);
+
+        handle
+            .mirror_output(b"\x1b[2J\x1b[H* Done.\r\n\xe2\x9d\xaf \r\n", false)
+            .await
+            .expect("render an idle empty composer");
+        // The write completes *after* that frame, so the frame says nothing
+        // about what the keystroke did to the composer.
+        handle
+            .complete_declared_draft_write()
+            .expect("the declared draft reaches the PTY");
+
+        assert!(
+            !handle
+                .attest_empty_composer()
+                .await
+                .expect("attest the rendered composer"),
+            "no output has been mirrored since the draft landed"
+        );
+        assert!(
+            input_rx.try_recv().is_err(),
+            "the message must stay held until the provider repaints"
+        );
+
+        // One repaint after the write is the evidence that was missing.
+        handle
+            .mirror_output(b"\x1b[2J\x1b[H* Done.\r\n\xe2\x9d\xaf \r\n", false)
+            .await
+            .expect("render the composer after the draft landed");
+        assert!(handle
+            .attest_empty_composer()
+            .await
+            .expect("attest the refreshed composer"));
+        assert_eq!(
+            input_rx.recv().await.expect("released message").data,
+            b"owner reply"
+        );
         handle.kill().await.unwrap();
     }
 

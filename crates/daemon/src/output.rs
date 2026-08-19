@@ -271,6 +271,18 @@ pub(crate) async fn stream_output(
                                     );
                                     break;
                                 }
+                                // A declared draft has now actually reached
+                                // the terminal, so frames rendered after it
+                                // can start being evidence about it.
+                                if completed.is_declared_draft()
+                                    && session.complete_declared_draft_write().is_err()
+                                {
+                                    log::error!(
+                                        "[stream] declared draft accounting failed session={}",
+                                        session_id
+                                    );
+                                    break;
+                                }
                                 completed.acknowledge_written();
                                 pending_offset = 0;
                             }
