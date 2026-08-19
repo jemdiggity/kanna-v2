@@ -244,6 +244,10 @@ export function createMobileController(
   let loadedTaskPrompt:
     | { taskId: string; routeIdentity: string; prompt: string }
     | null = null;
+  let activeTaskAttachmentSupportIdentity: string | null = null;
+  let resolvedTaskAttachmentSupport:
+    | { taskId: string; routeIdentity: string; supported: boolean }
+    | null = null;
   let backgroundRefreshTimer: ReturnType<typeof setInterval> | null = null;
   let backgroundRefreshInFlight = false;
   let backgroundRefreshMode: "collections" | "desktops" = "collections";
@@ -1222,22 +1226,60 @@ export function createMobileController(
   };
 
   const loadSelectedTaskAttachmentSupport = (taskId: string) => {
+    const task = findTask(taskId);
+    if (!task) {
+      return;
+    }
+    // `startTaskView` is a reconciler, not an open hook: every live cloud
+    // publication and every collection refresh re-enters it for the task on
+    // screen. Answering once per (task, route) is therefore the whole point —
+    // re-asking on each entry both floods the relay and, because each entry
+    // would clear the flag first, unmounts the attach control mid-composer and
+    // never lets it back when publications outpace the round trip. Memoized
+    // and in-flight-guarded exactly like the sibling `loadSelectedTaskPrompt`.
+    const routeIdentity = taskPromptRouteIdentity(task);
+    const supportIdentity = JSON.stringify([taskId, routeIdentity]);
+    if (
+      resolvedTaskAttachmentSupport?.taskId === taskId &&
+      resolvedTaskAttachmentSupport.routeIdentity === routeIdentity
+    ) {
+      store.setDesktopSupportsTaskInputAttachments(
+        resolvedTaskAttachmentSupport.supported
+      );
+      return;
+    }
+    if (activeTaskAttachmentSupportIdentity === supportIdentity) {
+      return;
+    }
+
     const generation = ++taskAttachmentSupportGeneration;
+    activeTaskAttachmentSupportIdentity = supportIdentity;
+    // Only here — a route this answer has never been asked of. A re-entry for
+    // the same task and route returns above without touching the flag.
     store.setDesktopSupportsTaskInputAttachments(false);
     void client
       .supportsTaskInputAttachments(taskId)
       .then((supported) => {
+        // Released whatever the guards below decide, so a read superseded by a
+        // task switch cannot leave this route permanently unaskable.
+        if (activeTaskAttachmentSupportIdentity === supportIdentity) {
+          activeTaskAttachmentSupportIdentity = null;
+        }
         if (
           generation !== taskAttachmentSupportGeneration ||
           durableTaskIdForSelection(store.getState().selectedTaskId) !== taskId
         ) {
           return;
         }
+        resolvedTaskAttachmentSupport = { taskId, routeIdentity, supported };
         store.setDesktopSupportsTaskInputAttachments(supported);
       })
       .catch(() => {
         // Already false, and an unreachable desktop is not one to offer an
-        // attach control for.
+        // attach control for. Nothing is memoized, so the next entry retries.
+        if (activeTaskAttachmentSupportIdentity === supportIdentity) {
+          activeTaskAttachmentSupportIdentity = null;
+        }
       });
   };
 
