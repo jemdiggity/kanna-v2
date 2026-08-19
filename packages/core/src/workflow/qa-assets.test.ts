@@ -581,6 +581,118 @@ describe("QA workflow assets", () => {
     expect(implement).toContain("the reviewer's feedback is the whole assignment");
   });
 
+  // The task spec artifact: the implementer writes the task's terms down and
+  // commits them, and reviewers judge the branch against that file instead of
+  // reconstructing intent from the stage prompt plus raw directive snippets.
+  // See docs/specs/task-spec-artifact.md.
+  const SPEC_PATH = "docs/task-specs/$KANNA_TASK_ID.md";
+  const SPEC_AGENTS = ["implement", "commit", "review", "qa-dispatcher"];
+
+  it("has every agent that touches the task spec name the same path", () => {
+    for (const name of SPEC_AGENTS) {
+      const agent = readRepoFile(`.kanna/agents/${name}/AGENT.md`);
+
+      expect(agent, name).toContain(SPEC_PATH);
+      // `.kanna` is read recursively at every definition resolution — one
+      // `git ls-tree -r` plus a batched read of every blob it names — so a
+      // per-task archive must never live there.
+      expect(agent, name).not.toContain(".kanna/task-specs");
+    }
+
+    // Children fork into their own tasks, so `$KANNA_TASK_ID` in a child
+    // prompt resolves to the child's id, not the reviewed task's.
+    const dispatcher = readRepoPhrases(".kanna/agents/qa-dispatcher/AGENT.md");
+    expect(dispatcher).toContain(
+      "Task spec: docs/task-specs/<the reviewed task's id>.md"
+    );
+    expect(dispatcher).toContain(
+      "Write the spec path out with the reviewed task's own id"
+    );
+  });
+
+  it("has the implementer seed the spec early and update it when the terms change", () => {
+    const implement = readRepoPhrases(".kanna/agents/implement/AGENT.md");
+
+    expect(implement).toContain("Create it early, before the bulk of the work");
+    // A directive delivered mid-task changes the contract; recording it in the
+    // spec is what stops the next reviewer reconstructing intent from snippets.
+    expect(implement).toContain("is a change to the terms, not a passing remark");
+    expect(implement).toContain(
+      "Update it whenever the terms change, in the same commit as the work that change produced"
+    );
+    expect(implement).toContain(
+      "Reviewer feedback, and anything a human tells you during a revision, land the same way"
+    );
+    // A declined finding that lives only in a run summary is invisible to the
+    // next round, which is how one round's decision gets relitigated.
+    expect(implement).toContain("invisible to the next round");
+    // Proportionality: existence and honesty, never length.
+    expect(implement).toContain("a three-line spec is a correct spec");
+    expect(implement).toContain("A spec the code has outgrown is worse than none");
+    // Project-neutral: the convention has to read for any repository.
+    expect(implement).toContain(
+      "If this repository's conventions document names a different location"
+    );
+  });
+
+  it("has the commit post carry the spec with the code it governs", () => {
+    const commitAgent = readRepoPhrases(".kanna/agents/commit/AGENT.md");
+
+    // Only committed work crosses a stage boundary, so a spec left in the
+    // working tree is invisible to the review worktree.
+    expect(commitAgent).toContain("is part of this task's work, not a stray file");
+    expect(commitAgent).toContain("Commit it with the rest");
+    // The commit agent was not in the session that received the terms, so it
+    // must not invent them.
+    expect(commitAgent).toContain("do not write one yourself");
+  });
+
+  it("has both deciding reviewers judge against the spec and audit it with the input ledger", () => {
+    for (const name of ["review", "qa-dispatcher"]) {
+      const agent = readRepoPhrases(`.kanna/agents/${name}/AGENT.md`);
+
+      expect(agent, name).toContain(
+        "Review against the committed spec, not against your reading of the prompt"
+      );
+      // The ledger is evidence that text arrived, not a statement of intent.
+      expect(agent, name).toContain(
+        "is the audit trail behind the spec, not a second statement of intent"
+      );
+      expect(agent, name).toContain('kanna_task_inputs {"task_id": "$KANNA_TASK_ID"}');
+      expect(agent, name).toContain(
+        "every directive the spec cites was really delivered, and no directive that changed the terms is missing from it"
+      );
+      // The failure this convention exists to stop: a reviewer that disagrees
+      // with the recorded terms and quietly reviews against its own reading.
+      expect(agent, name).toContain("Where the spec and the ledger disagree");
+      expect(agent, name).toMatch(/do not silently substitute your own reading of either/i);
+      expect(agent, name).toContain("outranks");
+      // A stale spec is worse than none, because the next reviewer believes it.
+      expect(agent, name).toContain("is itself a blocking finding");
+      expect(agent, name).toContain("the code has outgrown");
+      // Length is never a finding.
+      expect(agent, name).toContain("never on length");
+      // The ledger surface can be absent on an older server; "I could not read
+      // it" is not the same answer as "there was none".
+      expect(agent, name).toContain('not the same answer as "there was none"');
+      expect(agent, name).toContain('kanna-cli task inputs --task-id "$KANNA_TASK_ID"');
+    }
+
+    // The panel inherits the dispatcher's reading of the terms, so the spec
+    // has to reach the children rather than stopping at the dispatcher.
+    const dispatcher = readRepoPhrases(".kanna/agents/qa-dispatcher/AGENT.md");
+    expect(dispatcher).toContain("brief every child with it");
+  });
+
+  it("keeps the scope bar pointed at the spec rather than a re-read of the prompt", () => {
+    for (const name of ["review", "qa-dispatcher"]) {
+      const agent = readRepoPhrases(`.kanna/agents/${name}/AGENT.md`);
+
+      expect(agent, name).toContain("Not for work the spec does not ask for");
+      expect(agent, name).not.toContain("Not for work the original task did not ask for");
+    }
+  });
+
   it("bounds revision rounds on the dispatched QA workflow and publishes the field", () => {
     const parsed = parseWorkflowJson(readRepoFile(".kanna/workflows/specialized-reviewers.json"));
     expect(parsed.revision_limit).toBe(3);

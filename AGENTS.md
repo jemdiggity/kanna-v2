@@ -43,6 +43,7 @@ a reference below.
 | Server boundary and v1 LAN API surface | `docs/kanna-server-boundary.md` |
 | Mobile app, OTA operations | `apps/mobile/`, `docs/specs/mobile-ota-updates.md` |
 | Feature specs (merge master, task graph, QA dispatch, RCs) | `docs/specs/` |
+| What a task means, and what reviewers judge against | `docs/specs/task-spec-artifact.md` |
 | Every DB table and migration | `crates/kanna-server/src/db/mod.rs` |
 | Agent provider registry | `crates/kanna-agent-protocol/src/providers.rs` |
 | Built-in workflows and agents | `.kanna/workflows/*.json`, `.kanna/agents/*/AGENT.md` |
@@ -346,6 +347,22 @@ uncertain delivery is deliberately not recorded, and recording never fails a
 delivery that already reached the PTY. Add a new injected-message kind to this
 record where it is delivered, not by diffing terminals. See
 `docs/kanna-server-boundary.md`.
+
+**A task's terms live in its committed spec.** The delivered-input ledger is an
+audit trail, not a statement of intent: snippets do not compose into a
+contract, and a reviewer left to reconstruct intent from the stage prompt plus
+raw directives diverges from reality as directives accumulate. The implement
+agent therefore writes `docs/task-specs/<task-id>.md` early, seeded from the
+task prompt (goal, scope, constraints, what makes the work done), and updates
+it in the same commit as the work whenever a mid-task directive, reviewer
+feedback, or a declined finding changes the terms. `commit` commits it, and
+`review`/`qa-dispatcher` judge the branch against it, using `kanna_task_inputs`
+to verify the spec honestly reflects what was delivered — a disagreement is a
+finding, never a licence to substitute a reviewer's own reading. Proportional
+by design: a three-line spec is a correct spec, and length is never a finding;
+absence, dishonesty, and staleness are. This is a convention carried entirely
+by agent definitions — no engine, server, or workflow JSON knows the file
+exists. See `docs/specs/task-spec-artifact.md`.
 
 **Runtime and read state are two dimensions.** `activity` (`working` | `idle` |
 `unread`) is a *derived display value* that blends them, and it cannot answer

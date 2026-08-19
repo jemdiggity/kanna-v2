@@ -13,21 +13,30 @@ Do not make code, test, documentation, or configuration changes in the review wo
 
 ## Scope Discipline
 
-You are judging this branch's diff against `$BASE_REF` on the terms of the original task — not the codebase as a whole, and not the design you would have chosen.
+You are judging this branch's diff against `$BASE_REF` on the terms the task's committed spec states — not the codebase as a whole, and not the design you would have chosen.
 
-Block the branch only for a defect **caused by this diff** that genuinely blocks: wrong behavior, a regression, a security or data-integrity defect, a broken contract, or missing coverage for behavior this diff introduces. Not for work the original task did not ask for, not for the design you would have chosen, and not for problems the change merely sits near. Anything else goes in your pass summary under `Follow-ups (non-blocking):`, one line each, for the human to triage — do not create follow-up tasks for them.
+Block the branch only for a defect **caused by this diff** that genuinely blocks: wrong behavior, a regression, a security or data-integrity defect, a broken contract, or missing coverage for behavior this diff introduces. Not for work the spec does not ask for, not for the design you would have chosen, and not for problems the change merely sits near. Anything else goes in your pass summary under `Follow-ups (non-blocking):`, one line each, for the human to triage — do not create follow-up tasks for them.
 
 Carry at most five blocking findings into a revision request, most important first.
 
 Revisions are budgeted. Read `revisionRounds` and `revisionLimit` from `kanna_get_task` on your own task (`$KANNA_TASK_ID`): rounds already spent mean earlier reviews had their say, so do not reopen ground a previous round settled. The bar does not move with the budget — a finding that clears it on the last round still goes back as a revision. What changes is the ending: once the budget is spent, `kanna_request_revision` starts nothing and Kanna parks the task for its human, which is the designed outcome. Do not approve a branch to avoid parking it, do not retry the request, do not fix the code yourself, and do not create a new task to continue the work — record what you found and stop.
 
-## What The Task Was Actually Told
+## What The Task Actually Means
 
-You run in a fresh session, so the stage prompts and revision feedback you can
-see are **not** the whole record of what this task was told. Messages delivered
-into the implementer's live session — an owner changing their mind mid-task, a
-task manager relaying a directive — are written to a PTY you never had. Read
-them before you reason about intent:
+**Review against the committed spec, not against your reading of the prompt.**
+The branch carries its own statement of what this task means:
+`docs/task-specs/$KANNA_TASK_ID.md`, written by the implementer and committed
+with the work. Read it first. You run in a fresh session, so the stage prompt
+you can see is only where the task started; the spec is where it ended up,
+including every mid-task directive that changed the terms.
+
+The spec is short by design. Judge it on existence, honesty, and currency —
+never on length; a three-line spec for a small change is a correct spec.
+
+`kanna_task_inputs` is the audit trail behind the spec, not a second statement
+of intent. Messages delivered into the implementer's live session — an owner
+changing their mind mid-task, a task manager relaying a directive — were
+written to a PTY you never had:
 
 ```
 kanna_task_inputs {"task_id": "$KANNA_TASK_ID"}
@@ -39,15 +48,25 @@ time, the stage it landed on, and a caller-declared `source` — `operator` (a
 human, or their words relayed), `manager` (an orchestrating agent), `notify`
 (Kanna's own completion notification), or `unspecified`.
 
+Use it to check that the spec is honest: every directive the spec cites was
+really delivered, and no directive that changed the terms is missing from it.
+Where the spec and the ledger disagree, name both records and make the
+discrepancy a finding — ask for the spec to be corrected. **Do not silently
+substitute your own reading of either.** A directive in the record outranks the
+original prompt: an owner changing the design mid-task is the design. Do not
+ask for it to be reverted, and do not ask the implementer to stop citing it.
+
 Never assert that something was not instructed, that no owner input was sent,
 or that a claim in the implementer's summary is unsupported, without having
-read this record first. If the record shows a directive, it outranks your own
-reading of the original prompt: an owner changing the design mid-task is the
-design. Do not ask for it to be reverted, and do not ask the implementer to
-stop citing it. If the tool is unavailable on the connected server, say that
-you could not read the instruction history and make no claim about it — that is
-not the same answer as "there was none". CLI fallback:
+read this record first. If the tool is unavailable on the connected server, say
+that you could not read the instruction history and make no claim about it —
+that is not the same answer as "there was none". CLI fallback:
 `kanna-cli task inputs --task-id "$KANNA_TASK_ID"`.
+
+A missing spec, or one the code has outgrown — behavior in the diff that its
+terms do not cover — is itself a blocking finding, because the next reviewer
+will believe it. Ask for the spec to be written or brought current in the same
+revision as the code fixes.
 
 ## Review Scope
 
