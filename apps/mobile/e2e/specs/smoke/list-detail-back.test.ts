@@ -108,7 +108,7 @@ describe("performTaskDetailEdgeSwipeBack", () => {
 });
 
 describe("exerciseTaskPinSwipe", () => {
-  it("reveals the row action, observes canonical state, and restores the fixture", async () => {
+  function createPinFixtureDriver(renderedRowIds: () => string[]) {
     let pinned = false;
     const row = {
       getLocation: vi.fn(async () => ({ x: 10, y: 100 })),
@@ -130,11 +130,35 @@ describe("exerciseTaskPinSwipe", () => {
         if (selector === "~mobile.tasks.repo.repo-1") return repo;
         return selector === "~mobile.task-row.task-1" ? row : action;
       }),
+      $$: vi.fn(async () =>
+        renderedRowIds().map((taskId) => ({
+          getAttribute: vi.fn(async (name: string) =>
+            name === "name" ? `mobile.task-row.${taskId}` : null
+          )
+        }))
+      ),
       execute: vi.fn(async () => undefined),
       waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
         if (!(await condition())) throw new Error(options.timeoutMsg);
       })
     };
+    return {
+      action,
+      driver,
+      repo,
+      row,
+      isPinned: () => pinned,
+      setPinned: (next: boolean) => {
+        pinned = next;
+      }
+    };
+  }
+
+  it("reveals the row action, observes canonical state, and restores the fixture", async () => {
+    const fixture = createPinFixtureDriver(() =>
+      fixture.isPinned() ? ["task-1", "task-2"] : ["task-2", "task-1"]
+    );
+    const { action, driver, repo } = fixture;
     const fetchImpl = vi.fn(async (url: string, init?: { method?: string }) => {
       if (url.endsWith("/v1/tasks/task-1")) {
         return {
@@ -144,13 +168,16 @@ describe("exerciseTaskPinSwipe", () => {
         };
       }
       if (url.endsWith("/actions/unpin") && init?.method === "POST") {
-        pinned = false;
+        fixture.setPinned(false);
         return { ok: true, status: 200, json: async () => ({}) };
       }
       return {
         ok: true,
         status: 200,
-        json: async () => [{ id: "task-1", repoId: "repo-1", pinned }]
+        json: async () => [
+          { id: "task-1", repoId: "repo-1", pinned: fixture.isPinned() },
+          { id: "task-2", repoId: "repo-1", pinned: false }
+        ]
       };
     });
 
@@ -177,7 +204,45 @@ describe("exerciseTaskPinSwipe", () => {
       "http://127.0.0.1:48120/v1/tasks/task-1/actions/unpin",
       { method: "POST" }
     );
-    expect(pinned).toBe(false);
+    expect(fixture.isPinned()).toBe(false);
+  });
+
+  it("fails when the pinned task does not become the first rendered row", async () => {
+    const fixture = createPinFixtureDriver(() => ["task-2", "task-1"]);
+    const fetchImpl = vi.fn(async (url: string, init?: { method?: string }) => {
+      if (url.endsWith("/v1/tasks/task-1")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ repoId: "repo-1" })
+        };
+      }
+      if (url.endsWith("/actions/unpin") && init?.method === "POST") {
+        fixture.setPinned(false);
+        return { ok: true, status: 200, json: async () => ({}) };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => [
+          { id: "task-1", repoId: "repo-1", pinned: fixture.isPinned() },
+          { id: "task-2", repoId: "repo-1", pinned: false }
+        ]
+      };
+    });
+
+    await expect(
+      exerciseTaskPinSwipe(
+        fixture.driver as never,
+        "http://127.0.0.1:48120",
+        "task-1",
+        fetchImpl
+      )
+    ).rejects.toThrow(
+      "Expected the pinned task to render as the first row of its repo list"
+    );
+    // The fixture is still restored on the way out.
+    expect(fixture.isPinned()).toBe(false);
   });
 });
 

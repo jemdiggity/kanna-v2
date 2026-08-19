@@ -4,7 +4,7 @@ import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { RepoSummary, TaskSummary } from "../lib/api/types";
 import { TaskList } from "../components/TaskList";
 import { visibleActivityTasks } from "./activityTaskOrder";
-import { taskCreationTimestamp } from "./taskTreeRows";
+import { orderRepoTaskSlots } from "./repoTaskOrder";
 import type { TaskUiSlot } from "../state/taskUiSlots";
 import { taskUiSlotToTaskSummary } from "../state/taskUiSlots";
 import type { TaskCollectionStatus } from "../state/sessionStore";
@@ -22,16 +22,6 @@ interface TasksScreenProps {
   onOpenTask(taskId: string): void;
   onDismissActivity?(taskId: string): Promise<void>;
   onSetTaskPinned?(taskId: string, pinned: boolean): Promise<void>;
-}
-
-function sortTaskSlotsNewestFirst(taskSlots: readonly TaskUiSlot[]): TaskUiSlot[] {
-  return [...taskSlots].sort((left, right) => {
-    const leftTimestamp = taskCreationTimestamp(taskUiSlotToTaskSummary(left));
-    const rightTimestamp = taskCreationTimestamp(taskUiSlotToTaskSummary(right));
-    if (leftTimestamp === null) return rightTimestamp === null ? 0 : 1;
-    if (rightTimestamp === null) return -1;
-    return rightTimestamp - leftTimestamp;
-  });
 }
 
 export function TasksScreen({
@@ -65,7 +55,7 @@ export function TasksScreen({
           (slot) => taskUiSlotToTaskSummary(slot).id === task.id
         )!
       )
-    : sortTaskSlotsNewestFirst(scopedTaskSlots);
+    : orderRepoTaskSlots(scopedTaskSlots);
   const showDesktopSetup =
     !isRecentView &&
     needsDesktopSetup &&
