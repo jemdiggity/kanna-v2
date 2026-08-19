@@ -719,7 +719,7 @@ async fn build_create_request(
         repo_id: repo_id.to_string(),
         prompt: payload.task.prompt.clone().unwrap_or_default(),
         display_name: payload.task.display_name.clone(),
-        workflow_name: Some(payload.task.pipeline.clone()),
+        workflow_name: Some(payload.task.workflow.clone()),
         stage: Some(payload.task.stage.clone()),
         base_ref: payload::resolve_incoming_base_branch(payload),
         agent: None,

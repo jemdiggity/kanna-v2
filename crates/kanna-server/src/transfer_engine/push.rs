@@ -461,6 +461,12 @@ async fn build_payload(
     recovery: Option<crate::mobile_api::CreateTaskRecoverySnapshot>,
 ) -> Result<OutgoingTransferPayload, String> {
     let mode = payload::choose_repo_acquisition_mode(remote_url, preflight.target_has_repo);
+    // `pipeline` is the legacy storage column name for the task's workflow.
+    let workflow_name = source
+        .item
+        .pipeline
+        .clone()
+        .unwrap_or_else(|| "no-review".into());
     Ok(OutgoingTransferPayload {
         target_peer_id: peer_id.to_string(),
         target_desktop_id: target_desktop_id.map(str::to_string),
@@ -488,11 +494,8 @@ async fn build_payload(
                 .clone()
                 .unwrap_or_else(|| "in progress".into()),
             branch: source.item.branch.clone(),
-            pipeline: source
-                .item
-                .pipeline
-                .clone()
-                .unwrap_or_else(|| "no-review".into()),
+            workflow: workflow_name.clone(),
+            legacy_pipeline: workflow_name,
             display_name: source.item.display_name.clone(),
             base_ref: source.item.base_ref.clone(),
             agent_type: source.item.agent_type.clone(),
