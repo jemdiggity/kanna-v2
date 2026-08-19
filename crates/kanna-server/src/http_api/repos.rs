@@ -326,6 +326,23 @@ pub(super) async fn get_repo_kanna_definitions(
     .map(Json)
 }
 
+/// Fetch `origin` for this repo, then answer with the definitions it now
+/// resolves to. Clients call this before offering a workflow or base-branch
+/// choice; it is the one definitions route allowed to wait on the network,
+/// which is why nothing renders behind it.
+pub(super) async fn refresh_repo_origin(
+    State(state): State<Arc<AppState>>,
+    Path(repo_id): Path<String>,
+) -> Result<Json<crate::task_creator::RepoKannaDefinitions>, HttpError> {
+    run_blocking_http(move || {
+        let repo = get_definition_repo(&state, &repo_id)?;
+        crate::task_creator::refresh_repo_origin(&state.repo_definitions, &repo)
+            .map_err(map_definition_lookup_error)
+    })
+    .await
+    .map(Json)
+}
+
 pub(super) async fn get_repo_workflow_definition(
     State(state): State<Arc<AppState>>,
     Path((repo_id, workflow_name)): Path<(String, String)>,

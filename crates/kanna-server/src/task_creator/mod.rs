@@ -173,6 +173,22 @@ pub(crate) fn list_repo_agents(
     })
 }
 
+/// Fetch `origin` and drop this repo's cached definitions, so the next read
+/// resolves against the refs the fetch installed.
+///
+/// Definitions and base branches both come from remote-tracking refs, and
+/// nothing else updates them on a read path any more. A client about to offer
+/// an operator a choice — which workflow, which base branch — calls this first,
+/// off the interaction path, and re-reads once it returns.
+pub(crate) fn refresh_repo_origin(
+    cache: &RepoDefinitionsCache,
+    repo: &Repo,
+) -> Result<RepoKannaDefinitions, DefinitionLookupError> {
+    definition_source::fetch_origin(std::path::Path::new(&repo.path));
+    cache.invalidate(repo);
+    load_repo_kanna_definitions(cache, repo)
+}
+
 pub(crate) fn load_repo_kanna_definitions(
     cache: &RepoDefinitionsCache,
     repo: &Repo,

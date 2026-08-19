@@ -143,6 +143,18 @@ where
         flight.finish(result);
         returned
     }
+
+    /// Forget a ready entry. A load already in flight is left alone: it will
+    /// install its own result, and cancelling it would strand its waiters.
+    fn invalidate(&self, key: &K) {
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if matches!(entries.get(key), Some(CacheEntry::Ready(_))) {
+            entries.remove(key);
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -210,10 +222,23 @@ impl RepoDefinitionsCache {
             || {
                 #[cfg(test)]
                 self.run_before_load();
-                RepoDefinitions::resolve(repo).map_err(DefinitionLookupError::Other)
+                // Cached definitions answer reads that only display them, so
+                // they resolve from the refs already on disk. `git fetch` on
+                // this path put a network round trip behind ordinary UI
+                // refreshes; the operations that must see the real remote tip
+                // resolve authoritatively instead of through this cache.
+                RepoDefinitions::resolve_local(repo).map_err(DefinitionLookupError::Other)
             },
         )?;
         read(&definitions)
+    }
+
+    /// Drop a repo's cached definitions so the next read re-resolves. Pair it
+    /// with a fetch when the caller wants the cache to reflect a new remote
+    /// tip rather than wait out the TTL.
+    pub(crate) fn invalidate(&self, repo: &Repo) {
+        self.definitions
+            .invalidate(&RepoDefinitionCacheKey::from(repo));
     }
 }
 
