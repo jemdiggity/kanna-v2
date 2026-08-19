@@ -74,4 +74,61 @@ The physical-gesture limitation above is unchanged, so the coverage is again
 the gesture config React Native is handed:
 `src/components/SwipeableTaskCard.test.tsx` (a separate closing gesture, a
 rightward drag that stays open, and the tap that closes before it opens) and
-`src/components/taskPinSwipe.test.ts` (the offset-aware helpers).
+`src/components/taskPinSwipe.test.ts` (the offset-aware helpers) — both
+superseded by the section below.
+
+## Follow-up (2026-08-19): the swipe commits on release
+
+The owner replaced the grammar rather than the mechanics: "Just swipe and
+release for tap/untap is better. If you swipe and hold and swipe the pin button
+away and release then no action." So the row no longer rests open at all.
+
+- Dragging left uncovers the action under the finger, as before.
+- **Releasing past the commit threshold performs the action** — pin/unpin on
+  the task list, dismiss on Activity. There is no revealed button and no second
+  tap.
+- Dragging back inside the threshold before letting go disarms the swipe, so
+  the release does nothing and the row returns to rest. A gesture the row
+  *loses* (`onPanResponderTerminate`) performs nothing either: only a release
+  commits.
+- The action is emphasized exactly at that boundary — it sits back dimmed and
+  scaled down while a release would cancel, and snaps to full size and colour
+  once a release would commit (`taskRowActionEmphasis`). That is the only
+  signal the user gets before letting go, so it is a tested contract, not
+  styling.
+- No haptic: the app has no haptics dependency, and adding one is native work
+  that would force a `runtimeVersion` bump. This change is JS-only and
+  OTA-deliverable.
+
+Both swipe lists share the machinery, so both share the grammar: diverging
+would mean the same drag means different things one tab apart.
+
+What this retires, because nothing rests open any more: the rightward closing
+swipe and the card tap that consumed itself to close a revealed row (both from
+the section above), the offset-aware helper parameters they needed, and the
+tappable revealed action. A card tap means "open the task" in every state. The
+action is now drawn for the eye alone (hidden from the accessibility tree), so
+the `taskPinActionSelector` / `activityDismissActionSelector` Appium selectors
+— which could no longer resolve — are gone too, and the pin/dismiss journeys
+drag and then assert the outcome directly. **VoiceOver keeps pin, unpin, and
+dismiss as the row's own accessibility actions: they are now the only
+non-gesture path to either.**
+
+The physical-gesture limitation above is still unchanged — no dev client, no
+Appium/XCUITest run here — so the coverage is again the gesture config React
+Native is handed, now for the new grammar:
+
+- `src/components/SwipeableTaskCard.test.tsx` — release past the threshold
+  commits, release after retracting cancels, a drag that never reaches the
+  threshold cancels, a terminated gesture cancels, the emphasis flips exactly
+  at the threshold, the card tap always opens the task, and the accessibility
+  actions still toggle pin/unpin and dismiss.
+- `src/components/taskRowSwipe.test.ts` — the pure helpers. It replaces
+  `taskPinSwipe.test.ts`: the `taskPinSwipe` alias module existed only to keep
+  the pre-swipe pin names alive for that test, and every symbol in it was
+  renamed by this change.
+- `src/navigation/RootNavigator.integration.test.tsx` — drives the row's real
+  pan responder (grant → move → release) through to the phone's own record and
+  the reordered rows.
+- `e2e/specs/smoke/list-detail-back.test.ts` — the Appium helpers now commit
+  with the drag alone; the fixture fails if anything still expects a tap.

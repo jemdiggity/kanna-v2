@@ -3,6 +3,10 @@ import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { TaskSummary } from "../lib/api/types";
+import {
+  TASK_ROW_ACTION_ARMED_EMPHASIS,
+  TASK_ROW_ACTION_IDLE_EMPHASIS
+} from "./taskRowSwipe";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -53,26 +57,45 @@ const gesture = (dx: number, dy = 0) =>
   ({ dx, dy }) as never;
 const gestureEvent = {} as never;
 
-/** One complete touch: grant, drag by `dx`, release. */
-function swipe(dx: number): void {
+/** A touch that is still down, dragged through `dxs` in order. */
+function drag(...dxs: number[]): void {
   const config = gestureConfig();
   act(() => {
-    config.onPanResponderGrant?.(gestureEvent, gesture(dx));
-    config.onPanResponderMove?.(gestureEvent, gesture(dx));
+    config.onPanResponderGrant?.(gestureEvent, gesture(dxs[0] ?? 0));
+    for (const dx of dxs) {
+      config.onPanResponderMove?.(gestureEvent, gesture(dx));
+    }
+  });
+}
+
+/** Lifting the finger where the drag left off. */
+function release(dx: number): void {
+  const config = gestureConfig();
+  act(() => {
     config.onPanResponderRelease?.(gestureEvent, gesture(dx));
   });
 }
 
-function swipeOpen(dx = -70): void {
-  swipe(dx);
+/** One complete touch: drag through `dxs` and let go at the last one. */
+function swipe(...dxs: number[]): void {
+  drag(...dxs);
+  release(dxs.at(-1) ?? 0);
 }
 
-function actionRevealed(renderer: ReactTestRenderer, uiId: string): boolean {
-  return (
-    renderer.root.findByProps({
-      testID: MOBILE_E2E_IDS.taskPinAction(uiId)
-    }).props.importantForAccessibility === "yes"
-  );
+/** How the action under the row is drawn right now. */
+function actionEmphasis(
+  renderer: ReactTestRenderer,
+  testID: string
+): unknown {
+  const style = renderer.root.findByProps({ testID }).props.style as unknown[];
+  return style.at(-1);
+}
+
+/** Where the card itself sits, which is `0` whenever the row is at rest. */
+function rowTranslation(renderer: ReactTestRenderer): number {
+  const style = renderer.root.findByProps({ "data-pan-handlers": true }).props
+    .style as { transform: { translateX: number }[] };
+  return style.transform[0].translateX;
 }
 
 async function renderCard(
@@ -90,7 +113,8 @@ async function renderCard(
 
 function cardElement(
   pinned: boolean,
-  onTogglePin: (pinned: boolean) => Promise<void>
+  onTogglePin: (pinned: boolean) => Promise<void>,
+  onPress: () => void = vi.fn()
 ) {
   if (!SwipeableTaskCard) throw new Error("SwipeableTaskCard was not loaded");
   const task: TaskSummary = {
@@ -107,7 +131,7 @@ function cardElement(
       repoLabel={null}
       task={task}
       uiId="task-1"
-      onPress={vi.fn()}
+      onPress={onPress}
       onTogglePin={onTogglePin}
     />
   );
@@ -133,9 +157,20 @@ function dismissCardElement(onDismiss: () => Promise<void>) {
   );
 }
 
+async function renderDismissCard(
+  onDismiss: () => Promise<void>
+): Promise<ReactTestRenderer> {
+  let renderer: ReactTestRenderer | null = null;
+  await act(async () => {
+    renderer = create(dismissCardElement(onDismiss));
+  });
+  if (!renderer) throw new Error("SwipeableTaskCard did not render");
+  return renderer;
+}
+
 describe("SwipeableTaskCard", () => {
-  it("reveals Pin for a deliberate horizontal swipe but yields to scrolling", async () => {
-    const renderer = await renderCard(vi.fn().mockResolvedValue(undefined));
+  it("claims a deliberate leftward swipe but yields to scrolling", async () => {
+    await renderCard(vi.fn().mockResolvedValue(undefined));
     const config = gestureConfig();
 
     // A mostly-vertical drag stays with the enclosing task ScrollView.
@@ -150,138 +185,147 @@ describe("SwipeableTaskCard", () => {
     expect(
       config.onMoveShouldSetPanResponder?.(gestureEvent, gesture(-60, 5))
     ).toBe(true);
-
-    swipeOpen();
-
-    const action = renderer.root.findByProps({
-      testID: MOBILE_E2E_IDS.taskPinAction("task-1")
-    });
-    expect(action.props.accessibilityLabel).toBe("Pin Pin this task");
-    expect(action.props.importantForAccessibility).toBe("yes");
-  });
-
-  it("keeps the swipe once it starts and closes the row when it is cancelled", async () => {
-    const renderer = await renderCard(vi.fn().mockResolvedValue(undefined));
-    const config = gestureConfig();
-
-    // The row never hands the touch back, so a scroll container cannot
-    // reclaim it half-way through the reveal.
-    expect(config.onPanResponderTerminationRequest?.()).toBe(false);
-
-    swipeOpen();
-    expect(
-      renderer.root.findByProps({
-        testID: MOBILE_E2E_IDS.taskPinAction("task-1")
-      }).props.importantForAccessibility
-    ).toBe("yes");
-
-    act(() => {
-      config.onPanResponderTerminate?.(gestureEvent, gesture(-70));
-    });
-    expect(
-      renderer.root.findByProps({
-        testID: MOBILE_E2E_IDS.taskPinAction("task-1")
-      }).props.importantForAccessibility
-    ).toBe("no-hide-descendants");
-  });
-
-  it("closes a revealed row with a separate rightward gesture", async () => {
-    const renderer = await renderCard(vi.fn().mockResolvedValue(undefined));
-    const config = gestureConfig();
-
-    swipeOpen();
-    expect(actionRevealed(renderer, "task-1")).toBe(true);
-
-    // The revealed row is a resting position, so the closing drag arrives as
-    // its own touch — the row has to claim it in the direction that closes.
-    expect(
-      config.onMoveShouldSetPanResponderCapture?.(gestureEvent, gesture(60, 5))
-    ).toBe(true);
-    expect(
-      config.onMoveShouldSetPanResponder?.(gestureEvent, gesture(60, 5))
-    ).toBe(true);
-
-    swipe(60);
-    expect(actionRevealed(renderer, "task-1")).toBe(false);
-
-    // Closed again, a rightward drag has nothing to act on and goes back to
-    // whatever encloses the row.
+    // The row rests closed, so a rightward drag has nothing to act on and
+    // belongs to whatever encloses the row.
     expect(
       config.onMoveShouldSetPanResponderCapture?.(gestureEvent, gesture(60, 5))
     ).toBe(false);
   });
 
-  it("keeps a revealed row open for a rightward drag that stays past the threshold", async () => {
-    const renderer = await renderCard(vi.fn().mockResolvedValue(undefined));
+  it("pins when the swipe is released past the threshold", async () => {
+    const onTogglePin = vi.fn().mockResolvedValue(undefined);
+    const renderer = await renderCard(onTogglePin);
 
-    swipeOpen();
-    swipe(20);
+    await act(async () => {
+      swipe(-70);
+      await Promise.resolve();
+    });
 
-    expect(actionRevealed(renderer, "task-1")).toBe(true);
+    expect(onTogglePin).toHaveBeenCalledWith(true);
+    // Nothing rests open: the row is back where it started, with no revealed
+    // button waiting for a second tap.
+    expect(rowTranslation(renderer)).toBe(0);
   });
 
-  it("consumes the first tap on a revealed row to close it", async () => {
-    if (!SwipeableTaskCard) throw new Error("SwipeableTaskCard was not loaded");
+  it("performs nothing when the swipe is dragged back inside the threshold before release", async () => {
+    const onTogglePin = vi.fn().mockResolvedValue(undefined);
+    const renderer = await renderCard(onTogglePin);
+
+    // Swipe past the threshold, hold, then swipe the action back away again.
+    drag(-70);
+    expect(actionEmphasis(renderer, MOBILE_E2E_IDS.taskPinAction("task-1"))).toBe(
+      TASK_ROW_ACTION_ARMED_EMPHASIS
+    );
+    drag(-70, -20);
+    expect(actionEmphasis(renderer, MOBILE_E2E_IDS.taskPinAction("task-1"))).toBe(
+      TASK_ROW_ACTION_IDLE_EMPHASIS
+    );
+
+    await act(async () => {
+      release(-20);
+      await Promise.resolve();
+    });
+
+    expect(onTogglePin).not.toHaveBeenCalled();
+    expect(rowTranslation(renderer)).toBe(0);
+  });
+
+  it("performs nothing for a short, undecided drag", async () => {
+    const onTogglePin = vi.fn().mockResolvedValue(undefined);
+    const renderer = await renderCard(onTogglePin);
+
+    await act(async () => {
+      swipe(-20);
+      await Promise.resolve();
+    });
+
+    expect(onTogglePin).not.toHaveBeenCalled();
+    expect(rowTranslation(renderer)).toBe(0);
+  });
+
+  it("keeps the swipe once it starts and performs nothing if it is terminated", async () => {
+    const onTogglePin = vi.fn().mockResolvedValue(undefined);
+    const renderer = await renderCard(onTogglePin);
+    const config = gestureConfig();
+
+    // The row never hands the touch back, so a scroll container cannot
+    // reclaim it half-way through a swipe.
+    expect(config.onPanResponderTerminationRequest?.()).toBe(false);
+
+    drag(-70);
+    await act(async () => {
+      config.onPanResponderTerminate?.(gestureEvent, gesture(-70));
+      await Promise.resolve();
+    });
+
+    // A gesture the row lost is not a release: it acts on nothing.
+    expect(onTogglePin).not.toHaveBeenCalled();
+    expect(rowTranslation(renderer)).toBe(0);
+  });
+
+  it("emphasizes the action as the swipe crosses the commit threshold", async () => {
+    const renderer = await renderCard(vi.fn().mockResolvedValue(undefined));
+    const pinAction = MOBILE_E2E_IDS.taskPinAction("task-1");
+
+    expect(actionEmphasis(renderer, pinAction)).toBe(
+      TASK_ROW_ACTION_IDLE_EMPHASIS
+    );
+    drag(-47);
+    expect(actionEmphasis(renderer, pinAction)).toBe(
+      TASK_ROW_ACTION_IDLE_EMPHASIS
+    );
+    drag(-47, -48);
+    expect(actionEmphasis(renderer, pinAction)).toBe(
+      TASK_ROW_ACTION_ARMED_EMPHASIS
+    );
+    // The action is drawn for the eye alone now — VoiceOver reaches pin
+    // through the row's own accessibility action instead.
+    expect(
+      renderer.root.findByProps({ testID: pinAction }).props
+        .importantForAccessibility
+    ).toBe("no-hide-descendants");
+  });
+
+  it("keeps the card tap opening the task, swiped or not", async () => {
     const onPress = vi.fn();
-    const task: TaskSummary = {
-      id: "task-1",
-      repoId: "repo-1",
-      title: "Pin this task",
-      stage: "in progress"
-    };
+    const onTogglePin = vi.fn().mockResolvedValue(undefined);
     let renderer: ReactTestRenderer | null = null;
     await act(async () => {
-      renderer = create(
-        <SwipeableTaskCard
-          isSubtask={false}
-          repoLabel={null}
-          task={task}
-          uiId="task-1"
-          onPress={onPress}
-          onTogglePin={vi.fn().mockResolvedValue(undefined)}
-        />
-      );
+      renderer = create(cardElement(false, onTogglePin, onPress));
     });
     if (!renderer) throw new Error("SwipeableTaskCard did not render");
     const card = (renderer as ReactTestRenderer).root.findByProps({
       testID: MOBILE_E2E_IDS.taskListItem("task-1")
     });
 
-    swipeOpen();
-    act(() => {
-      card.props.onPress();
+    // After a cancelled swipe.
+    await act(async () => {
+      swipe(-20);
+      await Promise.resolve();
     });
-    expect(onPress).not.toHaveBeenCalled();
-    expect(actionRevealed(renderer as ReactTestRenderer, "task-1")).toBe(false);
-
-    // Closed, the card opens the task again.
     act(() => {
       card.props.onPress();
     });
     expect(onPress).toHaveBeenCalledTimes(1);
+
+    // And after a committed one: the row keeps no open state to consume the
+    // next tap.
+    await act(async () => {
+      swipe(-70);
+      await Promise.resolve();
+    });
+    act(() => {
+      card.props.onPress();
+    });
+    expect(onPress).toHaveBeenCalledTimes(2);
   });
 
-  it("does not release the reveal for a short, undecided drag", async () => {
-    const renderer = await renderCard(vi.fn().mockResolvedValue(undefined));
-    swipeOpen(-20);
-
-    expect(
-      renderer.root.findByProps({
-        testID: MOBILE_E2E_IDS.taskPinAction("task-1")
-      }).props.importantForAccessibility
-    ).toBe("no-hide-descendants");
-  });
-
-  it("pins from the revealed action and reports failures inline", async () => {
+  it("reports a failed pin inline on the row that failed", async () => {
     const onTogglePin = vi.fn().mockRejectedValue(new Error("offline"));
     const renderer = await renderCard(onTogglePin);
-    swipeOpen();
 
-    const action = renderer.root.findByProps({
-      testID: MOBILE_E2E_IDS.taskPinAction("task-1")
-    });
     await act(async () => {
-      action.props.onPress();
+      swipe(-70);
       await Promise.resolve();
     });
 
@@ -297,7 +341,8 @@ describe("SwipeableTaskCard", () => {
     const onTogglePin = vi.fn().mockResolvedValue(undefined);
     const renderer = await renderCard(onTogglePin);
 
-    // Swiping is the only pin affordance: no pin button survives on the card.
+    // Swiping is the only pointer pin affordance: no pin button survives on
+    // the card.
     expect(
       renderer.root.findAllByProps({ testID: "mobile.task-pin-button.task-1" })
     ).toHaveLength(0);
@@ -332,14 +377,9 @@ describe("SwipeableTaskCard", () => {
     expect(onTogglePin).toHaveBeenCalledWith(false);
   });
 
-  it("dismisses from the revealed swipe action, the only dismiss affordance", async () => {
-    if (!SwipeableTaskCard) throw new Error("SwipeableTaskCard was not loaded");
+  it("dismisses on release too: both lists read the same gesture", async () => {
     const onDismiss = vi.fn().mockResolvedValue(undefined);
-    let renderer: ReactTestRenderer | null = null;
-    await act(async () => {
-      renderer = create(dismissCardElement(onDismiss));
-    });
-    if (!renderer) throw new Error("SwipeableTaskCard did not render");
+    const renderer = await renderDismissCard(onDismiss);
     const config = gestureConfig();
     expect(
       config.onMoveShouldSetPanResponderCapture?.(gestureEvent, gesture(-10, -30))
@@ -347,15 +387,16 @@ describe("SwipeableTaskCard", () => {
     expect(
       config.onMoveShouldSetPanResponderCapture?.(gestureEvent, gesture(-75, 4))
     ).toBe(true);
-    swipeOpen(-75);
 
-    const swipeAction = renderer.root.findByProps({
-      testID: MOBILE_E2E_IDS.activityDismissAction("task-activity")
-    });
-    expect(swipeAction.props).toMatchObject({
-      accessibilityLabel: "Dismiss Review this activity",
-      importantForAccessibility: "yes"
-    });
+    const dismissAction = MOBILE_E2E_IDS.activityDismissAction("task-activity");
+    drag(-75);
+    expect(actionEmphasis(renderer, dismissAction)).toBe(
+      TASK_ROW_ACTION_ARMED_EMPHASIS
+    );
+    expect(
+      renderer.root.findByProps({ testID: dismissAction }).findByType("Text")
+        .props.children
+    ).toBe("Dismiss");
     // The card carries no dismiss button of its own any more.
     expect(
       renderer.root.findAllByProps({
@@ -364,26 +405,30 @@ describe("SwipeableTaskCard", () => {
     ).toHaveLength(0);
 
     await act(async () => {
-      swipeAction.props.onPress();
+      release(-75);
       await Promise.resolve();
     });
     expect(onDismiss).toHaveBeenCalledOnce();
-    // A local dismiss has nothing to wait for: the row closes immediately.
-    expect(
-      renderer.root.findByProps({
-        testID: MOBILE_E2E_IDS.activityDismissAction("task-activity")
-      }).props.importantForAccessibility
-    ).toBe("no-hide-descendants");
+    expect(rowTranslation(renderer)).toBe(0);
+  });
+
+  it("leaves an Activity row alone when its swipe is taken back", async () => {
+    const onDismiss = vi.fn().mockResolvedValue(undefined);
+    const renderer = await renderDismissCard(onDismiss);
+
+    drag(-75, -30);
+    await act(async () => {
+      release(-30);
+      await Promise.resolve();
+    });
+
+    expect(onDismiss).not.toHaveBeenCalled();
+    expect(rowTranslation(renderer)).toBe(0);
   });
 
   it("keeps a failed dismissal visible and announces its inline error", async () => {
-    if (!SwipeableTaskCard) throw new Error("SwipeableTaskCard was not loaded");
     const onDismiss = vi.fn().mockRejectedValue(new Error("storage full"));
-    let renderer: ReactTestRenderer | null = null;
-    await act(async () => {
-      renderer = create(dismissCardElement(onDismiss));
-    });
-    if (!renderer) throw new Error("SwipeableTaskCard did not render");
+    const renderer = await renderDismissCard(onDismiss);
     const card = renderer.root.findByProps({
       testID: MOBILE_E2E_IDS.taskListItem("task-activity")
     });
@@ -402,17 +447,18 @@ describe("SwipeableTaskCard", () => {
     expect(error.props.children).toBe("storage full");
   });
 
-  it("relabels the revealed action from the phone's own pin state, with no pending step", async () => {
+  it("labels the swipe action from the phone's own pin state, with no pending step", async () => {
     const onTogglePin = vi.fn().mockResolvedValue(undefined);
     const renderer = await renderCard(onTogglePin, false);
-    swipeOpen();
+    const pinAction = MOBILE_E2E_IDS.taskPinAction("task-1");
 
-    const action = renderer.root.findByProps({
-      testID: MOBILE_E2E_IDS.taskPinAction("task-1")
-    });
-    expect(action.findByType("Text").props.children).toBe("Pin");
+    drag(-70);
+    expect(
+      renderer.root.findByProps({ testID: pinAction }).findByType("Text").props
+        .children
+    ).toBe("Pin");
     await act(async () => {
-      action.props.onPress();
+      release(-70);
       await Promise.resolve();
     });
     expect(onTogglePin).toHaveBeenCalledWith(true);
@@ -422,11 +468,10 @@ describe("SwipeableTaskCard", () => {
     act(() => {
       renderer.update(cardElement(true, onTogglePin));
     });
-    swipeOpen();
-    const pinnedAction = renderer.root.findByProps({
-      testID: MOBILE_E2E_IDS.taskPinAction("task-1")
-    });
-    expect(pinnedAction.props.accessibilityLabel).toBe("Unpin Pin this task");
-    expect(pinnedAction.findByType("Text").props.children).toBe("Unpin");
+    drag(-70);
+    expect(
+      renderer.root.findByProps({ testID: pinAction }).findByType("Text").props
+        .children
+    ).toBe("Unpin");
   });
 });

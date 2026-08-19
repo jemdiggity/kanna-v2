@@ -110,17 +110,12 @@ describe("performTaskDetailEdgeSwipeBack", () => {
 describe("exerciseTaskPinSwipe", () => {
   function createPinFixtureDriver() {
     // Pinning is local to the phone now, so the fixture models the app's own
-    // record and leaves the desktop's pin columns alone.
+    // record and leaves the desktop's pin columns alone. The swipe commits
+    // when it is released, so the drag itself is what writes the pin.
     let pinnedLocally = false;
     const row = {
       getLocation: vi.fn(async () => ({ x: 10, y: 100 })),
       getSize: vi.fn(async () => ({ width: 360, height: 90 })),
-      waitForDisplayed: vi.fn(async () => undefined)
-    };
-    const action = {
-      click: vi.fn(async () => {
-        pinnedLocally = !pinnedLocally;
-      }),
       waitForDisplayed: vi.fn(async () => undefined)
     };
     const repo = {
@@ -130,10 +125,9 @@ describe("exerciseTaskPinSwipe", () => {
     let renderedRowIds: () => string[] = () =>
       pinnedLocally ? ["task-1", "task-2"] : ["task-2", "task-1"];
     const driver = {
-      $: vi.fn(async (selector: string) => {
-        if (selector === "~mobile.tasks.repo.repo-1") return repo;
-        return selector === "~mobile.task-row.task-1" ? row : action;
-      }),
+      $: vi.fn(async (selector: string) =>
+        selector === "~mobile.tasks.repo.repo-1" ? repo : row
+      ),
       $$: vi.fn(async () =>
         renderedRowIds().map((taskId) => ({
           getAttribute: vi.fn(async (name: string) =>
@@ -141,13 +135,14 @@ describe("exerciseTaskPinSwipe", () => {
           )
         }))
       ),
-      execute: vi.fn(async () => undefined),
+      execute: vi.fn(async () => {
+        pinnedLocally = !pinnedLocally;
+      }),
       waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
         if (!(await condition())) throw new Error(options.timeoutMsg);
       })
     };
     return {
-      action,
       driver,
       repo,
       row,
@@ -178,9 +173,9 @@ describe("exerciseTaskPinSwipe", () => {
     });
   }
 
-  it("reveals the row action, lifts the row locally, and leaves the desktop alone", async () => {
+  it("commits the pin on release, lifts the row locally, and leaves the desktop alone", async () => {
     const fixture = createPinFixtureDriver();
-    const { action, driver, repo } = fixture;
+    const { driver, repo } = fixture;
     const fetchImpl = createPinFetchMock();
 
     await exerciseTaskPinSwipe(
@@ -202,8 +197,8 @@ describe("exerciseTaskPinSwipe", () => {
     );
     expect(repo.click).toHaveBeenCalledOnce();
     // Pin, then unpin: the phone is the only place the pin lives, so the
-    // journey puts it back itself.
-    expect(action.click).toHaveBeenCalledTimes(2);
+    // journey puts it back itself — two swipes, and no tap in between.
+    expect(driver.execute).toHaveBeenCalledTimes(2);
     expect(fixture.isPinnedLocally()).toBe(false);
     // No pin route is ever called.
     expect(fetchImpl).not.toHaveBeenCalledWith(
@@ -231,7 +226,7 @@ describe("exerciseTaskPinSwipe", () => {
       "Expected the pinned task to render as the first row of its repo list"
     );
     // The phone is still put back on the way out.
-    expect(fixture.action.click).toHaveBeenCalledTimes(2);
+    expect(fixture.driver.execute).toHaveBeenCalledTimes(2);
   });
 
   it("fails when the local pin reaches the desktop's own pin state", async () => {
@@ -284,22 +279,17 @@ describe("exerciseActivityDismissSwipe", () => {
     };
     const activityTab = { click: vi.fn(async () => undefined) };
     const screen = { waitForDisplayed: vi.fn(async () => undefined) };
-    const action = {
-      // A local dismissal records the generation it hid; the desktop keeps
-      // reporting the task unread.
-      click: vi.fn(async () => {
-        dismissedRevision = activityRevision();
-      }),
-      waitForDisplayed: vi.fn(async () => undefined)
-    };
     const driver = {
       $: vi.fn(async (selector: string) => {
         if (selector === selectors.recentTab) return activityTab;
         if (selector === selectors.recentScreen) return screen;
-        if (selector === "~mobile.task-row.task-1") return row;
-        return action;
+        return row;
       }),
-      execute: vi.fn(async () => undefined),
+      // The released swipe is the dismissal: it records the generation it hid,
+      // and the desktop keeps reporting the task unread.
+      execute: vi.fn(async () => {
+        dismissedRevision = activityRevision();
+      }),
       waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
         if (!(await condition())) throw new Error(options.timeoutMsg);
       })
@@ -339,7 +329,7 @@ describe("exerciseActivityDismissSwipe", () => {
         toY: 145
       }
     );
-    expect(action.click).toHaveBeenCalledOnce();
+    expect(driver.execute).toHaveBeenCalledOnce();
     // Nothing marked the task read: only the phone stopped showing it.
     expect(activity).toBe("unread");
     expect(fetchImpl).not.toHaveBeenCalledWith(
