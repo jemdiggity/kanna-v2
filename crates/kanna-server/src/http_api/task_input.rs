@@ -86,6 +86,61 @@ pub(crate) enum TaskInputError {
     /// Submission may have reached the PTY even though its response was lost.
     /// Retrying this result could duplicate terminal bytes.
     Uncertain(String),
+    /// The daemon refuses to submit into this session at all: it inherited the
+    /// session across a restart or handoff and the composer holds text nobody
+    /// here saw typed. Nothing was delivered and retrying changes nothing —
+    /// distinguished from `Other` because a caller that cannot tell this from
+    /// a transient server fault retries forever, and because it is the one
+    /// failure whose fix is a human at that terminal.
+    InputBlocked(String),
+}
+
+/// Why a session refuses delivered input. One value today; a string on the
+/// wire so a later cause can be named rather than collapsed into a boolean.
+pub(crate) const INPUT_BLOCKED_INHERITED_DRAFT: &str = "inherited-draft-unknown";
+
+/// Record that a delivery target is refusing input, and make it visible where
+/// an operator will actually meet it.
+///
+/// The delivery that discovered this was usually made on someone else's
+/// behalf — a completion notification, the pre-close merge handoff — so the
+/// only human-facing trace it would otherwise leave is a log line inside
+/// another task's failure. The task is marked unread for the same reason: a
+/// wedged singleton is `idle` and reads as perfectly healthy in the sidebar.
+pub(crate) async fn record_input_blocked_target(state: &AppState, task_or_session_id: &str) {
+    let db_path = state.config().db_path.clone();
+    let task_or_session_id = task_or_session_id.to_string();
+    let logged_id = task_or_session_id.clone();
+    let recorded = tokio::task::spawn_blocking(move || -> Result<bool, String> {
+        let db = Db::open(&db_path).map_err(|error| format!("db error: {error}"))?;
+        let Some(task_id) = db
+            .resolve_pipeline_item_id(&task_or_session_id)
+            .map_err(|error| format!("db error: {error}"))?
+        else {
+            return Ok(false);
+        };
+        let open = db
+            .get_pipeline_item(&task_id)
+            .map_err(|error| format!("db error: {error}"))?
+            .is_some_and(|item| item.closed_at.is_none());
+        if !open {
+            return Ok(false);
+        }
+        let changed = db
+            .update_pipeline_item_input_blocked(&task_id, Some(INPUT_BLOCKED_INHERITED_DRAFT))
+            .map_err(|error| format!("db error: {error}"))?;
+        db.update_pipeline_item_activity(&task_id, "unread")
+            .map_err(|error| format!("db error: {error}"))?;
+        Ok(changed)
+    })
+    .await;
+    match recorded {
+        Ok(Ok(_)) => state.publish_state_changed(StateChangeScope::Tasks),
+        Ok(Err(error)) => {
+            log::error!("failed to record refused input for {logged_id}: {error}")
+        }
+        Err(error) => log::error!("refused-input record worker failed for {logged_id}: {error}"),
+    }
 }
 
 /// Queue one semantic logical message in a daemon session. The daemon owns the
@@ -126,6 +181,10 @@ async fn send_logical_session_input(
             code: Some(kanna_daemon::protocol::ErrorCode::WriteFailed),
             message,
         } => Err(TaskInputError::Uncertain(message)),
+        DaemonEvent::Error {
+            code: Some(kanna_daemon::protocol::ErrorCode::InheritedDraftStateUnknown),
+            message,
+        } => Err(TaskInputError::InputBlocked(message)),
         DaemonEvent::Error { message, .. }
             if message.to_ascii_lowercase().contains("session not found") =>
         {
@@ -199,6 +258,7 @@ pub(crate) async fn submit_task_input(
                 axum::http::StatusCode::SERVICE_UNAVAILABLE,
                 format!("terminal input delivery is uncertain: {message}"),
             ),
+            TaskInputError::InputBlocked(message) => (axum::http::StatusCode::CONFLICT, message),
         })
 }
 
@@ -373,8 +433,15 @@ pub(super) async fn send_task_input(
         ));
     };
 
-    try_submit_task_input_if_session(&mut daemon, &task_id, live_session_pid, &payload.input)
-        .await
+    let delivered =
+        try_submit_task_input_if_session(&mut daemon, &task_id, live_session_pid, &payload.input)
+            .await;
+    // Recorded before the answer is shaped: this is the one failure that says
+    // something durable about the *target* rather than about this call.
+    if let Err(TaskInputError::InputBlocked(_)) = &delivered {
+        record_input_blocked_target(&state, &task_id).await;
+    }
+    delivered
         .map_err(|error| {
             let (status, reason, message) = match error {
                 TaskInputError::SessionNotFound => (
@@ -392,6 +459,11 @@ pub(super) async fn send_task_input(
                 TaskInputError::Other(message) => (
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                     "task_input_failed",
+                    message,
+                ),
+                TaskInputError::InputBlocked(message) => (
+                    axum::http::StatusCode::CONFLICT,
+                    "input_blocked",
                     message,
                 ),
             };
@@ -637,9 +709,34 @@ pub(super) async fn notify_task_completion(
     let mut daemon = crate::daemon_client::DaemonClient::connect(&config.daemon_dir)
         .await
         .map_err(|e| format!("daemon error: {}", e))?;
-    submit_task_input(&mut daemon, &notification.notify_task_id, &message)
-        .await
-        .map_err(|(_, message)| message)?;
+    // A refused notification is not a lost log line: the claim is one-shot,
+    // so this message is gone, and the target — a live, idle-looking agent
+    // that will never hear that its child finished — has to be findable
+    // afterwards. Recording the refusal on it is what makes it so.
+    match try_submit_task_input(&mut daemon, &notification.notify_task_id, &message).await {
+        Ok(()) => {}
+        Err(TaskInputError::InputBlocked(reason)) => {
+            record_input_blocked_target(state, &notification.notify_task_id).await;
+            log::error!(
+                "completion notification for {child_id} was refused by its notify target {}: \
+                 {reason}",
+                notification.notify_task_id
+            );
+            return Err(format!(
+                "notify target {} refuses delivered input: {reason}",
+                notification.notify_task_id
+            ));
+        }
+        Err(TaskInputError::SessionNotFound) => {
+            return Err(format!(
+                "no live agent session for notify target {}",
+                notification.notify_task_id
+            ))
+        }
+        Err(TaskInputError::Other(message) | TaskInputError::Uncertain(message)) => {
+            return Err(message)
+        }
+    }
     // Completion notifications are recorded like any other delivery, labelled
     // `notify`. Their delivery semantics are untouched: this runs after the
     // daemon accepted the message and cannot fail the notification.

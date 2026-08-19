@@ -67,6 +67,26 @@ const OPENCODE_HINT_BAR_MARKER: &str = "ctrl+p commands";
 /// asking does not.
 const OPENCODE_WAITING_PROMPT_ROWS: usize = 24;
 
+/// What the rendered terminal proves about a session's composer.
+///
+/// There is no "a draft is present" answer on purpose. This exists to resolve
+/// inherited draft state — whether a session the daemon did not watch being
+/// typed into is holding an unsubmitted line — and only one of the two answers
+/// can be proven from a frame: an empty composer holds nothing. Everything
+/// else, including a line the daemon cannot explain, is `Unknown` and stays
+/// the operator's call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComposerState {
+    /// The provider's own idle composer chrome is on screen with nothing typed
+    /// into it. A positive match on rendered chrome, never an inference from a
+    /// quiet session.
+    Empty,
+    /// Not provably empty: a draft, a suggestion the daemon cannot tell from a
+    /// draft, a dialog, a busy frame, a provider whose empty composer has not
+    /// been measured, or a screen that has not drawn a composer yet.
+    Unknown,
+}
+
 pub fn initial_session_status(provider: Option<AgentProvider>) -> SessionStatus {
     if provider.is_some() {
         SessionStatus::Busy
@@ -309,6 +329,17 @@ impl HeadlessTerminal {
         };
 
         Ok(status)
+    }
+
+    pub fn composer_state(
+        &mut self,
+        provider: Option<AgentProvider>,
+    ) -> HeadlessTerminalResult<ComposerState> {
+        let Some(provider) = provider else {
+            return Ok(ComposerState::Unknown);
+        };
+        let footer_lines = self.visible_footer_lines(STATUS_ROWS)?;
+        Ok(composer_state_from_lines(&footer_lines, provider))
     }
 
     pub fn waiting_prompt_snippet(
@@ -840,6 +871,58 @@ fn codex_status_from_lines(lines: &[String]) -> Option<SessionStatus> {
     None
 }
 
+/// Read the composer out of a rendered frame.
+///
+/// Claude and Codex only: both draw a single-glyph prompt with the draft
+/// immediately after it, so an empty remainder on that line *is* the proof
+/// that nothing is typed. OpenCode, Antigravity and Copilot draw composers
+/// whose empty state has never been captured here, and this file's rule is
+/// that unmeasured chrome matches nothing rather than being written from the
+/// shape a matcher happened to expect.
+///
+/// The composer is the last prompt line in the window, with only provider
+/// chrome below it — Claude draws its permission-mode hint under the composer,
+/// so the composer is frequently not the last line on screen. A busy or
+/// waiting frame is refused outright: its empty composer is true but its
+/// screen is mid-repaint, and nothing needs an answer from a session that is
+/// still working.
+fn composer_state_from_lines(lines: &[String], provider: AgentProvider) -> ComposerState {
+    let prompt = match provider {
+        AgentProvider::Claude => CLAUDE_IDLE_PROMPT,
+        AgentProvider::Codex => CODEX_IDLE_PROMPT,
+        AgentProvider::Opencode | AgentProvider::Antigravity | AgentProvider::Copilot => {
+            return ComposerState::Unknown
+        }
+    };
+    let status = match provider {
+        AgentProvider::Claude => claude_status_from_lines(lines),
+        AgentProvider::Codex => codex_status_from_lines(lines),
+        _ => None,
+    };
+    if matches!(
+        status,
+        Some(SessionStatus::Busy) | Some(SessionStatus::Waiting)
+    ) {
+        return ComposerState::Unknown;
+    }
+    let Some(composer_index) = lines
+        .iter()
+        .rposition(|line| line_starts_with_prompt(line, &[prompt]))
+    else {
+        return ComposerState::Unknown;
+    };
+    if lines[composer_index + 1..]
+        .iter()
+        .any(|line| !line_is_provider_chrome(line, provider))
+    {
+        return ComposerState::Unknown;
+    }
+    match prompt_remainder(&lines[composer_index], &[prompt]) {
+        Some("") => ComposerState::Empty,
+        _ => ComposerState::Unknown,
+    }
+}
+
 fn opencode_line_has_interrupt_marker(line: &str) -> bool {
     OPENCODE_INTERRUPT_MARKERS
         .iter()
@@ -959,7 +1042,10 @@ mod tests {
 
     use crate::protocol::{AgentProvider, SessionStatus};
 
-    use super::{bound_waiting_prompt, initial_session_status, HeadlessTerminal, TerminalSnapshot};
+    use super::{
+        bound_waiting_prompt, initial_session_status, ComposerState, HeadlessTerminal,
+        TerminalSnapshot,
+    };
 
     /// A frame of the OpenCode TUI as it was actually drawn.
     ///
@@ -1415,6 +1501,181 @@ mod tests {
                 .unwrap(),
             Some(SessionStatus::Busy)
         );
+    }
+
+    /// Every frame below is the same shape the status matchers above are
+    /// pinned against, read for a different question: is anything typed into
+    /// the composer? Only a bare prompt glyph answers yes-it-is-empty.
+    #[test]
+    fn claude_empty_composer_is_provably_empty() {
+        let mut terminal = HeadlessTerminal::new(120, 10, 10_000).unwrap();
+        terminal.write(
+            concat!(
+                "⏺ Done — 3 files changed.\r\n",
+                "────────────────────────────────\r\n",
+                "❯ \r\n",
+                "⏵⏵ bypass permissions on (shift+tab to cycle)\r\n",
+            )
+            .as_bytes(),
+        );
+
+        assert_eq!(
+            terminal
+                .composer_state(Some(AgentProvider::Claude))
+                .unwrap(),
+            ComposerState::Empty
+        );
+    }
+
+    #[test]
+    fn claude_composer_holding_text_is_never_provably_empty() {
+        let mut terminal = HeadlessTerminal::new(120, 10, 10_000).unwrap();
+        terminal.write(
+            concat!(
+                "⏺ Done — 3 files changed.\r\n",
+                "────────────────────────────────\r\n",
+                "❯ half typed thought\r\n",
+                "⏵⏵ bypass permissions on (shift+tab to cycle)\r\n",
+            )
+            .as_bytes(),
+        );
+
+        assert_eq!(
+            terminal
+                .composer_state(Some(AgentProvider::Claude))
+                .unwrap(),
+            ComposerState::Unknown
+        );
+    }
+
+    /// A `❯` line carrying the CLI's own tab-to-accept suggestion renders as
+    /// text the daemon cannot tell from a typed draft, and it must not be
+    /// treated as an empty composer — accepting one would submit a sentence
+    /// nobody wrote.
+    #[test]
+    fn claude_composer_showing_a_suggestion_is_not_provably_empty() {
+        let mut terminal = HeadlessTerminal::new(120, 10, 10_000).unwrap();
+        terminal.write(
+            concat!(
+                "⏺ Done.\r\n",
+                "❯ run the tests again (tab to accept)\r\n",
+                "⏵⏵ bypass permissions on (shift+tab to cycle)\r\n",
+            )
+            .as_bytes(),
+        );
+
+        assert_eq!(
+            terminal
+                .composer_state(Some(AgentProvider::Claude))
+                .unwrap(),
+            ComposerState::Unknown
+        );
+    }
+
+    #[test]
+    fn claude_busy_and_waiting_frames_are_not_attested() {
+        let mut busy = HeadlessTerminal::new(120, 10, 10_000).unwrap();
+        busy.write(
+            concat!(
+                "✻ Thinking…\r\n",
+                "• Working (12s • esc to interrupt)\r\n",
+                "❯ \r\n",
+            )
+            .as_bytes(),
+        );
+        assert_eq!(
+            busy.composer_state(Some(AgentProvider::Claude)).unwrap(),
+            ComposerState::Unknown
+        );
+
+        let mut waiting = HeadlessTerminal::new(120, 10, 10_000).unwrap();
+        waiting.write(
+            concat!(
+                "Do you want to allow this command?\r\n",
+                "❯ 1. Yes\r\n",
+                "  2. No\r\n",
+            )
+            .as_bytes(),
+        );
+        assert_eq!(
+            waiting.composer_state(Some(AgentProvider::Claude)).unwrap(),
+            ComposerState::Unknown
+        );
+    }
+
+    /// Non-chrome output below the prompt line means the composer is not where
+    /// this thinks it is, so the frame proves nothing.
+    #[test]
+    fn claude_prompt_buried_above_transcript_output_is_not_a_composer() {
+        let mut terminal = HeadlessTerminal::new(120, 10, 10_000).unwrap();
+        terminal.write(concat!("❯ \r\n", "⏺ Reading src/main.rs\r\n").as_bytes());
+
+        assert_eq!(
+            terminal
+                .composer_state(Some(AgentProvider::Claude))
+                .unwrap(),
+            ComposerState::Unknown
+        );
+    }
+
+    #[test]
+    fn codex_empty_composer_is_provably_empty() {
+        let mut terminal = HeadlessTerminal::new(120, 10, 10_000).unwrap();
+        terminal.write(concat!("OpenAI Codex\r\n", "Done.\r\n", "› \r\n").as_bytes());
+
+        assert_eq!(
+            terminal.composer_state(Some(AgentProvider::Codex)).unwrap(),
+            ComposerState::Empty
+        );
+
+        let mut drafted = HeadlessTerminal::new(120, 10, 10_000).unwrap();
+        drafted.write(concat!("OpenAI Codex\r\n", "Done.\r\n", "› why did\r\n").as_bytes());
+        assert_eq!(
+            drafted.composer_state(Some(AgentProvider::Codex)).unwrap(),
+            ComposerState::Unknown
+        );
+    }
+
+    /// A session with no provider is a plain shell — Kanna's teardown and
+    /// worktree shells among them — and nothing here knows what an empty
+    /// composer looks like in one. The same holds for the providers whose
+    /// composers have never been captured: unmeasured chrome matches nothing.
+    #[test]
+    fn unmeasured_providers_and_plain_shells_are_never_attested() {
+        let mut terminal = HeadlessTerminal::new(120, 10, 10_000).unwrap();
+        terminal.write("❯ \r\n".as_bytes());
+
+        assert_eq!(
+            terminal.composer_state(None).unwrap(),
+            ComposerState::Unknown
+        );
+        for provider in [
+            AgentProvider::Opencode,
+            AgentProvider::Antigravity,
+            AgentProvider::Copilot,
+        ] {
+            assert_eq!(
+                terminal.composer_state(Some(provider)).unwrap(),
+                ComposerState::Unknown,
+                "{provider:?} has no captured empty-composer frame to match"
+            );
+        }
+    }
+
+    #[test]
+    fn opencode_captured_idle_frame_is_not_attested() {
+        for fixture in OPENCODE_FIXTURES {
+            let mut headless_terminal = fixture.replay();
+
+            assert_eq!(
+                headless_terminal
+                    .composer_state(Some(AgentProvider::Opencode))
+                    .unwrap(),
+                ComposerState::Unknown,
+                "{} must not be read as a provably empty composer",
+                fixture.name
+            );
+        }
     }
 
     #[test]

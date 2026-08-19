@@ -93,7 +93,7 @@ pub(crate) use tasks::create_task_in_process;
 
 pub(crate) use task_input::{
     handle_task_terminal_state, mark_task_session_interrupted, restore_task_run_for_live_session,
-    try_submit_task_input, TaskInputError,
+    try_submit_task_input, TaskInputError, INPUT_BLOCKED_INHERITED_DRAFT,
 };
 
 #[cfg(test)]

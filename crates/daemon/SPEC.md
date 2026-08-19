@@ -250,7 +250,7 @@ Line-delimited JSON over Unix domain socket. Each message is one JSON object + `
 | `Resize` | session_id, cols, rows | Update terminal dimensions |
 | `Signal` | session_id, signal (string) | Send Unix signal |
 | `Kill` | session_id | Terminate and remove session |
-| `List` | — | List all sessions |
+| `List` | — | List all sessions, each with `logical_input_blocked` |
 | `Handoff` | version (u32) | Request session transfer |
 
 ### Events (daemon → client)
@@ -262,6 +262,7 @@ Line-delimited JSON over Unix domain socket. Each message is one JSON object + `
 | `Output` | session_id, data (byte array) | PTY output |
 | `Exit` | session_id, code | Process exited |
 | `SessionCreated` | session_id | New session ready |
+| `InputBlockedChanged` | session_id, logical_input_blocked | Session started or stopped refusing logical input |
 | `SessionList` | sessions | Response to List |
 | `HandoffReady` | sessions | Session metadata (followed by SCM_RIGHTS) |
 | `ShuttingDown` | — | Daemon shutting down (handoff) |
@@ -339,10 +340,44 @@ published daemon generation.
 Draft state and accepted logical messages are part of transactional-v3 handoff
 state. A sender refuses a legacy-v2 adopter while that state is unknown, a draft
 is active, or any logical message remains queued. A current daemon adopting a
-legacy payload treats draft state as unknown and refuses logical input until a
-producer-declared submission boundary resolves it. This preserves accepted
-messages across normal handoff without guessing from terminal bytes or rendered
-provider UI.
+legacy payload treats draft state as unknown and refuses logical input until it
+is resolved. This preserves accepted messages across normal handoff without
+guessing a submission from terminal bytes: submission boundaries are still
+declared by the producer and never inferred, from PTY bytes or from rendered UI.
+
+Two things resolve an unknown draft state:
+
+- **A producer-declared boundary** — `InputBoundary` on the raw path, which is
+  what a human pressing Enter in that terminal produces.
+- **Composer attestation** — a positive match on the provider's own idle
+  composer chrome, rendered empty, in the daemon's headless terminal.
+
+Attestation answers exactly the question the guard asks — whether an
+unsubmitted draft is sitting at the prompt — and answers it more directly than
+the keystroke: an empty composer holds no draft, so there is nothing a logical
+message could be appended to. It is one-way (unknown to known-empty, never the
+reverse and never "a draft is present"), it writes nothing to the PTY, and it
+discards nothing on screen. It matches only Claude's `❯` and Codex's `›`
+composers; only when that prompt is the last one in the status window with
+nothing but provider chrome below it; only when the frame is neither busy nor
+waiting; and only when the remainder of the prompt line is empty. A suggestion
+the CLI drew and a half-typed line are indistinguishable in a rendered frame, so
+any text at all leaves the state unknown. Providers whose empty composer has not
+been captured, and sessions with no provider, are never attested. There is
+deliberately no clear-and-submit control: the daemon never discards or submits
+text a human may have typed.
+
+The daemon runs attestation on each session's own status tick — an inherited
+session nobody types into produces no output at all, so nothing else would ever
+run it — and once more on the refusal path of a `SubmitInput` that would
+otherwise be rejected.
+
+A session that stays unknown refuses `SubmitInput` with
+`inherited_draft_state_unknown`, and that refusal is visible before anything
+tries to deliver into it: `List` reports `logical_input_blocked` per session,
+and `InputBlockedChanged` is broadcast on every edge — adoption, a human
+keystroke, attestation — from the session's own status loop, so one publisher
+covers every cause.
 
 | Env Var | Description | Default |
 |---------|-------------|---------|

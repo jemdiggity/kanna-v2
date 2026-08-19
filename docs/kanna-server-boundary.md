@@ -509,6 +509,10 @@ cursor-based, not snapshot-diffed:
   saying whether it was cut. The event is only the announcement — the record is
   the `task_input` row, read through `GET /v1/tasks/{task_id}/inputs`. See
   [Delivered Task Inputs](#delivered-task-inputs).
+- `task.input_blocked` reports that a task's agent session started or stopped
+  refusing messages delivered into it. `payload.inputBlocked` names the reason
+  while it is blocked and is `null` when it clears; today the only reason is
+  `inherited-draft-unknown`. See [Refused task input](#refused-task-input).
 - `task.transfer_finalizing` reports each step of a cross-machine transfer
   shutting the task's agent down (`payload.phase`: `wrap-up-sent`, `idle`,
   `quit-sent`, `exited`, `already-exited`, `degraded`). See
@@ -602,6 +606,42 @@ visible rather than silent. `GET /v1/tasks/{task_id}` reports
 from it that nothing was ever sent. The review and qa-dispatcher agent
 definitions require reading this surface before making any claim about what was
 or was not instructed.
+
+## Refused Task Input
+
+A daemon that adopted a session across a restart or handoff never watched that
+terminal being typed into, so it cannot know whether an unsubmitted line is
+sitting at the prompt. It refuses to submit a logical message into such a
+session rather than append to someone else's draft — the guard the
+draft-isolation work established, and it is not weakened here.
+
+The session is alive and idle the whole time it refuses, so `activity`,
+`runtimeState`, and `readState` all report a perfectly healthy task. That is how
+one was found: a finishing task's merge handoff failed against an idle merge
+singleton, and the only record of the wedge was inside the failing task's own
+stage result.
+
+The daemon now resolves most of these itself, by reading the composer it
+inherited rather than waiting for a keystroke (see `crates/daemon/SPEC.md`).
+What remains — a composer holding text nobody here saw typed — is a human's
+decision about that screen, and it is surfaced rather than discovered:
+
+- `GET /v1/tasks/{task_id}` reports `inputBlocked` (`inherited-draft-unknown`,
+  or absent when the session accepts input). The value is written by the
+  terminal watcher from the daemon's own `logical_input_blocked`, reconciled
+  from `List` against every daemon generation — a session becomes blocked at
+  adoption — and updated live from the daemon's `InputBlockedChanged` event.
+- `task.input_blocked` announces each edge in the event feed.
+- `POST /v1/tasks/{task_id}/input` answers `409` with `reason: "input_blocked"`
+  and a message naming what unblocks it. Nothing was delivered, so nothing is
+  recorded as delivered, and retrying changes nothing.
+- Every server-side delivery that meets the refusal records it on the *target*
+  and marks that task `unread`, so a wedged singleton stops reading as idle in
+  the sidebar. This includes the two deliveries nobody would otherwise see: the
+  completion notification (whose claim is one-shot, so the message is gone) and
+  the pre-close merge-handoff backstop, which additionally refuses the close so
+  the finishing task parks at its final stage instead of disappearing with an
+  un-handed-off PR.
 
 ## Task Parentage
 

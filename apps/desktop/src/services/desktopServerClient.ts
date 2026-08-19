@@ -254,6 +254,12 @@ export interface DesktopTaskDetail {
   revisionRounds: number;
   revisionLimit: number;
   childTaskIds: string[];
+  /**
+   * Why messages delivered into this task's agent session are being refused,
+   * or absent when they are not. The session is alive and idle while this is
+   * set, so nothing else on screen says anything is wrong.
+   */
+  inputBlocked?: string | null;
 }
 
 export async function fetchDesktopTaskDetail(taskId: string): Promise<DesktopTaskDetail> {

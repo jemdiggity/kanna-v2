@@ -336,6 +336,8 @@
     "agentCopied": "コピーしました！",
     "commandHintPrefix": "",
     "commandHintSuffix": "で利用可能なコマンドを表示できます。",
+    "inputBlockedTitle": "送信されたメッセージが拒否されています",
+    "inputBlockedHint": "このエージェントのセッションは現在のデーモンが引き継いだもので、コンポーザーに Kanna が入力を確認していないテキストが残っているため、何も送信できません。このターミナルを開き、その行を送信するか消去してください。",
     "revisionExhaustedTitle": "自動リビジョンの上限に達しました",
     "revisionExhaustedHint": "このタスクは自動リビジョン {limit} 回中 {rounds} 回を使用し、保留されています。",
     "revise": "修正する",

@@ -116,6 +116,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "050_transfer_work_phase_value",
     "051_repo_remote_hash_task_event_indexes",
     "052_task_input_log",
+    "053_pipeline_item_input_blocked",
 ];
 
 #[derive(Debug, Serialize)]
@@ -146,6 +147,12 @@ pub struct PipelineItem {
     /// the task's agent session — `busy` | `waiting` | `idle` | `exited`, or
     /// `None` when no session has ever reported one.
     pub runtime_status: Option<String>,
+    /// Why the task's agent session refuses messages delivered into it, or
+    /// `None` when it accepts them. Today the only value is
+    /// `inherited-draft-unknown`: the daemon adopted the session across a
+    /// restart or handoff and its composer holds text nobody here saw typed,
+    /// so submitting would append to an unsent line.
+    pub input_blocked: Option<String>,
     pub closed_at: Option<String>,
     pub pinned: Option<i64>,
     pub pin_order: Option<i64>,
@@ -1747,6 +1754,15 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
             CREATE INDEX IF NOT EXISTS idx_task_input_task_id ON task_input(task_id, id);
             "#,
         )
+    })?;
+
+    run_migration(conn, "053_pipeline_item_input_blocked", |conn| {
+        // Why a task-level column rather than a live daemon read: a session
+        // that refuses input is otherwise indistinguishable from a healthy
+        // idle one, so the first sign of one used to be an unrelated agent's
+        // delivery failing against it. Recorded here, it is on task detail and
+        // in the event feed like every other state a watcher acts on.
+        add_column(conn, "pipeline_item", "input_blocked", "TEXT")
     })?;
 
     Ok(())

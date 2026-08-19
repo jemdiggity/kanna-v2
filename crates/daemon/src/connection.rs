@@ -31,6 +31,46 @@ use crate::successor_auth::SuccessorAuthorizer;
 use crate::util::{error_event, recovery_snapshot_to_terminal_snapshot};
 use crate::{agent_runtime, headless_terminal, pty};
 
+/// The whole unblock story, in the one line the caller actually reads.
+///
+/// The old wording ("retry after explicit terminal submission") described the
+/// daemon's internal rule rather than what anyone should do about it, and the
+/// only way to satisfy it was for a human to type into another agent's
+/// terminal. Attestation has already failed by the time this is written, so
+/// what is left really is a human decision about text on that screen.
+fn inherited_draft_state_unknown_message(session_id: &str) -> String {
+    format!(
+        "logical input refused for session {session_id}: this daemon inherited the session and \
+         its composer holds text it never saw typed, so submitting would append to someone \
+         else's unsent line; open that session's terminal and submit or clear the line. An empty \
+         composer unblocks itself with no human."
+    )
+}
+
+/// Deliver one logical message, resolving an inherited unknown draft state
+/// from the terminal first when the frame proves the composer is empty.
+///
+/// Attestation runs only on the refusal path: a session whose draft state is
+/// already known — every session this daemon spawned — pays nothing for it.
+async fn enqueue_logical_input_with_attestation(
+    session: &Arc<SessionHandle>,
+    data: Vec<u8>,
+) -> Result<(), crate::session::InputQueueError> {
+    match session.enqueue_logical_input(data.clone()) {
+        Err(crate::session::InputQueueError::InheritedDraftStateUnknown) => {
+            match session.attest_empty_composer().await {
+                Ok(true) => session.enqueue_logical_input(data),
+                Ok(false) => Err(crate::session::InputQueueError::InheritedDraftStateUnknown),
+                Err(error) => {
+                    log::warn!("[input] composer attestation failed: {error}");
+                    Err(crate::session::InputQueueError::InheritedDraftStateUnknown)
+                }
+            }
+        }
+        other => other,
+    }
+}
+
 async fn session_handle(
     sessions: &Arc<Mutex<SessionManager>>,
     session_id: &str,
@@ -822,13 +862,11 @@ pub(crate) async fn handle_command(
                 let _ = write_event(&mut *writer.lock().await, &evt).await;
                 return;
             }
-            let evt = match session.enqueue_logical_input(data) {
+            let evt = match enqueue_logical_input_with_attestation(&session, data).await {
                 Ok(()) => Event::Ok,
                 Err(crate::session::InputQueueError::InheritedDraftStateUnknown) => error_event(
                     Some(protocol::ErrorCode::InheritedDraftStateUnknown),
-                    format!(
-                        "logical input refused for session {session_id}: inherited draft state is unknown; retry after explicit terminal submission"
-                    ),
+                    inherited_draft_state_unknown_message(&session_id),
                 ),
                 Err(_) => error_event(
                     Some(protocol::ErrorCode::WriteFailed),
@@ -879,13 +917,11 @@ pub(crate) async fn handle_command(
                 let _ = write_event(&mut *writer.lock().await, &evt).await;
                 return;
             }
-            let evt = match session.enqueue_logical_input(data) {
+            let evt = match enqueue_logical_input_with_attestation(&session, data).await {
                 Ok(()) => Event::Ok,
                 Err(crate::session::InputQueueError::InheritedDraftStateUnknown) => error_event(
                     Some(protocol::ErrorCode::InheritedDraftStateUnknown),
-                    format!(
-                        "logical input refused for session {session_id}: inherited draft state is unknown; retry after explicit terminal submission"
-                    ),
+                    inherited_draft_state_unknown_message(&session_id),
                 ),
                 Err(_) => error_event(
                     Some(protocol::ErrorCode::WriteFailed),
