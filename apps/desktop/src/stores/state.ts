@@ -26,6 +26,7 @@ import {
   type MarkdownPreviewMode,
 } from "./markdownPreviewMode";
 import type { AdvanceStageResult, RequestRevisionOptions } from "./workflow";
+import type { ReloadSnapshotOptions } from "./queries";
 import type { TaskUiSlot } from "../types/taskUi";
 
 export type AgentMessageAppearance = "chat" | "log" | "terminal";
@@ -168,7 +169,7 @@ export interface RevisionedStageOrderCacheEntry {
 export interface StoreServices {
   windowWorkspace?: WindowWorkspaceController;
   loadInitialData?: () => Promise<void>;
-  reloadSnapshot?: () => Promise<void>;
+  reloadSnapshot?: (options?: ReloadSnapshotOptions) => Promise<void>;
   fetchSnapshot?: () => Promise<KannaSnapshot>;
   withOptimisticItemOverlay?: <T>(input: {
     key: string;

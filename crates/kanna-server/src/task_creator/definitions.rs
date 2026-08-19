@@ -1,4 +1,4 @@
-use super::definition_source::RepoDefinitionSnapshot;
+use super::definition_source::{OriginFreshness, RepoDefinitionSnapshot};
 use super::local_config::{apply_local_config_override, LocalConfigOverride};
 use crate::db::Repo;
 use kanna_agent_protocol::AgentProvider;
@@ -476,12 +476,34 @@ pub(super) struct RepoDefinitions {
 }
 
 impl RepoDefinitions {
+    /// Resolve against a freshly fetched `origin`. This is the authoritative
+    /// read: callers that pin a workflow onto a task or fork a workspace must
+    /// see the real remote tip, and may wait for the network to report it.
     pub(super) fn resolve(repo: &Repo) -> Result<Self, String> {
-        Self::resolve_path(&repo.path, repo.default_branch.as_deref())
+        Self::resolve_path(
+            &repo.path,
+            repo.default_branch.as_deref(),
+            OriginFreshness::Fetch,
+        )
     }
 
-    fn resolve_path(repo_path: &str, default_branch: Option<&str>) -> Result<Self, String> {
-        let snapshot = RepoDefinitionSnapshot::resolve(repo_path, default_branch)?;
+    /// Resolve against the remote-tracking refs already on disk. Reads that
+    /// only display definitions take this path, so opening a picker or
+    /// refreshing the sidebar never blocks on `git fetch`.
+    pub(super) fn resolve_local(repo: &Repo) -> Result<Self, String> {
+        Self::resolve_path(
+            &repo.path,
+            repo.default_branch.as_deref(),
+            OriginFreshness::Local,
+        )
+    }
+
+    fn resolve_path(
+        repo_path: &str,
+        default_branch: Option<&str>,
+        freshness: OriginFreshness,
+    ) -> Result<Self, String> {
+        let snapshot = RepoDefinitionSnapshot::resolve(repo_path, default_branch, freshness)?;
         let config_path = ".kanna/config.json";
         let mut raw_config = match read_snapshot_utf8(&snapshot, config_path)? {
             Some(content) => parse_config_object(&content)

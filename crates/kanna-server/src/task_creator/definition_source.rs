@@ -1,23 +1,51 @@
+use std::collections::{HashMap, HashSet};
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+
+/// Every definition Kanna resolves lives under this directory, so a snapshot
+/// loads that one subtree instead of reaching back into Git per file.
+const DEFINITION_ROOT: &str = ".kanna";
+
+/// How current `origin` must be before a snapshot is read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OriginFreshness {
+    /// Fetch `origin` first. Task creation and the other operations that pin a
+    /// workflow or fork a workspace take this path: they commit the repo to a
+    /// definition, so they must see the true remote tip and are allowed to wait
+    /// for the network to say what it is.
+    Fetch,
+    /// Read the remote-tracking refs already on disk. Everything that only
+    /// displays definitions reads this way, so no operator interaction ever
+    /// waits on a network round trip.
+    Local,
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct RepoDefinitionSnapshot {
-    repo_path: PathBuf,
     ref_name: String,
     commit_id: Option<String>,
+    tree: DefinitionTree,
 }
 
-#[derive(Debug)]
-struct GitTreeEntry {
-    kind: String,
-    object_id: String,
+/// The `.kanna` subtree of one commit, read by a single pair of Git
+/// invocations. Reads used to shell out twice per file — a tree lookup plus a
+/// blob read — so resolving one repo's definitions spawned ~20 `git` processes
+/// every time, which is seconds of scheduling latency on a busy machine even
+/// though the cached snapshot had already answered the same question.
+#[derive(Clone, Debug, Default)]
+struct DefinitionTree {
+    /// Every entry path in Git's own tree order, so listings keep that order.
+    paths: Vec<String>,
+    kinds: HashMap<String, String>,
+    blobs: HashMap<String, Vec<u8>>,
 }
 
 impl RepoDefinitionSnapshot {
     pub(crate) fn resolve(
         repo_path: impl AsRef<Path>,
         default_branch: Option<&str>,
+        freshness: OriginFreshness,
     ) -> Result<Self, String> {
         let repo_path = repo_path.as_ref().to_path_buf();
         let branch = default_branch
@@ -26,26 +54,8 @@ impl RepoDefinitionSnapshot {
             .unwrap_or("main");
         let ref_name = format!("origin/{branch}");
 
-        match Command::new("git")
-            .args(["fetch", "origin"])
-            .current_dir(&repo_path)
-            .output()
-        {
-            Ok(output) if !output.status.success() => {
-                log::warn!(
-                    "failed to fetch definitions from origin in {} (status {}): {}",
-                    repo_path.display(),
-                    output.status,
-                    command_stderr(&output)
-                );
-            }
-            Err(error) => {
-                log::warn!(
-                    "failed to run git fetch origin for definitions in {}: {error}",
-                    repo_path.display()
-                );
-            }
-            Ok(_) => {}
+        if freshness == OriginFreshness::Fetch {
+            fetch_origin(&repo_path);
         }
 
         let full_ref_name = format!("refs/remotes/origin/{branch}");
@@ -142,10 +152,15 @@ impl RepoDefinitionSnapshot {
             None
         };
 
+        let tree = match commit_id.as_deref() {
+            Some(commit_id) => load_definition_tree(&repo_path, commit_id)?,
+            None => DefinitionTree::default(),
+        };
+
         Ok(Self {
-            repo_path,
             ref_name,
             commit_id,
+            tree,
         })
     }
 
@@ -161,41 +176,26 @@ impl RepoDefinitionSnapshot {
         &self,
         relative_path: impl AsRef<Path>,
     ) -> Result<Option<String>, String> {
-        let relative_path = validate_relative_path(relative_path.as_ref())?;
+        let relative_path = validate_definition_path(relative_path.as_ref())?;
         let Some(commit_id) = self.commit_id.as_deref() else {
             return Ok(None);
         };
         let object_context = format!("{commit_id}:{relative_path}");
-        let Some(entry) = self.lookup_entry(commit_id, &relative_path)? else {
+        let Some(kind) = self.tree.kinds.get(&relative_path) else {
             return Ok(None);
         };
-        if entry.kind != "blob" {
+        if kind != "blob" {
             return Err(format!(
-                "Git object `{object_context}` is a {}, not a blob",
-                entry.kind
+                "Git object `{object_context}` is a {kind}, not a blob"
             ));
         }
+        let contents = self
+            .tree
+            .blobs
+            .get(&relative_path)
+            .ok_or_else(|| format!("Git blob `{object_context}` was listed but never read"))?;
 
-        let output = Command::new("git")
-            .args(["cat-file", "blob", entry.object_id.as_str()])
-            .current_dir(&self.repo_path)
-            .output()
-            .map_err(|error| {
-                format!(
-                    "failed to read Git object `{object_context}` in repository `{}`: {error}",
-                    self.repo_path.display()
-                )
-            })?;
-        if !output.status.success() {
-            return Err(format_git_failure(
-                "read",
-                &object_context,
-                &self.repo_path,
-                &output,
-            ));
-        }
-
-        String::from_utf8(output.stdout)
+        String::from_utf8(contents.clone())
             .map(Some)
             .map_err(|error| format!("Git blob `{object_context}` is not valid UTF-8: {error}"))
     }
@@ -204,128 +204,268 @@ impl RepoDefinitionSnapshot {
         &self,
         relative_tree: impl AsRef<Path>,
     ) -> Result<Vec<String>, String> {
-        let relative_tree = validate_relative_path(relative_tree.as_ref())?;
+        let relative_tree = validate_definition_path(relative_tree.as_ref())?;
         let Some(commit_id) = self.commit_id.as_deref() else {
             return Ok(Vec::new());
         };
         let object_context = format!("{commit_id}:{relative_tree}");
-        let Some(entry) = self.lookup_entry(commit_id, &relative_tree)? else {
+        let Some(kind) = self.tree.kinds.get(&relative_tree) else {
             return Ok(Vec::new());
         };
-        if entry.kind != "tree" {
+        if kind != "tree" {
             return Err(format!(
-                "Git object `{object_context}` is a {}, not a tree",
-                entry.kind
+                "Git object `{object_context}` is a {kind}, not a tree"
             ));
         }
 
-        let output = Command::new("git")
-            .args(["ls-tree", "-z", "--name-only", entry.object_id.as_str()])
-            .current_dir(&self.repo_path)
-            .output()
-            .map_err(|error| {
-                format!(
-                    "failed to list Git tree `{object_context}` in repository `{}`: {error}",
-                    self.repo_path.display()
-                )
-            })?;
-        if !output.status.success() {
-            return Err(format_git_failure(
-                "list",
-                &object_context,
-                &self.repo_path,
-                &output,
-            ));
-        }
-
-        output
-            .stdout
-            .split(|byte| *byte == 0)
-            .filter(|name| !name.is_empty())
-            .map(|name| {
-                String::from_utf8(name.to_vec()).map_err(|error| {
-                    format!("Git tree `{object_context}` contains a non-UTF-8 entry name: {error}")
-                })
-            })
-            .collect()
-    }
-
-    fn lookup_entry(
-        &self,
-        commit_id: &str,
-        relative_path: &str,
-    ) -> Result<Option<GitTreeEntry>, String> {
-        let object_context = format!("{commit_id}:{relative_path}");
-        let literal_pathspec = format!(":(literal){relative_path}");
-        let output = Command::new("git")
-            .args([
-                "ls-tree",
-                "-z",
-                "--full-tree",
-                commit_id,
-                "--",
-                literal_pathspec.as_str(),
-            ])
-            .current_dir(&self.repo_path)
-            .output()
-            .map_err(|error| {
-                format!(
-                    "failed to inspect Git object `{object_context}` in repository `{}`: {error}",
-                    self.repo_path.display()
-                )
-            })?;
-        if !output.status.success() {
-            return Err(format_git_failure(
-                "inspect",
-                &object_context,
-                &self.repo_path,
-                &output,
-            ));
-        }
-
-        let mut encoded_entries = output
-            .stdout
-            .split(|byte| *byte == 0)
-            .filter(|entry| !entry.is_empty());
-        let Some(encoded_entry) = encoded_entries.next() else {
-            return Ok(None);
-        };
-        if encoded_entries.next().is_some() {
-            return Err(format!(
-                "Git lookup for `{object_context}` returned multiple entries"
-            ));
-        }
-
-        let tab_index = encoded_entry
+        let prefix = format!("{relative_tree}/");
+        Ok(self
+            .tree
+            .paths
             .iter()
-            .position(|byte| *byte == b'\t')
-            .ok_or_else(|| format!("Git lookup for `{object_context}` returned malformed data"))?;
-        let header = std::str::from_utf8(&encoded_entry[..tab_index]).map_err(|error| {
-            format!("Git lookup for `{object_context}` returned a malformed header: {error}")
-        })?;
-        let mut fields = header.split_ascii_whitespace();
-        let _mode = fields.next();
-        let kind = fields.next();
-        let object_id = fields.next();
-        if _mode.is_none() || kind.is_none() || object_id.is_none() || fields.next().is_some() {
-            return Err(format!(
-                "Git lookup for `{object_context}` returned malformed metadata `{header}`"
-            ));
-        }
-
-        let encoded_path = &encoded_entry[tab_index + 1..];
-        if encoded_path != relative_path.as_bytes() {
-            return Err(format!(
-                "Git lookup for `{object_context}` unexpectedly returned path `{}`",
-                String::from_utf8_lossy(encoded_path)
-            ));
-        }
-
-        Ok(Some(GitTreeEntry {
-            kind: kind.unwrap().to_string(),
-            object_id: object_id.unwrap().to_string(),
-        }))
+            .filter_map(|path| path.strip_prefix(prefix.as_str()))
+            .filter(|name| !name.contains('/'))
+            .map(str::to_string)
+            .collect())
     }
+}
+
+/// Update the remote-tracking refs definitions resolve against. A failure is
+/// logged rather than raised: the refs already on disk remain a usable answer,
+/// and refusing to resolve because the network is down would strand the repo.
+pub(crate) fn fetch_origin(repo_path: &Path) {
+    match Command::new("git")
+        .args(["fetch", "origin"])
+        .current_dir(repo_path)
+        .output()
+    {
+        Ok(output) if !output.status.success() => {
+            log::warn!(
+                "failed to fetch definitions from origin in {} (status {}): {}",
+                repo_path.display(),
+                output.status,
+                command_stderr(&output)
+            );
+        }
+        Err(error) => {
+            log::warn!(
+                "failed to run git fetch origin for definitions in {}: {error}",
+                repo_path.display()
+            );
+        }
+        Ok(_) => {}
+    }
+}
+
+/// Read `.kanna` at one commit with two Git invocations: the recursive listing
+/// that names every entry, then one batched read of every blob it named.
+fn load_definition_tree(repo_path: &Path, commit_id: &str) -> Result<DefinitionTree, String> {
+    let object_context = format!("{commit_id}:{DEFINITION_ROOT}");
+    let literal_pathspec = format!(":(literal){DEFINITION_ROOT}");
+    let output = Command::new("git")
+        .args([
+            "ls-tree",
+            "-r",
+            "-t",
+            "-z",
+            "--full-tree",
+            commit_id,
+            "--",
+            literal_pathspec.as_str(),
+        ])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|error| {
+            format!(
+                "failed to list Git tree `{object_context}` in repository `{}`: {error}",
+                repo_path.display()
+            )
+        })?;
+    if !output.status.success() {
+        return Err(format_git_failure(
+            "list",
+            &object_context,
+            repo_path,
+            &output,
+        ));
+    }
+
+    let mut paths = Vec::new();
+    let mut kinds = HashMap::new();
+    let mut blob_object_ids: Vec<(String, String)> = Vec::new();
+    for encoded_entry in output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+    {
+        let (kind, object_id, path) = parse_tree_entry(&object_context, encoded_entry)?;
+        if kind == "blob" {
+            blob_object_ids.push((path.clone(), object_id));
+        }
+        kinds.insert(path.clone(), kind);
+        paths.push(path);
+    }
+
+    let blobs = read_blobs(repo_path, &object_context, &blob_object_ids)?;
+    Ok(DefinitionTree {
+        paths,
+        kinds,
+        blobs,
+    })
+}
+
+/// One `<mode> <type> <object-id>\t<path>` record from `git ls-tree -z`.
+fn parse_tree_entry(
+    object_context: &str,
+    encoded_entry: &[u8],
+) -> Result<(String, String, String), String> {
+    let tab_index = encoded_entry
+        .iter()
+        .position(|byte| *byte == b'\t')
+        .ok_or_else(|| format!("Git listing for `{object_context}` returned malformed data"))?;
+    let header = std::str::from_utf8(&encoded_entry[..tab_index]).map_err(|error| {
+        format!("Git listing for `{object_context}` returned a malformed header: {error}")
+    })?;
+    let mut fields = header.split_ascii_whitespace();
+    let (Some(_mode), Some(kind), Some(object_id), None) =
+        (fields.next(), fields.next(), fields.next(), fields.next())
+    else {
+        return Err(format!(
+            "Git listing for `{object_context}` returned malformed metadata `{header}`"
+        ));
+    };
+
+    let path = std::str::from_utf8(&encoded_entry[tab_index + 1..]).map_err(|error| {
+        format!("Git listing for `{object_context}` returned a non-UTF-8 path: {error}")
+    })?;
+
+    Ok((kind.to_string(), object_id.to_string(), path.to_string()))
+}
+
+/// Read every listed blob through one `git cat-file --batch`. Object ids are
+/// written from their own thread: Git stops reading requests once its output
+/// pipe fills, so writing and reading from this thread would deadlock on a
+/// definition tree larger than a pipe buffer.
+fn read_blobs(
+    repo_path: &Path,
+    object_context: &str,
+    blobs: &[(String, String)],
+) -> Result<HashMap<String, Vec<u8>>, String> {
+    if blobs.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let mut requested = HashSet::new();
+    let request: String = blobs
+        .iter()
+        .filter(|(_, object_id)| requested.insert(object_id.clone()))
+        .map(|(_, object_id)| format!("{object_id}\n"))
+        .collect();
+
+    let mut child = Command::new("git")
+        .args(["cat-file", "--batch"])
+        .current_dir(repo_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            format!(
+                "failed to read Git objects for `{object_context}` in repository `{}`: {error}",
+                repo_path.display()
+            )
+        })?;
+    let mut stdin = child.stdin.take().ok_or_else(|| {
+        format!("Git object read for `{object_context}` did not provide a request pipe")
+    })?;
+    let writer = std::thread::spawn(move || stdin.write_all(request.as_bytes()));
+
+    let output = child.wait_with_output().map_err(|error| {
+        format!(
+            "failed to read Git objects for `{object_context}` in repository `{}`: {error}",
+            repo_path.display()
+        )
+    })?;
+    let write_result = writer.join().map_err(|_| {
+        format!("Git object read for `{object_context}` lost its request writer to a panic")
+    })?;
+    if !output.status.success() {
+        return Err(format_git_failure(
+            "read",
+            object_context,
+            repo_path,
+            &output,
+        ));
+    }
+    write_result.map_err(|error| {
+        format!(
+            "failed to request Git objects for `{object_context}` in repository `{}`: {error}",
+            repo_path.display()
+        )
+    })?;
+
+    let contents = parse_batch_objects(object_context, &output.stdout)?;
+    blobs
+        .iter()
+        .map(|(path, object_id)| {
+            contents
+                .get(object_id)
+                .map(|content| (path.clone(), content.clone()))
+                .ok_or_else(|| {
+                    format!(
+                        "Git object read for `{object_context}` did not return `{object_id}` for `{path}`"
+                    )
+                })
+        })
+        .collect()
+}
+
+/// `git cat-file --batch` answers each request with `<oid> <type> <size>\n`,
+/// then exactly `size` bytes, then a newline.
+fn parse_batch_objects(
+    object_context: &str,
+    mut stdout: &[u8],
+) -> Result<HashMap<String, Vec<u8>>, String> {
+    let malformed = || format!("Git object read for `{object_context}` returned malformed data");
+    let mut contents = HashMap::new();
+    while !stdout.is_empty() {
+        let newline_index = stdout
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .ok_or_else(malformed)?;
+        let header = std::str::from_utf8(&stdout[..newline_index]).map_err(|_| malformed())?;
+        let mut fields = header.split_ascii_whitespace();
+        let (Some(object_id), Some(_kind), Some(size)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            return Err(format!(
+                "Git object read for `{object_context}` reported `{header}`"
+            ));
+        };
+        let size: usize = size.parse().map_err(|_| malformed())?;
+
+        let body_start = newline_index + 1;
+        let body_end = body_start.checked_add(size).ok_or_else(malformed)?;
+        if stdout.len() <= body_end {
+            return Err(malformed());
+        }
+        contents.insert(object_id.to_string(), stdout[body_start..body_end].to_vec());
+        stdout = &stdout[body_end + 1..];
+    }
+    Ok(contents)
+}
+
+/// Definition reads are confined to the subtree the snapshot loaded, so a path
+/// outside it fails loudly instead of silently reading as absent.
+fn validate_definition_path(relative_path: &Path) -> Result<String, String> {
+    let relative_path = validate_relative_path(relative_path)?;
+    if relative_path == DEFINITION_ROOT || relative_path.starts_with(&format!("{DEFINITION_ROOT}/"))
+    {
+        return Ok(relative_path);
+    }
+    Err(format!(
+        "definition path `{relative_path}` must live under `{DEFINITION_ROOT}/`"
+    ))
 }
 
 fn validate_relative_path(relative_path: &Path) -> Result<String, String> {
@@ -398,7 +538,7 @@ fn format_git_ref_failure(
 
 #[cfg(test)]
 mod tests {
-    use super::RepoDefinitionSnapshot;
+    use super::{OriginFreshness, RepoDefinitionSnapshot};
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use tempfile::TempDir;
@@ -507,7 +647,12 @@ mod tests {
         fixture.publish_config("remote-v2");
         write_config(&fixture.consumer, "local-stale");
 
-        let snapshot = RepoDefinitionSnapshot::resolve(&fixture.consumer, Some("main")).unwrap();
+        let snapshot = RepoDefinitionSnapshot::resolve(
+            &fixture.consumer,
+            Some("main"),
+            OriginFreshness::Fetch,
+        )
+        .unwrap();
 
         assert_eq!(snapshot.ref_name(), "origin/main");
         assert!(snapshot
@@ -524,7 +669,12 @@ mod tests {
         let fixture = GitFixture::new();
         fixture.publish_config("remote-v2");
 
-        let snapshot = RepoDefinitionSnapshot::resolve(&fixture.consumer, Some("main~1")).unwrap();
+        let snapshot = RepoDefinitionSnapshot::resolve(
+            &fixture.consumer,
+            Some("main~1"),
+            OriginFreshness::Fetch,
+        )
+        .unwrap();
 
         assert_eq!(snapshot.ref_name(), "origin/main~1");
         assert_eq!(snapshot.revision(), None);
@@ -540,7 +690,9 @@ mod tests {
         let directory = temp.path().join("not-a-repository");
         std::fs::create_dir(&directory).unwrap();
 
-        let error = RepoDefinitionSnapshot::resolve(&directory, Some("main")).unwrap_err();
+        let error =
+            RepoDefinitionSnapshot::resolve(&directory, Some("main"), OriginFreshness::Fetch)
+                .unwrap_err();
 
         assert!(error.contains("origin/main"), "{error}");
         assert!(error.contains(&directory.display().to_string()), "{error}");
@@ -551,10 +703,20 @@ mod tests {
     #[test]
     fn one_snapshot_stays_pinned_when_origin_advances() {
         let fixture = GitFixture::new();
-        let first = RepoDefinitionSnapshot::resolve(&fixture.consumer, Some("main")).unwrap();
+        let first = RepoDefinitionSnapshot::resolve(
+            &fixture.consumer,
+            Some("main"),
+            OriginFreshness::Fetch,
+        )
+        .unwrap();
 
         fixture.publish_config("remote-v2");
-        let second = RepoDefinitionSnapshot::resolve(&fixture.consumer, Some("main")).unwrap();
+        let second = RepoDefinitionSnapshot::resolve(
+            &fixture.consumer,
+            Some("main"),
+            OriginFreshness::Fetch,
+        )
+        .unwrap();
 
         assert_eq!(
             first.read_optional_utf8(".kanna/config.json").unwrap(),
@@ -572,7 +734,12 @@ mod tests {
         let fixture = GitFixture::new();
         fixture.disconnect_consumer();
 
-        let cached = RepoDefinitionSnapshot::resolve(&fixture.consumer, Some("main")).unwrap();
+        let cached = RepoDefinitionSnapshot::resolve(
+            &fixture.consumer,
+            Some("main"),
+            OriginFreshness::Fetch,
+        )
+        .unwrap();
 
         assert!(cached.revision().is_some());
         assert_eq!(
@@ -590,7 +757,9 @@ mod tests {
         run_git(&local_only, &["add", ".kanna/config.json"]);
         run_git(&local_only, &["commit", "-m", "local main definition"]);
 
-        let bundled_only = RepoDefinitionSnapshot::resolve(&local_only, Some("main")).unwrap();
+        let bundled_only =
+            RepoDefinitionSnapshot::resolve(&local_only, Some("main"), OriginFreshness::Fetch)
+                .unwrap();
 
         assert_eq!(bundled_only.ref_name(), "origin/main");
         assert_eq!(bundled_only.revision(), None);
@@ -607,8 +776,12 @@ mod tests {
         let fixture = GitFixture::new();
 
         for default_branch in [None, Some(""), Some(" \t")] {
-            let snapshot =
-                RepoDefinitionSnapshot::resolve(&fixture.consumer, default_branch).unwrap();
+            let snapshot = RepoDefinitionSnapshot::resolve(
+                &fixture.consumer,
+                default_branch,
+                OriginFreshness::Fetch,
+            )
+            .unwrap();
             assert_eq!(snapshot.ref_name(), "origin/main");
             assert!(snapshot.revision().is_some());
         }
@@ -617,7 +790,12 @@ mod tests {
     #[test]
     fn path_validation_rejects_absolute_empty_parent_and_non_normal_components() {
         let fixture = GitFixture::new();
-        let snapshot = RepoDefinitionSnapshot::resolve(&fixture.consumer, Some("main")).unwrap();
+        let snapshot = RepoDefinitionSnapshot::resolve(
+            &fixture.consumer,
+            Some("main"),
+            OriginFreshness::Fetch,
+        )
+        .unwrap();
 
         for invalid_path in [
             "",
@@ -655,7 +833,12 @@ mod tests {
         std::fs::write(agents.join("nested/child.json"), "child").unwrap();
         fixture.publish_changes("publish agent tree");
 
-        let snapshot = RepoDefinitionSnapshot::resolve(&fixture.consumer, Some("main")).unwrap();
+        let snapshot = RepoDefinitionSnapshot::resolve(
+            &fixture.consumer,
+            Some("main"),
+            OriginFreshness::Fetch,
+        )
+        .unwrap();
 
         assert_eq!(
             snapshot.list_direct_entries(".kanna/agents").unwrap(),
@@ -676,6 +859,122 @@ mod tests {
     }
 
     #[test]
+    fn a_local_resolve_reads_the_refs_on_disk_without_fetching() {
+        let fixture = GitFixture::new();
+        // Published after the consumer cloned, so it is reachable at origin but
+        // absent from the consumer's remote-tracking ref until something fetches.
+        fixture.publish_config("remote-v2");
+
+        let local = RepoDefinitionSnapshot::resolve(
+            &fixture.consumer,
+            Some("main"),
+            OriginFreshness::Local,
+        )
+        .unwrap();
+
+        // A fetching resolve answers `remote-v2` here — origin is reachable and
+        // holds it. Reading `remote-v1` is what proves no fetch was run.
+        assert_eq!(
+            local.read_optional_utf8(".kanna/config.json").unwrap(),
+            Some("remote-v1".to_string())
+        );
+
+        run_git(&fixture.consumer, &["fetch", "origin"]);
+        let after_fetch = RepoDefinitionSnapshot::resolve(
+            &fixture.consumer,
+            Some("main"),
+            OriginFreshness::Local,
+        )
+        .unwrap();
+
+        assert_eq!(
+            after_fetch
+                .read_optional_utf8(".kanna/config.json")
+                .unwrap(),
+            Some("remote-v2".to_string())
+        );
+        assert_ne!(local.revision(), after_fetch.revision());
+    }
+
+    #[test]
+    fn definition_reads_are_confined_to_the_definition_root() {
+        let fixture = GitFixture::new();
+        std::fs::write(fixture.publisher.join("README.md"), "outside").unwrap();
+        run_git(&fixture.publisher, &["add", "README.md"]);
+        fixture.publish_changes("publish a file outside the definition root");
+        let snapshot = RepoDefinitionSnapshot::resolve(
+            &fixture.consumer,
+            Some("main"),
+            OriginFreshness::Fetch,
+        )
+        .unwrap();
+
+        // The snapshot loads `.kanna` only, so anything else must fail loudly
+        // rather than read as absent.
+        let read_error = snapshot.read_optional_utf8("README.md").unwrap_err();
+        assert!(
+            read_error.contains("must live under `.kanna/`"),
+            "{read_error}"
+        );
+        let list_error = snapshot.list_direct_entries("docs").unwrap_err();
+        assert!(
+            list_error.contains("must live under `.kanna/`"),
+            "{list_error}"
+        );
+    }
+
+    #[test]
+    fn kind_mismatches_name_the_object_kind() {
+        let fixture = GitFixture::new();
+        std::fs::create_dir_all(fixture.publisher.join(".kanna/workflows")).unwrap();
+        std::fs::write(fixture.publisher.join(".kanna/workflows/review.json"), "{}").unwrap();
+        fixture.publish_changes("publish a workflow");
+        let snapshot = RepoDefinitionSnapshot::resolve(
+            &fixture.consumer,
+            Some("main"),
+            OriginFreshness::Fetch,
+        )
+        .unwrap();
+
+        let read_error = snapshot.read_optional_utf8(".kanna/workflows").unwrap_err();
+        assert!(read_error.contains("is a tree, not a blob"), "{read_error}");
+        let list_error = snapshot
+            .list_direct_entries(".kanna/workflows/review.json")
+            .unwrap_err();
+        assert!(list_error.contains("is a blob, not a tree"), "{list_error}");
+    }
+
+    #[test]
+    fn listings_keep_git_tree_order_when_a_name_collides_with_a_directory() {
+        let fixture = GitFixture::new();
+        let agents = fixture.publisher.join(".kanna/agents");
+        std::fs::create_dir_all(agents.join("review")).unwrap();
+        std::fs::write(agents.join("review/AGENT.md"), "nested").unwrap();
+        std::fs::write(agents.join("review.md"), "sibling").unwrap();
+        fixture.publish_changes("publish colliding agent names");
+
+        let snapshot = RepoDefinitionSnapshot::resolve(
+            &fixture.consumer,
+            Some("main"),
+            OriginFreshness::Fetch,
+        )
+        .unwrap();
+
+        // Git orders a tree as if its name ended in `/`, which puts
+        // `review.md` before `review`; a plain sort of the names would not.
+        assert_eq!(
+            snapshot.list_direct_entries(".kanna/agents").unwrap(),
+            vec!["review.md".to_string(), "review".to_string()],
+        );
+        assert_eq!(
+            snapshot
+                .read_optional_utf8(".kanna/agents/review/AGENT.md")
+                .unwrap(),
+            Some("nested".to_string())
+        );
+    }
+
+    #[test]
     fn non_utf8_blobs_return_a_clear_error() {
         let fixture = GitFixture::new();
         std::fs::write(
@@ -684,7 +983,12 @@ mod tests {
         )
         .unwrap();
         fixture.publish_changes("publish non-utf8 config");
-        let snapshot = RepoDefinitionSnapshot::resolve(&fixture.consumer, Some("main")).unwrap();
+        let snapshot = RepoDefinitionSnapshot::resolve(
+            &fixture.consumer,
+            Some("main"),
+            OriginFreshness::Fetch,
+        )
+        .unwrap();
 
         let error = snapshot
             .read_optional_utf8(".kanna/config.json")

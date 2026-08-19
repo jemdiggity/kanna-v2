@@ -177,6 +177,62 @@ describe("useAppTaskCreation", () => {
     await openPromise;
   });
 
+  it("offers the workflows on disk immediately, then the ones a fetched origin adds", async () => {
+    // Reads resolve from the refs already on disk, so a workflow pushed since
+    // the last fetch is invisible until this modal fetches origin itself.
+    let fetched = false;
+    let refreshes = 0;
+    updateDesktopServerClientHandlersForTests({
+      fetchRepoKannaDefinitions: async () => ({
+        revision: fetched ? "fetched-rev" : "on-disk-rev",
+        refName: "origin/main",
+        config: {},
+        defaultWorkflow: "default",
+        workflows: fetched ? ["default", "just-pushed"] : ["default"],
+      }),
+      refreshRepoOrigin: async () => {
+        fetched = true;
+        refreshes += 1;
+        return {
+          revision: "fetched-rev",
+          refName: "origin/main",
+          config: {},
+          defaultWorkflow: "default",
+          workflows: ["default", "just-pushed"],
+        };
+      },
+    });
+    const { creation, availableWorkflows } = createTaskCreationHarness();
+
+    await creation.openNewTaskModal();
+
+    // The modal is usable before anything touches the network.
+    expect(availableWorkflows.value).toEqual(["default"]);
+    expect(creation.newTaskOptionsLoading.value).toBe(false);
+
+    await vi.waitFor(() => {
+      expect(availableWorkflows.value).toEqual(["default", "just-pushed"]);
+    });
+    expect(refreshes).toBe(1);
+  });
+
+  it("keeps the New Task modal usable when fetching origin fails", async () => {
+    updateDesktopServerClientHandlersForTests({
+      refreshRepoOrigin: async () => {
+        throw new Error("origin unreachable");
+      },
+    });
+    const { creation, availableWorkflows, showNewTaskModal } = createTaskCreationHarness();
+
+    await creation.openNewTaskModal();
+    await vi.waitFor(() => {
+      expect(creation.newTaskOptionsLoading.value).toBe(false);
+    });
+
+    expect(showNewTaskModal.value).toBe(true);
+    expect(availableWorkflows.value).toEqual(["default"]);
+  });
+
   it("defaults the New Task workflow to the repository's most recently used one", async () => {
     updateDesktopServerClientHandlersForTests({
       fetchRepoKannaDefinitions: async () => ({

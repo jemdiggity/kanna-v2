@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { setTimeout as sleep } from "node:timers/promises";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { WebDriverClient } from "../helpers/webdriver";
@@ -119,6 +119,102 @@ async function restoreNewTaskOptionRequests(client: WebDriverClient): Promise<vo
      }
      delete window.__KANNA_NEW_TASK_OPTIONS_GATE__;
      return true;`,
+  );
+}
+
+/**
+ * Hold the modal's origin refresh so the list it renders from the refs on disk,
+ * the operator's choice, and the refreshed list are three observable steps
+ * rather than one race. Only `fetch-origin` is held: the reads that populate
+ * the modal must still answer, because the point is that they answer first.
+ */
+async function holdOriginRefreshRequests(
+  client: WebDriverClient,
+  repoId: string,
+): Promise<void> {
+  await client.executeSync(
+    `const originalFetch = globalThis.fetch;
+     const callOriginalFetch = originalFetch.bind(globalThis);
+     let releaseRefresh;
+     const refreshGate = new Promise((resolve) => { releaseRefresh = resolve; });
+     const heldPath = ${JSON.stringify(`/v1/repos/${encodeURIComponent(repoId)}/fetch-origin`)};
+     const gate = {
+       originalFetch,
+       requestsHeld: [],
+       released: false,
+       release() {
+         if (this.released) return;
+         this.released = true;
+         releaseRefresh();
+       },
+     };
+     window.__KANNA_ORIGIN_REFRESH_GATE__ = gate;
+     globalThis.fetch = async (input, init) => {
+       const url = typeof input === "string"
+         ? input
+         : input instanceof URL
+           ? input.href
+           : input.url;
+       const path = new URL(url, window.location.href).pathname;
+       if (path === heldPath) {
+         gate.requestsHeld.push(path);
+         await refreshGate;
+       }
+       return callOriginalFetch(input, init);
+     };
+     return true;`,
+  );
+}
+
+async function waitForHeldOriginRefreshRequest(
+  client: WebDriverClient,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const held = await client.executeSync<string[]>(
+      `return Array.from(window.__KANNA_ORIGIN_REFRESH_GATE__?.requestsHeld ?? []);`,
+    );
+    if (held.length > 0) return;
+    await sleep(50);
+  }
+  throw new Error("timed out waiting for the new task modal to request an origin refresh");
+}
+
+async function releaseOriginRefreshRequests(client: WebDriverClient): Promise<void> {
+  await client.executeSync(
+    `window.__KANNA_ORIGIN_REFRESH_GATE__?.release(); return true;`,
+  );
+}
+
+async function restoreOriginRefreshRequests(client: WebDriverClient): Promise<void> {
+  await client.executeSync(
+    `const gate = window.__KANNA_ORIGIN_REFRESH_GATE__;
+     if (gate) {
+       gate.release?.();
+       globalThis.fetch = gate.originalFetch;
+     }
+     delete window.__KANNA_ORIGIN_REFRESH_GATE__;
+     return true;`,
+  );
+}
+
+/** The workflow names the picker is currently offering. Requires it open. */
+async function workflowOptionNames(client: WebDriverClient): Promise<string[]> {
+  return await client.executeSync<string[]>(
+    `return Array.from(document.querySelectorAll('[data-testid^="workflow-option-"]'))
+       .map((option) => option.textContent?.trim() ?? "");`,
+  );
+}
+
+async function openWorkflowPicker(client: WebDriverClient): Promise<void> {
+  await client.click(await client.waitForElement('[data-testid="workflow-toggle"]', 2_000));
+  await client.waitForElement('[data-testid="workflow-options"]', 2_000);
+}
+
+async function selectedWorkflowName(client: WebDriverClient): Promise<string> {
+  return await client.executeSync<string>(
+    `return document.querySelector('[data-testid="workflow-value"]')?.textContent?.trim() ?? "";`,
   );
 }
 
@@ -1080,5 +1176,77 @@ describe("new task modal", () => {
     await client.waitForText('[data-testid="workflow-value"]', "qa-review", 5_000);
     await client.executeSync(buildGlobalKeydownScript({ key: "Escape" }));
     await client.waitForNoElement(".modal-overlay", 5_000);
+  });
+
+  // Publishes to the fixture origin and leaves it published, so it runs last:
+  // a test added after this one would inherit the extra workflow.
+  it("offers a workflow pushed to origin after the modal is already on screen", async () => {
+    // Definition reads resolve from the remote-tracking refs already on disk,
+    // so a workflow pushed since the last fetch can only reach this picker if
+    // the modal fetches origin itself and re-reads behind its own render.
+    const pushedWorkflow = "pushed-review";
+    const originPath = join(dirname(testRepoPath), `${basename(testRepoPath)}-origin.git`);
+    const publisherPath = join(dirname(testRepoPath), "pushed-workflow-publisher");
+    let refreshRequestsHeld = false;
+
+    try {
+      await openNewTaskModal(client);
+      await openWorkflowPicker(client);
+      expect(await workflowOptionNames(client)).not.toContain(pushedWorkflow);
+      await client.click(await client.waitForElement('[data-testid="workflow-toggle"]', 2_000));
+      await client.executeSync(buildGlobalKeydownScript({ key: "Escape" }));
+      await client.waitForNoElement(".modal-overlay", 5_000);
+
+      // Publish from a second clone. Pushing from the imported repo would move
+      // its own remote-tracking ref, which is the very thing that has to be
+      // stale for this test to mean anything.
+      await execFileAsync("git", ["clone", originPath, publisherPath]);
+      await git(publisherPath, ["config", "user.name", "Kanna E2E"]);
+      await git(publisherPath, ["config", "user.email", "kanna-e2e@example.com"]);
+      await mkdir(join(publisherPath, ".kanna", "workflows"), { recursive: true });
+      await writeFile(
+        join(publisherPath, ".kanna", "workflows", `${pushedWorkflow}.json`),
+        JSON.stringify({
+          name: pushedWorkflow,
+          stages: [{ name: "in progress", transition: "manual", agent_provider: "claude" }],
+        }),
+      );
+      await git(publisherPath, ["add", ".kanna"]);
+      await git(publisherPath, ["commit", "-m", "test: publish a workflow the desktop repo has not fetched"]);
+      await git(publisherPath, ["push", "origin", "main"]);
+
+      await holdOriginRefreshRequests(client, repoId);
+      refreshRequestsHeld = true;
+
+      await openNewTaskModal(client);
+      await openWorkflowPicker(client);
+      // The modal is usable before anything reaches the network, and what it
+      // offers at this point is exactly what the refs on disk hold.
+      expect(await workflowOptionNames(client)).not.toContain(pushedWorkflow);
+
+      // Choose a workflow that is not the repo's default, so a refresh that
+      // reset the selection would be visible.
+      await client.click(await client.waitForElement('[data-testid="workflow-option-default"]', 2_000));
+      expect(await selectedWorkflowName(client)).toBe("default");
+
+      await waitForHeldOriginRefreshRequest(client);
+      await releaseOriginRefreshRequests(client);
+
+      // Only a real fetch-origin round trip and re-read can put this option in
+      // the picker: nothing in this test stubs the definitions route.
+      await client.waitForElement('[data-testid="workflow-toggle"]', 2_000);
+      await openWorkflowPicker(client);
+      await client.waitForElement(`[data-testid="workflow-option-${pushedWorkflow}"]`, 10_000);
+      expect(await workflowOptionNames(client)).toContain(pushedWorkflow);
+
+      // The refresh brought new choices without moving the one already made.
+      expect(await selectedWorkflowName(client)).toBe("default");
+    } finally {
+      if (refreshRequestsHeld) {
+        await restoreOriginRefreshRequests(client).catch(() => undefined);
+      }
+      await client.executeSync(buildGlobalKeydownScript({ key: "Escape" })).catch(() => undefined);
+      await client.waitForNoElement(".modal-overlay", 5_000).catch(() => undefined);
+    }
   });
 });

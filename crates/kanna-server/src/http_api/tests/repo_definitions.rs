@@ -590,6 +590,103 @@ async fn json_response(app: &axum::Router, uri: &str) -> (StatusCode, Value) {
     (status, value)
 }
 
+async fn json_post(app: &axum::Router, uri: &str) -> (StatusCode, Value) {
+    let response = app
+        .clone()
+        .oneshot(Request::post(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value = from_slice(&body).unwrap_or_else(|error| {
+        panic!(
+            "expected JSON response for POST {uri} ({status}), got {:?}: {error}",
+            String::from_utf8_lossy(&body)
+        )
+    });
+    (status, value)
+}
+
+fn workflow_names(manifest: &Value) -> Vec<String> {
+    manifest["workflows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|name| name.as_str().unwrap().to_string())
+        .collect()
+}
+
+/// Reading definitions must never wait on the network, but choosing one must
+/// see what the remote actually holds. `fetch-origin` is where that trade is
+/// made: it is the only definitions route that fetches, so a client refreshes
+/// the choices it is about to offer without any render blocking on Git.
+#[tokio::test]
+async fn the_manifest_route_reads_local_refs_and_fetch_origin_refreshes_them() {
+    let workflow = |name: &str| {
+        json!({
+            "name": name,
+            "stages": [{ "name": "in progress", "prompt": "WORK" }],
+        })
+        .to_string()
+    };
+    let (temp, repo) = published_definitions_repo(
+        "fetch-origin",
+        &[
+            (
+                ".kanna/config.json",
+                json!({ "workflow": "first" }).to_string(),
+            ),
+            (".kanna/workflows/first.json", workflow("first")),
+        ],
+    );
+
+    let (status, manifest) = json_response(
+        &manifest_router("definitions-fetch-origin-before", &repo),
+        "/v1/repos/repo-1/kanna-definitions",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let published_revision = manifest["revision"].as_str().unwrap().to_string();
+    assert_eq!(
+        workflow_names(&manifest).contains(&"second".to_string()),
+        false
+    );
+
+    // Publish a second workflow. Nothing has fetched, so the consumer's
+    // remote-tracking ref still points at the first commit.
+    let publisher = temp.path().join("publisher");
+    std::fs::write(
+        publisher.join(".kanna/workflows/second.json"),
+        workflow("second"),
+    )
+    .unwrap();
+    run_git(&publisher, &["add", "."]);
+    run_git(&publisher, &["commit", "-m", "publish second workflow"]);
+    run_git(&publisher, &["push", "origin", "main"]);
+
+    // A cold cache proves the read path itself does not fetch: this router has
+    // never resolved this repo, and still reports the pre-push revision.
+    let app = manifest_router("definitions-fetch-origin-after", &repo);
+    let (status, stale) = json_response(&app, "/v1/repos/repo-1/kanna-definitions").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(stale["revision"], published_revision);
+    assert!(!workflow_names(&stale).contains(&"second".to_string()));
+
+    let (status, refreshed) = json_post(&app, "/v1/repos/repo-1/fetch-origin").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_ne!(refreshed["revision"], published_revision);
+    assert!(workflow_names(&refreshed).contains(&"second".to_string()));
+
+    // The refresh replaces the cached entry, so ordinary reads see it too
+    // rather than waiting out the TTL.
+    let (status, after) = json_response(&app, "/v1/repos/repo-1/kanna-definitions").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(after["revision"], refreshed["revision"]);
+    assert!(workflow_names(&after).contains(&"second".to_string()));
+}
+
 #[tokio::test]
 async fn repo_definition_routes_return_one_remote_revision_and_normalized_snake_case_definitions() {
     let fixture = RemoteDefinitionsFixture::new("routes", "dev");
