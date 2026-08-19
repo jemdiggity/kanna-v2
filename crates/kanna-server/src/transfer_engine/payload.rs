@@ -203,7 +203,16 @@ pub struct TransferTaskPayload {
     pub prompt: Option<String>,
     pub stage: String,
     pub branch: Option<String>,
-    pub pipeline: String,
+    /// The task's workflow name. Emitted under both `workflow` (canonical)
+    /// and `pipeline` (legacy) so a peer running either naming can import it;
+    /// parsing accepts either key.
+    #[serde(alias = "pipeline")]
+    pub workflow: String,
+    /// Legacy mirror of [`Self::workflow`], written on the wire only. Never
+    /// read — [`parse_outgoing_transfer_payload`] resolves the pair, and the
+    /// derived deserializer skips this key so `workflow`'s alias owns it.
+    #[serde(rename = "pipeline", default, skip_deserializing)]
+    pub legacy_pipeline: String,
     pub display_name: Option<String>,
     pub base_ref: Option<String>,
     pub agent_type: Option<String>,
@@ -730,6 +739,13 @@ pub fn parse_outgoing_transfer_payload(value: &Value) -> Result<OutgoingTransfer
         &["resume_session_id", "resumeSessionId"],
         "task resume_session_id must be a string or null",
     )?;
+    // `pipeline` is the legacy spelling of `workflow` on this wire; a peer on
+    // either naming must import.
+    let workflow_name = required_string(
+        task,
+        &["workflow", "workflowName", "pipeline"],
+        "task missing workflow",
+    )?;
     let mode = RepoAcquisitionMode::parse(&required_string(repo, &["mode"], "repo missing mode")?)?;
 
     let bundle = match repo.get("bundle") {
@@ -789,7 +805,8 @@ pub fn parse_outgoing_transfer_payload(value: &Value) -> Result<OutgoingTransfer
             prompt: nullable_string(task, &["prompt"], "task prompt must be a string or null")?,
             stage: required_string(task, &["stage"], "task missing stage")?,
             branch: nullable_string(task, &["branch"], "task branch must be a string or null")?,
-            pipeline: required_string(task, &["pipeline"], "task missing pipeline")?,
+            workflow: workflow_name.clone(),
+            legacy_pipeline: workflow_name,
             display_name: nullable_string(
                 task,
                 &["display_name", "displayName"],
@@ -864,6 +881,45 @@ mod tests {
             "repo": { "mode": "reuse-local", "path": "/repo" },
             "artifacts": artifacts,
         })
+    }
+
+    /// A peer on either naming must import, and every payload this machine
+    /// emits must carry both keys so an older peer can read it.
+    #[test]
+    fn the_task_workflow_parses_from_either_key_and_re_encodes_under_both() {
+        let legacy = parse_outgoing_transfer_payload(&payload_with(json!([])))
+            .expect("legacy `pipeline` key should parse");
+        assert_eq!(legacy.task.workflow, "single-reviewer");
+        assert_eq!(legacy.task.legacy_pipeline, "single-reviewer");
+
+        let mut canonical_value = payload_with(json!([]));
+        let task = canonical_value
+            .get_mut("task")
+            .and_then(Value::as_object_mut)
+            .expect("task object");
+        task.remove("pipeline");
+        task.insert("workflow".into(), json!("specialized-reviewers"));
+        let canonical = parse_outgoing_transfer_payload(&canonical_value)
+            .expect("canonical `workflow` key should parse");
+        assert_eq!(canonical.task.workflow, "specialized-reviewers");
+
+        let encoded = encode_outgoing_transfer_payload(&canonical).expect("re-encode");
+        assert_eq!(encoded["task"]["workflow"], json!("specialized-reviewers"));
+        assert_eq!(encoded["task"]["pipeline"], json!("specialized-reviewers"));
+    }
+
+    #[test]
+    fn a_payload_without_a_workflow_under_either_key_is_refused() {
+        let mut value = payload_with(json!([]));
+        value
+            .get_mut("task")
+            .and_then(Value::as_object_mut)
+            .expect("task object")
+            .remove("pipeline");
+        assert_eq!(
+            parse_outgoing_transfer_payload(&value).unwrap_err(),
+            "task missing workflow"
+        );
     }
 
     #[test]

@@ -17,7 +17,7 @@ import { BUFFY_UID } from "./firebaseAuth";
 
 const execFileAsync = promisify(execFile);
 
-const LINEAR_MANUAL_PIPELINE = JSON.stringify({
+const LINEAR_MANUAL_WORKFLOW = JSON.stringify({
   name: "remote-linear-manual",
   stages: [
     { name: "in progress", transition: "manual", prompt: "$TASK_PROMPT" },
@@ -26,7 +26,7 @@ const LINEAR_MANUAL_PIPELINE = JSON.stringify({
   ]
 });
 
-const LINEAR_AUTO_PIPELINE = JSON.stringify({
+const LINEAR_AUTO_WORKFLOW = JSON.stringify({
   name: "remote-linear-auto",
   stages: [
     { name: "in progress", transition: "auto", prompt: "$TASK_PROMPT" },
@@ -34,7 +34,7 @@ const LINEAR_AUTO_PIPELINE = JSON.stringify({
   ]
 });
 
-const APPROVAL_POST_PIPELINE = JSON.stringify({
+const APPROVAL_POST_WORKFLOW = JSON.stringify({
   name: "remote-approval-post",
   stages: [{
     name: "pr",
@@ -49,7 +49,7 @@ const APPROVAL_POST_PIPELINE = JSON.stringify({
   }]
 });
 
-const SINGLETON_MERGE_PIPELINE = JSON.stringify({
+const SINGLETON_MERGE_WORKFLOW = JSON.stringify({
   name: "singleton-merge",
   stages: [{
     name: "in progress",
@@ -292,7 +292,7 @@ describe("remote task listing, creation, and actions E2E", () => {
       harness,
       advanceTask.taskId,
       "remote-linear-manual",
-      LINEAR_MANUAL_PIPELINE,
+      LINEAR_MANUAL_WORKFLOW,
       "manual"
     );
 
@@ -335,7 +335,7 @@ describe("remote task listing, creation, and actions E2E", () => {
       harness,
       successTask.taskId,
       "remote-linear-auto",
-      LINEAR_AUTO_PIPELINE,
+      LINEAR_AUTO_WORKFLOW,
       "auto"
     );
     const successResponse = asActionResponse(await invokeDesktop(
@@ -365,7 +365,7 @@ describe("remote task listing, creation, and actions E2E", () => {
       harness,
       failureTask.taskId,
       "remote-linear-auto",
-      LINEAR_AUTO_PIPELINE,
+      LINEAR_AUTO_WORKFLOW,
       "auto"
     );
     const failureResponse = asActionResponse(await invokeDesktop(
@@ -598,13 +598,13 @@ async function setWorkflowDefinition(
   harness: RemoteHarness,
   taskId: string,
   workflowName: string,
-  pipelineDefinition: string,
+  workflowDefinition: string,
   completionTransition: "manual" | "auto"
 ): Promise<void> {
   const taskRowsAffected = await executeSql(
     harness,
     "UPDATE pipeline_item SET pipeline = ?1, pipeline_def = ?2 WHERE id = ?3",
-    [workflowName, pipelineDefinition, taskId]
+    [workflowName, workflowDefinition, taskId]
   );
   expect(taskRowsAffected).toBe(1);
 

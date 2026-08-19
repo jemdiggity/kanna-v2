@@ -102,14 +102,16 @@ fn init_provider_repo(root: &Path) -> PathBuf {
     let implement_agent_dir = repo.join(".kanna/agents/implement");
     let review_agent_dir = repo.join(".kanna/agents/review");
     let commit_agent_dir = repo.join(".kanna/agents/commit");
-    let pipeline_dir = repo.join(".kanna/pipelines");
+    // The retired `.kanna/pipelines` directory: repos that still carry it must
+    // keep resolving.
+    let legacy_workflow_dir = repo.join(".kanna/pipelines");
     let provider_bin = repo.join(".kanna/provider-bin");
     std::fs::create_dir_all(&agent_dir).expect("agent directory should be created");
     std::fs::create_dir_all(&implement_agent_dir)
         .expect("implement agent directory should be created");
     std::fs::create_dir_all(&review_agent_dir).expect("review agent directory should be created");
     std::fs::create_dir_all(&commit_agent_dir).expect("commit agent directory should be created");
-    std::fs::create_dir_all(&pipeline_dir).expect("pipeline directory should be created");
+    std::fs::create_dir_all(&legacy_workflow_dir).expect("workflow directory should be created");
     std::fs::create_dir_all(&provider_bin).expect("provider directory should be created");
     std::fs::write(repo.join("README.md"), "provider integration fixture\n")
         .expect("README should be written");
@@ -152,7 +154,7 @@ fn init_provider_repo(root: &Path) -> PathBuf {
     )
     .expect("commit agent definition should be written");
     std::fs::write(
-        pipeline_dir.join("ordered.json"),
+        legacy_workflow_dir.join("ordered.json"),
         json!({
             "name": "ordered",
             "stages": [
@@ -177,7 +179,7 @@ fn init_provider_repo(root: &Path) -> PathBuf {
         })
         .to_string(),
     )
-    .expect("ordered provider pipeline should be written");
+    .expect("ordered provider workflow should be written");
     write_executable(&provider_bin.join("claude"));
 
     for args in [
@@ -682,7 +684,7 @@ async fn repo_provider_and_model_override_agent_frontmatter_through_http_task_cr
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn durable_pipeline_provider_lists_fall_back_for_reloaded_stages_and_posts() {
+async fn durable_workflow_provider_lists_fall_back_for_reloaded_stages_and_posts() {
     let _fixture_guard = PROCESS_FIXTURE_LOCK.lock().await;
     let root = unique_test_root("durable-ordered-fallback");
     std::fs::create_dir_all(&root).expect("test root should be created");
@@ -706,6 +708,8 @@ async fn durable_pipeline_provider_lists_fall_back_for_reloaded_stages_and_posts
         .json(&json!({
             "repoId": repo_id,
             "prompt": "Exercise durable provider fallback",
+            // Deliberately the retired request key, which `CreateTaskRequest`
+            // still accepts as an alias for `workflowName`.
             "pipelineName": "ordered",
             "agentType": "agent"
         }))
@@ -723,7 +727,7 @@ async fn durable_pipeline_provider_lists_fall_back_for_reloaded_stages_and_posts
         .to_string();
     assert_claude_agent_spawn(next_daemon_command(&mut commands).await, &task_id);
 
-    let pipeline_def: String =
+    let workflow_def_json: String =
         Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .expect("server database should open read-only")
             .query_row(
@@ -731,24 +735,24 @@ async fn durable_pipeline_provider_lists_fall_back_for_reloaded_stages_and_posts
                 [&task_id],
                 |row| row.get(0),
             )
-            .expect("created task should persist its pipeline definition");
-    let pipeline_def: Value =
-        serde_json::from_str(&pipeline_def).expect("stored pipeline definition should be JSON");
+            .expect("created task should persist its workflow definition");
+    let workflow_def: Value = serde_json::from_str(&workflow_def_json)
+        .expect("stored workflow definition should be JSON");
     assert_eq!(
-        pipeline_def["stages"][0]["agent_provider"],
+        workflow_def["stages"][0]["agent_provider"],
         json!(["claude"])
     );
     assert_eq!(
-        pipeline_def["stages"][1]["agent_provider"],
+        workflow_def["stages"][1]["agent_provider"],
         json!(["codex", "claude"])
     );
     assert_eq!(
-        pipeline_def["stages"][1]["post"]["agent_provider"],
+        workflow_def["stages"][1]["post"]["agent_provider"],
         json!(["codex", "claude"])
     );
 
     std::fs::remove_file(repo.join(".kanna/pipelines/ordered.json"))
-        .expect("source pipeline should be removed after its snapshot is persisted");
+        .expect("source workflow should be removed after its snapshot is persisted");
 
     client
         .post(format!(

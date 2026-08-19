@@ -160,6 +160,17 @@ acknowledging transferred descriptors.
 
 ## Conventions
 
+- **The concept is a *workflow*; *pipeline* is the retired word for it.** The
+  storage layer still spells it the old way and deliberately keeps doing so:
+  the `pipeline_item` table (a task), its `pipeline` / `pipeline_def` /
+  `initial_pipeline` columns, the `pipeline_item_id` foreign keys, and the
+  recorded migration ids. The rule for new code is: an identifier that names
+  **the table or one of its columns** keeps saying `pipeline`; an identifier
+  that names **the concept** says workflow. Every renamed external surface
+  (routes, request/response keys, event payloads, transfer payloads, config
+  keys, `.kanna/` directory names) still answers to its old name as a
+  deprecated alias — the full table is in
+  `docs/2026-08-19-workflow-rename-remaining-debt.md`.
 - Task stage lives in `pipeline_item.stage`. **Visibility is governed by
   `closed_at`, not stage** — closed tasks keep their last stage. Blocked
   display state derives from `task_blocker`, not tags.

@@ -1207,13 +1207,13 @@ fn open_migrates_origin_main_028_activity_revision() {
 
     let item = db
         .get_pipeline_item("origin-main-task")
-        .expect("load migrated pipeline item")
-        .expect("migrated pipeline item exists");
+        .expect("load migrated task row")
+        .expect("migrated task row exists");
     assert_eq!(item.activity_revision, 0);
     // Rows written before the revision budget existed start with their full
     // budget rather than an exhausted one.
     assert_eq!(item.revision_rounds, 0);
-    let initial_and_current_pipeline: (String, String) = db
+    let initial_and_current_workflow: (String, String) = db
         .conn
         .query_row(
             "SELECT initial_pipeline, pipeline
@@ -1222,9 +1222,9 @@ fn open_migrates_origin_main_028_activity_revision() {
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
-        .expect("backfilled creation-time pipeline");
+        .expect("backfilled creation-time workflow");
     assert_eq!(
-        initial_and_current_pipeline,
+        initial_and_current_workflow,
         ("default".to_string(), "default".to_string())
     );
 
@@ -1252,8 +1252,8 @@ fn open_migrates_origin_main_028_activity_revision() {
         .expect("transition migrated activity");
     let item = db
         .get_pipeline_item("origin-main-task")
-        .expect("reload transitioned pipeline item")
-        .expect("transitioned pipeline item exists");
+        .expect("reload transitioned task row")
+        .expect("transitioned task row exists");
     assert_eq!(item.activity.as_deref(), Some("working"));
     assert_eq!(item.activity_revision, 1);
 
@@ -1484,7 +1484,7 @@ fn open_migrates_legacy_frontend_schema_with_backfills() {
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
-        .expect("migrated pipeline item");
+        .expect("migrated task row");
     assert_eq!(stage, "in progress");
     assert_eq!(pipeline, "default");
     assert_eq!(provider, "claude");
@@ -2112,7 +2112,7 @@ fn insert_pipeline_item_stores_stage_metadata() {
         notify_task_id: None,
         parent_task_id: None,
     })
-    .expect("insert pipeline item");
+    .expect("insert task row");
 
     struct InsertedPipelineItem {
         repo_id: String,
@@ -2840,7 +2840,7 @@ fn revision_rounds_count_agent_rounds_until_reset() {
         None
     );
     assert_eq!(db.task_revision_rounds("task-1").unwrap(), 2);
-    // A pipeline that opted out of the cap always admits.
+    // A workflow that opted out of the cap always admits.
     assert_eq!(
         db.try_claim_agent_revision_round("task-1", 0).unwrap(),
         Some(3)
@@ -3086,7 +3086,7 @@ fn legacy_parent_candidate_probe_is_indexed_and_never_sorts_history() {
     let _ = std::fs::remove_file(path);
 }
 
-fn seed_sticky_pipeline_db(path: &std::path::Path) -> Db {
+fn seed_sticky_workflow_db(path: &std::path::Path) -> Db {
     let db = Db::open_for_tests(path.to_str().expect("utf8 path")).expect("open db");
     for (id, name) in [("repo-1", "first"), ("repo-2", "second")] {
         db.insert_repo(NewRepo {
@@ -3100,23 +3100,23 @@ fn seed_sticky_pipeline_db(path: &std::path::Path) -> Db {
     db
 }
 
-fn insert_sticky_pipeline_task(db: &Db, id: &str, repo_id: &str, pipeline: &str) {
-    insert_sticky_pipeline_child_task(db, id, repo_id, pipeline, None);
+fn insert_sticky_workflow_task(db: &Db, id: &str, repo_id: &str, workflow_name: &str) {
+    insert_sticky_workflow_child_task(db, id, repo_id, workflow_name, None);
 }
 
-fn insert_sticky_pipeline_child_task(
+fn insert_sticky_workflow_child_task(
     db: &Db,
     id: &str,
     repo_id: &str,
-    pipeline: &str,
+    workflow_name: &str,
     parent_task_id: Option<&str>,
 ) {
     db.insert_pipeline_item(NewPipelineItem {
         id,
         repo_id,
-        prompt: "sticky pipeline task",
+        prompt: "sticky workflow task",
         display_name: None,
-        pipeline,
+        pipeline: workflow_name,
         pipeline_def: None,
         stage: "in progress",
         branch: &format!("task-{id}"),
@@ -3130,29 +3130,29 @@ fn insert_sticky_pipeline_child_task(
         notify_task_id: None,
         parent_task_id,
     })
-    .expect("insert pipeline item");
+    .expect("insert task row");
 }
 
 #[test]
-fn recent_repo_pipelines_reports_newest_first_per_repo() {
+fn recent_repo_workflows_reports_newest_first_per_repo() {
     let path = temp_db_path();
-    let db = seed_sticky_pipeline_db(&path);
+    let db = seed_sticky_workflow_db(&path);
 
-    insert_sticky_pipeline_task(&db, "task-1", "repo-1", "default");
-    insert_sticky_pipeline_task(&db, "task-2", "repo-1", "single-reviewer");
+    insert_sticky_workflow_task(&db, "task-1", "repo-1", "default");
+    insert_sticky_workflow_task(&db, "task-2", "repo-1", "single-reviewer");
     // Another repo's history must never leak into this one's default.
-    insert_sticky_pipeline_task(&db, "task-3", "repo-2", "specialized-reviewers");
+    insert_sticky_workflow_task(&db, "task-3", "repo-2", "specialized-reviewers");
 
     assert_eq!(
-        db.recent_repo_pipelines("repo-1", 10).expect("repo-1"),
+        db.recent_repo_workflows("repo-1", 10).expect("repo-1"),
         vec!["single-reviewer".to_string(), "default".to_string()],
     );
     assert_eq!(
-        db.recent_repo_pipelines("repo-2", 10).expect("repo-2"),
+        db.recent_repo_workflows("repo-2", 10).expect("repo-2"),
         vec!["specialized-reviewers".to_string()],
     );
     assert!(db
-        .recent_repo_pipelines("repo-unknown", 10)
+        .recent_repo_workflows("repo-unknown", 10)
         .expect("unknown repo")
         .is_empty());
 
@@ -3161,18 +3161,18 @@ fn recent_repo_pipelines_reports_newest_first_per_repo() {
 }
 
 #[test]
-fn recent_repo_pipelines_survives_a_closed_task() {
+fn recent_repo_workflows_survives_a_closed_task() {
     let path = temp_db_path();
-    let db = seed_sticky_pipeline_db(&path);
+    let db = seed_sticky_workflow_db(&path);
 
-    insert_sticky_pipeline_task(&db, "task-1", "repo-1", "single-reviewer");
+    insert_sticky_workflow_task(&db, "task-1", "repo-1", "single-reviewer");
     db.close_pipeline_item("task-1").expect("close task");
 
     // The desktop snapshot drops closed tasks; the sticky default must not,
     // or a create whose response was lost and whose task then closed would
     // lose the operator's choice.
     assert_eq!(
-        db.recent_repo_pipelines("repo-1", 10).expect("repo-1"),
+        db.recent_repo_workflows("repo-1", 10).expect("repo-1"),
         vec!["single-reviewer".to_string()],
     );
 
@@ -3181,18 +3181,18 @@ fn recent_repo_pipelines_survives_a_closed_task() {
 }
 
 #[test]
-fn recent_repo_pipelines_dedupes_and_ignores_dispatched_child_tasks() {
+fn recent_repo_workflows_dedupes_and_ignores_dispatched_child_tasks() {
     let path = temp_db_path();
-    let db = seed_sticky_pipeline_db(&path);
+    let db = seed_sticky_workflow_db(&path);
 
-    insert_sticky_pipeline_task(&db, "task-1", "repo-1", "default");
-    insert_sticky_pipeline_task(&db, "task-2", "repo-1", "specialized-reviewers");
-    insert_sticky_pipeline_task(&db, "task-3", "repo-1", "default");
+    insert_sticky_workflow_task(&db, "task-1", "repo-1", "default");
+    insert_sticky_workflow_task(&db, "task-2", "repo-1", "specialized-reviewers");
+    insert_sticky_workflow_task(&db, "task-3", "repo-1", "default");
     // A review stage dispatching specialty reviews is not an operator choice.
-    insert_sticky_pipeline_child_task(&db, "task-4", "repo-1", "specialty-review", Some("task-2"));
+    insert_sticky_workflow_child_task(&db, "task-4", "repo-1", "specialty-review", Some("task-2"));
 
     assert_eq!(
-        db.recent_repo_pipelines("repo-1", 10).expect("repo-1"),
+        db.recent_repo_workflows("repo-1", 10).expect("repo-1"),
         vec!["default".to_string(), "specialized-reviewers".to_string()],
     );
 
@@ -3201,16 +3201,16 @@ fn recent_repo_pipelines_dedupes_and_ignores_dispatched_child_tasks() {
 }
 
 #[test]
-fn recent_repo_pipelines_honours_the_requested_limit() {
+fn recent_repo_workflows_honours_the_requested_limit() {
     let path = temp_db_path();
-    let db = seed_sticky_pipeline_db(&path);
+    let db = seed_sticky_workflow_db(&path);
 
-    insert_sticky_pipeline_task(&db, "task-1", "repo-1", "default");
-    insert_sticky_pipeline_task(&db, "task-2", "repo-1", "single-reviewer");
-    insert_sticky_pipeline_task(&db, "task-3", "repo-1", "specialized-reviewers");
+    insert_sticky_workflow_task(&db, "task-1", "repo-1", "default");
+    insert_sticky_workflow_task(&db, "task-2", "repo-1", "single-reviewer");
+    insert_sticky_workflow_task(&db, "task-3", "repo-1", "specialized-reviewers");
 
     assert_eq!(
-        db.recent_repo_pipelines("repo-1", 2).expect("repo-1"),
+        db.recent_repo_workflows("repo-1", 2).expect("repo-1"),
         vec![
             "specialized-reviewers".to_string(),
             "single-reviewer".to_string()
@@ -3222,11 +3222,11 @@ fn recent_repo_pipelines_honours_the_requested_limit() {
 }
 
 #[test]
-fn recent_repo_pipelines_reads_durable_rows_after_reopening_the_database() {
+fn recent_repo_workflows_reads_durable_rows_after_reopening_the_database() {
     let path = temp_db_path();
     let path_string = path.to_string_lossy().to_string();
-    let db = seed_sticky_pipeline_db(&path);
-    insert_sticky_pipeline_task(&db, "task-1", "repo-1", "single-reviewer");
+    let db = seed_sticky_workflow_db(&path);
+    insert_sticky_workflow_task(&db, "task-1", "repo-1", "single-reviewer");
     db.close_pipeline_item("task-1").expect("close task");
     drop(db);
 
@@ -3235,7 +3235,7 @@ fn recent_repo_pipelines_reads_durable_rows_after_reopening_the_database() {
     let reopened = Db::open(&path_string).expect("reopen db");
     assert_eq!(
         reopened
-            .recent_repo_pipelines("repo-1", 10)
+            .recent_repo_workflows("repo-1", 10)
             .expect("repo-1"),
         vec!["single-reviewer".to_string()],
     );

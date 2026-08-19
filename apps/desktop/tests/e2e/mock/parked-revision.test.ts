@@ -113,7 +113,7 @@ describe("parked task human revision recovery", () => {
   });
 
   it("starts a human revision from the normal task UI and resets the exhausted budget", async () => {
-    const pipelineDefinition = JSON.stringify({
+    const workflowDefinition = JSON.stringify({
       name: "parked-revision-e2e",
       revision_limit: 3,
       environments: {
@@ -148,7 +148,7 @@ describe("parked task human revision recovery", () => {
         repoId,
         "Make notarization Keychain lookup deterministic",
         "Parked exhausted revision",
-        pipelineDefinition,
+        workflowDefinition,
         branch,
       ],
     );
@@ -176,7 +176,7 @@ describe("parked task human revision recovery", () => {
        ) VALUES (?, ?, 'Review release security', 'Closed security specialty review',
          'parked-revision-e2e', ?, 'review', 'pty', 'codex', NULL, 'idle', ?,
          datetime('now'), datetime('now'), datetime('now'))`,
-      [childTaskId, repoId, pipelineDefinition, taskId],
+      [childTaskId, repoId, workflowDefinition, taskId],
     );
 
     const loadResult = await callVueMethod(client, "loadItems", repoId);

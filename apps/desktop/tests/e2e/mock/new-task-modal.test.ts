@@ -269,12 +269,12 @@ async function submitTaskFromModal(
   await client.sendKeys(promptInput, prompt);
   const selection = await client.executeSync<{
     agentLabel: string;
-    pipeline: string;
+    workflow: string;
     baseBranch: string;
   }>(
     `return {
        agentLabel: document.querySelector(".agent-provider")?.textContent?.trim() ?? "",
-       pipeline: document.querySelector('[data-testid="workflow-value"]')?.textContent?.trim() ?? "",
+       workflow: document.querySelector('[data-testid="workflow-value"]')?.textContent?.trim() ?? "",
        baseBranch: document.querySelector('[data-testid="base-branch-value"]')?.textContent?.trim() ?? "",
      };`,
   );
@@ -287,7 +287,7 @@ async function submitTaskFromModal(
      Promise.resolve(ctx?.appTaskCreation?.handleNewTaskSubmit?.(
        ${JSON.stringify(prompt)},
        ${JSON.stringify(agentProvider)},
-       ${JSON.stringify(selection.pipeline)},
+       ${JSON.stringify(selection.workflow)},
        ${JSON.stringify(selection.baseBranch)},
        ${JSON.stringify(agentType)}
      ))
@@ -429,12 +429,14 @@ describe("new task modal", () => {
     testRepoPath = fixtureRepoRoot;
 
     const kannaDir = join(testRepoPath, ".kanna");
-    const pipelinesDir = join(kannaDir, "workflows");
+    const workflowsDir = join(kannaDir, "workflows");
     const fakeBinDir = join(kannaDir, "fake-bin");
-    await mkdir(pipelinesDir, { recursive: true });
+    await mkdir(workflowsDir, { recursive: true });
     await mkdir(fakeBinDir, { recursive: true });
     await writeFile(
       join(kannaDir, "config.json"),
+      // Deliberately the retired `pipeline` key: repo configs written before
+      // the workflow rename must still resolve through the whole stack.
       JSON.stringify({
         pipeline: "qa-review",
         workspace: {
@@ -445,11 +447,11 @@ describe("new task modal", () => {
       }),
     );
     await writeFile(
-      join(pipelinesDir, "default.json"),
+      join(workflowsDir, "default.json"),
       JSON.stringify({ name: "default", stages: [{ name: "in progress", transition: "manual", agent_provider: "claude" }] }),
     );
     await writeFile(
-      join(pipelinesDir, "qa-review.json"),
+      join(workflowsDir, "qa-review.json"),
       JSON.stringify({ name: "qa-review", stages: [{ name: "in progress", transition: "manual", agent_provider: "claude" }] }),
     );
     await writeFile(
@@ -646,7 +648,7 @@ describe("new task modal", () => {
 
       const loadedState = await client.executeSync<{
         prompt: string;
-        pipeline: string;
+        workflow: string;
         baseBranch: string;
         createDisabled: boolean;
         agentDisabled: boolean;
@@ -655,7 +657,7 @@ describe("new task modal", () => {
       }>(
         `return {
            prompt: document.querySelector(".prompt-input")?.value ?? "",
-           pipeline: document.querySelector('[data-testid="workflow-value"]')?.textContent?.trim() ?? "",
+           workflow: document.querySelector('[data-testid="workflow-value"]')?.textContent?.trim() ?? "",
            baseBranch: document.querySelector('[data-testid="base-branch-value"]')?.textContent?.trim() ?? "",
            createDisabled: document.querySelector(".modal-overlay .btn-primary")?.disabled === true,
            agentDisabled: document.querySelector(".agent-provider")?.disabled === true,
@@ -665,7 +667,7 @@ describe("new task modal", () => {
       );
       expect(loadedState).toEqual({
         prompt: "Prompt remains editable while options load",
-        pipeline: "qa-review",
+        workflow: "qa-review",
         baseBranch: expect.any(String),
         createDisabled: false,
         agentDisabled: false,
@@ -678,12 +680,12 @@ describe("new task modal", () => {
         buildSelectorKeydownScript(".prompt-input", { key: "Enter", meta: true }),
       );
       const created = await waitForTaskCreated(client, "Prompt remains editable while options load");
-      const pipelineRows = await queryDb(
+      const taskRows = await queryDb(
         client,
         "SELECT pipeline FROM pipeline_item WHERE id = ?",
         [created.id],
       ) as Array<{ pipeline: string }>;
-      expect(pipelineRows[0]?.pipeline).toBe("qa-review");
+      expect(taskRows[0]?.pipeline).toBe("qa-review");
     } finally {
       await restoreNewTaskOptionRequests(client).catch(() => undefined);
       await client.executeSync(
@@ -742,14 +744,14 @@ describe("new task modal", () => {
 
       const cachedState = await client.executeSync<{
         requestsHeld: string[];
-        pipeline: string;
+        workflow: string;
         baseBranch: string;
         baseBranchInvalid: boolean;
       }>(
         `const gate = window.__KANNA_NEW_TASK_OPTIONS_GATE__;
          return {
            requestsHeld: Array.from(gate?.requestsHeld ?? []),
-           pipeline: document.querySelector('[data-testid="workflow-value"]')?.textContent?.trim() ?? "",
+           workflow: document.querySelector('[data-testid="workflow-value"]')?.textContent?.trim() ?? "",
            baseBranch: document.querySelector('[data-testid="base-branch-value"]')?.textContent?.trim() ?? "",
            baseBranchInvalid: document.querySelector('[data-testid="base-branch-value"]')?.classList.contains("invalid") === true,
          };`,
@@ -759,7 +761,7 @@ describe("new task modal", () => {
           definitionsPath,
           providersPath,
         ]),
-        pipeline: "qa-review",
+        workflow: "qa-review",
         baseBranch: "origin/main",
         baseBranchInvalid: false,
       });
@@ -772,14 +774,14 @@ describe("new task modal", () => {
       await client.click(await client.waitForElement('[data-testid="base-branch-toggle"]', 2_000));
 
       const refreshedState = await client.executeSync<{
-        pipeline: string;
-        pipelineOptions: string[];
+        workflow: string;
+        workflowOptions: string[];
         baseBranch: string;
         baseBranchOptions: string[];
       }>(
         `return {
-           pipeline: document.querySelector('[data-testid="workflow-value"]')?.textContent?.trim() ?? "",
-           pipelineOptions: Array.from(document.querySelectorAll('[data-testid^="workflow-option-"]'))
+           workflow: document.querySelector('[data-testid="workflow-value"]')?.textContent?.trim() ?? "",
+           workflowOptions: Array.from(document.querySelectorAll('[data-testid^="workflow-option-"]'))
              .map((option) => option.textContent?.trim() ?? ""),
            baseBranch: document.querySelector('[data-testid="base-branch-value"]')?.textContent?.trim() ?? "",
            baseBranchOptions: Array.from(document.querySelectorAll('[data-testid^="base-branch-option-"]'))
@@ -787,8 +789,8 @@ describe("new task modal", () => {
          };`,
       );
       expect(refreshedState).toEqual({
-        pipeline: "release",
-        pipelineOptions: expect.arrayContaining(["default", "qa-review", "release"]),
+        workflow: "release",
+        workflowOptions: expect.arrayContaining(["default", "qa-review", "release"]),
         baseBranch: "origin/trunk",
         baseBranchOptions: expect.arrayContaining(["origin/trunk", "trunk"]),
       });
@@ -1059,12 +1061,12 @@ describe("new task modal", () => {
     expect(worktreeRows).toEqual([]);
   });
 
-  async function selectWorkflow(pipeline: string): Promise<void> {
+  async function selectWorkflow(workflow: string): Promise<void> {
     await client.click(await client.waitForElement('[data-testid="workflow-toggle"]', 2_000));
     await client.click(
-      await client.waitForElement(`[data-testid="workflow-option-${pipeline}"]`, 2_000),
+      await client.waitForElement(`[data-testid="workflow-option-${workflow}"]`, 2_000),
     );
-    await client.waitForText('[data-testid="workflow-value"]', pipeline, 2_000);
+    await client.waitForText('[data-testid="workflow-value"]', workflow, 2_000);
   }
 
   it("defaults New Task to the workflow this repository last created a task with", async () => {

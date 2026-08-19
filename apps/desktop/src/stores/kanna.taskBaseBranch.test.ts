@@ -924,7 +924,7 @@ describe("kanna store task base branch integration", () => {
         revision: "remote-rev",
         refName: "origin/main",
         config: mockState.repoConfig,
-        defaultWorkflow: mockState.repoConfig.pipeline ?? "default",
+        defaultWorkflow: mockState.repoConfig.workflow ?? "default",
         workflows: ["default"],
       }),
       fetchRepoWorkflowDefinition: async () => ({

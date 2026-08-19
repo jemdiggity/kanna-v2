@@ -35,10 +35,11 @@ impl Db {
             .map(Option::flatten)
     }
 
-    /// Pipeline names most recently chosen by operator-initiated task creates
-    /// in a repo, newest first and deduplicated. `initial_pipeline` is
-    /// intentionally immutable: changing an existing task's current pipeline
-    /// must not rewrite the sticky choice used for the next new task.
+    /// Workflow names most recently chosen by operator-initiated task creates
+    /// in a repo, newest first and deduplicated. The `initial_pipeline` column
+    /// (legacy name for the task's creation-time workflow) is intentionally
+    /// immutable: changing an existing task's current workflow must not rewrite
+    /// the sticky choice used for the next new task.
     ///
     /// This reads the durable task rows and deliberately does not filter on
     /// `closed_at`. The New Task modal's sticky default has to survive the task
@@ -49,12 +50,12 @@ impl Db {
     /// choice: the row was already committed.
     ///
     /// Child tasks are excluded. A specialty review that a review stage
-    /// dispatched is not a pipeline the operator picked, and letting those rows
+    /// dispatched is not a workflow the operator picked, and letting those rows
     /// win would hijack the default after every dispatched review.
     ///
     /// Ordered by `rowid`, i.e. insertion order. `created_at` is second
     /// resolution text, so tasks created within the same second tie under it.
-    pub fn recent_repo_pipelines(
+    pub fn recent_repo_workflows(
         &self,
         repo_id: &str,
         limit: u32,
@@ -217,7 +218,7 @@ impl Db {
     }
 
     /// Direct children of `parent_id`, oldest first, with the lifecycle and
-    /// pipeline identity a fan-out owner joins its children by. This is the
+    /// workflow identity a fan-out owner joins its children by. This is the
     /// single child query; [`Db::list_child_task_ids`] is its id projection,
     /// so both surfaces always agree on membership and ordering.
     ///
@@ -791,7 +792,7 @@ impl Db {
     ///
     /// The read and the increment share one immediate transaction so that two
     /// concurrent requests cannot both observe the last free slot and both
-    /// spend it. `limit` of `0` means the pipeline opted out of the cap.
+    /// spend it. `limit` of `0` means the workflow opted out of the cap.
     pub fn try_claim_agent_revision_round(
         &self,
         id: &str,
@@ -956,16 +957,18 @@ impl Db {
         Ok(())
     }
 
-    /// Replace the task's current pipeline and pinned definition atomically
+    /// Replace the task's current workflow and pinned definition atomically
     /// with the event that announces the change. The creation-time
-    /// `initial_pipeline` is deliberately untouched so re-pipelining does not
-    /// alter the repo's sticky new-task default.
+    /// `initial_pipeline` column is deliberately untouched so re-pointing a
+    /// task at another workflow does not alter the repo's sticky new-task
+    /// default. (`pipeline`, `pipeline_def`, and `initial_pipeline` are the
+    /// legacy storage column names for the task's workflow.)
     pub fn update_pipeline_item_pipeline(
         &self,
         id: &str,
         expected_stage: &str,
-        pipeline: &str,
-        pipeline_def: &str,
+        workflow_name: &str,
+        workflow_def: &str,
         revision_rounds: i64,
         revision_limit: i64,
     ) -> Result<bool, rusqlite::Error> {
@@ -993,8 +996,8 @@ impl Db {
                     current.2.as_deref().unwrap_or("<none>")
                 )));
             }
-            if current.0.as_deref() == Some(pipeline)
-                && current.1.as_deref() == Some(pipeline_def)
+            if current.0.as_deref() == Some(workflow_name)
+                && current.1.as_deref() == Some(workflow_def)
             {
                 return Ok(false);
             }
@@ -1003,7 +1006,7 @@ impl Db {
                 "UPDATE pipeline_item
                  SET pipeline = ?, pipeline_def = ?, updated_at = datetime('now')
                  WHERE id = ? AND closed_at IS NULL AND stage = ?",
-                (pipeline, pipeline_def, id, expected_stage),
+                (workflow_name, workflow_def, id, expected_stage),
             )?;
             if rows_affected == 0 {
                 return Err(rusqlite::Error::QueryReturnedNoRows);
@@ -1013,9 +1016,9 @@ impl Db {
                 TaskEventKind::WorkflowChanged,
                 json!({
                     "fromWorkflow": current.0.clone(),
-                    "toWorkflow": pipeline,
+                    "toWorkflow": workflow_name,
                     "fromPipeline": current.0,
-                    "toPipeline": pipeline,
+                    "toPipeline": workflow_name,
                     "stage": expected_stage,
                     "revisionRounds": revision_rounds,
                     "revisionLimit": revision_limit,
@@ -1274,7 +1277,7 @@ impl Db {
         })
     }
 
-    /// Record that a task reached the end of a pipeline whose final stage
+    /// Record that a task reached the end of a workflow whose final stage
     /// declares the merge-signaling `approve` post without any PR to hand
     /// off. The engine refuses to close such a task; this is what a watcher
     /// (and the operator) sees instead of a silent completion.

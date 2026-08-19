@@ -543,6 +543,8 @@ fn prepend_path_entry(path: Option<&str>, entry: &str) -> String {
         .join(":")
 }
 
+/// The `pipeline` directory name is the legacy on-disk spelling and stays part
+/// of the cross-version socket contract; only the symbols say workflow.
 fn workflow_socket_path(daemon_dir: &str) -> String {
     let dir = PathBuf::from(daemon_dir).join("pipeline");
     kanna_runtime_defaults::socket_path(&dir)

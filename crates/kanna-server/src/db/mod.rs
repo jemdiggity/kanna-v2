@@ -1,3 +1,16 @@
+//! SQLite schema and accessors.
+//!
+//! **Naming note.** The product concept is a *workflow*; the storage layer
+//! still spells it *pipeline*. The `pipeline_item` table (a task), its
+//! `pipeline` / `pipeline_def` / `initial_pipeline` columns, the
+//! `pipeline_item_id` foreign keys, the `idx_pipeline_item_*` indices, and the
+//! recorded migration ids are all deliberately left under the old name — a
+//! table rename buys the least and risks the most, and migration ids are
+//! immutable once recorded. Identifiers here that name *the table or its
+//! columns* therefore keep saying `pipeline_item` / `pipeline`; identifiers
+//! that name *the concept* say workflow. See
+//! `docs/2026-08-19-workflow-rename-remaining-debt.md`.
+
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -113,6 +126,8 @@ pub struct PipelineItem {
     pub issue_number: Option<i64>,
     pub issue_title: Option<String>,
     pub prompt: Option<String>,
+    /// The task's workflow name. `pipeline` is the legacy storage column name
+    /// (see [`crate::db`] — the table rename is deliberate remaining debt).
     pub pipeline: Option<String>,
     pub stage: Option<String>,
     pub pr_number: Option<i64>,
@@ -142,6 +157,8 @@ pub struct PipelineItem {
     pub notify_task_id: Option<String>,
     pub notified_at: Option<String>,
     pub parent_task_id: Option<String>,
+    /// The task's pinned workflow definition JSON. `pipeline_def` is the
+    /// legacy storage column name.
     pub pipeline_def: Option<String>,
     /// Agent-requested revision rounds since the last human-requested one.
     /// Bounds autonomous review/revise loops; a human revision resets it.
@@ -149,7 +166,7 @@ pub struct PipelineItem {
 }
 
 /// One direct child of a parent task, as the fan-out history surfaces read it:
-/// its identity, the pipeline that classifies it, and its lifecycle timestamps.
+/// its identity, the workflow that classifies it, and its lifecycle timestamps.
 /// The verdict itself lives on the child's latest `stage_run`.
 #[derive(Debug, Serialize)]
 pub struct PipelineItemChild {

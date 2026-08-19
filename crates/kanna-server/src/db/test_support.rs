@@ -520,7 +520,7 @@ impl Db {
         &self,
         id: &str,
         branch: &str,
-        pipeline: &str,
+        workflow_name: &str,
         _stage_result: Option<&str>,
         agent_provider: &str,
     ) -> Result<(), rusqlite::Error> {
@@ -528,7 +528,7 @@ impl Db {
             "UPDATE pipeline_item
              SET branch = ?, pipeline = ?, agent_provider = ?
              WHERE id = ?",
-            (branch, pipeline, agent_provider, id),
+            (branch, workflow_name, agent_provider, id),
         )?;
         Ok(())
     }

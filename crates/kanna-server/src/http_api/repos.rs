@@ -221,7 +221,7 @@ pub(super) async fn list_recent_repo_workflows(
         )
     })?;
     let workflows = db
-        .recent_repo_pipelines(&repo_id, RECENT_REPO_WORKFLOW_LIMIT)
+        .recent_repo_workflows(&repo_id, RECENT_REPO_WORKFLOW_LIMIT)
         .map_err(|e| {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,

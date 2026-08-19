@@ -4967,7 +4967,7 @@ async fn advance_stage_route_closes_final_stage_and_tears_down_environment_befor
         .unwrap()
         .success());
     assert!(Command::new("git")
-        .args(["commit", "-m", "add teardown pipeline"])
+        .args(["commit", "-m", "add teardown workflow"])
         .current_dir(&repo_root)
         .status()
         .unwrap()
@@ -5970,11 +5970,11 @@ async fn complete_stage_success_after_failed_post_refinishes_run_and_transitions
     daemon_server.await.unwrap();
 
     // The deferred transition executes on a detached task; wait for it.
-    // The stage landed on is the built-in `no-review` pipeline's second stage:
+    // The stage landed on is the built-in `no-review` workflow's second stage:
     // this repo's `.kanna` fixture is committed but never published to
     // origin/main, which is where definitions resolve from, so it never
     // takes effect. What this test asserts is the transition itself, not
-    // which pipeline supplied the stage name.
+    // which workflow supplied the stage name.
     let db = Db::open(&config.db_path).unwrap();
     let task = wait_for_running_task_stage(&db, "task-1", "pr").await;
     assert_eq!(task.stage.as_deref(), Some("pr"));

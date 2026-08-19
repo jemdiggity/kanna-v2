@@ -68,7 +68,7 @@ pub enum TaskEventKind {
     /// The task finished a final stage that declares the merge-signaling
     /// `approve` post, but no PR URL was ever recorded — so there was nothing
     /// to hand off and Kanna refused to close the task. A watcher must treat
-    /// this as a failed approval, not a completed pipeline.
+    /// this as a failed approval, not a completed workflow.
     MergeHandoffMissing,
     /// A message was delivered into the task's agent session from outside it
     /// — an operator or manager call to `POST /v1/tasks/{id}/input`, or the
@@ -236,7 +236,7 @@ impl TaskEventScope {
 
 impl Db {
     /// Append one event. Callers pass a JSON object payload; `task_id` must be
-    /// a resolved pipeline item id (not a branch name).
+    /// a resolved task id (a `pipeline_item` row id, not a branch name).
     pub fn append_task_event(
         &self,
         task_id: &str,
