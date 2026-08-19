@@ -33,8 +33,12 @@ use tokio::net::UnixListener;
 /// each other's stores.
 static CLAUDE_CONFIG_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Same reason as `CLAUDE_CONFIG_DIR_LOCK`, for the Codex rollout store.
+static CODEX_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 mod core;
 mod local_config;
+mod provider_session;
 mod recovery;
 mod revision;
 mod setup;

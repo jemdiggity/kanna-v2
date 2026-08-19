@@ -323,15 +323,33 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
     // paths mark the previous run failed before preparing the new run. This
     // happens BEFORE the kill so the run record never claims a dead session
     // is still running.
-    {
+    //
+    // The outgoing main run is resolved here too, while it is still the only
+    // main run this session has served: the replacement run is inserted below
+    // and reuses the same session id, so after that point "the session's
+    // latest run" names the wrong conversation. A stage's post shares the
+    // session but is not what a revision reopens, so the main run is the
+    // identity carried into the kill.
+    let outgoing_run_id = {
         let db = Db::open(db_path).map_err(|e| format!("db error: {}", e))?;
+        let outgoing_run_id = db
+            .latest_main_stage_run_id_for_session(&task_id, &session_id)
+            .map_err(|e| format!("db error: {}", e))?;
         db.finish_latest_running_stage_run(&task_id, "succeeded", None, None)
             .map_err(|e| format!("db error: {}", e))?;
-    }
+        outgoing_run_id
+    };
 
     // Only a freshly forked workspace is rolled back on failure; a resumed
     // workspace pre-exists this spawn and must survive it.
-    if let Err(error) = kill_session_replacing(daemon, replacements, &session_id).await {
+    if let Err(error) = kill_session_replacing_for_run(
+        daemon,
+        replacements,
+        &session_id,
+        outgoing_run_id.as_deref(),
+    )
+    .await
+    {
         return Err(rollback_prepared_stage_fork(&prepared, error));
     }
     if !matches!(prepared.workspace, PreparedRunWorkspace::Current) {
@@ -972,7 +990,24 @@ pub(crate) async fn kill_session_replacing(
     replacements: &SessionReplacements,
     session_id: &str,
 ) -> Result<(), String> {
-    replacements.begin(session_id);
+    kill_session_replacing_for_run(daemon, replacements, session_id, None).await
+}
+
+/// Kill a session as part of an orchestrated replacement, naming the stage run
+/// that session was serving.
+///
+/// The daemon reports a provider's own resume id (Codex's rollout uuid) on the
+/// `Exit` it broadcasts for the kill, and that id is the outgoing run's only
+/// record of its conversation. Only the killer knows which run that is: the
+/// Kill response carries no id, and by the time the watcher sees the `Exit`
+/// the replacement run has usually taken the same session id.
+pub(crate) async fn kill_session_replacing_for_run(
+    daemon: &mut DaemonClient,
+    replacements: &SessionReplacements,
+    session_id: &str,
+    outgoing_run_id: Option<&str>,
+) -> Result<(), String> {
+    replacements.begin_for_run(session_id, outgoing_run_id);
     let kill = daemon
         .send_command_retrying_successor(&DaemonCommand::Kill {
             session_id: session_id.to_string(),
@@ -2123,11 +2158,11 @@ mod successor_retry_tests {
             .unwrap();
 
         assert!(
-            replacements.consume("replace-me"),
+            replacements.consume("replace-me").replaced,
             "the one replacement marker must remain for the daemon's one Exit"
         );
         assert!(
-            !replacements.consume("replace-me"),
+            !replacements.consume("replace-me").replaced,
             "a duplicate Exit must not be classified as another replacement"
         );
         let (first, second) = server.await.unwrap();
@@ -2197,7 +2232,7 @@ mod successor_retry_tests {
 
         assert!(error.contains("daemon error: retry"));
         assert!(
-            !replacements.consume("replace-once"),
+            !replacements.consume("replace-once").replaced,
             "terminal retry exhaustion must cancel replacement bookkeeping"
         );
         let (first, second) = server.await.unwrap();
