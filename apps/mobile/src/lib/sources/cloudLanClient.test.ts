@@ -91,8 +91,6 @@ function createClientMock(overrides: Partial<KannaClient> = {}): KannaClient {
     runMergeAgent: vi.fn().mockResolvedValue({ taskId: "task-merge" }),
     advanceTaskStage: vi.fn().mockResolvedValue({ taskId: "task-advanced" }),
     markTaskRead: vi.fn().mockResolvedValue({ taskId: "task-1", activity: "idle" }),
-    pinTask: vi.fn().mockResolvedValue(undefined),
-    unpinTask: vi.fn().mockResolvedValue(undefined),
     abortTaskCreation: vi.fn().mockResolvedValue(undefined),
     closeTask: vi.fn().mockResolvedValue(undefined),
     sendTaskInput: vi.fn().mockResolvedValue(undefined),
@@ -1308,8 +1306,6 @@ describe("createCloudLanClient", () => {
     await client.advanceTaskStage("cloud-only");
     await client.runMergeAgent("cloud-duplicate");
     await client.markTaskRead("cloud-duplicate", 7);
-    await client.pinTask("cloud-duplicate");
-    await client.unpinTask("cloud-only");
     await client.getTask?.("cloud-duplicate");
     await client.getTask?.("cloud-only");
 
@@ -1346,9 +1342,6 @@ describe("createCloudLanClient", () => {
     expect(lan.runMergeAgent).toHaveBeenCalledWith("local-duplicate");
     expect(lan.markTaskRead).toHaveBeenCalledWith("local-duplicate", 7);
     expect(cloud.markTaskRead).not.toHaveBeenCalled();
-    expect(lan.pinTask).toHaveBeenCalledWith("local-duplicate");
-    expect(cloud.pinTask).not.toHaveBeenCalled();
-    expect(cloud.unpinTask).toHaveBeenCalledWith("cloud-only");
     expect(lan.getTask).toHaveBeenCalledWith("local-duplicate");
     expect(cloud.getTask).toHaveBeenCalledWith("cloud-only");
   });

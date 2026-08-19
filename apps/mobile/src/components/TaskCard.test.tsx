@@ -1,5 +1,4 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { TaskActivity, TaskSummary } from "../lib/api/types";
 
 vi.mock("react-native", () => ({
@@ -227,9 +226,9 @@ describe("TaskCard", () => {
         id: "task-1",
         repoId: "repo-1",
         title: "Pinned task",
-        stage: "review",
-        pinned: true
+        stage: "review"
       },
+      pinned: true,
       pinAction: { error: null, onToggle },
       onPress: vi.fn()
     }) as ElementNode;
@@ -253,7 +252,30 @@ describe("TaskCard", () => {
     expect(onToggle).toHaveBeenCalledOnce();
   });
 
-  it("exposes Activity dismissal as a visible button and accessibility action", () => {
+  it("marks a pinned row with a distinct outline rather than a glyph", () => {
+    if (!TaskCard) throw new Error("TaskCard was not loaded");
+    const task: TaskSummary = {
+      id: "task-1",
+      repoId: "repo-1",
+      title: "Pinned task",
+      stage: "review"
+    };
+    const unpinned = TaskCard({ task, onPress: vi.fn() }) as ElementNode;
+    const pinned = TaskCard({
+      task,
+      pinned: true,
+      onPress: vi.fn()
+    }) as ElementNode;
+
+    const unpinnedBorder = flattenStyle(unpinned.props?.style).borderColor;
+    const pinnedBorder = flattenStyle(pinned.props?.style).borderColor;
+    expect(unpinnedBorder).toBe("#20304C");
+    expect(pinnedBorder).toBe("#4C6FA8");
+    // The outline carries it on its own: no pin glyph joins the stage pill.
+    expect(textContent(pinned)).toBe(textContent(unpinned));
+  });
+
+  it("keeps Activity dismissal on the row's accessibility actions with no button", () => {
     if (!TaskCard) throw new Error("TaskCard was not loaded");
     const onDismiss = vi.fn();
     const tree = TaskCard({
@@ -264,21 +286,21 @@ describe("TaskCard", () => {
         stage: "review",
         activity: "unread"
       },
-      dismissAction: { error: null, pending: false, onDismiss },
+      dismissAction: { error: null, onDismiss },
       onPress: vi.fn()
     }) as ElementNode;
 
     expect(tree.props?.accessibilityActions).toEqual([
       { name: "dismiss", label: "Dismiss" }
     ]);
-    expect(findTextNodeByCompleteText(tree, "Dismiss")).not.toBeNull();
-    expect(
-      findNodeByProp(
-        tree,
-        "testID",
-        MOBILE_E2E_IDS.activityDismissButton("task-activity")
-      )
-    ).not.toBeNull();
+    // Swiping is the only dismiss affordance, exactly like pinning.
+    expect(findTextNodeByCompleteText(tree, "Dismiss")).toBeNull();
+
+    const handleAccessibilityAction = tree.props?.onAccessibilityAction as (
+      event: { nativeEvent: { actionName: string } }
+    ) => void;
+    handleAccessibilityAction({ nativeEvent: { actionName: "dismiss" } });
+    expect(onDismiss).toHaveBeenCalledOnce();
   });
 
   it("renders a normalized multiline prompt only once in text and accessibility", () => {

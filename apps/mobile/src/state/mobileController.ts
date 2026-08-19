@@ -47,6 +47,17 @@ import {
   taskUiSlotForSelection,
   taskUiSlotToTaskSummary
 } from "./taskUiSlots";
+import {
+  dismissLocalActivity,
+  pruneLocalTaskListPreferences,
+  seedLocalTaskPinsFromServer,
+  setLocalTaskPinned,
+  type LocalTaskListPreferences
+} from "./taskListPreferences";
+import {
+  createDefaultTaskListPreferencesStore,
+  type TaskListPreferencesStore
+} from "./taskListPreferencesStorage";
 
 export interface MobileController {
   bootstrap(): Promise<void>;
@@ -131,6 +142,8 @@ export interface MobileControllerOptions {
   pairingService?: MachinePairingService;
   replaceClientForTrustChange?: () => void;
   subscribeTaskRouteChanges?: (listener: () => void) => () => void;
+  /** Phone-local pin/dismiss record. Defaults to AsyncStorage. */
+  taskListPreferencesStore?: TaskListPreferencesStore;
 }
 
 let fallbackTaskCreationCounter = 0;
@@ -256,8 +269,6 @@ export function createMobileController(
   >();
   const taskCreationPersistenceFlights = new Map<string, Promise<void>>();
   const recoveryStartedTaskIds = new Set<string>();
-  const taskPinFlights = new Set<string>();
-  const activityDismissFlights = new Set<string>();
   let lastSubmittedTaskCreationId: string | null = null;
   let repoCommandLoadGeneration = 0;
   const repoCommandCatalogs = new Map<string, RepoCommandCatalog>();
@@ -538,6 +549,92 @@ export function createMobileController(
       activityRevision
     };
   };
+  const taskListPreferencesStore =
+    options.taskListPreferencesStore ?? createDefaultTaskListPreferencesStore();
+  let taskListPreferencesStatus: "pending" | "loaded" | "failed" = "pending";
+  let taskListPreferencesLoad: Promise<void> | null = null;
+
+  /**
+   * Hydrates this phone's own pin/dismiss record. Every mutation waits on it,
+   * which is what stops a swipe from replacing a record the phone has not read
+   * yet; once it has landed, a toggle is a local write and the list reorders
+   * from that write alone.
+   */
+  const ensureTaskListPreferences = (): Promise<void> => {
+    taskListPreferencesLoad ??= taskListPreferencesStore
+      .load()
+      .then((result) => {
+        taskListPreferencesStatus = result.status;
+        store.setLocalTaskListPreferences(result.preferences);
+      })
+      .catch(() => {
+        // A store that cannot even report its failure leaves the phone with
+        // the empty record it started with, and saving stays blocked below
+        // rather than replacing whatever is really on disk.
+        taskListPreferencesStatus = "failed";
+      });
+    return taskListPreferencesLoad;
+  };
+
+  const updateLocalTaskListPreferences = async (
+    update: (current: LocalTaskListPreferences) => LocalTaskListPreferences,
+    describeFailure: (detail: string) => string
+  ): Promise<void> => {
+    await ensureTaskListPreferences();
+    const previous = store.getState().localTaskListPreferences;
+    const next = update(previous);
+    if (next === previous) return;
+    // There is no round-trip to wait for: the list reorders (or drops the row)
+    // from this write, and the record on disk follows it.
+    store.setLocalTaskListPreferences(next);
+    try {
+      await taskListPreferencesStore.save(next);
+    } catch (error) {
+      // A write the phone could not keep is not a preference. Put the previous
+      // record back so the list matches what the next launch will read.
+      if (store.getState().localTaskListPreferences === next) {
+        store.setLocalTaskListPreferences(previous);
+      }
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(describeFailure(detail));
+    }
+  };
+
+  /**
+   * An authoritative all-open-tasks snapshot is the only thing that can prove
+   * a pinned task is gone or that a dismissed row has newer activity, so the
+   * local record is seeded and pruned against those reads rather than on a
+   * timer.
+   */
+  const reconcileLocalTaskListPreferences = (
+    snapshot: readonly TaskSummary[]
+  ) => {
+    if (taskListPreferencesStatus === "pending") {
+      // The first snapshot is the one the seed needs, so wait for the record
+      // rather than skipping it.
+      const pendingSnapshot = [...snapshot];
+      void ensureTaskListPreferences().then(() =>
+        reconcileLocalTaskListPreferences(pendingSnapshot)
+      );
+      return;
+    }
+    if (taskListPreferencesStatus !== "loaded") return;
+    const current = store.getState().localTaskListPreferences;
+    const next = pruneLocalTaskListPreferences(
+      seedLocalTaskPinsFromServer(current, snapshot),
+      snapshot
+    );
+    if (next === current) return;
+    store.setLocalTaskListPreferences(next);
+    void taskListPreferencesStore.save(next).catch(() => {
+      // Nothing was lost: the record on disk still holds what this pass wanted
+      // to drop, so show that instead of a list the next launch contradicts.
+      if (store.getState().localTaskListPreferences === next) {
+        store.setLocalTaskListPreferences(current);
+      }
+    });
+  };
+
   const markTaskRead = (
     taskId: string,
     expectedActivityRevision: number | undefined
@@ -1189,6 +1286,7 @@ export function createMobileController(
     lastExplicitRepos = repos;
     store.setRepos(mergeReposWithTaskRepos(repos, recentTasks));
     store.setRecentTasks(recentTasks);
+    reconcileLocalTaskListPreferences(recentTasks);
     if (!(await loadRepoTasks(store.getState().selectedRepoId))) {
       return;
     }
@@ -1277,6 +1375,7 @@ export function createMobileController(
     store.setRepos(mergeReposWithTaskRepos(store.getState().repos, recentTasks));
     store.setRecentTasks(recentTasks);
     store.setRepoTasks(repoTasks);
+    reconcileLocalTaskListPreferences(recentTasks);
     if (!(await refreshSearchResults())) {
       return false;
     }
@@ -1355,6 +1454,9 @@ export function createMobileController(
     );
     const searchQuery = store.getState().searchQuery;
     store.setSearchResults(searchQuery, filterTasksForQuery(tasks, searchQuery));
+    if (cloudAuthoritative) {
+      reconcileLocalTaskListPreferences(tasks);
+    }
     reconcileSelectedTask(true);
     store.reconcileTaskUiSlots(tasks, { authoritative: cloudAuthoritative });
     reconcileSelectedTask(true);
@@ -1700,6 +1802,9 @@ export function createMobileController(
 
   const doBootstrap = async () => {
       setUnownedErrorMessage(null);
+      // Read the phone's own pin/dismiss record alongside the connection: the
+      // lists it orders are about to be filled.
+      void ensureTaskListPreferences();
       await initializeAuth();
 
       try {
@@ -2197,31 +2302,13 @@ export function createMobileController(
       if (!task || task.activity !== "unread") {
         throw new Error("This activity is no longer available.");
       }
-      if (activityDismissFlights.has(task.id)) {
-        return;
-      }
-
-      activityDismissFlights.add(task.id);
-      taskCollectionsRevision += 1;
-      try {
-        const response = await markTaskRead(task.id, task.activityRevision);
-        if (response.activity !== "idle") {
-          throw new Error("The activity changed before it could be dismissed.");
-        }
-        store.setTaskActivity(
-          task.id,
-          "idle",
-          task.activityRevision === undefined
-            ? undefined
-            : task.activityRevision + 1
-        );
-        reconcileSelectedTaskRead();
-      } catch (error) {
-        const detail = error instanceof Error ? error.message : String(error);
-        throw new Error(`Could not dismiss activity: ${detail}`);
-      } finally {
-        activityDismissFlights.delete(task.id);
-      }
+      // Dismissing is this phone hiding a row it has seen. It deliberately
+      // does not mark the task read on the desktop: desktop unread state stays
+      // authoritative for desktop UI and for supervisors.
+      await updateLocalTaskListPreferences(
+        (preferences) => dismissLocalActivity(preferences, task),
+        (detail) => `Could not dismiss activity: ${detail}`
+      );
     },
 
     async setTaskPinned(taskId, pinned) {
@@ -2229,41 +2316,10 @@ export function createMobileController(
       if (!task) {
         throw new Error("This task is no longer available.");
       }
-      if (taskPinFlights.has(task.id)) {
-        return;
-      }
-      const previousPinned = task.pinned ?? false;
-      const previousPinOrder = task.pinOrder ?? null;
-      if (previousPinned === pinned) {
-        return;
-      }
-
-      taskPinFlights.add(task.id);
-      // Reject collection reads that began before this mutation so a stale
-      // repo response cannot immediately overwrite the optimistic pin state.
-      // That guard only dates the read, not the data it carries: a read that
-      // starts after this write can still answer from a snapshot taken before
-      // it. The pin intent is what survives that one — the store holds this
-      // value until a snapshot agrees with it (see `setTaskPinIntent`).
-      taskCollectionsRevision += 1;
-      store.setTaskPinIntent(task.id, pinned, pinned ? 0 : null);
-      try {
-        if (pinned) {
-          await client.pinTask(task.id);
-        } else {
-          await client.unpinTask(task.id);
-        }
-      } catch (error) {
-        // The write failed, so there is nothing to hold: the server state is
-        // whatever it was, and the row says so instead of reverting silently.
-        store.clearTaskPinIntent(task.id);
-        store.setTaskPinState(task.id, previousPinned, previousPinOrder);
-        const action = pinned ? "pin" : "unpin";
-        const detail = error instanceof Error ? error.message : String(error);
-        throw new Error(`Could not ${action} task: ${detail}`);
-      } finally {
-        taskPinFlights.delete(task.id);
-      }
+      await updateLocalTaskListPreferences(
+        (preferences) => setLocalTaskPinned(preferences, task, pinned),
+        (detail) => `Could not ${pinned ? "pin" : "unpin"} task: ${detail}`
+      );
     },
 
     createTask(terminalGeometry) {

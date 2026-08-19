@@ -25,36 +25,41 @@ function ids(ordered: readonly TaskUiSlot[]): string[] {
 }
 
 describe("orderTaskSlotsPinnedFirst", () => {
-  it("hoists pinned slots in owner pin order", () => {
-    const ordered = orderTaskSlotsPinnedFirst(slots([
-      task({ id: "loose-a" }),
-      task({ id: "pin-b", pinned: true, pinOrder: 1 }),
-      task({ id: "loose-b" }),
-      task({ id: "pin-a", pinned: true, pinOrder: 0 })
-    ]));
+  it("hoists pinned slots in this phone's pin order", () => {
+    const ordered = orderTaskSlotsPinnedFirst(
+      slots([
+        task({ id: "loose-a" }),
+        task({ id: "pin-b" }),
+        task({ id: "loose-b" }),
+        task({ id: "pin-a" })
+      ]),
+      ["pin-a", "pin-b"]
+    );
 
     expect(ids(ordered)).toEqual(["pin-a", "pin-b", "loose-a", "loose-b"]);
   });
 
-  it("keeps a pinned slot without an order behind the ordered pins", () => {
-    const ordered = orderTaskSlotsPinnedFirst(slots([
-      task({ id: "pin-unordered", pinned: true }),
-      task({ id: "pin-first", pinned: true, pinOrder: 0 }),
-      task({ id: "loose" })
-    ]));
+  it("ignores the desktop's own pin state on the payload", () => {
+    const ordered = orderTaskSlotsPinnedFirst(
+      slots([
+        task({ id: "desktop-pin", pinned: true, pinOrder: 0 }),
+        task({ id: "phone-pin" })
+      ]),
+      ["phone-pin"]
+    );
 
-    expect(ids(ordered)).toEqual(["pin-first", "pin-unordered", "loose"]);
+    expect(ids(ordered)).toEqual(["phone-pin", "desktop-pin"]);
   });
 
   it("preserves the caller's order within each group and leaves input alone", () => {
     const input = slots([
       task({ id: "loose-a" }),
-      task({ id: "pin-a", pinned: true, pinOrder: 0 }),
+      task({ id: "pin-a" }),
       task({ id: "loose-b" }),
-      task({ id: "pin-b", pinned: true, pinOrder: 0 })
+      task({ id: "pin-b" })
     ]);
 
-    expect(ids(orderTaskSlotsPinnedFirst(input))).toEqual([
+    expect(ids(orderTaskSlotsPinnedFirst(input, ["pin-a", "pin-b"]))).toEqual([
       "pin-a",
       "pin-b",
       "loose-a",
@@ -71,18 +76,18 @@ describe("orderTaskSlotsPinnedFirst", () => {
       desktopId: "desktop-1",
       agentProvider: "claude"
     });
-    const ordered = orderTaskSlotsPinnedFirst([
-      creating,
-      ...slots([task({ id: "pin-a", pinned: true, pinOrder: 0 })])
-    ]);
+    const ordered = orderTaskSlotsPinnedFirst(
+      [creating, ...slots([task({ id: "pin-a" })])],
+      ["pin-a"]
+    );
 
     expect(ids(ordered)).toEqual(["pin-a", "draft-1"]);
   });
 });
 
 describe("isPinnedTask", () => {
-  it("defaults an absent pin flag to unpinned", () => {
-    expect(isPinnedTask(task({ id: "task-1" }))).toBe(false);
-    expect(isPinnedTask(task({ id: "task-2", pinned: true }))).toBe(true);
+  it("reads the phone's own pin list rather than the task payload", () => {
+    expect(isPinnedTask("task-1", [])).toBe(false);
+    expect(isPinnedTask("task-2", ["task-2"])).toBe(true);
   });
 });

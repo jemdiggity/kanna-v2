@@ -1,44 +1,38 @@
-import type { TaskSummary } from "../lib/api/types";
 import type { TaskUiSlot } from "../state/taskUiSlots";
 import { taskUiSlotToTaskSummary } from "../state/taskUiSlots";
 
 /**
- * Owner-pinned tasks belong at the top of the list they were pinned in — the
- * whole point of the gesture, and desktop sidebar parity (pinned rows render
- * above every other row in their repo, ordered by `pinOrder`).
+ * Pinned tasks belong at the top of the list they were pinned in — the whole
+ * point of the gesture, and desktop sidebar parity (pinned rows render above
+ * every other row in their repo).
  *
- * Pin state travels on the task payload itself (`pinned`/`pinOrder`), which
- * both the LAN summaries and the Firestore-published index carry, so ordering
- * is a pure client-side projection of what the list already holds.
+ * Mobile pins are phone-local: the ids come from this device's own record
+ * rather than from the task payload, so the ordering is a pure projection of
+ * state the phone already holds and needs no read to agree with it. The
+ * desktop keeps its own pin state, which mobile no longer reads or writes.
  */
-export function isPinnedTask(task: TaskSummary): boolean {
-  return task.pinned ?? false;
+export function isPinnedTask(
+  taskId: string,
+  pinnedTaskIds: readonly string[]
+): boolean {
+  return pinnedTaskIds.includes(taskId);
 }
 
 /**
- * Owner-side ordering among pinned rows. A pinned row without a `pinOrder`
- * (a payload from a peer that predates the column, or a still-optimistic
- * local pin) sorts after the ordered ones rather than jumping the queue.
- */
-function pinRank(task: TaskSummary): number {
-  const pinOrder = task.pinOrder ?? null;
-  return pinOrder === null ? Number.MAX_SAFE_INTEGER : pinOrder;
-}
-
-/**
- * Hoists pinned slots above the rest, preserving the caller's ordering within
- * each group (so the unpinned tail keeps whatever order the view chose, and
- * pinned rows with equal `pinOrder` stay stable).
+ * Hoists pinned slots above the rest in pin order, preserving the caller's
+ * ordering within each group (so the unpinned tail keeps whatever order the
+ * view chose).
  */
 export function orderTaskSlotsPinnedFirst(
-  slots: readonly TaskUiSlot[]
+  slots: readonly TaskUiSlot[],
+  pinnedTaskIds: readonly string[]
 ): TaskUiSlot[] {
   const pinned: Array<{ slot: TaskUiSlot; rank: number; index: number }> = [];
   const rest: TaskUiSlot[] = [];
   slots.forEach((slot, index) => {
-    const task = taskUiSlotToTaskSummary(slot);
-    if (isPinnedTask(task)) {
-      pinned.push({ slot, rank: pinRank(task), index });
+    const rank = pinnedTaskIds.indexOf(taskUiSlotToTaskSummary(slot).id);
+    if (rank >= 0) {
+      pinned.push({ slot, rank, index });
     } else {
       rest.push(slot);
     }

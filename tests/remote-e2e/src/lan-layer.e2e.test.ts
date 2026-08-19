@@ -10,6 +10,13 @@ import type { TaskTerminalStreamEvent, TaskTerminalSubscription } from "../../..
 import { createLanTransport, type FetchLike, type WebSocketLike } from "../../../apps/mobile/src/lib/transports/lanTransport";
 import { createMobileController } from "../../../apps/mobile/src/state/mobileController";
 import { orderRepoTaskSlots } from "../../../apps/mobile/src/screens/repoTaskOrder";
+import { visibleActivityTasks } from "../../../apps/mobile/src/screens/activityTaskOrder";
+import {
+  emptyLocalTaskListPreferences,
+  localPinnedTaskIds,
+  type LocalTaskListPreferences
+} from "../../../apps/mobile/src/state/taskListPreferences";
+import type { TaskListPreferencesStore } from "../../../apps/mobile/src/state/taskListPreferencesStorage";
 import { projectTaskUiSlots } from "../../../apps/mobile/src/state/taskUiSlots";
 import {
   createSessionStore,
@@ -98,127 +105,104 @@ describe("LAN task loop E2E", () => {
     }));
   });
 
-  it("pins a task over LAN and lifts it to the top of the phone's repo list", async () => {
+  it("pins on the phone alone and lifts the row without writing the desktop", async () => {
     const older = await createScriptedTask(harness, {
-      displayName: "LAN pin older task",
-      repoName: "LAN pin repo"
+      displayName: "LAN local pin older task",
+      repoName: "LAN local pin repo"
     });
     const newer = await createSiblingTask(
       harness,
       older.repoId,
-      "LAN pin newer task"
-    );
-    const transport = createLanClient(harness);
-    const listOrder = async (): Promise<string[]> =>
-      orderRepoTaskSlots(
-        projectTaskUiSlots(await transport.listRepoTasks(older.repoId), [])
-      ).map((slot) => slot.taskId ?? slot.slotId);
-
-    // Whatever the unpinned order is, pinning has to move the task above it.
-    const unpinnedOrder = await listOrder();
-    expect(unpinnedOrder).toHaveLength(2);
-    expect(unpinnedOrder).toContain(newer);
-
-    await transport.pinTask(older.taskId);
-
-    // The LAN summaries the phone sorts have to carry the pin state itself.
-    const pinnedTasks = await transport.listRepoTasks(older.repoId);
-    expect(pinnedTasks).toContainEqual(
-      expect.objectContaining({
-        id: older.taskId,
-        pinned: true,
-        pinOrder: 0
-      })
-    );
-    expect(pinnedTasks).toContainEqual(
-      expect.objectContaining({ id: newer, pinned: false, pinOrder: null })
-    );
-    await expect(listOrder()).resolves.toEqual([
-      older.taskId,
-      ...unpinnedOrder.filter((taskId) => taskId !== older.taskId)
-    ]);
-
-    await transport.unpinTask(older.taskId);
-    await expect(listOrder()).resolves.toEqual(unpinnedOrder);
-  }, 120_000);
-
-  it("keeps a pin the desktop recorded when a pre-pin snapshot lands after it", async () => {
-    const pinned = await createScriptedTask(harness, {
-      displayName: "LAN pin race task",
-      repoName: "LAN pin race repo"
-    });
-    const other = await createSiblingTask(
-      harness,
-      pinned.repoId,
-      "LAN pin race sibling"
+      "LAN local pin newer task"
     );
     const transport = createLanClient(harness);
     const desktopClient = createKannaClient(transport);
-    // The snapshot a read that starts after the pin can still answer from: a
-    // shared in-flight LAN read, the composed client's cached snapshot, or a
-    // cloud index that has not republished yet. Replaying a pre-pin one on
-    // demand is the same interleaving without the timing.
-    let prePinSnapshot: {
-      recentTasks: TaskSummary[];
-      repoTasks: TaskSummary[];
-    } | null = null;
-    const client = {
-      ...desktopClient,
-      listRecentTasks: async () =>
-        prePinSnapshot?.recentTasks ?? desktopClient.listRecentTasks(),
-      listRepoTasks: async (repoId: string) =>
-        prePinSnapshot?.repoTasks ?? desktopClient.listRepoTasks(repoId)
-    };
     const store = createSessionStore();
-    const controller = createMobileController(client, store);
+    const preferences = createLocalTaskListPreferencesMock();
+    const controller = createMobileController(
+      desktopClient,
+      store,
+      undefined,
+      { taskListPreferencesStore: preferences }
+    );
     const listOrder = (): string[] =>
       orderRepoTaskSlots(
-        projectTaskUiSlots(store.getState().repoTasks, [])
+        projectTaskUiSlots(store.getState().repoTasks, []),
+        localPinnedTaskIds(store.getState().localTaskListPreferences)
       ).map((slot) => slot.taskId ?? slot.slotId);
 
     try {
       await controller.bootstrap();
-      await controller.selectRepo(pinned.repoId);
-      expect(listOrder()).toHaveLength(2);
-      expect(listOrder()).toContain(other);
+      await controller.selectRepo(older.repoId);
+      const unpinnedOrder = listOrder();
+      expect(unpinnedOrder).toHaveLength(2);
+      expect(unpinnedOrder).toContain(newer);
 
-      const staleRecentTasks = await desktopClient.listRecentTasks();
-      const staleRepoTasks = await desktopClient.listRepoTasks(pinned.repoId);
+      await controller.setTaskPinned(older.taskId, true);
 
-      await controller.setTaskPinned(pinned.taskId, true);
-      // The desktop really recorded it, so nothing the phone shows next may
-      // take the pin back off.
+      // The reorder comes from the phone's own record, which is also what was
+      // written to its storage.
+      expect(listOrder()[0]).toBe(older.taskId);
+      expect(preferences.saved().pins).toEqual([
+        { taskId: older.taskId, repoId: older.repoId }
+      ]);
+
+      // The desktop's own pin columns are untouched: mobile no longer calls
+      // the pin API, and its list does not depend on the desktop agreeing.
       await expect(
-        desktopClient.listRepoTasks(pinned.repoId)
+        desktopClient.listRepoTasks(older.repoId)
       ).resolves.toContainEqual(
-        expect.objectContaining({ id: pinned.taskId, pinned: true })
+        expect.objectContaining({ id: older.taskId, pinned: false })
+      );
+      await controller.refresh();
+      expect(listOrder()[0]).toBe(older.taskId);
+
+      await controller.setTaskPinned(older.taskId, false);
+      expect(listOrder()).toEqual(unpinnedOrder);
+    } finally {
+      controller.dispose();
+    }
+  }, 120_000);
+
+  it("dismisses Activity on the phone alone, leaving the desktop unread", async () => {
+    const task = await createScriptedTask(harness, {
+      displayName: "LAN local dismiss task",
+      repoName: "LAN local dismiss repo"
+    });
+    const transport = createLanClient(harness);
+    const desktopClient = createKannaClient(transport);
+    const store = createSessionStore();
+    const preferences = createLocalTaskListPreferencesMock();
+    const controller = createMobileController(
+      desktopClient,
+      store,
+      undefined,
+      { taskListPreferencesStore: preferences }
+    );
+    const visibleActivityIds = (): string[] =>
+      visibleActivityTasks(
+        store.getState().recentTasks,
+        store.getState().localTaskListPreferences
+      ).map((candidate) => candidate.id);
+
+    try {
+      await makeTaskUnread(harness, task.taskId);
+      await controller.bootstrap();
+      expect(visibleActivityIds()).toContain(task.taskId);
+
+      await controller.dismissActivity(task.taskId);
+
+      expect(visibleActivityIds()).not.toContain(task.taskId);
+      // Desktop read state stays authoritative for the desktop and for
+      // supervisors: the row the phone hides is still unread over the wire.
+      await expect(desktopClient.listRecentTasks()).resolves.toContainEqual(
+        expect.objectContaining({ id: task.taskId, activity: "unread" })
       );
 
-      prePinSnapshot = {
-        recentTasks: staleRecentTasks,
-        repoTasks: staleRepoTasks
-      };
+      // Newer activity on the same task brings the row back.
+      await makeTaskUnread(harness, task.taskId);
       await controller.refresh();
-      expect(
-        store.getState().repoTasks.find((task) => task.id === pinned.taskId)
-      ).toMatchObject({ pinned: true });
-      expect(listOrder()[0]).toBe(pinned.taskId);
-
-      // The first snapshot that does reflect the write hands the columns back
-      // to the desktop, `pinOrder` included.
-      prePinSnapshot = null;
-      await controller.refresh();
-      expect(
-        store.getState().repoTasks.find((task) => task.id === pinned.taskId)
-      ).toMatchObject({ pinned: true, pinOrder: 0 });
-      expect(listOrder()[0]).toBe(pinned.taskId);
-
-      // And an unpin made anywhere else is no longer fought.
-      await desktopClient.unpinTask(pinned.taskId);
-      await controller.refresh();
-      expect(
-        store.getState().repoTasks.find((task) => task.id === pinned.taskId)
-      ).toMatchObject({ pinned: false });
+      expect(visibleActivityIds()).toContain(task.taskId);
     } finally {
       controller.dispose();
     }
@@ -464,6 +448,49 @@ async function createSiblingTask(
     throw new Error(`Expected a created task id, received ${JSON.stringify(created)}`);
   }
   return taskId;
+}
+
+/** The phone's own pin/dismiss record, held in memory for the run. */
+function createLocalTaskListPreferencesMock(): TaskListPreferencesStore & {
+  saved(): LocalTaskListPreferences;
+} {
+  let stored = emptyLocalTaskListPreferences();
+  return {
+    saved: () => stored,
+    load: async () => ({
+      status: "loaded" as const,
+      preferences: structuredClone(stored)
+    }),
+    save: async (preferences) => {
+      stored = structuredClone(preferences);
+      return structuredClone(preferences);
+    }
+  };
+}
+
+/**
+ * Drives the owner task through busy → idle so the desktop records unread
+ * activity, exactly as a finishing agent session would.
+ */
+async function makeTaskUnread(
+  harness: RemoteHarness,
+  taskId: string
+): Promise<void> {
+  for (const status of ["busy", "idle"] as const) {
+    const response = await fetch(
+      `${harness.lanBaseUrl}/v1/tasks/${encodeURIComponent(taskId)}/actions/runtime-status`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status, selected: false })
+      }
+    );
+    if (!response.ok) {
+      throw new Error(
+        `Could not prepare unread activity (${response.status}) for ${taskId}`
+      );
+    }
+  }
 }
 
 function createLanClient(harness: RemoteHarness): LanTransport {

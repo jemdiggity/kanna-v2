@@ -4,11 +4,18 @@ import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { TaskSummary } from "../lib/api/types";
 import { TaskList } from "../components/TaskList";
 import { projectTaskUiSlots } from "../state/taskUiSlots";
+import {
+  emptyLocalTaskListPreferences,
+  localPinnedTaskIds,
+  type LocalTaskListPreferences
+} from "../state/taskListPreferences";
 
 interface SearchScreenProps {
   focusRequestKey: number;
   query: string;
   results: TaskSummary[];
+  /** This phone's own pinned rows. */
+  taskListPreferences?: LocalTaskListPreferences;
   onChangeQuery(query: string): void;
   onOpenTask(taskId: string): void;
   onSetTaskPinned?(taskId: string, pinned: boolean): Promise<void>;
@@ -18,6 +25,7 @@ export function SearchScreen({
   focusRequestKey,
   query,
   results,
+  taskListPreferences = emptyLocalTaskListPreferences(),
   onChangeQuery,
   onOpenTask,
   onSetTaskPinned
@@ -63,6 +71,7 @@ export function SearchScreen({
               ? "No tasks matched that search yet."
               : "Start typing to search tasks across your desktop."
           }
+          pinnedTaskIds={localPinnedTaskIds(taskListPreferences)}
           taskSlots={projectTaskUiSlots(results, [])}
           onOpenTask={onOpenTask}
           onSetTaskPinned={onSetTaskPinned}

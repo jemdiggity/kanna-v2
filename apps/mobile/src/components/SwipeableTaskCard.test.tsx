@@ -97,13 +97,13 @@ function cardElement(
     id: "task-1",
     repoId: "repo-1",
     title: "Pin this task",
-    stage: "in progress",
-    pinned
+    stage: "in progress"
   };
 
   return (
     <SwipeableTaskCard
       isSubtask={false}
+      pinned={pinned}
       repoLabel={null}
       task={task}
       uiId="task-1"
@@ -227,8 +227,7 @@ describe("SwipeableTaskCard", () => {
       id: "task-1",
       repoId: "repo-1",
       title: "Pin this task",
-      stage: "in progress",
-      pinned: false
+      stage: "in progress"
     };
     let renderer: ReactTestRenderer | null = null;
     await act(async () => {
@@ -333,7 +332,7 @@ describe("SwipeableTaskCard", () => {
     expect(onTogglePin).toHaveBeenCalledWith(false);
   });
 
-  it("reveals Dismiss for a deliberate swipe and exposes a non-swipe fallback", async () => {
+  it("dismisses from the revealed swipe action, the only dismiss affordance", async () => {
     if (!SwipeableTaskCard) throw new Error("SwipeableTaskCard was not loaded");
     const onDismiss = vi.fn().mockResolvedValue(undefined);
     let renderer: ReactTestRenderer | null = null;
@@ -357,30 +356,42 @@ describe("SwipeableTaskCard", () => {
       accessibilityLabel: "Dismiss Review this activity",
       importantForAccessibility: "yes"
     });
-    const button = renderer.root.findByProps({
-      testID: MOBILE_E2E_IDS.activityDismissButton("task-activity")
-    });
+    // The card carries no dismiss button of its own any more.
+    expect(
+      renderer.root.findAllByProps({
+        testID: "mobile.activity-dismiss-button.task-activity"
+      })
+    ).toHaveLength(0);
+
     await act(async () => {
-      button.props.onPress({ stopPropagation: vi.fn() });
+      swipeAction.props.onPress();
       await Promise.resolve();
     });
     expect(onDismiss).toHaveBeenCalledOnce();
+    // A local dismiss has nothing to wait for: the row closes immediately.
+    expect(
+      renderer.root.findByProps({
+        testID: MOBILE_E2E_IDS.activityDismissAction("task-activity")
+      }).props.importantForAccessibility
+    ).toBe("no-hide-descendants");
   });
 
   it("keeps a failed dismissal visible and announces its inline error", async () => {
     if (!SwipeableTaskCard) throw new Error("SwipeableTaskCard was not loaded");
-    const onDismiss = vi.fn().mockRejectedValue(new Error("owner offline"));
+    const onDismiss = vi.fn().mockRejectedValue(new Error("storage full"));
     let renderer: ReactTestRenderer | null = null;
     await act(async () => {
       renderer = create(dismissCardElement(onDismiss));
     });
     if (!renderer) throw new Error("SwipeableTaskCard did not render");
-    const button = renderer.root.findByProps({
-      testID: MOBILE_E2E_IDS.activityDismissButton("task-activity")
+    const card = renderer.root.findByProps({
+      testID: MOBILE_E2E_IDS.taskListItem("task-activity")
     });
 
     await act(async () => {
-      button.props.onPress({ stopPropagation: vi.fn() });
+      card.props.onAccessibilityAction({
+        nativeEvent: { actionName: "dismiss" }
+      });
       await Promise.resolve();
     });
 
@@ -388,57 +399,34 @@ describe("SwipeableTaskCard", () => {
       testID: MOBILE_E2E_IDS.activityDismissError("task-activity")
     });
     expect(error.props.accessibilityLiveRegion).toBe("polite");
-    expect(error.props.children).toBe("owner offline");
+    expect(error.props.children).toBe("storage full");
   });
 
-  it.each([
-    {
-      initialPinned: false,
-      requestedPinned: true,
-      pendingLabel: "Pinning…"
-    },
-    {
-      initialPinned: true,
-      requestedPinned: false,
-      pendingLabel: "Unpinning…"
-    }
-  ])(
-    "keeps $pendingLabel on the revealed action after the optimistic task rerender",
-    async ({ initialPinned, requestedPinned, pendingLabel }) => {
-      let resolveRequest: (() => void) | null = null;
-      const request = new Promise<void>((resolve) => {
-        resolveRequest = resolve;
-      });
-      const onTogglePin = vi.fn().mockReturnValue(request);
-      const renderer = await renderCard(onTogglePin, initialPinned);
-      swipeOpen();
+  it("relabels the revealed action from the phone's own pin state, with no pending step", async () => {
+    const onTogglePin = vi.fn().mockResolvedValue(undefined);
+    const renderer = await renderCard(onTogglePin, false);
+    swipeOpen();
 
-      const action = renderer.root.findByProps({
-        testID: MOBILE_E2E_IDS.taskPinAction("task-1")
-      });
-      act(() => action.props.onPress());
-      expect(onTogglePin).toHaveBeenCalledWith(requestedPinned);
+    const action = renderer.root.findByProps({
+      testID: MOBILE_E2E_IDS.taskPinAction("task-1")
+    });
+    expect(action.findByType("Text").props.children).toBe("Pin");
+    await act(async () => {
+      action.props.onPress();
+      await Promise.resolve();
+    });
+    expect(onTogglePin).toHaveBeenCalledWith(true);
 
-      act(() => {
-        renderer.update(cardElement(requestedPinned, onTogglePin));
-      });
-
-      const pendingAction = renderer.root.findByProps({
-        testID: MOBILE_E2E_IDS.taskPinAction("task-1")
-      });
-      expect(pendingAction.props.accessibilityLabel).toBe(
-        `${pendingLabel} Pin this task`
-      );
-      expect(pendingAction.props.accessibilityState).toEqual({
-        busy: true,
-        disabled: true
-      });
-      expect(pendingAction.findByType("Text").props.children).toBe(pendingLabel);
-
-      await act(async () => {
-        resolveRequest?.();
-        await request;
-      });
-    }
-  );
+    // The list re-renders the row from the local record; no "Pinning…" step
+    // exists to sit between the two labels.
+    act(() => {
+      renderer.update(cardElement(true, onTogglePin));
+    });
+    swipeOpen();
+    const pinnedAction = renderer.root.findByProps({
+      testID: MOBILE_E2E_IDS.taskPinAction("task-1")
+    });
+    expect(pinnedAction.props.accessibilityLabel).toBe("Unpin Pin this task");
+    expect(pinnedAction.findByType("Text").props.children).toBe("Unpin");
+  });
 });

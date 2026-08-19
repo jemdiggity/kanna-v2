@@ -940,8 +940,6 @@ function createDisconnectedClient(): KannaClient {
     runMergeAgent: unavailable,
     advanceTaskStage: unavailable,
     markTaskRead: unavailable,
-    pinTask: unavailable,
-    unpinTask: unavailable,
     closeTask: unavailable,
     sendTaskInput: unavailable,
     readTaskFile: unavailable,
@@ -1152,10 +1150,6 @@ function createTrustedLanFallbackClient({
             taskId,
             expectedActivityRevision
           ),
-    pinTask: async (taskId) =>
-      (await resolveClient(desktopId)).pinTask(taskId),
-    unpinTask: async (taskId) =>
-      (await resolveClient(desktopId)).unpinTask(taskId),
     closeTask: async (taskId) =>
       (await resolveClient(desktopId)).closeTask(taskId),
     sendTaskInput: async (taskId, input) =>
@@ -1372,8 +1366,6 @@ function createDelegatingClient(getClient: () => KannaClient): KannaClient {
       expectedActivityRevision === undefined
         ? getClient().markTaskRead(taskId)
         : getClient().markTaskRead(taskId, expectedActivityRevision),
-    pinTask: (taskId) => getClient().pinTask(taskId),
-    unpinTask: (taskId) => getClient().unpinTask(taskId),
     closeTask: (taskId) => getClient().closeTask(taskId),
     sendTaskInput: (taskId, input) => getClient().sendTaskInput(taskId, input),
     readTaskFile: (taskId, path) => getClient().readTaskFile(taskId, path),

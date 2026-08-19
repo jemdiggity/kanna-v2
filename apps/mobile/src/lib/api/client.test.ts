@@ -107,8 +107,6 @@ describe("createKannaClient", () => {
         taskId: "task-1",
         activity: "idle"
       }),
-      pinTask: vi.fn().mockResolvedValue(undefined),
-      unpinTask: vi.fn().mockResolvedValue(undefined),
       closeTask: vi.fn().mockResolvedValue(undefined),
       sendTaskInput: vi.fn().mockResolvedValue(undefined),
       readTaskFile: vi.fn().mockResolvedValue({
@@ -193,10 +191,6 @@ describe("createKannaClient", () => {
       activity: "idle"
     });
     expect(transport.markTaskRead).toHaveBeenLastCalledWith("task-1", 7);
-    await expect(client.pinTask("task-1")).resolves.toBeUndefined();
-    await expect(client.unpinTask("task-1")).resolves.toBeUndefined();
-    expect(transport.pinTask).toHaveBeenCalledWith("task-1");
-    expect(transport.unpinTask).toHaveBeenCalledWith("task-1");
     await expect(client.closeTask("task-1")).resolves.toBeUndefined();
     await expect(client.sendTaskInput("task-1", "continue")).resolves.toBeUndefined();
     await expect(

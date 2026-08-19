@@ -8,6 +8,11 @@ import { orderRepoTaskSlots } from "./repoTaskOrder";
 import type { TaskUiSlot } from "../state/taskUiSlots";
 import { taskUiSlotToTaskSummary } from "../state/taskUiSlots";
 import type { TaskCollectionStatus } from "../state/sessionStore";
+import {
+  emptyLocalTaskListPreferences,
+  localPinnedTaskIds,
+  type LocalTaskListPreferences
+} from "../state/taskListPreferences";
 
 interface TasksScreenProps {
   heading?: string | null;
@@ -15,6 +20,8 @@ interface TasksScreenProps {
   repos: RepoSummary[];
   selectedRepoId: string | null;
   taskCollectionStatus: TaskCollectionStatus;
+  /** This phone's own pinned/dismissed rows. */
+  taskListPreferences?: LocalTaskListPreferences;
   taskSlots: TaskUiSlot[];
   scrollViewRef?: React.RefObject<ScrollView | null>;
   onOpenMachines?(): void;
@@ -30,6 +37,7 @@ export function TasksScreen({
   repos,
   selectedRepoId,
   taskCollectionStatus,
+  taskListPreferences = emptyLocalTaskListPreferences(),
   taskSlots,
   scrollViewRef,
   onOpenMachines,
@@ -39,6 +47,7 @@ export function TasksScreen({
   onSetTaskPinned
 }: TasksScreenProps) {
   const isRecentView = heading === "Recent";
+  const pinnedTaskIds = localPinnedTaskIds(taskListPreferences);
   const repoNamesById = new Map(repos.map((repo) => [repo.id, repo.name]));
   const recentTaskRepoLabel = (task: TaskSummary): string =>
     task.repoName?.trim() ||
@@ -50,12 +59,15 @@ export function TasksScreen({
       )
     : taskSlots;
   const displayedTaskSlots = isRecentView
-    ? visibleActivityTasks(taskSlots.map(taskUiSlotToTaskSummary)).map(
+    ? visibleActivityTasks(
+        taskSlots.map(taskUiSlotToTaskSummary),
+        taskListPreferences
+      ).map(
         (task) => taskSlots.find(
           (slot) => taskUiSlotToTaskSummary(slot).id === task.id
         )!
       )
-    : orderRepoTaskSlots(scopedTaskSlots);
+    : orderRepoTaskSlots(scopedTaskSlots, pinnedTaskIds);
   const showDesktopSetup =
     !isRecentView &&
     needsDesktopSetup &&
@@ -121,6 +133,7 @@ export function TasksScreen({
               taskCollectionStatus === "loading" && displayedTaskSlots.length === 0
             }
             nestSubtasks
+            pinnedTaskIds={pinnedTaskIds}
             repoLabelForTask={isRecentView ? recentTaskRepoLabel : undefined}
             taskSlots={displayedTaskSlots}
             onOpenTask={onOpenTask}

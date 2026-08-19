@@ -894,6 +894,12 @@ async function readRenderedTaskRowIds(driver: Browser): Promise<string[]> {
   return taskIds;
 }
 
+/**
+ * Pinning is phone-local: the swipe writes this device's own record and the
+ * list reorders from it. The desktop's pin columns must not move — that
+ * divergence is the design, so the journey asserts it rather than the old
+ * server round-trip.
+ */
 export async function exerciseTaskPinSwipe(
   driver: Browser,
   desktopServerUrl: string,
@@ -927,13 +933,9 @@ export async function exerciseTaskPinSwipe(
       pinOrder: task.pinOrder ?? null
     };
   };
-  const initialPinState = await readPinState();
-  const restorePath = initialPinState.pinned ? "pin" : "unpin";
+  const desktopPinStateBefore = await readPinState();
 
-  try {
-    const repo = await driver.$(tasksRepoSelector(detail.repoId));
-    await repo.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
-    await repo.click();
+  const swipeRowOpen = async (): Promise<void> => {
     const row = await driver.$(`~mobile.task-row.${taskId}`);
     await row.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
     const [{ x, y }, { width, height }] = await Promise.all([
@@ -950,48 +952,50 @@ export async function exerciseTaskPinSwipe(
     const action = await driver.$(taskPinActionSelector(taskId));
     await action.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
     await action.click();
+  };
+
+  const repo = await driver.$(tasksRepoSelector(detail.repoId));
+  await repo.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await repo.click();
+
+  try {
+    await swipeRowOpen();
+    // A pin that does not lift the row is the bug this journey guards, and it
+    // must land from the local write alone — no read is awaited in between.
     await driver.waitUntil(
-      async () =>
-        (await readPinState()).pinned === !initialPinState.pinned,
+      async () => (await readRenderedTaskRowIds(driver))[0] === taskId,
       {
         interval: POLL_INTERVAL_MS,
         timeout: SCREEN_TIMEOUT_MS,
-        timeoutMsg: "Expected the swiped pin action to update canonical server state"
+        timeoutMsg:
+          "Expected the pinned task to render as the first row of its repo list"
       }
     );
-    if (!initialPinState.pinned) {
-      // Pin state that does not lift the row is the bug this journey guards:
-      // the list has to re-render with the pinned task first.
-      await driver.waitUntil(
-        async () => (await readRenderedTaskRowIds(driver))[0] === taskId,
-        {
-          interval: POLL_INTERVAL_MS,
-          timeout: SCREEN_TIMEOUT_MS,
-          timeoutMsg:
-            "Expected the pinned task to render as the first row of its repo list"
-        }
+    const desktopPinStateAfter = await readPinState();
+    if (
+      desktopPinStateAfter.pinned !== desktopPinStateBefore.pinned ||
+      desktopPinStateAfter.pinOrder !== desktopPinStateBefore.pinOrder
+    ) {
+      throw new Error(
+        "Expected the phone-local pin to leave the desktop's pin state alone, " +
+          `but it became ${JSON.stringify(desktopPinStateAfter)}`
       );
     }
   } finally {
-    if ((await readPinState()).pinned !== initialPinState.pinned) {
-      const response = await fetchImpl(
-        `${desktopServerUrl}/v1/tasks/${encodeURIComponent(taskId)}/actions/${restorePath}`,
-        {
-          method: "POST",
-          ...(initialPinState.pinned
-            ? {
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  position: initialPinState.pinOrder ?? 0
-                })
-              }
-            : {})
-        }
-      );
-      if (!response.ok) {
-        throw new Error(`Could not restore pin fixture state (${response.status}).`);
+    // Leave the phone as it was found: the pin lives only on this device, so
+    // the app itself is the only place to take it back off.
+    await swipeRowOpen();
+    await driver.waitUntil(
+      async () => {
+        const rows = await readRenderedTaskRowIds(driver);
+        return rows.length > 0 && rows[0] !== taskId;
+      },
+      {
+        interval: POLL_INTERVAL_MS,
+        timeout: SCREEN_TIMEOUT_MS,
+        timeoutMsg: "Expected the unpinned task to fall back down its repo list"
       }
-    }
+    ).catch(() => undefined);
   }
 }
 
@@ -1015,6 +1019,11 @@ async function prepareTaskUnreadActivity(
   }
 }
 
+/**
+ * Dismissing is phone-local too: the row leaves this device's Activity list
+ * while the desktop stays unread, and newer activity on the same task brings
+ * the row back.
+ */
 export async function exerciseActivityDismissSwipe(
   driver: Browser,
   desktopServerUrl: string,
@@ -1056,15 +1065,6 @@ export async function exerciseActivityDismissSwipe(
   await action.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
   await action.click();
   await driver.waitUntil(
-    async () => (await readActivity()) === "idle",
-    {
-      interval: POLL_INTERVAL_MS,
-      timeout: SCREEN_TIMEOUT_MS,
-      timeoutMsg:
-        "Expected Activity dismissal to acknowledge the owner task without removing it"
-    }
-  );
-  await driver.waitUntil(
     async () => {
       const dismissedRow = await driver.$(`~mobile.task-row.${taskId}`);
       return !(await dismissedRow.isExisting());
@@ -1072,10 +1072,18 @@ export async function exerciseActivityDismissSwipe(
     {
       interval: POLL_INTERVAL_MS,
       timeout: SCREEN_TIMEOUT_MS,
-      timeoutMsg: "Expected the acknowledged Activity row to leave the list"
+      timeoutMsg: "Expected the dismissed Activity row to leave the list"
     }
   );
+  // The desktop keeps its own read state: only this phone stopped showing it.
+  const desktopActivity = await readActivity();
+  if (desktopActivity !== "unread") {
+    throw new Error(
+      `Expected the local dismissal to leave the desktop unread, but it is ${desktopActivity}.`
+    );
+  }
 
+  // Newer activity than the dismissed generation resurfaces the row.
   await prepareTaskUnreadActivity(desktopServerUrl, taskId, fetchImpl);
   const laterActivityRow = await driver.$(`~mobile.task-row.${taskId}`);
   await laterActivityRow.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });

@@ -15,9 +15,6 @@ export const MOBILE_E2E_IDS = {
   activityDismissAction(taskId: string): string {
     return `mobile.activity-dismiss-action.${taskId}`;
   },
-  activityDismissButton(taskId: string): string {
-    return `mobile.activity-dismiss-button.${taskId}`;
-  },
   activityDismissError(taskId: string): string {
     return `mobile.activity-dismiss-error.${taskId}`;
   },

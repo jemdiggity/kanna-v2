@@ -20,6 +20,10 @@ import {
   type CompanionStatus
 } from "@kanna/visual-companion";
 import type { TaskCompanionStreamEvent } from "../lib/api/client";
+import {
+  emptyLocalTaskListPreferences,
+  type LocalTaskListPreferences
+} from "./taskListPreferences";
 import type { MobileAuthState } from "../lib/firebase/auth";
 import type {
   PersistedSessionContext,
@@ -133,6 +137,8 @@ export interface SessionState {
   pendingRepoCommandTask: PendingRepoCommandTask | null;
   unavailableRepoCommandIds: string[];
   recentTasks: TaskSummary[];
+  /** This phone's own pinned/dismissed rows. Never published to the desktop. */
+  localTaskListPreferences: LocalTaskListPreferences;
   searchQuery: string;
   searchResults: TaskSummary[];
   selectedTaskId: string | null;
@@ -248,17 +254,7 @@ export interface SessionStore {
     activity: TaskActivity,
     activityRevision?: number
   ): void;
-  setTaskPinState(
-    taskId: string,
-    pinned: boolean,
-    pinOrder: number | null
-  ): void;
-  setTaskPinIntent(
-    taskId: string,
-    pinned: boolean,
-    pinOrder: number | null
-  ): void;
-  clearTaskPinIntent(taskId: string): void;
+  setLocalTaskListPreferences(preferences: LocalTaskListPreferences): void;
   setTaskPrompt(taskId: string, prompt: string): void;
   setSelectedTask(taskId: string | null): void;
   beginTaskAction(taskId: string, action: TaskStageAction): boolean;
@@ -353,6 +349,7 @@ export function createSessionStore(): SessionStore {
     pendingRepoCommandTask: null,
     unavailableRepoCommandIds: [],
     recentTasks: [],
+    localTaskListPreferences: emptyLocalTaskListPreferences(),
     searchQuery: "",
     searchResults: [],
     selectedTaskId: null,
@@ -496,117 +493,6 @@ export function createSessionStore(): SessionStore {
       uniqueTasks.push(task);
     }
     return uniqueTasks;
-  };
-  /**
-   * Pin writes the phone made itself, kept until a snapshot agrees with them.
-   *
-   * Unlike activity there is no server-issued revision on the pin columns, so
-   * a snapshot cannot be dated: a task read that starts after the write can
-   * still carry pre-write state (a shared in-flight LAN read, the composed
-   * client's cached snapshot, or a cloud index that has not republished yet).
-   * Dropping the optimistic value on the next snapshot of any age is what let
-   * a successful first pin revert. The phone's own confirmed write is
-   * therefore the source of truth for these two columns until a snapshot
-   * reflects it — at which point the server's own values, including the
-   * `pinOrder` it assigned, take over.
-   */
-  const taskPinIntents = new Map<
-    string,
-    { pinned: boolean; pinOrder: number | null }
-  >();
-  /**
-   * The task objects this store stamped with an intent's own value. One
-   * collection is routinely derived from another the store already stamped —
-   * the repo slice is projected from the recent snapshot before the repo read
-   * lands — and the phone's own value arriving back is not the confirmation
-   * the intent is waiting for.
-   */
-  const taskPinIntentProjections = new WeakSet<TaskSummary>();
-  const stampTaskPinIntent = (
-    task: TaskSummary,
-    intent: { pinned: boolean; pinOrder: number | null }
-  ): TaskSummary => {
-    if (
-      (task.pinned ?? false) === intent.pinned &&
-      (task.pinOrder ?? null) === intent.pinOrder
-    ) {
-      taskPinIntentProjections.add(task);
-      return task;
-    }
-    const stamped: TaskSummary = {
-      ...task,
-      pinned: intent.pinned,
-      pinOrder: intent.pinOrder
-    };
-    taskPinIntentProjections.add(stamped);
-    return stamped;
-  };
-  const applyTaskPinIntents = (
-    tasks: readonly TaskSummary[]
-  ): readonly TaskSummary[] => {
-    if (taskPinIntents.size === 0) {
-      return tasks;
-    }
-    return tasks.map((task) => {
-      const intent = taskPinIntents.get(task.id);
-      if (!intent) {
-        return task;
-      }
-      if (
-        !taskPinIntentProjections.has(task) &&
-        (task.pinned ?? false) === intent.pinned
-      ) {
-        taskPinIntents.delete(task.id);
-        return task;
-      }
-      return stampTaskPinIntent(task, intent);
-    });
-  };
-  const applyTaskPinState = (
-    taskId: string,
-    pinned: boolean,
-    pinOrder: number | null,
-    stampAsIntent = false
-  ): void => {
-    let changed = false;
-    const updateTask = (task: TaskSummary): TaskSummary => {
-      if (task.id !== taskId) {
-        return task;
-      }
-      if (stampAsIntent) {
-        const stamped = stampTaskPinIntent(task, { pinned, pinOrder });
-        changed = changed || stamped !== task;
-        return stamped;
-      }
-      if (
-        (task.pinned ?? false) === pinned &&
-        (task.pinOrder ?? null) === pinOrder
-      ) {
-        return task;
-      }
-      changed = true;
-      return { ...task, pinned, pinOrder };
-    };
-    const updateTasks = (tasks: readonly TaskSummary[]): TaskSummary[] =>
-      tasks.map(updateTask);
-    const repoTasks = updateTasks(state.repoTasks);
-    const recentTasks = updateTasks(state.recentTasks);
-    const searchResults = updateTasks(state.searchResults);
-    const taskUiSlots = state.taskUiSlots.map((slot) =>
-      slot.state === "ready" && slot.task.id === taskId
-        ? { ...slot, task: updateTask(slot.task) }
-        : slot
-    );
-    if (!changed) return;
-
-    state = {
-      ...state,
-      repoTasks,
-      recentTasks,
-      searchResults,
-      taskUiSlots
-    };
-    publish();
   };
   const preserveNewerTaskActivities = (
     currentTasks: readonly TaskSummary[],
@@ -931,7 +817,7 @@ export function createSessionStore(): SessionStore {
     setRepoTasks(repoTasks) {
       const uniqueTasks = preserveNewerTaskActivities(
         state.repoTasks,
-        applyTaskPinIntents(dedupeTasksById(repoTasks))
+        dedupeTasksById(repoTasks)
       );
       if (areTaskListsEqual(state.repoTasks, uniqueTasks)) {
         return;
@@ -1043,7 +929,7 @@ export function createSessionStore(): SessionStore {
     setRecentTasks(tasks) {
       const uniqueTasks = preserveNewerTaskActivities(
         state.recentTasks,
-        applyTaskPinIntents(dedupeTasksById(tasks))
+        dedupeTasksById(tasks)
       );
       if (areTaskListsEqual(state.recentTasks, uniqueTasks)) {
         return;
@@ -1058,7 +944,7 @@ export function createSessionStore(): SessionStore {
     setSearchResults(query, results) {
       const uniqueResults = preserveNewerTaskActivities(
         state.searchResults,
-        applyTaskPinIntents(dedupeTasksById(results))
+        dedupeTasksById(results)
       );
       state = {
         ...state,
@@ -1109,15 +995,9 @@ export function createSessionStore(): SessionStore {
       };
       publish();
     },
-    setTaskPinState(taskId, pinned, pinOrder) {
-      applyTaskPinState(taskId, pinned, pinOrder);
-    },
-    setTaskPinIntent(taskId, pinned, pinOrder) {
-      taskPinIntents.set(taskId, { pinned, pinOrder });
-      applyTaskPinState(taskId, pinned, pinOrder, true);
-    },
-    clearTaskPinIntent(taskId) {
-      taskPinIntents.delete(taskId);
+    setLocalTaskListPreferences(preferences) {
+      state = { ...state, localTaskListPreferences: preferences };
+      publish();
     },
     setTaskPrompt(taskId, prompt) {
       let changed = false;
@@ -1429,7 +1309,7 @@ export function createSessionStore(): SessionStore {
         ...state,
         taskUiSlots: reconcileTaskUiSlotsState(
           state.taskUiSlots,
-          applyTaskPinIntents(tasks),
+          tasks,
           options
         )
       };

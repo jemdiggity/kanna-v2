@@ -22,9 +22,14 @@ export interface TaskCardPinAction {
   onToggle(): void;
 }
 
+/**
+ * Dismiss has no button of its own either: swiping the row is the only
+ * dismiss affordance, and this action keeps it reachable from VoiceOver. It
+ * is a local write, so there is no pending state to report — only a failure
+ * to record it.
+ */
 export interface TaskCardDismissAction {
   error: string | null;
-  pending: boolean;
   onDismiss(): void;
 }
 
@@ -33,6 +38,8 @@ interface TaskCardProps {
   uiId?: string;
   isSubtask?: boolean;
   repoLabel?: string | null;
+  /** This phone's own pin state for the row. */
+  pinned?: boolean;
   pinAction?: TaskCardPinAction;
   dismissAction?: TaskCardDismissAction;
   onPress(): void;
@@ -43,13 +50,13 @@ export function TaskCard({
   uiId = task.id,
   isSubtask = false,
   repoLabel = null,
+  pinned = false,
   pinAction,
   dismissAction,
   onPress
 }: TaskCardProps) {
   const model = buildTaskListItemModel(task);
   const blocked = isTaskBlocked(task);
-  const pinned = task.pinned ?? false;
   const pinLabel = pinned ? "Unpin" : "Pin";
   const accessibilityLabel = [
     isSubtask ? "Subtask" : null,
@@ -95,7 +102,7 @@ export function TaskCard({
       accessibilityRole="button"
       accessibilityValue={{ text: effectiveActivity }}
       accessible
-      style={styles.card}
+      style={[styles.card, pinned ? styles.cardPinned : null]}
       testID={MOBILE_E2E_IDS.taskListItem(uiId)}
       onAccessibilityAction={handleAccessibilityAction}
       onPress={onPress}
@@ -119,28 +126,6 @@ export function TaskCard({
                 blocked
               </Text>
             </View>
-          ) : null}
-          {dismissAction ? (
-            <Pressable
-              accessibilityLabel={`${
-                dismissAction.pending ? "Dismissing" : "Dismiss"
-              } ${model.title}`}
-              accessibilityRole="button"
-              accessibilityState={{
-                busy: dismissAction.pending,
-                disabled: dismissAction.pending
-              }}
-              style={styles.dismissButton}
-              testID={MOBILE_E2E_IDS.activityDismissButton(uiId)}
-              onPress={(event) => {
-                event.stopPropagation();
-                dismissAction.onDismiss();
-              }}
-            >
-              <Text style={styles.dismissButtonLabel}>
-                {dismissAction.pending ? "Dismissing…" : "Dismiss"}
-              </Text>
-            </Pressable>
           ) : null}
         </View>
       </View>
@@ -187,6 +172,15 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     gap: 10,
     padding: 16
+  },
+  /**
+   * Pinned rows say so with their outline: the same border, one step brighter.
+   * The row's position already carries most of the message, so this only has
+   * to be legible at a glance — a badge or glyph would shout over the stage
+   * pill it sits beside.
+   */
+  cardPinned: {
+    borderColor: "#4C6FA8"
   },
   row: {
     flexDirection: "row",
@@ -241,20 +235,6 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: "700",
     textTransform: "uppercase"
-  },
-  dismissButton: {
-    alignSelf: "flex-end",
-    backgroundColor: "#321B24",
-    borderColor: "#713548",
-    borderRadius: 999,
-    borderWidth: 1,
-    paddingHorizontal: 10,
-    paddingVertical: 6
-  },
-  dismissButtonLabel: {
-    color: "#FFB8C4",
-    fontSize: 11,
-    fontWeight: "800"
   },
   preview: {
     color: "#B8C6DB",

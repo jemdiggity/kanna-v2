@@ -833,24 +833,6 @@ export function createRemoteTransport({
           : { expectedActivityRevision },
         true
       ),
-    pinTask: async (taskId: string) => {
-      await requestTask<TaskActionResponse>(
-        taskId,
-        "POST",
-        (localTaskId) =>
-          `/v1/tasks/${encodeURIComponent(localTaskId)}/actions/pin`,
-        {}
-      );
-    },
-    unpinTask: async (taskId: string) => {
-      await requestTask<TaskActionResponse>(
-        taskId,
-        "POST",
-        (localTaskId) =>
-          `/v1/tasks/${encodeURIComponent(localTaskId)}/actions/unpin`,
-        null
-      );
-    },
     closeTask: async (taskId: string) => {
       const closingRoute = taskRouteForId(taskId);
       await requestTask<void>(

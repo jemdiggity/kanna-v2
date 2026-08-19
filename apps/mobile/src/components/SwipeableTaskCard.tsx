@@ -34,6 +34,8 @@ interface SwipeableTaskCardProps {
   uiId: string;
   isSubtask: boolean;
   repoLabel: string | null;
+  /** This phone's own pin state for the row. */
+  pinned?: boolean;
   onPress(): void;
   onDismiss?(): Promise<void>;
   onTogglePin?(pinned: boolean): Promise<void>;
@@ -44,14 +46,13 @@ export function SwipeableTaskCard({
   uiId,
   isSubtask,
   repoLabel,
+  pinned = false,
   onPress,
   onDismiss,
   onTogglePin
 }: SwipeableTaskCardProps) {
   const [swipeOffset, setSwipeOffset] = useState(0);
-  const [pendingPinned, setPendingPinned] = useState<boolean | null>(null);
   const [pinError, setPinError] = useState<string | null>(null);
-  const [dismissPending, setDismissPending] = useState(false);
   const [dismissError, setDismissError] = useState<string | null>(null);
   // A revealed row rests there until something closes it, so the gesture
   // config — which `PanResponder` builds once — has to read the position the
@@ -103,22 +104,17 @@ export function SwipeableTaskCard({
     []
   );
 
-  const pinned = task.pinned ?? false;
+  // Pin and dismiss are phone-local writes, so the row has no in-flight state
+  // to report: the label is whatever this phone's own record says right now.
   const pinLabel = pinned ? "Unpin" : "Pin";
-  const pendingPinLabel =
-    pendingPinned === null
-      ? null
-      : pendingPinned
-        ? "Pinning…"
-        : "Unpinning…";
   const actionRevealed = swipeOffset < 0;
-  const dismissLabel = dismissPending ? "Dismissing…" : "Dismiss";
-  const swipeLabel = onDismiss ? dismissLabel : pendingPinLabel ?? pinLabel;
+  const swipeLabel = onDismiss ? "Dismiss" : pinLabel;
 
   if (!onTogglePin && !onDismiss) {
     return (
       <TaskCard
         isSubtask={isSubtask}
+        pinned={pinned}
         repoLabel={repoLabel}
         task={task}
         uiId={uiId}
@@ -140,30 +136,22 @@ export function SwipeableTaskCard({
 
   const togglePin = async () => {
     if (!onTogglePin) return;
-    if (pendingPinned !== null) return;
-    const nextPinned = !pinned;
-    setPendingPinned(nextPinned);
     setPinError(null);
+    moveTo(0);
     try {
-      await onTogglePin(nextPinned);
-      moveTo(0);
+      await onTogglePin(!pinned);
     } catch (error) {
       setPinError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setPendingPinned(null);
     }
   };
   const dismiss = async () => {
-    if (!onDismiss || dismissPending) return;
-    setDismissPending(true);
+    if (!onDismiss) return;
     setDismissError(null);
+    moveTo(0);
     try {
       await onDismiss();
-      moveTo(0);
     } catch (error) {
       setDismissError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setDismissPending(false);
     }
   };
 
@@ -175,10 +163,6 @@ export function SwipeableTaskCard({
           buildTaskListItemModel(task).title
         }`}
         accessibilityRole="button"
-        accessibilityState={{
-          busy: onDismiss ? dismissPending : pendingPinned !== null,
-          disabled: onDismiss ? dismissPending : pendingPinned !== null
-        }}
         importantForAccessibility={
           actionRevealed ? "yes" : "no-hide-descendants"
         }
@@ -214,7 +198,6 @@ export function SwipeableTaskCard({
             onDismiss
               ? {
                   error: dismissError,
-                  pending: dismissPending,
                   onDismiss: () => {
                     void dismiss();
                   }
@@ -232,6 +215,7 @@ export function SwipeableTaskCard({
                 }
               : undefined
           }
+          pinned={pinned}
           repoLabel={repoLabel}
           task={task}
           uiId={uiId}
