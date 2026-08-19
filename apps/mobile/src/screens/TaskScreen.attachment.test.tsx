@@ -110,11 +110,16 @@ interface Harness {
   pickAttachment: ReturnType<typeof vi.fn>;
 }
 
-function screenElement(harness: Harness, task: TaskSummary = PTY_TASK) {
+function screenElement(
+  harness: Harness,
+  task: TaskSummary = PTY_TASK,
+  desktopSupportsAttachments = true
+) {
   if (!TaskScreen) throw new Error("TaskScreen was not loaded");
   return (
     <TaskScreen
       task={task}
+      desktopSupportsAttachments={desktopSupportsAttachments}
       terminalOutput={createTerminalOutput("")}
       terminalOutputEpoch={1}
       terminalOutputStart={0}
@@ -149,10 +154,13 @@ function createHarness(
 
 async function renderScreen(
   harness: Harness,
-  task: TaskSummary = PTY_TASK
+  task: TaskSummary = PTY_TASK,
+  desktopSupportsAttachments = true
 ): Promise<ReactTestRenderer> {
   await act(async () => {
-    rendered = create(screenElement(harness, task));
+    rendered = create(
+      screenElement(harness, task, desktopSupportsAttachments)
+    );
   });
   if (!rendered) throw new Error("the task screen was not rendered");
   return rendered;
@@ -281,6 +289,70 @@ describe("TaskScreen photo attachments", () => {
       tree.root.findByProps({ testID: MOBILE_E2E_IDS.taskAttachmentError })
         .props.children
     ).toContain("over the 3.0 MB attachment limit");
+  });
+
+  it("explains a denied photo permission instead of closing on silence", async () => {
+    // The distinction that matters: a cancelled pick says nothing, a denied
+    // permission must say something, because iOS and Android show no second
+    // dialog and the control would otherwise look broken forever.
+    const harness = createHarness(async () => {
+      throw new ImageAttachmentError(
+        "permission-denied",
+        "Photo access is off. Turn it on for Kanna in Settings to attach a photo."
+      );
+    });
+    const tree = await renderScreen(harness);
+
+    await press(tree, MOBILE_E2E_IDS.taskAttachButton);
+
+    expect(has(tree, MOBILE_E2E_IDS.taskAttachmentPreview)).toBe(false);
+    expect(
+      tree.root.findByProps({ testID: MOBILE_E2E_IDS.taskAttachmentError })
+        .props.children
+    ).toContain("Settings");
+  });
+
+  it("clears a permission message once a later pick succeeds", async () => {
+    let deny = true;
+    const harness = createHarness(async () => {
+      if (deny) {
+        throw new ImageAttachmentError(
+          "permission-denied",
+          "Photo access is off. Turn it on for Kanna in Settings to attach a photo."
+        );
+      }
+      return PHOTO;
+    });
+    const tree = await renderScreen(harness);
+
+    await press(tree, MOBILE_E2E_IDS.taskAttachButton);
+    expect(has(tree, MOBILE_E2E_IDS.taskAttachmentError)).toBe(true);
+
+    deny = false;
+    await press(tree, MOBILE_E2E_IDS.taskAttachButton);
+
+    expect(has(tree, MOBILE_E2E_IDS.taskAttachmentError)).toBe(false);
+    expect(has(tree, MOBILE_E2E_IDS.taskAttachmentPreview)).toBe(true);
+  });
+
+  it("offers no attach control when the desktop does not advertise attachments", async () => {
+    // A desktop built before attachments accepts the field, ignores it, and
+    // answers 204 — so offering the control would clear the composer and let
+    // the agent answer about a picture it never received.
+    const harness = createHarness();
+    const tree = await renderScreen(harness, PTY_TASK, false);
+
+    expect(has(tree, MOBILE_E2E_IDS.taskAttachButton)).toBe(false);
+  });
+
+  it("still sends text to a desktop that does not advertise attachments", async () => {
+    const harness = createHarness();
+    const tree = await renderScreen(harness, PTY_TASK, false);
+
+    await typeDraft(tree, "continue");
+    await sendComposer(tree);
+
+    expect(harness.onSendInput).toHaveBeenCalledWith("continue");
   });
 
   it("offers no attach control on an SDK-mode task, whose input never carries a file", async () => {

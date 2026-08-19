@@ -51,7 +51,14 @@ export interface PreparedImageAttachment {
   payload: ImageAttachmentPayload;
 }
 
-export type ImageAttachmentFailureReason = "too-large" | "unreadable";
+export type ImageAttachmentFailureReason =
+  | "too-large"
+  | "unreadable"
+  /** The OS refused photo-library or camera access. Distinct from a cancelled
+   * pick, which is not a failure at all: once a permission is denied neither
+   * iOS nor Android shows its dialog again, so silence would leave the user
+   * tapping a control that can never do anything. */
+  | "permission-denied";
 
 export class ImageAttachmentError extends Error {
   readonly reason: ImageAttachmentFailureReason;

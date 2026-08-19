@@ -47,12 +47,49 @@ export type ImageAttachmentRenderer = (
   size: ImageAttachmentSize | null
 ) => Promise<RenderedImage>;
 
+/**
+ * The Expo permission response, narrowed to what the composer acts on.
+ *
+ * `canAskAgain` is the field that decides what the user is told. Once a
+ * permission is denied the OS never shows its own dialog again, so a message
+ * saying "try again" would be a lie and the only real route left is Settings.
+ * `status` is carried through untouched for the same reason `granted` is not
+ * enough on its own: it is what a diagnostic needs to tell "denied" from
+ * "restricted by policy".
+ */
+export interface ImageAttachmentPermission {
+  granted: boolean;
+  canAskAgain: boolean;
+  status: string;
+}
+
 export interface ImageAttachmentPickerDeps {
-  /** Resolves false when the user declined; the caller shows nothing further. */
-  requestPermission(source: ImageAttachmentSource): Promise<boolean>;
+  /** Reports the OS decision. A denial is a failure the user must hear about,
+   * not the silent `null` a cancellation resolves to. */
+  requestPermission(
+    source: ImageAttachmentSource
+  ): Promise<ImageAttachmentPermission>;
   /** Resolves null when the user cancelled the picker. */
   launch(source: ImageAttachmentSource): Promise<PickedImageAsset | null>;
   render: ImageAttachmentRenderer;
+}
+
+/**
+ * What to tell the user about a refused permission.
+ *
+ * Same split as the pairing sheet's camera card: a permanently denied
+ * permission points at Settings, because nothing the app does will raise the
+ * system dialog again; a still-askable one only needs the user to try once
+ * more and allow it.
+ */
+export function imageAttachmentPermissionMessage(
+  source: ImageAttachmentSource,
+  permission: ImageAttachmentPermission
+): string {
+  const subject = source === "camera" ? "Camera access" : "Photo access";
+  return permission.canAskAgain
+    ? `${subject} is needed to attach a photo. Tap 📎 again and allow it.`
+    : `${subject} is off. Turn it on for Kanna in Settings to attach a photo.`;
 }
 
 /**
@@ -86,16 +123,25 @@ export async function prepareImageAttachment(
 }
 
 /**
- * Full flow: permission, picker, prepare. Resolves `null` when the user
- * declined permission or cancelled — neither is an error worth surfacing.
+ * Full flow: permission, picker, prepare.
+ *
+ * Resolves `null` only when the user cancelled the picker — a deliberate
+ * "never mind" that deserves no message. A refused permission throws instead,
+ * because it is the one outcome the user cannot diagnose from the UI: the
+ * sheet closes and nothing happens, the OS will not ask again, and without a
+ * message the control simply looks broken.
  */
 export async function pickImageAttachment(
   source: ImageAttachmentSource,
   deps?: ImageAttachmentPickerDeps
 ): Promise<PreparedImageAttachment | null> {
   const resolvedDeps = deps ?? (await expoImageAttachmentPickerDeps());
-  if (!(await resolvedDeps.requestPermission(source))) {
-    return null;
+  const permission = await resolvedDeps.requestPermission(source);
+  if (!permission.granted) {
+    throw new ImageAttachmentError(
+      "permission-denied",
+      imageAttachmentPermissionMessage(source, permission)
+    );
   }
   const asset = await resolvedDeps.launch(source);
   if (!asset) {
@@ -116,7 +162,11 @@ export async function expoImageAttachmentPickerDeps(): Promise<ImageAttachmentPi
         source === "camera"
           ? await picker.requestCameraPermissionsAsync()
           : await picker.requestMediaLibraryPermissionsAsync();
-      return response.granted;
+      return {
+        granted: response.granted,
+        canAskAgain: response.canAskAgain,
+        status: response.status
+      };
     },
     async launch(source) {
       // Photos only, and one at a time: v1 delivers a single image reference

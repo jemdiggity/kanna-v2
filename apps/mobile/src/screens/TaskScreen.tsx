@@ -113,6 +113,10 @@ interface TaskScreenProps {
   companionEventStatus?: TaskCompanionEventStatus;
   quickReplies: readonly TaskQuickReply[];
   quickRepliesHydrated: boolean;
+  /** Whether the connected desktop advertised the task-input attachment
+   * contract. Absent on desktops built before it, which accept the field and
+   * silently drop the photo. */
+  desktopSupportsAttachments?: boolean;
   pendingTaskAction?: TaskStageAction | TaskCreationAction | null;
   onBack(): boolean;
   onAdvanceTaskStage(): void;
@@ -164,6 +168,7 @@ export function TaskScreen({
   companionEventStatus = "idle",
   quickReplies,
   quickRepliesHydrated,
+  desktopSupportsAttachments = false,
   pendingTaskAction = null,
   onBack,
   onAdvanceTaskStage,
@@ -352,7 +357,13 @@ export function TaskScreen({
   // message, which only the HTTP input path does. SDK-mode tasks answer over
   // the agent stream instead, so they get no attach control rather than an
   // affordance that silently drops the photo.
-  const canAttachPhoto = !isAgentTask;
+  //
+  // The desktop has to be able to receive one too. A build that predates
+  // attachments deserializes the field, ignores it, delivers the text alone
+  // and answers 204 — indistinguishable from success — so an unadvertised
+  // desktop hides the control for exactly the same reason: no affordance beats
+  // one that quietly loses the photo.
+  const canAttachPhoto = !isAgentTask && desktopSupportsAttachments;
   const composerSnapshotRef = useRef({
     taskId: task.id,
     draftInput,

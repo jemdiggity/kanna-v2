@@ -6,8 +6,10 @@ import {
   MAX_ATTACHMENT_EDGE_PIXELS
 } from "./imageAttachmentBudget";
 import {
+  imageAttachmentPermissionMessage,
   pickImageAttachment,
   prepareImageAttachment,
+  type ImageAttachmentPermission,
   type ImageAttachmentPickerDeps,
   type ImageAttachmentRenderer,
   type PickedImageAsset
@@ -76,12 +78,42 @@ describe("prepareImageAttachment", () => {
   });
 });
 
+function granted(): ImageAttachmentPermission {
+  return { granted: true, canAskAgain: false, status: "granted" };
+}
+
+function refused(canAskAgain: boolean): ImageAttachmentPermission {
+  return { granted: false, canAskAgain, status: "denied" };
+}
+
+describe("imageAttachmentPermissionMessage", () => {
+  it("points a permanently denied permission at Settings", () => {
+    // Once the OS has recorded a denial it shows no further dialog, so "try
+    // again" would send the user in a circle.
+    expect(imageAttachmentPermissionMessage("library", refused(false))).toBe(
+      "Photo access is off. Turn it on for Kanna in Settings to attach a photo."
+    );
+    expect(imageAttachmentPermissionMessage("camera", refused(false))).toBe(
+      "Camera access is off. Turn it on for Kanna in Settings to attach a photo."
+    );
+  });
+
+  it("tells a still-askable permission to retry", () => {
+    expect(imageAttachmentPermissionMessage("library", refused(true))).toBe(
+      "Photo access is needed to attach a photo. Tap 📎 again and allow it."
+    );
+    expect(imageAttachmentPermissionMessage("camera", refused(true))).toBe(
+      "Camera access is needed to attach a photo. Tap 📎 again and allow it."
+    );
+  });
+});
+
 describe("pickImageAttachment", () => {
   function deps(
     overrides: Partial<ImageAttachmentPickerDeps> = {}
   ): ImageAttachmentPickerDeps {
     return {
-      requestPermission: vi.fn(async () => true),
+      requestPermission: vi.fn(async () => granted()),
       launch: vi.fn(async () => PHONE_PHOTO),
       render: renderer(),
       ...overrides
@@ -100,14 +132,32 @@ describe("pickImageAttachment", () => {
     }
   });
 
-  it("stops without rendering when permission is declined", async () => {
+  it("reports a declined permission as a failure rather than a silent null", async () => {
+    // A cancellation resolves null and says nothing. A denial must not: the
+    // sheet closes, the OS will never ask again, and a user given no message
+    // is left tapping a control that can no longer do anything.
     const dependencies = deps({
-      requestPermission: vi.fn(async () => false)
+      requestPermission: vi.fn(async () => refused(false))
     });
 
-    await expect(pickImageAttachment("library", dependencies)).resolves.toBeNull();
+    await expect(
+      pickImageAttachment("library", dependencies)
+    ).rejects.toThrow(ImageAttachmentError);
     expect(dependencies.launch).not.toHaveBeenCalled();
     expect(dependencies.render).not.toHaveBeenCalled();
+  });
+
+  it("carries the permission reason and an actionable message on the error", async () => {
+    const dependencies = deps({
+      requestPermission: vi.fn(async () => refused(true))
+    });
+
+    await expect(
+      pickImageAttachment("camera", dependencies)
+    ).rejects.toMatchObject({
+      reason: "permission-denied",
+      message: imageAttachmentPermissionMessage("camera", refused(true))
+    });
   });
 
   it("stops without rendering when the picker is cancelled", async () => {
