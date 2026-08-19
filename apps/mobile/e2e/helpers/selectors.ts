@@ -13,6 +13,7 @@ export const selectors = {
   toolbarSearch: `~${MOBILE_E2E_IDS.toolbarSearch}`,
   taskDetailScreen: `~${MOBILE_E2E_IDS.taskDetailScreen}`,
   taskDetailTitle: `~${MOBILE_E2E_IDS.taskDetailTitle}`,
+  taskDetailTaskId: `~${MOBILE_E2E_IDS.taskDetailTaskId}`,
   taskTitleButton: `~${MOBILE_E2E_IDS.taskTitleButton}`,
   taskExpandedPrompt: `~${MOBILE_E2E_IDS.taskExpandedPrompt}`,
   taskExpandedTaskId: `~${MOBILE_E2E_IDS.taskExpandedTaskId}`,

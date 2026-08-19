@@ -67,6 +67,7 @@ interface ListDetailBackOriginUi {
 interface TaskPromptExpansionUi {
   getBackButton(): Promise<SmokeElement>;
   getClipboard(): Promise<string>;
+  getCollapsedTaskId(): Promise<SmokeElement>;
   getCollapsedTitle(): Promise<SmokeElement>;
   getCopyMenuItem(): Promise<SmokeElement>;
   getExpandedPrompt(): Promise<SmokeElement>;
@@ -193,6 +194,9 @@ function createSmokeUi(driver: Browser): SmokeUi {
     },
     async getClipboard() {
       return driver.getClipboard("plaintext");
+    },
+    async getCollapsedTaskId() {
+      return driver.$(selectors.taskDetailTaskId);
     },
     async getCollapsedTitle() {
       return driver.$(selectors.taskDetailTitle);
@@ -392,6 +396,23 @@ export async function exerciseTaskPromptExpansion(
       interval: POLL_INTERVAL_MS,
       timeout: SCREEN_TIMEOUT_MS,
       timeoutMsg: `Expected collapsed task title ${JSON.stringify(fixture.expectedTitle)}`
+    }
+  );
+
+  // The collapsed header carries the id beside the truncating title, so the
+  // one place the owner reads most never loses it to a long title.
+  await ui.waitUntil(
+    async () => {
+      const collapsedTaskId = await ui.getCollapsedTaskId();
+      return (
+        (await collapsedTaskId.isExisting()) &&
+        (await smokeElementText(collapsedTaskId)) === fixture.taskId
+      );
+    },
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg: `Expected complete collapsed task ID ${JSON.stringify(fixture.taskId)}`
     }
   );
 

@@ -286,6 +286,12 @@ export function TaskScreen({
       : null;
   const isTitleExpanded = expandedTitleTaskId === task.id;
   const expandedTaskId = displayTaskId(task);
+  // The collapsed header carries the id too: it is how the owner cross-checks
+  // the task they are looking at, and a one-line title is exactly what
+  // ellipsizes. A task still being created has only a local slot id, which is
+  // not an id anything can be cross-checked against, so it shows none.
+  const collapsedTaskId =
+    taskCreationPhase === "idle" ? expandedTaskId : null;
   const expandedPrompt = task.prompt?.trim() ? task.prompt : task.title;
   const expandedPromptMaxHeight = Math.min(320, windowHeight * 0.45);
   const effectiveActivity =
@@ -686,7 +692,9 @@ export function TaskScreen({
           accessibilityLabel={`${model.stageLabel}: ${
             isTitleExpanded
               ? `${expandedPrompt}. Task ID: ${expandedTaskId}`
-              : model.title
+              : collapsedTaskId
+                ? `${model.title}. Task ID: ${collapsedTaskId}`
+                : model.title
           }`}
           accessibilityRole="button"
           accessibilityState={{ expanded: isTitleExpanded }}
@@ -738,14 +746,25 @@ export function TaskScreen({
               </View>
             </ScrollView>
           ) : (
-            <Text
-              accessible={false}
-              numberOfLines={1}
-              style={styles.title}
-              testID={MOBILE_E2E_IDS.taskDetailTitle}
-            >
-              {model.title}
-            </Text>
+            <>
+              <Text
+                accessible={false}
+                numberOfLines={1}
+                style={styles.title}
+                testID={MOBILE_E2E_IDS.taskDetailTitle}
+              >
+                {model.title}
+              </Text>
+              {collapsedTaskId ? (
+                <Text
+                  accessible={false}
+                  style={styles.collapsedTaskId}
+                  testID={MOBILE_E2E_IDS.taskDetailTaskId}
+                >
+                  {collapsedTaskId}
+                </Text>
+              ) : null}
+            </>
           )}
         </Pressable>
       </View>
@@ -1071,6 +1090,14 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: "700",
     lineHeight: 17
+  },
+  // The title above takes the slack and truncates to one line; the id sits
+  // beside it at its own width and never shrinks.
+  collapsedTaskId: {
+    color: "#7E93B4",
+    flexShrink: 0,
+    fontFamily: "Menlo",
+    fontSize: 11
   },
   promptScroll: {
     alignSelf: "stretch",

@@ -2,6 +2,7 @@ import React from "react";
 import { StyleSheet, Text, View } from "react-native";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { TaskSummary } from "../lib/api/types";
+import { displayTaskId } from "../lib/api/taskIdentity";
 import type { TaskUiSlot } from "../state/taskUiSlots";
 import { taskUiSlotToTaskSummary } from "../state/taskUiSlots";
 import { buildTaskTreeRows, type TaskTreeRow } from "../screens/taskTreeRows";
@@ -65,6 +66,10 @@ export function TaskList({
           isSubtask: depth > 0,
           pinned: pinnedTaskIds.includes(task.id),
           repoLabel: repoLabelForTask?.(task) ?? null,
+          // A slot still being created has no durable id yet — only the local
+          // slot id, which is not something the owner can cross-check — so it
+          // renders no id rather than a synthetic one.
+          shortId: slot.state === "ready" ? displayTaskId(slot.task) : null,
           task,
           uiId: slot.slotId,
           onPress: () => onOpenTask(slot.slotId)

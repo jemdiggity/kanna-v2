@@ -168,7 +168,45 @@ async function renderDismissCard(
   return renderer;
 }
 
+function longTitleCardElement() {
+  if (!SwipeableTaskCard) throw new Error("SwipeableTaskCard was not loaded");
+  return (
+    <SwipeableTaskCard
+      isSubtask={false}
+      repoLabel={null}
+      shortId="a6ea6b03"
+      task={{
+        id: "a6ea6b03",
+        repoId: "repo-1",
+        title: `Long ${"mobile task title ".repeat(12)}end`,
+        stage: "in progress"
+      }}
+      uiId="a6ea6b03"
+      onPress={vi.fn()}
+      onTogglePin={vi.fn().mockResolvedValue(undefined)}
+    />
+  );
+}
+
 describe("SwipeableTaskCard", () => {
+  it("keeps the complete short id on a long-titled row, open or closed", async () => {
+    let renderer: ReactTestRenderer | null = null;
+    await act(async () => {
+      renderer = create(longTitleCardElement());
+    });
+    if (!renderer) throw new Error("SwipeableTaskCard did not render");
+    const row = renderer as ReactTestRenderer;
+    const renderedId = () =>
+      row.root.findByProps({
+        testID: MOBILE_E2E_IDS.taskListItemId("a6ea6b03")
+      }).props.children;
+
+    expect(renderedId()).toBe("a6ea6b03");
+    // Finger still down, row displaced: the id must survive the open state too.
+    drag(-70);
+    expect(renderedId()).toBe("a6ea6b03");
+  });
+
   it("claims a deliberate leftward swipe but yields to scrolling", async () => {
     await renderCard(vi.fn().mockResolvedValue(undefined));
     const config = gestureConfig();

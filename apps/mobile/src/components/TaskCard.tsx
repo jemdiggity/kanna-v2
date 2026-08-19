@@ -38,6 +38,14 @@ interface TaskCardProps {
   uiId?: string;
   isSubtask?: boolean;
   repoLabel?: string | null;
+  /**
+   * The task's short id, rendered as its own non-shrinking element beside the
+   * title. The owner references tasks by this id constantly, so it must never
+   * be what an overlong title ellipsizes away — the title truncates, the id
+   * does not. Rows without a durable id yet (a task still being created
+   * carries only a local slot id) pass null and render no id.
+   */
+  shortId?: string | null;
   /** This phone's own pin state for the row. */
   pinned?: boolean;
   pinAction?: TaskCardPinAction;
@@ -50,6 +58,7 @@ export function TaskCard({
   uiId = task.id,
   isSubtask = false,
   repoLabel = null,
+  shortId = null,
   pinned = false,
   pinAction,
   dismissAction,
@@ -63,6 +72,7 @@ export function TaskCard({
     blocked ? "Blocked" : null,
     pinned ? "Pinned" : null,
     model.title,
+    shortId ? `Task ID ${shortId}` : null,
     repoLabel,
     model.stageLabel,
     model.waitingPromptSnippet
@@ -126,6 +136,14 @@ export function TaskCard({
                 blocked
               </Text>
             </View>
+          ) : null}
+          {shortId ? (
+            <Text
+              style={styles.shortId}
+              testID={MOBILE_E2E_IDS.taskListItemId(uiId)}
+            >
+              {shortId}
+            </Text>
           ) : null}
         </View>
       </View>
@@ -212,8 +230,13 @@ const styles = StyleSheet.create({
     fontStyle: "italic",
     fontWeight: "normal"
   },
+  /**
+   * The title takes the slack and truncates; this column sizes to its own
+   * content and never shrinks, which is what keeps the task id complete.
+   */
   pillColumn: {
     alignItems: "flex-end",
+    flexShrink: 0,
     gap: 6
   },
   stagePill: {
@@ -229,6 +252,13 @@ const styles = StyleSheet.create({
   },
   blockedLabel: {
     color: "#C9A8E0"
+  },
+  // Subordinate to the title on purpose: legible for cross-checking, quiet
+  // enough that the row still reads title-first.
+  shortId: {
+    color: "#6F819E",
+    fontFamily: "Menlo",
+    fontSize: 11
   },
   stageLabel: {
     color: "#9EB6DC",
