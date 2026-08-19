@@ -835,7 +835,8 @@ pub(crate) async fn dispatch_prepared_post_for_api(
         Err(
             TaskInputError::Other(message)
             | TaskInputError::Uncertain(message)
-            | TaskInputError::InputBlocked(message),
+            | TaskInputError::InputBlocked(message)
+            | TaskInputError::HeldByRawDraft(message),
         ) => Err(message),
     }
 }

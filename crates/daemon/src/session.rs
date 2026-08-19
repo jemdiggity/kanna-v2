@@ -159,7 +159,7 @@ pub struct PendingInput {
     pub kind: PendingInputKind,
     written: Option<oneshot::Sender<()>>,
     #[cfg_attr(not(test), allow(dead_code))]
-    logical_after_write: Vec<Vec<u8>>,
+    logical_after_write: Vec<(Vec<u8>, Option<oneshot::Sender<()>>)>,
 }
 
 impl PendingInput {
@@ -175,7 +175,7 @@ impl PendingInput {
     fn raw_submission(
         data: Vec<u8>,
         written: Option<oneshot::Sender<()>>,
-        logical_after_write: Vec<Vec<u8>>,
+        logical_after_write: Vec<(Vec<u8>, Option<oneshot::Sender<()>>)>,
     ) -> Self {
         Self {
             data,
@@ -185,19 +185,27 @@ impl PendingInput {
         }
     }
 
-    pub(crate) fn logical(data: Vec<u8>) -> Self {
+    /// A logical message whose `written` acknowledgement fires only once the
+    /// terminating Enter has been written — never after the message text
+    /// alone. The two writes are one delivery, so a caller that hears "ok"
+    /// after the first would be told a message was submitted while it was
+    /// still sitting unsent at the composer.
+    pub(crate) fn acknowledged_logical(
+        data: Vec<u8>,
+        written: Option<oneshot::Sender<()>>,
+    ) -> Self {
         if data.is_empty() {
             Self {
                 data: vec![b'\r'],
                 kind: PendingInputKind::LogicalEnter,
-                written: None,
+                written,
                 logical_after_write: Vec::new(),
             }
         } else {
             Self {
                 data,
                 kind: PendingInputKind::LogicalMessage,
-                written: None,
+                written,
                 logical_after_write: Vec::new(),
             }
         }
@@ -220,7 +228,9 @@ impl PendingInput {
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn take_logical_after_write(&mut self) -> Vec<Vec<u8>> {
+    pub(crate) fn take_logical_after_write(
+        &mut self,
+    ) -> Vec<(Vec<u8>, Option<oneshot::Sender<()>>)> {
         std::mem::take(&mut self.logical_after_write)
     }
 }
@@ -230,6 +240,20 @@ pub enum InputQueueError {
     Closed,
     CoordinationUnavailable,
     InheritedDraftStateUnknown,
+}
+
+/// One accepted logical message and what actually happened to it.
+///
+/// Acceptance and submission are not the same event, and answering a caller
+/// as though they were is what let a delivery report success while the message
+/// sat unsent at the composer. `written` resolves only once the message *and*
+/// its terminating Enter have reached the PTY; `held_by_raw_draft` says the
+/// message is not going anywhere until a human at that terminal submits their
+/// own line, so nothing has been written and no acknowledgement is coming
+/// within this call.
+pub struct LogicalInputAccepted {
+    pub written: oneshot::Receiver<()>,
+    pub held_by_raw_draft: bool,
 }
 
 struct InputCoordinationState {
@@ -246,6 +270,11 @@ struct InputCoordinationState {
 struct QueuedLogicalInput {
     data: Vec<u8>,
     dispatched: bool,
+    /// Fires when this message's terminating Enter is written. It travels with
+    /// the message rather than with the call that queued it, so a message
+    /// released by a later boundary or by composer attestation acknowledges
+    /// through the same channel as one dispatched immediately.
+    written: Option<oneshot::Sender<()>>,
 }
 
 impl InputCoordinationState {
@@ -261,6 +290,7 @@ impl InputCoordinationState {
                 .map(|data| QueuedLogicalInput {
                     data,
                     dispatched: false,
+                    written: None,
                 })
                 .collect(),
         }
@@ -347,7 +377,10 @@ fn dispatch_accepted_logical_inputs(
             continue;
         }
         input_tx
-            .send(PendingInput::logical(logical_input.data.clone()))
+            .send(PendingInput::acknowledged_logical(
+                logical_input.data.clone(),
+                logical_input.written.take(),
+            ))
             .map_err(|_| InputQueueError::Closed)?;
         logical_input.dispatched = true;
     }
@@ -431,7 +464,8 @@ impl SessionHandle {
                 let mut logical_after_write = Vec::new();
                 for logical_input in &mut state.logical_inputs {
                     if !logical_input.dispatched {
-                        logical_after_write.push(logical_input.data.clone());
+                        logical_after_write
+                            .push((logical_input.data.clone(), logical_input.written.take()));
                         logical_input.dispatched = true;
                     }
                 }
@@ -458,8 +492,11 @@ impl SessionHandle {
 
     /// Accept one logical message. It is submitted atomically now when no raw
     /// draft exists, or retained until the next producer-declared submission
-    /// boundary otherwise.
-    pub fn enqueue_logical_input(&self, data: Vec<u8>) -> Result<(), InputQueueError> {
+    /// boundary otherwise — and the caller is told which of the two happened.
+    pub fn enqueue_logical_input(
+        &self,
+        data: Vec<u8>,
+    ) -> Result<LogicalInputAccepted, InputQueueError> {
         let mut state = self
             .input_coordination
             .lock()
@@ -467,21 +504,37 @@ impl SessionHandle {
         if !state.raw_input_draft_state_known {
             return Err(InputQueueError::InheritedDraftStateUnknown);
         }
+        let (written_tx, written) = oneshot::channel();
         state.logical_inputs.push_back(QueuedLogicalInput {
             data: data.clone(),
             dispatched: false,
+            written: Some(written_tx),
         });
         if state.raw_input_draft_active {
-            return Ok(());
+            return Ok(LogicalInputAccepted {
+                written,
+                held_by_raw_draft: true,
+            });
         }
-        if self.input_tx.send(PendingInput::logical(data)).is_err() {
+        let queued_ack = state
+            .logical_inputs
+            .back_mut()
+            .and_then(|logical_input| logical_input.written.take());
+        if self
+            .input_tx
+            .send(PendingInput::acknowledged_logical(data, queued_ack))
+            .is_err()
+        {
             state.logical_inputs.pop_back();
             return Err(InputQueueError::Closed);
         }
         if let Some(logical_input) = state.logical_inputs.back_mut() {
             logical_input.dispatched = true;
         }
-        Ok(())
+        Ok(LogicalInputAccepted {
+            written,
+            held_by_raw_draft: false,
+        })
     }
 
     /// Whether this session currently refuses logical input because the draft
@@ -497,24 +550,38 @@ impl SessionHandle {
             .unwrap_or(true)
     }
 
-    /// Resolve inherited draft state from the terminal itself.
+    /// Whether a logical message would be withheld from the PTY right now:
+    /// either this daemon never saw whether a draft is at the prompt, or a
+    /// producer declared one and has not declared a boundary since.
+    fn logical_input_withheld(&self) -> bool {
+        self.input_coordination
+            .lock()
+            .map(|state| !state.raw_input_draft_state_known || state.raw_input_draft_active)
+            .unwrap_or(true)
+    }
+
+    /// Resolve draft state from the terminal itself.
     ///
-    /// The guard this lifts exists because a daemon that never watched a
-    /// terminal being typed into cannot know whether a half-typed line is
-    /// sitting at its prompt, and concatenating a logical message onto one
-    /// would submit a sentence nobody wrote. A frame that positively renders
-    /// the provider's own empty composer answers exactly that question, and
-    /// answers it more directly than the keystroke this used to wait for: an
-    /// empty composer holds no draft, so there is nothing to concatenate onto.
+    /// Two things withhold a logical message, and one piece of evidence
+    /// answers both. A daemon that never watched a terminal being typed into
+    /// cannot know whether a half-typed line is sitting at its prompt; and a
+    /// producer that declared a draft cannot un-declare one, so an arrow key,
+    /// an Escape or a Ctrl-key press — none of which leave an unsent line —
+    /// holds every later message until a human presses Enter there.
+    /// Concatenating onto a real unsent line would submit a sentence nobody
+    /// wrote, but a frame that positively renders the provider's own empty
+    /// composer proves there is no such line: an empty composer holds no
+    /// draft, so there is nothing to concatenate onto and nothing to protect.
     ///
     /// Nothing is written to the PTY, nothing on screen is discarded, and the
-    /// transition is one-way — unknown to known-empty, never the reverse, and
-    /// never to "a draft is present". Anything the frame does not prove empty
-    /// stays blocked for a human. Returns whether this call resolved it.
+    /// transition stays one-way — towards "no draft is here", never towards
+    /// "a draft is present", and never into a submission this daemon inferred
+    /// from bytes. Anything the frame does not prove empty stays withheld for
+    /// a human. Returns whether this call resolved it.
     pub async fn attest_empty_composer(
         &self,
     ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-        if !self.logical_input_blocked() {
+        if !self.logical_input_withheld() {
             return Ok(false);
         }
         let composer = {
@@ -529,7 +596,7 @@ impl SessionHandle {
             .input_coordination
             .lock()
             .map_err(|_| "terminal input coordination lock was poisoned")?;
-        if state.raw_input_draft_state_known {
+        if state.raw_input_draft_state_known && !state.raw_input_draft_active {
             return Ok(false);
         }
         state.raw_input_draft_state_known = true;
@@ -1461,6 +1528,17 @@ mod tests {
         handle.kill().await.unwrap();
     }
 
+    /// The message bodies a raw submission released, without their
+    /// acknowledgement channels — the channels are not comparable, and the
+    /// order and content of the release is what these tests are about.
+    fn released_logical_messages(boundary: &mut super::PendingInput) -> Vec<Vec<u8>> {
+        boundary
+            .take_logical_after_write()
+            .into_iter()
+            .map(|(data, _written)| data)
+            .collect()
+    }
+
     #[tokio::test]
     async fn logical_input_waits_for_a_raw_draft_boundary_and_keeps_fifo_order() {
         let handle = spawn_test_handle(AgentProvider::Codex, SessionStatus::Idle).unwrap();
@@ -1491,9 +1569,11 @@ mod tests {
         assert_eq!(boundary.kind, super::PendingInputKind::Raw);
         assert_eq!(boundary.data, b"\r");
         assert!(input_rx.try_recv().is_err());
-        let released = boundary.take_logical_after_write();
-        let first = super::PendingInput::logical(released[0].clone());
-        let second = super::PendingInput::logical(released[1].clone());
+        let mut released = boundary.take_logical_after_write().into_iter();
+        let (first_data, _) = released.next().expect("first released message");
+        let (second_data, _) = released.next().expect("second released message");
+        let first = super::PendingInput::acknowledged_logical(first_data, None);
+        let second = super::PendingInput::acknowledged_logical(second_data, None);
         assert_eq!(first.kind, super::PendingInputKind::LogicalMessage);
         assert_eq!(first.data, b"manager one");
         assert_eq!(second.kind, super::PendingInputKind::LogicalMessage);
@@ -1544,7 +1624,7 @@ mod tests {
         let mut boundary = input_rx.recv().await.expect("boundary");
         assert_eq!(boundary.data, b"\r");
         assert_eq!(
-            boundary.take_logical_after_write(),
+            released_logical_messages(&mut boundary),
             [b"manager message".to_vec()]
         );
         handle.kill().await.unwrap();
@@ -1579,7 +1659,7 @@ mod tests {
         let mut boundary = input_rx.recv().await.expect("boundary");
         assert_eq!(boundary.data, b"\r");
         assert_eq!(
-            boundary.take_logical_after_write(),
+            released_logical_messages(&mut boundary),
             [b"manager message".to_vec()]
         );
         handle.kill().await.unwrap();
@@ -1604,6 +1684,157 @@ mod tests {
             .expect("control input must not strand logical delivery behind a phantom draft");
         assert_eq!(logical.kind, super::PendingInputKind::LogicalMessage);
         assert_eq!(logical.data, b"manager message");
+        handle.kill().await.unwrap();
+    }
+
+    /// A logical message is one delivery in two writes. Acknowledging the
+    /// first would tell a caller its message was submitted while the text was
+    /// still sitting unsent at the composer waiting for its Enter.
+    #[tokio::test]
+    async fn logical_input_is_acknowledged_only_after_its_terminating_enter() {
+        let handle = spawn_test_handle(AgentProvider::Codex, SessionStatus::Idle).unwrap();
+        let mut input_rx = handle.take_input_rx().await.expect("input queue");
+
+        let mut accepted = handle
+            .enqueue_logical_input(b"owner reply".to_vec())
+            .expect("accept logical input");
+        assert!(!accepted.held_by_raw_draft);
+        assert!(
+            accepted.written.try_recv().is_err(),
+            "queueing alone must not report the message submitted"
+        );
+
+        let mut pending = input_rx.recv().await.expect("logical message");
+        assert_eq!(pending.kind, super::PendingInputKind::LogicalMessage);
+        assert_eq!(pending.data, b"owner reply");
+        assert!(
+            accepted.written.try_recv().is_err(),
+            "reaching the writer must not report the message submitted"
+        );
+
+        assert!(pending.advance_logical_message_to_enter());
+        assert_eq!(pending.kind, super::PendingInputKind::LogicalEnter);
+        assert!(
+            accepted.written.try_recv().is_err(),
+            "writing the text alone must not report the message submitted"
+        );
+
+        pending.acknowledge_written();
+        accepted
+            .written
+            .await
+            .expect("acknowledgement once the Enter is written");
+        handle.kill().await.unwrap();
+    }
+
+    /// The delivery the owner report is about: a message the daemon parks
+    /// behind someone's unsent line has not been submitted, and saying so is
+    /// the whole difference between a visible wait and a silent one.
+    #[tokio::test]
+    async fn a_declared_draft_reports_the_message_as_held_rather_than_submitted() {
+        let handle = spawn_test_handle(AgentProvider::Codex, SessionStatus::Idle).unwrap();
+        let mut input_rx = handle.take_input_rx().await.expect("input queue");
+
+        handle
+            .enqueue_raw_input(b"half typed".to_vec(), RawInputKind::Draft)
+            .expect("declare a raw draft");
+        assert_eq!(input_rx.recv().await.expect("draft").data, b"half typed");
+
+        let accepted = handle
+            .enqueue_logical_input(b"owner reply".to_vec())
+            .expect("accept logical input");
+        assert!(
+            accepted.held_by_raw_draft,
+            "a message parked behind a draft must not be reported as submitted"
+        );
+        assert!(
+            input_rx.try_recv().is_err(),
+            "nothing may reach the PTY writer while a draft is open"
+        );
+        handle.kill().await.unwrap();
+    }
+
+    /// The regression itself. A producer can declare a draft but cannot
+    /// un-declare one, so an arrow key — which leaves no unsent line — held
+    /// every later delivery until a human pressed Enter at that terminal. The
+    /// composer's own rendered emptiness is the evidence that ends it, and it
+    /// is the same evidence that already resolves an inherited unknown state.
+    #[tokio::test]
+    async fn a_declared_draft_over_a_provably_empty_composer_releases_the_held_message() {
+        let handle = spawn_test_handle(AgentProvider::Claude, SessionStatus::Idle).unwrap();
+        let mut input_rx = handle.take_input_rx().await.expect("input queue");
+
+        // Cursor-up: a keydown the desktop producer declares a draft, which
+        // leaves nothing at the prompt.
+        handle
+            .enqueue_raw_input(b"\x1b[A".to_vec(), RawInputKind::Draft)
+            .expect("declare a draft from a navigation key");
+        assert_eq!(input_rx.recv().await.expect("draft").data, b"\x1b[A");
+
+        let accepted = handle
+            .enqueue_logical_input(b"owner reply".to_vec())
+            .expect("accept logical input");
+        assert!(accepted.held_by_raw_draft);
+        assert!(input_rx.try_recv().is_err());
+
+        handle
+            .mirror_output(b"\x1b[2J\x1b[H* Done.\r\n\xe2\x9d\xaf \r\n", false)
+            .await
+            .expect("render an idle empty composer");
+
+        assert!(handle
+            .attest_empty_composer()
+            .await
+            .expect("attest the rendered composer"));
+
+        let mut released = input_rx.recv().await.expect("released logical message");
+        assert_eq!(released.kind, super::PendingInputKind::LogicalMessage);
+        assert_eq!(released.data, b"owner reply");
+        assert!(released.advance_logical_message_to_enter());
+        released.acknowledge_written();
+        accepted
+            .written
+            .await
+            .expect("the released message keeps its own acknowledgement");
+        handle.kill().await.unwrap();
+    }
+
+    /// Draft isolation is unchanged where it matters: a frame that does not
+    /// prove the composer empty keeps protecting whatever is typed there, so
+    /// no logical message is ever appended to a real unsent line.
+    #[tokio::test]
+    async fn a_composer_holding_text_keeps_holding_the_message() {
+        let handle = spawn_test_handle(AgentProvider::Claude, SessionStatus::Idle).unwrap();
+        let mut input_rx = handle.take_input_rx().await.expect("input queue");
+
+        handle
+            .enqueue_raw_input(b"half typed".to_vec(), RawInputKind::Draft)
+            .expect("declare a raw draft");
+        assert_eq!(input_rx.recv().await.expect("draft").data, b"half typed");
+        let accepted = handle
+            .enqueue_logical_input(b"owner reply".to_vec())
+            .expect("accept logical input");
+        assert!(accepted.held_by_raw_draft);
+
+        handle
+            .mirror_output(
+                b"\x1b[2J\x1b[H* Done.\r\n\xe2\x9d\xaf half typed\r\n",
+                false,
+            )
+            .await
+            .expect("render a composer holding an unsent line");
+
+        assert!(
+            !handle
+                .attest_empty_composer()
+                .await
+                .expect("attest the rendered composer"),
+            "a composer holding text is never attested empty"
+        );
+        assert!(
+            input_rx.try_recv().is_err(),
+            "the message must stay out of a real unsent line"
+        );
         handle.kill().await.unwrap();
     }
 

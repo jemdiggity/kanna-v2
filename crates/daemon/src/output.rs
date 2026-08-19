@@ -258,8 +258,9 @@ pub(crate) async fn stream_output(
                                     .pop_front()
                                     .expect("pending input disappeared before completion");
                                 let logical_after_write = completed.take_logical_after_write();
-                                for data in logical_after_write.into_iter().rev() {
-                                    pending_input.push_front(PendingInput::logical(data));
+                                for (data, written) in logical_after_write.into_iter().rev() {
+                                    pending_input
+                                        .push_front(PendingInput::acknowledged_logical(data, written));
                                 }
                                 if completed.kind == PendingInputKind::LogicalEnter
                                     && session.complete_logical_input().is_err()

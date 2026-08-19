@@ -467,9 +467,11 @@ async fn inject(
             log::warn!("transfer finalization {phase} for {task_id} may have landed: {reason}");
             Injected::Sent
         }
-        Err(TaskInputError::Other(reason) | TaskInputError::InputBlocked(reason)) => {
-            release(reason)
-        }
+        Err(
+            TaskInputError::Other(reason)
+            | TaskInputError::InputBlocked(reason)
+            | TaskInputError::HeldByRawDraft(reason),
+        ) => release(reason),
     }
 }
 

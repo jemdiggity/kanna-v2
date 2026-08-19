@@ -37,6 +37,7 @@ pub enum ErrorCode {
     InputUnauthorized,
     ProtectedInputProtocolRequired,
     InheritedDraftStateUnknown,
+    LogicalInputHeldByDraft,
 }
 
 /// Whether a session is a PTY terminal or a headless agent (NDJSON pipes).

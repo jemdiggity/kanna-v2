@@ -409,6 +409,13 @@ pub(super) async fn signal_agent_request(
                     );
                     (axum::http::StatusCode::CONFLICT, reason)
                 }
+                super::task_input::TaskInputError::HeldByRawDraft(reason) => {
+                    log::error!(
+                        "the {agent} agent for repo {repo_id} queued delivered input behind an \
+                         unsent human line: {reason}"
+                    );
+                    (axum::http::StatusCode::CONFLICT, reason)
+                }
                 super::task_input::TaskInputError::SessionNotFound => (
                     axum::http::StatusCode::NOT_FOUND,
                     format!("session not found: {}", running.session_id),

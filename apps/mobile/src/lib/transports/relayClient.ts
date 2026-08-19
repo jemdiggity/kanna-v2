@@ -241,11 +241,27 @@ export function createRelayDesktopClient({
       return;
     }
     if (status >= 400) {
-      pending.reject(new Error(`Remote desktop request failed with status ${status}.`));
+      // Carry the desktop's own explanation. A refusal a person has to act on
+      // — a task input held behind an unsent line at that terminal — names the
+      // terminal to go press Enter at; a bare status code names nothing.
+      const detail = failureMessage(message.body ?? message.data);
+      pending.reject(
+        new Error(
+          `Remote desktop request failed with status ${status}.${detail ? ` ${detail}` : ""}`
+        )
+      );
       return;
     }
 
     pending.resolve(message.body ?? message.data ?? null);
+  };
+
+  /** The desktop's own explanation for a failed invocation, when it sent one. */
+  const failureMessage = (body: unknown): string | null => {
+    if (isRecord(body) && typeof body.message === "string" && body.message) {
+      return body.message;
+    }
+    return null;
   };
 
   const handleRelayEvent = (message: RelayEventMessage) => {

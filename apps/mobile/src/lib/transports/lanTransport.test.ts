@@ -33,6 +33,41 @@ describe("createLanTransport", () => {
     ]);
   });
 
+  it("carries the server's explanation for a refused task input", async () => {
+    const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
+      ok: false,
+      status: 409,
+      json: async () => ({
+        ok: false,
+        reason: "input_held_by_draft",
+        message:
+          "logical input for session task-1 was not submitted: a human has an unsent line at that terminal"
+      })
+    });
+    const transport = createLanTransport("http://127.0.0.1:48120", fetchImpl);
+
+    // A bare status code sends the person who sent the message nowhere; the
+    // server's own sentence names the terminal to go press Enter at.
+    await expect(transport.sendTaskInput("task-1", "please rebase")).rejects.toThrow(
+      /unsent line at that terminal/
+    );
+  });
+
+  it("still reports a refusal the server did not explain", async () => {
+    const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
+      ok: false,
+      status: 503,
+      json: async () => {
+        throw new Error("not json");
+      }
+    });
+    const transport = createLanTransport("http://127.0.0.1:48120", fetchImpl);
+
+    await expect(transport.sendTaskInput("task-1", "please rebase")).rejects.toThrow(
+      /LAN request failed \(503\)/
+    );
+  });
+
   it("reports no inventory for a desktop that predates provider reporting", async () => {
     const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
       ok: true,

@@ -90,6 +90,24 @@ export function createLanTransport(
     deviceCredentials
       ? createSocket(url, credentialHeaders())
       : createSocket(url);
+  // The server's own explanation for a failed request, when it sent one.
+  const readFailureMessage = async (response: {
+    json: () => Promise<unknown>;
+  }): Promise<string | null> => {
+    try {
+      const body = await response.json();
+      if (body && typeof body === "object" && "message" in body) {
+        const message = (body as { message?: unknown }).message;
+        if (typeof message === "string" && message.length > 0) {
+          return message;
+        }
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  };
+
   const request = async <T>(
     path: string,
     init?: {
@@ -106,7 +124,13 @@ export function createLanTransport(
         : init
     );
     if (!response.ok) {
-      throw new Error(`LAN request failed (${response.status}) for ${path}`);
+      // The server explains refusals it expects a person to act on — a task
+      // input held behind someone's unsent line names the terminal to go
+      // press Enter at. A status code alone sends that person nowhere.
+      const detail = await readFailureMessage(response);
+      throw new Error(
+        `LAN request failed (${response.status}) for ${path}${detail ? `: ${detail}` : ""}`
+      );
     }
 
     if (response.status === 204) {

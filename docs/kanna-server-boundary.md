@@ -20,6 +20,19 @@ draft until that draft crosses a producer-declared submission boundary. The
 accepted queue is session-scoped, survives server/frontend reconnects and
 transactional daemon handoff, and is never redirected to a later run or stage.
 
+**A `204` means submitted, not queued.** The message and its Enter are one
+delivery in two PTY writes, and the daemon acknowledges only after the second,
+so a success answer cannot be given for text still sitting unsent at the
+composer. A message retained behind a draft answers `409` with
+`reason: "input_held_by_draft"` instead: it stays queued for the producer's
+boundary, but it has not been delivered, so it is not recorded as delivered
+either. Reported by the product owner on 2026-08-20, when replies sent from
+mobile sat at the agent's prompt until someone pressed Enter at that terminal
+while the phone had been told they were delivered. A declared draft that leaves
+nothing at the prompt — a navigation key, an Escape, a Ctrl-key press — no
+longer holds anything: the daemon clears it from the composer's own rendered
+emptiness (see `crates/daemon/SPEC.md`).
+
 Raw terminal producers classify each frame as draft, submission, or control.
 Desktop keyboard events declare unmodified Enter; mobile LAN and relay clients
 forward the same boundary bit, while mobile mouse/scroll reports are controls
@@ -580,6 +593,14 @@ The row is the record; `task.input_delivered` is only its announcement.
   that received them. Their delivery semantics are unchanged: the record is
   written after the daemon accepted the message and cannot fail the
   notification.
+- **Held deliveries are not recorded.** An `input_held_by_draft` response means
+  the message is queued at the daemon and has not reached the agent, so no row
+  asserts it did. If the producer later declares a boundary, the daemon writes
+  that message without telling the server, and it is delivered but unrecorded —
+  a known hole in this record, and the reason the refusal tells its caller the
+  message is still queued rather than inviting a resend that would queue a
+  second copy. Closing it needs a daemon-to-server signal for a released
+  message, which does not exist yet.
 - **Uncertain deliveries are not recorded.** A `delivery_uncertain` response
   means the bytes may or may not have reached the PTY; a row asserting the agent
   was told something it may never have heard is a worse record than a missing

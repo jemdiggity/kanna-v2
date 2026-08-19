@@ -157,6 +157,7 @@ enum ErrorCode {
     SessionIncarnationMismatch,
     InputUnauthorized,
     ProtectedInputProtocolRequired,
+    LogicalInputHeldByDraft,
     #[serde(other)]
     Other,
 }
@@ -248,7 +249,11 @@ fn logical_input_waits_for_partial_raw_input_and_submits_separately() {
         session_id: session_id.to_string(),
         data: b"manager message".to_vec(),
     });
-    expect_ok(&mut conn);
+    // Accepted into the queue, but not submitted — and the daemon says which.
+    match conn.recv() {
+        Evt::Error { code, .. } => assert_eq!(code, Some(ErrorCode::LogicalInputHeldByDraft)),
+        other => panic!("a message held behind a draft must not answer Ok, got: {other:?}"),
+    }
 
     thread::sleep(Duration::from_millis(300));
     conn.send(&Cmd::Snapshot {
@@ -291,6 +296,129 @@ fn logical_input_waits_for_partial_raw_input_and_submits_separately() {
         );
         thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// The owner-reported regression: a reply sent from the phone landed as text
+/// at the agent's prompt and sat there unsubmitted until someone pressed
+/// Enter at that terminal.
+///
+/// The desktop producer declares every non-Enter keydown a draft, and nothing
+/// could un-declare one, so a single navigation key held every later logical
+/// delivery — while the delivery itself was answered `Ok` the moment it was
+/// queued. This pins both halves: the daemon no longer calls a parked message
+/// submitted, and the parked message still goes out untouched at the
+/// producer's own boundary rather than being appended to an unsent line.
+#[test]
+fn a_navigation_key_draft_holds_a_logical_message_and_the_daemon_says_so() {
+    let daemon = DaemonHandle::start();
+    let mut conn = daemon.connect();
+    let session_id = "held-by-draft";
+    spawn_shell_session(
+        &mut conn,
+        session_id,
+        "stty -echo; while IFS= read -r line; do printf 'LINE:<%s>\\n' \"$line\"; done",
+    );
+
+    // Cursor-up: a keydown the desktop declares a draft, which leaves nothing
+    // unsent at the prompt.
+    conn.send(&Cmd::Input {
+        session_id: session_id.to_string(),
+        data: b"\x1b[A".to_vec(),
+    });
+    expect_ok(&mut conn);
+
+    conn.send(&Cmd::SubmitInput {
+        session_id: session_id.to_string(),
+        data: b"owner reply".to_vec(),
+    });
+    match conn.recv() {
+        Evt::Error { code, message } => {
+            assert_eq!(code, Some(ErrorCode::LogicalInputHeldByDraft));
+            assert!(
+                message.contains("was not submitted"),
+                "the refusal must say the message was not submitted: {message:?}"
+            );
+        }
+        other => panic!("a held message must not be reported as submitted, got: {other:?}"),
+    }
+
+    thread::sleep(Duration::from_millis(400));
+    let snapshot = recv_snapshot_for(&mut conn, session_id);
+    assert!(
+        !snapshot.vt.contains("LINE:<"),
+        "nothing may reach the PTY while a draft is open: {:?}",
+        snapshot.vt
+    );
+
+    conn.send(&Cmd::InputBoundary {
+        session_id: session_id.to_string(),
+        data: b"\r".to_vec(),
+    });
+    expect_ok(&mut conn);
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let snapshot = recv_snapshot_for(&mut conn, session_id);
+        if snapshot.vt.contains("LINE:<owner reply>") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the held message never reached the PTY after its boundary: {:?}",
+            snapshot.vt
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// `Ok` means submitted, not queued. The message and its terminating Enter
+/// are one delivery in two writes separated by the submit delay, so an answer
+/// that arrives before that delay elapsed cannot have seen the Enter written.
+#[test]
+fn submit_input_is_acknowledged_only_after_its_terminating_enter_is_written() {
+    let daemon = DaemonHandle::start();
+    let mut conn = daemon.connect();
+    let session_id = "acknowledged-submit";
+    spawn_shell_session(
+        &mut conn,
+        session_id,
+        "stty -echo; while IFS= read -r line; do printf 'LINE:<%s>\\n' \"$line\"; done",
+    );
+
+    let started = Instant::now();
+    conn.send(&Cmd::SubmitInput {
+        session_id: session_id.to_string(),
+        data: b"owner reply".to_vec(),
+    });
+    expect_ok(&mut conn);
+    let acknowledged_after = started.elapsed();
+
+    assert!(
+        acknowledged_after
+            >= Duration::from_millis(kanna_daemon::session::LOGICAL_INPUT_SUBMIT_DELAY_MS),
+        "the answer arrived in {acknowledged_after:?}, before the Enter could have been written"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let snapshot = recv_snapshot_for(&mut conn, session_id);
+        if snapshot.vt.contains("LINE:<owner reply>") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "an acknowledged message never reached the PTY: {:?}",
+            snapshot.vt
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn recv_snapshot_for(conn: &mut ClientConn, session_id: &str) -> SnapshotPayload {
+    conn.send(&Cmd::Snapshot {
+        session_id: session_id.to_string(),
+    });
+    recv_snapshot(conn, session_id)
 }
 
 #[derive(Debug, Deserialize)]
