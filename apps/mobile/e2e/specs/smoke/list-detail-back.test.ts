@@ -517,6 +517,10 @@ describe("task prompt expansion journey", () => {
           : ""
       )
     };
+    const collapsedTaskId = {
+      ...createElement(() => !expanded),
+      getText: vi.fn(async () => (expanded ? "" : taskId))
+    };
     const expandedTaskId = {
       ...createElement(() => expanded),
       getText: vi.fn(async () => (expanded ? taskId : "")),
@@ -558,6 +562,7 @@ describe("task prompt expansion journey", () => {
       setClipboard: vi.fn(async (encodedClipboard: string) => {
         clipboard = Buffer.from(encodedClipboard, "base64").toString("utf8");
       }),
+      getCollapsedTaskId: vi.fn(async () => collapsedTaskId),
       getCollapsedTitle: vi.fn(async () => titleButton),
       getCopyMenuItem: vi.fn(async () => copyMenuItem),
       getExpandedPrompt: vi.fn(async () => expandedPrompt),
@@ -579,6 +584,7 @@ describe("task prompt expansion journey", () => {
     });
 
     expect(titleButton.click).toHaveBeenCalledTimes(3);
+    expect(collapsedTaskId.getText).toHaveBeenCalled();
     expect(expandedPrompt.getText).toHaveBeenCalled();
     expect(expandedTaskId.getText).toHaveBeenCalled();
     expect(expandedTaskId.longPress).toHaveBeenCalledWith({ duration: 1_500 });

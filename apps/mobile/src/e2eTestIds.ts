@@ -25,6 +25,7 @@ export const MOBILE_E2E_IDS = {
   toolbarSearch: "mobile.toolbar.search",
   taskDetailScreen: "mobile.task-detail-screen",
   taskDetailTitle: "mobile.task-detail-title",
+  taskDetailTaskId: "mobile.task-detail-task-id",
   taskTitleButton: "mobile.task-title-button",
   taskExpandedPrompt: "mobile.task-expanded-prompt",
   taskExpandedTaskId: "mobile.task-expanded-task-id",
@@ -168,6 +169,11 @@ export const MOBILE_E2E_IDS = {
   },
   taskListItem(taskId: string): string {
     return `mobile.task-row.${taskId}`;
+  },
+  // Deliberately not under the `mobile.task-row.` prefix: selectors that
+  // enumerate rows match that prefix, and the id is a child of a row.
+  taskListItemId(taskId: string): string {
+    return `mobile.task-row-id.${taskId}`;
   },
   taskListSubtaskRow(taskId: string): string {
     return `mobile.task-row.${taskId}.subtask`;

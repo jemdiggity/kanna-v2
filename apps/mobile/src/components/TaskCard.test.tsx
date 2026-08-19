@@ -75,6 +75,20 @@ function findNodeByProp(
   return null;
 }
 
+function findColumnContaining(
+  node: ElementChild,
+  target: ElementNode | null
+): ElementNode | null {
+  if (!node || typeof node !== "object" || !target) return null;
+  const children = flattenChildren(node.props?.children);
+  if (children.includes(target)) return node;
+  for (const child of children) {
+    const match = findColumnContaining(child, target);
+    if (match) return match;
+  }
+  return null;
+}
+
 function flattenStyle(style: unknown): Record<string, unknown> {
   if (Array.isArray(style)) {
     return style.reduce<Record<string, unknown>>(
@@ -321,6 +335,101 @@ describe("TaskCard", () => {
 
     expect(textContent(tree)).toBe(`${title}in progress`);
     expect(tree.props?.accessibilityLabel).toBe(`${title}. in progress`);
+  });
+
+  it("keeps the complete short id on a row whose title has to truncate", () => {
+    if (!TaskCard) throw new Error("TaskCard was not loaded");
+
+    const longTitle = `Long ${"mobile task title ".repeat(12)}end`;
+    const tree = TaskCard({
+      task: {
+        id: "a6ea6b03",
+        repoId: "repo-1",
+        title: longTitle,
+        stage: "in progress"
+      },
+      shortId: "a6ea6b03",
+      onPress: vi.fn()
+    }) as ElementNode;
+
+    // The id is its own element, so nothing about it depends on title length.
+    const renderedId = findNodeByProp(
+      tree,
+      "testID",
+      "mobile.task-row-id.a6ea6b03"
+    );
+    expect(textContent(renderedId)).toBe("a6ea6b03");
+    expect(renderedId?.props?.numberOfLines).toBeUndefined();
+    // The title is what gives: it truncates with an ellipsis, and the id is
+    // not part of the string that truncated.
+    const title = findNodeByProp(tree, "numberOfLines", 2);
+    expect(textContent(title)).not.toContain("a6ea6b03");
+    expect(textContent(title).endsWith("…")).toBe(true);
+    expect(tree.props?.accessibilityLabel).toContain("Task ID a6ea6b03");
+  });
+
+  it("renders a short-title row with its title intact beside the same id", () => {
+    if (!TaskCard) throw new Error("TaskCard was not loaded");
+
+    const tree = TaskCard({
+      task: {
+        id: "a6ea6b03",
+        repoId: "repo-1",
+        title: "Short title",
+        stage: "in progress"
+      },
+      shortId: "a6ea6b03",
+      onPress: vi.fn()
+    }) as ElementNode;
+
+    expect(findTextNodeByCompleteText(tree, "Short title")).not.toBeNull();
+    expect(
+      findNodeByProp(tree, "testID", "mobile.task-row-id.a6ea6b03")
+    ).not.toBeNull();
+    expect(tree.props?.accessibilityLabel).toBe(
+      "Short title. Task ID a6ea6b03. in progress. …"
+    );
+  });
+
+  it("renders no id when the row has none to show yet", () => {
+    if (!TaskCard) throw new Error("TaskCard was not loaded");
+
+    const tree = TaskCard({
+      task: {
+        id: "local-slot-1",
+        repoId: "repo-1",
+        title: "Creating task",
+        stage: "in progress"
+      },
+      shortId: null,
+      onPress: vi.fn()
+    }) as ElementNode;
+
+    expect(textContent(tree)).not.toContain("local-slot-1");
+    expect(tree.props?.accessibilityLabel).not.toContain("Task ID");
+  });
+
+  it("holds the id column at its own width so the title takes the squeeze", () => {
+    if (!TaskCard) throw new Error("TaskCard was not loaded");
+
+    const tree = TaskCard({
+      task: {
+        id: "a6ea6b03",
+        repoId: "repo-1",
+        title: "Any title",
+        stage: "in progress"
+      },
+      shortId: "a6ea6b03",
+      onPress: vi.fn()
+    }) as ElementNode;
+
+    const idNode = findNodeByProp(tree, "testID", "mobile.task-row-id.a6ea6b03");
+    const column = findColumnContaining(tree, idNode);
+    expect(flattenStyle(column?.props?.style)).toMatchObject({
+      flexShrink: 0
+    });
+    const title = findNodeByProp(tree, "numberOfLines", 2);
+    expect(flattenStyle(title?.props?.style)).toMatchObject({ flex: 1 });
   });
 
   it("styles the pre-capture ellipsis as a muted placeholder", () => {

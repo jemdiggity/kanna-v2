@@ -1612,7 +1612,7 @@ describe("TaskScreen", () => {
 
     expect(titleButton?.props).toMatchObject({
       accessibilityHint: "Expand title",
-      accessibilityLabel: `in progress: ${title}`,
+      accessibilityLabel: `in progress: ${title}. Task ID: task-1`,
       accessibilityRole: "button",
       accessibilityState: { expanded: false },
       accessibilityValue: { text: "unread" }
@@ -1667,13 +1667,56 @@ describe("TaskScreen", () => {
     expect(styleEntries(titleDismissLayer)).toContainEqual({ top: 64 });
   });
 
-  it("shows the complete task ID only in the expanded identity panel", () => {
+  it("keeps the collapsed header's task ID complete when the title truncates", () => {
+    const taskId = "a6ea6b03";
+    const title = `Long ${"mobile task title ".repeat(12)}end`;
+    const tree = renderTaskScreen({ taskId, title });
+
+    const titleText = findByTestId(tree, "mobile.task-detail-title");
+    const idText = findByTestId(tree, "mobile.task-detail-task-id");
+    // The title is the one that gives — one line, tail-ellipsized — while the
+    // id renders beside it as its own element and stays whole.
+    expect(titleText?.props?.numberOfLines).toBe(1);
+    expect(String(titleText?.props?.children)).not.toContain(taskId);
+    expect(idText?.props).toMatchObject({
+      accessible: false,
+      children: taskId
+    });
+    expect(idText?.props?.numberOfLines).toBeUndefined();
+    expect(styleEntries(idText)).toContainEqual(
+      expect.objectContaining({ flexShrink: 0 })
+    );
+    // VoiceOver reads the whole title; only the visible line truncates.
+    expect(findByTestId(tree, "mobile.task-title-button")?.props).toMatchObject({
+      accessibilityLabel: `in progress: ${title}. Task ID: ${taskId}`
+    });
+  });
+
+  it("shows no task ID for a task that is still being created", () => {
+    const tree = renderTaskScreen({
+      taskId: "create:slot-1",
+      taskCreationPhase: "pending"
+    });
+
+    expect(findByTestId(tree, "mobile.task-detail-task-id")).toBeNull();
+    expect(
+      findByTestId(tree, "mobile.task-title-button")?.props?.accessibilityLabel
+    ).not.toContain("Task ID");
+  });
+
+  it("keeps the complete task ID in the collapsed header and the expanded panel", () => {
     const taskId = "019f6c9d6ed40000000120e4307b4591";
     const prompt = "Canonical full prompt";
     let tree = renderTaskScreen({ taskId, prompt });
 
+    // Collapsed: no identity panel, but the id itself survives beside the
+    // one-line title as its own element.
     expect(findByTypeAndText(tree, "Text", "Task ID")).toBeNull();
-    expect(findByTypeAndText(tree, "Text", taskId)).toBeNull();
+    expect(findByTypeAndText(tree, "Text", taskId)?.props).toMatchObject({
+      accessible: false,
+      children: taskId,
+      testID: "mobile.task-detail-task-id"
+    });
 
     pressByTestId(tree, "mobile.task-title-button");
     tree = renderTaskScreen({ taskId, prompt });
@@ -1914,7 +1957,7 @@ describe("TaskScreen", () => {
 
     tree = renderTaskScreen({ taskId: "task-b", title });
     expect(findByTestId(tree, "mobile.task-title-button")?.props).toMatchObject({
-      accessibilityLabel: `in progress: ${title}`,
+      accessibilityLabel: `in progress: ${title}. Task ID: task-b`,
       accessibilityState: { expanded: false }
     });
     expect(findByTestId(tree, "mobile.task-title-dismiss-layer")).toBeNull();

@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { TaskCollectionStatus } from "../state/sessionStore";
 import {
+  buildCreatingTaskUiSlot,
   projectTaskUiSlots,
   type TaskUiSlot
 } from "../state/taskUiSlots";
@@ -665,6 +666,63 @@ describe("TasksScreen", () => {
     expect(
       findByTestID(renderedList, MOBILE_E2E_IDS.taskListSubtaskRow("child"))
     ).not.toBeNull();
+  });
+
+  it("gives every ready row its desktop-local id and a creating row none", () => {
+    if (!TasksScreen || !TaskList || !TaskCard) throw new Error("TasksScreen was not loaded");
+    const readySlots = projectTaskUiSlots(
+      [
+        {
+          id: "a6ea6b03",
+          repoId: "repo-1",
+          title: "Local task",
+          stage: "review"
+        },
+        {
+          id: "cloud:desktop-1:repo-1:41ef899e",
+          ownerLocalTaskId: "41ef899e",
+          repoId: "repo-1",
+          title: "Cloud task",
+          stage: "review"
+        }
+      ],
+      []
+    );
+    const creatingSlot = buildCreatingTaskUiSlot({
+      slotId: "create:slot-1",
+      repoId: "repo-1",
+      prompt: "Still being created",
+      desktopId: "desktop-1",
+      agentProvider: "claude"
+    });
+    const tree = TasksScreen({
+      heading: "Tasks",
+      repos: [{ id: "repo-1", name: "Repo One" }],
+      selectedRepoId: "repo-1",
+      taskCollectionStatus: "ready",
+      taskSlots: [...readySlots, creatingSlot],
+      onOpenTask: vi.fn(),
+      onSelectRepo: vi.fn()
+    }) as ElementNode;
+
+    const collectCards = (
+      node: ElementNode,
+      out: ElementNode[] = []
+    ): ElementNode[] => {
+      if (node.type === TaskCard) out.push(node);
+      for (const child of flattenChildren(node.props?.children)) {
+        if (typeof child !== "string") collectCards(child, out);
+      }
+      return out;
+    };
+    const renderedList = TaskList(
+      findElement(tree, TaskList)?.props as never
+    ) as ElementNode;
+    expect(collectCards(renderedList).map((card) => card.props?.shortId)).toEqual([
+      "a6ea6b03",
+      "41ef899e",
+      null
+    ]);
   });
 
   it("opens an acknowledged task through its stable UI slot id", () => {

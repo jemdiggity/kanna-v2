@@ -29,6 +29,8 @@ interface SwipeableTaskCardProps {
   uiId: string;
   isSubtask: boolean;
   repoLabel: string | null;
+  /** The row's short task id; see {@link TaskCard}. */
+  shortId?: string | null;
   /** This phone's own pin state for the row. */
   pinned?: boolean;
   onPress(): void;
@@ -41,6 +43,7 @@ export function SwipeableTaskCard({
   uiId,
   isSubtask,
   repoLabel,
+  shortId = null,
   pinned = false,
   onPress,
   onDismiss,
@@ -99,6 +102,7 @@ export function SwipeableTaskCard({
         isSubtask={isSubtask}
         pinned={pinned}
         repoLabel={repoLabel}
+        shortId={shortId}
         task={task}
         uiId={uiId}
         onPress={onPress}
@@ -188,6 +192,7 @@ export function SwipeableTaskCard({
           }
           pinned={pinned}
           repoLabel={repoLabel}
+          shortId={shortId}
           task={task}
           uiId={uiId}
           onPress={onPress}
