@@ -327,7 +327,10 @@ function NavigatorTabBar(props: BottomTabBarProps) {
   return (
     <FloatingToolbar
       {...props}
-      activityCount={unreadActivityCount(state.recentTasks)}
+      activityCount={unreadActivityCount(
+        state.recentTasks,
+        state.localTaskListPreferences
+      )}
       onSelectUtilityAction={(action) => {
         if (action === "search") {
           pushSearch();
@@ -354,6 +357,7 @@ function TasksTabRoute() {
         repos={state.repos}
         selectedRepoId={state.selectedRepoId}
         taskCollectionStatus={state.taskCollectionStatus}
+        taskListPreferences={state.localTaskListPreferences}
         taskSlots={projectTaskUiSlots(state.repoTasks, state.taskUiSlots)}
         scrollViewRef={scrollViewRef}
         onOpenMachines={pushDesktops}
@@ -379,6 +383,7 @@ function ActivityTabRoute() {
         repos={state.repos}
         selectedRepoId={state.selectedRepoId}
         taskCollectionStatus={state.taskCollectionStatus}
+        taskListPreferences={state.localTaskListPreferences}
         taskSlots={projectTaskUiSlots(state.recentTasks, state.taskUiSlots)}
         scrollViewRef={scrollViewRef}
         onSelectRepo={(repoId) => {
@@ -411,6 +416,7 @@ function SearchRoute() {
         focusRequestKey={1}
         query={state.searchQuery}
         results={state.searchResults}
+        taskListPreferences={state.localTaskListPreferences}
         onChangeQuery={(query) => {
           void controller.searchTasks(query);
         }}

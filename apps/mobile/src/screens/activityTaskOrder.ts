@@ -1,4 +1,9 @@
 import type { TaskActivity, TaskSummary } from "../lib/api/types";
+import {
+  emptyLocalTaskListPreferences,
+  isLocallyDismissed,
+  type LocalTaskListPreferences
+} from "../state/taskListPreferences";
 
 function activityPriority(activity: TaskActivity | null | undefined): number {
   if (activity === "unread") return 0;
@@ -20,14 +25,26 @@ export function orderActivityTasks(
     .map(({ task }) => task);
 }
 
+/**
+ * The Activity rows this phone still shows: unread tasks it has not dismissed
+ * itself. A dismissal is local and generation-scoped, so a task that produces
+ * newer activity than the dismissed generation comes back.
+ */
 export function visibleActivityTasks(
-  tasks: readonly TaskSummary[]
+  tasks: readonly TaskSummary[],
+  preferences: LocalTaskListPreferences = emptyLocalTaskListPreferences()
 ): TaskSummary[] {
   return orderActivityTasks(
-    tasks.filter((task) => task.activity === "unread")
+    tasks.filter(
+      (task) =>
+        task.activity === "unread" && !isLocallyDismissed(preferences, task)
+    )
   );
 }
 
-export function unreadActivityCount(tasks: readonly TaskSummary[]): number {
-  return tasks.filter((task) => task.activity === "unread").length;
+export function unreadActivityCount(
+  tasks: readonly TaskSummary[],
+  preferences: LocalTaskListPreferences = emptyLocalTaskListPreferences()
+): number {
+  return visibleActivityTasks(tasks, preferences).length;
 }

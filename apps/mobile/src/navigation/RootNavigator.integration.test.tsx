@@ -572,6 +572,17 @@ function createClientMock(): KannaClient {
   } as unknown as KannaClient;
 }
 
+function renderedTaskRowIds(): string[] {
+  if (!rendered) return [];
+  return rendered.root
+    .findAll(
+      (node) =>
+        typeof node.props.testID === "string" &&
+        node.props.testID.startsWith("mobile.task-row.")
+    )
+    .map((node) => String(node.props.testID).replace("mobile.task-row.", ""));
+}
+
 function visibleText(): string {
   if (!rendered) return "";
   return rendered.root
@@ -688,6 +699,78 @@ describe("RootNavigator task collection integration", () => {
       )
     ).toBeDefined();
     expect(visibleText()).toContain("Loaded from the desktop");
+  });
+
+  it("pins from the row swipe straight into the phone's own record and reorders", async () => {
+    const newer: TaskSummary = {
+      id: "task-newer",
+      repoId: "repo-1",
+      title: "Newer task",
+      stage: "in progress",
+      createdAt: "2026-08-18T08:00:00.000Z"
+    };
+    const older: TaskSummary = {
+      id: "task-older",
+      repoId: "repo-1",
+      title: "Older task",
+      stage: "in progress",
+      createdAt: "2026-08-01T08:00:00.000Z"
+    };
+    const client = createClientMock();
+    vi.mocked(client.listRecentTasks).mockResolvedValue([newer, older]);
+    vi.mocked(client.listRepoTasks).mockResolvedValue([newer, older]);
+    const store = createSessionStore();
+    const saved: Array<{ pins: Array<{ taskId: string }> }> = [];
+    let stored = {
+      pins: [] as Array<{ taskId: string; repoId: string }>,
+      dismissedActivity: [] as Array<{
+        taskId: string;
+        repoId: string;
+        activityRevision: number | null;
+      }>,
+      pinsSeededFromServer: false
+    };
+    controller = createMobileController(client, store, undefined, {
+      taskListPreferencesStore: {
+        load: async () => ({
+          status: "loaded" as const,
+          preferences: structuredClone(stored)
+        }),
+        save: async (preferences) => {
+          stored = structuredClone(preferences);
+          saved.push(structuredClone(preferences));
+          return structuredClone(preferences);
+        }
+      }
+    });
+
+    await act(async () => {
+      rendered = create(
+        <NavigatorHarness activeController={controller!} store={store} />
+      );
+      await controller!.bootstrap();
+      await flushMicrotasks();
+    });
+
+    expect(renderedTaskRowIds()).toEqual(["task-newer", "task-older"]);
+
+    await act(async () => {
+      rendered!.root.find(
+        (node) =>
+          node.props.testID === MOBILE_E2E_IDS.taskPinAction("task-older")
+      ).props.onPress();
+      await flushMicrotasks();
+    });
+
+    // No pin route exists on the client any more: the reorder comes from the
+    // phone's own record, which is what was written.
+    expect(renderedTaskRowIds()).toEqual(["task-older", "task-newer"]);
+    expect(store.getState().localTaskListPreferences.pins).toEqual([
+      { taskId: "task-older", repoId: "repo-1" }
+    ]);
+    expect(saved.at(-1)?.pins).toEqual([
+      { taskId: "task-older", repoId: "repo-1" }
+    ]);
   });
 
   it("switches repos from the all-repo cache before the repo refresh settles", async () => {

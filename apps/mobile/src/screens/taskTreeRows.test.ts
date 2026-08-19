@@ -64,11 +64,14 @@ describe("buildTaskTreeRows", () => {
   });
 
   it("keeps a pinned subtask top-level so pinning can lift it", () => {
-    const rows = buildTaskTreeRows(slots([
-      task({ id: "pinned-child", parentTaskId: "parent", pinned: true }),
-      task({ id: "parent" }),
-      task({ id: "child", parentTaskId: "parent" })
-    ]));
+    const rows = buildTaskTreeRows(
+      slots([
+        task({ id: "pinned-child", parentTaskId: "parent" }),
+        task({ id: "parent" }),
+        task({ id: "child", parentTaskId: "parent" })
+      ]),
+      ["pinned-child"]
+    );
 
     expect(rowIds(rows)).toEqual([
       ["pinned-child", 0],

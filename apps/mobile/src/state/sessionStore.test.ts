@@ -467,85 +467,56 @@ describe("createSessionStore", () => {
     ]);
   });
 
-  it("holds a written pin against pre-write snapshots until one reflects it", () => {
+  it("keeps this phone's own pin/dismiss record as published state", () => {
     const store = createSessionStore();
-    const unpinned = {
-      id: "task-1",
-      repoId: "repo-1",
-      title: "Refactor mobile shell",
-      stage: "in progress",
-      pinned: false,
-      pinOrder: null
+    expect(store.getState().localTaskListPreferences).toEqual({
+      pins: [],
+      dismissedActivity: [],
+      pinsSeededFromServer: false
+    });
+
+    const preferences = {
+      pins: [{ taskId: "task-1", repoId: "repo-1" }],
+      dismissedActivity: [
+        { taskId: "task-2", repoId: "repo-1", activityRevision: 3 }
+      ],
+      pinsSeededFromServer: true
     };
-    const slot = buildCreatingTaskUiSlot({
-      slotId: pendingTaskCreation.slotId,
-      repoId: pendingTaskCreation.repoId,
-      prompt: pendingTaskCreation.prompt,
-      desktopId: pendingTaskCreation.desktopId,
-      agentProvider: pendingTaskCreation.agentProvider
+    let published = 0;
+    const unsubscribe = store.subscribe(() => {
+      published += 1;
     });
-    store.addTaskUiSlot(slot);
-    store.acknowledgeTaskUiSlot(slot.slotId, unpinned);
-    store.setRecentTasks([unpinned]);
-    store.setRepoTasks([unpinned]);
-    store.setSearchResults("refactor", [unpinned]);
-    store.reconcileTaskUiSlots([unpinned], { authoritative: true });
+    store.setLocalTaskListPreferences(preferences);
+    unsubscribe();
 
-    store.setTaskPinIntent("task-1", true, 0);
-
-    // Every collection a pre-write snapshot can land in keeps the pin.
-    store.setRecentTasks([unpinned]);
-    store.setRepoTasks([unpinned]);
-    store.setSearchResults("refactor", [unpinned]);
-    store.reconcileTaskUiSlots([unpinned], { authoritative: true });
-    const held = store.getState();
-    expect(held.recentTasks[0]).toMatchObject({ pinned: true, pinOrder: 0 });
-    expect(held.repoTasks[0]).toMatchObject({ pinned: true, pinOrder: 0 });
-    expect(held.searchResults[0]).toMatchObject({ pinned: true, pinOrder: 0 });
-    expect(held.taskUiSlots[0]).toMatchObject({
-      state: "ready",
-      task: { pinned: true, pinOrder: 0 }
-    });
-
-    // Feeding a collection the store itself stamped back in is not a
-    // confirmation — the repo slice is projected from the recent snapshot
-    // before the repo read lands.
-    store.setRepoTasks([...store.getState().recentTasks]);
-    store.setRecentTasks([unpinned]);
-    expect(store.getState().recentTasks[0]).toMatchObject({ pinned: true });
-
-    // The snapshot that does reflect the write hands the columns back.
-    const pinned = { ...unpinned, pinned: true, pinOrder: 4 };
-    store.setRecentTasks([pinned]);
-    expect(store.getState().recentTasks[0]).toMatchObject({
-      pinned: true,
-      pinOrder: 4
-    });
-    store.setRecentTasks([unpinned]);
-    expect(store.getState().recentTasks[0]).toMatchObject({
-      pinned: false,
-      pinOrder: null
-    });
+    expect(store.getState().localTaskListPreferences).toBe(preferences);
+    expect(published).toBe(1);
   });
 
-  it("drops a pin intent the write never landed", () => {
+  it("leaves the desktop's own pin columns on task payloads untouched", () => {
     const store = createSessionStore();
-    const unpinned = {
+    const desktopPinned = {
       id: "task-1",
       repoId: "repo-1",
       title: "Refactor mobile shell",
       stage: "in progress",
-      pinned: false,
-      pinOrder: null
+      pinned: true,
+      pinOrder: 0
     };
-    store.setRecentTasks([unpinned]);
 
-    store.setTaskPinIntent("task-1", true, 0);
-    store.clearTaskPinIntent("task-1");
-    store.setTaskPinState("task-1", false, null);
+    store.setRecentTasks([desktopPinned]);
+    store.setLocalTaskListPreferences({
+      pins: [],
+      dismissedActivity: [],
+      pinsSeededFromServer: true
+    });
 
-    store.setRecentTasks([unpinned]);
-    expect(store.getState().recentTasks[0]).toMatchObject({ pinned: false });
+    // Mobile pin state lives beside the task, never on it: a phone with no
+    // pins does not rewrite what the desktop reported.
+    expect(store.getState().recentTasks[0]).toMatchObject({
+      pinned: true,
+      pinOrder: 0
+    });
   });
 
   it("sets a pending task creation attempt and phase atomically", () => {

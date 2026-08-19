@@ -700,8 +700,6 @@ describe("remote transport", () => {
     await expect(transport.advanceTaskStage("task-1")).resolves.toEqual({
       taskId: "task-pr"
     });
-    await expect(transport.pinTask("task-1")).resolves.toBeUndefined();
-    await expect(transport.unpinTask("task-1")).resolves.toBeUndefined();
     await expect(transport.closeTask("task-1")).resolves.toBeUndefined();
     await expect(transport.sendTaskInput("task-1", "continue")).resolves.toBeUndefined();
 
@@ -753,22 +751,10 @@ describe("remote transport", () => {
     expect(invokeDesktop).toHaveBeenNthCalledWith(8, {
       desktopId: "desktop-1",
       method: "POST",
-      path: "/v1/tasks/task-1/actions/pin",
-      body: {}
-    });
-    expect(invokeDesktop).toHaveBeenNthCalledWith(9, {
-      desktopId: "desktop-1",
-      method: "POST",
-      path: "/v1/tasks/task-1/actions/unpin",
-      body: null
-    });
-    expect(invokeDesktop).toHaveBeenNthCalledWith(10, {
-      desktopId: "desktop-1",
-      method: "POST",
       path: "/v1/tasks/task-1/actions/close",
       body: null
     });
-    expect(invokeDesktop).toHaveBeenNthCalledWith(11, {
+    expect(invokeDesktop).toHaveBeenNthCalledWith(9, {
       desktopId: "desktop-1",
       method: "POST",
       path: "/v1/tasks/task-1/input",

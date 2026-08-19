@@ -21,6 +21,12 @@ import { createRemoteTransport, type RemoteDesktopInvoker } from "../lib/transpo
 import { mapCloudTaskSnapshot } from "../lib/firebase/taskIndex";
 import type { MachinePairingService } from "../lib/pairing/machinePairing";
 import { terminalOutputToString } from "./terminalOutputBuffer";
+import { visibleActivityTasks } from "../screens/activityTaskOrder";
+import {
+  emptyLocalTaskListPreferences,
+  type LocalTaskListPreferences
+} from "./taskListPreferences";
+import type { TaskListPreferencesStore } from "./taskListPreferencesStorage";
 
 function terminalText(store: ReturnType<typeof createSessionStore>): string {
   return terminalOutputToString(store.getState().taskTerminalOutput);
@@ -38,6 +44,27 @@ function createDeferred<T>(): {
     reject = nextReject;
   });
   return { promise, resolve, reject };
+}
+
+/** An in-memory stand-in for the phone's AsyncStorage-backed record. */
+function createTaskListPreferencesStoreMock(
+  initial: LocalTaskListPreferences = emptyLocalTaskListPreferences()
+): TaskListPreferencesStore & {
+  save: ReturnType<typeof vi.fn>;
+  saved(): LocalTaskListPreferences;
+} {
+  let stored = structuredClone(initial);
+  return {
+    saved: () => stored,
+    load: vi.fn(async () => ({
+      status: "loaded" as const,
+      preferences: structuredClone(stored)
+    })),
+    save: vi.fn(async (preferences: LocalTaskListPreferences) => {
+      stored = structuredClone(preferences);
+      return structuredClone(preferences);
+    })
+  };
 }
 
 async function flushMicrotasks(iterations = 5): Promise<void> {
@@ -199,8 +226,6 @@ function createClientMock(): ClientMock {
       taskId: "task-1",
       activity: "idle"
     }),
-    pinTask: vi.fn().mockResolvedValue(undefined),
-    unpinTask: vi.fn().mockResolvedValue(undefined),
     readTaskFile: vi.fn().mockResolvedValue({
       path: "docs/spec.md",
       content: "# Spec"
@@ -272,144 +297,66 @@ describe("createMobileController", () => {
     };
   }
 
-  it("optimistically pins without disturbing selection and rolls back a failed unpin", async () => {
+  it("pins locally, with no server write, and lifts the row into its own order", async () => {
     const store = createSessionStore();
     const client = createClientMock();
-    const pinDeferred = createDeferred<void>();
-    client.pinTask.mockReturnValueOnce(pinDeferred.promise);
-    const controller = createMobileController(client, store);
+    const preferences = createTaskListPreferencesStoreMock();
+    const controller = createMobileController(client, store, undefined, {
+      taskListPreferencesStore: preferences
+    });
     await controller.bootstrap();
     controller.openTask("task-1");
 
-    const pinning = controller.setTaskPinned("task-1", true);
-    expect(store.getState().repoTasks[0]).toMatchObject({
-      id: "task-1",
-      pinned: true,
-      pinOrder: 0
-    });
-    expect(store.getState().selectedTaskId).toBe("task-1");
-    pinDeferred.resolve();
-    await pinning;
-
-    client.unpinTask.mockRejectedValueOnce(new Error("relay unavailable"));
-    await expect(controller.setTaskPinned("task-1", false)).rejects.toThrow(
-      "Could not unpin task: relay unavailable"
-    );
-    expect(store.getState().repoTasks[0]).toMatchObject({
-      id: "task-1",
-      pinned: true,
-      pinOrder: 0
-    });
-    expect(store.getState().selectedTaskId).toBe("task-1");
-  });
-
-  it("keeps an optimistic pin when an older repo read completes", async () => {
-    const store = createSessionStore();
-    const client = createClientMock();
-    const staleRepoRead = createDeferred<TaskSummary[]>();
-    const staleRepoReadStarted = createDeferred<void>();
-    const controller = createMobileController(client, store);
-    await controller.bootstrap();
-    client.listRepoTasks.mockImplementationOnce(() => {
-      staleRepoReadStarted.resolve();
-      return staleRepoRead.promise;
-    });
-
-    const selection = controller.selectRepo("repo-1");
-    await staleRepoReadStarted.promise;
     await controller.setTaskPinned("task-1", true);
-    staleRepoRead.resolve([
-      {
-        id: "task-1",
-        repoId: "repo-1",
-        title: "Stale task snapshot",
-        stage: "in progress",
-        pinned: false,
-        pinOrder: null
-      }
+
+    // The phone's own record is the whole state change: nothing is sent, and
+    // the task payload keeps whatever the desktop said about its own pins.
+    expect(store.getState().localTaskListPreferences.pins).toEqual([
+      { taskId: "task-1", repoId: "repo-1" }
     ]);
-    await selection;
+    expect(preferences.saved().pins).toEqual([
+      { taskId: "task-1", repoId: "repo-1" }
+    ]);
+    expect(store.getState().repoTasks[0]).not.toMatchObject({ pinned: true });
+    expect(store.getState().selectedTaskId).toBe("task-1");
 
-    expect(store.getState().repoTasks[0]).toMatchObject({
-      id: "task-1",
-      pinned: true,
-      pinOrder: 0
-    });
+    await controller.setTaskPinned("task-1", false);
+    expect(store.getState().localTaskListPreferences.pins).toEqual([]);
+    expect(preferences.saved().pins).toEqual([]);
   });
 
-  it("keeps a written pin until a snapshot reflects it", async () => {
+  it("keeps the record it could not write and reports the failure on the row", async () => {
     const store = createSessionStore();
     const client = createClientMock();
-    const controller = createMobileController(client, store);
+    const preferences = createTaskListPreferencesStoreMock();
+    const controller = createMobileController(client, store, undefined, {
+      taskListPreferencesStore: preferences
+    });
     await controller.bootstrap();
-
-    await controller.setTaskPinned("task-1", true);
-
-    // A read that begins after the write can still answer from a snapshot
-    // taken before it — a shared in-flight LAN read, the composed client's
-    // cached snapshot, or a cloud index that has not republished. The pin the
-    // server already recorded must not go back out with it.
-    const prePinTask: TaskSummary = {
-      id: "task-1",
-      repoId: "repo-1",
-      title: "Refactor mobile shell",
-      stage: "in progress",
-      pinned: false,
-      pinOrder: null
-    };
-    client.listRecentTasks.mockResolvedValueOnce([prePinTask]);
-    client.listRepoTasks.mockResolvedValueOnce([prePinTask]);
-    await controller.refresh();
-
-    expect(store.getState().repoTasks[0]).toMatchObject({
-      id: "task-1",
-      pinned: true,
-      pinOrder: 0
-    });
-    expect(store.getState().recentTasks[0]).toMatchObject({
-      id: "task-1",
-      pinned: true
-    });
-
-    // The snapshot that does reflect the write hands the columns back to the
-    // server, including the `pinOrder` it assigned.
-    const pinnedTask: TaskSummary = {
-      ...prePinTask,
-      pinned: true,
-      pinOrder: 3
-    };
-    client.listRecentTasks.mockResolvedValueOnce([pinnedTask]);
-    client.listRepoTasks.mockResolvedValueOnce([pinnedTask]);
-    await controller.refresh();
-    expect(store.getState().repoTasks[0]).toMatchObject({
-      id: "task-1",
-      pinned: true,
-      pinOrder: 3
-    });
-
-    // And an unpin made anywhere else is no longer fought.
-    client.listRecentTasks.mockResolvedValueOnce([prePinTask]);
-    client.listRepoTasks.mockResolvedValueOnce([prePinTask]);
-    await controller.refresh();
-    expect(store.getState().repoTasks[0]).toMatchObject({
-      id: "task-1",
-      pinned: false,
-      pinOrder: null
-    });
-  });
-
-  it("stops holding a pin the write never landed", async () => {
-    const store = createSessionStore();
-    const client = createClientMock();
-    client.pinTask.mockRejectedValueOnce(new Error("relay unavailable"));
-    const controller = createMobileController(client, store);
-    await controller.bootstrap();
+    preferences.save.mockRejectedValueOnce(new Error("storage full"));
 
     await expect(controller.setTaskPinned("task-1", true)).rejects.toThrow(
-      "Could not pin task: relay unavailable"
+      "Could not pin task: storage full"
     );
 
-    const unpinnedTask: TaskSummary = {
+    expect(store.getState().localTaskListPreferences.pins).toEqual([]);
+    expect(preferences.saved().pins).toEqual([]);
+  });
+
+  it("keeps a local pin across refreshes that never mention it", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const preferences = createTaskListPreferencesStoreMock();
+    const controller = createMobileController(client, store, undefined, {
+      taskListPreferencesStore: preferences
+    });
+    await controller.bootstrap();
+    await controller.selectRepo("repo-1");
+    await controller.setTaskPinned("task-1", true);
+
+    // Nothing the desktop reports about its own pin columns moves the phone's
+    // record either way.
+    const desktopUnpinned: TaskSummary = {
       id: "task-1",
       repoId: "repo-1",
       title: "Refactor mobile shell",
@@ -417,108 +364,114 @@ describe("createMobileController", () => {
       pinned: false,
       pinOrder: null
     };
-    client.listRecentTasks.mockResolvedValueOnce([unpinnedTask]);
-    client.listRepoTasks.mockResolvedValueOnce([unpinnedTask]);
+    client.listRecentTasks.mockResolvedValueOnce([desktopUnpinned]);
+    client.listRepoTasks.mockResolvedValueOnce([desktopUnpinned]);
     await controller.refresh();
 
-    expect(store.getState().repoTasks[0]).toMatchObject({
-      id: "task-1",
-      pinned: false,
-      pinOrder: null
-    });
+    expect(store.getState().localTaskListPreferences.pins).toEqual([
+      { taskId: "task-1", repoId: "repo-1" }
+    ]);
   });
 
-  it("dismisses exactly the visible activity revision without removing the task", async () => {
+  it("seeds pins from desktop pin state once, then leaves the phone in charge", async () => {
     const store = createSessionStore();
     const client = createClientMock();
-    const controller = createMobileController(client, store);
-    await controller.bootstrap();
-    store.setRepoTasks([
+    const preferences = createTaskListPreferencesStoreMock();
+    const desktopPinned: TaskSummary[] = [
+      {
+        id: "task-later",
+        repoId: "repo-1",
+        title: "Second desktop pin",
+        stage: "review",
+        pinned: true,
+        pinOrder: 1
+      },
+      {
+        id: "task-first",
+        repoId: "repo-1",
+        title: "First desktop pin",
+        stage: "review",
+        pinned: true,
+        pinOrder: 0
+      },
       {
         id: "task-1",
         repoId: "repo-1",
-        title: "Unread task",
-        stage: "review",
-        activity: "unread",
-        activityRevision: 7
+        title: "Refactor mobile shell",
+        stage: "in progress"
       }
-    ]);
-    store.setRecentTasks(store.getState().repoTasks);
-    controller.openTask("task-1");
+    ];
+    client.listRecentTasks.mockResolvedValue(desktopPinned);
+    client.listRepoTasks.mockResolvedValue(desktopPinned);
+    const controller = createMobileController(client, store, undefined, {
+      taskListPreferencesStore: preferences
+    });
 
-    await controller.dismissActivity("task-1");
+    await controller.bootstrap();
+    await flushMicrotasks();
 
-    expect(client.markTaskRead).toHaveBeenCalledWith("task-1", 7);
-    expect(store.getState().recentTasks).toEqual([
-      expect.objectContaining({
-        id: "task-1",
-        activity: "idle",
-        activityRevision: 8
-      })
+    expect(store.getState().localTaskListPreferences).toMatchObject({
+      pins: [
+        { taskId: "task-first", repoId: "repo-1" },
+        { taskId: "task-later", repoId: "repo-1" }
+      ],
+      pinsSeededFromServer: true
+    });
+
+    // Once seeded, an unpin on the phone is not undone by the next snapshot
+    // that still reports the desktop pin.
+    await controller.setTaskPinned("task-first", false);
+    await controller.refresh();
+    await flushMicrotasks();
+    expect(store.getState().localTaskListPreferences.pins).toEqual([
+      { taskId: "task-later", repoId: "repo-1" }
     ]);
-    expect(store.getState().repoTasks).toHaveLength(1);
-    expect(store.getState().selectedTaskId).toBe("task-1");
   });
 
-  it.each([
-    { repoActivity: "idle" as const, repoActivityRevision: 6 },
-    { repoActivity: "unread" as const, repoActivityRevision: 6 }
-  ])(
-    "dismisses the recent Activity revision when the repo copy is $repoActivity at an older revision",
-    async ({ repoActivity, repoActivityRevision }) => {
-      const store = createSessionStore();
-      const client = createClientMock();
-      const controller = createMobileController(client, store);
-      await controller.bootstrap();
-      store.setRepoTasks([
-        {
-          id: "task-1",
-          repoId: "repo-1",
-          title: "Stale repo task",
-          stage: "review",
-          activity: repoActivity,
-          activityRevision: repoActivityRevision
-        }
-      ]);
-      store.setRecentTasks([
-        {
-          id: "task-1",
-          repoId: "repo-1",
-          title: "Visible Activity task",
-          stage: "review",
-          activity: "unread",
-          activityRevision: 7
-        }
-      ]);
-
-      await controller.dismissActivity("task-1");
-
-      expect(client.markTaskRead).toHaveBeenCalledWith("task-1", 7);
-      expect(store.getState().recentTasks).toEqual([
-        expect.objectContaining({
-          id: "task-1",
-          activity: "idle",
-          activityRevision: 8
-        })
-      ]);
-      expect(store.getState().repoTasks).toEqual([
-        expect.objectContaining({
-          id: "task-1",
-          activity: "idle",
-          activityRevision: 8
-        })
-      ]);
-    }
-  );
-
-  it("does not suppress a later distinct activity when dismissal loses its revision race", async () => {
+  it("prunes entries a snapshot proves are gone but keeps repos it does not cover", async () => {
     const store = createSessionStore();
     const client = createClientMock();
-    const response = createDeferred<{ taskId: string; activity: null }>();
-    client.markTaskRead.mockReturnValueOnce(response.promise);
-    const controller = createMobileController(client, store);
+    const preferences = createTaskListPreferencesStoreMock({
+      pins: [
+        { taskId: "task-1", repoId: "repo-1" },
+        { taskId: "task-closed", repoId: "repo-1" },
+        { taskId: "task-other-machine", repoId: "repo-elsewhere" }
+      ],
+      dismissedActivity: [
+        { taskId: "task-1", repoId: "repo-1", activityRevision: 7 }
+      ],
+      pinsSeededFromServer: true
+    });
+    const controller = createMobileController(client, store, undefined, {
+      taskListPreferencesStore: preferences
+    });
+
     await controller.bootstrap();
-    const unreadTasks: TaskSummary[] = [
+    await flushMicrotasks();
+
+    // `task-closed` is gone from the all-open-tasks snapshot, and `task-1` is
+    // no longer unread, so both entries go. The pin for a repo this snapshot
+    // says nothing about survives.
+    expect(store.getState().localTaskListPreferences).toEqual({
+      pins: [
+        { taskId: "task-1", repoId: "repo-1" },
+        { taskId: "task-other-machine", repoId: "repo-elsewhere" }
+      ],
+      dismissedActivity: [],
+      pinsSeededFromServer: true
+    });
+  });
+
+  it("dismisses activity on the phone alone, leaving the desktop unread", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const preferences = createTaskListPreferencesStoreMock();
+    const controller = createMobileController(client, store, undefined, {
+      taskListPreferencesStore: preferences
+    });
+    await controller.bootstrap();
+    client.markTaskRead.mockClear();
+    const unread: TaskSummary[] = [
       {
         id: "task-1",
         repoId: "repo-1",
@@ -528,28 +481,39 @@ describe("createMobileController", () => {
         activityRevision: 7
       }
     ];
-    store.setRepoTasks(unreadTasks);
-    store.setRecentTasks(unreadTasks);
+    store.setRepoTasks(unread);
+    store.setRecentTasks(unread);
 
-    const dismissal = controller.dismissActivity("task-1");
-    store.setTaskActivity("task-1", "unread", 8);
-    response.resolve({ taskId: "task-1", activity: null });
+    await controller.dismissActivity("task-1");
 
-    await expect(dismissal).rejects.toThrow(
-      "The activity changed before it could be dismissed"
-    );
+    expect(client.markTaskRead).not.toHaveBeenCalled();
+    expect(store.getState().localTaskListPreferences.dismissedActivity).toEqual([
+      { taskId: "task-1", repoId: "repo-1", activityRevision: 7 }
+    ]);
+    expect(preferences.saved().dismissedActivity).toEqual([
+      { taskId: "task-1", repoId: "repo-1", activityRevision: 7 }
+    ]);
+    // Desktop read state stays authoritative for the desktop: the row the
+    // phone hides is still unread everywhere else.
     expect(store.getState().recentTasks[0]).toMatchObject({
       activity: "unread",
-      activityRevision: 8
+      activityRevision: 7
     });
+    expect(visibleActivityTasks(
+      store.getState().recentTasks,
+      store.getState().localTaskListPreferences
+    )).toEqual([]);
   });
 
-  it("does not suppress a later live activity when dismissal succeeds after its subscription update", async () => {
+  it("brings a dismissed row back when the task produces newer activity", async () => {
     const store = createSessionStore();
     const client = createClientMock();
-    const auth = createAuthSessionMock();
-    const response = createDeferred<{ taskId: string; activity: "idle" }>();
-    const unreadTask: TaskSummary = {
+    const preferences = createTaskListPreferencesStoreMock();
+    const controller = createMobileController(client, store, undefined, {
+      taskListPreferencesStore: preferences
+    });
+    await controller.bootstrap();
+    const unread: TaskSummary = {
       id: "task-1",
       repoId: "repo-1",
       title: "Unread task",
@@ -557,45 +521,25 @@ describe("createMobileController", () => {
       activity: "unread",
       activityRevision: 7
     };
-    let publishCloudTasks: ((tasks: TaskSummary[]) => void) | null = null;
-    auth.getState = vi.fn(() => ({
-      status: "signedIn",
-      user: { uid: "user-1", email: "u@example.com", displayName: null }
-    }));
-    client.getStatus.mockResolvedValueOnce({
-      state: "running",
-      desktopId: "cloud",
-      desktopName: "Kanna Cloud",
-      lanHost: "cloud",
-      lanPort: 0,
-      pairingCode: null
-    });
-    client.markTaskRead.mockReturnValueOnce(response.promise);
-    const controller = createMobileController(client, store, auth, {
-      subscribeCloudTasks: vi.fn((_uid, onUpdate) => {
-        publishCloudTasks = onUpdate;
-        onUpdate([unreadTask]);
-        return () => undefined;
-      })
-    });
-    await controller.bootstrap();
+    store.setRepoTasks([unread]);
+    store.setRecentTasks([unread]);
+    await controller.dismissActivity("task-1");
 
-    const dismissal = controller.dismissActivity("task-1");
-    publishCloudTasks?.([
-      { ...unreadTask, activity: "unread", activityRevision: 9 }
-    ]);
-    response.resolve({ taskId: "task-1", activity: "idle" });
-    await dismissal;
+    const newerActivity: TaskSummary = { ...unread, activityRevision: 8 };
+    client.listRecentTasks.mockResolvedValueOnce([newerActivity]);
+    client.listRepoTasks.mockResolvedValueOnce([newerActivity]);
+    await controller.refresh();
+    await flushMicrotasks();
 
-    expect(client.markTaskRead).toHaveBeenCalledWith("task-1", 7);
-    expect(store.getState().recentTasks[0]).toMatchObject({
-      activity: "unread",
-      activityRevision: 9
-    });
-    expect(store.getState().repoTasks[0]).toMatchObject({
-      activity: "unread",
-      activityRevision: 9
-    });
+    expect(
+      store.getState().localTaskListPreferences.dismissedActivity
+    ).toEqual([]);
+    expect(
+      visibleActivityTasks(
+        store.getState().recentTasks,
+        store.getState().localTaskListPreferences
+      ).map((task) => task.id)
+    ).toEqual(["task-1"]);
   });
 
   it("marks polled task collections ready after bootstrap", async () => {

@@ -51,7 +51,8 @@ function compareCreatedAtAscending(left: TaskSummary, right: TaskSummary): numbe
  * every stage group.
  */
 export function buildTaskTreeRows(
-  slots: readonly TaskUiSlot[]
+  slots: readonly TaskUiSlot[],
+  pinnedTaskIds: readonly string[] = []
 ): TaskTreeRow[] {
   // Owner-local ids are only unique per desktop, so a mixed collection can
   // hold the same local id from several desktops. Keep every candidate and
@@ -67,7 +68,7 @@ export function buildTaskTreeRows(
 
   const resolveParent = (slot: TaskUiSlot): TaskUiSlot | null => {
     if (slot.state !== "ready") return null;
-    if (isPinnedTask(slot.task)) return null;
+    if (isPinnedTask(slot.task.id, pinnedTaskIds)) return null;
     const parentTaskId = slot.task.parentTaskId;
     if (!parentTaskId || parentTaskId === slotLocalTaskId(slot)) return null;
     const candidates = (slotsByLocalTaskId.get(parentTaskId) ?? []).filter(

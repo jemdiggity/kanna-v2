@@ -1440,14 +1440,6 @@ export function createCloudLanClient(
           ? client.markTaskRead(routedTaskId)
           : client.markTaskRead(routedTaskId, expectedActivityRevision)
       ),
-    pinTask: (taskId) =>
-      invokeTaskRoute(taskId, (client, routedTaskId) =>
-        client.pinTask(routedTaskId)
-      ),
-    unpinTask: (taskId) =>
-      invokeTaskRoute(taskId, (client, routedTaskId) =>
-        client.unpinTask(routedTaskId)
-      ),
     closeTask: async (taskId) => {
       const route = routeForTask(taskId);
       if (route.source === "unavailable") {

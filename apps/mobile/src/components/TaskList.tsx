@@ -19,6 +19,8 @@ interface TaskListProps {
   /** Nest subtasks under their visible parent (desktop sidebar parity). */
   nestSubtasks?: boolean;
   repoLabelForTask?: (task: TaskSummary) => string | null;
+  /** Task ids this phone has pinned, in its own pin order. */
+  pinnedTaskIds?: readonly string[];
   taskSlots: TaskUiSlot[];
   testID?: string;
   onOpenTask(taskId: string): void;
@@ -31,6 +33,7 @@ export function TaskList({
   errorLabel = null,
   loading = false,
   nestSubtasks = false,
+  pinnedTaskIds = [],
   repoLabelForTask,
   testID,
   taskSlots,
@@ -51,7 +54,7 @@ export function TaskList({
   }
 
   const rows: TaskTreeRow[] = nestSubtasks
-    ? buildTaskTreeRows(taskSlots)
+    ? buildTaskTreeRows(taskSlots, pinnedTaskIds)
     : taskSlots.map((slot) => ({ slot, depth: 0 }));
 
   return (
@@ -60,6 +63,7 @@ export function TaskList({
         const task = taskUiSlotToTaskSummary(slot);
         const commonProps = {
           isSubtask: depth > 0,
+          pinned: pinnedTaskIds.includes(task.id),
           repoLabel: repoLabelForTask?.(task) ?? null,
           task,
           uiId: slot.slotId,

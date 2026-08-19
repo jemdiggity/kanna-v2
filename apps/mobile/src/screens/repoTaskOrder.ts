@@ -14,15 +14,15 @@ function sortTaskSlotsNewestFirst(taskSlots: readonly TaskUiSlot[]): TaskUiSlot[
 }
 
 /**
- * The order the repo-scoped Tasks list renders in: owner-pinned tasks first,
- * in their owner pin order, then everything else newest first.
- *
- * It reads `pinned`/`pinOrder` straight off the task payload, which both the
- * LAN summaries and the Firestore-published index carry, so the same ordering
- * holds whichever transport served the list.
+ * The order the repo-scoped Tasks list renders in: this phone's pinned tasks
+ * first, in its own pin order, then everything else newest first.
  */
 export function orderRepoTaskSlots(
-  taskSlots: readonly TaskUiSlot[]
+  taskSlots: readonly TaskUiSlot[],
+  pinnedTaskIds: readonly string[] = []
 ): TaskUiSlot[] {
-  return orderTaskSlotsPinnedFirst(sortTaskSlotsNewestFirst(taskSlots));
+  return orderTaskSlotsPinnedFirst(
+    sortTaskSlotsNewestFirst(taskSlots),
+    pinnedTaskIds
+  );
 }

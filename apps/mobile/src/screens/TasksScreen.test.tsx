@@ -447,7 +447,7 @@ describe("TasksScreen", () => {
     ]);
   });
 
-  it("lifts pinned repo tasks above the newest unpinned ones", () => {
+  it("lifts this phone's pinned repo tasks above the newest unpinned ones", () => {
     if (!TasksScreen || !TaskList) throw new Error("TasksScreen was not loaded");
     const tasks = [
       {
@@ -462,25 +462,24 @@ describe("TasksScreen", () => {
         repoId: "repo-a",
         title: "Second pin",
         stage: "in progress",
-        createdAt: "2026-07-01T08:00:00.000Z",
-        pinned: true,
-        pinOrder: 1
+        createdAt: "2026-07-01T08:00:00.000Z"
       },
       {
         id: "task-older",
         repoId: "repo-a",
         title: "Older task",
         stage: "in progress",
-        createdAt: "2026-08-01T08:00:00.000Z"
+        createdAt: "2026-08-01T08:00:00.000Z",
+        // What the desktop pinned is not what this phone shows.
+        pinned: true,
+        pinOrder: 0
       },
       {
         id: "task-pinned-first",
         repoId: "repo-a",
         title: "First pin",
         stage: "in progress",
-        createdAt: "2026-06-01T08:00:00.000Z",
-        pinned: true,
-        pinOrder: 0
+        createdAt: "2026-06-01T08:00:00.000Z"
       }
     ];
     const taskSlots = projectTaskUiSlots(tasks, []);
@@ -490,21 +489,82 @@ describe("TasksScreen", () => {
       repos: [{ id: "repo-a", name: "Repo A" }],
       selectedRepoId: "repo-a",
       taskCollectionStatus: "ready",
+      taskListPreferences: {
+        pins: [
+          { taskId: "task-pinned-first", repoId: "repo-a" },
+          { taskId: "task-pinned-second", repoId: "repo-a" }
+        ],
+        dismissedActivity: [],
+        pinsSeededFromServer: true
+      },
       taskSlots,
       onOpenTask: vi.fn(),
       onSelectRepo: vi.fn()
     }) as ElementNode;
 
+    const list = findElement(tree, TaskList);
     expect(
-      (findElement(tree, TaskList)?.props?.taskSlots as typeof taskSlots).map(
-        ({ taskId }) => taskId
-      )
+      (list?.props?.taskSlots as typeof taskSlots).map(({ taskId }) => taskId)
     ).toEqual([
       "task-pinned-first",
       "task-pinned-second",
       "task-newest",
       "task-older"
     ]);
+    expect(list?.props?.pinnedTaskIds).toEqual([
+      "task-pinned-first",
+      "task-pinned-second"
+    ]);
+  });
+
+  it("hides Activity rows this phone dismissed and brings back newer activity", () => {
+    if (!TasksScreen || !TaskList) throw new Error("TasksScreen was not loaded");
+    const renderRecent = (activityRevision: number) => {
+      const tree = TasksScreen({
+        heading: "Recent",
+        repos: [{ id: "repo-a", name: "Repo A" }],
+        selectedRepoId: "repo-a",
+        taskCollectionStatus: "ready",
+        taskListPreferences: {
+          pins: [],
+          dismissedActivity: [
+            { taskId: "task-seen", repoId: "repo-a", activityRevision: 4 }
+          ],
+          pinsSeededFromServer: true
+        },
+        taskSlots: projectTaskUiSlots(
+          [
+            {
+              id: "task-seen",
+              repoId: "repo-a",
+              title: "Seen already",
+              stage: "review",
+              activity: "unread",
+              activityRevision
+            },
+            {
+              id: "task-fresh",
+              repoId: "repo-a",
+              title: "Still unread",
+              stage: "review",
+              activity: "unread",
+              activityRevision: 1
+            }
+          ],
+          []
+        ),
+        onOpenTask: vi.fn(),
+        onSelectRepo: vi.fn()
+      }) as ElementNode;
+      return (
+        findElement(tree, TaskList)?.props?.taskSlots as Array<{
+          taskId: string;
+        }>
+      ).map(({ taskId }) => taskId);
+    };
+
+    expect(renderRecent(4)).toEqual(["task-fresh"]);
+    expect(renderRecent(5)).toEqual(["task-seen", "task-fresh"]);
   });
 
   it("continues to scope the structural Tasks view to the selected repo", () => {
