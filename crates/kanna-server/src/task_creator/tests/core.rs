@@ -2087,6 +2087,62 @@ fn internal_builtin_agents_are_unlisted_but_resolve_by_name() {
 }
 
 #[test]
+fn review_agents_send_reviewers_to_an_instruction_history_tool_that_exists() {
+    // What the reviewer for task 00e8169f hit: the record existed, the built-in
+    // prompt pointed at it, and the tool the prompt named was not on the
+    // connected server — so the reviewer correctly refused to say anything
+    // about what the task had been told. A prompt naming a tool the catalog
+    // does not serve is worse than silence, so pin the guidance and every tool
+    // name in it to the catalog that actually answers it.
+    let repo_root = init_git_repo_without_provider_fixtures("definitions-instruction-history");
+    publish_origin_main(&repo_root, "publish repo without agents");
+
+    let definitions = RepoDefinitions::resolve(&definition_repo(&repo_root, "main")).unwrap();
+    let catalog = kanna_tool_catalog::bundled_catalog();
+
+    for name in ["review", "qa-dispatcher"] {
+        let prompt = definitions.agent(name).unwrap().prompt;
+        for required in [
+            // The tool that reads the history, the cheap count that says there
+            // is one, and the fallback for a client without MCP.
+            "kanna_task_inputs",
+            "deliveredInputCount",
+            "kanna-cli task inputs",
+        ] {
+            assert!(
+                prompt.contains(required),
+                "`{name}` must tell its reviewer about `{required}`"
+            );
+        }
+        for tool in mentioned_kanna_tools(&prompt) {
+            assert!(
+                catalog.tools.iter().any(|candidate| candidate.name == tool),
+                "`{name}` names `{tool}`, which the bundled catalog does not expose"
+            );
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(repo_root);
+}
+
+/// Every `kanna_*` tool an agent definition tells its agent to call.
+fn mentioned_kanna_tools(prompt: &str) -> std::collections::BTreeSet<String> {
+    let bytes = prompt.as_bytes();
+    let mut mentioned = std::collections::BTreeSet::new();
+    let mut cursor = 0;
+    while let Some(offset) = prompt[cursor..].find("kanna_") {
+        let start = cursor + offset;
+        let mut end = start;
+        while end < bytes.len() && (bytes[end].is_ascii_lowercase() || bytes[end] == b'_') {
+            end += 1;
+        }
+        mentioned.insert(prompt[start..end].trim_end_matches('_').to_string());
+        cursor = end.max(start + 1);
+    }
+    mentioned
+}
+
+#[test]
 fn extension_layering_keeps_or_overrides_the_base_agent_visibility() {
     // EXTEND.md follows the same replace-when-present rule as every other
     // frontmatter field: an extension that says nothing about visibility

@@ -1249,6 +1249,120 @@ async fn send_task_input_delivers_to_a_live_session_after_a_finished_run() {
     let _ = std::fs::remove_file(config.db_path);
 }
 
+/// The record is only as reachable as the tool that names it. Neither kanna-mcp
+/// nor kanna-cli hand-writes this route: both resolve `kanna_task_inputs` from
+/// the shared catalog and send whatever it yields. So a catalog path that
+/// drifts from the router turns a reviewer's "what was this task told?" into a
+/// 404 — which, from where they sit, is indistinguishable from "nothing was
+/// ever sent", the exact failure the record exists to prevent. Drive the real
+/// router with the catalog's own resolved request to pin the two together.
+#[tokio::test]
+async fn catalog_task_inputs_tool_reaches_the_recorded_instruction_history() {
+    let state = test_state_with_seed("desktop-catalog-inputs", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task 1",
+            "repo-1",
+            "Instructed task",
+            Some("Instructed task"),
+            "in progress",
+            "2026-08-20 04:00:00",
+        )
+        .unwrap();
+        db.record_task_input(
+            "task 1",
+            crate::db::TaskInputSource::Operator,
+            "Keep the new flag — I changed my mind mid-task.",
+        )
+        .unwrap()
+        .expect("a seeded task should accept a recorded input");
+    });
+    let app = router(state);
+
+    let catalog = kanna_tool_catalog::bundled_catalog();
+    let resolved = kanna_tool_catalog::resolve_request(
+        &catalog,
+        "kanna_task_inputs",
+        &serde_json::json!({ "task_id": "task 1", "tail": 25 }),
+    )
+    .expect("the bundled catalog must expose kanna_task_inputs");
+    assert_eq!(resolved.method, kanna_tool_catalog::Method::Get);
+    assert_eq!(resolved.kind, kanna_tool_catalog::ResponseKind::Json);
+
+    let response = app
+        .clone()
+        .oneshot(Request::get(&resolved.path).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "catalog path {} did not reach the inputs route",
+        resolved.path
+    );
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let inputs: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(inputs["taskId"], "task 1");
+    assert_eq!(inputs["total"], 1);
+    let recorded = &inputs["inputs"][0];
+    assert_eq!(
+        recorded["message"],
+        "Keep the new flag — I changed my mind mid-task."
+    );
+    assert_eq!(recorded["source"], "operator");
+    assert_eq!(recorded["stage"], "in progress");
+    assert!(recorded["deliveredAt"]
+        .as_str()
+        .is_some_and(|at| !at.is_empty()));
+    // The keys the MCP and CLI consumers deserialize. kanna-cli models this
+    // response with a typed struct it cannot share with this crate, so the
+    // shape is pinned on both sides — see `kanna-cli/tests/task_inputs.rs`.
+    let mut keys = recorded
+        .as_object()
+        .expect("each record is an object")
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "deliveredAt",
+            "id",
+            "message",
+            "runId",
+            "source",
+            "stage",
+            "taskId"
+        ]
+    );
+
+    // And the cheap summary on task detail, which is what tells a reviewer the
+    // history is worth fetching at all.
+    let detail_request = kanna_tool_catalog::resolve_request(
+        &catalog,
+        "kanna_get_task",
+        &serde_json::json!({ "task_id": "task 1" }),
+    )
+    .expect("the bundled catalog must expose kanna_get_task");
+    let response = app
+        .oneshot(
+            Request::get(&detail_request.path)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let detail: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(detail["deliveredInputCount"], 1);
+}
+
 #[tokio::test]
 async fn send_task_input_reports_daemon_write_failure_as_delivery_uncertain() {
     use kanna_daemon::protocol::{
