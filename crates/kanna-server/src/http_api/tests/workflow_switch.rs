@@ -9,9 +9,9 @@ fn seed_workflow_task(
     db: &Db,
     repo_path: &str,
     task_id: &str,
-    pipeline: &str,
+    workflow_name: &str,
     stage: &str,
-    pipeline_def: &str,
+    workflow_def: &str,
 ) {
     db.insert_repo(NewRepo {
         id: "repo-1",
@@ -25,8 +25,8 @@ fn seed_workflow_task(
         repo_id: "repo-1",
         prompt: "change this task workflow",
         display_name: Some("Dynamic workflow"),
-        pipeline,
-        pipeline_def: Some(pipeline_def),
+        pipeline: workflow_name,
+        pipeline_def: Some(workflow_def),
         stage,
         branch: &format!("task-{task_id}"),
         agent_type: "pty",
@@ -54,6 +54,31 @@ async fn set_workflow(
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({ "workflowName": workflow_name }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    (status, String::from_utf8(body.to_vec()).unwrap())
+}
+
+/// The retired route and request key. Both must keep working: a caller on the
+/// old naming (an older mobile build, a pinned tool catalog) still reaches the
+/// same handler.
+async fn set_workflow_via_legacy_surface(
+    app: &axum::Router,
+    task_id: &str,
+    workflow_name: &str,
+) -> (StatusCode, String) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post(format!("/v1/tasks/{task_id}/actions/set-pipeline"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "pipelineName": workflow_name }).to_string(),
                 ))
                 .unwrap(),
         )
@@ -146,7 +171,7 @@ async fn compatible_switch_repins_snapshot_carries_budget_emits_event_and_preser
         vec!["in progress", "review", "pr"]
     );
     assert_eq!(
-        db.recent_repo_pipelines("repo-1", 5).unwrap(),
+        db.recent_repo_workflows("repo-1", 5).unwrap(),
         vec!["no-review"],
         "mid-flight changes must not feed the creation-time sticky workflow"
     );
@@ -376,4 +401,31 @@ async fn exhausted_revision_rounds_are_not_reset_but_a_higher_limit_adds_headroo
         Some(4),
         "the higher limit adds headroom without granting a fresh budget"
     );
+}
+
+#[tokio::test]
+async fn the_legacy_pipeline_route_and_request_key_still_switch_the_workflow() {
+    let (_repo_temp, repo_path) = workflow_test_repo("legacy-surface");
+    let state = test_state_with_seed("workflow-switch-legacy", "Studio Mac", move |db| {
+        seed_workflow_task(
+            db,
+            &repo_path,
+            "task-1",
+            "no-review",
+            "in progress",
+            r#"{"name":"old-snapshot","stages":[]}"#,
+        );
+    });
+    let db_path = state.config().db_path.clone();
+    let app = router(Arc::clone(&state));
+
+    let (status, body) = set_workflow_via_legacy_surface(&app, "task-1", "single-reviewer").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let response: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(response["workflowName"], "single-reviewer");
+    assert_eq!(response["pipelineName"], "single-reviewer");
+
+    let db = Db::open(&db_path).unwrap();
+    let item = db.get_pipeline_item("task-1").unwrap().unwrap();
+    assert_eq!(item.pipeline.as_deref(), Some("single-reviewer"));
 }

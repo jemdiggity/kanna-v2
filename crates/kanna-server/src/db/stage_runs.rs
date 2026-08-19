@@ -277,7 +277,7 @@ impl Db {
 
     /// Persist a provider session id learned after spawn (for example Codex's
     /// terminal footer) on both the task and its latest run. The run record is
-    /// the durable resume source; the pipeline-item field remains the legacy
+    /// the durable resume source; the `pipeline_item` field remains the legacy
     /// current-session mirror.
     pub fn update_latest_stage_run_provider_session_id(
         &self,

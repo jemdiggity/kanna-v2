@@ -2704,7 +2704,7 @@ async fn every_working_task_stopping_emits_one_activity_changed_event() {
 /// `notifyTaskId` used to be creation-time only, so an orchestrator could not
 /// subscribe to a task it had adopted rather than created.
 ///
-/// Retargeting is pure pipeline-item state: the seeded tasks have no
+/// Retargeting is pure `pipeline_item` state: the seeded tasks have no
 /// workspace, no terminal session, and no stage run, so this also pins that a
 /// task which has not started its first stage can still be retargeted.
 #[tokio::test]

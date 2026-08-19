@@ -1555,7 +1555,7 @@ async fn terminal_state_notification_sends_once_to_notify_target() {
     let _ = std::fs::remove_dir_all(daemon_dir);
 }
 
-/// Closing a task past the final stage of a pipeline that declares the
+/// Closing a task past the final stage of a workflow that declares the
 /// merge-signaling `approve` post.
 ///
 /// The post is injected into whatever agent session the pr stage left running,
@@ -1573,9 +1573,9 @@ mod merge_handoff_on_close {
     use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
-    /// Pipeline whose final `pr` stage promises the merge handoff, preceded by
+    /// Workflow whose final `pr` stage promises the merge handoff, preceded by
     /// a review stage — the shape every failing task in the incident ran.
-    fn review_bearing_pipeline_def() -> String {
+    fn review_bearing_workflow_def() -> String {
         serde_json::json!({
             "name": "single-reviewer",
             "stages": [
@@ -1604,7 +1604,7 @@ mod merge_handoff_on_close {
     /// The control: same final stage, same approve post, no review stage. This
     /// is the path that kept working during the incident, and it must keep
     /// producing exactly one handoff.
-    fn no_review_pipeline_def() -> String {
+    fn no_review_workflow_def() -> String {
         serde_json::json!({
             "name": "no-review",
             "stages": [
@@ -1624,8 +1624,8 @@ mod merge_handoff_on_close {
         .to_string()
     }
 
-    /// A pipeline that never promised a handoff: closing must stay silent.
-    fn plain_pipeline_def() -> String {
+    /// A workflow that never promised a handoff: closing must stay silent.
+    fn plain_workflow_def() -> String {
         serde_json::json!({
             "name": "plain",
             "stages": [
@@ -1889,14 +1889,14 @@ mod merge_handoff_on_close {
             .collect()
     }
 
-    /// The incident, reproduced: a review-bearing pipeline whose approve post
+    /// The incident, reproduced: a review-bearing workflow whose approve post
     /// reports "Created PR ..." and signals nothing. The task must not close
     /// leaving that PR unannounced.
     #[tokio::test]
     async fn engine_signals_the_merge_master_when_the_approve_post_did_not() {
         let harness = Harness::new(
             "review-gap",
-            &review_bearing_pipeline_def(),
+            &review_bearing_workflow_def(),
             Some("https://github.com/acme/repo/pull/91"),
         );
 
@@ -1932,7 +1932,7 @@ mod merge_handoff_on_close {
     async fn a_post_that_signalled_for_itself_is_not_signalled_again() {
         let harness = Harness::new(
             "no-review-control",
-            &no_review_pipeline_def(),
+            &no_review_workflow_def(),
             Some("https://github.com/acme/repo/pull/91"),
         );
 
@@ -1978,13 +1978,13 @@ mod merge_handoff_on_close {
         harness.cleanup();
     }
 
-    /// A pipeline whose final stage declares no approve post promised no
+    /// A workflow whose final stage declares no approve post promised no
     /// merge side effect, so closing it must have none.
     #[tokio::test]
-    async fn a_pipeline_without_the_approve_post_closes_without_signalling() {
+    async fn a_workflow_without_the_approve_post_closes_without_signalling() {
         let harness = Harness::new(
             "no-post",
-            &plain_pipeline_def(),
+            &plain_workflow_def(),
             Some("https://github.com/acme/repo/pull/91"),
         );
         let db = harness.db();
@@ -2029,11 +2029,11 @@ mod merge_handoff_on_close {
     }
 
     /// The stage promised a handoff and there is nothing to hand off. That is
-    /// a failed approval, not a finished pipeline: the task stays open, unread,
+    /// a failed approval, not a finished workflow: the task stays open, unread,
     /// with the gap on the event feed.
     #[tokio::test]
     async fn a_promised_handoff_with_no_pr_refuses_to_close_the_task() {
-        let harness = Harness::new("no-pr", &review_bearing_pipeline_def(), None);
+        let harness = Harness::new("no-pr", &review_bearing_workflow_def(), None);
 
         assert_eq!(
             harness
@@ -2070,7 +2070,7 @@ mod merge_handoff_on_close {
 ///
 /// `TASK <id> DONE [<status>]` is acted on without re-reading task state, so
 /// each ending has to be distinguishable from the payload alone: a clean
-/// pipeline finish is `success`, a task closed before it finished its pipeline
+/// workflow finish is `success`, a task closed before it finished its workflow
 /// is `closed`, and only a real failing verdict is `failure`. Daemon `Exit`
 /// cannot tell them apart on its own — all three end the same PTY — so these
 /// drive the real routes and the real daemon socket rather than the derivation
@@ -2250,7 +2250,7 @@ mod completion_notification {
     }
 
     /// The regression: a task whose final run succeeded, closed by advancing
-    /// past the last pipeline stage, used to report `[failure]` because the
+    /// past the last workflow stage, used to report `[failure]` because the
     /// close path hardcoded it and daemon `Exit` was the only other signal.
     #[tokio::test]
     async fn advancing_past_the_final_stage_reports_success() {

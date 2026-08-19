@@ -405,7 +405,7 @@ omitted from the listing, but still resolve when the
 
 The matching `architect-consultation` workflow is internal for the same
 reason: it is a finite manual-stage child contract named explicitly by the
-task manager, not a product-work pipeline choice. The workflow binds
+task manager, not a product-work workflow choice. The workflow binds
 `architect`; task creation supplies the assessed work item as `parentTaskId`,
 the manager independently as `notifyTaskId`, and the assessed committed branch
 as `baseRef`. No singleton or new event loop is involved. See

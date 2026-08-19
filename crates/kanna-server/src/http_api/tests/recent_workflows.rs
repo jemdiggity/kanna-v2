@@ -12,13 +12,13 @@ fn seed_repo(db: &Db, id: &str) {
     .expect("insert repo");
 }
 
-fn seed_task(db: &Db, id: &str, repo_id: &str, pipeline: &str, parent_task_id: Option<&str>) {
+fn seed_task(db: &Db, id: &str, repo_id: &str, workflow_name: &str, parent_task_id: Option<&str>) {
     db.insert_pipeline_item(NewPipelineItem {
         id,
         repo_id,
         prompt: "recent workflows task",
         display_name: None,
-        pipeline,
+        pipeline: workflow_name,
         pipeline_def: None,
         stage: "in progress",
         branch: &format!("task-{id}"),

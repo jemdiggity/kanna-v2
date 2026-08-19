@@ -34,7 +34,9 @@ export interface PipelineItem {
   issue_number: number | null;
   issue_title: string | null;
   prompt: string | null;
+  /** Workflow name. `pipeline` is the legacy storage column name. */
   pipeline: string;
+  /** Pinned workflow definition JSON; legacy storage column name. */
   pipeline_def: string | null;
   stage: string;
   pr_number: number | null;

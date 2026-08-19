@@ -8,7 +8,7 @@ import {
   createScriptedTask,
   decodedOutput,
   expectNoRelayEvent,
-  pinSingleStagePipeline,
+  pinSingleStageWorkflow,
   readPipelineItem,
   waitForRelayEvent,
   waitForTerminalOutput
@@ -439,7 +439,7 @@ describe("remote task terminal flow E2E", () => {
   // the payload alone. Daemon Exit cannot do that on its own — a clean finish,
   // a direct close, and a real failure all end the same PTY the same way — so
   // these drive the three endings through the real server, daemon, and PTY.
-  it("reports a normal pipeline completion as DONE [success]", async () => {
+  it("reports a normal workflow completion as DONE [success]", async () => {
     const parent = await createScriptedTask(harness, {
       displayName: "Completion notification parent"
     });
@@ -453,7 +453,7 @@ describe("remote task terminal flow E2E", () => {
     try {
       await waitForTerminalOutput(parentEvents, "SCRIPT_READY");
       await waitForTerminalOutput(childEvents, "SCRIPT_READY");
-      await pinSingleStagePipeline(harness, child.taskId);
+      await pinSingleStageWorkflow(harness, child.taskId);
       const childRunId = await currentRunId(child.taskId);
       // The agent succeeds on its only stage, then the stage is advanced —
       // which, past the final stage, closes the task. That close used to

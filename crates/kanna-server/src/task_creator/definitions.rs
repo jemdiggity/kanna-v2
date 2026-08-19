@@ -842,6 +842,8 @@ fn repo_config_from_object(raw: &serde_json::Map<String, serde_json::Value>) -> 
         });
 
     RepoConfig {
+        // `pipeline` is the retired spelling of the `workflow` key; repo
+        // configs written before the rename must keep loading.
         workflow: raw
             .get("workflow")
             .or_else(|| raw.get("pipeline"))

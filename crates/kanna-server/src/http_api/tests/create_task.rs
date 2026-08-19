@@ -1683,7 +1683,7 @@ async fn create_task_route_sends_kanna_cli_runtime_env_to_daemon_spawn() {
     let daemon_dir = std::env::temp_dir().join(format!("kanna-http-create-env-daemon-{unique}"));
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
-    let pipeline_socket_path = workflow_socket_path_for_daemon_dir(&daemon_dir.to_string_lossy());
+    let workflow_socket_path = workflow_socket_path_for_daemon_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
 
     // Full desktop E2E would require launching the Tauri app plus staged sidecars
@@ -1693,7 +1693,7 @@ async fn create_task_route_sends_kanna_cli_runtime_env_to_daemon_spawn() {
     let daemon_server = tokio::spawn({
         let expected_cli_path = kanna_cli_path_string.clone();
         let expected_cli_dir = kanna_cli_dir.clone();
-        let expected_socket_path = pipeline_socket_path.clone();
+        let expected_socket_path = workflow_socket_path.clone();
         async move {
             let (stream, _) = daemon_listener.accept().await.unwrap();
             let (read_half, mut write_half) = stream.into_split();

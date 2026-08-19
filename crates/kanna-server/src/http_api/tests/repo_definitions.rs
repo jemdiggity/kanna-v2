@@ -57,7 +57,7 @@ impl RemoteDefinitionsFixture {
                 "name": "local-stale",
                 "stages": [{
                     "name": "local",
-                    "prompt": "LOCAL_STALE_PIPELINE",
+                    "prompt": "LOCAL_STALE_WORKFLOW",
                     "policy": {"transition": "manual"}
                 }]
             })
@@ -169,7 +169,7 @@ fn write_remote_definitions(repo: &Path) {
                 "name": "review",
                 "agent": "review@strict",
                 "agent_provider": ["codex", "claude"],
-                "prompt": "REMOTE_PIPELINE",
+                "prompt": "REMOTE_WORKFLOW",
                 "policy": {"transition": "manual"}
             }]
         })
@@ -206,7 +206,7 @@ fn write_remote_definitions(repo: &Path) {
         json!({
             "stages": [{
                 "name": "release",
-                "prompt": "REMOTE_DOTTED_PIPELINE",
+                "prompt": "REMOTE_DOTTED_WORKFLOW",
                 "policy": {"transition": "manual"}
             }]
         })
@@ -774,7 +774,7 @@ async fn repo_definition_routes_return_one_remote_revision_and_normalized_snake_
     assert_eq!(workflow["definition"]["name"], "remote-qa");
     assert_eq!(
         workflow["definition"]["stages"][0]["prompt"],
-        "REMOTE_PIPELINE"
+        "REMOTE_WORKFLOW"
     );
     assert_eq!(
         workflow["definition"]["stages"][0]["agent_provider"],
@@ -801,7 +801,7 @@ async fn repo_definition_routes_return_one_remote_revision_and_normalized_snake_
     assert_eq!(dotted_workflow["definition"]["name"], "release.v2");
     assert_eq!(
         dotted_workflow["definition"]["stages"][0]["prompt"],
-        "REMOTE_DOTTED_PIPELINE"
+        "REMOTE_DOTTED_WORKFLOW"
     );
 
     // Unlisted, but still resolvable — and the repo's override still wins over
@@ -866,7 +866,7 @@ async fn repo_definition_routes_share_a_fresh_resolved_snapshot() {
     assert_eq!(status, StatusCode::OK);
     let cached_revision = manifest["revision"].clone();
 
-    fixture.publish_workflow_prompt("REMOTE_PIPELINE_AFTER_CACHE");
+    fixture.publish_workflow_prompt("REMOTE_WORKFLOW_AFTER_CACHE");
 
     let (status, workflow) = json_response(
         &app,
@@ -877,7 +877,7 @@ async fn repo_definition_routes_share_a_fresh_resolved_snapshot() {
     assert_eq!(workflow["revision"], cached_revision);
     assert_eq!(
         workflow["definition"]["stages"][0]["prompt"],
-        "REMOTE_PIPELINE"
+        "REMOTE_WORKFLOW"
     );
 }
 

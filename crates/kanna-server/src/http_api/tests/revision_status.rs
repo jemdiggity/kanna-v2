@@ -172,7 +172,7 @@ async fn request_revision_route_resolves_branch_style_task_id() {
                     let command_line = args.join(" ");
                     assert!(command_line.contains("Implement revision:"));
                     assert!(command_line.contains("Add e2e coverage for task creation."));
-                    // The pipeline declares no revision_limit, so the default
+                    // The workflow declares no revision_limit, so the default
                     // cap applies and the revising agent is told which round
                     // it is and that the loop is bounded.
                     assert!(command_line.contains("Revision round 1 of 3"));
@@ -339,7 +339,7 @@ async fn automatic_revision_completion_dispatches_commit_post_through_http_route
         .unwrap()
         .success());
     assert!(Command::new("git")
-        .args(["commit", "-m", "add automatic revision pipeline"])
+        .args(["commit", "-m", "add automatic revision workflow"])
         .current_dir(&repo_root)
         .status()
         .unwrap()
@@ -352,14 +352,14 @@ async fn automatic_revision_completion_dispatches_commit_post_through_http_route
         .unwrap()
         .success());
     // The durable task remains pinned to the automatic revision policy even
-    // if the repo's current pipeline is later customized back to manual.
+    // if the repo's current workflow is later customized back to manual.
     // This makes the test distinguish snapshot policy from live definitions.
-    let mut current_pipeline_def: serde_json::Value = serde_json::from_str(&pipeline_def).unwrap();
-    current_pipeline_def["stages"][0]["policy"]["revision_transition"] =
+    let mut current_workflow_def: serde_json::Value = serde_json::from_str(&pipeline_def).unwrap();
+    current_workflow_def["stages"][0]["policy"]["revision_transition"] =
         serde_json::json!("manual");
     std::fs::write(
         repo_root.join(".kanna/workflows/qa.json"),
-        current_pipeline_def.to_string(),
+        current_workflow_def.to_string(),
     )
     .unwrap();
     assert!(Command::new("git")
@@ -890,7 +890,7 @@ async fn status_route_does_not_expose_pairing_secret() {
     assert!(status.pairing_code.is_none());
 }
 
-/// Repo + config + seeded task for the revision-budget tests: a pipeline that
+/// Repo + config + seeded task for the revision-budget tests: a workflow that
 /// caps revision rounds, a task parked at `review` with a running review run,
 /// and the round budget already spent.
 struct RevisionBudgetFixture {
@@ -929,7 +929,7 @@ fn setup_revision_budget_fixture(label: &str, revision_limit: i64) -> RevisionBu
         .unwrap()
         .success());
     assert!(Command::new("git")
-        .args(["commit", "-m", "add budgeted pipeline"])
+        .args(["commit", "-m", "add budgeted workflow"])
         .current_dir(&repo_root)
         .status()
         .unwrap()
@@ -1343,7 +1343,7 @@ async fn review_prompt_receives_the_implementer_result_while_prev_result_keeps_t
         .unwrap()
         .success());
     assert!(Command::new("git")
-        .args(["commit", "-m", "add prev-main pipeline"])
+        .args(["commit", "-m", "add prev-main workflow"])
         .current_dir(&repo_root)
         .status()
         .unwrap()

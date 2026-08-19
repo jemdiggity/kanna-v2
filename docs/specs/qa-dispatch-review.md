@@ -155,7 +155,7 @@ one; prompts alone cannot hold a limit.
 A workflow declares `revision_limit` (top level, default
 `DEFAULT_REVISION_LIMIT` = 3; `0` opts out). A negative value is a definition
 error in every parser — the Rust source of truth
-(`normalize_pipeline_definition`, covering both repo workflow files and pinned
+(`normalize_workflow_definition`, covering both repo workflow files and pinned
 `pipeline_def` snapshots), the JSON schema, and the TypeScript loader — rather
 than being clamped to `0`, since silently reading a typo as "unlimited" would
 disable the bound the field exists to set. `pipeline_item.revision_rounds`

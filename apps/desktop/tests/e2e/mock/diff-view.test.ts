@@ -1697,7 +1697,7 @@ describe("diff view", () => {
     expect(callsAfterApprove[1].method).toBe("POST");
   });
 
-  const E2E_PR_APPROVE_PIPELINE_DEF = JSON.stringify({
+  const E2E_PR_APPROVE_WORKFLOW_DEF = JSON.stringify({
     name: "default",
     stages: [
       { name: "in progress", policy: { transition: "manual" } },
@@ -1710,7 +1710,7 @@ describe("diff view", () => {
     ],
   });
 
-  const E2E_PR_NO_POST_PIPELINE_DEF = JSON.stringify({
+  const E2E_PR_NO_POST_WORKFLOW_DEF = JSON.stringify({
     name: "custom",
     stages: [
       { name: "in progress", policy: { transition: "manual" } },
@@ -1718,7 +1718,7 @@ describe("diff view", () => {
     ],
   });
 
-  async function parkSelectedTaskAtPr(pipelineDef: string): Promise<{ id: string }> {
+  async function parkSelectedTaskAtPr(workflowDef: string): Promise<{ id: string }> {
     const task = await client.executeSync<{ id: string }>(
       `const ctx = window.__KANNA_E2E__.setupState;
        return { id: ctx.selectedItem().id };`
@@ -1727,7 +1727,7 @@ describe("diff view", () => {
       `const cb = arguments[arguments.length - 1];
        const ctx = window.__KANNA_E2E__.setupState;
        const db = ctx.db.value || ctx.db;
-       db.execute("UPDATE pipeline_item SET stage = ?, pipeline_def = ? WHERE id = ?", ["pr", ${JSON.stringify(pipelineDef)}, ${JSON.stringify(task.id)}])
+       db.execute("UPDATE pipeline_item SET stage = ?, pipeline_def = ? WHERE id = ?", ["pr", ${JSON.stringify(workflowDef)}, ${JSON.stringify(task.id)}])
          .then(function() { return ctx.refreshAllItems(); })
          .then(function() { cb("ok"); })
          .catch(function(e) { cb("err:" + e); });`
@@ -1754,7 +1754,7 @@ describe("diff view", () => {
   }
 
   it("parks a pr-stage approve behind the running approve post and keeps approval single-flight", async () => {
-    const task = await parkSelectedTaskAtPr(E2E_PR_APPROVE_PIPELINE_DEF);
+    const task = await parkSelectedTaskAtPr(E2E_PR_APPROVE_WORKFLOW_DEF);
     await installStageActionRecorder(client);
 
     await openDiffModal(client);
@@ -1836,7 +1836,7 @@ describe("diff view", () => {
   });
 
   it("keeps approval generic and closing for pinned workflows without an approve post", async () => {
-    const task = await parkSelectedTaskAtPr(E2E_PR_NO_POST_PIPELINE_DEF);
+    const task = await parkSelectedTaskAtPr(E2E_PR_NO_POST_WORKFLOW_DEF);
     await installStageActionRecorder(client);
 
     await openDiffModal(client);
