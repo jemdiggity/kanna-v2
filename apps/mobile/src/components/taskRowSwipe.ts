@@ -1,51 +1,68 @@
 export const TASK_ROW_ACTION_WIDTH = 92;
 export const TASK_ROW_SWIPE_ACTIVATION = 14;
-export const TASK_ROW_SWIPE_REVEAL_THRESHOLD = 48;
+export const TASK_ROW_SWIPE_COMMIT_THRESHOLD = 48;
+
+/**
+ * How the action under the row is drawn while the finger is down. The row
+ * commits on release, so the only thing that tells the user what letting go
+ * will do is the action itself: it sits back, dimmed, while a release would
+ * cancel, and snaps to full size and full colour once a release would commit.
+ */
+export interface TaskRowActionEmphasis {
+  opacity: number;
+  transform: { scale: number }[];
+}
+
+export const TASK_ROW_ACTION_IDLE_EMPHASIS: TaskRowActionEmphasis = {
+  opacity: 0.55,
+  transform: [{ scale: 0.86 }]
+};
+
+export const TASK_ROW_ACTION_ARMED_EMPHASIS: TaskRowActionEmphasis = {
+  opacity: 1,
+  transform: [{ scale: 1 }]
+};
 
 export interface TaskRowSwipeDisplacement {
   dx: number;
   dy: number;
-  /**
-   * Where the row already rests when the gesture starts: `0` closed, negative
-   * with the action revealed. A revealed row is a resting state the next
-   * gesture has to be able to act on, so the direction that closes it is a
-   * gesture the row must claim too.
-   */
-  offset?: number;
 }
 
+/**
+ * The row has one resting position — closed — so only a leftward drag is ever
+ * its own to take. A rightward one has nothing to reveal and belongs to
+ * whatever encloses the row.
+ */
 export function shouldBeginTaskRowSwipe({
   dx,
-  dy,
-  offset = 0
+  dy
 }: TaskRowSwipeDisplacement): boolean {
   if (Math.abs(dx) <= Math.abs(dy) * 1.5) {
     return false;
   }
-  // Closed, only a leftward drag is the row's to take — a rightward one has
-  // nothing to reveal and belongs to whatever encloses the row. Revealed,
-  // either direction moves the row it is already displaced from.
-  return offset < 0
-    ? Math.abs(dx) > TASK_ROW_SWIPE_ACTIVATION
-    : dx < -TASK_ROW_SWIPE_ACTIVATION;
+  return dx < -TASK_ROW_SWIPE_ACTIVATION;
 }
 
 /**
- * The translation a drag of `dx` produces from a row resting at `startOffset`,
- * bounded by the action's width. Displacement is measured from where the row
- * rests, not from the closed position, so a drag that begins on a revealed row
- * moves it from there.
+ * The translation a drag of `dx` produces, bounded by the action's width.
+ * Dragging back past the closed position does not push the row the other way.
  */
-export function clampTaskRowSwipe(dx: number, startOffset = 0): number {
-  return Math.max(-TASK_ROW_ACTION_WIDTH, Math.min(0, startOffset + dx));
+export function clampTaskRowSwipe(dx: number): number {
+  return Math.max(-TASK_ROW_ACTION_WIDTH, Math.min(0, dx));
 }
 
 /**
- * Which resting position a released drag settles into, given the translation
- * it ended on. The same distance decides both directions: a closed row opens
- * once dragged past the threshold, and a revealed one closes once dragged back
- * inside it.
+ * Whether releasing at this translation performs the row's action. The same
+ * distance arms and disarms: dragging past it arms the release, dragging back
+ * inside it disarms again, so a swipe can always be taken back without
+ * lifting the finger.
  */
-export function shouldRevealTaskRowAction(offset: number): boolean {
-  return offset <= -TASK_ROW_SWIPE_REVEAL_THRESHOLD;
+export function shouldCommitTaskRowAction(offset: number): boolean {
+  return offset <= -TASK_ROW_SWIPE_COMMIT_THRESHOLD;
+}
+
+export function taskRowActionEmphasis(offset: number): TaskRowActionEmphasis {
+  return shouldCommitTaskRowAction(offset)
+    ? TASK_ROW_ACTION_ARMED_EMPHASIS
+    : TASK_ROW_ACTION_IDLE_EMPHASIS;
 }

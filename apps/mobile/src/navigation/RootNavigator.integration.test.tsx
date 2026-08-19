@@ -4,6 +4,7 @@ import { DEFAULT_TASK_QUICK_REPLIES } from "../screens/taskQuickReplies";
 import {
   act,
   create,
+  type ReactTestInstance,
   type ReactTestRenderer
 } from "react-test-renderer";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -74,8 +75,11 @@ vi.mock("react-native", () => ({
     dismiss: keyboardHarness.dismiss
   },
   PanResponder: {
+    // The row spreads its `panHandlers` onto the view it drags, so handing the
+    // config through them is what lets a test drive the real gesture on the
+    // row it means, rather than on whichever row created its responder first.
     create: (config: Record<string, unknown>) => ({
-      panHandlers: {},
+      panHandlers: { "data-pan-config": config },
       config
     })
   },
@@ -583,6 +587,31 @@ function renderedTaskRowIds(): string[] {
     .map((node) => String(node.props.testID).replace("mobile.task-row.", ""));
 }
 
+interface RowSwipeDisplacement {
+  dx: number;
+  dy: number;
+}
+
+interface RowGestureConfig {
+  onPanResponderGrant?(event: unknown, gesture: RowSwipeDisplacement): void;
+  onPanResponderMove?(event: unknown, gesture: RowSwipeDisplacement): void;
+  onPanResponderRelease?(event: unknown, gesture: RowSwipeDisplacement): void;
+}
+
+/** The swipe gesture one rendered task row handed to React Native. */
+function rowGestureConfig(taskId: string): RowGestureConfig {
+  if (!rendered) throw new Error("The navigator was not rendered");
+  let node: ReactTestInstance | null = rendered.root.find(
+    (candidate) => candidate.props.testID === `mobile.task-row.${taskId}`
+  );
+  while (node && !node.props["data-pan-config"]) {
+    node = node.parent;
+  }
+  const config = node?.props["data-pan-config"] as RowGestureConfig | undefined;
+  if (!config) throw new Error(`Task row ${taskId} carries no swipe gesture`);
+  return config;
+}
+
 function visibleText(): string {
   if (!rendered) return "";
   return rendered.root
@@ -754,11 +783,13 @@ describe("RootNavigator task collection integration", () => {
 
     expect(renderedTaskRowIds()).toEqual(["task-newer", "task-older"]);
 
+    // The swipe commits when the finger lifts: this is the whole gesture, from
+    // the row's own pan responder through to the record it writes.
     await act(async () => {
-      rendered!.root.find(
-        (node) =>
-          node.props.testID === MOBILE_E2E_IDS.taskPinAction("task-older")
-      ).props.onPress();
+      const gesture = rowGestureConfig("task-older");
+      gesture.onPanResponderGrant?.({}, { dx: 0, dy: 0 });
+      gesture.onPanResponderMove?.({}, { dx: -70, dy: 0 });
+      gesture.onPanResponderRelease?.({}, { dx: -70, dy: 0 });
       await flushMicrotasks();
     });
 

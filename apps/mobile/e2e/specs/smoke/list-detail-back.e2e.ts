@@ -1,9 +1,7 @@
 import type { Browser } from "webdriverio";
 import {
-  activityDismissActionSelector,
   extractTaskRowId,
   selectors,
-  taskPinActionSelector,
   tasksRepoSelector
 } from "../../helpers/selectors";
 import { DEFAULT_MOBILE_TERMINAL_GEOMETRY } from "../../../src/mobileTerminalGeometry";
@@ -895,6 +893,27 @@ async function readRenderedTaskRowIds(driver: Browser): Promise<string[]> {
 }
 
 /**
+ * One swipe on a task row, released well past the commit threshold — which is
+ * what performs the row's action now that nothing rests open.
+ */
+async function dragRowPastCommitThreshold(
+  driver: Browser,
+  row: Awaited<ReturnType<Browser["$"]>>
+): Promise<void> {
+  const [{ x, y }, { width, height }] = await Promise.all([
+    row.getLocation(),
+    row.getSize()
+  ]);
+  await driver.execute("mobile: dragFromToForDuration", {
+    duration: 0.35,
+    fromX: Math.round(x + width * 0.8),
+    fromY: Math.round(y + height / 2),
+    toX: Math.round(x + width * 0.35),
+    toY: Math.round(y + height / 2)
+  });
+}
+
+/**
  * Pinning is phone-local: the swipe writes this device's own record and the
  * list reorders from it. The desktop's pin columns must not move — that
  * divergence is the design, so the journey asserts it rather than the old
@@ -935,23 +954,12 @@ export async function exerciseTaskPinSwipe(
   };
   const desktopPinStateBefore = await readPinState();
 
-  const swipeRowOpen = async (): Promise<void> => {
+  // The row commits on release: the drag past the threshold *is* the pin,
+  // with no revealed button left to tap afterwards.
+  const swipeRowToTogglePin = async (): Promise<void> => {
     const row = await driver.$(`~mobile.task-row.${taskId}`);
     await row.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
-    const [{ x, y }, { width, height }] = await Promise.all([
-      row.getLocation(),
-      row.getSize()
-    ]);
-    await driver.execute("mobile: dragFromToForDuration", {
-      duration: 0.35,
-      fromX: Math.round(x + width * 0.8),
-      fromY: Math.round(y + height / 2),
-      toX: Math.round(x + width * 0.35),
-      toY: Math.round(y + height / 2)
-    });
-    const action = await driver.$(taskPinActionSelector(taskId));
-    await action.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
-    await action.click();
+    await dragRowPastCommitThreshold(driver, row);
   };
 
   const repo = await driver.$(tasksRepoSelector(detail.repoId));
@@ -959,7 +967,7 @@ export async function exerciseTaskPinSwipe(
   await repo.click();
 
   try {
-    await swipeRowOpen();
+    await swipeRowToTogglePin();
     // A pin that does not lift the row is the bug this journey guards, and it
     // must land from the local write alone — no read is awaited in between.
     await driver.waitUntil(
@@ -984,7 +992,7 @@ export async function exerciseTaskPinSwipe(
   } finally {
     // Leave the phone as it was found: the pin lives only on this device, so
     // the app itself is the only place to take it back off.
-    await swipeRowOpen();
+    await swipeRowToTogglePin();
     await driver.waitUntil(
       async () => {
         const rows = await readRenderedTaskRowIds(driver);
@@ -1050,20 +1058,9 @@ export async function exerciseActivityDismissSwipe(
   await screen.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
   const row = await driver.$(`~mobile.task-row.${taskId}`);
   await row.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
-  const [{ x, y }, { width, height }] = await Promise.all([
-    row.getLocation(),
-    row.getSize()
-  ]);
-  await driver.execute("mobile: dragFromToForDuration", {
-    duration: 0.35,
-    fromX: Math.round(x + width * 0.8),
-    fromY: Math.round(y + height / 2),
-    toX: Math.round(x + width * 0.35),
-    toY: Math.round(y + height / 2)
-  });
-  const action = await driver.$(activityDismissActionSelector(taskId));
-  await action.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
-  await action.click();
+  // Activity reads the same gesture as the task list: releasing the swipe past
+  // the threshold dismisses, with no second tap.
+  await dragRowPastCommitThreshold(driver, row);
   await driver.waitUntil(
     async () => {
       const dismissedRow = await driver.$(`~mobile.task-row.${taskId}`);
