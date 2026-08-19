@@ -19,12 +19,22 @@ export interface QueryState<T> {
   refresh: () => Promise<void>;
 }
 
+export interface ReloadSnapshotOptions {
+  /**
+   * Re-resolve every repo's `.kanna` definitions as well as its rows. Repo
+   * definitions live in the repo's committed tree, so the server resolves them
+   * through Git — cheap to hold, expensive to ask for. Only a reload that can
+   * actually have missed a definition change should pay for it.
+   */
+  refreshDefinitions?: boolean;
+}
+
 export interface QueriesApi {
   snapshot: QueryState<KannaSnapshot>;
   repos: QueryState<Repo[]>;
   items: QueryState<PipelineItem[]>;
   loadInitialData: () => Promise<void>;
-  reloadSnapshot: () => Promise<void>;
+  reloadSnapshot: (options?: ReloadSnapshotOptions) => Promise<void>;
   withOptimisticItemOverlay: <T>(input: {
     key: string;
     apply: (snapshot: KannaSnapshot) => KannaSnapshot;
@@ -143,7 +153,41 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
     }
   }
 
-  async function reloadSnapshot(): Promise<void> {
+  /**
+   * Keep every repo's stage order in the cache that `sortedItemsForCurrentRepo`
+   * reads. A repo's stage order changes only when its committed `.kanna` config
+   * does, so a task-driven reload just fills in repos the cache has never seen;
+   * `force` re-reads them all, which is what a repo-scoped change wants.
+   */
+  async function refreshStageOrderCache(
+    repos: Repo[],
+    runId: number,
+    force: boolean,
+  ): Promise<void> {
+    for (const repo of repos) {
+      if (!force && context.state.stageOrderCache.has(repo.id)) continue;
+
+      let manifest;
+      try {
+        manifest = await fetchDesktopRepoKannaDefinitions(repo.id);
+      } catch (error) {
+        if (runId !== refreshRunId.value) return;
+        console.warn(`[store] failed to refresh definitions for repo ${repo.id}:`, error);
+        continue;
+      }
+      if (runId !== refreshRunId.value) return;
+
+      const cachedStageOrder = context.state.stageOrderCache.get(repo.id);
+      if (!cachedStageOrder || cachedStageOrder.revision !== manifest.revision) {
+        context.state.stageOrderCache.set(repo.id, {
+          revision: manifest.revision,
+          stageOrder: manifest.config.stage_order ?? null,
+        });
+      }
+    }
+  }
+
+  async function reloadSnapshot(options: ReloadSnapshotOptions = {}): Promise<void> {
     const runId = ++refreshRunId.value;
     snapshotPending.value = true;
     snapshotError.value = null;
@@ -180,27 +224,8 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
         context.state.pendingCreateVisibility.delete(item.id);
       }
 
-      for (const { repo } of snapshot.entries) {
-        const repoStart = performance.now();
-        debugLog(`[perf:items] refresh repo #${runId} ${repo.id}: ${(performance.now() - repoStart).toFixed(1)}ms`);
-
-        let manifest;
-        try {
-          manifest = await fetchDesktopRepoKannaDefinitions(repo.id);
-        } catch (error) {
-          if (runId !== refreshRunId.value) return;
-          console.warn(`[store] failed to refresh definitions for repo ${repo.id}:`, error);
-          continue;
-        }
-        if (runId !== refreshRunId.value) return;
-        const cachedStageOrder = context.state.stageOrderCache.get(repo.id);
-        if (!cachedStageOrder || cachedStageOrder.revision !== manifest.revision) {
-          context.state.stageOrderCache.set(repo.id, {
-            revision: manifest.revision,
-            stageOrder: manifest.config.stage_order ?? null,
-          });
-        }
-      }
+      await refreshStageOrderCache(loadedRepos, runId, options.refreshDefinitions === true);
+      if (runId !== refreshRunId.value) return;
 
       debugLog(
         `[perf:items] refresh done #${runId}: ${(performance.now() - refreshStart).toFixed(1)}ms total, items=${loadedItems.length}`,
@@ -217,7 +242,8 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
   }
 
   async function loadInitialData(): Promise<void> {
-    await reloadSnapshot();
+    // Cold start has no cached definitions to reuse.
+    await reloadSnapshot({ refreshDefinitions: true });
   }
 
   function addOverlay(overlay: OptimisticItemOverlay): void {

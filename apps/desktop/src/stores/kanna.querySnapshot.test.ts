@@ -511,15 +511,59 @@ describe("kanna query snapshot regressions", () => {
     expect(selection.getStageOrder(repo.id)).toBe(firstOrder);
     expect(state.stageOrderCache.has(repo.path)).toBe(false);
 
+    // A task-driven reload keeps the definitions it already resolved: they can
+    // only change when the repo does, and resolving them costs a Git round trip.
     await queries.reloadSnapshot();
+    expect(state.stageOrderCache.get(repo.id)).toBe(firstEntry);
+    expect(fetchRepoKannaDefinitions).toHaveBeenCalledTimes(1);
+
+    await queries.reloadSnapshot({ refreshDefinitions: true });
     expect(state.stageOrderCache.get(repo.id)).toBe(firstEntry);
     expect(selection.getStageOrder(repo.id)).toBe(firstOrder);
 
-    await queries.reloadSnapshot();
+    await queries.reloadSnapshot({ refreshDefinitions: true });
     expect(state.stageOrderCache.get(repo.id)).not.toBe(firstEntry);
     expect(selection.getStageOrder(repo.id)).toEqual(["pr", "review", "in progress"]);
     expect(fetchRepoKannaDefinitions).toHaveBeenCalledTimes(3);
     expect(fetchRepoKannaDefinitions).toHaveBeenNthCalledWith(1, repo.id);
+  });
+
+  it("resolves definitions for a repo it has not seen even without a forced refresh", async () => {
+    const known = mockState.makeRepo({ id: "repo-known", path: "/tmp/known" });
+    const added = mockState.makeRepo({ id: "repo-added", path: "/tmp/added" });
+    const manifestFor = (repoId: string) => ({
+      revision: `rev-${repoId}`,
+      refName: "origin/main",
+      config: { stage_order: [repoId] },
+      defaultWorkflow: "default",
+      workflows: ["default"],
+    });
+    const fetchRepoKannaDefinitions = vi.fn(async (repoId: string) => manifestFor(repoId));
+    updateDesktopServerClientHandlersForTests({ fetchRepoKannaDefinitions });
+    const state = createStoreState();
+    let repos = [known];
+    const context = createStoreContext(state, { error: vi.fn(), warning: vi.fn() } as never, {
+      fetchSnapshot: async () => ({
+        entries: repos.map((repo) => ({ repo, items: [] })),
+        taskBlockers: [],
+        worktreePaths: {},
+        settings: {},
+      }),
+    });
+    const queries = createQueriesApi(context);
+    const selection = createSelectionApi(context);
+
+    await queries.reloadSnapshot();
+    expect(fetchRepoKannaDefinitions).toHaveBeenCalledTimes(1);
+
+    // A repo added while the app is running has no cached stage order, so it
+    // still resolves — only repos already answered for are skipped.
+    repos = [known, added];
+    await queries.reloadSnapshot();
+
+    expect(fetchRepoKannaDefinitions).toHaveBeenCalledTimes(2);
+    expect(fetchRepoKannaDefinitions).toHaveBeenLastCalledWith(added.id);
+    expect(selection.getStageOrder(added.id)).toEqual([added.id]);
   });
 
   it("publishes authoritative task state when one repo manifest fails", async () => {

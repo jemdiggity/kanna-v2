@@ -1,3 +1,4 @@
+import type { StateChangeScope } from "@kanna/agent-protocol";
 import type { DbHandle, PipelineItem, TaskBlocker } from "../types/kanna";
 import { invoke } from "../invoke";
 import { isTauri } from "../tauri-mock";
@@ -393,10 +394,20 @@ export function createInitApi(
       );
     });
 
+    // A repo's `.kanna` definitions change only when the repo does, and the
+    // server resolves them out of Git. Re-reading them for a task's activity —
+    // which is most of what StateChanged reports — put seconds of Git work
+    // between an operator's keystroke and its echo, so only a scope that can
+    // have moved a definition asks for one.
+    let definitionsNeedRefresh = false;
     const refreshAfterKspStateChange = createTrailingAsyncCoordinator(
       async () => {
+        const refreshDefinitions = definitionsNeedRefresh;
+        definitionsNeedRefresh = false;
         const focusedSelection = resolveFocusedSelectionBeforeExternalRefresh();
-        await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
+        await requireService(context.services.reloadSnapshot, "reloadSnapshot")({
+          refreshDefinitions,
+        });
         await preserveFocusedTaskAfterExternalRefresh(focusedSelection);
         console.debug("[store] refreshed snapshot after KSP state change");
       },
@@ -404,6 +415,10 @@ export function createInitApi(
         console.error("[store] KSP state change handler failed:", error);
       },
     );
+    const handleKspStateChange = (scope: StateChangeScope) => {
+      if (scope === "repos") definitionsNeedRefresh = true;
+      refreshAfterKspStateChange();
+    };
 
     if (isTauri) {
       let stateChangeSubscriptionReady = false;
@@ -413,13 +428,16 @@ export function createInitApi(
         const connection = getSharedStreamConnectionState();
         if (!connection.connected || connection.revision <= lastQueuedConnectionRevision) return;
         lastQueuedConnectionRevision = connection.revision;
+        // A gap in the stream can hide a repo-scoped change, so a reconnect
+        // reconciles definitions too.
+        definitionsNeedRefresh = true;
         refreshAfterKspStateChange();
       };
       onSharedStreamConnectionChange((connected) => {
         if (connected) catchUpAuthenticatedRevision();
       });
       getSharedStreamClient().then((client) => {
-        client.onStateChanged(refreshAfterKspStateChange);
+        client.onStateChanged(handleKspStateChange);
         stateChangeSubscriptionReady = true;
         // StateChanged is intentionally coarse and has no replay cursor. Once
         // its listener is installed, reconcile every authenticated connection

@@ -1293,6 +1293,14 @@ describe("createInitApi", () => {
 
     expect(services.reloadSnapshot).toHaveBeenCalled();
     expect(state.selectedItemId.value).toBe("create:stable-current");
+    // Task activity cannot move a repo's committed definitions, and resolving
+    // them costs a Git round trip per repo, so this reload must not ask.
+    expect(services.reloadSnapshot).toHaveBeenLastCalledWith({ refreshDefinitions: false });
+
+    mockState.stateChangedListeners[0]("repos");
+    await flushAsync();
+
+    expect(services.reloadSnapshot).toHaveBeenLastCalledWith({ refreshDefinitions: true });
   });
 
   it("refreshes an unselected sidebar task through missed and live activity changes", async () => {
