@@ -42,11 +42,19 @@ Source: [desktop cloud task publisher](https://github.com/tampopogk/kanna/blob/m
 
 ### Content sent through cloud access
 
-Firebase ID tokens authenticate Kanna Mobile's encrypted WebSocket connection to `relay.kanna.build`. The relay routes requests and live streams to and from the selected desktop. The routed content can include full task prompts, text sent to an agent, terminal keystrokes and output, agent events and permission decisions, task details, repository commands, task file and diff content requested in the app, and visual-companion content and interactions.
+Firebase ID tokens authenticate Kanna Mobile's encrypted WebSocket connection to `relay.kanna.build`. The relay routes requests and live streams to and from the selected desktop. The routed content can include full task prompts, text sent to an agent, a photo you attach to a message, terminal keystrokes and output, agent events and permission decisions, task details, repository commands, task file and diff content requested in the app, and visual-companion content and interactions.
 
 The relay implementation routes live connection data in memory and the source does not implement a database for storing full relay message bodies or terminal streams. This does not change the separate Firestore task-index storage described above, and operational infrastructure may generate logs as described below.
 
 Source: [mobile environment configuration](https://github.com/tampopogk/kanna/blob/main/apps/mobile/src/mobileEnvironments.json), [mobile relay client](https://github.com/tampopogk/kanna/blob/main/apps/mobile/src/lib/transports/relayClient.ts), [remote transport](https://github.com/tampopogk/kanna/blob/main/apps/mobile/src/lib/transports/remoteTransport.ts), [relay router](https://github.com/tampopogk/kanna/blob/main/services/relay/src/router.ts), and [relay server](https://github.com/tampopogk/kanna/blob/main/services/relay/src/index.ts).
+
+### Photos you attach to an agent message
+
+You can attach one photo to a message you send to an agent, from your photo library or by taking one. Photo-library permission is optional and is requested only when you use that control; without it the composer still sends text.
+
+The app resizes the photo and re-encodes it as a JPEG on the device before it is sent, and sends it with your message to the Mac that owns the task — directly over your local network, or through the relay when you are away from it, the same way your message text travels. The relay routes it and the source does not implement storage for it. The Mac writes the photo into a per-task attachment folder beside its own database, tells the agent where that file is, and deletes the folder when the task is closed. Kanna does not upload your photo anywhere else and does not store it in the cloud task index.
+
+Source: [photo picking and downscaling](https://github.com/tampopogk/kanna/blob/main/apps/mobile/src/lib/attachments/pickImageAttachment.ts), [attachment size budget](https://github.com/tampopogk/kanna/blob/main/apps/mobile/src/lib/attachments/imageAttachmentBudget.ts), and [desktop attachment storage](https://github.com/tampopogk/kanna/blob/main/crates/kanna-server/src/task_input_attachments.rs).
 
 ### Local pairing and device information
 
@@ -72,7 +80,7 @@ Source: [mobile push registration](https://github.com/tampopogk/kanna/blob/main/
 
 ### Camera
 
-Camera permission is optional and is used only to scan a machine-pairing QR code. The app processes the scanned QR value as a pairing payload. The source does not save or upload camera photos or video. You can enter the six-character pairing code instead of granting camera access.
+Camera permission is optional. Kanna uses it to scan a machine-pairing QR code, and — if you choose to take a photo rather than pick one — to capture a photo you attach to an agent message. When scanning a pairing code the app processes the scanned QR value as a pairing payload and the source does not save or upload the camera image or video. A photo you deliberately take for an attachment is handled as described under "Photos you attach to an agent message". You can enter the six-character pairing code instead of granting camera access.
 
 Source: [pairing camera UI](https://github.com/tampopogk/kanna/blob/main/apps/mobile/src/components/MachinePairingSheet.tsx) and [camera configuration](https://github.com/tampopogk/kanna/blob/main/apps/mobile/app.config.ts).
 
@@ -121,7 +129,8 @@ The code establishes the following product behavior but does not establish organ
 - local session, pairing, and preference records remain on the device until replaced, removed through an available app control, or removed with the app's local data;
 - push registration is deleted from Firestore when the app successfully unregisters the device, and invalid FCM tokens are removed after delivery failures;
 - the desktop's Firestore task collection is reconciled to its current published open-task snapshot, and task documents absent from a later snapshot are deleted; and
-- relay connection routing state is held in memory for active connections, while operational logs are handled separately.
+- relay connection routing state is held in memory for active connections, while operational logs are handled separately; and
+- a photo attached to an agent message is stored by the receiving Mac in that task's attachment folder and deleted when the task is closed.
 
 Beyond that product behavior, we retain information as follows:
 
