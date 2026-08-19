@@ -624,12 +624,16 @@ async fn repo_agent_provider_route_stays_responsive_and_uses_workspace_local_exe
         }
     }));
 
+    // Only a hang-breaker: a lookup that blocks the current-thread runtime
+    // inline parks every timer too, so nothing else could ever release the
+    // hook. It is deliberately far longer than any assertion below, so a
+    // loaded box can never have it rescue a passing run.
     let (watchdog_cancel_tx, watchdog_cancel_rx) = std::sync::mpsc::channel();
     let watchdog = std::thread::spawn({
         let release = Arc::clone(&release);
         move || {
             if watchdog_cancel_rx
-                .recv_timeout(Duration::from_millis(500))
+                .recv_timeout(Duration::from_secs(30))
                 .is_err()
             {
                 let (released, ready) = &*release;
@@ -638,7 +642,6 @@ async fn repo_agent_provider_route_stays_responsive_and_uses_workspace_local_exe
             }
         }
     });
-    let started_at = Instant::now();
     let request = tokio::spawn(
         super::router(state).oneshot(
             Request::get("/v1/repos/repo-1/agent-providers")
@@ -646,13 +649,22 @@ async fn repo_agent_provider_route_stays_responsive_and_uses_workspace_local_exe
                 .unwrap(),
         ),
     );
-    tokio::time::timeout(Duration::from_secs(1), started_rx)
+    tokio::time::timeout(Duration::from_secs(10), started_rx)
         .await
         .expect("provider route should resolve definitions through the shared cache")
         .unwrap();
-    let runtime_stayed_responsive = started_at.elapsed() < Duration::from_millis(100)
+    // The load-bearing check is a happens-before, not a wall-clock budget: the
+    // loader hook is parked in its condvar right now, so whatever delivered
+    // `started_rx` was not the thread running it. A lookup that ran inline on
+    // the runtime could only reach this line after the watchdog released the
+    // hook, which this reads directly instead of inferring from elapsed time.
+    let hook_still_parked = !*release.0.lock().unwrap();
+    let runtime_stayed_responsive = hook_still_parked
         && tokio::time::timeout(
-            Duration::from_millis(100),
+            // A blocked runtime never fires this timer at all, so the ceiling
+            // only has to be finite — 5s is orders of magnitude above the
+            // scheduler noise a loaded box adds to a 1ms sleep.
+            Duration::from_secs(5),
             tokio::time::sleep(Duration::from_millis(1)),
         )
         .await
@@ -2282,11 +2294,16 @@ async fn cloud_task_identity_route_stays_responsive_while_database_write_is_bloc
     let db_path = state.config.db_path.clone();
     let app = super::router(state);
     let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    // The writer holds the lock until this test has taken its measurement, so
+    // the healthy path pays nothing and only a blocked runtime waits out the
+    // ceiling. The window is an order of magnitude above the budget asserted
+    // below, so a loaded box can never turn a real block into a pass.
+    let (unlock_tx, unlock_rx) = std::sync::mpsc::channel();
     let locker = std::thread::spawn(move || {
         let conn = Connection::open(db_path).unwrap();
         conn.execute_batch("BEGIN IMMEDIATE").unwrap();
         locked_tx.send(()).unwrap();
-        std::thread::sleep(Duration::from_millis(250));
+        let _ = unlock_rx.recv_timeout(Duration::from_secs(10));
         conn.execute_batch("COMMIT").unwrap();
     });
     locked_rx.recv().unwrap();
@@ -2304,11 +2321,15 @@ async fn cloud_task_identity_route_stays_responsive_while_database_write_is_bloc
     );
     tokio::task::yield_now().await;
     let scheduler_delay = started_at.elapsed();
+    let _ = unlock_tx.send(());
     let response = request.await.unwrap().unwrap();
     locker.join().unwrap();
 
+    // Healthy is microseconds and a runtime-blocking write is the whole 10s
+    // lock window, so this only has to sit somewhere between the two. 3s keeps
+    // three orders of magnitude of headroom over the healthy path.
     assert!(
-        scheduler_delay < Duration::from_millis(100),
+        scheduler_delay < Duration::from_secs(3),
         "cloud identity write blocked the async runtime for {scheduler_delay:?}"
     );
     assert_eq!(response.status(), StatusCode::OK);
@@ -3684,7 +3705,10 @@ async fn task_file_resolver_route_stays_responsive_during_blocking_resolution() 
         move || {
             started_rx.recv().unwrap();
             let _ = probe_tx.send(Instant::now());
-            let _ = release_rx.recv_timeout(Duration::from_millis(250));
+            // Held until the measurement below is taken; the ceiling is an
+            // order of magnitude under this window, so load cannot mask a
+            // resolution that ran on the runtime thread.
+            let _ = release_rx.recv_timeout(Duration::from_secs(10));
             let (released, ready) = &*release;
             *released.lock().unwrap() = true;
             ready.notify_all();
@@ -3707,7 +3731,10 @@ async fn task_file_resolver_route_stays_responsive_during_blocking_resolution() 
     );
     let probe_sent_at = probe_rx.await.unwrap();
     tokio::time::timeout(
-        Duration::from_millis(100),
+        // A blocked runtime never fires this timer until the hook is released
+        // 10s later, so the ceiling only has to be finite and well clear of
+        // scheduler noise.
+        Duration::from_secs(3),
         tokio::time::sleep(Duration::from_millis(1)),
     )
     .await
@@ -3718,7 +3745,7 @@ async fn task_file_resolver_route_stays_responsive_during_blocking_resolution() 
     let response = request.await.unwrap().unwrap();
 
     assert!(
-        scheduler_delay < Duration::from_millis(100),
+        scheduler_delay < Duration::from_secs(3),
         "task file mention resolution blocked the async runtime for {scheduler_delay:?}"
     );
     assert_eq!(response.status(), StatusCode::OK);

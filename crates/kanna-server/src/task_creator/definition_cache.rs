@@ -497,7 +497,10 @@ mod tests {
         let results: Vec<_> = (0..2)
             .map(|_| {
                 result_rx
-                    .recv_timeout(Duration::from_millis(500))
+                    // A liveness wait, not a budget: a caller left hanging by
+                    // the panic never sends at all, so the ceiling only has to
+                    // be finite and clear of load-induced scheduling delay.
+                    .recv_timeout(Duration::from_secs(10))
                     .expect("every shared-load caller completed after the panic")
             })
             .collect();

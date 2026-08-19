@@ -1331,7 +1331,9 @@ mod tests {
             }
             drop(sidecar);
 
-            assert!(timeout(Duration::from_millis(500), relay.next())
+            // Liveness, not latency: a setup that was never cancelled sends
+            // nothing at all, so the ceiling only has to be finite.
+            assert!(timeout(Duration::from_secs(10), relay.next())
                 .await
                 .expect("local EOF did not cancel stalled setup")
                 .is_some());
@@ -1374,7 +1376,7 @@ mod tests {
             .is_err());
         let mut byte = [0_u8; 1];
         assert_eq!(
-            timeout(Duration::from_millis(500), second.read(&mut byte))
+            timeout(Duration::from_secs(10), second.read(&mut byte))
                 .await
                 .expect("saturated proxy did not close second requester")
                 .expect("read saturated requester"),

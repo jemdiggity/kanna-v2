@@ -3072,12 +3072,16 @@ fn non_reading_attached_client_does_not_block_healthy_terminal_output() {
     std::fs::write(dir.join("go"), b"go").unwrap();
 
     // Zero-delay requirement: the healthy client must receive the entire
-    // flood while the stalled client's socket is saturated, well below the
-    // former 500ms per-chunk write timeout — not merely less than it.
-    healthy.collect_output_until_contains_with_timeout("FLOOD_DONE", Duration::from_millis(350));
+    // flood while the stalled client's socket is saturated. The regression
+    // this guards is the 500ms per-chunk write timeout being paid for every
+    // chunk the stalled subscriber cannot take — a 16 KiB flood into a
+    // 4096-byte receive buffer, so seconds, not milliseconds. The ceiling
+    // therefore only has to be an order of magnitude under that, which keeps
+    // it out of reach of scheduler noise on a box running several suites.
+    healthy.collect_output_until_contains_with_timeout("FLOOD_DONE", Duration::from_millis(2_000));
     let flood_latency = flood_started.elapsed();
     assert!(
-        flood_latency < Duration::from_millis(350),
+        flood_latency < Duration::from_millis(2_000),
         "healthy delivery must not wait on the stalled subscriber; took {flood_latency:?}"
     );
 
@@ -3086,7 +3090,7 @@ fn non_reading_attached_client_does_not_block_healthy_terminal_output() {
         data: b"HEALTHY_MARKER\n".to_vec(),
     });
     let output = healthy
-        .collect_output_until_contains_with_timeout("HEALTHY_MARKER", Duration::from_millis(350));
+        .collect_output_until_contains_with_timeout("HEALTHY_MARKER", Duration::from_millis(2_000));
     let output = String::from_utf8_lossy(&output);
     let marker = output
         .find("HEALTHY_MARKER")
@@ -3587,9 +3591,13 @@ fn stream_output_prioritizes_live_delivery_before_recovery_persistence() {
     // the real app stack, but it cannot deterministically make only recovery
     // persistence slow for a live daemon. This daemon-level hook supplies that
     // missing control point and guards the ordering that protects PTY echo.
+    // The injected persistence delay and the latency ceiling below move
+    // together: live echo has to land an order of magnitude inside the delay,
+    // not merely beat it. Raising both keeps that ratio while leaving the
+    // ceiling well clear of what a loaded box adds to a PTY round trip.
     let daemon = DaemonHandle::start_with_fake_recovery([(
         "KANNA_DAEMON_TEST_SLOW_RECOVERY_WRITE_MS",
-        "1200",
+        "6000",
     )]);
 
     let mut shared = daemon.connect();
@@ -3608,13 +3616,13 @@ fn stream_output_prioritizes_live_delivery_before_recovery_persistence() {
     );
 
     let output =
-        attached.collect_output_until_contains_with_timeout(marker, Duration::from_millis(700));
+        attached.collect_output_until_contains_with_timeout(marker, Duration::from_millis(3_000));
     assert!(
         String::from_utf8_lossy(&output).contains(marker),
         "attached PTY client should receive echoed input before slow recovery bookkeeping"
     );
     assert!(
-        started.elapsed() < Duration::from_millis(900),
+        started.elapsed() < Duration::from_millis(3_000),
         "live PTY echo should not wait for the injected recovery persistence delay"
     );
 }

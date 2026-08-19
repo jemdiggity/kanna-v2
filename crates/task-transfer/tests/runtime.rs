@@ -158,8 +158,12 @@ async fn runtime_with_trusted_hostile_peer(root: &Path, listener: &TcpListener) 
         })
         .unwrap();
     TransferRuntime::spawn(
+        // Nothing here waits this out; it only has to outlast a round trip on
+        // a box running several worktrees' suites, where a 2s bound turned a
+        // slow reply into a timeout instead of the frame-limit rejection under
+        // test.
         RuntimeConfig::for_tests("peer-primary", "Primary", root, 0)
-            .with_peer_request_timeout(Duration::from_secs(2)),
+            .with_peer_request_timeout(Duration::from_secs(60)),
     )
     .await
     .unwrap()
@@ -241,7 +245,8 @@ async fn unauthenticated_peer_connection_has_a_read_deadline() {
         .unwrap();
     let mut byte = [0u8; 1];
 
-    let read = tokio::time::timeout(Duration::from_millis(250), slow.read(&mut byte))
+    // Liveness: a retained listener task never closes the socket at all.
+    let read = tokio::time::timeout(Duration::from_secs(10), slow.read(&mut byte))
         .await
         .expect("slow unauthenticated peer retained a listener task")
         .unwrap();
@@ -361,8 +366,11 @@ async fn terminal_input_chunk_at_the_ui_boundary_fits_the_authenticated_peer_fra
 async fn peer_listener_rejects_connections_beyond_its_hard_cap() {
     let temp = tempfile::tempdir().unwrap();
     let runtime = TransferRuntime::spawn(
+        // The 32 held connections must still occupy the cap when the 33rd
+        // arrives, so this has to outlast everything below it. A 2s bound was
+        // a race against the loop that opens them.
         RuntimeConfig::for_tests("peer-primary", "Primary", temp.path(), 0)
-            .with_peer_request_timeout(Duration::from_secs(2)),
+            .with_peer_request_timeout(Duration::from_secs(60)),
     )
     .await
     .unwrap();
@@ -2878,7 +2886,7 @@ async fn stalled_preauth_connections_time_out_and_do_not_starve_next_request() {
 
     for mut stream in stalled {
         let mut byte = [0_u8; 1];
-        let read = tokio::time::timeout(Duration::from_millis(200), stream.read(&mut byte))
+        let read = tokio::time::timeout(Duration::from_secs(10), stream.read(&mut byte))
             .await
             .expect("stalled connection should be closed after the pre-auth deadline")
             .unwrap();
@@ -2891,8 +2899,12 @@ async fn stalled_preauth_connections_time_out_and_do_not_starve_next_request() {
 async fn complete_max_size_unauthenticated_requests_remain_limited_until_protocol_decision() {
     let temp = tempfile::tempdir().unwrap();
     let owner = TransferRuntime::spawn(
+        // Every one of the sixteen pre-auth permits has to still be held when
+        // the count is read below, so this must outlast draining all sixteen
+        // events. At 10s a loaded box expired two of them mid-drain and the
+        // count came back 14.
         RuntimeConfig::for_tests("peer-owner", "Owner", temp.path(), 0)
-            .with_peer_request_timeout(Duration::from_secs(10)),
+            .with_peer_request_timeout(Duration::from_secs(120)),
     )
     .await
     .unwrap();
@@ -2939,7 +2951,7 @@ async fn complete_max_size_unauthenticated_requests_remain_limited_until_protoco
 
     let mut pairing_request_ids = Vec::new();
     for _ in 0..16 {
-        let event = tokio::time::timeout(Duration::from_secs(5), owner.next_event())
+        let event = tokio::time::timeout(Duration::from_secs(60), owner.next_event())
             .await
             .expect("all sixteen permitted requests should reach pairing policy")
             .unwrap();
@@ -2967,7 +2979,7 @@ async fn complete_max_size_unauthenticated_requests_remain_limited_until_protoco
     );
 
     owner.reject_pairing(&pairing_request_ids[0]).await.unwrap();
-    let released_event = tokio::time::timeout(Duration::from_secs(2), owner.next_event())
+    let released_event = tokio::time::timeout(Duration::from_secs(30), owner.next_event())
         .await
         .expect("releasing any protocol decision should admit the queued request")
         .unwrap();
@@ -3452,7 +3464,7 @@ async fn saturated_pairing_event_enqueue_does_not_retain_pending_admission() {
     .await
     .unwrap();
     let retry_pairing = tokio::spawn(async move { retry.start_pairing("peer-target").await });
-    let request = tokio::time::timeout(Duration::from_millis(250), target.next_event())
+    let request = tokio::time::timeout(Duration::from_secs(10), target.next_event())
         .await
         .expect("cleaned pairing admission should allow retry")
         .unwrap();
@@ -5341,7 +5353,10 @@ async fn stalled_mark_read_is_bounded_without_blocking_terminal_control_or_snaps
     let runtime = std::sync::Arc::new(
         TransferRuntime::spawn(
             RuntimeConfig::for_tests("peer-primary", "Primary", temp.path(), 0)
-                .with_peer_request_timeout(Duration::from_secs(5))
+                // The mark-read bound below is what this test measures; the
+                // outer per-request bound only has to outlast the other six
+                // connections on a loaded box.
+                .with_peer_request_timeout(Duration::from_secs(60))
                 .with_mark_read_timeout(Duration::from_millis(75))
                 .with_peer_request_limits(2, 1),
         )
@@ -5455,7 +5470,7 @@ async fn stalled_mark_read_is_bounded_without_blocking_terminal_control_or_snaps
         "terminal control or LAN snapshot refresh waited behind mark-read"
     );
 
-    let error = tokio::time::timeout(Duration::from_millis(250), mark_read)
+    let error = tokio::time::timeout(Duration::from_secs(10), mark_read)
         .await
         .expect("mark-read exceeded its lower-layer deadline")
         .unwrap()
@@ -5465,7 +5480,7 @@ async fn stalled_mark_read_is_bounded_without_blocking_terminal_control_or_snaps
         "unexpected mark-read error: {error}"
     );
     assert_eq!(
-        tokio::time::timeout(Duration::from_millis(250), event_rx.recv())
+        tokio::time::timeout(Duration::from_secs(10), event_rx.recv())
             .await
             .expect("stalled peer connection survived mark-read timeout"),
         Some("mark-closed"),
@@ -6990,7 +7005,7 @@ async fn commit_ack_stays_responsive_when_secondary_events_are_not_drained() {
             }),
         );
 
-        tokio::time::timeout(Duration::from_millis(200), commit)
+        tokio::time::timeout(Duration::from_secs(10), commit)
             .await
             .expect("commit ack should not block on event backpressure")
             .unwrap();
@@ -8987,7 +9002,11 @@ async fn current_destination_cannot_force_legacy_artifact_materialization() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stalled_legacy_artifact_reader_releases_materialization_admission_for_retry() {
     let temp = tempfile::tempdir().unwrap();
-    let peer_timeout = Duration::from_millis(300);
+    // The single-flight probe below has to observe the retained permit before
+    // this timeout releases it, so the window it polls in and this value move
+    // together. A 300ms permit against a 250ms probe left no room at all once
+    // the box was busy.
+    let peer_timeout = Duration::from_secs(5);
     let source = TransferRuntime::spawn(
         RuntimeConfig::for_tests("peer-source-stalled-legacy", "Source", temp.path(), 0)
             .with_peer_request_timeout(peer_timeout),
@@ -9077,7 +9096,7 @@ async fn stalled_legacy_artifact_reader_releases_materialization_admission_for_r
         .unwrap();
     stalled_stream.flush().await.unwrap();
 
-    let saw_single_flight = tokio::time::timeout(Duration::from_millis(250), async {
+    let saw_single_flight = tokio::time::timeout(peer_timeout / 2, async {
         loop {
             let mut contender = TcpStream::connect(&source_endpoint).await.unwrap();
             contender

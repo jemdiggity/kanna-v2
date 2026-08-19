@@ -1233,7 +1233,7 @@ describe("App", () => {
     expect(scheduleStartupBackupMock).toHaveBeenCalledWith("test.db");
 
     wrapper.unmount();
-  }, 15_000);
+  });
 
   it("does not schedule startup backup from restored secondary windows", async () => {
     mockWindowWorkspace.bootstrap.windowId = "window-2";
@@ -4042,7 +4042,6 @@ describe("App", () => {
       expect(staleClose).toHaveBeenCalledOnce();
       wrapper.unmount();
     },
-    15_000,
   );
 
   it("renders the modal with the preferred existing base branch selected", async () => {

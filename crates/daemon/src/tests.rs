@@ -863,7 +863,8 @@ async fn handoff_release_waits_for_the_dedicated_connection_to_close() {
         "the release barrier must not infer ownership release while the dedicated connection is open"
     );
     drop(incumbent);
-    tokio::time::timeout(Duration::from_secs(1), release)
+    // Liveness: a barrier that missed the EOF never completes at all.
+    tokio::time::timeout(Duration::from_secs(15), release)
         .await
         .expect("release barrier should observe connection EOF")
         .expect("release task should join")

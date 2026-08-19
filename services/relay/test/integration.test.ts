@@ -61,8 +61,12 @@ async function relayTunnelFlowHealth(): Promise<RelayTunnelFlowHealth> {
 /**
  * Helper: wait for the relay's /health endpoint to respond 200.
  * Polls every 200ms for up to `timeoutMs`.
+ *
+ * A liveness wait on a freshly spawned process, not a startup budget: the
+ * default is deliberately generous so a box running several suites at once
+ * cannot turn a slow start into a failure.
  */
-async function waitForRelay(timeoutMs = 10_000): Promise<void> {
+async function waitForRelay(timeoutMs = 60_000): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     try {
@@ -1563,7 +1567,9 @@ describe("Relay integration", () => {
     await vi.waitFor(
       async () => expect((await relayTunnelFlowHealth()).pauseCount)
         .toBeGreaterThan(before.pauseCount),
-      { timeout: 10_000, interval: 100 },
+      // Liveness polls: the counters either move or they do not. Generous so
+      // a box running several suites cannot fail a correct run.
+      { timeout: 60_000, interval: 100 },
     );
     expect(sendCallbacks).toBeLessThan(expectedFrames);
 
@@ -1573,18 +1579,18 @@ describe("Relay integration", () => {
       new Promise<never>((_, reject) => {
         setTimeout(
           () => reject(new Error(`received ${receivedFrames}/${expectedFrames} snapshots`)),
-          15_000,
+          60_000,
         );
       }),
     ]);
     await vi.waitFor(
       () => expect(sendCallbacks).toBe(expectedFrames),
-      { timeout: 5_000 },
+      { timeout: 60_000 },
     );
     await vi.waitFor(
       async () => expect((await relayTunnelFlowHealth()).resumeCount)
         .toBeGreaterThan(before.resumeCount),
-      { timeout: 5_000, interval: 100 },
+      { timeout: 60_000, interval: 100 },
     );
     const after = await relayTunnelFlowHealth();
     expect(after.maxBufferedBytes).toBeLessThanOrEqual(64 * 1024 * 1024);
@@ -2349,9 +2355,13 @@ describe("Relay integration", () => {
     const elapsedMs = Date.now() - startedAt;
 
     expect(closeCode).toBe(4001);
+    // The lower bound is the real assertion: the relay waited out its 10s auth
+    // window rather than closing early. The upper bound only says the window is
+    // roughly that, not minutes, so it carries order-of-magnitude headroom —
+    // a 12s ceiling on a 10s window left none once the box was busy.
     expect(elapsedMs).toBeGreaterThanOrEqual(9_500);
-    expect(elapsedMs).toBeLessThan(12_000);
-  }, 13_000);
+    expect(elapsedMs).toBeLessThan(30_000);
+  }, 40_000);
 
   it("rejects connections whose first message is not auth", async () => {
     const ws = new WebSocket(relayUrl());

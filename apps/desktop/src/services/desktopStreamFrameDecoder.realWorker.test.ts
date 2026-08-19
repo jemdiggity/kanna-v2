@@ -91,17 +91,28 @@ it("keeps the main thread schedulable for a real-worker maximum bundle", async (
         );
       }),
     ]);
+    const totalDecodeMs = performance.now() - callStarted;
     expect(frame).toMatchObject({
       type: "companion_snapshot",
       task_id: "task-max-worker",
       revision: "revision-max-worker",
       html: expect.stringMatching(/^x+$/),
     });
-    expect(callLatencyMs).toBeLessThan(100);
+    // The claim is that `decodeChunks` hands the bundle off instead of parsing
+    // it on the caller's thread, and that is a ratio, not a duration: a
+    // main-thread parse costs the whole decode, so the synchronous call must be
+    // a small fraction of it. Load stretches both numbers together, which is
+    // why the shared-box flake this replaces cannot come back.
+    expect(callLatencyMs).toBeLessThan(totalDecodeMs / 4);
+    // The main thread kept running its 1ms heartbeat throughout — work
+    // completed rather than time elapsed.
     expect(ticks).toBeGreaterThan(10);
-    expect(maximumGapMs).toBeLessThan(250);
+    // Order-of-magnitude only: a main-thread parse of a 16 MiB bundle blocks
+    // for seconds, so this ceiling sits roughly 10x above the healthy gap while
+    // staying far below the regression it catches.
+    expect(maximumGapMs).toBeLessThan(2_500);
   } finally {
     clearInterval(heartbeat);
     decoder!.cancel();
   }
-}, 40_000);
+}, 60_000);

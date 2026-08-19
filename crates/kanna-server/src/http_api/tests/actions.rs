@@ -4882,8 +4882,10 @@ async fn advance_stage_detached_transition_aborts_when_task_closes_before_stage_
     drop(db);
     release_spawn_tx.send(()).unwrap();
 
+    // Generous because a short window turns "the cleanup did not happen yet"
+    // into the silently-skipped branch below on a loaded box, not a failure.
     let cleanup_session_id =
-        tokio::time::timeout(std::time::Duration::from_millis(500), cleanup_seen_rx)
+        tokio::time::timeout(std::time::Duration::from_secs(10), cleanup_seen_rx)
             .await
             .ok()
             .map(|received| received.unwrap());
@@ -6075,7 +6077,7 @@ async fn complete_stage_for_already_closed_task_is_idempotent() {
 #[tokio::test(flavor = "current_thread")]
 async fn advance_stage_route_stays_responsive_while_prepare_blocks_on_git() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::{SystemTime, UNIX_EPOCH};
     use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
@@ -6230,7 +6232,7 @@ async fn advance_stage_route_stays_responsive_while_prepare_blocks_on_git() {
     // the full fetch duration.
     let (response, max_drift) = super::await_measuring_runtime_drift(request).await;
     assert!(
-        max_drift < Duration::from_millis(750),
+        max_drift < super::MAX_RUNTIME_DRIFT,
         "stage advance prepare blocked the async runtime for {max_drift:?}"
     );
 
@@ -6274,7 +6276,6 @@ async fn advance_stage_route_stays_responsive_while_prepare_blocks_on_git() {
 #[tokio::test(flavor = "current_thread")]
 async fn close_last_blocker_stays_responsive_while_dependent_prepare_blocks() {
     use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
-    use std::time::Duration;
     use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
@@ -6452,7 +6453,7 @@ async fn close_last_blocker_stays_responsive_while_dependent_prepare_blocks() {
     );
     let (close_response, max_drift) = super::await_measuring_runtime_drift(close_request).await;
     assert!(
-        max_drift < Duration::from_millis(750),
+        max_drift < super::MAX_RUNTIME_DRIFT,
         "dependent start during manual close blocked the async runtime for {max_drift:?}"
     );
     assert_eq!(close_response.unwrap().status(), StatusCode::NO_CONTENT);
@@ -6495,7 +6496,6 @@ async fn close_last_blocker_stays_responsive_while_dependent_prepare_blocks() {
 #[tokio::test(flavor = "current_thread")]
 async fn complete_pr_stage_stays_responsive_while_dependent_prepare_blocks() {
     use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
-    use std::time::Duration;
     use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
@@ -6690,7 +6690,7 @@ async fn complete_pr_stage_stays_responsive_while_dependent_prepare_blocks() {
     let (complete_response, max_drift) =
         super::await_measuring_runtime_drift(complete_request).await;
     assert!(
-        max_drift < Duration::from_millis(750),
+        max_drift < super::MAX_RUNTIME_DRIFT,
         "optimistic dependent start during pr completion blocked the async runtime for {max_drift:?}"
     );
     assert_eq!(complete_response.unwrap().status(), StatusCode::OK);

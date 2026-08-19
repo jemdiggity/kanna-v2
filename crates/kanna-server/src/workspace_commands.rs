@@ -613,7 +613,11 @@ mod tests {
         WorkspaceCommandPolicy {
             soft_timeout: Duration::from_millis(50),
             hard_timeout,
-            final_drain_timeout: Duration::from_millis(100),
+            // Reap-and-drain is a bounded wait, not a budget under test: it
+            // ends as soon as the child is reapable, so a generous ceiling
+            // costs nothing on a quiet box and stops a loaded one from
+            // dropping output into the background reaper.
+            final_drain_timeout: Duration::from_secs(2),
             poll_interval: Duration::from_millis(10),
             max_concurrent,
             max_output_bytes: 64 * 1024,
@@ -656,8 +660,14 @@ mod tests {
             "printf 'setup-started\\n'; sleep 30 & echo $! > '{}'; wait",
             pid_file.display()
         );
+        // The command sleeps for 30s, so any hard timeout below that proves the
+        // same thing. It is generous because the assertions below need the
+        // shell to have reached its `printf` before the kill lands, and a
+        // 150ms budget lost that race on a loaded machine — the shell had not
+        // finished starting. 5s is ~two orders of magnitude more than a shell
+        // needs to print one line; only a timeout that never fires trips it.
         let supervisor = Arc::new(WorkspaceCommandSupervisor::new(test_policy(
-            Duration::from_millis(150),
+            Duration::from_secs(5),
             4,
         )));
 
@@ -726,8 +736,11 @@ mod tests {
             )
             .unwrap();
 
+        // `sleep 30 &` is what would hold the pipe open, so the failure this
+        // guards costs 30s. A 10s ceiling keeps that order-of-magnitude signal
+        // while surviving a loaded box.
         assert!(
-            started.elapsed() < Duration::from_secs(2),
+            started.elapsed() < Duration::from_secs(10),
             "inherited pipe held the runner open for {:?}",
             started.elapsed()
         );

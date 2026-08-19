@@ -18,6 +18,12 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Notify};
 
+/// How long a control response may take to come back from the out-of-process
+/// sidecar. Every use is a liveness wait — the failure it guards is a response
+/// that never arrives — so it is deliberately far above the milliseconds a
+/// healthy round trip takes, leaving room for a box running several suites.
+const CONTROL_RESPONSE_WAIT: Duration = Duration::from_secs(10);
+
 struct SidecarProcess {
     child: Child,
     stdin: ChildStdin,
@@ -201,7 +207,7 @@ async fn stalled_mark_read_does_not_monopolize_sidecar_control() {
         },
     );
     let overloaded = response_rx
-        .recv_timeout(Duration::from_millis(500))
+        .recv_timeout(CONTROL_RESPONSE_WAIT)
         .expect("excess mark-read control did not receive bounded backpressure");
     assert!(
         matches!(
@@ -264,7 +270,7 @@ async fn stalled_mark_read_does_not_monopolize_sidecar_control() {
         },
     );
     let ordinary_overload = response_rx
-        .recv_timeout(Duration::from_millis(500))
+        .recv_timeout(CONTROL_RESPONSE_WAIT)
         .expect("excess ordinary control did not receive bounded backpressure");
     assert!(
         matches!(
@@ -280,13 +286,13 @@ async fn stalled_mark_read_does_not_monopolize_sidecar_control() {
     snapshot_release.notify_one();
 
     let first = response_rx
-        .recv_timeout(Duration::from_millis(500))
+        .recv_timeout(CONTROL_RESPONSE_WAIT)
         .expect("terminal control waited behind stalled mark-read");
     let second = response_rx
-        .recv_timeout(Duration::from_millis(500))
+        .recv_timeout(CONTROL_RESPONSE_WAIT)
         .expect("LAN refresh waited behind stalled mark-read");
     let third = response_rx
-        .recv_timeout(Duration::from_millis(500))
+        .recv_timeout(CONTROL_RESPONSE_WAIT)
         .expect("second terminal input did not run after the first response");
     let mut completed_ids = vec![control_response_id(&first), control_response_id(&second)];
     completed_ids.push(control_response_id(&third));
@@ -306,7 +312,7 @@ async fn stalled_mark_read_does_not_monopolize_sidecar_control() {
         "unexpected mark-read response: {mark:?}",
     );
     assert_eq!(
-        tokio::time::timeout(Duration::from_millis(500), peer_event_rx.recv())
+        tokio::time::timeout(CONTROL_RESPONSE_WAIT, peer_event_rx.recv())
             .await
             .expect("stalled peer work survived mark-read timeout"),
         Some("mark-closed".into()),

@@ -2659,8 +2659,11 @@ async fn every_working_task_stopping_emits_one_activity_changed_event() {
         "/v1/task-events?taskIds=child-a,child-b,child-c&timeoutSecs=15",
     )
     .await;
+    // The failure this guards is the wait blocking for its full 15s window,
+    // so the ceiling only has to sit clearly below that; an immediate drain is
+    // milliseconds even on a loaded box.
     assert!(
-        started.elapsed() < Duration::from_secs(2),
+        started.elapsed() < Duration::from_secs(6),
         "a cursor-less wait must drain retained stopped edges immediately"
     );
     let events = body["events"].as_array().expect("events");

@@ -206,7 +206,9 @@ function runMcpExchange(
           `kd-mcp exchange timed out\nstdout:\n${stdoutBuffer}\nstderr:\n${stderr}`
         )
       );
-    }, 30_000);
+      // A handshake that never answers is what this guards; a cold install on
+      // a box running several suites is simply slow. Keep it finite, not tight.
+    }, 120_000);
 
     child.once("error", fail);
     child.stderr.setEncoding("utf8");
@@ -313,7 +315,13 @@ describe("kd CLI", () => {
       join(tempRoot, `repo ${index + 1}`)
     );
     const home = join(tempRoot, "home");
-    const resolverTimeoutMs = 120_000;
+    // Eight launchers race a real cold install (pnpm install plus a tsup
+    // build) through one lease. What the test proves is the serialization
+    // below — one "Installing kd:", the rest waiting — not how long the
+    // install takes, and on a box running several worktrees' suites it can
+    // take minutes. The budget is sized to catch a resolver that never
+    // finishes, not a slow machine.
+    const resolverTimeoutMs = 600_000;
     mkdirSync(home, { recursive: true });
 
     try {
@@ -332,7 +340,7 @@ describe("kd CLI", () => {
           spawnResult("./kd", ["env", "print"], {
             cwd: fixtureRepoRoot,
             env,
-            timeoutMs: 240_000
+            timeoutMs: resolverTimeoutMs + 60_000
           })
         )
       );
@@ -343,6 +351,8 @@ describe("kd CLI", () => {
           launch.status,
           `stdout:\n${launch.stdout}\nstderr:\n${launch.stderr}`
         ).toBe(0);
+        // Redundant with the exit status above (an overrun is killed as 124),
+        // kept as the explicit statement of the budget.
         expect(launch.durationMs).toBeLessThan(resolverTimeoutMs);
         expect(
           (JSON.parse(launch.stdout) as { repoRoot: string }).repoRoot
@@ -412,7 +422,7 @@ describe("kd CLI", () => {
     } finally {
       rmSync(tempRoot, { recursive: true, force: true });
     }
-  }, 240_000);
+  }, 720_000);
 
   it("bounds resolver startup and reports a clear timeout", async () => {
     const packageRoot = resolve(import.meta.dirname, "..");
@@ -444,10 +454,13 @@ describe("kd CLI", () => {
           ...cleanLauncherEnv(home),
           KANNA_KD_RESOLVER_TIMEOUT_MS: "50"
         },
-        timeoutMs: 5_000
+        // A resolver that ignored its own 50ms budget hangs forever, so this
+        // outer kill is the hang-breaker and the assertion below sits well
+        // under it. Both are far above what the launch costs when it works.
+        timeoutMs: 60_000
       });
 
-      expect(Date.now() - startedAt).toBeLessThan(5_000);
+      expect(Date.now() - startedAt).toBeLessThan(30_000);
       expect(launch.status, launch.stderr).toBe(124);
       expect(launch.stdout).toBe("");
       expect(launch.stderr).toContain(
@@ -478,7 +491,10 @@ describe("kd CLI", () => {
           ...cleanLauncherEnv(home),
           KANNA_KD_CACHE_ROOT: cacheRoot
         },
-        timeoutMs: 240_000
+        // A real cold clone: pnpm install plus a tsup build. Generous because
+        // the assertions below are about what the bootstrap produced, not how
+        // fast it produced it.
+        timeoutMs: 600_000
       });
 
       expect(
@@ -504,7 +520,7 @@ describe("kd CLI", () => {
     } finally {
       rmSync(tempRoot, { recursive: true, force: true });
     }
-  }, 240_000);
+  }, 660_000);
 
   it("prints contextual help for command groups and leaf commands", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});

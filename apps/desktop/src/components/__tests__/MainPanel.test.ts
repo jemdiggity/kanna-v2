@@ -217,7 +217,7 @@ describe("MainPanel", () => {
     const remounted = mountPanel();
 
     expect(remounted.find('[data-testid="command-hint"]').exists()).toBe(false);
-  }, 15_000);
+  });
 
   it("shows full agent CLI version numbers from --version output", async () => {
     invokeMock.mockImplementation((command: string, args?: { name?: string; script?: string }) => {
@@ -261,7 +261,7 @@ describe("MainPanel", () => {
     expect(wrapper.text()).toContain("Version 1.0.32");
     expect(wrapper.text()).toContain("Version 0.125.0-beta.1+20260429");
     expect(wrapper.text()).toContain("Version 1.0.14");
-  }, 15_000);
+  });
 
   it("renders a setup card and checks the generated executable for every provider", async () => {
     invokeMock.mockImplementation((command: string) => {
@@ -288,7 +288,7 @@ describe("MainPanel", () => {
         name: getAgentProviderSpec(provider).executable,
       });
     }
-  }, 15_000);
+  });
 
   it("updates a newly installed CLI when setup requests a recheck", async () => {
     let opencodeInstalled = false;
@@ -331,7 +331,7 @@ describe("MainPanel", () => {
 
     expect(openCodeCard()?.find(".installed").exists()).toBe(true);
     expect(openCodeCard()?.text()).toContain("Version 1.2.3");
-  }, 15_000);
+  });
 
   it("shows the Antigravity install command when agy is missing", async () => {
     invokeMock.mockImplementation((command: string, args?: { name?: string }) => {
@@ -369,7 +369,7 @@ describe("MainPanel", () => {
 
     expect(wrapper.text()).toContain("Google Antigravity");
     expect(wrapper.text()).toContain("curl -fsSL https://antigravity.google/cli/install.sh | bash");
-  }, 15_000);
+  });
 
   it("groups installed agents before missing agents and sorts each group alphabetically", async () => {
     invokeMock.mockImplementation((command: string, args?: { name?: string; script?: string }) => {
@@ -425,7 +425,7 @@ describe("MainPanel", () => {
       "GitHub Copilot",
       "OpenCode",
     ]);
-  }, 15_000);
+  });
 
   it("keeps setup ahead of stale blockers and cloud routing through all creating phases", async () => {
     const { default: MainPanel } = await import("../MainPanel.vue");

@@ -1207,9 +1207,7 @@ mod tests {
 
         let mut session = session;
         session.kill().expect("kill should succeed");
-        while session.try_wait().is_none() {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        reap_within(&mut session, "spawned session");
     }
 
     /// Spawn a child that classifies each fd above its own stdio as tty or
@@ -1254,9 +1252,7 @@ mod tests {
 
     fn kill_and_reap(mut session: PtySession) {
         session.kill().expect("kill should succeed");
-        while session.try_wait().is_none() {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        reap_within(&mut session, "killed session");
     }
 
     #[test]
@@ -1336,6 +1332,25 @@ mod tests {
             .next()
     }
 
+    /// Reaps a killed session, bounded.
+    ///
+    /// A macOS PTY child can wedge mid-exit and never become reapable. An
+    /// unbounded poll turns that into a `./kd test all` that hangs forever
+    /// with no output — the whole gate stuck on one line — instead of a test
+    /// that says what happened. The bound is a liveness ceiling, not a budget:
+    /// a healthy reap takes milliseconds.
+    fn reap_within(session: &mut PtySession, message: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while session.try_wait().is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{message}: killed session never became reapable (pid {})",
+                session.pid()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
     fn assert_dies_within(pid: libc::pid_t, timeout: std::time::Duration, message: &str) {
         let deadline = std::time::Instant::now() + timeout;
         loop {
@@ -1380,9 +1395,7 @@ mod tests {
             .unwrap_or_else(|| panic!("grandchild pid should be printed: {output:?}"));
 
         session.kill().expect("kill should succeed");
-        while session.try_wait().is_none() {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        reap_within(&mut session, "killed session");
 
         // The grandchild must die with the session's process group instead of
         // being orphaned to launchd (where it would pin PTYs forever).
@@ -1437,9 +1450,7 @@ mod tests {
         );
 
         session.kill().expect("kill should succeed");
-        while session.try_wait().is_none() {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        reap_within(&mut session, "killed session");
         assert_dies_within(
             job,
             std::time::Duration::from_secs(5),
@@ -1492,9 +1503,7 @@ mod tests {
         }
 
         session.kill().expect("kill should succeed");
-        while session.try_wait().is_none() {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        reap_within(&mut session, "killed session");
         assert_dies_within(
             escapee,
             std::time::Duration::from_secs(5),
@@ -1593,9 +1602,7 @@ mod tests {
             24,
         )
         .expect("donor spawn should succeed");
-        while donor.try_wait().is_none() {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        reap_within(&mut donor, "donor session");
         donor
     }
 
@@ -1765,9 +1772,7 @@ mod tests {
         );
         // But teardown still works.
         adopted.kill().expect("adopted teardown should succeed");
-        while session.try_wait().is_none() {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        reap_within(&mut session, "killed session");
         assert_dies_within(
             leader as libc::pid_t,
             std::time::Duration::from_secs(5),
@@ -1844,9 +1849,7 @@ mod tests {
         );
 
         adopted_tty.kill().expect("adopted kill should succeed");
-        while session.try_wait().is_none() {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        reap_within(&mut session, "killed session");
         assert_dies_within(
             leader as libc::pid_t,
             std::time::Duration::from_secs(5),
@@ -1920,9 +1923,7 @@ mod tests {
         );
 
         session.kill().expect("kill should succeed");
-        while session.try_wait().is_none() {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        reap_within(&mut session, "killed session");
         assert_dies_within(
             escapee,
             std::time::Duration::from_secs(5),
