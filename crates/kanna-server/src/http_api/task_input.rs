@@ -1,6 +1,10 @@
 use super::lan_trust::PrivilegedTaskAccess;
 use super::state::AppState;
 use crate::db::{Db, TaskInputSource};
+use crate::task_input_attachments::{
+    compose_input_with_attachment, discard_stored_attachment, store_task_input_attachment,
+    TaskInputAttachment,
+};
 use axum::extract::State;
 use axum::Json;
 use kanna_agent_protocol::StateChangeScope;
@@ -22,6 +26,14 @@ pub(super) struct TaskInputRequest {
     /// it beside the message it can verify was delivered.
     #[serde(default)]
     source: Option<String>,
+    /// One image the caller attached. Carried as base64 in the same JSON body
+    /// the text arrives in, because that body is the only shape both mobile
+    /// transports share: the relay tunnels a desktop invocation as JSON, and
+    /// the LAN client posts the same JSON to the same route. One encoding
+    /// means one handler and one durable record, and the payload is capped
+    /// small enough that multipart would buy nothing.
+    #[serde(default)]
+    attachment: Option<TaskInputAttachment>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -446,8 +458,47 @@ pub(super) async fn send_task_input(
         ));
     };
 
+    // Stored only once a live session is known: a file written for an input
+    // that was never going to be delivered is a leak with no message to name
+    // it. If the submission below fails the file is discarded again. The write
+    // itself goes to the blocking pool with the rest of the handler's
+    // filesystem work — megabytes of decode and disk on a runtime worker would
+    // stall every KSP terminal stream the same runtime carries.
+    let stored_attachment = match payload.attachment.clone() {
+        Some(attachment) => {
+            let db_path = state.config.db_path.clone();
+            let attachment_task_id = task_id.clone();
+            Some(
+                tokio::task::spawn_blocking(move || {
+                    store_task_input_attachment(&db_path, &attachment_task_id, &attachment)
+                })
+                .await
+                .map_err(|error| {
+                    task_input_http_error(
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        "attachment_write_failed",
+                        format!("task input attachment worker failed: {error}"),
+                        None,
+                    )
+                })?
+                .map_err(|error| {
+                    task_input_http_error(error.status(), error.reason(), error.message(), None)
+                })?,
+            )
+        }
+        None => None,
+    };
+    // What the agent actually receives, and — because an attachment is a file
+    // path the agent reads — what the durable record must say. There is no
+    // separate attachment column: the record's contract is the text that
+    // entered the session, and that text names the path.
+    let delivered_input = match stored_attachment.as_ref() {
+        Some(path) => compose_input_with_attachment(&payload.input, &path.to_string_lossy()),
+        None => payload.input.clone(),
+    };
+
     let delivered =
-        try_submit_task_input_if_session(&mut daemon, &task_id, live_session_pid, &payload.input)
+        try_submit_task_input_if_session(&mut daemon, &task_id, live_session_pid, &delivered_input)
             .await;
     // Recorded before the answer is shaped: this is the one failure that says
     // something durable about the *target* rather than about this call.
@@ -455,6 +506,23 @@ pub(super) async fn send_task_input(
         record_input_blocked_target(&state, &task_id).await;
     }
     delivered
+        .inspect_err(|error| {
+            // Whether the file outlives a failed submission is decided by one
+            // question: can the message naming it still reach the agent?
+            // `Uncertain` may already have put the path in front of it, and
+            // `HeldByRawDraft` is queued at the daemon and goes out when that
+            // terminal submits — in both cases the path has to still resolve
+            // when the agent finally reads it, so the file stays. Every other
+            // failure means the message is gone for good, and a file no
+            // surviving message names is a leak.
+            let message_may_still_arrive = matches!(
+                error,
+                TaskInputError::Uncertain(_) | TaskInputError::HeldByRawDraft(_)
+            );
+            if let (Some(path), false) = (stored_attachment.as_ref(), message_may_still_arrive) {
+                discard_stored_attachment(path);
+            }
+        })
         .map_err(|error| {
             let (status, reason, message) = match error {
                 TaskInputError::SessionNotFound => (
@@ -491,7 +559,7 @@ pub(super) async fn send_task_input(
     // Only a delivery the daemon accepted is recorded. An uncertain one may or
     // may not have reached the agent, and a row asserting it did would be a
     // worse record than none at all.
-    record_delivered_task_input(&state.config.db_path, &task_id, source, &payload.input).await;
+    record_delivered_task_input(&state.config.db_path, &task_id, source, &delivered_input).await;
 
     Ok(axum::http::StatusCode::NO_CONTENT)
 }

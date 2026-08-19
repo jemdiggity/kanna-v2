@@ -1363,6 +1363,223 @@ async fn catalog_task_inputs_tool_reaches_the_recorded_instruction_history() {
     assert_eq!(detail["deliveredInputCount"], 1);
 }
 
+/// Spawn a fake daemon that reports one live PTY session for `task_id` and
+/// answers `expected_commands` commands, returning what it was sent.
+fn spawn_live_session_daemon(
+    listener: tokio::net::UnixListener,
+    task_id: &'static str,
+    expected_commands: usize,
+) -> tokio::task::JoinHandle<Vec<kanna_daemon::protocol::Command>> {
+    use kanna_daemon::protocol::{
+        Command as DaemonCommand, Event as DaemonEvent, SessionInfo, SessionState, SessionStatus,
+    };
+    use tokio::io::{AsyncWriteExt, BufReader};
+
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut commands = Vec::new();
+        while commands.len() < expected_commands {
+            let command = read_test_daemon_command(&mut reader, &mut write_half).await;
+            let response = match &command {
+                DaemonCommand::List => DaemonEvent::SessionList {
+                    sessions: vec![SessionInfo {
+                        session_id: task_id.to_string(),
+                        pid: 42,
+                        cwd: "/tmp".to_string(),
+                        state: SessionState::Active,
+                        idle_seconds: 0,
+                        status: SessionStatus::Idle,
+                        kind: Default::default(),
+                        // This helper's sessions accept delivered input; the
+                        // refusal path has its own tests on main.
+                        logical_input_blocked: false,
+                    }],
+                },
+                DaemonCommand::SubmitInputIfSession { .. } => DaemonEvent::Ok,
+                other => panic!("unexpected daemon command: {other:?}"),
+            };
+            commands.push(command);
+            write_half
+                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+                .await
+                .unwrap();
+        }
+        commands
+    })
+}
+
+fn seed_live_task(config: &Config, task_id: &str) {
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        task_id,
+        "repo-1",
+        "Live task",
+        Some("Live task"),
+        "in progress",
+        "2026-08-19 04:00:00",
+    )
+    .unwrap();
+}
+
+/// A photo sent from the phone has to become a file the agent can open, and
+/// the message the agent receives has to name that file. Both halves are
+/// asserted here because either alone is useless: a stored image nobody
+/// mentions is invisible, and a mentioned path with no file behind it sends
+/// the agent to read nothing.
+#[tokio::test]
+async fn send_task_input_stores_an_attachment_and_names_its_path_in_the_message() {
+    use base64::Engine;
+    use kanna_daemon::protocol::Command as DaemonCommand;
+    use tokio::net::UnixListener;
+
+    let unique = format!("task-input-attachment-{}", unique_test_suffix());
+    let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let daemon_server = spawn_live_session_daemon(listener, "task-live", 2);
+
+    let config = merge_test_config(&unique, &daemon_dir);
+    seed_live_task(&config, "task-live");
+
+    let image_bytes = b"\x89PNG\r\n\x1a\n pretend pixels".to_vec();
+    let app = super::router(Arc::new(super::AppState::new(config.clone())));
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks/task-live/input")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "input": "what is wrong here?",
+                        "attachment": {
+                            "fileName": "IMG_4821.HEIC",
+                            "mediaType": "image/png",
+                            "dataBase64": base64::engine::general_purpose::STANDARD
+                                .encode(&image_bytes),
+                        },
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let directory =
+        crate::task_input_attachments::task_attachments_dir(&config.db_path, "task-live");
+    let stored: Vec<_> = std::fs::read_dir(&directory)
+        .expect("attachment directory")
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(stored.len(), 1, "expected exactly one stored attachment");
+    assert_eq!(std::fs::read(&stored[0]).unwrap(), image_bytes);
+    let stored_path = stored[0].to_string_lossy().to_string();
+    assert!(
+        stored_path.contains("IMG_4821-"),
+        "stored name should keep a recognisable prefix: {stored_path}"
+    );
+
+    let commands = daemon_server.await.unwrap();
+    let DaemonCommand::SubmitInputIfSession { data, .. } = &commands[1] else {
+        panic!("expected a submission, got {:?}", commands[1]);
+    };
+    let delivered = String::from_utf8(data.clone()).unwrap();
+    assert_eq!(
+        delivered,
+        format!("what is wrong here? [Attached image: {stored_path}]")
+    );
+    // One submission, not two: the daemon writes the message and then a
+    // carriage return, so a newline here would split the text from the image.
+    assert!(!delivered.contains('\n'));
+
+    // The durable record is the delivered text, so a later stage reading the
+    // record — in a fresh worktree, with no terminal — can still find the file.
+    let response = app
+        .oneshot(
+            Request::get("/v1/tasks/task-live/inputs")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let inputs: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(inputs["inputs"][0]["message"], delivered);
+
+    let _ = std::fs::remove_dir_all(crate::task_input_attachments::attachments_root(
+        &config.db_path,
+    ));
+    let _ = std::fs::remove_file(socket_path);
+    let _ = std::fs::remove_dir_all(daemon_dir);
+    let _ = std::fs::remove_file(config.db_path);
+}
+
+/// A refused attachment must leave nothing behind and must not put a message
+/// in front of the agent that names a file which was never written.
+#[tokio::test]
+async fn send_task_input_refuses_an_oversized_attachment_and_stores_nothing() {
+    use base64::Engine;
+    use tokio::net::UnixListener;
+
+    let unique = format!("task-input-attachment-oversized-{}", unique_test_suffix());
+    let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    // Only the session listing: the submission never happens.
+    let daemon_server = spawn_live_session_daemon(listener, "task-live", 1);
+
+    let config = merge_test_config(&unique, &daemon_dir);
+    seed_live_task(&config, "task-live");
+
+    let oversized = vec![0_u8; crate::task_input_attachments::MAX_TASK_INPUT_ATTACHMENT_BYTES + 1];
+    let app = super::router(Arc::new(super::AppState::new(config.clone())));
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-live/input")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "input": "too big",
+                        "attachment": {
+                            "mediaType": "image/jpeg",
+                            "dataBase64": base64::engine::general_purpose::STANDARD
+                                .encode(&oversized),
+                        },
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let failure: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(failure["reason"], "attachment_too_large");
+    assert!(
+        !crate::task_input_attachments::task_attachments_dir(&config.db_path, "task-live").exists()
+    );
+
+    let commands = daemon_server.await.unwrap();
+    assert_eq!(commands.len(), 1, "the session was never written to");
+
+    let _ = std::fs::remove_file(socket_path);
+    let _ = std::fs::remove_dir_all(daemon_dir);
+    let _ = std::fs::remove_file(config.db_path);
+}
+
 #[tokio::test]
 async fn send_task_input_reports_daemon_write_failure_as_delivery_uncertain() {
     use kanna_daemon::protocol::{

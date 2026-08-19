@@ -651,6 +651,12 @@ pub(super) async fn close_task(
         .await;
     }
     crate::task_creator::remove_completion_contexts(&state.config.daemon_dir, &pipeline_item_id);
+    // Attachments belong to the task, not to a workspace, so they go here with
+    // the task's other per-task on-disk artifacts rather than with a worktree.
+    crate::task_input_attachments::remove_task_attachments(
+        &state.config.db_path,
+        &pipeline_item_id,
+    );
     // A direct close reaches no verdict, so it is reported as `closed` — never
     // as a failure the receiving agent would try to diagnose. Best-effort:
     // the close has already committed, and a lost notification must not
@@ -814,6 +820,7 @@ async fn close_task_after_final_stage(
         )
     })?;
     crate::task_creator::remove_completion_contexts(&state.config.daemon_dir, &task_id);
+    crate::task_input_attachments::remove_task_attachments(&state.config.db_path, &task_id);
     if has_workspace_teardown {
         crate::task_creator::spawn_prepared_workspace_teardown_best_effort(
             daemon,

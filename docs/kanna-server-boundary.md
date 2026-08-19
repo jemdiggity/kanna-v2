@@ -44,6 +44,49 @@ Every accepted delivery is also recorded durably against the task — see
 [Delivered Task Inputs](#delivered-task-inputs) — because terminal bytes are
 not a record any later stage can read.
 
+### Image attachments
+
+`POST /v1/tasks/{task_id}/input` accepts one optional `attachment`:
+`{ fileName?, mediaType, dataBase64 }`, where `mediaType` is one of
+`image/jpeg`, `image/png`, `image/webp`, `image/heic`. Photos only — no video
+and no arbitrary file types.
+
+The agent CLIs are terminal programs, so nothing about the daemon contract
+changes: the server writes the decoded bytes to a file and delivers the
+caller's text **plus a reference to that file's absolute path** as one ordinary
+logical message —
+`<text> [Attached image: <path>]`, or the bracket alone when the caller sent no
+text. The reference is joined with a space and never a newline, because the
+daemon writes a logical message and then a carriage return: an inserted newline
+would split one submission into two and put the words in front of the agent
+before the picture.
+
+- **Encoding is base64-in-JSON on both mobile transports.** The relay carries a
+  desktop invocation as a JSON message and the LAN client posts the same JSON
+  to the same route, so one encoding means one handler, one durable record, and
+  one thing to test. Multipart would exist on one path only and would buy a
+  third of a payload that is capped at a few megabytes anyway.
+- **Budget.** 3 MiB decoded per attachment (`MAX_TASK_INPUT_ATTACHMENT_BYTES`);
+  the route raises axum's body limit to 8 MiB to leave room for base64 plus the
+  message. Mobile resizes to a 1568px longest edge and re-encodes as JPEG
+  before uploading, which lands ordinary photos far below the cap; the server
+  cap is the backstop, not the working limit. Over-budget returns 413
+  `attachment_too_large`, an unsupported type 415, and a corrupt payload 400.
+- **Storage and lifetime.** Files live beside the database, under
+  `<db-dir>/<db-stem>-task-attachments/<task_id>/`, **not** in the task's
+  worktree: closing a task snapshots its dirty worktree into a WIP commit, so a
+  photo dropped there would be committed onto the branch and appear in every
+  diff. They are removed when the task closes, alongside the task's other
+  per-task on-disk artifacts. A stored file whose submission then failed is
+  deleted again; a file whose delivery was *uncertain* is kept, because the
+  agent may already have been told the path.
+- **Durable record.** No separate attachment column: the `task_input` row holds
+  the exact delivered text, which names the path. The record's contract is what
+  entered the session, and a second representation could only disagree with it.
+- **PTY sessions only.** A live daemon PTY session is required as it is for any
+  other input; SDK-mode tasks answer over the agent stream, which carries text
+  alone, and the mobile composer hides the attach control for them.
+
 Desktop-to-desktop LAN input has the same fail-closed rule at task-transfer
 protocol v5. A v4 peer may still be discovered and use unrelated compatible
 features, but a current sender refuses all terminal input to it and a current
@@ -65,7 +108,7 @@ owner refuses its duplex observation/input before contacting the daemon.
 - `GET /v1/tasks/{task_id}/inputs?tail=...` (durable instruction history: every message delivered into the task's agent session from outside it)
 - `GET /v1/task-events?taskIds=...|parentTaskId=...|repoId=...|repoRemoteUrlHash=...&cursor=...&timeoutSecs=...&limit=...` (multi-task, multi-machine event feed; blocks server-side until an event arrives or the window elapses)
 - `POST /v1/tasks`
-- `POST /v1/tasks/{task_id}/input`
+- `POST /v1/tasks/{task_id}/input` (optionally with one base64 image `attachment`; see [Image attachments](#image-attachments))
 - `POST /v1/tasks/{task_id}/actions/complete-stage`
 - `POST /v1/tasks/{task_id}/actions/request-revision`
 - `POST /v1/tasks/{task_id}/actions/close`
@@ -612,6 +655,11 @@ The row is the record; `task.input_delivered` is only its announcement.
 - **Full text, no truncation.** Rows cascade with the task and are as short-lived
   as it is. Only the event payload's `preview` is bounded (200 characters, with
   `truncated`), because the event feed is a 14-day wake-up channel.
+- **Attachments are the delivered text.** An input with a photo records the
+  composed message, which names the stored file's absolute path — see
+  [Image attachments](#image-attachments). There is no separate attachment
+  field to read, and no record is written for an attachment whose message never
+  reached the session.
 - **Scope.** This covers `POST /v1/tasks/{task_id}/input` and the server's
   completion notifications. Stage prompts, post prompts, and revision feedback
   are already durable on `stage_run` and are not duplicated here; blocker
