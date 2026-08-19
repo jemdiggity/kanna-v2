@@ -16,6 +16,7 @@ mod settings;
 mod snapshot;
 mod stage_runs;
 mod task_events;
+mod task_inputs;
 #[cfg(test)]
 mod test_support;
 #[cfg(test)]
@@ -35,6 +36,8 @@ pub use pipeline_items::MergeSignalSource;
 pub use stage_runs::FinishedStageRun;
 #[allow(unused_imports)]
 pub use task_events::{appended as task_event_appended, TaskEvent, TaskEventKind, TaskEventScope};
+#[allow(unused_imports)]
+pub use task_inputs::{TaskInputRecord, TaskInputSource};
 #[allow(unused_imports)]
 pub use transfer_work::{TransferWorkItem, MAX_TRANSFER_WORK_ATTEMPTS};
 pub use transfers::{
@@ -99,6 +102,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "049_transfer_work_queue",
     "050_transfer_work_phase_value",
     "051_repo_remote_hash_task_event_indexes",
+    "052_task_input_log",
 ];
 
 #[derive(Debug, Serialize)]
@@ -1701,6 +1705,30 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
              ON repo(remote_url_hash, id);
              CREATE INDEX IF NOT EXISTS idx_pipeline_item_repo_id_id
              ON pipeline_item(repo_id, id);",
+        )
+    })?;
+
+    run_migration(conn, "052_task_input_log", |conn| {
+        // Messages delivered into a task's PTY from outside its session used
+        // to exist only as terminal bytes, so a later stage could read the
+        // whole durable record and honestly conclude none had ever been sent.
+        // `id` is AUTOINCREMENT because `delivered_at` has one-second
+        // resolution and two deliveries in the same second must still order.
+        // Rows follow the task: they are as short-lived as it is, which is why
+        // the full message text is kept rather than truncated.
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS task_input (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+                run_id TEXT REFERENCES stage_run(id) ON DELETE SET NULL,
+                stage TEXT,
+                source TEXT NOT NULL,
+                message TEXT NOT NULL,
+                delivered_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_task_input_task_id ON task_input(task_id, id);
+            "#,
         )
     })?;
 

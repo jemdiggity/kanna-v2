@@ -82,12 +82,31 @@ fn builds_request_revision_payload() {
 
 #[test]
 fn builds_send_task_input_payload() {
-    let request = build_send_task_input_request("Please fix the failing typecheck".to_string());
+    let request =
+        build_send_task_input_request("Please fix the failing typecheck".to_string(), None);
 
     assert_eq!(
         serde_json::to_value(request).unwrap(),
         json!({
             "input": "Please fix the failing typecheck",
+        })
+    );
+}
+
+/// A declared source rides with the message so the durable record says who
+/// was speaking; omitting it stays absent rather than becoming a claim.
+#[test]
+fn builds_send_task_input_payload_with_a_declared_source() {
+    let request = build_send_task_input_request(
+        "The owner asked for swipe-only pinning".to_string(),
+        Some("operator".to_string()),
+    );
+
+    assert_eq!(
+        serde_json::to_value(request).unwrap(),
+        json!({
+            "input": "The owner asked for swipe-only pinning",
+            "source": "operator",
         })
     );
 }
@@ -139,7 +158,7 @@ fn builds_add_repo_payload() {
 #[test]
 fn send_task_input_payload_passes_message_through_unchanged() {
     // The server owns submission; the CLI sends the message verbatim.
-    let request = build_send_task_input_request("continue\n".to_string());
+    let request = build_send_task_input_request("continue\n".to_string(), None);
 
     assert_eq!(
         serde_json::to_value(request).unwrap(),
@@ -169,7 +188,7 @@ async fn send_task_input_posts_input_to_task_endpoint() {
     let response = send_task_input_via_api(
         &format!("http://{address}"),
         "task-1",
-        &build_send_task_input_request("continue".to_string()),
+        &build_send_task_input_request("continue".to_string(), None),
     )
     .await;
 
@@ -196,7 +215,7 @@ async fn send_task_input_preserves_http_error_body() {
     let response = send_task_input_via_api(
         &format!("http://{address}"),
         "task-1",
-        &build_send_task_input_request("continue".to_string()),
+        &build_send_task_input_request("continue".to_string(), None),
     )
     .await;
 

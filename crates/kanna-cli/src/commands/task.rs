@@ -9,8 +9,8 @@ use crate::api::{
     rename_task_via_api, request_revision_via_api, rerun_stage_via_api, resume_task_via_api,
     search_tasks_via_api, send_task_input_via_api, set_task_notify_via_api,
     set_task_parent_via_api, set_task_workflow_via_api, signal_merge_handoff_via_api,
-    task_logs_via_api, unblock_task_via_api, wait_task_events_via_api, wait_task_via_api,
-    WaitTaskOutcome,
+    task_inputs_via_api, task_logs_via_api, unblock_task_via_api, wait_task_events_via_api,
+    wait_task_via_api, WaitTaskOutcome,
 };
 use crate::commands::{parse_metadata_json, print_json};
 use crate::config::resolve_server_base_url_from_env;
@@ -56,12 +56,18 @@ pub(crate) fn build_request_revision_request(
     }
 }
 
-pub(crate) fn build_send_task_input_request(message: String) -> TaskInputRequest {
+pub(crate) fn build_send_task_input_request(
+    message: String,
+    source: Option<String>,
+) -> TaskInputRequest {
     // Send the message text as-is. Submitting it to the agent terminal (typing
     // the text, then a discrete Enter keystroke) is the daemon's job at
     // /v1/tasks/{id}/input — keeping that policy server-side means kanna-cli,
     // kanna-mcp, and the mobile app all submit consistently.
-    TaskInputRequest { input: message }
+    TaskInputRequest {
+        input: message,
+        source,
+    }
 }
 
 pub(crate) fn build_block_task_request(blocker_task_ids: Vec<String>) -> BlockTaskRequest {
@@ -272,6 +278,23 @@ pub(crate) async fn run(command: TaskCommands) {
                 process::exit(1);
             }
         }
+        TaskCommands::Inputs {
+            task_id,
+            tail,
+            server_url,
+        } => {
+            let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+            let inputs = task_inputs_via_api(&base_url, &task_id, tail)
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                });
+            if let Err(e) = print_json(&inputs) {
+                eprintln!("Error: {e}");
+                process::exit(1);
+            }
+        }
         TaskCommands::Logs {
             task_id,
             tail,
@@ -362,10 +385,11 @@ pub(crate) async fn run(command: TaskCommands) {
         TaskCommands::SendInput {
             task_id,
             message,
+            source,
             server_url,
         } => {
             let base_url = resolve_server_base_url_from_env(server_url.as_deref());
-            let request = build_send_task_input_request(message);
+            let request = build_send_task_input_request(message, source);
             let response = send_task_input_via_api(&base_url, &task_id, &request)
                 .await
                 .unwrap_or_else(|e| {

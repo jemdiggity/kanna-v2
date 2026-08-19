@@ -163,6 +163,13 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
             },
         ),
         (
+            "kanna_task_inputs",
+            TypedToolSurface {
+                command_path: &["task", "inputs"],
+                param_args: &[("task_id", "task_id"), ("tail", "tail")],
+            },
+        ),
+        (
             "kanna_search_tasks",
             TypedToolSurface {
                 command_path: &["task", "search"],
@@ -230,7 +237,11 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
             "kanna_send_task_input",
             TypedToolSurface {
                 command_path: &["task", "send-input"],
-                param_args: &[("task_id", "task_id"), ("input", "message")],
+                param_args: &[
+                    ("task_id", "task_id"),
+                    ("input", "message"),
+                    ("source", "source"),
+                ],
             },
         ),
         (

@@ -94,6 +94,27 @@ Keep this child-verdict ledger separate from `$PREV_MAIN_RESULT`: the ledger is
 the recorded specialty history, while `$PREV_MAIN_RESULT` is the implementing
 agent's separate declined-finding signal.
 
+Then read what the task was actually told. Stage prompts and revision feedback
+are not the whole record: messages delivered into the implementer's live
+session — an owner changing their mind mid-task, a manager relaying a directive
+— are written to a PTY your fresh session never had.
+
+```
+kanna_task_inputs {"task_id": "$KANNA_TASK_ID"}
+```
+
+`kanna_get_task` reports `deliveredInputCount` for the same reason: a non-zero
+count means an instruction history exists. Each record carries the message, the
+time, the stage it landed on, and a caller-declared `source` (`operator`,
+`manager`, `notify`, `unspecified`). Never assert that something was not
+instructed, or that a claim in the implementer's summary is unsupported,
+without having read this record — and never brief a specialty reviewer on the
+task's terms without it either, because they inherit your reading. A directive
+in the record outranks your own reading of the original prompt. If the surface
+is unavailable on the connected server, say you could not read the instruction
+history and make no claim about it; that is not the same answer as "there was
+none". CLI fallback: `kanna-cli task inputs --task-id "$KANNA_TASK_ID"`.
+
 - **Full branch** — `$BASE_REF..HEAD`, everything this task has changed. Always read it: it is the context every finding is judged in.
 - **This round** — the commits added since the previous review round. On the first round the two ranges are the same.
 

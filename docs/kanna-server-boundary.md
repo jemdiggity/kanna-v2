@@ -27,6 +27,10 @@ that neither create nor clear draft state. KSP peers must mutually advertise
 `term_input_boundary`; a mixed-version connection rejects all terminal input
 rather than accept bytes whose boundary meaning may be lost. CR/LF content is
 opaque and never used to infer submission, including inside multiline paste.
+Every accepted delivery is also recorded durably against the task — see
+[Delivered Task Inputs](#delivered-task-inputs) — because terminal bytes are
+not a record any later stage can read.
+
 Desktop-to-desktop LAN input has the same fail-closed rule at task-transfer
 protocol v5. A v4 peer may still be discovered and use unrelated compatible
 features, but a current sender refuses all terminal input to it and a current
@@ -45,6 +49,7 @@ owner refuses its duplex observation/input before contacting the daemon.
 - `GET /v1/tasks/recent`
 - `GET /v1/tasks/search?query=...`
 - `GET /v1/tasks/{task_id}/children` (durable direct-child fan-out history; includes closed children)
+- `GET /v1/tasks/{task_id}/inputs?tail=...` (durable instruction history: every message delivered into the task's agent session from outside it)
 - `GET /v1/task-events?taskIds=...|parentTaskId=...|repoId=...|repoRemoteUrlHash=...&cursor=...&timeoutSecs=...&limit=...` (multi-task, multi-machine event feed; blocks server-side until an event arrives or the window elapses)
 - `POST /v1/tasks`
 - `POST /v1/tasks/{task_id}/input`
@@ -496,6 +501,14 @@ cursor-based, not snapshot-diffed:
   classification. Before acting on this weaker event, an MCP orchestrator
   reconciles with `kanna_get_task`, whose existing confirmation read is the
   single debounce boundary.
+- `task.input_delivered` announces a message delivered into a task's agent
+  session from outside it. `payload.source` is the caller-declared author
+  (`operator`, `manager`, `unspecified`) or `notify` for the server's own
+  completion notification; `payload.runId` and `payload.stage` are what was live
+  at delivery; `payload.preview` is a bounded prefix with `payload.truncated`
+  saying whether it was cut. The event is only the announcement — the record is
+  the `task_input` row, read through `GET /v1/tasks/{task_id}/inputs`. See
+  [Delivered Task Inputs](#delivered-task-inputs).
 - `task.transfer_finalizing` reports each step of a cross-machine transfer
   shutting the task's agent down (`payload.phase`: `wrap-up-sent`, `idle`,
   `quit-sent`, `exited`, `already-exited`, `degraded`). See
@@ -532,6 +545,63 @@ The hot query always starts with the indexable `task_event.seq > ?` range and
 uses `idx_pipeline_item_parent_created_id` for membership, so an empty long poll
 advances past unrelated rows instead of rescanning retained history on every
 recheck.
+
+## Delivered Task Inputs
+
+`POST /v1/tasks/{task_id}/input` writes to a PTY. Terminal bytes are not a
+record: the message is visible in that live terminal and nowhere else, so every
+consumer that reasons from durable state — a review stage running in a forked
+worktree with a fresh session, a dispatcher, a post-hoc audit — was structurally
+blind to it, and could "prove" from the record that an owner directive it was
+told about had never been issued. That happened on 2026-08-19: a round-2 review
+agent read the stage prompts, post prompts, and revision feedback, concluded
+there had been "no owner send-input at any point", and instructed the
+implementer to revert an owner's mid-task design directive.
+
+Every delivery the daemon **accepts** is therefore appended to `task_input`:
+the full message text, `delivered_at`, the `stage` the task was on, the
+`stage_run` that was running at the time (null when none was), and a `source`.
+The row is the record; `task.input_delivered` is only its announcement.
+
+- **Sources.** `notify` is the only label the server assigns from its own
+  knowledge — it generated that message. `operator` and `manager` are
+  **declared by the caller and not verified**: the endpoint cannot tell a human
+  typing on mobile from an orchestrating agent's MCP call, and a distinction it
+  cannot observe is better admitted than invented. A caller may declare
+  `operator` or `manager`; declaring `notify` is a 400. Omitting the field
+  records `unspecified`, which is what desktop, mobile, and CLI deliveries do.
+  What every record proves regardless of label is that text entered the session
+  from outside it, at a recorded time, with the recorded content.
+- **Completion notifications are recorded**, labelled `notify`, against the task
+  that received them. Their delivery semantics are unchanged: the record is
+  written after the daemon accepted the message and cannot fail the
+  notification.
+- **Uncertain deliveries are not recorded.** A `delivery_uncertain` response
+  means the bytes may or may not have reached the PTY; a row asserting the agent
+  was told something it may never have heard is a worse record than a missing
+  one, and that path already tells its caller not to retry blindly.
+- **Recording never fails a delivery.** By the time the row is written the bytes
+  are queued in the PTY, so a DB failure is logged and the request still
+  succeeds — answering with an error would invite a retry that duplicates
+  terminal input.
+- **Full text, no truncation.** Rows cascade with the task and are as short-lived
+  as it is. Only the event payload's `preview` is bounded (200 characters, with
+  `truncated`), because the event feed is a 14-day wake-up channel.
+- **Scope.** This covers `POST /v1/tasks/{task_id}/input` and the server's
+  completion notifications. Stage prompts, post prompts, and revision feedback
+  are already durable on `stage_run` and are not duplicated here; blocker
+  resolution instructions and transfer wrap-up messages are server-generated
+  session control and are likewise not recorded. An empty list therefore means
+  "nothing was sent through the input surface", not "nothing was ever said to
+  this task".
+
+`GET /v1/tasks/{task_id}/inputs?tail=N` returns the most recent `N` records
+(default 100, clamped to 500) oldest first, plus `total` — so a tailed window is
+visible rather than silent. `GET /v1/tasks/{task_id}` reports
+`deliveredInputCount` so a consumer reading only task detail cannot conclude
+from it that nothing was ever sent. The review and qa-dispatcher agent
+definitions require reading this surface before making any claim about what was
+or was not instructed.
 
 ## Task Parentage
 

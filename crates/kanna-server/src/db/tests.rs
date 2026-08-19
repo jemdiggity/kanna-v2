@@ -237,7 +237,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "051_repo_remote_hash_task_event_indexes");
+    assert_eq!(latest_migration, "052_task_input_log");
     assert_eq!(
         index_columns(&db.conn, "idx_pipeline_item_parent_created_id"),
         vec!["parent_task_id", "created_at", "id"],
@@ -2906,6 +2906,7 @@ fn task_event_type_names_are_stable() {
             "task.activity_changed",
             "task.merge_signaled",
             "task.merge_handoff_missing",
+            "task.input_delivered",
             "task.transfer_finalizing",
         ]
     );
@@ -3241,4 +3242,224 @@ fn recent_repo_pipelines_reads_durable_rows_after_reopening_the_database() {
 
     drop(reopened);
     let _ = std::fs::remove_file(path);
+}
+
+/// The record that makes the incident impossible to repeat: an owner directive
+/// relayed into a live PTY leaves a row a later stage can read, with the text,
+/// the time, the stage and run it landed on, and who claimed to be speaking.
+#[test]
+fn recorded_task_inputs_carry_their_text_source_and_live_run() {
+    let path = temp_db_path();
+    let db = Db::open_migrated(path.to_str().expect("utf8 path")).expect("open migrated db");
+    db.insert_test_repo("repo-1", "Repo One").expect("repo");
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Fix mobile pinning",
+        Some("Fix mobile pinning"),
+        "in progress",
+        "2026-08-19 04:00:00",
+    )
+    .expect("task");
+    db.insert_stage_run(super::NewStageRun {
+        id: "run-implement",
+        task_id: "task-1",
+        stage: "in progress",
+        kind: "main",
+        agent: Some("implement"),
+        agent_provider: Some("claude"),
+        model: None,
+        effort: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
+    })
+    .expect("run");
+
+    let recorded = db
+        .record_task_input(
+            "task-1",
+            super::TaskInputSource::Operator,
+            "there shouldn't be a pin/unpin button, just swiping",
+        )
+        .expect("record")
+        .expect("task exists");
+
+    assert_eq!(recorded.task_id, "task-1");
+    assert_eq!(recorded.run_id.as_deref(), Some("run-implement"));
+    assert_eq!(recorded.stage.as_deref(), Some("in progress"));
+    assert_eq!(recorded.source, "operator");
+    assert_eq!(
+        recorded.message,
+        "there shouldn't be a pin/unpin button, just swiping"
+    );
+    assert!(!recorded.delivered_at.is_empty());
+
+    assert_eq!(db.count_task_inputs("task-1").expect("count"), 1);
+    assert_eq!(
+        db.list_task_inputs("task-1", 50).expect("list"),
+        vec![recorded]
+    );
+
+    drop(db);
+    let _ = std::fs::remove_file(path);
+}
+
+/// Deliveries read back oldest first, so the list reads as the instruction
+/// history it is, and every source label round-trips — including `notify`,
+/// which the server assigns to its own completion notifications.
+#[test]
+fn task_inputs_read_back_in_delivery_order_with_every_source() {
+    let path = temp_db_path();
+    let db = Db::open_migrated(path.to_str().expect("utf8 path")).expect("open migrated db");
+    db.insert_test_repo("repo-1", "Repo One").expect("repo");
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Parent task",
+        Some("Parent task"),
+        "in progress",
+        "2026-08-19 04:00:00",
+    )
+    .expect("task");
+
+    for (source, message) in [
+        (super::TaskInputSource::Operator, "first"),
+        (super::TaskInputSource::Manager, "second"),
+        (super::TaskInputSource::Unspecified, "third"),
+        (
+            super::TaskInputSource::Notify,
+            "TASK child-1 DONE [success]: Child",
+        ),
+    ] {
+        db.record_task_input("task-1", source, message)
+            .expect("record")
+            .expect("task exists");
+    }
+
+    let inputs = db.list_task_inputs("task-1", 50).expect("list");
+    assert_eq!(
+        inputs
+            .iter()
+            .map(|input| (input.source.as_str(), input.message.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("operator", "first"),
+            ("manager", "second"),
+            ("unspecified", "third"),
+            ("notify", "TASK child-1 DONE [success]: Child"),
+        ]
+    );
+    // No running run: the input is still recorded, attributed to the stage
+    // rather than invented onto a run that was not executing.
+    assert!(inputs.iter().all(|input| input.run_id.is_none()));
+    assert_eq!(db.count_task_inputs("task-1").expect("count"), 4);
+
+    // A tail is a window on the end of the history, not a reordering of it,
+    // and `total` is what tells a reader the window was one.
+    let tailed = db.list_task_inputs("task-1", 2).expect("tail");
+    assert_eq!(
+        tailed
+            .iter()
+            .map(|input| input.message.as_str())
+            .collect::<Vec<_>>(),
+        vec!["third", "TASK child-1 DONE [success]: Child"]
+    );
+
+    drop(db);
+    let _ = std::fs::remove_file(path);
+}
+
+/// The row is the record; the event only announces it. A watcher gets the
+/// source and a bounded preview, and is told when the preview was cut so it
+/// never mistakes a prefix for the whole directive.
+#[test]
+fn recording_a_task_input_appends_a_previewed_event() {
+    let path = temp_db_path();
+    let db = Db::open_migrated(path.to_str().expect("utf8 path")).expect("open migrated db");
+    db.insert_test_repo("repo-1", "Repo One").expect("repo");
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Long directive task",
+        Some("Long directive task"),
+        "review",
+        "2026-08-19 04:00:00",
+    )
+    .expect("task");
+
+    let long_message = "x".repeat(500);
+    db.record_task_input("task-1", super::TaskInputSource::Manager, &long_message)
+        .expect("record")
+        .expect("task exists");
+    db.record_task_input("task-1", super::TaskInputSource::Operator, "short")
+        .expect("record")
+        .expect("task exists");
+
+    let head = db.latest_task_event_seq().expect("head");
+    let events = db
+        .list_task_events(
+            &super::TaskEventScope::Tasks(vec!["task-1".to_string()]),
+            0,
+            head,
+            10,
+        )
+        .expect("events");
+    let delivered = events
+        .iter()
+        .filter(|event| event.event_type == "task.input_delivered")
+        .collect::<Vec<_>>();
+    assert_eq!(delivered.len(), 2);
+    assert_eq!(delivered[0].payload["source"], "manager");
+    assert_eq!(delivered[0].payload["stage"], "review");
+    assert_eq!(delivered[0].payload["truncated"], true);
+    assert_eq!(
+        delivered[0].payload["preview"].as_str().expect("preview"),
+        "x".repeat(200)
+    );
+    assert_eq!(delivered[1].payload["source"], "operator");
+    assert_eq!(delivered[1].payload["truncated"], false);
+    assert_eq!(delivered[1].payload["preview"], "short");
+
+    drop(db);
+    let _ = std::fs::remove_file(path);
+}
+
+/// A notification aimed at a task that no longer exists is a log line, not an
+/// error: nothing to record, and nothing broken by there being nothing.
+#[test]
+fn recording_an_input_for_an_unknown_task_reports_no_record() {
+    let path = temp_db_path();
+    let db = Db::open_migrated(path.to_str().expect("utf8 path")).expect("open migrated db");
+
+    assert_eq!(
+        db.record_task_input("missing-task", super::TaskInputSource::Notify, "hello")
+            .expect("record"),
+        None
+    );
+    assert_eq!(db.count_task_inputs("missing-task").expect("count"), 0);
+
+    drop(db);
+    let _ = std::fs::remove_file(path);
+}
+
+/// `notify` names a message the server generated itself, so a caller cannot
+/// claim it; `unspecified` is already what saying nothing means.
+#[test]
+fn caller_declared_input_sources_are_a_closed_set() {
+    assert_eq!(
+        super::TaskInputSource::from_caller_declared("operator"),
+        Ok(super::TaskInputSource::Operator)
+    );
+    assert_eq!(
+        super::TaskInputSource::from_caller_declared("manager"),
+        Ok(super::TaskInputSource::Manager)
+    );
+    assert!(super::TaskInputSource::from_caller_declared("notify").is_err());
+    assert!(super::TaskInputSource::from_caller_declared("unspecified").is_err());
+    assert!(super::TaskInputSource::from_caller_declared("owner").is_err());
 }

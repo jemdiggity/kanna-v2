@@ -1625,6 +1625,7 @@ mod tests {
                 "kanna_set_task_notify",
                 "kanna_set_task_workflow",
                 "kanna_task_logs",
+                "kanna_task_inputs",
                 "kanna_search_tasks",
                 "kanna_list_repo_tasks",
                 "kanna_list_agents",

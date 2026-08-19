@@ -1,6 +1,6 @@
 use super::lan_trust::PrivilegedTaskAccess;
 use super::state::AppState;
-use crate::db::Db;
+use crate::db::{Db, TaskInputSource};
 use axum::extract::State;
 use axum::Json;
 use kanna_agent_protocol::StateChangeScope;
@@ -16,6 +16,12 @@ pub(crate) const SESSION_INTERRUPTION_FEEDBACK: &str =
 #[serde(rename_all = "camelCase")]
 pub(super) struct TaskInputRequest {
     input: String,
+    /// Who is speaking, declared by the caller: `operator` or `manager`.
+    /// Omitted means `unspecified`, which is what desktop, mobile, and CLI
+    /// deliveries record. The server cannot verify the claim — it only records
+    /// it beside the message it can verify was delivered.
+    #[serde(default)]
+    source: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -196,6 +202,44 @@ pub(crate) async fn submit_task_input(
         })
 }
 
+/// Append the durable record of an input the daemon accepted.
+///
+/// This never fails the delivery it describes. By the time it runs the bytes
+/// are already queued in the PTY, so answering the caller with an error would
+/// invite a retry that duplicates terminal input — the one outcome the input
+/// path is built to avoid. A record that cannot be written is therefore loud
+/// in the log and nowhere else.
+pub(crate) async fn record_delivered_task_input(
+    db_path: &str,
+    task_id: &str,
+    source: TaskInputSource,
+    input: &str,
+) {
+    let db_path = db_path.to_string();
+    let task_id = task_id.to_string();
+    let logged_task_id = task_id.clone();
+    let message = task_input_message(input).to_string();
+    let recorded = tokio::task::spawn_blocking(move || {
+        let db = Db::open(&db_path)?;
+        db.record_task_input(&task_id, source, &message)
+    })
+    .await;
+    match recorded {
+        Ok(Ok(Some(_))) => {}
+        Ok(Ok(None)) => log::warn!(
+            "delivered {} input to {logged_task_id}, which has no task row to record it on",
+            source.as_str()
+        ),
+        Ok(Err(error)) => log::error!(
+            "failed to record a delivered {} input for task {logged_task_id}: {error}",
+            source.as_str()
+        ),
+        Err(error) => {
+            log::error!("task input record worker failed for task {logged_task_id}: {error}")
+        }
+    }
+}
+
 pub(super) async fn send_task_input(
     _access: PrivilegedTaskAccess,
     State(state): State<Arc<AppState>>,
@@ -216,6 +260,17 @@ pub(super) async fn send_task_input(
             });
     }
 
+    let source = match payload.source.as_deref() {
+        Some(declared) => TaskInputSource::from_caller_declared(declared).map_err(|message| {
+            task_input_http_error(
+                axum::http::StatusCode::BAD_REQUEST,
+                "invalid_input_source",
+                message,
+                None,
+            )
+        })?,
+        None => TaskInputSource::Unspecified,
+    };
     let task_id = super::task_actions::resolve_task_id_for_mutation(&state, &task_id)
         .await
         .map_err(map_task_input_error)?;
@@ -342,6 +397,11 @@ pub(super) async fn send_task_input(
             };
             task_input_http_error(status, reason, message, None)
         })?;
+
+    // Only a delivery the daemon accepted is recorded. An uncertain one may or
+    // may not have reached the agent, and a row asserting it did would be a
+    // worse record than none at all.
+    record_delivered_task_input(&state.config.db_path, &task_id, source, &payload.input).await;
 
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
@@ -579,5 +639,16 @@ pub(super) async fn notify_task_completion(
         .map_err(|e| format!("daemon error: {}", e))?;
     submit_task_input(&mut daemon, &notification.notify_task_id, &message)
         .await
-        .map_err(|(_, message)| message)
+        .map_err(|(_, message)| message)?;
+    // Completion notifications are recorded like any other delivery, labelled
+    // `notify`. Their delivery semantics are untouched: this runs after the
+    // daemon accepted the message and cannot fail the notification.
+    record_delivered_task_input(
+        &config.db_path,
+        &notification.notify_task_id,
+        crate::db::TaskInputSource::Notify,
+        &message,
+    )
+    .await;
+    Ok(())
 }

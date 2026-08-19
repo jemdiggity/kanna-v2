@@ -233,6 +233,21 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         server_url: Option<String>,
     },
+    /// Print a task's delivered-input history: what was said to its agent
+    /// session from outside that session, oldest first
+    Inputs {
+        /// The task ID
+        #[arg(long)]
+        task_id: String,
+
+        /// Number of most-recent records to print
+        #[arg(long)]
+        tail: Option<usize>,
+
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
     /// Print recent task logs
     Logs {
         /// The task ID
@@ -353,6 +368,12 @@ pub(crate) enum TaskCommands {
         /// Message to send to the running agent session
         #[arg(long)]
         message: String,
+
+        /// Who is speaking: "operator" for a human or a human's relayed words,
+        /// "manager" for an orchestrating agent's own instruction. Recorded
+        /// with the message as declared; omit it to claim nothing
+        #[arg(long)]
+        source: Option<String>,
 
         /// Override the local Kanna server base URL
         #[arg(long)]
