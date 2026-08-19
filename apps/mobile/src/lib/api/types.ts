@@ -18,6 +18,12 @@ export interface MobileServerStatus {
   /** Absent from desktops that predate write-path health reporting; absence
    * means the health is unknown, not unhealthy. */
   writePathHealth?: WritePathHealth;
+  /** Version of the task-input image-attachment contract the desktop serves.
+   * Absent means an older desktop that would deserialize an `attachment`
+   * field, ignore it, deliver the text alone and still answer 204 — so the
+   * composer treats absence as "cannot attach" rather than sending a photo
+   * into silence. */
+  taskInputAttachmentVersion?: number;
   /** Agent provider CLIs installed on the desktop. See
    * {@link DesktopSummary.agentProviders}. */
   agentProviders?: AgentProvider[];

@@ -2114,6 +2114,58 @@ describe("remote transport", () => {
     });
   });
 
+  it("carries the attachment capability marker through the relayed status", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue({
+      state: "running",
+      desktopId: "desktop-1",
+      desktopName: "Studio Mac",
+      version: "0.0.69",
+      environment: "production",
+      serverVersion: "0.0.69",
+      lanHost: "0.0.0.0",
+      lanPort: 48120,
+      pairingCode: null,
+      taskInputAttachmentVersion: 1
+    });
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => "desktop-1",
+      invokeDesktop
+    });
+
+    // The relayed status is rebuilt field by field, so a capability dropped
+    // here would make every relay-connected desktop read as too old.
+    await expect(transport.getStatus()).resolves.toMatchObject({
+      taskInputAttachmentVersion: 1
+    });
+  });
+
+  it("reports no attachment capability for a desktop that predates it", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue({
+      state: "running",
+      desktopId: "desktop-1",
+      desktopName: "Studio Mac",
+      version: "0.0.60",
+      environment: "production",
+      serverVersion: "0.0.60",
+      lanHost: "0.0.0.0",
+      lanPort: 48120,
+      pairingCode: null
+    });
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => "desktop-1",
+      invokeDesktop
+    });
+
+    const status = await transport.getStatus();
+
+    // Absent, not false: that older desktop would accept the attachment field,
+    // ignore it, and still answer 204.
+    expect(status.taskInputAttachmentVersion).toBeUndefined();
+    expect("taskInputAttachmentVersion" in status).toBe(false);
+  });
+
   it("carries a photo attachment to the owner desktop in the same relayed body", async () => {
     const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue(null);
     const transport = createRemoteTransport({

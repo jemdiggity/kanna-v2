@@ -1049,6 +1049,52 @@ describe("createLanTransport", () => {
       expect.objectContaining({ type: "error" })
     );
   });
+  it("passes the attachment capability marker through, and its absence", async () => {
+    const advertised = vi.fn<FetchLike>().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        state: "running",
+        desktopId: "desktop-1",
+        desktopName: "Studio Mac",
+        version: "0.0.69",
+        environment: "production",
+        serverVersion: "0.0.69",
+        lanHost: "0.0.0.0",
+        lanPort: 48120,
+        pairingCode: null,
+        taskInputAttachmentVersion: 1
+      })
+    });
+    await expect(
+      createLanTransport("http://127.0.0.1:48120", advertised).getStatus()
+    ).resolves.toMatchObject({ taskInputAttachmentVersion: 1 });
+
+    // A desktop built before attachments omits the field entirely. That
+    // absence is the whole signal — it would otherwise accept the attachment,
+    // ignore it, and answer 204 as if the photo had arrived.
+    const older = vi.fn<FetchLike>().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        state: "running",
+        desktopId: "desktop-1",
+        desktopName: "Studio Mac",
+        version: "0.0.60",
+        environment: "production",
+        serverVersion: "0.0.60",
+        lanHost: "0.0.0.0",
+        lanPort: 48120,
+        pairingCode: null
+      })
+    });
+    const status = await createLanTransport(
+      "http://127.0.0.1:48120",
+      older
+    ).getStatus();
+    expect(status.taskInputAttachmentVersion).toBeUndefined();
+  });
+
   it("posts a photo attachment in the task-input body and omits the field without one", async () => {
     const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
       ok: true,

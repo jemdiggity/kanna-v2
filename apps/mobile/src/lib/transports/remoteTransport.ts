@@ -1234,6 +1234,12 @@ function mapMobileServerStatus(response: unknown): MobileServerStatus {
   const lanPort = getNumberField(response, "lanPort");
   const pairingCode = getNullableStringField(response, "pairingCode");
   const writePathHealth = mapWritePathHealth(response.writePathHealth);
+  // Rebuilt field by field, so a capability the desktop advertises has to be
+  // copied here or the relay path reads as an older desktop forever.
+  const taskInputAttachmentVersion = getNumberField(
+    response,
+    "taskInputAttachmentVersion"
+  );
 
   if (
     state === null ||
@@ -1260,7 +1266,10 @@ function mapMobileServerStatus(response: unknown): MobileServerStatus {
     lanHost,
     lanPort,
     pairingCode,
-    ...(writePathHealth ? { writePathHealth } : {})
+    ...(writePathHealth ? { writePathHealth } : {}),
+    ...(taskInputAttachmentVersion === null
+      ? {}
+      : { taskInputAttachmentVersion })
   };
 }
 

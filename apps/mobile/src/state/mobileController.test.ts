@@ -301,6 +301,34 @@ describe("createMobileController", () => {
     };
   }
 
+  it("records the desktop's attachment capability, and its absence", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    await createMobileController(client, store).bootstrap();
+
+    // The stub status omits the marker, which is exactly what a desktop built
+    // before attachments sends. It would accept the field, ignore it, and
+    // still answer 204 — so absence has to read as "cannot attach".
+    expect(store.getState().desktopSupportsTaskInputAttachments).toBe(false);
+
+    const advertisedStore = createSessionStore();
+    const advertisedClient = createClientMock();
+    advertisedClient.getStatus.mockResolvedValue({
+      state: "running",
+      desktopId: "desktop-1",
+      desktopName: "Studio Mac",
+      lanHost: "0.0.0.0",
+      lanPort: 48120,
+      pairingCode: null,
+      taskInputAttachmentVersion: 1
+    });
+    await createMobileController(advertisedClient, advertisedStore).bootstrap();
+
+    expect(
+      advertisedStore.getState().desktopSupportsTaskInputAttachments
+    ).toBe(true);
+  });
+
   it("pins locally, with no server write, and lifts the row into its own order", async () => {
     const store = createSessionStore();
     const client = createClientMock();

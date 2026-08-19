@@ -86,6 +86,16 @@ before the picture.
 - **PTY sessions only.** A live daemon PTY session is required as it is for any
   other input; SDK-mode tasks answer over the agent stream, which carries text
   alone, and the mobile composer hides the attach control for them.
+- **Clients must check `/v1/status` first.** `taskInputAttachmentVersion`
+  (currently `1`) advertises this contract, and its **absence is the signal
+  that the desktop predates it** — the same convention as `kspStreamVersion`.
+  A desktop without the marker deserializes an `attachment` field, ignores it,
+  delivers the text alone and still answers `204`, which is indistinguishable
+  from success, so a phone that skipped the check would clear its composer
+  while the agent answered about a picture it never received. That mismatch is
+  the ordinary state on release day: phone and desktop are separate binaries
+  on separate cadences. Mobile hides the attach control when the marker is
+  absent.
 
 Desktop-to-desktop LAN input has the same fail-closed rule at task-transfer
 protocol v5. A v4 peer may still be discovered and use unrelated compatible

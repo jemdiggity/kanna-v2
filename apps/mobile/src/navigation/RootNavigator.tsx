@@ -612,6 +612,7 @@ function TaskDetailRoute({
       companionEventStatus={state.taskCompanionEventStatus}
       quickReplies={quickReplies}
       quickRepliesHydrated={quickRepliesHydrated}
+      desktopSupportsAttachments={state.desktopSupportsTaskInputAttachments}
       pendingTaskAction={pendingTaskAction}
       taskCreationPhase={resolveTaskCreationPhase(state, routeTaskId)}
       taskCreationErrorMessage={creationAttempt?.errorMessage ?? null}

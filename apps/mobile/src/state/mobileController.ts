@@ -1821,6 +1821,11 @@ export function createMobileController(
           status.pairingCode,
           status.desktopId
         );
+        // Absence is the answer for every desktop built before attachments
+        // existed, which is the normal state of a paired Mac on release day.
+        store.setDesktopSupportsTaskInputAttachments(
+          typeof status.taskInputAttachmentVersion === "number"
+        );
 
         if (status.state !== "running") {
           stopCloudTaskSubscription();
