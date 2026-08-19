@@ -11,9 +11,14 @@ import type { TaskSummary } from "../lib/api/types";
 import { isTaskBlocked } from "../lib/api/taskIdentity";
 import { buildTaskListItemModel } from "../screens/taskPresentation";
 
+/**
+ * Pin state has no button of its own: swiping the row is the only pin
+ * affordance. The card keeps this action so VoiceOver users still reach
+ * pin/unpin through the row's accessibility actions, and so an in-flight
+ * failure can be reported inline on the row that failed.
+ */
 export interface TaskCardPinAction {
   error: string | null;
-  pendingPinned: boolean | null;
   onToggle(): void;
 }
 
@@ -46,13 +51,6 @@ export function TaskCard({
   const blocked = isTaskBlocked(task);
   const pinned = task.pinned ?? false;
   const pinLabel = pinned ? "Unpin" : "Pin";
-  const pendingPinLabel =
-    pinAction?.pendingPinned === true
-      ? "Pinning…"
-      : pinAction?.pendingPinned === false
-        ? "Unpinning…"
-        : null;
-  const pinAccessibilityLabel = `${pendingPinLabel ?? pinLabel} ${model.title}`;
   const accessibilityLabel = [
     isSubtask ? "Subtask" : null,
     blocked ? "Blocked" : null,
@@ -121,34 +119,6 @@ export function TaskCard({
                 blocked
               </Text>
             </View>
-          ) : null}
-          {pinAction ? (
-            <Pressable
-              accessibilityLabel={pinAccessibilityLabel}
-              accessibilityRole="button"
-              accessibilityState={{
-                busy: pinAction.pendingPinned !== null,
-                disabled: pinAction.pendingPinned !== null
-              }}
-              style={[
-                styles.pinButton,
-                pinned ? styles.pinButtonActive : null
-              ]}
-              testID={MOBILE_E2E_IDS.taskPinButton(uiId)}
-              onPress={(event) => {
-                event.stopPropagation();
-                pinAction.onToggle();
-              }}
-            >
-              <Text
-                style={[
-                  styles.pinButtonLabel,
-                  pinned ? styles.pinButtonLabelActive : null
-                ]}
-              >
-                {pendingPinLabel ?? pinLabel}
-              </Text>
-            </Pressable>
           ) : null}
           {dismissAction ? (
             <Pressable
@@ -271,27 +241,6 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: "700",
     textTransform: "uppercase"
-  },
-  pinButton: {
-    alignSelf: "flex-end",
-    backgroundColor: "#172843",
-    borderColor: "#36527E",
-    borderRadius: 999,
-    borderWidth: 1,
-    paddingHorizontal: 10,
-    paddingVertical: 6
-  },
-  pinButtonActive: {
-    backgroundColor: "#DDEAFF",
-    borderColor: "#A9C7F5"
-  },
-  pinButtonLabel: {
-    color: "#B8CAE7",
-    fontSize: 11,
-    fontWeight: "800"
-  },
-  pinButtonLabelActive: {
-    color: "#10213D"
   },
   dismissButton: {
     alignSelf: "flex-end",

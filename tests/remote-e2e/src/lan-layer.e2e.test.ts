@@ -9,6 +9,8 @@ import type {
 import type { TaskTerminalStreamEvent, TaskTerminalSubscription } from "../../../apps/mobile/src/lib/api/client";
 import { createLanTransport, type FetchLike, type WebSocketLike } from "../../../apps/mobile/src/lib/transports/lanTransport";
 import { createMobileController } from "../../../apps/mobile/src/state/mobileController";
+import { orderRepoTaskSlots } from "../../../apps/mobile/src/screens/repoTaskOrder";
+import { projectTaskUiSlots } from "../../../apps/mobile/src/state/taskUiSlots";
 import {
   createSessionStore,
   type SessionStore
@@ -95,6 +97,50 @@ describe("LAN task loop E2E", () => {
       title: "LAN client loop task"
     }));
   });
+
+  it("pins a task over LAN and lifts it to the top of the phone's repo list", async () => {
+    const older = await createScriptedTask(harness, {
+      displayName: "LAN pin older task",
+      repoName: "LAN pin repo"
+    });
+    const newer = await createSiblingTask(
+      harness,
+      older.repoId,
+      "LAN pin newer task"
+    );
+    const transport = createLanClient(harness);
+    const listOrder = async (): Promise<string[]> =>
+      orderRepoTaskSlots(
+        projectTaskUiSlots(await transport.listRepoTasks(older.repoId), [])
+      ).map((slot) => slot.taskId ?? slot.slotId);
+
+    // Whatever the unpinned order is, pinning has to move the task above it.
+    const unpinnedOrder = await listOrder();
+    expect(unpinnedOrder).toHaveLength(2);
+    expect(unpinnedOrder).toContain(newer);
+
+    await transport.pinTask(older.taskId);
+
+    // The LAN summaries the phone sorts have to carry the pin state itself.
+    const pinnedTasks = await transport.listRepoTasks(older.repoId);
+    expect(pinnedTasks).toContainEqual(
+      expect.objectContaining({
+        id: older.taskId,
+        pinned: true,
+        pinOrder: 0
+      })
+    );
+    expect(pinnedTasks).toContainEqual(
+      expect.objectContaining({ id: newer, pinned: false, pinOrder: null })
+    );
+    await expect(listOrder()).resolves.toEqual([
+      older.taskId,
+      ...unpinnedOrder.filter((taskId) => taskId !== older.taskId)
+    ]);
+
+    await transport.unpinTask(older.taskId);
+    await expect(listOrder()).resolves.toEqual(unpinnedOrder);
+  }, 120_000);
 
   it("creates a local pairing session with LAN endpoint and five-minute expiry", async () => {
     const transport = createLanClient(harness);
@@ -313,6 +359,30 @@ describe("LAN task loop E2E", () => {
 const nodeFetch: FetchLike = async (input, init) => fetch(input, init);
 
 type LanTransport = ReturnType<typeof createLanTransport>;
+
+async function createSiblingTask(
+  harness: RemoteHarness,
+  repoId: string,
+  displayName: string
+): Promise<string> {
+  const created = await harness.client.invokeDesktop({
+    desktopId: harness.desktopId,
+    method: "POST",
+    path: "/v1/tasks",
+    body: {
+      repoId,
+      prompt: `Run deterministic scripted task for ${displayName}`,
+      displayName,
+      agentProvider: "codex",
+      agentType: "pty"
+    }
+  });
+  const taskId = (created as { taskId?: unknown }).taskId;
+  if (typeof taskId !== "string") {
+    throw new Error(`Expected a created task id, received ${JSON.stringify(created)}`);
+  }
+  return taskId;
+}
 
 function createLanClient(harness: RemoteHarness): LanTransport {
   return createLanTransport(

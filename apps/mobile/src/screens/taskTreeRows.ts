@@ -1,5 +1,6 @@
 import type { TaskSummary } from "../lib/api/types";
 import { sameTaskDesktop, taskLocalId } from "../lib/api/taskIdentity";
+import { isPinnedTask } from "./taskPinOrder";
 import type { ReadyTaskUiSlot, TaskUiSlot } from "../state/taskUiSlots";
 
 /**
@@ -43,6 +44,11 @@ function compareCreatedAtAscending(left: TaskSummary, right: TaskSummary): numbe
  * Orders slots so each subtask renders directly under its parent,
  * depth-annotated for indented rendering. Top-level rows keep the input
  * order; children sort oldest-first under their parent (desktop parity).
+ *
+ * A pinned task is never nested: pinning is an explicit request to lift a row
+ * to the top of the list, which nesting under a parent would silently defeat.
+ * The desktop sidebar does the same — its pinned zone is a flat list above
+ * every stage group.
  */
 export function buildTaskTreeRows(
   slots: readonly TaskUiSlot[]
@@ -61,6 +67,7 @@ export function buildTaskTreeRows(
 
   const resolveParent = (slot: TaskUiSlot): TaskUiSlot | null => {
     if (slot.state !== "ready") return null;
+    if (isPinnedTask(slot.task)) return null;
     const parentTaskId = slot.task.parentTaskId;
     if (!parentTaskId || parentTaskId === slotLocalTaskId(slot)) return null;
     const candidates = (slotsByLocalTaskId.get(parentTaskId) ?? []).filter(

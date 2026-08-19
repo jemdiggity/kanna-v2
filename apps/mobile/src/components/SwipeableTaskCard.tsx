@@ -1,10 +1,11 @@
-import React, { useRef, useState } from "react";
+import React, { useMemo, useState } from "react";
 import {
+  PanResponder,
   Pressable,
   StyleSheet,
   Text,
   View,
-  type GestureResponderEvent
+  type PanResponderGestureState
 } from "react-native";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { TaskSummary } from "../lib/api/types";
@@ -16,6 +17,10 @@ import {
   shouldBeginTaskRowSwipe,
   shouldRevealTaskRowAction
 } from "./taskRowSwipe";
+
+function beginsSwipe(gestureState: PanResponderGestureState): boolean {
+  return shouldBeginTaskRowSwipe({ dx: gestureState.dx, dy: gestureState.dy });
+}
 
 interface SwipeableTaskCardProps {
   task: TaskSummary;
@@ -41,7 +46,38 @@ export function SwipeableTaskCard({
   const [pinError, setPinError] = useState<string | null>(null);
   const [dismissPending, setDismissPending] = useState(false);
   const [dismissError, setDismissError] = useState<string | null>(null);
-  const touchStart = useRef<{ x: number; y: number } | null>(null);
+  // The row lives inside the vertical task ScrollView and wraps a pressable
+  // card, so the gesture has to win a real responder negotiation against both.
+  // `PanResponder` is the API that does that: it derives the displacement from
+  // React Native's own touch history (rather than from an `onTouchStart` this
+  // view is not guaranteed to observe once the card's Pressable holds the
+  // responder), and refusing termination keeps the enclosing ScrollView from
+  // reclaiming the touch mid-swipe and snapping the row shut.
+  const panResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onMoveShouldSetPanResponder: (_event, gestureState) =>
+          beginsSwipe(gestureState),
+        onMoveShouldSetPanResponderCapture: (_event, gestureState) =>
+          beginsSwipe(gestureState),
+        onPanResponderMove: (_event, gestureState) => {
+          setSwipeOffset(clampTaskRowSwipe(gestureState.dx));
+        },
+        onPanResponderRelease: (_event, gestureState) => {
+          setSwipeOffset(
+            shouldRevealTaskRowAction(gestureState.dx)
+              ? -TASK_ROW_ACTION_WIDTH
+              : 0
+          );
+        },
+        onPanResponderTerminate: () => {
+          setSwipeOffset(0);
+        },
+        onPanResponderTerminationRequest: () => false
+      }),
+    []
+  );
+
   const pinned = task.pinned ?? false;
   const pinLabel = pinned ? "Unpin" : "Pin";
   const pendingPinLabel =
@@ -66,15 +102,6 @@ export function SwipeableTaskCard({
     );
   }
 
-  const displacement = (event: GestureResponderEvent) => {
-    const start = touchStart.current;
-    return start
-      ? {
-          dx: event.nativeEvent.pageX - start.x,
-          dy: event.nativeEvent.pageY - start.y
-        }
-      : { dx: 0, dy: 0 };
-  };
   const togglePin = async () => {
     if (!onTogglePin) return;
     if (pendingPinned !== null) return;
@@ -144,30 +171,7 @@ export function SwipeableTaskCard({
       </Pressable>
       <View
         style={{ transform: [{ translateX: swipeOffset }] }}
-        onMoveShouldSetResponderCapture={(event) =>
-          shouldBeginTaskRowSwipe(displacement(event))
-        }
-        onResponderMove={(event) => {
-          setSwipeOffset(clampTaskRowSwipe(displacement(event).dx));
-        }}
-        onResponderRelease={(event) => {
-          setSwipeOffset(
-            shouldRevealTaskRowAction(displacement(event).dx)
-              ? -TASK_ROW_ACTION_WIDTH
-              : 0
-          );
-          touchStart.current = null;
-        }}
-        onResponderTerminate={() => {
-          setSwipeOffset(0);
-          touchStart.current = null;
-        }}
-        onTouchStart={(event) => {
-          touchStart.current = {
-            x: event.nativeEvent.pageX,
-            y: event.nativeEvent.pageY
-          };
-        }}
+        {...panResponder.panHandlers}
       >
         <TaskCard
           dismissAction={
@@ -186,7 +190,6 @@ export function SwipeableTaskCard({
             onTogglePin
               ? {
                   error: pinError,
-                  pendingPinned,
                   onToggle: () => {
                     void togglePin();
                   }

@@ -219,7 +219,7 @@ describe("TaskCard", () => {
     );
   });
 
-  it("announces pinned state and exposes a labeled non-swipe action", () => {
+  it("announces pinned state and keeps pin reachable without a pin button", () => {
     if (!TaskCard) throw new Error("TaskCard was not loaded");
     const onToggle = vi.fn();
     const tree = TaskCard({
@@ -230,7 +230,7 @@ describe("TaskCard", () => {
         stage: "review",
         pinned: true
       },
-      pinAction: { error: null, pendingPinned: null, onToggle },
+      pinAction: { error: null, onToggle },
       onPress: vi.fn()
     }) as ElementNode;
 
@@ -240,8 +240,17 @@ describe("TaskCard", () => {
     expect(tree.props?.accessibilityActions).toEqual([
       { name: "unpin", label: "Unpin" }
     ]);
-    const button = findTextNodeByCompleteText(tree, "Unpin");
-    expect(button).not.toBeNull();
+    // Swiping is the only pin affordance, so the card renders no pin control.
+    expect(findTextNodeByCompleteText(tree, "Unpin")).toBeNull();
+    expect(
+      findNodeByProp(tree, "testID", "mobile.task-pin-button.task-1")
+    ).toBeNull();
+
+    const handleAccessibilityAction = tree.props?.onAccessibilityAction as (
+      event: { nativeEvent: { actionName: string } }
+    ) => void;
+    handleAccessibilityAction({ nativeEvent: { actionName: "unpin" } });
+    expect(onToggle).toHaveBeenCalledOnce();
   });
 
   it("exposes Activity dismissal as a visible button and accessibility action", () => {
@@ -271,50 +280,6 @@ describe("TaskCard", () => {
       )
     ).not.toBeNull();
   });
-
-  it.each([
-    {
-      optimisticPinned: true,
-      pendingPinned: true,
-      pendingLabel: "Pinning…"
-    },
-    {
-      optimisticPinned: false,
-      pendingPinned: false,
-      pendingLabel: "Unpinning…"
-    }
-  ])(
-    "renders and announces $pendingLabel after the optimistic task rerender",
-    ({ optimisticPinned, pendingPinned, pendingLabel }) => {
-      if (!TaskCard) throw new Error("TaskCard was not loaded");
-      const tree = TaskCard({
-        task: {
-          id: "task-1",
-          repoId: "repo-1",
-          title: "Pending task",
-          stage: "review",
-          pinned: optimisticPinned
-        },
-        pinAction: { error: null, pendingPinned, onToggle: vi.fn() },
-        onPress: vi.fn()
-      }) as ElementNode;
-      const button = findNodeByProp(
-        tree,
-        "testID",
-        MOBILE_E2E_IDS.taskPinButton("task-1")
-      );
-
-      expect(button).not.toBeNull();
-      expect(textContent(button ?? null)).toBe(pendingLabel);
-      expect(button?.props?.accessibilityLabel).toBe(
-        `${pendingLabel} Pending task`
-      );
-      expect(button?.props?.accessibilityState).toEqual({
-        busy: true,
-        disabled: true
-      });
-    }
-  );
 
   it("renders a normalized multiline prompt only once in text and accessibility", () => {
     if (!TaskCard) throw new Error("TaskCard was not loaded");

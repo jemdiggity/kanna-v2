@@ -63,6 +63,20 @@ describe("buildTaskTreeRows", () => {
     ]);
   });
 
+  it("keeps a pinned subtask top-level so pinning can lift it", () => {
+    const rows = buildTaskTreeRows(slots([
+      task({ id: "pinned-child", parentTaskId: "parent", pinned: true }),
+      task({ id: "parent" }),
+      task({ id: "child", parentTaskId: "parent" })
+    ]));
+
+    expect(rowIds(rows)).toEqual([
+      ["pinned-child", 0],
+      ["parent", 0],
+      ["child", 1]
+    ]);
+  });
+
   it("keeps a task top-level when its parent is absent from the list", () => {
     const rows = buildTaskTreeRows(slots([
       task({ id: "orphan", parentTaskId: "closed-parent" }),

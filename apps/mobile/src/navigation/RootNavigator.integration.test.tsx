@@ -73,6 +73,12 @@ vi.mock("react-native", () => ({
     ),
     dismiss: keyboardHarness.dismiss
   },
+  PanResponder: {
+    create: (config: Record<string, unknown>) => ({
+      panHandlers: {},
+      config
+    })
+  },
   Pressable: "Pressable",
   ScrollView: React.forwardRef(function ScrollView(
     props: { children?: React.ReactNode; testID?: string },

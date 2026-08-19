@@ -1,6 +1,7 @@
 import type { Browser } from "webdriverio";
 import {
   activityDismissActionSelector,
+  extractTaskRowId,
   selectors,
   taskPinActionSelector,
   tasksRepoSelector
@@ -879,6 +880,20 @@ export async function performTaskDetailEdgeSwipeBack(
   );
 }
 
+/** Rendered task rows, top to bottom, as the phone currently orders them. */
+async function readRenderedTaskRowIds(driver: Browser): Promise<string[]> {
+  const rows = Array.from(await driver.$$(selectors.taskRowsXPath));
+  const taskIds: string[] = [];
+  for (const row of rows) {
+    const name =
+      (await row.getAttribute("name").catch(() => null)) ??
+      (await row.getAttribute("label").catch(() => null));
+    const taskId = extractTaskRowId(name);
+    if (taskId) taskIds.push(taskId);
+  }
+  return taskIds;
+}
+
 export async function exerciseTaskPinSwipe(
   driver: Browser,
   desktopServerUrl: string,
@@ -944,6 +959,19 @@ export async function exerciseTaskPinSwipe(
         timeoutMsg: "Expected the swiped pin action to update canonical server state"
       }
     );
+    if (!initialPinState.pinned) {
+      // Pin state that does not lift the row is the bug this journey guards:
+      // the list has to re-render with the pinned task first.
+      await driver.waitUntil(
+        async () => (await readRenderedTaskRowIds(driver))[0] === taskId,
+        {
+          interval: POLL_INTERVAL_MS,
+          timeout: SCREEN_TIMEOUT_MS,
+          timeoutMsg:
+            "Expected the pinned task to render as the first row of its repo list"
+        }
+      );
+    }
   } finally {
     if ((await readPinState()).pinned !== initialPinState.pinned) {
       const response = await fetchImpl(
