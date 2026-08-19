@@ -253,6 +253,17 @@ with file and line, no "also consider", no open-ended "harden this area". The
 `implement` agent's half of the contract: on a revision run, fix exactly what
 the feedback names, and report anything out of scope instead of building it.
 
+What "the task" means for that bar is the branch's committed spec,
+`docs/task-specs/<task-id>.md` — not the stage prompt, and not a reviewer's
+reconstruction of intent from the prompt plus the delivered-input ledger. The
+dispatcher reads it before selecting specialties and names it in every child
+prompt, so the panel judges the change on one statement of the terms instead of
+inheriting a fresh reading each round. `kanna_task_inputs` remains the audit
+trail behind it: a spec that misstates a delivered directive is a finding
+against the spec, never grounds for a reviewer to substitute its own reading.
+A missing or stale spec is itself a blocking finding. See
+[task-spec-artifact](task-spec-artifact.md).
+
 ### Incremental rounds
 
 A later review round reviews **what changed since the previous round**, not the

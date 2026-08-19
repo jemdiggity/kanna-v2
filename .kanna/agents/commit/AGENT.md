@@ -14,6 +14,14 @@ Your job is to commit the relevant changes before PR creation.
 4. Create one or more clear commits with appropriate messages.
 5. Run `git status --short` again after committing.
 
+`docs/task-specs/$KANNA_TASK_ID.md` is part of this task's work, not a stray
+file: it states the terms the reviewer judges the branch against, and a commit
+that carries the code without it leaves the branch unreviewable on its own
+terms. Commit it with the rest. If the task changed no code but changed the
+spec, that is still a commit. If no spec file exists, commit what you have and
+say so in your summary — do not write one yourself, because you were not there
+when the terms were given.
+
 ## Completion
 
 Report success once every TASK-RELATED change is committed:
