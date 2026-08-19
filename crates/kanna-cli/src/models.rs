@@ -267,6 +267,33 @@ pub(crate) struct RequestRevisionRequest {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TaskInputRequest {
     pub(crate) input: String,
+    /// Declared author of the message: `operator` or `manager`. Omitted means
+    /// the caller made no claim, which is what an ordinary CLI delivery is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) source: Option<String>,
+}
+
+/// A task's durable instruction history: what was delivered into its agent
+/// session from outside that session, and when.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TaskInputs {
+    pub(crate) task_id: String,
+    /// Every input the task ever received, not just the returned window.
+    pub(crate) total: i64,
+    pub(crate) inputs: Vec<TaskInputRecord>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TaskInputRecord {
+    pub(crate) id: i64,
+    pub(crate) task_id: String,
+    pub(crate) run_id: Option<String>,
+    pub(crate) stage: Option<String>,
+    pub(crate) source: String,
+    pub(crate) message: String,
+    pub(crate) delivered_at: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]

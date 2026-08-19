@@ -32,6 +32,7 @@ fn bundled_catalog_parses_and_declares_all_tools() {
             "kanna_set_task_notify",
             "kanna_set_task_workflow",
             "kanna_task_logs",
+            "kanna_task_inputs",
             "kanna_search_tasks",
             "kanna_list_repo_tasks",
             "kanna_list_agents",
@@ -411,6 +412,14 @@ fn resolves_expected_requests_for_every_bundled_tool() {
             Method::Get,
             ResponseKind::Text,
             "/v1/tasks/task%201/logs?tail=25",
+            json!({}),
+        ),
+        (
+            "kanna_task_inputs",
+            json!({ "task_id": "task 1", "tail": 25 }),
+            Method::Get,
+            ResponseKind::Json,
+            "/v1/tasks/task%201/inputs?tail=25",
             json!({}),
         ),
         (
@@ -917,6 +926,7 @@ fn wait_events_documents_every_event_type_the_server_emits() {
         "task.activity_changed",
         "task.merge_signaled",
         "task.merge_handoff_missing",
+        "task.input_delivered",
         "task.transfer_finalizing",
     ] {
         assert!(

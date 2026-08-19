@@ -21,6 +21,34 @@ Carry at most five blocking findings into a revision request, most important fir
 
 Revisions are budgeted. Read `revisionRounds` and `revisionLimit` from `kanna_get_task` on your own task (`$KANNA_TASK_ID`): rounds already spent mean earlier reviews had their say, so do not reopen ground a previous round settled. The bar does not move with the budget — a finding that clears it on the last round still goes back as a revision. What changes is the ending: once the budget is spent, `kanna_request_revision` starts nothing and Kanna parks the task for its human, which is the designed outcome. Do not approve a branch to avoid parking it, do not retry the request, do not fix the code yourself, and do not create a new task to continue the work — record what you found and stop.
 
+## What The Task Was Actually Told
+
+You run in a fresh session, so the stage prompts and revision feedback you can
+see are **not** the whole record of what this task was told. Messages delivered
+into the implementer's live session — an owner changing their mind mid-task, a
+task manager relaying a directive — are written to a PTY you never had. Read
+them before you reason about intent:
+
+```
+kanna_task_inputs {"task_id": "$KANNA_TASK_ID"}
+```
+
+`kanna_get_task` reports `deliveredInputCount` for the same reason: a non-zero
+count means an instruction history exists. Each record carries the message, the
+time, the stage it landed on, and a caller-declared `source` — `operator` (a
+human, or their words relayed), `manager` (an orchestrating agent), `notify`
+(Kanna's own completion notification), or `unspecified`.
+
+Never assert that something was not instructed, that no owner input was sent,
+or that a claim in the implementer's summary is unsupported, without having
+read this record first. If the record shows a directive, it outranks your own
+reading of the original prompt: an owner changing the design mid-task is the
+design. Do not ask for it to be reverted, and do not ask the implementer to
+stop citing it. If the tool is unavailable on the connected server, say that
+you could not read the instruction history and make no claim about it — that is
+not the same answer as "there was none". CLI fallback:
+`kanna-cli task inputs --task-id "$KANNA_TASK_ID"`.
+
 ## Review Scope
 
 1. Inspect the branch changes against `$BASE_REF`, and understand the behavior changed, not just the files changed.

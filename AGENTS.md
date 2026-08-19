@@ -318,6 +318,24 @@ wake-up and reconcile it through `kanna_get_task` — reading `runtimeState`, no
 debounce. See `docs/kanna-server-boundary.md` and
 `docs/2026-07-29-awaiting-input-detection-e2e-gap.md`.
 
+**Delivered task inputs are durable.** `POST /v1/tasks/{task_id}/input`
+(`kanna_send_task_input`, and the server's own completion notifications) writes
+to a PTY, and terminal bytes are not a record: a later stage forks a fresh
+worktree and session, so without a row it can read the whole durable record and
+honestly conclude an owner directive was never issued — which is exactly how a
+review agent once ordered an owner's mid-task design decision reverted. Every
+delivery the daemon *accepts* is therefore appended to `task_input` with its
+full text, the stage and `stage_run` live at delivery, and a `source`: `notify`
+for the server's own completion notification (the only label the server knows
+first-hand), or the caller's declared, unverified `operator` / `manager`, or
+`unspecified`. Read it with `kanna_task_inputs`
+(`GET /v1/tasks/{task_id}/inputs`); `kanna_get_task` reports
+`deliveredInputCount` so detail alone cannot read as "nothing was sent". An
+uncertain delivery is deliberately not recorded, and recording never fails a
+delivery that already reached the PTY. Add a new injected-message kind to this
+record where it is delivered, not by diffing terminals. See
+`docs/kanna-server-boundary.md`.
+
 **Runtime and read state are two dimensions.** `activity` (`working` | `idle` |
 `unread`) is a *derived display value* that blends them, and it cannot answer
 either question alone: a task busy inside a long MCP call whose output nobody

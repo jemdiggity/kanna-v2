@@ -1103,19 +1103,54 @@ describe("pty session (real CLI)", () => {
     return sessionId;
   }
 
-  async function queueLogicalTaskInput(sessionId: string, input: string): Promise<void> {
+  async function queueLogicalTaskInput(
+    sessionId: string,
+    input: string,
+    source?: "operator" | "manager",
+  ): Promise<void> {
     const { baseUrl } = await resolveAppKannaServer(client);
     const response = await fetch(
       `${baseUrl}/v1/tasks/${encodeURIComponent(sessionId)}/input`,
       {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ input }),
+        body: JSON.stringify(source ? { input, source } : { input }),
       },
     );
     if (!response.ok) {
       throw new Error(`logical task input failed: ${response.status} ${await response.text()}`);
     }
+  }
+
+  interface DeliveredTaskInput {
+    source: string;
+    message: string;
+    stage: string | null;
+    deliveredAt: string;
+  }
+
+  async function deliveredTaskInputs(sessionId: string): Promise<{
+    total: number;
+    inputs: DeliveredTaskInput[];
+  }> {
+    const { baseUrl } = await resolveAppKannaServer(client);
+    const response = await fetch(
+      `${baseUrl}/v1/tasks/${encodeURIComponent(sessionId)}/inputs`,
+    );
+    if (!response.ok) {
+      throw new Error(`task inputs read failed: ${response.status} ${await response.text()}`);
+    }
+    return (await response.json()) as { total: number; inputs: DeliveredTaskInput[] };
+  }
+
+  async function deliveredInputCount(sessionId: string): Promise<number> {
+    const { baseUrl } = await resolveAppKannaServer(client);
+    const response = await fetch(`${baseUrl}/v1/tasks/${encodeURIComponent(sessionId)}`);
+    if (!response.ok) {
+      throw new Error(`task detail read failed: ${response.status} ${await response.text()}`);
+    }
+    const detail = (await response.json()) as { deliveredInputCount?: number };
+    return detail.deliveredInputCount ?? 0;
   }
 
   async function submittedDraftsFor(sessionId: string): Promise<string[]> {
@@ -1186,6 +1221,57 @@ describe("pty session (real CLI)", () => {
       `SUBMIT:<${humanInput}>`,
       `SUBMIT:<${MANAGER_INPUT}>`,
     ]);
+  }, 45_000);
+
+  // A directive delivered here is written to a PTY and to nothing else. A
+  // later stage forks a new worktree and a fresh session, so unless the
+  // delivery leaves a durable row it can read the whole record and honestly
+  // conclude the directive was never issued — which is what happened, and what
+  // this covers end to end: real server, real daemon, real PTY, then the
+  // readback a review stage actually performs.
+  it("records a delivered task input where a later stage can read it back", async () => {
+    const sessionId = await startDraftBoundaryFixture();
+    const ownerDirective = `owner-directive-${randomUUID()}`;
+
+    expect(await deliveredTaskInputs(sessionId)).toEqual({ total: 0, inputs: [] });
+
+    await queueLogicalTaskInput(sessionId, ownerDirective, "operator");
+    await waitForTerminalBufferMatch(
+      client,
+      sessionId,
+      `SUBMIT:<${ownerDirective}>`,
+      10_000,
+    );
+
+    const recorded = await deliveredTaskInputs(sessionId);
+    expect(recorded.total).toBe(1);
+    expect(recorded.inputs).toHaveLength(1);
+    expect(recorded.inputs[0].message).toBe(ownerDirective);
+    expect(recorded.inputs[0].source).toBe("operator");
+    expect(recorded.inputs[0].stage).toBe("in progress");
+    expect(recorded.inputs[0].deliveredAt).toBeTruthy();
+    // Task detail is where a reviewer already looks; the count is what makes
+    // "nothing was ever sent" impossible to say without checking.
+    expect(await deliveredInputCount(sessionId)).toBe(1);
+
+    // A second delivery extends the history rather than replacing it, and the
+    // history reads oldest first.
+    const managerFollowUp = `manager-follow-up-${randomUUID()}`;
+    await queueLogicalTaskInput(sessionId, managerFollowUp, "manager");
+    await waitForTerminalBufferMatch(
+      client,
+      sessionId,
+      `SUBMIT:<${managerFollowUp}>`,
+      10_000,
+    );
+
+    const both = await deliveredTaskInputs(sessionId);
+    expect(both.total).toBe(2);
+    expect(both.inputs.map((input) => [input.source, input.message])).toEqual([
+      ["operator", ownerDirective],
+      ["manager", managerFollowUp],
+    ]);
+    expect(await deliveredInputCount(sessionId)).toBe(2);
   }, 45_000);
 
   it("routes focused-window keyboard input to that window's selected PTY task", async () => {

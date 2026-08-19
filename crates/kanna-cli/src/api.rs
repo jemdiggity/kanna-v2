@@ -12,8 +12,8 @@ use crate::models::{
     MobileNotificationResponse, RepoDetail, RepoSummary, RequestRevisionRequest,
     ResolvedAgentDefinition, SetTaskNotifyRequest, SetTaskParentRequest, SetTaskWorkflowRequest,
     SetTaskWorkflowResponse, SignalAgentRequest, SignalAgentResponse, TaskActionResponse,
-    TaskChild, TaskDetail, TaskInputRequest, TaskInputResponse, TaskRenameRequest, TaskSummary,
-    WaitUntil,
+    TaskChild, TaskDetail, TaskInputRequest, TaskInputResponse, TaskInputs, TaskRenameRequest,
+    TaskSummary, WaitUntil,
 };
 
 pub(crate) fn join_server_url(base_url: &str, path: &str) -> String {
@@ -117,6 +117,14 @@ pub(crate) fn task_events_path(params: &TaskEventsParams<'_>) -> String {
         query.push(format!("limit={limit}"));
     }
     format!("/v1/task-events?{}", query.join("&"))
+}
+
+pub(crate) fn task_inputs_path(task_id: &str, tail: Option<usize>) -> String {
+    let task_id = encode_path_segment(task_id);
+    match tail {
+        Some(tail) => format!("/v1/tasks/{task_id}/inputs?tail={tail}"),
+        None => format!("/v1/tasks/{task_id}/inputs"),
+    }
 }
 
 pub(crate) fn task_logs_path(task_id: &str, tail: Option<usize>) -> String {
@@ -359,6 +367,14 @@ pub(crate) async fn dependent_tasks_exist_via_api(
     task_id: &str,
 ) -> Result<DependentTasksExistResponse, String> {
     get_json(base_url, &dependent_tasks_exist_path(task_id)).await
+}
+
+pub(crate) async fn task_inputs_via_api(
+    base_url: &str,
+    task_id: &str,
+    tail: Option<usize>,
+) -> Result<TaskInputs, String> {
+    get_json(base_url, &task_inputs_path(task_id, tail)).await
 }
 
 pub(crate) async fn task_logs_via_api(

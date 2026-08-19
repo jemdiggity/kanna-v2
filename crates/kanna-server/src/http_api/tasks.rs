@@ -104,6 +104,50 @@ pub(super) async fn get_task_children(
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(super) struct TaskInputsQuery {
+    tail: Option<i64>,
+}
+
+/// Enough history for any real task, and a ceiling so one pathological task
+/// cannot make the route unbounded. `total` reports what was left out.
+const DEFAULT_TASK_INPUT_TAIL: i64 = 100;
+const MAX_TASK_INPUT_TAIL: i64 = 500;
+
+/// The task's durable instruction history — what was said to its agent from
+/// outside its session, and when. A review stage or dispatcher reads this
+/// before claiming anything about what was or was not instructed: it runs in a
+/// forked worktree with a fresh session, so the live terminal those messages
+/// were typed into is not something it can see.
+pub(super) async fn get_task_inputs(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+    axum::extract::Query(query): axum::extract::Query<TaskInputsQuery>,
+) -> Result<Json<crate::mobile_api::TaskInputs>, (axum::http::StatusCode, String)> {
+    let tail = query
+        .tail
+        .unwrap_or(DEFAULT_TASK_INPUT_TAIL)
+        .clamp(1, MAX_TASK_INPUT_TAIL);
+    let db = Db::open(&state.config.db_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {}", e),
+        )
+    })?;
+    let api = MobileApi::new(state.config.clone(), db);
+    let inputs = api
+        .list_task_inputs(&task_id, tail)
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                format!("task not found: {task_id}"),
+            )
+        })?;
+    Ok(Json(inputs))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct UpdateTaskRequest {
     #[serde(default, deserialize_with = "deserialize_nullable_field")]
     display_name: Option<Option<String>>,

@@ -177,6 +177,15 @@ pub struct TaskDetail {
     /// Rounds the task's workflow allows before the engine parks the task for
     /// its human instead of revising again; `0` means unlimited.
     pub revision_limit: i64,
+    /// How many messages have been delivered into this task's agent session
+    /// from outside it — operator/manager `POST /v1/tasks/{id}/input` calls and
+    /// the server's own completion notifications. The count is here so that a
+    /// consumer reading only task detail cannot conclude nothing was ever sent:
+    /// a non-zero value means there is an instruction history, and
+    /// `GET /v1/tasks/{id}/inputs` has its text. Optional only so a payload
+    /// from a peer that predates the record still deserializes.
+    #[serde(default)]
+    pub delivered_input_count: i64,
     pub parent_task_id: Option<String>,
     /// Direct children of this task, oldest first — the downward view of
     /// `parent_task_id`. **Closed children are included**: parentage is
@@ -200,6 +209,18 @@ pub struct TaskLatestRun {
     pub resumed_from_run_id: Option<String>,
     pub resume_fallback_reason: Option<String>,
     pub finished_at: Option<String>,
+}
+
+/// A task's durable instruction history: every message delivered into its
+/// agent session from outside that session.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskInputs {
+    pub task_id: String,
+    /// Every input the task has ever received, not just the returned window.
+    pub total: i64,
+    /// The most recent `tail` records, oldest first.
+    pub inputs: Vec<crate::db::TaskInputRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -645,6 +666,10 @@ impl MobileApi {
             ._db
             .list_child_task_ids(&item.id)
             .map_err(|e| format!("db error: {}", e))?;
+        let delivered_input_count = self
+            ._db
+            .count_task_inputs(&item.id)
+            .map_err(|e| format!("db error: {}", e))?;
         Ok(Some(map_task_detail(
             item,
             repo.as_ref(),
@@ -655,8 +680,41 @@ impl MobileApi {
                 resolved_effort,
                 child_task_ids,
                 blocked_by_task_ids,
+                delivered_input_count,
             },
         )))
+    }
+
+    /// The task's delivered-input history, oldest first, with `total` naming
+    /// the full count so a tailed list never reads as the whole record.
+    ///
+    /// `Ok(None)` means the task does not exist; an existing task that has
+    /// received nothing is an empty list.
+    pub fn list_task_inputs(
+        &self,
+        task_or_branch_id: &str,
+        tail: i64,
+    ) -> Result<Option<TaskInputs>, String> {
+        let Some(task_id) = self
+            ._db
+            .resolve_pipeline_item_id(task_or_branch_id)
+            .map_err(|e| format!("db error: {}", e))?
+        else {
+            return Ok(None);
+        };
+        let total = self
+            ._db
+            .count_task_inputs(&task_id)
+            .map_err(|e| format!("db error: {}", e))?;
+        let inputs = self
+            ._db
+            .list_task_inputs(&task_id, tail)
+            .map_err(|e| format!("db error: {}", e))?;
+        Ok(Some(TaskInputs {
+            task_id,
+            total,
+            inputs,
+        }))
     }
 
     /// The parent's direct children, oldest first, with each child's latest
@@ -844,6 +902,7 @@ struct TaskDetailRelations {
     resolved_effort: Option<String>,
     child_task_ids: Vec<String>,
     blocked_by_task_ids: Vec<String>,
+    delivered_input_count: i64,
 }
 
 fn map_task_detail(
@@ -858,6 +917,7 @@ fn map_task_detail(
         resolved_effort,
         child_task_ids,
         blocked_by_task_ids,
+        delivered_input_count,
     } = relations;
     let prompt = item.prompt.clone();
     let title = item
@@ -937,6 +997,7 @@ fn map_task_detail(
         latest_run: latest_run.map(map_task_latest_run),
         revision_rounds: item.revision_rounds,
         revision_limit,
+        delivered_input_count,
         parent_task_id: item.parent_task_id,
         child_task_ids,
         blocked_by_task_ids,

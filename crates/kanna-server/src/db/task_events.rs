@@ -70,6 +70,14 @@ pub enum TaskEventKind {
     /// to hand off and Kanna refused to close the task. A watcher must treat
     /// this as a failed approval, not a completed pipeline.
     MergeHandoffMissing,
+    /// A message was delivered into the task's agent session from outside it
+    /// — an operator or manager call to `POST /v1/tasks/{id}/input`, or the
+    /// server's own completion notification. `payload.source` says who
+    /// declared authorship, `payload.preview` carries a bounded prefix and
+    /// `payload.truncated` says whether it was cut; the full text is the
+    /// durable `task_input` row this event announces, readable through
+    /// `GET /v1/tasks/{id}/inputs`.
+    InputDelivered,
     /// A cross-machine transfer is shutting the task's agent down so its
     /// conversation can be shipped. `payload.phase` names the step —
     /// `wrap-up-sent`, `idle`, `quit-sent`, `exited`, `already-exited`, or
@@ -94,6 +102,7 @@ impl TaskEventKind {
             Self::ActivityChanged => "task.activity_changed",
             Self::MergeSignaled => "task.merge_signaled",
             Self::MergeHandoffMissing => "task.merge_handoff_missing",
+            Self::InputDelivered => "task.input_delivered",
             Self::TransferFinalizing => "task.transfer_finalizing",
         }
     }
@@ -112,6 +121,7 @@ impl TaskEventKind {
         Self::ActivityChanged,
         Self::MergeSignaled,
         Self::MergeHandoffMissing,
+        Self::InputDelivered,
         Self::TransferFinalizing,
     ];
 }

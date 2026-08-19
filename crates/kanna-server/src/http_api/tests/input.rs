@@ -867,6 +867,54 @@ async fn send_task_input_route_uses_input_sender() {
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
 }
 
+/// `notify` names a message Kanna generated itself. A caller that could claim
+/// it could forge the one label on the record that is not merely declared.
+#[tokio::test]
+async fn send_task_input_rejects_a_source_a_caller_cannot_be() {
+    let unique = format!("task-input-source-{}", unique_test_suffix());
+    let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let config = merge_test_config(&unique, &daemon_dir);
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-source",
+        "repo-1",
+        "Source task",
+        Some("Source task"),
+        "in progress",
+        "2026-08-19 04:00:00",
+    )
+    .unwrap();
+    drop(db);
+
+    let response = super::router(Arc::new(super::AppState::new(config.clone())))
+        .oneshot(
+            Request::post("/v1/tasks/task-source/input")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "input": "hello", "source": "notify" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let failure: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(failure["reason"], "invalid_input_source");
+
+    let db = Db::open(&config.db_path).unwrap();
+    assert_eq!(db.count_task_inputs("task-source").unwrap(), 0);
+    drop(db);
+
+    let _ = std::fs::remove_dir_all(daemon_dir);
+    let _ = std::fs::remove_file(config.db_path);
+}
+
 #[tokio::test]
 async fn send_task_input_rejects_an_in_flight_task_session_change() {
     let unique = format!("task-input-mutating-{}", unique_test_suffix());
@@ -1123,12 +1171,18 @@ async fn send_task_input_delivers_to_a_live_session_after_a_finished_run() {
         .unwrap();
     drop(db);
 
-    let response = super::router(Arc::new(super::AppState::new(config.clone())))
+    let app = super::router(Arc::new(super::AppState::new(config.clone())));
+    let response = app
+        .clone()
         .oneshot(
             Request::post("/v1/tasks/task-live/input")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    serde_json::json!({ "input": "One more change" }).to_string(),
+                    serde_json::json!({
+                        "input": "One more change",
+                        "source": "operator",
+                    })
+                    .to_string(),
                 ))
                 .unwrap(),
         )
@@ -1143,6 +1197,51 @@ async fn send_task_input_delivers_to_a_live_session_after_a_finished_run() {
         DaemonCommand::SubmitInputIfSession { session_id, expected_pid, data }
             if session_id == "task-live" && *expected_pid == 42 && data == b"One more change"
     ));
+
+    // The whole point of the record: a later stage, which never saw this
+    // terminal, can still read what was said here. This is the DB -> server ->
+    // HTTP readback the review stage depends on.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/tasks/task-live/inputs")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let inputs: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(inputs["taskId"], "task-live");
+    assert_eq!(inputs["total"], 1);
+    let recorded = &inputs["inputs"][0];
+    assert_eq!(recorded["message"], "One more change");
+    assert_eq!(recorded["source"], "operator");
+    assert_eq!(recorded["stage"], "in progress");
+    assert!(recorded["deliveredAt"]
+        .as_str()
+        .is_some_and(|at| !at.is_empty()));
+
+    // And task detail reports the count, so a consumer reading only detail
+    // cannot conclude from it that nothing was ever sent.
+    let response = app
+        .oneshot(
+            Request::get("/v1/tasks/task-live")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let detail: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(detail["deliveredInputCount"], 1);
+
     let _ = std::fs::remove_file(socket_path);
     let _ = std::fs::remove_dir_all(daemon_dir);
     let _ = std::fs::remove_file(config.db_path);
@@ -1260,6 +1359,12 @@ async fn send_task_input_reports_daemon_write_failure_as_delivery_uncertain() {
             data,
         }] if session_id == "task-write-failed" && data == b"Do not duplicate this"
     ));
+
+    // A record asserting the agent was told something it may never have heard
+    // is a worse record than none, so an uncertain delivery writes nothing.
+    let db = Db::open(&config.db_path).unwrap();
+    assert_eq!(db.count_task_inputs("task-write-failed").unwrap(), 0);
+    drop(db);
 
     let _ = std::fs::remove_file(socket_path);
     let _ = std::fs::remove_dir_all(daemon_dir);
@@ -1396,6 +1501,15 @@ async fn terminal_state_notification_sends_once_to_notify_target() {
         "2026-04-18 10:00:00",
     )
     .unwrap();
+    db.insert_test_pipeline_item(
+        "task-parent",
+        "repo-1",
+        "Parent prompt",
+        Some("Parent Display"),
+        "in progress",
+        "2026-04-18 10:00:00",
+    )
+    .unwrap();
     db.update_test_pipeline_item_notify_task("task-child", "task-parent")
         .unwrap();
     drop(db);
@@ -1426,6 +1540,16 @@ async fn terminal_state_notification_sends_once_to_notify_target() {
     // task to finish resolves on when no verdict was recorded.
     assert_eq!(task.runtime_status.as_deref(), Some("exited"));
     assert!(task.notified_at.is_some());
+    // Completion notifications are deliveries like any other and are recorded
+    // against the task that received them, labelled `notify` — the parent's
+    // record says where its wake-up came from without changing how it arrived.
+    let notified = db.list_task_inputs("task-parent", 10).unwrap();
+    assert_eq!(notified.len(), 1);
+    assert_eq!(notified[0].source, "notify");
+    assert_eq!(
+        notified[0].message,
+        "TASK task-child DONE [success]: Child Display"
+    );
 
     let _ = std::fs::remove_file(socket_path);
     let _ = std::fs::remove_dir_all(daemon_dir);

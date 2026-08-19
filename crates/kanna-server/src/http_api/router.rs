@@ -39,8 +39,8 @@ use super::task_input::send_task_input;
 use super::task_logs::task_logs;
 use super::task_ports::{claim_task_ports, release_task_ports};
 use super::tasks::{
-    create_task, get_task, get_task_children, list_closed_task_identities, list_recent_tasks,
-    put_task, search_tasks, set_task_notify, update_task,
+    create_task, get_task, get_task_children, get_task_inputs, list_closed_task_identities,
+    list_recent_tasks, put_task, search_tasks, set_task_notify, update_task,
 };
 use super::transfer_sidecar::{
     clear_cloud_transfer_proxies, ensure_cloud_transfer_proxy, remove_cloud_transfer_proxy,
@@ -155,6 +155,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(get_task).put(put_task).patch(update_task),
         )
         .route("/v1/tasks/{task_id}/children", get(get_task_children))
+        .route("/v1/tasks/{task_id}/inputs", get(get_task_inputs))
         .route("/v1/tasks/{task_id}/files/content", get(get_task_file))
         .route(
             "/v1/tasks/{task_id}/files/resolve-mentions",
