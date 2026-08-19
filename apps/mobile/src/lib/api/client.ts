@@ -127,6 +127,18 @@ export interface KannaTransport {
     input: string,
     attachment?: TaskInputAttachment
   ): Promise<void>;
+  /**
+   * Whether the desktop that owns this task advertises the image-attachment
+   * contract on its own `/v1/status`.
+   *
+   * Per task, not per connection, and asked of the desktop the input will
+   * actually reach — the composer's question is "will this photo arrive?",
+   * which only the receiving desktop can answer. Reading it from the
+   * connection's status is wrong on the relay path, where the status describes
+   * the cloud rather than any desktop, and wrong in general once the phone can
+   * see tasks owned by several machines at different versions.
+   */
+  supportsTaskInputAttachments(taskId: string): Promise<boolean>;
   readTaskFile(taskId: string, path: string): Promise<TaskFileContent>;
   resolveTaskFileMentions(
     taskId: string,
@@ -176,6 +188,18 @@ export interface KannaClient {
     input: string,
     attachment?: TaskInputAttachment
   ): Promise<void>;
+  /**
+   * Whether the desktop that owns this task advertises the image-attachment
+   * contract on its own `/v1/status`.
+   *
+   * Per task, not per connection, and asked of the desktop the input will
+   * actually reach — the composer's question is "will this photo arrive?",
+   * which only the receiving desktop can answer. Reading it from the
+   * connection's status is wrong on the relay path, where the status describes
+   * the cloud rather than any desktop, and wrong in general once the phone can
+   * see tasks owned by several machines at different versions.
+   */
+  supportsTaskInputAttachments(taskId: string): Promise<boolean>;
   readTaskFile(taskId: string, path: string): Promise<TaskFileContent>;
   resolveTaskFileMentions(
     taskId: string,
@@ -274,6 +298,8 @@ export function createKannaClient(transport: KannaTransport): KannaClient {
       attachment
         ? transport.sendTaskInput(taskId, input, attachment)
         : transport.sendTaskInput(taskId, input),
+    supportsTaskInputAttachments: (taskId) =>
+      transport.supportsTaskInputAttachments(taskId),
     readTaskFile: (taskId, path) => transport.readTaskFile(taskId, path),
     resolveTaskFileMentions: (taskId, mentions) =>
       transport.resolveTaskFileMentions(taskId, mentions),

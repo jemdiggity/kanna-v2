@@ -95,7 +95,10 @@ before the picture.
   while the agent answered about a picture it never received. That mismatch is
   the ordinary state on release day: phone and desktop are separate binaries
   on separate cadences. Mobile hides the attach control when the marker is
-  absent.
+  absent, and it asks **the desktop that owns the task**, routed the same way
+  the input itself is routed — a phone sees tasks owned by several machines at
+  different versions, and on the relay path its own connection status
+  describes the cloud rather than any desktop.
 
 Desktop-to-desktop LAN input has the same fail-closed rule at task-transfer
 protocol v5. A v4 peer may still be discovered and use unrelated compatible

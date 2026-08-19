@@ -1456,6 +1456,12 @@ export function createCloudLanClient(
           ? client.sendTaskInput(routedTaskId, input, attachment)
           : client.sendTaskInput(routedTaskId, input)
       ),
+    // Same route the input takes, so the capability answer and the delivery
+    // can never disagree about which desktop they mean.
+    supportsTaskInputAttachments: (taskId) =>
+      invokeTaskRoute(taskId, (client, routedTaskId) =>
+        client.supportsTaskInputAttachments(routedTaskId)
+      ),
     readTaskFile: async (taskId, path): Promise<TaskFileContent> => {
       const route = routeForTask(taskId);
       if (route.source === "unavailable") {

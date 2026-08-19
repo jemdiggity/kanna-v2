@@ -227,6 +227,13 @@ export function createLanTransport(
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(attachment ? { input, attachment } : { input })
       }),
+    // A LAN connection is pinned to one desktop, so that desktop's own status
+    // is the answer. Read fresh rather than reusing the cached
+    // `kspStreamVersion` probe: the desktop can be upgraded under a live app.
+    supportsTaskInputAttachments: async () => {
+      const status = await request<MobileServerStatus>("/v1/status");
+      return typeof status.taskInputAttachmentVersion === "number";
+    },
     readTaskFile: async (_taskId: string, _path: string): Promise<TaskFileContent> => {
       throw new Error(
         "Task file preview requires an authenticated relay connection."

@@ -942,6 +942,8 @@ function createDisconnectedClient(): KannaClient {
     markTaskRead: unavailable,
     closeTask: unavailable,
     sendTaskInput: unavailable,
+    // No desktop is reachable, so nothing can receive a photo.
+    supportsTaskInputAttachments: async () => false,
     readTaskFile: unavailable,
     resolveTaskFileMentions: unavailable,
     readTaskDiff: unavailable,
@@ -1158,6 +1160,8 @@ function createTrustedLanFallbackClient({
         ? client.sendTaskInput(taskId, input, attachment)
         : client.sendTaskInput(taskId, input);
     },
+    supportsTaskInputAttachments: async (taskId) =>
+      (await resolveClient(desktopId)).supportsTaskInputAttachments(taskId),
     readTaskFile: async (taskId, path) =>
       (await resolveClient(desktopId)).readTaskFile(taskId, path),
     resolveTaskFileMentions: async (taskId, mentions) =>
@@ -1375,6 +1379,8 @@ function createDelegatingClient(getClient: () => KannaClient): KannaClient {
       attachment
         ? getClient().sendTaskInput(taskId, input, attachment)
         : getClient().sendTaskInput(taskId, input),
+    supportsTaskInputAttachments: (taskId) =>
+      getClient().supportsTaskInputAttachments(taskId),
     readTaskFile: (taskId, path) => getClient().readTaskFile(taskId, path),
     resolveTaskFileMentions: (taskId, mentions) =>
       getClient().resolveTaskFileMentions(taskId, mentions),

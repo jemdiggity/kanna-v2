@@ -1095,6 +1095,57 @@ describe("createLanTransport", () => {
     expect(status.taskInputAttachmentVersion).toBeUndefined();
   });
 
+  it("answers the attachment question from the pinned desktop's own status", async () => {
+    const advertised = vi.fn<FetchLike>().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        state: "running",
+        desktopId: "desktop-1",
+        desktopName: "Studio Mac",
+        version: "0.0.69",
+        environment: "production",
+        serverVersion: "0.0.69",
+        lanHost: "0.0.0.0",
+        lanPort: 48120,
+        pairingCode: null,
+        taskInputAttachmentVersion: 1
+      })
+    });
+    await expect(
+      createLanTransport(
+        "http://127.0.0.1:48120",
+        advertised
+      ).supportsTaskInputAttachments("task-1")
+    ).resolves.toBe(true);
+    expect(advertised).toHaveBeenCalledWith(
+      "http://127.0.0.1:48120/v1/status",
+      undefined
+    );
+
+    const older = vi.fn<FetchLike>().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        state: "running",
+        desktopId: "desktop-1",
+        desktopName: "Studio Mac",
+        version: "0.0.60",
+        environment: "production",
+        serverVersion: "0.0.60",
+        lanHost: "0.0.0.0",
+        lanPort: 48120,
+        pairingCode: null
+      })
+    });
+    await expect(
+      createLanTransport(
+        "http://127.0.0.1:48120",
+        older
+      ).supportsTaskInputAttachments("task-1")
+    ).resolves.toBe(false);
+  });
+
   it("posts a photo attachment in the task-input body and omits the field without one", async () => {
     const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
       ok: true,

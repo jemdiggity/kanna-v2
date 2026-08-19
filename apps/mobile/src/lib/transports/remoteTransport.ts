@@ -865,6 +865,20 @@ export function createRemoteTransport({
         attachment ? { input, attachment } : { input }
       );
     },
+    supportsTaskInputAttachments: async (taskId: string) => {
+      // Deliberately NOT `getStatus()`: with cloud tasks wired that returns a
+      // synthetic "Kanna Cloud" literal describing no desktop at all, so the
+      // marker would always look absent. `requestTask` resolves the task's
+      // owner desktop — the same routing `sendTaskInput` uses — so the answer
+      // comes from the machine the photo would actually land on.
+      const status = await requestTask<MobileServerStatus>(
+        taskId,
+        "GET",
+        () => "/v1/status",
+        null
+      );
+      return typeof status.taskInputAttachmentVersion === "number";
+    },
     readTaskFile: (taskId: string, path: string) =>
       requestTask<TaskFileContent>(
         taskId,

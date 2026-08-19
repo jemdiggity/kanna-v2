@@ -2166,6 +2166,60 @@ describe("remote transport", () => {
     expect("taskInputAttachmentVersion" in status).toBe(false);
   });
 
+  it("asks the task's owner desktop about attachments, not the synthetic cloud status", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue({
+      state: "running",
+      desktopId: "desktop-owner",
+      desktopName: "Studio Mac",
+      version: "0.0.69",
+      environment: "production",
+      serverVersion: "0.0.69",
+      lanHost: "0.0.0.0",
+      lanPort: 48120,
+      pairingCode: null,
+      taskInputAttachmentVersion: 1
+    });
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => null,
+      invokeDesktop,
+      listCloudTasks: async () => [
+        {
+          id: "cloud-task-1",
+          repoId: "repo-1",
+          title: "Cloud task",
+          stage: "in progress",
+          ownerDesktopId: "desktop-owner",
+          ownerLocalTaskId: "local-task-1",
+          ownerOnline: true
+        }
+      ]
+    });
+
+    await transport.listRecentTasks();
+    invokeDesktop.mockClear();
+
+    await expect(
+      transport.supportsTaskInputAttachments("cloud-task-1")
+    ).resolves.toBe(true);
+    expect(invokeDesktop).toHaveBeenCalledWith({
+      desktopId: "desktop-owner",
+      method: "GET",
+      path: "/v1/status",
+      body: null
+    });
+
+    // And `getStatus()` on this same transport is the synthetic cloud record
+    // that carries no marker — which is exactly why the capability must not be
+    // read from it.
+    await expect(transport.getStatus()).resolves.toMatchObject({
+      desktopId: "cloud"
+    });
+    expect(
+      (await transport.getStatus()).taskInputAttachmentVersion
+    ).toBeUndefined();
+  });
+
   it("carries a photo attachment to the owner desktop in the same relayed body", async () => {
     const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue(null);
     const transport = createRemoteTransport({

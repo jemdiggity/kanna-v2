@@ -238,6 +238,8 @@ export function createMobileController(
   let taskAgentGeneration = 0;
   let taskCompanionGeneration = 0;
   let taskDetailGeneration = 0;
+  /** Fences the per-task attachment-capability read against task switching. */
+  let taskAttachmentSupportGeneration = 0;
   let activeTaskDetailIdentity: string | null = null;
   let loadedTaskPrompt:
     | { taskId: string; routeIdentity: string; prompt: string }
@@ -1200,12 +1202,52 @@ export function createMobileController(
     }
   };
 
+  /**
+   * Ask the desktop that owns this task whether it can receive a photo.
+   *
+   * Per task rather than per connection. The connection's own `/v1/status` is
+   * the wrong source twice over: on the relay path it is a synthetic "Kanna
+   * Cloud" record describing no desktop at all, and even on LAN a phone can
+   * see tasks owned by several machines running different versions. The
+   * transport answers by routing to the task's owner desktop — the same
+   * routing that will carry the input — so the gate and the delivery cannot
+   * disagree about which machine they mean.
+   *
+   * Failure resolves to "cannot attach". A desktop that will not answer the
+   * question is not one to send a photo into.
+   */
+  const resetSelectedTaskAttachmentSupport = () => {
+    taskAttachmentSupportGeneration += 1;
+    store.setDesktopSupportsTaskInputAttachments(false);
+  };
+
+  const loadSelectedTaskAttachmentSupport = (taskId: string) => {
+    const generation = ++taskAttachmentSupportGeneration;
+    store.setDesktopSupportsTaskInputAttachments(false);
+    void client
+      .supportsTaskInputAttachments(taskId)
+      .then((supported) => {
+        if (
+          generation !== taskAttachmentSupportGeneration ||
+          durableTaskIdForSelection(store.getState().selectedTaskId) !== taskId
+        ) {
+          return;
+        }
+        store.setDesktopSupportsTaskInputAttachments(supported);
+      })
+      .catch(() => {
+        // Already false, and an unreachable desktop is not one to offer an
+        // attach control for.
+      });
+  };
+
   const startTaskView = (taskId: string) => {
     const task = findTask(taskId);
     if (!task) {
       return;
     }
     loadSelectedTaskPrompt(taskId);
+    loadSelectedTaskAttachmentSupport(taskId);
     if (isTaskBlocked(task)) {
       // A blocked task has no agent session to attach; the task screen
       // renders the blocked placeholder instead. Collection refreshes
@@ -1230,6 +1272,11 @@ export function createMobileController(
 
   const openTask = (taskId: string) => {
     taskCollectionsRevision += 1;
+    // Clear the previous task's answer before the new one is asked. Selecting
+    // a task whose row has not loaded yet, or a blocked one, never reaches the
+    // read below, and inheriting "attachments are fine" from whatever was on
+    // screen before would offer the control against the wrong desktop.
+    resetSelectedTaskAttachmentSupport();
     const slot = taskUiSlotForSelection(store.getState().taskUiSlots, taskId);
     const selectionId = slot?.slotId ?? taskId;
     const durableTaskId = slot?.taskId ?? findCollectionTask(taskId)?.id ?? null;
@@ -1820,11 +1867,6 @@ export function createMobileController(
           status.desktopName,
           status.pairingCode,
           status.desktopId
-        );
-        // Absence is the answer for every desktop built before attachments
-        // existed, which is the normal state of a paired Mac on release day.
-        store.setDesktopSupportsTaskInputAttachments(
-          typeof status.taskInputAttachmentVersion === "number"
         );
 
         if (status.state !== "running") {
