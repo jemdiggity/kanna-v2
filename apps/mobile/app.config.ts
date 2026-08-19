@@ -32,6 +32,11 @@ interface MobileAppEnvironment {
   otaChannel: OtaChannel | null;
 }
 
+/// Every camera use Kanna has, in one string: two plugins write
+/// `NSCameraUsageDescription` and the last one to run wins.
+const CAMERA_PERMISSION =
+  "Allow Kanna to scan machine pairing QR codes and to take a photo to send to your agent.";
+
 const registry = environments as Record<
   KannaAppEnvironmentName,
   MobileAppEnvironment
@@ -228,9 +233,25 @@ export function createExpoConfig(
       [
         "expo-camera",
         {
-          cameraPermission: "Allow Kanna to scan machine pairing QR codes.",
+          cameraPermission: CAMERA_PERMISSION,
           barcodeScannerEnabled: true,
           recordAudioAndroid: false
+        }
+      ],
+      // Photo attachments on the task composer. `cameraPermission` repeats the
+      // string expo-camera declares because both plugins write the same
+      // Info.plist key and the later one wins — they must not disagree about
+      // what Kanna uses the camera for. `microphonePermission: false` is not
+      // cosmetic: left unset this plugin adds RECORD_AUDIO and a microphone
+      // usage string, and Kanna captures no audio anywhere (expo-camera above
+      // disables it for the same reason).
+      [
+        "expo-image-picker",
+        {
+          photosPermission:
+            "Allow Kanna to attach a photo to a message for your agent.",
+          cameraPermission: CAMERA_PERMISSION,
+          microphonePermission: false
         }
       ],
       [

@@ -32,9 +32,9 @@ describe("mobile app config", () => {
         channel: "production",
         manifestUrl: "https://relay.kanna.build/ota/manifest"
       },
-      runtimeVersion: "2.1.4"
+      runtimeVersion: "2.2.0"
     });
-    expect(config.runtimeVersion).toBe("2.1.4");
+    expect(config.runtimeVersion).toBe("2.2.0");
     expect(config.updates).toMatchObject({
       url: "https://relay.kanna.build/ota/manifest",
       requestHeaders: { "expo-channel-name": "production" },
@@ -90,9 +90,9 @@ describe("mobile app config", () => {
         channel: null,
         manifestUrl: null
       },
-      runtimeVersion: "2.1.4"
+      runtimeVersion: "2.2.0"
     });
-    expect(config.runtimeVersion).toBe("2.1.4");
+    expect(config.runtimeVersion).toBe("2.2.0");
     expect(config.updates).toBeUndefined();
   });
 
@@ -128,9 +128,9 @@ describe("mobile app config", () => {
         channel: "staging",
         manifestUrl: "https://relay-staging.kanna.build/ota/manifest"
       },
-      runtimeVersion: "2.1.4"
+      runtimeVersion: "2.2.0"
     });
-    expect(config.runtimeVersion).toBe("2.1.4");
+    expect(config.runtimeVersion).toBe("2.2.0");
     expect(config.updates).toMatchObject({
       url: "https://relay-staging.kanna.build/ota/manifest",
       requestHeaders: { "expo-channel-name": "staging" }
@@ -274,17 +274,52 @@ describe("mobile app config", () => {
     expect(() => readRepoVersion(root)).toThrow(/is empty/);
   });
 
-  it("configures QR-only camera access and a new native runtime", () => {
+  const CAMERA_PERMISSION =
+    "Allow Kanna to scan machine pairing QR codes and to take a photo to send to your agent.";
+
+  it("configures audio-free camera access and a new native runtime", () => {
     const config = createExpoConfig({ KANNA_APP_ENV: "dev" });
 
     expect(config.plugins).toContainEqual([
       "expo-camera",
       {
-        cameraPermission: "Allow Kanna to scan machine pairing QR codes.",
+        cameraPermission: CAMERA_PERMISSION,
         barcodeScannerEnabled: true,
         recordAudioAndroid: false
       }
     ]);
-    expect(config.runtimeVersion).toBe("2.1.4");
+    expect(config.runtimeVersion).toBe("2.2.0");
+  });
+
+  it("declares the composer attachment permissions and captures no audio", () => {
+    for (const appEnv of ["dev", "staging", "prod"] as const) {
+      const config = createExpoConfig({ KANNA_APP_ENV: appEnv });
+
+      // `microphonePermission: false` is load-bearing: unset, the image-picker
+      // plugin adds RECORD_AUDIO and a microphone usage string to an app that
+      // captures no audio.
+      expect(config.plugins).toContainEqual([
+        "expo-image-picker",
+        {
+          photosPermission:
+            "Allow Kanna to attach a photo to a message for your agent.",
+          cameraPermission: CAMERA_PERMISSION,
+          microphonePermission: false
+        }
+      ]);
+    }
+  });
+
+  it("declares one camera purpose across both plugins that write the key", () => {
+    const config = createExpoConfig({ KANNA_APP_ENV: "prod" });
+
+    const cameraPermissions = config.plugins
+      .filter((plugin): plugin is [string, Record<string, unknown>] =>
+        Array.isArray(plugin)
+      )
+      .map(([, options]) => options.cameraPermission)
+      .filter((permission) => permission !== undefined);
+
+    expect(cameraPermissions).toEqual([CAMERA_PERMISSION, CAMERA_PERMISSION]);
   });
 });

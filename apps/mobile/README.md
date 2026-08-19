@@ -15,9 +15,13 @@ Bump `runtimeVersion` whenever a change touches native code, native config, the
 Expo SDK, native dependencies, or `plugins/withKannaNativeIdentity.js`. JS-only
 changes keep the same `runtimeVersion` and are OTA-deliverable.
 
-The current Expo SDK 57 native runtime uses `runtimeVersion` `2.1.4`. OTA
+The current Expo SDK 57 native runtime uses `runtimeVersion` `2.2.0`. OTA
 updates built for an earlier runtime are not compatible; install a native build
 with the matching runtime before publishing or applying an update.
+
+`2.2.0` added `expo-image-picker` and `expo-image-manipulator` for composer
+photo attachments — new native dependencies, so that feature ships only with a
+new binary and cannot reach a `2.1.4` install over OTA.
 
 Development builds (`KANNA_APP_ENV=dev`) do not configure OTA updates; they run
 from Metro/dev-client.
