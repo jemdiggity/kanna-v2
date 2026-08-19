@@ -284,4 +284,11 @@ export interface TaskDetail extends TaskSummary {
   revisionRounds?: number;
   /** Rounds the task's workflow allows before it parks for its human; 0 = unlimited. */
   revisionLimit?: number;
+  /**
+   * Why messages delivered into this task's agent session are being refused,
+   * or absent when they are not. `inherited-draft-unknown` means the daemon
+   * adopted the session across a restart or handoff and its composer holds
+   * text nobody saw typed, so submitting would append to an unsent line.
+   */
+  inputBlocked?: string | null;
 }

@@ -78,6 +78,14 @@ pub enum TaskEventKind {
     /// durable `task_input` row this event announces, readable through
     /// `GET /v1/tasks/{id}/inputs`.
     InputDelivered,
+    /// The task's agent session started or stopped refusing messages
+    /// delivered into it from outside. `payload.inputBlocked` names the reason
+    /// while it is blocked (`inherited-draft-unknown`) and is null when it
+    /// clears. A blocked session is not a failed one and not a busy one: it is
+    /// running normally and silently dropping nothing — every delivery into it
+    /// is refused, including Kanna's own completion notifications and the
+    /// pre-close merge handoff, until the composer it inherited is resolved.
+    InputBlocked,
     /// A cross-machine transfer is shutting the task's agent down so its
     /// conversation can be shipped. `payload.phase` names the step —
     /// `wrap-up-sent`, `idle`, `quit-sent`, `exited`, `already-exited`, or
@@ -103,6 +111,7 @@ impl TaskEventKind {
             Self::MergeSignaled => "task.merge_signaled",
             Self::MergeHandoffMissing => "task.merge_handoff_missing",
             Self::InputDelivered => "task.input_delivered",
+            Self::InputBlocked => "task.input_blocked",
             Self::TransferFinalizing => "task.transfer_finalizing",
         }
     }
@@ -122,6 +131,7 @@ impl TaskEventKind {
         Self::MergeSignaled,
         Self::MergeHandoffMissing,
         Self::InputDelivered,
+        Self::InputBlocked,
         Self::TransferFinalizing,
     ];
 }
@@ -483,6 +493,64 @@ impl Db {
             [task_id],
         )?;
         Ok(rows_affected > 0)
+    }
+
+    /// Record whether messages delivered into this task's agent session are
+    /// being refused, and why. `None` clears it.
+    ///
+    /// Returns whether the stored value changed; each edge appends one
+    /// `task.input_blocked` event. Kept off `activity` and `runtime_status`
+    /// deliberately — a wedged session is `idle` and reads as perfectly
+    /// healthy through both, which is exactly why the wedge was invisible
+    /// until an unrelated agent's delivery failed against it.
+    pub fn update_pipeline_item_input_blocked(
+        &self,
+        task_id: &str,
+        input_blocked: Option<&str>,
+    ) -> Result<bool, rusqlite::Error> {
+        self.with_immediate_transaction(|db| {
+            let previous: Option<Option<String>> = db
+                .conn
+                .query_row(
+                    "SELECT input_blocked FROM pipeline_item WHERE id = ? AND closed_at IS NULL",
+                    [task_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(previous) = previous else {
+                return Ok(false);
+            };
+            if previous.as_deref() == input_blocked {
+                return Ok(false);
+            }
+            db.conn.execute(
+                "UPDATE pipeline_item
+                 SET input_blocked = ?, updated_at = datetime('now')
+                 WHERE id = ?",
+                (input_blocked, task_id),
+            )?;
+            db.append_task_event(
+                task_id,
+                TaskEventKind::InputBlocked,
+                json!({ "inputBlocked": input_blocked }),
+            )?;
+            Ok(true)
+        })
+    }
+
+    #[cfg(test)]
+    pub fn get_pipeline_item_input_blocked(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<String>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT input_blocked FROM pipeline_item WHERE id = ?",
+                [task_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map(Option::flatten)
     }
 
     #[cfg(test)]

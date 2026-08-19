@@ -122,7 +122,8 @@ impl Db {
                 teardown_started_at TEXT,
                 revision_rounds INTEGER NOT NULL DEFAULT 0,
                 merge_signaled_at TEXT,
-                runtime_status TEXT
+                runtime_status TEXT,
+                input_blocked TEXT
             );
             CREATE UNIQUE INDEX idx_pipeline_item_open_cloud_task_id
             ON pipeline_item(cloud_task_id)

@@ -408,6 +408,14 @@ pub enum Event {
     SessionCreated {
         session_id: String,
     },
+    /// A session started or stopped refusing logical input. Emitted on the
+    /// edge only, from the session's own status loop, so every cause —
+    /// adoption of an unknown draft state, a human keystroke, composer
+    /// attestation — reaches subscribers through one path.
+    InputBlockedChanged {
+        session_id: String,
+        logical_input_blocked: bool,
+    },
     SessionList {
         sessions: Vec<SessionInfo>,
     },
@@ -455,6 +463,14 @@ pub struct SessionInfo {
     pub status: SessionStatus,
     #[serde(default)]
     pub kind: SessionKind,
+    /// True while the daemon refuses `SubmitInput` for this session because
+    /// its inherited draft state is unknown and its composer is not provably
+    /// empty. A wedged session is otherwise indistinguishable from a healthy
+    /// idle one until something tries to deliver a message into it, which is
+    /// how one used to be discovered through an unrelated agent's failure.
+    /// Absent on a daemon that predates the field, which reports `false`.
+    #[serde(default)]
+    pub logical_input_blocked: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1018,6 +1034,7 @@ mod tests {
             idle_seconds: 30,
             status: SessionStatus::Idle,
             kind: SessionKind::Pty,
+            logical_input_blocked: false,
         };
         let json = serde_json::to_string(&info).unwrap();
         let decoded: SessionInfo = serde_json::from_str(&json).unwrap();
@@ -1046,6 +1063,7 @@ mod tests {
                 idle_seconds: 10,
                 status: SessionStatus::Idle,
                 kind: SessionKind::Pty,
+                logical_input_blocked: true,
             }],
         };
         let json = serde_json::to_string(&evt).unwrap();
@@ -1054,8 +1072,48 @@ mod tests {
             Event::SessionList { sessions } => {
                 assert_eq!(sessions.len(), 1);
                 assert_eq!(sessions[0].session_id, "s1");
+                assert!(sessions[0].logical_input_blocked);
             }
             _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn session_list_from_a_daemon_without_the_field_reports_deliverable() {
+        let json = r#"{
+            "type":"SessionList",
+            "sessions":[{
+                "session_id":"s1",
+                "pid":1,
+                "cwd":"/tmp",
+                "state":"Active",
+                "idle_seconds":0,
+                "status":"idle"
+            }]
+        }"#;
+
+        match serde_json::from_str::<Event>(json).unwrap() {
+            Event::SessionList { sessions } => assert!(!sessions[0].logical_input_blocked),
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn input_blocked_changed_roundtrips() {
+        let evt = Event::InputBlockedChanged {
+            session_id: "s1".to_string(),
+            logical_input_blocked: true,
+        };
+        let json = serde_json::to_string(&evt).unwrap();
+        match serde_json::from_str::<Event>(&json).unwrap() {
+            Event::InputBlockedChanged {
+                session_id,
+                logical_input_blocked,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert!(logical_input_blocked);
+            }
+            other => panic!("wrong variant: {other:?}"),
         }
     }
 

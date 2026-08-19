@@ -110,6 +110,17 @@ const parkedRevisionAvailable = computed(() => {
     && latestRun.summary?.startsWith("Parked for human review:") === true;
 });
 
+/// A session the daemon refuses to deliver messages into is running normally
+/// and looks idle everywhere else, so the only sign of it used to be some
+/// other agent's stage failing. Say it on the task itself.
+const inputBlocked = computed(() => {
+  const task = item.value;
+  const detail = taskDetail.value;
+  if (!task || !detail || detail.id !== task.id) return false;
+  if (task.closed_at != null || detail.closedAt != null) return false;
+  return typeof detail.inputBlocked === "string" && detail.inputBlocked.length > 0;
+});
+
 let taskDetailRequest = 0;
 async function loadTaskDetail(taskId: string): Promise<void> {
   const request = ++taskDetailRequest;
@@ -345,6 +356,10 @@ function dismissCommandHint() {
         <span>Tasks</span>
       </div>
       <TaskHeader v-if="!maximized && headerItem" :item="headerItem" />
+      <section v-if="inputBlocked" class="input-blocked" data-testid="input-blocked">
+        <p class="input-blocked-title">{{ $t('mainPanel.inputBlockedTitle') }}</p>
+        <p class="input-blocked-hint">{{ $t('mainPanel.inputBlockedHint') }}</p>
+      </section>
       <section v-if="parkedRevisionAvailable" class="revision-recovery" data-testid="revision-recovery">
         <div>
           <p class="revision-recovery-title">{{ $t('mainPanel.revisionExhaustedTitle') }}</p>
@@ -530,6 +545,25 @@ function dismissCommandHint() {
   min-width: 0;
   min-height: 0;
   background: var(--kn-bg-app);
+}
+
+.input-blocked {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--kn-warning);
+  background: var(--kn-warning-bg);
+}
+
+.input-blocked-title {
+  margin: 0;
+  color: var(--kn-text-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.input-blocked-hint {
+  margin: 2px 0 0;
+  color: var(--kn-text-muted);
+  font-size: 11px;
 }
 
 .revision-recovery {

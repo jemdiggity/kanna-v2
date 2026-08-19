@@ -110,6 +110,39 @@ fn apply_watcher_runtime_status(
     Ok(true)
 }
 
+/// Mirror the daemon's blocked-input verdict onto the task.
+///
+/// Returns whether anything changed. Publishing is the caller's job, as it is
+/// for runtime status: one daemon event can move several fields and the
+/// desktop only needs to be told once.
+fn apply_watcher_input_blocked(
+    state: &http_api::AppState,
+    session_id: &str,
+    logical_input_blocked: bool,
+) -> Result<bool, String> {
+    let db = crate::db::Db::open(&state.config().db_path)
+        .map_err(|error| format!("db error: {error}"))?;
+    let Some(task_id) = db
+        .resolve_pipeline_item_id(session_id)
+        .map_err(|error| format!("db error: {error}"))?
+    else {
+        return Ok(false);
+    };
+    let changed = db
+        .update_pipeline_item_input_blocked(
+            &task_id,
+            logical_input_blocked.then_some(http_api::INPUT_BLOCKED_INHERITED_DRAFT),
+        )
+        .map_err(|error| format!("db error: {error}"))?;
+    if changed && logical_input_blocked {
+        log::warn!(
+            "task {task_id} refuses delivered input: its agent session was inherited and its \
+             composer holds text this daemon never saw typed"
+        );
+    }
+    Ok(changed)
+}
+
 async fn reconcile_detached_terminal_status(
     state: &http_api::AppState,
     session_id: &str,
@@ -242,6 +275,22 @@ async fn terminal_state_watcher_once(
                         error
                     ),
                 }
+                // Every daemon generation is reconciled here, which matters
+                // for this field more than for status: a session becomes
+                // input-blocked at adoption, and this List is the first thing
+                // that runs against the daemon that adopted it.
+                match apply_watcher_input_blocked(
+                    state,
+                    &session.session_id,
+                    session.logical_input_blocked,
+                ) {
+                    Ok(blocked_changed) => changed |= blocked_changed,
+                    Err(error) => log::warn!(
+                        "failed to reconcile blocked input for {}: {}",
+                        session.session_id,
+                        error
+                    ),
+                }
                 if changed {
                     state.publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
                 }
@@ -296,6 +345,20 @@ async fn terminal_state_watcher_once(
                     state.publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
                 }
             }
+            DaemonEvent::InputBlockedChanged {
+                session_id,
+                logical_input_blocked,
+            } => match apply_watcher_input_blocked(state, &session_id, logical_input_blocked) {
+                Ok(true) => {
+                    state.publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks)
+                }
+                Ok(false) => {}
+                Err(error) => log::warn!(
+                    "failed to apply blocked input for {}: {}",
+                    session_id,
+                    error
+                ),
+            },
             DaemonEvent::Exit {
                 session_id,
                 code,
@@ -758,6 +821,112 @@ mod tests {
             !replacements.consume("task-child"),
             "replacement entry should have been consumed by the killed exit"
         );
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    /// A session that refuses delivered input reads as a perfectly healthy
+    /// idle task everywhere else, which is how a wedged merge singleton was
+    /// discovered only through an unrelated agent's stage failure. The
+    /// reconcile that runs against every daemon generation is what has to
+    /// catch it: a session becomes blocked at adoption, and adoption is
+    /// exactly when this List runs.
+    #[tokio::test]
+    async fn watcher_records_and_clears_refused_input_for_an_inherited_session() {
+        let unique = unique_name("terminal-watcher-input-blocked");
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        let config = test_config(&unique, &daemon_dir);
+        seed_plain_task(&config);
+        let replacements = session_replacements::SessionReplacements::default();
+        let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
+
+        let state = Arc::new(http_api::AppState::new(config.clone()));
+        let watcher_state = Arc::clone(&state);
+        let watcher_replacements = replacements.clone();
+        let watcher = tokio::spawn(async move {
+            terminal_state_watcher_once(&watcher_state, &watcher_replacements).await
+        });
+        let mut subscriber = expect_subscribe_with_sessions(
+            &listener,
+            vec![SessionInfo {
+                session_id: "task-child".to_string(),
+                pid: 42,
+                cwd: "/tmp".to_string(),
+                state: SessionState::Active,
+                idle_seconds: 0,
+                status: kanna_daemon::protocol::SessionStatus::Idle,
+                kind: Default::default(),
+                logical_input_blocked: true,
+            }],
+        )
+        .await;
+
+        let db = Db::open(&config.db_path).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if db
+                .get_pipeline_item_input_blocked("task-child")
+                .unwrap()
+                .as_deref()
+                == Some(http_api::INPUT_BLOCKED_INHERITED_DRAFT)
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the adopted session's refused input was never recorded"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let blocked_events: Vec<_> = db
+            .list_task_events(
+                &crate::db::TaskEventScope::Tasks(vec!["task-child".to_string()]),
+                0,
+                db.latest_task_event_seq().unwrap(),
+                100,
+            )
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.event_type == "task.input_blocked")
+            .collect();
+        assert_eq!(blocked_events.len(), 1);
+        assert_eq!(
+            blocked_events[0].payload["inputBlocked"],
+            serde_json::json!(http_api::INPUT_BLOCKED_INHERITED_DRAFT)
+        );
+
+        // Attestation on the daemon side clears it with no human involved.
+        write_event(
+            &mut subscriber,
+            &DaemonEvent::InputBlockedChanged {
+                session_id: "task-child".to_string(),
+                logical_input_blocked: false,
+            },
+        )
+        .await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if db
+                .get_pipeline_item_input_blocked("task-child")
+                .unwrap()
+                .is_none()
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the cleared block was never applied"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        write_event(&mut subscriber, &DaemonEvent::ShuttingDown).await;
+        timeout(Duration::from_secs(2), watcher)
+            .await
+            .expect("watcher did not finish")
+            .unwrap()
+            .unwrap();
+        drop(listener);
         let _ = std::fs::remove_file(socket_path);
         let _ = std::fs::remove_dir_all(daemon_dir);
     }
@@ -1281,6 +1450,7 @@ mod tests {
                         idle_seconds: 0,
                         status: kanna_daemon::protocol::SessionStatus::Idle,
                         kind: Default::default(),
+                        logical_input_blocked: false,
                     }],
                 },
             )
@@ -1371,6 +1541,7 @@ mod tests {
                     idle_seconds: 0,
                     status: kanna_daemon::protocol::SessionStatus::Busy,
                     kind: Default::default(),
+                    logical_input_blocked: false,
                 }],
             )
             .await;
@@ -1448,6 +1619,7 @@ mod tests {
                         idle_seconds: 0,
                         status: kanna_daemon::protocol::SessionStatus::Busy,
                         kind: Default::default(),
+                        logical_input_blocked: false,
                     }],
                 },
             )

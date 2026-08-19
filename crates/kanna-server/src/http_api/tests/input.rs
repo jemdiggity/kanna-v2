@@ -999,6 +999,7 @@ async fn send_task_input_rejects_a_finished_task_without_a_live_daemon_session()
                         idle_seconds: 0,
                         status: SessionStatus::Idle,
                         kind: Default::default(),
+                        logical_input_blocked: false,
                     }],
                 },
                 DaemonCommand::InputIfSession { .. } => DaemonEvent::Ok,
@@ -1123,6 +1124,7 @@ async fn send_task_input_delivers_to_a_live_session_after_a_finished_run() {
                         idle_seconds: 0,
                         status: SessionStatus::Idle,
                         kind: Default::default(),
+                        logical_input_blocked: false,
                     }],
                 },
                 DaemonCommand::SubmitInputIfSession { .. } => DaemonEvent::Ok,
@@ -1278,6 +1280,7 @@ async fn send_task_input_reports_daemon_write_failure_as_delivery_uncertain() {
                         idle_seconds: 0,
                         status: SessionStatus::Idle,
                         kind: Default::default(),
+                        logical_input_blocked: false,
                     }],
                 },
                 DaemonCommand::SubmitInputIfSession { .. } => DaemonEvent::Error {
@@ -1365,6 +1368,169 @@ async fn send_task_input_reports_daemon_write_failure_as_delivery_uncertain() {
     let db = Db::open(&config.db_path).unwrap();
     assert_eq!(db.count_task_inputs("task-write-failed").unwrap(), 0);
     drop(db);
+
+    let _ = std::fs::remove_file(socket_path);
+    let _ = std::fs::remove_dir_all(daemon_dir);
+    let _ = std::fs::remove_file(config.db_path);
+}
+
+/// The 2026-08-19 wedge, from the sender's side: the daemon refused the
+/// delivery, the caller got a 500 that read like a server fault, and the only
+/// record of the wedged singleton was inside the failing agent's own stage.
+/// The refusal is now its own answer, and the target carries it afterwards.
+#[tokio::test]
+async fn refused_input_reports_the_unblock_story_and_marks_the_target() {
+    use kanna_daemon::protocol::{
+        Command as DaemonCommand, ErrorCode, Event as DaemonEvent, SessionInfo, SessionState,
+        SessionStatus,
+    };
+    use tokio::io::{AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let unique = format!("task-input-blocked-{}", unique_test_suffix());
+    let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let daemon_server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut commands = Vec::new();
+        while commands.len() < 2 {
+            let command = read_test_daemon_command(&mut reader, &mut write_half).await;
+            let response = match &command {
+                DaemonCommand::List => DaemonEvent::SessionList {
+                    sessions: vec![SessionInfo {
+                        session_id: "task-merge".to_string(),
+                        pid: 42,
+                        cwd: "/tmp".to_string(),
+                        state: SessionState::Active,
+                        idle_seconds: 0,
+                        status: SessionStatus::Idle,
+                        kind: Default::default(),
+                        logical_input_blocked: true,
+                    }],
+                },
+                DaemonCommand::SubmitInputIfSession { .. } => DaemonEvent::Error {
+                    code: Some(ErrorCode::InheritedDraftStateUnknown),
+                    message: "logical input refused for session task-merge: this daemon \
+                              inherited the session and its composer holds text it never saw \
+                              typed"
+                        .to_string(),
+                },
+                other => panic!("unexpected daemon command: {other:?}"),
+            };
+            commands.push(command);
+            write_half
+                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+                .await
+                .unwrap();
+        }
+        commands
+    });
+
+    let config = merge_test_config(&unique, &daemon_dir);
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-merge",
+        "repo-1",
+        "Merge Master",
+        Some("Merge Master"),
+        "in progress",
+        "2026-08-19 04:00:00",
+    )
+    .unwrap();
+    db.insert_stage_run(crate::db::NewStageRun {
+        id: "run-live",
+        task_id: "task-merge",
+        stage: "in progress",
+        kind: "main",
+        agent: Some("merge"),
+        agent_provider: Some("claude"),
+        model: None,
+        effort: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("task-merge"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    drop(db);
+
+    let router = super::router(Arc::new(super::AppState::new(config.clone())));
+    let response = router
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks/task-merge/input")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "input": "MERGE task-743d8c3e -> main" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let failure: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(failure["reason"], "input_blocked");
+    assert!(
+        failure["message"]
+            .as_str()
+            .unwrap()
+            .contains("composer holds text it never saw typed"),
+        "the refusal must carry the daemon's own explanation: {failure}"
+    );
+    assert!(matches!(
+        daemon_server.await.unwrap().as_slice(),
+        [
+            DaemonCommand::List,
+            DaemonCommand::SubmitInputIfSession { .. }
+        ]
+    ));
+
+    let db = Db::open(&config.db_path).unwrap();
+    // Nothing reached the PTY, so nothing is recorded as delivered.
+    assert_eq!(db.count_task_inputs("task-merge").unwrap(), 0);
+    assert_eq!(
+        db.get_pipeline_item_input_blocked("task-merge")
+            .unwrap()
+            .as_deref(),
+        Some(crate::http_api::INPUT_BLOCKED_INHERITED_DRAFT)
+    );
+    let item = db.get_pipeline_item("task-merge").unwrap().unwrap();
+    assert_eq!(
+        item.activity.as_deref(),
+        Some("unread"),
+        "a wedged singleton must stop reading as a healthy idle task"
+    );
+    drop(db);
+
+    let response = router
+        .oneshot(
+            Request::get("/v1/tasks/task-merge")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let detail: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        detail["inputBlocked"],
+        serde_json::json!(crate::http_api::INPUT_BLOCKED_INHERITED_DRAFT)
+    );
 
     let _ = std::fs::remove_file(socket_path);
     let _ = std::fs::remove_dir_all(daemon_dir);

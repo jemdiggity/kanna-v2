@@ -589,6 +589,62 @@ describe("MainPanel", () => {
     expect(wrapper.find(".blocked-placeholder").exists()).toBe(false);
   });
 
+  it("says so when the task's agent session is refusing delivered messages", async () => {
+    fetchTaskDetailMock.mockResolvedValue({
+      id: "task-pending",
+      stage: "merge",
+      closedAt: null,
+      latestRun: null,
+      revisionRounds: 0,
+      revisionLimit: 3,
+      childTaskIds: [],
+      inputBlocked: "inherited-draft-unknown",
+    });
+    const { default: MainPanel } = await import("../MainPanel.vue");
+    const wrapper = mount(MainPanel, {
+      props: {
+        uiSlot: readySlot(durableTask({ activity: "idle" })),
+        hasRepos: true,
+      },
+      global: {
+        mocks: { $t: (key: string) => key },
+        stubs: {
+          TaskHeader: { template: '<div data-testid="task-header" />' },
+          TerminalTabs: { template: '<div data-testid="terminal-tabs" />' },
+        },
+      },
+    });
+
+    await flushPromises();
+
+    // The session is alive and idle, so nothing else on this screen says
+    // anything is wrong — this banner is the only thing that does.
+    expect(wrapper.find('[data-testid="input-blocked"]').exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("shows no refused-input banner for a task whose session accepts messages", async () => {
+    const { default: MainPanel } = await import("../MainPanel.vue");
+    const wrapper = mount(MainPanel, {
+      props: {
+        uiSlot: readySlot(durableTask({ activity: "idle" })),
+        hasRepos: true,
+      },
+      global: {
+        mocks: { $t: (key: string) => key },
+        stubs: {
+          TaskHeader: { template: '<div data-testid="task-header" />' },
+          TerminalTabs: { template: '<div data-testid="terminal-tabs" />' },
+        },
+      },
+    });
+
+    await flushPromises();
+
+    expect(wrapper.find('[data-testid="input-blocked"]').exists()).toBe(false);
+    wrapper.unmount();
+  });
+
   it.each([
     ["budget remains", 2, 3, "Parked for human review: waiting"],
     ["unlimited budget", 3, 0, "Parked for human review: waiting"],

@@ -439,6 +439,22 @@ pub(crate) async fn stream_output(
                         );
                     }
                 }
+                if stream_control.stop_requested() || session.is_retired() {
+                    log::info!("[stream] stopped retired reader session={}", session_id);
+                    stream_control.mark_stopped();
+                    return;
+                }
+                // An inherited session that nobody types into produces no
+                // output at all, so this tick — not a keystroke and not a
+                // chunk — is what has to resolve a wedged draft state.
+                if let Err(error) = session.attest_empty_composer().await {
+                    log::warn!(
+                        "[input] failed composer attestation for session {}: {}",
+                        session_id,
+                        error
+                    );
+                }
+                publish_input_blocked_transition(&session, &broadcast_tx, &session_id);
             }
         }
     }
@@ -806,6 +822,53 @@ async fn emit_status_changed(
                 resync_drained_subscribers(session_id, session, &fanout).await;
             }
         }
+    }
+}
+
+/// Announce a change in whether this session refuses logical input.
+///
+/// Broadcast only — this is kanna-server's signal, not a terminal client's, so
+/// it does not enter the per-session fanout. Edge-triggered against the
+/// session's own published value, so adoption of an unknown draft state, a
+/// human keystroke, and composer attestation all reach the server here without
+/// any of them holding a broadcast handle. A wedged session is otherwise
+/// silent — it is idle, it renders nothing new, and the first sign of it is an
+/// unrelated agent's delivery failing.
+fn publish_input_blocked_transition(
+    session: &Arc<SessionHandle>,
+    broadcast_tx: &broadcast::Sender<String>,
+    session_id: &str,
+) {
+    if session.is_retired() {
+        return;
+    }
+    let logical_input_blocked = match session.take_input_blocked_transition() {
+        Ok(Some(blocked)) => blocked,
+        Ok(None) => return,
+        Err(error) => {
+            log::warn!(
+                "[input] failed to read blocked-input transition for session {}: {:?}",
+                session_id,
+                error
+            );
+            return;
+        }
+    };
+    if logical_input_blocked {
+        log::warn!(
+            "[input] session {} refuses logical input: inherited draft state is unknown and its \
+             composer is not provably empty",
+            session_id
+        );
+    } else {
+        log::info!("[input] session {} accepts logical input again", session_id);
+    }
+    let event = Event::InputBlockedChanged {
+        session_id: session_id.to_string(),
+        logical_input_blocked,
+    };
+    if let Ok(json) = serde_json::to_string(&event) {
+        let _ = broadcast_tx.send(json);
     }
 }
 

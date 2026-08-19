@@ -149,6 +149,17 @@ pub struct TaskDetail {
     /// Optional only so a payload from a peer that predates the split still
     /// deserializes; this server always reports it.
     pub read_state: Option<String>,
+    /// Why messages delivered into this task's agent session are being
+    /// refused, or absent when they are not. `inherited-draft-unknown` means
+    /// the daemon adopted the session across a restart or handoff and its
+    /// composer holds text nobody here saw typed, so submitting would append
+    /// to an unsent line; the session is otherwise healthy and idle, which is
+    /// why neither `activity` nor `runtimeState` shows anything wrong. A
+    /// sender that sees this should stop retrying and say so: an empty
+    /// composer clears itself, and anything else needs a human at that
+    /// terminal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_blocked: Option<String>,
     pub snippet: Option<String>,
     pub waiting_prompt_snippet: Option<String>,
     pub agent_type: Option<String>,
@@ -980,6 +991,7 @@ fn map_task_detail(
         stage_transition,
         runtime_state: item.runtime_status,
         read_state: Some(read_state_for_activity(item.activity.as_deref()).to_string()),
+        input_blocked: item.input_blocked,
         activity: item.activity,
         snippet: waiting_prompt_snippet.clone(),
         waiting_prompt_snippet,

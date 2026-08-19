@@ -188,6 +188,10 @@ fn task_input_and_resume_descriptions_document_delivery_and_recovery_contracts()
         "no_live_agent_session",
         "kanna_resume_task",
         "kanna_rerun_stage",
+        // A refusal a caller cannot tell from a transient fault is a caller
+        // that retries forever against a session only a human can unblock.
+        "input_blocked",
+        "retrying changes nothing",
     ] {
         assert!(
             send_input.contains(required),
@@ -927,6 +931,7 @@ fn wait_events_documents_every_event_type_the_server_emits() {
         "task.merge_signaled",
         "task.merge_handoff_missing",
         "task.input_delivered",
+        "task.input_blocked",
         "task.transfer_finalizing",
     ] {
         assert!(

@@ -146,6 +146,9 @@ pub async fn agent_session_infos(agents: &AgentSessions) -> Vec<protocol::Sessio
                 idle_seconds: record.last_activity_at.elapsed().as_secs(),
                 status: record.status,
                 kind: protocol::SessionKind::Agent,
+                // Agent sessions carry no terminal composer: their input is
+                // structured NDJSON, never a draft that could be concatenated.
+                logical_input_blocked: false,
             }
         })
         .collect()

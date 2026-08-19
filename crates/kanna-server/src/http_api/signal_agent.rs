@@ -1,6 +1,5 @@
 use super::lan_trust::PrivilegedTaskAccess;
 use super::state::{db_write_error, AppState};
-use super::task_input::submit_task_input;
 use crate::config::Config;
 use crate::db::{Db, MergeSignalSource};
 use crate::task_creator::{PrepareTaskError, SingletonAgentOverrides};
@@ -215,7 +214,7 @@ pub(super) async fn ensure_merge_handoff_before_close(
         "approve post for {task_id} closed without signaling the merge master; \
          delivering the handoff for PR {pr_url}"
     );
-    deliver_merge_handoff(
+    let delivered = deliver_merge_handoff(
         Arc::clone(state),
         task_id.to_string(),
         crate::mobile_api::MergeHandoffRequest {
@@ -226,8 +225,31 @@ pub(super) async fn ensure_merge_handoff_before_close(
         },
         MergeSignalSource::Engine,
     )
-    .await
-    .map(|_| ())
+    .await;
+    let Err((status, reason)) = delivered else {
+        return Ok(());
+    };
+    // The backstop exists because the approve post cannot be trusted to have
+    // signalled; it must not itself fail quietly. The close is already
+    // abandoned by returning an error, but the task would otherwise park
+    // looking finished — mark it unread so its human meets it, and say in the
+    // log which delivery was refused rather than only that a close failed.
+    log::error!(
+        "the pre-close merge handoff for {task_id} was not delivered: {reason}; the task stays \
+         open at stage '{}'",
+        pending.stage
+    );
+    let record_state = Arc::clone(state);
+    let record_task_id = task_id.to_string();
+    super::blocking::run_handler_blocking("merge handoff refusal record", move || {
+        let db = Db::open(&record_state.config.db_path)
+            .map_err(|error| db_write_error("db error", error))?;
+        db.update_pipeline_item_activity(&record_task_id, "unread")
+            .map_err(|error| db_write_error("db error", error))
+    })
+    .await?;
+    state.publish_state_changed(StateChangeScope::Tasks);
+    Err((status, reason))
 }
 
 /// What the engine would send on the task's behalf, or `None` when the task
@@ -369,7 +391,37 @@ pub(super) async fn signal_agent_request(
                     format!("daemon error: {}", e),
                 )
             })?;
-        submit_task_input(&mut daemon, &running.session_id, &message).await?;
+        // A singleton that refuses delivered input is the one failure here
+        // that no retry fixes and that nothing else would ever surface: the
+        // agent is alive and idle, so it looks healthy everywhere, and the
+        // only trace of the refusal is inside whichever task happened to
+        // signal it. Record it on the singleton itself before answering.
+        if let Err(error) =
+            super::task_input::try_submit_task_input(&mut daemon, &running.session_id, &message)
+                .await
+        {
+            return Err(match error {
+                super::task_input::TaskInputError::InputBlocked(reason) => {
+                    super::task_input::record_input_blocked_target(&state, &running.session_id)
+                        .await;
+                    log::error!(
+                        "the {agent} agent for repo {repo_id} refuses delivered input: {reason}"
+                    );
+                    (axum::http::StatusCode::CONFLICT, reason)
+                }
+                super::task_input::TaskInputError::SessionNotFound => (
+                    axum::http::StatusCode::NOT_FOUND,
+                    format!("session not found: {}", running.session_id),
+                ),
+                super::task_input::TaskInputError::Uncertain(message) => (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    format!("terminal input delivery is uncertain: {message}"),
+                ),
+                super::task_input::TaskInputError::Other(message) => {
+                    (axum::http::StatusCode::INTERNAL_SERVER_ERROR, message)
+                }
+            });
+        }
         return Ok(SignalAgentResponse {
             task_id: running.task_id,
             created: false,

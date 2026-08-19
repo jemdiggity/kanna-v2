@@ -6,7 +6,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use crate::headless_terminal::HeadlessTerminal;
+use crate::headless_terminal::{ComposerState, HeadlessTerminal};
 use crate::protocol::{AgentProvider, SessionInfo, SessionState, SessionStatus};
 use crate::pty::PtySession;
 use kanna_daemon::terminal_perf::{self, TerminalPerfContext};
@@ -236,6 +236,11 @@ struct InputCoordinationState {
     raw_input_draft_active: bool,
     raw_input_draft_state_known: bool,
     logical_inputs: VecDeque<QueuedLogicalInput>,
+    /// The blocked value already published to subscribers. Every cause of a
+    /// change — adoption, a human keystroke, composer attestation — lands in
+    /// this struct, so one poller comparing against this field reports all of
+    /// them and none of the writers needs a broadcast handle.
+    published_input_blocked: bool,
 }
 
 struct QueuedLogicalInput {
@@ -248,6 +253,7 @@ impl InputCoordinationState {
         Self {
             raw_input_draft_active: record.raw_input_draft_active,
             raw_input_draft_state_known: record.raw_input_draft_state_known,
+            published_input_blocked: !record.raw_input_draft_state_known,
             logical_inputs: record
                 .pending_logical_inputs
                 .iter()
@@ -325,19 +331,35 @@ pub struct SessionHandle {
     retired: AtomicBool,
 }
 
+/// Hand every accepted-but-undispatched logical message to the writer, once
+/// the coordination state says nothing is holding them back. Shared by session
+/// construction and by composer attestation so a message accepted before a
+/// draft boundary can never be stranded by whichever path resolves it.
+fn dispatch_accepted_logical_inputs(
+    input_tx: &mpsc::UnboundedSender<PendingInput>,
+    state: &mut InputCoordinationState,
+) -> Result<(), InputQueueError> {
+    if !state.raw_input_draft_state_known || state.raw_input_draft_active {
+        return Ok(());
+    }
+    for logical_input in &mut state.logical_inputs {
+        if logical_input.dispatched {
+            continue;
+        }
+        input_tx
+            .send(PendingInput::logical(logical_input.data.clone()))
+            .map_err(|_| InputQueueError::Closed)?;
+        logical_input.dispatched = true;
+    }
+    Ok(())
+}
+
 impl SessionHandle {
     pub fn new(record: SessionRecord) -> Self {
         let (input_tx, input_rx) = mpsc::unbounded_channel();
         let mut input_coordination = InputCoordinationState::from_record(&record);
-        if input_coordination.raw_input_draft_state_known
-            && !input_coordination.raw_input_draft_active
-        {
-            for logical_input in &mut input_coordination.logical_inputs {
-                input_tx
-                    .send(PendingInput::logical(logical_input.data.clone()))
-                    .expect("new session input receiver must be open");
-                logical_input.dispatched = true;
-            }
+        if let Err(error) = dispatch_accepted_logical_inputs(&input_tx, &mut input_coordination) {
+            unreachable!("new session input receiver must be open: {error:?}");
         }
         Self {
             pty: Mutex::new(record.pty),
@@ -460,6 +482,78 @@ impl SessionHandle {
             logical_input.dispatched = true;
         }
         Ok(())
+    }
+
+    /// Whether this session currently refuses logical input because the draft
+    /// state it inherited is unknown.
+    ///
+    /// Reported as blocked when the coordination lock is unusable: that is the
+    /// state a caller would actually meet, and a "deliverable" answer that
+    /// every delivery then contradicts is worse than a pessimistic one.
+    pub fn logical_input_blocked(&self) -> bool {
+        self.input_coordination
+            .lock()
+            .map(|state| !state.raw_input_draft_state_known)
+            .unwrap_or(true)
+    }
+
+    /// Resolve inherited draft state from the terminal itself.
+    ///
+    /// The guard this lifts exists because a daemon that never watched a
+    /// terminal being typed into cannot know whether a half-typed line is
+    /// sitting at its prompt, and concatenating a logical message onto one
+    /// would submit a sentence nobody wrote. A frame that positively renders
+    /// the provider's own empty composer answers exactly that question, and
+    /// answers it more directly than the keystroke this used to wait for: an
+    /// empty composer holds no draft, so there is nothing to concatenate onto.
+    ///
+    /// Nothing is written to the PTY, nothing on screen is discarded, and the
+    /// transition is one-way — unknown to known-empty, never the reverse, and
+    /// never to "a draft is present". Anything the frame does not prove empty
+    /// stays blocked for a human. Returns whether this call resolved it.
+    pub async fn attest_empty_composer(
+        &self,
+    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        if !self.logical_input_blocked() {
+            return Ok(false);
+        }
+        let composer = {
+            let mut state = self.state.lock().await;
+            let provider = state.agent_provider;
+            state.headless_terminal.composer_state(provider)?
+        };
+        if composer != ComposerState::Empty {
+            return Ok(false);
+        }
+        let mut state = self
+            .input_coordination
+            .lock()
+            .map_err(|_| "terminal input coordination lock was poisoned")?;
+        if state.raw_input_draft_state_known {
+            return Ok(false);
+        }
+        state.raw_input_draft_state_known = true;
+        state.raw_input_draft_active = false;
+        dispatch_accepted_logical_inputs(&self.input_tx, &mut state)
+            .map_err(|error| format!("{error:?}"))?;
+        Ok(true)
+    }
+
+    /// The blocked-state change this session has not published yet, if any.
+    ///
+    /// Polled by the session's own status loop, which is the one task that
+    /// runs for every session whether or not anything is attached to it.
+    pub fn take_input_blocked_transition(&self) -> Result<Option<bool>, InputQueueError> {
+        let mut state = self
+            .input_coordination
+            .lock()
+            .map_err(|_| InputQueueError::CoordinationUnavailable)?;
+        let blocked = !state.raw_input_draft_state_known;
+        if blocked == state.published_input_blocked {
+            return Ok(None);
+        }
+        state.published_input_blocked = blocked;
+        Ok(Some(blocked))
     }
 
     pub fn complete_logical_input(&self) -> Result<(), InputQueueError> {
@@ -764,6 +858,7 @@ impl SessionHandle {
             idle_seconds,
             status,
             kind: crate::protocol::SessionKind::Pty,
+            logical_input_blocked: self.logical_input_blocked(),
         }
     }
 
@@ -1560,6 +1655,129 @@ mod tests {
             input_rx.recv().await.expect("logical retry").data,
             b"manager message"
         );
+        handle.kill().await.unwrap();
+    }
+
+    /// The wedge this exists to end: an inherited session that nobody has
+    /// typed into refuses every automated delivery, and before composer
+    /// attestation the only documented unblock was a human pressing Enter in
+    /// that agent's terminal. A frame that renders the provider's own empty
+    /// composer resolves it with no human and no bytes written.
+    #[tokio::test]
+    async fn inherited_unknown_draft_state_unblocks_from_a_provably_empty_composer() {
+        let mut record = spawn_test_record(AgentProvider::Claude, SessionStatus::Idle).unwrap();
+        record.raw_input_draft_state_known = false;
+        let handle = Arc::new(SessionHandle::new(record));
+        let mut input_rx = handle.take_input_rx().await.expect("input queue");
+
+        assert!(handle.logical_input_blocked());
+        assert!(matches!(
+            handle.enqueue_logical_input(b"manager message".to_vec()),
+            Err(super::InputQueueError::InheritedDraftStateUnknown)
+        ));
+
+        handle
+            .mirror_output(b"\x1b[2J\x1b[H* Done.\r\n\xe2\x9d\xaf \r\n", false)
+            .await
+            .expect("render an idle composer");
+
+        assert!(handle
+            .attest_empty_composer()
+            .await
+            .expect("attest the rendered composer"));
+        assert!(!handle.logical_input_blocked());
+        assert_eq!(
+            handle.take_input_blocked_transition().expect("transition"),
+            Some(false)
+        );
+
+        handle
+            .enqueue_logical_input(b"manager message".to_vec())
+            .expect("accept logical input after attestation");
+        let delivered = input_rx.recv().await.expect("logical delivery");
+        assert_eq!(delivered.kind, super::PendingInputKind::LogicalMessage);
+        assert_eq!(delivered.data, b"manager message");
+        assert!(
+            input_rx.try_recv().is_err(),
+            "attestation must write nothing of its own to the PTY"
+        );
+        handle.kill().await.unwrap();
+    }
+
+    /// Attestation resolves emptiness, never a draft. A composer holding text
+    /// this daemon never saw typed stays refused — that text belongs to
+    /// whoever wrote it, and nothing here may submit it or discard it.
+    #[tokio::test]
+    async fn inherited_composer_holding_text_stays_refused_and_is_never_submitted() {
+        let mut record = spawn_test_record(AgentProvider::Claude, SessionStatus::Idle).unwrap();
+        record.raw_input_draft_state_known = false;
+        let handle = Arc::new(SessionHandle::new(record));
+        let mut input_rx = handle.take_input_rx().await.expect("input queue");
+
+        handle
+            .mirror_output(
+                b"\x1b[2J\x1b[H* Done.\r\n\xe2\x9d\xaf half typed thought\r\n",
+                false,
+            )
+            .await
+            .expect("render a drafted composer");
+
+        assert!(!handle
+            .attest_empty_composer()
+            .await
+            .expect("read the rendered composer"));
+        assert!(handle.logical_input_blocked());
+        assert!(matches!(
+            handle.enqueue_logical_input(b"manager message".to_vec()),
+            Err(super::InputQueueError::InheritedDraftStateUnknown)
+        ));
+        assert!(
+            input_rx.try_recv().is_err(),
+            "a refused delivery must leave the inherited draft untouched"
+        );
+        assert_eq!(
+            handle.take_input_blocked_transition().expect("transition"),
+            None,
+            "a session that adopted blocked has already published that state"
+        );
+        handle.kill().await.unwrap();
+    }
+
+    /// A plain shell has no composer chrome to read, so the only thing that
+    /// can resolve its draft state remains an explicit producer boundary.
+    #[tokio::test]
+    async fn inherited_session_without_a_provider_is_never_attested() {
+        let mut record = spawn_test_record(AgentProvider::Claude, SessionStatus::Idle).unwrap();
+        record.agent_provider = None;
+        record.raw_input_draft_state_known = false;
+        let handle = Arc::new(SessionHandle::new(record));
+
+        handle
+            .mirror_output(b"\x1b[2J\x1b[H\xe2\x9d\xaf \r\n", false)
+            .await
+            .expect("render a prompt-shaped line");
+
+        assert!(!handle
+            .attest_empty_composer()
+            .await
+            .expect("read the rendered frame"));
+        assert!(handle.logical_input_blocked());
+        handle.kill().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_spawned_session_never_reports_blocked_input() {
+        let handle = spawn_test_handle(AgentProvider::Claude, SessionStatus::Idle).unwrap();
+
+        assert!(!handle.logical_input_blocked());
+        assert_eq!(
+            handle.take_input_blocked_transition().expect("transition"),
+            None
+        );
+        assert!(!handle
+            .attest_empty_composer()
+            .await
+            .expect("attestation is a no-op for a known session"));
         handle.kill().await.unwrap();
     }
 

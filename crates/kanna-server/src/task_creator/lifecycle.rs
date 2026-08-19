@@ -811,7 +811,14 @@ pub(crate) async fn dispatch_prepared_post_for_api(
         Err(TaskInputError::SessionNotFound) => {
             spawn_prepared_stage_run_for_api(db_path, daemon, replacements, prepared.fallback).await
         }
-        Err(TaskInputError::Other(message) | TaskInputError::Uncertain(message)) => Err(message),
+        // A blocked session is alive and refusing, so falling back to a fresh
+        // spawn would run the post twice against one live agent. Report the
+        // refusal — its message carries what unblocks it.
+        Err(
+            TaskInputError::Other(message)
+            | TaskInputError::Uncertain(message)
+            | TaskInputError::InputBlocked(message),
+        ) => Err(message),
     }
 }
 
@@ -2234,6 +2241,7 @@ mod teardown_deadline_tests {
                                 idle_seconds: 0,
                                 status: SessionStatus::Busy,
                                 kind: SessionKind::Pty,
+                                logical_input_blocked: false,
                             }],
                         };
                         write
@@ -2307,6 +2315,7 @@ mod teardown_deadline_tests {
                                 idle_seconds: 0,
                                 status: SessionStatus::Busy,
                                 kind: SessionKind::Pty,
+                                logical_input_blocked: false,
                             }],
                         };
                         write

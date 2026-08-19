@@ -281,6 +281,7 @@ mod tests {
             idle_seconds: 0,
             status: kanna_daemon::protocol::SessionStatus::Idle,
             kind,
+            logical_input_blocked: false,
         }
     }
 

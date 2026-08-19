@@ -237,7 +237,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "052_task_input_log");
+    assert_eq!(latest_migration, "053_pipeline_item_input_blocked");
     assert_eq!(
         index_columns(&db.conn, "idx_pipeline_item_parent_created_id"),
         vec!["parent_task_id", "created_at", "id"],
@@ -2907,6 +2907,7 @@ fn task_event_type_names_are_stable() {
             "task.merge_signaled",
             "task.merge_handoff_missing",
             "task.input_delivered",
+            "task.input_blocked",
             "task.transfer_finalizing",
         ]
     );

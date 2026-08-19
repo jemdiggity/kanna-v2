@@ -339,6 +339,8 @@
     "agentCopied": "Copied!",
     "commandHintPrefix": "Use",
     "commandHintSuffix": "to see available commands.",
+    "inputBlockedTitle": "Delivered messages are being refused",
+    "inputBlockedHint": "This agent's session was inherited by the current daemon and its composer holds text Kanna never saw typed, so nothing can be submitted into it. Open this terminal and submit or clear that line.",
     "revisionExhaustedTitle": "Automatic revisions exhausted",
     "revisionExhaustedHint": "This task is parked after {rounds} of {limit} automatic revision rounds.",
     "revise": "Revise",

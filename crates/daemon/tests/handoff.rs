@@ -157,6 +157,10 @@ enum Evt {
         session_id: String,
         status: SessionStatus,
     },
+    InputBlockedChanged {
+        session_id: String,
+        logical_input_blocked: bool,
+    },
     AgentSnapshot {
         session_id: String,
         next_seq: u64,
@@ -469,6 +473,55 @@ fn spawn_echo(conn: &mut ClientConn, id: &str) {
             Evt::SessionCreated { .. } => break,
             Evt::Output { .. } | Evt::StatusChanged { .. } => continue,
             other => panic!("expected SessionCreated, got: {:?}", other),
+        }
+    }
+}
+
+/// A session that paints provider frames and then parks, the way a singleton
+/// agent sits between requests. The script keeps the child alive, so the
+/// session stays adoptable and its raw input stays observable.
+fn spawn_provider_frame(
+    conn: &mut ClientConn,
+    id: &str,
+    provider: &str,
+    script: &str,
+    env: HashMap<String, String>,
+) {
+    conn.send(&Cmd::Spawn {
+        session_id: id.to_string(),
+        executable: "/bin/sh".to_string(),
+        args: vec!["-c".to_string(), script.to_string()],
+        cwd: "/tmp".to_string(),
+        env,
+        cols: 80,
+        rows: 24,
+        agent_provider: Some(provider.to_string()),
+        operator_input_only: false,
+    });
+    loop {
+        match conn.recv() {
+            Evt::SessionCreated { .. } => break,
+            Evt::Output { .. } | Evt::StatusChanged { .. } => continue,
+            other => panic!("expected SessionCreated, got: {:?}", other),
+        }
+    }
+}
+
+/// What `List` says about one session's refusal to accept logical input — the
+/// field kanna-server reconciles onto the task on every daemon generation.
+fn session_reports_blocked_input(conn: &mut ClientConn, session_id: &str) -> bool {
+    conn.send(&Cmd::List);
+    loop {
+        match conn.recv() {
+            Evt::SessionList { sessions } => {
+                let session = sessions
+                    .iter()
+                    .find(|session| session["session_id"] == session_id)
+                    .unwrap_or_else(|| panic!("{session_id} missing from List"));
+                return session["logical_input_blocked"] == Value::Bool(true);
+            }
+            Evt::Output { .. } | Evt::StatusChanged { .. } => continue,
+            other => panic!("expected SessionList, got: {other:?}"),
         }
     }
 }
@@ -1289,6 +1342,200 @@ fn shipped_v2_adoption_refuses_ambiguous_logical_input_until_explicit_boundary()
     assert!(!snapshot.vt.contains("protected draftmanager message"));
 
     drop(adopted);
+    drop(control);
+    drop(current);
+    drop(old);
+    cleanup(&dir);
+}
+
+/// The wedge from 2026-08-19: a singleton agent idle since before the current
+/// daemon adopted it refused every automated delivery — including Kanna's own
+/// pre-close merge-handoff backstop — and the only documented unblock was a
+/// human opening that terminal and pressing Enter.
+///
+/// The guard is unchanged: a composer holding text the daemon never saw typed
+/// still refuses, because submitting would append to someone else's unsent
+/// line. What changed is that an *empty* composer now answers the question the
+/// keystroke was being asked for, so the wedge ends without a human — and that
+/// a refusing session is visible before anything tries to deliver into it.
+#[test]
+fn shipped_v2_adoption_unblocks_a_provably_empty_composer_without_a_human() {
+    let Some(previous) = support::previous_daemon::binary_or_skip(
+        "shipped_v2_adoption_unblocks_a_provably_empty_composer_without_a_human",
+    ) else {
+        return;
+    };
+    let dir = test_dir("v2-empty-composer");
+    cleanup(&dir);
+    std::fs::create_dir_all(&dir).expect("create cross-version daemon directory");
+    let release_path = dir.join("release-composer");
+    let mut old = DaemonHandle::start_binary_in(&previous, &dir);
+
+    let mut release_env = HashMap::new();
+    release_env.insert(
+        "KANNA_HANDOFF_RELEASE".to_string(),
+        release_path.to_string_lossy().into_owned(),
+    );
+    let mut spawner = old.connect();
+    // Draws its composer only after the release marker, so the adopted session
+    // is still unresolved when the subscriber is listening and the frame that
+    // resolves it arrives with no keystroke behind it.
+    spawn_provider_frame(
+        &mut spawner,
+        "empty-composer",
+        "claude",
+        "printf 'Working on it'; while [ ! -f \"$KANNA_HANDOFF_RELEASE\" ]; do sleep 0.05; done; \
+         printf '\\033[2J\\033[HDone.\\r\\n\\342\\235\\257 '; exec /bin/cat",
+        release_env,
+    );
+    spawn_provider_frame(
+        &mut spawner,
+        "drafted-composer",
+        "claude",
+        "printf '\\033[2J\\033[HDone.\\r\\n\\342\\235\\257 half typed thought'; exec /bin/cat",
+        HashMap::new(),
+    );
+    drop(spawner);
+
+    let server_executable = std::fs::canonicalize(std::env::current_exe().unwrap())
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let current = DaemonHandle::start_in_with_env(
+        &dir,
+        &[("KANNA_SERVER_EXECUTABLE", server_executable.as_str())],
+    );
+    assert!(
+        wait_for_child_exit(&mut old.child, Duration::from_secs(10)).is_some(),
+        "v2 incumbent should exit after adoption"
+    );
+
+    let mut control = current.connect();
+    control.send(&Cmd::AuthorizeServer {
+        pid: std::process::id(),
+    });
+    assert!(matches!(control.recv(), Evt::Ok));
+    for session_id in ["empty-composer", "drafted-composer"] {
+        control.send(&Cmd::ClassifyInput {
+            session_id: session_id.to_string(),
+            operator_input_only: false,
+        });
+        assert!(matches!(control.recv(), Evt::Ok));
+        control.send(&Cmd::SubmitInput {
+            session_id: session_id.to_string(),
+            data: b"MERGE task-743d8c3e -> main".to_vec(),
+        });
+        assert!(
+            matches!(
+                control.recv(),
+                Evt::Error {
+                    code: Some(ErrorCode::InheritedDraftStateUnknown),
+                    ..
+                }
+            ),
+            "an inherited session must refuse until its composer is resolved"
+        );
+    }
+
+    // A refusing session is discoverable without attempting a delivery: this
+    // is what the server reconciles onto the task, so an operator meets a
+    // wedged singleton in the UI instead of in another agent's stage failure.
+    assert!(session_reports_blocked_input(
+        &mut control,
+        "empty-composer"
+    ));
+    assert!(session_reports_blocked_input(
+        &mut control,
+        "drafted-composer"
+    ));
+
+    let mut subscriber = current.connect();
+    subscriber.send(&Cmd::Subscribe);
+    assert!(matches!(subscriber.recv(), Evt::Ok));
+
+    // No attach, no keystroke, no human: the frame the agent draws on its own
+    // is the whole evidence.
+    std::fs::write(&release_path, b"go").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match subscriber.recv_with_timeout(Duration::from_millis(500)) {
+            Ok(Evt::InputBlockedChanged {
+                session_id,
+                logical_input_blocked,
+            }) => {
+                assert_eq!(session_id, "empty-composer");
+                assert!(!logical_input_blocked);
+                break;
+            }
+            Ok(_) => {}
+            Err(error) => assert!(
+                error.contains("read failed") || error.contains("timed out"),
+                "subscriber failed: {error}"
+            ),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "an inherited empty composer never announced that it accepts input again"
+        );
+    }
+    assert!(!session_reports_blocked_input(
+        &mut control,
+        "empty-composer"
+    ));
+
+    control.send(&Cmd::SubmitInput {
+        session_id: "empty-composer".to_string(),
+        data: b"MERGE task-743d8c3e -> main".to_vec(),
+    });
+    assert!(matches!(control.recv(), Evt::Ok));
+
+    control.send(&Cmd::SubmitInput {
+        session_id: "drafted-composer".to_string(),
+        data: b"MERGE task-743d8c3e -> main".to_vec(),
+    });
+    assert!(
+        matches!(
+            control.recv(),
+            Evt::Error {
+                code: Some(ErrorCode::InheritedDraftStateUnknown),
+                ..
+            }
+        ),
+        "a composer holding unexplained text must stay refused"
+    );
+    assert!(session_reports_blocked_input(
+        &mut control,
+        "drafted-composer"
+    ));
+
+    let mut adopted = current.connect();
+    attach(&mut adopted, "empty-composer");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let snapshot = request_snapshot(&mut adopted, "empty-composer");
+        if snapshot.vt.contains("MERGE task-743d8c3e") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the attested delivery never reached the PTY"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    attach(&mut adopted, "drafted-composer");
+    let snapshot = request_snapshot(&mut adopted, "drafted-composer");
+    assert!(
+        snapshot.vt.contains("half typed thought"),
+        "the inherited draft must survive untouched"
+    );
+    assert!(
+        !snapshot.vt.contains("MERGE task-743d8c3e"),
+        "a refused delivery must never reach a drafted composer"
+    );
+
+    drop(adopted);
+    drop(subscriber);
     drop(control);
     drop(current);
     drop(old);
