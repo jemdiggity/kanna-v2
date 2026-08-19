@@ -52,6 +52,7 @@ export interface DesktopServerClientHandlersForTests {
   unblockTask?: (taskId: string) => MaybePromise<void>;
   addRepo?: (input: AddDesktopRepoInput) => MaybePromise<DesktopRepoResponse>;
   fetchRepoKannaDefinitions?: (repoId: string) => MaybePromise<DesktopRepoKannaDefinitions>;
+  refreshRepoOrigin?: (repoId: string) => MaybePromise<DesktopRepoKannaDefinitions>;
   fetchRepoWorkflowDefinition?: (
     repoId: string,
     workflowName: string,
@@ -386,6 +387,23 @@ export async function fetchDesktopRepoKannaDefinitions(
   }
   return await requestJson<DesktopRepoKannaDefinitions>(
     `/v1/repos/${encodeURIComponent(repoId)}/kanna-definitions`,
+  );
+}
+
+/**
+ * Fetch the repo's `origin` and read back the definitions it now resolves to.
+ * This is the one definitions call that waits on the network, so callers run it
+ * beside a rendered UI rather than in front of one.
+ */
+export async function refreshDesktopRepoOrigin(
+  repoId: string,
+): Promise<DesktopRepoKannaDefinitions> {
+  if (clientHandlersForTests?.refreshRepoOrigin) {
+    return await clientHandlersForTests.refreshRepoOrigin(repoId);
+  }
+  return await requestJson<DesktopRepoKannaDefinitions>(
+    `/v1/repos/${encodeURIComponent(repoId)}/fetch-origin`,
+    { method: "POST" },
   );
 }
 

@@ -14,6 +14,7 @@ import {
   fetchDesktopRepoAgentProviders,
   fetchDesktopRepoKannaDefinitions,
   fetchDesktopRepoRecentWorkflows,
+  refreshDesktopRepoOrigin,
 } from "../services/desktopServerClient";
 import { resolveStickyWorkflowDefault } from "../utils/stickyWorkflow";
 import type { useKannaStore } from "../stores/kanna";
@@ -118,6 +119,84 @@ export function useAppTaskCreation({
     });
   }
 
+  /**
+   * Read every choice the new-task modal offers for a local repo. Definitions
+   * come from the refs already on disk, so this never waits on the network.
+   * Returns null when a newer open superseded this one.
+   */
+  async function readLocalRepoOptions(
+    targetRepo: { id: string },
+    repoPath: string,
+    loadGeneration: number,
+  ): Promise<NewTaskOptionsSnapshot | null> {
+    const [manifest, defaultBranch, baseBranches, repoAgentProviders, recentWorkflows] = await Promise.all([
+      fetchDesktopRepoKannaDefinitions(targetRepo.id).catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error("[App] failed to load repo definitions for new task modal:", error);
+        if (loadGeneration === newTaskOptionsLoadGeneration && showNewTaskModal.value) {
+          toast.error(`${t("toasts.repoDefinitionsFailed")}: ${message}`);
+        }
+        return null;
+      }),
+      invoke<string>("git_default_branch", { repoPath }).catch((error) => {
+        console.debug("[App] failed to read default branch for new task modal:", error);
+        return "";
+      }),
+      invoke<string[]>("git_list_base_branches", { repoPath }).catch((error) => {
+        console.debug("[App] failed to list base branches for new task modal:", error);
+        return [] as string[];
+      }),
+      fetchDesktopRepoAgentProviders(targetRepo.id).catch((error) => {
+        console.debug("[App] failed to resolve repo agent providers for new task modal:", error);
+        return undefined;
+      }),
+      // Sticky workflow default. Losing it is not worth failing the modal
+      // over — an empty history falls back to the repo's configured default.
+      fetchDesktopRepoRecentWorkflows(targetRepo.id).catch((error) => {
+        console.debug("[App] failed to read recently used workflows for new task modal:", error);
+        return [] as string[];
+      }),
+    ]);
+    if (loadGeneration !== newTaskOptionsLoadGeneration || !showNewTaskModal.value) return null;
+    const availableWorkflowNames = manifest?.workflows ?? [];
+    return {
+      availableAgentProviders: repoAgentProviders,
+      availableWorkflows: availableWorkflowNames,
+      defaultWorkflowName: resolveStickyWorkflowDefault(
+        availableWorkflowNames,
+        recentWorkflows,
+        manifest?.defaultWorkflow,
+      ),
+      availableBaseBranches: baseBranches,
+      defaultBaseBranchName:
+        getDefaultBaseBranch(baseBranches, defaultBranch || "main") || undefined,
+      repoDefaultBranchName: defaultBranch || undefined,
+    };
+  }
+
+  /**
+   * Fetch the repo's origin, then re-read the modal's choices from the refs it
+   * installed. A failure is left to the debug log: the choices already on
+   * screen came from the same refs and stay usable.
+   */
+  async function refreshNewTaskOptionsFromOrigin(
+    targetRepo: { id: string },
+    repoPath: string,
+    loadGeneration: number,
+  ): Promise<void> {
+    try {
+      await refreshDesktopRepoOrigin(targetRepo.id);
+    } catch (error) {
+      console.debug("[App] failed to refresh repo origin for new task modal:", error);
+      return;
+    }
+    if (loadGeneration !== newTaskOptionsLoadGeneration || !showNewTaskModal.value) return;
+    const snapshot = await readLocalRepoOptions(targetRepo, repoPath, loadGeneration);
+    if (!snapshot) return;
+    newTaskOptionsCache.set(targetRepo.id, snapshot);
+    applyNewTaskOptions(snapshot);
+  }
+
   async function openNewTaskModal(repoId?: string) {
     const loadGeneration = ++newTaskOptionsLoadGeneration;
     const targetRepoId = repoId ?? store.selectedRepoId ?? (sidebarRepos.value.length === 1 ? sidebarRepos.value[0]?.id : undefined);
@@ -135,51 +214,16 @@ export function useAppTaskCreation({
     const repoPath = targetRepo?.path;
     try {
       if (repoPath) {
-        const [manifest, defaultBranch, baseBranches, repoAgentProviders, recentWorkflows] = await Promise.all([
-          fetchDesktopRepoKannaDefinitions(targetRepo.id).catch((error: unknown) => {
-            const message = error instanceof Error ? error.message : String(error);
-            console.error("[App] failed to load repo definitions for new task modal:", error);
-            if (loadGeneration === newTaskOptionsLoadGeneration && showNewTaskModal.value) {
-              toast.error(`${t("toasts.repoDefinitionsFailed")}: ${message}`);
-            }
-            return null;
-          }),
-          invoke<string>("git_default_branch", { repoPath }).catch((error) => {
-            console.debug("[App] failed to read default branch for new task modal:", error);
-            return "";
-          }),
-          invoke<string[]>("git_list_base_branches", { repoPath }).catch((error) => {
-            console.debug("[App] failed to list base branches for new task modal:", error);
-            return [] as string[];
-          }),
-          fetchDesktopRepoAgentProviders(targetRepo.id).catch((error) => {
-            console.debug("[App] failed to resolve repo agent providers for new task modal:", error);
-            return undefined;
-          }),
-          // Sticky workflow default. Losing it is not worth failing the modal
-          // over — an empty history falls back to the repo's configured default.
-          fetchDesktopRepoRecentWorkflows(targetRepo.id).catch((error) => {
-            console.debug("[App] failed to read recently used workflows for new task modal:", error);
-            return [] as string[];
-          }),
-        ]);
-        if (loadGeneration !== newTaskOptionsLoadGeneration || !showNewTaskModal.value) return;
-        const availableWorkflowNames = manifest?.workflows ?? [];
-        const snapshot: NewTaskOptionsSnapshot = {
-          availableAgentProviders: repoAgentProviders,
-          availableWorkflows: availableWorkflowNames,
-          defaultWorkflowName: resolveStickyWorkflowDefault(
-            availableWorkflowNames,
-            recentWorkflows,
-            manifest?.defaultWorkflow,
-          ),
-          availableBaseBranches: baseBranches,
-          defaultBaseBranchName:
-            getDefaultBaseBranch(baseBranches, defaultBranch || "main") || undefined,
-          repoDefaultBranchName: defaultBranch || undefined,
-        };
+        const snapshot = await readLocalRepoOptions(targetRepo, repoPath, loadGeneration);
+        if (!snapshot) return;
         newTaskOptionsCache.set(targetRepo.id, snapshot);
         applyNewTaskOptions(snapshot);
+        // Workflows and base branches both come from remote-tracking refs, and
+        // no read path fetches any more. Bring them up to date beside the open
+        // modal rather than in front of it: the operator can pick from what is
+        // already on disk while this lands, and the modal keeps any choice they
+        // have already made.
+        void refreshNewTaskOptionsFromOrigin(targetRepo, repoPath, loadGeneration);
       } else if (isCloudOnlyRepoId(targetRepoId)) {
         const cloudRepo = remoteSnapshot.value.repos.find((repo) => repo.id === targetRepoId);
         const remoteUrl = cloudRepo?.remote_url ?? null;
