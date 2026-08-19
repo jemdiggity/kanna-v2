@@ -52,3 +52,26 @@ It becomes executable with no new harness work: with a compatible dev client
 installed and the standard `KANNA_E2E_*` smoke fixture environment present,
 `pnpm --filter @kanna/mobile test:e2e:smoke` exercises the swipe, the revealed
 action, the canonical server state, and now the resulting row order.
+
+## Follow-up (2026-08-19): closing a revealed row
+
+The owner then reported the other half of the gesture: a row that had been
+swiped open stayed open, and a separate rightward swipe did nothing — only one
+continuous left-then-right drag closed it. The gesture treated the closed
+position as the only starting position: `shouldBeginTaskRowSwipe` claimed
+leftward drags only, so a touch that began on an open row was never the row's
+to take, and both the translation and the released resting position were
+measured from `0` rather than from where the row rested. The helpers now take
+that resting offset, and the row snapshots it on `onPanResponderGrant`.
+
+Two close affordances ship: a rightward swipe that brings the row back inside
+the reveal threshold, and a tap on the card itself, which a revealed row
+consumes to close instead of opening the task. Tapping *another* row does not
+close this one — rows do not know about each other, and a list-wide open-row
+owner is more than this defect asks for.
+
+The physical-gesture limitation above is unchanged, so the coverage is again
+the gesture config React Native is handed:
+`src/components/SwipeableTaskCard.test.tsx` (a separate closing gesture, a
+rightward drag that stays open, and the tap that closes before it opens) and
+`src/components/taskPinSwipe.test.ts` (the offset-aware helpers).

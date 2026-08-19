@@ -53,12 +53,26 @@ const gesture = (dx: number, dy = 0) =>
   ({ dx, dy }) as never;
 const gestureEvent = {} as never;
 
-function swipeOpen(dx = -70): void {
+/** One complete touch: grant, drag by `dx`, release. */
+function swipe(dx: number): void {
   const config = gestureConfig();
   act(() => {
+    config.onPanResponderGrant?.(gestureEvent, gesture(dx));
     config.onPanResponderMove?.(gestureEvent, gesture(dx));
     config.onPanResponderRelease?.(gestureEvent, gesture(dx));
   });
+}
+
+function swipeOpen(dx = -70): void {
+  swipe(dx);
+}
+
+function actionRevealed(renderer: ReactTestRenderer, uiId: string): boolean {
+  return (
+    renderer.root.findByProps({
+      testID: MOBILE_E2E_IDS.taskPinAction(uiId)
+    }).props.importantForAccessibility === "yes"
+  );
 }
 
 async function renderCard(
@@ -169,6 +183,83 @@ describe("SwipeableTaskCard", () => {
         testID: MOBILE_E2E_IDS.taskPinAction("task-1")
       }).props.importantForAccessibility
     ).toBe("no-hide-descendants");
+  });
+
+  it("closes a revealed row with a separate rightward gesture", async () => {
+    const renderer = await renderCard(vi.fn().mockResolvedValue(undefined));
+    const config = gestureConfig();
+
+    swipeOpen();
+    expect(actionRevealed(renderer, "task-1")).toBe(true);
+
+    // The revealed row is a resting position, so the closing drag arrives as
+    // its own touch — the row has to claim it in the direction that closes.
+    expect(
+      config.onMoveShouldSetPanResponderCapture?.(gestureEvent, gesture(60, 5))
+    ).toBe(true);
+    expect(
+      config.onMoveShouldSetPanResponder?.(gestureEvent, gesture(60, 5))
+    ).toBe(true);
+
+    swipe(60);
+    expect(actionRevealed(renderer, "task-1")).toBe(false);
+
+    // Closed again, a rightward drag has nothing to act on and goes back to
+    // whatever encloses the row.
+    expect(
+      config.onMoveShouldSetPanResponderCapture?.(gestureEvent, gesture(60, 5))
+    ).toBe(false);
+  });
+
+  it("keeps a revealed row open for a rightward drag that stays past the threshold", async () => {
+    const renderer = await renderCard(vi.fn().mockResolvedValue(undefined));
+
+    swipeOpen();
+    swipe(20);
+
+    expect(actionRevealed(renderer, "task-1")).toBe(true);
+  });
+
+  it("consumes the first tap on a revealed row to close it", async () => {
+    if (!SwipeableTaskCard) throw new Error("SwipeableTaskCard was not loaded");
+    const onPress = vi.fn();
+    const task: TaskSummary = {
+      id: "task-1",
+      repoId: "repo-1",
+      title: "Pin this task",
+      stage: "in progress",
+      pinned: false
+    };
+    let renderer: ReactTestRenderer | null = null;
+    await act(async () => {
+      renderer = create(
+        <SwipeableTaskCard
+          isSubtask={false}
+          repoLabel={null}
+          task={task}
+          uiId="task-1"
+          onPress={onPress}
+          onTogglePin={vi.fn().mockResolvedValue(undefined)}
+        />
+      );
+    });
+    if (!renderer) throw new Error("SwipeableTaskCard did not render");
+    const card = (renderer as ReactTestRenderer).root.findByProps({
+      testID: MOBILE_E2E_IDS.taskListItem("task-1")
+    });
+
+    swipeOpen();
+    act(() => {
+      card.props.onPress();
+    });
+    expect(onPress).not.toHaveBeenCalled();
+    expect(actionRevealed(renderer as ReactTestRenderer, "task-1")).toBe(false);
+
+    // Closed, the card opens the task again.
+    act(() => {
+      card.props.onPress();
+    });
+    expect(onPress).toHaveBeenCalledTimes(1);
   });
 
   it("does not release the reveal for a short, undecided drag", async () => {

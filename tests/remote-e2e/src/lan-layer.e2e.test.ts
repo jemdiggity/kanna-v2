@@ -142,6 +142,88 @@ describe("LAN task loop E2E", () => {
     await expect(listOrder()).resolves.toEqual(unpinnedOrder);
   }, 120_000);
 
+  it("keeps a pin the desktop recorded when a pre-pin snapshot lands after it", async () => {
+    const pinned = await createScriptedTask(harness, {
+      displayName: "LAN pin race task",
+      repoName: "LAN pin race repo"
+    });
+    const other = await createSiblingTask(
+      harness,
+      pinned.repoId,
+      "LAN pin race sibling"
+    );
+    const transport = createLanClient(harness);
+    const desktopClient = createKannaClient(transport);
+    // The snapshot a read that starts after the pin can still answer from: a
+    // shared in-flight LAN read, the composed client's cached snapshot, or a
+    // cloud index that has not republished yet. Replaying a pre-pin one on
+    // demand is the same interleaving without the timing.
+    let prePinSnapshot: {
+      recentTasks: TaskSummary[];
+      repoTasks: TaskSummary[];
+    } | null = null;
+    const client = {
+      ...desktopClient,
+      listRecentTasks: async () =>
+        prePinSnapshot?.recentTasks ?? desktopClient.listRecentTasks(),
+      listRepoTasks: async (repoId: string) =>
+        prePinSnapshot?.repoTasks ?? desktopClient.listRepoTasks(repoId)
+    };
+    const store = createSessionStore();
+    const controller = createMobileController(client, store);
+    const listOrder = (): string[] =>
+      orderRepoTaskSlots(
+        projectTaskUiSlots(store.getState().repoTasks, [])
+      ).map((slot) => slot.taskId ?? slot.slotId);
+
+    try {
+      await controller.bootstrap();
+      await controller.selectRepo(pinned.repoId);
+      expect(listOrder()).toHaveLength(2);
+      expect(listOrder()).toContain(other);
+
+      const staleRecentTasks = await desktopClient.listRecentTasks();
+      const staleRepoTasks = await desktopClient.listRepoTasks(pinned.repoId);
+
+      await controller.setTaskPinned(pinned.taskId, true);
+      // The desktop really recorded it, so nothing the phone shows next may
+      // take the pin back off.
+      await expect(
+        desktopClient.listRepoTasks(pinned.repoId)
+      ).resolves.toContainEqual(
+        expect.objectContaining({ id: pinned.taskId, pinned: true })
+      );
+
+      prePinSnapshot = {
+        recentTasks: staleRecentTasks,
+        repoTasks: staleRepoTasks
+      };
+      await controller.refresh();
+      expect(
+        store.getState().repoTasks.find((task) => task.id === pinned.taskId)
+      ).toMatchObject({ pinned: true });
+      expect(listOrder()[0]).toBe(pinned.taskId);
+
+      // The first snapshot that does reflect the write hands the columns back
+      // to the desktop, `pinOrder` included.
+      prePinSnapshot = null;
+      await controller.refresh();
+      expect(
+        store.getState().repoTasks.find((task) => task.id === pinned.taskId)
+      ).toMatchObject({ pinned: true, pinOrder: 0 });
+      expect(listOrder()[0]).toBe(pinned.taskId);
+
+      // And an unpin made anywhere else is no longer fought.
+      await desktopClient.unpinTask(pinned.taskId);
+      await controller.refresh();
+      expect(
+        store.getState().repoTasks.find((task) => task.id === pinned.taskId)
+      ).toMatchObject({ pinned: false });
+    } finally {
+      controller.dispose();
+    }
+  }, 120_000);
+
   it("creates a local pairing session with LAN endpoint and five-minute expiry", async () => {
     const transport = createLanClient(harness);
     const before = Date.now();
