@@ -1,12 +1,24 @@
 import React from "react";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { TaskSummary } from "../lib/api/types";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
+const nativeHarness = vi.hoisted(() => ({
+  panResponderConfigs: [] as Array<
+    Record<string, ((...args: never[]) => unknown) | undefined>
+  >
+}));
+
 vi.mock("react-native", () => ({
+  PanResponder: {
+    create: vi.fn((config) => {
+      nativeHarness.panResponderConfigs.push(config);
+      return { panHandlers: { "data-pan-handlers": true } };
+    })
+  },
   Pressable: "Pressable",
   StyleSheet: {
     create: <T extends Record<string, unknown>>(styles: T) => styles
@@ -22,6 +34,32 @@ let SwipeableTaskCard:
 beforeAll(async () => {
   SwipeableTaskCard = (await import("./SwipeableTaskCard")).SwipeableTaskCard;
 });
+
+beforeEach(() => {
+  nativeHarness.panResponderConfigs.length = 0;
+});
+
+/** The gesture config the row handed to React Native for this render. */
+function gestureConfig(): Record<
+  string,
+  ((...args: never[]) => unknown) | undefined
+> {
+  const config = nativeHarness.panResponderConfigs.at(-1);
+  if (!config) throw new Error("The row did not create a pan responder");
+  return config;
+}
+
+const gesture = (dx: number, dy = 0) =>
+  ({ dx, dy }) as never;
+const gestureEvent = {} as never;
+
+function swipeOpen(dx = -70): void {
+  const config = gestureConfig();
+  act(() => {
+    config.onPanResponderMove?.(gestureEvent, gesture(dx));
+    config.onPanResponderRelease?.(gestureEvent, gesture(dx));
+  });
+}
 
 async function renderCard(
   onTogglePin: (pinned: boolean) => Promise<void>,
@@ -81,29 +119,25 @@ function dismissCardElement(onDismiss: () => Promise<void>) {
   );
 }
 
-function touch(pageX: number, pageY: number) {
-  return { nativeEvent: { pageX, pageY } };
-}
-
 describe("SwipeableTaskCard", () => {
   it("reveals Pin for a deliberate horizontal swipe but yields to scrolling", async () => {
     const renderer = await renderCard(vi.fn().mockResolvedValue(undefined));
-    const responder = renderer.root.findAllByType("View").find(
-      (node) => typeof node.props.onTouchStart === "function"
-    );
-    if (!responder) throw new Error("Swipe responder was not rendered");
+    const config = gestureConfig();
 
-    act(() => responder.props.onTouchStart(touch(200, 100)));
+    // A mostly-vertical drag stays with the enclosing task ScrollView.
     expect(
-      responder.props.onMoveShouldSetResponderCapture(touch(190, 80))
+      config.onMoveShouldSetPanResponderCapture?.(gestureEvent, gesture(-10, -20))
     ).toBe(false);
+    // A deliberate left drag takes the gesture, even though the card's own
+    // Pressable already holds the responder.
     expect(
-      responder.props.onMoveShouldSetResponderCapture(touch(130, 95))
+      config.onMoveShouldSetPanResponderCapture?.(gestureEvent, gesture(-60, 5))
     ).toBe(true);
-    act(() => {
-      responder.props.onResponderMove(touch(130, 95));
-      responder.props.onResponderRelease(touch(130, 95));
-    });
+    expect(
+      config.onMoveShouldSetPanResponder?.(gestureEvent, gesture(-60, 5))
+    ).toBe(true);
+
+    swipeOpen();
 
     const action = renderer.root.findByProps({
       testID: MOBILE_E2E_IDS.taskPinAction("task-1")
@@ -112,15 +146,52 @@ describe("SwipeableTaskCard", () => {
     expect(action.props.importantForAccessibility).toBe("yes");
   });
 
-  it("offers a visible non-swipe action and reports failures inline", async () => {
+  it("keeps the swipe once it starts and closes the row when it is cancelled", async () => {
+    const renderer = await renderCard(vi.fn().mockResolvedValue(undefined));
+    const config = gestureConfig();
+
+    // The row never hands the touch back, so a scroll container cannot
+    // reclaim it half-way through the reveal.
+    expect(config.onPanResponderTerminationRequest?.()).toBe(false);
+
+    swipeOpen();
+    expect(
+      renderer.root.findByProps({
+        testID: MOBILE_E2E_IDS.taskPinAction("task-1")
+      }).props.importantForAccessibility
+    ).toBe("yes");
+
+    act(() => {
+      config.onPanResponderTerminate?.(gestureEvent, gesture(-70));
+    });
+    expect(
+      renderer.root.findByProps({
+        testID: MOBILE_E2E_IDS.taskPinAction("task-1")
+      }).props.importantForAccessibility
+    ).toBe("no-hide-descendants");
+  });
+
+  it("does not release the reveal for a short, undecided drag", async () => {
+    const renderer = await renderCard(vi.fn().mockResolvedValue(undefined));
+    swipeOpen(-20);
+
+    expect(
+      renderer.root.findByProps({
+        testID: MOBILE_E2E_IDS.taskPinAction("task-1")
+      }).props.importantForAccessibility
+    ).toBe("no-hide-descendants");
+  });
+
+  it("pins from the revealed action and reports failures inline", async () => {
     const onTogglePin = vi.fn().mockRejectedValue(new Error("offline"));
     const renderer = await renderCard(onTogglePin);
-    const button = renderer.root.findByProps({
-      testID: MOBILE_E2E_IDS.taskPinButton("task-1")
-    });
+    swipeOpen();
 
+    const action = renderer.root.findByProps({
+      testID: MOBILE_E2E_IDS.taskPinAction("task-1")
+    });
     await act(async () => {
-      button.props.onPress({ stopPropagation: vi.fn() });
+      action.props.onPress();
       await Promise.resolve();
     });
 
@@ -132,6 +203,45 @@ describe("SwipeableTaskCard", () => {
     expect(error.props.children).toBe("offline");
   });
 
+  it("carries pin as a row accessibility action instead of a pin button", async () => {
+    const onTogglePin = vi.fn().mockResolvedValue(undefined);
+    const renderer = await renderCard(onTogglePin);
+
+    // Swiping is the only pin affordance: no pin button survives on the card.
+    expect(
+      renderer.root.findAllByProps({ testID: "mobile.task-pin-button.task-1" })
+    ).toHaveLength(0);
+
+    const card = renderer.root.findByProps({
+      testID: MOBILE_E2E_IDS.taskListItem("task-1")
+    });
+    expect(card.props.accessibilityActions).toEqual([
+      { name: "pin", label: "Pin" }
+    ]);
+    await act(async () => {
+      card.props.onAccessibilityAction({ nativeEvent: { actionName: "pin" } });
+      await Promise.resolve();
+    });
+    expect(onTogglePin).toHaveBeenCalledWith(true);
+  });
+
+  it("offers unpin to assistive technology once the task is pinned", async () => {
+    const onTogglePin = vi.fn().mockResolvedValue(undefined);
+    const renderer = await renderCard(onTogglePin, true);
+
+    const card = renderer.root.findByProps({
+      testID: MOBILE_E2E_IDS.taskListItem("task-1")
+    });
+    expect(card.props.accessibilityActions).toEqual([
+      { name: "unpin", label: "Unpin" }
+    ]);
+    await act(async () => {
+      card.props.onAccessibilityAction({ nativeEvent: { actionName: "unpin" } });
+      await Promise.resolve();
+    });
+    expect(onTogglePin).toHaveBeenCalledWith(false);
+  });
+
   it("reveals Dismiss for a deliberate swipe and exposes a non-swipe fallback", async () => {
     if (!SwipeableTaskCard) throw new Error("SwipeableTaskCard was not loaded");
     const onDismiss = vi.fn().mockResolvedValue(undefined);
@@ -140,22 +250,14 @@ describe("SwipeableTaskCard", () => {
       renderer = create(dismissCardElement(onDismiss));
     });
     if (!renderer) throw new Error("SwipeableTaskCard did not render");
-    const responder = renderer.root.findAllByType("View").find(
-      (node) => typeof node.props.onTouchStart === "function"
-    );
-    if (!responder) throw new Error("Swipe responder was not rendered");
-
-    act(() => responder.props.onTouchStart(touch(200, 100)));
+    const config = gestureConfig();
     expect(
-      responder.props.onMoveShouldSetResponderCapture(touch(190, 70))
+      config.onMoveShouldSetPanResponderCapture?.(gestureEvent, gesture(-10, -30))
     ).toBe(false);
     expect(
-      responder.props.onMoveShouldSetResponderCapture(touch(125, 96))
+      config.onMoveShouldSetPanResponderCapture?.(gestureEvent, gesture(-75, 4))
     ).toBe(true);
-    act(() => {
-      responder.props.onResponderMove(touch(125, 96));
-      responder.props.onResponderRelease(touch(125, 96));
-    });
+    swipeOpen(-75);
 
     const swipeAction = renderer.root.findByProps({
       testID: MOBILE_E2E_IDS.activityDismissAction("task-activity")
@@ -210,7 +312,7 @@ describe("SwipeableTaskCard", () => {
       pendingLabel: "Unpinning…"
     }
   ])(
-    "keeps $pendingLabel on both actions after the optimistic task rerender",
+    "keeps $pendingLabel on the revealed action after the optimistic task rerender",
     async ({ initialPinned, requestedPinned, pendingLabel }) => {
       let resolveRequest: (() => void) | null = null;
       const request = new Promise<void>((resolve) => {
@@ -218,16 +320,8 @@ describe("SwipeableTaskCard", () => {
       });
       const onTogglePin = vi.fn().mockReturnValue(request);
       const renderer = await renderCard(onTogglePin, initialPinned);
-      const responder = renderer.root.findAllByType("View").find(
-        (node) => typeof node.props.onTouchStart === "function"
-      );
-      if (!responder) throw new Error("Swipe responder was not rendered");
+      swipeOpen();
 
-      act(() => {
-        responder.props.onTouchStart(touch(200, 100));
-        responder.props.onResponderMove(touch(130, 95));
-        responder.props.onResponderRelease(touch(130, 95));
-      });
       const action = renderer.root.findByProps({
         testID: MOBILE_E2E_IDS.taskPinAction("task-1")
       });
@@ -249,18 +343,6 @@ describe("SwipeableTaskCard", () => {
         disabled: true
       });
       expect(pendingAction.findByType("Text").props.children).toBe(pendingLabel);
-
-      const pendingButton = renderer.root.findByProps({
-        testID: MOBILE_E2E_IDS.taskPinButton("task-1")
-      });
-      expect(pendingButton.props.accessibilityLabel).toBe(
-        `${pendingLabel} Pin this task`
-      );
-      expect(pendingButton.props.accessibilityState).toEqual({
-        busy: true,
-        disabled: true
-      });
-      expect(pendingButton.findByType("Text").props.children).toBe(pendingLabel);
 
       await act(async () => {
         resolveRequest?.();
