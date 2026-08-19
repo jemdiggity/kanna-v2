@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useRef, useState } from "react";
 import {
   PanResponder,
   Pressable,
@@ -18,8 +18,15 @@ import {
   shouldRevealTaskRowAction
 } from "./taskRowSwipe";
 
-function beginsSwipe(gestureState: PanResponderGestureState): boolean {
-  return shouldBeginTaskRowSwipe({ dx: gestureState.dx, dy: gestureState.dy });
+function beginsSwipe(
+  gestureState: PanResponderGestureState,
+  offset: number
+): boolean {
+  return shouldBeginTaskRowSwipe({
+    dx: gestureState.dx,
+    dy: gestureState.dy,
+    offset
+  });
 }
 
 interface SwipeableTaskCardProps {
@@ -46,6 +53,17 @@ export function SwipeableTaskCard({
   const [pinError, setPinError] = useState<string | null>(null);
   const [dismissPending, setDismissPending] = useState(false);
   const [dismissError, setDismissError] = useState<string | null>(null);
+  // A revealed row rests there until something closes it, so the gesture
+  // config — which `PanResponder` builds once — has to read the position the
+  // next touch starts from rather than assume the row is closed. Refs carry
+  // it: state alone would be a value the memoized handlers captured while the
+  // row was still closed.
+  const restingOffsetRef = useRef(0);
+  const gestureStartOffsetRef = useRef(0);
+  const moveTo = (offset: number) => {
+    restingOffsetRef.current = offset;
+    setSwipeOffset(offset);
+  };
   // The row lives inside the vertical task ScrollView and wraps a pressable
   // card, so the gesture has to win a real responder negotiation against both.
   // `PanResponder` is the API that does that: it derives the displacement from
@@ -57,21 +75,28 @@ export function SwipeableTaskCard({
     () =>
       PanResponder.create({
         onMoveShouldSetPanResponder: (_event, gestureState) =>
-          beginsSwipe(gestureState),
+          beginsSwipe(gestureState, restingOffsetRef.current),
         onMoveShouldSetPanResponderCapture: (_event, gestureState) =>
-          beginsSwipe(gestureState),
+          beginsSwipe(gestureState, restingOffsetRef.current),
+        onPanResponderGrant: () => {
+          gestureStartOffsetRef.current = restingOffsetRef.current;
+        },
         onPanResponderMove: (_event, gestureState) => {
-          setSwipeOffset(clampTaskRowSwipe(gestureState.dx));
+          moveTo(
+            clampTaskRowSwipe(gestureState.dx, gestureStartOffsetRef.current)
+          );
         },
         onPanResponderRelease: (_event, gestureState) => {
-          setSwipeOffset(
-            shouldRevealTaskRowAction(gestureState.dx)
-              ? -TASK_ROW_ACTION_WIDTH
-              : 0
+          const released = clampTaskRowSwipe(
+            gestureState.dx,
+            gestureStartOffsetRef.current
+          );
+          moveTo(
+            shouldRevealTaskRowAction(released) ? -TASK_ROW_ACTION_WIDTH : 0
           );
         },
         onPanResponderTerminate: () => {
-          setSwipeOffset(0);
+          moveTo(0);
         },
         onPanResponderTerminationRequest: () => false
       }),
@@ -102,6 +127,17 @@ export function SwipeableTaskCard({
     );
   }
 
+  // A revealed row is modal over its own content: the first tap on the card
+  // closes it rather than opening the task, which is the other half of the
+  // close affordance the swipe-right gesture provides.
+  const pressCard = () => {
+    if (actionRevealed) {
+      moveTo(0);
+      return;
+    }
+    onPress();
+  };
+
   const togglePin = async () => {
     if (!onTogglePin) return;
     if (pendingPinned !== null) return;
@@ -110,7 +146,7 @@ export function SwipeableTaskCard({
     setPinError(null);
     try {
       await onTogglePin(nextPinned);
-      setSwipeOffset(0);
+      moveTo(0);
     } catch (error) {
       setPinError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -123,7 +159,7 @@ export function SwipeableTaskCard({
     setDismissError(null);
     try {
       await onDismiss();
-      setSwipeOffset(0);
+      moveTo(0);
     } catch (error) {
       setDismissError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -199,7 +235,7 @@ export function SwipeableTaskCard({
           repoLabel={repoLabel}
           task={task}
           uiId={uiId}
-          onPress={onPress}
+          onPress={pressCard}
         />
       </View>
     </View>
