@@ -19,6 +19,9 @@ describe("buildDevPlan", () => {
     expect(plan.windows.map((window) => window.name)).toEqual(["desktop"]);
     expect(plan.windows[0]?.cwd).toBe("/repo/apps/desktop");
     expect(plan.windows[0]?.command).toContain("pnpm run build:sidecars");
+    // A dev build produces a runnable app, so the Tauri build script must keep
+    // treating unstaged externalBin sidecars as fatal.
+    expect(plan.windows[0]?.command).toContain("KANNA_REQUIRE_SIDECARS=1 ");
   });
 
   it("prefixes desktop command with E2E agent override environment", () => {
