@@ -337,6 +337,97 @@ describe("createMobileController", () => {
     });
   });
 
+  it("keeps a written pin until a snapshot reflects it", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+    await controller.bootstrap();
+
+    await controller.setTaskPinned("task-1", true);
+
+    // A read that begins after the write can still answer from a snapshot
+    // taken before it — a shared in-flight LAN read, the composed client's
+    // cached snapshot, or a cloud index that has not republished. The pin the
+    // server already recorded must not go back out with it.
+    const prePinTask: TaskSummary = {
+      id: "task-1",
+      repoId: "repo-1",
+      title: "Refactor mobile shell",
+      stage: "in progress",
+      pinned: false,
+      pinOrder: null
+    };
+    client.listRecentTasks.mockResolvedValueOnce([prePinTask]);
+    client.listRepoTasks.mockResolvedValueOnce([prePinTask]);
+    await controller.refresh();
+
+    expect(store.getState().repoTasks[0]).toMatchObject({
+      id: "task-1",
+      pinned: true,
+      pinOrder: 0
+    });
+    expect(store.getState().recentTasks[0]).toMatchObject({
+      id: "task-1",
+      pinned: true
+    });
+
+    // The snapshot that does reflect the write hands the columns back to the
+    // server, including the `pinOrder` it assigned.
+    const pinnedTask: TaskSummary = {
+      ...prePinTask,
+      pinned: true,
+      pinOrder: 3
+    };
+    client.listRecentTasks.mockResolvedValueOnce([pinnedTask]);
+    client.listRepoTasks.mockResolvedValueOnce([pinnedTask]);
+    await controller.refresh();
+    expect(store.getState().repoTasks[0]).toMatchObject({
+      id: "task-1",
+      pinned: true,
+      pinOrder: 3
+    });
+
+    // And an unpin made anywhere else is no longer fought.
+    client.listRecentTasks.mockResolvedValueOnce([prePinTask]);
+    client.listRepoTasks.mockResolvedValueOnce([prePinTask]);
+    await controller.refresh();
+    expect(store.getState().repoTasks[0]).toMatchObject({
+      id: "task-1",
+      pinned: false,
+      pinOrder: null
+    });
+  });
+
+  it("stops holding a pin the write never landed", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    client.pinTask.mockRejectedValueOnce(new Error("relay unavailable"));
+    const controller = createMobileController(client, store);
+    await controller.bootstrap();
+
+    await expect(controller.setTaskPinned("task-1", true)).rejects.toThrow(
+      "Could not pin task: relay unavailable"
+    );
+
+    const unpinnedTask: TaskSummary = {
+      id: "task-1",
+      repoId: "repo-1",
+      title: "Refactor mobile shell",
+      stage: "in progress",
+      pinned: false,
+      pinOrder: null
+    };
+    client.listRecentTasks.mockResolvedValueOnce([unpinnedTask]);
+    client.listRepoTasks.mockResolvedValueOnce([unpinnedTask]);
+    await controller.refresh();
+
+    expect(store.getState().repoTasks[0]).toMatchObject({
+      id: "task-1",
+      pinned: false,
+      pinOrder: null
+    });
+  });
+
   it("dismisses exactly the visible activity revision without removing the task", async () => {
     const store = createSessionStore();
     const client = createClientMock();

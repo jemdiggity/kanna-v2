@@ -467,6 +467,87 @@ describe("createSessionStore", () => {
     ]);
   });
 
+  it("holds a written pin against pre-write snapshots until one reflects it", () => {
+    const store = createSessionStore();
+    const unpinned = {
+      id: "task-1",
+      repoId: "repo-1",
+      title: "Refactor mobile shell",
+      stage: "in progress",
+      pinned: false,
+      pinOrder: null
+    };
+    const slot = buildCreatingTaskUiSlot({
+      slotId: pendingTaskCreation.slotId,
+      repoId: pendingTaskCreation.repoId,
+      prompt: pendingTaskCreation.prompt,
+      desktopId: pendingTaskCreation.desktopId,
+      agentProvider: pendingTaskCreation.agentProvider
+    });
+    store.addTaskUiSlot(slot);
+    store.acknowledgeTaskUiSlot(slot.slotId, unpinned);
+    store.setRecentTasks([unpinned]);
+    store.setRepoTasks([unpinned]);
+    store.setSearchResults("refactor", [unpinned]);
+    store.reconcileTaskUiSlots([unpinned], { authoritative: true });
+
+    store.setTaskPinIntent("task-1", true, 0);
+
+    // Every collection a pre-write snapshot can land in keeps the pin.
+    store.setRecentTasks([unpinned]);
+    store.setRepoTasks([unpinned]);
+    store.setSearchResults("refactor", [unpinned]);
+    store.reconcileTaskUiSlots([unpinned], { authoritative: true });
+    const held = store.getState();
+    expect(held.recentTasks[0]).toMatchObject({ pinned: true, pinOrder: 0 });
+    expect(held.repoTasks[0]).toMatchObject({ pinned: true, pinOrder: 0 });
+    expect(held.searchResults[0]).toMatchObject({ pinned: true, pinOrder: 0 });
+    expect(held.taskUiSlots[0]).toMatchObject({
+      state: "ready",
+      task: { pinned: true, pinOrder: 0 }
+    });
+
+    // Feeding a collection the store itself stamped back in is not a
+    // confirmation — the repo slice is projected from the recent snapshot
+    // before the repo read lands.
+    store.setRepoTasks([...store.getState().recentTasks]);
+    store.setRecentTasks([unpinned]);
+    expect(store.getState().recentTasks[0]).toMatchObject({ pinned: true });
+
+    // The snapshot that does reflect the write hands the columns back.
+    const pinned = { ...unpinned, pinned: true, pinOrder: 4 };
+    store.setRecentTasks([pinned]);
+    expect(store.getState().recentTasks[0]).toMatchObject({
+      pinned: true,
+      pinOrder: 4
+    });
+    store.setRecentTasks([unpinned]);
+    expect(store.getState().recentTasks[0]).toMatchObject({
+      pinned: false,
+      pinOrder: null
+    });
+  });
+
+  it("drops a pin intent the write never landed", () => {
+    const store = createSessionStore();
+    const unpinned = {
+      id: "task-1",
+      repoId: "repo-1",
+      title: "Refactor mobile shell",
+      stage: "in progress",
+      pinned: false,
+      pinOrder: null
+    };
+    store.setRecentTasks([unpinned]);
+
+    store.setTaskPinIntent("task-1", true, 0);
+    store.clearTaskPinIntent("task-1");
+    store.setTaskPinState("task-1", false, null);
+
+    store.setRecentTasks([unpinned]);
+    expect(store.getState().recentTasks[0]).toMatchObject({ pinned: false });
+  });
+
   it("sets a pending task creation attempt and phase atomically", () => {
     const store = createSessionStore();
 

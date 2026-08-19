@@ -2241,8 +2241,12 @@ export function createMobileController(
       taskPinFlights.add(task.id);
       // Reject collection reads that began before this mutation so a stale
       // repo response cannot immediately overwrite the optimistic pin state.
+      // That guard only dates the read, not the data it carries: a read that
+      // starts after this write can still answer from a snapshot taken before
+      // it. The pin intent is what survives that one — the store holds this
+      // value until a snapshot agrees with it (see `setTaskPinIntent`).
       taskCollectionsRevision += 1;
-      store.setTaskPinState(task.id, pinned, pinned ? 0 : null);
+      store.setTaskPinIntent(task.id, pinned, pinned ? 0 : null);
       try {
         if (pinned) {
           await client.pinTask(task.id);
@@ -2250,6 +2254,9 @@ export function createMobileController(
           await client.unpinTask(task.id);
         }
       } catch (error) {
+        // The write failed, so there is nothing to hold: the server state is
+        // whatever it was, and the row says so instead of reverting silently.
+        store.clearTaskPinIntent(task.id);
         store.setTaskPinState(task.id, previousPinned, previousPinOrder);
         const action = pinned ? "pin" : "unpin";
         const detail = error instanceof Error ? error.message : String(error);
