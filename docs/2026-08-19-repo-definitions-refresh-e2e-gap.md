@@ -41,27 +41,53 @@ re-resolving definitions for every reload: it fills in repos the stage-order
 cache has never seen, and re-reads them all only for a `repos`-scoped
 `StateChanged`, a reconnect, or cold start.
 
-## Why there is no E2E test
+## What the E2E covers
 
-Two of the load-bearing assertions are negative ones about traffic: after a
-task-activity change the desktop must not issue
-`GET /v1/repos/{id}/kanna-definitions`, and that route must not run `git fetch`.
-The mock E2E harness drives the app through WebDriver and asserts on rendered
-DOM and DB rows; it has no request recorder for desktop→server calls and no way
-to observe which Git commands the server ran, so neither is expressible today.
+`apps/desktop/tests/e2e/mock/new-task-modal.test.ts` — "offers a workflow
+pushed to origin after the modal is already on screen" drives the whole flow
+against the real server, stubbing nothing:
 
-What would make them testable: a request-log endpoint or in-process counter on
+- a second clone of the fixture's bare origin publishes a new
+  `.kanna/workflows/<name>.json`, so it is reachable at origin and absent from
+  the imported repo's remote-tracking ref;
+- the modal's `POST /fetch-origin` is held by a `globalThis.fetch` gate, and
+  the picker is asserted to render without the new workflow — the refs on disk
+  are what it offers, before anything reaches the network;
+- with the refresh still held, the operator picks a workflow that is not the
+  repo's default;
+- the refresh is released, and the new workflow appears among
+  `[data-testid^="workflow-option-"]`. It can only get there through a real
+  `fetch-origin` round trip and re-read, and the operator's pick is still
+  selected afterwards.
+
+## What is still not covered
+
+**That `GET /v1/repos/{id}/kanna-definitions` does not run `git fetch`.** This
+is server-internal. The harness can observe request paths — the gates in
+`new-task-modal.test.ts` record them from a `globalThis.fetch` wrapper — but
+not which subprocesses the server ran while serving one, so "this route did not
+shell out to Git" has no expression at that boundary. It is covered a layer
+down instead, in `definition_source.rs` and `http_api/tests/repo_definitions.rs`
+(below).
+
+**That a task-activity change issues no definitions request.** This one *is*
+expressible with the same fetch recorder, and is deliberately not written: it
+would need a suite that provokes a task-activity `StateChanged` and asserts the
+absence of a request over a window, and the store-level tests already pin the
+decision that produces it. Recorded here as a chosen gap rather than an
+impossible one.
+
+What would close the first: a request-log endpoint or in-process counter on
 `kanna-server` (definitions requests served, `git fetch` invocations) readable
-from the existing `execDb`/`callVueMethod` helpers, so a test could snapshot the
-counts, fire a task activity change or open the new-task modal, and assert on
-what moved.
+from the existing `execDb`/`callVueMethod` helpers, so an E2E could snapshot the
+counts and assert on what moved.
 
 ## What covers it meanwhile
 
-- `crates/kanna-server/src/http_api/tests/repo_definitions.rs` — the full
-  contract at the HTTP boundary against real Git fixtures: a workflow pushed to
-  origin stays invisible to the manifest route even on a cold cache, and
-  `fetch-origin` returns it and leaves the cache serving it.
+- `crates/kanna-server/src/http_api/tests/repo_definitions.rs` — the contract at
+  the HTTP boundary against real Git fixtures: a workflow pushed to origin stays
+  invisible to the manifest route even on a cold cache, and `fetch-origin`
+  returns it and leaves the cache serving it.
 - `crates/kanna-server/src/task_creator/definition_source.rs` tests — a local
   resolve reads the pre-push ref while origin is reachable (which is what proves
   no fetch ran), plus reads, listings, Git tree ordering including a name that
@@ -73,15 +99,21 @@ what moved.
 - `apps/desktop/src/stores/kanna.querySnapshot.test.ts` and `init.test.ts` — a
   plain reload keeps cached definitions, a `repos`-scoped change forces a
   re-read, a newly appearing repo is resolved regardless.
-- `apps/desktop/tests/e2e/mock/stage-order.test.ts` still covers the
-  user-visible half: an imported repo's stage order renders from its committed
-  config.
+- `apps/desktop/tests/e2e/mock/stage-order.test.ts` — an imported repo's stage
+  order renders from its committed config.
 
 ## Known trade-off
 
 A `stage_order` edit pushed to a repo's `.kanna/config.json` reaches the sidebar
-on cold start, repo add/rename, reconnect, or the next new-task modal open for
-that repo — not within the server's 30 s definition TTL as a side effect of
-unrelated task activity. Nothing notifies the server that a repo's committed
-config moved, so the old freshness came from re-resolving on traffic that had
-nothing to do with definitions.
+on cold start, repo add/rename, or stream reconnect — not within the server's
+30 s definition TTL as a side effect of unrelated task activity. Nothing
+notifies the server that a repo's committed config moved, so the old freshness
+came from re-resolving on traffic that had nothing to do with definitions.
+
+Opening the new-task modal does **not** close that gap, despite fetching origin
+for the same repo. `stageOrderCache` is written only by `refreshStageOrderCache`
+in `stores/queries.ts`, which runs from `reloadSnapshot` alone, and a non-forced
+reload skips a repo already in the cache. The modal's own re-read
+(`readLocalRepoOptions`) keeps workflows and base branches and discards
+`config.stage_order`, so it freshens the server-side cache without ever
+reaching the sidebar's.
