@@ -24,6 +24,7 @@ import type {
   TaskFileContent,
   TaskFileMentionInput,
   TaskFileMentionResolution,
+  TaskInputAttachment,
   TaskDetail,
   TaskSummary,
   WritePathHealth,
@@ -852,12 +853,16 @@ export function createRemoteTransport({
         }
       }
     },
-    sendTaskInput: async (taskId: string, input: string) => {
+    sendTaskInput: async (
+      taskId: string,
+      input: string,
+      attachment?: TaskInputAttachment
+    ) => {
       await requestTask<void>(
         taskId,
         "POST",
         (localTaskId) => `/v1/tasks/${encodeURIComponent(localTaskId)}/input`,
-        { input }
+        attachment ? { input, attachment } : { input }
       );
     },
     readTaskFile: (taskId: string, path: string) =>

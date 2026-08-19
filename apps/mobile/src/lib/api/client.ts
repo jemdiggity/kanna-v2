@@ -22,6 +22,7 @@ import type {
   TaskFileContent,
   TaskFileMentionInput,
   TaskFileMentionResolution,
+  TaskInputAttachment,
   TaskDetail,
   TaskSummary
 } from "./types";
@@ -121,7 +122,11 @@ export interface KannaTransport {
     expectedActivityRevision?: number
   ): Promise<TaskActivityResponse>;
   closeTask(taskId: string): Promise<void>;
-  sendTaskInput(taskId: string, input: string): Promise<void>;
+  sendTaskInput(
+    taskId: string,
+    input: string,
+    attachment?: TaskInputAttachment
+  ): Promise<void>;
   readTaskFile(taskId: string, path: string): Promise<TaskFileContent>;
   resolveTaskFileMentions(
     taskId: string,
@@ -166,7 +171,11 @@ export interface KannaClient {
     expectedActivityRevision?: number
   ): Promise<TaskActivityResponse>;
   closeTask(taskId: string): Promise<void>;
-  sendTaskInput(taskId: string, input: string): Promise<void>;
+  sendTaskInput(
+    taskId: string,
+    input: string,
+    attachment?: TaskInputAttachment
+  ): Promise<void>;
   readTaskFile(taskId: string, path: string): Promise<TaskFileContent>;
   resolveTaskFileMentions(
     taskId: string,
@@ -261,7 +270,10 @@ export function createKannaClient(transport: KannaTransport): KannaClient {
     markTaskRead: (taskId, expectedActivityRevision) =>
       transport.markTaskRead(taskId, expectedActivityRevision),
     closeTask: (taskId) => transport.closeTask(taskId),
-    sendTaskInput: (taskId, input) => transport.sendTaskInput(taskId, input),
+    sendTaskInput: (taskId, input, attachment) =>
+      attachment
+        ? transport.sendTaskInput(taskId, input, attachment)
+        : transport.sendTaskInput(taskId, input),
     readTaskFile: (taskId, path) => transport.readTaskFile(taskId, path),
     resolveTaskFileMentions: (taskId, mentions) =>
       transport.resolveTaskFileMentions(taskId, mentions),

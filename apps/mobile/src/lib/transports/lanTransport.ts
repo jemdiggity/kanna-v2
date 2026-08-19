@@ -22,6 +22,7 @@ import type {
   TaskFileContent,
   TaskFileMentionInput,
   TaskFileMentionResolution,
+  TaskInputAttachment,
   TaskDetail,
   TaskSummary
 } from "../api/types";
@@ -216,11 +217,15 @@ export function createLanTransport(
       request<void>(`/v1/tasks/${encodeURIComponent(taskId)}/actions/close`, {
         method: "POST"
       }),
-    sendTaskInput: (taskId: string, input: string) =>
+    sendTaskInput: (
+      taskId: string,
+      input: string,
+      attachment?: TaskInputAttachment
+    ) =>
       request<void>(`/v1/tasks/${encodeURIComponent(taskId)}/input`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ input })
+        body: JSON.stringify(attachment ? { input, attachment } : { input })
       }),
     readTaskFile: async (_taskId: string, _path: string): Promise<TaskFileContent> => {
       throw new Error(

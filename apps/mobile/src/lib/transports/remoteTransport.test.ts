@@ -2114,6 +2114,52 @@ describe("remote transport", () => {
     });
   });
 
+  it("carries a photo attachment to the owner desktop in the same relayed body", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue(null);
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => null,
+      invokeDesktop,
+      listCloudTasks: async () => [
+        {
+          id: "cloud-task-1",
+          repoId: "repo-1",
+          title: "Cloud task",
+          stage: "in progress",
+          ownerDesktopId: "desktop-owner",
+          ownerLocalTaskId: "local-task-1",
+          ownerOnline: true
+        }
+      ]
+    });
+
+    await transport.listRecentTasks();
+    invokeDesktop.mockClear();
+    await expect(
+      transport.sendTaskInput("cloud-task-1", "look at this", {
+        fileName: "IMG_4821.jpg",
+        mediaType: "image/jpeg",
+        dataBase64: "AQID"
+      })
+    ).resolves.toBeUndefined();
+
+    // The relay tunnels a desktop invocation as JSON, so the image travels
+    // base64-in-body — the same shape the LAN transport posts.
+    expect(invokeDesktop).toHaveBeenCalledWith({
+      desktopId: "desktop-owner",
+      method: "POST",
+      path: "/v1/tasks/local-task-1/input",
+      body: {
+        input: "look at this",
+        attachment: {
+          fileName: "IMG_4821.jpg",
+          mediaType: "image/jpeg",
+          dataBase64: "AQID"
+        }
+      }
+    });
+  });
+
   it("resolves a cloud task route before observing an uncached terminal", async () => {
     const subscription = {
       close: vi.fn(),

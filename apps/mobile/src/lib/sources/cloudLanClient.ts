@@ -1450,9 +1450,11 @@ export function createCloudLanClient(
         removeMatchingProvisionalRoutes(route.desktopId, route.taskId);
       }
     },
-    sendTaskInput: (taskId, input) =>
+    sendTaskInput: (taskId, input, attachment) =>
       invokeTaskRoute(taskId, (client, routedTaskId) =>
-        client.sendTaskInput(routedTaskId, input)
+        attachment
+          ? client.sendTaskInput(routedTaskId, input, attachment)
+          : client.sendTaskInput(routedTaskId, input)
       ),
     readTaskFile: async (taskId, path): Promise<TaskFileContent> => {
       const route = routeForTask(taskId);

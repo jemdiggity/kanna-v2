@@ -184,6 +184,22 @@ export interface TaskFileContent {
   content: string;
 }
 
+/**
+ * One image sent with a task input.
+ *
+ * Base64 in the JSON body on purpose, and identically on both transports: the
+ * relay carries a desktop invocation as a JSON message and the LAN client
+ * posts JSON to the same route, so a single encoding means one server handler,
+ * one durable record, and one thing to test. See
+ * `lib/attachments/imageAttachmentBudget.ts` for the size budget that keeps
+ * the payload small enough for that to be a good trade.
+ */
+export interface TaskInputAttachment {
+  fileName: string;
+  mediaType: string;
+  dataBase64: string;
+}
+
 export interface TaskFileMentionInput {
   path: string;
   line?: number;

@@ -1049,4 +1049,50 @@ describe("createLanTransport", () => {
       expect.objectContaining({ type: "error" })
     );
   });
+  it("posts a photo attachment in the task-input body and omits the field without one", async () => {
+    const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
+      ok: true,
+      status: 204,
+      json: async () => undefined
+    });
+    const transport = createLanTransport("http://127.0.0.1:48120", fetchImpl);
+
+    await expect(
+      transport.sendTaskInput("task-1", "look at this", {
+        fileName: "IMG_4821.jpg",
+        mediaType: "image/jpeg",
+        dataBase64: "AQID"
+      })
+    ).resolves.toBeUndefined();
+    await expect(
+      transport.sendTaskInput("task-1", "continue")
+    ).resolves.toBeUndefined();
+
+    expect(fetchImpl).toHaveBeenNthCalledWith(
+      1,
+      "http://127.0.0.1:48120/v1/tasks/task-1/input",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          input: "look at this",
+          attachment: {
+            fileName: "IMG_4821.jpg",
+            mediaType: "image/jpeg",
+            dataBase64: "AQID"
+          }
+        })
+      }
+    );
+    // An input with no photo stays byte-for-byte the request it always was.
+    expect(fetchImpl).toHaveBeenNthCalledWith(
+      2,
+      "http://127.0.0.1:48120/v1/tasks/task-1/input",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ input: "continue" })
+      }
+    );
+  });
 });

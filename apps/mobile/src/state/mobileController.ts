@@ -9,6 +9,7 @@ import type {
   TaskFileContent,
   TaskFileMentionInput,
   TaskFileMentionResolution,
+  TaskInputAttachment,
   TaskSummary
 } from "../lib/api/types";
 import type {
@@ -99,7 +100,11 @@ export interface MobileController {
     mentions: readonly TaskFileMentionInput[]
   ): Promise<TaskFileMentionResolution>;
   readTaskDiff(taskId: string, request?: TaskDiffRequest): Promise<TaskDiffContent>;
-  sendTaskInput(taskId: string, input: string): Promise<void>;
+  sendTaskInput(
+    taskId: string,
+    input: string,
+    attachment?: TaskInputAttachment
+  ): Promise<void>;
   sendTaskTerminalInput(taskId: string, dataB64: string): void;
   resizeTaskTerminal(taskId: string, cols: number, rows: number): void;
   sendTaskAgentPermission(taskId: string, requestId: string, decision: Parameters<TaskAgentSubscription["sendPermission"]>[1]): void;
@@ -2691,18 +2696,29 @@ export function createMobileController(
       return client.readTaskDiff(taskId, request);
     },
 
-    async sendTaskInput(taskId, input) {
+    async sendTaskInput(taskId, input, attachment) {
       const submittedInput = input.trim();
-      if (!submittedInput) {
+      if (!submittedInput && !attachment) {
         return;
       }
 
       try {
         const task = findTask(taskId);
-        if (task?.agentType === "agent" && activeTaskAgent?.taskId === taskId) {
+        // An attachment is a file the desktop writes and the injected message
+        // names, so it only exists on the HTTP input path. The SDK-mode agent
+        // stream carries text alone — the composer already hides the attach
+        // control for those tasks, and this keeps a stale one from silently
+        // dropping the image.
+        if (
+          !attachment &&
+          task?.agentType === "agent" &&
+          activeTaskAgent?.taskId === taskId
+        ) {
           activeTaskAgent.subscription.sendInput(submittedInput);
         } else {
-          await client.sendTaskInput(taskId, submittedInput);
+          await (attachment
+            ? client.sendTaskInput(taskId, submittedInput, attachment)
+            : client.sendTaskInput(taskId, submittedInput));
         }
         setUnownedErrorMessage(null);
       } catch (error) {
