@@ -134,7 +134,10 @@ export function TaskCard({
       onPress={onPress}
     >
       {repoLabel ? (
-        <Text numberOfLines={1} style={styles.repoLabel}>
+        <Text
+          numberOfLines={1}
+          style={[styles.repoLabel, { color: stageTheme.secondaryLabel }]}
+        >
           {repoLabel}
         </Text>
       ) : null}
@@ -241,8 +244,8 @@ const styles = StyleSheet.create({
     gap: 10,
     justifyContent: "space-between"
   },
+  /** Colour is stage-derived: a fixed grey loses AA on the tinted surfaces. */
   repoLabel: {
-    color: "#7E93B4",
     fontSize: 12,
     fontWeight: "700",
     letterSpacing: 0.4,

@@ -48,6 +48,15 @@ const BORDER_TINT = 0.55;
 const CHIP_TINT = 0.3;
 /** Chip and stripe labels ride toward white until they clear 4.5:1 on the chip. */
 const LABEL_LIFT = 0.62;
+/**
+ * Secondary labels sit directly on the tinted card, which is darker than the
+ * chip, so they ride less far and are checked against the card instead. The
+ * tint costs a fixed grey its contrast — `#7E93B4` read 5.52:1 on the untinted
+ * card but only 4.01:1 on the `pr` green — so the colour has to move with the
+ * stage rather than stay put. 0.45 leaves every palette entry above 5.5:1,
+ * headroom a future palette edit can spend without falling under AA.
+ */
+const SECONDARY_LABEL_LIFT = 0.45;
 
 export interface TaskStageTheme {
   /** Which palette entry this stage resolved to. */
@@ -64,6 +73,8 @@ export interface TaskStageTheme {
   chipBackground: string;
   /** Text inside the stage pill. */
   chipLabel: string;
+  /** Muted text on the card itself, below the title — the repo label. */
+  secondaryLabel: string;
 }
 
 function clampChannel(value: number): number {
@@ -116,7 +127,13 @@ export function contrastRatio(left: string, right: string): number {
   return (lighter + 0.05) / (darker + 0.05);
 }
 
-function stageThemeFor(colorName: KannaIconColorName): TaskStageTheme {
+/**
+ * The theme for one palette entry. Exported so a caller — and the contrast
+ * test — can reach an entry no named stage currently maps to.
+ */
+export function taskStageThemeForColor(
+  colorName: KannaIconColorName
+): TaskStageTheme {
   const accent = KANNA_ICON_PALETTE[colorName];
   return {
     colorName,
@@ -125,7 +142,8 @@ function stageThemeFor(colorName: KannaIconColorName): TaskStageTheme {
     border: mixHexColors(CARD_BORDER, accent, BORDER_TINT),
     pinnedBorder: accent,
     chipBackground: mixHexColors(CARD_SURFACE, accent, CHIP_TINT),
-    chipLabel: mixHexColors(accent, WHITE, LABEL_LIFT)
+    chipLabel: mixHexColors(accent, WHITE, LABEL_LIFT),
+    secondaryLabel: mixHexColors(accent, WHITE, SECONDARY_LABEL_LIFT)
   };
 }
 
@@ -158,7 +176,7 @@ const CUSTOM_STAGE_COLOR_NAMES: readonly KannaIconColorName[] = [
 const UNKNOWN_STAGE_COLOR_NAME: KannaIconColorName = "slate";
 
 /** Blocked is not a stage: it overlays whatever stage the task sits in. */
-export const TASK_BLOCKED_THEME: TaskStageTheme = stageThemeFor("rose");
+export const TASK_BLOCKED_THEME: TaskStageTheme = taskStageThemeForColor("rose");
 
 export function normalizeStageKey(stage: string | null | undefined): string {
   return (stage ?? "")
@@ -183,9 +201,9 @@ export function resolveTaskStageTheme(
   stage: string | null | undefined
 ): TaskStageTheme {
   const stageKey = normalizeStageKey(stage);
-  if (!stageKey) return stageThemeFor(UNKNOWN_STAGE_COLOR_NAME);
+  if (!stageKey) return taskStageThemeForColor(UNKNOWN_STAGE_COLOR_NAME);
   const known = STAGE_COLOR_NAMES[stageKey];
-  return stageThemeFor(known ?? customStageColorName(stageKey));
+  return taskStageThemeForColor(known ?? customStageColorName(stageKey));
 }
 
 /** Width of the saturated left edge that carries the stage colour. */

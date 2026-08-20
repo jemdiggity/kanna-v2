@@ -7,6 +7,7 @@ import {
   normalizeStageKey,
   relativeLuminance,
   resolveTaskStageTheme,
+  taskStageThemeForColor,
   type KannaIconColorName
 } from "./taskStageTheme";
 
@@ -82,12 +83,30 @@ describe("resolveTaskStageTheme", () => {
     null
   ])("keeps text readable on the %j stage surface", (stage) => {
     const theme = resolveTaskStageTheme(stage);
-    // WCAG AA for body text, on both the card and its stage pill.
+    // WCAG AA for body text, on the card and its stage pill alike.
     expect(contrastRatio(TITLE_COLOR, theme.surface)).toBeGreaterThanOrEqual(7);
     expect(
       contrastRatio(theme.chipLabel, theme.chipBackground)
     ).toBeGreaterThanOrEqual(4.5);
+    expect(
+      contrastRatio(theme.secondaryLabel, theme.surface)
+    ).toBeGreaterThanOrEqual(4.5);
   });
+
+  // Every palette entry, not only the ones the named stages happen to use: a
+  // custom stage hashes onto any of them, and the secondary label is the
+  // colour with the least headroom over the tint, so this is where a future
+  // palette edit would quietly drop the repo label back under AA.
+  it.each(Object.keys(KANNA_ICON_PALETTE) as KannaIconColorName[])(
+    "keeps the secondary label readable on the %s surface",
+    (colorName) => {
+      const theme = taskStageThemeForColor(colorName);
+      expect(theme.colorName).toBe(colorName);
+      expect(
+        contrastRatio(theme.secondaryLabel, theme.surface)
+      ).toBeGreaterThanOrEqual(4.5);
+    }
+  );
 
   it("separates the pinned outline from the unpinned one without changing hue", () => {
     for (const stage of ["in progress", "review", "pr", null]) {
