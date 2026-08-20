@@ -632,16 +632,21 @@ invited accounts).
 
 ## Decision 7 — Sequencing
 
-- **Slice 0 (human, unblocks everything)**: ~~Stripe account for Tampopo LLC
-  (test + live)~~ **done 2026-08-21 — account `acct_1Swxz4RSDDrR2YPq`**;
+- **Slice 0 (human, unblocks everything)**: ~~Stripe accounts for Tampopo LLC
+  (test + live)~~ **done 2026-08-21 — sandbox/test account
+  `acct_1Swy1rI0Oqa4EKBj`; live account `acct_1Swxz4RSDDrR2YPq`**;
   ToS/legal/特商法 pages, verify Firebase console signup
   settings, the Apple verification list from Decision 2 — including Paid
   Applications Agreement, banking/tax, subscription products + price points,
   Small Business Program enrollment, and grace-period enablement in App Store
   Connect. The price decision itself landed 2026-08-21 (Decision 4,
-  "Pricing"). Run the idempotent command below once with a test key and once
-  with a live key (use `--dry-run` to print the plan without contacting Stripe):
+  "Pricing"). For the first provisioning run, use the sandbox account's test
+  secret key; that same sandbox key belongs in the staging function config.
+  Run the idempotent command below with that key (use `--dry-run` to print the
+  plan without contacting Stripe):
   `STRIPE_SECRET_KEY=... pnpm --filter @kanna/firebase-functions stripe:provision`.
+  Provision the live account later with its live secret key only as an
+  explicitly named human production step.
   It creates what remains:
   - One **Product**, "Kanna Cloud", in **each** of test mode and live mode.
   - Under it, a **recurring monthly Price per currency** — JPY 500, USD 500,
