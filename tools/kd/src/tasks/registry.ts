@@ -2358,6 +2358,7 @@ export const taskDefinitions = [
       const result = await shipRelease({
         repoRoot: context.repoRoot,
         bump,
+        bumpExplicit: parsed.major || parsed.minor || parsed.patch,
         archLabels: archLabels.length > 0 ? archLabels : ["arm64", "x86_64"],
         environment,
         release: parsed.release,

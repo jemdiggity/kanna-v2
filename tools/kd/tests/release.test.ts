@@ -1923,6 +1923,13 @@ describe("release promotion", () => {
 });
 
 describe("release series", () => {
+  it("compares semantic versions including prerelease ordering", () => {
+    expect(compareVersions("1.2.4-staging.10", "1.2.4-staging.9")).toBeGreaterThan(0);
+    expect(compareVersions("1.2.4-staging.9", "1.2.4-staging.10")).toBeLessThan(0);
+    expect(compareVersions("1.2.4", "1.2.4-staging.10")).toBeGreaterThan(0);
+    expect(compareVersions("1.2.4-staging.10", "1.2.4-staging.10")).toBe(0);
+  });
+
   it("derives series and branch names from versions", () => {
     expect(releaseSeriesFromVersion("1.2.4")).toEqual({ major: 1, minor: 2 });
     expect(releaseSeriesFromVersion("v1.2.4-staging.3")).toEqual({ major: 1, minor: 2 });
@@ -3262,7 +3269,7 @@ describe("staging publish lineage gates", () => {
     };
   }
 
-  it("publishes a candidate that descends from the active staging commit", async () => {
+  it("automatically continues the active unpromoted staging series", async () => {
     const root = await mkdtemp(join(tmpdir(), "kd-release-"));
     try {
       const { repoRoot, privateKeyPath } = createReleaseRepo(root);
@@ -3272,8 +3279,51 @@ describe("staging publish lineage gates", () => {
 
       const result = await shipRelease(shipGateInput(repoRoot, privateKeyPath, runner));
 
-      expect(result.version).toBe("1.2.4-staging.1");
+      expect(result.version).toBe("1.2.4-staging.3");
       expect(calls.some((call) => call.command === "bazel" && call.args[0] === "build")).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a semver regression before building even when commit lineage moves forward", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot, privateKeyPath } = createReleaseRepo(root);
+      const calls: CommandCall[] = [];
+      const runner = shipGateRunner(
+        { head: DESCENDANT_COMMIT, activeVersion: "2.0.0-staging.3" },
+        repoRoot,
+        new Map(),
+        calls
+      );
+      const input = shipGateInput(repoRoot, privateKeyPath, runner);
+      input.bumpExplicit = true;
+
+      await expect(shipRelease(input)).rejects.toThrow(
+        /Refusing to roll the staging channel version back.*derived v1\.2\.4-staging\.1.*currently serves v2\.0\.0-staging\.3/s
+      );
+      expect(calls.some((call) => call.command === "bazel")).toBe(false);
+      expect(readVersionFiles(repoRoot)[0]).toBe("1.2.3\n");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("uses an explicit bump to start a new series instead of continuing the channel", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot, privateKeyPath } = createReleaseRepo(root);
+      const outputs = writeStagingReleaseBuildOutputs(repoRoot, ["arm64"]);
+      const calls: CommandCall[] = [];
+      const runner = shipGateRunner({ head: DESCENDANT_COMMIT }, repoRoot, outputs, calls);
+      const input = shipGateInput(repoRoot, privateKeyPath, runner);
+      input.bump = "minor";
+      input.bumpExplicit = true;
+
+      const result = await shipRelease(input);
+
+      expect(result.version).toBe("1.3.0-staging.1");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -3337,7 +3387,7 @@ describe("staging publish lineage gates", () => {
 
       const result = await shipRelease(shipGateInput(repoRoot, privateKeyPath, runner, "release/1.3"));
 
-      expect(result.version).toBe("1.3.0-staging.1");
+      expect(result.version).toBe("1.3.0-staging.2");
       const manifest = JSON.parse(readFileSync(result.latestJson, "utf8")) as { notes?: string };
       expect(manifest.notes).toContain("Source-Branch: release/1.3");
     } finally {
@@ -3683,7 +3733,7 @@ describe("staging publish lineage gates", () => {
       const result = await shipRelease(
         shipGateInput(repoRoot, privateKeyPath, shipGateRunner(fixture, repoRoot, outputs, calls), "release/0.1")
       );
-      expect(result.version).toBe("0.1.0-staging.1");
+      expect(result.version).toBe("0.1.0-staging.8");
 
       // The same record does not license a different destination.
       const otherCalls: CommandCall[] = [];

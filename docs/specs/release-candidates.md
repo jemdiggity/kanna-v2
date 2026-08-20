@@ -65,7 +65,16 @@ it.
 Before anything is built, `kd release ship --staging` resolves the active
 candidate (the version in `latest-staging.json` on `desktop-staging`, then that
 prerelease's `targetCommitish` and `Source-Branch:` trailer) and compares it with
-the commit about to be built:
+the commit about to be built. It also requires the fully derived candidate
+version to be strictly greater than the channel version by semantic-version
+ordering, including prerelease identifiers. Commit ancestry can therefore never
+authorize a version rollback.
+
+A bare ship continues an unpromoted active candidate from the same source branch:
+`X.Y.Z-staging.N` becomes the next unused `X.Y.Z-staging.*` version, with `N + 1`
+as its floor. It does not re-derive that series from trunk's `VERSION`. Explicit
+`--minor`, `--major`, or `--patch` selects a new derivation instead; the forward
+version gate still applies, so an explicit flag cannot roll the channel back.
 
 | Relationship of the new commit to the active candidate | Result |
 |---|---|
