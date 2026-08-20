@@ -13,9 +13,12 @@ import type { RawData, WebSocket } from "ws";
  * is an integer add on a path that already measured the payload for
  * backpressure — the odometer never re-measures a frame and never logs one.
  *
- * Per-user attribution exists only in the relay's own logs. `GET /stats`
- * reports process aggregates with no uid, desktop id, or per-connection row,
- * so an authenticated caller learns nothing about another account.
+ * Per-user attribution is operator-only. `GET /stats` reports process
+ * aggregates with no uid, desktop id, or per-connection row to a Firebase ID
+ * token, so an ordinary authenticated caller learns nothing about another
+ * account; the per-connection readers below (`getLiveConnectionReports`,
+ * `getRecentConnectionReports`) are served only to a caller presenting the
+ * operator credential `KANNA_RELAY_STATS_TOKEN` (see `relayStatus.ts`).
  */
 
 /**
@@ -76,12 +79,43 @@ export interface RelayByteStats {
   totalBytes: number;
 }
 
+/**
+ * One connection's odometer, flattened for reporting. The same shape is used
+ * for a live connection, for its close-time rollup, and for the `[bytes]` log
+ * line, so an operator reading the dashboard and an operator reading the logs
+ * are reading the same record.
+ */
+export interface RelayConnectionReport {
+  connectionId: number;
+  uid: string | null;
+  desktopId: string | null;
+  role: RelayConnectionRole;
+  tunnelService: string | null;
+  /** Whether this socket negotiated `permessage-deflate` at the upgrade. */
+  compressed: boolean;
+  openedAt: string;
+  /** Present only on a closed connection's rollup. */
+  closedAt?: string;
+  durationMs: number;
+  received: RelayByteTotals & { total: number };
+  sent: RelayByteTotals & { total: number };
+  totalBytes: number;
+}
+
+export interface RelayCompressionStats {
+  /** Connections that negotiated `permessage-deflate`, since process start. */
+  negotiated: number;
+  /** Connections that did not — the desktop client, today. */
+  plain: number;
+}
+
 interface ConnectionByteAccount {
   connectionId: number;
   uid: string | null;
   desktopId: string | null;
   role: RelayConnectionRole;
   tunnelService: string | null;
+  compressed: boolean;
   openedAtMs: number;
   received: RelayByteTotals;
   sent: RelayByteTotals;
@@ -102,12 +136,23 @@ const accounts = new WeakMap<WebSocket, ConnectionByteAccount>();
 /** Strongly held so the periodic rollup can walk live connections. */
 const openAccounts = new Set<ConnectionByteAccount>();
 
+/**
+ * How many close-time rollups the status dashboard can look back over. A ring,
+ * because this is a 1 GB e2-micro and an unbounded history of every connection
+ * the process ever served is a leak with a nice name.
+ */
+export const RECENT_CONNECTION_REPORT_LIMIT = 25;
+
 let nextConnectionId = 1;
 let processStartedAtMs = Date.now();
 let connectionsOpened = 0;
 let connectionsClosed = 0;
+let compressionNegotiated = 0;
+let compressionPlain = 0;
 let processReceived = emptyTotals();
 let processSent = emptyTotals();
+/** Newest last; trimmed to RECENT_CONNECTION_REPORT_LIMIT. */
+let recentReports: RelayConnectionReport[] = [];
 let rollupTimer: ReturnType<typeof setInterval> | null = null;
 
 /** Byte length of a `ws` frame without copying or re-encoding it. */
@@ -138,12 +183,19 @@ export function relayMessageByteClass(
 }
 
 export function openByteAccount(ws: WebSocket): void {
+  // `ws.extensions` is settled by the time the `connection` event fires — the
+  // extension is negotiated during the HTTP upgrade — so reading it here costs
+  // one string test per connection and answers "is compression actually being
+  // used?" without instrumenting the compression path itself.
+  const compressed = typeof ws.extensions === "string"
+    && ws.extensions.includes("permessage-deflate");
   const account: ConnectionByteAccount = {
     connectionId: nextConnectionId++,
     uid: null,
     desktopId: null,
     role: "unauthenticated",
     tunnelService: null,
+    compressed,
     openedAtMs: Date.now(),
     received: emptyTotals(),
     sent: emptyTotals(),
@@ -151,6 +203,8 @@ export function openByteAccount(ws: WebSocket): void {
   accounts.set(ws, account);
   openAccounts.add(account);
   connectionsOpened += 1;
+  if (compressed) compressionNegotiated += 1;
+  else compressionPlain += 1;
 }
 
 /**
@@ -207,7 +261,12 @@ export function closeByteAccount(ws: WebSocket): void {
   accounts.delete(ws);
   openAccounts.delete(account);
   connectionsClosed += 1;
-  logAccount("connection_close", account, Date.now());
+  const closedAtMs = Date.now();
+  recentReports.push(describeAccount(account, closedAtMs, closedAtMs));
+  if (recentReports.length > RECENT_CONNECTION_REPORT_LIMIT) {
+    recentReports.splice(0, recentReports.length - RECENT_CONNECTION_REPORT_LIMIT);
+  }
+  logAccount("connection_close", account, closedAtMs);
 }
 
 /** Emit one rollup line per still-open connection. */
@@ -264,6 +323,33 @@ export function getByteStats(nowMs = Date.now()): RelayByteStats {
 }
 
 /**
+ * Per-connection rows for the still-open connections, newest connection last.
+ *
+ * This carries uid and desktop id, so it is **operator-only** — see the
+ * visibility split in `relayStatus.ts`. Walks `openAccounts`, which the rollup
+ * timer already walks; there is no second registry to keep in step.
+ */
+export function getLiveConnectionReports(nowMs = Date.now()): RelayConnectionReport[] {
+  const reports: RelayConnectionReport[] = [];
+  for (const account of openAccounts) reports.push(describeAccount(account, nowMs));
+  return reports;
+}
+
+/**
+ * The last `RECENT_CONNECTION_REPORT_LIMIT` close-time rollups, newest first —
+ * the same records the `[bytes] connection_close` log lines carry. Also
+ * operator-only.
+ */
+export function getRecentConnectionReports(): RelayConnectionReport[] {
+  return [...recentReports].reverse();
+}
+
+/** How many connections negotiated compression, since process start. */
+export function getCompressionStats(): RelayCompressionStats {
+  return { negotiated: compressionNegotiated, plain: compressionPlain };
+}
+
+/**
  * Authorize a `GET /stats` request. The relay already verifies Firebase ID
  * tokens for its other authenticated HTTP routes; this only extracts the
  * bearer credential.
@@ -282,6 +368,30 @@ function sumTotals(totals: RelayByteTotals): number {
   let total = 0;
   for (const byteClass of RELAY_BYTE_CLASSES) total += totals[byteClass];
   return total;
+}
+
+/** Flatten one account into the record every reader and the log line share. */
+function describeAccount(
+  account: ConnectionByteAccount,
+  nowMs: number,
+  closedAtMs?: number,
+): RelayConnectionReport {
+  const received = withTotal(account.received);
+  const sent = withTotal(account.sent);
+  return {
+    connectionId: account.connectionId,
+    uid: account.uid,
+    desktopId: account.desktopId,
+    role: account.role,
+    tunnelService: account.tunnelService,
+    compressed: account.compressed,
+    openedAt: new Date(account.openedAtMs).toISOString(),
+    ...(closedAtMs === undefined ? {} : { closedAt: new Date(closedAtMs).toISOString() }),
+    durationMs: Math.max(0, nowMs - account.openedAtMs),
+    received,
+    sent,
+    totalBytes: received.total + sent.total,
+  };
 }
 
 function logAccount(
@@ -313,6 +423,9 @@ export function resetByteAccountingForTests(): void {
   processStartedAtMs = Date.now();
   connectionsOpened = 0;
   connectionsClosed = 0;
+  compressionNegotiated = 0;
+  compressionPlain = 0;
+  recentReports = [];
   processReceived = emptyTotals();
   processSent = emptyTotals();
   stopByteRollups();

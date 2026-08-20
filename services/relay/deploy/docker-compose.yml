@@ -17,6 +17,12 @@ services:
       # variable absent from this block never reaches the container, however
       # carefully it was written into /opt/kanna-relay/.env.
       KANNA_RELAY_ENTITLEMENT_ENFORCEMENT: ${KANNA_RELAY_ENTITLEMENT_ENFORCEMENT:-off}
+      # Operator credential for GET /stats and the GET /dashboard status page
+      # (docs/relay-vm-operations.md). Written into /opt/kanna-relay/.env by
+      # `kd cloud deploy --relay` from the kanna-relay-stats-token Secret
+      # Manager secret; empty when that secret does not exist, which leaves the
+      # dashboard disabled and /stats exactly as it was.
+      KANNA_RELAY_STATS_TOKEN: ${KANNA_RELAY_STATS_TOKEN:-}
       PORT: "8080"
     volumes:
       - /opt/kanna-relay/ota-private-key.pem:/run/secrets/kanna_ota_private_key.pem:ro
