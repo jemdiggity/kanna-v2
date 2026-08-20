@@ -129,6 +129,7 @@ enum ErrorCode {
     RetryOnSuccessor,
     InputUnauthorized,
     InheritedDraftStateUnknown,
+    LogicalInputHeldByDraft,
 }
 
 #[allow(dead_code)]
@@ -363,6 +364,22 @@ fn install_test_daemon_at(source: &Path, destination: &Path) {
 struct ClientConn {
     reader: BufReader<UnixStream>,
     writer: UnixStream,
+}
+
+/// A logical message queued behind a human's unsent line has been accepted but
+/// not submitted, so the daemon says so instead of answering `Ok`. These tests
+/// are about the queued message surviving a handoff, which is unchanged.
+fn expect_held_by_draft(connection: &mut ClientConn) {
+    loop {
+        match connection.recv() {
+            Evt::Error {
+                code: Some(ErrorCode::LogicalInputHeldByDraft),
+                ..
+            } => break,
+            Evt::Output { .. } | Evt::StatusChanged { .. } => continue,
+            other => panic!("expected a held-by-draft answer, got: {other:?}"),
+        }
+    }
 }
 
 impl ClientConn {
@@ -1630,13 +1647,7 @@ fn current_v3_refuses_shipped_v2_adopter_while_draft_coordination_is_active() {
         session_id: session_id.to_string(),
         data: b"manager message".to_vec(),
     });
-    loop {
-        match connection.recv() {
-            Evt::Ok => break,
-            Evt::Output { .. } | Evt::StatusChanged { .. } => continue,
-            other => panic!("expected logical input acceptance, got: {other:?}"),
-        }
-    }
+    expect_held_by_draft(&mut connection);
 
     install_test_daemon_at(&previous, &stable_daemon);
     let mut legacy = Command::new(&stable_daemon)
@@ -2546,13 +2557,7 @@ fn test_handoff_preserves_a_logical_message_queued_behind_a_raw_draft_using_echo
         session_id: session_id.to_string(),
         data: b"manager message".to_vec(),
     });
-    loop {
-        match conn_a.recv() {
-            Evt::Ok => break,
-            Evt::Output { .. } | Evt::StatusChanged { .. } => continue,
-            other => panic!("expected logical input acceptance, got: {other:?}"),
-        }
-    }
+    expect_held_by_draft(&mut conn_a);
 
     drop(conn_a);
     let daemon_b = DaemonHandle::start_in(&dir);
@@ -2625,7 +2630,7 @@ fn test_handoff_drains_unread_no_reply_raw_input_before_snapshot() {
         session_id: session_id.to_string(),
         data: b"manager message".to_vec(),
     });
-    assert!(matches!(conn_a.recv(), Evt::Ok));
+    expect_held_by_draft(&mut conn_a);
 
     drop(conn_a);
     let daemon_b = DaemonHandle::start_in(&dir);

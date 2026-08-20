@@ -258,7 +258,7 @@ Line-delimited JSON over Unix domain socket. Each message is one JSON object + `
 | Event | Fields | Description |
 |-------|--------|-------------|
 | `Ok` | — | Command acknowledged |
-| `Error` | message | Command failed |
+| `Error` | message, code | Command failed. `logical_input_held_by_draft` means the message is queued behind a human's unsent line and was not submitted |
 | `Output` | session_id, data (byte array) | PTY output |
 | `Exit` | session_id, code | Process exited |
 | `SessionCreated` | session_id | New session ready |
@@ -328,7 +328,19 @@ keeps it out of the PTY while an explicitly declared raw draft is active, then
 writes the message and its delayed Enter after the terminal producer declares a
 submission boundary. `Input`, `InputBoundary`, and `InputControl` (plus their
 one-way forms) classify raw bytes as draft, submission, or non-composer control;
-the daemon never infers a boundary from CR/LF bytes. A new server paired with a
+the daemon never infers a boundary from CR/LF bytes.
+
+**`Ok` to `SubmitInput` means submitted, not accepted.** A logical message is
+one delivery in two writes — the message, then its delayed Enter — and the
+acknowledgement fires only after that Enter reaches the PTY. It travels with
+the message rather than with the call, so a message dispatched immediately, one
+released by a producer's boundary, and one released by composer attestation all
+acknowledge through the same channel. A message the daemon parks behind a
+declared raw draft has not been submitted, and is answered
+`logical_input_held_by_draft` rather than `Ok`: the message stays queued for
+the boundary, but no caller is told a delivery happened that did not. A writer
+that ends between the two writes answers `write_failed`, because the text may
+already be sitting unsent at the composer and a blind retry would duplicate it. A new server paired with a
 previous daemon generation therefore waits for the supporting successor before
 serving. The daemon records the exact negotiating server
 process and refuses server-originated PTY spawns from an unnegotiated process,
@@ -345,19 +357,40 @@ is resolved. This preserves accepted messages across normal handoff without
 guessing a submission from terminal bytes: submission boundaries are still
 declared by the producer and never inferred, from PTY bytes or from rendered UI.
 
-Two things resolve an unknown draft state:
+Two things withhold a logical message from the PTY, and one piece of evidence
+answers both. An **unknown** draft state is an inherited session this daemon
+never watched being typed into. An **active** draft state is one a producer
+declared — and a producer can declare a draft but cannot un-declare one, so a
+navigation key, an Escape or a Ctrl-key press, none of which leave an unsent
+line, would otherwise withhold every later message until a human pressed Enter
+at that terminal. Both are resolved by the same two things:
 
 - **A producer-declared boundary** — `InputBoundary` on the raw path, which is
   what a human pressing Enter in that terminal produces.
 - **Composer attestation** — a positive match on the provider's own idle
   composer chrome, rendered empty, in the daemon's headless terminal.
 
-Attestation answers exactly the question the guard asks — whether an
+**Attestation is evidence from a rendered frame, and the frame must be proven
+newer than the draft it is used against.** A frame says only what was on screen
+when it was rendered. A declared byte still queued in the writer, or written but
+not yet echoed by the provider, leaves a composer that renders empty because the
+keystroke has not landed on it yet — not because there is no draft — and
+clearing on that frame would write the queued message and its Enter behind the
+human's first typed character. So an **active** declared draft is cleared only
+when every declared-draft write has completed at the PTY *and* at least one
+output chunk has been mirrored since the last one did; the mirrored-chunk count
+is sampled before the frame is read, so the frame is at least that new. Anything
+short of that leaves the message held and answers
+`logical_input_held_by_draft`. The **unknown** state has no such write to wait
+for — nothing here declared a draft — so it resolves from the current frame
+alone, exactly as before.
+
+Attestation answers exactly the question both guards ask — whether an
 unsubmitted draft is sitting at the prompt — and answers it more directly than
 the keystroke: an empty composer holds no draft, so there is nothing a logical
-message could be appended to. It is one-way (unknown to known-empty, never the
-reverse and never "a draft is present"), it writes nothing to the PTY, and it
-discards nothing on screen. It matches only Claude's `❯` and Codex's `›`
+message could be appended to. It is one-way (towards "no draft is here", never
+the reverse and never "a draft is present"), it writes nothing to the PTY, and
+it discards nothing on screen. It matches only Claude's `❯` and Codex's `›`
 composers; only when that prompt is the last one in the status window with
 nothing but provider chrome below it; only when the frame is neither busy nor
 waiting; and only when the remainder of the prompt line is empty. A suggestion
@@ -369,8 +402,8 @@ text a human may have typed.
 
 The daemon runs attestation on each session's own status tick — an inherited
 session nobody types into produces no output at all, so nothing else would ever
-run it — and once more on the refusal path of a `SubmitInput` that would
-otherwise be rejected.
+run it — and once more on the withholding path of a `SubmitInput` that would
+otherwise be refused or parked.
 
 A session that stays unknown refuses `SubmitInput` with
 `inherited_draft_state_unknown`, and that refusal is visible before anything

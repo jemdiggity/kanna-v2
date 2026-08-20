@@ -17,6 +17,7 @@ import type {
   TaskCompanionSubscription,
   TaskTerminalSubscription
 } from "../lib/api/client";
+import { isInputHeldByDraft } from "../lib/transports/serverRefusal";
 import type { CompanionEvent } from "@kanna/agent-protocol";
 import { TaskCreationError } from "../lib/api/client";
 import { RepoNotRegisteredError } from "../lib/api/client";
@@ -2705,6 +2706,16 @@ export function createMobileController(
         }
         setUnownedErrorMessage(null);
       } catch (error) {
+        // A message held behind an unsent line at that terminal is an ordinary
+        // outcome of a healthy session, not a broken connection. Surface what
+        // the desktop said and leave the app's connection state alone —
+        // otherwise one held reply drops the whole app into its error state.
+        if (isInputHeldByDraft(error)) {
+          setUnownedErrorMessage(
+            error instanceof Error ? error.message : "Mobile app request failed"
+          );
+          return;
+        }
         fail(error);
       }
     },

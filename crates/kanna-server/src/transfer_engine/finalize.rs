@@ -425,6 +425,13 @@ enum Injected {
 /// reached the PTY but the Enter's response was lost, so the claim is kept: a
 /// retry that re-typed a wrap-up (or a second `/exit`) would corrupt the
 /// composer of an agent that already has the first one.
+/// `TaskInputError::HeldByRawDraft` keeps it for the same reason from the other
+/// direction: the message is queued inside the daemon and *will* be typed when
+/// the human at that terminal submits their own line, so it has not failed to
+/// land — it has not landed *yet*. Releasing would let a later retry of this
+/// work item queue a second wrap-up, or a second `/exit`, behind the first.
+/// `InputBlocked` and `Other` do release: nothing was queued, so re-claiming
+/// and retrying is both safe and the only way the message ever arrives.
 async fn inject(
     state: &Arc<AppState>,
     work: &TransferWorkItem,
@@ -466,6 +473,13 @@ async fn inject(
         Err(TaskInputError::Uncertain(reason)) => {
             log::warn!("transfer finalization {phase} for {task_id} may have landed: {reason}");
             Injected::Sent
+        }
+        Err(TaskInputError::HeldByRawDraft(reason)) => {
+            log::warn!(
+                "transfer finalization {phase} for {task_id} is queued behind an unsent human \
+                 line and will be typed when that terminal submits: {reason}"
+            );
+            Injected::Failed(reason)
         }
         Err(TaskInputError::Other(reason) | TaskInputError::InputBlocked(reason)) => {
             release(reason)
@@ -691,7 +705,9 @@ impl SessionObserver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kanna_daemon::protocol::{SessionInfo, SessionKind, SessionState};
+    use kanna_daemon::protocol::{
+        ErrorCode as DaemonErrorCode, SessionInfo, SessionKind, SessionState,
+    };
     use std::sync::Mutex;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::{UnixListener, UnixStream};
@@ -727,6 +743,16 @@ mod tests {
 
     impl FakeDaemon {
         fn start(label: &str, listed: Option<SessionStatus>) -> Self {
+            Self::start_refusing(label, listed, None)
+        }
+
+        /// A daemon that refuses every `SubmitInput` with one error code, so a
+        /// test can pin what finalization does with each refusal.
+        fn start_refusing(
+            label: &str,
+            listed: Option<SessionStatus>,
+            submit_refusal: Option<DaemonErrorCode>,
+        ) -> Self {
             let dir = format!("/tmp/kanna-finalize-{label}-{}", std::process::id());
             std::fs::create_dir_all(&dir).expect("daemon dir");
             let socket = kanna_runtime_defaults::socket_path(std::path::Path::new(&dir));
@@ -747,6 +773,7 @@ mod tests {
                         Arc::clone(&accept_log),
                         accept_events.clone(),
                         listed,
+                        submit_refusal,
                     ));
                 }
             });
@@ -827,6 +854,7 @@ mod tests {
         log: Arc<Mutex<DaemonLog>>,
         events: tokio::sync::broadcast::Sender<DaemonEvent>,
         listed: Option<SessionStatus>,
+        submit_refusal: Option<DaemonErrorCode>,
     ) {
         let (read_half, write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
@@ -875,13 +903,19 @@ mod tests {
                         .into_iter()
                         .collect(),
                 },
-                DaemonCommand::SubmitInput { data, .. } => {
-                    log.lock()
-                        .expect("log")
-                        .inputs
-                        .push(String::from_utf8_lossy(&data).into_owned());
-                    DaemonEvent::Ok
-                }
+                DaemonCommand::SubmitInput { data, .. } => match submit_refusal {
+                    Some(code) => DaemonEvent::Error {
+                        code: Some(code),
+                        message: "the fake daemon refused this submission".to_string(),
+                    },
+                    None => {
+                        log.lock()
+                            .expect("log")
+                            .inputs
+                            .push(String::from_utf8_lossy(&data).into_owned());
+                        DaemonEvent::Ok
+                    }
+                },
                 DaemonCommand::NegotiateProtectedInput { version } => {
                     DaemonEvent::ProtectedInputReady { version }
                 }
@@ -1019,6 +1053,67 @@ mod tests {
             phases(&state),
             vec!["wrap-up-sent", "idle", "quit-sent", "exited"],
             "the transfer's finalization was not observable step by step",
+        );
+    }
+
+    /// A held wrap-up is queued inside the daemon and will be typed when the
+    /// human at that terminal submits their own line. It has not failed to
+    /// land — it has not landed yet — so the phase claim stays held.
+    ///
+    /// Releasing it let a retry of this work item queue a SECOND wrap-up (and
+    /// a second `/exit`) behind the first, which is the duplicate the claim
+    /// exists to prevent. Before `input_held_by_draft` existed a held message
+    /// answered `Ok`, so this could not happen.
+    #[tokio::test]
+    async fn a_wrap_up_held_behind_an_unsent_human_line_keeps_its_phase_claim() {
+        let daemon = FakeDaemon::start_refusing(
+            "held-by-draft",
+            Some(SessionStatus::Idle),
+            Some(DaemonErrorCode::LogicalInputHeldByDraft),
+        );
+        let state = state_for(&daemon, "desktop-finalize-held");
+
+        let outcome =
+            finalize_source_session(&state, &work_item(), SESSION, Some("pty"), Some("claude"))
+                .await;
+        assert!(
+            !outcome.cleanly_finalized(),
+            "a held wrap-up must degrade finalization: {outcome:?}"
+        );
+
+        let db = open_db(&state).expect("db");
+        assert!(
+            !db.claim_transfer_work_phase(&work_item().id, WRAP_UP_PHASE)
+                .expect("claim"),
+            "the wrap-up claim was released, so a retry would queue a second wrap-up"
+        );
+    }
+
+    /// The other refusal releases. `input_blocked` means the daemon queued
+    /// nothing at all, so re-claiming on a retry is both safe and the only way
+    /// the wrap-up ever gets typed.
+    #[tokio::test]
+    async fn a_wrap_up_refused_outright_releases_its_phase_claim_for_a_retry() {
+        let daemon = FakeDaemon::start_refusing(
+            "input-blocked",
+            Some(SessionStatus::Idle),
+            Some(DaemonErrorCode::InheritedDraftStateUnknown),
+        );
+        let state = state_for(&daemon, "desktop-finalize-blocked");
+
+        let outcome =
+            finalize_source_session(&state, &work_item(), SESSION, Some("pty"), Some("claude"))
+                .await;
+        assert!(
+            !outcome.cleanly_finalized(),
+            "a refused wrap-up must degrade finalization: {outcome:?}"
+        );
+
+        let db = open_db(&state).expect("db");
+        assert!(
+            db.claim_transfer_work_phase(&work_item().id, WRAP_UP_PHASE)
+                .expect("claim"),
+            "nothing was queued, so the claim must be available to a retry"
         );
     }
 

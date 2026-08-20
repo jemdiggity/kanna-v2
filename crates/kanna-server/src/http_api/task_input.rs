@@ -93,6 +93,13 @@ pub(crate) enum TaskInputError {
     /// a transient server fault retries forever, and because it is the one
     /// failure whose fix is a human at that terminal.
     InputBlocked(String),
+    /// A human has an unsent line open at that terminal, so the daemon queued
+    /// the message rather than appending it to someone else's draft. Nothing
+    /// was written, and it goes out when that terminal submits — so this is
+    /// neither a success nor something to retry, and it is distinguished from
+    /// `InputBlocked` because the daemon's knowledge is fine and no human has
+    /// to repair anything.
+    HeldByRawDraft(String),
 }
 
 /// Why a session refuses delivered input. One value today; a string on the
@@ -185,6 +192,10 @@ async fn send_logical_session_input(
             code: Some(kanna_daemon::protocol::ErrorCode::InheritedDraftStateUnknown),
             message,
         } => Err(TaskInputError::InputBlocked(message)),
+        DaemonEvent::Error {
+            code: Some(kanna_daemon::protocol::ErrorCode::LogicalInputHeldByDraft),
+            message,
+        } => Err(TaskInputError::HeldByRawDraft(message)),
         DaemonEvent::Error { message, .. }
             if message.to_ascii_lowercase().contains("session not found") =>
         {
@@ -258,7 +269,9 @@ pub(crate) async fn submit_task_input(
                 axum::http::StatusCode::SERVICE_UNAVAILABLE,
                 format!("terminal input delivery is uncertain: {message}"),
             ),
-            TaskInputError::InputBlocked(message) => (axum::http::StatusCode::CONFLICT, message),
+            TaskInputError::InputBlocked(message) | TaskInputError::HeldByRawDraft(message) => {
+                (axum::http::StatusCode::CONFLICT, message)
+            }
         })
 }
 
@@ -464,6 +477,11 @@ pub(super) async fn send_task_input(
                 TaskInputError::InputBlocked(message) => (
                     axum::http::StatusCode::CONFLICT,
                     "input_blocked",
+                    message,
+                ),
+                TaskInputError::HeldByRawDraft(message) => (
+                    axum::http::StatusCode::CONFLICT,
+                    "input_held_by_draft",
                     message,
                 ),
             };
@@ -724,6 +742,21 @@ pub(super) async fn notify_task_completion(
             );
             return Err(format!(
                 "notify target {} refuses delivered input: {reason}",
+                notification.notify_task_id
+            ));
+        }
+        Err(TaskInputError::HeldByRawDraft(reason)) => {
+            // The notification is queued at the daemon and goes out when that
+            // terminal submits, so nothing is lost — but the claim is
+            // one-shot, so this call must not report a delivery it cannot see
+            // happen.
+            log::error!(
+                "completion notification for {child_id} is queued behind an unsent human line at \
+                 its notify target {}: {reason}",
+                notification.notify_task_id
+            );
+            return Err(format!(
+                "notify target {} has an unsent human line at its terminal: {reason}",
                 notification.notify_task_id
             ));
         }

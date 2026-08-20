@@ -23,8 +23,8 @@ use crate::operator_auth::OperatorAuthorizer;
 use crate::output::{handle_output_chunk, stream_output};
 use crate::paths::daemon_data_dir;
 use crate::session::{
-    pty_occupancy_snapshot, RawInputKind, SessionHandle, SessionManager, SessionRecord,
-    StreamControl,
+    pty_occupancy_snapshot, LogicalInputAccepted, RawInputKind, SessionHandle, SessionManager,
+    SessionRecord, StreamControl,
 };
 use crate::socket::{read_command, write_event};
 use crate::successor_auth::SuccessorAuthorizer;
@@ -47,27 +47,99 @@ fn inherited_draft_state_unknown_message(session_id: &str) -> String {
     )
 }
 
-/// Deliver one logical message, resolving an inherited unknown draft state
-/// from the terminal first when the frame proves the composer is empty.
+/// Why a logical message is sitting in the queue instead of at the prompt.
 ///
-/// Attestation runs only on the refusal path: a session whose draft state is
-/// already known — every session this daemon spawned — pays nothing for it.
+/// Named separately from the inherited-draft refusal because the fix is
+/// different: nothing is wrong with this daemon's knowledge, a human simply
+/// has an unsent line open at that terminal, and the message goes out the
+/// moment they submit it.
+fn logical_input_held_by_draft_message(session_id: &str) -> String {
+    format!(
+        "logical input for session {session_id} was not submitted: a human has an unsent line at \
+         that terminal, and appending to it would submit a sentence nobody wrote. The message is \
+         queued and will be written when that terminal submits — do not send it again."
+    )
+}
+
+/// Deliver one logical message, resolving withheld draft state from the
+/// terminal first when the frame proves the composer is empty.
+///
+/// Both reasons a message is withheld — an inherited state this daemon never
+/// observed, and a declared draft no producer can un-declare — are answered by
+/// the same evidence, so both consult attestation before the message is
+/// refused or parked. Attestation runs only on those paths: a session with a
+/// known-idle draft state pays nothing for it.
 async fn enqueue_logical_input_with_attestation(
     session: &Arc<SessionHandle>,
     data: Vec<u8>,
-) -> Result<(), crate::session::InputQueueError> {
-    match session.enqueue_logical_input(data.clone()) {
-        Err(crate::session::InputQueueError::InheritedDraftStateUnknown) => {
-            match session.attest_empty_composer().await {
-                Ok(true) => session.enqueue_logical_input(data),
-                Ok(false) => Err(crate::session::InputQueueError::InheritedDraftStateUnknown),
-                Err(error) => {
-                    log::warn!("[input] composer attestation failed: {error}");
-                    Err(crate::session::InputQueueError::InheritedDraftStateUnknown)
-                }
-            }
+) -> Result<LogicalInputAccepted, crate::session::InputQueueError> {
+    let first = session.enqueue_logical_input(data.clone());
+    let withheld = match &first {
+        Err(crate::session::InputQueueError::InheritedDraftStateUnknown) => true,
+        Ok(accepted) => accepted.held_by_raw_draft,
+        Err(_) => false,
+    };
+    if !withheld {
+        return first;
+    }
+    match session.attest_empty_composer().await {
+        Ok(true) => match first {
+            // Attestation dispatched the message this call already queued,
+            // carrying its own acknowledgement. Queuing it again would write
+            // it twice.
+            Ok(accepted) => Ok(LogicalInputAccepted {
+                written: accepted.written,
+                held_by_raw_draft: false,
+            }),
+            // The refusal happened before the message reached the queue, so it
+            // still has to be submitted.
+            Err(_) => session.enqueue_logical_input(data),
+        },
+        Ok(false) => first,
+        Err(error) => {
+            log::warn!("[input] composer attestation failed: {error}");
+            first
         }
-        other => other,
+    }
+}
+
+/// Answer one `SubmitInput`, waiting for the terminating Enter to reach the
+/// PTY before calling the message submitted.
+async fn logical_input_event(
+    session: &Arc<SessionHandle>,
+    session_id: &str,
+    data: Vec<u8>,
+) -> Event {
+    let accepted = match enqueue_logical_input_with_attestation(session, data).await {
+        Ok(accepted) => accepted,
+        Err(crate::session::InputQueueError::InheritedDraftStateUnknown) => {
+            return error_event(
+                Some(protocol::ErrorCode::InheritedDraftStateUnknown),
+                inherited_draft_state_unknown_message(session_id),
+            )
+        }
+        Err(_) => {
+            return error_event(
+                Some(protocol::ErrorCode::WriteFailed),
+                format!("input queue closed for session: {session_id}"),
+            )
+        }
+    };
+    if accepted.held_by_raw_draft {
+        return error_event(
+            Some(protocol::ErrorCode::LogicalInputHeldByDraft),
+            logical_input_held_by_draft_message(session_id),
+        );
+    }
+    match accepted.written.await {
+        Ok(()) => Event::Ok,
+        Err(_) => error_event(
+            Some(protocol::ErrorCode::WriteFailed),
+            format!(
+                "logical input for session {session_id} was accepted but its terminal writer \
+                 ended before the message was submitted; inspect that terminal before retrying"
+            ),
+        ),
     }
 }
 
@@ -862,17 +934,7 @@ pub(crate) async fn handle_command(
                 let _ = write_event(&mut *writer.lock().await, &evt).await;
                 return;
             }
-            let evt = match enqueue_logical_input_with_attestation(&session, data).await {
-                Ok(()) => Event::Ok,
-                Err(crate::session::InputQueueError::InheritedDraftStateUnknown) => error_event(
-                    Some(protocol::ErrorCode::InheritedDraftStateUnknown),
-                    inherited_draft_state_unknown_message(&session_id),
-                ),
-                Err(_) => error_event(
-                    Some(protocol::ErrorCode::WriteFailed),
-                    format!("input queue closed for session: {session_id}"),
-                ),
-            };
+            let evt = logical_input_event(&session, &session_id, data).await;
             let _ = write_event(&mut *writer.lock().await, &evt).await;
         }
 
@@ -917,17 +979,7 @@ pub(crate) async fn handle_command(
                 let _ = write_event(&mut *writer.lock().await, &evt).await;
                 return;
             }
-            let evt = match enqueue_logical_input_with_attestation(&session, data).await {
-                Ok(()) => Event::Ok,
-                Err(crate::session::InputQueueError::InheritedDraftStateUnknown) => error_event(
-                    Some(protocol::ErrorCode::InheritedDraftStateUnknown),
-                    inherited_draft_state_unknown_message(&session_id),
-                ),
-                Err(_) => error_event(
-                    Some(protocol::ErrorCode::WriteFailed),
-                    format!("input queue closed for session: {session_id}"),
-                ),
-            };
+            let evt = logical_input_event(&session, &session_id, data).await;
             let _ = write_event(&mut *writer.lock().await, &evt).await;
         }
 

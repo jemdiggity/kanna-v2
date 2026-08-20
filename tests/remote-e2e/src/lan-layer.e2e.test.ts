@@ -280,7 +280,13 @@ describe("LAN task loop E2E", () => {
       events.sendInput(Buffer.from(humanDraft).toString("base64"));
       await events.waitForOutput(`SCRIPT_PARTIAL:${humanDraft}`);
 
-      await transport.sendTaskInput(task.taskId, managerMessage);
+      // A message parked behind someone's unsent line has not been submitted,
+      // so the delivery says so instead of answering success. Reported by the
+      // product owner on 2026-08-20: a reply sent from the phone sat at the
+      // prompt unsubmitted while the phone had been told it was delivered.
+      await expect(
+        transport.sendTaskInput(task.taskId, managerMessage)
+      ).rejects.toThrow(/unsent line at that terminal/);
 
       await new Promise((resolve) => setTimeout(resolve, 300));
       expect(events.outputText()).not.toContain(`SCRIPT_INPUT:${humanDraft}`);

@@ -258,14 +258,27 @@ pub(crate) async fn stream_output(
                                     .pop_front()
                                     .expect("pending input disappeared before completion");
                                 let logical_after_write = completed.take_logical_after_write();
-                                for data in logical_after_write.into_iter().rev() {
-                                    pending_input.push_front(PendingInput::logical(data));
+                                for (data, written) in logical_after_write.into_iter().rev() {
+                                    pending_input
+                                        .push_front(PendingInput::acknowledged_logical(data, written));
                                 }
                                 if completed.kind == PendingInputKind::LogicalEnter
                                     && session.complete_logical_input().is_err()
                                 {
                                     log::error!(
                                         "[stream] logical input coordination failed session={}",
+                                        session_id
+                                    );
+                                    break;
+                                }
+                                // A declared draft has now actually reached
+                                // the terminal, so frames rendered after it
+                                // can start being evidence about it.
+                                if completed.is_declared_draft()
+                                    && session.complete_declared_draft_write().is_err()
+                                {
+                                    log::error!(
+                                        "[stream] declared draft accounting failed session={}",
                                         session_id
                                     );
                                     break;
