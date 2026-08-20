@@ -184,8 +184,10 @@ The user-facing surface is described in
     (the mobile leg; the desktop's tokio-tungstenite client connects plain).
     Abuse bounds: 16 MiB `maxPayload` on decompressed frames plus pre-auth
     per-IP admission caps. Successful desktop-credential validations and
-    entitlement reads are each cached for 60 s; new connections always re-read
-    Firestore.
+    entitlement reads are each cached for 60 s; a new desktop-credential
+    connection always re-reads Firestore (so a revoked desktop cannot
+    reconnect), while entitlement resolution at authentication may be served
+    from the entitlement cache.
   - **Entitlement enforcement** exists behind `KANNA_RELAY_ENTITLEMENT_ENFORCEMENT`,
     off in every environment until the billing flag day: when on, an
     unentitled session still authenticates but is refused tunnels,
@@ -267,10 +269,16 @@ close steps, and shortcuts are in
 The contracts below are specified in
 [`docs/kanna-server-boundary.md`](../kanna-server-boundary.md); this is the map.
 
-- **Task event feed.** Every DB write that changes task state appends a
-  `task_event` row in the same transaction; `GET /v1/task-events` is a
-  cursor-based long poll over `task_event.seq` (16 event types today, from
-  `task.created` through `task.teardown_failed`). Cross-machine consumption is
+- **Task event feed.** Events are appended by the same DB calls that change
+  the state they describe, inside the caller's transaction where there is one
+  — the log stays consistent with `pipeline_item`/`stage_run` by construction
+  rather than by call sites remembering to publish (not every task-state
+  write emits an event; pinning, for example, does not).
+  `GET /v1/task-events` is a cursor-based long poll over `task_event.seq`;
+  16 event kinds exist today, covering task lifecycle, runs and stage
+  changes, input delivery/blocking, awaiting-input and activity edges, merge
+  signaling, teardown failures, and transfer finalization
+  (`crates/kanna-server/src/db/task_events.rs`). Cross-machine consumption is
   the **`ks1.` aggregated cursor**: when the caller is account-authorized and
   relay routing is up, the local server fans the wait out to sibling desktops
   as relay invokes, stamps every event with `machineId`, keeps one opaque

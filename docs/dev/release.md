@@ -65,26 +65,34 @@ prerelease tagged `vX.Y.Z-staging.N`, and repoints only `latest-staging.json`
 on the `desktop-staging` pointer release. Roll back by repointing:
 `./kd release ship --staging --rollback-to <version>`.
 
-How the version is derived depends on the source branch (`--branch
-main|release/X.Y`, defaulting to the current branch when it is a
+How the version is derived depends on the channel and the source branch
+(`--branch main|release/X.Y`, defaulting to the current branch when it is a
 `release/X.Y`, else `main`):
 
-- **main**: the bump (`--patch` default, `--minor`, `--major`) is applied to
-  the greater of the root `VERSION` and the greatest published production
-  version — the *version floor*, reported as `versionFloor` on the ship result
-  when it raised a stale trunk `VERSION`.
+- **Series continuation (the default).** A bare staging ship — no explicit
+  bump flag — whose source branch matches an **unpromoted** active candidate
+  continues that candidate's series: `X.Y.Z-staging.N` becomes the next unused
+  `X.Y.Z-staging.*`, with `N + 1` as its floor. It does not re-derive the
+  series from trunk's `VERSION`.
+- **main, new derivation**: an explicit `--patch` / `--minor` / `--major`
+  (or a bare ship with no matching active candidate) applies the bump to the
+  greater of the root `VERSION` and the greatest published production version
+  — the *version floor*, reported as `versionFloor` on the ship result when it
+  raised a stale trunk `VERSION`.
 - **release/X.Y**: the base is the next patch after the series' existing tags;
   the bump flags are ignored. The branch must exist on origin, must not be an
   abandoned series, and its remote tip must be the checked-out commit.
 
-Either way `N` is one past the highest existing `v<base>-staging.N` tag, and
-each staging publish prunes the channel down to the five newest staging
-prereleases and their assets.
+Either way `N` is one past the highest existing `v<base>-staging.N` tag (and
+past the active channel's `N`), and each staging publish prunes the channel
+down to the five newest staging prereleases and their assets.
 
-Note: as of this writing the staging-publish gate is enforced purely by **git
-ancestry** — there is no semver-ordering check, so a version-number regression
-on a descendant commit is currently accepted. A fix adding a semver-regression
-refusal plus automatic series continuation is in flight (task `8275f44c`).
+**Forward-version gate.** Whatever derived it, the candidate version must be
+**strictly greater** than the version `desktop-staging` currently serves, by
+semantic-version ordering including prerelease identifiers — commit ancestry
+can never authorize a version rollback, and an explicit bump flag cannot roll
+the channel back either. The refusal is actionable (it names the served
+version and the two ways forward) and exits nonzero.
 
 ### The release lifecycle
 
@@ -95,7 +103,8 @@ in [`docs/specs/release-candidates.md`](../specs/release-candidates.md). In
 short:
 
 - A staging publish must be a **descendant** of (or a rebuild of) the candidate
-  the channel already serves. Divergence, rollback, and unverifiable channel
+  the channel already serves, and must carry a strictly greater semver.
+  Divergence, rollback (by commit or by version), and unverifiable channel
   metadata are refused **before** anything is built — including under
   `--dry-run`.
 - A `release/X.Y` RC must build that branch's **remote tip exactly**. Push
