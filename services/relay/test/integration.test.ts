@@ -2886,6 +2886,38 @@ describe("Relay integration", () => {
     expect(closeCode).toBe(4004);
   });
 
+  it("keeps every other connection alive when one sends a frame over maxPayload", async () => {
+    // Three authenticated connections from one address — two desktops and a
+    // phone behind one NAT — are ordinary usage, and the per-IP bound is on the
+    // *unauthenticated* population, so none of them is refused.
+    const desktopA = await connectAndAuth({
+      device_token: TEST_DEVICE_TOKEN,
+      desktop_id: "limits-desktop-a",
+    });
+    const desktopB = await connectAndAuth({
+      device_token: TEST_DEVICE_TOKEN,
+      desktop_id: "limits-desktop-b",
+    });
+    const phone = await connectAndAuth({ id_token: idToken });
+
+    // 24 MiB of zeros is a few KiB once deflated, which is exactly the
+    // amplification this task closes: before it, the same trick could force a
+    // 100 MiB allocation on a 1 GB VM, and it did not need to authenticate
+    // first. `ws` now aborts the inflate at the cap and closes with 1009.
+    const closed = new Promise<number>((resolveClose) => {
+      phone.ws.once("close", (code: number) => resolveClose(code));
+    });
+    phone.ws.send(Buffer.alloc(24 * 1024 * 1024), { compress: true });
+    expect(await closed).toBe(1009);
+
+    const health = await fetch(healthUrl());
+    expect(health.status).toBe(200);
+    expect(desktopA.ws.readyState).toBe(WebSocket.OPEN);
+    expect(desktopB.ws.readyState).toBe(WebSocket.OPEN);
+    desktopA.ws.close();
+    desktopB.ws.close();
+  }, 30_000);
+
   it("gracefully closes clients before an authorized E2E shutdown", async () => {
     const unauthorized = await fetch(
       `http://127.0.0.1:${relayPort}/__kanna_e2e_shutdown`,

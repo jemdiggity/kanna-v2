@@ -33,6 +33,13 @@ import {
 } from "./router.js";
 import { handleOtaRequest } from "./ota.js";
 import { RELAY_PER_MESSAGE_DEFLATE } from "./webSocketCompression.js";
+import {
+  attachUpgradeAdmission,
+  clientAddressForRequest,
+  createUpgradeAdmission,
+  resolveMaxPayloadBytes,
+  resolveUpgradeAdmissionOptions,
+} from "./webSocketLimits.js";
 import { resolveBuildCommit } from "./buildInfo.js";
 import {
   beginCloudTaskPublicationSession,
@@ -66,6 +73,7 @@ import {
 const PORT = parseInt(process.env.PORT || "8080", 10);
 const BUILD_COMMIT = resolveBuildCommit(process.env);
 const AUTH_TIMEOUT_MS = 10_000;
+const MAX_PAYLOAD_BYTES = resolveMaxPayloadBytes();
 const E2E_SHUTDOWN_TOKEN =
   process.env.KANNA_E2E_RELAY_SHUTDOWN_TOKEN?.trim() || null;
 const cloudTaskPublicationStore = createFirestoreCloudTaskPublicationStore();
@@ -282,15 +290,46 @@ export const server = createServer(async (req, res) => {
 // read `bufferedAmount`, which counts the bytes actually held — compressed,
 // once a frame is on the socket. The memory bound they enforce stays exact,
 // but compressible traffic now moves much further before a source is paused.
+//
+// `noServer` rather than `{ server }`: the relay has to decide whether to admit
+// an upgrade *before* `ws` allocates a socket for it, and that decision needs
+// the request headers (see `clientAddressForRequest`). `ws` in `server` mode
+// installs its own `upgrade` listener and offers no hook that runs first.
 export const wss = new WebSocketServer({
-  server,
+  noServer: true,
   perMessageDeflate: RELAY_PER_MESSAGE_DEFLATE,
+  // Bounds the *decompressed* size of an inbound message, which is what makes
+  // `perMessageDeflate` safe to leave on for unauthenticated callers. See
+  // webSocketLimits.ts for the derivation and the operator override.
+  maxPayload: MAX_PAYLOAD_BYTES,
+});
+
+export const upgradeAdmission = createUpgradeAdmission(
+  resolveUpgradeAdmissionOptions(),
+);
+
+attachUpgradeAdmission({
+  server,
+  wss,
+  admission: upgradeAdmission,
+  onRefused: (address, reason) => {
+    console.warn(`[ws] Refused upgrade from ${address}: ${reason}`);
+  },
 });
 
 wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
+  const clientAddress = clientAddressForRequest(req);
   const remoteAddr = req.socket.remoteAddress ?? "unknown";
-  console.log(`[ws] New connection from ${remoteAddr}`);
+  console.log(`[ws] New connection from ${clientAddress} (peer ${remoteAddr})`);
   openByteAccount(ws);
+
+  // Held from the upgrade until this socket proves who it is, or gives up.
+  let preAuthSlotHeld = true;
+  const releasePreAuthSlot = (): void => {
+    if (!preAuthSlotHeld) return;
+    preAuthSlotHeld = false;
+    upgradeAdmission.release(clientAddress);
+  };
 
   let authenticated = false;
   let userId: string | null = null;
@@ -435,6 +474,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
           return;
         }
         authenticated = true;
+        releasePreAuthSlot();
         clearTimeout(authTimer);
         attachDesktopTunnel(userId, desktopId, msg.tunnel_id, ws);
         console.log(
@@ -468,6 +508,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
       }
 
       authenticated = true;
+      releasePreAuthSlot();
       clearTimeout(authTimer);
 
       // Register the connection with the router
@@ -714,6 +755,9 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
 
   ws.on("close", (code: number, reason: Buffer) => {
     clearTimeout(authTimer);
+    // A socket that never authenticated still holds its pre-auth slot; this is
+    // the only place a refused, timed-out, or abandoned upgrade gives it back.
+    releasePreAuthSlot();
     closeByteAccount(ws);
     console.log(
       `[ws] Connection closed: ${remoteAddr} (code=${code}, reason=${reason.toString()})`
@@ -721,6 +765,19 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
   });
 
   ws.on("error", (err: Error) => {
+    // Oversize closes get their own line because they are the one relay error
+    // an operator has to act on: two frame classes are producer-unbounded (see
+    // webSocketLimits.ts), so a real user hitting the cap is possible, and the
+    // fix is to raise KANNA_RELAY_MAX_PAYLOAD_BYTES on the VM. Anything less
+    // greppable than this would leave that failure looking like a flaky socket.
+    if ((err as NodeJS.ErrnoException).code === "WS_ERR_UNSUPPORTED_MESSAGE_LENGTH") {
+      console.error(
+        `[ws] Oversize frame from ${clientAddress} (authenticated=${authenticated}, `
+        + `role=${role ?? "unknown"}, maxPayload=${MAX_PAYLOAD_BYTES}); closing that `
+        + `connection only. Raise KANNA_RELAY_MAX_PAYLOAD_BYTES if this is legitimate traffic.`
+      );
+      return;
+    }
     console.error(`[ws] Error from ${remoteAddr}:`, err.message);
   });
 });
