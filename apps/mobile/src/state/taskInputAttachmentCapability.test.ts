@@ -16,6 +16,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { MobileAuthSession } from "../lib/firebase/auth";
 import type { TaskSummary } from "../lib/api/types";
+import type { KannaClient } from "../lib/api/client";
 import { createKannaClient } from "../lib/api/client";
 import {
   createRemoteTransport,
@@ -226,5 +227,216 @@ describe("attachment gate under repeated live cloud publications", () => {
     expect(supportsSpy.mock.calls.length).toBe(readsAfterOpen);
     // ...and the control never blinks out from under the composer.
     expect(flagsSeen).toEqual(Array.from({ length: 10 }, () => true));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Marker ownership under an A -> B -> A task switch.
+//
+// The memo's in-flight marker was first keyed on (task, route) identity alone.
+// Two reads for the *same* task share that identity, so on A -> B -> A the
+// first A read's completion freed the marker the second A read had installed.
+// The next reconciler entry then saw an unanswered route with nothing in
+// flight, re-probed, and cleared the flag — the exact flicker the memo exists
+// to prevent, reachable by an ordinary back-and-forth between two tasks.
+//
+// These reads are hand-resolved so the interleaving is exact rather than
+// hoped for; the ten-republication test above settles between publishes and
+// structurally cannot observe this.
+// ---------------------------------------------------------------------------
+
+const TASK_A = "cloud-task-a";
+const TASK_B = "cloud-task-b";
+
+interface DeferredRead {
+  taskId: string;
+  resolve(supported: boolean): void;
+}
+
+function switchableTask(id: string, localTaskId: string) {
+  return {
+    ...cloudTask(),
+    id,
+    ownerLocalTaskId: localTaskId
+  };
+}
+
+function createDeferredCapabilityClient(): {
+  client: KannaClient;
+  reads: DeferredRead[];
+} {
+  const reads: DeferredRead[] = [];
+  const tasks = [
+    switchableTask(TASK_A, "local-a"),
+    switchableTask(TASK_B, "local-b")
+  ];
+  const client = {
+    getStatus: vi.fn().mockResolvedValue({
+      state: "running",
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud",
+      lanHost: "cloud",
+      lanPort: 0,
+      pairingCode: null
+    }),
+    listDesktops: vi.fn().mockResolvedValue([]),
+    listRepos: vi.fn().mockResolvedValue([{ id: "repo-1", name: "Repo One" }]),
+    listRepoTasks: vi.fn().mockResolvedValue(tasks),
+    listRepoCommands: vi
+      .fn()
+      .mockResolvedValue({ repoId: "repo-1", revision: "v1", commands: [] }),
+    runRepoCommand: vi.fn(),
+    listRecentTasks: vi.fn().mockResolvedValue(tasks),
+    searchTasks: vi.fn().mockResolvedValue([]),
+    createTask: vi.fn(),
+    abortTaskCreation: vi.fn().mockResolvedValue(undefined),
+    runMergeAgent: vi.fn(),
+    advanceTaskStage: vi.fn(),
+    markTaskRead: vi.fn().mockResolvedValue({ taskId: TASK_A, activity: "idle" }),
+    closeTask: vi.fn().mockResolvedValue(undefined),
+    sendTaskInput: vi.fn().mockResolvedValue(undefined),
+    // Every read is parked until the test resolves it by hand.
+    supportsTaskInputAttachments: vi.fn(
+      (taskId: string) =>
+        new Promise<boolean>((resolve) => {
+          reads.push({ taskId, resolve });
+        })
+    ),
+    readTaskFile: vi.fn(),
+    resolveTaskFileMentions: vi.fn().mockResolvedValue({ mentions: [] }),
+    readTaskDiff: vi.fn(),
+    observeTaskTerminal: vi.fn(() => ({ close: vi.fn() })),
+    observeTaskAgent: vi.fn(() => ({ close: vi.fn() })),
+    observeTaskCompanion: vi.fn(() => ({ close: vi.fn(), sendEvent: vi.fn() }))
+  } as unknown as KannaClient;
+
+  return { client, reads };
+}
+
+describe("attachment gate across an A -> B -> A task switch", () => {
+  it("lets only the installing read release its claim, and keeps the flag steady", async () => {
+    const { client, reads } = createDeferredCapabilityClient();
+    const supportsSpy = vi.mocked(client.supportsTaskInputAttachments);
+    const store = createSessionStore();
+    let publish:
+      | ((tasks: TaskSummary[], publication?: { cloudAuthoritative: boolean }) => void)
+      | null = null;
+    const controller = createMobileController(
+      client,
+      store,
+      signedInAuthSession(),
+      {
+        subscribeCloudTasks: vi.fn((_uid, onUpdate) => {
+          publish = onUpdate;
+          return vi.fn();
+        })
+      }
+    );
+    const republish = async () => {
+      publish?.(
+        [
+          switchableTask(TASK_A, "local-a") as unknown as TaskSummary,
+          switchableTask(TASK_B, "local-b") as unknown as TaskSummary
+        ],
+        { cloudAuthoritative: true }
+      );
+      await settle();
+    };
+
+    await controller.bootstrap();
+    await republish();
+
+    // A -> B -> A, with every read still parked. The two A reads share a
+    // (task, route) identity; only their generations tell them apart.
+    controller.openTask(TASK_A);
+    await settle();
+    controller.openTask(TASK_B);
+    await settle();
+    controller.openTask(TASK_A);
+    await settle();
+
+    expect(reads.map((read) => read.taskId)).toEqual([TASK_A, TASK_B, TASK_A]);
+    const [firstA, readB, secondA] = reads;
+
+    // B completes between the second A read's install and its completion, and
+    // so does the *stale* first A read — the one that actually shares the
+    // marker's identity. Neither owns the claim, so neither may free it.
+    readB.resolve(true);
+    firstA.resolve(true);
+    await settle();
+    await republish();
+
+    expect(supportsSpy).toHaveBeenCalledTimes(3);
+    // Still unanswered, so still hidden — but hidden because nothing has
+    // replied yet, not because a re-probe knocked it back down.
+    expect(store.getState().desktopSupportsTaskInputAttachments).toBe(false);
+
+    secondA.resolve(true);
+    await settle();
+
+    expect(store.getState().desktopSupportsTaskInputAttachments).toBe(true);
+
+    // Reconciler entries after the answer land: no re-probe, no transition.
+    const flagsSeen: boolean[] = [];
+    for (let round = 0; round < 5; round += 1) {
+      await republish();
+      flagsSeen.push(store.getState().desktopSupportsTaskInputAttachments);
+    }
+
+    expect(supportsSpy).toHaveBeenCalledTimes(3);
+    expect(flagsSeen).toEqual([true, true, true, true, true]);
+  });
+
+  it("re-probes nothing when publications interleave with a read in flight", async () => {
+    // Publications that arrive *while* the read is outstanding, with no settle
+    // between them — the ordering the ten-republication test cannot produce.
+    const { client, reads } = createDeferredCapabilityClient();
+    const supportsSpy = vi.mocked(client.supportsTaskInputAttachments);
+    const store = createSessionStore();
+    let publish:
+      | ((tasks: TaskSummary[], publication?: { cloudAuthoritative: boolean }) => void)
+      | null = null;
+    const controller = createMobileController(
+      client,
+      store,
+      signedInAuthSession(),
+      {
+        subscribeCloudTasks: vi.fn((_uid, onUpdate) => {
+          publish = onUpdate;
+          return vi.fn();
+        })
+      }
+    );
+    const publishNow = () =>
+      publish?.(
+        [
+          switchableTask(TASK_A, "local-a") as unknown as TaskSummary,
+          switchableTask(TASK_B, "local-b") as unknown as TaskSummary
+        ],
+        { cloudAuthoritative: true }
+      );
+
+    await controller.bootstrap();
+    publishNow();
+    await settle();
+    controller.openTask(TASK_A);
+    await settle();
+
+    expect(supportsSpy).toHaveBeenCalledTimes(1);
+
+    for (let burst = 0; burst < 10; burst += 1) {
+      publishNow();
+    }
+    await settle();
+
+    // The read never resolved, so the claim never lifted and no burst entry
+    // was allowed to start a second one.
+    expect(supportsSpy).toHaveBeenCalledTimes(1);
+
+    reads[0].resolve(true);
+    await settle();
+
+    expect(store.getState().desktopSupportsTaskInputAttachments).toBe(true);
+    expect(supportsSpy).toHaveBeenCalledTimes(1);
   });
 });

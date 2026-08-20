@@ -244,7 +244,21 @@ export function createMobileController(
   let loadedTaskPrompt:
     | { taskId: string; routeIdentity: string; prompt: string }
     | null = null;
-  let activeTaskAttachmentSupportIdentity: string | null = null;
+  /**
+   * The attachment-capability read currently in flight, tagged with the
+   * generation that installed it.
+   *
+   * The generation is the owner token, and it is not decoration: two reads for
+   * the same task and route — an A -> B -> A switch — share an identity, so a
+   * marker keyed on identity alone lets the *earlier* read's completion free
+   * the marker the later one installed. The next reconciler entry then sees an
+   * unanswered route with nothing in flight, re-probes, and clears the flag
+   * again, which is the flicker the memo exists to prevent. Only the installer
+   * releases; every other release is a no-op.
+   */
+  let activeTaskAttachmentSupport:
+    | { identity: string; generation: number }
+    | null = null;
   let resolvedTaskAttachmentSupport:
     | { taskId: string; routeIdentity: string; supported: boolean }
     | null = null;
@@ -1206,6 +1220,13 @@ export function createMobileController(
     }
   };
 
+  /** Clear the in-flight claim only if this generation is the one holding it. */
+  const releaseTaskAttachmentSupportRead = (generation: number) => {
+    if (activeTaskAttachmentSupport?.generation === generation) {
+      activeTaskAttachmentSupport = null;
+    }
+  };
+
   /**
    * Ask the desktop that owns this task whether it can receive a photo.
    *
@@ -1248,12 +1269,12 @@ export function createMobileController(
       );
       return;
     }
-    if (activeTaskAttachmentSupportIdentity === supportIdentity) {
+    if (activeTaskAttachmentSupport?.identity === supportIdentity) {
       return;
     }
 
     const generation = ++taskAttachmentSupportGeneration;
-    activeTaskAttachmentSupportIdentity = supportIdentity;
+    activeTaskAttachmentSupport = { identity: supportIdentity, generation };
     // Only here — a route this answer has never been asked of. A re-entry for
     // the same task and route returns above without touching the flag.
     store.setDesktopSupportsTaskInputAttachments(false);
@@ -1261,10 +1282,10 @@ export function createMobileController(
       .supportsTaskInputAttachments(taskId)
       .then((supported) => {
         // Released whatever the guards below decide, so a read superseded by a
-        // task switch cannot leave this route permanently unaskable.
-        if (activeTaskAttachmentSupportIdentity === supportIdentity) {
-          activeTaskAttachmentSupportIdentity = null;
-        }
+        // task switch cannot leave this route permanently unaskable — but only
+        // by the read that installed it, so an earlier read for the same route
+        // cannot free a later one's claim.
+        releaseTaskAttachmentSupportRead(generation);
         if (
           generation !== taskAttachmentSupportGeneration ||
           durableTaskIdForSelection(store.getState().selectedTaskId) !== taskId
@@ -1277,9 +1298,7 @@ export function createMobileController(
       .catch(() => {
         // Already false, and an unreachable desktop is not one to offer an
         // attach control for. Nothing is memoized, so the next entry retries.
-        if (activeTaskAttachmentSupportIdentity === supportIdentity) {
-          activeTaskAttachmentSupportIdentity = null;
-        }
+        releaseTaskAttachmentSupportRead(generation);
       });
   };
 
