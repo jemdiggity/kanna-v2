@@ -10164,6 +10164,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn loopback_ksp_task_summary_attachment_streams_live_snippet() {
+        let unique = format!(
+            "ksp-task-summary-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let config = test_config(&unique, "KSP Task Summary");
+        let db = Db::open_for_tests(&config.db_path).unwrap();
+        db.insert_test_repo("repo-summary-ksp", "Summary KSP")
+            .unwrap();
+        db.insert_test_pipeline_item(
+            "summary-ksp-task",
+            "repo-summary-ksp",
+            "Stream summary",
+            None,
+            "in progress",
+            "2026-08-20 00:00:00",
+        )
+        .unwrap();
+        db.update_test_pipeline_item_preview("summary-ksp-task", Some("live agent output"))
+            .unwrap();
+        drop(db);
+
+        let state = Arc::new(crate::http_api::AppState::new(config.clone()));
+        let url = serve_router(crate::http_api::router(state)).await;
+        let mut socket = ws_connect(&url).await;
+        send_frame(&mut socket, &client_auth_frame()).await;
+        assert_eq!(recv_frame(&mut socket).await, auth_ok_frame_for(false));
+        send_frame(
+            &mut socket,
+            &ClientFrame::Attach {
+                task_id: config.desktop_id.clone(),
+                kind: StreamKind::TaskSummary,
+                from_seq: 0,
+                include_assets: None,
+                accept_snapshot_chunks: None,
+                attachment_epoch: None,
+            },
+        )
+        .await;
+
+        assert!(matches!(
+            recv_frame(&mut socket).await,
+            ServerFrame::TaskSummary {
+                task_id,
+                snippet: Some(snippet),
+                activity,
+                runtime_state,
+                revision,
+            } if task_id == "summary-ksp-task"
+                && snippet == "live agent output"
+                && activity == "idle"
+                && runtime_state == "idle"
+                && revision > 0
+        ));
+        let _ = std::fs::remove_file(config.db_path);
+    }
+
+    #[tokio::test]
     async fn loopback_ksp_delivers_ordinary_input_to_merge_singleton() {
         let unique = format!(
             "ksp-merge-input-{}",

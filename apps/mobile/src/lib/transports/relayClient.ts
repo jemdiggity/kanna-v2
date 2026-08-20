@@ -3,8 +3,9 @@ import type {
   TaskAgentSubscription,
   TaskCompanionSubscription,
   TaskTerminalStreamEvent,
-  TaskTerminalSubscription
-  , TaskSummaryStreamEvent, TaskSummarySubscription
+  TaskTerminalSubscription,
+  TaskSummaryStreamEvent,
+  TaskSummarySubscription
 } from "../api/client";
 import type {
   RemoteDesktopInvocationRequest,
@@ -472,7 +473,10 @@ export function createRelayDesktopClient({
       const client = streamClientForDesktop(desktopId);
       client.attachTaskSummaries({
         onSummary(summary) {
-          listener(summary);
+          listener({ type: "summary", ...summary });
+        },
+        onConnectionChange(connected) {
+          listener({ type: "connection", connected });
         }
       });
       return {

@@ -285,6 +285,15 @@ export function createMobileController(
   let appForeground = true;
   const taskSummarySubscriptions = new Map<string, { close(): void }>();
   const taskSummaryRevisions = new Map<string, number>();
+  const restingTaskSummaries = new Map<
+    string,
+    {
+      taskId: string;
+      snippet: string | undefined;
+      activity: TaskActivity;
+      runtimeState: TaskSummary["runtimeState"];
+    }
+  >();
   let liveRepositoryRevision = 0;
   let lastExplicitRepos: RepoSummary[] = [];
   let desktopCollectionsRevision = 0;
@@ -333,6 +342,23 @@ export function createMobileController(
     );
   };
 
+  const restoreRestingTaskSummaries = (desktopId: string) => {
+    const prefix = `${desktopId}:`;
+    for (const [key, summary] of restingTaskSummaries) {
+      if (!key.startsWith(prefix)) continue;
+      store.setTaskLiveSummary(
+        summary.taskId,
+        summary.snippet,
+        summary.activity,
+        summary.runtimeState
+      );
+      restingTaskSummaries.delete(key);
+      taskSummaryRevisions.delete(
+        `${desktopId}:${summary.taskId}`
+      );
+    }
+  };
+
   const reconcileTaskSummarySubscriptions = () => {
     const state = store.getState();
     const shouldSubscribe =
@@ -350,12 +376,18 @@ export function createMobileController(
     for (const [desktopId, subscription] of taskSummarySubscriptions) {
       if (!desiredDesktopIds.has(desktopId)) {
         subscription.close();
+        restoreRestingTaskSummaries(desktopId);
         taskSummarySubscriptions.delete(desktopId);
       }
     }
     for (const desktopId of desiredDesktopIds) {
       if (taskSummarySubscriptions.has(desktopId)) continue;
-      const subscription = client.observeDesktopTaskSummaries?.(desktopId, (summary) => {
+      const subscription = client.observeDesktopTaskSummaries?.(desktopId, (event) => {
+        if (event.type === "connection") {
+          if (!event.connected) restoreRestingTaskSummaries(desktopId);
+          return;
+        }
+        const summary = event;
         const key = `${desktopId}:${summary.taskId}`;
         if ((taskSummaryRevisions.get(key) ?? -1) >= summary.revision) return;
         taskSummaryRevisions.set(key, summary.revision);
@@ -366,6 +398,15 @@ export function createMobileController(
             (candidate.ownerLocalTaskId ?? candidate.id) === summary.taskId
         );
         if (!task) return;
+        const restingKey = `${desktopId}:${task.id}`;
+        if (!restingTaskSummaries.has(restingKey)) {
+          restingTaskSummaries.set(restingKey, {
+            taskId: task.id,
+            snippet: task.waitingPromptSnippet ?? undefined,
+            activity: task.activity ?? "idle",
+            runtimeState: task.runtimeState ?? "idle"
+          });
+        }
         const activity = summary.activity === "working" ||
           summary.activity === "unread" ? summary.activity : "idle";
         const runtimeState =

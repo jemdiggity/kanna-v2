@@ -703,8 +703,11 @@ mod tests {
     }
 
     #[test]
-    fn publication_keeps_working_snippet_resting_until_a_boundary() {
+    fn publisher_skips_continuous_output_writes_until_resting_boundary() {
         let mut cache = RestingSnippetCache::default();
+        let mut publisher = PublisherState::new();
+        publisher.on_authenticated(Some(2));
+        let now = Instant::now();
         let first = map_ui_snapshot_for_publication(
             "desktop-1",
             "Studio Mac",
@@ -712,6 +715,13 @@ mod tests {
             ui_snapshot("working"),
             &mut cache,
         );
+        publisher.observe(first);
+        let PublisherStep::Publish(first_request) = publisher.next_step(now) else {
+            panic!("expected initial publication");
+        };
+        publisher
+            .on_ack(&first_request.id, true, None, now)
+            .unwrap();
         for index in 0..10 {
             let mut continuous = ui_snapshot("working");
             continuous.entries[0].items[0].last_output_preview =
@@ -723,7 +733,8 @@ mod tests {
                 continuous,
                 &mut cache,
             );
-            assert_eq!(first.fingerprint(), continuous.fingerprint());
+            publisher.observe(continuous);
+            assert!(matches!(publisher.next_step(now), PublisherStep::Wait));
         }
 
         let mut idle = ui_snapshot("idle");
@@ -735,6 +746,11 @@ mod tests {
             idle,
             &mut cache,
         );
+        publisher.observe(idle.clone());
+        assert!(matches!(
+            publisher.next_step(now),
+            PublisherStep::Publish(_)
+        ));
         assert_eq!(
             serde_json::to_value(idle).unwrap()["tasks"][0]["waitingPromptSnippet"],
             "finished output"

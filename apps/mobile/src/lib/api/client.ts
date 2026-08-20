@@ -54,13 +54,18 @@ export interface TaskTerminalSubscription {
   resize?(cols: number, rows: number): void;
 }
 
-export interface TaskSummaryStreamEvent {
+export interface TaskSummaryFrameEvent {
+  type: "summary";
   taskId: string;
   snippet?: string;
   activity: string;
   runtimeState: string;
   revision: number;
 }
+
+export type TaskSummaryStreamEvent =
+  | TaskSummaryFrameEvent
+  | { type: "connection"; connected: boolean };
 
 export interface TaskSummarySubscription {
   close(): void;
