@@ -169,6 +169,7 @@ describe("websocket message lifecycle", () => {
       unregisterPushDevice: vi.fn(),
     }));
     vi.doMock("./cloudTaskPublication.js", () => ({
+      createFirestoreCloudTaskPublicationStore: vi.fn().mockReturnValue({}),
       beginCloudTaskPublicationSession: vi.fn().mockResolvedValue(1),
       endCloudTaskPublicationSession: vi.fn().mockResolvedValue(undefined),
       handleCloudTaskPublication: vi.fn(),

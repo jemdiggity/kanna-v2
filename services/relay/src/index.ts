@@ -26,6 +26,7 @@ import { handleOtaRequest } from "./ota.js";
 import { resolveBuildCommit } from "./buildInfo.js";
 import {
   beginCloudTaskPublicationSession,
+  createFirestoreCloudTaskPublicationStore,
   endCloudTaskPublicationSession,
   handleCloudTaskPublication,
   MAX_TASK_SNAPSHOT_BYTES,
@@ -57,6 +58,7 @@ const BUILD_COMMIT = resolveBuildCommit(process.env);
 const AUTH_TIMEOUT_MS = 10_000;
 const E2E_SHUTDOWN_TOKEN =
   process.env.KANNA_E2E_RELAY_SHUTDOWN_TOKEN?.trim() || null;
+const cloudTaskPublicationStore = createFirestoreCloudTaskPublicationStore();
 
 /**
  * Read the full request body as a string.
@@ -267,6 +269,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
       userId,
       desktopId,
       generation: publicationSessionGeneration,
+      store: cloudTaskPublicationStore,
     }).catch((error) => {
       console.warn(
         `[cloud] Failed to end task publication session for ${userId}/${desktopId}: ${error instanceof Error ? error.message : String(error)}`,
@@ -382,6 +385,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
           publicationSessionGeneration = await beginCloudTaskPublicationSession({
             userId,
             desktopId,
+            store: cloudTaskPublicationStore,
           });
           nextPublicationSequence = 1;
         } catch (error) {
@@ -563,6 +567,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
             desktopId,
             generation,
             snapshot: publication.snapshot,
+            store: cloudTaskPublicationStore,
           });
           sendAck(true);
         } catch (error) {

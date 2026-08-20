@@ -1063,6 +1063,97 @@ describe("Relay integration", () => {
     await closeAndWait(ws);
   });
 
+  it("diffs task documents after warm-up and reseeds safely after restart", async () => {
+    const desktopId = `desktop-diff-${Date.now()}`;
+    const desktopRef = testFirestore.doc(`users/${TEST_USER_ID}/desktops/${desktopId}`);
+    let taskReads = 0;
+    const taskWrites: Array<{ kind: "set" | "delete"; id: string }> = [];
+    const store = createFirestoreCloudTaskPublicationStore(testFirestore, {
+      onTaskCollectionRead() {
+        taskReads += 1;
+      },
+      onTaskDocumentWrite(kind, id) {
+        taskWrites.push({ kind, id });
+      },
+    });
+    const snapshot = (tasks: Record<string, unknown>[]) =>
+      publishedSnapshot("idle", tasks.map((task) => ({ ...task, ownerDesktopId: desktopId })));
+    const firstTask = publishedTask("idle");
+    const secondTask = publishedTask("idle", { ownerLocalTaskId: "task-second" });
+
+    try {
+      const generation = await beginCloudTaskPublicationSession({
+        userId: TEST_USER_ID,
+        desktopId,
+        store,
+      });
+      expect(taskReads).toBe(1);
+      await handleCloudTaskPublication({
+        userId: TEST_USER_ID,
+        desktopId,
+        generation: { session: generation, sequence: 1 },
+        snapshot: snapshot([firstTask, secondTask]),
+        store,
+      });
+      expect(taskWrites).toHaveLength(2);
+
+      taskReads = 0;
+      taskWrites.length = 0;
+      await handleCloudTaskPublication({
+        userId: TEST_USER_ID,
+        desktopId,
+        generation: { session: generation, sequence: 2 },
+        snapshot: snapshot([firstTask, secondTask]),
+        store,
+      });
+      expect(taskReads).toBe(0);
+      expect(taskWrites).toHaveLength(0);
+
+      await handleCloudTaskPublication({
+        userId: TEST_USER_ID,
+        desktopId,
+        generation: { session: generation, sequence: 3 },
+        snapshot: snapshot([
+          { ...firstTask, activity: "working", updatedAt: "2026-07-14 00:03:00" },
+          secondTask,
+        ]),
+        store,
+      });
+      expect(taskWrites).toHaveLength(1);
+      expect(taskWrites[0]?.kind).toBe("set");
+
+      const restartedWrites: Array<{ kind: "set" | "delete"; id: string }> = [];
+      let restartedReads = 0;
+      const restartedStore = createFirestoreCloudTaskPublicationStore(testFirestore, {
+        onTaskCollectionRead() {
+          restartedReads += 1;
+        },
+        onTaskDocumentWrite(kind, id) {
+          restartedWrites.push({ kind, id });
+        },
+      });
+      const restartedGeneration = await beginCloudTaskPublicationSession({
+        userId: TEST_USER_ID,
+        desktopId,
+        store: restartedStore,
+      });
+      expect(restartedReads).toBe(1);
+      await handleCloudTaskPublication({
+        userId: TEST_USER_ID,
+        desktopId,
+        generation: { session: restartedGeneration, sequence: 1 },
+        snapshot: snapshot([firstTask]),
+        store: restartedStore,
+      });
+      expect(restartedWrites.map(({ kind }) => kind).sort()).toEqual(["delete", "set"]);
+      const remaining = await desktopRef.collection("tasks").get();
+      expect(remaining.docs).toHaveLength(1);
+      expect(remaining.docs[0]?.data()).toMatchObject({ ownerLocalTaskId: "task-cloud-publish" });
+    } finally {
+      await testFirestore.recursiveDelete(desktopRef);
+    }
+  });
+
   it("transactionally rejects a delayed older publication after a newer session commits", async () => {
     const desktopId = `desktop-publication-race-${Date.now()}`;
     const desktopRef = testFirestore.doc(

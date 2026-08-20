@@ -60,6 +60,8 @@ export interface CloudTaskPublicationSessionStore extends CloudTaskPublicationSt
 
 export interface CloudTaskPublicationFaultInjection {
   afterGenerationClaim?(generation: CloudTaskPublicationGeneration): Promise<void>;
+  onTaskCollectionRead?(): void;
+  onTaskDocumentWrite?(kind: "set" | "delete", id: string): void;
 }
 
 export interface TaskReconciliationPlan {
@@ -70,6 +72,15 @@ export interface TaskReconciliationPlan {
 interface ExistingTaskDocument {
   id: string;
   data: unknown;
+  fingerprint?: string;
+}
+
+interface CachedTaskDocument extends ExistingTaskDocument {
+  fingerprint: string;
+}
+
+interface PublicationSessionState {
+  tasksByIdentity: Map<string, CachedTaskDocument[]>;
 }
 
 export function validateCloudTaskPublication(
@@ -313,7 +324,12 @@ export function planTaskReconciliation(
     const matches = existingByIdentity.get(taskIdentity(task)) ?? [];
     const targetId = matches[0]?.id ?? newId();
     retainedIds.add(targetId);
-    sets.push({ id: targetId, data: task });
+    if (
+      !matches[0]
+      || (matches[0].fingerprint ?? taskFingerprint(matches[0].data)) !== taskFingerprint(task)
+    ) {
+      sets.push({ id: targetId, data: task });
+    }
   }
   const deleteIds = existing
     .map((document) => document.id)
@@ -372,12 +388,14 @@ export function createFirestoreCloudTaskPublicationStore(
   db: Firestore = getFirebaseServices().db,
   faultInjection?: CloudTaskPublicationFaultInjection,
 ): CloudTaskPublicationSessionStore {
+  const sessionStates = new Map<string, PublicationSessionState>();
+
   return {
     async beginSession({ userId, desktopId }) {
       const desktopDocId = cloudDesktopDocumentId(desktopId);
       const desktopsRef = db.collection(`users/${userId}/desktops`);
       const desktopRef = desktopsRef.doc(desktopDocId);
-      return await db.runTransaction(async (transaction) => {
+      const generation = await db.runTransaction(async (transaction) => {
         const current = await transaction.get(desktopRef);
         const currentGeneration = storedGenerationPart(
           current.data()?.publicationSessionGeneration,
@@ -394,12 +412,21 @@ export function createFirestoreCloudTaskPublicationStore(
         }, { merge: true });
         return nextGeneration;
       });
+      faultInjection?.onTaskCollectionRead?.();
+      const tasks = await desktopRef.collection("tasks").get();
+      sessionStates.set(publicationSessionKey(userId, desktopId, generation), {
+        tasksByIdentity: indexTaskDocuments(tasks.docs.map((document) => ({
+          id: document.id,
+          data: document.data(),
+        }))),
+      });
+      return generation;
     },
 
     async endSession({ userId, desktopId, generation }) {
       const desktopDocId = cloudDesktopDocumentId(desktopId);
       const desktopRef = db.doc(`users/${userId}/desktops/${desktopDocId}`);
-      return await db.runTransaction(async (transaction) => {
+      const ended = await db.runTransaction(async (transaction) => {
         const current = await transaction.get(desktopRef);
         if (storedGenerationPart(
           current.data()?.publicationSessionGeneration,
@@ -412,6 +439,8 @@ export function createFirestoreCloudTaskPublicationStore(
         }, { merge: true });
         return true;
       });
+      sessionStates.delete(publicationSessionKey(userId, desktopId, generation));
+      return ended;
     },
 
     async reconcile({
@@ -427,6 +456,19 @@ export function createFirestoreCloudTaskPublicationStore(
       const desktopDocId = cloudDesktopDocumentId(desktopId);
       const desktopsRef = db.collection(`users/${userId}/desktops`);
       const desktopRef = desktopsRef.doc(desktopDocId);
+      const stateKey = publicationSessionKey(userId, desktopId, generation.session);
+      let sessionState = sessionStates.get(stateKey);
+      if (!sessionState) {
+        faultInjection?.onTaskCollectionRead?.();
+        const seededTasks = await desktopRef.collection("tasks").get();
+        sessionState = {
+          tasksByIdentity: indexTaskDocuments(seededTasks.docs.map((document) => ({
+            id: document.id,
+            data: document.data(),
+          }))),
+        };
+        sessionStates.set(stateKey, sessionState);
+      }
       await db.runTransaction(async (transaction) => {
         const current = await transaction.get(desktopRef);
         const currentGeneration = storedPublicationGeneration(current.data());
@@ -448,9 +490,9 @@ export function createFirestoreCloudTaskPublicationStore(
       await faultInjection?.afterGenerationClaim?.(generation);
 
       const tasksRef = desktopRef.collection("tasks");
-      const existing = await tasksRef.get();
+      const existing = [...sessionState.tasksByIdentity.values()].flat();
       const plan = planTaskReconciliation(
-        existing.docs.map((document) => ({ id: document.id, data: document.data() })),
+        existing,
         tasks,
         () => tasksRef.doc().id,
       );
@@ -461,6 +503,11 @@ export function createFirestoreCloudTaskPublicationStore(
         ...plan.sets.map((operation) => ({ kind: "set" as const, ...operation })),
         ...plan.deleteIds.map((id) => ({ kind: "delete" as const, id })),
       ];
+      if (operations.length === 0) {
+        await db.runTransaction(async (transaction) => {
+          await requireCurrentPublication(transaction, desktopRef, generation);
+        });
+      }
       for (let offset = 0; offset < operations.length; offset += MAX_BATCH_OPERATIONS) {
         await db.runTransaction(async (transaction) => {
           await requireCurrentPublication(transaction, desktopRef, generation);
@@ -468,9 +515,11 @@ export function createFirestoreCloudTaskPublicationStore(
             const ref = tasksRef.doc(operation.id);
             if (operation.kind === "set") transaction.set(ref, operation.data);
             else transaction.delete(ref);
+            faultInjection?.onTaskDocumentWrite?.(operation.kind, operation.id);
           }
         });
       }
+      sessionState.tasksByIdentity = indexTaskDocuments(planResultDocuments(existing, plan));
 
       // Older renderer publishers created auto-id desktop documents. The full
       // server reconciliation makes the canonical document authoritative, so
@@ -559,6 +608,44 @@ function taskIdentityFromUnknown(value: unknown): string | null {
   if (!isRecord(value)) return null;
   if (typeof value.localRepoId !== "string" || typeof value.ownerLocalTaskId !== "string") return null;
   return `${value.localRepoId}\u0000${value.ownerLocalTaskId}`;
+}
+
+function taskFingerprint(value: unknown): string {
+  return JSON.stringify(value, (_, nestedValue: unknown) => {
+    if (!isRecord(nestedValue)) return nestedValue;
+    return Object.fromEntries(Object.entries(nestedValue).sort(([left], [right]) =>
+      left.localeCompare(right)));
+  });
+}
+
+function indexTaskDocuments(
+  documents: ExistingTaskDocument[],
+): Map<string, CachedTaskDocument[]> {
+  const result = new Map<string, CachedTaskDocument[]>();
+  for (const document of documents) {
+    const identity = taskIdentityFromUnknown(document.data);
+    if (!identity) continue;
+    const cached = { ...document, fingerprint: taskFingerprint(document.data) };
+    result.set(identity, [...(result.get(identity) ?? []), cached]);
+  }
+  return result;
+}
+
+function planResultDocuments(
+  existing: ExistingTaskDocument[],
+  plan: TaskReconciliationPlan,
+): ExistingTaskDocument[] {
+  const deleted = new Set(plan.deleteIds);
+  const byId = new Map(existing.filter(({ id }) => !deleted.has(id)).map((document) => [
+    document.id,
+    document,
+  ]));
+  for (const operation of plan.sets) byId.set(operation.id, operation);
+  return [...byId.values()];
+}
+
+function publicationSessionKey(userId: string, desktopId: string, generation: number): string {
+  return `${userId}\u0000${desktopId}\u0000${generation}`;
 }
 
 function requiredRecord(value: unknown, field: string): Record<string, unknown> {
