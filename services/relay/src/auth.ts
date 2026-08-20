@@ -144,21 +144,38 @@ export function invalidateDesktopCredentialCache(desktopId?: string): void {
   desktopCredentialCache.delete(desktopId);
 }
 
+export interface PhonePrincipal {
+  userId: string;
+  /**
+   * The token's `email_verified` claim. Entitlement enforcement refuses an
+   * unverified phone token outright (`docs/specs/accounts-and-billing.md`,
+   * Decision 1: an unverified account cannot activate an entitlement).
+   */
+  emailVerified: boolean;
+}
+
 /**
  * Verify a Firebase Auth ID token (sent by the phone client).
- * Returns the userId or null if verification fails.
+ * Returns the principal or null if verification fails.
  */
-export async function verifyPhoneToken(
+export async function verifyPhoneIdentity(
   idToken: string
-): Promise<string | null> {
+): Promise<PhonePrincipal | null> {
   try {
     const { auth } = getFirebaseServices();
     const decoded = await auth.verifyIdToken(idToken);
-    return decoded.uid;
+    return { userId: decoded.uid, emailVerified: decoded.email_verified === true };
   } catch (err) {
     console.error("[auth] Failed to verify phone token:", err);
     return null;
   }
+}
+
+/** The uid alone, for the routes that only need to know who is calling. */
+export async function verifyPhoneToken(
+  idToken: string
+): Promise<string | null> {
+  return (await verifyPhoneIdentity(idToken))?.userId ?? null;
 }
 
 /**

@@ -3,6 +3,7 @@ import { pathToFileURL } from "node:url";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import {
   verifyPhoneToken,
+  verifyPhoneIdentity,
   verifyDeviceToken,
   verifyDesktopCredentials,
   revalidateServerAuth,
@@ -11,6 +12,14 @@ import {
   unregisterPushDevice,
   type ServerAuthProof,
 } from "./auth.js";
+import {
+  ENTITLEMENT_REQUIRED_CODE,
+  ENTITLEMENT_REQUIRED_ERROR,
+  entitlementEnforcementEnabled,
+  resolveSessionEntitlement,
+  sessionHasCapability,
+  type EntitlementSubject,
+} from "./entitlement.js";
 import {
   attachDesktopTunnel,
   forwardTunnelData,
@@ -71,6 +80,26 @@ function readBody(req: IncomingMessage): Promise<string> {
     req.on("end", () => resolve(Buffer.concat(chunks).toString()));
     req.on("error", reject);
   });
+}
+
+/**
+ * Identify a phone `tunnel_request` frame, for the entitlement gate alone.
+ *
+ * The router parses the same frame again on its way through, which is one
+ * wasted parse on the request that opens a tunnel — a rare, expensive
+ * operation — in exchange for the entitlement check not reaching into the
+ * router's routing logic at all.
+ */
+function parseTunnelRequest(data: string): { id: unknown } | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const message = parsed as { type?: unknown; id?: unknown };
+  return message.type === "tunnel_request" ? { id: message.id } : null;
 }
 
 /**
@@ -268,6 +297,10 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
   let role: "phone" | "server" | null = null;
   let desktopId: string | null = null;
   let serverAuthProof: ServerAuthProof | null = null;
+  // Null until the handshake resolves an identity. Every entitlement check the
+  // session makes afterwards goes through it, so a phone token's
+  // `email_verified` claim keeps applying to later requests, not just to auth.
+  let entitlementSubject: EntitlementSubject | null = null;
   let publicationSessionGeneration: number | null = null;
   let nextPublicationSequence = 1;
 
@@ -318,6 +351,9 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
     if (!authenticated) {
       recordBytesReceived(ws, "control", receivedByteLength);
       const data = raw.toString();
+      // The phone token's `email_verified` claim; null for desktop credential
+      // sessions, which carry no token and so make no claim.
+      let phoneEmailVerified: boolean | null = null;
       let msg: {
         type?: string;
         id_token?: string;
@@ -343,7 +379,9 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
 
       if (msg.id_token) {
         // Phone client auth
-        userId = await verifyPhoneToken(msg.id_token);
+        const principal = await verifyPhoneIdentity(msg.id_token);
+        userId = principal?.userId ?? null;
+        phoneEmailVerified = principal?.emailVerified ?? null;
         role = "phone";
       } else if (msg.desktop_id && msg.desktop_secret) {
         const principal = await verifyDesktopCredentials(
@@ -380,7 +418,22 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         return;
       }
 
+      // Identity is settled; entitlement is the next question
+      // (`docs/specs/accounts-and-billing.md`, Decision 5). Both session kinds
+      // resolve to a uid, so both are enforced. With the flag off this resolves
+      // to an unrestricted session without reading anything.
+      entitlementSubject = { userId, emailVerified: phoneEmailVerified };
+      const sessionEntitlement = await resolveSessionEntitlement(entitlementSubject);
+
       if (role === "server" && desktopId && msg.tunnel_id) {
+        // A tunnel socket carries the payload the phone's `tunnel_request`
+        // already had to be entitled to ask for. Refusing it here as well is
+        // what makes the tunnel closed rather than merely unadvertised.
+        if (!sessionEntitlement.grants("cloud_relay")) {
+          clearTimeout(authTimer);
+          ws.close(ENTITLEMENT_REQUIRED_CODE, ENTITLEMENT_REQUIRED_ERROR);
+          return;
+        }
         authenticated = true;
         clearTimeout(authTimer);
         attachDesktopTunnel(userId, desktopId, msg.tunnel_id, ws);
@@ -429,25 +482,40 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         role,
       });
 
-      // Send auth success
+      // Send auth success. An unentitled session still gets `auth_ok` — it is
+      // authenticated, and closing it would be the generic connection error
+      // Decision 5 exists to avoid — but the relay advertises only what it will
+      // actually serve, so the capability block narrows instead. With
+      // enforcement off every `grants` call answers true and this frame is
+      // byte-identical to the pre-enforcement relay, `entitlement` included:
+      // the field is absent, not false.
       const authOk = JSON.stringify({
         type: "auth_ok",
         userId,
         capabilities: {
-          tunnelServices: ["ksp", "task-transfer"],
+          tunnelServices: sessionEntitlement.grants("cloud_relay")
+            ? ["ksp", "task-transfer"]
+            : [],
           ...(serverAuthProof?.kind === "desktop" ? {
-            taskSnapshotPublication: {
-              version: 2,
-              authModes: ["desktop-secret"],
-            },
-            mobileNotifications: {
-              version: 1,
-            },
+            ...(sessionEntitlement.grants("cloud_task_index") ? {
+              taskSnapshotPublication: {
+                version: 2,
+                authModes: ["desktop-secret"],
+              },
+            } : {}),
+            ...(sessionEntitlement.grants("cloud_relay") ? {
+              mobileNotifications: {
+                version: 1,
+              },
+            } : {}),
             desktopRouting: {
               version: 1,
             },
           } : {}),
         },
+        ...(sessionEntitlement.snapshot
+          ? { entitlement: sessionEntitlement.snapshot }
+          : {}),
       });
       ws.send(authOk);
       recordBytesSent(ws, "control", Buffer.byteLength(authOk));
@@ -501,7 +569,8 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         const sendAck = (
           ok: boolean,
           delivery?: MobileNotificationDelivery,
-          error?: string
+          error?: string,
+          code?: number
         ) => {
           messageLifecycle.sendMobileNotificationAck({
             type: "mobile_notification_ack",
@@ -509,6 +578,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
             ok,
             ...(delivery ? { delivery } : {}),
             ...(error ? { error } : {}),
+            ...(code === undefined ? {} : { code }),
           });
         };
         if (serverAuthProof?.kind !== "desktop") {
@@ -522,6 +592,14 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         if (!await revalidateServerAuth(serverAuthProof, userId!, desktopId)) {
           sendAck(false, undefined, "desktop credential is no longer authorized");
           ws.close(4005, "Authentication revoked");
+          return;
+        }
+        // Push is part of cloud access, so it stops when the entitlement does.
+        // Re-resolved per notification rather than reused from the handshake,
+        // which is what bounds revocation by the cache TTL instead of by the
+        // desktop's next reconnect.
+        if (!await sessionHasCapability(entitlementSubject!, "cloud_relay")) {
+          sendAck(false, undefined, ENTITLEMENT_REQUIRED_ERROR, ENTITLEMENT_REQUIRED_CODE);
           return;
         }
         let notification;
@@ -547,12 +625,13 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
               session: publicationSessionGeneration,
               sequence: nextPublicationSequence++,
             };
-        const sendAck = (ok: boolean, error?: string) => {
+        const sendAck = (ok: boolean, error?: string, code?: number) => {
           messageLifecycle.sendTaskSnapshotAck({
             type: "task_snapshot_ack",
             id,
             ok,
             ...(error ? { error } : {}),
+            ...(code === undefined ? {} : { code }),
           });
         };
         if (serverAuthProof?.kind !== "desktop") {
@@ -576,6 +655,13 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
           ws.close(4005, "Authentication revoked");
           return;
         }
+        // The cloud task index is the paid surface here: publication stops and
+        // the index goes stale, but nothing already published is deleted, so it
+        // comes back on renewal (Decision 5).
+        if (!await sessionHasCapability(entitlementSubject!, "cloud_task_index")) {
+          sendAck(false, ENTITLEMENT_REQUIRED_ERROR, ENTITLEMENT_REQUIRED_CODE);
+          return;
+        }
         try {
           await handleCloudTaskPublication({
             userId: userId!,
@@ -595,6 +681,25 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
     } else {
       // Phone clients only ever send control-plane requests.
       recordBytesReceived(ws, "control", receivedByteLength);
+      // A tunnel is the relay's most expensive unit of remote value, so it is
+      // the one control-plane request an unentitled account cannot make. The
+      // parse happens only while enforcement is on, which is what keeps the
+      // flag-off path byte-for-byte and read-for-read what it was.
+      if (entitlementEnforcementEnabled()) {
+        const request = parseTunnelRequest(data);
+        if (
+          request
+          && !await sessionHasCapability(entitlementSubject!, "cloud_relay")
+        ) {
+          sendErrorResponse(
+            ws,
+            request.id,
+            ENTITLEMENT_REQUIRED_ERROR,
+            ENTITLEMENT_REQUIRED_CODE,
+          );
+          return;
+        }
+      }
     }
     routeMessage(
       userId!,

@@ -118,7 +118,14 @@ function sendControlFrame(
 export function sendErrorResponse(
   client: WebSocket | undefined,
   id: unknown,
-  error: string
+  error: string,
+  /**
+   * A distinct refusal code, when the reason is one a client is expected to
+   * render specifically rather than as a generic failure — today only
+   * `ENTITLEMENT_REQUIRED_CODE` (`docs/specs/accounts-and-billing.md`,
+   * Decision 5). Omitted for every other error, so the frame is unchanged.
+   */
+  code?: number
 ): void {
   if (!client || client.readyState !== 1) {
     return;
@@ -130,6 +137,7 @@ export function sendErrorResponse(
       type: "response",
       id: id ?? null,
       error,
+      ...(code === undefined ? {} : { code }),
     })
   );
 }
