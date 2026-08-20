@@ -301,6 +301,32 @@ describe("upgrade admission bookkeeping", () => {
     for (let index = 0; index < 4; index += 1) admission.release(`host-${index}`, 1_000);
     expect(admission.admit("host-4", 3_000).admitted).toBe(true);
   });
+
+  it("counts admitted and refused upgrades by status for GET /stats", () => {
+    const admission = createUpgradeAdmission({
+      maxUnauthenticatedPerAddress: 1,
+      maxTrackedAddresses: 1,
+      windowMs: 1_000,
+    });
+
+    expect(admission.stats()).toEqual({
+      admitted: 0,
+      refused: { total: 0, byStatus: {} },
+      trackedAddresses: 0,
+    });
+
+    admission.admit("a", 1_000);
+    // Second slot for the same address: over the per-address cap.
+    admission.admit("a", 1_000);
+    // A new address while the table is full and the held slot blocks collection.
+    admission.admit("b", 1_000);
+
+    expect(admission.stats()).toEqual({
+      admitted: 1,
+      refused: { total: 2, byStatus: { "429": 1, "503": 1 } },
+      trackedAddresses: 1,
+    });
+  });
 });
 
 describe("per-IP upgrade admission over a real upgrade", () => {

@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { cloudEnvironmentToKdEnvironment, resolveKdEnvironment } from "./environment";
 import type { CommandRunner } from "./process";
+import { RELAY_STATS_TOKEN_SECRET_NAME } from "./relay-stats";
 import { resolveSourceRef, type ResolvedSourceRef } from "./source-ref";
 
 interface Firebaserc {
@@ -583,6 +584,12 @@ function buildRemoteRelayDeployCommand(input: {
     "KANNA_OTA_KEY_ID=kanna-mobile-ota-v1",
     "KANNA_OTA_PRIVATE_KEY_PATH=/run/secrets/kanna_ota_private_key.pem",
     "KANNA_RELAY_ENV",
+    // The relay status token is optional by construction: an environment that
+    // has not provisioned the secret still deploys, and the only consequence is
+    // that GET /dashboard reports itself disabled.
+    "STATS_SECRET=$(curl -fsS -H \"Authorization: Bearer $TOKEN\" \"https://secretmanager.googleapis.com/v1/projects/" + input.projectId + "/secrets/" + RELAY_STATS_TOKEN_SECRET_NAME + "/versions/latest:access\" | sed -n 's/.*\"data\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p' || true)",
+    "STATS_TOKEN=$(printf '%s' \"$STATS_SECRET\" | base64 -d | tr -d '\\r\\n')",
+    "if [ -n \"$STATS_TOKEN\" ]; then printf 'KANNA_RELAY_STATS_TOKEN=%s\\n' \"$STATS_TOKEN\" >> .env.tmp; else echo \"note: secret " + RELAY_STATS_TOKEN_SECRET_NAME + " is unset; the relay status dashboard stays disabled\"; fi",
     "sudo install -m 0644 .env.tmp /opt/kanna-relay/.env",
     "rm .env.tmp",
     "docker compose pull",

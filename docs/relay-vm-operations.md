@@ -77,20 +77,115 @@ it).
 
 ### `GET /stats`
 
-Process aggregates since the relay started, for ops inspection:
+Everything the relay knows about itself since it started, for ops inspection:
 
 ```bash
-curl -s -H "Authorization: Bearer $FIREBASE_ID_TOKEN" https://relay.kanna.build/stats
+./kd relay stats --staging
 ```
 
-Unlike `/health`, this route requires a Firebase ID token — usage data is not
-public. The body carries **aggregates only**: no uid, no desktop id, no
-per-connection row, so an authenticated caller learns nothing about another
-account. Per-user attribution exists only in the logs above.
+Unlike `/health`, this route is never public, and it answers **two credentials
+with two visibilities**:
+
+| credential | sees |
+|---|---|
+| `KANNA_RELAY_STATS_TOKEN` (the operator token, below) | everything, including the live connection list and the recent close rollups — which carry uid and desktop id |
+| a Firebase ID token | process aggregates only: no uid, no desktop id, no per-connection row |
+
+The Firebase path is unchanged from before the dashboard landed: an
+authenticated account still learns nothing about another account. The
+per-connection rows are per-user data, so holding a valid ID token is
+deliberately *not* enough to read them.
+
+The credential goes in `Authorization: Bearer …` or in a `?token=` query
+parameter; both routes answer `Cache-Control: no-store` and
+`Referrer-Policy: no-referrer`.
+
+The body:
+
+```jsonc
+{
+  "status": "ok",
+  "commit": "5022d3f9f0aa",
+  "connections": 2,                  // paired desktop/phone connections in the router
+  "bytes": { "startedAt": "…", "uptimeMs": 0, "connections": { "open": 0, "opened": 0, "closed": 0 },
+             "received": { "tunnel": 0, "taskTransfer": 0, "terminalEvent": 0, "control": 0, "total": 0 },
+             "sent": { … }, "totalBytes": 0 },
+  "compression": { "negotiated": 12, "plain": 29 },   // connections that did or did not negotiate deflate
+  "tunnelFlow": { "pauseCount": 0, "resumeCount": 0, "capRejectCount": 0, "maxBufferedBytes": 0 },
+  "upgrades": { "admitted": 41, "refused": { "total": 3, "byStatus": { "429": 3 } }, "trackedAddresses": 5 },
+
+  // operator token only:
+  "liveConnections": [ { "connectionId": 39, "uid": "Bax9…", "desktopId": "a1b2…", "role": "server",
+                         "tunnelService": "ksp", "compressed": false, "openedAt": "…", "durationMs": 734512,
+                         "received": { … }, "sent": { … }, "totalBytes": 21336866 } ],
+  "recentConnections": [ /* the last 25 close-time rollups, newest first, each with a closedAt */ ]
+}
+```
 
 Counters are in-memory per process: **a relay restart or redeploy resets every
 counter and loses the open connections' totals so far.** Read a window from the
 logs, not from `/stats`, when a redeploy may have happened inside it.
+
+## Watching the relay live
+
+### `GET /dashboard`
+
+The same data as a live page, so watching the relay does not mean streaming a
+`docker logs` console:
+
+```bash
+./kd relay stats --staging --open
+```
+
+One self-contained HTML page served by the relay process itself — no new
+infrastructure, no external asset, no build step — polling `/stats` every four
+seconds and rendering the live connection list, the aggregates, tunnel buffer
+pressure, upgrade admission, compression negotiation, and the recent closes. It
+requires the **operator token specifically**, because it shows uids; a Firebase
+ID token gets a 401 here.
+
+`--open` prints a URL with the token in the query string and launches it. That
+is a deliberate trade for a single-operator tool: a page cannot set a header on
+its own navigation, the responses are `no-store`/`no-referrer`, and the token
+grants nothing but this read. **Treat that printed line as a credential** — it
+is the one piece of `kd` output that is one.
+
+A relay running without `KANNA_RELAY_STATS_TOKEN` answers `/dashboard` with a
+503 saying so, rather than a 401 that sends you hunting for a credential no
+value could satisfy.
+
+### `KANNA_RELAY_STATS_TOKEN`
+
+The operator credential for both routes. It lives in Secret Manager as
+`kanna-relay-stats-token`, `kd cloud deploy --relay` writes it into
+`/opt/kanna-relay/.env`, and `deploy/docker-compose.yml` passes it to the
+container. **A deploy against an environment that has no such secret still
+succeeds** — it writes no line, prints a note, and the dashboard reports itself
+disabled.
+
+Provision it once per environment (`$PROJECT` is `kanna-staging` or
+`kanna-build`, `$SA` the relay VM's service account):
+
+```bash
+openssl rand -hex 32 \
+  | gcloud secrets create kanna-relay-stats-token --project "$PROJECT" --data-file=-
+gcloud secrets add-iam-policy-binding kanna-relay-stats-token \
+  --project "$PROJECT" --member "serviceAccount:$SA" \
+  --role roles/secretmanager.secretAccessor
+```
+
+Apply the IAM grant through the approved GCP change process; `kd` does not
+execute IAM changes. Then redeploy the relay so the VM picks the value up.
+
+`kd relay stats` reads the same secret with **your** gcloud credentials, so your
+account needs `roles/secretmanager.secretAccessor` on it too. Set
+`KANNA_RELAY_STATS_TOKEN` in your shell to bypass the secret read entirely — the
+env var wins over Secret Manager.
+
+To rotate: add a new secret version, redeploy the relay, and the old value stops
+working when the container restarts. The relay refuses a token shorter than 16
+characters and logs a warning rather than half-enabling the dashboard with a
+guessable credential.
 
 Note that these counters measure **application** bytes — the payload the relay
 handed to or received from the WebSocket layer — on both sides. WebSocket
@@ -313,6 +408,10 @@ integration suite does.
    KANNA_RELAY_DOMAIN=relay-staging.kanna.build
    KANNA_RELAY_IMAGE=us-central1-docker.pkg.dev/kanna-staging/kanna-relay/relay:latest
    ```
+
+   Plus `KANNA_RELAY_STATS_TOKEN=…` when the `kanna-relay-stats-token` secret
+   exists in the project (see `GET /dashboard` above); the line is simply
+   omitted when it does not.
 
 8. Wire staging apps to:
 

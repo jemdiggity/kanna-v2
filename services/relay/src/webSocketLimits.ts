@@ -213,6 +213,15 @@ interface ClientAddressState {
   windowStartedAt: number;
 }
 
+export interface UpgradeAdmissionStats {
+  /** Upgrades admitted since process start. */
+  admitted: number;
+  /** Upgrades refused since process start, split by the status answered. */
+  refused: { total: number; byStatus: Record<string, number> };
+  /** Client addresses currently tracked. */
+  trackedAddresses: number;
+}
+
 export interface UpgradeAdmission {
   /** Take a pre-auth slot for `address`, or refuse the upgrade. */
   admit(address: string, now?: number): UpgradeRefusal;
@@ -222,6 +231,12 @@ export interface UpgradeAdmission {
   trackedAddressCount(): number;
   /** Pre-auth slots held by `address`; for tests. */
   unauthenticatedCount(address: string): number;
+  /**
+   * Admission counters since process start, for `GET /stats`. Counted inside
+   * `admit`, which every upgrade decision passes through, so no caller can
+   * forget to report one.
+   */
+  stats(): UpgradeAdmissionStats;
 }
 
 export interface UpgradeAdmissionOptions {
@@ -247,6 +262,13 @@ export function createUpgradeAdmission(
   const windowMs = options.windowMs ?? UPGRADE_RATE_WINDOW_MS;
   const maxTracked = options.maxTrackedAddresses ?? MAX_TRACKED_CLIENT_ADDRESSES;
   const states = new Map<string, ClientAddressState>();
+  let admittedCount = 0;
+  const refusedByStatus = new Map<number, number>();
+
+  function refuse(status: number, reason: string): UpgradeRefusal {
+    refusedByStatus.set(status, (refusedByStatus.get(status) ?? 0) + 1);
+    return { admitted: false, status, reason };
+  }
 
   /** Drop entries that hold no slot and whose rate window has lapsed. */
   function collect(now: number): void {
@@ -268,11 +290,7 @@ export function createUpgradeAdmission(
             // size that only a flood produces, and admitting untracked
             // connections would silently disable both bounds exactly when they
             // are needed.
-            return {
-              admitted: false,
-              status: 503,
-              reason: "relay is shedding new connections",
-            };
+            return refuse(503, "relay is shedding new connections");
           }
         }
         state = { unauthenticated: 0, upgrades: 0, windowStartedAt: now };
@@ -285,22 +303,21 @@ export function createUpgradeAdmission(
       }
 
       if (state.unauthenticated >= maxUnauthenticated) {
-        return {
-          admitted: false,
-          status: 429,
-          reason: `too many unauthenticated connections (limit ${maxUnauthenticated})`,
-        };
+        return refuse(
+          429,
+          `too many unauthenticated connections (limit ${maxUnauthenticated})`,
+        );
       }
       if (state.upgrades >= maxUpgrades) {
-        return {
-          admitted: false,
-          status: 429,
-          reason: `too many connection attempts (limit ${maxUpgrades} per ${windowMs} ms)`,
-        };
+        return refuse(
+          429,
+          `too many connection attempts (limit ${maxUpgrades} per ${windowMs} ms)`,
+        );
       }
 
       state.unauthenticated += 1;
       state.upgrades += 1;
+      admittedCount += 1;
       return { admitted: true };
     },
 
@@ -325,6 +342,20 @@ export function createUpgradeAdmission(
 
     unauthenticatedCount(address): number {
       return states.get(address)?.unauthenticated ?? 0;
+    },
+
+    stats(): UpgradeAdmissionStats {
+      let total = 0;
+      const byStatus: Record<string, number> = {};
+      for (const [status, count] of refusedByStatus) {
+        byStatus[String(status)] = count;
+        total += count;
+      }
+      return {
+        admitted: admittedCount,
+        refused: { total, byStatus },
+        trackedAddresses: states.size,
+      };
     },
   };
 }

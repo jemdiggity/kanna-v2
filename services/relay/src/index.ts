@@ -58,7 +58,6 @@ import {
 } from "./webSocketMessageLifecycle.js";
 import {
   closeByteAccount,
-  getByteStats,
   identifyByteAccount,
   openByteAccount,
   rawDataByteLength,
@@ -66,9 +65,16 @@ import {
   recordBytesSent,
   relayMessageByteClass,
   startByteRollups,
-  statsBearerToken,
   stopByteRollups,
 } from "./byteAccounting.js";
+import {
+  buildRelayStatsPayload,
+  matchesStatsToken,
+  resolveStatsToken,
+  statsRequestToken,
+  type RelayStatsAudience,
+} from "./relayStatus.js";
+import { RELAY_STATUS_DASHBOARD_HTML } from "./statusDashboardPage.js";
 
 const PORT = parseInt(process.env.PORT || "8080", 10);
 const BUILD_COMMIT = resolveBuildCommit(process.env);
@@ -76,6 +82,12 @@ const AUTH_TIMEOUT_MS = 10_000;
 const MAX_PAYLOAD_BYTES = resolveMaxPayloadBytes();
 const E2E_SHUTDOWN_TOKEN =
   process.env.KANNA_E2E_RELAY_SHUTDOWN_TOKEN?.trim() || null;
+/**
+ * The operator credential for `/stats` and `/dashboard`. Null on a relay
+ * deployed without it, which leaves `/stats` behaving exactly as it did before
+ * the dashboard landed and `/dashboard` unavailable.
+ */
+const STATS_TOKEN = resolveStatsToken();
 const cloudTaskPublicationStore = createFirestoreCloudTaskPublicationStore();
 
 /**
@@ -108,6 +120,33 @@ function parseTunnelRequest(data: string): { id: unknown } | null {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
   const message = parsed as { type?: unknown; id?: unknown };
   return message.type === "tunnel_request" ? { id: message.id } : null;
+}
+
+/**
+ * What a status request's credential may see, or null when it presented none
+ * the relay accepts.
+ *
+ * The operator token is checked first, so a relay running with one never pays a
+ * Firebase round trip for the operator's own polling.
+ */
+async function authorizeStatsRequest(
+  req: IncomingMessage,
+): Promise<RelayStatsAudience | null> {
+  const presented = statsRequestToken(req);
+  if (!presented) return null;
+  if (STATS_TOKEN && matchesStatsToken(presented, STATS_TOKEN)) return "operator";
+  return await verifyPhoneToken(presented) ? "account" : null;
+}
+
+/**
+ * Mark a status response uncacheable and unreferrable. Both matter because the
+ * dashboard URL carries the token: `no-store` keeps it out of the browser's
+ * disk cache and `no-referrer` keeps it out of anything the page links to.
+ */
+function noStore(res: ServerResponse): void {
+  res.setHeader("Cache-Control", "no-store, max-age=0");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("X-Content-Type-Options", "nosniff");
 }
 
 /**
@@ -155,24 +194,53 @@ export const server = createServer(async (req, res) => {
       return;
     }
 
-    // Byte odometer. Authenticated because usage data is not public; the
-    // body carries process aggregates only — no uid, desktop id, or
-    // per-connection row — so it cannot describe any individual account.
-    if (req.method === "GET" && req.url === "/stats") {
-      const bearer = statsBearerToken(req.headers.authorization);
-      const callerId = bearer ? await verifyPhoneToken(bearer) : null;
-      if (!callerId) {
+    // Relay status. Never public, and two credentials with two visibilities:
+    // a Firebase ID token reads process aggregates only, exactly as it always
+    // has, while the operator token additionally reads the per-connection rows
+    // the dashboard shows. See relayStatus.ts.
+    const statusPath = new URL(req.url ?? "/", "http://relay.invalid").pathname;
+
+    if (req.method === "GET" && statusPath === "/stats") {
+      noStore(res);
+      const audience = await authorizeStatsRequest(req);
+      if (!audience) {
         res.setHeader("WWW-Authenticate", "Bearer");
         jsonResponse(res, 401, { error: "Unauthorized" });
         return;
       }
 
-      jsonResponse(res, 200, {
-        status: "ok",
+      jsonResponse(res, 200, buildRelayStatsPayload({
         commit: BUILD_COMMIT,
-        connections: getConnectionCount(),
-        bytes: getByteStats(),
+        upgrades: upgradeAdmission.stats(),
+        audience,
+      }));
+      return;
+    }
+
+    // The status dashboard: one self-contained page that polls /stats. It shows
+    // uid and desktop id, so only the operator credential opens it — a valid
+    // Firebase ID token is not enough.
+    if (req.method === "GET" && statusPath === "/dashboard") {
+      noStore(res);
+      if (!STATS_TOKEN) {
+        // Configuration state, not user data. Answering 401 here would send the
+        // operator hunting for a credential that no value could satisfy.
+        jsonResponse(res, 503, {
+          error: "Relay status dashboard is disabled: KANNA_RELAY_STATS_TOKEN is not set",
+        });
+        return;
+      }
+      if (await authorizeStatsRequest(req) !== "operator") {
+        res.setHeader("WWW-Authenticate", "Bearer");
+        jsonResponse(res, 401, { error: "Unauthorized" });
+        return;
+      }
+
+      res.writeHead(200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Content-Length": Buffer.byteLength(RELAY_STATUS_DASHBOARD_HTML),
       });
+      res.end(RELAY_STATUS_DASHBOARD_HTML);
       return;
     }
 
