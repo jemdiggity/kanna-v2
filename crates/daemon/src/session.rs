@@ -520,7 +520,16 @@ impl SessionHandle {
             RawInputKind::Draft => {
                 state.raw_input_draft_active = true;
                 state.raw_input_draft_state_known = true;
-                state.declared_draft_writes_enqueued += 1;
+                // Counted only for bytes that will actually be written. The
+                // writer drops an empty raw input without ever completing it,
+                // so counting one here would leave the completed total short
+                // for the life of the session and wedge attestation shut — the
+                // very state this whole change exists to end. Empty bytes
+                // write nothing to the PTY and so change no rendered frame:
+                // there is nothing for a frame to have to post-date.
+                if !data.is_empty() {
+                    state.declared_draft_writes_enqueued += 1;
+                }
                 routed.push(PendingInput::raw_draft(data, written));
             }
             RawInputKind::Control => routed.push(PendingInput::raw(data, written)),
@@ -1934,6 +1943,62 @@ mod tests {
             input_rx.try_recv().is_err(),
             "the message must stay held while the draft is unaccounted for"
         );
+        handle.kill().await.unwrap();
+    }
+
+    /// An empty declared draft must not be counted as a write to wait for.
+    ///
+    /// The writer drops an empty raw input without ever completing it, so a
+    /// counted one leaves the completed total permanently short: every later
+    /// attestation refuses, and the session sits refusing logical input until
+    /// a human presses Enter at that terminal — the exact wedge this change
+    /// exists to end, made unrecoverable. Any producer can send one; nothing
+    /// on the way in rejects an empty payload.
+    #[tokio::test]
+    async fn an_empty_declared_draft_does_not_wedge_the_attestation_interlock() {
+        let handle = spawn_test_handle(AgentProvider::Claude, SessionStatus::Idle).unwrap();
+        let mut input_rx = handle.take_input_rx().await.expect("input queue");
+
+        handle
+            .enqueue_raw_input(Vec::new(), RawInputKind::Draft)
+            .expect("declare an empty draft");
+        handle
+            .enqueue_raw_input(b"\x1b[A".to_vec(), RawInputKind::Draft)
+            .expect("declare a draft from a navigation key");
+
+        let accepted = handle
+            .enqueue_logical_input(b"owner reply".to_vec())
+            .expect("accept logical input");
+        assert!(accepted.held_by_raw_draft);
+
+        assert!(input_rx.recv().await.expect("empty draft").data.is_empty());
+        assert_eq!(input_rx.recv().await.expect("draft").data, b"\x1b[A");
+
+        // Only the non-empty draft reaches the writer's completion path; the
+        // empty one was dropped and acknowledged before it.
+        handle
+            .complete_declared_draft_write()
+            .expect("the written draft reaches the PTY");
+        handle
+            .mirror_output(b"\x1b[2J\x1b[H* Done.\r\n\xe2\x9d\xaf \r\n", false)
+            .await
+            .expect("render an idle empty composer");
+
+        assert!(
+            handle
+                .attest_empty_composer()
+                .await
+                .expect("attest the rendered composer"),
+            "an empty declared draft must not leave the interlock waiting forever"
+        );
+        let mut released = input_rx.recv().await.expect("released logical message");
+        assert_eq!(released.data, b"owner reply");
+        assert!(released.advance_logical_message_to_enter());
+        released.acknowledge_written();
+        accepted
+            .written
+            .await
+            .expect("the released message keeps its own acknowledgement");
         handle.kill().await.unwrap();
     }
 
