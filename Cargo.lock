@@ -2954,7 +2954,6 @@ dependencies = [
  "tauri-plugin-webdriver",
  "tokio",
  "tokio-tungstenite 0.26.2",
- "tokio-tungstenite 0.29.0",
 ]
 
 [[package]]

@@ -549,14 +549,24 @@ mod tests {
             }
             InventoryResource::TmuxServer { .. } => panic!("expected daemon process record"),
         }
-        drop(child);
+        // Keep the child owned and actively waited while kd terminates it. If
+        // the Child is merely dropped, this test process remains its parent
+        // and the terminated process can stay visible to `ps` as a zombie.
+        // kd then correctly sees the same process identity until the test
+        // harness eventually reaps it. Waiting in parallel makes process exit
+        // the synchronization event and matches the production daemon, whose
+        // parent does not retain a Rust Child handle.
+        let reaper = std::thread::spawn(move || {
+            let mut child = child;
+            child.wait()
+        });
 
         let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../..")
             .canonicalize()
             .unwrap();
         let script = format!(
-            r#"import {{ executeDevDownWithContext }} from './src/tasks/registry.ts'; import {{ nodeCommandRunner }} from './src/runtime/process.ts'; await executeDevDownWithContext({{ killDaemon: true }}, {{ runner: nodeCommandRunner, context: {{ repoRoot: {}, ports: {{}}, env: {{ KANNA_DAEMON_DIR: {} }}, tmux: {{ server: 'kanna-rust-inventory-test', session: 'kanna-rust-inventory-test' }} }} }});"#,
+            r#"import {{ executeDevDownWithContext }} from './src/tasks/registry.ts'; import {{ nodeCommandRunner }} from './src/runtime/process.ts'; executeDevDownWithContext({{ killDaemon: true }}, {{ runner: nodeCommandRunner, context: {{ repoRoot: {}, ports: {{}}, env: {{ KANNA_DAEMON_DIR: {} }}, tmux: {{ server: 'kanna-rust-inventory-test', session: 'kanna-rust-inventory-test' }} }} }}).then((result) => {{ if (!result.ok) {{ console.error(result.message); process.exitCode = 1; }} }}).catch((error) => {{ console.error(error); process.exitCode = 1; }});"#,
             serde_json::to_string(&worktree).unwrap(),
             serde_json::to_string(&worktree.join(".kanna-daemon")).unwrap()
         );
@@ -566,6 +576,8 @@ mod tests {
             .status()
             .unwrap();
         assert!(cleanup.success());
+        let child_status = reaper.join().unwrap().unwrap();
+        assert!(!child_status.success());
         assert!(process_identity(child_pid).is_none());
         assert!(process_identity(unrelated.id()).is_some());
         assert!(!worktree
