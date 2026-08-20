@@ -40,6 +40,75 @@ function relayHttpUrl(path: string): string {
   return `http://localhost:${relayPort}${path}`;
 }
 
+/** Everything the relay has written to stdout since it was spawned. */
+let relayStdout = "";
+
+interface RelayByteLogLine {
+  event: string;
+  connectionId: number;
+  uid: string | null;
+  desktopId: string | null;
+  role: string;
+  tunnelService: string | null;
+  durationMs: number;
+  received: Record<string, number>;
+  sent: Record<string, number>;
+  receivedTotal: number;
+  sentTotal: number;
+  totalBytes: number;
+}
+
+interface RelayByteStatsBody {
+  status: string;
+  bytes: {
+    uptimeMs: number;
+    connections: { open: number; opened: number; closed: number };
+    received: Record<string, number>;
+    sent: Record<string, number>;
+    totalBytes: number;
+  };
+}
+
+const BYTE_LOG_PREFIX = "[bytes] ";
+
+function relayByteLogLines(): RelayByteLogLine[] {
+  const lines: RelayByteLogLine[] = [];
+  for (const line of relayStdout.split("\n")) {
+    const start = line.indexOf(BYTE_LOG_PREFIX);
+    if (start < 0) continue;
+    try {
+      lines.push(JSON.parse(line.slice(start + BYTE_LOG_PREFIX.length)) as RelayByteLogLine);
+    } catch {
+      // A stdout chunk boundary can split a line; the next poll sees it whole.
+    }
+  }
+  return lines;
+}
+
+async function waitForByteLogLine(
+  predicate: (line: RelayByteLogLine) => boolean,
+  description: string,
+  timeoutMs = 15_000,
+): Promise<RelayByteLogLine> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const match = relayByteLogLines().find(predicate);
+    if (match) return match;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`relay never logged ${description}`);
+}
+
+async function fetchRelayByteStats(token: string): Promise<RelayByteStatsBody> {
+  const response = await fetch(relayHttpUrl("/stats"), {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!response.ok) {
+    throw new Error(`relay /stats failed: ${response.status}`);
+  }
+  return await response.json() as RelayByteStatsBody;
+}
+
 interface RelayTunnelFlowHealth {
   pauseCount: number;
   resumeCount: number;
@@ -565,6 +634,9 @@ describe("Relay integration", () => {
         FIRESTORE_EMULATOR_HOST: `127.0.0.1:${firestorePort}`,
         PORT: String(relayPort),
         KANNA_E2E_RELAY_SHUTDOWN_TOKEN: E2E_SHUTDOWN_TOKEN,
+        // Short enough that the byte-odometer test sees a periodic rollup for
+        // a still-open connection instead of waiting an hour for one.
+        KANNA_RELAY_BYTE_ROLLUP_INTERVAL_MS: "1000",
       },
       detached: true,
       stdio: "pipe",
@@ -573,6 +645,12 @@ describe("Relay integration", () => {
     // Log relay stderr for debugging test failures
     relayProcess.stderr?.on("data", (chunk: Buffer) => {
       process.stderr.write(`[relay] ${chunk.toString()}`);
+    });
+    // The byte odometer reports on stdout, and an unread pipe eventually
+    // blocks the relay's own logging.
+    relayStdout = "";
+    relayProcess.stdout?.on("data", (chunk: Buffer) => {
+      relayStdout += chunk.toString();
     });
 
     await waitForRelay();
@@ -1366,6 +1444,229 @@ describe("Relay integration", () => {
     await closeAndWait(clientTunnel);
     await closeAndWait(desktopTunnel);
     await closeAndWait(desktopControl);
+  });
+
+  it("accounts tunnel, terminal, and control bytes per connection and reports them", async () => {
+    const ODOMETER_DESKTOP_ID = "desktop-byte-odometer";
+    const SESSION_ID = "sess-byte-odometer";
+    const TUNNEL_DOWNLOAD_BYTES = 128 * 1024;
+    const TUNNEL_UPLOAD_BYTES = 8 * 1024;
+    const CONTROL_BUDGET_BYTES = 16 * 1024;
+
+    const statsBefore = await fetchRelayByteStats(idToken);
+
+    const { ws: desktopControl } = await connectAndAuth({
+      device_token: TEST_DEVICE_TOKEN,
+      desktop_id: ODOMETER_DESKTOP_ID,
+    });
+    const { ws: phoneControl } = await connectAndAuth({ id_token: idToken });
+    const { ws: phoneTunnel } = await connectAndAuth({ id_token: idToken });
+
+    // 1. Control traffic: a request and its response.
+    expect(await requestActiveDesktopIds(phoneControl, "odometer-list"))
+      .toContain(ODOMETER_DESKTOP_ID);
+
+    // 2. Terminal streaming over the control channel, the way the mobile app
+    //    watches a session.
+    const observeSeen = waitForMessage(
+      desktopControl,
+      (msg) => msg.type === "invoke" && msg.id === "odometer-observe",
+    );
+    phoneControl.send(JSON.stringify({
+      type: "invoke",
+      id: "odometer-observe",
+      desktopId: ODOMETER_DESKTOP_ID,
+      command: "observe_session",
+      args: { session_id: SESSION_ID },
+    }));
+    await observeSeen;
+
+    const terminalChunk = "x".repeat(64 * 1024);
+    const terminalFrame = JSON.stringify({
+      type: "event",
+      payload: {
+        session_id: SESSION_ID,
+        type: "terminal_output",
+        data: terminalChunk,
+      },
+    });
+    const terminalFrameBytes = Buffer.byteLength(terminalFrame);
+    const terminalSeen = waitForMessage(
+      phoneControl,
+      (msg) => msg.type === "event",
+      10_000,
+    );
+    desktopControl.send(terminalFrame);
+    await terminalSeen;
+
+    // 3. Tunnel traffic in both directions.
+    const establishSignal = waitForMessage(
+      desktopControl,
+      (msg) => msg.type === "tunnel_establish" && msg.desktopId === ODOMETER_DESKTOP_ID,
+    );
+    phoneTunnel.send(JSON.stringify({
+      type: "tunnel_request",
+      id: "odometer-tunnel",
+      desktopId: ODOMETER_DESKTOP_ID,
+    }));
+    const signal = await establishSignal;
+
+    const desktopTunnel = new WebSocket(relayUrl());
+    const desktopReady = waitForMessage(
+      desktopTunnel,
+      (msg) => msg.type === "tunnel_ready" && msg.tunnelId === signal.tunnelId,
+    );
+    const clientReady = waitForMessage(
+      phoneTunnel,
+      (msg) => msg.type === "tunnel_ready" && msg.tunnelId === signal.tunnelId,
+    );
+    await new Promise<void>((resolve) => desktopTunnel.on("open", resolve));
+    desktopTunnel.send(JSON.stringify({
+      type: "auth",
+      device_token: TEST_DEVICE_TOKEN,
+      desktop_id: ODOMETER_DESKTOP_ID,
+      tunnel_id: signal.tunnelId,
+    }));
+    await desktopReady;
+    await clientReady;
+
+    const downloadSeen = waitForRawMessage(
+      phoneTunnel,
+      (raw, isBinary) => isBinary && raw.length === TUNNEL_DOWNLOAD_BYTES,
+      10_000,
+    );
+    desktopTunnel.send(Buffer.alloc(TUNNEL_DOWNLOAD_BYTES, 9));
+    await downloadSeen;
+
+    const uploadSeen = waitForRawMessage(
+      desktopTunnel,
+      (raw, isBinary) => isBinary && raw.length === TUNNEL_UPLOAD_BYTES,
+      10_000,
+    );
+    phoneTunnel.send(Buffer.alloc(TUNNEL_UPLOAD_BYTES, 4));
+    await uploadSeen;
+
+    // A long-lived tunnel reports before it closes.
+    const rollup = await waitForByteLogLine(
+      (line) =>
+        line.event === "connection_rollup"
+        && line.desktopId === ODOMETER_DESKTOP_ID
+        && line.tunnelService === "ksp"
+        && line.received.tunnel >= TUNNEL_DOWNLOAD_BYTES,
+      "a periodic rollup for the open desktop tunnel",
+    );
+    expect(rollup.uid).toBe(TEST_USER_ID);
+    expect(rollup.durationMs).toBeGreaterThan(0);
+
+    await closeAndWait(phoneTunnel);
+    await closeAndWait(desktopTunnel);
+    await closeAndWait(phoneControl);
+    await closeAndWait(desktopControl);
+
+    // Close-time rollups, one per connection, attributed to the account.
+    const desktopTunnelClose = await waitForByteLogLine(
+      (line) =>
+        line.event === "connection_close"
+        && line.role === "server"
+        && line.desktopId === ODOMETER_DESKTOP_ID
+        && line.tunnelService === "ksp",
+      "the desktop tunnel close rollup",
+    );
+    expect(desktopTunnelClose.uid).toBe(TEST_USER_ID);
+    expect(desktopTunnelClose.received.tunnel).toBe(TUNNEL_DOWNLOAD_BYTES);
+    expect(desktopTunnelClose.sent.tunnel).toBe(TUNNEL_UPLOAD_BYTES);
+    expect(desktopTunnelClose.received.taskTransfer).toBe(0);
+    expect(desktopTunnelClose.received.terminalEvent).toBe(0);
+    expect(desktopTunnelClose.received.control).toBeLessThan(CONTROL_BUDGET_BYTES);
+
+    const phoneTunnelClose = await waitForByteLogLine(
+      (line) =>
+        line.event === "connection_close"
+        && line.role === "phone"
+        && line.desktopId === ODOMETER_DESKTOP_ID,
+      "the phone tunnel close rollup",
+    );
+    expect(phoneTunnelClose.uid).toBe(TEST_USER_ID);
+    expect(phoneTunnelClose.tunnelService).toBe("ksp");
+    expect(phoneTunnelClose.sent.tunnel).toBe(TUNNEL_DOWNLOAD_BYTES);
+    expect(phoneTunnelClose.received.tunnel).toBe(TUNNEL_UPLOAD_BYTES);
+    expect(phoneTunnelClose.received.control).toBeLessThan(CONTROL_BUDGET_BYTES);
+    expect(phoneTunnelClose.sent.control).toBeLessThan(CONTROL_BUDGET_BYTES);
+
+    const desktopControlClose = await waitForByteLogLine(
+      (line) =>
+        line.event === "connection_close"
+        && line.role === "server"
+        && line.desktopId === ODOMETER_DESKTOP_ID
+        && line.tunnelService === null,
+      "the desktop control close rollup",
+    );
+    expect(desktopControlClose.uid).toBe(TEST_USER_ID);
+    expect(desktopControlClose.received.terminalEvent).toBe(terminalFrameBytes);
+    expect(desktopControlClose.received.tunnel).toBe(0);
+    expect(desktopControlClose.received.control).toBeLessThan(CONTROL_BUDGET_BYTES);
+    expect(desktopControlClose.sent.control).toBeGreaterThan(0);
+    expect(desktopControlClose.sent.control).toBeLessThan(CONTROL_BUDGET_BYTES);
+
+    const phoneControlClose = await waitForByteLogLine(
+      (line) =>
+        line.event === "connection_close"
+        && line.role === "phone"
+        && line.desktopId === null
+        && line.sent.terminalEvent > 0,
+      "the phone control close rollup",
+    );
+    expect(phoneControlClose.uid).toBe(TEST_USER_ID);
+    expect(phoneControlClose.sent.terminalEvent).toBe(terminalFrameBytes);
+    expect(phoneControlClose.received.terminalEvent).toBe(0);
+    expect(phoneControlClose.received.tunnel).toBe(0);
+    expect(phoneControlClose.received.control).toBeLessThan(CONTROL_BUDGET_BYTES);
+
+    // Process aggregates moved by at least what this exchange carried.
+    const statsAfter = await fetchRelayByteStats(idToken);
+    expect(statsAfter.bytes.received.tunnel - statsBefore.bytes.received.tunnel)
+      .toBeGreaterThanOrEqual(TUNNEL_DOWNLOAD_BYTES + TUNNEL_UPLOAD_BYTES);
+    expect(statsAfter.bytes.sent.tunnel - statsBefore.bytes.sent.tunnel)
+      .toBeGreaterThanOrEqual(TUNNEL_DOWNLOAD_BYTES + TUNNEL_UPLOAD_BYTES);
+    expect(statsAfter.bytes.received.terminalEvent - statsBefore.bytes.received.terminalEvent)
+      .toBeGreaterThanOrEqual(terminalFrameBytes);
+    expect(statsAfter.bytes.sent.terminalEvent - statsBefore.bytes.sent.terminalEvent)
+      .toBeGreaterThanOrEqual(terminalFrameBytes);
+    expect(statsAfter.bytes.connections.closed).toBeGreaterThanOrEqual(4);
+    expect(statsAfter.bytes.totalBytes).toBeGreaterThan(statsBefore.bytes.totalBytes);
+    // Aggregates only: the endpoint never names an account.
+    expect(JSON.stringify(statsAfter)).not.toContain(TEST_USER_ID);
+    expect(JSON.stringify(statsAfter)).not.toContain(ODOMETER_DESKTOP_ID);
+  }, 60_000);
+
+  it("refuses byte stats to callers without a valid Firebase credential", async () => {
+    const anonymous = await fetch(relayHttpUrl("/stats"));
+    expect(anonymous.status).toBe(401);
+    expect(await anonymous.json()).toEqual({ error: "Unauthorized" });
+
+    const forged = await fetch(relayHttpUrl("/stats"), {
+      headers: { Authorization: "Bearer not-a-real-id-token" },
+    });
+    expect(forged.status).toBe(401);
+
+    const wrongScheme = await fetch(relayHttpUrl("/stats"), {
+      headers: { Authorization: `Basic ${idToken}` },
+    });
+    expect(wrongScheme.status).toBe(401);
+
+    const authorized = await fetch(relayHttpUrl("/stats"), {
+      headers: { Authorization: `Bearer ${idToken}` },
+    });
+    expect(authorized.status).toBe(200);
+    const body = await authorized.json() as RelayByteStatsBody;
+    expect(body.status).toBe("ok");
+    expect(Object.keys(body.bytes.received).sort()).toEqual([
+      "control",
+      "taskTransfer",
+      "terminalEvent",
+      "total",
+      "tunnel",
+    ]);
   });
 
   it("routes same-user task-transfer tunnels with the requested service", async () => {

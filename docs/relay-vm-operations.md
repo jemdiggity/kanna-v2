@@ -36,6 +36,62 @@ built outside `kd cloud deploy` (a manual `gcloud builds submit` without
 `_COMMIT`, or a local `docker build`). Nothing else about the build is exposed —
 no branch, no build id.
 
+## How much traffic is this account using?
+
+The relay keeps a **byte odometer**: cumulative sent/received counters per
+WebSocket connection, attributed to the authenticated Firebase uid and desktop
+id and split by message class. It exists to measure real per-user traffic ahead
+of subscription pricing (`docs/specs/accounts-and-billing.md`); it enforces
+nothing.
+
+Classes:
+
+| class | what it counts |
+|---|---|
+| `tunnel` | spliced `ksp` tunnel frames — the Kanna Server Protocol, including raw terminal bytes |
+| `taskTransfer` | spliced `task-transfer` tunnel frames |
+| `terminalEvent` | terminal stream events routed to `observe_session` observers (how the mobile app watches a terminal) |
+| `control` | everything else: auth, invokes, responses, task snapshot publication, mobile notifications, acks |
+
+`received` is what the relay read from that connection; `sent` is what it wrote
+to it.
+
+### Logs
+
+One JSON line per connection close, plus an hourly rollup per still-open
+connection so a long-lived tunnel is visible before it closes:
+
+```bash
+sudo docker compose -f /opt/kanna-relay/docker-compose.yml logs relay \
+  | grep '\[bytes\]'
+```
+
+```json
+{"event":"connection_close","connectionId":41,"uid":"Bax9…","desktopId":"a1b2…","role":"server","tunnelService":"ksp","durationMs":734512,"received":{"tunnel":19283746,"taskTransfer":0,"terminalEvent":0,"control":1024},"sent":{…},"receivedTotal":19284770,"sentTotal":8192,"totalBytes":19292962}
+```
+
+`event` is `connection_close` or `connection_rollup`; a rollup carries the same
+totals-so-far for a connection that is still open. `KANNA_RELAY_BYTE_ROLLUP_INTERVAL_MS`
+overrides the hourly cadence (used by the test suite; the deploy does not set
+it).
+
+### `GET /stats`
+
+Process aggregates since the relay started, for ops inspection:
+
+```bash
+curl -s -H "Authorization: Bearer $FIREBASE_ID_TOKEN" https://relay.kanna.build/stats
+```
+
+Unlike `/health`, this route requires a Firebase ID token — usage data is not
+public. The body carries **aggregates only**: no uid, no desktop id, no
+per-connection row, so an authenticated caller learns nothing about another
+account. Per-user attribution exists only in the logs above.
+
+Counters are in-memory per process: **a relay restart or redeploy resets every
+counter and loses the open connections' totals so far.** Read a window from the
+logs, not from `/stats`, when a redeploy may have happened inside it.
+
 ## Staging
 
 1. Build the provisioning plan:
