@@ -9,7 +9,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 #[cfg(test)]
 use std::sync::OnceLock;
 use std::sync::{Arc, Mutex, Weak};
@@ -19,11 +19,12 @@ use axum::extract::ws::{Message as WsMessage, WebSocket};
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::{mpsc, watch, Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{broadcast, mpsc, watch, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
+use kanna_agent_protocol::frames::TermResumePosition;
 use kanna_agent_protocol::{
     ClientFrame, CompanionEvent, FrameAgentEvent, KspCapability, PermissionDecision, ServerFrame,
     StreamKind,
@@ -34,6 +35,9 @@ use kanna_daemon::terminal_perf::{self, TerminalPerfContext, TerminalPerfMonitor
 use crate::daemon_client::DaemonClient;
 use crate::db::Db;
 use crate::http_api::{dispatch_authenticated_http_invoke, AppState};
+use crate::terminal_window::{
+    window_snapshot, HistoryChunk, OutputRing, TerminalHistory, TERMINAL_RING_MAX_BYTES,
+};
 
 mod auth;
 
@@ -697,6 +701,7 @@ fn auth_ok_frame_for(companion_access: bool) -> ServerFrame {
             KspCapability::CompanionAttachmentEpoch,
             KspCapability::CompanionEventEpoch,
             KspCapability::TermInputBoundary,
+            KspCapability::TermScrollbackWindow,
         ],
     }
 }
@@ -1602,12 +1607,14 @@ async fn handle_stream_channels(
         companion_tx,
         attachments: HashMap::new(),
         terminal_controls: HashMap::new(),
+        terminal_taps: HashMap::new(),
         agent_commands: None,
         requests: None,
         companion_events: None,
         authed: false,
         supports_companion_event_epoch: false,
         supports_term_input_boundary: false,
+        supports_terminal_window: false,
         legacy_companion_tasks_on_connection: HashSet::new(),
         auth_mode,
         companion_access,
@@ -1655,12 +1662,16 @@ struct StreamConn {
     companion_tx: CompanionFrameSender,
     attachments: HashMap<(String, StreamKind), StreamAttachment>,
     terminal_controls: HashMap<String, TerminalControlHandle>,
+    /// Session taps backing this connection's windowed terminal attachments,
+    /// keyed by task id so a scrollback request can find its own history.
+    terminal_taps: HashMap<String, Arc<TerminalTap>>,
     agent_commands: Option<AgentCommandWorker>,
     requests: Option<RequestWorker>,
     companion_events: Option<CompanionEventWorker>,
     authed: bool,
     supports_companion_event_epoch: bool,
     supports_term_input_boundary: bool,
+    supports_terminal_window: bool,
     legacy_companion_tasks_on_connection: HashSet<String>,
     auth_mode: AuthMode,
     companion_access: bool,
@@ -2298,6 +2309,7 @@ impl StreamConn {
         for control in controls {
             let _ = control.task.await;
         }
+        self.terminal_taps.clear();
         if let Some(worker) = self.agent_commands.take() {
             worker.task.abort();
         }
@@ -2608,6 +2620,7 @@ impl StreamConn {
                 | ClientFrame::TermInputBoundary { task_id, .. }
                 | ClientFrame::TermInputControl { task_id, .. }
                 | ClientFrame::TermResize { task_id, .. }
+                | ClientFrame::TermScrollbackRequest { task_id, .. }
                 | ClientFrame::CompanionEvent { task_id, .. } => Some(task_id.clone()),
                 ClientFrame::Request { .. }
                 | ClientFrame::Auth { .. }
@@ -2634,6 +2647,7 @@ impl StreamConn {
                 include_assets,
                 accept_snapshot_chunks,
                 attachment_epoch,
+                term_resume,
             } => {
                 if kind == StreamKind::Companion && !self.companion_access {
                     self.error(
@@ -2675,6 +2689,7 @@ impl StreamConn {
                     include_assets.unwrap_or(false),
                     accept_snapshot_chunks.unwrap_or(false),
                     attachment_epoch,
+                    term_resume,
                 )
                 .await;
                 if let Some(task_id) = legacy_companion_task_id {
@@ -2720,6 +2735,7 @@ impl StreamConn {
                     let _ = attachment.task.await;
                 }
                 if kind == StreamKind::Terminal {
+                    self.terminal_taps.remove(&task_id);
                     if let Some(control) = self.terminal_controls.remove(&task_id) {
                         Self::retire_terminal_control(control).await;
                     }
@@ -2798,6 +2814,16 @@ impl StreamConn {
                 rows,
             } => self
                 .enqueue_terminal_control(task_id, TerminalControlCommand::Resize { cols, rows }),
+            ClientFrame::TermScrollbackRequest {
+                task_id,
+                request_id,
+                history_id,
+                before_line,
+                max_lines,
+            } => {
+                self.serve_scrollback(task_id, request_id, history_id, before_line, max_lines)
+                    .await;
+            }
             ClientFrame::CompanionEvent {
                 task_id,
                 session_id,
@@ -2911,6 +2937,7 @@ impl StreamConn {
             capabilities.contains(&KspCapability::CompanionEventEpoch);
         self.supports_term_input_boundary =
             capabilities.contains(&KspCapability::TermInputBoundary);
+        self.supports_terminal_window = capabilities.contains(&KspCapability::TermScrollbackWindow);
         self.send(auth_ok_frame_for(self.companion_access)).await;
         true
     }
@@ -2958,6 +2985,53 @@ impl StreamConn {
         }
     }
 
+    /// Answer one bounded scrollback request from the retained history of the
+    /// tap backing this connection's terminal attachment.
+    ///
+    /// A request naming a history this tap has since replaced is answered with
+    /// the current `history_id` and an empty chunk, so the client re-anchors on
+    /// the snapshot it now holds instead of splicing stale rows above it.
+    async fn serve_scrollback(
+        &mut self,
+        task_id: String,
+        request_id: u64,
+        history_id: u64,
+        before_line: u32,
+        max_lines: u32,
+    ) {
+        let Some(tap) = self.terminal_taps.get(&task_id) else {
+            self.error(
+                Some(task_id),
+                "no_scrollback",
+                "no windowed terminal attachment for this task".into(),
+            )
+            .await;
+            return;
+        };
+        let Some((current_history_id, chunk)) =
+            tap.scrollback_chunk(history_id, before_line, max_lines)
+        else {
+            self.error(
+                Some(task_id),
+                "no_scrollback",
+                "the terminal has no scrollback history yet".into(),
+            )
+            .await;
+            return;
+        };
+        self.send(ServerFrame::TermScrollbackChunk {
+            task_id,
+            request_id,
+            history_id: current_history_id,
+            start_line: chunk.start_line,
+            end_line: chunk.end_line,
+            data_b64: b64(chunk.data.as_bytes()),
+            remaining_lines: chunk.remaining_lines,
+        })
+        .await;
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn attach(
         &mut self,
         task_id: String,
@@ -2966,6 +3040,7 @@ impl StreamConn {
         include_assets: bool,
         accept_snapshot_chunks: bool,
         attachment_epoch: Option<u64>,
+        term_resume: Option<TermResumePosition>,
     ) {
         // Replace any existing attachment for this (task, kind).
         if let Some(existing) = self.attachments.remove(&(task_id.clone(), kind)) {
@@ -3062,6 +3137,18 @@ impl StreamConn {
             StreamKind::Agent => tokio::spawn(stream_agent(
                 daemon_dir, task_id, session_id, from_seq, frame_tx,
             )),
+            StreamKind::Terminal if self.supports_terminal_window => {
+                let lease = self.state.terminal_attachments().attach(session_id.clone());
+                let tap =
+                    self.state
+                        .terminal_taps
+                        .get_or_create(&self.state, &session_id, &task_id);
+                self.terminal_taps.insert(task_id.clone(), Arc::clone(&tap));
+                tokio::spawn(async move {
+                    let _lease = lease;
+                    stream_terminal_windowed(tap, task_id, session_id, term_resume, frame_tx).await;
+                })
+            }
             StreamKind::Terminal => {
                 let lease = self.state.terminal_attachments().attach(session_id.clone());
                 let state = Arc::clone(&self.state);
@@ -3659,6 +3746,801 @@ async fn stream_agent_once(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Windowed terminal streaming (KspCapability::TermScrollbackWindow)
+// ---------------------------------------------------------------------------
+//
+// A remote viewer does not get the whole terminal. It gets a bounded window of
+// it (`crate::terminal_window`), pulls older scrollback on demand, and — this
+// is what makes a flaky link survivable — resumes from a byte offset instead of
+// re-hydrating from scratch.
+//
+// Resuming needs somebody to still be holding the byte stream while the client
+// is away, so a capability client attaches through a *session tap*: one daemon
+// connection per session, shared by that session's subscribers, recording live
+// output into a bounded ring and outliving the last subscriber by
+// `TERMINAL_TAP_IDLE_GRACE`. Clients without the capability keep the original
+// one-daemon-connection-per-attachment path below, untouched.
+
+/// How long a tap keeps its daemon connection (and its replay ring) after the
+/// last subscriber leaves. This is the window in which a dropped mobile link
+/// costs O(delta) instead of O(buffer); past it the client gets a bounded fresh
+/// snapshot, which is correct, just less cheap.
+const TERMINAL_TAP_IDLE_GRACE: Duration = Duration::from_secs(120);
+/// How often an idle tap re-checks whether its grace has expired. Runs on the
+/// tap's own connection loop, so it also fires while output is flowing with
+/// nobody watching.
+const TERMINAL_TAP_IDLE_POLL: Duration = Duration::from_secs(5);
+/// Live output events a lagging subscriber may fall behind before it is resynced
+/// from the tap's current state instead of the stream.
+const TERMINAL_TAP_BROADCAST_CAPACITY: usize = 512;
+/// Taps kept for sessions nobody is watching. Active taps are bounded by actual
+/// viewers; this only bounds the idle ones still holding their grace window.
+const MAX_IDLE_TERMINAL_TAPS: usize = 16;
+
+static NEXT_TERMINAL_TAP_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_terminal_tap_id() -> u64 {
+    NEXT_TERMINAL_TAP_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// The session taps this server process is holding, keyed by daemon session id.
+#[derive(Clone, Default)]
+pub(crate) struct TerminalTapRegistry {
+    taps: Arc<Mutex<HashMap<String, Arc<TerminalTap>>>>,
+}
+
+impl TerminalTapRegistry {
+    fn get_or_create(
+        &self,
+        state: &Arc<AppState>,
+        session_id: &str,
+        task_id: &str,
+    ) -> Arc<TerminalTap> {
+        let mut taps = self
+            .taps
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(existing) = taps.get(session_id) {
+            if !existing.is_finished() {
+                return Arc::clone(existing);
+            }
+        }
+        Self::evict_idle(&mut taps);
+        let tap = Arc::new(TerminalTap::new(session_id, task_id));
+        taps.insert(session_id.to_string(), Arc::clone(&tap));
+        drop(taps);
+        tokio::spawn(run_terminal_tap(
+            Arc::clone(&tap),
+            Arc::clone(state),
+            self.clone(),
+        ));
+        tap
+    }
+
+    /// Drop taps whose grace has run out, then the least recently idle ones if
+    /// the idle population is still over its bound.
+    fn evict_idle(taps: &mut HashMap<String, Arc<TerminalTap>>) {
+        taps.retain(|_, tap| !tap.is_finished() && !tap.idle_expired());
+        let mut idle: Vec<(Instant, String)> = taps
+            .iter()
+            .filter_map(|(session_id, tap)| {
+                tap.idle_since().map(|since| (since, session_id.clone()))
+            })
+            .collect();
+        if idle.len() <= MAX_IDLE_TERMINAL_TAPS {
+            return;
+        }
+        idle.sort_by_key(|(since, _)| *since);
+        for (_, session_id) in idle.into_iter().take(idle_overflow(taps)) {
+            if let Some(tap) = taps.remove(&session_id) {
+                tap.finish();
+            }
+        }
+    }
+
+    fn remove(&self, session_id: &str, tap: &Arc<TerminalTap>) {
+        let mut taps = self
+            .taps
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if taps
+            .get(session_id)
+            .is_some_and(|current| Arc::ptr_eq(current, tap))
+        {
+            taps.remove(session_id);
+        }
+    }
+}
+
+fn idle_overflow(taps: &HashMap<String, Arc<TerminalTap>>) -> usize {
+    taps.values()
+        .filter(|tap| tap.idle_since().is_some())
+        .count()
+        .saturating_sub(MAX_IDLE_TERMINAL_TAPS)
+}
+
+/// The bounded snapshot a tap currently offers, and the scrollback it kept back.
+struct TapBase {
+    history_id: u64,
+    cols: u16,
+    rows: u16,
+    agent_provider: Option<kanna_agent_protocol::AgentProvider>,
+    window: String,
+    history: TerminalHistory,
+}
+
+struct TapShared {
+    /// Bumped for every daemon connection: an offset only means anything inside
+    /// the generation that produced it.
+    stream_id: u64,
+    base: Option<Arc<TapBase>>,
+    /// Stream offset the current base is valid at.
+    base_offset: u64,
+    ring: OutputRing,
+    status: Option<SessionStatus>,
+}
+
+#[derive(Clone)]
+enum TapEvent {
+    Output(Arc<[u8]>),
+    /// A new base snapshot replaced the old one; subscribers re-hydrate.
+    Snapshot,
+    Status(SessionStatus),
+    Exit(i32),
+    Failed {
+        code: String,
+        message: String,
+    },
+}
+
+/// What a subscriber should send its client to become current.
+enum TapAttach {
+    /// No snapshot yet — wait for one.
+    NotReady,
+    /// The ring can no longer reach the base, so nothing can be rebuilt from
+    /// it. The tap must re-attach to the daemon for a fresh one.
+    NeedsRestart,
+    Fresh {
+        stream_id: u64,
+        offset: u64,
+        base: Arc<TapBase>,
+        replay: Vec<Arc<[u8]>>,
+        status: Option<SessionStatus>,
+    },
+    Resumed {
+        stream_id: u64,
+        offset: u64,
+        base: Arc<TapBase>,
+        replay: Vec<Arc<[u8]>>,
+        status: Option<SessionStatus>,
+    },
+}
+
+pub(crate) struct TerminalTap {
+    session_id: String,
+    /// The task this tap was opened for. Only used to record a handoff-lost
+    /// session; frames always carry the *subscriber's* task id.
+    task_id: String,
+    shared: Mutex<TapShared>,
+    events: broadcast::Sender<TapEvent>,
+    subscribers: AtomicUsize,
+    idle_since: Mutex<Option<Instant>>,
+    restart: Notify,
+    finished: AtomicBool,
+    attached_once: AtomicBool,
+}
+
+impl TerminalTap {
+    fn new(session_id: &str, task_id: &str) -> Self {
+        let (events, _) = broadcast::channel(TERMINAL_TAP_BROADCAST_CAPACITY);
+        Self {
+            session_id: session_id.to_string(),
+            task_id: task_id.to_string(),
+            shared: Mutex::new(TapShared {
+                stream_id: next_terminal_tap_id(),
+                base: None,
+                base_offset: 0,
+                ring: OutputRing::new(TERMINAL_RING_MAX_BYTES),
+                status: None,
+            }),
+            events,
+            subscribers: AtomicUsize::new(0),
+            idle_since: Mutex::new(Some(Instant::now())),
+            restart: Notify::new(),
+            finished: AtomicBool::new(false),
+            attached_once: AtomicBool::new(false),
+        }
+    }
+
+    fn lock_shared(&self) -> std::sync::MutexGuard<'_, TapShared> {
+        self.shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn is_finished(&self) -> bool {
+        self.finished.load(Ordering::Acquire)
+    }
+
+    fn finish(&self) {
+        self.finished.store(true, Ordering::Release);
+        self.restart.notify_waiters();
+    }
+
+    fn idle_since(&self) -> Option<Instant> {
+        *self
+            .idle_since
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn idle_expired(&self) -> bool {
+        self.idle_since()
+            .is_some_and(|since| since.elapsed() >= TERMINAL_TAP_IDLE_GRACE)
+    }
+
+    fn subscribe_guard(self: &Arc<Self>) -> TapSubscriberGuard {
+        self.subscribers.fetch_add(1, Ordering::AcqRel);
+        *self
+            .idle_since
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        TapSubscriberGuard {
+            tap: Arc::clone(self),
+        }
+    }
+
+    fn request_restart(&self) {
+        self.restart.notify_one();
+    }
+
+    /// Subscribe to live events and learn what to send first. The receiver is
+    /// created under the same lock that reads the state, so no byte can slip
+    /// between the two.
+    fn attach(
+        &self,
+        resume: Option<TermResumePosition>,
+    ) -> (broadcast::Receiver<TapEvent>, TapAttach) {
+        let shared = self.lock_shared();
+        let events = self.events.subscribe();
+        let Some(base) = shared.base.clone() else {
+            return (events, TapAttach::NotReady);
+        };
+        if let Some(resume) = resume {
+            if resume.stream_id == shared.stream_id {
+                if let Some(replay) = shared.ring.replay_from(resume.offset) {
+                    return (
+                        events,
+                        TapAttach::Resumed {
+                            stream_id: shared.stream_id,
+                            offset: resume.offset,
+                            base,
+                            replay,
+                            status: shared.status,
+                        },
+                    );
+                }
+            }
+        }
+        let Some(replay) = shared.ring.replay_from(shared.base_offset) else {
+            // The ring outran the snapshot it was anchored to: everything it
+            // still holds is unreachable from that base.
+            return (events, TapAttach::NeedsRestart);
+        };
+        (
+            events,
+            TapAttach::Fresh {
+                stream_id: shared.stream_id,
+                offset: shared.base_offset,
+                base,
+                replay,
+                status: shared.status,
+            },
+        )
+    }
+
+    /// The retained scrollback for `history_id`, or the current history id when
+    /// the request names one this tap has replaced.
+    fn scrollback_chunk(
+        &self,
+        history_id: u64,
+        before_line: u32,
+        max_lines: u32,
+    ) -> Option<(u64, HistoryChunk)> {
+        let shared = self.lock_shared();
+        let base = shared.base.as_ref()?;
+        if base.history_id != history_id {
+            return Some((
+                base.history_id,
+                HistoryChunk {
+                    start_line: 0,
+                    end_line: 0,
+                    data: String::new(),
+                    remaining_lines: base.history.len() as u32,
+                },
+            ));
+        }
+        Some((
+            base.history_id,
+            base.history.chunk(before_line as usize, max_lines as usize),
+        ))
+    }
+
+    fn publish_snapshot(
+        &self,
+        snapshot: kanna_daemon::protocol::TerminalSnapshot,
+        agent_provider: Option<kanna_agent_protocol::AgentProvider>,
+    ) {
+        let windowed = window_snapshot(&snapshot.vt, snapshot.rows);
+        let base = Arc::new(TapBase {
+            history_id: next_terminal_tap_id(),
+            cols: snapshot.cols,
+            rows: snapshot.rows,
+            agent_provider,
+            window: windowed.window,
+            history: TerminalHistory::new(windowed.history),
+        });
+        // Publish under the lock. A subscriber reads this state and subscribes
+        // to the broadcast under the same lock, so anything it can already see
+        // must not also reach it as a live event.
+        let mut shared = self.lock_shared();
+        let offset = shared.ring.end_offset();
+        shared.ring.reset_to(offset);
+        shared.base_offset = offset;
+        shared.base = Some(base);
+        let _ = self.events.send(TapEvent::Snapshot);
+    }
+
+    fn publish_output(&self, data: Vec<u8>) {
+        let data: Arc<[u8]> = Arc::from(data);
+        // Recording and broadcasting are one step under the lock: a subscriber
+        // that attaches between them would be replayed this chunk from the ring
+        // *and* handed it again as a live event.
+        let mut shared = self.lock_shared();
+        shared.ring.push(Arc::clone(&data));
+        let _ = self.events.send(TapEvent::Output(data));
+    }
+
+    fn publish_status(&self, status: SessionStatus) {
+        let mut shared = self.lock_shared();
+        shared.status = Some(status);
+        let _ = self.events.send(TapEvent::Status(status));
+    }
+
+    /// A daemon connection ended: the byte stream restarts, so every offset
+    /// handed out under the old generation is void.
+    fn invalidate_stream(&self) {
+        let mut shared = self.lock_shared();
+        shared.stream_id = next_terminal_tap_id();
+        shared.base = None;
+        shared.base_offset = 0;
+        shared.ring.reset_to(0);
+        shared.status = None;
+    }
+}
+
+struct TapSubscriberGuard {
+    tap: Arc<TerminalTap>,
+}
+
+impl Drop for TapSubscriberGuard {
+    fn drop(&mut self) {
+        if self.tap.subscribers.fetch_sub(1, Ordering::AcqRel) == 1 {
+            *self
+                .tap
+                .idle_since
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Instant::now());
+        }
+    }
+}
+
+enum TapRunEnd {
+    /// The session is over, or the daemon answered with something fatal.
+    Done,
+    /// The daemon connection dropped; re-attach with backoff.
+    DaemonLost,
+    /// A subscriber asked for a fresh base snapshot.
+    Restart,
+    /// Nobody has watched this session for longer than the grace window.
+    Idle,
+}
+
+async fn run_terminal_tap(
+    tap: Arc<TerminalTap>,
+    state: Arc<AppState>,
+    registry: TerminalTapRegistry,
+) {
+    let daemon_dir = state.config().daemon_dir.clone();
+    let mut retry_attempt = 0usize;
+    loop {
+        match run_terminal_tap_once(&tap, &state, &daemon_dir).await {
+            TapRunEnd::Done | TapRunEnd::Idle => break,
+            TapRunEnd::Restart => {
+                retry_attempt = 0;
+                tap.invalidate_stream();
+            }
+            TapRunEnd::DaemonLost => {
+                log::warn!(
+                    "[ksp] terminal tap lost daemon connection (session={}, attempt={retry_attempt}); re-attaching",
+                    tap.session_id
+                );
+                tap.invalidate_stream();
+                let _ = tap.events.send(TapEvent::Snapshot);
+                daemon_stream_retry_delay(retry_attempt).await;
+                retry_attempt += 1;
+            }
+        }
+        if tap.is_finished() {
+            break;
+        }
+    }
+    tap.finish();
+    registry.remove(&tap.session_id, &tap);
+}
+
+async fn run_terminal_tap_once(
+    tap: &Arc<TerminalTap>,
+    state: &AppState,
+    daemon_dir: &str,
+) -> TapRunEnd {
+    let fail = |code: &str, message: String| {
+        let _ = tap.events.send(TapEvent::Failed {
+            code: code.to_string(),
+            message,
+        });
+    };
+
+    let mut client = match DaemonClient::connect(daemon_dir).await {
+        Ok(client) => client,
+        Err(error) => {
+            if tap.attached_once.load(Ordering::Acquire) {
+                return TapRunEnd::DaemonLost;
+            }
+            fail("daemon", format!("daemon error: {error}"));
+            return TapRunEnd::Done;
+        }
+    };
+
+    let attach_reply = client
+        .send_command(&DaemonCommand::AttachSnapshot {
+            session_id: tap.session_id.clone(),
+            emulate_terminal: true,
+        })
+        .await
+        .map_err(|error| error.to_string());
+    match attach_reply {
+        Ok(DaemonEvent::Snapshot {
+            snapshot,
+            agent_provider,
+            ..
+        }) => {
+            tap.attached_once.store(true, Ordering::Release);
+            tap.publish_snapshot(snapshot, agent_provider);
+        }
+        Ok(DaemonEvent::Error { code, message }) => {
+            let code = terminal_attach_error_code(state, &tap.task_id, code, &message);
+            fail(code, message);
+            return TapRunEnd::Done;
+        }
+        Ok(other) => {
+            fail("daemon", format!("unexpected attach reply: {other:?}"));
+            return TapRunEnd::Done;
+        }
+        Err(error) => {
+            if tap.attached_once.load(Ordering::Acquire) {
+                return TapRunEnd::DaemonLost;
+            }
+            fail("daemon", format!("daemon error: {error}"));
+            return TapRunEnd::Done;
+        }
+    }
+
+    // The daemon event reader runs in its own task: a line read is not
+    // cancel-safe, so it must never sit in a `select!` arm that another branch
+    // can win.
+    let (mut reader, _writer) = client.into_split();
+    let (event_tx, mut event_rx) = mpsc::channel::<DaemonEvent>(TERMINAL_TAP_BROADCAST_CAPACITY);
+    let reader_task = tokio::spawn(async move {
+        loop {
+            // Bind the read's non-`Send` error before the next await point.
+            let event = match reader.read_event().await {
+                Ok(event) => event,
+                Err(_) => return,
+            };
+            if event_tx.send(event).await.is_err() {
+                return;
+            }
+        }
+    });
+
+    let mut idle_poll = tokio::time::interval(TERMINAL_TAP_IDLE_POLL);
+    idle_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    idle_poll.tick().await;
+
+    let end = loop {
+        tokio::select! {
+            biased;
+            () = tap.restart.notified() => {
+                if tap.is_finished() {
+                    break TapRunEnd::Done;
+                }
+                break TapRunEnd::Restart;
+            }
+            event = event_rx.recv() => {
+                let Some(event) = event else {
+                    break TapRunEnd::DaemonLost;
+                };
+                match event {
+                    DaemonEvent::Output { session_id, data } if session_id == tap.session_id => {
+                        tap.publish_output(data);
+                    }
+                    DaemonEvent::Snapshot {
+                        session_id,
+                        snapshot,
+                        agent_provider,
+                    } if session_id == tap.session_id => {
+                        tap.publish_snapshot(snapshot, agent_provider);
+                    }
+                    DaemonEvent::StatusChanged {
+                        session_id, status, ..
+                    } if session_id == tap.session_id => {
+                        tap.publish_status(status);
+                    }
+                    DaemonEvent::Exit {
+                        session_id, code, ..
+                    } if session_id == tap.session_id => {
+                        let _ = tap.events.send(TapEvent::Exit(code));
+                        break TapRunEnd::Done;
+                    }
+                    DaemonEvent::ShuttingDown => break TapRunEnd::DaemonLost,
+                    _ => {}
+                }
+            }
+            _ = idle_poll.tick() => {
+                if tap.idle_expired() {
+                    break TapRunEnd::Idle;
+                }
+            }
+        }
+    };
+    reader_task.abort();
+    end
+}
+
+/// The client-facing code for a daemon attach error, recording a handoff-lost
+/// session on the way through exactly as the unwindowed path does.
+fn terminal_attach_error_code(
+    state: &AppState,
+    task_id: &str,
+    code: Option<kanna_daemon::protocol::ErrorCode>,
+    message: &str,
+) -> &'static str {
+    match code {
+        Some(kanna_daemon::protocol::ErrorCode::HandoffLost) => {
+            let reason = format!(
+                "session lost during daemon handoff; use kanna_resume_task to recover: {message}"
+            );
+            match crate::http_api::mark_task_session_interrupted(
+                &state.config().db_path,
+                task_id,
+                "failed",
+                &reason,
+            ) {
+                Ok(Some(_)) => {
+                    state.publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    log::warn!("[ksp] failed to record handoff-lost task {task_id}: {error}");
+                }
+            }
+            "handoff_lost"
+        }
+        Some(kanna_daemon::protocol::ErrorCode::SessionNotFound) => "session_not_found",
+        _ if message.contains("session not found") => "session_not_found",
+        _ => "daemon",
+    }
+}
+
+/// One capability client's view of a session tap.
+async fn stream_terminal_windowed(
+    tap: Arc<TerminalTap>,
+    task_id: String,
+    session_id: String,
+    resume: Option<TermResumePosition>,
+    frame_tx: mpsc::Sender<ServerFrame>,
+) {
+    let _guard = tap.subscribe_guard();
+    let monitor = terminal_perf::global_monitor().clone();
+    let mut resume = resume;
+
+    'attach: loop {
+        if tap.is_finished() {
+            return;
+        }
+        let (mut events, outcome) = tap.attach(resume.take());
+        let (replay, status, hydrate) = match outcome {
+            TapAttach::NotReady => {
+                if !wait_for_tap_base(&mut events, &task_id, &frame_tx).await {
+                    return;
+                }
+                continue 'attach;
+            }
+            TapAttach::NeedsRestart => {
+                tap.request_restart();
+                if !wait_for_tap_base(&mut events, &task_id, &frame_tx).await {
+                    return;
+                }
+                continue 'attach;
+            }
+            TapAttach::Fresh {
+                stream_id,
+                offset,
+                base,
+                replay,
+                status,
+            } => (
+                replay,
+                status,
+                ServerFrame::TermSnapshot {
+                    task_id: task_id.clone(),
+                    cols: base.cols,
+                    rows: base.rows,
+                    data_b64: b64(base.window.as_bytes()),
+                    agent_provider: base.agent_provider,
+                    stream_id: Some(stream_id),
+                    stream_offset: Some(offset),
+                    history_id: Some(base.history_id),
+                    scrollback_lines: Some(base.history.len() as u32),
+                },
+            ),
+            TapAttach::Resumed {
+                stream_id,
+                offset,
+                base,
+                replay,
+                status,
+            } => (
+                replay,
+                status,
+                ServerFrame::TermResumed {
+                    task_id: task_id.clone(),
+                    stream_id,
+                    offset,
+                    cols: base.cols,
+                    rows: base.rows,
+                    agent_provider: base.agent_provider,
+                    history_id: Some(base.history_id),
+                    scrollback_lines: Some(base.history.len() as u32),
+                },
+            ),
+        };
+
+        if send_terminal_frame(
+            frame_tx.clone(),
+            hydrate,
+            session_id.clone(),
+            monitor.clone(),
+        )
+        .await
+        .is_err()
+        {
+            return;
+        }
+        if let Some(status) = status {
+            if frame_tx
+                .send(ServerFrame::StatusChanged {
+                    task_id: task_id.clone(),
+                    status: status_str(status).to_string(),
+                })
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+        for chunk in replay {
+            if send_terminal_frame(
+                frame_tx.clone(),
+                ServerFrame::TermOutput {
+                    task_id: task_id.clone(),
+                    data_b64: b64(&chunk),
+                },
+                session_id.clone(),
+                monitor.clone(),
+            )
+            .await
+            .is_err()
+            {
+                return;
+            }
+        }
+
+        loop {
+            match events.recv().await {
+                Ok(TapEvent::Output(data)) => {
+                    if send_terminal_frame(
+                        frame_tx.clone(),
+                        ServerFrame::TermOutput {
+                            task_id: task_id.clone(),
+                            data_b64: b64(&data),
+                        },
+                        session_id.clone(),
+                        monitor.clone(),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        return;
+                    }
+                }
+                Ok(TapEvent::Status(status)) => {
+                    if frame_tx
+                        .send(ServerFrame::StatusChanged {
+                            task_id: task_id.clone(),
+                            status: status_str(status).to_string(),
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                Ok(TapEvent::Snapshot) => continue 'attach,
+                Ok(TapEvent::Exit(code)) => {
+                    let _ = frame_tx
+                        .send(ServerFrame::SessionExit {
+                            task_id: task_id.clone(),
+                            code,
+                        })
+                        .await;
+                    return;
+                }
+                Ok(TapEvent::Failed { code, message }) => {
+                    send_task_error(&frame_tx, &task_id, &code, message).await;
+                    return;
+                }
+                // Falling behind the live stream is resolved exactly like a
+                // reconnect: re-hydrate from the tap's current state.
+                Err(broadcast::error::RecvError::Lagged(_)) => continue 'attach,
+                Err(broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    }
+}
+
+/// Park until the tap has a base snapshot to hydrate from. Returns false when
+/// the stream is over.
+async fn wait_for_tap_base(
+    events: &mut broadcast::Receiver<TapEvent>,
+    task_id: &str,
+    frame_tx: &mpsc::Sender<ServerFrame>,
+) -> bool {
+    loop {
+        match events.recv().await {
+            Ok(TapEvent::Snapshot) => return true,
+            Ok(TapEvent::Failed { code, message }) => {
+                send_task_error(frame_tx, task_id, &code, message).await;
+                return false;
+            }
+            Ok(TapEvent::Exit(code)) => {
+                let _ = frame_tx
+                    .send(ServerFrame::SessionExit {
+                        task_id: task_id.to_string(),
+                        code,
+                    })
+                    .await;
+                return false;
+            }
+            Ok(_) => continue,
+            Err(broadcast::error::RecvError::Lagged(_)) => return true,
+            Err(broadcast::error::RecvError::Closed) => return false,
+        }
+    }
+}
+
 /// Terminal stream: daemon AttachSnapshot returns the authoritative headless
 /// terminal snapshot first, then the same connection receives live Output.
 /// If the daemon connection is lost after a successful attach (daemon
@@ -3760,6 +4642,10 @@ async fn stream_terminal_once(
                 rows: snapshot.rows,
                 data_b64: b64(snapshot.vt.as_bytes()),
                 agent_provider,
+                stream_id: None,
+                stream_offset: None,
+                history_id: None,
+                scrollback_lines: None,
             };
             if send_terminal_frame(
                 frame_tx.clone(),
@@ -3854,6 +4740,10 @@ async fn stream_terminal_once(
                     rows: snapshot.rows,
                     data_b64: b64(snapshot.vt.as_bytes()),
                     agent_provider,
+                    stream_id: None,
+                    stream_offset: None,
+                    history_id: None,
+                    scrollback_lines: None,
                 };
                 if send_terminal_frame(
                     frame_tx.clone(),
@@ -4418,6 +5308,8 @@ mod tests {
                 authed: true,
                 supports_companion_event_epoch,
                 supports_term_input_boundary: true,
+                supports_terminal_window: false,
+                terminal_taps: HashMap::new(),
                 legacy_companion_tasks_on_connection: HashSet::new(),
                 auth_mode: AuthMode::AllowEmpty,
                 companion_access: true,
@@ -4434,6 +5326,7 @@ mod tests {
             include_assets: None,
             accept_snapshot_chunks: Some(false),
             attachment_epoch: Some(attachment_epoch),
+            term_resume: None,
         }
     }
 
@@ -6016,6 +6909,7 @@ mod tests {
                 include_assets: Some(true),
                 accept_snapshot_chunks: None,
                 attachment_epoch: None,
+                term_resume: None,
             },
         )
         .await;
@@ -6134,6 +7028,7 @@ mod tests {
                 include_assets: Some(true),
                 accept_snapshot_chunks: Some(false),
                 attachment_epoch: Some(1),
+                term_resume: None,
             },
         )
         .await;
@@ -6160,6 +7055,7 @@ mod tests {
                 include_assets: Some(false),
                 accept_snapshot_chunks: Some(false),
                 attachment_epoch: Some(2),
+                term_resume: None,
             },
         )
         .await;
@@ -6231,6 +7127,7 @@ mod tests {
                 include_assets: None,
                 accept_snapshot_chunks: None,
                 attachment_epoch: None,
+                term_resume: None,
             },
         )
         .await;
@@ -6301,6 +7198,7 @@ mod tests {
                 include_assets: None,
                 accept_snapshot_chunks: Some(false),
                 attachment_epoch: Some(1),
+                term_resume: None,
             },
         )
         .await;
@@ -6321,6 +7219,7 @@ mod tests {
                 include_assets: None,
                 accept_snapshot_chunks: Some(true),
                 attachment_epoch: Some(2),
+                term_resume: None,
             },
         )
         .await;
@@ -6390,6 +7289,7 @@ mod tests {
                 include_assets: Some(false),
                 accept_snapshot_chunks: Some(true),
                 attachment_epoch: None,
+                term_resume: None,
             },
         )
         .await;
@@ -6451,6 +7351,7 @@ mod tests {
                 include_assets: None,
                 accept_snapshot_chunks: None,
                 attachment_epoch: None,
+                term_resume: None,
             },
         )
         .await;
@@ -6512,6 +7413,7 @@ mod tests {
                 include_assets: None,
                 accept_snapshot_chunks: None,
                 attachment_epoch: None,
+                term_resume: None,
             },
         )
         .await;
@@ -6571,6 +7473,7 @@ mod tests {
                 include_assets: None,
                 accept_snapshot_chunks: None,
                 attachment_epoch: None,
+                term_resume: None,
             },
         )
         .await;
@@ -6631,6 +7534,7 @@ mod tests {
                 include_assets: None,
                 accept_snapshot_chunks: Some(false),
                 attachment_epoch: Some(1),
+                term_resume: None,
             },
         )
         .await;
@@ -6679,6 +7583,7 @@ mod tests {
                 include_assets: None,
                 accept_snapshot_chunks: Some(false),
                 attachment_epoch: Some(2),
+                term_resume: None,
             },
         )
         .await;
@@ -6728,6 +7633,7 @@ mod tests {
                 include_assets: None,
                 accept_snapshot_chunks: Some(false),
                 attachment_epoch: Some(1),
+                term_resume: None,
             },
         )
         .await;
@@ -6776,6 +7682,7 @@ mod tests {
                 include_assets: None,
                 accept_snapshot_chunks: Some(false),
                 attachment_epoch: Some(2),
+                term_resume: None,
             },
         )
         .await;
@@ -6858,6 +7765,7 @@ mod tests {
                 include_assets: None,
                 accept_snapshot_chunks: Some(false),
                 attachment_epoch: Some(1),
+                term_resume: None,
             },
         )
         .await;
@@ -6919,6 +7827,7 @@ mod tests {
                 include_assets: None,
                 accept_snapshot_chunks: Some(false),
                 attachment_epoch: Some(2),
+                term_resume: None,
             },
         )
         .await;
@@ -6973,6 +7882,7 @@ mod tests {
             include_assets: None,
             accept_snapshot_chunks: Some(false),
             attachment_epoch: Some(attachment_epoch),
+            term_resume: None,
         };
 
         let mut first = ws_connect(&url).await;
@@ -7097,6 +8007,7 @@ mod tests {
                 include_assets: None,
                 accept_snapshot_chunks: Some(false),
                 attachment_epoch: Some(1),
+                term_resume: None,
             },
         )
         .await;
@@ -7202,6 +8113,7 @@ mod tests {
                 include_assets: None,
                 accept_snapshot_chunks: Some(false),
                 attachment_epoch: Some(1),
+                term_resume: None,
             },
         )
         .await;
@@ -7301,6 +8213,7 @@ mod tests {
                 include_assets: None,
                 accept_snapshot_chunks: Some(false),
                 attachment_epoch: Some(1),
+                term_resume: None,
             },
         )
         .await;
@@ -7338,6 +8251,7 @@ mod tests {
                 include_assets: None,
                 accept_snapshot_chunks: Some(false),
                 attachment_epoch: Some(2),
+                term_resume: None,
             },
         )
         .await;
@@ -7395,6 +8309,8 @@ mod tests {
                 authed: true,
                 supports_companion_event_epoch: false,
                 supports_term_input_boundary: true,
+                supports_terminal_window: false,
+                terminal_taps: HashMap::new(),
                 legacy_companion_tasks_on_connection: HashSet::new(),
                 auth_mode: AuthMode::AllowEmpty,
                 companion_access: true,
@@ -7503,6 +8419,8 @@ mod tests {
             authed: true,
             supports_companion_event_epoch: false,
             supports_term_input_boundary: true,
+            supports_terminal_window: false,
+            terminal_taps: HashMap::new(),
             legacy_companion_tasks_on_connection: HashSet::new(),
             auth_mode: AuthMode::AllowEmpty,
             companion_access: true,
@@ -7612,6 +8530,7 @@ mod tests {
                 include_assets: None,
                 accept_snapshot_chunks: None,
                 attachment_epoch: None,
+                term_resume: None,
             },
         )
         .await;
@@ -7624,6 +8543,7 @@ mod tests {
                 include_assets: None,
                 accept_snapshot_chunks: None,
                 attachment_epoch: None,
+                term_resume: None,
             },
         )
         .await;
@@ -7825,6 +8745,7 @@ mod tests {
                 include_assets: None,
                 accept_snapshot_chunks: None,
                 attachment_epoch: None,
+                term_resume: None,
             },
         )
         .await;
@@ -8234,6 +9155,7 @@ mod tests {
                 include_assets: None,
                 accept_snapshot_chunks: Some(false),
                 attachment_epoch: Some(1),
+                term_resume: None,
             },
         )
         .await;
@@ -8597,6 +9519,8 @@ mod tests {
             authed: true,
             supports_companion_event_epoch: false,
             supports_term_input_boundary: true,
+            supports_terminal_window: false,
+            terminal_taps: HashMap::new(),
             legacy_companion_tasks_on_connection: HashSet::new(),
             auth_mode: AuthMode::AllowEmpty,
             companion_access: true,
@@ -8673,6 +9597,8 @@ mod tests {
             authed: true,
             supports_companion_event_epoch: false,
             supports_term_input_boundary: true,
+            supports_terminal_window: false,
+            terminal_taps: HashMap::new(),
             legacy_companion_tasks_on_connection: HashSet::new(),
             auth_mode: AuthMode::AllowEmpty,
             companion_access: true,
@@ -8737,6 +9663,8 @@ mod tests {
             authed: true,
             supports_companion_event_epoch: false,
             supports_term_input_boundary: true,
+            supports_terminal_window: false,
+            terminal_taps: HashMap::new(),
             legacy_companion_tasks_on_connection: HashSet::new(),
             auth_mode: AuthMode::AllowEmpty,
             companion_access: true,
@@ -8844,6 +9772,8 @@ mod tests {
             authed: true,
             supports_companion_event_epoch: false,
             supports_term_input_boundary: true,
+            supports_terminal_window: false,
+            terminal_taps: HashMap::new(),
             legacy_companion_tasks_on_connection: HashSet::new(),
             auth_mode: AuthMode::AllowEmpty,
             companion_access: true,
@@ -8855,6 +9785,7 @@ mod tests {
             0,
             true,
             false,
+            None,
             None,
         )
         .await;
@@ -9275,6 +10206,7 @@ mod tests {
                 include_assets: None,
                 accept_snapshot_chunks: None,
                 attachment_epoch: None,
+                term_resume: None,
             },
         )
         .await;
@@ -9292,6 +10224,7 @@ mod tests {
                 rows,
                 data_b64,
                 agent_provider,
+                ..
             } => {
                 assert_eq!(task_id, "task-1");
                 assert_eq!(cols, 80);
@@ -9467,6 +10400,7 @@ mod tests {
                 include_assets: None,
                 accept_snapshot_chunks: None,
                 attachment_epoch: None,
+                term_resume: None,
             },
         )
         .await;
@@ -9659,6 +10593,7 @@ mod tests {
                 include_assets: None,
                 accept_snapshot_chunks: None,
                 attachment_epoch: None,
+                term_resume: None,
             },
         )
         .await;
@@ -9739,6 +10674,7 @@ mod tests {
                 include_assets: None,
                 accept_snapshot_chunks: None,
                 attachment_epoch: None,
+                term_resume: None,
             },
         )
         .await;
@@ -10462,6 +11398,7 @@ mod tests {
                     KspCapability::CompanionAttachmentEpoch,
                     KspCapability::CompanionEventEpoch,
                     KspCapability::TermInputBoundary,
+                    KspCapability::TermScrollbackWindow,
                 ],
             })
         );
@@ -10475,6 +11412,7 @@ mod tests {
                     include_assets: Some(false),
                     accept_snapshot_chunks: Some(true),
                     attachment_epoch: None,
+                    term_resume: None,
                 })
                 .unwrap(),
             )
@@ -10555,5 +11493,579 @@ mod tests {
         }
         drop(incoming_tx);
         let _ = task.await;
+    }
+
+    // -- windowed terminal streaming -------------------------------------
+
+    fn windowed_client_auth_frame() -> ClientFrame {
+        ClientFrame::Auth {
+            credential: None,
+            capabilities: vec![
+                KspCapability::CompanionEventEpoch,
+                KspCapability::TermInputBoundary,
+                KspCapability::TermScrollbackWindow,
+            ],
+        }
+    }
+
+    fn scrollback_vt(lines: usize) -> String {
+        (0..lines)
+            .map(|index| format!("row-{index}"))
+            .collect::<Vec<_>>()
+            .join("\r\n")
+    }
+
+    struct WindowedTerminalFixture {
+        url: String,
+        daemon: JoinHandle<()>,
+        daemon_dir: std::path::PathBuf,
+        socket_path: std::path::PathBuf,
+    }
+
+    impl WindowedTerminalFixture {
+        /// A daemon that answers one `AttachSnapshot` with `vt`, writes
+        /// `outputs` as live output, and then holds the connection open — which
+        /// is what lets a tap outlive a client's socket.
+        async fn new(label: &str, vt: String, outputs: Vec<Vec<u8>>) -> Self {
+            let unique = format!(
+                "ksp-{label}-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            );
+            let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+            std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+            let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+            let _ = std::fs::remove_file(&socket_path);
+
+            let listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
+            let daemon = tokio::spawn(async move {
+                let mut connection = 0usize;
+                loop {
+                    let (stream, _) = listener.accept().await.expect("accept daemon connection");
+                    // Live output is served once. A tap that re-attaches — the
+                    // path a new viewer takes when the replay ring has outrun
+                    // its snapshot — gets the snapshot and nothing else, so a
+                    // test can tell a restart from a replay.
+                    let outputs = if connection == 0 {
+                        outputs.clone()
+                    } else {
+                        Vec::new()
+                    };
+                    connection += 1;
+                    let vt = vt.clone();
+                    tokio::spawn(async move {
+                        let (read_half, mut write_half) = stream.into_split();
+                        let mut reader = BufReader::new(read_half);
+                        let mut line = String::new();
+                        reader
+                            .read_line(&mut line)
+                            .await
+                            .expect("read attach snapshot command");
+                        let command: DaemonCommand = serde_json::from_str(line.trim())
+                            .expect("parse attach snapshot command");
+                        assert!(matches!(command, DaemonCommand::AttachSnapshot { .. }));
+
+                        let mut events = vec![DaemonEvent::Snapshot {
+                            session_id: "daemon-terminal-1".to_string(),
+                            snapshot: kanna_daemon::protocol::TerminalSnapshot {
+                                version: 1,
+                                rows: 24,
+                                cols: 80,
+                                cursor_row: 1,
+                                cursor_col: 0,
+                                cursor_visible: true,
+                                saved_at: 0,
+                                sequence: 0,
+                                vt,
+                            },
+                            agent_provider: Some(kanna_daemon::protocol::AgentProvider::Claude),
+                        }];
+                        events.extend(outputs.into_iter().map(|data| DaemonEvent::Output {
+                            session_id: "daemon-terminal-1".to_string(),
+                            data,
+                        }));
+                        for event in events {
+                            write_half
+                                .write_all(
+                                    format!("{}\n", serde_json::to_string(&event).unwrap())
+                                        .as_bytes(),
+                                )
+                                .await
+                                .expect("write daemon event");
+                        }
+                        // Hold the connection open: the tap is expected to keep it.
+                        let mut trailing = String::new();
+                        let _ = reader.read_line(&mut trailing).await;
+                        std::future::pending::<()>().await;
+                    });
+                }
+            });
+
+            let mut config = test_config(&unique, "KSP Windowed Terminal");
+            config.daemon_dir = daemon_dir.to_string_lossy().to_string();
+            config.db_path = Db::test_db_path(&unique);
+            config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+
+            let db = Db::open_for_tests(&config.db_path).expect("open test db");
+            db.insert_test_repo("repo-1", "Repo One")
+                .expect("insert repo");
+            db.insert_test_pipeline_item(
+                "task-1",
+                "repo-1",
+                "Windowed terminal",
+                None,
+                "in progress",
+                "2026-08-21T00:00:00Z",
+            )
+            .expect("insert task");
+            db.insert_test_terminal_session(
+                "terminal-1",
+                "repo-1",
+                "task-1",
+                "agent",
+                "daemon-terminal-1",
+            )
+            .expect("insert terminal session");
+
+            let url = serve_router(crate::http_api::router(Arc::new(AppState::new(config)))).await;
+            Self {
+                url,
+                daemon,
+                daemon_dir,
+                socket_path,
+            }
+        }
+    }
+
+    impl Drop for WindowedTerminalFixture {
+        fn drop(&mut self) {
+            self.daemon.abort();
+            let _ = std::fs::remove_file(&self.socket_path);
+            let _ = std::fs::remove_dir_all(&self.daemon_dir);
+        }
+    }
+
+    fn decode_frame_bytes(data_b64: &str) -> Vec<u8> {
+        base64::engine::general_purpose::STANDARD
+            .decode(data_b64)
+            .expect("decode terminal frame")
+    }
+
+    fn attach_terminal_frame(term_resume: Option<TermResumePosition>) -> ClientFrame {
+        ClientFrame::Attach {
+            task_id: "task-1".into(),
+            kind: StreamKind::Terminal,
+            from_seq: 0,
+            include_assets: None,
+            accept_snapshot_chunks: None,
+            attachment_epoch: None,
+            term_resume,
+        }
+    }
+
+    #[tokio::test]
+    async fn windowed_attach_bounds_the_snapshot_and_serves_the_rest_as_scrollback() {
+        let vt = scrollback_vt(2_000);
+        let fixture =
+            WindowedTerminalFixture::new("windowed-snapshot", vt.clone(), Vec::new()).await;
+        let mut socket = ws_connect(&fixture.url).await;
+        send_frame(&mut socket, &windowed_client_auth_frame()).await;
+        assert_eq!(recv_frame(&mut socket).await, auth_ok_frame_for(false));
+        send_frame(&mut socket, &attach_terminal_frame(None)).await;
+
+        let (window, history_id, scrollback_lines) = match recv_frame(&mut socket).await {
+            ServerFrame::TermSnapshot {
+                data_b64,
+                history_id,
+                scrollback_lines,
+                stream_id,
+                stream_offset,
+                agent_provider,
+                ..
+            } => {
+                assert!(stream_id.is_some(), "a windowed snapshot names its stream");
+                assert_eq!(stream_offset, Some(0));
+                assert_eq!(
+                    agent_provider,
+                    Some(kanna_agent_protocol::AgentProvider::Claude)
+                );
+                (
+                    String::from_utf8(decode_frame_bytes(&data_b64)).expect("utf8 window"),
+                    history_id.expect("a windowed snapshot names its history"),
+                    scrollback_lines.expect("a windowed snapshot reports its scrollback"),
+                )
+            }
+            other => panic!("expected a windowed terminal snapshot, got {other:?}"),
+        };
+
+        // The screen plus its recent scrollback, not the whole buffer.
+        assert!(
+            window.len() * 4 < vt.len(),
+            "window {} was not meaningfully smaller than the {} byte terminal",
+            window.len(),
+            vt.len()
+        );
+        assert_eq!(scrollback_lines, 2_000 - (24 + 400));
+        assert!(window.ends_with("row-1999"));
+
+        // Walking the history downward reproduces exactly what was withheld.
+        let mut chunks: Vec<String> = Vec::new();
+        let mut before_line = scrollback_lines;
+        let mut request_id = 1u64;
+        while before_line > 0 {
+            send_frame(
+                &mut socket,
+                &ClientFrame::TermScrollbackRequest {
+                    task_id: "task-1".into(),
+                    request_id,
+                    history_id,
+                    before_line,
+                    max_lines: 200,
+                },
+            )
+            .await;
+            match recv_frame(&mut socket).await {
+                ServerFrame::TermScrollbackChunk {
+                    task_id,
+                    request_id: echoed,
+                    history_id: chunk_history,
+                    start_line,
+                    end_line,
+                    data_b64,
+                    remaining_lines,
+                } => {
+                    assert_eq!(task_id, "task-1");
+                    assert_eq!(echoed, request_id);
+                    assert_eq!(chunk_history, history_id);
+                    assert_eq!(end_line, before_line);
+                    assert!(end_line - start_line <= 200);
+                    chunks.push(
+                        String::from_utf8(decode_frame_bytes(&data_b64)).expect("utf8 chunk"),
+                    );
+                    assert_eq!(remaining_lines, start_line);
+                    before_line = start_line;
+                }
+                other => panic!("expected a scrollback chunk, got {other:?}"),
+            }
+            request_id += 1;
+        }
+        assert!(request_id > 2, "the history was served in bounded chunks");
+
+        chunks.reverse();
+        let mut rebuilt = String::new();
+        for chunk in &chunks {
+            rebuilt.push_str(chunk.trim_start_matches("\x1b[0m"));
+        }
+        rebuilt.push_str(window.trim_start_matches("\x1b[0m"));
+        assert_eq!(rebuilt, vt);
+
+        // A request against a history this tap no longer has re-anchors the
+        // client instead of splicing stale rows above its buffer.
+        send_frame(
+            &mut socket,
+            &ClientFrame::TermScrollbackRequest {
+                task_id: "task-1".into(),
+                request_id: 9_999,
+                history_id: history_id.wrapping_add(1_000),
+                before_line: 100,
+                max_lines: 10,
+            },
+        )
+        .await;
+        match recv_frame(&mut socket).await {
+            ServerFrame::TermScrollbackChunk {
+                history_id: current,
+                data_b64,
+                remaining_lines,
+                ..
+            } => {
+                assert_eq!(current, history_id);
+                assert!(data_b64.is_empty());
+                assert_eq!(remaining_lines, scrollback_lines);
+            }
+            other => panic!("expected a re-anchoring chunk, got {other:?}"),
+        }
+
+        drop(socket);
+    }
+
+    #[tokio::test]
+    async fn terminal_snapshot_is_unbounded_without_the_window_capability() {
+        let vt = scrollback_vt(2_000);
+        let fixture =
+            WindowedTerminalFixture::new("unwindowed-snapshot", vt.clone(), Vec::new()).await;
+        let mut socket = ws_connect(&fixture.url).await;
+        send_frame(&mut socket, &client_auth_frame()).await;
+        assert_eq!(recv_frame(&mut socket).await, auth_ok_frame_for(false));
+        send_frame(&mut socket, &attach_terminal_frame(None)).await;
+
+        match recv_frame(&mut socket).await {
+            ServerFrame::TermSnapshot {
+                data_b64,
+                stream_id,
+                stream_offset,
+                history_id,
+                scrollback_lines,
+                ..
+            } => {
+                assert_eq!(
+                    String::from_utf8(decode_frame_bytes(&data_b64)).expect("utf8 snapshot"),
+                    vt,
+                    "a client that negotiated nothing still gets the whole terminal"
+                );
+                assert_eq!(stream_id, None);
+                assert_eq!(stream_offset, None);
+                assert_eq!(history_id, None);
+                assert_eq!(scrollback_lines, None);
+            }
+            other => panic!("expected the legacy terminal snapshot, got {other:?}"),
+        }
+
+        drop(socket);
+    }
+
+    #[tokio::test]
+    async fn reconnect_replays_the_delta_instead_of_the_buffer() {
+        let vt = scrollback_vt(2_000);
+        let outputs: Vec<Vec<u8>> = (0..20)
+            .map(|index| format!("live-line-{index:04}\r\n").into_bytes())
+            .collect();
+        let total_output: usize = outputs.iter().map(|chunk| chunk.len()).sum();
+        let fixture =
+            WindowedTerminalFixture::new("reconnect-delta", vt.clone(), outputs.clone()).await;
+
+        let mut socket = ws_connect(&fixture.url).await;
+        send_frame(&mut socket, &windowed_client_auth_frame()).await;
+        assert_eq!(recv_frame(&mut socket).await, auth_ok_frame_for(false));
+        send_frame(&mut socket, &attach_terminal_frame(None)).await;
+
+        let (stream_id, mut offset, window_bytes) = match recv_frame(&mut socket).await {
+            ServerFrame::TermSnapshot {
+                stream_id,
+                stream_offset,
+                data_b64,
+                ..
+            } => (
+                stream_id.expect("stream id"),
+                stream_offset.expect("stream offset"),
+                decode_frame_bytes(&data_b64).len(),
+            ),
+            other => panic!("expected a windowed terminal snapshot, got {other:?}"),
+        };
+
+        // Read part of the live stream, then lose the link.
+        let mut consumed = 0usize;
+        for _ in 0..5 {
+            match recv_frame(&mut socket).await {
+                ServerFrame::TermOutput { data_b64, .. } => {
+                    let bytes = decode_frame_bytes(&data_b64);
+                    consumed += bytes.len();
+                    offset += bytes.len() as u64;
+                }
+                other => panic!("expected live terminal output, got {other:?}"),
+            }
+        }
+        drop(socket);
+
+        let mut resumed = ws_connect(&fixture.url).await;
+        send_frame(&mut resumed, &windowed_client_auth_frame()).await;
+        assert_eq!(recv_frame(&mut resumed).await, auth_ok_frame_for(false));
+        send_frame(
+            &mut resumed,
+            &attach_terminal_frame(Some(TermResumePosition { stream_id, offset })),
+        )
+        .await;
+
+        match recv_frame(&mut resumed).await {
+            ServerFrame::TermResumed {
+                stream_id: resumed_stream,
+                offset: resumed_offset,
+                cols,
+                rows,
+                ..
+            } => {
+                assert_eq!(resumed_stream, stream_id);
+                assert_eq!(resumed_offset, offset);
+                assert_eq!((cols, rows), (80, 24));
+            }
+            other => panic!("a resumable reconnect must not re-ship a snapshot: {other:?}"),
+        }
+
+        let expected_delta = total_output - consumed;
+        let mut replayed = Vec::new();
+        while replayed.len() < expected_delta {
+            match recv_frame(&mut resumed).await {
+                ServerFrame::TermOutput { data_b64, .. } => {
+                    replayed.extend(decode_frame_bytes(&data_b64));
+                }
+                other => panic!("expected replayed terminal output, got {other:?}"),
+            }
+        }
+        let expected: Vec<u8> = outputs.concat()[consumed..].to_vec();
+        assert_eq!(replayed, expected);
+        assert!(
+            replayed.len() * 4 < window_bytes,
+            "reconnect transferred {} bytes against a {window_bytes} byte snapshot",
+            replayed.len()
+        );
+
+        drop(resumed);
+    }
+
+    #[tokio::test]
+    async fn reconnect_beyond_the_replay_window_falls_back_to_a_bounded_snapshot() {
+        let vt = scrollback_vt(2_000);
+        let fixture = WindowedTerminalFixture::new("reconnect-stale", vt.clone(), Vec::new()).await;
+        let mut socket = ws_connect(&fixture.url).await;
+        send_frame(&mut socket, &windowed_client_auth_frame()).await;
+        assert_eq!(recv_frame(&mut socket).await, auth_ok_frame_for(false));
+        send_frame(&mut socket, &attach_terminal_frame(None)).await;
+        let stream_id = match recv_frame(&mut socket).await {
+            ServerFrame::TermSnapshot { stream_id, .. } => stream_id.expect("stream id"),
+            other => panic!("expected a windowed terminal snapshot, got {other:?}"),
+        };
+        drop(socket);
+
+        let mut resumed = ws_connect(&fixture.url).await;
+        send_frame(&mut resumed, &windowed_client_auth_frame()).await;
+        assert_eq!(recv_frame(&mut resumed).await, auth_ok_frame_for(false));
+        send_frame(
+            &mut resumed,
+            &attach_terminal_frame(Some(TermResumePosition {
+                // An offset from a generation this tap never served.
+                stream_id: stream_id.wrapping_add(4_096),
+                offset: 12_345,
+            })),
+        )
+        .await;
+
+        match recv_frame(&mut resumed).await {
+            ServerFrame::TermSnapshot {
+                data_b64,
+                scrollback_lines,
+                ..
+            } => {
+                let window = decode_frame_bytes(&data_b64);
+                assert!(
+                    window.len() * 4 < vt.len(),
+                    "the fallback must still be a bounded tail, not the whole buffer"
+                );
+                assert_eq!(scrollback_lines, Some(2_000 - (24 + 400)));
+            }
+            other => panic!("an unreplayable resume must fall back to a snapshot: {other:?}"),
+        }
+
+        drop(resumed);
+    }
+
+    #[tokio::test]
+    async fn two_viewers_share_one_daemon_stream() {
+        let vt = scrollback_vt(100);
+        let outputs: Vec<Vec<u8>> = (0..4)
+            .map(|index| format!("shared-{index}\r\n").into_bytes())
+            .collect();
+        let fixture = WindowedTerminalFixture::new("shared-tap", vt.clone(), outputs.clone()).await;
+
+        let mut first = ws_connect(&fixture.url).await;
+        send_frame(&mut first, &windowed_client_auth_frame()).await;
+        assert_eq!(recv_frame(&mut first).await, auth_ok_frame_for(false));
+        send_frame(&mut first, &attach_terminal_frame(None)).await;
+        assert!(matches!(
+            recv_frame(&mut first).await,
+            ServerFrame::TermSnapshot { .. }
+        ));
+        let mut first_output = Vec::new();
+        while first_output.len() < outputs.concat().len() {
+            match recv_frame(&mut first).await {
+                ServerFrame::TermOutput { data_b64, .. } => {
+                    first_output.extend(decode_frame_bytes(&data_b64));
+                }
+                other => panic!("expected live terminal output, got {other:?}"),
+            }
+        }
+
+        // The second viewer joins the same tap: the fake daemon serves live
+        // output on its first connection only, so anything this client sees is
+        // replayed from what the tap already recorded.
+        let mut second = ws_connect(&fixture.url).await;
+        send_frame(&mut second, &windowed_client_auth_frame()).await;
+        assert_eq!(recv_frame(&mut second).await, auth_ok_frame_for(false));
+        send_frame(&mut second, &attach_terminal_frame(None)).await;
+        assert!(matches!(
+            recv_frame(&mut second).await,
+            ServerFrame::TermSnapshot { .. }
+        ));
+        let mut second_output = Vec::new();
+        while second_output.len() < first_output.len() {
+            match recv_frame(&mut second).await {
+                ServerFrame::TermOutput { data_b64, .. } => {
+                    second_output.extend(decode_frame_bytes(&data_b64));
+                }
+                other => panic!("expected replayed terminal output, got {other:?}"),
+            }
+        }
+        assert_eq!(second_output, first_output);
+
+        drop(first);
+        drop(second);
+    }
+
+    #[tokio::test]
+    async fn a_new_viewer_gets_a_fresh_snapshot_when_the_ring_outran_the_old_one() {
+        let vt = scrollback_vt(100);
+        // Past TERMINAL_RING_MAX_BYTES, so the recorded stream can no longer be
+        // replayed from the snapshot it was anchored to.
+        let chunk = "x".repeat(1_024);
+        let outputs: Vec<Vec<u8>> = (0..700).map(|_| chunk.clone().into_bytes()).collect();
+        let total_output = outputs.concat().len();
+        let fixture = WindowedTerminalFixture::new("ring-outran", vt.clone(), outputs).await;
+
+        let mut first = ws_connect(&fixture.url).await;
+        send_frame(&mut first, &windowed_client_auth_frame()).await;
+        assert_eq!(recv_frame(&mut first).await, auth_ok_frame_for(false));
+        send_frame(&mut first, &attach_terminal_frame(None)).await;
+        assert!(matches!(
+            recv_frame(&mut first).await,
+            ServerFrame::TermSnapshot { .. }
+        ));
+        let mut consumed = 0usize;
+        while consumed < total_output {
+            match recv_frame(&mut first).await {
+                ServerFrame::TermOutput { data_b64, .. } => {
+                    consumed += decode_frame_bytes(&data_b64).len();
+                }
+                other => panic!("expected live terminal output, got {other:?}"),
+            }
+        }
+        drop(first);
+
+        let mut second = ws_connect(&fixture.url).await;
+        send_frame(&mut second, &windowed_client_auth_frame()).await;
+        assert_eq!(recv_frame(&mut second).await, auth_ok_frame_for(false));
+        send_frame(&mut second, &attach_terminal_frame(None)).await;
+
+        match recv_frame(&mut second).await {
+            ServerFrame::TermSnapshot { data_b64, .. } => {
+                assert_eq!(
+                    String::from_utf8(decode_frame_bytes(&data_b64)).expect("utf8 window"),
+                    vt,
+                    "the re-attached daemon snapshot is what hydrates the new viewer"
+                );
+            }
+            other => panic!("expected a fresh bounded snapshot, got {other:?}"),
+        }
+
+        // The unreplayable recording is not shipped behind it.
+        assert!(
+            recv_frame_with_timeout(&mut second, Duration::from_millis(300))
+                .await
+                .is_none(),
+            "a restarted tap must not replay the ring it could not anchor"
+        );
+
+        drop(second);
     }
 }

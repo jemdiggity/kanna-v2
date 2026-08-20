@@ -87,6 +87,22 @@ describe("planTerminalMutation", () => {
     ).toEqual({ kind: "replace", output: "snapshot\n", status: "live" });
   });
 
+  it("prepends when the new epoch spliced older scrollback above the buffer", () => {
+    expect(
+      planTerminalMutation({
+        previousEpoch: 5,
+        previousOutput: "window\n",
+        previousStart: 0,
+        previousStatus: "live",
+        nextEpoch: 6,
+        nextOutput: "older\nwindow\n",
+        nextStart: 0,
+        nextStatus: "live",
+        nextPrependedScrollback: true
+      })
+    ).toEqual({ kind: "prepend", output: "older\nwindow\n", status: "live" });
+  });
+
   it("uses the safe replacement path when compaction creates a genuine gap", () => {
     expect(
       planTerminalMutation({

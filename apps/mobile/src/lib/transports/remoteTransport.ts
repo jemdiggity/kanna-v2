@@ -1006,6 +1006,11 @@ export function createRemoteTransport({
             withSubscription((subscription) =>
               subscription.resize?.(cols, rows)
             );
+          },
+          requestScrollback(request) {
+            withSubscription((subscription) =>
+              subscription.requestScrollback?.(request)
+            );
           }
         };
       }

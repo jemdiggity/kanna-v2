@@ -31,6 +31,7 @@ import {
   buildTerminalAppendScript,
   buildTerminalBottomInsetScript,
   buildTerminalDocument,
+  buildTerminalPrependScript,
   buildTerminalReplaceScript,
   buildTerminalResizeScript
 } from "./buildTerminalDocument";
@@ -62,6 +63,9 @@ interface TerminalWebViewProps {
   onMentionedFilesChange?: (history: TerminalFileMentionHistory) => void;
   onOpenFile?: (path: string, line?: number) => void;
   onTerminalInput?: (dataB64: string) => void;
+  /** The reader scrolled near the top of the loaded buffer. Whether there is
+   * older scrollback to fetch is the app's question, not the page's. */
+  onRequestScrollback?: () => void;
 }
 
 const ENABLE_E2E_TERMINAL_INSPECTION =
@@ -113,7 +117,8 @@ export function TerminalWebViewComponent({
   onConsolePress,
   onMentionedFilesChange,
   onOpenFile,
-  onTerminalInput
+  onTerminalInput,
+  onRequestScrollback
 }: TerminalWebViewProps) {
   const webViewRef = useRef<TerminalWebViewHandle>(null);
   const bridgeReadyRef = useRef(false);
@@ -249,6 +254,16 @@ export function TerminalWebViewComponent({
     );
   };
 
+  const prependTerminalScrollback = (terminalState: PendingTerminalState) => {
+    if (!bridgeReadyRef.current) {
+      queueTerminalState();
+      return;
+    }
+    webViewRef.current?.injectJavaScript(
+      buildTerminalPrependScript(terminalState)
+    );
+  };
+
   const appendTerminalChunk = (chunk: string) => {
     if (!bridgeReadyRef.current) {
       queueTerminalState();
@@ -275,7 +290,8 @@ export function TerminalWebViewComponent({
       nextEpoch: snapshot.outputEpoch,
       nextOutput: snapshot.output,
       nextStart: snapshot.outputStart,
-      nextStatus: snapshot.status
+      nextStatus: snapshot.status,
+      nextPrependedScrollback: snapshot.prependedScrollback
     });
 
     previousOutputRef.current = snapshot.output;
@@ -289,6 +305,13 @@ export function TerminalWebViewComponent({
         break;
       case "replace":
         replaceTerminalState({
+          contentRevision: snapshot.outputEpoch,
+          output: mutation.output,
+          status: mutation.status
+        });
+        break;
+      case "prepend":
+        prependTerminalScrollback({
           contentRevision: snapshot.outputEpoch,
           output: mutation.output,
           status: mutation.status
@@ -322,7 +345,8 @@ export function TerminalWebViewComponent({
               output: normalizedOutput,
               outputEpoch,
               outputStart,
-              status
+              status,
+              prependedScrollback: false
             };
       activeOutputEpochRef.current = initialSnapshot.outputEpoch;
       latestOutputStartRef.current = initialSnapshot.outputStart;
@@ -348,7 +372,8 @@ export function TerminalWebViewComponent({
       output: normalizedOutput,
       outputEpoch,
       outputStart,
-      status
+      status,
+      prependedScrollback: false
     });
   }, [
     onMentionedFilesChange,
@@ -459,6 +484,11 @@ export function TerminalWebViewComponent({
       ) {
         onTerminalInput?.(payload.dataB64);
       }
+      return;
+    }
+
+    if (payload.type === "terminal-scrollback-request") {
+      onRequestScrollback?.();
       return;
     }
 

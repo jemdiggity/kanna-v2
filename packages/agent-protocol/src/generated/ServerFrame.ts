@@ -11,4 +11,26 @@ import type { StreamKind } from "./StreamKind";
 /**
  * Frames sent by kanna-server to clients.
  */
-export type ServerFrame = { "type": "auth_ok", stream_kinds?: Array<StreamKind>, capabilities?: Array<KspCapability>, } | { "type": "agent_snapshot", task_id: string, next_seq: number, events: Array<FrameAgentEvent>, } | { "type": "agent_event", task_id: string, seq: number, event: AgentEvent, } | { "type": "term_snapshot", task_id: string, cols: number, rows: number, data_b64: string, agent_provider?: AgentProvider | null, } | { "type": "term_output", task_id: string, data_b64: string, } | { "type": "task_summary", task_id: string, snippet?: string | null, activity: string, runtime_state: string, revision: number, } | { "type": "companion_snapshot", task_id: string, session_id: string, revision: string, document_kind: CompanionDocumentKind, html: string, source_origin?: string | null, assets?: Array<CompanionAsset>, attachment_epoch?: number, } | { "type": "companion_snapshot_chunk", task_id: string, transfer_id: string, index: number, count: number, data: string, attachment_epoch?: number, } | { "type": "companion_unavailable", task_id: string, attachment_epoch?: number, } | { "type": "companion_event_result", task_id: string, session_id?: string | null, revision?: string | null, event_id: string, accepted: boolean, code?: string | null, message?: string | null, attachment_epoch?: number, } | { "type": "companion_error", task_id: string, code: string, message: string, attachment_epoch?: number, } | { "type": "status_changed", task_id: string, status: string, } | { "type": "state_changed", scope: StateChangeScope, } | { "type": "session_exit", task_id: string, code: number, } | { "type": "response", id: number, status: number, body?: unknown, } | { "type": "error", task_id?: string | null, code: string, message: string, };
+export type ServerFrame = { "type": "auth_ok", stream_kinds?: Array<StreamKind>, capabilities?: Array<KspCapability>, } | { "type": "agent_snapshot", task_id: string, next_seq: number, events: Array<FrameAgentEvent>, } | { "type": "agent_event", task_id: string, seq: number, event: AgentEvent, } | { "type": "term_snapshot", task_id: string, cols: number, rows: number, data_b64: string, agent_provider?: AgentProvider | null, 
+/**
+ * The tap generation `stream_offset` belongs to.
+ */
+stream_id?: number, 
+/**
+ * Byte offset in that generation at which this snapshot is valid; the
+ * client adds each `term_output` frame's decoded length to it.
+ */
+stream_offset?: number, 
+/**
+ * Identifies the retained scrollback history this window was cut from.
+ */
+history_id?: number, 
+/**
+ * Lines of older scrollback the server retained and will serve through
+ * `term_scrollback_request`.
+ */
+scrollback_lines?: number | null, } | { "type": "term_resumed", task_id: string, stream_id: number, 
+/**
+ * The offset the replay starts at — the position the client presented.
+ */
+offset: number, cols: number, rows: number, agent_provider?: AgentProvider | null, history_id?: number, scrollback_lines?: number | null, } | { "type": "term_scrollback_chunk", task_id: string, request_id: number, history_id: number, start_line: number, end_line: number, data_b64: string, remaining_lines: number, } | { "type": "term_output", task_id: string, data_b64: string, } | { "type": "task_summary", task_id: string, snippet?: string | null, activity: string, runtime_state: string, revision: number, } | { "type": "companion_snapshot", task_id: string, session_id: string, revision: string, document_kind: CompanionDocumentKind, html: string, source_origin?: string | null, assets?: Array<CompanionAsset>, attachment_epoch?: number, } | { "type": "companion_snapshot_chunk", task_id: string, transfer_id: string, index: number, count: number, data: string, attachment_epoch?: number, } | { "type": "companion_unavailable", task_id: string, attachment_epoch?: number, } | { "type": "companion_event_result", task_id: string, session_id?: string | null, revision?: string | null, event_id: string, accepted: boolean, code?: string | null, message?: string | null, attachment_epoch?: number, } | { "type": "companion_error", task_id: string, code: string, message: string, attachment_epoch?: number, } | { "type": "status_changed", task_id: string, status: string, } | { "type": "state_changed", scope: StateChangeScope, } | { "type": "session_exit", task_id: string, code: number, } | { "type": "response", id: number, status: number, body?: unknown, } | { "type": "error", task_id?: string | null, code: string, message: string, };

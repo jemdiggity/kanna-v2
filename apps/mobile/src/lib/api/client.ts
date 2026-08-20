@@ -5,7 +5,12 @@ import type {
   FrameAgentEvent,
   PermissionDecision,
 } from "@kanna/agent-protocol";
-import type { CompanionAssetSnapshot } from "@kanna/stream-client";
+import type {
+  CompanionAssetSnapshot,
+  TerminalScrollbackChunk,
+  TerminalScrollbackRequest,
+  TerminalWindowMetadata
+} from "@kanna/stream-client";
 import type {
   AbortTaskCreationRequest,
   CreateTaskRequest,
@@ -34,8 +39,19 @@ export type TaskTerminalStreamEvent =
       cols: number;
       rows: number;
       dataB64: string;
+      /** Present when the desktop sent a *bounded* window of the terminal and
+       * kept older scrollback back for `requestScrollback`. */
+      window?: TerminalWindowMetadata | null;
     }
   | { type: "output"; taskId: string; dataB64: string }
+  /** The desktop replayed from where this viewer's buffer stopped: nothing is
+   * re-hydrated, and the missed bytes follow as ordinary output. */
+  | { type: "resumed"; taskId: string; window: TerminalWindowMetadata }
+  | {
+      type: "scrollback";
+      taskId: string;
+      chunk: TerminalScrollbackChunk;
+    }
   | { type: "exit"; taskId: string; code: number }
   | { type: "error"; taskId: string; message: string };
 
@@ -52,6 +68,10 @@ export interface TaskTerminalSubscription {
   /** Resize both the observer's xterm grid and the owning PTY. The transport
    * keeps this scoped to the attached task session. */
   resize?(cols: number, rows: number): void;
+  /** Pull one bounded chunk of scrollback older than the loaded buffer.
+   * Optional: a transport whose desktop sent the whole terminal has none to
+   * pull. */
+  requestScrollback?(request: TerminalScrollbackRequest): void;
 }
 
 export interface TaskSummaryFrameEvent {

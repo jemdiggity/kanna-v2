@@ -672,7 +672,11 @@ describe("createLanTransport", () => {
           deviceId: "phone-1",
           deviceSecret: "lan-secret"
         }),
-        capabilities: ["companion_event_epoch", "term_input_boundary"]
+        capabilities: [
+          "companion_event_epoch",
+          "term_input_boundary",
+          "term_scrollback_window"
+        ]
       },
       { type: "attach", task_id: "task-1", kind: "terminal", from_seq: 0 }
     ]);
@@ -777,7 +781,11 @@ describe("createLanTransport", () => {
     subscription.resize?.(80, 48);
 
     expect(sent).toEqual([
-      { type: "auth", capabilities: ["companion_event_epoch", "term_input_boundary"] },
+      { type: "auth", capabilities: [
+          "companion_event_epoch",
+          "term_input_boundary",
+          "term_scrollback_window"
+        ] },
       { type: "attach", task_id: "task-1", kind: "terminal", from_seq: 0 },
       { type: "term_input_control", task_id: "task-1", data_b64: "G1s8NjU7MTsxTQ==" },
       { type: "term_input", task_id: "task-1", data_b64: "aHVtYW4gZHJhZnQ=" },

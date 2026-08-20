@@ -267,17 +267,35 @@ export function createLanTransport(
         url: buildKspWebSocketUrl(baseUrl, kspStreamVersion),
         credential: streamCredential,
         webSocketFactory: (url) => createKspSocket(url) as unknown as StreamWebSocketLike,
-        reconnectDelaysMs: [250, 500, 1000, 2000]
+        reconnectDelaysMs: [250, 500, 1000, 2000],
+        // A phone on LAN is still a phone: same xterm buffer, same cold-open
+        // latency. The window is negotiated on both mobile transports.
+        terminalScrollbackWindow: true
       });
 
       client.attachTerminal(taskId, {
-        onSnapshot(cols, rows, dataB64) {
-          listener({ type: "snapshot", taskId, cols, rows, dataB64 });
+        onSnapshot(cols, rows, dataB64, _agentProvider, window) {
+          listener({
+            type: "snapshot",
+            taskId,
+            cols,
+            rows,
+            dataB64,
+            // Omitted rather than nulled for an unwindowed snapshot: the event
+            // shape a legacy desktop produces is unchanged.
+            ...(window ? { window } : {})
+          });
         },
         onOutput(dataB64) {
           if (dataB64) {
             listener({ type: "output", taskId, dataB64 });
           }
+        },
+        onResumed(window) {
+          listener({ type: "resumed", taskId, window });
+        },
+        onScrollbackChunk(chunk) {
+          listener({ type: "scrollback", taskId, chunk });
         },
         onSessionExit(code) {
           listener({ type: "exit", taskId, code });
@@ -296,6 +314,9 @@ export function createLanTransport(
         },
         resize(cols: number, rows: number) {
           client.sendTermResize(taskId, cols, rows);
+        },
+        requestScrollback(request) {
+          client.requestTerminalScrollback(taskId, request);
         }
       } satisfies TaskTerminalSubscription;
     },

@@ -1103,6 +1103,110 @@ describe("createSessionStore", () => {
     expect(publishes).toBe(1);
   });
 
+  it("records the retained scrollback a bounded snapshot names", () => {
+    const store = createSessionStore();
+    store.beginTaskTerminal("task-1", "");
+
+    store.replaceTaskTerminalSnapshot("task-1", "d2luZG93", 132, 43, {
+      streamId: 3,
+      historyId: 9,
+      scrollbackLines: 1_200
+    });
+
+    expect(store.getState().taskTerminalScrollback).toEqual({
+      historyId: 9,
+      remainingLines: 1_200,
+      loading: false
+    });
+
+    // A desktop that sent the whole terminal has nothing retained.
+    store.replaceTaskTerminalSnapshot("task-1", "d2hvbGU=", 132, 43);
+    expect(store.getState().taskTerminalScrollback).toBeNull();
+  });
+
+  it("splices older scrollback above the loaded buffer", () => {
+    const store = createSessionStore();
+    store.beginTaskTerminal("task-1", "");
+    store.replaceTaskTerminalSnapshot("task-1", "d2luZG93", 132, 43, {
+      streamId: 3,
+      historyId: 9,
+      scrollbackLines: 400
+    });
+    store.appendTaskTerminal("task-1", "bGl2ZQ==\n");
+    const epochBefore = store.getState().taskTerminalOutputEpoch;
+    let prepended: boolean | null = null;
+    store.taskTerminalOutputSource.subscribe(() => {
+      prepended = store.taskTerminalOutputSource.getSnapshot().prependedScrollback;
+    });
+
+    store.setTaskTerminalScrollbackLoading("task-1", true);
+    store.prependTaskTerminalScrollback("task-1", {
+      requestId: 1,
+      historyId: 9,
+      startLine: 200,
+      endLine: 400,
+      dataB64: "b2xkZXI=",
+      remainingLines: 200
+    });
+
+    expect(terminalText(store)).toBe("b2xkZXI=\nd2luZG93\nbGl2ZQ==\n");
+    expect(store.getState().taskTerminalOutputEpoch).toBe(epochBefore + 1);
+    expect(store.getState().taskTerminalScrollback).toEqual({
+      historyId: 9,
+      remainingLines: 200,
+      loading: false
+    });
+    expect(prepended).toBe(true);
+  });
+
+  it("ignores a scrollback chunk cut from a replaced history", () => {
+    const store = createSessionStore();
+    store.beginTaskTerminal("task-1", "");
+    store.replaceTaskTerminalSnapshot("task-1", "d2luZG93", 132, 43, {
+      streamId: 3,
+      historyId: 9,
+      scrollbackLines: 400
+    });
+
+    store.prependTaskTerminalScrollback("task-1", {
+      requestId: 1,
+      historyId: 10,
+      startLine: 0,
+      endLine: 200,
+      dataB64: "c3RhbGU=",
+      remainingLines: 0
+    });
+
+    expect(terminalText(store)).toBe("d2luZG93\n");
+    expect(store.getState().taskTerminalScrollback).toEqual({
+      historyId: 9,
+      remainingLines: 400,
+      loading: false
+    });
+  });
+
+  it("keeps the rendered buffer when the desktop resumes the stream", () => {
+    const store = createSessionStore();
+    store.beginTaskTerminal("task-1", "");
+    store.replaceTaskTerminalSnapshot("task-1", "d2luZG93", 132, 43, {
+      streamId: 3,
+      historyId: 9,
+      scrollbackLines: 400
+    });
+    store.appendTaskTerminal("task-1", "bGl2ZQ==\n");
+    const epochBefore = store.getState().taskTerminalOutputEpoch;
+
+    store.resumeTaskTerminal("task-1", {
+      streamId: 3,
+      historyId: 9,
+      scrollbackLines: 400
+    });
+
+    expect(terminalText(store)).toBe("d2luZG93\nbGl2ZQ==\n");
+    expect(store.getState().taskTerminalOutputEpoch).toBe(epochBefore);
+    expect(store.getState().taskTerminalStatus).toBe("live");
+  });
+
   it("evicts only whole oldest live frames while retaining the snapshot", () => {
     const store = createSessionStore();
     store.beginTaskTerminal("task-1", "");

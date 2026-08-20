@@ -14,6 +14,13 @@ export type TerminalMutation =
       output: TerminalOutputLike;
       status: TaskTerminalStatus;
     }
+  /** The buffer grew upward: older scrollback arrived above what is loaded, so
+   * it is rewritten without snapping the reader back to the bottom. */
+  | {
+      kind: "prepend";
+      output: TerminalOutputLike;
+      status: TaskTerminalStatus;
+    }
   | {
       kind: "append";
       chunk: string;
@@ -28,6 +35,8 @@ interface PlanTerminalMutationOptions {
   nextOutput: TerminalOutputLike;
   nextStart: number;
   nextStatus: TaskTerminalStatus;
+  /** This revision is a scrollback splice, not a fresh terminal state. */
+  nextPrependedScrollback?: boolean;
 }
 
 export function planTerminalMutation({
@@ -38,11 +47,12 @@ export function planTerminalMutation({
   nextEpoch,
   nextOutput,
   nextStart,
-  nextStatus
+  nextStatus,
+  nextPrependedScrollback = false
 }: PlanTerminalMutationOptions): TerminalMutation {
   if (nextEpoch !== previousEpoch) {
     return {
-      kind: "replace",
+      kind: nextPrependedScrollback ? "prepend" : "replace",
       output: nextOutput,
       status: nextStatus
     };

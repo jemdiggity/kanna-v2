@@ -20,6 +20,10 @@ import {
   type CompanionStatus
 } from "@kanna/visual-companion";
 import type { TaskCompanionStreamEvent } from "../lib/api/client";
+import type {
+  TerminalScrollbackChunk,
+  TerminalWindowMetadata
+} from "@kanna/stream-client";
 import {
   emptyLocalTaskListPreferences,
   type LocalTaskListPreferences
@@ -42,6 +46,7 @@ import {
   appendTerminalOutput,
   createTerminalOutput,
   EMPTY_TERMINAL_OUTPUT,
+  terminalOutputToString,
   type TerminalOutputBuffer
 } from "./terminalOutputBuffer";
 
@@ -179,6 +184,9 @@ export interface SessionState {
   taskTerminalCols: number | null;
   taskTerminalRows: number | null;
   taskTerminalErrorMessage: string | null;
+  /** What the desktop kept back from the loaded terminal buffer, when it sent
+   * a bounded window of it. Null when the whole terminal arrived. */
+  taskTerminalScrollback: TaskTerminalScrollback | null;
   taskAgentTaskId: string | null;
   taskAgentStatus: TaskTerminalStatus;
   taskAgentEvents: FrameAgentEvent[];
@@ -192,12 +200,37 @@ export interface SessionState {
   taskCompanionEventStatus: TaskCompanionEventStatus;
 }
 
+/** Older scrollback the desktop retained for this terminal attachment. */
+export interface TaskTerminalScrollback {
+  historyId: number;
+  /** Retained lines still older than everything loaded here. */
+  remainingLines: number;
+  /** A chunk request is in flight. */
+  loading: boolean;
+}
+
+function scrollbackFromWindow(
+  window: TerminalWindowMetadata | null | undefined
+): TaskTerminalScrollback | null {
+  if (!window || window.historyId === null || window.scrollbackLines <= 0) {
+    return null;
+  }
+  return {
+    historyId: window.historyId,
+    remainingLines: window.scrollbackLines,
+    loading: false
+  };
+}
+
 export interface TaskTerminalOutputSnapshot {
   taskId: string | null;
   output: TerminalOutputBuffer;
   outputEpoch: number;
   outputStart: number;
   status: TaskTerminalStatus;
+  /** This revision grew *upward*: older scrollback was spliced above the
+   * buffer, so the view must re-render without snapping to the bottom. */
+  prependedScrollback: boolean;
 }
 
 export interface TaskTerminalOutputSource {
@@ -318,7 +351,24 @@ export interface SessionStore {
   ): void;
   removeTaskUiSlot(slotId: string): void;
   beginTaskTerminal(taskId: string, initialOutput: string): void;
-  replaceTaskTerminalSnapshot(taskId: string, dataB64: string, cols: number, rows: number): void;
+  replaceTaskTerminalSnapshot(
+    taskId: string,
+    dataB64: string,
+    cols: number,
+    rows: number,
+    scrollback?: TerminalWindowMetadata | null
+  ): void;
+  /** The desktop replayed from where this buffer stopped: keep it, and adopt
+   * whatever the resume reported about the retained scrollback. */
+  resumeTaskTerminal(taskId: string, scrollback: TerminalWindowMetadata): void;
+  /** Splice one chunk of older scrollback above the loaded buffer. */
+  prependTaskTerminalScrollback(
+    taskId: string,
+    chunk: TerminalScrollbackChunk
+  ): void;
+  /** Record that a scrollback chunk request is in flight, so the viewer asks
+   * once per scroll rather than once per frame. */
+  setTaskTerminalScrollbackLoading(taskId: string, loading: boolean): boolean;
   appendTaskTerminal(taskId: string, chunk: string): void;
   setTaskTerminalStatus(taskId: string, status: TaskTerminalStatus): void;
   setTaskTerminalDims(taskId: string, cols: number, rows: number): void;
@@ -395,6 +445,7 @@ export function createSessionStore(): SessionStore {
     taskTerminalCols: null,
     taskTerminalRows: null,
     taskTerminalErrorMessage: null,
+    taskTerminalScrollback: null,
     taskAgentTaskId: null,
     taskAgentStatus: "idle",
     taskAgentEvents: [],
@@ -415,20 +466,22 @@ export function createSessionStore(): SessionStore {
     output: state.taskTerminalOutput,
     outputEpoch: state.taskTerminalOutputEpoch,
     outputStart: state.taskTerminalOutputStart,
-    status: state.taskTerminalStatus
+    status: state.taskTerminalStatus,
+    prependedScrollback: false
   };
   const publish = () => {
     for (const listener of listeners) {
       listener();
     }
   };
-  const publishTerminalOutput = () => {
+  const publishTerminalOutput = (prependedScrollback = false) => {
     terminalOutputSnapshot = {
       taskId: state.taskTerminalTaskId,
       output: state.taskTerminalOutput,
       outputEpoch: state.taskTerminalOutputEpoch,
       outputStart: state.taskTerminalOutputStart,
-      status: state.taskTerminalStatus
+      status: state.taskTerminalStatus,
+      prependedScrollback
     };
     for (const listener of terminalOutputListeners) {
       listener();
@@ -1099,6 +1152,8 @@ export function createSessionStore(): SessionStore {
           selectedTaskId === null ? null : state.taskTerminalRows,
         taskTerminalErrorMessage:
           selectedTaskId === null ? null : state.taskTerminalErrorMessage,
+        taskTerminalScrollback:
+          selectedTaskId === null ? null : state.taskTerminalScrollback,
         taskAgentTaskId:
           selectedTaskId === null ? null : state.taskAgentTaskId,
         taskAgentStatus:
@@ -1396,7 +1451,7 @@ export function createSessionStore(): SessionStore {
       publishTerminalOutput();
       publish();
     },
-    replaceTaskTerminalSnapshot(taskId, dataB64, cols, rows) {
+    replaceTaskTerminalSnapshot(taskId, dataB64, cols, rows, scrollback) {
       if (state.taskTerminalTaskId !== taskId) {
         return;
       }
@@ -1411,10 +1466,81 @@ export function createSessionStore(): SessionStore {
         taskTerminalOutputStart: 0,
         taskTerminalCols: cols,
         taskTerminalRows: rows,
-        taskTerminalErrorMessage: null
+        taskTerminalErrorMessage: null,
+        taskTerminalScrollback: scrollbackFromWindow(scrollback)
       };
       publishTerminalOutput();
       publish();
+    },
+    resumeTaskTerminal(taskId, scrollback) {
+      if (state.taskTerminalTaskId !== taskId) {
+        return;
+      }
+      // The rendered buffer is still current: only the stream's own metadata
+      // and the connected status change.
+      state = {
+        ...state,
+        taskTerminalStatus: "live",
+        taskTerminalErrorMessage: null,
+        taskTerminalScrollback:
+          scrollbackFromWindow(scrollback) ?? state.taskTerminalScrollback
+      };
+      publish();
+    },
+    prependTaskTerminalScrollback(taskId, chunk) {
+      const scrollback = state.taskTerminalScrollback;
+      if (
+        state.taskTerminalTaskId !== taskId ||
+        !scrollback ||
+        scrollback.historyId !== chunk.historyId
+      ) {
+        return;
+      }
+      if (!chunk.dataB64) {
+        state = {
+          ...state,
+          taskTerminalScrollback: {
+            ...scrollback,
+            remainingLines: chunk.remainingLines,
+            loading: false
+          }
+        };
+        publish();
+        return;
+      }
+
+      const olderFirst = `${chunk.dataB64}\n${terminalOutputToString(
+        state.taskTerminalOutput
+      )}`;
+      state = {
+        ...state,
+        taskTerminalOutput: createTerminalOutput(olderFirst),
+        taskTerminalOutputEpoch: state.taskTerminalOutputEpoch + 1,
+        taskTerminalOutputStart: 0,
+        taskTerminalScrollback: {
+          ...scrollback,
+          remainingLines: chunk.remainingLines,
+          loading: false
+        }
+      };
+      publishTerminalOutput(true);
+      publish();
+    },
+    setTaskTerminalScrollbackLoading(taskId, loading) {
+      const scrollback = state.taskTerminalScrollback;
+      if (
+        state.taskTerminalTaskId !== taskId ||
+        !scrollback ||
+        scrollback.loading === loading
+      ) {
+        return false;
+      }
+      state = {
+        ...state,
+        taskTerminalScrollback: { ...scrollback, loading }
+      };
+      publish();
+      return true;
     },
     appendTaskTerminal(taskId, chunk) {
       if (state.taskTerminalTaskId !== taskId) {

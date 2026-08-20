@@ -25,6 +25,7 @@ mod task_input_attachments;
 mod task_transfer_tunnel;
 mod terminal_attachments;
 mod terminal_watcher;
+mod terminal_window;
 mod transfer_artifact;
 mod transfer_control;
 mod transfer_engine;

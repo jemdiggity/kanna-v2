@@ -105,6 +105,46 @@ protocol v5. A v4 peer may still be discovered and use unrelated compatible
 features, but a current sender refuses all terminal input to it and a current
 owner refuses its duplex observation/input before contacting the daemon.
 
+## Bounded Terminal Windows
+
+A terminal attach used to hand the client the whole serialized terminal: the
+visible screen **plus** up to 10,000 rows of scrollback, re-shipped on every
+reconnect. On a phone that is the wrong unit of transfer — the frame inventory
+in `docs/task-specs/7a38cc18.md` measured 1.71 MiB base64 for a plain 10,000-row
+scrollback and 114.8 MiB for a truecolor one, and a flaky link paid for it again
+every time it dropped.
+
+A client that advertises `term_scrollback_window` in its `auth` frame gets three
+things instead; a client that does not is served exactly as before, including
+its own daemon connection per attachment.
+
+- **`term_snapshot` is a bounded window** — the visible screen plus a bounded
+  slice of recent scrollback, capped by both a line count and a byte ceiling
+  (`crates/kanna-server/src/terminal_window.rs`). The frame names the retained
+  remainder: `history_id`, `scrollback_lines`, and where the live byte stream
+  continues (`stream_id`, `stream_offset`).
+- **Older scrollback is pulled on demand.** `term_scrollback_request
+  { request_id, history_id, before_line, max_lines }` is answered with
+  `term_scrollback_chunk { start_line, end_line, data_b64, remaining_lines }`,
+  bounded per request by both lines and bytes and served newest-first. A request
+  naming a `history_id` the server has replaced is answered with the current one
+  and an empty chunk, so the client re-anchors rather than splicing stale rows
+  above its buffer.
+- **A reconnect replays the delta.** The client tracks its own position by
+  adding each `term_output` frame's decoded length to the snapshot's
+  `stream_offset` — nothing per-frame travels on the wire — and presents
+  `term_resume { stream_id, offset }` on re-attach. Inside the server's replay
+  window it receives `term_resumed` and then only the bytes it missed, keeping
+  the buffer it already rendered. Outside it, a *bounded* fresh snapshot. Never
+  the full history unconditionally.
+
+Capability clients attach through a session-scoped **terminal tap**: one daemon
+connection per session shared by its subscribers, recording live output into a
+bounded ring and outliving the last subscriber by a grace window. That grace is
+what makes a dropped link cost O(delta); an offset only means anything inside
+the `stream_id` generation that produced it, so a daemon reconnect voids it and
+the client falls back to a bounded snapshot.
+
 ## v1 LAN Surface
 
 - `GET /v1/status`

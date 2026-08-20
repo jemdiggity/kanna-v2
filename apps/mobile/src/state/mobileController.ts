@@ -108,6 +108,9 @@ export interface MobileController {
   ): Promise<void>;
   sendTaskTerminalInput(taskId: string, dataB64: string): void;
   resizeTaskTerminal(taskId: string, cols: number, rows: number): void;
+  /** Pull the next older chunk of terminal scrollback, if the desktop kept any
+   * back and no request is already in flight. */
+  requestTaskTerminalScrollback(taskId: string): void;
   sendTaskAgentPermission(taskId: string, requestId: string, decision: Parameters<TaskAgentSubscription["sendPermission"]>[1]): void;
   interruptTaskAgent(taskId: string): void;
   setTaskCompanionOpen(taskId: string, isOpen: boolean): void;
@@ -125,6 +128,10 @@ const BACKGROUND_REFRESH_INTERVAL_MS = 3_000;
 const MARK_READ_DEBOUNCE_MS = 1_000;
 const MARK_READ_MAX_ATTEMPTS = 3;
 const MARK_READ_RETRY_BASE_MS = 1_000;
+/// Lines asked for per scrollback chunk. Deliberately smaller than the
+/// desktop's per-request ceiling: on a poor link a chunk that renders now beats
+/// a chunk that arrives complete.
+const TERMINAL_SCROLLBACK_CHUNK_LINES = 200;
 const REPO_COMMAND_TASK_LOAD_ERROR =
   "The command launched successfully, but its task could not be loaded. Check your connection and try again.";
 
@@ -1175,7 +1182,8 @@ export function createMobileController(
               streamTaskId,
               event.dataB64,
               event.cols,
-              event.rows
+              event.rows,
+              event.window
             );
             // Every reconnect produces a fresh daemon snapshot. Reassert the
             // mounted mobile viewport if another client changed the shared PTY
@@ -1184,6 +1192,15 @@ export function createMobileController(
             break;
           case "output":
             store.appendTaskTerminal(streamTaskId, `${event.dataB64}\n`);
+            break;
+          // A resume means the rendered buffer survived the reconnect: the
+          // missed bytes arrive as ordinary output behind this, so nothing is
+          // replaced and the reader keeps their place.
+          case "resumed":
+            store.resumeTaskTerminal(streamTaskId, event.window);
+            break;
+          case "scrollback":
+            store.prependTaskTerminalScrollback(streamTaskId, event.chunk);
             break;
           case "exit":
             store.setTaskTerminalStatus(streamTaskId, "closed");
@@ -2979,6 +2996,24 @@ export function createMobileController(
       // mouse/scroll reports. Declare them as controls so they cannot create
       // a phantom composer draft and strand a queued logical message.
       activeTaskTerminal.subscription.sendInput?.(dataB64, false, true);
+    },
+
+    requestTaskTerminalScrollback(taskId) {
+      if (activeTaskTerminal?.taskId !== taskId) {
+        return;
+      }
+      const scrollback = store.getState().taskTerminalScrollback;
+      if (!scrollback || scrollback.loading || scrollback.remainingLines <= 0) {
+        return;
+      }
+      if (!store.setTaskTerminalScrollbackLoading(taskId, true)) {
+        return;
+      }
+      activeTaskTerminal.subscription.requestScrollback?.({
+        historyId: scrollback.historyId,
+        beforeLine: scrollback.remainingLines,
+        maxLines: TERMINAL_SCROLLBACK_CHUNK_LINES
+      });
     },
 
     resizeTaskTerminal(taskId, cols, rows) {

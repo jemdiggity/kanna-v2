@@ -3,8 +3,16 @@ import type { CompanionEvent } from "./CompanionEvent";
 import type { KspCapability } from "./KspCapability";
 import type { PermissionDecision } from "./PermissionDecision";
 import type { StreamKind } from "./StreamKind";
+import type { TermResumePosition } from "./TermResumePosition";
 
 /**
  * Frames sent by clients to kanna-server.
  */
-export type ClientFrame = { "type": "auth", credential?: string | null, capabilities?: Array<KspCapability>, } | { "type": "attach", task_id: string, kind: StreamKind, from_seq: number, include_assets?: boolean | null, accept_snapshot_chunks?: boolean | null, attachment_epoch?: number, } | { "type": "detach", task_id: string, kind: StreamKind, attachment_epoch?: number, } | { "type": "agent_input", task_id: string, text: string, } | { "type": "agent_permission", task_id: string, request_id: string, decision: PermissionDecision, } | { "type": "agent_interrupt", task_id: string, } | { "type": "agent_set_model", task_id: string, model: string, } | { "type": "term_input", task_id: string, data_b64: string, } | { "type": "term_input_boundary", task_id: string, data_b64: string, } | { "type": "term_input_control", task_id: string, data_b64: string, } | { "type": "term_resize", task_id: string, cols: number, rows: number, } | { "type": "companion_event", task_id: string, session_id: string, revision: string, attachment_epoch?: number, event: CompanionEvent, } | { "type": "request", id: number, method: string, path: string, body?: unknown, };
+export type ClientFrame = { "type": "auth", credential?: string | null, capabilities?: Array<KspCapability>, } | { "type": "attach", task_id: string, kind: StreamKind, from_seq: number, include_assets?: boolean | null, accept_snapshot_chunks?: boolean | null, attachment_epoch?: number, 
+/**
+ * Terminal streams only. Where this client's rendered buffer stopped,
+ * so the server can replay the missed bytes instead of re-shipping the
+ * whole terminal. Ignored unless the client negotiated
+ * [`KspCapability::TermScrollbackWindow`].
+ */
+term_resume?: TermResumePosition | null, } | { "type": "detach", task_id: string, kind: StreamKind, attachment_epoch?: number, } | { "type": "agent_input", task_id: string, text: string, } | { "type": "agent_permission", task_id: string, request_id: string, decision: PermissionDecision, } | { "type": "agent_interrupt", task_id: string, } | { "type": "agent_set_model", task_id: string, model: string, } | { "type": "term_input", task_id: string, data_b64: string, } | { "type": "term_input_boundary", task_id: string, data_b64: string, } | { "type": "term_input_control", task_id: string, data_b64: string, } | { "type": "term_resize", task_id: string, cols: number, rows: number, } | { "type": "term_scrollback_request", task_id: string, request_id: number, history_id: number, before_line: number, max_lines: number, } | { "type": "companion_event", task_id: string, session_id: string, revision: string, attachment_epoch?: number, event: CompanionEvent, } | { "type": "request", id: number, method: string, path: string, body?: unknown, };

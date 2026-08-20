@@ -130,6 +130,8 @@ interface TaskScreenProps {
   /** Injected by the attachment tests; production uses the Expo picker. */
   pickAttachment?(source: ImageAttachmentSource): Promise<PreparedImageAttachment | null>;
   onSendTerminalInput?(dataB64: string): void;
+  /** The terminal view scrolled near the top of its loaded buffer. */
+  onRequestTerminalScrollback?(): void;
   onResizeTerminal?(cols: number, rows: number): void;
   onStopAgent(): void;
   onResolveAgentPermission(requestId: string, decision: PermissionDecision): void;
@@ -179,6 +181,7 @@ export function TaskScreen({
   onSendInput,
   pickAttachment = pickImageAttachment,
   onSendTerminalInput,
+  onRequestTerminalScrollback,
   onResizeTerminal,
   onStopAgent,
   onResolveAgentPermission,
@@ -710,6 +713,7 @@ export function TaskScreen({
             onMentionedFilesChange={handleTerminalMentionedFilesChange}
             onOpenFile={handleTerminalOpenFile}
             onTerminalInput={onSendTerminalInput}
+            onRequestScrollback={onRequestTerminalScrollback}
           />
         ) : (
           <View style={styles.terminalSkeleton}>

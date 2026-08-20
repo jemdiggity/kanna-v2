@@ -173,6 +173,7 @@ async function renderTerminalWebView(input: {
   onMentionedFilesChange?: (history: TerminalFileMentionHistory) => void;
   onOpenFile?: (path: string, line?: number) => void;
   onTerminalInput?: (dataB64: string) => void;
+  onRequestScrollback?: () => void;
   terminalOutputSource?: TaskTerminalOutputSource;
 }): Promise<ElementNode> {
   resetRenderState();
@@ -194,6 +195,7 @@ async function renderTerminalWebView(input: {
     onMentionedFilesChange: input.onMentionedFilesChange,
     onOpenFile: input.onOpenFile,
     onTerminalInput: input.onTerminalInput,
+    onRequestScrollback: input.onRequestScrollback,
     terminalOutputSource: input.terminalOutputSource
   }) as ElementNode;
   lastTree = tree;
@@ -694,6 +696,60 @@ describe("TerminalWebView", () => {
 
     expect(onTerminalInput).toHaveBeenCalledOnce();
     expect(onTerminalInput).toHaveBeenCalledWith("G1s8NjU7MTsxTQ==");
+  });
+
+  it("forwards a near-the-top scroll as a scrollback request", async () => {
+    const onRequestScrollback = vi.fn();
+    const webView = await renderTerminalWebView({ onRequestScrollback });
+
+    (webView.props.onMessage as (event: WebViewMessageEvent) => void)({
+      nativeEvent: {
+        data: JSON.stringify({ type: "terminal-scrollback-request" })
+      }
+    } as WebViewMessageEvent);
+
+    expect(onRequestScrollback).toHaveBeenCalledOnce();
+  });
+
+  it("splices a scrollback revision above the buffer instead of replacing it", async () => {
+    const older = Buffer.from("older scrollback").toString("base64");
+    const window = Buffer.from("window").toString("base64");
+    const initial = await renderTerminalWebView({
+      output: `${window}\n`,
+      outputEpoch: 1
+    });
+    runEffects();
+    (initial.props.onMessage as (event: { nativeEvent: { data: string } }) => void)({
+      nativeEvent: { data: JSON.stringify({ type: "terminal-ready" }) }
+    });
+    injectedScripts.length = 0;
+
+    const source = {
+      getSnapshot: () => ({
+        taskId: "task-1",
+        output: createTerminalOutput(`${older}\n${window}\n`),
+        outputEpoch: 2,
+        outputStart: 0,
+        status: "live" as TaskTerminalStatus,
+        prependedScrollback: true
+      }),
+      subscribe: () => () => {}
+    };
+    await renderTerminalWebView({
+      output: `${older}\n${window}\n`,
+      outputEpoch: 2,
+      terminalOutputSource: source
+    });
+    runEffects();
+
+    expect(
+      injectedScripts.some((script) =>
+        script.includes("__prependTerminalScrollback")
+      )
+    ).toBe(true);
+    expect(
+      injectedScripts.some((script) => script.includes("__replaceTerminalState"))
+    ).toBe(false);
   });
 
   it("preserves unrelated terminal message handling", async () => {

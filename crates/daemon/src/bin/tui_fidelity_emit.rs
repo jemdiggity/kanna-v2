@@ -159,6 +159,12 @@ fn emit_fixture_with_snapshot_at(
         rows: snapshot.snapshot.rows,
         data_b64: b64(snapshot.snapshot.vt.as_bytes()),
         agent_provider: None,
+        // The fidelity harness replays a whole terminal, never a bounded
+        // remote window.
+        stream_id: None,
+        stream_offset: None,
+        history_id: None,
+        scrollback_lines: None,
     }];
     let first_output_end = resnapshot_at.unwrap_or(bytes.len());
     for chunk in split_chunks(&bytes[snapshot_at..first_output_end], pattern) {
@@ -177,6 +183,10 @@ fn emit_fixture_with_snapshot_at(
             rows: resnapshot.snapshot.rows,
             data_b64: b64(resnapshot.snapshot.vt.as_bytes()),
             agent_provider: None,
+            stream_id: None,
+            stream_offset: None,
+            history_id: None,
+            scrollback_lines: None,
         });
         for chunk in split_chunks(&bytes[resnapshot_at..], pattern) {
             frames.push(ServerFrame::TermOutput {
