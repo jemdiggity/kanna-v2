@@ -1,9 +1,11 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { runCli } from "../src/cli";
 import type { CommandRunner } from "../src/runtime/process";
+import { nodeCommandRunner } from "../src/runtime/process";
 
 vi.mock("../src/runtime/updater-key", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/runtime/updater-key")>();
@@ -1923,6 +1925,13 @@ describe("release promotion", () => {
 });
 
 describe("release series", () => {
+  it("compares semantic versions including prerelease ordering", () => {
+    expect(compareVersions("1.2.4-staging.10", "1.2.4-staging.9")).toBeGreaterThan(0);
+    expect(compareVersions("1.2.4-staging.9", "1.2.4-staging.10")).toBeLessThan(0);
+    expect(compareVersions("1.2.4", "1.2.4-staging.10")).toBeGreaterThan(0);
+    expect(compareVersions("1.2.4-staging.10", "1.2.4-staging.10")).toBe(0);
+  });
+
   it("derives series and branch names from versions", () => {
     expect(releaseSeriesFromVersion("1.2.4")).toEqual({ major: 1, minor: 2 });
     expect(releaseSeriesFromVersion("v1.2.4-staging.3")).toEqual({ major: 1, minor: 2 });
@@ -3262,7 +3271,7 @@ describe("staging publish lineage gates", () => {
     };
   }
 
-  it("publishes a candidate that descends from the active staging commit", async () => {
+  it("automatically continues the active unpromoted staging series", async () => {
     const root = await mkdtemp(join(tmpdir(), "kd-release-"));
     try {
       const { repoRoot, privateKeyPath } = createReleaseRepo(root);
@@ -3272,8 +3281,146 @@ describe("staging publish lineage gates", () => {
 
       const result = await shipRelease(shipGateInput(repoRoot, privateKeyPath, runner));
 
-      expect(result.version).toBe("1.2.4-staging.1");
+      expect(result.version).toBe("1.2.4-staging.3");
       expect(calls.some((call) => call.command === "bazel" && call.args[0] === "build")).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a semver regression before building even when commit lineage moves forward", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot, privateKeyPath } = createReleaseRepo(root);
+      const calls: CommandCall[] = [];
+      const runner = shipGateRunner(
+        { head: DESCENDANT_COMMIT, activeVersion: "2.0.0-staging.3" },
+        repoRoot,
+        new Map(),
+        calls
+      );
+      const input = shipGateInput(repoRoot, privateKeyPath, runner);
+      input.bumpExplicit = true;
+
+      await expect(shipRelease(input)).rejects.toThrow(
+        /Refusing to roll the staging channel version back.*derived v1\.2\.4-staging\.1.*currently serves v2\.0\.0-staging\.3/s
+      );
+      expect(calls.some((call) => call.command === "bazel")).toBe(false);
+      expect(readVersionFiles(repoRoot)[0]).toBe("1.2.3\n");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("returns a nonzero CLI exit code when staging semver would not advance", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-cli-"));
+    const privateKeyPath = join(root, "updater-private.key");
+    writeFileSync(privateKeyPath, "private key\n", { mode: 0o600 });
+    const repoRoot = resolve(import.meta.dirname, "..", "..", "..");
+    const calls: CommandCall[] = [];
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const previousEnvironment = {
+      HOME: process.env.HOME,
+      KANNA_UPDATER_PUBKEY: process.env.KANNA_UPDATER_PUBKEY,
+      TAURI_PRIVATE_KEY_PATH: process.env.TAURI_PRIVATE_KEY_PATH
+    };
+    process.env.HOME = root;
+    process.env.KANNA_UPDATER_PUBKEY = "pubkey";
+    process.env.TAURI_PRIVATE_KEY_PATH = privateKeyPath;
+
+    const runner = vi.spyOn(nodeCommandRunner, "run").mockImplementation(async (command, args, options) => {
+      calls.push({ command, args, options });
+      const key = `${command} ${args.join(" ")}`;
+      if (key === "git rev-parse --show-toplevel") {
+        return { exitCode: 0, stdout: `${repoRoot}\n`, stderr: "" };
+      }
+      if (key === "git rev-parse --abbrev-ref HEAD") {
+        return { exitCode: 0, stdout: "main\n", stderr: "" };
+      }
+      if (key === "git rev-parse --short HEAD") {
+        return { exitCode: 0, stdout: "8888888\n", stderr: "" };
+      }
+      if (key === "git rev-parse HEAD") {
+        return { exitCode: 0, stdout: `${DESCENDANT_COMMIT}\n`, stderr: "" };
+      }
+      if (key === "git status --porcelain") {
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+      if (key === "git remote get-url origin") {
+        return { exitCode: 0, stdout: "git@github.com:jemdiggity/kanna.git\n", stderr: "" };
+      }
+      if (isProductionReleaseListQuery(command, args)) {
+        return { exitCode: 0, stdout: "[]", stderr: "" };
+      }
+      if (isStagingChannelAssetsQuery(command, args)) {
+        return stagingChannelAssetsResponse(["latest-staging.json"]);
+      }
+      if (command === "gh" && args[0] === "release" && args[1] === "download") {
+        const dirIndex = args.indexOf("--dir");
+        writeFileSync(join(args[dirIndex + 1] ?? "", "latest-staging.json"), '{"version":"2.0.0-staging.3"}\n');
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+      if (key.startsWith("gh release view v2.0.0-staging.3 ")) {
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({
+            targetCommitish: ACTIVE_COMMIT,
+            publishedAt: "2026-08-21T00:00:00Z",
+            body: "Staging updater manifest\n\nSource-Branch: main"
+          }),
+          stderr: ""
+        };
+      }
+      if (key.startsWith("gh release view v2.0.0 ")) {
+        return { exitCode: 1, stdout: "", stderr: "release not found" };
+      }
+      if (command === "git" && args[0] === "fetch") {
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+      if (command === "git" && args[0] === "merge-base" && args[1] === "--is-ancestor") {
+        return {
+          exitCode: args[2] === ACTIVE_COMMIT && args[3] === DESCENDANT_COMMIT ? 0 : 1,
+          stdout: "",
+          stderr: ""
+        };
+      }
+      if (command === "git" && args[0] === "ls-remote") {
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+      return { exitCode: 1, stdout: "", stderr: `unexpected command ${key}` };
+    });
+
+    try {
+      await expect(runCli(["release", "ship", "--staging", "--dry-run", "--patch"])).resolves.toBe(1);
+      expect(error).toHaveBeenLastCalledWith(expect.stringMatching(
+        /Refusing to roll the staging channel version back.*currently serves v2\.0\.0-staging\.3/s
+      ));
+      expect(calls.some((call) => call.command === "bazel")).toBe(false);
+    } finally {
+      runner.mockRestore();
+      error.mockRestore();
+      for (const [key, value] of Object.entries(previousEnvironment)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("uses an explicit bump to start a new series instead of continuing the channel", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot, privateKeyPath } = createReleaseRepo(root);
+      const outputs = writeStagingReleaseBuildOutputs(repoRoot, ["arm64"]);
+      const calls: CommandCall[] = [];
+      const runner = shipGateRunner({ head: DESCENDANT_COMMIT }, repoRoot, outputs, calls);
+      const input = shipGateInput(repoRoot, privateKeyPath, runner);
+      input.bump = "minor";
+      input.bumpExplicit = true;
+
+      const result = await shipRelease(input);
+
+      expect(result.version).toBe("1.3.0-staging.1");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -3337,7 +3484,7 @@ describe("staging publish lineage gates", () => {
 
       const result = await shipRelease(shipGateInput(repoRoot, privateKeyPath, runner, "release/1.3"));
 
-      expect(result.version).toBe("1.3.0-staging.1");
+      expect(result.version).toBe("1.3.0-staging.2");
       const manifest = JSON.parse(readFileSync(result.latestJson, "utf8")) as { notes?: string };
       expect(manifest.notes).toContain("Source-Branch: release/1.3");
     } finally {
@@ -3683,7 +3830,7 @@ describe("staging publish lineage gates", () => {
       const result = await shipRelease(
         shipGateInput(repoRoot, privateKeyPath, shipGateRunner(fixture, repoRoot, outputs, calls), "release/0.1")
       );
-      expect(result.version).toBe("0.1.0-staging.1");
+      expect(result.version).toBe("0.1.0-staging.8");
 
       // The same record does not license a different destination.
       const otherCalls: CommandCall[] = [];

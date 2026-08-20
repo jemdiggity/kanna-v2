@@ -45,6 +45,8 @@ export interface ReleaseCommandContext {
 export interface ReleaseShipInput {
   repoRoot: string;
   bump: ReleaseBump;
+  /** Whether the operator explicitly selected a bump instead of accepting the staging-series default. */
+  bumpExplicit?: boolean;
   archLabels: ReleaseArchLabel[];
   environment?: ReleaseEnvironment;
   release: boolean;
@@ -235,9 +237,17 @@ function parseExistingStagingNumbers(output: string, baseVersion: string): numbe
   return [...numbers];
 }
 
-async function resolveNextStagingVersion(input: ReleaseShipInput, baseVersion: string): Promise<string> {
+async function resolveNextStagingVersion(
+  input: ReleaseShipInput,
+  baseVersion: string,
+  activeVersion: string | null = null
+): Promise<string> {
   const tags = await mustRun(input.runner, "git", ["ls-remote", "--tags", "origin", `v${baseVersion}-staging.*`], input.repoRoot, input.env);
-  const highest = Math.max(0, ...parseExistingStagingNumbers(tags, baseVersion));
+  const activeMatch = activeVersion
+    ? new RegExp(`^${baseVersion.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-staging\\.(\\d+)$`).exec(activeVersion)
+    : null;
+  const activeNumber = Number.parseInt(activeMatch?.[1] ?? "0", 10);
+  const highest = Math.max(activeNumber, ...parseExistingStagingNumbers(tags, baseVersion));
   return `${baseVersion}-staging.${highest + 1}`;
 }
 
@@ -1047,13 +1057,13 @@ async function resolveCandidateLineage(
 async function assertStagingPublishAllowed(
   input: ReleaseShipInput,
   proposed: { sourceBranch: string; commit: string }
-): Promise<PostPromotionTrunkRecord | null> {
+): Promise<{ active: StagingCandidate | null; postPromotion: PostPromotionTrunkRecord | null }> {
   const remoteUrl = await mustRun(input.runner, "git", ["remote", "get-url", "origin"], input.repoRoot, input.env);
   const repoSlug = releaseRepoSlug(remoteUrl);
   const active = await resolveActiveStagingCandidate(input, repoSlug);
   // A candidate we could not read still has to reach the gate: only a channel
   // positively known to be empty skips the comparison.
-  if (!active.candidate && !active.error) return null;
+  if (!active.candidate && !active.error) return { active: null, postPromotion: null };
 
   if (active.candidate) await fetchStagingHistory(input);
   const relationship = active.candidate
@@ -1079,7 +1089,20 @@ async function assertStagingPublishAllowed(
   if (!decision.allowed) {
     throw new Error(decision.reason ?? `Refusing to repoint ${STAGING_CHANNEL_TAG}.`);
   }
-  return decision.authorizedByPromotion ? postPromotion : null;
+  return {
+    active: active.candidate,
+    postPromotion: decision.authorizedByPromotion ? postPromotion : null
+  };
+}
+
+function assertStagingVersionAdvances(version: string, active: StagingCandidate | null): void {
+  if (!active || compareVersions(version, active.version) > 0) return;
+  throw new Error(
+    `Refusing to roll the staging channel version back or republish it: derived v${version}, but ` +
+      `${STAGING_CHANNEL_TAG}/${STAGING_MANIFEST_NAME} currently serves v${active.version}. ` +
+      `A staging publish must be strictly greater by semantic-version ordering. Run \`kd release status\`; ` +
+      `use a bare \`kd release ship --staging\` to continue the active series, or pass --minor/--major to start a newer series.`
+  );
 }
 
 interface ResolvedPromotion {
@@ -1461,11 +1484,21 @@ export async function shipRelease(input: ReleaseShipInput): Promise<ReleaseShipR
     const stagingContext = await resolveStagingContext(input);
     stagingSourceBranch = stagingContext.sourceBranch;
     versionFloor = stagingContext.versionFloor;
-    postPromotionTrunk = await assertStagingPublishAllowed(input, {
+    const publishGate = await assertStagingPublishAllowed(input, {
       sourceBranch: stagingContext.sourceBranch,
       commit: stagingContext.commit
     });
-    version = await resolveNextStagingVersion(input, stagingContext.baseVersion);
+    postPromotionTrunk = publishGate.postPromotion;
+    const activeBaseVersion = publishGate.active &&
+        publishGate.active.sourceBranch === stagingContext.sourceBranch &&
+        !(await activeProductionTagExists(input, publishGate.active.version))
+      ? productionVersionForStaging(publishGate.active.version)
+      : null;
+    const baseVersion = !input.bumpExplicit && activeBaseVersion
+      ? activeBaseVersion
+      : stagingContext.baseVersion;
+    version = await resolveNextStagingVersion(input, baseVersion, publishGate.active?.version ?? null);
+    assertStagingVersionAdvances(version, publishGate.active);
   } else {
     const sourceVersion = readCurrentVersion(input.repoRoot);
     version = bumpVersion(sourceVersion, input.bump);
@@ -1626,22 +1659,46 @@ export function abandonedSeriesTag(branch: string): string {
 }
 
 export function compareVersions(left: string, right: string): number {
-  const parse = (value: string): number[] =>
-    value
-      .trim()
-      .replace(/^v/, "")
-      .split(/[.-]/)
-      .slice(0, 3)
-      .map((part) => Number.parseInt(part, 10));
+  interface SemanticVersion {
+    core: number[];
+    prerelease: string[];
+  }
+  const parse = (value: string): SemanticVersion => {
+    const match = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/.exec(
+      value.trim().replace(/^v/, "")
+    );
+    if (!match) throw new Error(`Cannot compare versions ${left} and ${right}.`);
+    return {
+      core: [match[1], match[2], match[3]].map((part) => Number.parseInt(part ?? "", 10)),
+      prerelease: match[4]?.split(".") ?? []
+    };
+  };
   const a = parse(left);
   const b = parse(right);
   for (let index = 0; index < 3; index += 1) {
-    const leftPart = a[index] ?? 0;
-    const rightPart = b[index] ?? 0;
-    if (Number.isNaN(leftPart) || Number.isNaN(rightPart)) {
-      throw new Error(`Cannot compare versions ${left} and ${right}.`);
-    }
+    const leftPart = a.core[index] ?? 0;
+    const rightPart = b.core[index] ?? 0;
     if (leftPart !== rightPart) return leftPart < rightPart ? -1 : 1;
+  }
+  if (a.prerelease.length === 0 || b.prerelease.length === 0) {
+    if (a.prerelease.length === b.prerelease.length) return 0;
+    return a.prerelease.length === 0 ? 1 : -1;
+  }
+  const identifiers = Math.max(a.prerelease.length, b.prerelease.length);
+  for (let index = 0; index < identifiers; index += 1) {
+    const leftIdentifier = a.prerelease[index];
+    const rightIdentifier = b.prerelease[index];
+    if (leftIdentifier === undefined || rightIdentifier === undefined) {
+      return leftIdentifier === undefined ? -1 : 1;
+    }
+    if (leftIdentifier === rightIdentifier) continue;
+    const leftNumeric = /^\d+$/.test(leftIdentifier);
+    const rightNumeric = /^\d+$/.test(rightIdentifier);
+    if (leftNumeric && rightNumeric) {
+      return Number.parseInt(leftIdentifier, 10) < Number.parseInt(rightIdentifier, 10) ? -1 : 1;
+    }
+    if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
+    return leftIdentifier < rightIdentifier ? -1 : 1;
   }
   return 0;
 }
