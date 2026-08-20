@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -26,6 +26,17 @@ const SECRET_DESKTOP_SECRET = "desktop-secret-for-relay";
 const ROUTING_TARGET_DESKTOP_ID = "desktop-secret-routing-target";
 const ROUTING_TARGET_DESKTOP_SECRET = "desktop-secret-routing-target-secret";
 const E2E_SHUTDOWN_TOKEN = "relay-integration-shutdown-capability";
+/**
+ * The relay caches a successful desktop-credential validation for this long,
+ * so a revocation lands on an already-open socket only once it expires.
+ */
+const DESKTOP_CREDENTIAL_CACHE_TTL_MS = 250;
+
+/** Wait out the credential cache, so the next revalidation reaches Firestore. */
+async function expireDesktopCredentialCache(): Promise<void> {
+  await new Promise((resolve) =>
+    setTimeout(resolve, DESKTOP_CREDENTIAL_CACHE_TTL_MS + 100));
+}
 let relayPort = 0;
 
 function relayUrl(): string {
@@ -258,8 +269,19 @@ function publishedSnapshot(activity: string, tasks = [publishedTask(activity)]):
 }
 
 function maximumLegalCompanionChunkFrames(bundleCount = 3): string[] {
-  const chunkData = "x".repeat(96 * 1024);
-  const chunksPerBundle = Math.ceil((23 * 1024 * 1024) / chunkData.length);
+  // Incompressible on purpose, and freshly random per chunk. The relay
+  // negotiates `permessage-deflate`, and its tunnel watermarks measure
+  // `bufferedAmount` — which counts the bytes actually held, i.e. compressed
+  // ones once a frame is on the socket. A repetitive filler (or one buffer
+  // reused across chunks, which deflate's cross-message context would match)
+  // shrinks away to nothing and never reaches the 32 MiB pause mark, so this
+  // test would silently stop exercising the cap it exists to bound. Real
+  // companion payloads are images and fonts, which do not compress either, so
+  // this is also the more faithful worst case.
+  // 72 KiB of entropy is exactly 96 KiB of base64, the chunk size the desktop
+  // actually sends (`COMPANION_SNAPSHOT_CHUNK_DATA_BYTES`).
+  const chunkBytes = 72 * 1024;
+  const chunksPerBundle = Math.ceil((23 * 1024 * 1024) / (chunkBytes * 4 / 3));
   return Array.from({ length: bundleCount }, (_, bundleIndex) =>
     Array.from({ length: chunksPerBundle }, (_, index) => JSON.stringify({
       type: "companion_snapshot_chunk",
@@ -267,7 +289,7 @@ function maximumLegalCompanionChunkFrames(bundleCount = 3): string[] {
       transfer_id: `session-maximum-companion:revision-${bundleIndex}`,
       index,
       count: chunksPerBundle,
-      data: chunkData,
+      data: randomBytes(chunkBytes).toString("base64"),
     }))
   ).flat();
 }
@@ -637,6 +659,13 @@ describe("Relay integration", () => {
         // Short enough that the byte-odometer test sees a periodic rollup for
         // a still-open connection instead of waiting an hour for one.
         KANNA_RELAY_BYTE_ROLLUP_INTERVAL_MS: "1000",
+        // The desktop-credential cache bounds how long a revoked credential
+        // is still honoured on an already-open socket. Short enough that the
+        // revocation tests below can observe the bound instead of waiting the
+        // production minute for it.
+        KANNA_RELAY_DESKTOP_CREDENTIAL_CACHE_TTL_MS: String(
+          DESKTOP_CREDENTIAL_CACHE_TTL_MS,
+        ),
       },
       detached: true,
       stdio: "pipe",
@@ -864,6 +893,7 @@ describe("Relay integration", () => {
         revokedAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       });
+      await expireDesktopCredentialCache();
 
       const unexpectedInvoke = waitForMessage(
         target,
@@ -1315,6 +1345,7 @@ describe("Relay integration", () => {
         uid: newOwnerUid,
       });
       expect(reclaim.status).toBe(200);
+      await expireDesktopCredentialCache();
 
       const ack = waitForMessage(oldOwnerSocket, (message) =>
         message.type === "task_snapshot_ack" && message.id === "publish-after-reassignment");
@@ -1583,7 +1614,12 @@ describe("Relay integration", () => {
       type: "tunnel_ready",
       service: "ksp",
     });
-    expect(readyOrder.slice(0, 2)).toEqual(["desktop", "client"]);
+    // Both ends are told the tunnel is ready before any payload is spliced.
+    // Which of the two *sockets* delivers its frame first is not something the
+    // relay can guarantee — they are independent TCP connections, and
+    // `attachDesktopTunnel` has already wired the peer map before it sends
+    // either frame — so the order is asserted as a set, not a sequence.
+    expect([...readyOrder.slice(0, 2)].sort()).toEqual(["client", "desktop"]);
 
     const desktopSawJson = waitForRawMessage(
       desktopTunnel,

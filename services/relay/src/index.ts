@@ -23,6 +23,7 @@ import {
   isTunnelSocket,
 } from "./router.js";
 import { handleOtaRequest } from "./ota.js";
+import { RELAY_PER_MESSAGE_DEFLATE } from "./webSocketCompression.js";
 import { resolveBuildCommit } from "./buildInfo.js";
 import {
   beginCloudTaskPublicationSession,
@@ -241,7 +242,21 @@ export const server = createServer(async (req, res) => {
 
 // --- WebSocket server ---
 
-export const wss = new WebSocketServer({ server });
+// Terminal frames are the relay's dominant traffic and compress well; see
+// webSocketCompression.ts for the bounds and for which clients negotiate.
+//
+// The byte odometer is unaffected: `ws` hands the message handler decompressed
+// payloads and compresses on the way out, so both sides keep counting
+// application bytes, which is the right unit for per-user metering.
+//
+// The router's tunnel watermarks *do* change meaning, and correctly so: they
+// read `bufferedAmount`, which counts the bytes actually held — compressed,
+// once a frame is on the socket. The memory bound they enforce stays exact,
+// but compressible traffic now moves much further before a source is paused.
+export const wss = new WebSocketServer({
+  server,
+  perMessageDeflate: RELAY_PER_MESSAGE_DEFLATE,
+});
 
 wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
   const remoteAddr = req.socket.remoteAddress ?? "unknown";
