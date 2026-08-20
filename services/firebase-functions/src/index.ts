@@ -9,11 +9,24 @@
  * stays deleted and unexported, and deploys go through
  * `./kd cloud deploy --functions` rather than bare `firebase deploy`.
  *
- * Stripe credentials are read from the environment at call time — Secret
- * Manager in staging and production, process env under the emulator. Nothing
- * secret is committed, and a missing key surfaces as a clear error on the
- * request that needs it rather than as a module-load crash that would take the
- * whole deploy down.
+ * Stripe configuration is read from the environment at call time and bound to
+ * each function from GCP Secret Manager by the `secrets` declarations below.
+ * That binding is what puts the values in `process.env` at all: a deployed
+ * 2nd-gen function's environment is populated only from declared secrets and
+ * committed `.env` files, so an undeclared variable is simply absent at runtime,
+ * however carefully it was stored in Secret Manager.
+ *
+ * Declaring them also decides how a missing credential fails. `firebase deploy`
+ * refuses to deploy a function whose declared secret does not exist in the
+ * target project, naming it — so before Slice 0 creates them, the deploy fails
+ * loudly instead of publishing a billing backend that answers every Stripe
+ * delivery with a 500 until Stripe disables the endpoint.
+ *
+ * Nothing secret is committed. Bindings are per function rather than global so
+ * each carries only what it uses: the webhook never sees the Stripe API key,
+ * and checkout never sees the webhook signing secret. The lists themselves live
+ * beside the variables they name in `billing/config.ts`, so this module's own
+ * exports stay exactly the two functions it deploys.
  */
 import { getApps, initializeApp } from "firebase-admin/app";
 import { getFirestore, type Firestore } from "firebase-admin/firestore";
@@ -21,6 +34,7 @@ import { setGlobalOptions } from "firebase-functions/v2";
 import { HttpsError, onCall, onRequest } from "firebase-functions/v2/https";
 import * as functionsLogger from "firebase-functions/logger";
 import { createCheckoutSession as createCheckoutSessionCore } from "./billing/checkout.js";
+import { CHECKOUT_SECRET_ENVS, STRIPE_WEBHOOK_SECRET_ENVS } from "./billing/config.js";
 import { BillingRequestError } from "./billing/errors.js";
 import type { BillingLogger } from "./billing/logger.js";
 import { handleStripeWebhook } from "./billing/stripeWebhook.js";
@@ -47,26 +61,30 @@ function db(): Firestore {
  * or an active App Store subscription, so the portal can render the right
  * explanation instead of a generic failure.
  */
-export const createCheckoutSession = onCall(async (request) => {
-  try {
-    return await createCheckoutSessionCore(
-      { plan: (request.data as { plan?: unknown } | undefined)?.plan },
-      request.auth
-        ? {
-            uid: request.auth.uid,
-            email: typeof request.auth.token.email === "string" ? request.auth.token.email : null,
-            emailVerified: request.auth.token.email_verified === true,
-          }
-        : null,
-      { db: db(), env: process.env, logger }
-    );
-  } catch (error) {
-    if (error instanceof BillingRequestError) {
-      throw new HttpsError(error.code, error.message, { reason: error.reason });
+export const createCheckoutSession = onCall(
+  { secrets: [...CHECKOUT_SECRET_ENVS] },
+  async (request) => {
+    try {
+      return await createCheckoutSessionCore(
+        { plan: (request.data as { plan?: unknown } | undefined)?.plan },
+        request.auth
+          ? {
+              uid: request.auth.uid,
+              email:
+                typeof request.auth.token.email === "string" ? request.auth.token.email : null,
+              emailVerified: request.auth.token.email_verified === true,
+            }
+          : null,
+        { db: db(), env: process.env, logger }
+      );
+    } catch (error) {
+      if (error instanceof BillingRequestError) {
+        throw new HttpsError(error.code, error.message, { reason: error.reason });
+      }
+      throw error;
     }
-    throw error;
   }
-});
+);
 
 /**
  * Stripe's webhook endpoint: the only writer of `users/{uid}/billing/stripe`.
@@ -74,16 +92,19 @@ export const createCheckoutSession = onCall(async (request) => {
  * Signature verification runs against `rawBody` — the exact bytes Stripe sent,
  * which a re-serialized body would not match.
  */
-export const stripeWebhook = onRequest(async (request, response) => {
-  const outcome = await handleStripeWebhook(
-    {
-      rawBody: request.rawBody,
-      signature: request.header("stripe-signature"),
-    },
-    { db: db(), env: process.env, logger }
-  );
-  response.status(outcome.httpStatus).json({
-    code: outcome.code,
-    ...(outcome.message ? { message: outcome.message } : {}),
-  });
-});
+export const stripeWebhook = onRequest(
+  { secrets: [...STRIPE_WEBHOOK_SECRET_ENVS] },
+  async (request, response) => {
+    const outcome = await handleStripeWebhook(
+      {
+        rawBody: request.rawBody,
+        signature: request.header("stripe-signature"),
+      },
+      { db: db(), env: process.env, logger }
+    );
+    response.status(outcome.httpStatus).json({
+      code: outcome.code,
+      ...(outcome.message ? { message: outcome.message } : {}),
+    });
+  }
+);

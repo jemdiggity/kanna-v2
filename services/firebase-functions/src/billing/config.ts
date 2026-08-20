@@ -27,6 +27,36 @@ export const PORTAL_BASE_URL_ENV = "KANNA_PORTAL_BASE_URL";
 export const STRIPE_GRACE_FALLBACK_DAYS_ENV = "STRIPE_GRACE_FALLBACK_DAYS";
 const DEFAULT_STRIPE_GRACE_FALLBACK_DAYS = 14;
 
+/**
+ * Secret Manager entries each function must declare so its values reach
+ * `process.env` at runtime.
+ *
+ * A deployed 2nd-gen function's environment is populated only from declared
+ * secrets and committed `.env` files, so a variable read below but absent from
+ * the matching list here is simply undefined in production, however carefully
+ * it was stored in Secret Manager. `src/index.ts` binds these per function, and
+ * `test/function-secrets.test.ts` pins that each list is exactly the set its
+ * resolver requires.
+ *
+ * The price ids and the portal base URL are ordinary configuration rather than
+ * secrets. They are bound this way because it is the only mechanism that
+ * commits nothing to this public repository — the alternative, a
+ * `.env.<project>` file in the functions source directory, would mean checking
+ * per-environment values into git.
+ *
+ * `STRIPE_GRACE_FALLBACK_DAYS` is deliberately absent: it is optional and has a
+ * documented default. Adding it to a list is what would make it overridable in
+ * a deployed environment.
+ */
+export const CHECKOUT_SECRET_ENVS = [
+  STRIPE_SECRET_KEY_ENV,
+  STRIPE_PRICE_MONTHLY_ENV,
+  STRIPE_PRICE_ANNUAL_ENV,
+  PORTAL_BASE_URL_ENV,
+] as const;
+
+export const STRIPE_WEBHOOK_SECRET_ENVS = [STRIPE_WEBHOOK_SECRET_ENV] as const;
+
 export class BillingConfigError extends Error {
   constructor(readonly variable: string) {
     super(
