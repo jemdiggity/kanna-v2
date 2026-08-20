@@ -701,6 +701,15 @@ describe("QA workflow assets", () => {
     expect(schema.properties.revision_limit).toMatchObject({ type: "integer", minimum: 0 });
   });
 
+  it("teaches the current revision limit in the workflow factory", () => {
+    const workflowFactory = readRepoPhrases(".kanna/agents/workflow-factory/AGENT.md");
+
+    expect(workflowFactory).toContain('"revision_limit": 5');
+    expect(workflowFactory).toContain("Defaults to 5; `0` disables the cap");
+    expect(workflowFactory).not.toContain('"revision_limit": 3');
+    expect(workflowFactory).not.toContain("Defaults to 3; `0` disables the cap");
+  });
+
   it("resolves PR head/base refs with gh pr view even when task metadata has the URL", () => {
     const approveAgent = readRepoPhrases(".kanna/agents/approve/AGENT.md");
     const approveContract = readRepoPhrases(".kanna/agents/approve/CONTRACT.md");
