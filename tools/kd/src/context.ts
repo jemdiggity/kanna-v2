@@ -4,6 +4,7 @@ import { resolvePorts, type KdPorts } from "./ports";
 export interface KdTmuxContext {
   server: string;
   session: string;
+  inventoryPath?: string;
 }
 
 export interface KdContext {
@@ -118,6 +119,6 @@ export function resolveKdContext(input: ResolveKdContextInput): KdContext {
     bundleIdentifier: input.bundleIdentifier,
     ports,
     env,
-    tmux: { server: session, session }
+    tmux: { server: session, session, inventoryPath: join(input.repoRoot, ".kanna", "kd-state", "process-inventory.json") }
   };
 }

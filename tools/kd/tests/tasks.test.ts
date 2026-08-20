@@ -144,13 +144,6 @@ describe("task executors", () => {
         if (args.includes("has-session")) {
           return { exitCode: 1, stdout: "", stderr: "no server running" };
         }
-        if (command === "ps") {
-          return {
-            exitCode: 0,
-            stdout: " 123 /repo/.build/debug/kanna-daemon\n 456 /repo/.build/debug/kanna-server\n",
-            stderr: ""
-          };
-        }
         return { exitCode: 0, stdout: "", stderr: "" };
       }
     };
@@ -171,16 +164,12 @@ describe("task executors", () => {
 
     expect(result.data).toEqual({
       stopped: false,
-      serverCleanup: [{ pid: 456, command: "/repo/.build/debug/kanna-server" }],
-      daemonCleanup: {
-        orphanedKilled: [{ pid: 123, command: "/repo/.build/debug/kanna-daemon" }]
-      }
+      inventoryCleanup: { cleaned: [], failed: [] },
+      daemonCleanup: {}
     });
-    expect(killed).toEqual([456, 123]);
+    expect(killed).toEqual([]);
     expect(calls).toEqual([
-      "tmux -L kanna-task-abc has-session -t kanna-task-abc",
-      "ps -axo pid=,command=",
-      "ps -axo pid=,command="
+      "tmux -L kanna-task-abc has-session -t kanna-task-abc"
     ]);
   });
 

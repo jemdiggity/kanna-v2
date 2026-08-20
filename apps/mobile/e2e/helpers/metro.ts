@@ -1,4 +1,6 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { processInventoryPath, recordInventoryResource, removeInventoryResource } from "../../../../tools/kd/src/runtime/process-inventory";
+import { resolve } from "node:path";
 import { promisify } from "node:util";
 import { waitFor } from "./wait";
 
@@ -114,8 +116,9 @@ export async function ensureExpoServer(
       };
     }
 
-    await terminateProcess(existingPid);
-    await waitForPortToClear(options.metroPort);
+    throw new Error(
+      `Metro port ${options.metroPort} is held by a process that this run did not start; run ./kd dev down instead of killing an inferred owner.`
+    );
   }
 
   const child = spawn(
@@ -133,6 +136,10 @@ export async function ensureExpoServer(
       stdio: "inherit"
     }
   );
+  const inventoryPath = processInventoryPath(resolve(options.projectRoot, "../.."));
+  if (child.pid) {
+    recordInventoryResource(inventoryPath, { kind: "process", pid: child.pid, label: "mobile-e2e-metro" });
+  }
 
   await waitForExpoServer(options.metroPort);
 
@@ -150,6 +157,9 @@ export async function ensureExpoServer(
         child.once("exit", () => resolve());
         setTimeout(() => resolve(), 2_000);
       });
+      if (child.pid) {
+        removeInventoryResource(inventoryPath, { kind: "process", pid: child.pid, label: "mobile-e2e-metro" });
+      }
     }
   };
 }
@@ -185,22 +195,6 @@ async function inspectRunningExpoProcess(pid: number): Promise<RunningExpoProces
   } catch {
     return null;
   }
-}
-
-async function terminateProcess(pid: number): Promise<void> {
-  try {
-    process.kill(pid, "SIGTERM");
-  } catch {
-    return;
-  }
-}
-
-async function waitForPortToClear(port: number): Promise<void> {
-  await waitFor(
-    `Metro port ${port} to clear`,
-    async () => ((await findListeningProcessPid(port)) === null ? true : null),
-    { intervalMs: 250, timeoutMs: 5_000 }
-  );
 }
 
 async function waitForExpoServer(port: number): Promise<void> {

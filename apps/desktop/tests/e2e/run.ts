@@ -7,6 +7,7 @@ import { createServer as createHttpServer } from "node:http";
 import { homedir } from "node:os";
 import { dirname, basename, join, posix, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { processInventoryPath, recordInventoryResource, removeInventoryResource } from "../../../../tools/kd/src/runtime/process-inventory";
 import { fileURLToPath } from "node:url";
 import { realE2eTierFiles } from "./realTiers";
 import { buildRealE2eAgentEnv } from "./runEnv";
@@ -683,6 +684,7 @@ async function main(): Promise<void> {
       stdio: ["ignore", "pipe", "pipe"],
     });
     firebaseEmulatorProcess = proc;
+    if (proc.pid) recordInventoryResource(processInventoryPath(repoRoot), { kind: "process", pid: proc.pid, label: "desktop-e2e-firebase" });
     proc.stdout?.on("data", (chunk: Buffer) => {
       firebaseEmulatorOutput += chunk.toString();
     });
@@ -692,6 +694,7 @@ async function main(): Promise<void> {
 
     let exited: { code: number | null; signal: NodeJS.Signals | null } | null = null;
     proc.once("exit", (code, signal) => {
+      if (proc.pid) removeInventoryResource(processInventoryPath(repoRoot), { kind: "process", pid: proc.pid, label: "desktop-e2e-firebase" });
       exited = { code, signal };
       if (firebaseEmulatorProcess === proc) firebaseEmulatorProcess = null;
     });
@@ -742,6 +745,7 @@ async function main(): Promise<void> {
           proc.kill("SIGKILL");
         }
       }
+      removeInventoryResource(processInventoryPath(repoRoot), { kind: "process", pid: proc.pid, label: "desktop-e2e-firebase" });
     }
     await runCommand(["./kd", "emulators", "down"], {
       cwd: repoRoot,
@@ -828,6 +832,7 @@ async function main(): Promise<void> {
       stdio: ["ignore", "pipe", "pipe"],
     });
     relayProcess = proc;
+    if (proc.pid) recordInventoryResource(processInventoryPath(repoRoot), { kind: "process", pid: proc.pid, label: "desktop-e2e-relay" });
     proc.stdout?.on("data", (chunk: Buffer) => {
       const text = chunk.toString();
       startupOutput += text;
@@ -842,10 +847,12 @@ async function main(): Promise<void> {
     let exited: { code: number | null; signal: NodeJS.Signals | null } | null = null;
     let spawnError: Error | null = null;
     proc.once("error", (error) => {
+      if (proc.pid) removeInventoryResource(processInventoryPath(repoRoot), { kind: "process", pid: proc.pid, label: "desktop-e2e-relay" });
       spawnError = error;
       if (relayProcess === proc) relayProcess = null;
     });
     proc.once("exit", (code, signal) => {
+      if (proc.pid) removeInventoryResource(processInventoryPath(repoRoot), { kind: "process", pid: proc.pid, label: "desktop-e2e-relay" });
       exited = { code, signal };
       if (relayProcess === proc) relayProcess = null;
     });
@@ -924,6 +931,7 @@ async function main(): Promise<void> {
         waitForRelayPortClosed(5_000),
       ]);
     }
+    removeInventoryResource(processInventoryPath(repoRoot), { kind: "process", pid: proc.pid, label: "desktop-e2e-relay" });
     if (!childExited || !portClosed) {
       throw new Error(
         `relay shutdown incomplete (childExited=${childExited}, portClosed=${portClosed})`,

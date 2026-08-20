@@ -206,6 +206,9 @@ describe("KANNA_TASK_ENVIRONMENT_TEMPLATE", () => {
     );
 
     expect(KANNA_TASK_ENVIRONMENT_TEMPLATE).toBe(canonical.trimEnd());
+    expect(KANNA_TASK_ENVIRONMENT_TEMPLATE).toContain(
+      "Stop every background process you start before recording stage completion."
+    );
   });
 });
 

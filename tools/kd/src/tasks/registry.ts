@@ -20,7 +20,7 @@ import { selectPreferredLanAddress } from "../runtime/lan-address";
 import { buildDevPlan, buildProductionMobilePlan } from "../runtime/dev-plan";
 import { resolveKdEnvironment } from "../runtime/environment";
 import { assertNotProductionDb, resetSqliteDb, seedSqliteDb, type DevDbTarget } from "../runtime/db";
-import { killWorkspaceDaemons, killWorkspaceDesktopDevProcesses, killWorkspaceServers } from "../runtime/daemon";
+import { killWorkspaceDaemons } from "../runtime/daemon";
 import { checkRequiredCommands } from "../runtime/doctor";
 import { syncMachineLocalConfig, writeCargoConfig } from "../runtime/env-sync";
 import { buildFirebaseCommandEnv, buildFirebaseEmulatorArgs, formatMissingFirebaseEmulators, resolveFirebaseEnvFromReference, writeFirebaseEmulatorConfig, type FirebasePortInput } from "../runtime/firebase";
@@ -68,6 +68,7 @@ import { getPortStatuses } from "../runtime/port-status";
 import { executeRemoteE2e } from "../runtime/remote-e2e";
 import { executeStagingSmoke } from "../runtime/staging-smoke";
 import { nodeCommandRunner, type CommandResult, type CommandRunner } from "../runtime/process";
+import { cleanupProcessInventory, processInventoryPath } from "../runtime/process-inventory";
 import { readDevDesktopAuth, readStagingDesktopAuth } from "../runtime/developer-config";
 import {
   listStagingRelayActiveDesktopIds,
@@ -670,12 +671,6 @@ export async function executeDevRestartWithContext(
     };
   }
 
-  const desktopCleanup = input.component === "desktop"
-    ? await killWorkspaceDesktopDevProcesses({
-        repoRoot: executor.context.repoRoot,
-        runner: executor.runner
-      })
-    : undefined;
   const restarted = await respawnTmuxWindow(executor.runner, executor.context.tmux, window);
   return {
     ok: restarted,
@@ -685,7 +680,6 @@ export async function executeDevRestartWithContext(
     data: {
       component: input.component,
       environment,
-      desktopCleanup,
       ...restart.data
     }
   };
@@ -1766,15 +1760,11 @@ export async function executeDevDownWithContext(
   options: DevDownExecutionOptions = {}
 ): Promise<TaskResult> {
   const stopped = await stopTmuxSession(executor.runner, executor.context.tmux);
-  // Always stop the workspace kanna-server: the desktop app dies with the
-  // tmux session, and an orphaned server would keep the port bound and serve
-  // a stale binary across restarts. The daemon stays (unless asked) so PTY
-  // sessions survive.
-  const serverCleanup = await killWorkspaceServers({
-    repoRoot: executor.context.repoRoot,
-    runner: executor.runner,
-    killProcess: options.killProcess
-  });
+  const inventoryCleanup = await cleanupProcessInventory(
+    processInventoryPath(executor.context.repoRoot),
+    executor.runner,
+    options.killProcess
+  );
   const daemonCleanup = input.killDaemon
     ? await killWorkspaceDaemons({
         repoRoot: executor.context.repoRoot,
@@ -1786,7 +1776,7 @@ export async function executeDevDownWithContext(
   return {
     ok: true,
     message: stopped ? "Stopped." : "No session running.",
-    data: { stopped, serverCleanup, daemonCleanup }
+    data: { stopped, inventoryCleanup, daemonCleanup }
   };
 }
 
@@ -2280,6 +2270,9 @@ export const taskDefinitions = [
     execute: async (_context, input) => {
       const parsed = cleanInputSchema.parse(input);
       const context = await resolveDefaultContext(process.env);
+      const inventoryCleanup = parsed.dry
+        ? { cleaned: [], failed: [] }
+        : await cleanupProcessInventory(processInventoryPath(context.repoRoot), nodeCommandRunner);
       const result = cleanWorkspace({
         repoRoot: context.repoRoot,
         homeDir: context.homeDir,
@@ -2290,7 +2283,7 @@ export const taskDefinitions = [
       return {
         ok: true,
         message: result.removals.length === 0 ? "nothing to clean" : formatJsonResult(result.removals),
-        data: result
+        data: { ...result, inventoryCleanup }
       };
     }
   },

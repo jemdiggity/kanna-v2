@@ -1,9 +1,11 @@
 import type { DevWindow } from "./dev-plan";
 import type { CommandRunner } from "./process";
+import { recordInventoryResource, removeInventoryResource } from "./process-inventory";
 
 export interface TmuxTarget {
   server: string;
   session: string;
+  inventoryPath?: string;
 }
 
 function tmuxWindowEnvArgs(env: NodeJS.ProcessEnv): string[] {
@@ -117,10 +119,16 @@ export async function startTmuxSession(runner: CommandRunner, target: TmuxTarget
   );
   if (firstResult.exitCode !== 0) {
     if (isDuplicateSessionError(firstResult.stderr)) {
+      if (target.inventoryPath) {
+        recordInventoryResource(target.inventoryPath, { kind: "tmux-server", socket: target.server });
+      }
       await addMissingTmuxWindows(runner, target, windows);
       return;
     }
     throw new Error(`tmux failed to start ${target.session}:${first.name}: ${firstResult.stderr}`);
+  }
+  if (target.inventoryPath) {
+    recordInventoryResource(target.inventoryPath, { kind: "tmux-server", socket: target.server });
   }
 
   await setRemainOnExit(runner, target);
@@ -220,8 +228,11 @@ export async function stopTmuxSession(runner: CommandRunner, target: TmuxTarget)
     .filter(Boolean)) {
     await runner.run("tmux", ["-L", target.server, "send-keys", "-t", `${target.session}:${name}`, "C-c"]);
   }
-  await runner.run("tmux", ["-L", target.server, "kill-session", "-t", target.session]);
-  return true;
+  const killed = await runner.run("tmux", ["-L", target.server, "kill-session", "-t", target.session]);
+  if (killed.exitCode === 0 && target.inventoryPath) {
+    removeInventoryResource(target.inventoryPath, { kind: "tmux-server", socket: target.server });
+  }
+  return killed.exitCode === 0;
 }
 
 export async function stopTmuxWindow(runner: CommandRunner, target: TmuxTarget, window: string): Promise<boolean> {

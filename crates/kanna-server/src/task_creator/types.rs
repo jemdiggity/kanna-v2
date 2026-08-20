@@ -303,6 +303,8 @@ pub(super) struct DeferredStageSetup {
 pub(crate) struct PreparedWorkspaceTeardown {
     pub(crate) session_id: String,
     pub(super) daemon_dir: String,
+    pub(super) db_path: String,
+    pub(super) task_id: String,
     pub(super) cwd: String,
     pub(super) env: HashMap<String, String>,
     pub(super) session: PreparedSessionSpawn,

@@ -6,6 +6,7 @@ target/
 .kanna-daemon/
 .kanna-daemon-*/
 .kanna-daemon-e2e/
+.kanna/kd-state/
 .kanna-transfer/
 .kanna-transfer-*/
 *.sqlite

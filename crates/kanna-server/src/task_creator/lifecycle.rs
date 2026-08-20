@@ -600,6 +600,8 @@ pub(crate) async fn spawn_prepared_workspace_teardown_best_effort(
     };
     let session_id = prepared.session_id.clone();
     let daemon_dir = prepared.daemon_dir.clone();
+    let db_path = prepared.db_path.clone();
+    let task_id = prepared.task_id.clone();
     let command = spawn_session_command(
         prepared.session_id,
         prepared.cwd,
@@ -613,20 +615,30 @@ pub(crate) async fn spawn_prepared_workspace_teardown_best_effort(
             tokio::spawn(supervise_teardown_session(
                 daemon_dir,
                 session_id,
+                db_path,
+                task_id,
                 std::time::Duration::from_secs(10 * 60),
                 std::time::Duration::from_secs(30 * 60),
             ));
         }
         Ok(DaemonEvent::Error { message, .. }) => {
             log::warn!("workspace teardown session {session_id} failed to start: {message}");
+            record_teardown_failure(&db_path, &task_id, &session_id, &message);
         }
         Ok(other) => {
             log::warn!(
                 "workspace teardown session {session_id} returned unexpected daemon response: {other:?}"
             );
+            record_teardown_failure(
+                &db_path,
+                &task_id,
+                &session_id,
+                &format!("unexpected daemon response: {other:?}"),
+            );
         }
         Err(error) => {
             log::warn!("workspace teardown session {session_id} daemon error: {error}");
+            record_teardown_failure(&db_path, &task_id, &session_id, &error.to_string());
         }
     }
 }
@@ -634,6 +646,8 @@ pub(crate) async fn spawn_prepared_workspace_teardown_best_effort(
 async fn supervise_teardown_session(
     daemon_dir: String,
     session_id: String,
+    db_path: String,
+    task_id: String,
     soft_timeout: std::time::Duration,
     hard_timeout: std::time::Duration,
 ) {
@@ -667,6 +681,12 @@ async fn supervise_teardown_session(
                 "workspace teardown session {session_id} timed out after {}s; killing process group",
                 hard_timeout.as_secs()
             );
+            record_teardown_failure(
+                &db_path,
+                &task_id,
+                &session_id,
+                &format!("timed out after {}s", hard_timeout.as_secs()),
+            );
         }
         match DaemonClient::connect(&daemon_dir)
             .await
@@ -694,6 +714,19 @@ async fn supervise_teardown_session(
             }
         }
         tokio::time::sleep(retry_interval).await;
+    }
+}
+
+fn record_teardown_failure(db_path: &str, task_id: &str, session_id: &str, error: &str) {
+    let result = Db::open(db_path).and_then(|db| {
+        db.append_task_event(
+            task_id,
+            crate::db::TaskEventKind::TeardownFailed,
+            serde_json::json!({ "sessionId": session_id, "error": error }),
+        )
+    });
+    if let Err(db_error) = result {
+        log::error!("failed to record teardown failure event for task {task_id}: {db_error}");
     }
 }
 
@@ -2304,6 +2337,8 @@ mod teardown_deadline_tests {
             supervise_teardown_session(
                 daemon_dir.to_string_lossy().to_string(),
                 "td-task-1".to_string(),
+                "/tmp/kanna-missing-teardown-test.db".to_string(),
+                "task-1".to_string(),
                 std::time::Duration::from_millis(20),
                 std::time::Duration::from_millis(50),
             ),
@@ -2378,6 +2413,8 @@ mod teardown_deadline_tests {
             supervise_teardown_session(
                 daemon_dir.to_string_lossy().to_string(),
                 "td-task-transient".to_string(),
+                "/tmp/kanna-missing-teardown-transient-test.db".to_string(),
+                "task-transient".to_string(),
                 std::time::Duration::from_millis(20),
                 std::time::Duration::from_millis(50),
             ),

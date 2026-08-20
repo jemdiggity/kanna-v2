@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createServer } from "node:net";
 import { setTimeout as sleep } from "node:timers/promises";
+import { processInventoryPath, recordInventoryResource, removeInventoryResource } from "../../../tools/kd/src/runtime/process-inventory";
 
 export interface ManagedProcess {
   readonly name: string;
@@ -11,6 +12,7 @@ export interface ManagedProcess {
 export interface RunCommandOptions {
   cwd: string;
   env?: NodeJS.ProcessEnv;
+  inventoryRoot?: string;
 }
 
 export async function findFreePort(): Promise<number> {
@@ -102,6 +104,10 @@ export function startManagedProcess(
     env: options.env ?? process.env,
     stdio: "pipe"
   });
+  const inventoryPath = processInventoryPath(options.inventoryRoot ?? options.cwd);
+  if (child.pid) {
+    recordInventoryResource(inventoryPath, { kind: "process", pid: child.pid, label: name });
+  }
   child.stdout.on("data", (chunk: Buffer) => {
     process.stderr.write(`[${name}] ${chunk.toString()}`);
   });
@@ -109,6 +115,9 @@ export function startManagedProcess(
     process.stderr.write(`[${name}] ${chunk.toString()}`);
   });
   child.once("exit", (code, signal) => {
+    if (child.pid) {
+      removeInventoryResource(inventoryPath, { kind: "process", pid: child.pid, label: name });
+    }
     if (code !== 0 && signal !== "SIGTERM" && signal !== "SIGINT") {
       const reason = signal ? `signal ${signal}` : `code ${code ?? "unknown"}`;
       process.stderr.write(`[${name}] exited with ${reason}\n`);
@@ -120,6 +129,7 @@ export function startManagedProcess(
     process: child,
     stop: async () => {
       if (child.exitCode !== null || child.signalCode !== null) {
+        if (child.pid) removeInventoryResource(inventoryPath, { kind: "process", pid: child.pid, label: name });
         return;
       }
       child.kill("SIGTERM");
@@ -140,6 +150,7 @@ export function startManagedProcess(
           child.once("exit", () => resolve());
         });
       }
+      if (child.pid) removeInventoryResource(inventoryPath, { kind: "process", pid: child.pid, label: name });
     }
   };
 }

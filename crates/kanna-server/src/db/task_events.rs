@@ -86,6 +86,8 @@ pub enum TaskEventKind {
     /// is refused, including Kanna's own completion notifications and the
     /// pre-close merge handoff, until the composer it inherited is resolved.
     InputBlocked,
+    /// A detached workspace teardown failed to start or exceeded its deadline.
+    TeardownFailed,
     /// A cross-machine transfer is shutting the task's agent down so its
     /// conversation can be shipped. `payload.phase` names the step —
     /// `wrap-up-sent`, `idle`, `quit-sent`, `exited`, `already-exited`, or
@@ -112,6 +114,7 @@ impl TaskEventKind {
             Self::MergeHandoffMissing => "task.merge_handoff_missing",
             Self::InputDelivered => "task.input_delivered",
             Self::InputBlocked => "task.input_blocked",
+            Self::TeardownFailed => "task.teardown_failed",
             Self::TransferFinalizing => "task.transfer_finalizing",
         }
     }
@@ -132,6 +135,7 @@ impl TaskEventKind {
         Self::MergeHandoffMissing,
         Self::InputDelivered,
         Self::InputBlocked,
+        Self::TeardownFailed,
         Self::TransferFinalizing,
     ];
 }

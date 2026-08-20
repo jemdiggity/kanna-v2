@@ -1,6 +1,7 @@
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Browser } from "webdriverio";
+import { processInventoryPath, recordInventoryResource, removeInventoryResource } from "../../../tools/kd/src/runtime/process-inventory";
 import {
   createPhysicalDeviceCapabilities,
   createSimulatorCapabilities,
@@ -198,6 +199,11 @@ async function main(): Promise<void> {
     env.appiumPort,
     process.env as Record<string, string | undefined>
   );
+  const mobileRepoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
+  const mobileInventoryPath = processInventoryPath(mobileRepoRoot);
+  if (appiumServer.pid) {
+    recordInventoryResource(mobileInventoryPath, { kind: "process", pid: appiumServer.pid, label: "mobile-e2e-appium" });
+  }
   let driver: Browser | null = null;
   let expoServer: Awaited<ReturnType<typeof ensureExpoServer>> | null = null;
   let relayHarness: Awaited<ReturnType<typeof startMobileRelayHarness>> | null = null;
@@ -404,6 +410,9 @@ async function main(): Promise<void> {
       await driver.deleteSession();
     }
     appiumServer.kill("SIGTERM");
+    if (appiumServer.pid) {
+      removeInventoryResource(mobileInventoryPath, { kind: "process", pid: appiumServer.pid, label: "mobile-e2e-appium" });
+    }
     await expoServer?.stop();
     await relayHarness?.stop();
   }
