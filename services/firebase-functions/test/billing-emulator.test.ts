@@ -55,8 +55,6 @@ const webhookEnv: NodeJS.ProcessEnv = {
 
 const checkoutEnv: NodeJS.ProcessEnv = {
   STRIPE_SECRET_KEY: "sk_test_slice1",
-  STRIPE_PRICE_MONTHLY: "price_monthly_test",
-  STRIPE_PRICE_ANNUAL: "price_annual_test",
   KANNA_PORTAL_BASE_URL: "https://portal.kanna.build/",
   GCLOUD_PROJECT: "kanna-local",
 };
@@ -109,6 +107,9 @@ function stubGateway(): StubGateway {
     async createCustomer() {
       calls.customers += 1;
       return { id: "cus_TestSlice1" };
+    },
+    async resolvePriceId(lookupKey) {
+      return `price_for_${lookupKey}`;
     },
     async createCheckoutSession(input) {
       calls.sessions.push(input);
@@ -424,7 +425,7 @@ describeWithEmulator("billing backend against the Firestore emulator", () => {
       });
       expect(gateway.calls.sessions[0]).toMatchObject({
         uid: CHECKOUT_UID,
-        priceId: "price_monthly_test",
+        priceId: "price_for_cloud_monthly_usd",
         successUrl: "https://portal.kanna.build/billing/success?session_id={CHECKOUT_SESSION_ID}",
         cancelUrl: "https://portal.kanna.build/billing/canceled",
       });
@@ -436,10 +437,16 @@ describeWithEmulator("billing backend against the Firestore emulator", () => {
       });
     });
 
-    it("selects the annual price for the annual plan", async () => {
+    it("rejects the unpriced annual plan", async () => {
       const gateway = stubGateway();
-      await createCheckoutSession({ plan: "annual" }, verified, deps(gateway));
-      expect(gateway.calls.sessions[0]).toMatchObject({ priceId: "price_annual_test" });
+      await expect(createCheckoutSession({ plan: "annual" }, verified, deps(gateway)))
+        .rejects.toMatchObject({ reason: "unknown_plan" });
+    });
+
+    it("resolves the selected currency by stable lookup key", async () => {
+      const gateway = stubGateway();
+      await createCheckoutSession({ plan: "monthly", currency: "jpy" }, verified, deps(gateway));
+      expect(gateway.calls.sessions[0]).toMatchObject({ priceId: "price_for_cloud_monthly_jpy" });
     });
 
     it("reuses the account's existing Stripe customer", async () => {

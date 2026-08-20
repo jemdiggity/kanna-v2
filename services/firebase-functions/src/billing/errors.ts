@@ -20,6 +20,7 @@ export type BillingErrorReason =
   | "app_store_active"
   | "already_subscribed"
   | "unknown_plan"
+  | "unknown_currency"
   | "not_configured"
   | "stripe_error";
 

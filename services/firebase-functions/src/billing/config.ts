@@ -11,8 +11,6 @@ import type { BillingEnvironment } from "./types.js";
 
 export const STRIPE_SECRET_KEY_ENV = "STRIPE_SECRET_KEY";
 export const STRIPE_WEBHOOK_SECRET_ENV = "STRIPE_WEBHOOK_SECRET";
-export const STRIPE_PRICE_MONTHLY_ENV = "STRIPE_PRICE_MONTHLY";
-export const STRIPE_PRICE_ANNUAL_ENV = "STRIPE_PRICE_ANNUAL";
 export const PORTAL_BASE_URL_ENV = "KANNA_PORTAL_BASE_URL";
 
 /**
@@ -38,8 +36,8 @@ const DEFAULT_STRIPE_GRACE_FALLBACK_DAYS = 14;
  * `test/function-secrets.test.ts` pins that each list is exactly the set its
  * resolver requires.
  *
- * The price ids and the portal base URL are ordinary configuration rather than
- * secrets. They are bound this way because it is the only mechanism that
+ * The portal base URL is ordinary configuration rather than a secret. It is
+ * bound this way because it is the only mechanism that
  * commits nothing to this public repository — the alternative, a
  * `.env.<project>` file in the functions source directory, would mean checking
  * per-environment values into git.
@@ -50,8 +48,6 @@ const DEFAULT_STRIPE_GRACE_FALLBACK_DAYS = 14;
  */
 export const CHECKOUT_SECRET_ENVS = [
   STRIPE_SECRET_KEY_ENV,
-  STRIPE_PRICE_MONTHLY_ENV,
-  STRIPE_PRICE_ANNUAL_ENV,
   PORTAL_BASE_URL_ENV,
 ] as const;
 
@@ -103,8 +99,6 @@ export function resolveBillingEnvironment(env: NodeJS.ProcessEnv): BillingEnviro
 export interface StripeConfig {
   secretKey: string;
   webhookSecret: string;
-  priceMonthly: string;
-  priceAnnual: string;
   portalBaseUrl: string;
   graceFallbackDays: number;
   environment: BillingEnvironment;
@@ -114,8 +108,6 @@ export interface StripeConfig {
 export function resolveCheckoutConfig(env: NodeJS.ProcessEnv): Omit<StripeConfig, "webhookSecret"> {
   return {
     secretKey: requireEnv(env, STRIPE_SECRET_KEY_ENV),
-    priceMonthly: requireEnv(env, STRIPE_PRICE_MONTHLY_ENV),
-    priceAnnual: requireEnv(env, STRIPE_PRICE_ANNUAL_ENV),
     portalBaseUrl: requireEnv(env, PORTAL_BASE_URL_ENV),
     graceFallbackDays: stripeGraceFallbackDays(env),
     environment: resolveBillingEnvironment(env),

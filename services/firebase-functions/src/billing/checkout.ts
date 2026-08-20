@@ -12,13 +12,14 @@ import { resolveCheckoutConfig } from "./config.js";
 import { readBillingState } from "./entitlement.js";
 import { BillingRequestError } from "./errors.js";
 import { consoleBillingLogger, type BillingLogger } from "./logger.js";
-import type { StripeCheckoutGateway } from "./stripeGateway.js";
+import type { StripeCheckoutGateway, StripePriceCurrency } from "./stripeGateway.js";
 import { stripeCustomerPath, userDocPath, type BilledSourceState } from "./types.js";
 
-export type CheckoutPlan = "monthly" | "annual";
+export type CheckoutPlan = "monthly";
 
 export interface CreateCheckoutSessionRequest {
   plan?: unknown;
+  currency?: unknown;
 }
 
 export interface CheckoutCaller {
@@ -32,6 +33,7 @@ export interface CreateCheckoutSessionResult {
   url: string | null;
   customerId: string;
   plan: CheckoutPlan;
+  currency: StripePriceCurrency;
 }
 
 export interface CreateCheckoutSessionDependencies {
@@ -48,11 +50,27 @@ function isBlockingStatus(state: BilledSourceState | null): boolean {
 }
 
 function parsePlan(value: unknown): CheckoutPlan {
-  if (value === "monthly" || value === "annual") return value;
+  if (value === "monthly") return value;
   throw new BillingRequestError(
     "invalid-argument",
     "unknown_plan",
-    `Unknown plan: ${String(value)}. Expected "monthly" or "annual".`
+    `Unknown plan: ${String(value)}. Expected "monthly".`
+  );
+}
+
+const SUPPORTED_CURRENCIES = new Set<StripePriceCurrency>([
+  "jpy", "usd", "cad", "aud", "eur", "gbp",
+]);
+
+function parseCurrency(value: unknown): StripePriceCurrency {
+  const currency = value === undefined ? "usd" : String(value).toLowerCase();
+  if (SUPPORTED_CURRENCIES.has(currency as StripePriceCurrency)) {
+    return currency as StripePriceCurrency;
+  }
+  throw new BillingRequestError(
+    "invalid-argument",
+    "unknown_currency",
+    `Unknown currency: ${String(value)}.`
   );
 }
 
@@ -80,6 +98,7 @@ export async function createCheckoutSession(
   }
 
   const plan = parsePlan(request.plan);
+  const currency = parseCurrency(request.currency);
 
   let config: ReturnType<typeof resolveCheckoutConfig>;
   try {
@@ -123,11 +142,15 @@ export async function createCheckoutSession(
     now: now(),
   });
 
-  const priceId = plan === "monthly" ? config.priceMonthly : config.priceAnnual;
   const base = config.portalBaseUrl.replace(/\/+$/, "");
 
   let session: Awaited<ReturnType<StripeCheckoutGateway["createCheckoutSession"]>>;
   try {
+    const lookupKey = `cloud_monthly_${currency}`;
+    const priceId = await gateway.resolvePriceId(lookupKey);
+    if (!priceId) {
+      throw new Error(`No active Stripe price has lookup_key ${lookupKey}`);
+    }
     session = await gateway.createCheckoutSession({
       uid: caller.uid,
       customerId,
@@ -148,9 +171,10 @@ export async function createCheckoutSession(
   logger.info("Created a Stripe checkout session", {
     uid: caller.uid,
     plan,
+    currency,
     sessionId: session.id,
   });
-  return { sessionId: session.id, url: session.url, customerId, plan };
+  return { sessionId: session.id, url: session.url, customerId, plan, currency };
 }
 
 /**

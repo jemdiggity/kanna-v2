@@ -3,8 +3,7 @@
  *
  * Kept behind an interface so the emulator tests exercise the real
  * `createCheckoutSession` logic — its guards, its customer reuse, the metadata
- * it stamps — without live Stripe credentials, which do not exist yet
- * (Slice-0 human item).
+ * it stamps — without making live Stripe calls in CI.
  */
 import Stripe from "stripe";
 
@@ -21,6 +20,8 @@ export interface StripeCheckoutSessionInput {
   cancelUrl: string;
 }
 
+export type StripePriceCurrency = "jpy" | "usd" | "cad" | "aud" | "eur" | "gbp";
+
 export interface StripeCheckoutSession {
   id: string;
   url: string | null;
@@ -28,6 +29,7 @@ export interface StripeCheckoutSession {
 
 export interface StripeCheckoutGateway {
   createCustomer(input: StripeCustomerInput): Promise<{ id: string }>;
+  resolvePriceId(lookupKey: string): Promise<string | null>;
   createCheckoutSession(input: StripeCheckoutSessionInput): Promise<StripeCheckoutSession>;
 }
 
@@ -48,6 +50,10 @@ export function stripeCheckoutGateway(secretKey: string): StripeCheckoutGateway 
         metadata: { firebase_uid: input.uid },
       });
       return { id: customer.id };
+    },
+    async resolvePriceId(lookupKey) {
+      const prices = await stripe.prices.list({ active: true, lookup_keys: [lookupKey], limit: 1 });
+      return prices.data[0]?.id ?? null;
     },
     async createCheckoutSession(input) {
       const session = await stripe.checkout.sessions.create({
