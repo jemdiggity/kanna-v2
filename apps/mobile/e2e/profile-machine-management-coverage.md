@@ -20,6 +20,11 @@ The Appium flow begins signed out and exercises these contracts in order:
 - creates another real server session and injects its versioned QR payload as
   the simulator's scanned value, then claims it through the same
   `pairMachineByPayload`/Bonjour/server endpoint used by the camera callback;
+- leaves the Machines screen for Recent immediately after that claim and
+  requires the paired machine's LAN task row within a budget tighter than the
+  generic screen timeout — the claim itself must load the machine's work,
+  rather than the lists filling only when an unrelated discovery tick or the
+  later relaunch happens to re-bootstrap;
 - terminates and reactivates the app to prove the trusted machine and its
   human-readable server name survive AsyncStorage reload plus a fresh Bonjour
   inventory refresh;
@@ -35,6 +40,13 @@ The server's E2E mobile controls are debug-build-only, require the existing
 cannot be invoked through relay. The LAN control is middleware-level so the
 same running `kanna-server` keeps its authenticated relay connection while
 direct simulator HTTP returns 503.
+
+The in-flight progress panel (`mobile.machine-pairing.progress`) is asserted in
+`apps/mobile/src/components/MachinePairingSheet.test.tsx` rather than here:
+whether a spinner is still on screen when Appium looks is a race against how
+fast the harness's local machine answers, so an E2E assertion on it would be
+flaky in exactly the case it is meant to protect. What the journey pins is the
+outcome the panel is covering for — that the tasks arrive from the claim.
 
 Physical camera optics remain human-only, as required by the design. Appium
 and the iOS simulator cannot feed a deterministic QR image into the

@@ -110,56 +110,73 @@ export function MachinePairingSheet({
             </Pressable>
           </View>
 
-          <View style={styles.modeRow}>
-            <Pressable
-              accessibilityRole="tab"
-              accessibilityState={{ selected: mode === "scan" }}
-              style={styles.modeButton}
-              testID={MOBILE_E2E_IDS.machinePairingScanModeButton}
-              onPress={() => setMode("scan")}
+          {submitting ? (
+            <View
+              style={styles.progressCard}
+              testID={MOBILE_E2E_IDS.machinePairingProgress}
             >
-              <Text style={mode === "scan" ? styles.modeActive : styles.modeLabel}>Scan QR</Text>
-            </Pressable>
-            <Pressable
-              accessibilityRole="tab"
-              accessibilityState={{ selected: mode === "code" }}
-              style={styles.modeButton}
-              onPress={() => setMode("code")}
-            >
-              <Text style={mode === "code" ? styles.modeActive : styles.modeLabel}>Enter code</Text>
-            </Pressable>
-          </View>
-
-          {mode === "scan" ? (
-            permission?.granted ? (
-              <PairingCamera
-                barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
-                onBarcodeScanned={scanLocked ? undefined : ({ data }) => submitPayload(data)}
-                style={styles.camera}
-                testID={MOBILE_E2E_IDS.machinePairingCamera}
-              />
-            ) : permission?.canAskAgain === false ? (
-              <View style={styles.permissionCard}>
-                <Text style={styles.permissionText}>Camera access is off. You can still enter the code below.</Text>
+              <ActivityIndicator color="#9FC1F5" />
+              <View style={styles.progressCopy}>
+                <Text style={styles.progressTitle}>Adding machine…</Text>
+                <Text style={styles.progressDetail}>
+                  Connecting and loading its tasks. This can take a few seconds.
+                </Text>
+              </View>
+            </View>
+          ) : (
+            <>
+              <View style={styles.modeRow}>
                 <Pressable
-                  accessibilityRole="button"
-                  style={styles.secondaryButton}
-                  testID={MOBILE_E2E_IDS.machinePairingOpenSettingsButton}
-                  onPress={() => void Linking.openSettings()}
+                  accessibilityRole="tab"
+                  accessibilityState={{ selected: mode === "scan" }}
+                  style={styles.modeButton}
+                  testID={MOBILE_E2E_IDS.machinePairingScanModeButton}
+                  onPress={() => setMode("scan")}
                 >
-                  <Text style={styles.secondaryLabel}>Open Settings</Text>
+                  <Text style={mode === "scan" ? styles.modeActive : styles.modeLabel}>Scan QR</Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="tab"
+                  accessibilityState={{ selected: mode === "code" }}
+                  style={styles.modeButton}
+                  onPress={() => setMode("code")}
+                >
+                  <Text style={mode === "code" ? styles.modeActive : styles.modeLabel}>Enter code</Text>
                 </Pressable>
               </View>
-            ) : (
-              <Pressable
-                accessibilityRole="button"
-                style={styles.secondaryButton}
-                onPress={() => void requestPermission()}
-              >
-                <Text style={styles.secondaryLabel}>Allow Camera</Text>
-              </Pressable>
-            )
-          ) : null}
+
+              {mode === "scan" ? (
+                permission?.granted ? (
+                  <PairingCamera
+                    barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
+                    onBarcodeScanned={scanLocked ? undefined : ({ data }) => submitPayload(data)}
+                    style={styles.camera}
+                    testID={MOBILE_E2E_IDS.machinePairingCamera}
+                  />
+                ) : permission?.canAskAgain === false ? (
+                  <View style={styles.permissionCard}>
+                    <Text style={styles.permissionText}>Camera access is off. You can still enter the code below.</Text>
+                    <Pressable
+                      accessibilityRole="button"
+                      style={styles.secondaryButton}
+                      testID={MOBILE_E2E_IDS.machinePairingOpenSettingsButton}
+                      onPress={() => void Linking.openSettings()}
+                    >
+                      <Text style={styles.secondaryLabel}>Open Settings</Text>
+                    </Pressable>
+                  </View>
+                ) : (
+                  <Pressable
+                    accessibilityRole="button"
+                    style={styles.secondaryButton}
+                    onPress={() => void requestPermission()}
+                  >
+                    <Text style={styles.secondaryLabel}>Allow Camera</Text>
+                  </Pressable>
+                )
+              ) : null}
+            </>
+          )}
 
           <View style={styles.codeArea}>
             <Text style={styles.label}>Pairing code</Text>
@@ -168,6 +185,7 @@ export function MachinePairingSheet({
                 accessibilityLabel="Pairing code"
                 autoCapitalize="characters"
                 autoCorrect={false}
+                editable={!submitting}
                 maxLength={8}
                 placeholder="ABC123"
                 placeholderTextColor="#6A7E9D"
@@ -248,6 +266,19 @@ const styles = StyleSheet.create({
   modeLabel: { color: "#8FA2BF", fontSize: 13, fontWeight: "700" },
   modeActive: { color: "#F5F7FB", fontSize: 13, fontWeight: "800" },
   camera: { aspectRatio: 1.45, borderRadius: 18, overflow: "hidden" },
+  progressCard: {
+    alignItems: "center",
+    backgroundColor: "#111D30",
+    borderColor: "#243754",
+    borderRadius: 16,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 14,
+    padding: 16
+  },
+  progressCopy: { flex: 1, gap: 3 },
+  progressTitle: { color: "#F5F7FB", fontSize: 15, fontWeight: "800" },
+  progressDetail: { color: "#9FB0C8", fontSize: 13, lineHeight: 19 },
   permissionCard: { backgroundColor: "#111D30", borderRadius: 16, gap: 12, padding: 16 },
   permissionText: { color: "#B4C2D8", fontSize: 14, lineHeight: 20 },
   codeArea: { gap: 8 },

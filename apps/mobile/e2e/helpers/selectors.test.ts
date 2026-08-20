@@ -89,6 +89,7 @@ describe("mobile E2E selector helpers", () => {
       machinePairingSheet: "~mobile.machine-pairing.sheet",
       machinePairingCodeInput: "~mobile.machine-pairing.code",
       machinePairingSubmit: "~mobile.machine-pairing.submit",
+      machinePairingProgress: "~mobile.machine-pairing.progress",
       machinePairingError: "~mobile.machine-pairing.error",
       machinePairingClose: "~mobile.machine-pairing.close",
       machinePairingCamera: "~mobile.machine-pairing.camera",

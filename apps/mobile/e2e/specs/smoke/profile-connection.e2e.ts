@@ -19,6 +19,10 @@ import {
 } from "./list-detail-back.e2e";
 
 const SCREEN_TIMEOUT_MS = 30_000;
+// Pairing itself must load the machine's work. A generous wait would also pass
+// on the old behavior, where the lists filled only when an unrelated discovery
+// tick or relaunch happened to re-bootstrap.
+const PAIRED_TASK_LOAD_TIMEOUT_MS = 15_000;
 const POLL_INTERVAL_MS = 250;
 const IOS_APP_STATE_NOT_RUNNING = 1;
 
@@ -733,6 +737,14 @@ export async function runProfileDisconnectedConnectionSmoke(
     account: false,
     manual: true
   });
+  // The claim alone must surface the machine's work: no relaunch, no sign-in,
+  // and no waiting on an unrelated refresh.
+  await assertPairedMachineTasksLoad(
+    driver,
+    ui,
+    options.hybridFixture.duplicate.displayTaskId,
+    options.hybridFixture.duplicate.lanTitle
+  );
 
   await relaunchApp(
     driver,
@@ -899,6 +911,29 @@ async function signInFromProfile(
   await (await driver.$(selectors.accountCloseButton)).click();
 }
 
+export async function assertPairedMachineTasksLoad(
+  driver: Browser,
+  ui: Pick<
+    ProfileMachinesUi,
+    "getAccountButton" | "getAccountSheet" | "getMachinesButton" | "getMachinesScreen"
+  >,
+  taskId: string,
+  expectedTitle: string
+): Promise<void> {
+  await (await driver.$(selectors.machinesBackButton)).click();
+  const recentTab = await driver.$(selectors.recentTab);
+  await recentTab.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await recentTab.click();
+  await waitForTaskRowText(
+    driver,
+    taskId,
+    expectedTitle,
+    "Expected pairing to load the machine's tasks without a relaunch",
+    PAIRED_TASK_LOAD_TIMEOUT_MS
+  );
+  await openMachinesFromProfile(ui);
+}
+
 async function dismissSavePasswordPrompt(driver: Browser): Promise<void> {
   for (const selector of [
     "~Not Now",
@@ -916,7 +951,8 @@ async function waitForTaskRowText(
   driver: Browser,
   taskId: string,
   expectedText: string,
-  timeoutMsg: string
+  timeoutMsg: string,
+  timeout = SCREEN_TIMEOUT_MS
 ): Promise<void> {
   await driver.waitUntil(
     async () => {
@@ -928,7 +964,7 @@ async function waitForTaskRowText(
     },
     {
       interval: POLL_INTERVAL_MS,
-      timeout: SCREEN_TIMEOUT_MS,
+      timeout,
       timeoutMsg
     }
   );
