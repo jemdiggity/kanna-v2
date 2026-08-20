@@ -18,6 +18,12 @@ export interface MobileServerStatus {
   /** Absent from desktops that predate write-path health reporting; absence
    * means the health is unknown, not unhealthy. */
   writePathHealth?: WritePathHealth;
+  /** Version of the task-input image-attachment contract the desktop serves.
+   * Absent means an older desktop that would deserialize an `attachment`
+   * field, ignore it, deliver the text alone and still answer 204 — so the
+   * composer treats absence as "cannot attach" rather than sending a photo
+   * into silence. */
+  taskInputAttachmentVersion?: number;
   /** Agent provider CLIs installed on the desktop. See
    * {@link DesktopSummary.agentProviders}. */
   agentProviders?: AgentProvider[];
@@ -182,6 +188,22 @@ export interface TaskActivityResponse {
 export interface TaskFileContent {
   path: string;
   content: string;
+}
+
+/**
+ * One image sent with a task input.
+ *
+ * Base64 in the JSON body on purpose, and identically on both transports: the
+ * relay carries a desktop invocation as a JSON message and the LAN client
+ * posts JSON to the same route, so a single encoding means one server handler,
+ * one durable record, and one thing to test. See
+ * `lib/attachments/imageAttachmentBudget.ts` for the size budget that keeps
+ * the payload small enough for that to be a good trade.
+ */
+export interface TaskInputAttachment {
+  fileName: string;
+  mediaType: string;
+  dataBase64: string;
 }
 
 export interface TaskFileMentionInput {

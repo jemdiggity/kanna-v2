@@ -116,6 +116,16 @@ export interface SessionState {
   desktopId: string | null;
   desktopName: string | null;
   serverStatus: string | null;
+  /**
+   * Whether the connected desktop advertised the task-input attachment
+   * contract on `/v1/status`.
+   *
+   * False until a status read says otherwise, because that is what an older
+   * desktop looks like: it accepts an `attachment` field, ignores it, and
+   * still answers 204. Defaulting to "supported" would make a lost photo the
+   * failure mode of every not-yet-updated desktop.
+   */
+  desktopSupportsTaskInputAttachments: boolean;
   errorMessage: string | null;
   refreshStatus: RefreshStatus;
   taskCollectionStatus: TaskCollectionStatus;
@@ -205,6 +215,9 @@ export interface SessionStore {
   setConnectionMode(mode: DesktopMode | null): void;
   setConnectionState(state: ConnectionState): void;
   setDesktopStatus(status: string | null, desktopName: string | null, pairingCode: string | null, desktopId?: string | null): void;
+  /** Record what the connected desktop advertised it can do. Separate from
+   * `setDesktopStatus` because a capability is not desktop status text. */
+  setDesktopSupportsTaskInputAttachments(supported: boolean): void;
   setErrorMessage(message: string | null): void;
   setRefreshStatus(status: RefreshStatus): void;
   setTaskCollectionStatus(status: TaskCollectionStatus): void;
@@ -328,6 +341,7 @@ export function createSessionStore(): SessionStore {
     desktopId: null,
     desktopName: null,
     serverStatus: null,
+    desktopSupportsTaskInputAttachments: false,
     errorMessage: null,
     refreshStatus: "idle",
     taskCollectionStatus: "loading",
@@ -645,6 +659,18 @@ export function createSessionStore(): SessionStore {
     },
     setDesktopStatus(serverStatus, desktopName, pairingCode, desktopId = state.desktopId) {
       state = { ...state, serverStatus, desktopName, pairingCode, desktopId };
+      publish();
+    },
+    setDesktopSupportsTaskInputAttachments(
+      desktopSupportsTaskInputAttachments
+    ) {
+      if (
+        state.desktopSupportsTaskInputAttachments ===
+        desktopSupportsTaskInputAttachments
+      ) {
+        return;
+      }
+      state = { ...state, desktopSupportsTaskInputAttachments };
       publish();
     },
     setErrorMessage(errorMessage) {

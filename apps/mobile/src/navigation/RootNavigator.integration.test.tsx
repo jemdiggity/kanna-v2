@@ -567,6 +567,7 @@ function createClientMock(): KannaClient {
     markTaskRead: vi.fn().mockResolvedValue({ taskId: "task-1", activity: "idle" }),
     advanceTaskStage: vi.fn().mockResolvedValue({ taskId: "task-1" }),
     closeTask: vi.fn().mockResolvedValue(undefined),
+    supportsTaskInputAttachments: vi.fn().mockResolvedValue(true),
     resolveTaskFileMentions: vi.fn().mockResolvedValue({ mentions: [] }),
     observeTaskTerminal: vi.fn(() => ({ close: vi.fn() })),
     observeTaskCompanion: vi.fn(() => ({

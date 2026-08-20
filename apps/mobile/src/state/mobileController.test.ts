@@ -250,6 +250,8 @@ function createClientMock(): ClientMock {
       truncated: false
     }),
     sendTaskInput: vi.fn().mockResolvedValue(undefined),
+    // The desktop the stub stands for advertises the attachment contract.
+    supportsTaskInputAttachments: vi.fn().mockResolvedValue(true),
     closeTask: vi.fn().mockResolvedValue(undefined),
     observeTaskTerminal: vi.fn().mockImplementation((_taskId, listener) => {
       terminalStream.subscription.setListener(listener);
@@ -300,6 +302,67 @@ describe("createMobileController", () => {
       claimPayload: vi.fn().mockResolvedValue(trustedDesktop)
     };
   }
+
+  it("asks the opened task's own desktop whether it can receive a photo", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+    await controller.bootstrap();
+
+    controller.openTask("task-1");
+    await flushMicrotasks();
+
+    // The question is asked of the task, not of the connection: the relay's
+    // own status describes "Kanna Cloud" and no desktop at all.
+    expect(client.supportsTaskInputAttachments).toHaveBeenCalledWith("task-1");
+    expect(store.getState().desktopSupportsTaskInputAttachments).toBe(true);
+  });
+
+  it("treats a desktop that predates attachments as unable to receive one", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    client.supportsTaskInputAttachments.mockResolvedValue(false);
+    const controller = createMobileController(client, store);
+    await controller.bootstrap();
+
+    controller.openTask("task-1");
+    await flushMicrotasks();
+
+    expect(store.getState().desktopSupportsTaskInputAttachments).toBe(false);
+  });
+
+  it("treats an unreachable desktop as unable to receive one", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    client.supportsTaskInputAttachments.mockRejectedValue(
+      new Error("Desktop offline")
+    );
+    const controller = createMobileController(client, store);
+    await controller.bootstrap();
+
+    controller.openTask("task-1");
+    await flushMicrotasks();
+
+    // A desktop that will not answer is not one to send a photo into.
+    expect(store.getState().desktopSupportsTaskInputAttachments).toBe(false);
+  });
+
+  it("does not carry one task's attachment answer onto the next task opened", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+    await controller.bootstrap();
+
+    controller.openTask("task-1");
+    await flushMicrotasks();
+    expect(store.getState().desktopSupportsTaskInputAttachments).toBe(true);
+
+    client.supportsTaskInputAttachments.mockResolvedValue(false);
+    controller.openTask("task-2");
+    await flushMicrotasks();
+
+    expect(store.getState().desktopSupportsTaskInputAttachments).toBe(false);
+  });
 
   it("pins locally, with no server write, and lifts the row into its own order", async () => {
     const store = createSessionStore();

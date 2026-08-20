@@ -219,8 +219,8 @@ coarse-location human decision below. Evidence:
 | Data type | Collected | Linked to identity | Used for tracking | Purpose | Source evidence |
 | --- | --- | --- | --- | --- | --- |
 | Emails or Text Messages | No | No | No | N/A | Kanna has no interpersonal email/SMS/private-user-messaging feature. Agent/task free-form text is classified as Other User Content below: [`remoteTransport.ts`](../apps/mobile/src/lib/transports/remoteTransport.ts), [`api/types.ts`](../apps/mobile/src/lib/api/types.ts). |
-| Photos or Videos | No | No | No | N/A | `expo-camera` is used only for on-device QR barcode scanning; the scanned image/frame is not sent or retained: [`MachinePairingSheet.tsx`](../apps/mobile/src/components/MachinePairingSheet.tsx), [`app.config.ts`](../apps/mobile/app.config.ts). |
-| Audio Data | No | No | No | N/A | No microphone/audio capture dependency or permission exists, and camera audio recording is disabled: [`package.json`](../apps/mobile/package.json), [`app.config.ts`](../apps/mobile/app.config.ts). |
+| Photos or Videos | **Requires human confirmation** (see item 3) | Yes if collected | No | App Functionality — attach a photo to a message for the user's coding agent | Changed after this audit's preparation date, at runtime `2.2.0`. `expo-camera` is still only on-device QR scanning, but the task composer now lets a user attach one photo from the library or camera (`expo-image-picker`), downscales and re-encodes it on-device (`expo-image-manipulator`), and uploads it with the message. On the LAN path it never leaves the user's network. On the relay path it passes through relay in transit and relay does not persist it; the desktop stores it in the task's attachment directory and deletes it when the task closes. Whether transit through relay counts as collection is the same judgement already open for Other User Content: [`pickImageAttachment.ts`](../apps/mobile/src/lib/attachments/pickImageAttachment.ts), [`imageAttachmentBudget.ts`](../apps/mobile/src/lib/attachments/imageAttachmentBudget.ts), [`task_input_attachments.rs`](../crates/kanna-server/src/task_input_attachments.rs), [`router.ts`](../services/relay/src/router.ts). |
+| Audio Data | No | No | No | N/A | No microphone/audio capture dependency or permission exists: camera audio recording is disabled, and the image-picker plugin is configured with `microphonePermission: false`, which is what keeps it from adding RECORD_AUDIO and a microphone usage string: [`package.json`](../apps/mobile/package.json), [`app.config.ts`](../apps/mobile/app.config.ts). |
 | Gameplay Content | No | No | No | N/A | Kanna has no game functionality: [`package.json`](../apps/mobile/package.json), [`App.tsx`](../apps/mobile/src/App.tsx). |
 | Customer Support | No | No | No | N/A | There is no in-app support submission. A user can copy a local diagnostic to the clipboard, but the app does not transmit it: [`MobileCrashBoundary.tsx`](../apps/mobile/src/components/MobileCrashBoundary.tsx), [`BuildInfoPanel.tsx`](../apps/mobile/src/components/BuildInfoPanel.tsx). |
 | Other User Content | **Yes** | **Yes** | No | App Functionality — create, display, route, and notify about coding-agent tasks | Firestore retains task titles, up to 500 prompt characters, up to 240 output-preview characters, repo names/URLs, branch/base names, PR URLs, and task/agent metadata under the UID. FCM processes notification title/body and desktop/task IDs for delivery. Full prompts, agent/task input, terminal output, file contents, and diffs are relayed in real time but are not persisted by relay source: [`cloud_task_publisher.rs`](../crates/kanna-server/src/cloud_task_publisher.rs), [`cloudTaskPublication.ts`](../services/relay/src/cloudTaskPublication.ts), [`mobileNotifications.ts`](../services/relay/src/mobileNotifications.ts), [`remoteTransport.ts`](../apps/mobile/src/lib/transports/remoteTransport.ts), [`router.ts`](../services/relay/src/router.ts). |
@@ -311,7 +311,20 @@ establish.
    or confidential code? Confirm that the privacy policy describes this risk.
    If legal says yes, select **Sensitive Info**, **Linked to identity: Yes**,
    **Tracking: No**, purpose **App Functionality**.
-3. **Operational analytics or monitoring outside source.** Confirm whether
+3. **Photos attached to agent messages.** The composer photo attachment
+   (runtime `2.2.0`, added after this sheet's preparation date) sends a
+   user-selected image to the user's own desktop. On the LAN path nothing
+   leaves the local network. On the relay path the image passes through relay
+   in transit and is not persisted there, exactly like the prompt and terminal
+   content already classified as Other User Content — but Apple's **Photos or
+   Videos** type is separate, and whether library/camera media in transit is
+   "collected" is the same business/legal call as item 2, not a source-code
+   guess. If legal says yes, select **Photos or Videos**, **Linked to identity:
+   Yes**, **Tracking: No**, purpose **App Functionality**. Also confirm the
+   privacy policy describes photo attachments, and re-check the photo-library
+   and camera usage strings in
+   [`app.config.ts`](../apps/mobile/app.config.ts).
+4. **Operational analytics or monitoring outside source.** Confirm whether
    Firebase/Google Analytics, notification campaign reporting, App Store
    campaign attribution, product analytics, CDN analytics, crash reporting,
    performance monitoring, or another telemetry service is enabled in the
@@ -324,8 +337,10 @@ establish.
 
 ## Final submitter checklist
 
-- Confirm the build being submitted is production `build.kanna.app` with
-  runtime version `2.1.4`.
+- Confirm the build being submitted is production `build.kanna.app`, and note
+  its runtime version. This sheet was prepared against `2.1.4`; runtime `2.2.0`
+  added composer photo attachments, so a `2.2.0`-or-later build must resolve
+  the **Photos or Videos** question in item 3 before the label is published.
 - Answer **Yes, we collect data from this app**.
 - Select and complete Email Address, Other User Content, User ID, Device ID,
   Other Diagnostic Data, and Other Data Types using the summary above.

@@ -1049,4 +1049,147 @@ describe("createLanTransport", () => {
       expect.objectContaining({ type: "error" })
     );
   });
+  it("passes the attachment capability marker through, and its absence", async () => {
+    const advertised = vi.fn<FetchLike>().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        state: "running",
+        desktopId: "desktop-1",
+        desktopName: "Studio Mac",
+        version: "0.0.69",
+        environment: "production",
+        serverVersion: "0.0.69",
+        lanHost: "0.0.0.0",
+        lanPort: 48120,
+        pairingCode: null,
+        taskInputAttachmentVersion: 1
+      })
+    });
+    await expect(
+      createLanTransport("http://127.0.0.1:48120", advertised).getStatus()
+    ).resolves.toMatchObject({ taskInputAttachmentVersion: 1 });
+
+    // A desktop built before attachments omits the field entirely. That
+    // absence is the whole signal — it would otherwise accept the attachment,
+    // ignore it, and answer 204 as if the photo had arrived.
+    const older = vi.fn<FetchLike>().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        state: "running",
+        desktopId: "desktop-1",
+        desktopName: "Studio Mac",
+        version: "0.0.60",
+        environment: "production",
+        serverVersion: "0.0.60",
+        lanHost: "0.0.0.0",
+        lanPort: 48120,
+        pairingCode: null
+      })
+    });
+    const status = await createLanTransport(
+      "http://127.0.0.1:48120",
+      older
+    ).getStatus();
+    expect(status.taskInputAttachmentVersion).toBeUndefined();
+  });
+
+  it("answers the attachment question from the pinned desktop's own status", async () => {
+    const advertised = vi.fn<FetchLike>().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        state: "running",
+        desktopId: "desktop-1",
+        desktopName: "Studio Mac",
+        version: "0.0.69",
+        environment: "production",
+        serverVersion: "0.0.69",
+        lanHost: "0.0.0.0",
+        lanPort: 48120,
+        pairingCode: null,
+        taskInputAttachmentVersion: 1
+      })
+    });
+    await expect(
+      createLanTransport(
+        "http://127.0.0.1:48120",
+        advertised
+      ).supportsTaskInputAttachments("task-1")
+    ).resolves.toBe(true);
+    expect(advertised).toHaveBeenCalledWith(
+      "http://127.0.0.1:48120/v1/status",
+      undefined
+    );
+
+    const older = vi.fn<FetchLike>().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        state: "running",
+        desktopId: "desktop-1",
+        desktopName: "Studio Mac",
+        version: "0.0.60",
+        environment: "production",
+        serverVersion: "0.0.60",
+        lanHost: "0.0.0.0",
+        lanPort: 48120,
+        pairingCode: null
+      })
+    });
+    await expect(
+      createLanTransport(
+        "http://127.0.0.1:48120",
+        older
+      ).supportsTaskInputAttachments("task-1")
+    ).resolves.toBe(false);
+  });
+
+  it("posts a photo attachment in the task-input body and omits the field without one", async () => {
+    const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
+      ok: true,
+      status: 204,
+      json: async () => undefined
+    });
+    const transport = createLanTransport("http://127.0.0.1:48120", fetchImpl);
+
+    await expect(
+      transport.sendTaskInput("task-1", "look at this", {
+        fileName: "IMG_4821.jpg",
+        mediaType: "image/jpeg",
+        dataBase64: "AQID"
+      })
+    ).resolves.toBeUndefined();
+    await expect(
+      transport.sendTaskInput("task-1", "continue")
+    ).resolves.toBeUndefined();
+
+    expect(fetchImpl).toHaveBeenNthCalledWith(
+      1,
+      "http://127.0.0.1:48120/v1/tasks/task-1/input",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          input: "look at this",
+          attachment: {
+            fileName: "IMG_4821.jpg",
+            mediaType: "image/jpeg",
+            dataBase64: "AQID"
+          }
+        })
+      }
+    );
+    // An input with no photo stays byte-for-byte the request it always was.
+    expect(fetchImpl).toHaveBeenNthCalledWith(
+      2,
+      "http://127.0.0.1:48120/v1/tasks/task-1/input",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ input: "continue" })
+      }
+    );
+  });
 });

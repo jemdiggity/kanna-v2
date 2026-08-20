@@ -11,7 +11,7 @@ describe("release install check helpers", () => {
       appEnv: "staging",
       bundleId: "build.kanna.app.staging",
       displayName: "Kanna Staging",
-      runtimeVersion: "2.1.4"
+      runtimeVersion: "2.2.0"
     });
   });
 

@@ -9,6 +9,7 @@ import type {
   TaskFileContent,
   TaskFileMentionInput,
   TaskFileMentionResolution,
+  TaskInputAttachment,
   TaskSummary
 } from "../lib/api/types";
 import type {
@@ -99,7 +100,11 @@ export interface MobileController {
     mentions: readonly TaskFileMentionInput[]
   ): Promise<TaskFileMentionResolution>;
   readTaskDiff(taskId: string, request?: TaskDiffRequest): Promise<TaskDiffContent>;
-  sendTaskInput(taskId: string, input: string): Promise<void>;
+  sendTaskInput(
+    taskId: string,
+    input: string,
+    attachment?: TaskInputAttachment
+  ): Promise<void>;
   sendTaskTerminalInput(taskId: string, dataB64: string): void;
   resizeTaskTerminal(taskId: string, cols: number, rows: number): void;
   sendTaskAgentPermission(taskId: string, requestId: string, decision: Parameters<TaskAgentSubscription["sendPermission"]>[1]): void;
@@ -233,9 +238,29 @@ export function createMobileController(
   let taskAgentGeneration = 0;
   let taskCompanionGeneration = 0;
   let taskDetailGeneration = 0;
+  /** Fences the per-task attachment-capability read against task switching. */
+  let taskAttachmentSupportGeneration = 0;
   let activeTaskDetailIdentity: string | null = null;
   let loadedTaskPrompt:
     | { taskId: string; routeIdentity: string; prompt: string }
+    | null = null;
+  /**
+   * The attachment-capability read currently in flight, tagged with the
+   * generation that installed it.
+   *
+   * The generation is the owner token, and it is not decoration: two reads for
+   * the same task and route — an A -> B -> A switch — share an identity, so a
+   * marker keyed on identity alone lets the *earlier* read's completion free
+   * the marker the later one installed. The next reconciler entry then sees an
+   * unanswered route with nothing in flight, re-probes, and clears the flag
+   * again, which is the flicker the memo exists to prevent. Only the installer
+   * releases; every other release is a no-op.
+   */
+  let activeTaskAttachmentSupport:
+    | { identity: string; generation: number }
+    | null = null;
+  let resolvedTaskAttachmentSupport:
+    | { taskId: string; routeIdentity: string; supported: boolean }
     | null = null;
   let backgroundRefreshTimer: ReturnType<typeof setInterval> | null = null;
   let backgroundRefreshInFlight = false;
@@ -1195,12 +1220,95 @@ export function createMobileController(
     }
   };
 
+  /** Clear the in-flight claim only if this generation is the one holding it. */
+  const releaseTaskAttachmentSupportRead = (generation: number) => {
+    if (activeTaskAttachmentSupport?.generation === generation) {
+      activeTaskAttachmentSupport = null;
+    }
+  };
+
+  /**
+   * Ask the desktop that owns this task whether it can receive a photo.
+   *
+   * Per task rather than per connection. The connection's own `/v1/status` is
+   * the wrong source twice over: on the relay path it is a synthetic "Kanna
+   * Cloud" record describing no desktop at all, and even on LAN a phone can
+   * see tasks owned by several machines running different versions. The
+   * transport answers by routing to the task's owner desktop — the same
+   * routing that will carry the input — so the gate and the delivery cannot
+   * disagree about which machine they mean.
+   *
+   * Failure resolves to "cannot attach". A desktop that will not answer the
+   * question is not one to send a photo into.
+   */
+  const resetSelectedTaskAttachmentSupport = () => {
+    taskAttachmentSupportGeneration += 1;
+    store.setDesktopSupportsTaskInputAttachments(false);
+  };
+
+  const loadSelectedTaskAttachmentSupport = (taskId: string) => {
+    const task = findTask(taskId);
+    if (!task) {
+      return;
+    }
+    // `startTaskView` is a reconciler, not an open hook: every live cloud
+    // publication and every collection refresh re-enters it for the task on
+    // screen. Answering once per (task, route) is therefore the whole point —
+    // re-asking on each entry both floods the relay and, because each entry
+    // would clear the flag first, unmounts the attach control mid-composer and
+    // never lets it back when publications outpace the round trip. Memoized
+    // and in-flight-guarded exactly like the sibling `loadSelectedTaskPrompt`.
+    const routeIdentity = taskPromptRouteIdentity(task);
+    const supportIdentity = JSON.stringify([taskId, routeIdentity]);
+    if (
+      resolvedTaskAttachmentSupport?.taskId === taskId &&
+      resolvedTaskAttachmentSupport.routeIdentity === routeIdentity
+    ) {
+      store.setDesktopSupportsTaskInputAttachments(
+        resolvedTaskAttachmentSupport.supported
+      );
+      return;
+    }
+    if (activeTaskAttachmentSupport?.identity === supportIdentity) {
+      return;
+    }
+
+    const generation = ++taskAttachmentSupportGeneration;
+    activeTaskAttachmentSupport = { identity: supportIdentity, generation };
+    // Only here — a route this answer has never been asked of. A re-entry for
+    // the same task and route returns above without touching the flag.
+    store.setDesktopSupportsTaskInputAttachments(false);
+    void client
+      .supportsTaskInputAttachments(taskId)
+      .then((supported) => {
+        // Released whatever the guards below decide, so a read superseded by a
+        // task switch cannot leave this route permanently unaskable — but only
+        // by the read that installed it, so an earlier read for the same route
+        // cannot free a later one's claim.
+        releaseTaskAttachmentSupportRead(generation);
+        if (
+          generation !== taskAttachmentSupportGeneration ||
+          durableTaskIdForSelection(store.getState().selectedTaskId) !== taskId
+        ) {
+          return;
+        }
+        resolvedTaskAttachmentSupport = { taskId, routeIdentity, supported };
+        store.setDesktopSupportsTaskInputAttachments(supported);
+      })
+      .catch(() => {
+        // Already false, and an unreachable desktop is not one to offer an
+        // attach control for. Nothing is memoized, so the next entry retries.
+        releaseTaskAttachmentSupportRead(generation);
+      });
+  };
+
   const startTaskView = (taskId: string) => {
     const task = findTask(taskId);
     if (!task) {
       return;
     }
     loadSelectedTaskPrompt(taskId);
+    loadSelectedTaskAttachmentSupport(taskId);
     if (isTaskBlocked(task)) {
       // A blocked task has no agent session to attach; the task screen
       // renders the blocked placeholder instead. Collection refreshes
@@ -1225,6 +1333,11 @@ export function createMobileController(
 
   const openTask = (taskId: string) => {
     taskCollectionsRevision += 1;
+    // Clear the previous task's answer before the new one is asked. Selecting
+    // a task whose row has not loaded yet, or a blocked one, never reaches the
+    // read below, and inheriting "attachments are fine" from whatever was on
+    // screen before would offer the control against the wrong desktop.
+    resetSelectedTaskAttachmentSupport();
     const slot = taskUiSlotForSelection(store.getState().taskUiSlots, taskId);
     const selectionId = slot?.slotId ?? taskId;
     const durableTaskId = slot?.taskId ?? findCollectionTask(taskId)?.id ?? null;
@@ -2691,18 +2804,29 @@ export function createMobileController(
       return client.readTaskDiff(taskId, request);
     },
 
-    async sendTaskInput(taskId, input) {
+    async sendTaskInput(taskId, input, attachment) {
       const submittedInput = input.trim();
-      if (!submittedInput) {
+      if (!submittedInput && !attachment) {
         return;
       }
 
       try {
         const task = findTask(taskId);
-        if (task?.agentType === "agent" && activeTaskAgent?.taskId === taskId) {
+        // An attachment is a file the desktop writes and the injected message
+        // names, so it only exists on the HTTP input path. The SDK-mode agent
+        // stream carries text alone — the composer already hides the attach
+        // control for those tasks, and this keeps a stale one from silently
+        // dropping the image.
+        if (
+          !attachment &&
+          task?.agentType === "agent" &&
+          activeTaskAgent?.taskId === taskId
+        ) {
           activeTaskAgent.subscription.sendInput(submittedInput);
         } else {
-          await client.sendTaskInput(taskId, submittedInput);
+          await (attachment
+            ? client.sendTaskInput(taskId, submittedInput, attachment)
+            : client.sendTaskInput(taskId, submittedInput));
         }
         setUnownedErrorMessage(null);
       } catch (error) {

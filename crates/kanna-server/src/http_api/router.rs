@@ -171,7 +171,15 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(dependent_tasks_exist),
         )
         .route("/v1/tasks/{task_id}/logs", get(task_logs))
-        .route("/v1/tasks/{task_id}/input", post(send_task_input))
+        // Photo attachments ride in this route's JSON body, so it alone opts
+        // out of axum's default 2 MiB limit. See
+        // `task_input_attachments::MAX_TASK_INPUT_BODY_BYTES` for the budget.
+        .route(
+            "/v1/tasks/{task_id}/input",
+            post(send_task_input).layer(axum::extract::DefaultBodyLimit::max(
+                crate::task_input_attachments::MAX_TASK_INPUT_BODY_BYTES,
+            )),
+        )
         .route("/v1/tasks/{task_id}/actions/block", post(block_task))
         .route("/v1/tasks/{task_id}/actions/unblock", post(unblock_task))
         .route(

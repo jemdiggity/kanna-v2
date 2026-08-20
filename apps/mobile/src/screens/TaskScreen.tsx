@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Image,
   Keyboard,
   Pressable,
   ScrollView,
@@ -20,9 +21,19 @@ import type {
   TaskFileContent,
   TaskFileMentionInput,
   TaskFileMentionResolution,
+  TaskInputAttachment,
   TaskSummary
 } from "../lib/api/types";
 import { isTaskBlocked, type BlockerTaskRef } from "../lib/api/taskIdentity";
+import {
+  ImageAttachmentError,
+  type PreparedImageAttachment
+} from "../lib/attachments/imageAttachmentBudget";
+import {
+  pickImageAttachment,
+  type ImageAttachmentSource
+} from "../lib/attachments/pickImageAttachment";
+import { showImageAttachmentSourceMenu } from "./taskAttachmentMenu";
 import type {
   TaskCompanionEventStatus,
   TaskCompanionStatus,
@@ -102,6 +113,10 @@ interface TaskScreenProps {
   companionEventStatus?: TaskCompanionEventStatus;
   quickReplies: readonly TaskQuickReply[];
   quickRepliesHydrated: boolean;
+  /** Whether the connected desktop advertised the task-input attachment
+   * contract. Absent on desktops built before it, which accept the field and
+   * silently drop the photo. */
+  desktopSupportsAttachments?: boolean;
   pendingTaskAction?: TaskStageAction | TaskCreationAction | null;
   onBack(): boolean;
   onAdvanceTaskStage(): void;
@@ -111,7 +126,9 @@ interface TaskScreenProps {
   ): Promise<TaskFileMentionResolution>;
   onReadTaskFile(path: string): Promise<TaskFileContent>;
   onReadTaskDiff(request: TaskDiffRequest): Promise<TaskDiffContent>;
-  onSendInput(input: string): void;
+  onSendInput(input: string, attachment?: TaskInputAttachment): void;
+  /** Injected by the attachment tests; production uses the Expo picker. */
+  pickAttachment?(source: ImageAttachmentSource): Promise<PreparedImageAttachment | null>;
   onSendTerminalInput?(dataB64: string): void;
   onResizeTerminal?(cols: number, rows: number): void;
   onStopAgent(): void;
@@ -151,6 +168,7 @@ export function TaskScreen({
   companionEventStatus = "idle",
   quickReplies,
   quickRepliesHydrated,
+  desktopSupportsAttachments = false,
   pendingTaskAction = null,
   onBack,
   onAdvanceTaskStage,
@@ -159,6 +177,7 @@ export function TaskScreen({
   onReadTaskFile,
   onReadTaskDiff,
   onSendInput,
+  pickAttachment = pickImageAttachment,
   onSendTerminalInput,
   onResizeTerminal,
   onStopAgent,
@@ -177,6 +196,13 @@ export function TaskScreen({
   // opening a task does not drop the signal that led the eye to it.
   const stageTheme = resolveTaskStageTheme(task.stage);
   const [draftInput, setDraftInput] = useState("");
+  const [attachment, setAttachment] = useState<PreparedImageAttachment | null>(
+    null
+  );
+  const [attachmentErrorMessage, setAttachmentErrorMessage] = useState<
+    string | null
+  >(null);
+  const [isPickingAttachment, setIsPickingAttachment] = useState(false);
   const [composerInputHeight, setComposerInputHeight] = useState(
     TASK_COMPOSER_MIN_HEIGHT
   );
@@ -327,15 +353,28 @@ export function TaskScreen({
   );
   const terminalSelectionToolbarTop =
     getTerminalSelectionToolbarTop(topChromeBottom);
+  // An attachment is a file the desktop writes and names in the injected
+  // message, which only the HTTP input path does. SDK-mode tasks answer over
+  // the agent stream instead, so they get no attach control rather than an
+  // affordance that silently drops the photo.
+  //
+  // The desktop has to be able to receive one too. A build that predates
+  // attachments deserializes the field, ignores it, delivers the text alone
+  // and answers 204 — indistinguishable from success — so an unadvertised
+  // desktop hides the control for exactly the same reason: no affordance beats
+  // one that quietly loses the photo.
+  const canAttachPhoto = !isAgentTask && desktopSupportsAttachments;
   const composerSnapshotRef = useRef({
     taskId: task.id,
     draftInput,
+    attachment,
     isComposerDisabled,
     onSendInput
   });
   composerSnapshotRef.current = {
     taskId: task.id,
     draftInput,
+    attachment,
     isComposerDisabled,
     onSendInput
   };
@@ -348,8 +387,51 @@ export function TaskScreen({
   };
   const clearDraftInput = () => {
     composerSnapshotRef.current.draftInput = "";
+    composerSnapshotRef.current.attachment = null;
     setComposerInputHeight(TASK_COMPOSER_MIN_HEIGHT);
     setDraftInput("");
+    setAttachment(null);
+    setAttachmentErrorMessage(null);
+  };
+  const removeAttachment = () => {
+    composerSnapshotRef.current.attachment = null;
+    setAttachment(null);
+    setAttachmentErrorMessage(null);
+  };
+  const attachPhotoFrom = async (source: ImageAttachmentSource) => {
+    setIsPickingAttachment(true);
+    setAttachmentErrorMessage(null);
+    try {
+      const picked = await pickAttachment(source);
+      if (!picked) {
+        return;
+      }
+      // The user can switch tasks while the picker is open; a photo chosen for
+      // one task must not land on whichever task the screen now shows.
+      if (composerSnapshotRef.current.taskId !== task.id) {
+        return;
+      }
+      composerSnapshotRef.current.attachment = picked;
+      setAttachment(picked);
+    } catch (error) {
+      setAttachmentErrorMessage(
+        error instanceof ImageAttachmentError
+          ? error.message
+          : `Could not attach that photo: ${
+              error instanceof Error ? error.message : String(error)
+            }`
+      );
+    } finally {
+      setIsPickingAttachment(false);
+    }
+  };
+  const openAttachmentMenu = () => {
+    if (isPickingAttachment || isComposerDisabled) {
+      return;
+    }
+    showImageAttachmentSourceMenu((source) => {
+      void attachPhotoFrom(source);
+    });
   };
   const updateComposerInputHeight = (
     event: TextInputContentSizeChangeEvent
@@ -363,11 +445,20 @@ export function TaskScreen({
   const submitInput = (input: string) => {
     const snapshot = composerSnapshotRef.current;
     const nextInput = input.trim();
-    if (!nextInput || snapshot.isComposerDisabled) {
+    const nextAttachment = snapshot.attachment;
+    // A photo on its own is a message: the composed input the agent receives
+    // is the image reference, with or without accompanying text.
+    if ((!nextInput && !nextAttachment) || snapshot.isComposerDisabled) {
       return;
     }
 
-    snapshot.onSendInput(nextInput);
+    // Forwarded only when there is one: an input with no photo must reach
+    // every layer below exactly as it always did.
+    if (nextAttachment) {
+      snapshot.onSendInput(nextInput, nextAttachment.payload);
+    } else {
+      snapshot.onSendInput(nextInput);
+    }
     clearDraftInput();
     Keyboard.dismiss();
   };
@@ -445,6 +536,7 @@ export function TaskScreen({
     );
     setCompanionModalTaskId(null);
     setDiffModalTaskId(null);
+    removeAttachment();
     return () => {
       if (!lifecycle.isOpen) return;
       lifecycle.isOpen = false;
@@ -858,7 +950,66 @@ export function TaskScreen({
           </Pressable>
         </View>
 
+        {attachment ? (
+          <View
+            style={styles.attachmentRow}
+            testID={MOBILE_E2E_IDS.taskAttachmentPreview}
+          >
+            <Image
+              accessibilityIgnoresInvertColors
+              accessibilityLabel="Attached photo"
+              source={{ uri: attachment.previewUri }}
+              style={styles.attachmentThumbnail}
+            />
+            <Text numberOfLines={1} style={styles.attachmentLabel}>
+              {attachment.payload.fileName}
+            </Text>
+            <Pressable
+              accessibilityLabel="Remove attached photo"
+              accessibilityRole="button"
+              onPress={removeAttachment}
+              style={styles.attachmentRemove}
+              testID={MOBILE_E2E_IDS.taskAttachmentRemove}
+            >
+              <Text style={styles.attachmentRemoveLabel}>✕</Text>
+            </Pressable>
+          </View>
+        ) : null}
+        {attachmentErrorMessage ? (
+          <Text
+            style={styles.attachmentError}
+            testID={MOBILE_E2E_IDS.taskAttachmentError}
+          >
+            {attachmentErrorMessage}
+          </Text>
+        ) : null}
+
         <View style={styles.inputComposer}>
+          {canAttachPhoto ? (
+            <Pressable
+              accessibilityLabel={
+                isPickingAttachment ? "Attaching photo" : "Attach a photo"
+              }
+              accessibilityRole="button"
+              accessibilityState={{
+                busy: isPickingAttachment,
+                disabled: isComposerDisabled || isPickingAttachment
+              }}
+              disabled={isComposerDisabled || isPickingAttachment}
+              onPress={openAttachmentMenu}
+              style={[
+                styles.attachButton,
+                isComposerDisabled ? styles.attachButtonDisabled : null
+              ]}
+              testID={MOBILE_E2E_IDS.taskAttachButton}
+            >
+              {isPickingAttachment ? (
+                <ActivityIndicator color="#9BB0CC" size="small" />
+              ) : (
+                <Text style={styles.attachButtonLabel}>📎</Text>
+              )}
+            </Pressable>
+          ) : null}
           <TextInput
             {...TASK_COMPOSER_TEXT_INPUT_PROPS}
             editable={!isComposerDisabled}
@@ -1194,6 +1345,61 @@ const styles = StyleSheet.create({
     fontSize: 22,
     fontWeight: "500",
     lineHeight: 22
+  },
+  attachmentRow: {
+    alignItems: "center",
+    backgroundColor: "rgba(8, 15, 27, 0.88)",
+    borderColor: "#20304C",
+    borderRadius: 14,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 10,
+    marginBottom: 8,
+    padding: 8
+  },
+  attachmentThumbnail: {
+    backgroundColor: "#0B1322",
+    borderRadius: 8,
+    height: 44,
+    width: 44
+  },
+  attachmentLabel: {
+    color: "#C6D6EC",
+    flex: 1,
+    fontSize: 12
+  },
+  attachmentRemove: {
+    alignItems: "center",
+    borderRadius: 999,
+    height: 28,
+    justifyContent: "center",
+    width: 28
+  },
+  attachmentRemoveLabel: {
+    color: "#9BB0CC",
+    fontSize: 14,
+    fontWeight: "700"
+  },
+  attachmentError: {
+    color: "#FF9A8B",
+    fontSize: 12,
+    marginBottom: 8,
+    paddingHorizontal: 4
+  },
+  attachButton: {
+    alignItems: "center",
+    borderRadius: 999,
+    height: 32,
+    justifyContent: "center",
+    width: 32
+  },
+  attachButtonDisabled: {
+    opacity: 0.45
+  },
+  attachButtonLabel: {
+    color: "#9BB0CC",
+    fontSize: 16,
+    lineHeight: 20
   },
   inputComposer: {
     alignItems: "center",

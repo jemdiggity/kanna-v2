@@ -2114,6 +2114,158 @@ describe("remote transport", () => {
     });
   });
 
+  it("carries the attachment capability marker through the relayed status", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue({
+      state: "running",
+      desktopId: "desktop-1",
+      desktopName: "Studio Mac",
+      version: "0.0.69",
+      environment: "production",
+      serverVersion: "0.0.69",
+      lanHost: "0.0.0.0",
+      lanPort: 48120,
+      pairingCode: null,
+      taskInputAttachmentVersion: 1
+    });
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => "desktop-1",
+      invokeDesktop
+    });
+
+    // The relayed status is rebuilt field by field, so a capability dropped
+    // here would make every relay-connected desktop read as too old.
+    await expect(transport.getStatus()).resolves.toMatchObject({
+      taskInputAttachmentVersion: 1
+    });
+  });
+
+  it("reports no attachment capability for a desktop that predates it", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue({
+      state: "running",
+      desktopId: "desktop-1",
+      desktopName: "Studio Mac",
+      version: "0.0.60",
+      environment: "production",
+      serverVersion: "0.0.60",
+      lanHost: "0.0.0.0",
+      lanPort: 48120,
+      pairingCode: null
+    });
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => "desktop-1",
+      invokeDesktop
+    });
+
+    const status = await transport.getStatus();
+
+    // Absent, not false: that older desktop would accept the attachment field,
+    // ignore it, and still answer 204.
+    expect(status.taskInputAttachmentVersion).toBeUndefined();
+    expect("taskInputAttachmentVersion" in status).toBe(false);
+  });
+
+  it("asks the task's owner desktop about attachments, not the synthetic cloud status", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue({
+      state: "running",
+      desktopId: "desktop-owner",
+      desktopName: "Studio Mac",
+      version: "0.0.69",
+      environment: "production",
+      serverVersion: "0.0.69",
+      lanHost: "0.0.0.0",
+      lanPort: 48120,
+      pairingCode: null,
+      taskInputAttachmentVersion: 1
+    });
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => null,
+      invokeDesktop,
+      listCloudTasks: async () => [
+        {
+          id: "cloud-task-1",
+          repoId: "repo-1",
+          title: "Cloud task",
+          stage: "in progress",
+          ownerDesktopId: "desktop-owner",
+          ownerLocalTaskId: "local-task-1",
+          ownerOnline: true
+        }
+      ]
+    });
+
+    await transport.listRecentTasks();
+    invokeDesktop.mockClear();
+
+    await expect(
+      transport.supportsTaskInputAttachments("cloud-task-1")
+    ).resolves.toBe(true);
+    expect(invokeDesktop).toHaveBeenCalledWith({
+      desktopId: "desktop-owner",
+      method: "GET",
+      path: "/v1/status",
+      body: null
+    });
+
+    // And `getStatus()` on this same transport is the synthetic cloud record
+    // that carries no marker — which is exactly why the capability must not be
+    // read from it.
+    await expect(transport.getStatus()).resolves.toMatchObject({
+      desktopId: "cloud"
+    });
+    expect(
+      (await transport.getStatus()).taskInputAttachmentVersion
+    ).toBeUndefined();
+  });
+
+  it("carries a photo attachment to the owner desktop in the same relayed body", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue(null);
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => null,
+      invokeDesktop,
+      listCloudTasks: async () => [
+        {
+          id: "cloud-task-1",
+          repoId: "repo-1",
+          title: "Cloud task",
+          stage: "in progress",
+          ownerDesktopId: "desktop-owner",
+          ownerLocalTaskId: "local-task-1",
+          ownerOnline: true
+        }
+      ]
+    });
+
+    await transport.listRecentTasks();
+    invokeDesktop.mockClear();
+    await expect(
+      transport.sendTaskInput("cloud-task-1", "look at this", {
+        fileName: "IMG_4821.jpg",
+        mediaType: "image/jpeg",
+        dataBase64: "AQID"
+      })
+    ).resolves.toBeUndefined();
+
+    // The relay tunnels a desktop invocation as JSON, so the image travels
+    // base64-in-body — the same shape the LAN transport posts.
+    expect(invokeDesktop).toHaveBeenCalledWith({
+      desktopId: "desktop-owner",
+      method: "POST",
+      path: "/v1/tasks/local-task-1/input",
+      body: {
+        input: "look at this",
+        attachment: {
+          fileName: "IMG_4821.jpg",
+          mediaType: "image/jpeg",
+          dataBase64: "AQID"
+        }
+      }
+    });
+  });
+
   it("resolves a cloud task route before observing an uncached terminal", async () => {
     const subscription = {
       close: vi.fn(),

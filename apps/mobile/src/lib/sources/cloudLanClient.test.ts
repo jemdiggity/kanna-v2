@@ -91,6 +91,7 @@ function createClientMock(overrides: Partial<KannaClient> = {}): KannaClient {
     runMergeAgent: vi.fn().mockResolvedValue({ taskId: "task-merge" }),
     advanceTaskStage: vi.fn().mockResolvedValue({ taskId: "task-advanced" }),
     markTaskRead: vi.fn().mockResolvedValue({ taskId: "task-1", activity: "idle" }),
+    supportsTaskInputAttachments: vi.fn().mockResolvedValue(true),
     abortTaskCreation: vi.fn().mockResolvedValue(undefined),
     closeTask: vi.fn().mockResolvedValue(undefined),
     sendTaskInput: vi.fn().mockResolvedValue(undefined),
@@ -1239,6 +1240,48 @@ describe("createCloudLanClient", () => {
       vi.clearAllTimers();
       vi.useRealTimers();
     }
+  });
+
+  it("asks the task's own route whether its desktop can receive a photo", async () => {
+    const duplicate = task({
+      id: "cloud-duplicate",
+      ownerDesktopId: "desktop-lan",
+      ownerLocalTaskId: "local-duplicate"
+    });
+    const cloudOnly = task({
+      id: "cloud-only",
+      ownerDesktopId: "desktop-other",
+      ownerLocalTaskId: "other-local-id"
+    });
+    const cloud = createClientMock({
+      listRecentTasks: vi.fn().mockResolvedValue([duplicate, cloudOnly]),
+      supportsTaskInputAttachments: vi.fn().mockResolvedValue(false)
+    });
+    const lan = createClientMock({
+      listRecentTasks: vi.fn().mockResolvedValue([task({ id: "local-duplicate" })]),
+      supportsTaskInputAttachments: vi.fn().mockResolvedValue(true)
+    });
+    const client = createCloudLanClient(cloud, lan, {
+      isLanEnabled: () => true
+    });
+
+    await client.listRecentTasks();
+
+    // The answer has to follow the same route the input does — a LAN-routed
+    // task asks the LAN desktop with its local id, a cloud-routed one asks the
+    // owner desktop — or the gate and the delivery would disagree about which
+    // machine they mean.
+    await expect(
+      client.supportsTaskInputAttachments("cloud-duplicate")
+    ).resolves.toBe(true);
+    expect(lan.supportsTaskInputAttachments).toHaveBeenCalledWith(
+      "local-duplicate"
+    );
+
+    await expect(
+      client.supportsTaskInputAttachments("cloud-only")
+    ).resolves.toBe(false);
+    expect(cloud.supportsTaskInputAttachments).toHaveBeenCalledWith("cloud-only");
   });
 
   it("routes mixed task streams and mutations to the correct client and raw id", async () => {

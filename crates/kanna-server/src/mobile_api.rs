@@ -61,6 +61,19 @@ pub struct MobileServerStatus {
     pub pairing_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ksp_stream_version: Option<u8>,
+    /// Version of the task-input image-attachment contract this build serves,
+    /// or absent on a build that predates it.
+    ///
+    /// A phone and the desktop it talks to are separate binaries on separate
+    /// release cadences, and on the day attachments ship the normal state is a
+    /// new phone paired with a desktop that has not been updated yet. That
+    /// desktop deserializes the input body, ignores the unknown `attachment`
+    /// field, delivers the text alone, and answers 204 — so without this marker
+    /// the phone would clear its composer and the agent would answer about a
+    /// picture it never received. Absence is the signal; the client hides the
+    /// attach control rather than sending into that silence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_input_attachment_version: Option<u8>,
     /// Agent-facing tool names this build serves, read from the bundled
     /// `kanna-tool-catalog` it was compiled against.
     ///
@@ -1205,6 +1218,11 @@ fn generate_repo_id() -> Result<String, AddRepoError> {
     Ok(format!("repo-{nanos:x}"))
 }
 
+/// The task-input attachment contract this build serves: one optional image,
+/// base64 in the input body, delivered as a file path in the injected message.
+/// Bump it only if that shape changes in a way a client must branch on.
+pub const TASK_INPUT_ATTACHMENT_VERSION: u8 = 1;
+
 pub fn build_mobile_server_status(
     config: &Config,
     pairing_code: Option<String>,
@@ -1220,6 +1238,7 @@ pub fn build_mobile_server_status(
         lan_port: config.lan_port,
         pairing_code,
         ksp_stream_version: Some(2),
+        task_input_attachment_version: Some(TASK_INPUT_ATTACHMENT_VERSION),
         agent_providers: Some(crate::agent_inventory::installed_agent_providers()),
         agent_api_tools: Some(
             kanna_tool_catalog::bundled_catalog()
@@ -1941,6 +1960,12 @@ mod tests {
         assert_eq!(status_json["environment"], "production");
         assert_eq!(status_json["serverVersion"], "0.0.69");
         assert_eq!(status_json["kspStreamVersion"], 2);
+        // The marker a phone reads before it offers the attach control. A
+        // desktop that omits it is one that would swallow the photo.
+        assert_eq!(
+            status_json["taskInputAttachmentVersion"],
+            super::TASK_INPUT_ATTACHMENT_VERSION
+        );
         assert_eq!(status_json["writePathHealth"]["status"], "healthy");
         assert_eq!(status_json["writePathHealth"]["maxWorkspaceCommands"], 4);
         assert_eq!(status.pairing_code.as_deref(), Some("ABC123"));

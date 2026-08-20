@@ -24,6 +24,7 @@ import type {
   TaskFileContent,
   TaskFileMentionInput,
   TaskFileMentionResolution,
+  TaskInputAttachment,
   TaskDetail,
   TaskSummary,
   WritePathHealth,
@@ -852,13 +853,31 @@ export function createRemoteTransport({
         }
       }
     },
-    sendTaskInput: async (taskId: string, input: string) => {
+    sendTaskInput: async (
+      taskId: string,
+      input: string,
+      attachment?: TaskInputAttachment
+    ) => {
       await requestTask<void>(
         taskId,
         "POST",
         (localTaskId) => `/v1/tasks/${encodeURIComponent(localTaskId)}/input`,
-        { input }
+        attachment ? { input, attachment } : { input }
       );
+    },
+    supportsTaskInputAttachments: async (taskId: string) => {
+      // Deliberately NOT `getStatus()`: with cloud tasks wired that returns a
+      // synthetic "Kanna Cloud" literal describing no desktop at all, so the
+      // marker would always look absent. `requestTask` resolves the task's
+      // owner desktop — the same routing `sendTaskInput` uses — so the answer
+      // comes from the machine the photo would actually land on.
+      const status = await requestTask<MobileServerStatus>(
+        taskId,
+        "GET",
+        () => "/v1/status",
+        null
+      );
+      return typeof status.taskInputAttachmentVersion === "number";
     },
     readTaskFile: (taskId: string, path: string) =>
       requestTask<TaskFileContent>(
@@ -1229,6 +1248,12 @@ function mapMobileServerStatus(response: unknown): MobileServerStatus {
   const lanPort = getNumberField(response, "lanPort");
   const pairingCode = getNullableStringField(response, "pairingCode");
   const writePathHealth = mapWritePathHealth(response.writePathHealth);
+  // Rebuilt field by field, so a capability the desktop advertises has to be
+  // copied here or the relay path reads as an older desktop forever.
+  const taskInputAttachmentVersion = getNumberField(
+    response,
+    "taskInputAttachmentVersion"
+  );
 
   if (
     state === null ||
@@ -1255,7 +1280,10 @@ function mapMobileServerStatus(response: unknown): MobileServerStatus {
     lanHost,
     lanPort,
     pairingCode,
-    ...(writePathHealth ? { writePathHealth } : {})
+    ...(writePathHealth ? { writePathHealth } : {}),
+    ...(taskInputAttachmentVersion === null
+      ? {}
+      : { taskInputAttachmentVersion })
   };
 }
 

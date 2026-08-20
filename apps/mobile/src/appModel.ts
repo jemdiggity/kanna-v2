@@ -942,6 +942,8 @@ function createDisconnectedClient(): KannaClient {
     markTaskRead: unavailable,
     closeTask: unavailable,
     sendTaskInput: unavailable,
+    // No desktop is reachable, so nothing can receive a photo.
+    supportsTaskInputAttachments: async () => false,
     readTaskFile: unavailable,
     resolveTaskFileMentions: unavailable,
     readTaskDiff: unavailable,
@@ -1152,8 +1154,14 @@ function createTrustedLanFallbackClient({
           ),
     closeTask: async (taskId) =>
       (await resolveClient(desktopId)).closeTask(taskId),
-    sendTaskInput: async (taskId, input) =>
-      (await resolveClient(desktopId)).sendTaskInput(taskId, input),
+    sendTaskInput: async (taskId, input, attachment) => {
+      const client = await resolveClient(desktopId);
+      return attachment
+        ? client.sendTaskInput(taskId, input, attachment)
+        : client.sendTaskInput(taskId, input);
+    },
+    supportsTaskInputAttachments: async (taskId) =>
+      (await resolveClient(desktopId)).supportsTaskInputAttachments(taskId),
     readTaskFile: async (taskId, path) =>
       (await resolveClient(desktopId)).readTaskFile(taskId, path),
     resolveTaskFileMentions: async (taskId, mentions) =>
@@ -1367,7 +1375,12 @@ function createDelegatingClient(getClient: () => KannaClient): KannaClient {
         ? getClient().markTaskRead(taskId)
         : getClient().markTaskRead(taskId, expectedActivityRevision),
     closeTask: (taskId) => getClient().closeTask(taskId),
-    sendTaskInput: (taskId, input) => getClient().sendTaskInput(taskId, input),
+    sendTaskInput: (taskId, input, attachment) =>
+      attachment
+        ? getClient().sendTaskInput(taskId, input, attachment)
+        : getClient().sendTaskInput(taskId, input),
+    supportsTaskInputAttachments: (taskId) =>
+      getClient().supportsTaskInputAttachments(taskId),
     readTaskFile: (taskId, path) => getClient().readTaskFile(taskId, path),
     resolveTaskFileMentions: (taskId, mentions) =>
       getClient().resolveTaskFileMentions(taskId, mentions),
