@@ -695,7 +695,7 @@ describe("QA workflow assets", () => {
 
   it("bounds revision rounds on the dispatched QA workflow and publishes the field", () => {
     const parsed = parseWorkflowJson(readRepoFile(".kanna/workflows/specialized-reviewers.json"));
-    expect(parsed.revision_limit).toBe(3);
+    expect(parsed.revision_limit).toBe(5);
 
     const schema = JSON.parse(readRepoFile(".kanna/workflows/schema.json"));
     expect(schema.properties.revision_limit).toMatchObject({ type: "integer", minimum: 0 });
