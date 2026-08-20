@@ -11,6 +11,12 @@ services:
       # Optional: when empty the relay uses Application Default Credentials
       # (the VM's attached service account). Set it only for a key-based deploy.
       GOOGLE_APPLICATION_CREDENTIALS_JSON: ${GOOGLE_APPLICATION_CREDENTIALS_JSON:-}
+      # Entitlement enforcement (docs/specs/accounts-and-billing.md, Decision
+      # 5). Off until the Slice-3 flag day: the deploy writes no value for it,
+      # so this default is what every environment runs. Declared here because a
+      # variable absent from this block never reaches the container, however
+      # carefully it was written into /opt/kanna-relay/.env.
+      KANNA_RELAY_ENTITLEMENT_ENFORCEMENT: ${KANNA_RELAY_ENTITLEMENT_ENFORCEMENT:-off}
       PORT: "8080"
     volumes:
       - /opt/kanna-relay/ota-private-key.pem:/run/secrets/kanna_ota_private_key.pem:ro

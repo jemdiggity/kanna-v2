@@ -133,6 +133,66 @@ Set this variable to shorten that window, or to `0` to disable the cache
 entirely and restore a Firestore read per revalidation. The deploy does not set
 it; the integration suite does.
 
+## Entitlement enforcement
+
+### `KANNA_RELAY_ENTITLEMENT_ENFORCEMENT`
+
+**Off in every environment today, and it must stay off until the Slice-3 flag
+day** (`docs/specs/accounts-and-billing.md`, Decisions 5 and 7). The deploy
+writes no value for it and `deploy/docker-compose.yml` defaults it to `off`, so
+the relay serves every authenticated account exactly as it always has.
+
+When it is turned on, the relay resolves each authenticated session's uid to
+`users/{uid}/entitlements/cloud_access` — the single record the billing reducer
+in `services/firebase-functions` derives — and enforces it on both session
+kinds, phone ID token and desktop credential:
+
+- An unentitled session **still authenticates**. It receives `auth_ok`, holds
+  its socket, and carries an `entitlement` block (`active`, `status`,
+  `currentPeriodEndsAt`, `graceEndsAt`, and a `reason` when the refusal is not
+  something the entitlement record itself explains) so a client can render
+  "subscription required" rather than a connection fault. `status` is the
+  record's own word, or `none` when the account has no entitlement document, or
+  `unknown` when the relay did not read one.
+- It is advertised **no** `tunnelServices`, and no `taskSnapshotPublication` or
+  `mobileNotifications` capability — the relay advertises only what it will
+  serve.
+- `tunnel_request`, `task_snapshot_publish` and `mobile_notification_publish`
+  are refused with `code: 4402` and `error: "entitlement required"`. A tunnel
+  socket that reaches the relay anyway is closed with the same code.
+- Nothing is deleted. A published task index simply goes stale and returns on
+  renewal.
+- An unverified phone token (`email_verified: false`) is unentitled regardless
+  of the entitlement document, reported as
+  `reason: "unverified_email"`.
+- A Firestore failure while reading the entitlement **fails open**: the session
+  keeps working and the error is logged. An outage of the billing database must
+  not disconnect every paying subscriber.
+
+LAN is unaffected, permanently: it involves no account and no relay.
+
+To flip it on the flag day, add the line to `/opt/kanna-relay/.env` on the VM
+(or to the `.env` block the deploy writes in
+`tools/kd/src/runtime/cloud-deploy.ts`) and `docker compose up -d`:
+
+```text
+KANNA_RELAY_ENTITLEMENT_ENFORCEMENT=on
+```
+
+Recognised values are `on`/`true`/`1` and `off`/`false`/`0`. Anything else logs
+a warning and stays **off** — the failure mode of a typo is an open relay, not a
+relay that refuses everyone.
+
+### `KANNA_RELAY_ENTITLEMENT_CACHE_TTL_MS`
+
+The entitlement read is cached for 60 s per account, for the same reason the
+credential cache exists: it is consulted on every publication, push and tunnel
+request. The TTL is the window in which an entitlement revoked elsewhere is
+still honoured on a live session, and it is also the window after which a
+freshly subscribed account starts being served without reconnecting. Set it
+lower, or to `0` to disable the cache. The deploy does not set it; the
+integration suite does.
+
 ## Staging
 
 1. Build the provisioning plan:
