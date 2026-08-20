@@ -288,6 +288,12 @@ The resolved commit appears in the command result (`source`, and `relay.commit`
 for a relay deploy) and is baked into the relay image, which reports it as
 `commit` on `GET /health` — see [relay VM operations](../relay-vm-operations.md).
 
+To see what a deployed relay is actually doing — live connections, bytes by
+class, tunnel buffer pressure, refused upgrades — use `./kd relay stats
+--staging|--production`, or `--open` for the live dashboard. It reads the
+operator token from Secret Manager, so no `gcloud compute ssh` is involved;
+provisioning that token is in the same runbook.
+
 ## Mobile
 
 ### App Store builds

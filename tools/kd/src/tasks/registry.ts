@@ -8,6 +8,7 @@ import { readKannaRepoConfig } from "../config";
 import { resolveKdContext, type KdContext } from "../context";
 import { cleanWorkspace } from "../runtime/clean";
 import { buildRelayProvisionPlan, deployFirebaseCloud } from "../runtime/cloud-deploy";
+import { executeRelayStats } from "../runtime/relay-stats";
 import {
   buildCloudEmulatorTestCommand,
   buildCloudSmokeCommand,
@@ -389,6 +390,13 @@ const cloudDeployInputSchema = z.object({
 const cloudRelayProvisionInputSchema = z.object({
   staging: z.boolean().default(false),
   production: z.boolean().default(false)
+});
+
+const relayStatsInputSchema = z.object({
+  staging: z.boolean().default(false),
+  production: z.boolean().default(false),
+  open: z.boolean().default(false),
+  dryRun: z.boolean().default(false)
 });
 
 export interface ExecutorInput {
@@ -2549,6 +2557,37 @@ export const taskDefinitions = [
         message: formatJsonResult(plan),
         data: plan
       };
+    }
+  },
+  {
+    id: "relay.stats",
+    description:
+      "Read the relay's status surface with the operator token: print GET /stats, or open the live dashboard.",
+    inputSchema: relayStatsInputSchema,
+    execute: async (_context, input) => {
+      const parsed = relayStatsInputSchema.parse(input);
+      if (parsed.staging && parsed.production) {
+        return { ok: false, message: "relay stats accepts only one of --staging or --production." };
+      }
+      if (!parsed.staging && !parsed.production) {
+        return { ok: false, message: "relay stats requires --staging or --production." };
+      }
+      const context = await resolveDefaultContext(process.env);
+      try {
+        return await executeRelayStats({
+          repoRoot: context.repoRoot,
+          env: context.env,
+          runner: nodeCommandRunner,
+          environment: parsed.staging ? "staging" : "production",
+          open: parsed.open,
+          dryRun: parsed.dryRun
+        });
+      } catch (error) {
+        return {
+          ok: false,
+          message: error instanceof Error ? error.message : String(error)
+        };
+      }
     }
   },
   {

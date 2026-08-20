@@ -41,6 +41,7 @@ const booleanFlagMap: Record<string, string> = {
   "--remote": "remote",
   "--dev": "dev",
   "--with-credentials": "withCredentials",
+  "--open": "open",
   "--upload": "upload",
   "--ota": "ota"
 };
@@ -803,6 +804,12 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   if (group === "cloud" && command === "relay-provision") {
     return { taskId: "cloud.relay-provision", input: parseFlagInput(rest, { staging: false, production: false }) };
   }
+  if (group === "relay" && command === "stats") {
+    return {
+      taskId: "relay.stats",
+      input: parseFlagInput(rest, { staging: false, production: false, open: false, dryRun: false })
+    };
+  }
   if (group === "pages" && command === "build-schema") {
     return { taskId: "pages.build-schema", input: parseFlagInput(rest, {}) };
   }
@@ -935,6 +942,7 @@ const helpTopics: Record<string, string[]> = {
     "  release status",
     "  cloud deploy --staging|--production [--ref <branch|tag|sha>] [--functions] [--portal] [--relay]",
     "  cloud relay-provision --staging|--production",
+    "  relay stats --staging|--production [--open] [--dry-run]",
     "  pages build-schema --out-dir <dir>",
     "  test rust",
     "  test desktop-e2e",
@@ -1400,6 +1408,23 @@ const helpTopics: Record<string, string[]> = {
     "Usage: kd cloud relay-provision --staging|--production",
     "",
     "Build the relay VM provisioning command plan."
+  ],
+  relay: [
+    "Usage: kd relay <command>",
+    "",
+    "Commands:",
+    "  relay stats --staging|--production [--open] [--dry-run]"
+  ],
+  "relay stats": [
+    "Usage: kd relay stats --staging|--production [--open] [--dry-run]",
+    "",
+    "Read the relay's status surface with the operator token, instead of ssh-ing to the VM.",
+    "The token comes from KANNA_RELAY_STATS_TOKEN when this shell sets it, otherwise from the",
+    "kanna-relay-stats-token Secret Manager secret in the environment's project.",
+    "",
+    "  --open      Open the live status dashboard in a browser instead of printing the JSON.",
+    "              The URL carries the token, so treat the printed line as a credential.",
+    "  --dry-run   Print the resolved URLs and token source without reading the secret."
   ],
   pages: [
     "Usage: kd pages <command>",
