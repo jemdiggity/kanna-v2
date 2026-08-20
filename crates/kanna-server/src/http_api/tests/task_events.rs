@@ -14,6 +14,8 @@ use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixListener;
 
 fn seed_orchestration(db: &Db) {
     db.insert_test_repo("repo-events", "Events Repo")
@@ -565,6 +567,12 @@ async fn local_surface_aggregates_peer_repo_events_and_resumes_after_reconnect()
         )
         .expect("insert peer task");
         start_run(db, "remote-run", "remote-child", "in progress");
+        db.update_pipeline_item_runtime_status("remote-child", "busy", None)
+            .expect("set peer runtime busy");
+        db.update_pipeline_item_activity("remote-child", "working")
+            .expect("set peer activity working");
+        db.flush_debounced_activity_events(0)
+            .expect("flush peer activity transition");
     });
     let connected = Arc::new(AtomicBool::new(true));
     let relay = connect_test_relay_peer(&source, Arc::clone(&peer), Arc::clone(&connected));
@@ -581,9 +589,13 @@ async fn local_surface_aggregates_peer_repo_events_and_resumes_after_reconnect()
     assert!(cursor_of(&first).starts_with("ks1."));
     assert_eq!(
         event_pairs(&first),
-        vec![("remote-child".into(), "run.started".into())]
+        vec![
+            ("remote-child".into(), "run.started".into()),
+            ("remote-child".into(), "task.activity_changed".into()),
+        ]
     );
     assert_eq!(first["events"][0]["machineId"], "desktop-peer-events");
+    assert_eq!(first["events"][1]["machineId"], "desktop-peer-events");
     assert_eq!(first["machineErrors"], json!([]));
     let first_cursor = cursor_of(&first);
 
@@ -660,6 +672,217 @@ async fn local_surface_aggregates_peer_repo_events_and_resumes_after_reconnect()
     );
 
     relay.abort();
+}
+
+/// Stage start is itself the authoritative stopped→working write. The daemon's
+/// first Busy reconciliation is consequently a no-op, but must not erase the
+/// debounce armed by the lifecycle write. Exercise that full path through the
+/// daemon socket, the real debounce loop, and the ks1 aggregate HTTP feed.
+#[tokio::test]
+async fn stage_start_emits_one_settled_working_edge_and_suppresses_a_resume_flicker() {
+    use kanna_daemon::protocol::{
+        Command as DaemonCommand, Event as DaemonEvent, SessionInfo, SessionState, SessionStatus,
+    };
+
+    const REMOTE_HASH: &str = "sha256:stage-start-activity-events";
+    let unique = format!(
+        "task-event-stage-start-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time before epoch")
+            .as_nanos()
+    );
+    let daemon_dir = std::env::temp_dir().join(&unique);
+    std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+    let socket_path = kanna_runtime_defaults::socket_path(&daemon_dir);
+    let listener = UnixListener::bind(&socket_path).expect("bind daemon socket");
+
+    let source = test_state_with_seed("desktop-start-source", "Start Source", |db| {
+        db.insert_test_repo("repo-start-source", "Start Source Repo")
+            .expect("insert source repo");
+        db.patch_repo(
+            "repo-start-source",
+            None,
+            None,
+            Some(Some(REMOTE_HASH)),
+            None,
+        )
+        .expect("set source remote hash");
+    });
+    let peer = crate::http_api::test_state_with_daemon_dir_and_debounce(
+        "desktop-start-peer",
+        "Start Peer",
+        daemon_dir.to_str().expect("daemon path utf8"),
+        1,
+        |db| {
+            db.insert_test_repo("repo-start-peer", "Start Peer Repo")
+                .expect("insert peer repo");
+            db.patch_repo("repo-start-peer", None, None, Some(Some(REMOTE_HASH)), None)
+                .expect("set peer remote hash");
+            for task_id in ["settled-start", "flicker-start"] {
+                db.insert_test_pipeline_item(
+                    task_id,
+                    "repo-start-peer",
+                    "start stopped task",
+                    Some(task_id),
+                    "in progress",
+                    "2026-08-21 00:00:00",
+                )
+                .expect("insert peer task");
+                start_run(db, &format!("run-{task_id}"), task_id, "in progress");
+            }
+        },
+    );
+    let relay =
+        connect_test_relay_peer(&source, Arc::clone(&peer), Arc::new(AtomicBool::new(true)));
+    let source_router = router(Arc::clone(&source));
+
+    // Drain creation/run events and retain a ks1 cursor immediately before the
+    // lifecycle transitions under test.
+    let initial = get_account_json_body(
+        &source_router,
+        &source,
+        "/v1/task-events?repoId=repo-start-source&timeoutSecs=1",
+    )
+    .await;
+    assert!(cursor_of(&initial).starts_with("ks1."));
+
+    let debounce = tokio::spawn(crate::terminal_watcher::activity_event_debounce_loop(
+        Arc::clone(&peer),
+    ));
+    {
+        let db = Db::open(&peer.config().db_path).expect("open peer db");
+        for task_id in ["settled-start", "flicker-start"] {
+            db.update_pipeline_item_base_ref_and_activity(task_id, Some("origin/main"), "working")
+                .expect("start stopped task");
+        }
+    }
+
+    let daemon = tokio::spawn(async move {
+        let (subscriber, _) = listener.accept().await.expect("accept subscription");
+        let (subscriber_read, mut subscriber_write) = subscriber.into_split();
+        let mut subscriber_reader = BufReader::new(subscriber_read);
+        let mut line = String::new();
+        subscriber_reader
+            .read_line(&mut line)
+            .await
+            .expect("read subscribe");
+        assert!(matches!(
+            serde_json::from_str::<DaemonCommand>(line.trim()).expect("decode subscribe"),
+            DaemonCommand::Subscribe
+        ));
+        subscriber_write
+            .write_all(format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap()).as_bytes())
+            .await
+            .expect("ack subscribe");
+
+        let (control, _) = listener.accept().await.expect("accept list");
+        let (control_read, mut control_write) = control.into_split();
+        let mut control_reader = BufReader::new(control_read);
+        line.clear();
+        control_reader
+            .read_line(&mut line)
+            .await
+            .expect("read list");
+        assert!(matches!(
+            serde_json::from_str::<DaemonCommand>(line.trim()).expect("decode list"),
+            DaemonCommand::List
+        ));
+        let sessions = ["settled-start", "flicker-start"]
+            .into_iter()
+            .map(|task_id| SessionInfo {
+                session_id: task_id.to_string(),
+                pid: 42,
+                cwd: "/tmp".to_string(),
+                state: SessionState::Active,
+                idle_seconds: 0,
+                status: SessionStatus::Busy,
+                kind: Default::default(),
+                logical_input_blocked: false,
+                composer_text: None,
+                composer_attestation: Default::default(),
+            })
+            .collect();
+        control_write
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&DaemonEvent::SessionList { sessions }).unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("write session list");
+        subscriber_write
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&DaemonEvent::ShuttingDown).unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("stop watcher");
+    });
+    crate::terminal_watcher::terminal_state_watcher_once(
+        &peer,
+        &crate::session_replacements::SessionReplacements::default(),
+    )
+    .await
+    .expect("watch daemon state");
+    daemon.await.expect("daemon task");
+
+    // This start/resume did not survive the configured debounce. Returning to
+    // the published idle baseline must clear it without an event.
+    Db::open(&peer.config().db_path)
+        .expect("open peer db")
+        .update_pipeline_item_activity("flicker-start", "idle")
+        .expect("stop flickering start");
+
+    let settled = get_account_json_body(
+        &source_router,
+        &source,
+        &format!(
+            "/v1/task-events?repoId=repo-start-source&cursor={}&timeoutSecs=5",
+            cursor_of(&initial)
+        ),
+    )
+    .await;
+    assert_eq!(
+        event_pairs(&settled),
+        vec![(
+            "settled-start".to_string(),
+            "task.activity_changed".to_string()
+        )]
+    );
+    assert_eq!(settled["events"][0]["machineId"], "desktop-start-peer");
+    assert_eq!(
+        settled["events"][0]["payload"],
+        json!({
+            "previousActivity": "idle",
+            "activity": "working",
+            "runtimeState": "busy",
+            "latestRunFinishedWithoutCompletion": false,
+        })
+    );
+
+    let drained = get_account_json_body(
+        &source_router,
+        &source,
+        &format!(
+            "/v1/task-events?repoId=repo-start-source&cursor={}&timeoutSecs=2",
+            cursor_of(&settled)
+        ),
+    )
+    .await;
+    assert_eq!(drained["waitOutcome"], "timeout");
+    assert!(event_pairs(&drained).is_empty());
+
+    debounce.abort();
+    relay.abort();
+    let _ = std::fs::remove_file(socket_path);
+    let _ = std::fs::remove_dir_all(daemon_dir);
 }
 
 #[tokio::test]
@@ -2621,36 +2844,33 @@ async fn a_task_parked_on_a_prompt_emits_awaiting_input_once_per_block() {
     );
 }
 
-/// PTY providers do not all expose a structured "needs input" signal. Codex,
-/// for example, returns to its ordinary idle prompt after printing a design
-/// approval question. The weaker activity edge must still be observable, with
-/// the same transcript tail task detail exposes, without pretending it was a
-/// daemon-confirmed interactive prompt.
+/// Codex has no Claude-style prompt placeholder. Settled activity transitions
+/// must still arrive, in both directions, without one.
 #[tokio::test]
-async fn every_working_task_stopping_emits_one_activity_changed_event() {
+async fn every_provider_emits_debounced_activity_transitions_in_both_directions() {
     let (router, db_path) = events_router();
     let db = Db::open(&db_path).expect("open db");
 
-    for (task_id, activity, prompt) in [
-        (
-            "child-a",
-            "unread",
-            Some("Does this design have your approval?"),
-        ),
-        ("child-b", "idle", Some("Choose the deployment target.")),
-        ("child-c", "unread", None),
+    for (task_id, activity) in [
+        ("child-a", "unread"),
+        ("child-b", "idle"),
+        ("child-c", "unread"),
     ] {
-        if let Some(prompt) = prompt {
-            db.update_pipeline_item_waiting_prompt(task_id, prompt)
-                .expect("persist prompt");
-        }
+        db.update_pipeline_item_runtime_status(task_id, "busy", None)
+            .expect("busy runtime");
         db.update_pipeline_item_activity(task_id, "working")
             .expect("working");
+        db.flush_debounced_activity_events(0)
+            .expect("flush working transition");
+        db.update_pipeline_item_runtime_status(task_id, "idle", None)
+            .expect("idle runtime");
         db.update_pipeline_item_activity(task_id, activity)
             .expect("stopped");
         // Repeating the stored state is not another transition.
         db.update_pipeline_item_activity(task_id, activity)
             .expect("same stopped state");
+        db.flush_debounced_activity_events(0)
+            .expect("flush stopped transition");
     }
 
     let started = std::time::Instant::now();
@@ -2667,41 +2887,21 @@ async fn every_working_task_stopping_emits_one_activity_changed_event() {
         "a cursor-less wait must drain retained stopped edges immediately"
     );
     let events = body["events"].as_array().expect("events");
-    assert_eq!(events.len(), 3);
-    assert_eq!(
-        events[0]["type"],
-        serde_json::json!("task.activity_changed")
-    );
-    assert_eq!(events[0]["payload"]["previousActivity"], "working");
-    assert_eq!(events[0]["payload"]["activity"], "unread");
-    assert_eq!(
-        events[0]["payload"]["waitingPromptSnippet"],
-        "Does this design have your approval?"
-    );
-    assert_eq!(
-        events[1]["type"],
-        serde_json::json!("task.activity_changed")
-    );
-    assert_eq!(events[1]["payload"]["previousActivity"], "working");
-    assert_eq!(events[1]["payload"]["activity"], "idle");
-    assert_eq!(
-        events[1]["payload"]["waitingPromptSnippet"],
-        "Choose the deployment target."
-    );
-    assert_eq!(
-        events[2]["type"],
-        serde_json::json!("task.activity_changed")
-    );
-    assert_eq!(events[2]["payload"]["previousActivity"], "working");
-    assert_eq!(events[2]["payload"]["activity"], "unread");
-    assert!(
-        events[2]["payload"]
-            .as_object()
-            .expect("activity payload")
-            .get("waitingPromptSnippet")
-            .is_none(),
-        "an empty prompt must be omitted rather than serialized as null"
-    );
+    assert_eq!(events.len(), 6);
+    for pair in events.chunks_exact(2) {
+        assert_eq!(pair[0]["type"], "task.activity_changed");
+        assert_eq!(pair[0]["payload"]["previousActivity"], "idle");
+        assert_eq!(pair[0]["payload"]["activity"], "working");
+        assert_eq!(pair[0]["payload"]["runtimeState"], "busy");
+        assert_eq!(pair[1]["type"], "task.activity_changed");
+        assert_eq!(pair[1]["payload"]["previousActivity"], "working");
+        assert!(matches!(
+            pair[1]["payload"]["activity"].as_str(),
+            Some("idle" | "unread")
+        ));
+        assert_eq!(pair[1]["payload"]["runtimeState"], "idle");
+        assert!(pair[1]["payload"].get("waitingPromptSnippet").is_none());
+    }
 }
 
 /// `notifyTaskId` used to be creation-time only, so an orchestrator could not

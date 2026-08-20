@@ -316,18 +316,15 @@ appending it where the state already changes, not by diffing snapshots. The
 `task.awaiting_input` event is the daemon's `Waiting` status — a positive match
 on prompt chrome, never inferred from a quiet session, because mislabelling a
 long build as blocked is worse than not reporting it at all.
-`task.activity_changed` is the provider-neutral fallback, and it fires on the
-**display dimension's** edges, not the runtime dimension's: it is appended when
-`activity` moves from `working` to `idle` or `unread`, whether or not the task
-has a waiting prompt snippet. The payload always carries `previousActivity` and
-`activity`, and carries `waitingPromptSnippet` only when non-empty. That weaker
-edge makes unrecognized provider questions and ordinary completion visible,
-but does not prove any included snippet is a question. Read-state-only
-`idle` ↔ `unread` changes do not emit. A prompt-only change while the task
-remains stopped is visible only by polling task detail. Treat the event as a
-wake-up and reconcile it through `kanna_get_task` — reading `runtimeState`, not
-`activity` — before acting; that confirmation read is the single activity
-debounce. See `docs/kanna-server-boundary.md` and
+`task.activity_changed` is provider-neutral and server-debounced. Every
+activity direction emits after the configured value has held, for every
+provider, without depending on a waiting-prompt placeholder. Its payload
+carries `previousActivity`, `activity`, `runtimeState`, and
+`latestRunFinishedWithoutCompletion`, so managers use the shared server verdict
+instead of polling or inventing their own timing. A transition that flickers
+back within the debounce window emits nothing. `task.awaiting_input` remains
+the separate positive question-detection signal. See
+`docs/kanna-server-boundary.md` and
 `docs/2026-07-29-awaiting-input-detection-e2e-gap.md`.
 
 **Delivered task inputs are durable.** `POST /v1/tasks/{task_id}/input`

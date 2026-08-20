@@ -237,7 +237,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "054_pipeline_item_composer");
+    assert_eq!(latest_migration, "055_activity_event_debounce");
     assert_eq!(
         index_columns(&db.conn, "idx_pipeline_item_parent_created_id"),
         vec!["parent_task_id", "created_at", "id"],
@@ -2181,6 +2181,38 @@ fn every_server_activity_write_advances_the_activity_revision() {
             .activity_revision,
         1
     );
+    let (baseline, pending): (Option<String>, Option<String>) = db
+        .conn
+        .query_row(
+            "SELECT activity_event_baseline, activity_event_pending_at
+             FROM pipeline_item WHERE id = 'task-1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(baseline.as_deref(), Some("idle"));
+    assert!(pending.is_some());
+
+    db.flush_debounced_activity_events(0).unwrap();
+    db.update_pipeline_item_base_ref_and_activity("task-1", Some("origin/main"), "working")
+        .unwrap();
+    let (revision, pending): (i64, Option<String>) = db
+        .conn
+        .query_row(
+            "SELECT activity_revision, activity_event_pending_at
+             FROM pipeline_item WHERE id = 'task-1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        revision, 1,
+        "an unchanged combined write is an activity no-op"
+    );
+    assert!(
+        pending.is_none(),
+        "an unchanged combined write must not re-arm"
+    );
 
     db.update_pipeline_item_base_ref_and_activity("task-1", Some("origin/main"), "unread")
         .unwrap();
@@ -2200,12 +2232,12 @@ fn every_server_activity_write_advances_the_activity_revision() {
 }
 
 #[test]
-fn activity_changed_events_cover_working_to_stopped_edges_only() {
+fn activity_changed_events_are_debounced_provider_neutral_and_bidirectional() {
     let path = temp_db_path();
     let db = Db::open_for_tests(path.to_str().expect("utf8 path")).expect("open test db");
     db.insert_test_repo("repo-1", "Repo One")
         .expect("insert repo");
-    for task_id in ["empty", "prompted", "closed"] {
+    for task_id in ["codex", "closed"] {
         db.insert_test_pipeline_item(
             task_id,
             "repo-1",
@@ -2215,27 +2247,34 @@ fn activity_changed_events_cover_working_to_stopped_edges_only() {
             "2026-08-16 01:00:00",
         )
         .expect("insert task");
-        db.update_pipeline_item_activity(task_id, "working")
-            .expect("start working");
     }
+    db.conn
+        .execute(
+            "INSERT INTO stage_run (id, task_id, stage, kind, status)
+             VALUES ('run-codex', 'codex', 'in progress', 'main', 'running')",
+            [],
+        )
+        .expect("insert running codex stage run");
 
-    db.update_pipeline_item_activity("empty", "unread")
-        .expect("stop without prompt");
-    db.update_pipeline_item_waiting_prompt("prompted", "  Ready for review.  ")
-        .expect("persist prompt");
-    db.update_pipeline_item_activity("prompted", "idle")
-        .expect("stop with prompt");
+    db.update_pipeline_item_runtime_status("codex", "busy", None)
+        .expect("busy runtime");
+    db.update_pipeline_item_activity("codex", "working")
+        .expect("start working without a placeholder");
+    assert_eq!(db.flush_debounced_activity_events(0).unwrap(), 1);
 
-    // Read-state changes after the task stops are not new supervision signals.
-    assert!(db
-        .mark_pipeline_item_read_if_unchanged("empty", None)
-        .expect("mark read"));
-    db.update_pipeline_item_activity("empty", "unread")
-        .expect("mark unread again");
-    db.update_pipeline_item_activity("prompted", "unread")
-        .expect("mark prompted task unread");
-    db.update_pipeline_item_activity("prompted", "idle")
-        .expect("mark prompted task read");
+    // A complete stopped-and-resumed flicker before the flush returns to the
+    // published baseline and produces no event.
+    db.update_pipeline_item_activity("codex", "unread")
+        .expect("brief stop");
+    db.update_pipeline_item_activity("codex", "working")
+        .expect("resume before debounce");
+    assert_eq!(db.flush_debounced_activity_events(0).unwrap(), 0);
+
+    db.update_pipeline_item_runtime_status("codex", "idle", None)
+        .expect("idle runtime");
+    db.update_pipeline_item_activity("codex", "unread")
+        .expect("settled stop without prompt");
+    assert_eq!(db.flush_debounced_activity_events(0).unwrap(), 1);
 
     db.close_pipeline_item("closed").expect("close task");
     let cursor_after_close = db.latest_task_event_seq().expect("event cursor");
@@ -2253,7 +2292,7 @@ fn activity_changed_events_cover_working_to_stopped_edges_only() {
 
     let events = db
         .list_task_events(
-            &super::TaskEventScope::Tasks(vec!["empty".to_string(), "prompted".to_string()]),
+            &super::TaskEventScope::Tasks(vec!["codex".to_string()]),
             0,
             i64::MAX,
             10,
@@ -2264,8 +2303,10 @@ fn activity_changed_events_cover_working_to_stopped_edges_only() {
     assert_eq!(
         events[0].payload,
         serde_json::json!({
-            "previousActivity": "working",
-            "activity": "unread",
+            "previousActivity": "idle",
+            "activity": "working",
+            "runtimeState": "busy",
+            "latestRunFinishedWithoutCompletion": false,
         })
     );
     assert_eq!(events[1].event_type, "task.activity_changed");
@@ -2273,8 +2314,9 @@ fn activity_changed_events_cover_working_to_stopped_edges_only() {
         events[1].payload,
         serde_json::json!({
             "previousActivity": "working",
-            "activity": "idle",
-            "waitingPromptSnippet": "Ready for review.",
+            "activity": "unread",
+            "runtimeState": "idle",
+            "latestRunFinishedWithoutCompletion": true,
         })
     );
 

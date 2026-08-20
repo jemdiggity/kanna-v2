@@ -2,8 +2,51 @@ use super::{
     CloudTaskIdentityWrite, Db, NewPipelineItem, OpenAgentTask, PipelineItem, PipelineItemChild,
     ReopenPipelineItemError, TaskEventKind, TaskStageSource,
 };
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::json;
+
+/// Change an open task's activity and arm the settled-transition debounce in
+/// the same transaction. `None` means there is no open task; `Some(false)` is
+/// an unchanged value or a failed optimistic precondition.
+pub(super) fn update_open_pipeline_item_activity(
+    conn: &Connection,
+    id: &str,
+    activity: &str,
+    expected_activity: Option<&str>,
+    expected_activity_revision: Option<i64>,
+) -> Result<Option<bool>, rusqlite::Error> {
+    let current = conn
+        .query_row(
+            "SELECT activity, activity_revision
+             FROM pipeline_item
+             WHERE id = ? AND closed_at IS NULL",
+            [id],
+            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()?;
+    let Some((previous_activity, activity_revision)) = current else {
+        return Ok(None);
+    };
+    if expected_activity.is_some_and(|expected| previous_activity.as_deref() != Some(expected))
+        || expected_activity_revision.is_some_and(|expected| activity_revision != expected)
+        || previous_activity.as_deref() == Some(activity)
+    {
+        return Ok(Some(false));
+    }
+
+    conn.execute(
+        "UPDATE pipeline_item
+         SET activity_event_baseline = COALESCE(activity_event_baseline, activity),
+             activity_event_pending_at = datetime('now'),
+             activity = ?, activity_changed_at = datetime('now'),
+             activity_revision = activity_revision + 1,
+             unread_at = CASE WHEN ? = 'unread' THEN datetime('now') ELSE unread_at END,
+             updated_at = datetime('now')
+         WHERE id = ? AND closed_at IS NULL",
+        (activity, activity, id),
+    )?;
+    Ok(Some(true))
+}
 
 impl Db {
     pub fn list_task_completion_runs(
@@ -769,58 +812,71 @@ impl Db {
         id: &str,
         activity: &str,
     ) -> Result<(), rusqlite::Error> {
-        let current = self
-            .conn
-            .query_row(
-                "SELECT activity, last_output_preview
-                 FROM pipeline_item
-                 WHERE id = ? AND closed_at IS NULL",
-                [id],
-                |row| {
-                    Ok((
-                        row.get::<_, Option<String>>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                    ))
-                },
-            )
-            .optional()?;
-        let Some((previous_activity, waiting_prompt_snippet)) = current else {
-            return Ok(());
-        };
-        if previous_activity.as_deref() == Some(activity) {
-            return Ok(());
-        }
-
-        self.conn.execute(
-            "UPDATE pipeline_item
-             SET activity = ?, activity_changed_at = datetime('now'),
-                 activity_revision = activity_revision + 1,
-                 unread_at = CASE WHEN ? = 'unread' THEN datetime('now') ELSE unread_at END,
-                 updated_at = datetime('now')
-             WHERE id = ?",
-            (activity, activity, id),
-        )?;
-
-        let waiting_prompt_snippet = waiting_prompt_snippet
-            .as_deref()
-            .map(str::trim)
-            .filter(|snippet| !snippet.is_empty());
-        if previous_activity.as_deref() == Some("working") && matches!(activity, "idle" | "unread")
-        {
-            let payload = match waiting_prompt_snippet {
-                Some(snippet) => json!({
-                    "previousActivity": "working",
-                    "activity": activity,
-                    "waitingPromptSnippet": snippet,
-                }),
-                None => json!({
-                    "previousActivity": "working",
-                    "activity": activity,
-                }),
-            };
-            self.append_task_event(id, TaskEventKind::ActivityChanged, payload)?;
-        }
+        update_open_pipeline_item_activity(&self.conn, id, activity, None, None)?;
         Ok(())
+    }
+
+    /// Publish every activity value that remains stable for the configured
+    /// debounce. The baseline is the last value managers were told about, so
+    /// a short A→B→A flicker clears itself without producing either edge.
+    pub fn flush_debounced_activity_events(
+        &self,
+        debounce_seconds: u64,
+    ) -> Result<usize, rusqlite::Error> {
+        self.with_immediate_transaction(|db| {
+            let modifier = format!("-{debounce_seconds} seconds");
+            let mut stmt = db.conn.prepare(
+                "SELECT pi.id, pi.activity_event_baseline, pi.activity, pi.runtime_status,
+                        (SELECT sr.status FROM stage_run sr WHERE sr.task_id = pi.id
+                         ORDER BY sr.rowid DESC LIMIT 1)
+                 FROM pipeline_item pi
+                 WHERE pi.closed_at IS NULL
+                   AND pi.activity_event_pending_at IS NOT NULL
+                   AND pi.activity_event_pending_at <= datetime('now', ?)",
+            )?;
+            let rows = stmt
+                .query_map([modifier], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(stmt);
+            let mut appended = 0;
+            for (id, baseline, activity, runtime_state, latest_run_status) in rows {
+                db.conn.execute(
+                    "UPDATE pipeline_item SET activity_event_pending_at = NULL WHERE id = ?",
+                    [&id],
+                )?;
+                if baseline == activity {
+                    continue;
+                }
+                let latest_run_finished_without_completion = matches!(
+                    (activity.as_deref(), runtime_state.as_deref(), latest_run_status.as_deref()),
+                    (Some("idle" | "unread"), Some("idle"), Some("running"))
+                );
+                db.conn.execute(
+                    "UPDATE pipeline_item SET activity_event_baseline = ? WHERE id = ?",
+                    (&activity, &id),
+                )?;
+                db.append_task_event(
+                    &id,
+                    TaskEventKind::ActivityChanged,
+                    json!({
+                        "previousActivity": baseline,
+                        "activity": activity,
+                        "runtimeState": runtime_state,
+                        "latestRunFinishedWithoutCompletion": latest_run_finished_without_completion,
+                    }),
+                )?;
+                appended += 1;
+            }
+            Ok(appended)
+        })
     }
 
     /// Agent-requested revision rounds recorded since the last
@@ -895,16 +951,16 @@ impl Db {
         id: &str,
         expected_activity_revision: Option<i64>,
     ) -> Result<bool, rusqlite::Error> {
-        let rows_affected = self.conn.execute(
-            "UPDATE pipeline_item
-             SET activity = 'idle', activity_changed_at = datetime('now'),
-                 activity_revision = activity_revision + 1,
-                 updated_at = datetime('now')
-             WHERE id = ? AND activity = 'unread' AND closed_at IS NULL
-               AND (? IS NULL OR activity_revision = ?)",
-            (id, expected_activity_revision, expected_activity_revision),
-        )?;
-        Ok(rows_affected > 0)
+        self.with_immediate_transaction(|db| {
+            Ok(update_open_pipeline_item_activity(
+                &db.conn,
+                id,
+                "idle",
+                Some("unread"),
+                expected_activity_revision,
+            )?
+            .unwrap_or(false))
+        })
     }
 
     pub fn update_pipeline_item_base_ref_and_activity(
@@ -913,19 +969,19 @@ impl Db {
         base_ref: Option<&str>,
         activity: &str,
     ) -> Result<(), rusqlite::Error> {
-        let rows_affected = self.conn.execute(
-            "UPDATE pipeline_item
-             SET base_ref = ?,
-                 activity_revision = activity_revision + CASE WHEN activity != ? THEN 1 ELSE 0 END,
-                 activity = ?, activity_changed_at = datetime('now'),
-                 updated_at = datetime('now')
-             WHERE id = ? AND closed_at IS NULL",
-            (base_ref, activity, activity, id),
-        )?;
-        if rows_affected == 0 {
-            return Err(rusqlite::Error::QueryReturnedNoRows);
-        }
-        Ok(())
+        self.with_immediate_transaction(|db| {
+            let rows_affected = db.conn.execute(
+                "UPDATE pipeline_item
+                 SET base_ref = ?, updated_at = datetime('now')
+                 WHERE id = ? AND closed_at IS NULL",
+                (base_ref, id),
+            )?;
+            if rows_affected == 0 {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+            update_open_pipeline_item_activity(&db.conn, id, activity, None, None)?;
+            Ok(())
+        })
     }
 
     pub fn close_pipeline_item(&self, id: &str) -> Result<(), rusqlite::Error> {

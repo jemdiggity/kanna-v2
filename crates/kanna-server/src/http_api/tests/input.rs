@@ -91,6 +91,7 @@ async fn assert_signal_agent_reuses_open_task_with_run_status(run_status: &str, 
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -231,6 +232,7 @@ fn merge_test_config(unique: &str, daemon_dir: &Path) -> Config {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-{unique}.json"),
     }
 }
@@ -408,6 +410,7 @@ async fn natural_language_merge_signal_creates_pinned_singleton_when_absent() {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -535,6 +538,7 @@ async fn signal_agent_route_creates_agent_task_with_requested_provider_and_effor
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -632,6 +636,7 @@ async fn assert_signal_agent_route_rejects_override(
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -759,6 +764,7 @@ async fn signal_agent_route_detaches_creation_spawn_from_request_future() {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -2365,6 +2371,7 @@ async fn terminal_state_notification_sends_once_to_notify_target() {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -2989,6 +2996,7 @@ mod completion_notification {
                 lan_host: "127.0.0.1".to_string(),
                 lan_port: 48120,
                 transfer_port: 4455,
+                activity_event_debounce_seconds: 300,
                 pairing_store_path: format!("/tmp/kanna-pairings-{unique}.json"),
             };
             (

@@ -475,6 +475,7 @@ mod tests {
             lan_host: "127.0.0.1".into(),
             lan_port: 0,
             transfer_port: 0,
+            activity_event_debounce_seconds: 300,
             pairing_store_path: String::new(),
         }
     }
@@ -796,6 +797,7 @@ mod tests {
             lan_host: "127.0.0.1".into(),
             lan_port,
             transfer_port: 4455,
+            activity_event_debounce_seconds: 300,
             pairing_store_path: pairing_store_path.clone(),
         };
         let database = db::Db::open_for_tests(&db_path).unwrap();

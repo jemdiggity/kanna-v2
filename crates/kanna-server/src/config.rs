@@ -24,6 +24,10 @@ pub struct Config {
     /// it spawns and dials the same port from the inbound tunnel bridge.
     pub transfer_port: u16,
     pub pairing_store_path: String,
+    /// Seconds an activity value must hold before its transition reaches the
+    /// event feed. Display state remains immediate; manager notifications are
+    /// settled server-side and provider-neutral.
+    pub activity_event_debounce_seconds: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -45,6 +49,7 @@ struct RawConfig {
     lan_port: Option<u16>,
     transfer_port: Option<u16>,
     pairing_store_path: Option<String>,
+    activity_event_debounce_seconds: Option<u64>,
 }
 
 fn default_daemon_dir_for_root(data_root: &Path) -> String {
@@ -177,6 +182,7 @@ fn load_from_path(
         pairing_store_path: raw
             .pairing_store_path
             .unwrap_or_else(|| default_pairing_store_path_for_root(data_root)),
+        activity_event_debounce_seconds: raw.activity_event_debounce_seconds.unwrap_or(20),
     })
 }
 
@@ -245,6 +251,7 @@ mod tests {
                  version = \"0.0.69-staging.1\"\n\
                  environment = \"staging\"\n\
                  transfer_port = 4455\n\
+                 activity_event_debounce_seconds = 17\n\
                  db_path = \"{}\"\n\
                  desktop_id = \"desktop-1\"\n\
                  desktop_name = \"Studio Mac\"\n",
@@ -263,6 +270,7 @@ mod tests {
         assert_eq!(config.lan_port, 48_120);
         assert_eq!(config.version, "0.0.69-staging.1");
         assert_eq!(config.environment, "staging");
+        assert_eq!(config.activity_event_debounce_seconds, 17);
         assert_eq!(
             config.pairing_store_path,
             root.join("Kanna")
@@ -356,6 +364,7 @@ mod tests {
         let config = load_from_path(&config_path, &root).unwrap();
 
         assert_eq!(config.db_path, canonical.display().to_string());
+        assert_eq!(config.activity_event_debounce_seconds, 20);
         let _ = fs::remove_dir_all(root);
     }
 

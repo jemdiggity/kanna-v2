@@ -268,6 +268,20 @@ pub(crate) async fn terminal_detach_reconciliation_loop(
     }
 }
 
+pub(crate) async fn activity_event_debounce_loop(state: Arc<http_api::AppState>) {
+    let interval =
+        std::time::Duration::from_secs(state.config().activity_event_debounce_seconds.clamp(1, 5));
+    loop {
+        tokio::time::sleep(interval).await;
+        match crate::db::Db::open(&state.config().db_path).and_then(|db| {
+            db.flush_debounced_activity_events(state.config().activity_event_debounce_seconds)
+        }) {
+            Ok(_) => {}
+            Err(error) => log::warn!("failed to flush debounced activity events: {error}"),
+        }
+    }
+}
+
 pub(crate) async fn terminal_state_watcher_loop(
     state: Arc<http_api::AppState>,
     replacements: session_replacements::SessionReplacements,
@@ -574,6 +588,7 @@ mod tests {
             lan_host: "127.0.0.1".to_string(),
             lan_port: 48120,
             transfer_port: 4455,
+            activity_event_debounce_seconds: 300,
             pairing_store_path: format!("/tmp/kanna-pairings-{unique}.json"),
         }
     }
@@ -1624,8 +1639,11 @@ mod tests {
             item.last_output_preview.as_deref(),
             Some("Does this design have your approval?")
         );
-        let events = Db::open(&config.db_path)
-            .unwrap()
+        let event_db = Db::open(&config.db_path).unwrap();
+        event_db
+            .flush_debounced_activity_events(0)
+            .expect("flush settled watcher activity");
+        let events = event_db
             .list_task_events(
                 &crate::db::TaskEventScope::Tasks(vec!["task-child".to_string()]),
                 0,
@@ -1638,9 +1656,10 @@ mod tests {
         assert_eq!(
             events[0].payload,
             serde_json::json!({
-                "previousActivity": "working",
+                "previousActivity": "idle",
                 "activity": "unread",
-                "waitingPromptSnippet": "Does this design have your approval?",
+                "runtimeState": "idle",
+                "latestRunFinishedWithoutCompletion": false,
             })
         );
         let _ = std::fs::remove_file(socket_path);
@@ -1726,15 +1745,9 @@ mod tests {
                 10,
             )
             .unwrap();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].event_type, "task.activity_changed");
-        assert_eq!(
-            events[0].payload,
-            serde_json::json!({
-                "previousActivity": "working",
-                "activity": "unread",
-            }),
-            "the raw edge wakes event consumers; kanna_get_task owns the one confirmation debounce"
+        assert!(
+            events.is_empty(),
+            "the server debounce must suppress a stopped edge that returned to working"
         );
         let _ = std::fs::remove_file(socket_path);
         let _ = std::fs::remove_dir_all(daemon_dir);

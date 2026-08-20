@@ -1,4 +1,4 @@
-use super::{Db, WorktreeRecord};
+use super::{pipeline_items::update_open_pipeline_item_activity, Db, WorktreeRecord};
 use rusqlite::OptionalExtension;
 
 impl Db {
@@ -168,25 +168,26 @@ impl Db {
         item_id: &str,
         previous_base_ref: Option<&str>,
     ) -> Result<(), rusqlite::Error> {
-        self.conn.execute(
-            "DELETE FROM terminal_session WHERE pipeline_item_id = ?",
-            [item_id],
-        )?;
-        self.conn
-            .execute("DELETE FROM worktree WHERE pipeline_item_id = ?", [item_id])?;
-        self.conn.execute(
-            "DELETE FROM task_port WHERE pipeline_item_id = ?",
-            [item_id],
-        )?;
-        self.conn.execute(
-            "UPDATE pipeline_item
-             SET base_ref = ?, port_offset = NULL, port_env = NULL,
-                 activity_revision = activity_revision + CASE WHEN activity != 'idle' THEN 1 ELSE 0 END,
-                 activity = 'idle', activity_changed_at = datetime('now'),
-                 updated_at = datetime('now')
-             WHERE id = ? AND closed_at IS NULL",
-            (previous_base_ref, item_id),
-        )?;
-        Ok(())
+        self.with_immediate_transaction(|db| {
+            db.conn.execute(
+                "DELETE FROM terminal_session WHERE pipeline_item_id = ?",
+                [item_id],
+            )?;
+            db.conn
+                .execute("DELETE FROM worktree WHERE pipeline_item_id = ?", [item_id])?;
+            db.conn.execute(
+                "DELETE FROM task_port WHERE pipeline_item_id = ?",
+                [item_id],
+            )?;
+            db.conn.execute(
+                "UPDATE pipeline_item
+                 SET base_ref = ?, port_offset = NULL, port_env = NULL,
+                     updated_at = datetime('now')
+                 WHERE id = ? AND closed_at IS NULL",
+                (previous_base_ref, item_id),
+            )?;
+            update_open_pipeline_item_activity(&db.conn, item_id, "idle", None, None)?;
+            Ok(())
+        })
     }
 }

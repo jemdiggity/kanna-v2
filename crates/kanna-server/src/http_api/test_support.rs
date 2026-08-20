@@ -47,6 +47,7 @@ pub(crate) fn test_router(desktop_id: &str, desktop_name: &str) -> Router {
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-{desktop_id}-{test_db_id}.json"),
     };
     let _ = Db::open_for_tests(&config.db_path).expect("open test db");
@@ -79,6 +80,7 @@ pub(super) fn test_router_with_seed(
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-{desktop_id}-{test_db_id}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).expect("open test db");
@@ -112,6 +114,7 @@ pub(crate) fn test_state_with_seed(
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-invoke-{desktop_id}-{test_db_id}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).expect("open test db");
@@ -125,6 +128,16 @@ pub(crate) fn test_state_with_daemon_dir(
     desktop_id: &str,
     desktop_name: &str,
     daemon_dir: &str,
+    seed: impl FnOnce(&Db),
+) -> Arc<AppState> {
+    test_state_with_daemon_dir_and_debounce(desktop_id, desktop_name, daemon_dir, 300, seed)
+}
+
+pub(crate) fn test_state_with_daemon_dir_and_debounce(
+    desktop_id: &str,
+    desktop_name: &str,
+    daemon_dir: &str,
+    activity_event_debounce_seconds: u64,
     seed: impl FnOnce(&Db),
 ) -> Arc<AppState> {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -148,6 +161,7 @@ pub(crate) fn test_state_with_daemon_dir(
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds,
         pairing_store_path: format!("/tmp/kanna-pairings-daemon-{desktop_id}-{test_db_id}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).expect("open test db");
@@ -181,6 +195,7 @@ pub(super) fn test_state_with_task_input_sender(
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!(
             "/tmp/kanna-pairings-invoke-input-{desktop_id}-{test_db_id}.json"
         ),
@@ -215,6 +230,7 @@ pub(super) fn test_router_with_task_creator(
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-{desktop_id}-{test_db_id}.json"),
     };
     let _ = Db::open_for_tests(&config.db_path).expect("open test db");
@@ -248,6 +264,7 @@ pub(super) fn test_router_with_seed_and_task_creator(
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-{desktop_id}-{test_db_id}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).expect("open test db");
@@ -281,6 +298,7 @@ pub(super) fn test_router_with_merge_agent_runner(
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-{desktop_id}-{test_db_id}.json"),
     };
     let _ = Db::open_for_tests(&config.db_path).expect("open test db");
@@ -316,6 +334,7 @@ pub(super) fn test_router_with_task_input_sender(
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-{desktop_id}-{test_db_id}.json"),
     };
     let _ = Db::open_for_tests(&config.db_path).expect("open test db");
@@ -351,6 +370,7 @@ pub(super) fn test_router_with_task_closer(
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-{desktop_id}-{test_db_id}.json"),
     };
     seed_test_mutation_tasks(&config, &["task-1", "a1b2c3d4"]);
@@ -383,6 +403,7 @@ pub(super) fn test_router_with_stage_advancer(
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-{desktop_id}-{test_db_id}.json"),
     };
     seed_test_mutation_tasks(&config, &["task-1"]);
@@ -418,6 +439,7 @@ pub(super) fn test_router_with_stage_rerunner(
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-rerun-{desktop_id}-{test_db_id}.json"),
     };
     seed_test_mutation_tasks(&config, &["task-1"]);
@@ -453,6 +475,7 @@ pub(super) fn test_router_with_stage_completer(
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-{desktop_id}-{test_db_id}.json"),
     };
     seed_test_mutation_tasks(&config, &["task-1"]);
@@ -488,6 +511,7 @@ pub(super) fn test_router_with_revision_requester(
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-{desktop_id}-{test_db_id}.json"),
     };
     seed_test_mutation_tasks(&config, &["review-task"]);

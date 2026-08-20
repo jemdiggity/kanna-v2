@@ -955,12 +955,12 @@ fn wait_events_documents_every_event_type_the_server_emits() {
     }
 
     assert!(
-        description.contains("working to idle or unread")
-            && description.contains("waitingPromptSnippet")
-            && description.contains("only when non-empty")
-            && description.contains("debounced kanna_get_task")
-            && description.contains("does not prove"),
-        "kanna_wait_events must distinguish the provider-neutral activity edge from confirmed awaiting input: {description}"
+        description.contains("server-debounced")
+            && description.contains("every activity direction")
+            && description.contains("latestRunFinishedWithoutCompletion")
+            && description.contains("no waiting-prompt placeholder")
+            && description.contains("follow-up polling"),
+        "kanna_wait_events must document the complete provider-neutral settled activity contract: {description}"
     );
 }
 

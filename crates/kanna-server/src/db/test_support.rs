@@ -100,6 +100,8 @@ impl Db {
                 activity_revision INTEGER NOT NULL DEFAULT 0,
                 blocker_revision INTEGER NOT NULL DEFAULT 0,
                 activity_changed_at TEXT,
+                activity_event_baseline TEXT,
+                activity_event_pending_at TEXT,
                 unread_at TEXT,
                 pinned INTEGER,
                 pin_order INTEGER,

@@ -56,9 +56,9 @@ pub enum TaskEventKind {
     /// rendered — never inferred from a session merely going quiet, so a long
     /// build is never mislabelled as blocked.
     AwaitingInput,
-    /// A provider-neutral stopped edge. This is weaker than `AwaitingInput`:
-    /// the task moved from working to idle/unread and has a transcript tail,
-    /// but the provider did not necessarily expose a structured prompt.
+    /// A provider-neutral display transition that held past the server's
+    /// debounce. Every direction and provider uses this same event; unlike
+    /// `AwaitingInput`, it does not identify a question.
     ActivityChanged,
     /// The task's merge request reached the repo's merge agent. `payload.source`
     /// says who delivered it: `agent` for the approve post's own

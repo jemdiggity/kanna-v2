@@ -3157,7 +3157,9 @@ fn read_agent_definition_loads_builtin_task_manager_agent_with_codex_first() {
         .contains("response body rather than silently restarting"));
     assert!(definition.prompt.contains("task.awaiting_input"));
     assert!(definition.prompt.contains("task.activity_changed"));
-    assert!(definition.prompt.contains("waitingPromptSnippet"));
+    assert!(definition
+        .prompt
+        .contains("latestRunFinishedWithoutCompletion"));
     assert!(definition.prompt.contains("no_live_agent_session"));
     assert!(definition.prompt.contains("delivery_uncertain"));
     assert!(definition.prompt.contains("kanna_resume_task"));
@@ -6161,6 +6163,7 @@ fn prepare_task_uses_builtin_default_workflow_when_repo_has_no_local_default_wor
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -6289,6 +6292,7 @@ fn prepare_task_prefers_explicit_then_repo_then_agent_definition_over_default_pr
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();

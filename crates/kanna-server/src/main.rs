@@ -199,5 +199,9 @@ async fn main() {
     tokio::spawn(async move {
         terminal_watcher::terminal_state_watcher_loop(terminal_state, session_replacements).await;
     });
+    let activity_debounce_state = Arc::clone(&http_state);
+    tokio::spawn(async move {
+        terminal_watcher::activity_event_debounce_loop(activity_debounce_state).await;
+    });
     runtime::run_server_services(config, db, http_state).await;
 }

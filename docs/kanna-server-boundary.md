@@ -554,25 +554,17 @@ cursor-based, not snapshot-diffed:
   is a positive match on a prompt the agent CLI rendered. It is deliberately
   never inferred from a session going quiet; see
   [2026-07-29-awaiting-input-detection-e2e-gap.md](2026-07-29-awaiting-input-detection-e2e-gap.md).
-- `task.activity_changed` is the provider-neutral fallback, and it fires on the
-  **display dimension's** edges, not the runtime dimension's: it is appended on
-  every `working` → `idle`/`unread` `activity` edge for an open task, and
-  carries `previousActivity` and `activity`. Because `activity` is only written
-  `working` by a `busy` runtime verdict, that edge tracks the agent stopping —
-  but it is a projection of it, taken through read state and desktop selection,
-  not the verdict itself. The authoritative runtime dimension is `runtimeState`
-  on `GET /v1/tasks/{task_id}`; `task.awaiting_input` is the runtime
-  dimension's own edge into `waiting`. The event also carries
-  `waitingPromptSnippet` when that value is non-empty, but does not claim the
-  snippet is a question: PTY providers also use this edge after ordinary final
-  output. Transitions into `working` and read-state-only `idle` ↔ `unread`
-  changes do not append this event. A changed snippet while activity remains
-  stopped is task-detail state only and requires polling `kanna_get_task`.
-  The event is a durable wake-up edge, not a second activity debounce: the
-  server records every daemon verdict, including a one-frame idle
-  classification. Before acting on this weaker event, an MCP orchestrator
-  reconciles with `kanna_get_task`, whose existing confirmation read is the
-  single debounce boundary.
+- `task.activity_changed` is the provider-neutral settled display transition.
+  Every activity direction (`working`, `idle`, or `unread`) is eligible for
+  every provider; no waiting-prompt placeholder is required. The server waits
+  for `activity_event_debounce_seconds` (20 seconds by default in
+  `server.toml`) before appending it. An A→B→A flicker inside that window emits
+  nothing, while each value that holds emits once. Its payload contains
+  `previousActivity`, `activity`, the authoritative `runtimeState`, and
+  `latestRunFinishedWithoutCompletion`; the last field identifies a settled
+  idle task whose latest run remains without a stage-completion verdict, so a
+  manager can advance it without a private polling/debounce loop. The
+  aggregated `ks1.` feed adds `machineId` in the usual way.
 - `task.input_delivered` announces a message delivered into a task's agent
   session from outside it. `payload.source` is the caller-declared author
   (`operator`, `manager`, `unspecified`) or `notify` for the server's own
