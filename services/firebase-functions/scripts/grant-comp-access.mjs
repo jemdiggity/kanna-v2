@@ -7,7 +7,10 @@
  *   # Emulator (default): the accounts must already exist in Firebase Auth.
  *   pnpm --filter @kanna/firebase-functions comp:grant -- friend@example.com
  *
- *   # A real project — human operators only, per the production rule.
+ *   # A real project — human operators only, per the production rule. Unset
+ *   # every emulator host first; `./kd dev up --emulators` exports both, and a
+ *   # run with either one still set is refused.
+ *   unset FIRESTORE_EMULATOR_HOST FIREBASE_AUTH_EMULATOR_HOST
  *   pnpm --filter @kanna/firebase-functions comp:grant -- \
  *     --project kanna-build --confirm kanna-build \
  *     --reason grandfathered friend@example.com
@@ -80,6 +83,24 @@ if (options.targets.length === 0) {
 
 const emulatorHost = process.env.FIRESTORE_EMULATOR_HOST;
 
+/**
+ * Every emulator redirect that is set, so a real-project run can refuse before
+ * it splits itself across two directories.
+ *
+ * Both matter, and for different reasons: `FIRESTORE_EMULATOR_HOST` sends the
+ * write to the emulator, and `FIREBASE_AUTH_EMULATOR_HOST` sends the
+ * email-to-uid lookup there. The second is the dangerous one on its own —
+ * `./kd dev up --emulators` exports both, so an operator who unsets only the
+ * first resolves the email against the emulator's user directory and then
+ * writes a comp grant plus a derived entitlement into the *real* project for a
+ * uid nobody owns, while the account they meant to comp gets nothing.
+ */
+function emulatorRedirects() {
+  return ["FIRESTORE_EMULATOR_HOST", "FIREBASE_AUTH_EMULATOR_HOST"]
+    .map((variable) => ({ variable, value: process.env[variable] }))
+    .filter((entry) => Boolean(entry.value));
+}
+
 // Two mutually exclusive modes, and neither can be entered by accident. The
 // emulator is the default because that is where agents and tests run; a real
 // project has to be named twice, because this script hands out paid access.
@@ -91,10 +112,12 @@ if (options.project) {
       "(docs/comp-access-runbook.md)."
     );
   }
-  if (emulatorHost) {
+  const redirects = emulatorRedirects();
+  if (redirects.length > 0) {
     fail(
-      `FIRESTORE_EMULATOR_HOST=${emulatorHost} is set, so this process would write to the ` +
-      "emulator no matter what --project says. Unset it and run again."
+      redirects.map((entry) => `${entry.variable}=${entry.value}`).join(", ") +
+      ` is set, so this process would not run wholly against ${options.project} ` +
+      "no matter what --project says. Unset every emulator host variable and run again."
     );
   }
 } else if (!emulatorHost) {

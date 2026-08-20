@@ -26,7 +26,7 @@ same project.
 ## Granting
 
 ```bash
-# Against the emulator (./kd dev up --emulators exports FIRESTORE_EMULATOR_HOST):
+# Against the emulator (./kd dev up --emulators exports both emulator hosts):
 pnpm --filter @kanna/firebase-functions comp:grant -- friend@example.com
 
 # Grandfathering several existing accounts at once:
@@ -72,11 +72,16 @@ its entitlement-cache TTL (60 s by default), not instantly.
 ## Running against staging or production
 
 Real projects are human-only, the same rule as production deploys. The script
-refuses unless the project is named twice, and refuses outright if
-`FIRESTORE_EMULATOR_HOST` is set (which would silently redirect the write):
+refuses unless the project is named twice, and refuses outright if either
+`FIRESTORE_EMULATOR_HOST` or `FIREBASE_AUTH_EMULATOR_HOST` is set, naming the
+one it found. Both redirect, and the auth one is the dangerous half: with only
+`FIRESTORE_EMULATOR_HOST` unset, the email is resolved against the emulator's
+user directory while the grant is written to the real project — so the account
+you meant to comp gets nothing and a stray grant lands on a uid nobody owns.
+`./kd dev up --emulators` exports both, so unset both:
 
 ```bash
-unset FIRESTORE_EMULATOR_HOST
+unset FIRESTORE_EMULATOR_HOST FIREBASE_AUTH_EMULATOR_HOST
 gcloud auth application-default login   # or export GOOGLE_APPLICATION_CREDENTIALS
 pnpm --filter @kanna/firebase-functions comp:grant -- \
   --project kanna-build --confirm kanna-build --reason "owner account" me@example.com
