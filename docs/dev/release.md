@@ -209,19 +209,26 @@ release path does not forward direct Apple credential variables into Bazel.
 ## Cloud services
 
 ```sh
-./kd cloud deploy --staging                              # Firestore rules + indexes
-./kd cloud deploy --staging --functions                  # + services/firebase-functions
+./kd cloud deploy --staging                              # Firestore rules + indexes + account portal
+./kd cloud deploy --staging --functions                  # services/firebase-functions only
+./kd cloud deploy --staging --portal                     # account portal only
 ./kd cloud deploy --production --ref release/0.2
-./kd cloud deploy --staging --relay                      # + relay VM
+./kd cloud deploy --staging --relay                      # relay VM only
 ```
+
+Target flags select only the named targets and can be combined. With no target
+flag, kd deploys the ordinary Firebase surface: Firestore rules and indexes plus
+the account portal. The portal path idempotently ensures its configured Hosting
+site exists before building and deploying it. Relay- and functions-only deploys
+do not read portal build credentials.
 
 **`--functions` is opt-in on purpose.** `services/firebase-functions` exported
 nothing at all for most of its life, precisely so a stray `firebase deploy`
 could not resurrect a retired endpoint, and it now carries the billing backend
 that writes entitlements (`docs/specs/accounts-and-billing.md`). Without the
-flag a deploy is scoped to `firestore:rules,firestore:indexes` and never builds
-or ships a function; with it, kd builds the package first and adds `functions`
-to the deploy scope. The scope kd used is reported back as `targets`.
+flag a deploy never builds or ships a function; with it, kd builds the package
+and deploys the `functions` target. The scope kd used is reported back as
+`targets`.
 
 **The Secret Manager entries must exist before `--functions` can deploy.** Each
 function declares the entries it needs (`src/index.ts`, lists in

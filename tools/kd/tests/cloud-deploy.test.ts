@@ -8,6 +8,8 @@ import {
   buildRelayProvisionPlan,
   deployRelayCloud,
   deployFirebaseCloud,
+  ensureAccountHostingSite,
+  resolveAccountHostingSite,
   resolveFirebaseProject,
   resolveProductionFirebaseProject,
   resolveWebPortalBuildEnvironment
@@ -125,6 +127,132 @@ describe("cloud deploy runtime", () => {
       .toThrow("cloud deploy requires KANNA_WEB_PORTAL_FIREBASE_API_KEY");
   });
 
+  it("resolves the account hosting site from the Firebase target configuration", () => {
+    const repoRoot = resolve(import.meta.dirname, "..", "..", "..");
+    expect(resolveAccountHostingSite(repoRoot, "kanna-staging")).toBe("kanna-staging-account");
+  });
+
+  it("creates the account hosting site only when it is absent", async () => {
+    const calls: string[] = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push(`${command} ${args.join(" ")}`);
+        if (args.includes("hosting:sites:get")) {
+          return { exitCode: 1, stdout: "", stderr: "Requested entity was not found" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+
+    await expect(ensureAccountHostingSite({
+      repoRoot: "/repo",
+      env: {},
+      runner,
+      projectId: "kanna-staging"
+    })).resolves.toBe("kanna-staging-account");
+    expect(calls).toEqual([
+      "pnpm exec firebase hosting:sites:get kanna-staging-account --project kanna-staging",
+      "pnpm exec firebase hosting:sites:create kanna-staging-account --project kanna-staging"
+    ]);
+  });
+
+  it("leaves an existing account hosting site unchanged", async () => {
+    const calls: string[] = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push(`${command} ${args.join(" ")}`);
+        return { exitCode: 0, stdout: "site exists", stderr: "" };
+      }
+    };
+
+    await ensureAccountHostingSite({
+      repoRoot: "/repo",
+      env: {},
+      runner,
+      projectId: "kanna-staging"
+    });
+    expect(calls).toEqual([
+      "pnpm exec firebase hosting:sites:get kanna-staging-account --project kanna-staging"
+    ]);
+  });
+
+  it("propagates account hosting site provisioning failures", async () => {
+    const runner: CommandRunner = {
+      async run(_command, args) {
+        return args.includes("hosting:sites:get")
+          ? { exitCode: 1, stdout: "", stderr: "Requested entity was not found" }
+          : { exitCode: 1, stdout: "", stderr: "site creation denied" };
+      }
+    };
+
+    await expect(ensureAccountHostingSite({
+      repoRoot: "/repo",
+      env: {},
+      runner,
+      projectId: "kanna-staging"
+    })).rejects.toThrow("site creation denied");
+  });
+
+  it("propagates account hosting site lookup failures without attempting creation", async () => {
+    const calls: string[] = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push(`${command} ${args.join(" ")}`);
+        return { exitCode: 1, stdout: "", stderr: "Permission denied while listing hosting sites" };
+      }
+    };
+
+    await expect(ensureAccountHostingSite({
+      repoRoot: "/repo",
+      env: {},
+      runner,
+      projectId: "kanna-staging"
+    })).rejects.toThrow("Permission denied while listing hosting sites");
+    expect(calls).toEqual([
+      "pnpm exec firebase hosting:sites:get kanna-staging-account --project kanna-staging"
+    ]);
+  });
+
+  it("deploys only the relay without portal configuration when --relay is selected", async () => {
+    const calls: string[] = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push(`${command} ${args.join(" ")}`);
+        return gitSourceResult(command, args) ?? { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+
+    const result = await deployFirebaseCloud({
+      repoRoot: "/repo",
+      env: { KANNA_FIREBASE_STAGING_PROJECT: "kanna-staging" },
+      runner,
+      environment: "staging",
+      relay: true
+    });
+
+    expect(result.deployed).toBe(false);
+    expect(result.targets).toEqual([]);
+    expect(result.relay?.projectId).toBe("kanna-staging");
+    expect(calls.some((call) => call.includes("apps/web-portal"))).toBe(false);
+    expect(calls.some((call) => call.includes("firebase deploy"))).toBe(false);
+  });
+
+  it("refuses a portal-inclusive deploy without portal configuration", async () => {
+    const runner: CommandRunner = {
+      async run(command, args) {
+        return gitSourceResult(command, args) ?? { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+
+    await expect(deployFirebaseCloud({
+      repoRoot: "/repo",
+      env: { KANNA_FIREBASE_STAGING_PROJECT: "kanna-staging" },
+      runner,
+      environment: "staging",
+      portal: true
+    })).rejects.toThrow("cloud deploy requires KANNA_WEB_PORTAL_FIREBASE_API_KEY");
+  });
+
   it("refuses cloud deploys without an explicit environment", async () => {
     const runner: CommandRunner = {
       async run() {
@@ -172,7 +300,7 @@ describe("cloud deploy runtime", () => {
       expect(result).toEqual({
         projectId: "prod-project",
         deployed: true,
-        targets: ["functions", "firestore:rules", "firestore:indexes", "hosting:account"],
+        targets: ["functions"],
         source: SOURCE
       });
       expect(calls).toEqual([
@@ -198,17 +326,12 @@ describe("cloud deploy runtime", () => {
         },
         {
           command: "pnpm",
-          args: ["--dir", "apps/web-portal", "build"],
-          cwd: repoRoot
-        },
-        {
-          command: "pnpm",
           args: [
             "exec",
             "firebase",
             "deploy",
             "--only",
-            "functions,firestore:rules,firestore:indexes,hosting:account",
+            "functions",
             "--project",
             "prod-project",
             "--force"
@@ -268,11 +391,11 @@ describe("cloud deploy runtime", () => {
   it("parses --functions for cloud deploy", () => {
     expect(parseCliArgs(["cloud", "deploy", "--staging", "--functions"])).toEqual({
       taskId: "cloud.deploy",
-      input: { staging: true, production: false, relay: false, functions: true }
+      input: { staging: true, production: false, relay: false, functions: true, portal: false }
     });
     expect(parseCliArgs(["cloud", "deploy", "--staging"])).toEqual({
       taskId: "cloud.deploy",
-      input: { staging: true, production: false, relay: false, functions: false }
+      input: { staging: true, production: false, relay: false, functions: false, portal: false }
     });
   });
 
@@ -644,7 +767,7 @@ describe("cloud deploy runtime", () => {
   it("parses --ref for cloud deploy", () => {
     expect(parseCliArgs(["cloud", "deploy", "--production", "--relay", "--ref", "release/0.2"])).toEqual({
       taskId: "cloud.deploy",
-      input: { staging: false, production: true, relay: true, functions: false, ref: "release/0.2" }
+      input: { staging: false, production: true, relay: true, functions: false, portal: false, ref: "release/0.2" }
     });
     expect(() => parseCliArgs(["cloud", "deploy", "--production", "--ref"])).toThrow("--ref requires a value");
   });

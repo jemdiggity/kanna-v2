@@ -21,6 +21,7 @@ import {
   validateKdInstallation
 } from "../bin/kd-cache.mjs";
 import { parseCliArgs, runCli } from "../src/cli";
+import { nodeCommandRunner } from "../src/runtime/process";
 import { getTaskDefinition } from "../src/tasks/registry";
 
 interface SpawnResult {
@@ -599,6 +600,60 @@ describe("kd CLI", () => {
 
     await expect(runCli(["not-a-command", "--help"])).resolves.toBe(1);
     expect(error).toHaveBeenLastCalledWith("Unknown help topic: not-a-command");
+  });
+
+  it("returns a nonzero exit code for an unknown flag", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(runCli(["mobile", "ota", "publish", "--unknown"])).resolves.toBe(1);
+    expect(error).toHaveBeenLastCalledWith("Unknown flag: --unknown");
+
+    await expect(runCli(["mobile", "ota", "publish", "--relay"])).resolves.toBe(1);
+    expect(error).toHaveBeenLastCalledWith("Unknown flag for mobile.ota.publish: --relay");
+  });
+
+  it("returns a nonzero exit code when a portal deploy lacks required configuration", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(nodeCommandRunner, "run").mockImplementation(async (command, args) => {
+      if (command === "git" && args[0] === "status") {
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+      if (command === "git" && args[0] === "rev-parse") {
+        if (args.includes("--show-toplevel")) {
+          return {
+            exitCode: 0,
+            stdout: `${resolve(import.meta.dirname, "..", "..", "..")}\n`,
+            stderr: ""
+          };
+        }
+        return {
+          exitCode: 0,
+          stdout: "1f2e3d4c5b6a79880123456789abcdef01234567\n",
+          stderr: ""
+        };
+      }
+      return { exitCode: 0, stdout: "", stderr: "" };
+    });
+    const portalEnvKeys = [
+      "KANNA_WEB_PORTAL_FIREBASE_API_KEY",
+      "KANNA_WEB_PORTAL_FIREBASE_APP_ID",
+      "KANNA_WEB_PORTAL_STRIPE_PUBLISHABLE_KEY"
+    ];
+    const previousValues = portalEnvKeys.map((key) => process.env[key]);
+    for (const key of portalEnvKeys) process.env[key] = "";
+
+    try {
+      await expect(runCli(["cloud", "deploy", "--staging", "--portal"])).resolves.toBe(1);
+      expect(error).toHaveBeenLastCalledWith(
+        "cloud deploy requires KANNA_WEB_PORTAL_FIREBASE_API_KEY to build the account portal."
+      );
+    } finally {
+      portalEnvKeys.forEach((key, index) => {
+        const previous = previousValues[index];
+        if (previous === undefined) delete process.env[key];
+        else process.env[key] = previous;
+      });
+    }
   });
 
   it("parses dev up with mobile and emulators flags", () => {
@@ -1322,15 +1377,15 @@ describe("kd CLI", () => {
     });
     expect(parseCliArgs(["cloud", "deploy", "--production"])).toEqual({
       taskId: "cloud.deploy",
-      input: { staging: false, production: true, relay: false, functions: false }
+      input: { staging: false, production: true, relay: false, functions: false, portal: false }
     });
     expect(parseCliArgs(["cloud", "deploy", "--production", "--relay"])).toEqual({
       taskId: "cloud.deploy",
-      input: { staging: false, production: true, relay: true, functions: false }
+      input: { staging: false, production: true, relay: true, functions: false, portal: false }
     });
     expect(parseCliArgs(["cloud", "deploy", "--staging", "--relay"])).toEqual({
       taskId: "cloud.deploy",
-      input: { staging: true, production: false, relay: true, functions: false }
+      input: { staging: true, production: false, relay: true, functions: false, portal: false }
     });
     expect(parseCliArgs(["cloud", "relay-provision", "--staging"])).toEqual({
       taskId: "cloud.relay-provision",
