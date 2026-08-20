@@ -361,12 +361,53 @@ do to agent contributions. Highlights you will hit early:
 
 - Run `pnpm exec tsc --noEmit` and `cargo clippy` before calling work done;
   `cargo fmt --all` from the repo root before committing Rust.
+- `cargo check --workspace` / `cargo clippy --all-targets` work in a fresh
+  worktree without staging sidecars first — see "Sidecars and check-only
+  builds" below for what the warning they print means.
 - No `any` in TypeScript; no `unwrap()` in production Rust.
 - Trace the full data flow (DB → server → store → component → daemon) before
   changing any layer; fix designs rather than layering workarounds.
 - Cross-boundary behavior changes need E2E coverage, or an explicit dated note
   in `docs/` explaining why not yet (see the `*-e2e-gap.md` / `*-e2e-note.md`
   convention).
+
+### Sidecars and check-only builds
+
+`apps/desktop/src-tauri/tauri.conf.json` declares six `bundle.externalBin`
+sidecars, staged into `apps/desktop/src-tauri/binaries/` by
+`./kd build sidecars`. `tauri_build` treats a missing entry as fatal, so a
+fresh worktree used to fail `cargo check --workspace` and
+`cargo clippy --all-targets` on `kanna-desktop` until six extra crate builds
+had been paid for — purely to lint.
+
+The build script now decides per invocation
+(`apps/desktop/src-tauri/build_support/sidecars.rs`):
+
+- **Sidecars staged** — wired through unchanged. Nothing about a normal build
+  changes.
+- **Sidecars missing, check-only invocation** — `bundle.externalBin` is dropped
+  from the effective `TAURI_CONFIG` and the build prints a `cargo:warning`
+  naming every missing file and `./kd build sidecars`. Checking, linting, and
+  `cargo test` work; the resulting binary is not a runnable app.
+- **Sidecars missing, bundling or dev invocation** — hard failure with the same
+  message. `KANNA_REQUIRE_SIDECARS=1` is what marks an invocation as bundling;
+  every in-repo path that drives the Tauri CLI sets it (`./kd dev up`'s desktop
+  window and the `tauri`, `tauri:dev`, `tauri:build` scripts in
+  `apps/desktop/package.json`). The Tauri CLI's own `TAURI_CLI_VERBOSITY` is
+  honored as a best-effort second signal.
+
+Staging a sidecar dirties the build script, so a `tauri dev` that follows a
+`cargo check` re-expands the full config rather than inheriting the relaxed one.
+
+This mirrors what the Bazel release path already did: `desktop_build_script` in
+`apps/desktop/src-tauri/BUILD.bazel` hands the build script
+`TAURI_CONFIG={"bundle":{"externalBin":[],"resources":[]}}` and assembles the
+shipped sidecars from Bazel targets, so release bundles never read
+`binaries/` at all. Nothing a relaxed build produces can stand in for a real
+sidecar — the entry is removed, not stubbed.
+
+`apps/desktop/src-tauri/tests/sidecar_build_policy.rs` runs that decision's
+tests under ordinary `cargo test`.
 
 ## Build caches
 

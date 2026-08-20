@@ -234,6 +234,16 @@ fn add_slow_fetch_origin(repo_root: &Path, sleep_secs: u32) {
         .success());
 }
 
+/// The most drift [`await_measuring_runtime_drift`] callers tolerate.
+///
+/// The regression these probes exist to catch is synchronous git or SQLite
+/// work on the runtime thread, which costs whole seconds — while a healthy
+/// run drifts by well under the 25ms tick. The budget sits between the two
+/// rather than close to either, because a shared box running several
+/// worktrees' suites at once can stall any process for a few hundred
+/// milliseconds without anything being wrong.
+const MAX_RUNTIME_DRIFT: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// Await a spawned request on a current-thread runtime while measuring
 /// scheduler lateness: every wakeup's delay beyond the 25ms probe tick is
 /// runtime drift, whether the wakeup is the late tick itself or the request

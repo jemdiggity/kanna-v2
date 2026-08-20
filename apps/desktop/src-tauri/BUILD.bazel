@@ -10,6 +10,7 @@ exports_files([
     "Cargo.toml",
     "Info.plist",
     "build.rs",
+    "build_support/sidecars.rs",
     "tauri.conf.json",
 ])
 
@@ -20,6 +21,7 @@ filegroup(
         "Cargo.toml",
         "Info.plist",
         "build.rs",
+        "build_support/sidecars.rs",
         "tauri.conf.json",
     ] + glob([
         "capabilities/**",
@@ -280,7 +282,10 @@ PY
 
 cargo_build_script(
     name = "desktop_build_script",
-    srcs = ["build.rs"],
+    srcs = [
+        "build.rs",
+        "build_support/sidecars.rs",
+    ],
     crate_root = "build.rs",
     edition = "2021",
     rundir = "apps/desktop/src-tauri",

@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 const repoRoot = resolve(import.meta.dirname, "..", "..", "..");
 const cliContractTestsDir = resolve(repoRoot, "tests", "cli-contract", "tests");
@@ -92,7 +92,9 @@ describe("test orchestration", () => {
         cwd: repoRoot,
         encoding: "utf8",
         maxBuffer: 10 * 1024 * 1024,
-        timeout: 30_000,
+        // A turbo dry run hashes the whole repository; on a box running
+        // several worktrees' suites that is IO-bound, not stuck.
+        timeout: 180_000,
       },
     );
     const plan = JSON.parse(output) as TurboDryRun;
@@ -120,7 +122,9 @@ describe("test orchestration", () => {
         cwd: repoRoot,
         encoding: "utf8",
         maxBuffer: 10 * 1024 * 1024,
-        timeout: 30_000,
+        // A turbo dry run hashes the whole repository; on a box running
+        // several worktrees' suites that is IO-bound, not stuck.
+        timeout: 180_000,
       },
     );
     const plan = JSON.parse(output) as TurboDryRun;
@@ -276,5 +280,86 @@ describe("test orchestration", () => {
         /export async function find\w+Binary\([^)]*\): Promise<string> \{\n  assertLiveAgentCliContractsEnabled\(\);/,
       );
     }
+  });
+});
+
+/**
+ * Vitest's stock 5s test / 10s hook budgets are quiet-machine numbers. This box
+ * runs several worktrees' suites and cargo builds at once, so they used to turn
+ * ordinary setup work into failures that passed on rerun. `vitest.shared.ts`
+ * owns the ceilings; a package that runs vitest without inheriting them is
+ * silently back on the defaults, which is invisible until something flakes.
+ */
+describe("shared vitest timeouts", () => {
+  const packageDirs = [
+    "apps/desktop",
+    "apps/mobile",
+    "packages/core",
+    "packages/db",
+    "packages/stream-client",
+    "packages/visual-companion",
+    "services/firebase-functions",
+    "services/relay",
+    "tests/cli-contract",
+    "tests/remote-e2e",
+    "tools/kd",
+  ];
+
+  it("declares ceilings well above the stock defaults", () => {
+    const shared = readFileSync(resolve(repoRoot, "vitest.shared.ts"), "utf8");
+    expect(shared).toContain("testTimeout: 60_000");
+    expect(shared).toContain("hookTimeout: 60_000");
+    expect(shared).toContain("vitest.setup.ts");
+  });
+
+  /**
+   * `vi.waitFor`'s 1s default is hard-coded with no config knob, so
+   * `vitest.setup.ts` replaces it. Nothing else would notice if that patch
+   * stopped being applied — every call site would silently go back to a
+   * sub-second wall-clock deadline.
+   */
+  it("waits past vitest's 1s waitFor default", async () => {
+    let ready = false;
+    const timer = setTimeout(() => {
+      ready = true;
+    }, 2_000);
+    try {
+      await vi.waitFor(() => expect(ready).toBe(true));
+    } finally {
+      clearTimeout(timer);
+    }
+    expect(ready).toBe(true);
+  });
+
+  it("lists every workspace package whose test script runs vitest", () => {
+    const discovered = ["apps", "packages", "services", "tests", "tools"]
+      .flatMap((group) =>
+        readdirSync(resolve(repoRoot, group), { withFileTypes: true })
+          .filter((entry) => entry.isDirectory())
+          .map((entry) => `${group}/${entry.name}`),
+      )
+      .filter((dir) => {
+        const manifestPath = resolve(repoRoot, dir, "package.json");
+        if (!existsSync(manifestPath)) return false;
+        const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+          scripts?: Record<string, string>;
+        };
+        return (manifest.scripts?.test ?? "").includes("vitest");
+      })
+      .sort();
+
+    // A new vitest package must be added to `packageDirs` above, which is what
+    // makes the per-package assertion below run against it.
+    expect(discovered).toEqual([...packageDirs].sort());
+  });
+
+  it.each(packageDirs)("%s inherits the shared options", (dir) => {
+    const configPath = resolve(repoRoot, dir, "vitest.config.ts");
+    expect(existsSync(configPath), `${dir} has no vitest.config.ts`).toBe(true);
+    if (!existsSync(configPath)) return;
+
+    const config = readFileSync(configPath, "utf8");
+    expect(config, dir).toContain("vitest.shared");
+    expect(config, dir).toContain("...sharedTestOptions");
   });
 });

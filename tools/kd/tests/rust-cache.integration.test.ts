@@ -416,10 +416,20 @@ describeMac("the two-revision fixture detects a mis-selected cache key", () => {
     });
     expect(cache.state.active).toBe(true);
 
-    const result = await nodeCommandRunner.run("cargo", ["build", "-p", "kd-probe-consumer"], {
-      cwd: repoRoot,
-      env: cache.env
-    });
+    // `-j 1` is what makes the poisoning deterministic. This stand-in cache
+    // overwrites the `defaults` outputs only after rustc exits, but cargo's
+    // metadata pipelining lets the consumer start as soon as rustc emits the
+    // fresh `.rmeta` — so with parallel jobs the consumer can read a
+    // revision-2 metadata file and fail later at link time with E0460 instead.
+    // One job keeps the consumer queued until the poisoned `defaults` unit is
+    // finished, which is the ordering this negative control is about. (Verified
+    // by widening the overwrite window to 800ms: parallel builds fail with
+    // E0460, `-j 1` still reports E0432.)
+    const result = await nodeCommandRunner.run(
+      "cargo",
+      ["build", "-j", "1", "-p", "kd-probe-consumer"],
+      { cwd: repoRoot, env: cache.env }
+    );
     expect(result.exitCode).not.toBe(0);
     expect(result.stderr).toContain("E0432");
     expect(result.stderr).toContain("session_id");

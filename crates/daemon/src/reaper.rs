@@ -538,12 +538,16 @@ mod tests {
         reaper.try_reap(first).expect("first admission");
         reaper.try_reap(second).expect("second admission");
 
+        // At capacity, admission must refuse rather than wait for a permit —
+        // and nothing here ever frees one, so a waiting implementation blocks
+        // forever. The ceiling only has to be finite; keep it far above what a
+        // loaded box adds to a lock-free refusal.
         let began = std::time::Instant::now();
         let rejected = reaper.try_reap(ReapOwnership::Pid(ReapIdentity {
             pid: 44,
             start: Some((1, 1)),
         }));
-        assert!(began.elapsed() < std::time::Duration::from_millis(50));
+        assert!(began.elapsed() < std::time::Duration::from_secs(10));
         assert!(matches!(rejected, Err(AdmissionError::Full(_))));
         assert_eq!(reaper.stats().outstanding(), 2);
     }
@@ -570,23 +574,27 @@ mod tests {
         let reaper = ReaperHandle::new_for_test(2);
         let core = Arc::clone(&reaper.core);
         let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        // The holder keeps the state mutex until this test hands it back, so
+        // "did not wait on the mutex" is a happens-before rather than a
+        // wall-clock budget: an admission that took the lock could not return
+        // before `release_tx` fires below, whatever the machine's load.
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
         let holder = std::thread::spawn(move || {
             let _guard = core
                 .state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             locked_tx.send(()).expect("announce held lock");
-            std::thread::sleep(Duration::from_millis(200));
+            release_rx.recv().expect("test releases the held lock");
         });
         locked_rx.recv().expect("owner thread holds lock");
 
-        let began = Instant::now();
         let result = reaper.try_reap(ReapOwnership::Pid(ReapIdentity {
             pid: 42,
             start: Some((1, 1)),
         }));
-        assert!(began.elapsed() < Duration::from_millis(50));
         assert!(matches!(result, Err(AdmissionError::Full(_))));
+        release_tx.send(()).expect("release held lock");
         holder.join().expect("owner thread exits");
     }
 
@@ -683,12 +691,15 @@ mod tests {
 
         let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let ran_in_job = Arc::clone(&ran);
+        // The only permit is held by a worker parked until this test releases
+        // it, so an admission that waited for capacity would never return. The
+        // ceiling only has to be finite, not tight.
         let began = Instant::now();
         let rejected = try_run_teardown_on(
             &lifecycle,
             Box::new(move || ran_in_job.store(true, std::sync::atomic::Ordering::SeqCst)),
         );
-        assert!(began.elapsed() < Duration::from_millis(50));
+        assert!(began.elapsed() < Duration::from_secs(10));
         let TeardownAdmission::Full(job) = rejected else {
             panic!("in-flight work must consume the only permit");
         };

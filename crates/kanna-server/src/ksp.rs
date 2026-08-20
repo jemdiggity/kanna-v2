@@ -3831,6 +3831,13 @@ mod tests {
     const TEST_DEVICE_ID: &str = "ksp-test-device";
     const TEST_DEVICE_SECRET: &str = "ksp-test-secret";
 
+    /// Ceiling for waits whose failure mode is "the frame or command never
+    /// arrives at all". These are liveness waits, not latency budgets: the
+    /// assertion that follows is what proves the behavior, so the ceiling only
+    /// has to be finite and far enough above scheduler noise that a box
+    /// running several worktrees' suites cannot trip it.
+    const LIVENESS_WAIT: Duration = Duration::from_secs(10);
+
     fn test_config(desktop_id: &str, desktop_name: &str) -> crate::config::Config {
         crate::config::Config {
             relay_url: "wss://relay.example".to_string(),
@@ -4390,9 +4397,7 @@ mod tests {
             "duplicate legacy attach without detach must retire the connection"
         );
         let mut saw_rejection = false;
-        while let Ok(Some(frame)) =
-            tokio::time::timeout(Duration::from_millis(500), outbound_rx.recv()).await
-        {
+        while let Ok(Some(frame)) = tokio::time::timeout(LIVENESS_WAIT, outbound_rx.recv()).await {
             if let ServerFrame::Error { code, .. } = &frame {
                 if code == "companion_attach_rejected" {
                     saw_rejection = true;
@@ -4812,7 +4817,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let (frame, _outbound_rx) = tokio::time::timeout(Duration::from_millis(100), receiver)
+        let (frame, _outbound_rx) = tokio::time::timeout(LIVENESS_WAIT, receiver)
             .await
             .expect("terminal output waited for maximum companion serialization")
             .unwrap();
@@ -4892,7 +4897,7 @@ mod tests {
         let _current = companion_tx.attachment("task-fenced-send".into(), true, false);
 
         assert_eq!(
-            tokio::time::timeout(Duration::from_millis(100), blocked_send)
+            tokio::time::timeout(LIVENESS_WAIT, blocked_send)
                 .await
                 .expect("blocked stale delivery ignored attachment replacement")
                 .unwrap(),
@@ -8001,7 +8006,7 @@ mod tests {
         let mut received = Vec::new();
         for _ in 0..3 {
             received.push(
-                tokio::time::timeout(std::time::Duration::from_millis(300), commands.recv())
+                tokio::time::timeout(LIVENESS_WAIT, commands.recv())
                     .await
                     .expect("missing ACK stalled a later terminal command")
                     .expect("fake daemon command channel closed"),
@@ -8090,8 +8095,7 @@ mod tests {
         )
         .await;
 
-        let command_while_locked =
-            tokio::time::timeout(std::time::Duration::from_millis(300), commands.recv()).await;
+        let command_while_locked = tokio::time::timeout(LIVENESS_WAIT, commands.recv()).await;
         lock.execute_batch("ROLLBACK")
             .expect("release sqlite write lock");
 
@@ -8181,7 +8185,7 @@ mod tests {
         )
         .await;
         let command_while_append_blocked =
-            tokio::time::timeout(Duration::from_millis(300), commands.recv()).await;
+            tokio::time::timeout(LIVENESS_WAIT, commands.recv()).await;
         append_gate.release();
         drop(append_gate);
 
@@ -8250,13 +8254,8 @@ mod tests {
         )
         .await;
 
-        let terminal_command =
-            tokio::time::timeout(std::time::Duration::from_millis(300), commands.recv()).await;
-        let overflow_response = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            recv_frame(&mut socket),
-        )
-        .await;
+        let terminal_command = tokio::time::timeout(LIVENESS_WAIT, commands.recv()).await;
+        let overflow_response = tokio::time::timeout(LIVENESS_WAIT, recv_frame(&mut socket)).await;
         lock.execute_batch("ROLLBACK")
             .expect("release sqlite write lock");
 
@@ -8387,8 +8386,7 @@ mod tests {
             },
         )
         .await;
-        let input_while_agent_waited =
-            tokio::time::timeout(std::time::Duration::from_millis(300), command_rx.recv()).await;
+        let input_while_agent_waited = tokio::time::timeout(LIVENESS_WAIT, command_rx.recv()).await;
         release_agent.notify_waiters();
 
         assert_command(

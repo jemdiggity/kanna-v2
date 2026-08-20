@@ -724,12 +724,25 @@ async fn startup_artifact_cleanup_yields_the_async_runtime_worker() {
     let peer_id = "peer-startup-cleanup-worker";
     let artifact_root = utils::managed_artifact_root(temp.path(), peer_id);
     std::fs::create_dir_all(&artifact_root).expect("create artifact root");
-    std::fs::write(artifact_root.join("stale"), b"stale").expect("write stale artifact");
-    let yielded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let yielded_in_task = yielded.clone();
+    // Enough stale artifacts that removing them is real work. With a single
+    // file the cleanup could finish before `spawn_blocking(..).await` was ever
+    // polled, so the await returned `Ready` without giving the executor a
+    // turn and the probe below never ran — a correct implementation failing
+    // for scheduling reasons, which is what made this flaky under load. A
+    // cleanup that takes measurable time forces the await to pend, which is
+    // the condition the probe is actually about.
+    for index in 0..2_000 {
+        std::fs::write(artifact_root.join(format!("stale-{index}")), b"stale")
+            .expect("write stale artifact");
+    }
+    // One executor turn is all this needs: it stores on its first poll rather
+    // than parking on `yield_now` and requiring a second. A cleanup that ran
+    // inline on the runtime thread would block that single turn, which is the
+    // regression under test.
+    let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ran_in_task = ran.clone();
     tokio::spawn(async move {
-        tokio::task::yield_now().await;
-        yielded_in_task.store(true, std::sync::atomic::Ordering::SeqCst);
+        ran_in_task.store(true, std::sync::atomic::Ordering::SeqCst);
     });
 
     let runtime = TransferRuntime::spawn(RuntimeConfig::for_tests(
@@ -742,7 +755,7 @@ async fn startup_artifact_cleanup_yields_the_async_runtime_worker() {
     .expect("spawn peer");
 
     assert!(
-        yielded.load(std::sync::atomic::Ordering::SeqCst),
+        ran.load(std::sync::atomic::Ordering::SeqCst),
         "startup cleanup blocked the async runtime worker",
     );
     drop(runtime);

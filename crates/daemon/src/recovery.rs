@@ -1618,11 +1618,19 @@ mod tests {
             }
         };
 
+        // Relative, not absolute: eight serialized waiters would each pay a
+        // full request timeout, so anything under that total proves they
+        // shared one attempt. The spawn-log assertion below proves the same
+        // thing structurally; this one keeps the cost claim honest without
+        // pinning it to a wall clock the box's load can move.
+        let serialized_cost = recovery_request_timeout() * 8;
         let started = std::time::Instant::now();
         call_batch(manager.clone()).await;
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(1),
-            "waiters serialized replay timeouts instead of sharing one attempt"
+            started.elapsed() < serialized_cost,
+            "waiters serialized replay timeouts instead of sharing one attempt \
+             (took {:?}, serialized would cost {serialized_cost:?})",
+            started.elapsed()
         );
         assert_eq!(
             std::fs::read_to_string(&spawn_log)

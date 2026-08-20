@@ -221,7 +221,11 @@ export function buildDevPlan(input: BuildDevPlanInput): DevPlan {
       ...sharedEnv,
       ...(input.desktopSecretEnv ?? {}),
     },
-    command: `${desktopEnv ? `${desktopEnv} ` : ""}pnpm run build:sidecars && ${desktopEnv ? `${desktopEnv} ` : ""}pnpm exec tauri dev --config ${JSON.stringify(localConfigPath)}`
+    // KANNA_REQUIRE_SIDECARS keeps the Tauri build script's `externalBin`
+    // requirement hard for a build that produces a runnable app. Only
+    // check/lint/test builds are allowed to drop unstaged sidecars — see
+    // apps/desktop/src-tauri/build_support/sidecars.rs.
+    command: `${desktopEnv ? `${desktopEnv} ` : ""}pnpm run build:sidecars && KANNA_REQUIRE_SIDECARS=1 ${desktopEnv ? `${desktopEnv} ` : ""}pnpm exec tauri dev --config ${JSON.stringify(localConfigPath)}`
   });
 
   if (input.mobile) {

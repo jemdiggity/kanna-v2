@@ -83,6 +83,44 @@ boundaries listed above. Tests reach Vue internals via
 and the `--ignored` Rust integration tests drive real agent CLIs. Run them
 deliberately, not as part of routine iteration.
 
+## Timing assertions on a shared box
+
+A dev machine routinely runs four to six worktrees' suites and cargo builds at
+once; load averages around 20 are normal. Any test whose pass condition is a
+short absolute wall-clock deadline will eventually fail there and pass on
+rerun, and a suite that has to be rerun is a suite nobody reads.
+
+Rules for anything that touches a clock:
+
+- **Prefer a happens-before to a duration.** Hold a lock or a worker until the
+  measurement is taken, then assert the state directly, rather than inferring
+  it from elapsed time.
+- **Prefer a ratio to an absolute.** "The synchronous call took a quarter of
+  the total decode" survives load; "the call took under 100ms" does not.
+- **Use a mocked clock where the subject allows one** — `#[tokio::test(start_paused
+  = true)]`, `vi.useFakeTimers()`.
+- **Otherwise, pick an order-of-magnitude ceiling and say so in a comment.**
+  Name the regression it catches and roughly what that regression costs; the
+  ceiling belongs between the healthy path and that cost, not next to either.
+- **A liveness wait is not a budget.** `recv_timeout`, `tokio::time::timeout`
+  around an expected success, and poll helpers guard against something that
+  never arrives. Make them generous: the assertion after them is what proves
+  the behavior.
+- **Never lean on the runner's per-test timeout to assert speed.**
+  `vitest.shared.ts` sets the workspace's `testTimeout`/`hookTimeout` well
+  above vitest's quiet-machine defaults, and every package inherits it (a
+  `tools/kd` test enforces that). Those ceilings exist so a slow machine is not
+  a failing machine. Do not add a per-test override *below* the shared ceiling
+  — an override written to raise vitest's old 5s default now lowers it.
+  `vitest.setup.ts`, loaded through the same shared options, does the same for
+  `vi.waitFor`/`vi.waitUntil`, whose 1s default vitest hard-codes with no
+  config knob.
+- **A genuine performance benchmark belongs in an opt-in lane**, not in the
+  canonical gate.
+
+Port collisions get the same treatment: bind port `0` and read back what the OS
+assigned, rather than picking a number and hoping.
+
 ## The E2E coverage expectation
 
 Any behavior that crosses component or system boundaries (UI flows,

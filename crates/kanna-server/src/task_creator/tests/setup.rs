@@ -713,7 +713,11 @@ async fn timed_out_stage_fork_setup_kills_group_records_failure_and_removes_fork
         PreparedStageTransition::Run(run) => run,
         _ => panic!("expected stage run"),
     };
-    run.set_setup_hard_timeout(std::time::Duration::from_millis(150));
+    // The setup command loops forever, so any finite budget proves the timeout
+    // fires. It is generous because the assertions below need the shell to have
+    // reached its `printf` first — a 150ms budget lost that race on a loaded
+    // box, where starting a shell can take longer than the whole budget.
+    run.set_setup_hard_timeout(std::time::Duration::from_secs(5));
     assert!(
         fork_path.exists(),
         "preparation should leave the fork for detached setup"

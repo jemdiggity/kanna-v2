@@ -1,3 +1,6 @@
+#[path = "build_support/sidecars.rs"]
+mod sidecars;
+
 fn merge_json(base: &mut serde_json::Value, overlay: serde_json::Value) {
     match (base, overlay) {
         (serde_json::Value::Object(base_map), serde_json::Value::Object(overlay_map)) => {
@@ -48,6 +51,99 @@ fn merge_updater_pubkey_into_tauri_config() {
         serde_json::to_string(&tauri_config)
             .unwrap_or_else(|error| panic!("failed to serialize merged TAURI_CONFIG: {error}")),
     );
+}
+
+/// Reads the effective Tauri config: `tauri.conf.json` with the current
+/// `TAURI_CONFIG` overlay merged on top, which is the same view `tauri_build`
+/// resolves.
+fn effective_tauri_config() -> serde_json::Value {
+    let mut config = std::fs::read_to_string("tauri.conf.json")
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+    if let Ok(raw) = std::env::var("TAURI_CONFIG") {
+        if let Ok(overlay) = serde_json::from_str::<serde_json::Value>(&raw) {
+            merge_json(&mut config, overlay);
+        }
+    }
+    config
+}
+
+/// Drops `bundle.externalBin` when its sidecars have not been staged and this
+/// invocation cannot produce a bundle.
+///
+/// `tauri_build` treats a missing `externalBin` entry as fatal, which made
+/// `cargo check --workspace` and `cargo clippy --all-targets` fail in every
+/// fresh worktree until someone ran `./kd build sidecars` — a six-crate build
+/// paid to lint. Bundling and dev builds still hard-require every sidecar; see
+/// `build_support/sidecars.rs` for how the two are told apart.
+fn relax_external_bin_when_sidecars_are_absent() {
+    println!(
+        "cargo:rerun-if-env-changed={}",
+        sidecars::REQUIRE_SIDECARS_ENV
+    );
+    println!("cargo:rerun-if-env-changed={}", sidecars::TAURI_CLI_ENV);
+
+    let config = effective_tauri_config();
+    let declared = config
+        .pointer("/bundle/externalBin")
+        .and_then(serde_json::Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| entry.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if declared.is_empty() {
+        return;
+    }
+
+    let target_triple = std::env::var("TARGET").unwrap_or_default();
+    let paths = sidecars::external_binary_paths(&declared, &target_triple);
+    // Staging a sidecar must dirty this script, or a `cargo check` that
+    // relaxed the requirement would leave a stale config baked into the next
+    // `tauri dev` build.
+    for path in &paths {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
+    let missing =
+        sidecars::missing_external_binaries(std::path::Path::new(&manifest_dir), &paths, |path| {
+            path.exists()
+        });
+    let bundling = sidecars::is_bundling_build(|name| std::env::var(name).ok());
+    match sidecars::decide(missing, bundling) {
+        sidecars::ExternalBinDecision::Wire => {}
+        sidecars::ExternalBinDecision::Require { missing } => {
+            panic!("{}", sidecars::missing_sidecar_report(&missing));
+        }
+        sidecars::ExternalBinDecision::Relax { missing } => {
+            println!(
+                "cargo:warning={} This build drops them, so it can check, lint, and \
+                 test but cannot produce a runnable app.",
+                sidecars::missing_sidecar_report(&missing)
+            );
+            let mut config = match std::env::var("TAURI_CONFIG") {
+                Ok(raw) => {
+                    serde_json::from_str::<serde_json::Value>(&raw).unwrap_or_else(|error| {
+                        panic!("failed to parse TAURI_CONFIG as JSON: {error}")
+                    })
+                }
+                Err(_) => serde_json::Value::Object(serde_json::Map::new()),
+            };
+            merge_json(
+                &mut config,
+                serde_json::json!({ "bundle": { "externalBin": [] } }),
+            );
+            std::env::set_var(
+                "TAURI_CONFIG",
+                serde_json::to_string(&config)
+                    .unwrap_or_else(|error| panic!("failed to serialize TAURI_CONFIG: {error}")),
+            );
+        }
+    }
 }
 
 /// Makes the compiled crate depend on the effective `TAURI_CONFIG`.
@@ -138,6 +234,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=KANNA_BUILD_WORKTREE");
 
     merge_updater_pubkey_into_tauri_config();
+    relax_external_bin_when_sidecars_are_absent();
     pin_tauri_config_fingerprint();
 
     if let Err(error) = tauri_build::try_build(Default::default()) {
@@ -161,7 +258,7 @@ fn main() {
             ),
         ];
         panic!(
-            "tauri_build failed: {error:#}\ncwd={cwd:?}\nCARGO_MANIFEST_DIR={manifest_dir:?}\npath_diagnostics={diagnostics:?}\nIf this is a focused desktop Rust test from a fresh worktree, run `./kd build sidecars` first so Tauri externalBin inputs exist."
+            "tauri_build failed: {error:#}\ncwd={cwd:?}\nCARGO_MANIFEST_DIR={manifest_dir:?}\npath_diagnostics={diagnostics:?}\nMissing externalBin sidecars are handled separately (see build_support/sidecars.rs); this failure is something else."
         );
     }
 }

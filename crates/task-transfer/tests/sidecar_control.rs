@@ -18,6 +18,12 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Notify};
 
+/// How long a control response may take to come back from the out-of-process
+/// sidecar. Every use is a liveness wait — the failure it guards is a response
+/// that never arrives — so it is deliberately far above the milliseconds a
+/// healthy round trip takes, leaving room for a box running several suites.
+const CONTROL_RESPONSE_WAIT: Duration = Duration::from_secs(10);
+
 struct SidecarProcess {
     child: Child,
     stdin: ChildStdin,
@@ -201,7 +207,7 @@ async fn stalled_mark_read_does_not_monopolize_sidecar_control() {
         },
     );
     let overloaded = response_rx
-        .recv_timeout(Duration::from_millis(500))
+        .recv_timeout(CONTROL_RESPONSE_WAIT)
         .expect("excess mark-read control did not receive bounded backpressure");
     assert!(
         matches!(
@@ -264,7 +270,7 @@ async fn stalled_mark_read_does_not_monopolize_sidecar_control() {
         },
     );
     let ordinary_overload = response_rx
-        .recv_timeout(Duration::from_millis(500))
+        .recv_timeout(CONTROL_RESPONSE_WAIT)
         .expect("excess ordinary control did not receive bounded backpressure");
     assert!(
         matches!(
@@ -280,13 +286,13 @@ async fn stalled_mark_read_does_not_monopolize_sidecar_control() {
     snapshot_release.notify_one();
 
     let first = response_rx
-        .recv_timeout(Duration::from_millis(500))
+        .recv_timeout(CONTROL_RESPONSE_WAIT)
         .expect("terminal control waited behind stalled mark-read");
     let second = response_rx
-        .recv_timeout(Duration::from_millis(500))
+        .recv_timeout(CONTROL_RESPONSE_WAIT)
         .expect("LAN refresh waited behind stalled mark-read");
     let third = response_rx
-        .recv_timeout(Duration::from_millis(500))
+        .recv_timeout(CONTROL_RESPONSE_WAIT)
         .expect("second terminal input did not run after the first response");
     let mut completed_ids = vec![control_response_id(&first), control_response_id(&second)];
     completed_ids.push(control_response_id(&third));
@@ -297,8 +303,11 @@ async fn stalled_mark_read_does_not_monopolize_sidecar_control() {
     );
     assert_eq!(peer_event_rx.recv().await.as_deref(), Some("input:second"));
 
+    // The 2000ms lower-layer deadline asserted below is the one under test;
+    // this outer wait only has to outlast it by enough that load cannot fire
+    // it first.
     let mark = response_rx
-        .recv_timeout(Duration::from_secs(3))
+        .recv_timeout(CONTROL_RESPONSE_WAIT)
         .expect("mark-read did not finish at its lower-layer deadline");
     assert_eq!(control_response_id(&mark), "mark");
     assert!(
@@ -306,7 +315,7 @@ async fn stalled_mark_read_does_not_monopolize_sidecar_control() {
         "unexpected mark-read response: {mark:?}",
     );
     assert_eq!(
-        tokio::time::timeout(Duration::from_millis(500), peer_event_rx.recv())
+        tokio::time::timeout(CONTROL_RESPONSE_WAIT, peer_event_rx.recv())
             .await
             .expect("stalled peer work survived mark-read timeout"),
         Some("mark-closed".into()),
@@ -398,7 +407,10 @@ async fn sidecar_fails_closed_in_both_shipped_v4_terminal_input_directions() {
     });
     let mut sidecar = SidecarProcess { child, stdin };
 
-    let primary_entry = tokio::time::timeout(Duration::from_secs(2), async {
+    // Liveness: a freshly spawned sidecar either advertises its listener or
+    // never does. Two seconds was a wall-clock guess at how long spawning a
+    // binary and writing a registry entry takes on an idle box.
+    let primary_entry = tokio::time::timeout(CONTROL_RESPONSE_WAIT, async {
         loop {
             if let Some(entry) = registry
                 .list_peers("")
@@ -430,7 +442,7 @@ async fn sidecar_fails_closed_in_both_shipped_v4_terminal_input_directions() {
             },
         );
         let response = response_rx
-            .recv_timeout(Duration::from_secs(1))
+            .recv_timeout(CONTROL_RESPONSE_WAIT)
             .unwrap_or_else(|error| panic!("no control response for {request_id}: {error}"));
         assert!(
             matches!(

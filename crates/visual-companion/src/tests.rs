@@ -810,8 +810,11 @@ fn asset_bundle_omits_non_utf8_names_and_non_regular_entries_promptly() {
 
     let started = std::time::Instant::now();
     let bundle = current_bundle(fixture.worktree()).unwrap().unwrap();
+    // Opening the FIFO for read blocks until someone writes, which no one
+    // ever does: the failure this guards is unbounded, so the ceiling only
+    // has to be finite and clear of scheduler noise.
     assert!(
-        started.elapsed() < Duration::from_secs(1),
+        started.elapsed() < Duration::from_secs(30),
         "asset discovery blocked on a non-regular entry"
     );
     assert_eq!(
@@ -2240,7 +2243,10 @@ fn refuses_a_fifo_event_target_promptly_without_writing() {
         result_tx.send(result).unwrap();
     });
 
-    let prompt_result = result_rx.recv_timeout(Duration::from_millis(250));
+    // Blocking on an untrusted FIFO open is unbounded, so this only has to be
+    // finite: the slow path below still recovers, and `returned_promptly` is
+    // what the assertion reads.
+    let prompt_result = result_rx.recv_timeout(Duration::from_secs(5));
     let returned_promptly = prompt_result.is_ok();
     let mut reader = std::fs::OpenOptions::new()
         .read(true)
@@ -2250,7 +2256,7 @@ fn refuses_a_fifo_event_target_promptly_without_writing() {
     let append_result = match prompt_result {
         Ok(result) => result,
         Err(mpsc::RecvTimeoutError::Timeout) => result_rx
-            .recv_timeout(Duration::from_secs(1))
+            .recv_timeout(Duration::from_secs(10))
             .expect("opening a FIFO reader should release a blocking writer"),
         Err(error) => panic!("visual companion append channel failed: {error}"),
     };

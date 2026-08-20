@@ -1,6 +1,7 @@
 import { configDefaults, defineConfig } from "vitest/config";
 import vue from "@vitejs/plugin-vue";
 import path from "path";
+import { sharedTestOptions } from "../../vitest.shared";
 
 export default defineConfig({
   plugins: [vue()],
@@ -11,8 +12,9 @@ export default defineConfig({
     },
   },
   test: {
+    ...sharedTestOptions,
     environment: "happy-dom",
-    setupFiles: ["./src/composables/test-setup.ts"],
+    setupFiles: [...sharedTestOptions.setupFiles, "./src/composables/test-setup.ts"],
     // Driven suites need a running app and are launched through
     // `tests/e2e/run.ts` with `tests/e2e/vitest.config.ts`. Collecting them
     // from a bare `vitest run` only runs their setup/cleanup hooks against no

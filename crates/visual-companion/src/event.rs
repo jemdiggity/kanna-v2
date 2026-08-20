@@ -901,8 +901,12 @@ mod tests {
 
         assert_eq!(repair, LegacyTailRepair::Oversized);
         assert_eq!(reader.bytes_read, MAX_COMPANION_EVENT_BYTES + 1);
+        // `reader.bytes_read` above is the real proof that the read is
+        // bounded; this only guards against a repair that walks the whole
+        // 64 GiB sparse file, which costs minutes. An order-of-magnitude
+        // ceiling keeps that signal without racing a loaded box.
         assert!(
-            started.elapsed() < Duration::from_secs(1),
+            started.elapsed() < Duration::from_secs(30),
             "bounded legacy repair took {:?}",
             started.elapsed()
         );

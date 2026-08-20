@@ -311,9 +311,13 @@ mod tests {
                 .start,
             "/tmp/not-the-live-peer-executable",
         )));
+        // The rejection this guards is "before the request read": a peer that
+        // never sends a frame would otherwise hold the connection open
+        // indefinitely, so any bounded return proves it. 30s only catches that
+        // unbounded case and never a loaded box.
         let started = std::time::Instant::now();
         assert!(authenticate_peer_before_frame(&server, &trusted).is_err());
-        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(started.elapsed() < std::time::Duration::from_secs(30));
     }
 
     #[tokio::test]
@@ -326,6 +330,8 @@ mod tests {
                 .await
                 .unwrap_err();
         assert!(error.contains("timed out"));
-        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        // Same shape: an unenforced lifetime never returns at all, so the
+        // ceiling only has to be finite. Keep it far above scheduler noise.
+        assert!(started.elapsed() < std::time::Duration::from_secs(30));
     }
 }

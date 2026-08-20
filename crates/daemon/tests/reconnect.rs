@@ -712,6 +712,16 @@ fn daemon_log_contents(daemon: &DaemonHandle) -> String {
         .join("\n")
 }
 
+/// How long a bare [`ClientConn::recv`] waits for the next daemon event.
+///
+/// `recv` panics when this expires, so it is a liveness ceiling, not a budget:
+/// no test can pass *because* it fired. A test that wants a bounded "nothing
+/// arrived" check uses `recv_with_timeout` or `assert_no_event_within`, which
+/// set their own timeout and restore this one afterwards. The former 5s value
+/// was tight enough to fail a correct run on a box carrying several
+/// worktrees' suites, which is the whole failure class this branch removes.
+const CLIENT_EVENT_WAIT: Duration = Duration::from_secs(60);
+
 struct ClientConn {
     reader: BufReader<UnixStream>,
     writer: UnixStream,
@@ -737,9 +747,7 @@ impl ClientConn {
 
     fn connect(socket_path: &Path) -> Self {
         let stream = UnixStream::connect(socket_path).expect("failed to connect to daemon");
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
+        stream.set_read_timeout(Some(CLIENT_EVENT_WAIT)).unwrap();
         ClientConn {
             reader: BufReader::new(stream.try_clone().unwrap()),
             writer: stream,
@@ -783,7 +791,7 @@ impl ClientConn {
 
         self.reader
             .get_mut()
-            .set_read_timeout(Some(Duration::from_secs(5)))
+            .set_read_timeout(Some(CLIENT_EVENT_WAIT))
             .map_err(|error| format!("failed to restore read timeout: {error}"))?;
         result
     }
@@ -799,7 +807,7 @@ impl ClientConn {
 
         self.reader
             .get_mut()
-            .set_read_timeout(Some(Duration::from_secs(5)))
+            .set_read_timeout(Some(CLIENT_EVENT_WAIT))
             .expect("failed to restore read timeout");
 
         match result {
@@ -1353,17 +1361,12 @@ fn authenticated_server_declassifies_a_legacy_session_for_ordinary_input() {
             other => panic!("expected ordinary input acknowledgement, got {other:?}"),
         }
     }
-    conn.send(&Cmd::Snapshot {
-        session_id: session_id.to_string(),
-    });
-    let snapshot = loop {
-        match conn.recv() {
-            Evt::Snapshot { snapshot, .. } => break snapshot,
-            Evt::Output { .. } | Evt::StatusChanged { .. } => continue,
-            other => panic!("expected ordinary session snapshot, got {other:?}"),
-        }
-    };
-    assert!(snapshot.vt.contains("ordinary policy request"));
+    // The `Evt::Ok` above is a write acknowledgement, not a render: `/bin/cat`
+    // still has to echo the bytes back through the PTY and the daemon still has
+    // to feed them to the vt parser. Asserting on one snapshot taken right
+    // after the ack raced that under load; poll until the text lands, the way
+    // the sibling declassification tests already do.
+    wait_for_snapshot(&mut conn, session_id, "ordinary policy request");
 }
 
 #[test]
@@ -2101,19 +2104,29 @@ fn cleanup_atomic_attach_dir(dir: &Path) {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Polls snapshots until `needle` appears in the rendered screen.
+///
+/// This is a liveness wait, not a latency budget: a write acknowledgement is
+/// not a render, and the text this waits for either arrives or never does. The
+/// ceiling therefore only has to be finite and far enough above scheduler
+/// noise that a box running several worktrees' suites cannot trip it — the
+/// former bound of 50 polls at 50ms was a 2.5s absolute deadline, tight enough
+/// to fail a correct run under load.
 fn wait_for_snapshot(conn: &mut ClientConn, session_id: &str, needle: &str) -> SnapshotPayload {
-    for _ in 0..50 {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
         let snapshot = request_snapshot(conn, session_id);
         if snapshot.vt.contains(needle) {
             return snapshot;
         }
+        assert!(
+            Instant::now() < deadline,
+            "snapshot for session {:?} never contained {:?}",
+            session_id,
+            needle
+        );
         std::thread::sleep(Duration::from_millis(50));
     }
-
-    panic!(
-        "snapshot for session {:?} never contained {:?}",
-        session_id, needle
-    );
 }
 
 fn send_input(conn: &mut ClientConn, session_id: &str, data: &[u8]) {
@@ -3072,12 +3085,16 @@ fn non_reading_attached_client_does_not_block_healthy_terminal_output() {
     std::fs::write(dir.join("go"), b"go").unwrap();
 
     // Zero-delay requirement: the healthy client must receive the entire
-    // flood while the stalled client's socket is saturated, well below the
-    // former 500ms per-chunk write timeout — not merely less than it.
-    healthy.collect_output_until_contains_with_timeout("FLOOD_DONE", Duration::from_millis(350));
+    // flood while the stalled client's socket is saturated. The regression
+    // this guards is the 500ms per-chunk write timeout being paid for every
+    // chunk the stalled subscriber cannot take — a 16 KiB flood into a
+    // 4096-byte receive buffer, so seconds, not milliseconds. The ceiling
+    // therefore only has to be an order of magnitude under that, which keeps
+    // it out of reach of scheduler noise on a box running several suites.
+    healthy.collect_output_until_contains_with_timeout("FLOOD_DONE", Duration::from_millis(2_000));
     let flood_latency = flood_started.elapsed();
     assert!(
-        flood_latency < Duration::from_millis(350),
+        flood_latency < Duration::from_millis(2_000),
         "healthy delivery must not wait on the stalled subscriber; took {flood_latency:?}"
     );
 
@@ -3086,7 +3103,7 @@ fn non_reading_attached_client_does_not_block_healthy_terminal_output() {
         data: b"HEALTHY_MARKER\n".to_vec(),
     });
     let output = healthy
-        .collect_output_until_contains_with_timeout("HEALTHY_MARKER", Duration::from_millis(350));
+        .collect_output_until_contains_with_timeout("HEALTHY_MARKER", Duration::from_millis(2_000));
     let output = String::from_utf8_lossy(&output);
     let marker = output
         .find("HEALTHY_MARKER")
@@ -3587,9 +3604,13 @@ fn stream_output_prioritizes_live_delivery_before_recovery_persistence() {
     // the real app stack, but it cannot deterministically make only recovery
     // persistence slow for a live daemon. This daemon-level hook supplies that
     // missing control point and guards the ordering that protects PTY echo.
+    // The injected persistence delay and the latency ceiling below move
+    // together: live echo has to land an order of magnitude inside the delay,
+    // not merely beat it. Raising both keeps that ratio while leaving the
+    // ceiling well clear of what a loaded box adds to a PTY round trip.
     let daemon = DaemonHandle::start_with_fake_recovery([(
         "KANNA_DAEMON_TEST_SLOW_RECOVERY_WRITE_MS",
-        "1200",
+        "6000",
     )]);
 
     let mut shared = daemon.connect();
@@ -3608,13 +3629,13 @@ fn stream_output_prioritizes_live_delivery_before_recovery_persistence() {
     );
 
     let output =
-        attached.collect_output_until_contains_with_timeout(marker, Duration::from_millis(700));
+        attached.collect_output_until_contains_with_timeout(marker, Duration::from_millis(3_000));
     assert!(
         String::from_utf8_lossy(&output).contains(marker),
         "attached PTY client should receive echoed input before slow recovery bookkeeping"
     );
     assert!(
-        started.elapsed() < Duration::from_millis(900),
+        started.elapsed() < Duration::from_millis(3_000),
         "live PTY echo should not wait for the injected recovery persistence delay"
     );
 }

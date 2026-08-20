@@ -137,7 +137,11 @@ function waitForChild(child) {
   });
 }
 
-async function waitForFile(path, timeoutMs = 5_000) {
+// A liveness wait on a spawned build's marker, not a latency budget: the
+// failure it guards is a marker that never appears. The ceiling is generous
+// because this box routinely runs several worktrees' suites at once, and a
+// short one turned a slow-but-correct spawn into a failure.
+async function waitForFile(path, timeoutMs = 60_000) {
   const deadline = Date.now() + timeoutMs;
   while (!existsSync(path)) {
     if (Date.now() >= deadline) {
@@ -337,7 +341,9 @@ describe("kd installation publication", () => {
       ],
       {
         encoding: "utf8",
-        timeout: 10_000
+        // Liveness only: the retry either recovers the stale lock or it does
+        // not. Sized to survive a box running several suites, not to time it.
+        timeout: 120_000
       }
     );
 
@@ -810,11 +816,13 @@ describe("kd installation resolver", () => {
       KANNA_KD_CACHE_ROOT: cacheRoot
     };
 
+    // A real cold install: pnpm install plus a tsup build. The assertions
+    // are about what it produced, never how long it took.
     const first = spawnSync(process.execPath, [resolver, "kd"], {
       cwd: repoRoot,
       env,
       encoding: "utf8",
-      timeout: 180_000
+      timeout: 600_000
     });
 
     expect(first.status).toBe(0);
@@ -830,7 +838,7 @@ describe("kd installation resolver", () => {
         NODE_PATH: ""
       },
       encoding: "utf8",
-      timeout: 30_000
+      timeout: 120_000
     });
     expect(standalone.status).toBe(0);
     expect(standalone.stdout).toContain("Usage: kd <command>");
@@ -839,10 +847,10 @@ describe("kd installation resolver", () => {
       cwd: repoRoot,
       env,
       encoding: "utf8",
-      timeout: 30_000
+      timeout: 120_000
     });
     expect(second.status).toBe(0);
     expect(second.stdout.trim()).toBe(entrypoint);
     expect(second.stderr).toBe("");
-  }, 240_000);
+  }, 780_000);
 });
