@@ -114,6 +114,10 @@ export function createRelayDesktopClient({
       }),
       reconnectDelaysMs: [250, 500, 1000, 2000],
       onAuthError,
+      // The relay path is the one the owner measured at ~4.9 MB per five
+      // minutes of viewing: bounded snapshots, on-demand scrollback, and delta
+      // resubscribe are all negotiated here.
+      terminalScrollbackWindow: true,
     });
     streamClients.set(desktopId, client);
     return client;
@@ -435,13 +439,28 @@ export function createRelayDesktopClient({
     observeTaskTerminal({ desktopId, taskId }, listener) {
       const client = streamClientForDesktop(desktopId);
       client.attachTerminal(taskId, {
-        onSnapshot(cols, rows, dataB64) {
-          listener({ type: "snapshot", taskId, cols, rows, dataB64 });
+        onSnapshot(cols, rows, dataB64, _agentProvider, window) {
+          listener({
+            type: "snapshot",
+            taskId,
+            cols,
+            rows,
+            dataB64,
+            // Omitted rather than nulled for an unwindowed snapshot: the event
+            // shape a legacy desktop produces is unchanged.
+            ...(window ? { window } : {})
+          });
         },
         onOutput(dataB64) {
           if (dataB64) {
             listener({ type: "output", taskId, dataB64 });
           }
+        },
+        onResumed(window) {
+          listener({ type: "resumed", taskId, window });
+        },
+        onScrollbackChunk(chunk) {
+          listener({ type: "scrollback", taskId, chunk });
         },
         onSessionExit(code) {
           listener({ type: "exit", taskId, code });
@@ -466,6 +485,9 @@ export function createRelayDesktopClient({
         },
         resize(cols: number, rows: number) {
           client.sendTermResize(taskId, cols, rows);
+        },
+        requestScrollback(request) {
+          client.requestTerminalScrollback(taskId, request);
         }
       } satisfies TaskTerminalSubscription;
     },

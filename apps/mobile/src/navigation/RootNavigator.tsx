@@ -679,6 +679,12 @@ function TaskDetailRoute({
           controller.resizeTaskTerminal(durableTaskId, cols, rows);
         }
       }}
+      onRequestTerminalScrollback={() => {
+        const durableTaskId = resolveDurableTaskId(state, routeTaskId);
+        if (durableTaskId) {
+          controller.requestTaskTerminalScrollback(durableTaskId);
+        }
+      }}
       onStopAgent={() => {
         const durableTaskId = resolveDurableTaskId(state, routeTaskId);
         if (durableTaskId) controller.interruptTaskAgent(durableTaskId);

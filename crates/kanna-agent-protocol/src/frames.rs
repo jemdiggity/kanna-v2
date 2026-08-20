@@ -40,6 +40,12 @@ pub enum KspCapability {
     CompanionAttachmentEpoch,
     CompanionEventEpoch,
     TermInputBoundary,
+    /// The client accepts a *bounded* terminal snapshot (visible screen plus a
+    /// window of recent scrollback), pulls older scrollback on demand, and
+    /// presents a resume position on re-attach so the server replays the delta
+    /// instead of the whole buffer. A client that does not advertise this gets
+    /// the unbounded snapshot and the per-attachment daemon stream unchanged.
+    TermScrollbackWindow,
     #[serde(other)]
     Unknown,
 }
@@ -104,6 +110,20 @@ pub struct FrameAgentEvent {
     pub event: AgentEvent,
 }
 
+/// Where a re-attaching terminal client's rendered buffer stopped.
+///
+/// `stream_id` names the server's tap generation the offset belongs to: a
+/// daemon reconnect restarts the byte stream, so an offset is only meaningful
+/// within its own generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(TS), ts(export))]
+pub struct TermResumePosition {
+    #[cfg_attr(feature = "typescript", ts(type = "number"))]
+    pub stream_id: u64,
+    #[cfg_attr(feature = "typescript", ts(type = "number"))]
+    pub offset: u64,
+}
+
 /// Frames sent by clients to kanna-server.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -136,6 +156,12 @@ pub enum ClientFrame {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "typescript", ts(type = "number"))]
         attachment_epoch: Option<u64>,
+        /// Terminal streams only. Where this client's rendered buffer stopped,
+        /// so the server can replay the missed bytes instead of re-shipping the
+        /// whole terminal. Ignored unless the client negotiated
+        /// [`KspCapability::TermScrollbackWindow`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        term_resume: Option<TermResumePosition>,
     },
     Detach {
         task_id: String,
@@ -184,6 +210,19 @@ pub enum ClientFrame {
         task_id: String,
         cols: u16,
         rows: u16,
+    },
+    /// Pull one bounded chunk of scrollback older than what the client holds.
+    /// `before_line` indexes the retained history identified by `history_id`,
+    /// counted from its oldest retained line; a client walks it downward until
+    /// `remaining_lines` reaches zero.
+    TermScrollbackRequest {
+        task_id: String,
+        #[cfg_attr(feature = "typescript", ts(type = "number"))]
+        request_id: u64,
+        #[cfg_attr(feature = "typescript", ts(type = "number"))]
+        history_id: u64,
+        before_line: u32,
+        max_lines: u32,
     },
     /// Send a structured selection back to the currently displayed visual
     /// companion. The server validates both session and revision before
@@ -237,6 +276,12 @@ pub enum ServerFrame {
         event: AgentEvent,
     },
     /// Terminal attach reply: serialized terminal state to hydrate xterm.
+    ///
+    /// For a client that negotiated [`KspCapability::TermScrollbackWindow`],
+    /// `data_b64` carries only the bounded window (visible screen plus recent
+    /// scrollback) and the fields below describe what was left behind and where
+    /// the live byte stream continues. They are omitted entirely for every
+    /// other client, whose snapshot is the whole terminal exactly as before.
     TermSnapshot {
         task_id: String,
         cols: u16,
@@ -244,6 +289,58 @@ pub enum ServerFrame {
         data_b64: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_provider: Option<AgentProvider>,
+        /// The tap generation `stream_offset` belongs to.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "typescript", ts(type = "number"))]
+        stream_id: Option<u64>,
+        /// Byte offset in that generation at which this snapshot is valid; the
+        /// client adds each `term_output` frame's decoded length to it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "typescript", ts(type = "number"))]
+        stream_offset: Option<u64>,
+        /// Identifies the retained scrollback history this window was cut from.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "typescript", ts(type = "number"))]
+        history_id: Option<u64>,
+        /// Lines of older scrollback the server retained and will serve through
+        /// `term_scrollback_request`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scrollback_lines: Option<u32>,
+    },
+    /// Terminal re-attach reply when the server can replay: the client keeps
+    /// the buffer it already rendered and the missed bytes follow as ordinary
+    /// `term_output` frames. Sent *instead of* a snapshot.
+    TermResumed {
+        task_id: String,
+        #[cfg_attr(feature = "typescript", ts(type = "number"))]
+        stream_id: u64,
+        /// The offset the replay starts at — the position the client presented.
+        #[cfg_attr(feature = "typescript", ts(type = "number"))]
+        offset: u64,
+        cols: u16,
+        rows: u16,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_provider: Option<AgentProvider>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "typescript", ts(type = "number"))]
+        history_id: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scrollback_lines: Option<u32>,
+    },
+    /// One bounded chunk of scrollback older than the client's buffer, in reply
+    /// to a `term_scrollback_request`. `data_b64` is prepended above what the
+    /// client holds. `remaining_lines` is how much older history is still
+    /// retained below `start_line`.
+    TermScrollbackChunk {
+        task_id: String,
+        #[cfg_attr(feature = "typescript", ts(type = "number"))]
+        request_id: u64,
+        #[cfg_attr(feature = "typescript", ts(type = "number"))]
+        history_id: u64,
+        start_line: u32,
+        end_line: u32,
+        data_b64: String,
+        remaining_lines: u32,
     },
     TermOutput {
         task_id: String,
@@ -385,6 +482,26 @@ mod tests {
                 include_assets: None,
                 accept_snapshot_chunks: None,
                 attachment_epoch: None,
+                term_resume: None,
+            },
+            ClientFrame::Attach {
+                task_id: "t2".into(),
+                kind: StreamKind::Terminal,
+                from_seq: 0,
+                include_assets: None,
+                accept_snapshot_chunks: None,
+                attachment_epoch: None,
+                term_resume: Some(TermResumePosition {
+                    stream_id: 4,
+                    offset: 8192,
+                }),
+            },
+            ClientFrame::TermScrollbackRequest {
+                task_id: "t2".into(),
+                request_id: 9,
+                history_id: 4,
+                before_line: 200,
+                max_lines: 100,
             },
             ClientFrame::AgentInput {
                 task_id: "t1".into(),
@@ -518,6 +635,7 @@ mod tests {
                 include_assets: None,
                 accept_snapshot_chunks: None,
                 attachment_epoch: None,
+                term_resume: None,
             }
         );
 
@@ -534,6 +652,7 @@ mod tests {
                 include_assets: Some(false),
                 accept_snapshot_chunks: None,
                 attachment_epoch: None,
+                term_resume: None,
             }
         );
         assert_eq!(

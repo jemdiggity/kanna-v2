@@ -418,7 +418,11 @@ describe("createRelayDesktopClient", () => {
       3,
       JSON.stringify({
         type: "auth",
-        capabilities: ["companion_event_epoch", "term_input_boundary"],
+        capabilities: [
+          "companion_event_epoch",
+          "term_input_boundary",
+          "term_scrollback_window"
+        ],
         credential: "id-token-1"
       })
     );

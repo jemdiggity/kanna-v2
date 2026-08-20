@@ -1103,6 +1103,291 @@ describe("createSessionStore", () => {
     expect(publishes).toBe(1);
   });
 
+  it("records the retained scrollback a bounded snapshot names", () => {
+    const store = createSessionStore();
+    store.beginTaskTerminal("task-1", "");
+
+    store.replaceTaskTerminalSnapshot("task-1", "d2luZG93", 132, 43, {
+      streamId: 3,
+      historyId: 9,
+      scrollbackLines: 1_200
+    });
+
+    expect(store.getState().taskTerminalScrollback).toEqual({
+      historyId: 9,
+      remainingLines: 1_200,
+      loading: false,
+      atClientLimit: false
+    });
+
+    // A desktop that sent the whole terminal has nothing retained.
+    store.replaceTaskTerminalSnapshot("task-1", "d2hvbGU=", 132, 43);
+    expect(store.getState().taskTerminalScrollback).toBeNull();
+  });
+
+  it("splices older scrollback above the loaded buffer", () => {
+    const store = createSessionStore();
+    store.beginTaskTerminal("task-1", "");
+    store.replaceTaskTerminalSnapshot("task-1", "d2luZG93", 132, 43, {
+      streamId: 3,
+      historyId: 9,
+      scrollbackLines: 400
+    });
+    store.appendTaskTerminal("task-1", "bGl2ZQ==\n");
+    const epochBefore = store.getState().taskTerminalOutputEpoch;
+    let prepended: boolean | null = null;
+    store.taskTerminalOutputSource.subscribe(() => {
+      prepended = store.taskTerminalOutputSource.getSnapshot().prependedScrollback;
+    });
+
+    store.setTaskTerminalScrollbackLoading("task-1", true);
+    store.prependTaskTerminalScrollback("task-1", {
+      requestId: 1,
+      historyId: 9,
+      startLine: 200,
+      endLine: 400,
+      dataB64: "b2xkZXI=",
+      remainingLines: 200
+    });
+
+    expect(terminalText(store)).toBe("b2xkZXI=\nd2luZG93\nbGl2ZQ==\n");
+    expect(store.getState().taskTerminalOutputEpoch).toBe(epochBefore + 1);
+    expect(store.getState().taskTerminalScrollback).toEqual({
+      historyId: 9,
+      remainingLines: 200,
+      loading: false,
+      atClientLimit: false
+    });
+    expect(prepended).toBe(true);
+  });
+
+  it("refuses a prepend that would not fit rather than evicting the middle", () => {
+    // The reviewer's reproduction: a 340k-char window plus a 200k-char live
+    // frame, then 87k-char chunks walked upward past the client's bound. Under
+    // front-eviction the 6th prepend silently dropped the 5th; the buffer must
+    // instead stop growing and stay contiguous.
+    const store = createSessionStore();
+    store.beginTaskTerminal("task-1", "");
+    const windowFrame = "W".repeat(340_000);
+    store.replaceTaskTerminalSnapshot("task-1", windowFrame, 132, 43, {
+      streamId: 3,
+      historyId: 9,
+      scrollbackLines: 5_000
+    });
+    store.appendTaskTerminal("task-1", `${"L".repeat(200_000)}\n`);
+
+    const chunks: string[] = [];
+    let accepted = 0;
+    for (let index = 0; index < 20; index += 1) {
+      const dataB64 = `${`${index}`.padStart(8, "C")}${"c".repeat(87_000)}`;
+      const before = store.getState().taskTerminalScrollback;
+      store.prependTaskTerminalScrollback("task-1", {
+        requestId: index,
+        historyId: 9,
+        startLine: 5_000 - (index + 1) * 200,
+        endLine: 5_000 - index * 200,
+        dataB64,
+        remainingLines: 5_000 - (index + 1) * 200
+      });
+      const after = store.getState().taskTerminalScrollback;
+      if (after?.atClientLimit && !before?.atClientLimit) {
+        // Refused: the buffer keeps exactly what it had.
+        break;
+      }
+      chunks.unshift(dataB64);
+      accepted += 1;
+    }
+
+    expect(accepted).toBeGreaterThan(5);
+    expect(store.getState().taskTerminalScrollback).toMatchObject({
+      historyId: 9,
+      loading: false,
+      atClientLimit: true
+    });
+    // Contiguous: every accepted chunk, in order, then the window, then live —
+    // nothing missing between the newest prepended chunk and the retained tail.
+    const frames = terminalText(store).split("\n").filter(Boolean);
+    expect(frames).toEqual([
+      ...chunks,
+      windowFrame,
+      "L".repeat(200_000)
+    ]);
+  });
+
+  it("keeps the prepended history contiguous while live output evicts", () => {
+    const store = createSessionStore();
+    store.beginTaskTerminal("task-1", "");
+    store.replaceTaskTerminalSnapshot("task-1", "d2luZG93", 132, 43, {
+      streamId: 3,
+      historyId: 9,
+      scrollbackLines: 400
+    });
+    store.prependTaskTerminalScrollback("task-1", {
+      requestId: 1,
+      historyId: 9,
+      startLine: 200,
+      endLine: 400,
+      dataB64: "b2xkZXI=",
+      remainingLines: 200
+    });
+
+    // Push the live region past its own cap. Eviction stays where it always
+    // was — the front of live output — and never reaches back into the
+    // prepended history or the window frame between them.
+    const liveFrames = Array.from({ length: 12 }, (_, index) =>
+      String.fromCharCode(97 + index).repeat(100_000)
+    );
+    for (const frame of liveFrames) {
+      store.appendTaskTerminal("task-1", `${frame}\n`);
+    }
+
+    const frames = terminalText(store).split("\n").filter(Boolean);
+    expect(frames[0]).toBe("b2xkZXI=");
+    expect(frames[1]).toBe("d2luZG93");
+    // The surviving live frames are a contiguous suffix of what was appended:
+    // eviction took whole frames off the front and nothing from the middle.
+    const live = frames.slice(2);
+    expect(live.length).toBeLessThan(liveFrames.length);
+    expect(live).toEqual(liveFrames.slice(liveFrames.length - live.length));
+  });
+
+  it("ignores a scrollback chunk cut from a replaced history", () => {
+    const store = createSessionStore();
+    store.beginTaskTerminal("task-1", "");
+    store.replaceTaskTerminalSnapshot("task-1", "d2luZG93", 132, 43, {
+      streamId: 3,
+      historyId: 9,
+      scrollbackLines: 400
+    });
+
+    store.prependTaskTerminalScrollback("task-1", {
+      requestId: 1,
+      historyId: 10,
+      startLine: 0,
+      endLine: 200,
+      dataB64: "c3RhbGU=",
+      remainingLines: 0
+    });
+
+    expect(terminalText(store)).toBe("d2luZG93\n");
+    expect(store.getState().taskTerminalScrollback).toEqual({
+      historyId: 9,
+      remainingLines: 400,
+      loading: false,
+      atClientLimit: false
+    });
+  });
+
+  it("keeps the rendered buffer when the desktop resumes the stream", () => {
+    const store = createSessionStore();
+    store.beginTaskTerminal("task-1", "");
+    store.replaceTaskTerminalSnapshot("task-1", "d2luZG93", 132, 43, {
+      streamId: 3,
+      historyId: 9,
+      scrollbackLines: 400
+    });
+    store.appendTaskTerminal("task-1", "bGl2ZQ==\n");
+    const epochBefore = store.getState().taskTerminalOutputEpoch;
+
+    store.resumeTaskTerminal("task-1", {
+      streamId: 3,
+      historyId: 9,
+      scrollbackLines: 400
+    });
+
+    expect(terminalText(store)).toBe("d2luZG93\nbGl2ZQ==\n");
+    expect(store.getState().taskTerminalOutputEpoch).toBe(epochBefore);
+    expect(store.getState().taskTerminalStatus).toBe("live");
+  });
+
+  it("keeps the scrollback walk cursor across a resume of the same history", () => {
+    // `scrollbackLines` on a resume is the desktop's full retained history, not
+    // what this viewer has left to pull. Adopting it would rewind the walk and
+    // re-pull rows the buffer already holds.
+    const store = createSessionStore();
+    store.beginTaskTerminal("task-1", "");
+    store.replaceTaskTerminalSnapshot("task-1", "d2luZG93", 132, 43, {
+      streamId: 3,
+      historyId: 9,
+      scrollbackLines: 400
+    });
+    store.prependTaskTerminalScrollback("task-1", {
+      requestId: 1,
+      historyId: 9,
+      startLine: 200,
+      endLine: 400,
+      dataB64: "b2xkZXI=",
+      remainingLines: 200
+    });
+    expect(store.getState().taskTerminalScrollback?.remainingLines).toBe(200);
+
+    store.resumeTaskTerminal("task-1", {
+      streamId: 3,
+      historyId: 9,
+      scrollbackLines: 400
+    });
+
+    expect(store.getState().taskTerminalScrollback).toEqual({
+      historyId: 9,
+      remainingLines: 200,
+      loading: false,
+      atClientLimit: false
+    });
+    expect(terminalText(store)).toBe("b2xkZXI=\nd2luZG93\n");
+  });
+
+  it("keeps the client limit across a resume of the same history", () => {
+    const store = createSessionStore();
+    store.beginTaskTerminal("task-1", "");
+    store.replaceTaskTerminalSnapshot("task-1", "d2luZG93", 132, 43, {
+      streamId: 3,
+      historyId: 9,
+      scrollbackLines: 400
+    });
+    store.markTaskTerminalScrollbackAtClientLimit("task-1");
+    expect(store.getState().taskTerminalScrollback?.atClientLimit).toBe(true);
+
+    store.resumeTaskTerminal("task-1", {
+      streamId: 3,
+      historyId: 9,
+      scrollbackLines: 400
+    });
+
+    // A viewer that had stopped at the client bound must not restart the walk
+    // and prepend duplicates until the refusal fires again.
+    expect(store.getState().taskTerminalScrollback?.atClientLimit).toBe(true);
+  });
+
+  it("stops the walk when a resume reports a history the viewer did not pull from", () => {
+    const store = createSessionStore();
+    store.beginTaskTerminal("task-1", "");
+    store.replaceTaskTerminalSnapshot("task-1", "d2luZG93", 132, 43, {
+      streamId: 3,
+      historyId: 9,
+      scrollbackLines: 400
+    });
+    store.prependTaskTerminalScrollback("task-1", {
+      requestId: 1,
+      historyId: 9,
+      startLine: 200,
+      endLine: 400,
+      dataB64: "b2xkZXI=",
+      remainingLines: 200
+    });
+
+    // The desktop took a fresh base while this viewer was away: its line
+    // indices do not address the rows already loaded here.
+    store.resumeTaskTerminal("task-1", {
+      streamId: 3,
+      historyId: 10,
+      scrollbackLines: 900
+    });
+
+    expect(store.getState().taskTerminalScrollback).toBeNull();
+    // The rendered buffer is untouched — the replayed delta keeps it correct.
+    expect(terminalText(store)).toBe("b2xkZXI=\nd2luZG93\n");
+  });
+
   it("evicts only whole oldest live frames while retaining the snapshot", () => {
     const store = createSessionStore();
     store.beginTaskTerminal("task-1", "");

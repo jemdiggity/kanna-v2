@@ -10,6 +10,7 @@ import type {
   AgentEvent,
   AgentProvider,
   ClientFrame,
+  TermResumePosition,
   CompanionDocumentKind,
   CompanionEvent,
   FrameAgentEvent,
@@ -61,14 +62,50 @@ export interface AgentStreamHandlers {
   onError?(code: string, message: string): void;
 }
 
+/**
+ * What a bounded terminal snapshot says about the rest of the buffer: where the
+ * live byte stream continues (so a reconnect can resume from it) and how much
+ * older scrollback the server kept back (so the viewer can pull it on demand).
+ *
+ * Absent for a client that did not negotiate `term_scrollback_window`, whose
+ * snapshot is the whole terminal.
+ */
+export interface TerminalWindowMetadata {
+  streamId: number;
+  historyId: number | null;
+  scrollbackLines: number;
+}
+
+/** One bounded answer to a scrollback request, prepended above the buffer. */
+export interface TerminalScrollbackChunk {
+  requestId: number;
+  historyId: number;
+  startLine: number;
+  endLine: number;
+  dataB64: string;
+  remainingLines: number;
+}
+
+export interface TerminalScrollbackRequest {
+  historyId: number;
+  beforeLine: number;
+  maxLines: number;
+}
+
 export interface TerminalStreamHandlers {
   onSnapshot?(
     cols: number,
     rows: number,
     dataB64: string,
     agentProvider?: AgentProvider | null,
+    window?: TerminalWindowMetadata | null,
   ): void;
   onOutput(dataB64: string, metadata: TerminalOutputMetadata): void;
+  /** The server replayed from the client's resume position instead of sending
+   * a snapshot: the rendered buffer is still current, and the bytes missed
+   * while the link was down arrive as ordinary output. */
+  onResumed?(window: TerminalWindowMetadata): void;
+  onScrollbackChunk?(chunk: TerminalScrollbackChunk): void;
   onStatus?(status: string): void;
   onSessionExit?(code: number): void;
   onError?(code: string, message: string): void;
@@ -166,6 +203,13 @@ export interface StreamClientOptions {
   now?: () => number;
   /** Decode large inbound frames away from the UI thread. */
   frameDecoder?: StreamFrameDecoder;
+  /**
+   * Negotiate `term_scrollback_window`: bounded terminal snapshots, scrollback
+   * pulled on demand, and delta replay on re-attach. Off by default — a
+   * localhost desktop client has no reason to trade scrollback completeness
+   * for bytes it does not pay for.
+   */
+  terminalScrollbackWindow?: boolean;
 }
 
 interface AgentAttachment {
@@ -178,6 +222,10 @@ interface AgentAttachment {
 interface TerminalAttachment {
   kind: "terminal";
   handlers: TerminalStreamHandlers;
+  /** Where this attachment's rendered buffer stopped, tracked locally: the
+   * snapshot names the starting offset and every output frame's own decoded
+   * length advances it, so resuming costs nothing on the wire. */
+  resume: TermResumePosition | null;
 }
 
 interface CompanionAttachment {
@@ -267,6 +315,7 @@ export class StreamClient {
    * treated as an auth failure even without a relay close code. */
   private authFailurePending = false;
   private nextRequestId = 1;
+  private nextScrollbackRequestId = 1;
   private readonly pendingRequests = new Map<number, PendingRequest>();
   private readonly pendingCompanionEvents = new Map<string, PendingCompanionEvent>();
   private readonly attachments = new Map<string, Attachment>();
@@ -339,6 +388,7 @@ export class StreamClient {
     this.attachments.set(attachmentKey(taskId, "terminal"), {
       kind: "terminal",
       handlers,
+      resume: null,
     });
     this.sendFrame({ type: "attach", task_id: taskId, kind: "terminal", from_seq: 0 });
   }
@@ -354,6 +404,26 @@ export class StreamClient {
 
   detachTaskSummaries(): void {
     this.detach("__desktop__", "task_summary");
+  }
+
+  /**
+   * Pull one bounded chunk of scrollback older than what this viewer holds.
+   * Silently ignored when the peer did not negotiate the window capability:
+   * such a peer already sent the whole buffer, so there is nothing to pull.
+   */
+  requestTerminalScrollback(
+    taskId: string,
+    request: TerminalScrollbackRequest,
+  ): void {
+    if (!this.supportsCapability("term_scrollback_window")) return;
+    this.sendFrame({
+      type: "term_scrollback_request",
+      task_id: taskId,
+      request_id: this.nextScrollbackRequestId++,
+      history_id: request.historyId,
+      before_line: request.beforeLine,
+      max_lines: request.maxLines,
+    });
   }
 
   attachCompanion(
@@ -662,7 +732,13 @@ export class StreamClient {
     this.rawSend({
       type: "auth",
       ...(credential ? { credential } : {}),
-      capabilities: ["companion_event_epoch", "term_input_boundary"],
+      capabilities: this.options.terminalScrollbackWindow
+        ? [
+            "companion_event_epoch",
+            "term_input_boundary",
+            "term_scrollback_window",
+          ]
+        : ["companion_event_epoch", "term_input_boundary"],
     }, socket);
   }
 
@@ -696,6 +772,11 @@ export class StreamClient {
             task_id: taskId,
             kind,
             from_seq: attachment.kind === "agent" ? attachment.fromSeq : 0,
+            // A terminal re-attach presents where its buffer stopped, so the
+            // server replays the gap instead of re-shipping the terminal.
+            ...(attachment.kind === "terminal" && attachment.resume
+              ? { term_resume: attachment.resume }
+              : {}),
             ...(attachment.kind === "companion"
               ? {
                   accept_snapshot_chunks: true,
@@ -760,16 +841,51 @@ export class StreamClient {
         return;
       }
       case "term_snapshot": {
-        this.terminalAttachment(frame.task_id)?.handlers.onSnapshot?.(
+        const attachment = this.terminalAttachment(frame.task_id);
+        if (!attachment) return;
+        const window = terminalWindowMetadata(frame.stream_id, frame.history_id, frame.scrollback_lines);
+        attachment.resume =
+          window && typeof frame.stream_offset === "number"
+            ? { stream_id: window.streamId, offset: frame.stream_offset }
+            : null;
+        attachment.handlers.onSnapshot?.(
           frame.cols,
           frame.rows,
           frame.data_b64,
           frame.agent_provider,
+          window,
         );
         return;
       }
+      case "term_resumed": {
+        const attachment = this.terminalAttachment(frame.task_id);
+        if (!attachment) return;
+        const window = terminalWindowMetadata(frame.stream_id, frame.history_id, frame.scrollback_lines);
+        attachment.resume = { stream_id: frame.stream_id, offset: frame.offset };
+        if (window) attachment.handlers.onResumed?.(window);
+        return;
+      }
+      case "term_scrollback_chunk": {
+        this.terminalAttachment(frame.task_id)?.handlers.onScrollbackChunk?.({
+          requestId: frame.request_id,
+          historyId: frame.history_id,
+          startLine: frame.start_line,
+          endLine: frame.end_line,
+          dataB64: frame.data_b64,
+          remainingLines: frame.remaining_lines,
+        });
+        return;
+      }
       case "term_output": {
-        this.terminalAttachment(frame.task_id)?.handlers.onOutput(frame.data_b64, {
+        const attachment = this.terminalAttachment(frame.task_id);
+        if (!attachment) return;
+        if (attachment.resume) {
+          attachment.resume = {
+            stream_id: attachment.resume.stream_id,
+            offset: attachment.resume.offset + base64ByteLength(frame.data_b64),
+          };
+        }
+        attachment.handlers.onOutput(frame.data_b64, {
           receivedAtMs: this.now(),
         });
         return;
@@ -1346,6 +1462,32 @@ function closeEventCode(event: unknown): number | null {
   return null;
 }
 
+/**
+ * Read the window fields off a terminal frame. They travel together — a server
+ * that bounded the snapshot names all of them — so a missing `stream_id` means
+ * this is an unbounded snapshot with no scrollback to pull and no resumable
+ * position.
+ */
+function terminalWindowMetadata(
+  streamId: number | undefined,
+  historyId: number | undefined | null,
+  scrollbackLines: number | undefined | null,
+): TerminalWindowMetadata | null {
+  if (typeof streamId !== "number") return null;
+  return {
+    streamId,
+    historyId: typeof historyId === "number" ? historyId : null,
+    scrollbackLines: typeof scrollbackLines === "number" ? scrollbackLines : 0,
+  };
+}
+
+/** Decoded byte length of standard padded base64, without decoding it. */
+function base64ByteLength(data: string): number {
+  if (!data) return 0;
+  const padding = data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0;
+  return Math.floor((data.length * 3) / 4) - padding;
+}
+
 function attachmentKey(taskId: string, kind: StreamKind): string {
   return `${kind}:${taskId}`;
 }
@@ -1370,7 +1512,11 @@ function companionEventKey(taskId: string, eventId: string): string {
 function decodeLaneForWireFrame(data: string): StreamFrameDecodeLane {
   if (
     data.startsWith('{"type":"term_snapshot",') ||
-    data.startsWith('{"type":"term_output",')
+    data.startsWith('{"type":"term_output",') ||
+    // A resume and a scrollback chunk both reshape the same buffer, so they
+    // must stay ordered against the output around them.
+    data.startsWith('{"type":"term_resumed",') ||
+    data.startsWith('{"type":"term_scrollback_chunk",')
   ) {
     return "terminal";
   }

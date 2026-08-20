@@ -7,6 +7,11 @@ import type {
   TaskSummary
 } from "../../../apps/mobile/src/lib/api/types";
 import type { TaskTerminalStreamEvent, TaskTerminalSubscription } from "../../../apps/mobile/src/lib/api/client";
+import type {
+  TerminalScrollbackChunk,
+  TerminalScrollbackRequest,
+  TerminalWindowMetadata
+} from "../../../packages/stream-client/src/index";
 import { createLanTransport, type FetchLike, type WebSocketLike } from "../../../apps/mobile/src/lib/transports/lanTransport";
 import { createMobileController } from "../../../apps/mobile/src/state/mobileController";
 import { orderRepoTaskSlots } from "../../../apps/mobile/src/screens/repoTaskOrder";
@@ -264,6 +269,56 @@ describe("LAN task loop E2E", () => {
       events.close();
     }
   }, 45_000);
+
+  it("hands the phone a bounded terminal window and serves the rest as scrollback", async () => {
+    // The scripted agent prints ~10,000 history lines before it goes ready —
+    // the shape the owner hit on 4G, where the whole thing used to arrive as
+    // one `term_snapshot` on every attach.
+    const task = await createScriptedTask(harness, {
+      displayName: "LAN bounded terminal window",
+      snapshotHistory: { sentinel: "MOBILE_PTY_SNAPSHOT_SENTINEL" }
+    });
+    const transport = createLanClient(harness);
+    const seeding = collectLanTerminalEvents(transport, task.taskId);
+    let events: LanTerminalCollector | null = null;
+
+    try {
+      // The sentinel is printed after the history loop, so the desktop's
+      // terminal now holds the whole scrollback.
+      await seeding.waitForOutput("MOBILE_PTY_SNAPSHOT_SENTINEL", 90_000);
+      seeding.close();
+
+      events = collectLanTerminalEvents(transport, task.taskId);
+      await events.waitForReady(30_000);
+      const window = events.snapshotWindow();
+      expect(window).not.toBeNull();
+      if (!window) throw new Error("unreachable");
+      expect(window.historyId).not.toBeNull();
+      expect(window.scrollbackLines).toBeGreaterThan(1_000);
+
+      const snapshotText = events.outputText();
+      expect(snapshotText).toContain("MOBILE_PTY_HISTORY_10050");
+      expect(snapshotText).not.toContain("MOBILE_PTY_HISTORY_05000");
+      // The full history is ~800 KB; the window is a small tail of it.
+      expect(Buffer.byteLength(snapshotText, "utf8")).toBeLessThan(300_000);
+
+      events.requestScrollback({
+        historyId: window.historyId ?? 0,
+        beforeLine: window.scrollbackLines,
+        maxLines: 200
+      });
+      const chunk = await events.waitForScrollback(30_000);
+      expect(chunk.historyId).toBe(window.historyId);
+      expect(chunk.endLine).toBe(window.scrollbackLines);
+      expect(chunk.remainingLines).toBeLessThan(window.scrollbackLines);
+      const older = Buffer.from(chunk.dataB64, "base64").toString("utf8");
+      expect(older).toContain("MOBILE_PTY_HISTORY_");
+      expect(older).not.toContain("MOBILE_PTY_HISTORY_10050");
+    } finally {
+      seeding.close();
+      events?.close();
+    }
+  }, 150_000);
 
   it("keeps a LAN terminal draft separate from a simultaneous logical task message", async () => {
     const task = await createScriptedTask(harness, {
@@ -612,9 +667,13 @@ interface LanTerminalCollector {
   close(): void;
   exitCode(): number | null;
   outputText(): string;
+  /** What the desktop said it kept back from the snapshot, if anything. */
+  snapshotWindow(): TerminalWindowMetadata | null;
   sendInput(dataB64: string, submissionBoundary?: boolean, controlInput?: boolean): void;
+  requestScrollback(request: TerminalScrollbackRequest): void;
   waitForReady(timeoutMs?: number): Promise<void>;
   waitForOutput(marker: string, timeoutMs?: number): Promise<string>;
+  waitForScrollback(timeoutMs?: number): Promise<TerminalScrollbackChunk>;
   waitForExit(expectedCode: number, timeoutMs?: number): Promise<void>;
 }
 
@@ -636,8 +695,12 @@ class LanTerminalCollectorImpl implements LanTerminalCollector {
     resolve(): void;
     reject(error: Error): void;
   }> = [];
+  private readonly scrollbackWaiters: Array<{
+    resolve(chunk: TerminalScrollbackChunk): void;
+  }> = [];
   private ready = false;
   private code: number | null = null;
+  private window: TerminalWindowMetadata | null = null;
   private readonly subscription: TaskTerminalSubscription;
 
   constructor(transport: LanTransport, private readonly taskId: string) {
@@ -656,8 +719,35 @@ class LanTerminalCollectorImpl implements LanTerminalCollector {
     return this.chunks.join("");
   }
 
+  snapshotWindow(): TerminalWindowMetadata | null {
+    return this.window;
+  }
+
   sendInput(dataB64: string, submissionBoundary = false, controlInput = false): void {
     this.subscription.sendInput?.(dataB64, submissionBoundary, controlInput);
+  }
+
+  requestScrollback(request: TerminalScrollbackRequest): void {
+    this.subscription.requestScrollback?.(request);
+  }
+
+  async waitForScrollback(timeoutMs = 10_000): Promise<TerminalScrollbackChunk> {
+    return await new Promise<TerminalScrollbackChunk>((resolve, reject) => {
+      const waiter = { resolve: (chunk: TerminalScrollbackChunk) => resolve(chunk) };
+      const timeout = setTimeout(() => {
+        const index = this.scrollbackWaiters.indexOf(waiter);
+        if (index >= 0) {
+          this.scrollbackWaiters.splice(index, 1);
+        }
+        reject(new Error(`timed out waiting for a scrollback chunk from ${this.taskId}`));
+      }, timeoutMs);
+      this.scrollbackWaiters.push({
+        resolve: (chunk) => {
+          clearTimeout(timeout);
+          resolve(chunk);
+        }
+      });
+    });
   }
 
   async waitForReady(timeoutMs = 10_000): Promise<void> {
@@ -740,6 +830,7 @@ class LanTerminalCollectorImpl implements LanTerminalCollector {
     switch (event.type) {
       case "snapshot": {
         this.chunks = [Buffer.from(event.dataB64, "base64").toString("utf8")];
+        this.window = event.window ?? null;
         this.ready = true;
         for (const waiter of [...this.readyWaiters]) {
           this.readyWaiters.splice(this.readyWaiters.indexOf(waiter), 1);
@@ -762,6 +853,16 @@ class LanTerminalCollectorImpl implements LanTerminalCollector {
             this.outputWaiters.splice(this.outputWaiters.indexOf(waiter), 1);
             waiter.resolve(output);
           }
+        }
+        return;
+      }
+      case "scrollback": {
+        this.window = this.window
+          ? { ...this.window, scrollbackLines: event.chunk.remainingLines }
+          : null;
+        for (const waiter of [...this.scrollbackWaiters]) {
+          this.scrollbackWaiters.splice(this.scrollbackWaiters.indexOf(waiter), 1);
+          waiter.resolve(event.chunk);
         }
         return;
       }

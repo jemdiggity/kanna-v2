@@ -89,6 +89,175 @@ describe("StreamClient", () => {
     return { client, socket };
   }
 
+  function windowedTerminalClient(): { client: StreamClient; socket: MockSocket } {
+    const client = new StreamClient({
+      url: "ws://test/v1/stream",
+      webSocketFactory: factory,
+      terminalScrollbackWindow: true,
+    });
+    const socket = sockets[0];
+    socket.open();
+    expect(socket.sent[0]).toEqual({
+      type: "auth",
+      capabilities: [
+        "companion_event_epoch",
+        "term_input_boundary",
+        "term_scrollback_window",
+      ],
+    });
+    socket.receive({
+      type: "auth_ok",
+      capabilities: ["term_input_boundary", "term_scrollback_window"],
+    });
+    return { client, socket };
+  }
+
+  it("re-attaches a windowed terminal at the offset its buffer reached", () => {
+    const { client, socket } = windowedTerminalClient();
+    const windows: Array<unknown> = [];
+    client.attachTerminal("task-pty", {
+      onSnapshot: (_cols, _rows, _dataB64, _provider, window) => windows.push(window),
+      onOutput: () => {},
+      onResumed: (window) => windows.push({ resumed: window }),
+    });
+
+    socket.receive({
+      type: "term_snapshot",
+      task_id: "task-pty",
+      cols: 80,
+      rows: 24,
+      data_b64: "c25hcA==",
+      stream_id: 7,
+      stream_offset: 100,
+      history_id: 12,
+      scrollback_lines: 900,
+    });
+    expect(windows).toEqual([{ streamId: 7, historyId: 12, scrollbackLines: 900 }]);
+
+    // "bGl2ZQ==" is 4 bytes; the offset advances by the frame's own length.
+    socket.receive({ type: "term_output", task_id: "task-pty", data_b64: "bGl2ZQ==" });
+    socket.receive({ type: "term_output", task_id: "task-pty", data_b64: "bGl2ZQ==" });
+
+    socket.drop();
+    vi.advanceTimersByTime(1000);
+    const reconnected = sockets[1];
+    reconnected.open();
+    reconnected.receive({
+      type: "auth_ok",
+      capabilities: ["term_input_boundary", "term_scrollback_window"],
+    });
+
+    expect(reconnected.sent.at(-1)).toEqual({
+      type: "attach",
+      task_id: "task-pty",
+      kind: "terminal",
+      from_seq: 0,
+      term_resume: { stream_id: 7, offset: 108 },
+    });
+
+    reconnected.receive({
+      type: "term_resumed",
+      task_id: "task-pty",
+      stream_id: 7,
+      offset: 108,
+      cols: 80,
+      rows: 24,
+      history_id: 12,
+      scrollback_lines: 900,
+    });
+    expect(windows.at(-1)).toEqual({
+      resumed: { streamId: 7, historyId: 12, scrollbackLines: 900 },
+    });
+    client.close();
+  });
+
+  it("does not present a resume position for an unwindowed terminal snapshot", () => {
+    const { client, socket } = connectedClient();
+    client.attachTerminal("task-pty", {
+      onSnapshot: () => {},
+      onOutput: () => {},
+    });
+    socket.receive({
+      type: "term_snapshot",
+      task_id: "task-pty",
+      cols: 80,
+      rows: 24,
+      data_b64: "c25hcA==",
+    });
+    socket.receive({ type: "term_output", task_id: "task-pty", data_b64: "bGl2ZQ==" });
+
+    socket.drop();
+    vi.advanceTimersByTime(1000);
+    const reconnected = sockets[1];
+    reconnected.open();
+    reconnected.receive({ type: "auth_ok" });
+    expect(reconnected.sent.at(-1)).toEqual({
+      type: "attach",
+      task_id: "task-pty",
+      kind: "terminal",
+      from_seq: 0,
+    });
+    client.close();
+  });
+
+  it("requests scrollback chunks and routes them to the terminal attachment", () => {
+    const { client, socket } = windowedTerminalClient();
+    const chunks: Array<unknown> = [];
+    client.attachTerminal("task-pty", {
+      onOutput: () => {},
+      onScrollbackChunk: (chunk) => chunks.push(chunk),
+    });
+
+    client.requestTerminalScrollback("task-pty", {
+      historyId: 12,
+      beforeLine: 900,
+      maxLines: 200,
+    });
+    expect(socket.sent.at(-1)).toEqual({
+      type: "term_scrollback_request",
+      task_id: "task-pty",
+      request_id: 1,
+      history_id: 12,
+      before_line: 900,
+      max_lines: 200,
+    });
+
+    socket.receive({
+      type: "term_scrollback_chunk",
+      task_id: "task-pty",
+      request_id: 1,
+      history_id: 12,
+      start_line: 700,
+      end_line: 900,
+      data_b64: "b2xk",
+      remaining_lines: 700,
+    });
+    expect(chunks).toEqual([
+      {
+        requestId: 1,
+        historyId: 12,
+        startLine: 700,
+        endLine: 900,
+        dataB64: "b2xk",
+        remainingLines: 700,
+      },
+    ]);
+    client.close();
+  });
+
+  it("never asks a peer without the window capability for scrollback", () => {
+    const { client, socket } = connectedClient();
+    client.attachTerminal("task-pty", { onOutput: () => {} });
+    const sentBefore = socket.sent.length;
+    client.requestTerminalScrollback("task-pty", {
+      historyId: 1,
+      beforeLine: 10,
+      maxLines: 10,
+    });
+    expect(socket.sent.length).toBe(sentBefore);
+    client.close();
+  });
+
   it("authenticates on open and flushes queued frames after auth_ok", () => {
     const client = new StreamClient({
       url: "ws://test/v1/stream",

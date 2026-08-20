@@ -36,8 +36,12 @@ import type { WebSocket, WebSocketServer } from "ws";
  *   1.28 MiB serialized, 1.71 MiB once base64'd into the frame) and ~17× the
  *   largest snapshot ever observed in the field (977 KB).
  *
- * Two frame classes — `term_snapshot` and `agent_snapshot` — have no
- * producer-side bound at all, so no value here is provably safe for them. That
+ * `agent_snapshot` still has no producer-side bound at all, so no value here is
+ * provably safe for it. `term_snapshot` is bounded only for a client that
+ * negotiated `term_scrollback_window` (Kanna Mobile;
+ * `docs/task-specs/226a06b2.md`) — the phone's snapshot is a bounded window
+ * with the rest pulled on demand — while a client that negotiated nothing
+ * still receives the whole terminal. That
  * is not a reason to keep 100 MiB: a per-cell-truecolor 240×60 scrollback
  * measures 114.81 MiB in the frame, i.e. the ws default already clips it. The
  * cap is therefore chosen to clear every *bounded* class with margin and made

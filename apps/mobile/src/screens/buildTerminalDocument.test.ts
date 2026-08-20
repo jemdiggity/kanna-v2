@@ -1,8 +1,13 @@
 import { Window } from "happy-dom";
+import {
+  createTerminalOutput,
+  prependTerminalScrollback
+} from "../state/terminalOutputBuffer";
 import { describe, expect, it, vi } from "vitest";
 import {
   buildTerminalAppendScript,
   buildTerminalDocument,
+  buildTerminalPrependScript,
   buildTerminalReplaceScript,
   buildTerminalResizeScript
 } from "./buildTerminalDocument";
@@ -1803,6 +1808,110 @@ describe("buildTerminalDocument", () => {
 
     expect(script).toContain(`"chunksB64":["${firstFrame}","${secondFrame}"]`);
     expect(script).not.toContain(`${firstFrame}\\n${secondFrame}`);
+  });
+
+  it("asks for older scrollback only near the top, and only once per gesture", () => {
+    const { messages, terminal, window } = createExecutedTerminalDocument();
+    const scrollbackRequests = () =>
+      messages.filter((message) => message.includes("terminal-scrollback-request"))
+        .length;
+
+    const rows = Array.from({ length: 200 }, (_, index) => `row ${index}`).join("\n");
+    window.__replaceTerminalState({
+      contentRevision: 1,
+      chunksB64: [b64(`${rows}\n`)]
+    });
+
+    // Parked at the bottom of a long buffer: nothing older is wanted yet.
+    terminal.scrollToLine(terminal.buffer.active.baseY);
+    const atBottom = scrollbackRequests();
+
+    const windowDate = (window as unknown as { Date: DateConstructor }).Date;
+    const later = Date.now() + 60_000;
+    const now = vi.spyOn(windowDate, "now").mockReturnValue(later);
+    terminal.scrollToLine(0);
+    expect(scrollbackRequests()).toBe(atBottom + 1);
+
+    // Debounced: one gesture emits many scroll events, and each one must not
+    // become its own request.
+    terminal.scrollToLine(1);
+    expect(scrollbackRequests()).toBe(atBottom + 1);
+
+    now.mockReturnValue(later + 1_000);
+    terminal.scrollToLine(0);
+    expect(scrollbackRequests()).toBe(atBottom + 2);
+    now.mockRestore();
+  });
+
+  it("prepends older scrollback without snapping the reader to the bottom", () => {
+    const { terminal, window } = createExecutedTerminalDocument();
+
+    window.__replaceTerminalState({
+      contentRevision: 1,
+      chunksB64: [b64("newer one\nnewer two\nnewer three\n")]
+    });
+    terminal.scrollToLine(1);
+    const viewportBefore = terminal.buffer.active.viewportY;
+    const linesBefore = terminal.buffer.normal.length;
+    const resetsBefore = terminal.resets;
+    const scrollToBottomBefore = terminal.scrollToBottomCalls;
+
+    window.__prependTerminalScrollback({
+      contentRevision: 2,
+      chunksB64: [b64("older one\nolder two\nnewer one\nnewer two\nnewer three\n")]
+    });
+
+    expect(terminal.resets).toBe(resetsBefore + 1);
+    expect(terminal.scrollToBottomCalls).toBe(scrollToBottomBefore);
+    // The store refuses a chunk it cannot fit rather than evicting to make
+    // room, so a prepend only ever grows the buffer upward: every row that was
+    // loaded is still loaded, two arrived above them, and restoring
+    // `viewportY + addedRows` therefore lands on the same content.
+    expect(terminal.buffer.normal.length).toBe(linesBefore + 2);
+    expect(terminal.scrollToLineCalls.at(-1)).toBe(viewportBefore + 2);
+    const rendered = [...terminal.bufferLines.values()].join("\n");
+    for (const line of ["older one", "older two", "newer one", "newer two", "newer three"]) {
+      expect(rendered).toContain(line);
+    }
+  });
+
+  it("builds prepend scripts that keep the whole buffer in order", () => {
+    const script = buildTerminalPrependScript({
+      contentRevision: 7,
+      output: `${b64("older\n")}\n${b64("newer\n")}`,
+      status: "live"
+    });
+
+    expect(script).toContain("window.__prependTerminalScrollback(");
+    expect(script).toContain(b64("older\n"));
+    expect(script).toContain(b64("newer\n"));
+    expect(script).toContain('"contentRevision":7');
+  });
+
+  it("carries pulled scrollback above the snapshot into the injected script", () => {
+    const withHistory = prependTerminalScrollback(
+      createTerminalOutput(`${b64("window\n")}\n${b64("live\n")}\n`),
+      `${b64("older\n")}\n`
+    );
+    expect(withHistory.accepted).toBe(true);
+
+    const script = buildTerminalPrependScript({
+      contentRevision: 8,
+      output: withHistory.output,
+      status: "live"
+    });
+
+    const chunks = JSON.parse(
+      script.slice(
+        script.indexOf("(") + 1,
+        script.lastIndexOf(")")
+      )
+    ) as { chunksB64: string[] };
+    expect(chunks.chunksB64).toEqual([
+      b64("older\n"),
+      b64("window\n"),
+      b64("live\n")
+    ]);
   });
 
   it("builds resize scripts for the WebView terminal dimension bridge", () => {

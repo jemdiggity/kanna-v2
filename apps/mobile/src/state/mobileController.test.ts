@@ -89,6 +89,7 @@ function createTerminalSubscriptionMock(): {
       close: vi.fn(),
       sendInput: vi.fn(),
       resize: vi.fn(),
+      requestScrollback: vi.fn(),
       setListener(nextListener) {
         listener = nextListener;
       }
@@ -7539,6 +7540,213 @@ describe("createMobileController", () => {
       expect(client.sendTaskInput).toHaveBeenCalledWith("task-1", input);
     }
   );
+
+  it("pulls one scrollback chunk per scroll and splices it above the buffer", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+    const requestScrollback =
+      client.__terminalStream.subscription.requestScrollback;
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    client.__terminalStream.emit({
+      type: "snapshot",
+      taskId: "task-1",
+      cols: 80,
+      rows: 24,
+      dataB64: "d2luZG93",
+      window: { streamId: 4, historyId: 11, scrollbackLines: 900 }
+    });
+
+    controller.requestTaskTerminalScrollback("task-1");
+    expect(requestScrollback).toHaveBeenCalledTimes(1);
+    expect(requestScrollback).toHaveBeenLastCalledWith({
+      historyId: 11,
+      beforeLine: 900,
+      maxLines: 200
+    });
+
+    // A second scroll while the first chunk is still in flight asks again for
+    // the same rows; the request is held until the answer lands.
+    controller.requestTaskTerminalScrollback("task-1");
+    expect(requestScrollback).toHaveBeenCalledTimes(1);
+
+    client.__terminalStream.emit({
+      type: "scrollback",
+      taskId: "task-1",
+      chunk: {
+        requestId: 1,
+        historyId: 11,
+        startLine: 700,
+        endLine: 900,
+        dataB64: "b2xkZXI=",
+        remainingLines: 700
+      }
+    });
+    expect(terminalText(store)).toBe("b2xkZXI=\nd2luZG93\n");
+
+    controller.requestTaskTerminalScrollback("task-1");
+    expect(requestScrollback).toHaveBeenLastCalledWith({
+      historyId: 11,
+      beforeLine: 700,
+      maxLines: 200
+    });
+  });
+
+  it("stops asking once the loaded buffer has no room for another chunk", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+    const requestScrollback =
+      client.__terminalStream.subscription.requestScrollback;
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    client.__terminalStream.emit({
+      type: "snapshot",
+      taskId: "task-1",
+      cols: 80,
+      rows: 24,
+      dataB64: "d2luZG93",
+      window: { streamId: 4, historyId: 11, scrollbackLines: 5_000 }
+    });
+
+    controller.requestTaskTerminalScrollback("task-1");
+    expect(requestScrollback).toHaveBeenCalledTimes(1);
+    // One chunk that all but fills the client's scrollback budget.
+    client.__terminalStream.emit({
+      type: "scrollback",
+      taskId: "task-1",
+      chunk: {
+        requestId: 1,
+        historyId: 11,
+        startLine: 3_000,
+        endLine: 5_000,
+        dataB64: "o".repeat(950_000),
+        remainingLines: 3_000
+      }
+    });
+
+    // The desktop still has 3,000 lines, but loading them would mean evicting
+    // content below them, so the walk stops here instead.
+    controller.requestTaskTerminalScrollback("task-1");
+    expect(requestScrollback).toHaveBeenCalledTimes(1);
+    expect(store.getState().taskTerminalScrollback).toMatchObject({
+      remainingLines: 3_000,
+      loading: false,
+      atClientLimit: true
+    });
+  });
+
+  it("asks for nothing once the retained scrollback runs out", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+    const requestScrollback =
+      client.__terminalStream.subscription.requestScrollback;
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    client.__terminalStream.emit({
+      type: "snapshot",
+      taskId: "task-1",
+      cols: 80,
+      rows: 24,
+      dataB64: "d2luZG93"
+    });
+
+    controller.requestTaskTerminalScrollback("task-1");
+    expect(requestScrollback).not.toHaveBeenCalled();
+  });
+
+  it("keeps the terminal buffer intact when the desktop replays a reconnect delta", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    client.__terminalStream.emit({
+      type: "snapshot",
+      taskId: "task-1",
+      cols: 80,
+      rows: 24,
+      dataB64: "d2luZG93",
+      window: { streamId: 4, historyId: 11, scrollbackLines: 900 }
+    });
+    client.__terminalStream.emit({
+      type: "output",
+      taskId: "task-1",
+      dataB64: "bGl2ZQ=="
+    });
+    const epochBefore = store.getState().taskTerminalOutputEpoch;
+
+    client.__terminalStream.emit({
+      type: "resumed",
+      taskId: "task-1",
+      window: { streamId: 4, historyId: 11, scrollbackLines: 900 }
+    });
+    client.__terminalStream.emit({
+      type: "output",
+      taskId: "task-1",
+      dataB64: "ZGVsdGE="
+    });
+
+    expect(store.getState().taskTerminalOutputEpoch).toBe(epochBefore);
+    expect(terminalText(store)).toBe("d2luZG93\nbGl2ZQ==\nZGVsdGE=\n");
+    expect(store.getState().taskTerminalStatus).toBe("live");
+  });
+
+  it("resumes the scrollback walk where it left off, not where the desktop's history starts", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+    const requestScrollback =
+      client.__terminalStream.subscription.requestScrollback;
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    client.__terminalStream.emit({
+      type: "snapshot",
+      taskId: "task-1",
+      cols: 80,
+      rows: 24,
+      dataB64: "d2luZG93",
+      window: { streamId: 4, historyId: 11, scrollbackLines: 900 }
+    });
+
+    controller.requestTaskTerminalScrollback("task-1");
+    client.__terminalStream.emit({
+      type: "scrollback",
+      taskId: "task-1",
+      chunk: {
+        requestId: 1,
+        historyId: 11,
+        startLine: 700,
+        endLine: 900,
+        dataB64: "b2xkZXI=",
+        remainingLines: 700
+      }
+    });
+
+    // The link flaps. The desktop replays the delta and reports its full
+    // retained history again — it does not know what this viewer pulled.
+    client.__terminalStream.emit({
+      type: "resumed",
+      taskId: "task-1",
+      window: { streamId: 4, historyId: 11, scrollbackLines: 900 }
+    });
+
+    controller.requestTaskTerminalScrollback("task-1");
+    expect(requestScrollback).toHaveBeenLastCalledWith({
+      historyId: 11,
+      beforeLine: 700,
+      maxLines: 200
+    });
+    // Nothing was re-pulled above rows the buffer already holds.
+    expect(terminalText(store)).toBe("b2xkZXI=\nd2luZG93\n");
+  });
 
   it("forwards alt-screen terminal scroll bytes to the active terminal stream", async () => {
     const store = createSessionStore();

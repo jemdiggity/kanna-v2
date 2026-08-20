@@ -114,6 +114,11 @@ export function buildTerminalDocument({
       const SMOOTH_SCROLL_DURATION_MS = 80;
       const MAX_RETAINED_FILE_MENTIONS = 20;
       const MAX_FILE_MENTION_PAYLOAD = 21;
+      // Older scrollback is fetched when the reader gets within this many rows
+      // of the top of what is loaded, so the next chunk is usually already in
+      // place by the time they reach it.
+      const SCROLLBACK_REQUEST_THRESHOLD_ROWS = 40;
+      const SCROLLBACK_REQUEST_INTERVAL_MS = 250;
       const MAX_INITIAL_FILE_MENTION_SCAN_ROWS = 1000;
       const MAX_REWRITTEN_FILE_MENTION_SCAN_ROWS = 200;
       const FILE_MENTION_SCAN_OVERLAP_ROWS = 2;
@@ -183,6 +188,7 @@ export function buildTerminalDocument({
       let selectionAnchor = null;
       let selectionMode = false;
       let altScreenScrollCapture = null;
+      let lastScrollbackRequestAt = 0;
       const terminalFileMentionHistory = new Map();
       const terminalFileMentionOccurrences = {
         alternate: new Map(),
@@ -206,7 +212,32 @@ export function buildTerminalDocument({
         if (!selectionMode) {
           stickyToBottom = isNearBottom();
         }
+        maybeRequestOlderScrollback();
       });
+
+      // Scrolling near the top of the loaded buffer is the ask for the next
+      // chunk of history. The page cannot know whether any is left — that is
+      // the desktop's answer, tracked on the native side — so this only
+      // reports the gesture, debounced, and lets the app decide.
+      function maybeRequestOlderScrollback() {
+        if (!window.ReactNativeWebView || !window.ReactNativeWebView.postMessage) {
+          return;
+        }
+        if (term.buffer.active.type === "alternate") {
+          return;
+        }
+        if (term.buffer.active.viewportY > SCROLLBACK_REQUEST_THRESHOLD_ROWS) {
+          return;
+        }
+        const now = Date.now();
+        if (now - lastScrollbackRequestAt < SCROLLBACK_REQUEST_INTERVAL_MS) {
+          return;
+        }
+        lastScrollbackRequestAt = now;
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: "terminal-scrollback-request"
+        }));
+      }
       term.onData((data) => {
         if (altScreenScrollCapture) {
           altScreenScrollCapture.push(new TextEncoder().encode(data));
@@ -1518,6 +1549,38 @@ export function buildTerminalDocument({
         });
       };
 
+      // A scrollback chunk grows the buffer *upward*. xterm has no API to
+      // insert above its scrollback, so the buffer is rewritten with the older
+      // rows in front and the reader is put back on the same content — the
+      // rows they were looking at have simply moved down by however many
+      // arrived.
+      window.__prependTerminalScrollback = function prependTerminalScrollback(state) {
+        const contentRevision = Number.isSafeInteger(state.contentRevision)
+          ? state.contentRevision
+          : null;
+        latestContentRevision = contentRevision;
+        enqueueTerminalMutation((finishMutation) => {
+          clearTerminalSelection();
+          const previousLength = normalBuffer().length;
+          const previousViewportY = term.buffer.active.viewportY;
+          term.reset();
+          ${enableE2EInspection ? "resetTerminalFrameDiagnostics();" : ""}
+          fitTerminal();
+          writeTerminalChunks(state.chunksB64, () => {
+            fitTerminal();
+            const addedRows = Math.max(0, normalBuffer().length - previousLength);
+            stickyToBottom = false;
+            viewportPinnedToBottom = false;
+            term.scrollToLine(Math.max(0, previousViewportY + addedRows));
+            scheduleViewportAlignment();
+            ${enableE2EInspection ? "notifyTerminalInspection();" : ""}
+            rebuildTerminalFileMentions();
+            scheduleTerminalContentReady(contentRevision);
+            finishMutation();
+          });
+        });
+      };
+
       window.__appendTerminalChunk = function appendTerminalChunk(state) {
         if (!state.chunksB64 || state.chunksB64.length === 0) {
           return;
@@ -1570,6 +1633,18 @@ export function buildTerminalReplaceScript({
   return `window.__replaceTerminalState(${JSON.stringify(state)}); true;`;
 }
 
+export function buildTerminalPrependScript({
+  contentRevision,
+  output,
+  status
+}: BuildTerminalUpdateScriptOptions): string {
+  const chunksB64 = terminalChunksFromOutput(output);
+  const state = chunksB64.length > 0
+    ? { chunksB64, contentRevision }
+    : { text: getStatusCopy(status), contentRevision };
+  return `window.__prependTerminalScrollback(${JSON.stringify(state)}); true;`;
+}
+
 export function buildTerminalAppendScript(chunk: string): string {
   return `window.__appendTerminalChunk(${JSON.stringify({
     chunksB64: terminalChunksFromOutput(chunk)
@@ -1600,10 +1675,16 @@ function getStatusCopy(status: TaskTerminalStatus): string {
 }
 
 function terminalChunksFromOutput(output: TerminalOutputLike): string[] {
+  // Region order is the buffer's contiguity contract: pulled scrollback, then
+  // the attach snapshot, then live output.
   const segments =
     typeof output === "string"
       ? [output]
-      : [output.snapshot, ...output.liveSegments];
+      : [
+          ...output.scrollbackSegments,
+          output.snapshot,
+          ...output.liveSegments
+        ];
   const chunks: string[] = [];
   for (const segment of segments) {
     for (const chunk of segment.split("\n")) {
