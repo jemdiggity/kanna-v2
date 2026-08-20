@@ -5,6 +5,9 @@
     "production": "kanna-build"
   },
   "targets": {
+    "kanna-local": {
+      "hosting": { "account": ["kanna-local-account"] }
+    },
     "kanna-staging": {
       "hosting": { "account": ["kanna-staging-account"] }
     },
