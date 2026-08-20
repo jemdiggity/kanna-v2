@@ -1522,6 +1522,234 @@ async fn send_task_input_stores_an_attachment_and_names_its_path_in_the_message(
     let _ = std::fs::remove_file(config.db_path);
 }
 
+/// Spawn a fake daemon that reports one live PTY session and then refuses the
+/// submission with `code`, returning what it was sent.
+fn spawn_refusing_session_daemon(
+    listener: tokio::net::UnixListener,
+    task_id: &'static str,
+    code: kanna_daemon::protocol::ErrorCode,
+    message: &'static str,
+) -> tokio::task::JoinHandle<Vec<kanna_daemon::protocol::Command>> {
+    use kanna_daemon::protocol::{
+        Command as DaemonCommand, Event as DaemonEvent, SessionInfo, SessionState, SessionStatus,
+    };
+    use tokio::io::{AsyncWriteExt, BufReader};
+
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut commands = Vec::new();
+        while commands.len() < 2 {
+            let command = read_test_daemon_command(&mut reader, &mut write_half).await;
+            let response = match &command {
+                DaemonCommand::List => DaemonEvent::SessionList {
+                    sessions: vec![SessionInfo {
+                        session_id: task_id.to_string(),
+                        pid: 42,
+                        cwd: "/tmp".to_string(),
+                        state: SessionState::Active,
+                        idle_seconds: 0,
+                        status: SessionStatus::Idle,
+                        kind: Default::default(),
+                        logical_input_blocked: code
+                            == kanna_daemon::protocol::ErrorCode::InheritedDraftStateUnknown,
+                    }],
+                },
+                DaemonCommand::SubmitInputIfSession { .. } => DaemonEvent::Error {
+                    code: Some(code),
+                    message: message.to_string(),
+                },
+                other => panic!("unexpected daemon command: {other:?}"),
+            };
+            commands.push(command);
+            write_half
+                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+                .await
+                .unwrap();
+        }
+        commands
+    })
+}
+
+/// A wedged session refuses the message outright and nothing will retry it, so
+/// the photo it named is a file no surviving message points at. It goes.
+///
+/// This is where the attachment path meets the refusal semantics that landed
+/// while this work was in review: the answer is the same 409 `input_blocked` a
+/// text-only input gets, the ledger stays empty because nothing was delivered,
+/// and the difference an attachment makes is only that a file must not be left
+/// orphaned behind the refusal.
+#[tokio::test]
+async fn an_attachment_refused_by_a_blocked_session_is_not_left_on_disk() {
+    use base64::Engine;
+    use kanna_daemon::protocol::ErrorCode;
+    use tokio::net::UnixListener;
+
+    let unique = format!("task-input-attachment-blocked-{}", unique_test_suffix());
+    let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let daemon_server = spawn_refusing_session_daemon(
+        listener,
+        "task-live",
+        ErrorCode::InheritedDraftStateUnknown,
+        "logical input refused for session task-live: this daemon inherited the session and its \
+         composer holds text it never saw typed",
+    );
+
+    let config = merge_test_config(&unique, &daemon_dir);
+    seed_live_task(&config, "task-live");
+
+    let app = super::router(Arc::new(super::AppState::new(config.clone())));
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-live/input")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "input": "look at this",
+                        "attachment": {
+                            "mediaType": "image/png",
+                            "dataBase64": base64::engine::general_purpose::STANDARD
+                                .encode(b"\x89PNG pretend"),
+                        },
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let failure: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(failure["reason"], "input_blocked");
+
+    let directory =
+        crate::task_input_attachments::task_attachments_dir(&config.db_path, "task-live");
+    let leftovers: Vec<_> = std::fs::read_dir(&directory)
+        .map(|entries| entries.map(|entry| entry.unwrap().path()).collect())
+        .unwrap_or_default();
+    assert!(
+        leftovers.is_empty(),
+        "a refused attachment must not outlive its message: {leftovers:?}"
+    );
+
+    let db = Db::open(&config.db_path).unwrap();
+    // Nothing reached the PTY, so nothing is recorded as delivered — the same
+    // rule the text-only path follows.
+    assert_eq!(db.count_task_inputs("task-live").unwrap(), 0);
+    assert_eq!(
+        db.get_pipeline_item_input_blocked("task-live")
+            .unwrap()
+            .as_deref(),
+        Some(crate::http_api::INPUT_BLOCKED_INHERITED_DRAFT)
+    );
+    drop(db);
+
+    let _ = daemon_server.await.unwrap();
+    let _ = std::fs::remove_dir_all(crate::task_input_attachments::attachments_root(
+        &config.db_path,
+    ));
+    let _ = std::fs::remove_file(socket_path);
+    let _ = std::fs::remove_dir_all(daemon_dir);
+    let _ = std::fs::remove_file(config.db_path);
+}
+
+/// A message held behind a human's unsent line is not delivered *yet* — but it
+/// is queued at the daemon and goes out when that terminal submits. So the
+/// photo it names has to still be there when the agent finally reads the path.
+///
+/// This is the opposite half of the reconciliation above, and the one a naive
+/// "any error means clean up" rule gets wrong: the caller is told 409
+/// `input_held_by_draft` and nothing is recorded as delivered, yet the file
+/// must survive.
+#[tokio::test]
+async fn an_attachment_held_behind_a_human_draft_stays_on_disk_for_the_queued_message() {
+    use base64::Engine;
+    use kanna_daemon::protocol::ErrorCode;
+    use tokio::net::UnixListener;
+
+    let unique = format!("task-input-attachment-held-{}", unique_test_suffix());
+    let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let daemon_server = spawn_refusing_session_daemon(
+        listener,
+        "task-live",
+        ErrorCode::LogicalInputHeldByDraft,
+        "logical input held for session task-live: a human line is open at that terminal",
+    );
+
+    let config = merge_test_config(&unique, &daemon_dir);
+    seed_live_task(&config, "task-live");
+
+    let image_bytes = b"\x89PNG held pixels".to_vec();
+    let app = super::router(Arc::new(super::AppState::new(config.clone())));
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-live/input")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "input": "look at this",
+                        "attachment": {
+                            "mediaType": "image/png",
+                            "dataBase64": base64::engine::general_purpose::STANDARD
+                                .encode(&image_bytes),
+                        },
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let failure: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(failure["reason"], "input_held_by_draft");
+
+    // The queued message still names this path, so the file has to be here
+    // when that terminal submits and the agent goes to read it.
+    let directory =
+        crate::task_input_attachments::task_attachments_dir(&config.db_path, "task-live");
+    let stored: Vec<_> = std::fs::read_dir(&directory)
+        .expect("a held attachment keeps its directory")
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(stored.len(), 1, "expected the held attachment to survive");
+    assert_eq!(std::fs::read(&stored[0]).unwrap(), image_bytes);
+
+    let db = Db::open(&config.db_path).unwrap();
+    // Held is not delivered: the ledger records what reached the agent, and
+    // this has not, so it stays empty until the daemon writes it.
+    assert_eq!(db.count_task_inputs("task-live").unwrap(), 0);
+    // And a human draft is not a wedged session, so nothing is marked blocked.
+    assert_eq!(
+        db.get_pipeline_item_input_blocked("task-live").unwrap(),
+        None
+    );
+    drop(db);
+
+    let _ = daemon_server.await.unwrap();
+    let _ = std::fs::remove_dir_all(crate::task_input_attachments::attachments_root(
+        &config.db_path,
+    ));
+    let _ = std::fs::remove_file(socket_path);
+    let _ = std::fs::remove_dir_all(daemon_dir);
+    let _ = std::fs::remove_file(config.db_path);
+}
+
 /// A refused attachment must leave nothing behind and must not put a message
 /// in front of the agent that names a file which was never written.
 #[tokio::test]
