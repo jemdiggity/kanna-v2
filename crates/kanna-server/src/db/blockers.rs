@@ -135,6 +135,8 @@ impl Db {
             "UPDATE pipeline_item
              SET activity = 'idle', activity_changed_at = datetime('now'),
                  activity_revision = activity_revision + 1,
+                 activity_event_baseline = COALESCE(activity_event_baseline, activity),
+                 activity_event_pending_at = datetime('now'),
                  updated_at = datetime('now')
              WHERE id = ? AND activity != 'idle' AND closed_at IS NULL",
             [&task_id],

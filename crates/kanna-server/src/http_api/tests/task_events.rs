@@ -565,6 +565,12 @@ async fn local_surface_aggregates_peer_repo_events_and_resumes_after_reconnect()
         )
         .expect("insert peer task");
         start_run(db, "remote-run", "remote-child", "in progress");
+        db.update_pipeline_item_runtime_status("remote-child", "busy", None)
+            .expect("set peer runtime busy");
+        db.update_pipeline_item_activity("remote-child", "working")
+            .expect("set peer activity working");
+        db.flush_debounced_activity_events(0)
+            .expect("flush peer activity transition");
     });
     let connected = Arc::new(AtomicBool::new(true));
     let relay = connect_test_relay_peer(&source, Arc::clone(&peer), Arc::clone(&connected));
@@ -581,9 +587,13 @@ async fn local_surface_aggregates_peer_repo_events_and_resumes_after_reconnect()
     assert!(cursor_of(&first).starts_with("ks1."));
     assert_eq!(
         event_pairs(&first),
-        vec![("remote-child".into(), "run.started".into())]
+        vec![
+            ("remote-child".into(), "run.started".into()),
+            ("remote-child".into(), "task.activity_changed".into()),
+        ]
     );
     assert_eq!(first["events"][0]["machineId"], "desktop-peer-events");
+    assert_eq!(first["events"][1]["machineId"], "desktop-peer-events");
     assert_eq!(first["machineErrors"], json!([]));
     let first_cursor = cursor_of(&first);
 
@@ -2621,36 +2631,33 @@ async fn a_task_parked_on_a_prompt_emits_awaiting_input_once_per_block() {
     );
 }
 
-/// PTY providers do not all expose a structured "needs input" signal. Codex,
-/// for example, returns to its ordinary idle prompt after printing a design
-/// approval question. The weaker activity edge must still be observable, with
-/// the same transcript tail task detail exposes, without pretending it was a
-/// daemon-confirmed interactive prompt.
+/// Codex has no Claude-style prompt placeholder. Settled activity transitions
+/// must still arrive, in both directions, without one.
 #[tokio::test]
-async fn every_working_task_stopping_emits_one_activity_changed_event() {
+async fn every_provider_emits_debounced_activity_transitions_in_both_directions() {
     let (router, db_path) = events_router();
     let db = Db::open(&db_path).expect("open db");
 
-    for (task_id, activity, prompt) in [
-        (
-            "child-a",
-            "unread",
-            Some("Does this design have your approval?"),
-        ),
-        ("child-b", "idle", Some("Choose the deployment target.")),
-        ("child-c", "unread", None),
+    for (task_id, activity) in [
+        ("child-a", "unread"),
+        ("child-b", "idle"),
+        ("child-c", "unread"),
     ] {
-        if let Some(prompt) = prompt {
-            db.update_pipeline_item_waiting_prompt(task_id, prompt)
-                .expect("persist prompt");
-        }
+        db.update_pipeline_item_runtime_status(task_id, "busy", None)
+            .expect("busy runtime");
         db.update_pipeline_item_activity(task_id, "working")
             .expect("working");
+        db.flush_debounced_activity_events(0)
+            .expect("flush working transition");
+        db.update_pipeline_item_runtime_status(task_id, "idle", None)
+            .expect("idle runtime");
         db.update_pipeline_item_activity(task_id, activity)
             .expect("stopped");
         // Repeating the stored state is not another transition.
         db.update_pipeline_item_activity(task_id, activity)
             .expect("same stopped state");
+        db.flush_debounced_activity_events(0)
+            .expect("flush stopped transition");
     }
 
     let started = std::time::Instant::now();
@@ -2667,41 +2674,21 @@ async fn every_working_task_stopping_emits_one_activity_changed_event() {
         "a cursor-less wait must drain retained stopped edges immediately"
     );
     let events = body["events"].as_array().expect("events");
-    assert_eq!(events.len(), 3);
-    assert_eq!(
-        events[0]["type"],
-        serde_json::json!("task.activity_changed")
-    );
-    assert_eq!(events[0]["payload"]["previousActivity"], "working");
-    assert_eq!(events[0]["payload"]["activity"], "unread");
-    assert_eq!(
-        events[0]["payload"]["waitingPromptSnippet"],
-        "Does this design have your approval?"
-    );
-    assert_eq!(
-        events[1]["type"],
-        serde_json::json!("task.activity_changed")
-    );
-    assert_eq!(events[1]["payload"]["previousActivity"], "working");
-    assert_eq!(events[1]["payload"]["activity"], "idle");
-    assert_eq!(
-        events[1]["payload"]["waitingPromptSnippet"],
-        "Choose the deployment target."
-    );
-    assert_eq!(
-        events[2]["type"],
-        serde_json::json!("task.activity_changed")
-    );
-    assert_eq!(events[2]["payload"]["previousActivity"], "working");
-    assert_eq!(events[2]["payload"]["activity"], "unread");
-    assert!(
-        events[2]["payload"]
-            .as_object()
-            .expect("activity payload")
-            .get("waitingPromptSnippet")
-            .is_none(),
-        "an empty prompt must be omitted rather than serialized as null"
-    );
+    assert_eq!(events.len(), 6);
+    for pair in events.chunks_exact(2) {
+        assert_eq!(pair[0]["type"], "task.activity_changed");
+        assert_eq!(pair[0]["payload"]["previousActivity"], "idle");
+        assert_eq!(pair[0]["payload"]["activity"], "working");
+        assert_eq!(pair[0]["payload"]["runtimeState"], "busy");
+        assert_eq!(pair[1]["type"], "task.activity_changed");
+        assert_eq!(pair[1]["payload"]["previousActivity"], "working");
+        assert!(matches!(
+            pair[1]["payload"]["activity"].as_str(),
+            Some("idle" | "unread")
+        ));
+        assert_eq!(pair[1]["payload"]["runtimeState"], "idle");
+        assert!(pair[1]["payload"].get("waitingPromptSnippet").is_none());
+    }
 }
 
 /// `notifyTaskId` used to be creation-time only, so an orchestrator could not

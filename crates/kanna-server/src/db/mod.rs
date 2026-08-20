@@ -118,6 +118,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "052_task_input_log",
     "053_pipeline_item_input_blocked",
     "054_pipeline_item_composer",
+    "055_activity_event_debounce",
 ];
 
 #[derive(Debug, Serialize)]
@@ -1787,6 +1788,17 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         // verdict on whether anybody typed it.
         add_column(conn, "pipeline_item", "composer_text", "TEXT")?;
         add_column(conn, "pipeline_item", "composer_attestation", "TEXT")
+    })?;
+
+    run_migration(conn, "055_activity_event_debounce", |conn| {
+        add_column(conn, "pipeline_item", "activity_event_baseline", "TEXT")?;
+        add_column(conn, "pipeline_item", "activity_event_pending_at", "TEXT")?;
+        conn.execute(
+            "UPDATE pipeline_item SET activity_event_baseline = activity
+             WHERE activity_event_baseline IS NULL",
+            [],
+        )?;
+        Ok(())
     })?;
 
     Ok(())

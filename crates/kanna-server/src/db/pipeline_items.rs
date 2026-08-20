@@ -772,19 +772,14 @@ impl Db {
         let current = self
             .conn
             .query_row(
-                "SELECT activity, last_output_preview
+                "SELECT activity
                  FROM pipeline_item
                  WHERE id = ? AND closed_at IS NULL",
                 [id],
-                |row| {
-                    Ok((
-                        row.get::<_, Option<String>>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                    ))
-                },
+                |row| row.get::<_, Option<String>>(0),
             )
             .optional()?;
-        let Some((previous_activity, waiting_prompt_snippet)) = current else {
+        let Some(previous_activity) = current else {
             return Ok(());
         };
         if previous_activity.as_deref() == Some(activity) {
@@ -801,26 +796,77 @@ impl Db {
             (activity, activity, id),
         )?;
 
-        let waiting_prompt_snippet = waiting_prompt_snippet
-            .as_deref()
-            .map(str::trim)
-            .filter(|snippet| !snippet.is_empty());
-        if previous_activity.as_deref() == Some("working") && matches!(activity, "idle" | "unread")
-        {
-            let payload = match waiting_prompt_snippet {
-                Some(snippet) => json!({
-                    "previousActivity": "working",
-                    "activity": activity,
-                    "waitingPromptSnippet": snippet,
-                }),
-                None => json!({
-                    "previousActivity": "working",
-                    "activity": activity,
-                }),
-            };
-            self.append_task_event(id, TaskEventKind::ActivityChanged, payload)?;
-        }
+        self.conn.execute(
+            "UPDATE pipeline_item
+             SET activity_event_baseline = COALESCE(activity_event_baseline, ?),
+                 activity_event_pending_at = datetime('now')
+             WHERE id = ?",
+            (previous_activity, id),
+        )?;
         Ok(())
+    }
+
+    /// Publish every activity value that remains stable for the configured
+    /// debounce. The baseline is the last value managers were told about, so
+    /// a short A→B→A flicker clears itself without producing either edge.
+    pub fn flush_debounced_activity_events(
+        &self,
+        debounce_seconds: u64,
+    ) -> Result<usize, rusqlite::Error> {
+        self.with_immediate_transaction(|db| {
+            let modifier = format!("-{debounce_seconds} seconds");
+            let mut stmt = db.conn.prepare(
+                "SELECT pi.id, pi.activity_event_baseline, pi.activity, pi.runtime_status,
+                        (SELECT sr.status FROM stage_run sr WHERE sr.task_id = pi.id
+                         ORDER BY sr.rowid DESC LIMIT 1)
+                 FROM pipeline_item pi
+                 WHERE pi.closed_at IS NULL
+                   AND pi.activity_event_pending_at IS NOT NULL
+                   AND pi.activity_event_pending_at <= datetime('now', ?)",
+            )?;
+            let rows = stmt
+                .query_map([modifier], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(stmt);
+            let mut appended = 0;
+            for (id, baseline, activity, runtime_state, latest_run_status) in rows {
+                db.conn.execute(
+                    "UPDATE pipeline_item SET activity_event_pending_at = NULL WHERE id = ?",
+                    [&id],
+                )?;
+                if baseline == activity {
+                    continue;
+                }
+                let latest_run_finished_without_completion = matches!(
+                    (activity.as_deref(), runtime_state.as_deref(), latest_run_status.as_deref()),
+                    (Some("idle" | "unread"), Some("idle"), Some("running"))
+                );
+                db.conn.execute(
+                    "UPDATE pipeline_item SET activity_event_baseline = ? WHERE id = ?",
+                    (&activity, &id),
+                )?;
+                db.append_task_event(
+                    &id,
+                    TaskEventKind::ActivityChanged,
+                    json!({
+                        "previousActivity": baseline,
+                        "activity": activity,
+                        "runtimeState": runtime_state,
+                        "latestRunFinishedWithoutCompletion": latest_run_finished_without_completion,
+                    }),
+                )?;
+                appended += 1;
+            }
+            Ok(appended)
+        })
     }
 
     /// Agent-requested revision rounds recorded since the last
@@ -899,6 +945,8 @@ impl Db {
             "UPDATE pipeline_item
              SET activity = 'idle', activity_changed_at = datetime('now'),
                  activity_revision = activity_revision + 1,
+                 activity_event_baseline = COALESCE(activity_event_baseline, activity),
+                 activity_event_pending_at = datetime('now'),
                  updated_at = datetime('now')
              WHERE id = ? AND activity = 'unread' AND closed_at IS NULL
                AND (? IS NULL OR activity_revision = ?)",

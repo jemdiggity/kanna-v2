@@ -136,6 +136,7 @@ async fn assert_created_task_overrides_reach_daemon_spawn(
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-create-overrides-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -617,6 +618,7 @@ async fn create_task_route_replays_requested_task_id_without_preparing_or_spawni
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-create-replay-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -735,6 +737,7 @@ async fn requested_task_retry_repairs_prepare_before_daemon_spawn() {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-create-repair-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -1189,6 +1192,7 @@ async fn create_task_route_uses_saved_default_agent_provider_when_payload_omits_
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-default-provider-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -1307,6 +1311,7 @@ async fn create_task_route_runs_a_non_review_builtin_agent_in_the_first_stage() 
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-create-commit-agent-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -1422,6 +1427,7 @@ async fn create_task_route_persists_display_name_alias_and_returns_it_as_title()
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-create-title-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -1607,6 +1613,7 @@ async fn create_task_route_preserves_stage_override_for_transferred_tasks() {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-stage-override-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -1761,6 +1768,7 @@ async fn create_task_route_sends_kanna_cli_runtime_env_to_daemon_spawn() {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-create-env-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -1854,6 +1862,7 @@ async fn create_task_route_rejects_invalid_blocker_before_creating_task_or_spawn
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-invalid-blocker-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -1941,6 +1950,7 @@ async fn create_task_route_preserves_failed_prepare_diagnostics() {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-create-bad-base-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -2046,6 +2056,7 @@ async fn create_task_route_with_blocker_creates_dormant_task_without_spawning() 
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-create-dormant-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -2207,6 +2218,7 @@ async fn create_task_route_with_only_closed_blockers_spawns_immediately() {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-create-closed-blocker-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -2350,6 +2362,7 @@ async fn create_task_route_preserves_failed_recovery_seed_diagnostics_without_sp
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-create-spawn-fail-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -2488,6 +2501,7 @@ async fn create_task_route_persists_blocker_without_daemon_spawn() {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-create-blocker-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();

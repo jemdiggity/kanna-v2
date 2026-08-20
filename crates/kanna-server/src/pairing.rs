@@ -361,6 +361,7 @@ mod tests {
             lan_host: "0.0.0.0".to_string(),
             lan_port: 48_120,
             transfer_port: 4455,
+            activity_event_debounce_seconds: 300,
             pairing_store_path: std::env::temp_dir()
                 .join(format!("kanna-pairing-{label}-{unique}.json"))
                 .to_string_lossy()
@@ -425,6 +426,7 @@ mod tests {
             lan_host: "0.0.0.0".to_string(),
             lan_port: 48120,
             transfer_port: 4455,
+            activity_event_debounce_seconds: 300,
             pairing_store_path: PathBuf::from("/tmp/kanna-pairings.json")
                 .to_string_lossy()
                 .to_string(),

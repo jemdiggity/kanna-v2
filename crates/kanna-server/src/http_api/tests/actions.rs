@@ -286,6 +286,7 @@ async fn close_task_route_releases_claimed_ports() {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-close-ports-{unique}.json"),
     };
     let app = super::router(Arc::new(super::AppState::new(config)));
@@ -408,6 +409,7 @@ async fn reopen_task_route_reopens_and_reclaims_ports_from_remote_default_config
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-reopen-ports-{unique}.json"),
     };
     let app = super::router(Arc::new(super::AppState::new(config)));
@@ -524,6 +526,7 @@ async fn reopen_task_route_rejects_cloud_identity_conflict_without_claiming_port
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-reopen-identity-{unique}.json"),
     };
     let app = super::router(Arc::new(super::AppState::new(config)));
@@ -780,6 +783,7 @@ async fn close_pr_task_sends_blocker_close_instruction_with_renamed_branch_to_ru
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-close-pr-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -1264,6 +1268,7 @@ async fn close_task_route_resolves_branch_style_task_id() {
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-close-{unique}.json"),
     };
     let app = super::router(Arc::new(super::AppState::new(config)));
@@ -1495,6 +1500,7 @@ async fn close_task_route_tears_down_current_stage_environment_before_repo_teard
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-close-env-{unique}.json"),
     };
     let app = super::router(Arc::new(super::AppState::new(config)));
@@ -1793,6 +1799,7 @@ async fn pr_completion_starts_dormant_dependent_from_current_branch_optimistical
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-pr-optimistic-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -2123,6 +2130,7 @@ async fn complete_pr_stage_without_pr_url_leaves_dormant_dependent_unstarted() {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-pr-stays-blocked-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -2247,6 +2255,7 @@ async fn close_last_blocker_starts_dormant_dependent_from_blocker_branch() {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-close-unblocks-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -2475,6 +2484,7 @@ fn dependent_scenario_config(label: &str, unique: &str, daemon_dir: &Path) -> Co
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-{label}-{unique}.json"),
     }
 }
@@ -2888,6 +2898,7 @@ async fn conflicting_sibling_blockers_create_integration_task_and_leave_dependen
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-conflict-integrates-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -3133,6 +3144,7 @@ async fn closing_integration_task_starts_dependent_from_integration_branch() {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-integration-closes-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -3410,6 +3422,7 @@ async fn renamed_multi_blocker_pr_branches_survive_earlier_worktree_cleanup() {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-clean-multi-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -3635,6 +3648,7 @@ async fn close_non_final_blocker_leaves_dormant_dependent_unstarted() {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-close-non-final-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -4372,6 +4386,7 @@ async fn advance_stage_route_records_stage_run_for_spawned_next_task() {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-advance-stage-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -4564,6 +4579,7 @@ async fn advance_stage_route_notifies_after_detached_setup_failure_is_persisted(
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-advance-failure-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -4835,6 +4851,7 @@ async fn advance_stage_detached_transition_aborts_when_task_closes_before_stage_
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-advance-close-race-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -5087,6 +5104,7 @@ async fn advance_stage_route_closes_final_stage_and_tears_down_environment_befor
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-final-close-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -5887,6 +5905,7 @@ async fn complete_stage_success_after_failed_post_refinishes_run_and_transitions
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-post-refinish-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -6193,6 +6212,7 @@ async fn advance_stage_route_stays_responsive_while_prepare_blocks_on_git() {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-advance-block-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -6316,6 +6336,7 @@ async fn close_last_blocker_stays_responsive_while_dependent_prepare_blocks() {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-close-unblock-block-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -6536,6 +6557,7 @@ async fn complete_pr_stage_stays_responsive_while_dependent_prepare_blocks() {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
         pairing_store_path: format!("/tmp/kanna-pairings-pr-optimistic-block-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
