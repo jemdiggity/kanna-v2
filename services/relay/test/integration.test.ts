@@ -32,6 +32,22 @@ const E2E_SHUTDOWN_TOKEN = "relay-integration-shutdown-capability";
  */
 const DESKTOP_CREDENTIAL_CACHE_TTL_MS = 250;
 
+/**
+ * The per-IP pre-auth cap this suite runs the relay with, via
+ * `KANNA_RELAY_MAX_UNAUTHENTICATED_CONNECTIONS_PER_IP`.
+ *
+ * Lowered from the shipped 8 so the cases below can reach the cap in a handful
+ * of sockets instead of a dozen — and, because the relay reads it from the
+ * environment, exercising `resolveUpgradeAdmissionOptions` at the same time.
+ *
+ * 4 rather than 1 or 2 on purpose: this whole file shares one relay process,
+ * and a few of its cases deliberately hold a socket that never authenticates
+ * (the auth-timeout case holds exactly one for the full 10 s window). Those
+ * hold at most one slot at a time, so 4 leaves three of headroom while still
+ * being small enough to test cheaply.
+ */
+const MAX_UNAUTHENTICATED_CONNECTIONS_PER_IP = 4;
+
 /** Wait out the credential cache, so the next revalidation reaches Firestore. */
 async function expireDesktopCredentialCache(): Promise<void> {
   await new Promise((resolve) =>
@@ -53,6 +69,34 @@ function relayHttpUrl(path: string): string {
 
 /** Everything the relay has written to stdout since it was spawned. */
 let relayStdout = "";
+/**
+ * The same for stderr. The relay's refusal and oversize lines are
+ * `console.warn`/`console.error`, which Node writes to stderr, so a test that
+ * only reads stdout cannot see them.
+ */
+let relayStderr = "";
+
+/**
+ * A mark in both relay streams. Each stream is append-only but they grow
+ * independently, so one offset into their concatenation would slide as the
+ * other grew and could re-expose output from an earlier case.
+ */
+interface RelayLogMark {
+  stdout: number;
+  stderr: number;
+}
+
+function markRelayLog(): RelayLogMark {
+  return { stdout: relayStdout.length, stderr: relayStderr.length };
+}
+
+/**
+ * Everything the relay has written since `mark`, on either stream — for
+ * assertions that should not care which one a given line lands on.
+ */
+function relayLogSince(mark: RelayLogMark): string {
+  return `${relayStdout.slice(mark.stdout)}\n${relayStderr.slice(mark.stderr)}`;
+}
 
 interface RelayByteLogLine {
   event: string;
@@ -401,6 +445,77 @@ function connectAndAuth(
   });
 }
 
+/**
+ * Open a socket and stop at the upgrade: no auth frame is ever sent, so the
+ * connection holds its pre-auth admission slot until it closes or times out.
+ */
+function openWithoutAuth(): Promise<WebSocket> {
+  return new Promise((resolveSocket, reject) => {
+    const ws = new WebSocket(relayUrl());
+    const timeout = setTimeout(() => {
+      ws.terminate();
+      reject(new Error("Upgrade timed out"));
+    }, 5_000);
+    ws.once("open", () => {
+      clearTimeout(timeout);
+      resolveSocket(ws);
+    });
+    ws.once("unexpected-response", (_request, response) => {
+      clearTimeout(timeout);
+      response.resume();
+      ws.terminate();
+      reject(new Error(`Upgrade refused with ${response.statusCode}`));
+    });
+    ws.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+  });
+}
+
+/** Open a socket expecting the relay to refuse the upgrade, and report its status. */
+function openExpectingUpgradeRefusal(): Promise<number> {
+  return new Promise((resolveStatus, reject) => {
+    const ws = new WebSocket(relayUrl());
+    const timeout = setTimeout(() => {
+      ws.terminate();
+      reject(new Error("Expected upgrade refusal timed out"));
+    }, 5_000);
+    // `ws` surfaces a non-101 upgrade response as `unexpected-response`, and
+    // only emits `error` instead when nothing is listening for it.
+    ws.once("unexpected-response", (_request, response) => {
+      clearTimeout(timeout);
+      response.resume();
+      ws.terminate();
+      resolveStatus(response.statusCode ?? 0);
+    });
+    ws.once("open", () => {
+      clearTimeout(timeout);
+      ws.terminate();
+      reject(new Error("Upgrade was admitted"));
+    });
+    ws.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+  });
+}
+
+/** Wait for the relay to log `needle` on either stream after `mark`. */
+async function waitForRelayLog(
+  mark: RelayLogMark,
+  needle: string,
+  description: string,
+  timeoutMs = 5_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (relayLogSince(mark).includes(needle)) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`relay never logged ${description}`);
+}
+
 function connectAndExpectClose(
   authPayload: Record<string, unknown>,
   expectedCode: number,
@@ -666,13 +781,21 @@ describe("Relay integration", () => {
         KANNA_RELAY_DESKTOP_CREDENTIAL_CACHE_TTL_MS: String(
           DESKTOP_CREDENTIAL_CACHE_TTL_MS,
         ),
+        // The per-IP pre-auth cap, lowered so the admission cases below reach
+        // it in a handful of sockets. See the constant for why this value.
+        KANNA_RELAY_MAX_UNAUTHENTICATED_CONNECTIONS_PER_IP: String(
+          MAX_UNAUTHENTICATED_CONNECTIONS_PER_IP,
+        ),
       },
       detached: true,
       stdio: "pipe",
     });
 
-    // Log relay stderr for debugging test failures
+    // Log relay stderr for debugging test failures, and keep it for the tests
+    // that assert on a `console.warn` line the relay emits.
+    relayStderr = "";
     relayProcess.stderr?.on("data", (chunk: Buffer) => {
+      relayStderr += chunk.toString();
       process.stderr.write(`[relay] ${chunk.toString()}`);
     });
     // The byte odometer reports on stdout, and an unread pipe eventually
@@ -2885,6 +3008,107 @@ describe("Relay integration", () => {
     // The relay closes with 4004 for "Missing id_token or device_token"
     expect(closeCode).toBe(4004);
   });
+
+  it("keeps every other connection alive when one sends a frame over maxPayload", async () => {
+    // Three authenticated connections from one address — two desktops and a
+    // phone behind one NAT — are ordinary usage, and the per-IP bound is on the
+    // *unauthenticated* population, so none of them is refused.
+    const desktopA = await connectAndAuth({
+      device_token: TEST_DEVICE_TOKEN,
+      desktop_id: "limits-desktop-a",
+    });
+    const desktopB = await connectAndAuth({
+      device_token: TEST_DEVICE_TOKEN,
+      desktop_id: "limits-desktop-b",
+    });
+    const phone = await connectAndAuth({ id_token: idToken });
+
+    // 24 MiB of zeros is a few KiB once deflated, which is exactly the
+    // amplification this task closes: before it, the same trick could force a
+    // 100 MiB allocation on a 1 GB VM, and it did not need to authenticate
+    // first. `ws` now aborts the inflate at the cap and closes with 1009.
+    const closed = new Promise<number>((resolveClose) => {
+      phone.ws.once("close", (code: number) => resolveClose(code));
+    });
+    phone.ws.send(Buffer.alloc(24 * 1024 * 1024), { compress: true });
+    expect(await closed).toBe(1009);
+
+    const health = await fetch(healthUrl());
+    expect(health.status).toBe(200);
+    expect(desktopA.ws.readyState).toBe(WebSocket.OPEN);
+    expect(desktopB.ws.readyState).toBe(WebSocket.OPEN);
+    desktopA.ws.close();
+    desktopB.ws.close();
+  }, 30_000);
+
+  it("releases each pre-auth slot on the auth frame, so live sockets are not capped", async () => {
+    // The per-IP cap this suite runs the relay with bounds the *pre-auth*
+    // population, not the live one: `releasePreAuthSlot()` hands the slot back
+    // on the auth frame. That release is the load-bearing half of the feature. If it
+    // regressed, the constant would silently become a hard cap on live sockets
+    // per client address — which ordinary usage reaches, because every desktop
+    // holds a control socket plus its KSP and task-transfer tunnel sockets and
+    // a NAT puts several desktops and phones on one address. So this opens
+    // more connections than the cap and keeps every one of them.
+    const logMark = markRelayLog();
+    const total = MAX_UNAUTHENTICATED_CONNECTIONS_PER_IP + 3;
+    const connections: Array<{ ws: WebSocket; userId: string }> = [];
+    try {
+      for (let index = 0; index < total; index += 1) {
+        // Distinct desktop ids on purpose: `setServerConnection` closes a
+        // same-id predecessor, and that close would hand a slot back for the
+        // wrong reason — letting this pass even with the release removed.
+        connections.push(await connectAndAuth({
+          device_token: TEST_DEVICE_TOKEN,
+          desktop_id: `preauth-release-${index}`,
+        }));
+      }
+
+      expect(connections).toHaveLength(total);
+      for (const { ws } of connections) {
+        expect(ws.readyState).toBe(WebSocket.OPEN);
+      }
+      expect(relayLogSince(logMark)).not.toContain("[ws] Refused upgrade");
+    } finally {
+      for (const { ws } of connections) ws.close();
+    }
+  }, 40_000);
+
+  it("refuses an unauthenticated flood from one address and frees the slot on close", async () => {
+    const logMark = markRelayLog();
+    const silent: WebSocket[] = [];
+    try {
+      for (let index = 0; index < MAX_UNAUTHENTICATED_CONNECTIONS_PER_IP; index += 1) {
+        silent.push(await openWithoutAuth());
+      }
+
+      // The surplus upgrade is refused before `ws` allocates anything for it.
+      expect(await openExpectingUpgradeRefusal()).toBe(429);
+      await waitForRelayLog(
+        logMark,
+        "[ws] Refused upgrade from",
+        "the refused upgrade",
+      );
+      // Refusing the surplus must not disturb the sockets already admitted.
+      for (const ws of silent) {
+        expect(ws.readyState).toBe(WebSocket.OPEN);
+      }
+
+      // Closing one silent socket returns its slot — the release-on-close path,
+      // which is the only thing that frees a socket that never authenticated.
+      const closed = new Promise<void>((resolveClosed) => {
+        silent[0].once("close", () => resolveClosed());
+      });
+      silent[0].close();
+      await closed;
+      silent.splice(0, 1);
+      silent.push(await openWithoutAuth());
+    } finally {
+      // Close every silent socket, so the relay's 10 s auth timeout does not
+      // bleed into a later case in this shared process.
+      for (const ws of silent) ws.close();
+    }
+  }, 40_000);
 
   it("gracefully closes clients before an authorized E2E shutdown", async () => {
     const unauthorized = await fetch(

@@ -14,6 +14,7 @@ import {
   resetByteAccountingForTests,
 } from "../src/byteAccounting.js";
 import { RELAY_PER_MESSAGE_DEFLATE } from "../src/webSocketCompression.js";
+import { RELAY_MAX_PAYLOAD_BYTES } from "../src/webSocketLimits.js";
 
 const sockets: WebSocket[] = [];
 let server: WebSocketServer | null = null;
@@ -43,6 +44,7 @@ async function startRelayWebSocketServer(): Promise<string> {
     port,
     host: "127.0.0.1",
     perMessageDeflate: RELAY_PER_MESSAGE_DEFLATE,
+    maxPayload: RELAY_MAX_PAYLOAD_BYTES,
   });
   await new Promise<void>((resolve) => server!.once("listening", resolve));
   return `ws://127.0.0.1:${port}`;

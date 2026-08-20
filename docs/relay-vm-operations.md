@@ -133,6 +133,61 @@ Set this variable to shorten that window, or to `0` to disable the cache
 entirely and restore a Firestore read per revalidation. The deploy does not set
 it; the integration suite does.
 
+## Frame size and pre-auth abuse bounds
+
+Two bounds keep the compression above from being a cheap way to exhaust the VM.
+Both are documented with their derivation at
+`services/relay/src/webSocketLimits.ts`, and the frame-by-frame inventory they
+are derived from is in `docs/task-specs/7a38cc18.md`.
+
+**`maxPayload` is 16 MiB.** `ws` applies it to the *decompressed* size, so it is
+what stops a few KiB of compressed upload forcing a huge allocation — before the
+caller has authenticated, because extension negotiation happens at the HTTP
+upgrade. Peak concurrent decompression memory across the whole process is
+`concurrencyLimit × maxPayload`, i.e. 10 × 16 MiB = 160 MiB.
+
+**Per-IP admission runs before the upgrade.** One client address may hold 8
+*unauthenticated* connections at once and complete 600 upgrades per minute. The
+slot is released the moment a socket authenticates, so how many desktops,
+phones, and tunnels a household or a carrier-NAT'd range runs is not bounded —
+only how many can sit in the pre-auth window at once. Refusals are logged as
+`[ws] Refused upgrade from <address>: <reason>` and answered with 429.
+
+The address is read from `X-Forwarded-For`, last hop, and only when the peer is
+private — which it always is in production, because Caddy reverse-proxies to
+`relay:8080` and nothing else can reach the container. **If a second proxy hop
+is ever put in front of Caddy, that index has to move** or every user lands in
+one bucket.
+
+### When a legitimate frame is refused
+
+Two frame classes have no producer-side size bound at all — `term_snapshot`
+(a 10,000-row terminal scrollback) and `agent_snapshot` (a whole agent journal).
+A pathological but legal terminal can exceed any cap, including the 100 MiB ws
+default the relay used before. If a real user is being clipped you will see, per
+occurrence:
+
+```
+[ws] Oversize frame from <address> (authenticated=true, role=server, maxPayload=16777216); closing that connection only.
+```
+
+`authenticated=true` is the tell: an attack does not need to authenticate, so an
+authenticated oversize frame is almost certainly a real snapshot. Raise
+`KANNA_RELAY_MAX_PAYLOAD_BYTES` on the VM and restart the container, then open a
+task to bound the producer — the relay is the wrong place to fix an unbounded
+snapshot.
+
+### `KANNA_RELAY_MAX_PAYLOAD_BYTES`
+
+Bytes. Overrides the 16 MiB cap above. A value that is not a positive integer is
+ignored with a warning rather than disabling the bound. The deploy does not set
+it.
+
+### `KANNA_RELAY_MAX_UNAUTHENTICATED_CONNECTIONS_PER_IP` and `KANNA_RELAY_MAX_UPGRADES_PER_IP_PER_MINUTE`
+
+The two per-IP bounds, for the case where a shared NAT trips one of them. Same
+parsing rules, and the deploy sets neither.
+
 ## Entitlement enforcement
 
 ### `KANNA_RELAY_ENTITLEMENT_ENFORCEMENT`
