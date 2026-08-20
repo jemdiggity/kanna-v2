@@ -10,6 +10,11 @@ import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { TaskSummary } from "../lib/api/types";
 import { isTaskBlocked } from "../lib/api/taskIdentity";
 import { buildTaskListItemModel } from "../screens/taskPresentation";
+import {
+  TASK_BLOCKED_THEME,
+  TASK_STAGE_STRIPE_WIDTH,
+  resolveTaskStageTheme
+} from "../theme/taskStageTheme";
 
 /**
  * Pin state has no button of its own: swiping the row is the only pin
@@ -66,6 +71,10 @@ export function TaskCard({
 }: TaskCardProps) {
   const model = buildTaskListItemModel(task);
   const blocked = isTaskBlocked(task);
+  // Stage sets the row's hue; pinning sets how brightly its outline burns.
+  // The two signals stay readable together because they never fight over the
+  // same channel.
+  const stageTheme = resolveTaskStageTheme(task.stage);
   const pinLabel = pinned ? "Unpin" : "Pin";
   const accessibilityLabel = [
     isSubtask ? "Subtask" : null,
@@ -112,7 +121,14 @@ export function TaskCard({
       accessibilityRole="button"
       accessibilityValue={{ text: effectiveActivity }}
       accessible
-      style={[styles.card, pinned ? styles.cardPinned : null]}
+      style={[
+        styles.card,
+        {
+          backgroundColor: stageTheme.surface,
+          borderColor: pinned ? stageTheme.pinnedBorder : stageTheme.border,
+          borderLeftColor: stageTheme.accent
+        }
+      ]}
       testID={MOBILE_E2E_IDS.taskListItem(uiId)}
       onAccessibilityAction={handleAccessibilityAction}
       onPress={onPress}
@@ -127,12 +143,30 @@ export function TaskCard({
           {model.title}
         </Text>
         <View style={styles.pillColumn}>
-          <View style={styles.stagePill}>
-            <Text style={styles.stageLabel}>{model.stageLabel}</Text>
+          <View
+            style={[
+              styles.stagePill,
+              { backgroundColor: stageTheme.chipBackground }
+            ]}
+          >
+            <Text style={[styles.stageLabel, { color: stageTheme.chipLabel }]}>
+              {model.stageLabel}
+            </Text>
           </View>
           {blocked ? (
-            <View style={[styles.stagePill, styles.blockedPill]}>
-              <Text style={[styles.stageLabel, styles.blockedLabel]}>
+            <View
+              style={[
+                styles.stagePill,
+                styles.blockedPill,
+                { backgroundColor: TASK_BLOCKED_THEME.chipBackground }
+              ]}
+            >
+              <Text
+                style={[
+                  styles.stageLabel,
+                  { color: TASK_BLOCKED_THEME.chipLabel }
+                ]}
+              >
                 blocked
               </Text>
             </View>
@@ -183,22 +217,24 @@ export function TaskCard({
 }
 
 const styles = StyleSheet.create({
+  /**
+   * Colour arrives per row from `resolveTaskStageTheme`: a saturated left edge
+   * in the stage's icon colour, over a card surface tinted the same hue. The
+   * static styles here only hold the geometry.
+   *
+   * Pinned rows still say so with their outline — now the stage's own colour
+   * at full strength against the muted border an unpinned row wears. Stage and
+   * pin stay orthogonal: hue is the stage, brightness is the pin, and a badge
+   * or glyph would shout over the stage pill it sits beside.
+   */
   card: {
-    backgroundColor: "#111B2C",
-    borderColor: "#20304C",
     borderRadius: 20,
     borderWidth: 1,
+    // The stripe eats 5px of the left inset, so the text starts where it did.
+    borderLeftWidth: TASK_STAGE_STRIPE_WIDTH,
     gap: 10,
-    padding: 16
-  },
-  /**
-   * Pinned rows say so with their outline: the same border, one step brighter.
-   * The row's position already carries most of the message, so this only has
-   * to be legible at a glance — a badge or glyph would shout over the stage
-   * pill it sits beside.
-   */
-  cardPinned: {
-    borderColor: "#4C6FA8"
+    padding: 16,
+    paddingLeft: 16 - (TASK_STAGE_STRIPE_WIDTH - 1)
   },
   row: {
     flexDirection: "row",
@@ -241,17 +277,12 @@ const styles = StyleSheet.create({
   },
   stagePill: {
     alignSelf: "flex-start",
-    backgroundColor: "#172843",
     borderRadius: 999,
     paddingHorizontal: 10,
     paddingVertical: 6
   },
   blockedPill: {
-    alignSelf: "flex-end",
-    backgroundColor: "#2B2033"
-  },
-  blockedLabel: {
-    color: "#C9A8E0"
+    alignSelf: "flex-end"
   },
   // Subordinate to the title on purpose: legible for cross-checking, quiet
   // enough that the row still reads title-first.
@@ -261,7 +292,6 @@ const styles = StyleSheet.create({
     fontSize: 11
   },
   stageLabel: {
-    color: "#9EB6DC",
     fontSize: 11,
     fontWeight: "700",
     textTransform: "uppercase"

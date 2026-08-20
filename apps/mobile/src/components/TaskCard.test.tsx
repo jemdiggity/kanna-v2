@@ -1,5 +1,10 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { TaskActivity, TaskSummary } from "../lib/api/types";
+import {
+  TASK_BLOCKED_THEME,
+  TASK_STAGE_STRIPE_WIDTH,
+  resolveTaskStageTheme
+} from "../theme/taskStageTheme";
 
 vi.mock("react-native", () => ({
   Pressable: "Pressable",
@@ -274,6 +279,7 @@ describe("TaskCard", () => {
       title: "Pinned task",
       stage: "review"
     };
+    const theme = resolveTaskStageTheme("review");
     const unpinned = TaskCard({ task, onPress: vi.fn() }) as ElementNode;
     const pinned = TaskCard({
       task,
@@ -283,10 +289,70 @@ describe("TaskCard", () => {
 
     const unpinnedBorder = flattenStyle(unpinned.props?.style).borderColor;
     const pinnedBorder = flattenStyle(pinned.props?.style).borderColor;
-    expect(unpinnedBorder).toBe("#20304C");
-    expect(pinnedBorder).toBe("#4C6FA8");
+    // Stage colour and pin state are orthogonal: both rows keep the stage's
+    // hue, and only the pinned one wears it at full strength.
+    expect(unpinnedBorder).toBe(theme.border);
+    expect(pinnedBorder).toBe(theme.pinnedBorder);
+    expect(pinnedBorder).not.toBe(unpinnedBorder);
+    expect(flattenStyle(pinned.props?.style).borderLeftColor).toBe(
+      flattenStyle(unpinned.props?.style).borderLeftColor
+    );
     // The outline carries it on its own: no pin glyph joins the stage pill.
     expect(textContent(pinned)).toBe(textContent(unpinned));
+  });
+
+  it.each(["in progress", "review", "pr", "somewhere-custom", null])(
+    "colours the %j row from its stage theme",
+    (stage) => {
+      if (!TaskCard) throw new Error("TaskCard was not loaded");
+      const theme = resolveTaskStageTheme(stage);
+      const tree = TaskCard({
+        task: {
+          id: "task-1",
+          repoId: "repo-1",
+          title: "Coloured row",
+          stage
+        },
+        onPress: vi.fn()
+      }) as ElementNode;
+
+      const cardStyle = flattenStyle(tree.props?.style);
+      expect(cardStyle.backgroundColor).toBe(theme.surface);
+      expect(cardStyle.borderColor).toBe(theme.border);
+      // The saturated left edge is the stage signal that reads from a scroll.
+      expect(cardStyle.borderLeftColor).toBe(theme.accent);
+      expect(cardStyle.borderLeftWidth).toBe(TASK_STAGE_STRIPE_WIDTH);
+
+      const stageLabel = findTextNodeByCompleteText(
+        tree,
+        stage ?? "unknown"
+      );
+      expect(flattenStyle(stageLabel?.props?.style).color).toBe(
+        theme.chipLabel
+      );
+    }
+  );
+
+  it("keeps the blocked badge on its own colour over the stage colour", () => {
+    if (!TaskCard) throw new Error("TaskCard was not loaded");
+    const tree = TaskCard({
+      task: {
+        id: "task-1",
+        repoId: "repo-1",
+        title: "Blocked task",
+        stage: "in progress",
+        blockedByTaskIds: ["task-blocker"]
+      },
+      onPress: vi.fn()
+    }) as ElementNode;
+
+    const blockedLabel = findTextNodeByCompleteText(tree, "blocked");
+    expect(flattenStyle(blockedLabel?.props?.style).color).toBe(
+      TASK_BLOCKED_THEME.chipLabel
+    );
+    expect(TASK_BLOCKED_THEME.chipLabel).not.toBe(
+      resolveTaskStageTheme("in progress").chipLabel
+    );
   });
 
   it("keeps Activity dismissal on the row's accessibility actions with no button", () => {

@@ -67,6 +67,10 @@ import {
 import { buildTaskWorkspaceModel } from "./taskWorkspace";
 import { resolveMobileTerminalGeometry } from "../mobileTerminalGeometry";
 import {
+  TASK_STAGE_STRIPE_WIDTH,
+  resolveTaskStageTheme
+} from "../theme/taskStageTheme";
+import {
   getTerminalBottomInset,
   getTerminalSelectionToolbarTop
 } from "./terminalSafeArea";
@@ -169,6 +173,9 @@ export function TaskScreen({
     terminalErrorMessage,
     taskCreationPhase
   });
+  // The list colours rows by stage; the detail header wears the same colour so
+  // opening a task does not drop the signal that led the eye to it.
+  const stageTheme = resolveTaskStageTheme(task.stage);
   const [draftInput, setDraftInput] = useState("");
   const [composerInputHeight, setComposerInputHeight] = useState(
     TASK_COMPOSER_MIN_HEIGHT
@@ -701,6 +708,10 @@ export function TaskScreen({
           accessibilityValue={{ text: effectiveActivity }}
           style={[
             styles.titleChip,
+            {
+              borderColor: stageTheme.border,
+              borderLeftColor: stageTheme.accent
+            },
             isTitleExpanded ? styles.titleChipExpanded : null
           ]}
           testID={MOBILE_E2E_IDS.taskTitleButton}
@@ -713,7 +724,10 @@ export function TaskScreen({
             )
           }
         >
-          <Text accessible={false} style={styles.stageLabel}>
+          <Text
+            accessible={false}
+            style={[styles.stageLabel, { color: stageTheme.chipLabel }]}
+          >
             {model.stageLabel}
           </Text>
           {isTitleExpanded ? (
@@ -1050,17 +1064,19 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     lineHeight: 19
   },
+  /** Stage colour arrives inline; only the geometry is static here. */
   titleChip: {
     alignItems: "center",
     backgroundColor: "rgba(13, 21, 36, 0.78)",
-    borderColor: "#22304D",
     borderRadius: 18,
     borderWidth: 1,
+    borderLeftWidth: TASK_STAGE_STRIPE_WIDTH,
     flex: 1,
     flexDirection: "row",
     gap: 10,
     minWidth: 0,
     paddingHorizontal: 14,
+    paddingLeft: 14 - (TASK_STAGE_STRIPE_WIDTH - 1),
     paddingVertical: 10
   },
   titleChipExpanded: {
@@ -1077,7 +1093,6 @@ const styles = StyleSheet.create({
     zIndex: 4
   },
   stageLabel: {
-    color: "#7FA7D9",
     fontSize: 10,
     fontWeight: "700",
     letterSpacing: 0.8,
