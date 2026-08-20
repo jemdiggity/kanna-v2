@@ -39,6 +39,9 @@ off, speaking the real protocol:
   refused publication and push with `code: 4402`;
 - an unentitled phone's `tunnel_request` is refused with the same code, while an
   entitled one reaches the router;
+- an unentitled desktop opening a tunnel socket directly — no phone involved —
+  is closed with 4402 at the handshake, and the same connection against the
+  flag-off relay gets past it to the router's own 4404;
 - an unverified phone token is refused even holding an active subscription;
 - a `grace` record whose `graceEndsAt` has passed is refused — nothing sweeps
   it, so the enforcement-side read is what expires it;
@@ -51,7 +54,10 @@ The comp path is proved end to end within that suite: it runs the real
 `comp:grant` script against the emulator, which writes `billing/comp`, invokes
 `recomputeEntitlement`, and the relay then serves the account.
 `services/firebase-functions/test/comp-grant.test.ts` covers the grant/revoke
-matrix, including that a source-doc write with no recompute grants nothing.
+matrix, including that a source-doc write with no recompute grants nothing, and
+`comp-grant-script.test.ts` runs the script as a process — grant, revoke,
+`--dry-run`, and the guards that keep a dev shell from writing a grant into a
+real project.
 
 `services/relay/test/entitlement.test.ts` covers the flag vocabulary, the cache
 (TTL bound both ways, no caching of failures, capacity) and the fail-open

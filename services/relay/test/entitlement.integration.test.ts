@@ -27,9 +27,18 @@ const PASSWORD = "password123";
 
 /**
  * Short enough that the revocation test can observe the bound instead of
- * waiting the production minute for it.
+ * waiting the production minute for it, and long enough that the same test's
+ * *other* half is not a race.
+ *
+ * The cache is warmed at the handshake, so "still entitled inside the window"
+ * is only observable if the connect, the first publication round trip and the
+ * revoking Firestore write all fit inside the TTL. At a few hundred
+ * milliseconds they do not, reliably, on a machine running several suites at
+ * once — which is a flaky test, not a finding about the relay. Three seconds is
+ * twenty times shorter than production and roughly ten times longer than that
+ * sequence takes.
  */
-const ENTITLEMENT_CACHE_TTL_MS = 400;
+const ENTITLEMENT_CACHE_TTL_MS = 3_000;
 
 interface TestAccount {
   uid: string;
@@ -195,6 +204,33 @@ function connectAndAuth(port: number, payload: Record<string, unknown>): Promise
       });
     };
     ws.on("message", handler);
+    ws.on("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+  });
+}
+
+/**
+ * Connect, send one auth frame, and resolve with the close code the relay
+ * answers with. A tunnel socket is never told `auth_ok`, so the close code is
+ * the whole reply.
+ */
+function connectAndAwaitClose(
+  port: number,
+  payload: Record<string, unknown>,
+): Promise<number> {
+  return new Promise((resolveCode, reject) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+    const timeout = setTimeout(() => {
+      ws.close();
+      reject(new Error("close timed out"));
+    }, 10_000);
+    ws.on("open", () => ws.send(JSON.stringify({ type: "auth", ...payload })));
+    ws.on("close", (code: number) => {
+      clearTimeout(timeout);
+      resolveCode(code);
+    });
     ws.on("error", (error) => {
       clearTimeout(timeout);
       reject(error);
@@ -553,6 +589,34 @@ describe("Relay entitlement enforcement", () => {
     await closeAndWait(auth.ws);
   });
 
+  it("refuses an unentitled tunnel socket at the handshake", async () => {
+    // Reachable without a phone: a desktop can open a tunnel socket directly.
+    // The pending-tunnel lookup would refuse this one anyway, so the assertion
+    // that matters is *which* refusal answers — 4402 means the entitlement gate
+    // turned it away before the router ever saw it.
+    const code = await connectAndAwaitClose(enforcingPort, {
+      desktop_id: accounts.unentitled.desktopId,
+      desktop_secret: accounts.unentitled.desktopSecret,
+      tunnel_id: "tunnel-unentitled",
+    });
+
+    expect(code).toBe(ENTITLEMENT_REQUIRED_CODE);
+  });
+
+  it("lets an unentitled tunnel socket past the handshake with the flag off", async () => {
+    // The same connection, byte for byte, against the permissive relay: it
+    // reaches the router, which answers 4404 because no phone requested this
+    // tunnel. Nothing entitlement-shaped happens on the way.
+    const code = await connectAndAwaitClose(permissivePort, {
+      desktop_id: accounts.unentitled.desktopId,
+      desktop_secret: accounts.unentitled.desktopSecret,
+      tunnel_id: "tunnel-unentitled",
+    });
+
+    expect(code).toBe(4404);
+    expect(code).not.toBe(ENTITLEMENT_REQUIRED_CODE);
+  });
+
   it("refuses an unverified phone token holding an active subscription", async () => {
     const auth = await connectAndAuth(enforcingPort, { id_token: accounts.unverified.idToken });
 
@@ -593,6 +657,10 @@ describe("Relay entitlement enforcement", () => {
   });
 
   it("honours a revocation on a live session within the cache TTL", async () => {
+    // The cache is warmed during the handshake, so the window opens no earlier
+    // than this instant; measuring from here can only over-state the elapsed
+    // time, which is the safe direction for the assertion below.
+    const windowOpenedAt = Date.now();
     const first = await publishAs(enforcingPort, accounts.entitled, "revoke-before");
     expect(first.ack).toMatchObject({ ok: true });
 
@@ -614,7 +682,16 @@ describe("Relay entitlement enforcement", () => {
       };
 
       // Inside the window the open session keeps the entitlement it was granted.
-      expect(await publish("revoke-inside-ttl")).toMatchObject({ ok: true });
+      // The elapsed time rides along in the failure message so a machine too
+      // slow to reach here inside the TTL says so, instead of reading as a
+      // relay that stopped honouring its own cache.
+      const insideTtl = await publish("revoke-inside-ttl");
+      const elapsedMs = Date.now() - windowOpenedAt;
+      expect(
+        insideTtl,
+        `published ${elapsedMs}ms into a ${ENTITLEMENT_CACHE_TTL_MS}ms cache window`,
+      ).toMatchObject({ ok: true });
+      expect(elapsedMs).toBeLessThan(ENTITLEMENT_CACHE_TTL_MS);
 
       // The TTL is the revocation bound, so it must actually bind — without a
       // reconnect, and without the relay polling anything.
