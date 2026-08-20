@@ -482,11 +482,8 @@ of portal copy.
 
 **The ruling prices the monthly plan only.** The earlier default of "~2 months
 free annual" is not part of it and no annual amount is decided here, while
-`createCheckoutSession` still requires a `STRIPE_PRICE_ANNUAL` id beside the
-monthly one (`services/firebase-functions/src/billing/config.ts`). Slice 0 must
-therefore either get an annual price from the owner or drop the annual plan and
-that requirement with it — an open item, deliberately not decided by this
-amendment.
+`createCheckoutSession` accepts the monthly plan only; an annual plan remains
+out until the owner prices one.
 
 ### Pricing parity
 
@@ -635,28 +632,38 @@ invited accounts).
 
 ## Decision 7 — Sequencing
 
-- **Slice 0 (human, unblocks everything)**: Stripe account for Tampopo LLC
-  (test + live), ToS/legal/特商法 pages, verify Firebase console signup
+- **Slice 0 (human, unblocks everything)**: ~~Stripe accounts for Tampopo LLC
+  (test + live)~~ **done 2026-08-21 — sandbox/test account
+  `acct_1Swy1rI0Oqa4EKBj`; live account `acct_1Swxz4RSDDrR2YPq`**;
+  ToS/legal/特商法 pages, verify Firebase console signup
   settings, the Apple verification list from Decision 2 — including Paid
   Applications Agreement, banking/tax, subscription products + price points,
   Small Business Program enrollment, and grace-period enablement in App Store
   Connect. The price decision itself landed 2026-08-21 (Decision 4,
-  "Pricing"); what remains is creating it in Stripe:
+  "Pricing"). For the first provisioning run, use the sandbox account's test
+  secret key; that same sandbox key belongs in the staging function config.
+  Run the idempotent command below with that key (use `--dry-run` to print the
+  plan without contacting Stripe):
+  `STRIPE_SECRET_KEY=... pnpm --filter @kanna/firebase-functions stripe:provision`.
+  Provision the live account later with its live secret key only as an
+  explicitly named human production step.
+  It creates what remains:
   - One **Product**, "Kanna Cloud", in **each** of test mode and live mode.
   - Under it, a **recurring monthly Price per currency** — JPY 500, USD 500,
     CAD 500, AUD 500, EUR 500, GBP 500 in Stripe's minor units (JPY is
     zero-decimal, so `500` is ¥500; the rest are $5.00 / €5.00 / £5.00) —
-    **twelve price points in total, six test and six live**. Multi-currency
-    price options on a single Price are equivalent and preferable if the
-    dashboard offers them; what matters is that one price id per mode is what
-    `createCheckoutSession` passes, with the currency selected per customer.
-  - Record the price ids in Secret Manager beside the API keys, per project
-    (`kanna-staging` ↔ test, `kanna-build` ↔ live) — `createCheckoutSession`
-    reads them as `STRIPE_PRICE_MONTHLY` / `STRIPE_PRICE_ANNUAL`. Live-mode
-    creation is human-only, same rule as production deploys.
-  - **The annual plan is still unpriced** (the ruling covers monthly only) and
-    the checkout resolver requires its id: price it, or drop the annual plan
-    and that requirement together. Owner call, Slice 0.
+    **twelve price points in total, six test and six live**, with stable lookup
+    keys `cloud_monthly_jpy`, `cloud_monthly_usd`, `cloud_monthly_cad`,
+    `cloud_monthly_aud`, `cloud_monthly_eur`, and `cloud_monthly_gbp`.
+    `createCheckoutSession` resolves the selected currency by lookup key.
+    Live-mode creation is human-only, like production deploys.
+  - **Still requiring dashboard/key access:** create restricted API keys for
+    test and live mode; supply each portal build environment's publishable key
+    as `KANNA_WEB_PORTAL_STRIPE_PUBLISHABLE_KEY`; after the deployed
+    `stripeWebhook` function URL is registered as a Stripe endpoint, record its
+    webhook signing secret.
+  - **The annual plan is still unpriced** (the ruling covers monthly only), so
+    checkout deliberately exposes only monthly billing. Owner call, Slice 0.
   - Apple's grid has no exact ¥500/$5 equivalents in every storefront: pick
     the nearest tier per the parity default in Decision 4 and accept small
     regional divergence.

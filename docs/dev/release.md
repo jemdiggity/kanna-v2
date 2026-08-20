@@ -243,8 +243,6 @@ test mode, `kanna-build` ↔ live mode):
 | Secret | Bound to | What it holds |
 |---|---|---|
 | `STRIPE_SECRET_KEY` | `createCheckoutSession` | Stripe API key for that mode |
-| `STRIPE_PRICE_MONTHLY` | `createCheckoutSession` | Monthly `cloud_access` price id |
-| `STRIPE_PRICE_ANNUAL` | `createCheckoutSession` | Annual `cloud_access` price id |
 | `KANNA_PORTAL_BASE_URL` | `createCheckoutSession` | Portal origin for the Checkout return URLs |
 | `STRIPE_WEBHOOK_SECRET` | `stripeWebhook` | Signing secret of that project's endpoint |
 
@@ -254,8 +252,8 @@ printf '%s' "$VALUE" | gcloud secrets create STRIPE_SECRET_KEY \
 ```
 
 Bindings are per function, so each carries only what it uses: the webhook never
-sees the API key and checkout never sees the signing secret. The price ids and
-the portal URL are not secrets; they are bound this way because it is the one
+sees the API key and checkout never sees the signing secret. The portal URL is
+not a secret; it is bound this way because it is the one
 mechanism that commits nothing to this public repository — the alternative, a
 `.env.<project>` file in the functions source directory, would mean checking
 per-environment values into git. `STRIPE_GRACE_FALLBACK_DAYS` is deliberately
@@ -263,9 +261,8 @@ unbound: it is optional with a documented default, and adding it to the list in
 `src/billing/config.ts` is what would make it overridable in a deployed
 environment.
 
-Creating these is a Slice-0 human item (`docs/specs/accounts-and-billing.md`);
-no Stripe account exists yet, so no deploy of these functions has been run
-against a real project.
+The Stripe account exists; remaining key and endpoint setup is tracked in the
+Slice-0 runbook (`docs/specs/accounts-and-billing.md`).
 
 Never run `firebase deploy` directly. If `kd cloud deploy` misbehaves, fix the
 `kd` workflow and redeploy through it. Environments: `kanna-build`

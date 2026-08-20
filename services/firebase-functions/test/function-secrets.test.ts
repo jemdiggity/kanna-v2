@@ -46,8 +46,6 @@ describe("deployed function secret bindings", () => {
     expect(boundSecrets("createCheckoutSession")).toEqual([...CHECKOUT_SECRET_ENVS]);
     expect(boundSecrets("createCheckoutSession")).toEqual([
       "STRIPE_SECRET_KEY",
-      "STRIPE_PRICE_MONTHLY",
-      "STRIPE_PRICE_ANNUAL",
       "KANNA_PORTAL_BASE_URL",
     ]);
   });

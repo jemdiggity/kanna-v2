@@ -7,7 +7,8 @@
     "build": "tsc -p tsconfig.build.json",
     "test": "pnpm exec vitest run --maxWorkers=2 --exclude 'dist/**'",
     "seed:billing": "pnpm build && node scripts/seed-billing-fixtures.mjs",
-    "comp:grant": "pnpm build && node scripts/grant-comp-access.mjs"
+    "comp:grant": "pnpm build && node scripts/grant-comp-access.mjs",
+    "stripe:provision": "node scripts/provision-stripe-catalog.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
