@@ -899,6 +899,8 @@ mod tests {
                             status,
                             kind: SessionKind::default(),
                             logical_input_blocked: false,
+                            composer_text: None,
+                            composer_attestation: Default::default(),
                         })
                         .into_iter()
                         .collect(),

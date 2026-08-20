@@ -596,6 +596,10 @@ pub(crate) async fn handle_command(
                         input_policy_classified: true,
                         raw_input_draft_active: false,
                         raw_input_draft_state_known: true,
+                        // A session this daemon spawns is attested from its
+                        // first byte: nothing has been typed into it yet, and
+                        // every keystroke from here is counted.
+                        typed_draft_bytes: Some(0),
                         pending_logical_inputs: Vec::new(),
                     }));
                     let io_fd = match handle.try_clone_io_fd().await {

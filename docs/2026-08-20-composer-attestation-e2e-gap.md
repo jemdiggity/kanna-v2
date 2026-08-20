@@ -75,3 +75,26 @@ What these cannot prove, and what the E2E above would: that a real provider
 process repainting a real PTY produces a frame the daemon reads as attestable,
 and that the release survives the full server → daemon → PTY path. Until then,
 the attested-and-delivered path is verified at the daemon boundary only.
+
+## Update, later on 2026-08-20: the ledger path *is* covered end to end
+
+The work that added the typed-byte ledger (`docs/task-specs/b30b165f.md`)
+changed what "attested" can mean. Attestation no longer needs a frame at all
+when the daemon counted zero typed bytes, and that half runs over the real
+socket against a real daemon process in
+`crates/daemon/tests/reconnect.rs`:
+
+| Test | Pins |
+|---|---|
+| `a_declared_draft_that_typed_nothing_delivers_through_a_rendered_suggestion` | a declared draft with nothing typed into it delivers through a composer rendering the CLI's suggestion, the message reaches the PTY, and `List` reports `composer_attestation: "not-typed"` |
+| `a_typed_draft_still_holds_a_message_behind_a_rendered_suggestion` | the same frame with real keystrokes behind it still answers `LogicalInputHeldByDraft` and reports `"typed"` |
+
+Both spawn `/bin/sh` declared as a Claude session, so the provider composer
+matchers apply to a script the test controls — which is exactly the fixture
+shape this note said the remote-e2e harness could not produce.
+
+**The gap above is unchanged for the frame path.** What is still uncovered is
+the original case: a real provider process repainting a real PTY into a frame
+the daemon reads as an *empty* composer, releasing a message that a declared
+draft had held. That is the attested-and-delivered row in the table above, and
+it still waits on a scripted-agent mode that owns its whole frame.

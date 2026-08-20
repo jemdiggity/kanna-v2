@@ -76,6 +76,41 @@ fn persist_waiting_prompt(
         .map_err(|error| format!("db error: {error}"))
 }
 
+/// Record a session's composer line and its attestation against the task.
+///
+/// Its own function, and its own columns, because the composer is not output:
+/// a Claude session paints a tab-to-accept suggestion at its own prompt, and
+/// folding that into the waiting-prompt snippet is what handed a task manager
+/// an owner directive nobody wrote.
+fn persist_composer(
+    state: &http_api::AppState,
+    session_id: &str,
+    composer_text: Option<&str>,
+    composer_attestation: kanna_daemon::protocol::ComposerAttestation,
+) -> Result<bool, String> {
+    let composer_text = composer_text.map(str::trim).filter(|text| !text.is_empty());
+    let db = crate::db::Db::open(&state.config().db_path)
+        .map_err(|error| format!("db error: {error}"))?;
+    db.update_pipeline_item_composer(
+        session_id,
+        composer_text,
+        composer_attestation_label(composer_attestation),
+    )
+    .map_err(|error| format!("db error: {error}"))
+}
+
+/// The wire spelling of an attestation verdict, shared by the watcher and the
+/// task-detail payload so one vocabulary reaches every consumer.
+pub(crate) fn composer_attestation_label(
+    attestation: kanna_daemon::protocol::ComposerAttestation,
+) -> &'static str {
+    match attestation {
+        kanna_daemon::protocol::ComposerAttestation::Typed => "typed",
+        kanna_daemon::protocol::ComposerAttestation::NotTyped => "not-typed",
+        kanna_daemon::protocol::ComposerAttestation::Unknown => "unknown",
+    }
+}
+
 fn apply_watcher_runtime_status(
     state: &http_api::AppState,
     session_id: &str,
@@ -322,6 +357,23 @@ pub(crate) async fn terminal_state_watcher_once(
                         error
                     ),
                 }
+                // Same reason as the field above: an adopted session's
+                // composer is whatever the provider left on screen, and this
+                // List is the first thing that runs against the daemon that
+                // adopted it.
+                match persist_composer(
+                    state,
+                    &session.session_id,
+                    session.composer_text.as_deref(),
+                    session.composer_attestation,
+                ) {
+                    Ok(composer_changed) => changed |= composer_changed,
+                    Err(error) => log::warn!(
+                        "failed to reconcile composer state for {}: {}",
+                        session.session_id,
+                        error
+                    ),
+                }
                 if changed {
                     state.publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
                 }
@@ -376,6 +428,26 @@ pub(crate) async fn terminal_state_watcher_once(
                     state.publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
                 }
             }
+            DaemonEvent::ComposerChanged {
+                session_id,
+                composer_text,
+                composer_attestation,
+            } => match persist_composer(
+                state,
+                &session_id,
+                composer_text.as_deref(),
+                composer_attestation,
+            ) {
+                Ok(true) => {
+                    state.publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks)
+                }
+                Ok(false) => {}
+                Err(error) => log::warn!(
+                    "failed to persist composer state for {}: {}",
+                    session_id,
+                    error
+                ),
+            },
             DaemonEvent::InputBlockedChanged {
                 session_id,
                 logical_input_blocked,
@@ -1097,6 +1169,8 @@ mod tests {
                 status: kanna_daemon::protocol::SessionStatus::Idle,
                 kind: Default::default(),
                 logical_input_blocked: true,
+                composer_text: None,
+                composer_attestation: Default::default(),
             }],
         )
         .await;
@@ -1691,6 +1765,8 @@ mod tests {
                         status: kanna_daemon::protocol::SessionStatus::Idle,
                         kind: Default::default(),
                         logical_input_blocked: false,
+                        composer_text: None,
+                        composer_attestation: Default::default(),
                     }],
                 },
             )
@@ -1782,6 +1858,8 @@ mod tests {
                     status: kanna_daemon::protocol::SessionStatus::Busy,
                     kind: Default::default(),
                     logical_input_blocked: false,
+                    composer_text: None,
+                    composer_attestation: Default::default(),
                 }],
             )
             .await;
@@ -1860,6 +1938,8 @@ mod tests {
                         status: kanna_daemon::protocol::SessionStatus::Busy,
                         kind: Default::default(),
                         logical_input_blocked: false,
+                        composer_text: None,
+                        composer_attestation: Default::default(),
                     }],
                 },
             )

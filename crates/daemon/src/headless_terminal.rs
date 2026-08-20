@@ -24,6 +24,10 @@ const COPILOT_BUSY_MARKER: &str = "esc to cancel";
 const ANTIGRAVITY_BUSY_MARKER: &str = "esc to cancel";
 const CLAUDE_IDLE_PROMPT: char = '\u{276F}';
 const CODEX_IDLE_PROMPT: char = '\u{203A}';
+/// Every prompt glyph a measured composer is drawn with. One list, because a
+/// line that opens with one of these is the same thing everywhere it is read:
+/// the input line, not something the session said.
+const COMPOSER_PROMPTS: &[char] = &[CLAUDE_IDLE_PROMPT, CODEX_IDLE_PROMPT];
 
 // OpenCode's TUI, pinned against CLI 1.18.15. Every constant below was read off
 // real captured frames — `crates/daemon/tests/fixtures/opencode/*.ansi`, which
@@ -342,6 +346,21 @@ impl HeadlessTerminal {
         Ok(composer_state_from_lines(&footer_lines, provider))
     }
 
+    /// The text rendered on this frame's composer line, or `None` when the
+    /// frame draws no readable composer. Reported beside the session's typed-
+    /// byte attestation so a reader can tell a human's unsent line from the
+    /// CLI's own suggestion; the frame alone cannot.
+    pub fn composer_line(
+        &mut self,
+        provider: Option<AgentProvider>,
+    ) -> HeadlessTerminalResult<Option<String>> {
+        let Some(provider) = provider else {
+            return Ok(None);
+        };
+        let footer_lines = self.visible_footer_lines(STATUS_ROWS)?;
+        Ok(composer_line_from_lines(&footer_lines, provider))
+    }
+
     pub fn waiting_prompt_snippet(
         &mut self,
         provider: Option<AgentProvider>,
@@ -395,6 +414,22 @@ impl HeadlessTerminal {
             None => Self::new(cols, rows, scrollback),
         }
     }
+}
+
+/// Whether a rendered line is a provider composer — the input line, not
+/// something the session said.
+///
+/// Public because the composer has to be recognisable outside the daemon too:
+/// the task-logs tail is a rendered frame flattened to text, and an agent
+/// reading it cannot be left to guess which line is the prompt. One rule, one
+/// place, so the tail and the snippet agree on what the composer is.
+pub fn line_is_composer(line: &str) -> bool {
+    line_starts_with_prompt(line, COMPOSER_PROMPTS)
+}
+
+/// The text a composer line carries, without its prompt glyph.
+pub fn composer_line_text(line: &str) -> &str {
+    prompt_remainder(line, COMPOSER_PROMPTS).unwrap_or("")
 }
 
 pub fn scrollback_byte_limit(cols: u16, rows: u16, scrollback_rows: usize) -> usize {
@@ -582,7 +617,7 @@ fn line_is_provider_chrome(line: &str, provider: AgentProvider) -> bool {
     let trimmed = line.trim();
     let common_chrome = trimmed.is_empty()
         || line_is_visual_divider(trimmed)
-        || line_starts_with_prompt(trimmed, &[CLAUDE_IDLE_PROMPT, CODEX_IDLE_PROMPT])
+        || line_is_composer(trimmed)
         || line_contains_worktree_path(trimmed)
         || contains_ascii_case_insensitive(trimmed, INTERRUPT_MARKER)
         || contains_ascii_case_insensitive(trimmed, COPILOT_BUSY_MARKER)
@@ -795,8 +830,21 @@ fn waiting_prompt_from_lines(lines: &[String], provider: AgentProvider) -> Optio
         }
     }
 
+    // Where the composer starts, when the frame draws one. Nothing at or below
+    // it is session output: the composer line is what someone is about to say
+    // (or what the CLI is *suggesting* they say), and the rows under it are the
+    // hint bar, the box rule, and the composer's own wrapped continuation.
+    // Wrapping is why this is a position rather than a per-line rule — a
+    // continuation row carries no prompt glyph, so it reads as content and used
+    // to be collected as if the provider had said it.
+    let composer_index = lines.iter().rposition(|line| line_is_composer(line));
+
     let mut content = Vec::new();
-    for line in lines.iter().rev() {
+    for (index, line) in lines.iter().enumerate().rev() {
+        if Some(index) == composer_index {
+            content.clear();
+            continue;
+        }
         if line_is_provider_chrome(line, provider) {
             if content.is_empty() {
                 continue;
@@ -887,11 +935,27 @@ fn codex_status_from_lines(lines: &[String]) -> Option<SessionStatus> {
 /// screen is mid-repaint, and nothing needs an answer from a session that is
 /// still working.
 fn composer_state_from_lines(lines: &[String], provider: AgentProvider) -> ComposerState {
+    match composer_line_from_lines(lines, provider) {
+        Some(text) if text.is_empty() => ComposerState::Empty,
+        _ => ComposerState::Unknown,
+    }
+}
+
+/// The text rendered on the composer line, or `None` when this frame draws no
+/// readable composer.
+///
+/// `Some("")` is the positive proof [`composer_state_from_lines`] is built on;
+/// `Some(text)` is what is *rendered* there and nothing more. Whether that text
+/// is a human's unsent line or the CLI's own tab-to-accept suggestion is not
+/// answerable from the frame — both are painted the same shape — which is why
+/// the session's typed-byte attestation, not this function, decides how it is
+/// labelled.
+fn composer_line_from_lines(lines: &[String], provider: AgentProvider) -> Option<String> {
     let prompt = match provider {
         AgentProvider::Claude => CLAUDE_IDLE_PROMPT,
         AgentProvider::Codex => CODEX_IDLE_PROMPT,
         AgentProvider::Opencode | AgentProvider::Antigravity | AgentProvider::Copilot => {
-            return ComposerState::Unknown
+            return None
         }
     };
     let status = match provider {
@@ -903,24 +967,18 @@ fn composer_state_from_lines(lines: &[String], provider: AgentProvider) -> Compo
         status,
         Some(SessionStatus::Busy) | Some(SessionStatus::Waiting)
     ) {
-        return ComposerState::Unknown;
+        return None;
     }
-    let Some(composer_index) = lines
+    let composer_index = lines
         .iter()
-        .rposition(|line| line_starts_with_prompt(line, &[prompt]))
-    else {
-        return ComposerState::Unknown;
-    };
+        .rposition(|line| line_starts_with_prompt(line, &[prompt]))?;
     if lines[composer_index + 1..]
         .iter()
         .any(|line| !line_is_provider_chrome(line, provider))
     {
-        return ComposerState::Unknown;
+        return None;
     }
-    match prompt_remainder(&lines[composer_index], &[prompt]) {
-        Some("") => ComposerState::Empty,
-        _ => ComposerState::Unknown,
-    }
+    Some(composer_line_text(&lines[composer_index]).to_string())
 }
 
 fn opencode_line_has_interrupt_marker(line: &str) -> bool {
@@ -1500,6 +1558,71 @@ mod tests {
                 .visible_status(Some(AgentProvider::Claude))
                 .unwrap(),
             Some(SessionStatus::Busy)
+        );
+    }
+
+    /// The composer is where somebody is about to speak, not where the
+    /// session spoke — and the CLI paints its own tab-to-accept suggestion
+    /// there. A snippet that carries it hands an agent a sentence nobody said,
+    /// which is how "run it on my phone so i can see it" reached a task
+    /// manager as an owner directive.
+    #[test]
+    fn claude_waiting_prompt_snippet_never_carries_the_composer_suggestion() {
+        let mut terminal = HeadlessTerminal::new(120, 10, 10_000).unwrap();
+        terminal.write(
+            concat!(
+                "Claude Code\r\n",
+                "⏺ Ready for review.\r\n",
+                "────────────────────────────────\r\n",
+                "❯\u{a0}check again in a minute\r\n",
+                "────────────────────────────────\r\n",
+                "⏵⏵ bypass permissions on (shift+tab to cycle)\r\n",
+            )
+            .as_bytes(),
+        );
+
+        assert_eq!(
+            terminal
+                .waiting_prompt_snippet(Some(AgentProvider::Claude))
+                .unwrap()
+                .as_deref(),
+            Some("⏺ Ready for review.")
+        );
+        assert_eq!(
+            terminal
+                .composer_line(Some(AgentProvider::Claude))
+                .unwrap()
+                .as_deref(),
+            Some("check again in a minute"),
+            "the text still has to be readable — as its own labelled field"
+        );
+    }
+
+    /// A composer line long enough to wrap carries no prompt glyph on its
+    /// continuation rows, so those rows read as transcript unless the snippet
+    /// cuts at the composer's *position*. This is the leak a per-line chrome
+    /// rule cannot close.
+    #[test]
+    fn claude_waiting_prompt_snippet_never_carries_a_wrapped_composer_line() {
+        let mut terminal = HeadlessTerminal::new(40, 12, 10_000).unwrap();
+        terminal.write(
+            concat!(
+                "Claude Code\r\n",
+                "⏺ Ready for review.\r\n",
+                "────────────────────────\r\n",
+                "❯\u{a0}run it on my phone so i can see it right now please\r\n",
+                "⏵⏵ bypass permissions on\r\n",
+            )
+            .as_bytes(),
+        );
+
+        let snippet = terminal
+            .waiting_prompt_snippet(Some(AgentProvider::Claude))
+            .unwrap();
+        assert_eq!(snippet.as_deref(), Some("⏺ Ready for review."));
+        assert!(
+            !snippet.unwrap_or_default().contains("phone"),
+            "no part of the composer line, wrapped or not, is session output"
         );
     }
 

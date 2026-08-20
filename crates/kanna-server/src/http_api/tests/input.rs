@@ -1000,6 +1000,8 @@ async fn send_task_input_rejects_a_finished_task_without_a_live_daemon_session()
                         status: SessionStatus::Idle,
                         kind: Default::default(),
                         logical_input_blocked: false,
+                        composer_text: None,
+                        composer_attestation: Default::default(),
                     }],
                 },
                 DaemonCommand::InputIfSession { .. } => DaemonEvent::Ok,
@@ -1125,6 +1127,8 @@ async fn send_task_input_delivers_to_a_live_session_after_a_finished_run() {
                         status: SessionStatus::Idle,
                         kind: Default::default(),
                         logical_input_blocked: false,
+                        composer_text: None,
+                        composer_attestation: Default::default(),
                     }],
                 },
                 DaemonCommand::SubmitInputIfSession { .. } => DaemonEvent::Ok,
@@ -1395,6 +1399,8 @@ fn spawn_live_session_daemon(
                         // This helper's sessions accept delivered input; the
                         // refusal path has its own tests on main.
                         logical_input_blocked: false,
+                        composer_text: None,
+                        composer_attestation: Default::default(),
                     }],
                 },
                 DaemonCommand::SubmitInputIfSession { .. } => DaemonEvent::Ok,
@@ -1554,6 +1560,8 @@ fn spawn_refusing_session_daemon(
                         kind: Default::default(),
                         logical_input_blocked: code
                             == kanna_daemon::protocol::ErrorCode::InheritedDraftStateUnknown,
+                        composer_text: None,
+                        composer_attestation: Default::default(),
                     }],
                 },
                 DaemonCommand::SubmitInputIfSession { .. } => DaemonEvent::Error {
@@ -1840,6 +1848,8 @@ async fn send_task_input_reports_daemon_write_failure_as_delivery_uncertain() {
                         status: SessionStatus::Idle,
                         kind: Default::default(),
                         logical_input_blocked: false,
+                        composer_text: None,
+                        composer_attestation: Default::default(),
                     }],
                 },
                 DaemonCommand::SubmitInputIfSession { .. } => DaemonEvent::Error {
@@ -1969,6 +1979,8 @@ async fn refused_input_reports_the_unblock_story_and_marks_the_target() {
                         status: SessionStatus::Idle,
                         kind: Default::default(),
                         logical_input_blocked: true,
+                        composer_text: None,
+                        composer_attestation: Default::default(),
                     }],
                 },
                 DaemonCommand::SubmitInputIfSession { .. } => DaemonEvent::Error {
@@ -2136,6 +2148,8 @@ async fn input_held_behind_an_unsent_human_line_is_not_reported_as_delivered() {
                         status: SessionStatus::Idle,
                         kind: Default::default(),
                         logical_input_blocked: false,
+                        composer_text: None,
+                        composer_attestation: Default::default(),
                     }],
                 },
                 DaemonCommand::SubmitInputIfSession { .. } => DaemonEvent::Error {

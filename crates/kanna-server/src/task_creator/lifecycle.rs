@@ -2419,6 +2419,8 @@ mod teardown_deadline_tests {
                                 status: SessionStatus::Busy,
                                 kind: SessionKind::Pty,
                                 logical_input_blocked: false,
+                                composer_text: None,
+                                composer_attestation: Default::default(),
                             }],
                         };
                         write
@@ -2497,6 +2499,8 @@ mod teardown_deadline_tests {
                                 status: SessionStatus::Busy,
                                 kind: SessionKind::Pty,
                                 logical_input_blocked: false,
+                                composer_text: None,
+                                composer_attestation: Default::default(),
                             }],
                         };
                         write

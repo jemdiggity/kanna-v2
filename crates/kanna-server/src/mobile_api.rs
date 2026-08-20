@@ -175,6 +175,17 @@ pub struct TaskDetail {
     pub input_blocked: Option<String>,
     pub snippet: Option<String>,
     pub waiting_prompt_snippet: Option<String>,
+    /// The task's agent-session composer, as its own labelled field.
+    ///
+    /// `waitingPromptSnippet` and `snippet` are what the session *said*; this
+    /// is what somebody is about to say into it — or, on a Claude session,
+    /// what the CLI is *suggesting* they say. The two were the same field
+    /// once, and the suggestion "run it on my phone so i can see it" was read
+    /// as an owner directive and stalled a task for a day. Read `attestation`
+    /// before treating `text` as anything: only `typed` is a human draft.
+    /// Absent when no session has reported a composer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composer: Option<TaskComposer>,
     pub agent_type: Option<String>,
     pub agent_provider: Option<String>,
     /// Resolved model for the latest stage run. Before the first run starts,
@@ -220,6 +231,23 @@ pub struct TaskDetail {
     pub child_task_ids: Vec<String>,
     #[serde(default)]
     pub blocked_by_task_ids: Vec<String>,
+}
+
+/// What a task's agent session has at its prompt, and what the daemon can
+/// prove about it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskComposer {
+    /// The text rendered on the composer line, or absent when the session
+    /// draws no readable composer. Never session output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// `typed` — keystrokes reached this composer since its last submission
+    /// boundary, so `text` may be a human's unsent line. `not-typed` — an
+    /// attested session with none, so `text` is provably the CLI's own
+    /// chrome or suggestion and nobody wrote it. `unknown` — the session was
+    /// inherited from before attestation and nothing can be proven.
+    pub attestation: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -985,6 +1013,17 @@ fn map_task_detail(
         })
         .unwrap_or(crate::task_creator::DEFAULT_REVISION_LIMIT);
     let waiting_prompt_snippet = item.last_output_preview.clone();
+    // Reported only once a session has said something about its composer. An
+    // absent field means "nothing has reported one", which is a different
+    // answer from `unknown` — that one means a session reported it and could
+    // prove nothing.
+    let composer = item
+        .composer_attestation
+        .clone()
+        .map(|attestation| TaskComposer {
+            text: item.composer_text.clone(),
+            attestation,
+        });
     // `pipeline_item.agent_provider` retains the task-level provider fallback
     // used when resolving later stages. A stage-level agent can run under a
     // different provider, so terminal consumers must follow the provider the
@@ -1008,6 +1047,7 @@ fn map_task_detail(
         activity: item.activity,
         snippet: waiting_prompt_snippet.clone(),
         waiting_prompt_snippet,
+        composer,
         agent_type: item.agent_type,
         agent_provider: active_agent_provider,
         model: resolved_model,

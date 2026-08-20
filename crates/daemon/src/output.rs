@@ -468,6 +468,7 @@ pub(crate) async fn stream_output(
                     );
                 }
                 publish_input_blocked_transition(&session, &broadcast_tx, &session_id);
+                publish_composer_transition(&session, &broadcast_tx, &session_id).await;
             }
         }
     }
@@ -879,6 +880,38 @@ fn publish_input_blocked_transition(
     let event = Event::InputBlockedChanged {
         session_id: session_id.to_string(),
         logical_input_blocked,
+    };
+    if let Ok(json) = serde_json::to_string(&event) {
+        let _ = broadcast_tx.send(json);
+    }
+}
+
+/// Publish the composer line and its attestation when either has changed.
+///
+/// Edge-triggered from the same tick as the blocked-input transition, and for
+/// the same reason: the composer moves without anything else moving. A CLI
+/// suggestion appearing on the `❯` line is not a status change, not a chunk
+/// worth resyncing, and not a keystroke — but it is exactly the thing a reader
+/// must not mistake for something the session said.
+async fn publish_composer_transition(
+    session: &Arc<SessionHandle>,
+    broadcast_tx: &broadcast::Sender<String>,
+    session_id: &str,
+) {
+    if session.is_retired() {
+        return;
+    }
+    let Some((composer_text, composer_attestation)) = session.take_composer_transition().await
+    else {
+        return;
+    };
+    if session.is_retired() {
+        return;
+    }
+    let event = Event::ComposerChanged {
+        session_id: session_id.to_string(),
+        composer_text,
+        composer_attestation,
     };
     if let Ok(json) = serde_json::to_string(&event) {
         let _ = broadcast_tx.send(json);
