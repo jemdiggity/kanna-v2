@@ -298,6 +298,60 @@ impl Db {
         self.update_pipeline_item_agent_session_id(task_id, Some(provider_session_id))
     }
 
+    /// The most recent `main` run a daemon session served for a task. A stage
+    /// transition respawns the same session id for the next stage, so the run
+    /// — not the session — is the identity a provider session belongs to, and
+    /// a killer must resolve it before its replacement run is inserted. The
+    /// stage's post shares the session id but is never the run a revision
+    /// reopens, so it is deliberately skipped.
+    pub fn latest_main_stage_run_id_for_session(
+        &self,
+        task_id: &str,
+        session_id: &str,
+    ) -> Result<Option<String>, rusqlite::Error> {
+        let run_id = self
+            .conn
+            .query_row(
+                "SELECT id FROM stage_run
+                 WHERE task_id = ? AND session_id = ? AND kind = 'main'
+                 ORDER BY rowid DESC
+                 LIMIT 1",
+                (task_id, session_id),
+                |row| row.get::<_, String>(0),
+            )
+            .optional();
+        match run_id {
+            Ok(run_id) => Ok(run_id),
+            Err(err) if is_missing_stage_run_table(&err) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Record a provider session id discovered as a session ended, on the exact
+    /// run that session was serving. Returns whether it was recorded.
+    ///
+    /// The write is fenced on the run still naming that session and on having
+    /// no provider session of its own: a delayed `Exit` from a replaced
+    /// incarnation must never overwrite the id a later session recorded for
+    /// the same run. Unlike the natural-exit path this deliberately leaves
+    /// `pipeline_item.agent_session_id` alone — an orchestrated kill retires
+    /// the outgoing session, and the task's current session is its
+    /// replacement, which sets that mirror itself when it spawns.
+    pub fn record_stage_run_provider_session_id(
+        &self,
+        run_id: &str,
+        session_id: &str,
+        provider_session_id: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        let updated = self.conn.execute(
+            "UPDATE stage_run
+             SET provider_session_id = ?
+             WHERE id = ? AND session_id = ? AND provider_session_id IS NULL",
+            (provider_session_id, run_id, session_id),
+        )?;
+        Ok(updated > 0)
+    }
+
     /// Restore a run that the terminal-loss path marked interrupted when the
     /// daemon proves the original session is still alive. The feedback marker
     /// identifies current no-verdict interruptions; legacy bare cancellations

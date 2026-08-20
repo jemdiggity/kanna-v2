@@ -27,6 +27,37 @@ fn persist_exit_resume_session_id(
     Ok(())
 }
 
+/// Record the provider session id an orchestrated kill discovered on its way
+/// out, on the run the killer named as outgoing.
+///
+/// A stage transition kills the implementation session and respawns the same
+/// session id for the review stage, so by the time this `Exit` arrives the
+/// task's latest run is usually the review run — which is why the natural-exit
+/// helper above cannot be reused here, and why the identity is carried through
+/// the replacement entry rather than re-derived from the task.
+fn persist_replaced_exit_resume_session_id(
+    state: &http_api::AppState,
+    session_id: &str,
+    outgoing_run_id: &str,
+    resume_session_id: Option<&str>,
+) -> Result<(), String> {
+    let Some(resume_session_id) = resume_session_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+
+    let db = crate::db::Db::open(&state.config().db_path).map_err(|e| format!("db error: {e}"))?;
+    if db
+        .record_stage_run_provider_session_id(outgoing_run_id, session_id, resume_session_id)
+        .map_err(|e| format!("db error: {e}"))?
+    {
+        state.publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
+    }
+    Ok(())
+}
+
 /// Returns whether anything changed. Publishing is the caller's job: one
 /// daemon event can move the prompt, the runtime status, and the activity, and
 /// the desktop only needs to be told once.
@@ -217,7 +248,7 @@ pub(crate) async fn terminal_state_watcher_loop(
     }
 }
 
-async fn terminal_state_watcher_once(
+pub(crate) async fn terminal_state_watcher_once(
     state: &http_api::AppState,
     replacements: &session_replacements::SessionReplacements,
 ) -> Result<(), String> {
@@ -368,10 +399,29 @@ async fn terminal_state_watcher_once(
                 // Consume the replacement entry even when the event is
                 // self-describing — a leftover entry would swallow a future
                 // legitimate Exit for the same session id.
-                let replaced = replacements.consume(&session_id);
-                if replaced || killed {
+                let replacement = replacements.consume(&session_id);
+                if replacement.replaced || killed {
                     // Orchestrated kill (stage swap, rerun, close) — not the
-                    // agent finishing.
+                    // agent finishing, so no completion notification and no
+                    // terminal-state finalization. The provider resume id the
+                    // daemon discovered on the way out still belongs to the
+                    // killed run, and is its only record of the conversation
+                    // a revision would reopen.
+                    if let Some(outgoing_run_id) = replacement.outgoing_run_id.as_deref() {
+                        if let Err(error) = persist_replaced_exit_resume_session_id(
+                            state,
+                            &session_id,
+                            outgoing_run_id,
+                            resume_session_id.as_deref(),
+                        ) {
+                            log::warn!(
+                                "failed to persist replaced resume session id for {} run {}: {}",
+                                session_id,
+                                outgoing_run_id,
+                                error
+                            );
+                        }
+                    }
                     continue;
                 }
                 if let Err(error) =
@@ -635,6 +685,10 @@ mod tests {
     }
 
     #[tokio::test]
+    /// An agent that ends on its own keeps the pre-existing semantics: the id
+    /// lands on the task's latest run and moves the pipeline-item mirror, and
+    /// the exit still finalizes the run. Only an orchestrated kill needs the
+    /// run-scoped path, because only it races a replacement run.
     async fn watcher_persists_exit_resume_session_id() {
         let unique = unique_name("terminal-watcher-resume-session");
         let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
@@ -701,6 +755,192 @@ mod tests {
             Some("019d99a5-aa94-7c73-b786-644cc095c037")
         );
         assert_eq!(run.status, "cancelled");
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    /// Seeds the state a stage transition leaves behind: the outgoing codex
+    /// implementation run, the stage's post that shared its session, and the
+    /// replacement run the transition already inserted under the same session
+    /// id before the killed `Exit` is processed.
+    fn seed_transitioned_codex_runs(config: &Config) {
+        let db = Db::open(&config.db_path).unwrap();
+        let run =
+            |id: &'static str, stage: &'static str, kind: &'static str, status: &'static str| {
+                crate::db::NewStageRun {
+                    id,
+                    task_id: "task-child",
+                    stage,
+                    kind,
+                    agent: None,
+                    agent_provider: Some("codex"),
+                    model: None,
+                    effort: None,
+                    status,
+                    result: None,
+                    feedback: None,
+                    session_id: Some("task-child"),
+                    provider_session_id: None,
+                    cwd: Some("/tmp/codex-task"),
+                    resumed_from_run_id: None,
+                }
+            };
+        db.insert_stage_run(run("run-impl", "in progress", "main", "succeeded"))
+            .unwrap();
+        db.insert_stage_run(run("run-commit", "commit", "post", "succeeded"))
+            .unwrap();
+        db.insert_stage_run(run("run-review", "review", "main", "running"))
+            .unwrap();
+    }
+
+    fn provider_session_of(config: &Config, run_id: &str) -> Option<String> {
+        Db::open(&config.db_path)
+            .unwrap()
+            .stage_run(run_id)
+            .unwrap()
+            .unwrap_or_else(|| panic!("run {run_id} recorded"))
+            .provider_session_id
+    }
+
+    /// A stage transition kills the codex session on purpose. That `Exit` must
+    /// still not notify completion or finalize the task, but the rollout uuid
+    /// it carries is the outgoing run's only record of its conversation — and
+    /// it belongs to the run the killer named, not to the replacement run that
+    /// already holds the same session id.
+    #[tokio::test]
+    async fn watcher_records_killed_exit_resume_session_on_the_named_outgoing_run() {
+        let unique = unique_name("terminal-watcher-killed-resume-session");
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        let config = test_config(&unique, &daemon_dir);
+        seed_notifying_task(&config);
+        seed_transitioned_codex_runs(&config);
+        let replacements = session_replacements::SessionReplacements::default();
+        replacements.begin_for_run("task-child", Some("run-impl"));
+        let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
+
+        let server = tokio::spawn(async move {
+            let mut subscriber = expect_subscribe(&listener).await;
+            write_event(
+                &mut subscriber,
+                &DaemonEvent::Exit {
+                    session_id: "task-child".to_string(),
+                    code: 128 + 9,
+                    resume_session_id: Some("019d99a5-aa94-7c73-b786-644cc095c037".to_string()),
+                    killed: true,
+                },
+            )
+            .await;
+            write_event(&mut subscriber, &DaemonEvent::ShuttingDown).await;
+            expect_no_notification_connection(&listener).await;
+        });
+
+        timeout(
+            Duration::from_secs(2),
+            terminal_state_watcher_once(&http_api::AppState::new(config.clone()), &replacements),
+        )
+        .await
+        .expect("watcher did not finish")
+        .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(
+            provider_session_of(&config, "run-impl").as_deref(),
+            Some("019d99a5-aa94-7c73-b786-644cc095c037"),
+        );
+        assert_eq!(
+            provider_session_of(&config, "run-review"),
+            None,
+            "the replacement run must never inherit the outgoing session"
+        );
+        assert_eq!(
+            provider_session_of(&config, "run-commit"),
+            None,
+            "the post run is not the conversation a revision reopens"
+        );
+
+        let db = Db::open(&config.db_path).unwrap();
+        // An intentional kill is not the agent finishing: no finalization of
+        // the live replacement run, and no completion notification (asserted
+        // by the server task above).
+        assert_eq!(
+            db.stage_run("run-review").unwrap().unwrap().status,
+            "running"
+        );
+        let agent_session_id: Option<String> = rusqlite::Connection::open(&config.db_path)
+            .unwrap()
+            .query_row(
+                "SELECT agent_session_id FROM pipeline_item WHERE id = ?",
+                ["task-child"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            agent_session_id, None,
+            "the outgoing session must not become the task's current session"
+        );
+        let item = db.get_pipeline_item("task-child").unwrap().unwrap();
+        assert_ne!(item.activity.as_deref(), Some("unread"));
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    /// Replacement entries are consume-once per session id, so a repeated or
+    /// delayed kill of the same id cannot hand an old uuid to a run that has
+    /// already recorded its own, and an unmarked `Exit` has no entry to borrow.
+    #[tokio::test]
+    async fn watcher_killed_exit_cannot_overwrite_a_recorded_provider_session() {
+        let unique = unique_name("terminal-watcher-killed-resume-aba");
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        let config = test_config(&unique, &daemon_dir);
+        seed_notifying_task(&config);
+        seed_transitioned_codex_runs(&config);
+        Db::open(&config.db_path)
+            .unwrap()
+            .record_stage_run_provider_session_id(
+                "run-impl",
+                "task-child",
+                "019d99a5-aa94-7c73-b786-644cc095c037",
+            )
+            .unwrap();
+        let replacements = session_replacements::SessionReplacements::default();
+        // A stale entry still naming the already-recorded run, plus a second
+        // killed Exit behind it that no entry covers at all.
+        replacements.begin_for_run("task-child", Some("run-impl"));
+        let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
+
+        let server = tokio::spawn(async move {
+            let mut subscriber = expect_subscribe(&listener).await;
+            for _ in 0..2 {
+                write_event(
+                    &mut subscriber,
+                    &DaemonEvent::Exit {
+                        session_id: "task-child".to_string(),
+                        code: 128 + 9,
+                        resume_session_id: Some("019dbb22-0000-7000-8000-000000000000".to_string()),
+                        killed: true,
+                    },
+                )
+                .await;
+            }
+            write_event(&mut subscriber, &DaemonEvent::ShuttingDown).await;
+            expect_no_notification_connection(&listener).await;
+        });
+
+        timeout(
+            Duration::from_secs(2),
+            terminal_state_watcher_once(&http_api::AppState::new(config.clone()), &replacements),
+        )
+        .await
+        .expect("watcher did not finish")
+        .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(
+            provider_session_of(&config, "run-impl").as_deref(),
+            Some("019d99a5-aa94-7c73-b786-644cc095c037"),
+            "a later Exit must not rewrite the conversation a run already recorded"
+        );
+        assert_eq!(provider_session_of(&config, "run-review"), None);
         let _ = std::fs::remove_file(socket_path);
         let _ = std::fs::remove_dir_all(daemon_dir);
     }
@@ -773,7 +1013,7 @@ mod tests {
         let config = test_config(&unique, &daemon_dir);
         seed_notifying_task(&config);
         let replacements = session_replacements::SessionReplacements::default();
-        replacements.begin("task-child");
+        replacements.begin_for_run("task-child", None);
         let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
 
         let server = tokio::spawn(async move {
@@ -818,7 +1058,7 @@ mod tests {
         );
         assert_task_completed(&config);
         assert!(
-            !replacements.consume("task-child"),
+            !replacements.consume("task-child").replaced,
             "replacement entry should have been consumed by the killed exit"
         );
         let _ = std::fs::remove_file(socket_path);
@@ -938,7 +1178,7 @@ mod tests {
         let config = test_config(&unique, &daemon_dir);
         seed_notifying_task(&config);
         let replacements = session_replacements::SessionReplacements::default();
-        replacements.begin("task-child");
+        replacements.begin_for_run("task-child", None);
         let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
 
         let server = tokio::spawn(async move {
@@ -963,7 +1203,7 @@ mod tests {
 
         assert_task_not_completed(&config);
         assert!(
-            !replacements.consume("task-child"),
+            !replacements.consume("task-child").replaced,
             "legacy replacement entry should have been consumed"
         );
         let _ = std::fs::remove_file(socket_path);
