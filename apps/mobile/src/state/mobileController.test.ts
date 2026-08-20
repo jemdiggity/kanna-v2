@@ -344,6 +344,18 @@ describe("createMobileController", () => {
     controller.setTaskDetailVisible(false);
     expect(observe).toHaveBeenCalledTimes(2);
 
+    summaryListener?.({
+      type: "summary",
+      taskId: "task-1",
+      snippet: "live snippet after revision reset",
+      activity: "working",
+      runtimeState: "busy",
+      revision: 0
+    });
+    expect(store.getState().recentTasks[0]?.waitingPromptSnippet).toBe(
+      "live snippet after revision reset"
+    );
+
     controller.setAppForeground(false);
     expect(close).toHaveBeenCalledTimes(2);
     controller.setAppForeground(true);

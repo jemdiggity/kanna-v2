@@ -353,9 +353,9 @@ export function createMobileController(
         summary.runtimeState
       );
       restingTaskSummaries.delete(key);
-      taskSummaryRevisions.delete(
-        `${desktopId}:${summary.taskId}`
-      );
+    }
+    for (const key of taskSummaryRevisions.keys()) {
+      if (key.startsWith(prefix)) taskSummaryRevisions.delete(key);
     }
   };
 
@@ -376,8 +376,8 @@ export function createMobileController(
     for (const [desktopId, subscription] of taskSummarySubscriptions) {
       if (!desiredDesktopIds.has(desktopId)) {
         subscription.close();
-        restoreRestingTaskSummaries(desktopId);
         taskSummarySubscriptions.delete(desktopId);
+        restoreRestingTaskSummaries(desktopId);
       }
     }
     for (const desktopId of desiredDesktopIds) {
