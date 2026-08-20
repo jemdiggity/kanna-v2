@@ -44,6 +44,7 @@ mod revision;
 mod setup;
 mod spawn;
 mod stage;
+mod work_tip;
 
 fn test_daemon_socket_path(daemon_dir: &str) -> std::path::PathBuf {
     kanna_runtime_defaults::socket_path(std::path::Path::new(daemon_dir))

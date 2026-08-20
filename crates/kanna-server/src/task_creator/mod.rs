@@ -12,6 +12,7 @@ mod resume;
 mod stages;
 mod terminal_marker;
 mod types;
+mod work_tip;
 mod worktree;
 
 #[cfg(test)]
