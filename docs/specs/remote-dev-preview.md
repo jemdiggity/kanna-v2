@@ -184,11 +184,14 @@ Remote: WebView ─ https://p-<token>.relay.kanna.build/ ─► relay preview  �
      `409 { ports: [{name, port, listening}] }` and no session; the client
      renders "dev server isn't running" with retry. (The kd process
      inventory cannot answer this — see Verified state.)
-  3. Mints the session: 128-bit random URL token, independent 128-bit cookie
-     secret, sliding idle timeout (default 30 min), hard cap (default 12 h).
+  3. Mints the session: a 128-bit random **enter secret** (the `t=` query
+     parameter) and an independent 128-bit **cookie value**, sliding idle
+     timeout (default 30 min), hard cap (default 12 h). Both credentials are
+     desktop-owned on every path: only the desktop's forwarder ever stores or
+     validates them (see "Wire design" for what the relay holds instead).
   4. LAN: binds an OS-assigned ephemeral TCP listener on `lan_host` (the
      `cloud_transfer_proxy` pattern) and returns
-     `{ port: <ephemeral>, enterPath: "/__kanna_preview__/enter?t=<token>",
+     `{ port: <ephemeral>, enterPath: "/__kanna_preview__/enter?t=<enterSecret>",
         ports: [...] }`. The phone composes the URL from its already
      validated Bonjour host for that desktop — the server never guesses its
      own LAN IP.
@@ -209,10 +212,10 @@ Remote: WebView ─ https://p-<token>.relay.kanna.build/ ─► relay preview  �
 ### Enter flow — token once, cookie thereafter
 
 The first navigation hits
-`http(s)://<origin>/__kanna_preview__/enter?t=<token>`; the forwarder
-validates the token, sets an `HttpOnly; SameSite=Lax; Path=/` session cookie
-(the cookie secret, not the token; `Secure` on the relay path), and 302s to
-`/`. Every subsequent request — absolute-path assets, XHR, and the HMR
+`http(s)://<origin>/__kanna_preview__/enter?t=<enterSecret>`; the forwarder
+validates the enter secret, sets an `HttpOnly; SameSite=Lax; Path=/` session
+cookie (the cookie value, not the enter secret; `Secure` on the relay path),
+and 302s to `/`. Every subsequent request — absolute-path assets, XHR, and the HMR
 WebSocket handshake, all of which carry cookies — must present the cookie or
 gets `404`. This solves the absolute-path problem without body rewriting:
 **each preview session is its own origin** (a distinct LAN port, or a
@@ -310,31 +313,90 @@ New tunnel service class `"preview"` (third variant of `TunnelService` in
 `capabilities.tunnelServices` for feature detection).
 
 Session open — mirrors `tunnel_request`, preserving the phone-initiates
-invariant:
+invariant. Credential ownership is split once and never shared: the **relay
+owns the host token** (routing only — it maps a `p-<hostToken>` label to a
+spliced tunnel and nothing else), and the **desktop owns the enter secret and
+the session cookie value** (authentication — only the desktop's forwarder
+stores or validates them; the relay carries the enter path once as an opaque
+string and treats every later cookie as ordinary request bytes).
 
 1. Phone → relay control socket:
    `{type:"preview_request", id, desktopId, taskId, portName?}`.
 2. Relay checks entitlement (`cloud_relay`, same 4402 refusal shape as
-   `tunnel_request`; enforcement-flag semantics identical).
-3. Relay → desktop control socket:
-   `{type:"preview_establish", tunnelId, taskId, portName?}`. The desktop
-   validates the task and resolves the port **against its own `task_port`
-   claims** (the relay never sees or trusts a port number), probes it, mints
-   the session, and dials back the standard tunnel socket
-   (`{type:"auth", desktop_id, desktop_secret, tunnel_id}`) with
-   `service:"preview"`; on failure it answers with a typed refusal the relay
-   forwards to the phone (not-listening → the phone's "not running" state).
-4. Relay mints the URL token, binds `token → tunnel`, and answers the phone:
-   `{type:"response", id, body:{url:"https://p-<token>.<preview-domain>/__kanna_preview__/enter?t=<cookieSecret>", expiresAt}}`.
-5. WebView loads the URL. Caddy routes the wildcard host to the relay; the
-   relay's HTTP server resolves the `p-<token>` label to the tunnel and
-   forwards framed requests; the desktop end feeds them through the same
-   forwarder as LAN.
+   `tunnel_request`; enforcement-flag semantics identical), registers a
+   pending preview keyed by a freshly minted `tunnelId` — the same
+   `PendingTunnel` machinery and 10 s expiry that `tunnel_request` uses — and
+   sends the desktop control socket:
+   `{type:"preview_establish", tunnelId, taskId, portName?}`.
+3. The desktop validates the task and resolves the port **against its own
+   `task_port` claims** (the relay never sees or trusts a port number) and
+   probes it.
+   - **Refusal** goes on the control socket:
+     `{type:"preview_refuse", tunnelId,
+     code:"not_listening"|"unknown_task"|"no_ports"|"session_limit",
+     ports?:[{name, port, listening}]}`. The relay clears the pending entry
+     and forwards `{type:"response", id, error, code, body:{ports}}` to the
+     phone (`not_listening` → the phone's "not running" state). No tunnel is
+     dialed, no session or secrets ever exist.
+   - **Success**: the desktop mints the session (enter secret, cookie value,
+     expiries) and dials back the standard tunnel socket
+     (`{type:"auth", desktop_id, desktop_secret, tunnel_id}`) with
+     `service:"preview"`.
+4. **Acceptance rides the tunnel it describes.** The first frame the desktop
+   sends on the freshly authenticated tunnel is
+   `preview_accept {enterPath:"/__kanna_preview__/enter?t=<enterSecret>",
+   expiresAt}` — which binds the session's credentials to exactly this
+   `tunnelId`, whose ownership the dial-back auth (desktop secret +
+   `tunnel_id`) has already proven. The relay does not answer the phone
+   before this frame arrives; any other first frame closes the tunnel as a
+   protocol error.
+5. Relay mints the 128-bit host token, binds `hostToken → tunnel`, and
+   answers the phone: `{type:"response", id,
+   body:{url:"https://p-<hostToken>.<preview-domain>" + enterPath,
+   expiresAt}}`. The relay keeps the enter path only long enough to compose
+   this response; the phone is the only party that ever holds the complete
+   URL. (The relay is necessarily inside the remote path's trust boundary
+   regardless — it terminates TLS for every preview request and sees the
+   cookie in transit — so this split is about *state authority*, not hiding
+   bytes from the relay: the desktop alone decides what the secrets are and
+   whether a presented one is valid.)
+6. WebView loads the URL. Caddy routes the wildcard host to the relay; the
+   relay resolves the `p-<hostToken>` label to the tunnel and forwards
+   framed requests; the desktop end validates the enter secret / cookie and
+   feeds requests through the same forwarder as LAN. A valid host token
+   paired with the wrong enter secret or cookie routes to the right tunnel
+   and is then refused by the desktop's forwarder (404) — routing and
+   authentication fail independently, and neither can substitute for the
+   other.
+
+Pending state and failure cleanup, on every side:
+
+- **Pending timeout** — the desktop neither refuses nor completes
+  (never dials back, or dials back but never sends `preview_accept`) within
+  the 10 s pending expiry: the relay deletes the pending entry, closes a
+  half-attached tunnel socket if one arrived, and answers the phone with the
+  existing tunnel-timeout error. A dial-back for an expired or unknown
+  `tunnelId` gets the existing 4404 "Tunnel not found" close, upon which the
+  desktop destroys the session and its secrets.
+- **Phone disconnect** before the response: the pending entry is dropped
+  with the phone's other pending state; a tunnel completing afterwards is
+  closed, and tunnel close is the desktop's signal to destroy the session.
+- **Desktop control-socket disconnect**: all pending previews addressed to
+  that desktop fail to the phone immediately, same as pending invokes.
+- **Tunnel death** at any later point: the relay unbinds the host token (the
+  hostname stops resolving → 502 to the WebView) and aborts in-flight
+  streams; the desktop destroys the session and secrets. Tokens never
+  outlive their tunnel, and there is no re-attach — reopening is a fresh
+  `preview_request` minting fresh credentials.
+- **Desktop-side revocation** (task close, stage transition, expiry,
+  explicit `DELETE`): the desktop closes the tunnel; that close *is* the
+  revocation signal the relay needs — no separate control message exists.
 
 Tunnel framing (JSON control + binary chunks, chunk size 64 KiB — well under
 the 16 MiB `maxPayload`):
 
 ```
+desktop → relay  preview_accept {enterPath, expiresAt}   (first frame, exactly once)
 relay → desktop  preview_req   {stream, method, path, headers}
 both directions  preview_body  {stream} + chunk        (binary, interleaved)
                  preview_end   {stream, trailers?}
@@ -371,8 +433,9 @@ domain (Caddy DNS-01 with a Cloud DNS token — new relay-VM provisioning
 surface; **owner decision** below). The token appears in DNS queries and SNI,
 so a passive network observer can learn an active hostname — which is why the
 hostname token alone is not sufficient: the enter URL carries the separate
-cookie secret, and requests without the resulting cookie get 404. A DNS
-observer learns that a preview exists, not how to view it.
+desktop-minted enter secret, and requests without the resulting cookie get
+404 from the desktop's forwarder. A DNS observer learns that a preview
+exists, not how to view it.
 
 Dev/E2E environments run the same code without wildcard TLS: the local relay
 serves preview by `Host` header over plain HTTP and tests construct the Host
@@ -404,11 +467,17 @@ themselves.
    minted only through paired-device-authenticated API calls; relay sessions
    ride the existing uid↔desktopId scoping (`connections` map keyed by uid) —
    a phone can only preview tasks on desktops its Firebase account owns.
-4. **Ephemeral unguessable credentials, two factors on the remote path.**
-   128-bit URL/host token (routing) + independent 128-bit cookie secret
-   (auth), `HttpOnly`. Sliding 30 min idle, 12 h hard cap. Revoked on: task
-   close, stage transition/workspace teardown, explicit close, expiry, tunnel
-   death, desktop restart (sessions are in-memory only, deliberately).
+4. **Ephemeral unguessable credentials, two factors on the remote path,
+   each with exactly one owner.** Routing: the relay-minted 128-bit host
+   token, bound to one tunnel (on LAN the ephemeral port fills this role).
+   Authentication: the desktop-minted 128-bit enter secret and `HttpOnly`
+   session cookie, stored and validated only by the desktop's forwarder —
+   the relay never checks a credential, so a host token presented with the
+   wrong enter secret or cookie routes and is then refused desktop-side.
+   Sliding 30 min idle, 12 h hard cap. Revoked on: task close, stage
+   transition/workspace teardown, explicit close, expiry, tunnel death
+   (tokens never outlive their tunnel), desktop restart (sessions are
+   in-memory only, deliberately).
 5. **Entitlement-gated on the relay path.** `preview_request` and the
    preview origin enforce `cloud_relay` with the landed 4402 semantics behind
    the same enforcement flag; LAN is ungated (owner ruling). Tokens for
@@ -530,19 +599,36 @@ posture) → land `docs/<date>-mobile-preview-webview-e2e-gap.md` naming
 exactly that gap and the harness coverage that runs now.
 
 **P2 — Remote path (relay + desktop tunnel + mobile routing).**
-Boundary: `services/relay` — `"preview"` service class, `preview_request`
-control message + 4402 gate, wildcard-host routing, HTTP↔frame gateway with
-streaming and the preview caps, `"preview"` odometer class;
-`crates/kanna-server` — `preview_establish` handler, tunnel dial-back,
-framing over the existing forwarder; `apps/mobile` — relay routing in the
-preview controller. Includes the dev-mode plain-HTTP Host-routing path for
-tests.
-E2E: Layer A — establish/refuse (4402 on unentitled), framed request/
-response, WS splice, stalled-reader cap → 1013, byte-class attribution;
-`tests/remote-e2e/` cloud flow — the P0 scenario end-to-end through the
-local relay, plus entitlement-flag-on refusal rendering the phone's neutral
-state. Wildcard TLS itself is not automatable locally → dated e2e-gap note
-for the DNS/cert leg, verified against staging at deploy.
+Boundary: `services/relay` — `"preview"` service class, the
+`preview_request` / `preview_establish` / `preview_refuse` control messages
+with the 4402 gate and the `PendingTunnel`-based pending lifecycle
+(timeout, phone-disconnect, desktop-disconnect cleanup), `preview_accept`
+handling and host-token binding, wildcard-host routing, HTTP↔frame gateway
+with streaming and the preview caps, `"preview"` odometer class;
+`crates/kanna-server` — `preview_establish` handler, session/credential
+minting, tunnel dial-back with `preview_accept` as first frame, framing over
+the existing forwarder, session teardown on tunnel close/4404; `apps/mobile`
+— relay routing in the preview controller. Includes the dev-mode plain-HTTP
+Host-routing path for tests.
+E2E: Layer A (`services/relay/test/integration.test.ts`) — 4402 refusal on
+unentitled `preview_request`; framed request/response; WS splice;
+stalled-reader cap → 1013; byte-class attribution; pending-entry cleanup on
+timeout and on either peer's disconnect, including 4404 on a late dial-back.
+`tests/remote-e2e/` cloud flow — this is asynchronous phone↔relay↔desktop
+coordination, so isolated tests cannot prove the wiring; the full stack must
+cover: **successful credential binding** (the URL the phone receives is the
+relay's host token composed with the desktop's `enterPath`, proven by
+enter → cookie → absolute-path asset fetch → WS echo through the tunnel);
+**typed refusal** (`preview_refuse: not_listening` reaching the phone as its
+"not running" state); **timeout/disconnect cleanup** (a desktop that never
+dials back → phone gets the timeout error and the relay holds no residual
+pending/token state; desktop control-socket drop mid-establish → immediate
+phone error); **wrong-credential rejection** (a valid host token paired with
+the wrong enter secret or wrong/absent cookie → desktop-side 404, session
+unaffected; a dead tunnel's host token → 502); plus entitlement-flag-on
+refusal rendering the phone's neutral state. Wildcard TLS itself is not
+automatable locally → dated e2e-gap note for the DNS/cert leg, verified
+against staging at deploy.
 
 **P3 — Hardening (co-requisite for P2 rollout, separable task).**
 Global tunnel-buffer budget (scaling spec Stage-1 item, now including
