@@ -1,7 +1,7 @@
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Browser } from "webdriverio";
-import { processInventoryPath, recordInventoryResource, removeInventoryResource } from "../../../tools/kd/src/runtime/process-inventory";
+import { processIdentity, processInventoryPath, recordInventoryResource, removeInventoryResource, terminateInventoryProcess } from "../../../tools/kd/src/runtime/process-inventory";
 import {
   createPhysicalDeviceCapabilities,
   createSimulatorCapabilities,
@@ -201,9 +201,9 @@ async function main(): Promise<void> {
   );
   const mobileRepoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
   const mobileInventoryPath = processInventoryPath(mobileRepoRoot);
-  if (appiumServer.pid) {
-    recordInventoryResource(mobileInventoryPath, { kind: "process", pid: appiumServer.pid, label: "mobile-e2e-appium" });
-  }
+  const appiumResource = appiumServer.pid
+    ? recordInventoryResource(mobileInventoryPath, { kind: "process" as const, pid: appiumServer.pid, label: "mobile-e2e-appium", identity: processIdentity(appiumServer.pid) })
+    : undefined;
   let driver: Browser | null = null;
   let expoServer: Awaited<ReturnType<typeof ensureExpoServer>> | null = null;
   let relayHarness: Awaited<ReturnType<typeof startMobileRelayHarness>> | null = null;
@@ -409,9 +409,9 @@ async function main(): Promise<void> {
     if (driver) {
       await driver.deleteSession();
     }
-    appiumServer.kill("SIGTERM");
-    if (appiumServer.pid) {
-      removeInventoryResource(mobileInventoryPath, { kind: "process", pid: appiumServer.pid, label: "mobile-e2e-appium" });
+    if (appiumResource?.kind === "process") {
+      const outcome = await terminateInventoryProcess(appiumResource);
+      if (outcome !== "failed") removeInventoryResource(mobileInventoryPath, appiumResource);
     }
     await expoServer?.stop();
     await relayHarness?.stop();

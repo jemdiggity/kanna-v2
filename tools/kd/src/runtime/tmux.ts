@@ -1,6 +1,6 @@
 import type { DevWindow } from "./dev-plan";
 import type { CommandRunner } from "./process";
-import { recordInventoryResource, removeInventoryResource } from "./process-inventory";
+import { recordInventoryResource } from "./process-inventory";
 
 export interface TmuxTarget {
   server: string;
@@ -130,6 +130,7 @@ export async function startTmuxSession(runner: CommandRunner, target: TmuxTarget
   if (target.inventoryPath) {
     recordInventoryResource(target.inventoryPath, { kind: "tmux-server", socket: target.server });
   }
+  await recordTmuxServerSocketPath(runner, target);
 
   await setRemainOnExit(runner, target);
 
@@ -139,6 +140,7 @@ export async function startTmuxSession(runner: CommandRunner, target: TmuxTarget
       throw new Error(`tmux failed to start ${target.session}:${first.name}: window was not created`);
     }
   }
+  await recordTmuxPane(runner, target, first.name);
 
   for (const window of rest) {
     const result = hasTmuxWindowEnv(window.env)
@@ -162,6 +164,27 @@ export async function startTmuxSession(runner: CommandRunner, target: TmuxTarget
     if (result.exitCode !== 0) {
       throw new Error(`tmux failed to start ${target.session}:${window.name}: ${result.stderr}`);
     }
+    await recordTmuxPane(runner, target, window.name);
+  }
+}
+
+async function recordTmuxServerSocketPath(runner: CommandRunner, target: TmuxTarget): Promise<void> {
+  if (!target.inventoryPath) return;
+  const result = await runner.run("tmux", ["-L", target.server, "display-message", "-p", "#{socket_path}"]);
+  const socketPath = result.stdout.trim();
+  if (result.exitCode === 0 && socketPath) {
+    recordInventoryResource(target.inventoryPath, { kind: "tmux-server", socket: target.server, socketPath });
+  }
+}
+
+async function recordTmuxPane(runner: CommandRunner, target: TmuxTarget, window: string): Promise<void> {
+  if (!target.inventoryPath) return;
+  const result = await runner.run("tmux", [
+    "-L", target.server, "display-message", "-p", "-t", `${target.session}:${window}`, "#{pane_pid}"
+  ]);
+  const pid = Number(result.stdout.trim());
+  if (result.exitCode === 0 && Number.isInteger(pid) && pid > 1) {
+    recordInventoryResource(target.inventoryPath, { kind: "process", pid, label: `tmux:${target.session}:${window}` });
   }
 }
 
@@ -229,9 +252,6 @@ export async function stopTmuxSession(runner: CommandRunner, target: TmuxTarget)
     await runner.run("tmux", ["-L", target.server, "send-keys", "-t", `${target.session}:${name}`, "C-c"]);
   }
   const killed = await runner.run("tmux", ["-L", target.server, "kill-session", "-t", target.session]);
-  if (killed.exitCode === 0 && target.inventoryPath) {
-    removeInventoryResource(target.inventoryPath, { kind: "tmux-server", socket: target.server });
-  }
   return killed.exitCode === 0;
 }
 

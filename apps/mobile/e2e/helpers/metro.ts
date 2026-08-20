@@ -1,5 +1,5 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
-import { processInventoryPath, recordInventoryResource, removeInventoryResource } from "../../../../tools/kd/src/runtime/process-inventory";
+import { processIdentity, processInventoryPath, recordInventoryResource, removeInventoryResource, terminateInventoryProcess } from "../../../../tools/kd/src/runtime/process-inventory";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
 import { waitFor } from "./wait";
@@ -137,9 +137,9 @@ export async function ensureExpoServer(
     }
   );
   const inventoryPath = processInventoryPath(resolve(options.projectRoot, "../.."));
-  if (child.pid) {
-    recordInventoryResource(inventoryPath, { kind: "process", pid: child.pid, label: "mobile-e2e-metro" });
-  }
+  const resource = child.pid
+    ? recordInventoryResource(inventoryPath, { kind: "process" as const, pid: child.pid, label: "mobile-e2e-metro", identity: processIdentity(child.pid) })
+    : undefined;
 
   await waitForExpoServer(options.metroPort);
 
@@ -152,13 +152,9 @@ export async function ensureExpoServer(
         return;
       }
 
-      child.kill("SIGTERM");
-      await new Promise<void>((resolve) => {
-        child.once("exit", () => resolve());
-        setTimeout(() => resolve(), 2_000);
-      });
-      if (child.pid) {
-        removeInventoryResource(inventoryPath, { kind: "process", pid: child.pid, label: "mobile-e2e-metro" });
+      if (resource?.kind === "process") {
+        const outcome = await terminateInventoryProcess(resource);
+        if (outcome !== "failed") removeInventoryResource(inventoryPath, resource);
       }
     }
   };
