@@ -9,6 +9,9 @@ interface Firebaserc {
     staging?: string;
     production?: string;
   };
+  targets?: Record<string, {
+    hosting?: Record<string, string[]>;
+  }>;
 }
 
 export type CloudDeployEnvironment = "staging" | "production";
@@ -29,6 +32,8 @@ export interface CloudDeployInput {
    * carries writes entitlements. See `docs/specs/accounts-and-billing.md`.
    */
   functions?: boolean;
+  /** Build and deploy the web account portal. */
+  portal?: boolean;
 }
 
 export interface CloudDeployResult {
@@ -146,10 +151,54 @@ export function resolveProductionFirebaseProject(
   return resolveFirebaseProject(repoRoot, env, "production");
 }
 
-export function buildCloudDeployTargets(functions: boolean): string[] {
-  return functions
-    ? ["functions", "firestore:rules", "firestore:indexes", "hosting:account"]
-    : ["firestore:rules", "firestore:indexes", "hosting:account"];
+export function resolveAccountHostingSite(repoRoot: string, projectId: string): string {
+  try {
+    const firebaserc = JSON.parse(readFileSync(join(repoRoot, ".firebaserc"), "utf8")) as Firebaserc;
+    const sites = firebaserc.targets?.[projectId]?.hosting?.account;
+    if (sites?.length === 1 && sites[0]?.trim()) {
+      return sites[0].trim();
+    }
+  } catch {
+    // Fall through to the stable per-project convention used by Kanna.
+  }
+  return `${projectId}-account`;
+}
+
+export async function ensureAccountHostingSite(input: {
+  repoRoot: string;
+  env: NodeJS.ProcessEnv;
+  runner: CommandRunner;
+  projectId: string;
+}): Promise<string> {
+  const site = resolveAccountHostingSite(input.repoRoot, input.projectId);
+  const inspect = await input.runner.run(
+    "pnpm",
+    ["exec", "firebase", "hosting:sites:get", site, "--project", input.projectId],
+    { cwd: input.repoRoot, env: input.env }
+  );
+  if (inspect.exitCode === 0) return site;
+
+  const create = await input.runner.run(
+    "pnpm",
+    ["exec", "firebase", "hosting:sites:create", site, "--project", input.projectId],
+    { cwd: input.repoRoot, env: input.env, streamOutput: true }
+  );
+  if (create.exitCode !== 0) {
+    throw new Error(create.stderr || create.stdout || `Failed to create Firebase Hosting site ${site}.`);
+  }
+  return site;
+}
+
+export function buildCloudDeployTargets(input: {
+  functions: boolean;
+  portal: boolean;
+  includeFirestore: boolean;
+}): string[] {
+  return [
+    ...(input.functions ? ["functions"] : []),
+    ...(input.includeFirestore ? ["firestore:rules", "firestore:indexes"] : []),
+    ...(input.portal ? ["hosting:account"] : [])
+  ];
 }
 
 export async function deployFirebaseCloud(input: CloudDeployInput & { relay?: boolean }): Promise<CloudDeployResult> {
@@ -165,7 +214,14 @@ export async function deployFirebaseCloud(input: CloudDeployInput & { relay?: bo
     command: "cloud deploy"
   });
 
+  const hasExplicitTarget = input.functions === true || input.portal === true || input.relay === true;
   const functions = input.functions === true;
+  const portal = input.portal === true || !hasExplicitTarget;
+  const targets = buildCloudDeployTargets({
+    functions,
+    portal,
+    includeFirestore: !hasExplicitTarget
+  });
   if (functions) {
     const build = await input.runner.run("pnpm", ["--dir", "services/firebase-functions", "build"], {
       cwd: input.repoRoot,
@@ -175,34 +231,44 @@ export async function deployFirebaseCloud(input: CloudDeployInput & { relay?: bo
       throw new Error(build.stderr || build.stdout || "Firebase functions build failed.");
     }
   }
-  const portalBuild = await input.runner.run("pnpm", ["--dir", "apps/web-portal", "build"], {
-    cwd: input.repoRoot,
-    env: resolveWebPortalBuildEnvironment(input.env, projectId)
-  });
-  if (portalBuild.exitCode !== 0) {
-    throw new Error(portalBuild.stderr || portalBuild.stdout || "Web account portal build failed.");
+  if (portal) {
+    const portalBuildEnv = resolveWebPortalBuildEnvironment(input.env, projectId);
+    await ensureAccountHostingSite({
+      repoRoot: input.repoRoot,
+      env: input.env,
+      runner: input.runner,
+      projectId
+    });
+    const portalBuild = await input.runner.run("pnpm", ["--dir", "apps/web-portal", "build"], {
+      cwd: input.repoRoot,
+      env: portalBuildEnv
+    });
+    if (portalBuild.exitCode !== 0) {
+      throw new Error(portalBuild.stderr || portalBuild.stdout || "Web account portal build failed.");
+    }
   }
 
-  const targets = buildCloudDeployTargets(functions);
-  const deploy = await input.runner.run(
-    "pnpm",
-    [
-      "exec",
-      "firebase",
-      "deploy",
-      "--only",
-      targets.join(","),
-      "--project",
-      projectId,
-      "--force"
-    ],
-    { cwd: input.repoRoot, env: input.env, streamOutput: true }
-  );
-  if (deploy.exitCode !== 0) {
-    throw new Error(deploy.stderr || deploy.stdout || "Firebase deploy failed.");
+  if (targets.length > 0) {
+    const deploy = await input.runner.run(
+      "pnpm",
+      [
+        "exec",
+        "firebase",
+        "deploy",
+        "--only",
+        targets.join(","),
+        "--project",
+        projectId,
+        "--force"
+      ],
+      { cwd: input.repoRoot, env: input.env, streamOutput: true }
+    );
+    if (deploy.exitCode !== 0) {
+      throw new Error(deploy.stderr || deploy.stdout || "Firebase deploy failed.");
+    }
   }
 
-  const result: CloudDeployResult = { projectId, deployed: true, targets, source };
+  const result: CloudDeployResult = { projectId, deployed: targets.length > 0, targets, source };
   if (input.relay) {
     result.relay = await deployRelayCloud({ ...input, source });
   }

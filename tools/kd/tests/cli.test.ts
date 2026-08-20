@@ -601,6 +601,16 @@ describe("kd CLI", () => {
     expect(error).toHaveBeenLastCalledWith("Unknown help topic: not-a-command");
   });
 
+  it("returns a nonzero exit code for an unknown flag", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(runCli(["mobile", "ota", "publish", "--unknown"])).resolves.toBe(1);
+    expect(error).toHaveBeenLastCalledWith("Unknown flag: --unknown");
+
+    await expect(runCli(["mobile", "ota", "publish", "--relay"])).resolves.toBe(1);
+    expect(error).toHaveBeenLastCalledWith("Unknown flag for mobile.ota.publish: --relay");
+  });
+
   it("parses dev up with mobile and emulators flags", () => {
     expect(parseCliArgs(["dev", "up", "--mobile", "--emulators", "--seed"])).toEqual({
       taskId: "dev.up",
@@ -1322,15 +1332,15 @@ describe("kd CLI", () => {
     });
     expect(parseCliArgs(["cloud", "deploy", "--production"])).toEqual({
       taskId: "cloud.deploy",
-      input: { staging: false, production: true, relay: false, functions: false }
+      input: { staging: false, production: true, relay: false, functions: false, portal: false }
     });
     expect(parseCliArgs(["cloud", "deploy", "--production", "--relay"])).toEqual({
       taskId: "cloud.deploy",
-      input: { staging: false, production: true, relay: true, functions: false }
+      input: { staging: false, production: true, relay: true, functions: false, portal: false }
     });
     expect(parseCliArgs(["cloud", "deploy", "--staging", "--relay"])).toEqual({
       taskId: "cloud.deploy",
-      input: { staging: true, production: false, relay: true, functions: false }
+      input: { staging: true, production: false, relay: true, functions: false, portal: false }
     });
     expect(parseCliArgs(["cloud", "relay-provision", "--staging"])).toEqual({
       taskId: "cloud.relay-provision",

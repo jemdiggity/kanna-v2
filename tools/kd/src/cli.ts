@@ -36,6 +36,7 @@ const booleanFlagMap: Record<string, string> = {
   "--production": "production",
   "--relay": "relay",
   "--functions": "functions",
+  "--portal": "portal",
   "--device": "device",
   "--remote": "remote",
   "--dev": "dev",
@@ -790,7 +791,13 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   if (group === "cloud" && command === "deploy") {
     return {
       taskId: "cloud.deploy",
-      input: parseFlagInput(rest, { staging: false, production: false, relay: false, functions: false })
+      input: parseFlagInput(rest, {
+        staging: false,
+        production: false,
+        relay: false,
+        functions: false,
+        portal: false
+      })
     };
   }
   if (group === "cloud" && command === "relay-provision") {
@@ -926,7 +933,7 @@ const helpTopics: Record<string, string[]> = {
     "  release cut [--major|--minor|--patch] [--version X.Y.0] [--abandon-series X.Y[,X.Y]] [--reason <why>]",
     "  release reset-staging --to main|release/X.Y --reason <why> --confirm-abandon <staging-version> [--dry-run]",
     "  release status",
-    "  cloud deploy --staging|--production [--ref <branch|tag|sha>] [--functions] [--relay]",
+    "  cloud deploy --staging|--production [--ref <branch|tag|sha>] [--functions] [--portal] [--relay]",
     "  cloud relay-provision --staging|--production",
     "  pages build-schema --out-dir <dir>",
     "  test rust",
@@ -1371,21 +1378,23 @@ const helpTopics: Record<string, string[]> = {
     "Usage: kd cloud <command>",
     "",
     "Commands:",
-    "  cloud deploy --staging|--production [--ref <branch|tag|sha>] [--functions] [--relay]",
+    "  cloud deploy --staging|--production [--ref <branch|tag|sha>] [--functions] [--portal] [--relay]",
     "  cloud relay-provision --staging|--production"
   ],
   "cloud deploy": [
-    "Usage: kd cloud deploy --staging|--production [--ref <branch|tag|sha>] [--functions] [--relay]",
+    "Usage: kd cloud deploy --staging|--production [--ref <branch|tag|sha>] [--functions] [--portal] [--relay]",
     "",
     "Deploy Kanna Firebase cloud services.",
     "",
     "  --ref <branch|tag|sha>  Source ref the deploy builds from. Required with --production.",
     "                          The build consumes the working tree, so the ref must be checked",
     "                          out and the tree clean.",
-    "  --functions             Also build and deploy services/firebase-functions. Off by default",
-    "                          so reviving function deployment stays deliberate; without it the",
-    "                          deploy is scoped to Firestore rules and indexes.",
-    "  --relay                 Also build and deploy the relay VM image."
+    "  --functions             Build and deploy services/firebase-functions. Off by default so",
+    "                          reviving function deployment stays deliberate.",
+    "  --portal                Build and deploy the web account portal.",
+    "  --relay                 Build and deploy only the relay VM image unless combined with",
+    "                          another explicit target. With no target flag, deploy Firestore",
+    "                          rules, indexes, and the account portal."
   ],
   "cloud relay-provision": [
     "Usage: kd cloud relay-provision --staging|--production",
@@ -1563,9 +1572,20 @@ export async function runCli(args: string[], env = process.env): Promise<number>
     }
     const task = getTaskDefinition(parsed.taskId);
     const input = task.inputSchema.parse(parsed.input);
+    if (typeof input === "object" && input !== null) {
+      const acceptedKeys = input as Record<string, unknown>;
+      const unsupportedKey = Object.keys(parsed.input).find((key) => !(key in acceptedKeys));
+      if (unsupportedKey) {
+        const flag = unsupportedKey.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`);
+        throw new Error(`Unknown flag for ${task.id}: --${flag}`);
+      }
+    }
     const result = await task.execute({ cwd: process.cwd(), env }, input);
+    if (!result.ok) {
+      throw new Error(result.message);
+    }
     console.log(result.message);
-    return result.ok ? 0 : 1;
+    return 0;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(message);
