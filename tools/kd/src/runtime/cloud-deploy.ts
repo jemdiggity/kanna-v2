@@ -20,11 +20,22 @@ export interface CloudDeployInput {
   environment: CloudDeployEnvironment;
   /** Branch, tag, or sha the deploy builds from; required for production. */
   ref?: string;
+  /**
+   * Build and deploy `services/firebase-functions`.
+   *
+   * Off by default so reviving function deployment stays a deliberate act: the
+   * package spent its whole life exporting nothing precisely so a stray deploy
+   * could not resurrect a retired endpoint, and the billing backend it now
+   * carries writes entitlements. See `docs/specs/accounts-and-billing.md`.
+   */
+  functions?: boolean;
 }
 
 export interface CloudDeployResult {
   projectId: string;
   deployed: boolean;
+  /** What `firebase deploy --only` was scoped to. */
+  targets: string[];
   source: ResolvedSourceRef;
   relay?: RelayDeployResult;
 }
@@ -135,6 +146,12 @@ export function resolveProductionFirebaseProject(
   return resolveFirebaseProject(repoRoot, env, "production");
 }
 
+export function buildCloudDeployTargets(functions: boolean): string[] {
+  return functions
+    ? ["functions", "firestore:rules", "firestore:indexes", "hosting:account"]
+    : ["firestore:rules", "firestore:indexes", "hosting:account"];
+}
+
 export async function deployFirebaseCloud(input: CloudDeployInput & { relay?: boolean }): Promise<CloudDeployResult> {
   assertCloudDeployEnvironment(input.environment);
 
@@ -147,12 +164,16 @@ export async function deployFirebaseCloud(input: CloudDeployInput & { relay?: bo
     requireRef: input.environment === "production",
     command: "cloud deploy"
   });
-  const build = await input.runner.run("pnpm", ["--dir", "services/firebase-functions", "build"], {
-    cwd: input.repoRoot,
-    env: input.env
-  });
-  if (build.exitCode !== 0) {
-    throw new Error(build.stderr || build.stdout || "Firebase functions build failed.");
+
+  const functions = input.functions === true;
+  if (functions) {
+    const build = await input.runner.run("pnpm", ["--dir", "services/firebase-functions", "build"], {
+      cwd: input.repoRoot,
+      env: input.env
+    });
+    if (build.exitCode !== 0) {
+      throw new Error(build.stderr || build.stdout || "Firebase functions build failed.");
+    }
   }
   const portalBuild = await input.runner.run("pnpm", ["--dir", "apps/web-portal", "build"], {
     cwd: input.repoRoot,
@@ -162,6 +183,7 @@ export async function deployFirebaseCloud(input: CloudDeployInput & { relay?: bo
     throw new Error(portalBuild.stderr || portalBuild.stdout || "Web account portal build failed.");
   }
 
+  const targets = buildCloudDeployTargets(functions);
   const deploy = await input.runner.run(
     "pnpm",
     [
@@ -169,7 +191,7 @@ export async function deployFirebaseCloud(input: CloudDeployInput & { relay?: bo
       "firebase",
       "deploy",
       "--only",
-      "functions,firestore:rules,firestore:indexes,hosting:account",
+      targets.join(","),
       "--project",
       projectId,
       "--force"
@@ -180,7 +202,7 @@ export async function deployFirebaseCloud(input: CloudDeployInput & { relay?: bo
     throw new Error(deploy.stderr || deploy.stdout || "Firebase deploy failed.");
   }
 
-  const result: CloudDeployResult = { projectId, deployed: true, source };
+  const result: CloudDeployResult = { projectId, deployed: true, targets, source };
   if (input.relay) {
     result.relay = await deployRelayCloud({ ...input, source });
   }

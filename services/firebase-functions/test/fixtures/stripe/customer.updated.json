@@ -1,0 +1,22 @@
+{
+  "id": "evt_customer_updated",
+  "object": "event",
+  "api_version": "2026-06-30.preview",
+  "created": 1787097601,
+  "livemode": false,
+  "pending_webhooks": 1,
+  "request": {
+    "id": null,
+    "idempotency_key": null
+  },
+  "type": "customer.updated",
+  "data": {
+    "object": {
+      "id": "cus_TestSlice1",
+      "object": "customer",
+      "metadata": {
+        "firebase_uid": "fixture-checkout-user"
+      }
+    }
+  }
+}

@@ -209,10 +209,27 @@ release path does not forward direct Apple credential variables into Bazel.
 ## Cloud services
 
 ```sh
-./kd cloud deploy --staging                              # Firebase (functions, rules, …)
+./kd cloud deploy --staging                              # Firestore rules + indexes
+./kd cloud deploy --staging --functions                  # + services/firebase-functions
 ./kd cloud deploy --production --ref release/0.2
 ./kd cloud deploy --staging --relay                      # + relay VM
 ```
+
+**`--functions` is opt-in on purpose.** `services/firebase-functions` exported
+nothing at all for most of its life, precisely so a stray `firebase deploy`
+could not resurrect a retired endpoint, and it now carries the billing backend
+that writes entitlements (`docs/specs/accounts-and-billing.md`). Without the
+flag a deploy is scoped to `firestore:rules,firestore:indexes` and never builds
+or ships a function; with it, kd builds the package first and adds `functions`
+to the deploy scope. The scope kd used is reported back as `targets`.
+
+Stripe configuration reaches the functions through the environment —
+`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_MONTHLY`,
+`STRIPE_PRICE_ANNUAL`, `KANNA_PORTAL_BASE_URL`, and the optional
+`STRIPE_GRACE_FALLBACK_DAYS` — bound from Secret Manager per project
+(`kanna-staging` ↔ Stripe test mode, `kanna-build` ↔ live mode). This
+repository is public: no key is ever committed, and a missing one surfaces as a
+clear error on the request that needs it rather than as a load-time crash.
 
 Never run `firebase deploy` directly. If `kd cloud deploy` misbehaves, fix the
 `kd` workflow and redeploy through it. Environments: `kanna-build`

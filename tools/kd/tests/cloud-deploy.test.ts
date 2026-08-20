@@ -143,7 +143,7 @@ describe("cloud deploy runtime", () => {
     ).rejects.toThrow("cloud deploy requires staging or production");
   });
 
-  it("builds functions before deploying Firebase cloud services", async () => {
+  it("builds functions before deploying them when --functions is passed", async () => {
     const repoRoot = mkdtempSync(join(tmpdir(), "kd-cloud-deploy-"));
     mkdirSync(join(repoRoot, "services/firebase-functions"), { recursive: true });
     const calls: Array<{ command: string; args: string[]; cwd?: string; streamOutput?: boolean }> = [];
@@ -165,10 +165,16 @@ describe("cloud deploy runtime", () => {
         env: { KANNA_FIREBASE_PRODUCTION_PROJECT: "prod-project", ...PORTAL_ENV },
         runner,
         environment: "production",
+        functions: true,
         ref: "release/0.2"
       });
 
-      expect(result).toEqual({ projectId: "prod-project", deployed: true, source: SOURCE });
+      expect(result).toEqual({
+        projectId: "prod-project",
+        deployed: true,
+        targets: ["functions", "firestore:rules", "firestore:indexes", "hosting:account"],
+        source: SOURCE
+      });
       expect(calls).toEqual([
         {
           command: "git",
@@ -214,6 +220,60 @@ describe("cloud deploy runtime", () => {
     } finally {
       rmSync(repoRoot, { recursive: true, force: true });
     }
+  });
+
+  it("deploys neither the functions build nor the functions target without --functions", async () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), "kd-cloud-deploy-"));
+    mkdirSync(join(repoRoot, "services/firebase-functions"), { recursive: true });
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push({ command, args });
+        return gitSourceResult(command, args) ?? { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+
+    try {
+      const result = await deployFirebaseCloud({
+        repoRoot,
+        env: { KANNA_FIREBASE_STAGING_PROJECT: "kanna-staging", ...PORTAL_ENV },
+        runner,
+        environment: "staging"
+      });
+
+      expect(result.targets).toEqual(["firestore:rules", "firestore:indexes", "hosting:account"]);
+      expect(
+        calls.some(
+          (call) => call.args.includes("services/firebase-functions") && call.args.includes("build")
+        )
+      ).toBe(false);
+      expect(calls.at(-1)).toEqual({
+        command: "pnpm",
+        args: [
+          "exec",
+          "firebase",
+          "deploy",
+          "--only",
+          "firestore:rules,firestore:indexes,hosting:account",
+          "--project",
+          "kanna-staging",
+          "--force"
+        ]
+      });
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("parses --functions for cloud deploy", () => {
+    expect(parseCliArgs(["cloud", "deploy", "--staging", "--functions"])).toEqual({
+      taskId: "cloud.deploy",
+      input: { staging: true, production: false, relay: false, functions: true }
+    });
+    expect(parseCliArgs(["cloud", "deploy", "--staging"])).toEqual({
+      taskId: "cloud.deploy",
+      input: { staging: true, production: false, relay: false, functions: false }
+    });
   });
 
   it("refuses to deploy Firebase cloud services from a dirty git worktree", async () => {
@@ -584,7 +644,7 @@ describe("cloud deploy runtime", () => {
   it("parses --ref for cloud deploy", () => {
     expect(parseCliArgs(["cloud", "deploy", "--production", "--relay", "--ref", "release/0.2"])).toEqual({
       taskId: "cloud.deploy",
-      input: { staging: false, production: true, relay: true, ref: "release/0.2" }
+      input: { staging: false, production: true, relay: true, functions: false, ref: "release/0.2" }
     });
     expect(() => parseCliArgs(["cloud", "deploy", "--production", "--ref"])).toThrow("--ref requires a value");
   });
