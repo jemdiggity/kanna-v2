@@ -1,10 +1,15 @@
-# Accounts and Billing (Stripe) — Architecture Spec
+# Accounts and Billing (Stripe + Apple IAP) — Architecture Spec
 
-Status: architect consultation verdict (task `da6b6800`, 2026-08-20). This is
-the approach-level spec the owner asked for ("proper account creation and
-subscription handling … assume Stripe"). It builds on, and does not replace,
-`docs/2026-07-08-mobile-subscription-iap-strategy.md` — that document's
-two-tier model and entitlement schema are adopted here.
+Status: architect consultation verdict (task `da6b6800`, 2026-08-20), amended
+2026-08-20 by task `72f6675f` on the owner's decision (verbatim): "Let's
+include iap from the start." Apple In-App Purchase is now a **launch channel**
+alongside web Stripe — Model 1 of
+`docs/2026-07-08-mobile-subscription-iap-strategy.md` — not the review-forced
+fallback the original verdict kept in reserve. That strategy doc's two-tier
+model and entitlement schema remain adopted here. The same amendment folds in
+a second owner addition (verbatim): "Also I'll need a leech flag for users who
+don't need to pay" — the complimentary `comp` entitlement source in
+Decision 3.
 
 Apple App Store analysis in this spec reflects knowledge current to
 January 2026. Every item under "Human verification required" must be checked
@@ -42,6 +47,11 @@ Confirmed by source inspection; corrections to the consultation prompt noted.
   `kanna-build` — a clean seam for Stripe test vs live mode.
 - No billing, entitlement, IAP/StoreKit, telemetry, or crash-reporting SDK code
   exists anywhere (mobile crash diagnostics are local-only and redacted).
+- The mobile app is Expo SDK 57 / React Native 0.86, `runtimeVersion: "2.1.4"`
+  in all three environments of `apps/mobile/src/mobileEnvironments.json`,
+  native identity applied by config plugins in `apps/mobile/plugins/`. Adding
+  any StoreKit dependency is a native change: per the repo contract it bumps
+  `runtimeVersion` in **every** environment and ships binary-only, never OTA.
 - Legal/web: privacy policy and support pages are live at
   `kanna.build/privacy` / `/support`, served from the **separate**
   `tampopogk/kanna-web` repo; markdown source lives here in `docs/legal/`.
@@ -54,6 +64,10 @@ Confirmed by source inspection; corrections to the consultation prompt noted.
   the Identity Toolkit REST API may already allow anyone to create an account —
   and today any account gets full relay service. Verify the console setting
   now; once entitlement enforcement (below) ships, open signup becomes safe.
+- ⚠️ Normalization of the amendment prompt's `source: "apple"`: the adopted
+  entitlement schema already names this enum value `app_store`. This spec
+  keeps `app_store`; introducing a second spelling for the same source would
+  be a bug factory. Everywhere the owner said "apple", read `app_store`.
 
 ## Decision 1 — Account lifecycle
 
@@ -61,83 +75,113 @@ Confirmed by source inspection; corrections to the consultation prompt noted.
 mobile, desktop, relay verification, and Firestore rules; replacing it buys
 nothing. Additions:
 
-- **Registration lives on the web first**: a small account portal (see
-  component layout below) at `kanna.build` handles register → verify email →
-  subscribe → manage billing → delete account. Web-first keeps the iOS app
-  free of account-creation (so Apple's 5.1.1(v) in-app-deletion requirement is
-  not triggered in phase 1) and puts registration on the same page as Stripe
-  Checkout, which Apple cannot police. Email/password only at launch; no
-  social providers (adding Google would drag in mandatory Sign in with Apple
-  on iOS — defer both).
-- **Email verification**: required before an entitlement can activate.
-  Firebase `sendEmailVerification`; the billing backend refuses to create a
-  Checkout session for an unverified account, and the relay treats
-  `email_verified: false` phone tokens as unentitled.
+- **Registration ships on both surfaces at launch.** The web account portal
+  at `kanna.build` (register → verify email → subscribe → manage billing →
+  delete account) remains the web channel's funnel and the only place Stripe
+  Checkout is reachable. The iOS app **additionally gets in-app registration**
+  (Firebase email/password `createUser` + `sendEmailVerification`) in the same
+  binary that carries IAP: with purchase available in the app, sending a
+  stranger to the website to make an account before they can buy is bad UX
+  and plausible App Review friction. Email/password only at launch on both
+  surfaces; no social providers (adding Google would drag in mandatory Sign
+  in with Apple on iOS — defer both; plain email/password registration does
+  not trigger guideline 4.8, verify item).
+- **In-app registration triggers Apple's in-app account deletion requirement
+  (5.1.1(v))**, so the same binary must carry an in-app deletion screen
+  backed by the `deleteAccount` pipeline below. Deletion thereby moves from
+  "lifecycle completeness" into the launch-blocking set for the app channel
+  (Decision 7). The prior verdict's "mobile registration is a fast-follow"
+  paragraph is superseded by this amendment.
+- **Account-first purchase, always.** A purchase requires a signed-in,
+  email-verified Firebase account before StoreKit is invoked; the purchase is
+  bound to the account via `appAccountToken` (Decision 4). Anonymous
+  purchase-then-bind-later is rejected: it requires parking orphaned
+  transactions keyed only by Apple identity, a claim/merge flow, and a
+  support queue for every edge (device shared, wrong account claimed,
+  restore-before-claim). Account-first with `appAccountToken` is simpler,
+  honest, and what the reconciliation rules in Decision 4 assume.
+- **Email verification**: required before an entitlement can activate, on
+  both channels. The billing backend refuses to create a Stripe Checkout
+  session for an unverified account, refuses to mint an `appAccountToken`
+  for one (the IAP-side enforcement point — the purchase UI stays disabled
+  until verified), and the relay treats `email_verified: false` phone tokens
+  as unentitled.
 - **Password reset**: Firebase `sendPasswordResetEmail`, surfaced on the
   portal sign-in page and as a "Forgot password?" link in the mobile
-  `AccountSheet` (a reset link is not account creation and triggers no Apple
-  obligations).
-- **Account deletion** becomes a first-class backend pipeline regardless of
-  where the button lives (APPI/GDPR and the existing 30-day manual promise
-  both demand it): a callable function `deleteAccount` that, in order —
-  cancels any Stripe subscription immediately (`cancel_now`, no proration
-  surprises), recursively deletes `users/{uid}` (task index, desktops,
-  pushDevices, entitlements, transfers), deletes/tombstones
-  `desktopCredentials` docs whose `uid` matches, deletes legacy
-  `devices/{token}` rows, revokes refresh tokens, then deletes the Firebase
-  Auth user. The Stripe Customer object and invoices are retained (financial
-  record-keeping obligation) — say so in the privacy policy. Paired desktops:
-  LAN pairing is untouched (accountless by design); the desktop's cloud
-  session dies with token revocation and it falls back to local-only.
-  The portal exposes deletion in phase 1; mobile gets an in-app deletion
-  screen **at the same time as** (or before) mobile in-app registration.
-- **Mobile registration** is a fast-follow, not phase 1. When added, ship
-  in-app deletion in the same release, and re-audit the App Store listing.
-  Until then the mobile invite-only copy (`AccountSheet.tsx`,
-  `CLOUD_ACCESS_REQUEST_URL`) must change to neutral wording — once accounts
-  are self-serve, a link that lands users one click from a Stripe paywall is
-  steering; keep the in-app link pointing at support/docs, not the
-  pricing/signup page (see Decision 2).
+  `AccountSheet`.
+- **Account deletion** is a first-class backend pipeline regardless of where
+  the button lives (APPI/GDPR, the existing 30-day manual promise, and now
+  5.1.1(v) all demand it): a callable function `deleteAccount` that, in
+  order — cancels any Stripe subscription immediately (`cancel_now`, no
+  proration surprises), recursively deletes `users/{uid}` (task index,
+  desktops, pushDevices, entitlements, billing source docs), tombstones the
+  `appAccountTokens/{token}` mapping (so later App Store Server Notifications
+  for the dead account resolve to "deleted" and are logged and dropped, not
+  errored), deletes/tombstones `desktopCredentials` docs whose `uid` matches,
+  deletes legacy `devices/{token}` rows, revokes refresh tokens, then deletes
+  the Firebase Auth user. **An active Apple subscription cannot be canceled
+  by Kanna** — before deleting, the flow must warn "your App Store
+  subscription keeps renewing until you cancel it in Apple's subscription
+  settings", open/deep-link those settings, and require acknowledgment; it
+  must never block deletion on the Apple state (Apple requires deletion to
+  work regardless). The Stripe Customer object and invoices are retained
+  (financial record-keeping obligation) — say so in the privacy policy.
+  Paired desktops: LAN pairing is untouched (accountless by design); the
+  desktop's cloud session dies with token revocation and it falls back to
+  local-only. The portal and the iOS app both expose deletion at their
+  respective channel launches.
 
 ## Decision 2 — The Apple question
 
-Answered from the January 2026 knowledge cutoff plus the sources already
-reviewed in `docs/2026-07-08-mobile-subscription-iap-strategy.md`; a human
-must re-verify the flagged items against Apple's current text.
+**Answered by the owner (2026-08-20): the iOS app sells `cloud_access` as an
+auto-renewable In-App Purchase from the start.** This is Model 1 of the
+strategy doc — the same entitlement sold through StoreKit on iOS and Stripe
+on the web, normalized into one backend entitlement record. The original
+verdict's honor-only posture (Model 2/3, app sells nothing) and its
+"IAP only if App Review forces it" fallback framing are dead for iOS.
 
-- **When Apple requires IAP** (3.1.1): when the *app itself* unlocks paid
-  digital features or shows a purchase path. Guideline 3.1.3(b)
-  ("multiplatform services") permits an app to *honor* subscriptions bought
-  on other platforms; its "provided those items are also available as IAP"
-  clause is applied with reviewer discretion, and 3.1.3(f) permits free
-  companion apps to a paid web/desktop tool with **no purchase UI and no
-  calls to action**. Slack/GitHub-style companion apps live in this space.
-- **US anti-steering**: after the Epic v. Apple contempt ruling
-  (April 30, 2025), Apple's US-storefront guidelines were changed to allow
-  external purchase links without commission; Apple's appeal was pending as
-  of the cutoff. Japan's smartphone competition act (in force from
-  December 2025) imposes similar obligations for the Japan storefront —
-  relevant since Tampopo LLC is Japan-based. **Do not build the launch
-  posture on either carveout**: they are storefront-specific, in legal flux,
-  and Kanna does not need them.
-- **Recommended structure** (Model 2/3 of the strategy doc, unchanged):
-  **web-first Stripe checkout; the iOS app honors existing entitlements and
-  sells nothing.** The iOS app must NOT: show pricing, plan pickers, upgrade
-  buttons, purchase links, "subscribe at kanna.build" copy, or locked-feature
-  UI that advertises a paid upgrade. Expired/absent entitlement shows the
-  neutral copy already specified: "Cloud access is not active for this
-  account." LAN remains a first-class free path, which is what makes the
-  free-companion framing honest. If App Review still objects under
-  3.1.1/3.1.3(b), the prepared fallback is exactly one `cloud_access`
-  auto-renewable IAP normalized into the same entitlement record (the
-  entitlement schema below is deliberately source-agnostic so this bolts on
-  without reshaping anything).
-- **Human verification required before paid launch**: (1) current text of
-  3.1.1 / 3.1.3(b) / 3.1.3(f); (2) status of the US external-link rules and
-  the Epic appeal; (3) Japan storefront obligations; (4) whether 5.1.1(v)
-  deletion has widened beyond "supports account creation"; (5) whether the
-  App Review posture on web-created accounts signing in has shifted. Also
-  update the App Review notes and listing copy ("invite-only") at flag day.
+What this buys and costs, so the record is honest:
+
+- The chronic 3.1.3(b) exposure disappears: web-purchased subscribers may
+  sign in and be served precisely because the same item **is** available as
+  IAP in the app. App Review risk shifts from "is this companion framing
+  accepted" to ordinary subscription-compliance mechanics (3.1.2), which are
+  checkable and enumerated in Decision 4.
+- The cost is Apple commission on app-channel revenue (15% under the Small
+  Business Program), the App Store Connect business setup, a mandatory new
+  binary + subscription review, and the reconciliation surface of two billing
+  sources (Decision 4). All accepted by the owner's decision.
+- **LAN remains free and account-free, permanently.** The free-companion
+  floor is unchanged and still what makes the free tier honest.
+- **What the app says about web billing — conservative default**: the app
+  shows **only** the IAP price and terms, and never mentions web pricing,
+  the portal, or that a web purchase path exists. For an already-subscribed
+  Stripe-sourced account, the app states the subscription is active and
+  managed outside the App Store, without price or link (exact copy in
+  Decision 4; whether naming "kanna.build" there is acceptable is a verify
+  item). As of the January 2026 cutoff, the US storefront external-link
+  rules (post-Epic contempt ruling, appeal pending) and Japan's smartphone
+  competition act would likely permit more explicit web-pricing references
+  on those storefronts — **do not build on either**: storefront-specific,
+  in legal flux, and unnecessary now that IAP exists. One global binary,
+  one global policy.
+
+**Human verification required before paid launch** (knowledge-cutoff items):
+(1) current text of 3.1.1 / 3.1.2 / 3.1.3; (2) whether 5.1.1(v) deletion
+requirements have widened; (3) status of the US external-link rules and the
+Epic appeal, and Japan storefront obligations — informational only, since
+this spec does not rely on them; (4) **Paid Applications Agreement signed in
+App Store Connect** (required even for sandbox IAP testing); (5) **banking
+and tax setup complete in App Store Connect**; (6) **subscription group +
+auto-renewable products created with price points chosen** (Apple's price
+grid may not exactly match the Stripe price — pick the nearest tier, owner
+signs off); (7) **Small Business Program enrollment** (15% assumes it);
+(8) the React Native StoreKit library landscape (Decision 4 names `expo-iap`
+from cutoff knowledge — re-verify maintenance status at implementation time);
+(9) whether the in-app "managed outside the App Store" copy for
+Stripe-sourced subscribers is acceptable, or must stay fully neutral. Also
+update the App Review notes and listing copy ("invite-only", "no in-app
+purchases") at flag day — both become false.
 
 ## Decision 3 — Stripe integration shape
 
@@ -149,13 +193,18 @@ must re-verify the flagged items against Apple's current text.
   Kanna builds no billing UI beyond a "Manage billing" button.
 - **The billing backend lives in `services/firebase-functions`**, revived as
   real 2nd-gen Cloud Functions on the existing three Firebase projects:
-  - `createCheckoutSession` (callable, auth + verified email required),
+  - `createCheckoutSession` (callable, auth + verified email required;
+    **refuses with a distinct error when an `app_store`-sourced subscription
+    is active** — the portal renders "you're subscribed via the App Store —
+    manage it in Apple's subscription settings" with the deep link instead
+    of a checkout button; double-pay prevention, Decision 4),
   - `createPortalSession` (callable),
   - `stripeWebhook` (HTTPS, signature-verified; handles
     `checkout.session.completed`,
     `customer.subscription.created/updated/deleted`,
     `invoice.payment_failed`, `invoice.paid`),
-  - `deleteAccount` (callable; Decision 1).
+  - `deleteAccount` (callable; Decision 1),
+  - plus the Apple-side functions in Decision 4.
   Rationale vs the relay VM: the relay is a single availability-critical
   e2-micro tunnel with a heavyweight deploy path; billing needs an
   independent lifecycle, TLS/webhook hosting for free, admin Firestore
@@ -163,22 +212,55 @@ must re-verify the flagged items against Apple's current text.
   `createPairingCode` guard must be preserved: function deployment goes
   through `./kd cloud deploy` (extended to own `--functions`), never bare
   `firebase deploy`, and the retired function stays unexported.
-- **Entitlement record**: adopt the strategy doc's schema at
+- **One entitlement, three writers, one reducer** (amended structure): with
+  multiple billing sources, no handler upserts `entitlements/cloud_access`
+  directly — source-blind writers racing on one doc is how a canceled Stripe
+  sub erases a live Apple one. Instead each source has its own **source-state
+  doc** — `users/{uid}/billing/stripe` and `users/{uid}/billing/app_store`
+  written by their webhooks, plus `users/{uid}/billing/comp` below — all
+  admin-written, owner-readable, same rules stanza pattern as entitlements —
+  and every write invokes a shared `recomputeEntitlement(uid)` that reads all
+  source docs in a transaction and derives the single
+  `users/{uid}/entitlements/cloud_access` record. Reconciliation rules live
+  only in the reducer (Decision 4).
+- **Complimentary access — the `comp` source** (owner addition, 2026-08-20:
+  "I'll need a leech flag for users who don't need to pay"). An
+  admin-granted grant of `cloud_access` with no billing relationship:
+  `users/{uid}/billing/comp` holds `{active, reason, grantedBy, grantedAt,
+  revokedAt}`. Semantics: while active it **never bills, never duns, never
+  expires** — only explicit revocation ends it; on revocation the reducer
+  falls back to whatever paid source the account holds, so comping a paying
+  user and later un-comping them is safe. `createCheckoutSession` and
+  `beginAppStorePurchase` refuse while comp is active (never let a comped
+  user pay). Grant/revoke is a **manual admin-SDK Firestore write for v1**
+  (single operator, a handful of grants); the eventual admin surface is a
+  `kd cloud comp grant|revoke|list <email>` command — `kd` is already the
+  canonical operator surface, and a portal admin page would drag in a
+  role/claims system nothing else needs. Client writes are impossible under
+  the deny-by-default rules; the rules tests must pin that (Decision 8).
+  **The App Review demo account and the owner's own accounts run on comp**,
+  which also keeps them out of revenue reconciliation. This subsumes the
+  adopted enum's `manual` and `review` values — one comp mechanism with a
+  `reason` field, not three source spellings; `free_beta`, `grandfathered`,
+  and `promo` remain distinct because they carry different lifecycle policy.
+- **Entitlement record**: the strategy doc's schema at
   `users/{uid}/entitlements/cloud_access` — `status`
   (`active|grace|expired|revoked`), `source`
-  (`stripe|app_store|free_beta|grandfathered|promo|manual|review`),
+  (`stripe|app_store|comp|free_beta|grandfathered|promo`),
   `capabilities` (`cloud_relay`, `cloud_task_index`, `remote_task_control`),
-  `currentPeriodEndsAt`, `graceEndsAt`, `stripeCustomerId`,
-  `stripeSubscriptionId`, `environment`, `updatedAt`. Owner-read-only in
-  `firestore.rules` (same stanza pattern as the task index); only the admin
-  SDK writes it. No Firebase custom claims for entitlement — the relay
-  already does a Firestore read per auth and revalidates per publish, so the
-  entitlement read piggybacks on that path; claims would add up-to-1h
-  staleness for no savings.
-- **Webhook correctness**: dedupe on `stripeEvents/{event.id}`; entitlement
+  `currentPeriodEndsAt` (null for non-expiring sources such as `comp`),
+  `graceEndsAt`, `stripeCustomerId`,
+  `stripeSubscriptionId`, `appStoreOriginalTransactionId`,
+  `duplicateSources` (bool, Decision 4), `environment`, `updatedAt`.
+  Owner-read-only in `firestore.rules`; only the admin SDK writes it. No
+  Firebase custom claims for entitlement — the relay already does a
+  Firestore read per auth and revalidates per publish, so the entitlement
+  read piggybacks on that path; claims would add up-to-1h staleness for no
+  savings.
+- **Webhook correctness**: dedupe on `stripeEvents/{event.id}`; source-state
   writes are idempotent upserts keyed by subscription id; out-of-order events
   resolved by Stripe's `created` timestamp. Grace/dunning: map Stripe
-  `past_due` → `status: grace` with `graceEndsAt` = end of Stripe Smart
+  `past_due` → source status `grace` with `graceEndsAt` = end of Stripe Smart
   Retries; `canceled`/`unpaid` → `expired`. Cancellation at period end keeps
   `active` until `currentPeriodEndsAt` passes.
 - **Test vs live**: `kanna-staging` ↔ Stripe **test mode** (own webhook
@@ -188,7 +270,189 @@ must re-verify the flagged items against Apple's current text.
   Stripe test mode via the Stripe CLI (`stripe listen`/`trigger`); live keys
   and live-mode operations are human-only, same rule as production deploys.
 
-## Decision 4 — Entitlement enforcement
+## Decision 4 — Apple IAP integration shape (new)
+
+### Products and client library
+
+- **One subscription group ("Kanna Cloud") holding the same catalog as the
+  web**: a monthly and an annual auto-renewable subscription for
+  `cloud_access` (product ids `build.kanna.cloud.monthly` /
+  `build.kanna.cloud.annual`). Same group so plan changes are Apple-managed
+  up/crossgrades. No consumables, no non-renewing products, no intro/promo
+  offers at launch (fast-follow once trial mechanics are decided — keep
+  parity with the Stripe trial decision, one trial policy across channels).
+- **Client: StoreKit 2 via `expo-iap`** (the maintained successor to
+  `react-native-iap` from the same author, StoreKit-2-backed, Expo config
+  plugin, works with `expo prebuild`). `expo-in-app-purchases` is archived —
+  do not use it. Re-verify the library landscape at implementation time
+  (Decision 2 item 8); if the ecosystem has shifted, a thin native
+  StoreKit-2 module in `apps/mobile/plugins/` style is the fallback, not a
+  reason to change this architecture. Either way it is a **native
+  dependency: `runtimeVersion` bumps in every environment and the IAP build
+  ships binary-only** (see Decision 7 for the timeline consequence).
+- The app never hardcodes price strings: price and period render from
+  StoreKit product metadata (localized, storefront-correct), which is also
+  what keeps the binary honest if price points change.
+
+### Purchase binding — `appAccountToken`
+
+- `appAccountToken` must be a UUID and Firebase uids are not UUIDs, so a
+  callable `beginAppStorePurchase` (auth + verified email required, Decision
+  1) mints a stable random UUID per account on first use, storing it both on
+  `users/{uid}` and as a reverse-lookup doc `appAccountTokens/{token} → uid`
+  (admin-only; not client-writable). The app passes it to every StoreKit
+  purchase; every signed transaction and server notification then carries
+  the uid binding. The mint refusal path (unverified email, already-active
+  entitlement) is what keeps the purchase UI honest before StoreKit is ever
+  invoked.
+
+### Activation and authority
+
+- **App Store Server Notifications v2 is the authoritative entitlement
+  writer** for the Apple source: a new HTTPS function
+  `appStoreNotifications` in `services/firebase-functions`, beside
+  `stripeWebhook`. It verifies the `signedPayload` JWS by validating the
+  embedded `x5c` certificate chain against the **pinned Apple Root CA
+  certificates** (bundled, not fetched), checks the payload's `environment`
+  claim, dedupes on `appleNotifications/{notificationUUID}`, upserts
+  `users/{uid}/billing/app_store` keyed by `originalTransactionId` (uid
+  resolved via `appAccountToken`; a token that resolves to a tombstone —
+  deleted account — is logged and dropped), and calls
+  `recomputeEntitlement(uid)`.
+- **Fast path**: waiting for a notification after purchase is bad UX, so the
+  app also posts its signed transaction JWS to a callable
+  `registerAppStoreTransaction`, which verifies the JWS exactly the same way
+  and performs the same source-state upsert. Both paths converge on
+  idempotent writes keyed by `originalTransactionId`, so ordering between
+  them is irrelevant. ASSN remains the authority for everything the app
+  cannot observe: renewals, billing retry, expiration, refunds, revocation.
+- Notification mapping (source-state, mirroring the Stripe table):
+  `SUBSCRIBED` / `DID_RENEW` / `DID_CHANGE_RENEWAL_STATUS` → `active` with
+  `currentPeriodEndsAt` = `expiresDate` (auto-renew intent is display-only);
+  `DID_FAIL_TO_RENEW` with `GRACE_PERIOD` subtype → `grace` with
+  `graceEndsAt` = `gracePeriodExpiresDate`; `DID_FAIL_TO_RENEW` without
+  grace → `expired` at `expiresDate`; `EXPIRED` → `expired`; `REFUND` /
+  `REVOKE` → `revoked` immediately. **Enable Billing Grace Period in App
+  Store Connect** so Apple-side dunning mirrors the Stripe Smart Retries
+  design instead of hard-expiring.
+- The **App Store Server API** (subscription statuses, transaction history)
+  is the reconciliation/backfill tool — used by an admin runbook script and
+  by `registerAppStoreTransaction` conflict checks when needed, never as the
+  steady-state polling source.
+
+### Restore purchases and relink policy
+
+- Restore reads `Transaction.currentEntitlements` and posts the JWS(s) to
+  `registerAppStoreTransaction` — same verification, same upsert. Required
+  by Apple; also the recovery path for reinstalls and new devices.
+- **An `originalTransactionId` binds to exactly one uid.** If a restore (or
+  notification) arrives whose transaction is already bound to a different
+  uid, the backend refuses the relink and the app shows support-contact
+  copy. Self-serve relink is deliberately not offered at launch: silent
+  relink is an entitlement-sharing and account-takeover lever, and support
+  volume for legitimate cases (user made a second account) will be tiny.
+
+### Reconciliation across sources
+
+- **Prevention first, then resolution.** Prevented double-pay: the portal's
+  `createCheckoutSession` refuses when the Apple source is active (Decision
+  3); the app's `beginAppStorePurchase` refuses — and the purchase UI is
+  replaced by a status row — when **any** source is active. What survives
+  prevention (races, restore of an old sub onto a Stripe-active account) is
+  resolved by the reducer, never hidden.
+- **Reducer rule — one honored source at a time**: an active `comp` grant
+  takes absolute precedence — `status: active`, `source: comp`,
+  `currentPeriodEndsAt: null`, no grace machinery, and no
+  `duplicateSources` flag against paid sources (comp beside a paid sub is a
+  gift, not a double-pay). Among the billed sources, per-source states rank
+  `active` > `grace` > everything else. The entitlement takes the best
+  status any source holds; `source` names the source holding it, tie-broken
+  by later `currentPeriodEndsAt`, then by keeping the previously honored
+  source (stable, no flapping). `currentPeriodEndsAt`/`graceEndsAt` come
+  from the honored source. A `revoked` source contributes nothing (refunded
+  ≠ entitled) but never suppresses the *other* source. When two billed
+  sources are simultaneously `active`/`grace`, the reducer sets
+  `duplicateSources: true`.
+- **Double-pay display**: on `duplicateSources`, the portal and the app both
+  show a warning banner — "you have two active subscriptions" — with
+  per-source guidance: cancel Stripe via the Customer Portal, cancel Apple
+  via Apple's subscription settings. Kanna never auto-cancels either (an
+  Apple sub it cannot touch at all; a Stripe sub it must not cancel without
+  consent). Refund requests for the redundant period are a support-runbook
+  matter (Apple refunds are Apple's alone; Stripe refunds via dashboard).
+- **Cancellation flows per source**: Apple subscriptions are managed only
+  through Apple — the app opens the native manage-subscriptions sheet
+  (StoreKit `showManageSubscriptions`), the portal deep-links
+  `https://apps.apple.com/account/subscriptions`; neither ever renders its
+  own "cancel Apple subscription" affordance. Stripe subscriptions are
+  managed only through the Customer Portal; the app shows Stripe-sourced
+  subscriptions as "active — managed outside the App Store" (copy
+  neutrality per Decision 2; verify item 9) and offers no management
+  affordance for them.
+
+### Environments
+
+- App Store Connect carries the production **and** sandbox server-notification
+  URLs, and **both point at the `kanna-build` project's
+  `appStoreNotifications` function**. Sandbox is not staging: TestFlight and
+  sandbox purchases happen inside the production-configured app
+  (`build.kanna.app`, Firebase `kanna-build`), so their `appAccountToken`s
+  resolve only in production Firestore — routing the sandbox URL at
+  `kanna-staging` would orphan every one of them. The function trusts the
+  verified JWS `environment` claim, stamps it into the source state and the
+  entitlement (`environment: sandbox`), and the relay honors
+  sandbox-stamped entitlements (TestFlight testers keep working) while
+  revenue reconciliation excludes them.
+- The staging bundle id (`build.kanna.app.staging`) is not an App Store
+  Connect app and gets no ASC products; dev/staging IAP work runs on
+  **StoreKit configuration files** (Decision 8) and the emulator.
+
+### 3.1.2 compliance surface — the screens
+
+The purchase-silent design is replaced by exactly these iOS surfaces, all in
+the `AccountSheet` area:
+
+1. **Registration screen** — email/password create + verification-pending
+   state (resend link), per Decision 1.
+2. **Subscribe screen (paywall)** — what `cloud_access` is (relay access,
+   cloud task index, push — framed as connecting to *your* desktop), the
+   monthly and annual plans with **StoreKit-localized price and period**,
+   auto-renewal disclosure copy, Subscribe button, **Restore Purchases**
+   button, and functional links to **Terms of Service and Privacy Policy**.
+   No web pricing, no portal link (Decision 2). Reached only by a signed-in,
+   verified, unentitled account.
+3. **Subscription status screen** — active/grace/expired state; for
+   Apple-sourced subs a "Manage subscription" row opening the native
+   manage-subscriptions sheet; for Stripe-sourced subs the neutral
+   managed-elsewhere row; for `comp` a plain "Complimentary access" state
+   with **no** manage-billing affordance and no paywall route (the portal
+   renders the same); the `duplicateSources` warning banner.
+4. **Account deletion screen** — Decision 1, including the active-Apple-sub
+   warning and deep link.
+5. **App Store metadata** — privacy policy URL and Terms of Use (EULA) link
+   in the listing, subscription display metadata in ASC, and rewritten App
+   Review notes (demo account — running on the `comp` source, Decision 3 —
+   how to exercise purchase/restore in sandbox, an already-entitled account)
+   replacing the "no purchases" notes.
+
+The unentitled-but-not-buying states elsewhere in the app keep the neutral
+"Cloud access is not active for this account" copy, now with a route to the
+subscribe screen — a paywall existing in-app makes that pointer legal and
+correct where it was steering before. LAN surfaces never gate or upsell.
+
+### Pricing parity
+
+**Default (owner decision, revisit post-launch): same nominal price on both
+channels; the owner absorbs Apple's 15% Small Business Program commission on
+app-channel revenue.** Rationale: price-splitting by channel invites
+storefront-rule complexity (and looks petty at a ~$10 price point), and the
+margin question is a spreadsheet problem, not an architecture problem. Apple
+price points are a grid — pick the tier nearest the Stripe price and accept
+small regional divergence. Small Business Program enrollment is a Slice-0
+human item; without it the take is 30% and the owner should re-confirm the
+default.
+
+## Decision 5 — Entitlement enforcement
 
 - **The relay is the enforcement point.** It already terminates every unit of
   remote value — tunnels, snapshot publication, push — and already re-reads
@@ -202,14 +466,21 @@ must re-verify the flagged items against Apple's current text.
   instead of a generic connection error. Enforcement applies to both phone
   ID-token sessions and desktop `desktopCredentials` sessions (both resolve
   to a uid).
+- **Enforcement is source-agnostic and unchanged by this amendment** — the
+  relay reads `status`/`capabilities` and never branches on `source`. That
+  the schema was designed source-agnostic is exactly why adding the Apple
+  channel — and the `comp` source, which lands in the same doc shape with
+  `status: active` — touches the writers and the reducer, never the
+  enforcement point.
 - **Firestore rules stay as they are initially.** The task index is the
   user's own data; when publication stops, it merely goes stale. Gating owner
   reads on an entitlement `get()` doubles read costs for marginal benefit —
   optional hardening later, not launch scope.
 - **Desktop and mobile are display surfaces, not enforcement points**: they
   read entitlement state (from the relay auth response and/or the owner-read
-  entitlement doc) and render active/grace/inactive, with mobile keeping the
-  strategy doc's neutral no-CTA copy.
+  entitlement doc) and render active/grace/inactive. Mobile's inactive state
+  now routes to the subscribe screen (Decision 4) instead of being a dead
+  end.
 - **Expired subscription**: relay tunnel refused, publication refused (index
   frozen), push stops. Nothing is deleted — data returns on renewal.
 - **What stays free — stated explicitly**: LAN is free, permanently. The
@@ -223,20 +494,23 @@ must re-verify the flagged items against Apple's current text.
   a flag day after the portal + billing path is live. The cutoff is enforced
   in the backend seeding, never inferred by clients.
 
-## Decision 5 — Adoption gap-check (ranked)
+## Decision 6 — Adoption gap-check (ranked)
 
-Launch-blocking (a stranger cannot responsibly pay without these):
+Launch-blocking for the **web channel** (a stranger cannot responsibly pay
+without these):
 
 1. **Terms of Service** — none exist. Plus privacy-policy revision (Stripe as
    processor, entitlement/billing data, portal cookies) and — Japan-specific
    and easy to miss — a **Specified Commercial Transactions Act
    (特定商取引法) disclosure page**, legally required for paid online services
    sold by a Japanese operator. Human/legal work in `docs/legal/` +
-   `tampopogk/kanna-web`.
+   `tampopogk/kanna-web`. The ToS/privacy links are now *also* an Apple
+   3.1.2 requirement, so this blocks both channels.
 2. **Web account portal + pricing page** (registration, verification,
-   checkout, manage billing, delete account) — the entire self-serve funnel.
+   checkout, manage billing, delete account) — the entire self-serve web
+   funnel, now including the "subscribed via the App Store" state.
 3. **Billing backend + entitlement record + relay enforcement** (Decisions
-   3–4) — without enforcement, "subscribed" is meaningless and the relay is
+   3–5) — without enforcement, "subscribed" is meaningless and the relay is
    an open free tunnel the moment signup is self-serve.
 4. **Email verification + password reset** (Decision 1).
 5. **Deletion pipeline** (Decision 1) — replaces the manual 30-day email
@@ -254,41 +528,65 @@ Launch-blocking (a stranger cannot responsibly pay without these):
    rate limiting, and note the unauthenticated `/ota/*` endpoints as a
    bandwidth-abuse surface to cap. Full metering/quotas are fast-follow.
 
+Additionally launch-blocking for the **app channel** (the IAP binary cannot
+ship without these; the web channel can go live first if App Review lags —
+Decision 7):
+
+9. **App Store Connect business setup** (human): Paid Applications
+   Agreement, banking/tax, subscription group + products + price points,
+   Small Business Program enrollment, grace period enabled, ASSN URLs set.
+10. **Apple backend track**: `appStoreNotifications`, `beginAppStorePurchase`,
+    `registerAppStoreTransaction`, the source-state docs and
+    `recomputeEntitlement` reducer, tombstone handling (Decisions 3–4).
+11. **iOS surfaces**: in-app registration, the 3.1.2 screen set, in-app
+    deletion (Decisions 1, 4) — one binary, `runtimeVersion` bumped
+    everywhere, binary-only ship.
+12. **App Review readiness**: comp-sourced demo account (Decision 3),
+    sandbox test pass, rewritten review notes and listing copy (Decision 4).
+
 Fast-follow (weeks after, in rough order):
 
-9. **Crash reporting + opt-in telemetry** (Sentry or equivalent on desktop +
-   mobile): strangers file unreproducible bugs; do it early. Updates the App
-   Store privacy label (Diagnostics → collected) and privacy policy. Opt-in
-   is the right default for a developer tool that tunnels source code.
-10. **Trial mechanics** — owner decision; sensible default: 14-day free trial
+13. **Crash reporting + opt-in telemetry** (Sentry or equivalent on desktop +
+    mobile): strangers file unreproducible bugs; do it early. Updates the App
+    Store privacy label (Diagnostics → collected) and privacy policy. Opt-in
+    is the right default for a developer tool that tunnels source code.
+14. **Trial mechanics** — owner decision; sensible default: 14-day free trial
     with card required (Stripe `trial_period_days`), because card-up-front
-    kills throwaway-account relay abuse. Alternative (better funnel, more
-    abuse surface): no-card trial via a `promo`-source entitlement.
-11. **Mobile in-app registration + in-app deletion** (shipped together), then
-    the IAP fallback only if App Review forces it or mobile-led growth
-    matters.
-12. **Teams/multi-seat**: defer — single-user first is right. The per-uid
+    kills throwaway-account relay abuse. If a trial ships, mirror it on the
+    Apple side as an introductory offer **at the same time** — one trial
+    policy across channels — noting Apple-side free trials cannot require a
+    card, so the abuse calculus differs; resolve then, not now.
+15. **Teams/multi-seat**: defer — single-user first is right. The per-uid
     entitlement schema extends later (org doc + seat entitlements) without
     migration of the single-user shape.
-13. Per-user bandwidth metering/quotas, relay horizontal scaling, additional
-    Firestore-rule hardening.
+16. Per-user bandwidth metering/quotas, relay horizontal scaling, additional
+    Firestore-rule hardening; self-serve Apple-transaction relink if support
+    volume warrants it.
 
 Owner decisions needed (defaults supplied, none block spec-writing): price
-(default: one plan, "Kanna Cloud", ~$10/month, ~2 months free annual);
-trial shape (default: 14-day, card required); grandfathering (default:
-permanent for existing invited accounts); whether the iOS app ever sells
-(default: no, honor-only).
+(default: one plan, "Kanna Cloud", ~$10/month, ~2 months free annual — same
+nominal price on both channels, owner absorbs Apple's commission, Decision
+4); trial shape (default: 14-day, card required, cross-channel policy
+resolved when trials ship); grandfathering (default: permanent for existing
+invited accounts).
 
-## Decision 6 — Sequencing
+## Decision 7 — Sequencing
 
 - **Slice 0 (human, unblocks everything)**: Stripe account for Tampopo LLC
-  (test + live), ToS/legal/特商法 pages, price decision, verify Firebase
-  console signup settings, Apple-guideline verification list from Decision 2.
-- **Slice 1 — one stranger can sign up and pay** (rough edges fine):
+  (test + live), ToS/legal/特商法 pages, price + parity decision, verify
+  Firebase console signup settings, the Apple verification list from
+  Decision 2 — including Paid Applications Agreement, banking/tax,
+  subscription products + price points, Small Business Program enrollment,
+  and grace-period enablement in App Store Connect.
+- **Slice 1 — one stranger can sign up and pay on the web** (rough edges
+  fine):
   - `services/firebase-functions`: revive function deploys via `kd cloud
-    deploy --functions`; implement `createCheckoutSession`, `stripeWebhook`,
-    entitlement writes; `firestore.rules` entitlement stanza; emulator seed
-    fixtures.
+    deploy --functions`; implement `createCheckoutSession`, `stripeWebhook`;
+    **land the source-state + `recomputeEntitlement` reducer shape from day
+    one** (the Stripe writer targets `billing/stripe`, never the entitlement
+    doc directly — retrofitting the reducer after Apple ships is the
+    expensive order); `firestore.rules` stanzas for entitlements, billing
+    source docs, and `appAccountTokens`; emulator seed fixtures.
   - Account portal (registration/verification/sign-in → Checkout → success
     page). Product surface with backend contracts; recommended home is this
     repo (e.g. `apps/web-portal/`, deployed by `kd cloud deploy` to Firebase
@@ -298,44 +596,111 @@ permanent for existing invited accounts); whether the iOS app ever sells
     Firebase Auth) is identical.
   - Relay: entitlement check + 4402 semantics behind a config flag;
     grandfather seeding script; flag stays off until slice 3.
-- **Slice 2 — lifecycle completeness**: `createPortalSession` + "Manage
-  billing"; `deleteAccount` pipeline + portal deletion UI; password reset
-  surfaces (portal + mobile sheet); grace/dunning state rendering.
-- **Slice 3 — flag day**: turn relay enforcement on; mobile neutral
-  inactive/expired states and removal of invite-only copy; desktop
-  entitlement state surface; App Store listing/review-notes/support-doc
-  updates; privacy-policy final.
+- **Slice 2 — lifecycle completeness + the Apple track** (backend/portal and
+  mobile sub-tracks can run in parallel):
+  - Web lifecycle: `createPortalSession` + "Manage billing"; `deleteAccount`
+    pipeline + portal deletion UI; password reset surfaces; grace/dunning
+    state rendering; the portal's App-Store-sourced and `duplicateSources`
+    states.
+  - Apple backend: `appStoreNotifications` (JWS verification, dedupe,
+    mapping table), `beginAppStorePurchase`, `registerAppStoreTransaction`,
+    restore conflict rule, tombstones; emulator + fixture coverage
+    (Decision 8).
+  - iOS binary: `expo-iap` dependency (**`runtimeVersion` bump in every
+    environment of `mobileEnvironments.json`**), in-app registration +
+    deletion, the 3.1.2 screen set, StoreKit-configuration-file testing,
+    then a TestFlight sandbox pass against `kanna-build` (sandbox-stamped
+    entitlements, Decision 4).
+- **Slice 3 — flag day**: turn relay enforcement on; **submit the IAP binary
+  (1.1.0) with its subscription products for App Review**, with rewritten
+  review notes, listing copy, and privacy label; desktop entitlement state
+  surface; privacy-policy final. **The web channel may flag-day before the
+  IAP binary is approved**: the shipped 1.0.0 binary predates billing,
+  contains no purchase UI and no CTA, and honoring web subscriptions in it
+  is the transitional Model-2 posture — acceptable for a short window, and
+  the IAP binary replaces it as soon as Apple approves. Do not hold the web
+  launch hostage to App Review; do not ship any OTA update that references
+  billing to the 1.0.0 binary.
 - **Slice 4 — operate it**: relay monitoring/alerting + instance upsize;
   connection caps + pre-auth rate limit; `/ota/*` caps; billing runbook in
-  `docs/` (refunds, disputes, support flows).
+  `docs/` (refunds — Stripe and Apple's separate worlds, disputes,
+  double-pay support flow, App Store Server API reconciliation script,
+  support flows).
 - **Slice 5 — grow it**: crash reporting/telemetry (opt-in), onboarding
-  polish, trial tuning, then the deferred items (mobile registration+deletion,
-  IAP fallback, teams).
+  polish, trial/intro-offer tuning (cross-channel, Decision 6 item 14), then
+  the deferred items (teams, metering, relink self-serve).
 
-## Required test coverage (repo taxonomy)
+**App Store timeline note**: the IAP build is necessarily a new binary (new
+native dependency → `runtimeVersion` bump → binary-only) and its first
+subscription product review rides with a binary review. It is independent of
+the 1.0.0 currently in App Review — do not touch that submission.
+**Recommendation: target the first post-1.0 update (1.1.0) as the IAP
+binary, timed to Slice 3** — not earlier, because a paywall in the store
+while cloud is still free-for-everyone is incoherent and reviewers will
+exercise the purchase against a backend that isn't enforcing anything; and
+not later, because every week the web channel runs alone is a week iOS-first
+users can't pay. If an unrelated 1.0.x fix must ship first, it must not
+carry StoreKit.
+
+## Decision 8 — Required test coverage (repo taxonomy)
 
 - **Emulator rules tests** (`services/firebase-functions/test/`): entitlement
-  doc owner-read/no-client-write; deletion pipeline leaves no `users/{uid}`
-  residue.
-- **Unit/integration**: webhook handler against Stripe CLI fixture events —
-  idempotency (duplicate event id), out-of-order events, every
-  subscription-state transition mapping to `status`; relay entitlement gate
-  (entitled / grace / expired / absent / unverified-email) for both phone and
+  doc and billing source docs — `billing/comp` explicitly included —
+  owner-read/no-client-write;
+  `appAccountTokens/{token}` not client-readable or writable; deletion
+  pipeline leaves no `users/{uid}` residue and leaves the token tombstone.
+- **Unit/integration — Stripe**: webhook handler against Stripe CLI fixture
+  events — idempotency (duplicate event id), out-of-order events, every
+  subscription-state transition mapping to source state.
+- **Unit/integration — Apple**: `signedPayload` JWS verification against
+  fixture payloads — valid chain accepted, broken/expired/untrusted chain
+  rejected, wrong-environment claim stamped correctly; dedupe on
+  `notificationUUID`; the full notification-type mapping matrix of Decision
+  4 (SUBSCRIBED, DID_RENEW, DID_FAIL_TO_RENEW ± GRACE_PERIOD, EXPIRED,
+  REFUND, REVOKE, DID_CHANGE_RENEWAL_STATUS); token-tombstone drop path;
+  restore/relink refusal when `originalTransactionId` is bound to another
+  uid.
+- **Unit/integration — reducer**: `recomputeEntitlement` matrix — each
+  source alone in each state; both billed sources active (honored-source
+  rule + `duplicateSources`); active + grace; active + revoked (revocation
+  never suppresses the other source); comp beside each billed-source state
+  (comp wins, no `duplicateSources`, null `currentPeriodEndsAt`); comp
+  revoked with a paid source present (falls back to the paid source);
+  checkout/purchase refusal while comp is active; tie-breaks stable across
+  repeated runs.
+- **Unit/integration — relay**: entitlement gate (entitled / grace /
+  expired / absent / unverified-email / sandbox-stamped) for both phone and
   desktop auth paths, including the 4402 refusal semantics and TTL-cache
   revalidation on revocation.
+- **Mobile/local**: a checked-in **StoreKit configuration file** in
+  `apps/mobile` drives simulator purchase, restore, renewal, and refund
+  flows without App Store Connect; sandbox Apple IDs cover
+  device/TestFlight passes, with sandbox ASSN arriving at the `kanna-build`
+  function per Decision 4.
 - **E2E** (per the repo's E2E expectation): a staging-stack flow — create
   account → Stripe test-mode checkout → webhook fires → entitlement doc →
-  relay session gains tunnel service; and the reverse (subscription canceled →
-  relay refuses with 4402 → mobile shows neutral state). Where live-stack
-  automation is not yet possible (Stripe-hosted pages in CI), land the dated
-  `docs/YYYY-MM-DD-billing-e2e-gap.md` note naming the narrower tests that
-  run now, per convention.
+  relay session gains tunnel service; and the reverse (subscription canceled
+  → relay refuses with 4402 → mobile shows neutral state).
+- **What cannot be E2E-tested**, and the record it requires: a real App
+  Store purchase, real production ASSN delivery, and App Review's own
+  behavior are not automatable — the closest executable proofs are the
+  StoreKit-configuration simulator flows, the sandbox/TestFlight pass, and
+  the fixture-driven ASSN verification tests above. Per the repo convention,
+  the implementation task that lands the Apple track must also land a dated
+  `docs/YYYY-MM-DD-iap-e2e-gap.md` note naming exactly that boundary and the
+  narrower tests that run now (the Stripe-side equivalent gap note,
+  `docs/YYYY-MM-DD-billing-e2e-gap.md`, is likewise required where
+  Stripe-hosted pages block CI automation).
 
 ## Scope / exclusions
 
 This consultation designs; it changed no product code. Out of scope, decided
-deliberately: teams/multi-seat, IAP implementation (fallback-ready only),
-metered/usage-based pricing, relay HA, Firestore-rule entitlement gating, and
-any non-Stripe processor. Not repo-resolvable: Firebase console signup
-setting, Stripe/legal onboarding, Apple current-guideline verification, and
-`tampopogk/kanna-web` content — all named above as human work.
+deliberately: teams/multi-seat, metered/usage-based pricing, relay HA,
+Firestore-rule entitlement gating, any non-Stripe web processor, **Google
+Play billing** (no Android channel is in scope anywhere in this spec),
+introductory/promotional offers and Family Sharing (deferred with trial
+mechanics), storefront-specific external-purchase-link builds, and
+self-serve Apple-transaction relink. Not repo-resolvable: Firebase console
+signup setting, Stripe/legal onboarding, the App Store Connect business
+setup, Apple current-guideline verification, and `tampopogk/kanna-web`
+content — all named above as human work.
