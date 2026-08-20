@@ -122,6 +122,15 @@ repo (and dogfooded by this repo on itself):
 Built-in agents/workflows ship as Tauri bundled resources; per-repo files
 override them by name.
 
+Long-lived processes started by `kd` and the E2E harnesses are spawn-owned.
+Their exact PIDs and tmux socket names are recorded under
+`.kanna/kd-state/process-inventory.json`; normal harness `finally` paths remove
+their entries, while `kd dev down` and `kd clean` consume surviving entries
+after a crash. Cleanup never discovers targets from process names, arguments,
+or working directories. Detached repository teardown remains best-effort, but
+startup failures and hard timeouts are logged and appended to the task event
+feed as `task.teardown_failed`.
+
 ### Machine-local config: `.kanna/config.local.json`
 
 Agents, workflows, and `config.json` are resolved from `origin/<default_branch>`

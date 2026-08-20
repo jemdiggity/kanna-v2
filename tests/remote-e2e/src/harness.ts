@@ -337,6 +337,7 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
     }
     relayProcess = startManagedProcess("relay", "node", ["dist/index.js"], {
       cwd: join(repoRoot, "services/relay"),
+      inventoryRoot: repoRoot,
       env: {
         ...process.env,
         FIREBASE_PROJECT_ID: "kanna-local",
@@ -368,6 +369,7 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
     }
     serverProcess = startManagedProcess("kanna-server", join(repoRoot, ".build/debug/kanna-server"), [], {
       cwd: repoRoot,
+      inventoryRoot: repoRoot,
       env: {
         ...process.env,
         KANNA_SERVER_CONFIG: configPath,
@@ -465,6 +467,7 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
         buildFirebaseEmulatorArgs(firebaseConfigPath, []),
         {
           cwd: repoRoot,
+          inventoryRoot: repoRoot,
           env: buildFirebaseCommandEnv(repoRoot, process.env)
         }
       ));
@@ -480,6 +483,7 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
 
     processes.push(startManagedProcess("daemon", join(repoRoot, ".build/debug/kanna-daemon"), [], {
       cwd: repoRoot,
+      inventoryRoot: repoRoot,
       env: {
         ...process.env,
         KANNA_DAEMON_DIR: daemonDir,

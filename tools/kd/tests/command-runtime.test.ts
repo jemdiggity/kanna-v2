@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { checkRequiredCommands } from "../src/runtime/doctor";
-import { findWorkspaceDesktopDevProcesses, killWorkspaceDesktopDevProcesses } from "../src/runtime/daemon";
 import { buildMobileDeviceSmokeCommand, buildMobileTestCommand } from "../src/runtime/mobile-commands";
 import {
   buildProductionMobileQaCommands,
@@ -245,46 +244,6 @@ describe("command runtime helpers", () => {
     } finally {
       await rm(executableDir, { recursive: true, force: true });
     }
-  });
-
-  it("finds only this worktree's desktop dev processes for restart cleanup", () => {
-    const repoRoot = "/repo/task-abc";
-    const psOutput = [
-      `101 node /repo/task-abc/apps/desktop/node_modules/.bin/../vite/bin/vite.js`,
-      `102 node /repo/task-abc/apps/desktop/node_modules/.bin/../@tauri-apps/cli/tauri.js dev --config /repo/task-abc/apps/desktop/src-tauri/tauri.conf.local.json`,
-      `103 /repo/task-abc/.build/debug/kanna-desktop`,
-      `104 /repo/task-abc/.build/debug/kanna-server`,
-      `105 node /repo/other/apps/desktop/node_modules/.bin/../vite/bin/vite.js`,
-    ].join("\n");
-
-    expect(findWorkspaceDesktopDevProcesses(repoRoot, psOutput).map((process) => process.pid)).toEqual([101, 102, 103]);
-  });
-
-  it("kills matched desktop dev processes before a component restart", async () => {
-    const killed: number[] = [];
-    const runner: CommandRunner = {
-      async run(command, args) {
-        expect(command).toBe("ps");
-        expect(args).toEqual(["-axo", "pid=,command="]);
-        return {
-          exitCode: 0,
-          stdout: [
-            `101 node /repo/task-abc/apps/desktop/node_modules/.bin/../vite/bin/vite.js`,
-            `102 /repo/task-abc/.build/debug/kanna-desktop`,
-          ].join("\n"),
-          stderr: ""
-        };
-      }
-    };
-
-    const result = await killWorkspaceDesktopDevProcesses({
-      repoRoot: "/repo/task-abc",
-      runner,
-      killProcess: (pid) => killed.push(pid)
-    });
-
-    expect(result.map((process) => process.pid)).toEqual([101, 102]);
-    expect(killed).toEqual([101, 102]);
   });
 
   it("stops a single tmux window without killing the dev session", async () => {

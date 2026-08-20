@@ -1,95 +1,82 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { findWorkspaceDaemonProcesses, findWorkspaceServerProcesses, killWorkspaceDaemons, killWorkspaceServers } from "../src/runtime/daemon";
-import type { CommandRunner } from "../src/runtime/process";
+import { killWorkspaceDaemons } from "../src/runtime/daemon";
+import { processInventoryPath, readProcessInventory, recordInventoryResource } from "../src/runtime/process-inventory";
 
 describe("daemon cleanup", () => {
-  it("finds orphaned workspace daemon processes from ps output", () => {
-    expect(
-      findWorkspaceDaemonProcesses(
-        "/repo/worktree",
-        [
-          " 111 /repo/worktree/.build/aarch64/debug/kanna-daemon",
-          " 222 /repo/worktree/.build/aarch64/debug/kanna-terminal-recovery",
-          " 333 /other/.build/aarch64/debug/kanna-daemon",
-          " 444 /repo/worktree/node_modules/.bin/not-kanna-daemon"
-        ].join("\n")
-      )
-    ).toEqual([
-      { pid: 111, command: "/repo/worktree/.build/aarch64/debug/kanna-daemon" },
-      { pid: 222, command: "/repo/worktree/.build/aarch64/debug/kanna-terminal-recovery" }
-    ]);
+  it("does not signal a stale daemon pidfile identity", async () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), "kanna-daemon-stale-"));
+    const inventoryPath = processInventoryPath(repoRoot);
+    recordInventoryResource(inventoryPath, { kind: "process", pid: 111, label: "kanna-daemon", identity: "old" });
+    const signals: NodeJS.Signals[] = [];
+    const result = await killWorkspaceDaemons({
+      repoRoot,
+      daemonDir: join(repoRoot, ".kanna-daemon"),
+      runner: { run: async () => ({ exitCode: 0, stdout: "", stderr: "" }) },
+      readPidFile: () => 111,
+      cleanupOperations: { identity: () => "new", signal: (_pid, signal) => signals.push(signal) }
+    });
+    expect(result).toEqual({});
+    expect(signals).toEqual([]);
+    expect(readProcessInventory(inventoryPath)).toHaveLength(1);
   });
 
-  it("kills pid-file and orphaned workspace daemon processes", async () => {
-    const killed: number[] = [];
-    const runner: CommandRunner = {
-      async run(command, args) {
-        expect(command).toBe("ps");
-        expect(args).toEqual(["-axo", "pid=,command="]);
-        return {
-          exitCode: 0,
-          stdout: " 222 /repo/worktree/.build/debug/kanna-daemon\n",
-          stderr: ""
-        };
+  it("escalates a TERM-resistant daemon and succeeds only after verified exit", async () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), "kanna-daemon-resistant-"));
+    const inventoryPath = processInventoryPath(repoRoot);
+    recordInventoryResource(inventoryPath, { kind: "process", pid: 112, label: "kanna-daemon", identity: "spawn" });
+    const signals: NodeJS.Signals[] = [];
+    let identity: string | undefined = "spawn";
+    const result = await killWorkspaceDaemons({
+      repoRoot,
+      daemonDir: join(repoRoot, ".kanna-daemon"),
+      runner: { run: async () => ({ exitCode: 0, stdout: "", stderr: "" }) },
+      readPidFile: () => 112,
+      cleanupOperations: {
+        identity: () => identity,
+        signal: (_pid, signal) => {
+          signals.push(signal);
+          if (signal === "SIGKILL") identity = undefined;
+        },
+        graceMs: 1,
+        pollMs: 1
       }
-    };
+    });
+    expect(result).toEqual({ pidFileKilled: 112 });
+    expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
+    expect(readProcessInventory(inventoryPath)).toEqual([]);
+  });
 
+  it("retains the daemon record when exit cannot be confirmed", async () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), "kanna-daemon-unconfirmed-"));
+    const inventoryPath = processInventoryPath(repoRoot);
+    recordInventoryResource(inventoryPath, { kind: "process", pid: 113, label: "kanna-daemon", identity: "spawn" });
+    const result = await killWorkspaceDaemons({
+      repoRoot,
+      daemonDir: join(repoRoot, ".kanna-daemon"),
+      runner: { run: async () => ({ exitCode: 0, stdout: "", stderr: "" }) },
+      readPidFile: () => 113,
+      cleanupOperations: { identity: () => "spawn", signal: () => undefined, graceMs: 1, pollMs: 1 }
+    });
+    expect(result).toEqual({});
+    expect(readProcessInventory(inventoryPath)).toHaveLength(1);
+  });
+
+  it("does not enumerate or kill anything without an owning pidfile", async () => {
+    let runnerCalled = false;
     const result = await killWorkspaceDaemons({
       repoRoot: "/repo/worktree",
       daemonDir: "/repo/worktree/.kanna-daemon",
-      runner,
-      readPidFile: () => 111,
-      killProcess: (pid) => killed.push(pid)
+      runner: { run: async () => {
+        runnerCalled = true;
+        return { exitCode: 0, stdout: "999 unrelated", stderr: "" };
+      } },
+      readPidFile: () => undefined,
+      cleanupOperations: { signal: () => { throw new Error("must not kill"); } }
     });
-
-    expect(result).toEqual({
-      pidFileKilled: 111,
-      orphanedKilled: [{ pid: 222, command: "/repo/worktree/.build/debug/kanna-daemon" }]
-    });
-    expect(killed).toEqual([111, 222]);
-  });
-
-  it("finds only this workspace's kanna-server processes from ps output", () => {
-    expect(
-      findWorkspaceServerProcesses(
-        "/repo/worktree",
-        [
-          " 111 /repo/worktree/.build/debug/kanna-server",
-          " 222 /repo/worktree/.build/aarch64/debug/kanna-server",
-          " 333 /other/.build/debug/kanna-server",
-          " 444 /Applications/Kanna.app/Contents/MacOS/kanna-server",
-          " 555 /repo/worktree/.build/debug/kanna-daemon"
-        ].join("\n")
-      )
-    ).toEqual([
-      { pid: 111, command: "/repo/worktree/.build/debug/kanna-server" },
-      { pid: 222, command: "/repo/worktree/.build/aarch64/debug/kanna-server" }
-    ]);
-  });
-
-  it("kills workspace kanna-server processes", async () => {
-    const killed: number[] = [];
-    const runner: CommandRunner = {
-      async run(command, args) {
-        expect(command).toBe("ps");
-        expect(args).toEqual(["-axo", "pid=,command="]);
-        return {
-          exitCode: 0,
-          stdout: " 321 /repo/worktree/.build/debug/kanna-server\n",
-          stderr: ""
-        };
-      }
-    };
-
-    const result = await killWorkspaceServers({
-      repoRoot: "/repo/worktree",
-      runner,
-      killProcess: (pid) => killed.push(pid)
-    });
-
-    expect(result).toEqual([
-      { pid: 321, command: "/repo/worktree/.build/debug/kanna-server" }
-    ]);
-    expect(killed).toEqual([321]);
+    expect(result).toEqual({});
+    expect(runnerCalled).toBe(false);
   });
 });

@@ -582,6 +582,9 @@ cursor-based, not snapshot-diffed:
   refusing messages delivered into it. `payload.inputBlocked` names the reason
   while it is blocked and is `null` when it clears; today the only reason is
   `inherited-draft-unknown`. See [Refused task input](#refused-task-input).
+- `task.teardown_failed` reports that detached best-effort workspace teardown
+  failed to start or exceeded its hard deadline. Its payload contains
+  `sessionId` and `error`; the same failure is written to the server log.
 - `task.transfer_finalizing` reports each step of a cross-machine transfer
   shutting the task's agent down (`payload.phase`: `wrap-up-sent`, `idle`,
   `quit-sent`, `exited`, `already-exited`, `degraded`). See

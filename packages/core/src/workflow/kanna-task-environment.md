@@ -10,6 +10,7 @@ Rules:
 - Do not push a branch or create a pull request unless this stage's prompt explicitly tells you to. Local commits are fine; publishing is usually a later workflow stage.
 - If the repo's `.kanna/config.json` declares `ports`, this session's environment has each of those variables set to a port reserved for this task. Start dev servers and other services on the assigned ports so parallel tasks do not collide.
 - You are not running inside a Kanna sandbox; use the normal shell and tools available in this worktree.
+- Stop every background process you start before recording stage completion.
 
 Kanna task operations (inspect tasks, create subtasks, send input to other tasks, record stage results):
 

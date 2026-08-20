@@ -1,5 +1,7 @@
 use tauri::Emitter;
 
+use serde::{Deserialize, Serialize};
+
 use crate::commands::daemon::DaemonState;
 use crate::daemon_client::DaemonClient;
 use crate::{commands, daemon_data_dir, daemon_socket_path, subprocess_env};
@@ -8,6 +10,192 @@ use crate::{commands, daemon_data_dir, daemon_socket_path, subprocess_env};
 enum PublishedPid {
     Exact(u32),
     SuccessorOf(u32),
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(tag = "kind")]
+enum InventoryResource {
+    #[serde(rename = "process")]
+    Process {
+        pid: u32,
+        label: String,
+        identity: String,
+    },
+    #[serde(rename = "tmux-server")]
+    TmuxServer {
+        socket: String,
+        #[serde(rename = "socketPath", skip_serializing_if = "Option::is_none")]
+        socket_path: Option<String>,
+    },
+}
+
+#[derive(Deserialize, Serialize)]
+struct ProcessInventory {
+    version: u8,
+    resources: Vec<InventoryResource>,
+}
+
+fn process_identity(pid: u32) -> Option<String> {
+    let output = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "lstart="])
+        .output()
+        .ok()?;
+    let identity = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    (!identity.is_empty()).then_some(identity)
+}
+
+fn inventory_lock_is_abandoned(lock: &std::path::Path) -> bool {
+    let owner = std::fs::read(lock.join("owner.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+    if let Some((pid, identity)) = owner.and_then(|value| {
+        Some((
+            u32::try_from(value.get("pid")?.as_u64()?).ok()?,
+            value.get("identity")?.as_str()?.to_string(),
+        ))
+    }) {
+        return process_identity(pid).as_deref() != Some(identity.as_str());
+    }
+    std::fs::metadata(lock)
+        .and_then(|metadata| metadata.modified())
+        .and_then(|modified| modified.elapsed().map_err(std::io::Error::other))
+        .is_ok_and(|age| age >= std::time::Duration::from_secs(1))
+}
+
+fn record_spawned_daemon(worktree: &std::path::Path, pid: u32) -> Result<(), String> {
+    let identity = process_identity(pid)
+        .ok_or_else(|| format!("could not establish spawn identity for daemon pid {pid}"))?;
+    let path = worktree.join(".kanna/kd-state/process-inventory.json");
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("inventory path has no parent: {}", path.display()))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("could not create process inventory directory: {error}"))?;
+    let lock = std::path::PathBuf::from(format!("{}.lock", path.display()));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let candidate = std::path::PathBuf::from(format!(
+            "{}.pending-{}-{}",
+            lock.display(),
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default()
+        ));
+        let owner = serde_json::json!({
+            "pid": std::process::id(),
+            "identity": process_identity(std::process::id())
+                .ok_or_else(|| "could not establish inventory writer identity".to_string())?
+        });
+        let acquisition = std::fs::create_dir(&candidate)
+            .and_then(|()| std::fs::write(candidate.join("owner.json"), owner.to_string()))
+            .and_then(|()| std::fs::rename(&candidate, &lock));
+        match acquisition {
+            Ok(()) => break,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::DirectoryNotEmpty
+                ) =>
+            {
+                let _ = std::fs::remove_dir_all(&candidate);
+                if std::time::Instant::now() >= deadline {
+                    return Err(format!(
+                        "timed out acquiring process inventory lock: {error}"
+                    ));
+                }
+                if inventory_lock_is_abandoned(&lock) {
+                    let abandoned = std::path::PathBuf::from(format!(
+                        "{}.abandoned-{}-{}",
+                        lock.display(),
+                        std::process::id(),
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|duration| duration.as_nanos())
+                            .unwrap_or_default()
+                    ));
+                    if std::fs::rename(&lock, &abandoned).is_ok() {
+                        let _ = std::fs::remove_dir_all(abandoned);
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) => {
+                let _ = std::fs::remove_dir_all(&candidate);
+                return Err(format!("could not acquire process inventory lock: {error}"));
+            }
+        }
+    }
+    let result = (|| {
+        let mut inventory = std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<ProcessInventory>(&bytes).ok())
+            .filter(|inventory| inventory.version == 1)
+            .unwrap_or(ProcessInventory {
+                version: 1,
+                resources: Vec::new(),
+            });
+        inventory.resources.retain(|resource| {
+            !matches!(resource, InventoryResource::Process { pid: existing, .. } if *existing == pid)
+        });
+        inventory.resources.push(InventoryResource::Process {
+            pid,
+            label: "kanna-daemon".to_string(),
+            identity,
+        });
+        let temp = parent.join(format!(
+            "process-inventory.json.tmp-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|error| format!("system clock error: {error}"))?
+                .as_nanos()
+        ));
+        let bytes = serde_json::to_vec_pretty(&inventory)
+            .map_err(|error| format!("could not serialize process inventory: {error}"))?;
+        std::fs::write(&temp, bytes)
+            .map_err(|error| format!("could not write process inventory: {error}"))?;
+        std::fs::rename(&temp, &path)
+            .map_err(|error| format!("could not publish process inventory: {error}"))
+    })();
+    let released = std::path::PathBuf::from(format!(
+        "{}.released-{}-{}",
+        lock.display(),
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default()
+    ));
+    if std::fs::rename(&lock, &released).is_ok() {
+        let _ = std::fs::remove_dir_all(released);
+    }
+    result
+}
+
+fn spawn_inventoried_daemon(
+    cmd: &mut std::process::Command,
+    worktree: Option<&std::path::Path>,
+) -> Result<std::process::Child, String> {
+    use std::os::unix::process::CommandExt;
+    let mut child = unsafe {
+        cmd.pre_exec(|| {
+            crate::macos::raise_child_nofile_limit();
+            libc::setsid();
+            Ok(())
+        })
+        .spawn()
+    }
+    .map_err(|error| format!("failed to spawn daemon: {error}"))?;
+    if let Some(worktree) = worktree {
+        if let Err(error) = record_spawned_daemon(worktree, child.id()) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("failed to inventory spawned daemon: {error}"));
+        }
+    }
+    Ok(child)
 }
 
 impl PublishedPid {
@@ -64,20 +252,18 @@ fn spawn_daemon_process() -> Result<(std::process::Child, std::path::PathBuf), S
     .map(std::path::PathBuf::from)?;
 
     let daemon_dir = daemon_data_dir();
-    let inferred_worktree = kanna_runtime_defaults::worktree_root_for_path(&daemon_bin)
-        .or_else(|| {
+    let inferred_worktree =
+        kanna_runtime_defaults::worktree_root_for_path(&daemon_bin).or_else(|| {
             std::env::current_exe()
                 .ok()
                 .and_then(|path| kanna_runtime_defaults::worktree_root_for_path(&path))
-        })
-        .is_some();
-    let is_worktree = std::env::var("KANNA_WORKTREE").is_ok() || inferred_worktree;
+        });
+    let is_worktree = std::env::var("KANNA_WORKTREE").is_ok() || inferred_worktree.is_some();
     eprintln!(
         "[daemon] spawning {:?} (worktree={}, daemon_dir={:?})",
         daemon_bin, is_worktree, daemon_dir
     );
 
-    use std::os::unix::process::CommandExt;
     let mut cmd = std::process::Command::new(&daemon_bin);
     let mut explicit_env = Vec::new();
     if is_worktree {
@@ -99,15 +285,7 @@ fn spawn_daemon_process() -> Result<(std::process::Child, std::path::PathBuf), S
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
 
-    let child = unsafe {
-        cmd.pre_exec(|| {
-            crate::macos::raise_child_nofile_limit();
-            libc::setsid();
-            Ok(())
-        })
-        .spawn()
-    }
-    .map_err(|error| format!("failed to spawn daemon: {error}"))?;
+    let child = spawn_inventoried_daemon(&mut cmd, inferred_worktree.as_deref())?;
 
     Ok((child, daemon_dir))
 }
@@ -326,12 +504,78 @@ pub(crate) fn spawn_event_bridge(
 #[cfg(test)]
 mod tests {
     use super::{
-        authorize_server_generation, wait_for_published_daemon_at, AuthorizationRetryBackoff,
-        PublishedPid,
+        authorize_server_generation, process_identity, spawn_inventoried_daemon,
+        wait_for_published_daemon_at, AuthorizationRetryBackoff, InventoryResource,
+        ProcessInventory, PublishedPid,
     };
     use crate::daemon_client::DaemonClient;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
+
+    #[test]
+    fn production_spawn_path_publishes_identity_for_kd_cleanup() {
+        let worktree = std::env::temp_dir().join(format!(
+            "kanna-daemon-inventory-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&worktree).unwrap();
+        let mut command = std::process::Command::new("/bin/sleep");
+        command.arg("30");
+        let child = spawn_inventoried_daemon(&mut command, Some(&worktree)).unwrap();
+        let child_pid = child.id();
+        let mut unrelated = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+
+        let inventory: ProcessInventory = serde_json::from_slice(
+            &std::fs::read(worktree.join(".kanna/kd-state/process-inventory.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(inventory.resources.len(), 1);
+        match &inventory.resources[0] {
+            InventoryResource::Process {
+                pid,
+                label,
+                identity,
+            } => {
+                assert_eq!(*pid, child_pid);
+                assert_eq!(label, "kanna-daemon");
+                assert_eq!(Some(identity.clone()), process_identity(*pid));
+            }
+            InventoryResource::TmuxServer { .. } => panic!("expected daemon process record"),
+        }
+        drop(child);
+
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .unwrap();
+        let script = format!(
+            r#"import {{ executeDevDownWithContext }} from './src/tasks/registry.ts'; import {{ nodeCommandRunner }} from './src/runtime/process.ts'; await executeDevDownWithContext({{ killDaemon: true }}, {{ runner: nodeCommandRunner, context: {{ repoRoot: {}, ports: {{}}, env: {{ KANNA_DAEMON_DIR: {} }}, tmux: {{ server: 'kanna-rust-inventory-test', session: 'kanna-rust-inventory-test' }} }} }});"#,
+            serde_json::to_string(&worktree).unwrap(),
+            serde_json::to_string(&worktree.join(".kanna-daemon")).unwrap()
+        );
+        let cleanup = std::process::Command::new("pnpm")
+            .args(["exec", "tsx", "-e", &script])
+            .current_dir(repo_root.join("tools/kd"))
+            .status()
+            .unwrap();
+        assert!(cleanup.success());
+        assert!(process_identity(child_pid).is_none());
+        assert!(process_identity(unrelated.id()).is_some());
+        assert!(!worktree
+            .join(".kanna/kd-state/process-inventory.json")
+            .exists());
+
+        unrelated.kill().unwrap();
+        unrelated.wait().unwrap();
+        std::fs::remove_dir_all(worktree).unwrap();
+    }
 
     #[tokio::test]
     async fn successor_boundary_requires_a_different_published_connectable_peer() {

@@ -1452,6 +1452,8 @@ fn prepare_workspace_teardown_with_extra(
     Some(PreparedWorkspaceTeardown {
         session_id,
         daemon_dir: config.daemon_dir.clone(),
+        db_path: config.db_path.clone(),
+        task_id: task_id.to_string(),
         cwd: worktree_path,
         env: spawn_env,
         session: PreparedSessionSpawn::Pty {
