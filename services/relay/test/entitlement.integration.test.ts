@@ -522,8 +522,9 @@ describe("Relay entitlement enforcement", () => {
     expect(auth.capabilities.tunnelServices).toEqual([]);
     expect(auth.capabilities.taskSnapshotPublication).toBeUndefined();
     expect(auth.capabilities.mobileNotifications).toBeUndefined();
-    // Desktop-to-desktop routing is not part of the enforced set, so it stays.
-    expect(auth.capabilities.desktopRouting).toBeDefined();
+    // Desktop-to-desktop routing crosses the relay, so the 2026-08-21 owner
+    // ruling makes it paid too — it is no longer advertised either.
+    expect(auth.capabilities.desktopRouting).toBeUndefined();
     expect(auth.entitlement).toEqual({
       active: false,
       status: "none",
@@ -568,6 +569,134 @@ describe("Relay entitlement enforcement", () => {
       code: ENTITLEMENT_REQUIRED_CODE,
     });
     await closeAndWait(auth.ws);
+  });
+
+  it("refuses an unentitled phone invoke with the entitlement code", async () => {
+    // Remote task control is the path the owner's 2026-08-21 ruling added to
+    // the enforced set: everything through the relay is paid, LAN is free.
+    const auth = await connectAndAuth(enforcingPort, { id_token: accounts.unentitled.idToken });
+
+    const response = waitForMessage(auth.ws, (message) =>
+      message.type === "response" && message.id === "unentitled-invoke");
+    auth.ws.send(JSON.stringify({
+      type: "invoke",
+      id: "unentitled-invoke",
+      desktopId: accounts.unentitled.desktopId,
+      command: "list_sessions",
+      args: {},
+    }));
+    await expect(response).resolves.toMatchObject({
+      error: "entitlement required",
+      code: ENTITLEMENT_REQUIRED_CODE,
+    });
+    await closeAndWait(auth.ws);
+  });
+
+  it("lets an entitled phone invoke through to the router", async () => {
+    const auth = await connectAndAuth(enforcingPort, { id_token: accounts.entitled.idToken });
+
+    const response = waitForMessage(auth.ws, (message) =>
+      message.type === "response" && message.id === "entitled-invoke");
+    auth.ws.send(JSON.stringify({
+      type: "invoke",
+      id: "entitled-invoke",
+      desktopId: accounts.entitled.desktopId,
+      command: "list_sessions",
+      args: {},
+    }));
+    // No desktop is connected, so the router's own answer is the proof that the
+    // invoke passed the entitlement gate rather than being refused by it.
+    const message = await response;
+    expect(message.error).toBe("Desktop offline");
+    expect(message.code).toBeUndefined();
+    await closeAndWait(auth.ws);
+  });
+
+  it("refuses an unentitled desktop-to-desktop invoke with the entitlement code", async () => {
+    const auth = await connectAndAuth(enforcingPort, {
+      desktop_id: accounts.unentitled.desktopId,
+      desktop_secret: accounts.unentitled.desktopSecret,
+    });
+    expect(auth.capabilities.desktopRouting).toBeUndefined();
+
+    const response = waitForMessage(auth.ws, (message) =>
+      message.type === "response" && message.id === "unentitled-sibling-invoke");
+    auth.ws.send(JSON.stringify({
+      type: "invoke",
+      id: "unentitled-sibling-invoke",
+      desktopId: "some-other-desktop",
+      command: "list_sessions",
+      args: {},
+    }));
+    await expect(response).resolves.toMatchObject({
+      error: "entitlement required",
+      code: ENTITLEMENT_REQUIRED_CODE,
+    });
+    // Decision 5: an entitlement never closes an ordinary session, so the
+    // desktop is still connected and can read its own state.
+    expect(auth.ws.readyState).toBe(WebSocket.OPEN);
+    await closeAndWait(auth.ws);
+  });
+
+  it("lets an entitled desktop-to-desktop invoke through to the router", async () => {
+    const auth = await connectAndAuth(enforcingPort, {
+      desktop_id: accounts.entitled.desktopId,
+      desktop_secret: accounts.entitled.desktopSecret,
+    });
+    expect(auth.capabilities.desktopRouting).toBeDefined();
+
+    const response = waitForMessage(auth.ws, (message) =>
+      message.type === "response" && message.id === "entitled-sibling-invoke");
+    auth.ws.send(JSON.stringify({
+      type: "invoke",
+      id: "entitled-sibling-invoke",
+      desktopId: "some-other-desktop",
+      command: "list_sessions",
+      args: {},
+    }));
+    const message = await response;
+    expect(message.error).toBe("Desktop offline");
+    expect(message.code).toBeUndefined();
+    await closeAndWait(auth.ws);
+  });
+
+  it("routes the same unentitled invokes untouched with the flag off", async () => {
+    // The frames the enforcing relay refuses, byte for byte, against the
+    // permissive one: the router's own answer, no `code`, nothing read from
+    // Firestore on the way.
+    const phone = await connectAndAuth(permissivePort, { id_token: accounts.unentitled.idToken });
+    const phoneResponse = waitForMessage(phone.ws, (message) =>
+      message.type === "response" && message.id === "flag-off-invoke");
+    phone.ws.send(JSON.stringify({
+      type: "invoke",
+      id: "flag-off-invoke",
+      desktopId: accounts.unentitled.desktopId,
+      command: "list_sessions",
+      args: {},
+    }));
+    const phoneMessage = await phoneResponse;
+    expect(phoneMessage.error).toBe("Desktop offline");
+    expect(phoneMessage.code).toBeUndefined();
+    await closeAndWait(phone.ws);
+
+    const desktop = await connectAndAuth(permissivePort, {
+      desktop_id: accounts.unentitled.desktopId,
+      desktop_secret: accounts.unentitled.desktopSecret,
+    });
+    expect(desktop.capabilities.desktopRouting).toBeDefined();
+    const desktopResponse = waitForMessage(desktop.ws, (message) =>
+      message.type === "response" && message.id === "flag-off-sibling-invoke");
+    desktop.ws.send(JSON.stringify({
+      type: "invoke",
+      id: "flag-off-sibling-invoke",
+      desktopId: "some-other-desktop",
+      command: "list_sessions",
+      args: {},
+    }));
+    const desktopMessage = await desktopResponse;
+    expect(desktopMessage.error).toBe("Desktop offline");
+    expect(desktopMessage.code).toBeUndefined();
+    await closeAndWait(desktop.ws);
   });
 
   it("lets an entitled tunnel request through to the router", async () => {

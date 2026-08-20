@@ -18,6 +18,7 @@ import {
   entitlementEnforcementEnabled,
   resolveSessionEntitlement,
   sessionHasCapability,
+  type CloudAccessCapability,
   type EntitlementSubject,
 } from "./entitlement.js";
 import {
@@ -103,14 +104,23 @@ function readBody(req: IncomingMessage): Promise<string> {
 }
 
 /**
- * Identify a phone `tunnel_request` frame, for the entitlement gate alone.
+ * Identify a phone frame the entitlement gate has something to say about, and
+ * name the capability it needs.
+ *
+ * Two frame types qualify, and between them they are every unit of remote value
+ * a phone can ask the relay for: `tunnel_request` opens a tunnel
+ * (`cloud_relay`), and `invoke` drives the desktop from the phone
+ * (`remote_task_control`) — the owner's 2026-08-21 ruling that everything
+ * crossing the relay is paid. Anything else a phone sends is a response or an
+ * event on a conversation one of these already started.
  *
  * The router parses the same frame again on its way through, which is one
- * wasted parse on the request that opens a tunnel — a rare, expensive
- * operation — in exchange for the entitlement check not reaching into the
- * router's routing logic at all.
+ * wasted parse per gated request in exchange for the entitlement check not
+ * reaching into the router's routing logic at all.
  */
-function parseTunnelRequest(data: string): { id: unknown } | null {
+function parseGatedPhoneRequest(
+  data: string,
+): { id: unknown; capability: CloudAccessCapability } | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(data);
@@ -119,7 +129,13 @@ function parseTunnelRequest(data: string): { id: unknown } | null {
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
   const message = parsed as { type?: unknown; id?: unknown };
-  return message.type === "tunnel_request" ? { id: message.id } : null;
+  if (message.type === "tunnel_request") {
+    return { id: message.id, capability: "cloud_relay" };
+  }
+  if (message.type === "invoke") {
+    return { id: message.id, capability: "remote_task_control" };
+  }
+  return null;
 }
 
 /**
@@ -617,9 +633,11 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
                 version: 1,
               },
             } : {}),
-            desktopRouting: {
-              version: 1,
-            },
+            ...(sessionEntitlement.grants("remote_task_control") ? {
+              desktopRouting: {
+                version: 1,
+              },
+            } : {}),
           } : {}),
         },
         ...(sessionEntitlement.snapshot
@@ -670,6 +688,20 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
             "desktop credential is no longer authorized",
           );
           ws.close(4005, "Authentication revoked");
+          return;
+        }
+        // Desktop-to-desktop routing is remote control that crosses the relay,
+        // so it is paid for by the same capability as the phone's `invoke`
+        // (owner ruling, 2026-08-21). Re-resolved per request, which is what
+        // bounds a revocation by the cache TTL rather than by the next
+        // reconnect. The session itself is never closed over an entitlement.
+        if (!await sessionHasCapability(entitlementSubject!, "remote_task_control")) {
+          sendErrorResponse(
+            ws,
+            publication.id,
+            ENTITLEMENT_REQUIRED_ERROR,
+            ENTITLEMENT_REQUIRED_CODE,
+          );
           return;
         }
       }
@@ -790,15 +822,16 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
     } else {
       // Phone clients only ever send control-plane requests.
       recordBytesReceived(ws, "control", receivedByteLength);
-      // A tunnel is the relay's most expensive unit of remote value, so it is
-      // the one control-plane request an unentitled account cannot make. The
-      // parse happens only while enforcement is on, which is what keeps the
+      // Everything a phone asks the relay to do is remote value, and remote
+      // value is what the subscription buys (owner ruling, 2026-08-21): a
+      // tunnel needs `cloud_relay`, an `invoke` needs `remote_task_control`.
+      // The parse happens only while enforcement is on, which is what keeps the
       // flag-off path byte-for-byte and read-for-read what it was.
       if (entitlementEnforcementEnabled()) {
-        const request = parseTunnelRequest(data);
+        const request = parseGatedPhoneRequest(data);
         if (
           request
-          && !await sessionHasCapability(entitlementSubject!, "cloud_relay")
+          && !await sessionHasCapability(entitlementSubject!, request.capability)
         ) {
           sendErrorResponse(
             ws,

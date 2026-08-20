@@ -8,7 +8,14 @@ const props = withDefaults(defineProps<{ redirect?: (url: string) => void }>(), 
 });
 const pending = ref(false);
 const error = ref("");
-const price = import.meta.env.VITE_KANNA_CLOUD_PRICE || "$10/month";
+/**
+ * The headline price, and the same amount in every currency Kanna Cloud is sold
+ * in (owner ruling, 2026-08-21 — see `docs/specs/accounts-and-billing.md`). One
+ * build-time string plus a static list, deliberately: there is no locale
+ * framework in the portal and one price per currency does not need one.
+ */
+const price = import.meta.env.VITE_KANNA_CLOUD_PRICE || "$5/month";
+const currencies = ["¥500 JPY", "$5 USD", "$5 CAD", "$5 AUD", "€5 EUR", "£5 GBP"];
 
 async function subscribe(): Promise<void> {
   pending.value = true;
@@ -31,6 +38,7 @@ async function subscribe(): Promise<void> {
     <p class="eyebrow">Kanna Cloud</p>
     <h1>Work from anywhere</h1>
     <p class="price">{{ price }}</p>
+    <p class="currencies quiet">The same price in every currency we sell in: {{ currencies.join(" · ") }} per month.</p>
     <p>Secure remote access to your Kanna desktop, cloud task index, and remote task controls.</p>
     <ul>
       <li>Cloud relay access</li>

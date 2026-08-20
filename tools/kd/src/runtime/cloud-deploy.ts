@@ -89,6 +89,16 @@ const WEB_PORTAL_CONFIG_KEYS = [
   "STRIPE_PUBLISHABLE_KEY"
 ] as const;
 
+/**
+ * The launch price as the portal renders it when a deploy names none
+ * (`docs/specs/accounts-and-billing.md`, pricing). One nominal price per
+ * currency — ¥500 / $5 / €5 / £5 a month — of which this string is the USD
+ * face; the subscribe page lists the rest. Owner ruling of 2026-08-21, "possibly
+ * revised pending our new opex estimation", so an operator can still override
+ * it per deploy with `KANNA_WEB_PORTAL_CLOUD_PRICE` without a code change.
+ */
+export const DEFAULT_WEB_PORTAL_CLOUD_PRICE = "$5/month";
+
 export function resolveWebPortalBuildEnvironment(
   env: NodeJS.ProcessEnv,
   projectId: string
@@ -99,7 +109,7 @@ export function resolveWebPortalBuildEnvironment(
     VITE_FIREBASE_AUTH_DOMAIN: env.KANNA_WEB_PORTAL_FIREBASE_AUTH_DOMAIN?.trim() || `${projectId}.firebaseapp.com`,
     VITE_FIREBASE_FUNCTIONS_REGION: env.KANNA_WEB_PORTAL_FIREBASE_FUNCTIONS_REGION?.trim() || "us-central1",
     VITE_FIREBASE_USE_EMULATORS: "false",
-    VITE_KANNA_CLOUD_PRICE: env.KANNA_WEB_PORTAL_CLOUD_PRICE?.trim() || "$10/month"
+    VITE_KANNA_CLOUD_PRICE: env.KANNA_WEB_PORTAL_CLOUD_PRICE?.trim() || DEFAULT_WEB_PORTAL_CLOUD_PRICE
   };
   for (const key of WEB_PORTAL_CONFIG_KEYS) {
     const source = `KANNA_WEB_PORTAL_${key}`;

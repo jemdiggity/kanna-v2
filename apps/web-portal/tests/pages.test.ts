@@ -33,6 +33,25 @@ describe("checkout pages", () => {
     expect(redirect).toHaveBeenCalledWith("https://checkout.stripe.test/session");
   });
 
+  it("shows the launch price and every currency it is sold in", async () => {
+    // The headline comes from the build environment (`VITE_KANNA_CLOUD_PRICE`,
+    // defaulted by `kd cloud deploy`); the matrix is the owner's 2026-08-21
+    // pricing ruling — `docs/specs/accounts-and-billing.md`.
+    const mockApi = api();
+    const host = {
+      template: "<SubscribePage />",
+      components: { SubscribePage },
+      setup() { providePortalSession(mockApi); }
+    };
+    const wrapper = mount(host);
+    expect(wrapper.get(".price").text()).toBe("$5/month");
+    const currencies = wrapper.get(".currencies").text();
+    for (const amount of ["¥500 JPY", "$5 USD", "$5 CAD", "$5 AUD", "€5 EUR", "£5 GBP"]) {
+      expect(currencies).toContain(amount);
+    }
+    expect(currencies).not.toContain("$10");
+  });
+
   it("renders the cancelled return state", async () => {
     const router = createRouter({
       history: createMemoryHistory(),
