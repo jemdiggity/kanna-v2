@@ -11170,6 +11170,7 @@ mod tests {
                 include_assets: None,
                 accept_snapshot_chunks: None,
                 attachment_epoch: None,
+                term_resume: None,
             },
         )
         .await;
