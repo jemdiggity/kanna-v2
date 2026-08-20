@@ -207,7 +207,7 @@ pub(super) struct WorkflowDefinition {
 /// forking new work and parks the task for its human. A review agent that
 /// keeps finding new work each round is the mechanism by which a scoped task
 /// turns into an open-ended project, so the loop is bounded by default.
-pub(crate) const DEFAULT_REVISION_LIMIT: i64 = 3;
+pub(crate) const DEFAULT_REVISION_LIMIT: i64 = 5;
 
 impl WorkflowDefinition {
     /// Effective revision-round cap: `0` means unlimited. Negative values are

@@ -20,7 +20,7 @@ When `.kanna/workflows/schema.json` exists in this repo it is the authoritative 
   "$schema": "./schema.json",
   "name": "<must match the filename without .json>",
   "description": "<human-readable description>",
-  "revision_limit": 3,
+  "revision_limit": 5,
   "environments": {
     "<env-name>": { "setup": ["<shell command>"], "teardown": ["<shell command>"] }
   },
@@ -43,7 +43,7 @@ When `.kanna/workflows/schema.json` exists in this repo it is the authoritative 
 }
 ```
 
-- `revision_limit` — agent-requested revision rounds a task may spend before Kanna parks it for its human. Defaults to 3; `0` disables the cap.
+- `revision_limit` — agent-requested revision rounds a task may spend before Kanna parks it for its human. Defaults to 5; `0` disables the cap.
 - `agent` — omit for a gate stage: no agent spawns and the stage just waits for a manual advance.
 - `prompt` — the stage assignment, rendered under `## Your Task` after the agent's `## Agent Instructions`.
 - `policy.transition` — `manual` (the user advances) or `auto` (a successful stage result advances). Optional `policy.revision_transition` controls runs entered through a revision request and defaults to `transition`.

@@ -175,7 +175,7 @@ async fn request_revision_route_resolves_branch_style_task_id() {
                     // The workflow declares no revision_limit, so the default
                     // cap applies and the revising agent is told which round
                     // it is and that the loop is bounded.
-                    assert!(command_line.contains("Revision round 1 of 3"));
+                    assert!(command_line.contains("Revision round 1 of 5"));
                     session_id
                 }
                 other => panic!("expected revision spawn command, got {:?}", other),

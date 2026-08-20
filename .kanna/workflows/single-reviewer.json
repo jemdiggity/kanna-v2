@@ -2,7 +2,7 @@
   "$schema": "./schema.json",
   "name": "single-reviewer",
   "description": "One review agent: implement (commit as post) -> review -> PR, with automatic revision requests for weak testing",
-  "revision_limit": 3,
+  "revision_limit": 5,
   "stages": [
     {
       "name": "in progress",

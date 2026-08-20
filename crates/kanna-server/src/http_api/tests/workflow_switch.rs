@@ -152,7 +152,7 @@ async fn compatible_switch_repins_snapshot_carries_budget_emits_event_and_preser
     assert_eq!(response["pipelineName"], "single-reviewer");
     assert_eq!(response["stage"], "in progress");
     assert_eq!(response["revisionRounds"], 2);
-    assert_eq!(response["revisionLimit"], 3);
+    assert_eq!(response["revisionLimit"], 5);
 
     let db = Db::open(&db_path).unwrap();
     let item = db.get_pipeline_item("task-1").unwrap().unwrap();
@@ -191,7 +191,7 @@ async fn compatible_switch_repins_snapshot_carries_budget_emits_event_and_preser
     assert_eq!(changed.payload["toWorkflow"], "single-reviewer");
     assert_eq!(changed.payload["stage"], "in progress");
     assert_eq!(changed.payload["revisionRounds"], 2);
-    assert_eq!(changed.payload["revisionLimit"], 3);
+    assert_eq!(changed.payload["revisionLimit"], 5);
 
     let detail_response = app
         .oneshot(
@@ -210,7 +210,7 @@ async fn compatible_switch_repins_snapshot_carries_budget_emits_event_and_preser
     .unwrap();
     assert_eq!(detail["workflowName"], "single-reviewer");
     assert_eq!(detail["revisionRounds"], 2);
-    assert_eq!(detail["revisionLimit"], 3);
+    assert_eq!(detail["revisionLimit"], 5);
 }
 
 #[tokio::test]

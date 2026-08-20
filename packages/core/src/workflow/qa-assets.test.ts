@@ -695,10 +695,19 @@ describe("QA workflow assets", () => {
 
   it("bounds revision rounds on the dispatched QA workflow and publishes the field", () => {
     const parsed = parseWorkflowJson(readRepoFile(".kanna/workflows/specialized-reviewers.json"));
-    expect(parsed.revision_limit).toBe(3);
+    expect(parsed.revision_limit).toBe(5);
 
     const schema = JSON.parse(readRepoFile(".kanna/workflows/schema.json"));
     expect(schema.properties.revision_limit).toMatchObject({ type: "integer", minimum: 0 });
+  });
+
+  it("teaches the current revision limit in the workflow factory", () => {
+    const workflowFactory = readRepoPhrases(".kanna/agents/workflow-factory/AGENT.md");
+
+    expect(workflowFactory).toContain('"revision_limit": 5');
+    expect(workflowFactory).toContain("Defaults to 5; `0` disables the cap");
+    expect(workflowFactory).not.toContain('"revision_limit": 3');
+    expect(workflowFactory).not.toContain("Defaults to 3; `0` disables the cap");
   });
 
   it("resolves PR head/base refs with gh pr view even when task metadata has the URL", () => {

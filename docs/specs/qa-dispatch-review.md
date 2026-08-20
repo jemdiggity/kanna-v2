@@ -153,7 +153,7 @@ one; prompts alone cannot hold a limit.
 ### Revision-round budget (engine)
 
 A workflow declares `revision_limit` (top level, default
-`DEFAULT_REVISION_LIMIT` = 3; `0` opts out). A negative value is a definition
+`DEFAULT_REVISION_LIMIT` = 5; `0` opts out). A negative value is a definition
 error in every parser — the Rust source of truth
 (`normalize_workflow_definition`, covering both repo workflow files and pinned
 `pipeline_def` snapshots), the JSON schema, and the TypeScript loader — rather
@@ -448,7 +448,7 @@ parent review stage (qa-dispatcher, auto)
   the final round.
 - `crates/kanna-server` `http_api::tests::revision_status` — against the real
   router and DB: an agent revision under budget starts a round, counts it, and
-  spawns with `Revision round 1 of 3` in the prompt; an agent revision with the
+  spawns with `Revision round 1 of 5` in the prompt; an agent revision with the
   budget spent starts nothing (no daemon is even listening), leaves the task at
   `review`, marks it `unread`, records the parked verdict with the findings as
   feedback, and reports `exhausted: true`; a `human`-origin revision at the same
