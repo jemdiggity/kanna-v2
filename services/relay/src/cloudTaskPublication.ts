@@ -81,6 +81,7 @@ interface CachedTaskDocument extends ExistingTaskDocument {
 
 interface PublicationSessionState {
   tasksByIdentity: Map<string, CachedTaskDocument[]>;
+  reconciliationTail: Promise<void>;
 }
 
 export function validateCloudTaskPublication(
@@ -419,6 +420,7 @@ export function createFirestoreCloudTaskPublicationStore(
           id: document.id,
           data: document.data(),
         }))),
+        reconciliationTail: Promise.resolve(),
       });
       return generation;
     },
@@ -466,9 +468,17 @@ export function createFirestoreCloudTaskPublicationStore(
             id: document.id,
             data: document.data(),
           }))),
+          reconciliationTail: Promise.resolve(),
         };
         sessionStates.set(stateKey, sessionState);
       }
+      const previousReconciliation = sessionState.reconciliationTail;
+      let releaseReconciliation: () => void = () => undefined;
+      sessionState.reconciliationTail = new Promise((resolve) => {
+        releaseReconciliation = resolve;
+      });
+      await previousReconciliation;
+      try {
       await db.runTransaction(async (transaction) => {
         const current = await transaction.get(desktopRef);
         const currentGeneration = storedPublicationGeneration(current.data());
@@ -540,6 +550,9 @@ export function createFirestoreCloudTaskPublicationStore(
           await requireCurrentPublication(transaction, desktopRef, generation);
           transaction.delete(duplicate.ref);
         });
+      }
+      } finally {
+        releaseReconciliation();
       }
     },
   };
@@ -623,8 +636,7 @@ function indexTaskDocuments(
 ): Map<string, CachedTaskDocument[]> {
   const result = new Map<string, CachedTaskDocument[]>();
   for (const document of documents) {
-    const identity = taskIdentityFromUnknown(document.data);
-    if (!identity) continue;
+    const identity = taskIdentityFromUnknown(document.data) ?? `\u0001${document.id}`;
     const cached = { ...document, fingerprint: taskFingerprint(document.data) };
     result.set(identity, [...(result.get(identity) ?? []), cached]);
   }

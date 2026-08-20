@@ -1132,6 +1132,9 @@ describe("Relay integration", () => {
           restartedWrites.push({ kind, id });
         },
       });
+      await desktopRef.collection("tasks").doc("identity-less-stray").set({
+        stale: true,
+      });
       const restartedGeneration = await beginCloudTaskPublicationSession({
         userId: TEST_USER_ID,
         desktopId,
@@ -1145,11 +1148,75 @@ describe("Relay integration", () => {
         snapshot: snapshot([firstTask]),
         store: restartedStore,
       });
-      expect(restartedWrites.map(({ kind }) => kind).sort()).toEqual(["delete", "set"]);
+      expect(restartedWrites.map(({ kind }) => kind).sort()).toEqual(["delete", "delete", "set"]);
+      expect(restartedWrites).toContainEqual({ kind: "delete", id: "identity-less-stray" });
       const remaining = await desktopRef.collection("tasks").get();
       expect(remaining.docs).toHaveLength(1);
       expect(remaining.docs[0]?.data()).toMatchObject({ ownerLocalTaskId: "task-cloud-publish" });
     } finally {
+      await testFirestore.recursiveDelete(desktopRef);
+    }
+  });
+
+  it("serializes delayed overlapping publications in one session and retains removal state", async () => {
+    const desktopId = `desktop-publication-overlap-${Date.now()}`;
+    const desktopRef = testFirestore.doc(`users/${TEST_USER_ID}/desktops/${desktopId}`);
+    const firstClaimed = deferredVoid();
+    const releaseFirst = deferredVoid();
+    const writes: Array<{ kind: "set" | "delete"; id: string }> = [];
+    const store = createFirestoreCloudTaskPublicationStore(testFirestore, {
+      async afterGenerationClaim(generation) {
+        if (generation.sequence !== 1) return;
+        firstClaimed.resolve();
+        await releaseFirst.promise;
+      },
+      onTaskDocumentWrite(kind, id) {
+        writes.push({ kind, id });
+      },
+    });
+    const snapshot = (tasks: Record<string, unknown>[]) =>
+      publishedSnapshot("idle", tasks.map((task) => ({ ...task, ownerDesktopId: desktopId })));
+
+    try {
+      const session = await beginCloudTaskPublicationSession({
+        userId: TEST_USER_ID,
+        desktopId,
+        store,
+      });
+      const older = handleCloudTaskPublication({
+        userId: TEST_USER_ID,
+        desktopId,
+        generation: { session, sequence: 1 },
+        snapshot: snapshot([publishedTask("idle")]),
+        store,
+      });
+      await firstClaimed.promise;
+      const newer = handleCloudTaskPublication({
+        userId: TEST_USER_ID,
+        desktopId,
+        generation: { session, sequence: 2 },
+        snapshot: snapshot([
+          publishedTask("working"),
+          publishedTask("idle", { ownerLocalTaskId: "task-second" }),
+        ]),
+        store,
+      });
+
+      releaseFirst.resolve();
+      await Promise.all([older, newer]);
+      writes.length = 0;
+      await handleCloudTaskPublication({
+        userId: TEST_USER_ID,
+        desktopId,
+        generation: { session, sequence: 3 },
+        snapshot: snapshot([]),
+        store,
+      });
+
+      expect(writes.map(({ kind }) => kind)).toEqual(["delete", "delete"]);
+      expect((await desktopRef.collection("tasks").get()).empty).toBe(true);
+    } finally {
+      releaseFirst.resolve();
       await testFirestore.recursiveDelete(desktopRef);
     }
   });
