@@ -178,6 +178,11 @@ export async function ensureAccountHostingSite(input: {
   );
   if (inspect.exitCode === 0) return site;
 
+  const inspectError = inspect.stderr || inspect.stdout;
+  if (!/\brequested entity was not found\b/i.test(inspectError)) {
+    throw new Error(inspectError || `Failed to inspect Firebase Hosting site ${site}.`);
+  }
+
   const create = await input.runner.run(
     "pnpm",
     ["exec", "firebase", "hosting:sites:create", site, "--project", input.projectId],

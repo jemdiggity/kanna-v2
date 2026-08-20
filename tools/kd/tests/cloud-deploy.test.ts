@@ -180,7 +180,7 @@ describe("cloud deploy runtime", () => {
     const runner: CommandRunner = {
       async run(_command, args) {
         return args.includes("hosting:sites:get")
-          ? { exitCode: 1, stdout: "", stderr: "not found" }
+          ? { exitCode: 1, stdout: "", stderr: "Requested entity was not found" }
           : { exitCode: 1, stdout: "", stderr: "site creation denied" };
       }
     };
@@ -191,6 +191,26 @@ describe("cloud deploy runtime", () => {
       runner,
       projectId: "kanna-staging"
     })).rejects.toThrow("site creation denied");
+  });
+
+  it("propagates account hosting site lookup failures without attempting creation", async () => {
+    const calls: string[] = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push(`${command} ${args.join(" ")}`);
+        return { exitCode: 1, stdout: "", stderr: "Permission denied while listing hosting sites" };
+      }
+    };
+
+    await expect(ensureAccountHostingSite({
+      repoRoot: "/repo",
+      env: {},
+      runner,
+      projectId: "kanna-staging"
+    })).rejects.toThrow("Permission denied while listing hosting sites");
+    expect(calls).toEqual([
+      "pnpm exec firebase hosting:sites:get kanna-staging-account --project kanna-staging"
+    ]);
   });
 
   it("deploys only the relay without portal configuration when --relay is selected", async () => {
