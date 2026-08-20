@@ -68,6 +68,9 @@ describe("MOBILE_E2E_IDS", () => {
     expect(MOBILE_E2E_IDS.machinePairingSheet).toBe("mobile.machine-pairing.sheet");
     expect(MOBILE_E2E_IDS.machinePairingCodeInput).toBe("mobile.machine-pairing.code");
     expect(MOBILE_E2E_IDS.machinePairingSubmitButton).toBe("mobile.machine-pairing.submit");
+    expect(MOBILE_E2E_IDS.machinePairingProgress).toBe(
+      "mobile.machine-pairing.progress"
+    );
     expect(MOBILE_E2E_IDS.machinePairingError).toBe("mobile.machine-pairing.error");
     expect(MOBILE_E2E_IDS.machinePairingCloseButton).toBe("mobile.machine-pairing.close");
     expect(MOBILE_E2E_IDS.machinePairingCamera).toBe("mobile.machine-pairing.camera");

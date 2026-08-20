@@ -2083,6 +2083,25 @@ export function createMobileController(
     setUnownedErrorMessage(message);
   };
 
+  // A machine is added so its work becomes reachable, so pairing owns loading
+  // that work. Refreshing desktop metadata alone left the task lists empty
+  // until something unrelated re-bootstrapped — a Bonjour publish (not
+  // guaranteed: the browser already knows the service the claim just went to)
+  // or the background poll, which never runs when the phone had no machine at
+  // all and so was never connected. Flip the collection status to `loading`
+  // first: every task surface then shows its loading state for the whole wait
+  // instead of reading as an empty machine.
+  const loadPairedMachineWork = async () => {
+    store.setTaskCollectionStatus("loading");
+    await bootstrap();
+    if (store.getState().connectionState !== "connected") {
+      // Bootstrap stops before reading anything when the connection is not
+      // running, but the machine that was just added still has to appear in
+      // the inventory the Machines screen renders.
+      await refreshDesktops({ force: true });
+    }
+  };
+
   return {
     bootstrap,
 
@@ -2100,7 +2119,7 @@ export function createMobileController(
         throw error;
       }
       options.replaceClientForTrustChange?.();
-      await refreshDesktops({ force: true });
+      await loadPairedMachineWork();
       return trusted.desktopId;
     },
 
@@ -2118,7 +2137,7 @@ export function createMobileController(
         throw error;
       }
       options.replaceClientForTrustChange?.();
-      await refreshDesktops({ force: true });
+      await loadPairedMachineWork();
       return trusted.desktopId;
     },
 

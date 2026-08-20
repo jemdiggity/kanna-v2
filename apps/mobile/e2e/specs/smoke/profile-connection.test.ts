@@ -6,6 +6,7 @@ import {
   assertMachineDisplayName,
   assertMachineOrigins,
   assertPairingFailure,
+  assertPairedMachineTasksLoad,
   assertPairingSheetFresh,
   assertProfilePasswordCanRevealAndHide,
   assertProfileSignInControlsReachable,
@@ -237,6 +238,86 @@ describe("Profile to Machines smoke helpers", () => {
     expect(codeInput.setValue).toHaveBeenCalledWith("ABC123");
     expect(submit.click).toHaveBeenCalledOnce();
     expect(machineRow.waitForDisplayed).toHaveBeenCalledWith({ timeout: 30_000 });
+  });
+
+  it("requires pairing itself to surface the machine's tasks", async () => {
+    const rows = new Map<string, ReturnType<typeof createElement>>();
+    let taskRowText = "";
+    const machinesScreen = createElement();
+    const driver = {
+      $: async (selector: string) => {
+        if (selector === "~mobile.task-row.task-1") {
+          return {
+            ...(rows.get(selector) ?? createElement()),
+            isExisting: async () => taskRowText !== "",
+            getText: async () => taskRowText
+          };
+        }
+        return rows.get(selector) ?? (() => {
+          const element = createElement();
+          rows.set(selector, element);
+          return element;
+        })();
+      },
+      getPageSource: async () => "<XCUIElementTypeOther/>",
+      waitUntil: async (
+        condition: () => Promise<boolean>,
+        options: { timeout: number; timeoutMsg: string }
+      ) => {
+        // A pairing-driven load: the row appears on the second poll, well
+        // inside the tighter budget this assertion holds pairing to.
+        if (await condition()) return true;
+        taskRowText = "Paired machine task";
+        if (await condition()) return true;
+        throw new Error(options.timeoutMsg);
+      }
+    } as unknown as Browser;
+
+    await assertPairedMachineTasksLoad(
+      driver,
+      {
+        getAccountButton: async () => createElement(),
+        getAccountSheet: async () => createElement(),
+        getMachinesButton: async () => createElement(),
+        getMachinesScreen: async () => machinesScreen
+      },
+      "task-1",
+      "Paired machine task"
+    );
+
+    expect(rows.get("~mobile.machines-back")?.click).toHaveBeenCalledOnce();
+    expect(rows.get("~mobile.toolbar.tab.recent")?.click).toHaveBeenCalledOnce();
+    expect(machinesScreen.waitForDisplayed).toHaveBeenCalledWith({ timeout: 30_000 });
+  });
+
+  it("fails when the paired machine's tasks never arrive", async () => {
+    const driver = {
+      $: async () => ({
+        ...createElement(),
+        isExisting: async () => false,
+        getText: async () => ""
+      }),
+      getPageSource: async () => "",
+      waitUntil: async (
+        condition: () => Promise<boolean>,
+        options: { timeout: number; timeoutMsg: string }
+      ) => {
+        if (await condition()) return true;
+        throw new Error(`${options.timeoutMsg} (${options.timeout}ms)`);
+      }
+    } as unknown as Browser;
+
+    await expect(assertPairedMachineTasksLoad(
+      driver,
+      {
+        getAccountButton: async () => createElement(),
+        getAccountSheet: async () => createElement(),
+        getMachinesButton: async () => createElement(),
+        getMachinesScreen: async () => createElement()
+      },
+      "task-1",
+      "Paired machine task"
+    )).rejects.toThrow("without a relaunch (15000ms)");
   });
 
   it("requires invalid and expired pairing copy while keeping recovery controls", async () => {

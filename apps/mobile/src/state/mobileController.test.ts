@@ -704,6 +704,59 @@ describe("createMobileController", () => {
     expect(client.listDesktops).toHaveBeenCalled();
   });
 
+  it("loads the paired machine's work, showing loading until it lands", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    let releaseTasks!: () => void;
+    const pendingTasks = new Promise<void>((resolve) => { releaseTasks = resolve; });
+    const recentTasks = await client.listRecentTasks();
+    client.listRecentTasks.mockImplementation(async () => {
+      await pendingTasks;
+      return recentTasks;
+    });
+    const controller = createMobileController(client, store, undefined, {
+      pairingService: createPairingServiceMock(),
+      persistSessionContext: vi.fn().mockResolvedValue(undefined),
+      replaceClientForTrustChange: vi.fn()
+    });
+
+    const paired = controller.pairMachineByPayload("pairing-payload");
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(store.getState().taskCollectionStatus).toBe("loading");
+
+    releaseTasks();
+    await paired;
+
+    expect(client.listRepos).toHaveBeenCalled();
+    expect(client.listRecentTasks).toHaveBeenCalled();
+    expect(store.getState().recentTasks).not.toHaveLength(0);
+    expect(store.getState().connectionState).toBe("connected");
+    expect(store.getState().taskCollectionStatus).toBe("ready");
+  });
+
+  it("still refreshes the machine inventory when the paired desktop is not running", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    client.getStatus.mockResolvedValue({
+      state: "stopped",
+      desktopId: "desktop-1",
+      desktopName: "Studio Mac",
+      lanHost: "0.0.0.0",
+      lanPort: 48120,
+      pairingCode: null
+    });
+    const controller = createMobileController(client, store, undefined, {
+      pairingService: createPairingServiceMock(),
+      persistSessionContext: vi.fn().mockResolvedValue(undefined),
+      replaceClientForTrustChange: vi.fn()
+    });
+
+    await controller.pairMachineByCode("ABC123");
+
+    expect(client.listDesktops).toHaveBeenCalled();
+  });
+
   it("merges a QR claim into an existing machine instead of duplicating", async () => {
     const store = createSessionStore();
     store.setTrustedDesktops([{

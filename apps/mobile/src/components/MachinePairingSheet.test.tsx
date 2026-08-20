@@ -129,6 +129,32 @@ describe("MachinePairingSheet", () => {
     await pending;
   });
 
+  it("shows pairing progress instead of the scanner while a claim is in flight", async () => {
+    let resolve!: () => void;
+    const pending = new Promise<void>((nextResolve) => { resolve = nextResolve; });
+    const onPairPayload = vi.fn(() => pending);
+    let tree = render({ onPairPayload });
+
+    findByType(tree, "CameraView")?.props?.onBarcodeScanned?.({
+      type: "qr",
+      data: "pairing-payload"
+    });
+    tree = render({ onPairPayload });
+
+    const progress = findByTestId(tree, "mobile.machine-pairing.progress");
+    expect(progress).not.toBeNull();
+    expect(find(progress!, (node) =>
+      node.type === "Text" &&
+      typeof node.props?.children === "string" &&
+      node.props.children.includes("loading its tasks")
+    )).not.toBeNull();
+    expect(findByType(tree, "CameraView")).toBeNull();
+    expect(findByTestId(tree, "mobile.machine-pairing.code")?.props?.editable).toBe(false);
+
+    resolve();
+    await pending;
+  });
+
   it("normalizes and submits a six-character code", async () => {
     const onPairCode = vi.fn(async () => undefined);
     let tree = render({ onPairCode });
