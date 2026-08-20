@@ -10,6 +10,141 @@ import { getFirebaseServices } from "./firebase.js";
 const DESKTOP_LOOKUP_LIMIT = 10;
 
 /**
+ * How long a successful `desktopCredentials` validation stays usable for
+ * per-message revalidation.
+ *
+ * The tradeoff: `revalidateServerAuth` runs on every published message and
+ * every invoke, so an uncached read costs ~1-2M Firestore reads/month per
+ * active desktop for a document that only changes at sign-in and sign-out.
+ * Against that, the TTL is the window in which a credential revoked out from
+ * under us is still honoured on an *already open* socket — the relay handles
+ * no `desktopCredentials` write of its own (see
+ * `invalidateDesktopCredentialCache`), so this bound is the real revocation
+ * latency, not a backstop behind a write hook. 60s keeps that window shorter
+ * than a desktop's 5s reconnect loop takes to matter while removing
+ * essentially all of the read cost.
+ */
+export const DEFAULT_DESKTOP_CREDENTIAL_CACHE_TTL_MS = 60_000;
+
+/**
+ * Override for the TTL above. `0` disables the cache entirely, restoring a
+ * Firestore read per revalidation — the escape hatch if a deployment ever
+ * needs revocation to be immediate, and what the integration suite turns down
+ * so it can observe the bound instead of waiting a minute for it.
+ */
+export function resolveDesktopCredentialCacheTtlMs(
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  const raw = env.KANNA_RELAY_DESKTOP_CREDENTIAL_CACHE_TTL_MS?.trim();
+  if (!raw) return DEFAULT_DESKTOP_CREDENTIAL_CACHE_TTL_MS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    console.warn(
+      `[auth] Ignoring invalid KANNA_RELAY_DESKTOP_CREDENTIAL_CACHE_TTL_MS=${raw}`,
+    );
+    return DEFAULT_DESKTOP_CREDENTIAL_CACHE_TTL_MS;
+  }
+  return Math.floor(parsed);
+}
+
+const desktopCredentialCacheTtlMs = resolveDesktopCredentialCacheTtlMs();
+
+/**
+ * Hard cap on cached desktops, so a relay that sees many desktops over its
+ * lifetime cannot grow this map without bound on a 1 GB VM. Entries are tiny
+ * (two strings and two numbers); the cap exists for the shape, not the size.
+ */
+export const DESKTOP_CREDENTIAL_CACHE_MAX_ENTRIES = 10_000;
+
+interface CachedDesktopCredential {
+  /** Hash of the secret Firestore accepted, re-checked on every hit. */
+  desktopSecretHash: string;
+  principal: DesktopPrincipal;
+  expiresAtMs: number;
+}
+
+/**
+ * Keyed by desktopId so invalidation is a single delete. The validated
+ * secret's hash rides along in the entry rather than in the key: a hit must
+ * prove the caller presented the same secret Firestore accepted, and a
+ * different secret for the same desktop is a miss that re-reads Firestore.
+ */
+const desktopCredentialCache = new Map<string, CachedDesktopCredential>();
+
+function cachedDesktopPrincipal(
+  desktopId: string,
+  desktopSecret: string,
+  nowMs: number,
+): DesktopPrincipal | null {
+  const entry = desktopCredentialCache.get(desktopId);
+  if (!entry) return null;
+  if (entry.expiresAtMs <= nowMs) {
+    desktopCredentialCache.delete(desktopId);
+    return null;
+  }
+  if (!desktopSecretMatchesHash(desktopSecret, entry.desktopSecretHash)) {
+    return null;
+  }
+  return entry.principal;
+}
+
+/**
+ * Record a validation Firestore just accepted. Only ever called on success:
+ * rejections and Firestore errors are deliberately not cached, so a transient
+ * outage degrades to today's behaviour instead of pinning a wrong answer.
+ */
+function cacheDesktopCredential(
+  desktopId: string,
+  desktopSecret: string,
+  principal: DesktopPrincipal,
+  nowMs: number,
+): void {
+  desktopCredentialCache.delete(desktopId);
+  if (desktopCredentialCacheTtlMs <= 0) return;
+  if (desktopCredentialCache.size >= DESKTOP_CREDENTIAL_CACHE_MAX_ENTRIES) {
+    evictForCapacity(nowMs);
+  }
+  desktopCredentialCache.set(desktopId, {
+    desktopSecretHash: hashDesktopSecret(desktopSecret),
+    principal,
+    expiresAtMs: nowMs + desktopCredentialCacheTtlMs,
+  });
+}
+
+/** Drop expired entries first; fall back to oldest-inserted. */
+function evictForCapacity(nowMs: number): void {
+  for (const [desktopId, entry] of desktopCredentialCache) {
+    if (entry.expiresAtMs <= nowMs) desktopCredentialCache.delete(desktopId);
+  }
+  while (desktopCredentialCache.size >= DESKTOP_CREDENTIAL_CACHE_MAX_ENTRIES) {
+    const oldest = desktopCredentialCache.keys().next();
+    if (oldest.done) return;
+    desktopCredentialCache.delete(oldest.value);
+  }
+}
+
+/**
+ * Drop a desktop's cached validation (or the whole cache when no id is given).
+ *
+ * The relay itself writes no `desktopCredentials` document — sign-in and
+ * sign-out are written directly by the desktop app
+ * (`apps/desktop/src/services/desktopCloudAssociation.ts`), and this service's
+ * own mutators (`registerDevice`, `registerPushDevice`,
+ * `unregisterPushDevice`) touch unrelated collections. So this is exported for
+ * a future relay-side mutator, and wired today to the one place the relay
+ * learns first-hand that a credential went bad: an authoritative rejection in
+ * `verifyDesktopCredentials`, which is how a desktop reconnecting after
+ * sign-out flushes the entry still serving its previous socket.
+ */
+export function invalidateDesktopCredentialCache(desktopId?: string): void {
+  if (desktopId === undefined) {
+    desktopCredentialCache.clear();
+    return;
+  }
+  desktopCredentialCache.delete(desktopId);
+}
+
+/**
  * Verify a Firebase Auth ID token (sent by the phone client).
  * Returns the userId or null if verification fails.
  */
@@ -65,7 +200,17 @@ export async function revalidateServerAuth(
 ): Promise<boolean> {
   if (proof.desktopId !== expectedDesktopId) return false;
   if (proof.kind === "desktop") {
-    const principal = await verifyDesktopCredentials(proof.desktopId, proof.desktopSecret);
+    // The hot path: every published message and every invoke lands here. A
+    // cache hit is a validation Firestore already accepted for this exact
+    // secret, at most one TTL window ago. Establishing a
+    // connection deliberately does not read the cache — see
+    // verifyDesktopCredentials — so a revoked desktop can never open a fresh
+    // socket, only finish out the TTL on one it already holds.
+    const principal = cachedDesktopPrincipal(
+      proof.desktopId,
+      proof.desktopSecret,
+      Date.now(),
+    ) ?? await verifyDesktopCredentials(proof.desktopId, proof.desktopSecret);
     return principal?.userId === expectedUserId && principal.desktopId === expectedDesktopId;
   }
   // A legacy device token proves account membership only. It cannot prove that
@@ -91,75 +236,106 @@ export function desktopSecretMatchesHash(
   return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
+/**
+ * Authoritative desktop-credential check: always reads Firestore, never the
+ * cache. This is what a *new* connection authenticates against, so revoking a
+ * desktop locks it out of the relay immediately.
+ *
+ * It writes through to the cache on success — which is what makes the
+ * revalidation immediately following a handshake a hit rather than a second
+ * read — and purges on an authoritative rejection.
+ */
 export async function verifyDesktopCredentials(
   desktopId: string,
   desktopSecret: string
 ): Promise<DesktopPrincipal | null> {
+  let principal: DesktopPrincipal | null;
   try {
-    const { db } = getFirebaseServices();
-    const credentialDoc = await db
-      .collection("desktopCredentials")
-      .doc(desktopDocumentId(desktopId))
-      .get();
-    if (credentialDoc.exists) {
-      const data = credentialDoc.data();
-      if (data?.desktopId !== desktopId
-        || data?.revokedAt
-        || typeof data?.uid !== "string"
-        || !desktopSecretMatchesHash(desktopSecret, data?.desktopSecretHash)) {
-        console.warn("[auth] Canonical desktop credentials rejected:", desktopId);
-        return null;
-      }
-      return { userId: data.uid, desktopId };
-    }
-
-    const snapshot = await db
-      .collectionGroup("desktops")
-      .where("desktopId", "==", desktopId)
-      .limit(DESKTOP_LOOKUP_LIMIT)
-      .get();
-
-    if (snapshot.empty) {
-      console.warn("[auth] Desktop not found:", desktopId);
-      return null;
-    }
-
-    const matchingPrincipals: DesktopPrincipal[] = [];
-    for (const doc of snapshot.docs) {
-      const data = doc.data();
-      if (data.revokedAt) {
-        continue;
-      }
-
-      if (!desktopSecretMatchesHash(desktopSecret, data.desktopSecretHash)) {
-        continue;
-      }
-
-      const userDoc = doc.ref.parent.parent;
-      if (!userDoc) {
-        console.warn("[auth] Desktop missing parent user:", desktopId);
-        continue;
-      }
-
-      matchingPrincipals.push({
-        userId: userDoc.id,
-        desktopId,
-      });
-    }
-
-    const userIds = new Set(matchingPrincipals.map((principal) => principal.userId));
-    if (userIds.size === 1) return matchingPrincipals[0];
-    if (userIds.size > 1) {
-      console.warn("[auth] Ambiguous legacy desktop ownership:", desktopId);
-      return null;
-    }
-
-    console.warn("[auth] Desktop credentials rejected:", desktopId);
-    return null;
+    principal = await readDesktopCredentials(desktopId, desktopSecret);
   } catch (err) {
+    // Firestore is unavailable, which is not evidence about the credential.
+    // Leave any cached validation alone: flushing it here would turn an
+    // outage into a disconnect for every live desktop.
     console.error("[auth] Failed to verify desktop credentials:", err);
     return null;
   }
+  if (!principal) {
+    invalidateDesktopCredentialCache(desktopId);
+    return null;
+  }
+  cacheDesktopCredential(desktopId, desktopSecret, principal, Date.now());
+  return principal;
+}
+
+/**
+ * The Firestore read itself. Returns null only for an *authoritative*
+ * rejection; an unavailable Firestore throws, so the caller can tell the two
+ * apart.
+ */
+async function readDesktopCredentials(
+  desktopId: string,
+  desktopSecret: string
+): Promise<DesktopPrincipal | null> {
+  const { db } = getFirebaseServices();
+  const credentialDoc = await db
+    .collection("desktopCredentials")
+    .doc(desktopDocumentId(desktopId))
+    .get();
+  if (credentialDoc.exists) {
+    const data = credentialDoc.data();
+    if (data?.desktopId !== desktopId
+      || data?.revokedAt
+      || typeof data?.uid !== "string"
+      || !desktopSecretMatchesHash(desktopSecret, data?.desktopSecretHash)) {
+      console.warn("[auth] Canonical desktop credentials rejected:", desktopId);
+      return null;
+    }
+    return { userId: data.uid, desktopId };
+  }
+
+  const snapshot = await db
+    .collectionGroup("desktops")
+    .where("desktopId", "==", desktopId)
+    .limit(DESKTOP_LOOKUP_LIMIT)
+    .get();
+
+  if (snapshot.empty) {
+    console.warn("[auth] Desktop not found:", desktopId);
+    return null;
+  }
+
+  const matchingPrincipals: DesktopPrincipal[] = [];
+  for (const doc of snapshot.docs) {
+    const data = doc.data();
+    if (data.revokedAt) {
+      continue;
+    }
+
+    if (!desktopSecretMatchesHash(desktopSecret, data.desktopSecretHash)) {
+      continue;
+    }
+
+    const userDoc = doc.ref.parent.parent;
+    if (!userDoc) {
+      console.warn("[auth] Desktop missing parent user:", desktopId);
+      continue;
+    }
+
+    matchingPrincipals.push({
+      userId: userDoc.id,
+      desktopId,
+    });
+  }
+
+  const userIds = new Set(matchingPrincipals.map((principal) => principal.userId));
+  if (userIds.size === 1) return matchingPrincipals[0];
+  if (userIds.size > 1) {
+    console.warn("[auth] Ambiguous legacy desktop ownership:", desktopId);
+    return null;
+  }
+
+  console.warn("[auth] Desktop credentials rejected:", desktopId);
+  return null;
 }
 
 function desktopDocumentId(desktopId: string): string {

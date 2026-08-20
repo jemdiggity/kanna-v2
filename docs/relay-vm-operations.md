@@ -92,6 +92,47 @@ Counters are in-memory per process: **a relay restart or redeploy resets every
 counter and loses the open connections' totals so far.** Read a window from the
 logs, not from `/stats`, when a redeploy may have happened inside it.
 
+Note that these counters measure **application** bytes — the payload the relay
+handed to or received from the WebSocket layer — on both sides. WebSocket
+compression (below) sits underneath that measurement point, so `/stats` and the
+`[bytes]` lines report pre-compression volume and will not move when
+compression is working. That is deliberate: per-user metering should not change
+because a client did or did not negotiate an extension.
+
+## WebSocket compression
+
+The relay negotiates `permessage-deflate` on every WebSocket. It is opt-in per
+client: anything that sends no `Sec-WebSocket-Extensions` header — the desktop
+app's `tokio-tungstenite` client, today — connects uncompressed and is
+unaffected. Nothing needs to be configured, and there is no way to turn it off
+short of a code change.
+
+The zlib configuration is bounded for the 1 GB e2-micro and documented at
+`services/relay/src/webSocketCompression.ts`: roughly **160 KiB per connection
+that actually compresses in both directions**, allocated lazily on that
+connection's first compressed frame. If the relay starts showing memory
+pressure that tracks connection count, that file is where the window and
+`memLevel` bounds live; if it shows *CPU* pressure, lower the deflate `level`
+there first.
+
+One consequence worth knowing when reading the tunnel flow counters in
+`/health`: the tunnel watermarks measure `bufferedAmount`, which counts the
+bytes actually held — so once a frame is compressed onto the socket, it counts
+compressed. The memory bound is therefore still exact, but highly compressible
+traffic now moves far more application data before it reaches a pause mark.
+
+### `KANNA_RELAY_DESKTOP_CREDENTIAL_CACHE_TTL_MS`
+
+The relay caches a successful `desktopCredentials` validation for 60 s and
+serves per-message revalidation from that cache, instead of reading Firestore
+on every published message. The TTL is the window in which a credential revoked
+elsewhere is still honoured **on an already-open socket**; opening a new
+connection always re-reads Firestore, so a revoked desktop cannot reconnect.
+
+Set this variable to shorten that window, or to `0` to disable the cache
+entirely and restore a Firestore read per revalidation. The deploy does not set
+it; the integration suite does.
+
 ## Staging
 
 1. Build the provisioning plan:
