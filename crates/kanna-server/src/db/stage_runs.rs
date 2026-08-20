@@ -117,6 +117,26 @@ impl Db {
         rows.collect()
     }
 
+    /// Every distinct worktree a task's runs have been recorded in, most
+    /// recently used first. A task's work does not stay on one branch —
+    /// each stage transition forks a new workspace — so this is how
+    /// `task_creator::work_tip` enumerates the branches that might hold the
+    /// task's committed tip.
+    pub fn task_stage_run_cwds(&self, task_id: &str) -> Result<Vec<String>, rusqlite::Error> {
+        let mut stmt = match self.conn.prepare(
+            "SELECT cwd FROM stage_run
+             WHERE task_id = ? AND cwd IS NOT NULL
+             GROUP BY cwd
+             ORDER BY MAX(rowid) DESC",
+        ) {
+            Ok(stmt) => stmt,
+            Err(err) if is_missing_stage_run_table(&err) => return Ok(Vec::new()),
+            Err(err) => return Err(err),
+        };
+        let rows = stmt.query_map([task_id], |row| row.get::<_, String>(0))?;
+        rows.collect()
+    }
+
     /// The most recently started run for a task, regardless of status.
     pub fn latest_stage_run(&self, task_id: &str) -> Result<Option<StageRun>, rusqlite::Error> {
         let run = self

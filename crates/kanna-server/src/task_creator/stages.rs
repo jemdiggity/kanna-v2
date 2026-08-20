@@ -57,11 +57,32 @@ fn load_stage_identity(db: &Db, source_task_id: &str) -> Result<LoadedStageIdent
     Ok(LoadedStageIdentity { source_task, repo })
 }
 
+/// Load everything a stage preparation needs, with the task's workspace
+/// identity first reconciled onto the branch that actually holds its committed
+/// work.
+///
+/// Every fork below cuts from `source_task.branch`, so that field has to be
+/// the task's real committed tip before anything else reads it. A revision
+/// round whose commit landed on a workspace the field no longer named used to
+/// be dropped by the next fork, and the next reviewer re-raised the same
+/// finding — see `work_tip` and `docs/task-specs/48a0da30.md`.
 fn load_stage_transition_source(
+    db: &Db,
     identity: LoadedStageIdentity,
     source_task_id: &str,
 ) -> Result<LoadedStageTransitionSource, String> {
-    let LoadedStageIdentity { source_task, repo } = identity;
+    let LoadedStageIdentity {
+        mut source_task,
+        repo,
+    } = identity;
+    if source_task.closed_at.is_none() {
+        super::work_tip::reconcile_task_work_branch(
+            db,
+            &repo.path,
+            source_task_id,
+            &mut source_task,
+        )?;
+    }
     let definitions = RepoDefinitions::resolve(&repo)?;
     let workflow_name = source_task
         .pipeline
@@ -98,7 +119,7 @@ pub(crate) fn prepare_advance_stage_for_api(
     if open_blockers > 0 {
         return Err(format!("task is blocked: {}", source_task_id));
     }
-    let loaded = load_stage_transition_source(identity, source_task_id)?;
+    let loaded = load_stage_transition_source(db, identity, source_task_id)?;
     let context = StageTransitionContext {
         source_task: &loaded.source_task,
         source_task_id,
@@ -163,7 +184,7 @@ pub(crate) fn prepare_stage_completion_for_api(
     if identity.source_task.closed_at.is_some() {
         return Ok(None);
     }
-    let loaded = load_stage_transition_source(identity, source_task_id)?;
+    let loaded = load_stage_transition_source(db, identity, source_task_id)?;
     let context = StageTransitionContext {
         source_task: &loaded.source_task,
         source_task_id,
@@ -570,7 +591,7 @@ pub(crate) fn prepare_revision_task_for_api(
     // round on nothing and silently loses the verdict that triggered it.
     let revision_feedback = resolve_revision_feedback(db, source_task_id, revision_prompt)?;
     let revision_prompt = revision_feedback.as_str();
-    let loaded = load_stage_transition_source(identity, source_task_id)?;
+    let loaded = load_stage_transition_source(db, identity, source_task_id)?;
     let context = StageTransitionContext {
         source_task: &loaded.source_task,
         source_task_id,
@@ -718,7 +739,7 @@ fn prepare_stage_restart(
     if identity.source_task.closed_at.is_some() {
         return Err(format!("task is closed: {task_id}"));
     }
-    let loaded = load_stage_transition_source(identity, task_id)?;
+    let loaded = load_stage_transition_source(db, identity, task_id)?;
     let source_task = &loaded.source_task;
     let run = db
         .latest_stage_run(task_id)

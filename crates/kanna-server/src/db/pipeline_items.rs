@@ -1246,6 +1246,24 @@ impl Db {
         self.append_stage_changed_event(id, from_stage.as_deref(), stage, Some(branch))
     }
 
+    /// Point the task's workspace identity at the branch that actually holds
+    /// its committed work, without moving its stage. Used to reconcile
+    /// `pipeline_item.branch` after a round's commit landed on a workspace the
+    /// field no longer named — see `task_creator::work_tip`. A closed task is
+    /// left alone: reconciliation is preparation for more work, and there is
+    /// none.
+    pub fn update_pipeline_item_branch(
+        &self,
+        id: &str,
+        branch: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        let rows_affected = self.conn.execute(
+            "UPDATE pipeline_item SET branch = ?, updated_at = datetime('now') WHERE id = ? AND closed_at IS NULL",
+            (branch, id),
+        )?;
+        Ok(rows_affected > 0)
+    }
+
     pub fn get_pipeline_item_pr_branch(&self, id: &str) -> Result<Option<String>, rusqlite::Error> {
         self.conn
             .query_row(
