@@ -38,6 +38,19 @@ import {
 import {
   attachWebSocketMessageHandler,
 } from "./webSocketMessageLifecycle.js";
+import {
+  closeByteAccount,
+  getByteStats,
+  identifyByteAccount,
+  openByteAccount,
+  rawDataByteLength,
+  recordBytesReceived,
+  recordBytesSent,
+  relayMessageByteClass,
+  startByteRollups,
+  statsBearerToken,
+  stopByteRollups,
+} from "./byteAccounting.js";
 
 const PORT = parseInt(process.env.PORT || "8080", 10);
 const BUILD_COMMIT = resolveBuildCommit(process.env);
@@ -98,6 +111,27 @@ export const server = createServer(async (req, res) => {
         commit: BUILD_COMMIT,
         connections: getConnectionCount(),
         tunnelFlow: getTunnelFlowStats(),
+      });
+      return;
+    }
+
+    // Byte odometer. Authenticated because usage data is not public; the
+    // body carries process aggregates only — no uid, desktop id, or
+    // per-connection row — so it cannot describe any individual account.
+    if (req.method === "GET" && req.url === "/stats") {
+      const bearer = statsBearerToken(req.headers.authorization);
+      const callerId = bearer ? await verifyPhoneToken(bearer) : null;
+      if (!callerId) {
+        res.setHeader("WWW-Authenticate", "Bearer");
+        jsonResponse(res, 401, { error: "Unauthorized" });
+        return;
+      }
+
+      jsonResponse(res, 200, {
+        status: "ok",
+        commit: BUILD_COMMIT,
+        connections: getConnectionCount(),
+        bytes: getByteStats(),
       });
       return;
     }
@@ -210,6 +244,7 @@ export const wss = new WebSocketServer({ server });
 wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
   const remoteAddr = req.socket.remoteAddress ?? "unknown";
   console.log(`[ws] New connection from ${remoteAddr}`);
+  openByteAccount(ws);
 
   let authenticated = false;
   let userId: string | null = null;
@@ -252,8 +287,18 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
     isBinary: boolean,
     messageLifecycle,
   ) => {
+    // Tunnel frames are the relay's hot path. forwardTunnelData already
+    // measures every frame for backpressure and feeds that same measurement
+    // to the byte odometer, so they are never measured again here.
+    if (isTunnelSocket(ws)) {
+      forwardTunnelData(ws, raw, isBinary);
+      return;
+    }
+    const receivedByteLength = rawDataByteLength(raw);
+
     // --- Auth handshake (first message) ---
     if (!authenticated) {
+      recordBytesReceived(ws, "control", receivedByteLength);
       const data = raw.toString();
       let msg: {
         type?: string;
@@ -359,9 +404,14 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
       } else {
         setServerConnection(userId, desktopId ?? "default", ws, serverAuthProof);
       }
+      identifyByteAccount(ws, {
+        uid: userId,
+        desktopId: role === "server" ? desktopId ?? "default" : null,
+        role,
+      });
 
       // Send auth success
-      ws.send(JSON.stringify({
+      const authOk = JSON.stringify({
         type: "auth_ok",
         userId,
         capabilities: {
@@ -379,7 +429,9 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
             },
           } : {}),
         },
-      }));
+      });
+      ws.send(authOk);
+      recordBytesSent(ws, "control", Buffer.byteLength(authOk));
       console.log(
         `[ws] Authenticated ${role} for user ${userId} from ${remoteAddr}`
       );
@@ -387,10 +439,6 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
     }
 
     // --- Post-auth: route messages ---
-    if (isTunnelSocket(ws)) {
-      forwardTunnelData(ws, raw, isBinary);
-      return;
-    }
     const data = raw.toString();
     if (role === "server") {
       let publication: {
@@ -409,6 +457,9 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
       } catch {
         // Non-publication messages retain the router's existing behavior.
       }
+      // That parse already identified the message, so the odometer classifies
+      // it without a second one.
+      recordBytesReceived(ws, relayMessageByteClass(publication), receivedByteLength);
       if (
         publication?.type === "invoke"
         && serverAuthProof?.kind === "desktop"
@@ -521,12 +572,24 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         }
         return;
       }
+    } else {
+      // Phone clients only ever send control-plane requests.
+      recordBytesReceived(ws, "control", receivedByteLength);
     }
-    routeMessage(userId!, role!, data, ws, desktopId, serverAuthProof);
+    routeMessage(
+      userId!,
+      role!,
+      data,
+      ws,
+      desktopId,
+      serverAuthProof,
+      receivedByteLength,
+    );
   });
 
   ws.on("close", (code: number, reason: Buffer) => {
     clearTimeout(authTimer);
+    closeByteAccount(ws);
     console.log(
       `[ws] Connection closed: ${remoteAddr} (code=${code}, reason=${reason.toString()})`
     );
@@ -540,6 +603,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
 // --- Start ---
 
 export function startRelay(port = PORT, host?: string): void {
+  startByteRollups();
   const onListening = () => {
     console.log(`[relay] Listening on port ${port}`);
     console.log(
@@ -558,6 +622,7 @@ function shutdown(signal: string): void {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`[relay] ${signal} received; closing connections`);
+  stopByteRollups();
   server.close();
   for (const client of wss.clients) {
     if (client.readyState === WebSocket.OPEN) {

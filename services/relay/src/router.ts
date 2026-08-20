@@ -1,6 +1,14 @@
 import type { RawData, WebSocket } from "ws";
 import { randomUUID } from "node:crypto";
 import type { ServerAuthProof } from "./auth.js";
+import {
+  identifyByteAccount,
+  rawDataByteLength,
+  recordBytesReceived,
+  recordBytesSent,
+  relayMessageByteClass,
+  type RelayByteClass,
+} from "./byteAccounting.js";
 
 interface ConnectionPair {
   clients: Set<WebSocket>;
@@ -91,6 +99,22 @@ function parseRelayMessage(data: string): RelayMessage | null {
   return null;
 }
 
+/**
+ * Send a control-channel frame and add it to the target's byte odometer.
+ * `byteLength` is passed by callers that already measured the payload; only
+ * relay-generated frames pay for their own measurement, and those are small
+ * and infrequent by construction.
+ */
+function sendControlFrame(
+  target: WebSocket,
+  payload: string,
+  byteLength = Buffer.byteLength(payload),
+  byteClass: RelayByteClass = "control",
+): void {
+  target.send(payload);
+  recordBytesSent(target, byteClass, byteLength);
+}
+
 export function sendErrorResponse(
   client: WebSocket | undefined,
   id: unknown,
@@ -100,7 +124,8 @@ export function sendErrorResponse(
     return;
   }
 
-  client.send(
+  sendControlFrame(
+    client,
     JSON.stringify({
       type: "response",
       id: id ?? null,
@@ -114,7 +139,8 @@ function sendSuccessResponse(client: WebSocket | undefined, id: unknown): void {
     return;
   }
 
-  client.send(
+  sendControlFrame(
+    client,
     JSON.stringify({
       type: "response",
       id,
@@ -132,7 +158,8 @@ function sendDataResponse(
     return;
   }
 
-  client.send(
+  sendControlFrame(
+    client,
     JSON.stringify({
       type: "response",
       id,
@@ -196,13 +223,6 @@ function rawDataToString(data: RawData): string {
   return Buffer.from(data).toString();
 }
 
-function rawDataByteLength(data: RawData): number {
-  if (typeof data === "string") return Buffer.byteLength(data);
-  if (Buffer.isBuffer(data)) return data.length;
-  if (Array.isArray(data)) return data.reduce((total, chunk) => total + chunk.length, 0);
-  return data.byteLength;
-}
-
 function forwardUnobserveIfLastObserverGone(
   pair: ConnectionPair,
   key: string,
@@ -217,7 +237,7 @@ function forwardUnobserveIfLastObserverGone(
   if (pendingTarget) {
     pair.pendingResponses.set(id, pendingTarget);
   }
-  target.send(buildUnobserveMessage(observer.sessionId, id));
+  sendControlFrame(target, buildUnobserveMessage(observer.sessionId, id));
 }
 
 function removeClient(pair: ConnectionPair, ws: WebSocket): void {
@@ -431,13 +451,17 @@ export function isTunnelSocket(ws: WebSocket): boolean {
 }
 
 export function forwardTunnelData(source: WebSocket, data: RawData, isBinary = false): void {
+  const service = tunnelServices.get(source);
+  // Measured once, for backpressure and the byte odometer alike. The relay
+  // never parses a tunnel frame, so its class is the tunnel's service.
+  const byteLength = rawDataByteLength(data);
+  const byteClass: RelayByteClass = service === "task-transfer" ? "taskTransfer" : "tunnel";
+  recordBytesReceived(source, byteClass, byteLength);
   const peer = tunnelPeers.get(source);
   if (!peer || peer.readyState !== 1) {
     return;
   }
-  const service = tunnelServices.get(source);
   if (service === "task-transfer" && isBinary) {
-    const byteLength = rawDataByteLength(data);
     if (peer.bufferedAmount + byteLength > TASK_TRANSFER_TUNNEL_MAX_BUFFERED_BYTES) {
       source.close(1013, "Task-transfer backpressure limit exceeded");
       peer.close(1013, "Task-transfer backpressure limit exceeded");
@@ -456,6 +480,7 @@ export function forwardTunnelData(source: WebSocket, data: RawData, isBinary = f
         source.resume();
       }
     });
+    recordBytesSent(peer, byteClass, byteLength);
     tunnelPeakBufferedBytes.set(
       source,
       Math.max(tunnelPeakBufferedBytes.get(source) ?? 0, peer.bufferedAmount),
@@ -469,10 +494,9 @@ export function forwardTunnelData(source: WebSocket, data: RawData, isBinary = f
     }
     return;
   }
-  const payloadBytes = rawDataByteLength(data);
   if (
-    payloadBytes > MAX_TUNNEL_BUFFERED_BYTES ||
-    peer.bufferedAmount > MAX_TUNNEL_BUFFERED_BYTES - payloadBytes
+    byteLength > MAX_TUNNEL_BUFFERED_BYTES ||
+    peer.bufferedAmount > MAX_TUNNEL_BUFFERED_BYTES - byteLength
   ) {
     tunnelFlowStats.capRejectCount += 1;
     failTunnelPair(source, 1013, "Tunnel peer is not consuming data");
@@ -480,7 +504,7 @@ export function forwardTunnelData(source: WebSocket, data: RawData, isBinary = f
   }
   if (process.env.KANNA_RELAY_DEBUG_TUNNEL === "1") {
     const direction = tunnelLabels.get(source) === "client" ? "client->desktop" : "desktop->client";
-    let summary = `<${payloadBytes} bytes>`;
+    let summary = `<${byteLength} bytes>`;
     try {
       const parsed = JSON.parse(rawDataToString(data)) as Record<string, unknown>;
       summary = typeof parsed.type === "string" ? parsed.type : "json";
@@ -517,6 +541,7 @@ export function forwardTunnelData(source: WebSocket, data: RawData, isBinary = f
     return;
   }
 
+  recordBytesSent(peer, byteClass, byteLength);
   tunnelFlowStats.maxBufferedBytes = Math.max(
     tunnelFlowStats.maxBufferedBytes,
     peer.bufferedAmount,
@@ -563,14 +588,27 @@ export function attachDesktopTunnel(
   ws.on("close", () => closeTunnelPeer(ws));
   tunnel.client.on("close", () => closeTunnelPeer(tunnel.client));
 
+  identifyByteAccount(ws, {
+    uid: userId,
+    desktopId,
+    role: "server",
+    tunnelService: tunnel.service,
+  });
+  identifyByteAccount(tunnel.client, {
+    uid: userId,
+    desktopId,
+    tunnelService: tunnel.service,
+  });
+
   const ready = JSON.stringify({
     type: "tunnel_ready",
     tunnelId,
     desktopId,
     service: tunnel.service,
   });
-  ws.send(ready);
-  tunnel.client.send(ready);
+  const readyBytes = Buffer.byteLength(ready);
+  sendControlFrame(ws, ready, readyBytes);
+  sendControlFrame(tunnel.client, ready, readyBytes);
   return true;
 }
 
@@ -589,10 +627,17 @@ export function routeMessage(
   source?: WebSocket,
   sourceDesktopId?: string | null,
   serverAuthProof?: ServerAuthProof | null,
+  /**
+   * Byte length of `data` as it arrived on the wire. The caller already
+   * measured the frame; passing it here keeps the byte odometer from
+   * measuring the same payload twice.
+   */
+  dataByteLength = Buffer.byteLength(data),
 ): void {
   const pair = connections.get(userId);
   if (!pair) return;
   const parsed = parseRelayMessage(data);
+  const byteClass = relayMessageByteClass(parsed);
 
   if (from === "phone") {
     if (parsed?.type === "tunnel_request") {
@@ -620,7 +665,9 @@ export function routeMessage(
       const tunnelId = randomUUID();
       storePendingTunnel(pair, tunnelId, source, desktopId, service);
       tunnelSockets.add(source);
-      target.send(
+      identifyByteAccount(source, { uid: userId, desktopId, tunnelService: service });
+      sendControlFrame(
+        target,
         JSON.stringify({
           type: "tunnel_establish",
           id,
@@ -690,7 +737,7 @@ export function routeMessage(
           pair.terminalObservers.delete(key);
         }
       }
-      target.send(data);
+      sendControlFrame(target, data, dataByteLength, byteClass);
     } else {
       if (target && target.readyState !== 1) {
         error = "Desktop offline";
@@ -712,7 +759,7 @@ export function routeMessage(
       const target = pair.pendingResponses.get(idKey);
       pair.pendingResponses.delete(idKey);
       if (target && target.readyState === 1) {
-        target.send(data);
+        sendControlFrame(target, data, dataByteLength, byteClass);
       }
       if (hadPendingResponse) return;
     }
@@ -759,7 +806,7 @@ export function routeMessage(
       if (idKey && source) {
         pair.pendingResponses.set(idKey, source);
       }
-      target.send(data);
+      sendControlFrame(target, data, dataByteLength, byteClass);
       return;
     }
 
@@ -770,7 +817,7 @@ export function routeMessage(
       if (observers && observers.size > 0) {
         for (const target of observers) {
           if (target.readyState === 1) {
-            target.send(data);
+            sendControlFrame(target, data, dataByteLength, byteClass);
           }
         }
         return;
@@ -779,7 +826,7 @@ export function routeMessage(
 
     for (const target of pair.clients) {
       if (target.readyState === 1) {
-        target.send(data);
+        sendControlFrame(target, data, dataByteLength, byteClass);
       }
     }
   }

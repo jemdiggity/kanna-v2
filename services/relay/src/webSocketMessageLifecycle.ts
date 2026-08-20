@@ -1,4 +1,5 @@
 import { WebSocket, type RawData } from "ws";
+import { recordBytesSent } from "./byteAccounting.js";
 
 const MESSAGE_FAILURE = "relay could not process request";
 
@@ -44,9 +45,11 @@ function createMessageLifecycle(
       terminateSocket(ws);
       return;
     }
-    ws.send(JSON.stringify(body), (error) => {
+    const payload = JSON.stringify(body);
+    ws.send(payload, (error) => {
       if (error) terminateSocket(ws);
     });
+    recordBytesSent(ws, "control", Buffer.byteLength(payload));
   };
 
   return {
