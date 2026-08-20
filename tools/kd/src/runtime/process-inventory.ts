@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { CommandRunner } from "./process";
 
@@ -76,7 +76,7 @@ export function recordInventoryResource(path: string, resource: InventoryResourc
 export function removeInventoryResource(path: string, resource: InventoryResource): void {
   if (!existsSync(path) && !existsSync(`${path}.lock`)) return;
   mutateInventory(path, (resources) =>
-    resources.filter((candidate) => resourceKey(candidate) !== resourceKey(resource))
+    resources.filter((candidate) => !sameResource(candidate, resource))
   );
 }
 
@@ -142,9 +142,10 @@ export async function cleanupProcessInventory(
     }
   }
   mutateInventory(path, (current) => {
-    const attempted = new Set(resources.map(resourceKey));
-    const failures = new Set(failed.map(resourceKey));
-    return current.filter((resource) => !attempted.has(resourceKey(resource)) || failures.has(resourceKey(resource)));
+    return current.filter((resource) =>
+      !resources.some((attempted) => sameResource(resource, attempted)) ||
+      failed.some((failure) => sameResource(resource, failure))
+    );
   });
   return { cleaned, failed };
 }
@@ -165,14 +166,25 @@ async function waitForIdentityToDisappear(
 
 function mutateInventory(path: string, mutation: (resources: InventoryResource[]) => InventoryResource[]): void {
   const lock = `${path}.lock`;
+  const lockOwner = join(lock, "owner.json");
   mkdirSync(dirname(path), { recursive: true });
   const deadline = Date.now() + 5_000;
   while (true) {
     try {
       mkdirSync(lock);
+      writeFileSync(lockOwner, JSON.stringify({ pid: process.pid, identity: processIdentity(process.pid) }));
       break;
     } catch (error) {
       if (!isAlreadyExists(error) || Date.now() >= deadline) throw error;
+      if (isAbandonedLock(lock, lockOwner)) {
+        const abandoned = `${lock}.abandoned-${process.pid}-${Math.random().toString(16).slice(2)}`;
+        try {
+          renameSync(lock, abandoned);
+          rmSync(abandoned, { recursive: true, force: true });
+        } catch {
+          // Another writer recovered or replaced it first; retry acquisition.
+        }
+      }
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
     }
   }
@@ -180,6 +192,22 @@ function mutateInventory(path: string, mutation: (resources: InventoryResource[]
     writeInventory(path, mutation(readProcessInventory(path)));
   } finally {
     rmSync(lock, { recursive: true, force: true });
+  }
+}
+
+function isAbandonedLock(lock: string, ownerPath: string): boolean {
+  try {
+    const owner: unknown = JSON.parse(readFileSync(ownerPath, "utf8"));
+    if (!isRecord(owner) || !Number.isInteger(owner.pid) || typeof owner.identity !== "string") return false;
+    return processIdentity(Number(owner.pid)) !== owner.identity;
+  } catch {
+    // mkdir and owner metadata are separate syscalls. Only recover an empty or
+    // damaged directory after allowing an in-flight owner time to publish it.
+    try {
+      return Date.now() - statSync(lock).mtimeMs >= 1_000;
+    } catch {
+      return false;
+    }
   }
 }
 
@@ -196,6 +224,15 @@ function writeInventory(path: string, resources: InventoryResource[]): void {
 
 function resourceKey(resource: InventoryResource): string {
   return resource.kind === "process" ? `process:${resource.pid}` : `tmux:${resource.socket}`;
+}
+
+function sameResource(left: InventoryResource, right: InventoryResource): boolean {
+  if (left.kind !== right.kind) return false;
+  if (left.kind === "process" && right.kind === "process") {
+    return left.pid === right.pid && left.label === right.label && left.identity === right.identity;
+  }
+  return left.kind === "tmux-server" && right.kind === "tmux-server" &&
+    left.socket === right.socket && left.socketPath === right.socketPath;
 }
 
 function isInventoryResource(value: unknown): value is InventoryResource {

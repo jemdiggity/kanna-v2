@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -104,6 +104,37 @@ describe("kd process inventory", () => {
       .toEqual(Array.from({ length: 8 }, (_, index) => `socket-${index}`).sort());
     expect(readFileSync(path, "utf8")).toContain('"version": 1');
   }, 20_000);
+
+  it("recovers an inventory lock abandoned by a crashed writer", () => {
+    const directory = mkdtempSync(join(tmpdir(), "kanna-inventory-abandoned-"));
+    const path = join(directory, "inventory.json");
+    mkdirSync(`${path}.lock`);
+    writeFileSync(join(`${path}.lock`, "owner.json"), JSON.stringify({ pid: 999_999_999, identity: "gone" }));
+    recordInventoryResource(path, { kind: "tmux-server", socket: "recovered" });
+    expect(readProcessInventory(path)).toEqual([{ kind: "tmux-server", socket: "recovered" }]);
+  });
+
+  it("preserves and does not signal a concurrent same-PID replacement", async () => {
+    const path = join(mkdtempSync(join(tmpdir(), "kanna-inventory-replaced-")), "inventory.json");
+    recordInventoryResource(path, { kind: "process", pid: 702, label: "old", identity: "spawn-1" });
+    let identity = "spawn-1";
+    const signals: NodeJS.Signals[] = [];
+    const result = await cleanupProcessInventory(path, runner, {
+      identity: () => identity,
+      signal: (_pid, signal) => {
+        signals.push(signal);
+        identity = "spawn-2";
+        recordInventoryResource(path, { kind: "process", pid: 702, label: "new", identity });
+      },
+      graceMs: 1,
+      pollMs: 1
+    });
+    expect(result.failed).toEqual([]);
+    expect(signals).toEqual(["SIGTERM"]);
+    expect(readProcessInventory(path)).toEqual([
+      { kind: "process", pid: 702, label: "new", identity: "spawn-2" }
+    ]);
+  });
 
   it.runIf(tmuxAvailable)("dev down removes the exact tmux server and detached pane while preserving an unrelated process", async () => {
     const repoRoot = mkdtempSync(join(tmpdir(), "kanna-dev-down-"));

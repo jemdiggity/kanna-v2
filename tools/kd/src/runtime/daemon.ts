@@ -1,13 +1,20 @@
 import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { CommandRunner } from "./process";
-import { removeInventoryResource } from "./process-inventory";
+import {
+  readProcessInventory,
+  removeInventoryResource,
+  terminateInventoryProcess,
+  type ProcessCleanupOperations
+} from "./process-inventory";
 
 export interface KillWorkspaceDaemonsInput {
   repoRoot: string;
   daemonDir: string;
   runner: CommandRunner;
   readPidFile?: (pidFile: string) => number | undefined;
+  cleanupOperations?: ProcessCleanupOperations;
+  /** Test seam retained for callers that only replace signal delivery. */
   killProcess?: (pid: number) => void;
 }
 
@@ -29,19 +36,17 @@ export async function killWorkspaceDaemons(input: KillWorkspaceDaemonsInput): Pr
   const pidFile = join(input.daemonDir, "daemon.pid");
   const pid = (input.readPidFile ?? readPidFile)(pidFile);
   if (pid === undefined) return {};
-  try {
-    (input.killProcess ?? ((target) => process.kill(target, "SIGTERM")))(pid);
-    removeInventoryResource(join(input.repoRoot, ".kanna", "kd-state", "process-inventory.json"), {
-      kind: "process",
-      pid,
-      label: "kanna-daemon"
-    });
-    return { pidFileKilled: pid };
-  } catch (error) {
-    if (typeof error === "object" && error !== null && "code" in error && error.code === "ESRCH") {
-      rmSync(pidFile, { force: true });
-      return {};
-    }
-    throw error;
-  }
+  const inventoryPath = join(input.repoRoot, ".kanna", "kd-state", "process-inventory.json");
+  const resource = readProcessInventory(inventoryPath).find((candidate) =>
+    candidate.kind === "process" && candidate.pid === pid && candidate.label === "kanna-daemon"
+  );
+  if (resource?.kind !== "process") return {};
+  const cleanupOperations = input.killProcess
+    ? { ...input.cleanupOperations, signal: (target: number) => input.killProcess?.(target) }
+    : input.cleanupOperations;
+  const outcome = await terminateInventoryProcess(resource, cleanupOperations);
+  if (outcome !== "cleaned") return {};
+  removeInventoryResource(inventoryPath, resource);
+  rmSync(pidFile, { force: true });
+  return { pidFileKilled: pid };
 }
