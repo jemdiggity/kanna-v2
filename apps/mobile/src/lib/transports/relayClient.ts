@@ -4,6 +4,7 @@ import type {
   TaskCompanionSubscription,
   TaskTerminalStreamEvent,
   TaskTerminalSubscription
+  , TaskSummaryStreamEvent, TaskSummarySubscription
 } from "../api/client";
 import type {
   RemoteDesktopInvocationRequest,
@@ -34,6 +35,10 @@ export interface RelayDesktopClient {
   observeTaskTerminal: RemoteTaskTerminalObserver;
   observeTaskAgent: RemoteTaskAgentObserver;
   observeTaskCompanion: RemoteTaskCompanionObserver;
+  observeDesktopTaskSummaries(
+    desktopId: string,
+    listener: (event: TaskSummaryStreamEvent) => void
+  ): TaskSummarySubscription;
 }
 
 export interface RelayDesktopClientDependencies {
@@ -462,6 +467,19 @@ export function createRelayDesktopClient({
           client.sendTermResize(taskId, cols, rows);
         }
       } satisfies TaskTerminalSubscription;
+    },
+    observeDesktopTaskSummaries(desktopId, listener) {
+      const client = streamClientForDesktop(desktopId);
+      client.attachTaskSummaries({
+        onSummary(summary) {
+          listener(summary);
+        }
+      });
+      return {
+        close() {
+          client.detachTaskSummaries();
+        }
+      };
     },
     observeTaskAgent({ desktopId, taskId }, listener) {
       const client = new StreamClient({

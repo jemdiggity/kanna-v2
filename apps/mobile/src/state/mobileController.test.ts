@@ -286,6 +286,46 @@ function createAuthSessionMock(): MobileAuthSession {
 }
 
 describe("createMobileController", () => {
+  it("scopes live task summaries to foreground list views", async () => {
+    const client = createClientMock();
+    const close = vi.fn();
+    const observe = vi.fn(() => ({ close }));
+    client.observeDesktopTaskSummaries = observe;
+    client.listRecentTasks.mockResolvedValue([{
+      id: "cloud-task-1",
+      repoId: "repo-1",
+      title: "Streaming summary",
+      stage: "in progress",
+      ownerDesktopId: "desktop-1",
+      ownerLocalTaskId: "task-1"
+    }]);
+    client.listRepoTasks.mockResolvedValue([{
+      id: "cloud-task-1",
+      repoId: "repo-1",
+      title: "Streaming summary",
+      stage: "in progress",
+      ownerDesktopId: "desktop-1",
+      ownerLocalTaskId: "task-1"
+    }]);
+    const store = createSessionStore();
+    const controller = createMobileController(client, store, createAuthSessionMock());
+
+    controller.setNavigationView("recent");
+    await controller.bootstrap();
+    expect(observe).toHaveBeenCalledOnce();
+
+    controller.setTaskDetailVisible(true);
+    expect(close).toHaveBeenCalledOnce();
+    controller.setTaskDetailVisible(false);
+    expect(observe).toHaveBeenCalledTimes(2);
+
+    controller.setAppForeground(false);
+    expect(close).toHaveBeenCalledTimes(2);
+    controller.setAppForeground(true);
+    expect(observe).toHaveBeenCalledTimes(3);
+    controller.dispose();
+  });
+
   const trustedDesktop = {
     desktopId: "desktop-1",
     displayName: "Studio Mac",

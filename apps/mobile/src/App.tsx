@@ -251,8 +251,10 @@ function AppContent() {
   useEffect(() => {
     let previousState: AppStateStatus = AppState.currentState;
     model.setForeground?.(previousState === "active");
+    controller.setAppForeground(previousState === "active");
     const subscription = AppState.addEventListener("change", (nextState) => {
       model.setForeground?.(nextState === "active");
+      controller.setAppForeground(nextState === "active");
       const foregroundAction = getForegroundTransitionAction({
         previousState,
         nextState,

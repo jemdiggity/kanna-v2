@@ -72,6 +72,7 @@ export interface MobileController {
   refresh(): Promise<void>;
   setNavigationView(view: MobileView): void;
   setTaskDetailVisible(visible: boolean): void;
+  setAppForeground(foreground: boolean): void;
   selectDesktop(desktopId: string): Promise<void>;
   selectRepo(repoId: string): Promise<void>;
   loadRepoCommands(): Promise<void>;
@@ -281,6 +282,9 @@ export function createMobileController(
   let unownedErrorMessage: string | null = null;
   let taskCollectionsRevision = 0;
   let taskDetailVisible = false;
+  let appForeground = true;
+  const taskSummarySubscriptions = new Map<string, { close(): void }>();
+  const taskSummaryRevisions = new Map<string, number>();
   let liveRepositoryRevision = 0;
   let lastExplicitRepos: RepoSummary[] = [];
   let desktopCollectionsRevision = 0;
@@ -328,6 +332,61 @@ export function createMobileController(
       null
     );
   };
+
+  const reconcileTaskSummarySubscriptions = () => {
+    const state = store.getState();
+    const shouldSubscribe =
+      appForeground &&
+      !taskDetailVisible &&
+      (state.activeView === "tasks" || state.activeView === "recent") &&
+      client.observeDesktopTaskSummaries !== undefined;
+    const desiredDesktopIds = shouldSubscribe
+      ? new Set(
+          [...state.recentTasks, ...state.repoTasks]
+            .map((task) => task.ownerDesktopId)
+            .filter((desktopId): desktopId is string => Boolean(desktopId))
+        )
+      : new Set<string>();
+    for (const [desktopId, subscription] of taskSummarySubscriptions) {
+      if (!desiredDesktopIds.has(desktopId)) {
+        subscription.close();
+        taskSummarySubscriptions.delete(desktopId);
+      }
+    }
+    for (const desktopId of desiredDesktopIds) {
+      if (taskSummarySubscriptions.has(desktopId)) continue;
+      const subscription = client.observeDesktopTaskSummaries?.(desktopId, (summary) => {
+        const key = `${desktopId}:${summary.taskId}`;
+        if ((taskSummaryRevisions.get(key) ?? -1) >= summary.revision) return;
+        taskSummaryRevisions.set(key, summary.revision);
+        const current = store.getState();
+        const task = [...current.recentTasks, ...current.repoTasks].find(
+          (candidate) =>
+            candidate.ownerDesktopId === desktopId &&
+            (candidate.ownerLocalTaskId ?? candidate.id) === summary.taskId
+        );
+        if (!task) return;
+        const activity = summary.activity === "working" ||
+          summary.activity === "unread" ? summary.activity : "idle";
+        const runtimeState =
+          summary.runtimeState === "busy" ||
+          summary.runtimeState === "waiting" ||
+          summary.runtimeState === "exited"
+            ? summary.runtimeState
+            : "idle";
+        store.setTaskLiveSummary(
+          task.id,
+          summary.snippet,
+          activity,
+          runtimeState
+        );
+      });
+      if (subscription) taskSummarySubscriptions.set(desktopId, subscription);
+    }
+  };
+  const taskSummaryStoreUnsubscribe = store.subscribe(
+    reconcileTaskSummarySubscriptions
+  );
 
   const setUnownedErrorMessage = (message: string | null) => {
     unownedErrorMessage = message;
@@ -2200,6 +2259,7 @@ export function createMobileController(
 
     setNavigationView(view) {
       store.setActiveView(view);
+      reconcileTaskSummarySubscriptions();
       const state = store.getState();
       if (
         view === "more" &&
@@ -2213,7 +2273,14 @@ export function createMobileController(
     setTaskDetailVisible(visible) {
       if (taskDetailVisible === visible) return;
       taskDetailVisible = visible;
+      reconcileTaskSummarySubscriptions();
       reconcileSelectedTaskRead();
+    },
+
+    setAppForeground(foreground) {
+      if (appForeground === foreground) return;
+      appForeground = foreground;
+      reconcileTaskSummarySubscriptions();
     },
 
     async selectDesktop(desktopId) {
@@ -2961,6 +3028,9 @@ export function createMobileController(
     },
 
     dispose() {
+      taskSummaryStoreUnsubscribe();
+      for (const subscription of taskSummarySubscriptions.values()) subscription.close();
+      taskSummarySubscriptions.clear();
       stopTaskSession();
       stopCloudTaskSubscription();
       if (backgroundRefreshTimer) {

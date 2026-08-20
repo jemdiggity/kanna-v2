@@ -1,5 +1,7 @@
 use crate::{
-    cloud_task_publisher::{map_ui_snapshot, PublisherState, PublisherStep},
+    cloud_task_publisher::{
+        map_ui_snapshot_for_publication, PublisherState, PublisherStep, RestingSnippetCache,
+    },
     commands,
     config::Config,
     daemon_client, db, http_api, relay_client, task_transfer_tunnel,
@@ -86,6 +88,7 @@ pub(crate) async fn run_relay_loop(
     http_state: Arc<http_api::AppState>,
 ) -> Result<(), String> {
     let mut publisher = PublisherState::new();
+    let mut resting_snippets = RestingSnippetCache::default();
     let mut mobile_notification_requests = http_state.take_mobile_notification_requests()?;
     let mut desktop_relay_requests = http_state.take_desktop_relay_requests()?;
     let mut next_mobile_notification_id = 1_u64;
@@ -141,11 +144,12 @@ pub(crate) async fn run_relay_loop(
                 }
                 _ = publication_interval.tick(), if publication_enabled => {
                     match db.ui_snapshot() {
-                        Ok(snapshot) => publisher.observe(map_ui_snapshot(
+                        Ok(snapshot) => publisher.observe(map_ui_snapshot_for_publication(
                             &config.desktop_id,
                             &config.desktop_name,
                             crate::agent_inventory::installed_agent_providers(),
                             snapshot,
+                            &mut resting_snippets,
                         )),
                         Err(error) => log::warn!("Failed to build cloud task snapshot: {error}"),
                     }

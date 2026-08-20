@@ -54,6 +54,18 @@ export interface TaskTerminalSubscription {
   resize?(cols: number, rows: number): void;
 }
 
+export interface TaskSummaryStreamEvent {
+  taskId: string;
+  snippet?: string;
+  activity: string;
+  runtimeState: string;
+  revision: number;
+}
+
+export interface TaskSummarySubscription {
+  close(): void;
+}
+
 export type TaskAgentStreamEvent =
   | { type: "snapshot"; taskId: string; events: FrameAgentEvent[]; nextSeq: number }
   | { type: "event"; taskId: string; seq: number; event: AgentEvent }
@@ -99,6 +111,10 @@ export interface TaskCompanionSubscription {
 }
 
 export interface KannaTransport {
+  observeDesktopTaskSummaries?(
+    desktopId: string,
+    listener: (event: TaskSummaryStreamEvent) => void
+  ): TaskSummarySubscription;
   getTaskRouteIdentity?(taskId: string): string;
   getStatus(): Promise<MobileServerStatus>;
   listDesktops(): Promise<DesktopSummary[]>;
@@ -160,6 +176,10 @@ export interface KannaTransport {
 }
 
 export interface KannaClient {
+  observeDesktopTaskSummaries?(
+    desktopId: string,
+    listener: (event: TaskSummaryStreamEvent) => void
+  ): TaskSummarySubscription;
   getTaskRouteIdentity?(taskId: string): string;
   getStatus(): Promise<MobileServerStatus>;
   listDesktops(): Promise<DesktopSummary[]>;
@@ -256,6 +276,12 @@ export class RepoNotRegisteredError extends TaskCreationError {
 
 export function createKannaClient(transport: KannaTransport): KannaClient {
   return {
+    ...(transport.observeDesktopTaskSummaries
+      ? {
+          observeDesktopTaskSummaries: (desktopId: string, listener: (event: TaskSummaryStreamEvent) => void) =>
+            transport.observeDesktopTaskSummaries?.(desktopId, listener) ?? { close() {} }
+        }
+      : {}),
     ...(transport.getTaskRouteIdentity
       ? {
           getTaskRouteIdentity: (taskId: string) =>

@@ -3,4 +3,4 @@
 /**
  * Which stream of a task to attach.
  */
-export type StreamKind = "agent" | "terminal" | "companion";
+export type StreamKind = "agent" | "terminal" | "companion" | "task_summary";

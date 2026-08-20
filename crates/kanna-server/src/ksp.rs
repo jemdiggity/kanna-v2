@@ -9,7 +9,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 #[cfg(test)]
 use std::sync::OnceLock;
 use std::sync::{Arc, Mutex, Weak};
@@ -683,7 +683,11 @@ fn auth_ok_frame() -> ServerFrame {
 }
 
 fn auth_ok_frame_for(companion_access: bool) -> ServerFrame {
-    let mut stream_kinds = vec![StreamKind::Agent, StreamKind::Terminal];
+    let mut stream_kinds = vec![
+        StreamKind::Agent,
+        StreamKind::Terminal,
+        StreamKind::TaskSummary,
+    ];
     if companion_access {
         stream_kinds.push(StreamKind::Companion);
     }
@@ -2968,6 +2972,21 @@ impl StreamConn {
             existing.task.abort();
             let _ = existing.task.await;
         }
+        if kind == StreamKind::TaskSummary {
+            let key = (task_id.clone(), kind);
+            let state = Arc::clone(&self.state);
+            let frame_tx = self.frame_tx.clone();
+            let task = tokio::spawn(stream_task_summaries(state, frame_tx));
+            self.attachments.insert(
+                key,
+                StreamAttachment {
+                    task,
+                    attachment_epoch: None,
+                    accepts_legacy_companion_events: false,
+                },
+            );
+            return;
+        }
         if kind == StreamKind::Companion {
             let Some(attachment_slot) = self.state.companion_resources.try_attachment() else {
                 self.send(ServerFrame::CompanionError {
@@ -3052,6 +3071,7 @@ impl StreamConn {
                 })
             }
             StreamKind::Companion => unreachable!("companion attach handled above"),
+            StreamKind::TaskSummary => unreachable!("task-summary attach handled above"),
         };
         self.attachments.insert(
             key,
@@ -3061,6 +3081,73 @@ impl StreamConn {
                 accepts_legacy_companion_events: false,
             },
         );
+    }
+}
+
+const TASK_SUMMARY_DEBOUNCE: Duration = Duration::from_millis(250);
+static TASK_SUMMARY_REVISION: AtomicU64 = AtomicU64::new(1);
+
+async fn stream_task_summaries(state: Arc<AppState>, frame_tx: mpsc::Sender<ServerFrame>) {
+    let mut changes = state.subscribe_state_changes();
+    let mut runtime_states = HashMap::<String, String>::new();
+    loop {
+        let db_path = state.config().db_path.clone();
+        let snapshot =
+            tokio::task::spawn_blocking(move || Db::open(&db_path).and_then(|db| db.ui_snapshot()))
+                .await;
+        if let Ok(Ok(snapshot)) = snapshot {
+            for entry in snapshot.entries {
+                for item in entry.items {
+                    let revision = TASK_SUMMARY_REVISION.fetch_add(1, Ordering::Relaxed);
+                    let runtime_state =
+                        runtime_states.get(&item.id).cloned().unwrap_or_else(|| {
+                            if item.closed_at.is_some() {
+                                "exited".into()
+                            } else if item.activity == "working" {
+                                "busy".into()
+                            } else {
+                                "idle".into()
+                            }
+                        });
+                    if frame_tx
+                        .send(ServerFrame::TaskSummary {
+                            task_id: item.id,
+                            snippet: item.last_output_preview,
+                            activity: item.activity,
+                            runtime_state,
+                            revision,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+        }
+
+        let first = match changes.recv().await {
+            Ok(frame) => frame,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+        };
+        if let ServerFrame::StatusChanged { task_id, status } = first {
+            runtime_states.insert(task_id, status);
+        }
+        let deadline = tokio::time::sleep(TASK_SUMMARY_DEBOUNCE);
+        tokio::pin!(deadline);
+        loop {
+            tokio::select! {
+                _ = &mut deadline => break,
+                change = changes.recv() => match change {
+                    Ok(ServerFrame::StatusChanged { task_id, status }) => {
+                        runtime_states.insert(task_id, status);
+                    }
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                }
+            }
+        }
     }
 }
 
@@ -10304,7 +10391,11 @@ mod tests {
         assert_eq!(
             outbound_rx.recv().await,
             Some(ServerFrame::AuthOk {
-                stream_kinds: vec![StreamKind::Agent, StreamKind::Terminal],
+                stream_kinds: vec![
+                    StreamKind::Agent,
+                    StreamKind::Terminal,
+                    StreamKind::TaskSummary,
+                ],
                 capabilities: vec![
                     KspCapability::CompanionAttachmentEpoch,
                     KspCapability::CompanionEventEpoch,
