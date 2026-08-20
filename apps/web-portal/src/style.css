@@ -1,0 +1,29 @@
+:root { font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; color: #18211d; background: #f2f5f1; font-synthesis: none; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; }
+a { color: #246b4b; }
+.site-header { height: 68px; padding: 0 max(24px, calc((100vw - 900px) / 2)); display: flex; align-items: center; justify-content: space-between; background: #fff; border-bottom: 1px solid #dce3dc; }
+.site-header nav { display: flex; gap: 20px; align-items: center; }
+.site-header a { text-decoration: none; }
+.brand { font-weight: 800; font-size: 22px; color: #18211d; letter-spacing: -.04em; }
+main { width: min(900px, calc(100% - 32px)); margin: 72px auto; }
+.card { background: #fff; border: 1px solid #dce3dc; border-radius: 18px; padding: clamp(28px, 5vw, 52px); box-shadow: 0 14px 45px rgba(34, 59, 45, .07); }
+.narrow { max-width: 540px; margin: 0 auto; }
+.plan { max-width: 660px; margin: 0 auto; }
+h1 { margin: 4px 0 14px; line-height: 1.1; letter-spacing: -.035em; font-size: clamp(32px, 6vw, 48px); }
+.eyebrow { margin: 0; color: #398261; font-weight: 750; text-transform: uppercase; letter-spacing: .1em; font-size: 12px; }
+.price { font-size: 26px; font-weight: 750; }
+form { display: grid; gap: 18px; margin-top: 28px; }
+label { display: grid; gap: 7px; font-weight: 650; }
+input { width: 100%; padding: 12px 14px; border: 1px solid #bdc9c0; border-radius: 9px; font: inherit; }
+input:focus { outline: 3px solid #cde9da; border-color: #398261; }
+button, .button { display: inline-block; border: 0; border-radius: 9px; padding: 12px 17px; background: #246b4b; color: #fff; font: inherit; font-weight: 700; text-decoration: none; cursor: pointer; }
+button:disabled { opacity: .55; cursor: wait; }
+.link-button { padding: 0; background: transparent; color: #246b4b; font-weight: 500; }
+.quiet { color: #657069; font-size: 14px; }
+.error { color: #a1262d; }
+.status-row { display: flex; justify-content: space-between; padding: 18px 0; margin: 24px 0; border-block: 1px solid #e4e9e5; }
+.status-row strong { text-transform: capitalize; }
+.active { color: #23714b; }
+.inactive { color: #7a625b; }
+@media (max-width: 540px) { main { margin-top: 32px; } .site-header nav { gap: 12px; } }

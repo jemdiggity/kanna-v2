@@ -294,6 +294,7 @@ describe("shared vitest timeouts", () => {
   const packageDirs = [
     "apps/desktop",
     "apps/mobile",
+    "apps/web-portal",
     "packages/core",
     "packages/db",
     "packages/stream-client",

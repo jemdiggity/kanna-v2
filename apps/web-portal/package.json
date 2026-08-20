@@ -1,0 +1,26 @@
+{
+  "name": "@kanna/web-portal",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "vue-tsc --noEmit && vite build",
+    "test": "vitest run",
+    "test:integration": "KANNA_RUN_WEB_PORTAL_EMULATOR_INTEGRATION=1 vitest run tests/emulator.integration.test.ts --maxWorkers=1",
+    "typecheck": "vue-tsc --noEmit"
+  },
+  "dependencies": {
+    "firebase": "^12.12.1",
+    "vue": "^3.5.13",
+    "vue-router": "^4.5.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "@vue/test-utils": "^2.4.10",
+    "happy-dom": "^20.8.9",
+    "typescript": "~5.6.2",
+    "vite": "^6.0.3",
+    "vitest": "^4.1.4",
+    "vue-tsc": "^2.1.10"
+  }
+}
