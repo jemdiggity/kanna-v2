@@ -1487,14 +1487,32 @@ export function createSessionStore(): SessionStore {
       if (state.taskTerminalTaskId !== taskId) {
         return;
       }
-      // The rendered buffer is still current: only the stream's own metadata
-      // and the connected status change.
+      const current = state.taskTerminalScrollback;
+      // `scrollbackLines` on a resume is the desktop's *full* retained history,
+      // the same number it reports on a fresh snapshot — the server has no idea
+      // how much of it this viewer already pulled. `remainingLines` is this
+      // viewer's walk cursor, so adopting the reported number would rewind the
+      // walk and re-pull rows the buffer already holds, splicing duplicates
+      // into the middle of the reader's scrollback. A resume means the buffer
+      // survived the reconnect, so the walk position survived with it: keep the
+      // cursor and the client limit, and only clear an in-flight request whose
+      // answer went down with the socket.
+      const resumedScrollback =
+        current && current.historyId === scrollback.historyId
+          ? { ...current, loading: false }
+          : // A different history means the server took a fresh base snapshot
+            // while this viewer was away. Its line indices do not address the
+            // rows already in the buffer, and its newest lines may be rows the
+            // buffer already renders, so neither cursor is usable: the walk
+            // stops until the next full snapshot re-anchors it (which also
+            // clears the pulled region). Nothing is dropped from the rendered
+            // buffer — the replayed delta keeps it correct.
+            null;
       state = {
         ...state,
         taskTerminalStatus: "live",
         taskTerminalErrorMessage: null,
-        taskTerminalScrollback:
-          scrollbackFromWindow(scrollback) ?? state.taskTerminalScrollback
+        taskTerminalScrollback: resumedScrollback
       };
       publish();
     },

@@ -7698,6 +7698,56 @@ describe("createMobileController", () => {
     expect(store.getState().taskTerminalStatus).toBe("live");
   });
 
+  it("resumes the scrollback walk where it left off, not where the desktop's history starts", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+    const requestScrollback =
+      client.__terminalStream.subscription.requestScrollback;
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    client.__terminalStream.emit({
+      type: "snapshot",
+      taskId: "task-1",
+      cols: 80,
+      rows: 24,
+      dataB64: "d2luZG93",
+      window: { streamId: 4, historyId: 11, scrollbackLines: 900 }
+    });
+
+    controller.requestTaskTerminalScrollback("task-1");
+    client.__terminalStream.emit({
+      type: "scrollback",
+      taskId: "task-1",
+      chunk: {
+        requestId: 1,
+        historyId: 11,
+        startLine: 700,
+        endLine: 900,
+        dataB64: "b2xkZXI=",
+        remainingLines: 700
+      }
+    });
+
+    // The link flaps. The desktop replays the delta and reports its full
+    // retained history again — it does not know what this viewer pulled.
+    client.__terminalStream.emit({
+      type: "resumed",
+      taskId: "task-1",
+      window: { streamId: 4, historyId: 11, scrollbackLines: 900 }
+    });
+
+    controller.requestTaskTerminalScrollback("task-1");
+    expect(requestScrollback).toHaveBeenLastCalledWith({
+      historyId: 11,
+      beforeLine: 700,
+      maxLines: 200
+    });
+    // Nothing was re-pulled above rows the buffer already holds.
+    expect(terminalText(store)).toBe("b2xkZXI=\nd2luZG93\n");
+  });
+
   it("forwards alt-screen terminal scroll bytes to the active terminal stream", async () => {
     const store = createSessionStore();
     const client = createClientMock();

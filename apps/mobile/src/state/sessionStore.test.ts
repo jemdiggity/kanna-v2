@@ -1300,6 +1300,94 @@ describe("createSessionStore", () => {
     expect(store.getState().taskTerminalStatus).toBe("live");
   });
 
+  it("keeps the scrollback walk cursor across a resume of the same history", () => {
+    // `scrollbackLines` on a resume is the desktop's full retained history, not
+    // what this viewer has left to pull. Adopting it would rewind the walk and
+    // re-pull rows the buffer already holds.
+    const store = createSessionStore();
+    store.beginTaskTerminal("task-1", "");
+    store.replaceTaskTerminalSnapshot("task-1", "d2luZG93", 132, 43, {
+      streamId: 3,
+      historyId: 9,
+      scrollbackLines: 400
+    });
+    store.prependTaskTerminalScrollback("task-1", {
+      requestId: 1,
+      historyId: 9,
+      startLine: 200,
+      endLine: 400,
+      dataB64: "b2xkZXI=",
+      remainingLines: 200
+    });
+    expect(store.getState().taskTerminalScrollback?.remainingLines).toBe(200);
+
+    store.resumeTaskTerminal("task-1", {
+      streamId: 3,
+      historyId: 9,
+      scrollbackLines: 400
+    });
+
+    expect(store.getState().taskTerminalScrollback).toEqual({
+      historyId: 9,
+      remainingLines: 200,
+      loading: false,
+      atClientLimit: false
+    });
+    expect(terminalText(store)).toBe("b2xkZXI=\nd2luZG93\n");
+  });
+
+  it("keeps the client limit across a resume of the same history", () => {
+    const store = createSessionStore();
+    store.beginTaskTerminal("task-1", "");
+    store.replaceTaskTerminalSnapshot("task-1", "d2luZG93", 132, 43, {
+      streamId: 3,
+      historyId: 9,
+      scrollbackLines: 400
+    });
+    store.markTaskTerminalScrollbackAtClientLimit("task-1");
+    expect(store.getState().taskTerminalScrollback?.atClientLimit).toBe(true);
+
+    store.resumeTaskTerminal("task-1", {
+      streamId: 3,
+      historyId: 9,
+      scrollbackLines: 400
+    });
+
+    // A viewer that had stopped at the client bound must not restart the walk
+    // and prepend duplicates until the refusal fires again.
+    expect(store.getState().taskTerminalScrollback?.atClientLimit).toBe(true);
+  });
+
+  it("stops the walk when a resume reports a history the viewer did not pull from", () => {
+    const store = createSessionStore();
+    store.beginTaskTerminal("task-1", "");
+    store.replaceTaskTerminalSnapshot("task-1", "d2luZG93", 132, 43, {
+      streamId: 3,
+      historyId: 9,
+      scrollbackLines: 400
+    });
+    store.prependTaskTerminalScrollback("task-1", {
+      requestId: 1,
+      historyId: 9,
+      startLine: 200,
+      endLine: 400,
+      dataB64: "b2xkZXI=",
+      remainingLines: 200
+    });
+
+    // The desktop took a fresh base while this viewer was away: its line
+    // indices do not address the rows already loaded here.
+    store.resumeTaskTerminal("task-1", {
+      streamId: 3,
+      historyId: 10,
+      scrollbackLines: 900
+    });
+
+    expect(store.getState().taskTerminalScrollback).toBeNull();
+    // The rendered buffer is untouched — the replayed delta keeps it correct.
+    expect(terminalText(store)).toBe("b2xkZXI=\nd2luZG93\n");
+  });
+
   it("evicts only whole oldest live frames while retaining the snapshot", () => {
     const store = createSessionStore();
     store.beginTaskTerminal("task-1", "");
