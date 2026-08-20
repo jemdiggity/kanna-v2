@@ -130,6 +130,16 @@ pub(crate) fn test_state_with_daemon_dir(
     daemon_dir: &str,
     seed: impl FnOnce(&Db),
 ) -> Arc<AppState> {
+    test_state_with_daemon_dir_and_debounce(desktop_id, desktop_name, daemon_dir, 300, seed)
+}
+
+pub(crate) fn test_state_with_daemon_dir_and_debounce(
+    desktop_id: &str,
+    desktop_name: &str,
+    daemon_dir: &str,
+    activity_event_debounce_seconds: u64,
+    seed: impl FnOnce(&Db),
+) -> Arc<AppState> {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static NEXT_TEST_DB_ID: AtomicUsize = AtomicUsize::new(9_000);
@@ -151,7 +161,7 @@ pub(crate) fn test_state_with_daemon_dir(
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
-        activity_event_debounce_seconds: 300,
+        activity_event_debounce_seconds,
         pairing_store_path: format!("/tmp/kanna-pairings-daemon-{desktop_id}-{test_db_id}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).expect("open test db");

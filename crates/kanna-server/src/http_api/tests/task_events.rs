@@ -14,6 +14,8 @@ use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixListener;
 
 fn seed_orchestration(db: &Db) {
     db.insert_test_repo("repo-events", "Events Repo")
@@ -670,6 +672,217 @@ async fn local_surface_aggregates_peer_repo_events_and_resumes_after_reconnect()
     );
 
     relay.abort();
+}
+
+/// Stage start is itself the authoritative stopped→working write. The daemon's
+/// first Busy reconciliation is consequently a no-op, but must not erase the
+/// debounce armed by the lifecycle write. Exercise that full path through the
+/// daemon socket, the real debounce loop, and the ks1 aggregate HTTP feed.
+#[tokio::test]
+async fn stage_start_emits_one_settled_working_edge_and_suppresses_a_resume_flicker() {
+    use kanna_daemon::protocol::{
+        Command as DaemonCommand, Event as DaemonEvent, SessionInfo, SessionState, SessionStatus,
+    };
+
+    const REMOTE_HASH: &str = "sha256:stage-start-activity-events";
+    let unique = format!(
+        "task-event-stage-start-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time before epoch")
+            .as_nanos()
+    );
+    let daemon_dir = std::env::temp_dir().join(&unique);
+    std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+    let socket_path = kanna_runtime_defaults::socket_path(&daemon_dir);
+    let listener = UnixListener::bind(&socket_path).expect("bind daemon socket");
+
+    let source = test_state_with_seed("desktop-start-source", "Start Source", |db| {
+        db.insert_test_repo("repo-start-source", "Start Source Repo")
+            .expect("insert source repo");
+        db.patch_repo(
+            "repo-start-source",
+            None,
+            None,
+            Some(Some(REMOTE_HASH)),
+            None,
+        )
+        .expect("set source remote hash");
+    });
+    let peer = crate::http_api::test_state_with_daemon_dir_and_debounce(
+        "desktop-start-peer",
+        "Start Peer",
+        daemon_dir.to_str().expect("daemon path utf8"),
+        1,
+        |db| {
+            db.insert_test_repo("repo-start-peer", "Start Peer Repo")
+                .expect("insert peer repo");
+            db.patch_repo("repo-start-peer", None, None, Some(Some(REMOTE_HASH)), None)
+                .expect("set peer remote hash");
+            for task_id in ["settled-start", "flicker-start"] {
+                db.insert_test_pipeline_item(
+                    task_id,
+                    "repo-start-peer",
+                    "start stopped task",
+                    Some(task_id),
+                    "in progress",
+                    "2026-08-21 00:00:00",
+                )
+                .expect("insert peer task");
+                start_run(db, &format!("run-{task_id}"), task_id, "in progress");
+            }
+        },
+    );
+    let relay =
+        connect_test_relay_peer(&source, Arc::clone(&peer), Arc::new(AtomicBool::new(true)));
+    let source_router = router(Arc::clone(&source));
+
+    // Drain creation/run events and retain a ks1 cursor immediately before the
+    // lifecycle transitions under test.
+    let initial = get_account_json_body(
+        &source_router,
+        &source,
+        "/v1/task-events?repoId=repo-start-source&timeoutSecs=1",
+    )
+    .await;
+    assert!(cursor_of(&initial).starts_with("ks1."));
+
+    let debounce = tokio::spawn(crate::terminal_watcher::activity_event_debounce_loop(
+        Arc::clone(&peer),
+    ));
+    {
+        let db = Db::open(&peer.config().db_path).expect("open peer db");
+        for task_id in ["settled-start", "flicker-start"] {
+            db.update_pipeline_item_base_ref_and_activity(task_id, Some("origin/main"), "working")
+                .expect("start stopped task");
+        }
+    }
+
+    let daemon = tokio::spawn(async move {
+        let (subscriber, _) = listener.accept().await.expect("accept subscription");
+        let (subscriber_read, mut subscriber_write) = subscriber.into_split();
+        let mut subscriber_reader = BufReader::new(subscriber_read);
+        let mut line = String::new();
+        subscriber_reader
+            .read_line(&mut line)
+            .await
+            .expect("read subscribe");
+        assert!(matches!(
+            serde_json::from_str::<DaemonCommand>(line.trim()).expect("decode subscribe"),
+            DaemonCommand::Subscribe
+        ));
+        subscriber_write
+            .write_all(format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap()).as_bytes())
+            .await
+            .expect("ack subscribe");
+
+        let (control, _) = listener.accept().await.expect("accept list");
+        let (control_read, mut control_write) = control.into_split();
+        let mut control_reader = BufReader::new(control_read);
+        line.clear();
+        control_reader
+            .read_line(&mut line)
+            .await
+            .expect("read list");
+        assert!(matches!(
+            serde_json::from_str::<DaemonCommand>(line.trim()).expect("decode list"),
+            DaemonCommand::List
+        ));
+        let sessions = ["settled-start", "flicker-start"]
+            .into_iter()
+            .map(|task_id| SessionInfo {
+                session_id: task_id.to_string(),
+                pid: 42,
+                cwd: "/tmp".to_string(),
+                state: SessionState::Active,
+                idle_seconds: 0,
+                status: SessionStatus::Busy,
+                kind: Default::default(),
+                logical_input_blocked: false,
+                composer_text: None,
+                composer_attestation: Default::default(),
+            })
+            .collect();
+        control_write
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&DaemonEvent::SessionList { sessions }).unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("write session list");
+        subscriber_write
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&DaemonEvent::ShuttingDown).unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("stop watcher");
+    });
+    crate::terminal_watcher::terminal_state_watcher_once(
+        &peer,
+        &crate::session_replacements::SessionReplacements::default(),
+    )
+    .await
+    .expect("watch daemon state");
+    daemon.await.expect("daemon task");
+
+    // This start/resume did not survive the configured debounce. Returning to
+    // the published idle baseline must clear it without an event.
+    Db::open(&peer.config().db_path)
+        .expect("open peer db")
+        .update_pipeline_item_activity("flicker-start", "idle")
+        .expect("stop flickering start");
+
+    let settled = get_account_json_body(
+        &source_router,
+        &source,
+        &format!(
+            "/v1/task-events?repoId=repo-start-source&cursor={}&timeoutSecs=5",
+            cursor_of(&initial)
+        ),
+    )
+    .await;
+    assert_eq!(
+        event_pairs(&settled),
+        vec![(
+            "settled-start".to_string(),
+            "task.activity_changed".to_string()
+        )]
+    );
+    assert_eq!(settled["events"][0]["machineId"], "desktop-start-peer");
+    assert_eq!(
+        settled["events"][0]["payload"],
+        json!({
+            "previousActivity": "idle",
+            "activity": "working",
+            "runtimeState": "busy",
+            "latestRunFinishedWithoutCompletion": false,
+        })
+    );
+
+    let drained = get_account_json_body(
+        &source_router,
+        &source,
+        &format!(
+            "/v1/task-events?repoId=repo-start-source&cursor={}&timeoutSecs=2",
+            cursor_of(&settled)
+        ),
+    )
+    .await;
+    assert_eq!(drained["waitOutcome"], "timeout");
+    assert!(event_pairs(&drained).is_empty());
+
+    debounce.abort();
+    relay.abort();
+    let _ = std::fs::remove_file(socket_path);
+    let _ = std::fs::remove_dir_all(daemon_dir);
 }
 
 #[tokio::test]

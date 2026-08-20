@@ -2181,6 +2181,38 @@ fn every_server_activity_write_advances_the_activity_revision() {
             .activity_revision,
         1
     );
+    let (baseline, pending): (Option<String>, Option<String>) = db
+        .conn
+        .query_row(
+            "SELECT activity_event_baseline, activity_event_pending_at
+             FROM pipeline_item WHERE id = 'task-1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(baseline.as_deref(), Some("idle"));
+    assert!(pending.is_some());
+
+    db.flush_debounced_activity_events(0).unwrap();
+    db.update_pipeline_item_base_ref_and_activity("task-1", Some("origin/main"), "working")
+        .unwrap();
+    let (revision, pending): (i64, Option<String>) = db
+        .conn
+        .query_row(
+            "SELECT activity_revision, activity_event_pending_at
+             FROM pipeline_item WHERE id = 'task-1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        revision, 1,
+        "an unchanged combined write is an activity no-op"
+    );
+    assert!(
+        pending.is_none(),
+        "an unchanged combined write must not re-arm"
+    );
 
     db.update_pipeline_item_base_ref_and_activity("task-1", Some("origin/main"), "unread")
         .unwrap();

@@ -1,4 +1,4 @@
-use super::Db;
+use super::{pipeline_items::update_open_pipeline_item_activity, Db};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use std::collections::HashSet;
 use std::fmt;
@@ -131,16 +131,7 @@ impl Db {
                 (&task_id, blocker_id),
             )?;
         }
-        transaction.execute(
-            "UPDATE pipeline_item
-             SET activity = 'idle', activity_changed_at = datetime('now'),
-                 activity_revision = activity_revision + 1,
-                 activity_event_baseline = COALESCE(activity_event_baseline, activity),
-                 activity_event_pending_at = datetime('now'),
-                 updated_at = datetime('now')
-             WHERE id = ? AND activity != 'idle' AND closed_at IS NULL",
-            [&task_id],
-        )?;
+        update_open_pipeline_item_activity(&transaction, &task_id, "idle", None, None)?;
         transaction.commit()?;
         Ok(task_id)
     }
