@@ -712,6 +712,16 @@ fn daemon_log_contents(daemon: &DaemonHandle) -> String {
         .join("\n")
 }
 
+/// How long a bare [`ClientConn::recv`] waits for the next daemon event.
+///
+/// `recv` panics when this expires, so it is a liveness ceiling, not a budget:
+/// no test can pass *because* it fired. A test that wants a bounded "nothing
+/// arrived" check uses `recv_with_timeout` or `assert_no_event_within`, which
+/// set their own timeout and restore this one afterwards. The former 5s value
+/// was tight enough to fail a correct run on a box carrying several
+/// worktrees' suites, which is the whole failure class this branch removes.
+const CLIENT_EVENT_WAIT: Duration = Duration::from_secs(60);
+
 struct ClientConn {
     reader: BufReader<UnixStream>,
     writer: UnixStream,
@@ -737,9 +747,7 @@ impl ClientConn {
 
     fn connect(socket_path: &Path) -> Self {
         let stream = UnixStream::connect(socket_path).expect("failed to connect to daemon");
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
+        stream.set_read_timeout(Some(CLIENT_EVENT_WAIT)).unwrap();
         ClientConn {
             reader: BufReader::new(stream.try_clone().unwrap()),
             writer: stream,
@@ -783,7 +791,7 @@ impl ClientConn {
 
         self.reader
             .get_mut()
-            .set_read_timeout(Some(Duration::from_secs(5)))
+            .set_read_timeout(Some(CLIENT_EVENT_WAIT))
             .map_err(|error| format!("failed to restore read timeout: {error}"))?;
         result
     }
@@ -799,7 +807,7 @@ impl ClientConn {
 
         self.reader
             .get_mut()
-            .set_read_timeout(Some(Duration::from_secs(5)))
+            .set_read_timeout(Some(CLIENT_EVENT_WAIT))
             .expect("failed to restore read timeout");
 
         match result {
@@ -1353,17 +1361,12 @@ fn authenticated_server_declassifies_a_legacy_session_for_ordinary_input() {
             other => panic!("expected ordinary input acknowledgement, got {other:?}"),
         }
     }
-    conn.send(&Cmd::Snapshot {
-        session_id: session_id.to_string(),
-    });
-    let snapshot = loop {
-        match conn.recv() {
-            Evt::Snapshot { snapshot, .. } => break snapshot,
-            Evt::Output { .. } | Evt::StatusChanged { .. } => continue,
-            other => panic!("expected ordinary session snapshot, got {other:?}"),
-        }
-    };
-    assert!(snapshot.vt.contains("ordinary policy request"));
+    // The `Evt::Ok` above is a write acknowledgement, not a render: `/bin/cat`
+    // still has to echo the bytes back through the PTY and the daemon still has
+    // to feed them to the vt parser. Asserting on one snapshot taken right
+    // after the ack raced that under load; poll until the text lands, the way
+    // the sibling declassification tests already do.
+    wait_for_snapshot(&mut conn, session_id, "ordinary policy request");
 }
 
 #[test]
@@ -2101,19 +2104,29 @@ fn cleanup_atomic_attach_dir(dir: &Path) {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Polls snapshots until `needle` appears in the rendered screen.
+///
+/// This is a liveness wait, not a latency budget: a write acknowledgement is
+/// not a render, and the text this waits for either arrives or never does. The
+/// ceiling therefore only has to be finite and far enough above scheduler
+/// noise that a box running several worktrees' suites cannot trip it — the
+/// former bound of 50 polls at 50ms was a 2.5s absolute deadline, tight enough
+/// to fail a correct run under load.
 fn wait_for_snapshot(conn: &mut ClientConn, session_id: &str, needle: &str) -> SnapshotPayload {
-    for _ in 0..50 {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
         let snapshot = request_snapshot(conn, session_id);
         if snapshot.vt.contains(needle) {
             return snapshot;
         }
+        assert!(
+            Instant::now() < deadline,
+            "snapshot for session {:?} never contained {:?}",
+            session_id,
+            needle
+        );
         std::thread::sleep(Duration::from_millis(50));
     }
-
-    panic!(
-        "snapshot for session {:?} never contained {:?}",
-        session_id, needle
-    );
 }
 
 fn send_input(conn: &mut ClientConn, session_id: &str, data: &[u8]) {

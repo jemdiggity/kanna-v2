@@ -91,7 +91,6 @@ it("keeps the main thread schedulable for a real-worker maximum bundle", async (
         );
       }),
     ]);
-    const totalDecodeMs = performance.now() - callStarted;
     expect(frame).toMatchObject({
       type: "companion_snapshot",
       task_id: "task-max-worker",
@@ -99,13 +98,20 @@ it("keeps the main thread schedulable for a real-worker maximum bundle", async (
       html: expect.stringMatching(/^x+$/),
     });
     // The claim is that `decodeChunks` hands the bundle off instead of parsing
-    // it on the caller's thread, and that is a ratio, not a duration: a
-    // main-thread parse costs the whole decode, so the synchronous call must be
-    // a small fraction of it. Load stretches both numbers together, which is
-    // why the shared-box flake this replaces cannot come back.
-    expect(callLatencyMs).toBeLessThan(totalDecodeMs / 4);
+    // it on the caller's thread. `ticks` below is the direct statement of that
+    // — work completed on the main thread while the decode ran — and this is
+    // an order-of-magnitude backstop on the synchronous call itself: parsing a
+    // 16 MiB bundle inline costs seconds, spawning the worker and transferring
+    // the chunks costs tens of milliseconds.
+    //
+    // Deliberately not a ratio against the total decode. The two do not scale
+    // together: worker startup dominates the synchronous side and is unrelated
+    // to how long the async decode takes, so under load the numerator grew
+    // while the denominator did not and a correct run failed at 66ms vs 55ms.
+    expect(callLatencyMs).toBeLessThan(2_500);
     // The main thread kept running its 1ms heartbeat throughout — work
-    // completed rather than time elapsed.
+    // completed rather than time elapsed, which is the load-immune form of
+    // "stayed schedulable".
     expect(ticks).toBeGreaterThan(10);
     // Order-of-magnitude only: a main-thread parse of a 16 MiB bundle blocks
     // for seconds, so this ceiling sits roughly 10x above the healthy gap while

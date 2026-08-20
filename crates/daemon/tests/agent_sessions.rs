@@ -368,6 +368,36 @@ fn is_session_ended(event: &AgentEvent) -> bool {
     matches!(event, AgentEvent::SessionEnded { .. })
 }
 
+/// Waits until the daemon has observed the child's EOF and reaped it.
+///
+/// A fixed sleep used to stand in for this. That is a wall-clock guess at a
+/// state transition, and on a box running several worktrees' suites the guess
+/// was short: the next `AgentInput` arrived while the daemon still considered
+/// the session live, so it never took the respawn path the test asserts on.
+/// `SessionState::Exited` is the transition itself, so poll for it. The
+/// ceiling is a liveness bound — the session either exits or never does.
+fn wait_for_session_exit(conn: &mut ClientConn, session_id: &str) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        conn.send(&Command::List);
+        if let Event::SessionList { sessions } =
+            conn.recv_until(|e| matches!(e, Event::SessionList { .. }))
+        {
+            let exited = sessions.iter().any(|session| {
+                session.session_id == session_id && matches!(session.state, SessionState::Exited(_))
+            });
+            if exited {
+                return;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "agent session {session_id:?} never reached SessionState::Exited"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn is_turn_completed(event: &AgentEvent) -> bool {
     matches!(event, AgentEvent::TurnCompleted { .. })
 }
@@ -592,8 +622,7 @@ fn input_after_exit_resumes_via_respawn() {
             seen.push(event);
         }
     }
-    // Give the daemon a moment to observe EOF and reap the child.
-    std::thread::sleep(Duration::from_millis(500));
+    wait_for_session_exit(&mut conn, "agent-r");
 
     // Input after exit must respawn (the fake ignores --resume args but the
     // daemon path is identical to the real one).
@@ -628,7 +657,7 @@ fn input_after_handoff_uses_persisted_provider_session_id() {
     });
     conn.recv_until(|e| matches!(e, Event::AgentSnapshot { .. }));
     conn.collect_agent_events_until(is_turn_completed);
-    std::thread::sleep(Duration::from_millis(500));
+    wait_for_session_exit(&mut conn, "agent-rp");
 
     let new_daemon = DaemonHandle::start_in(&dir);
     drop(conn);
@@ -1109,8 +1138,9 @@ fn kill_during_resumed_turn_terminates_the_resumed_child() {
     });
     conn.recv_until(|e| matches!(e, Event::AgentSnapshot { .. }));
     conn.collect_agent_events_until(is_turn_completed);
-    // Let the daemon observe EOF so the next input takes the resume path.
-    std::thread::sleep(Duration::from_millis(500));
+    // The next input must take the resume path, which requires the daemon to
+    // have observed EOF first.
+    wait_for_session_exit(&mut conn, "agent-slow");
 
     conn.send(&Command::AgentInput {
         session_id: "agent-slow".to_string(),

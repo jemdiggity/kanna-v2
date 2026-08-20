@@ -303,8 +303,11 @@ async fn stalled_mark_read_does_not_monopolize_sidecar_control() {
     );
     assert_eq!(peer_event_rx.recv().await.as_deref(), Some("input:second"));
 
+    // The 2000ms lower-layer deadline asserted below is the one under test;
+    // this outer wait only has to outlast it by enough that load cannot fire
+    // it first.
     let mark = response_rx
-        .recv_timeout(Duration::from_secs(3))
+        .recv_timeout(CONTROL_RESPONSE_WAIT)
         .expect("mark-read did not finish at its lower-layer deadline");
     assert_eq!(control_response_id(&mark), "mark");
     assert!(
@@ -404,7 +407,10 @@ async fn sidecar_fails_closed_in_both_shipped_v4_terminal_input_directions() {
     });
     let mut sidecar = SidecarProcess { child, stdin };
 
-    let primary_entry = tokio::time::timeout(Duration::from_secs(2), async {
+    // Liveness: a freshly spawned sidecar either advertises its listener or
+    // never does. Two seconds was a wall-clock guess at how long spawning a
+    // binary and writing a registry entry takes on an idle box.
+    let primary_entry = tokio::time::timeout(CONTROL_RESPONSE_WAIT, async {
         loop {
             if let Some(entry) = registry
                 .list_peers("")
@@ -436,7 +442,7 @@ async fn sidecar_fails_closed_in_both_shipped_v4_terminal_input_directions() {
             },
         );
         let response = response_rx
-            .recv_timeout(Duration::from_secs(1))
+            .recv_timeout(CONTROL_RESPONSE_WAIT)
             .unwrap_or_else(|error| panic!("no control response for {request_id}: {error}"));
         assert!(
             matches!(
