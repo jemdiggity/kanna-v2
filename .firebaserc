@@ -3,5 +3,13 @@
     "default": "kanna-local",
     "staging": "kanna-staging",
     "production": "kanna-build"
+  },
+  "targets": {
+    "kanna-staging": {
+      "hosting": { "account": ["kanna-staging-account"] }
+    },
+    "kanna-build": {
+      "hosting": { "account": ["kanna-build-account"] }
+    }
   }
 }

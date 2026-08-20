@@ -66,6 +66,34 @@ export interface RelayDeployPlan {
   commands: RelayCommandPlanStep[];
 }
 
+const WEB_PORTAL_CONFIG_KEYS = [
+  "FIREBASE_API_KEY",
+  "FIREBASE_APP_ID",
+  "STRIPE_PUBLISHABLE_KEY"
+] as const;
+
+export function resolveWebPortalBuildEnvironment(
+  env: NodeJS.ProcessEnv,
+  projectId: string
+): NodeJS.ProcessEnv {
+  const buildEnv: NodeJS.ProcessEnv = {
+    ...env,
+    VITE_FIREBASE_PROJECT_ID: projectId,
+    VITE_FIREBASE_AUTH_DOMAIN: env.KANNA_WEB_PORTAL_FIREBASE_AUTH_DOMAIN?.trim() || `${projectId}.firebaseapp.com`,
+    VITE_FIREBASE_FUNCTIONS_REGION: env.KANNA_WEB_PORTAL_FIREBASE_FUNCTIONS_REGION?.trim() || "us-central1",
+    VITE_FIREBASE_USE_EMULATORS: "false",
+    VITE_KANNA_CLOUD_PRICE: env.KANNA_WEB_PORTAL_CLOUD_PRICE?.trim() || "$10/month"
+  };
+  for (const key of WEB_PORTAL_CONFIG_KEYS) {
+    const source = `KANNA_WEB_PORTAL_${key}`;
+    const destination = `VITE_${key}`;
+    const value = env[source]?.trim();
+    if (!value) throw new Error(`cloud deploy requires ${source} to build the account portal.`);
+    buildEnv[destination] = value;
+  }
+  return buildEnv;
+}
+
 function assertCloudDeployEnvironment(environment: unknown): asserts environment is CloudDeployEnvironment {
   if (environment !== "staging" && environment !== "production") {
     throw new Error("cloud deploy requires staging or production");
@@ -126,6 +154,13 @@ export async function deployFirebaseCloud(input: CloudDeployInput & { relay?: bo
   if (build.exitCode !== 0) {
     throw new Error(build.stderr || build.stdout || "Firebase functions build failed.");
   }
+  const portalBuild = await input.runner.run("pnpm", ["--dir", "apps/web-portal", "build"], {
+    cwd: input.repoRoot,
+    env: resolveWebPortalBuildEnvironment(input.env, projectId)
+  });
+  if (portalBuild.exitCode !== 0) {
+    throw new Error(portalBuild.stderr || portalBuild.stdout || "Web account portal build failed.");
+  }
 
   const deploy = await input.runner.run(
     "pnpm",
@@ -134,7 +169,7 @@ export async function deployFirebaseCloud(input: CloudDeployInput & { relay?: bo
       "firebase",
       "deploy",
       "--only",
-      "functions,firestore:rules,firestore:indexes",
+      "functions,firestore:rules,firestore:indexes,hosting:account",
       "--project",
       projectId,
       "--force"

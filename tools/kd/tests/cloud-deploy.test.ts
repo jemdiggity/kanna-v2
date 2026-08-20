@@ -9,13 +9,19 @@ import {
   deployRelayCloud,
   deployFirebaseCloud,
   resolveFirebaseProject,
-  resolveProductionFirebaseProject
+  resolveProductionFirebaseProject,
+  resolveWebPortalBuildEnvironment
 } from "../src/runtime/cloud-deploy";
 import type { CommandRunner } from "../src/runtime/process";
 
 const HEAD_COMMIT = "1f2e3d4c5b6a79880123456789abcdef01234567";
 const SHORT_COMMIT = HEAD_COMMIT.slice(0, 12);
 const SOURCE = { ref: "release/0.2", commit: HEAD_COMMIT, shortCommit: SHORT_COMMIT };
+const PORTAL_ENV = {
+  KANNA_WEB_PORTAL_FIREBASE_API_KEY: "web-api-key",
+  KANNA_WEB_PORTAL_FIREBASE_APP_ID: "web-app-id",
+  KANNA_WEB_PORTAL_STRIPE_PUBLISHABLE_KEY: "pk_test_kanna"
+};
 
 /** Answers the git probes `resolveSourceRef` makes before a deploy touches anything. */
 function gitSourceResult(
@@ -97,6 +103,28 @@ describe("cloud deploy runtime", () => {
     }
   });
 
+  it("builds the portal with environment-scoped public Firebase and Stripe configuration", () => {
+    const buildEnv = resolveWebPortalBuildEnvironment({
+      ...PORTAL_ENV,
+      KANNA_WEB_PORTAL_CLOUD_PRICE: "$12/month"
+    }, "kanna-staging");
+
+    expect(buildEnv).toMatchObject({
+      VITE_FIREBASE_API_KEY: "web-api-key",
+      VITE_FIREBASE_APP_ID: "web-app-id",
+      VITE_FIREBASE_PROJECT_ID: "kanna-staging",
+      VITE_FIREBASE_AUTH_DOMAIN: "kanna-staging.firebaseapp.com",
+      VITE_FIREBASE_FUNCTIONS_REGION: "us-central1",
+      VITE_STRIPE_PUBLISHABLE_KEY: "pk_test_kanna",
+      VITE_KANNA_CLOUD_PRICE: "$12/month"
+    });
+  });
+
+  it("refuses to build a deploy with missing portal configuration", () => {
+    expect(() => resolveWebPortalBuildEnvironment({}, "kanna-staging"))
+      .toThrow("cloud deploy requires KANNA_WEB_PORTAL_FIREBASE_API_KEY");
+  });
+
   it("refuses cloud deploys without an explicit environment", async () => {
     const runner: CommandRunner = {
       async run() {
@@ -134,7 +162,7 @@ describe("cloud deploy runtime", () => {
     try {
       const result = await deployFirebaseCloud({
         repoRoot,
-        env: { KANNA_FIREBASE_PRODUCTION_PROJECT: "prod-project" },
+        env: { KANNA_FIREBASE_PRODUCTION_PROJECT: "prod-project", ...PORTAL_ENV },
         runner,
         environment: "production",
         ref: "release/0.2"
@@ -164,12 +192,17 @@ describe("cloud deploy runtime", () => {
         },
         {
           command: "pnpm",
+          args: ["--dir", "apps/web-portal", "build"],
+          cwd: repoRoot
+        },
+        {
+          command: "pnpm",
           args: [
             "exec",
             "firebase",
             "deploy",
             "--only",
-            "functions,firestore:rules,firestore:indexes",
+            "functions,firestore:rules,firestore:indexes,hosting:account",
             "--project",
             "prod-project",
             "--force"
@@ -612,7 +645,7 @@ describe("cloud deploy runtime", () => {
 
     const result = await deployFirebaseCloud({
       repoRoot: "/repo",
-      env: { KANNA_FIREBASE_STAGING_PROJECT: "kanna-staging" },
+      env: { KANNA_FIREBASE_STAGING_PROJECT: "kanna-staging", ...PORTAL_ENV },
       runner,
       environment: "staging",
       relay: true
