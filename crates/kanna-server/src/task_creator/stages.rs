@@ -495,6 +495,64 @@ pub(crate) fn previous_main_stage_result(
         .map_err(|e| format!("db error: {}", e))
 }
 
+/// The feedback a revision actually runs on.
+///
+/// A revision whose reviewer-feedback section is empty is worse than no
+/// revision: the agent has nothing to act on, the round is spent anyway, and
+/// the verdict that triggered it is lost — so a request that carries no
+/// feedback falls back to the verdict recorded on the task's terminating run
+/// (its `feedback`, then its result `summary`), which is where a review's
+/// findings are already durable. A revision with nothing to act on anywhere is
+/// refused rather than started; the caller hands its claimed round back.
+///
+/// The agent-origin path is refused earlier, at the API boundary, so it can be
+/// told to resend its findings. This is the backstop for every other caller.
+fn resolve_revision_feedback(
+    db: &Db,
+    source_task_id: &str,
+    requested: &str,
+) -> Result<String, String> {
+    if !requested.trim().is_empty() {
+        return Ok(requested.to_string());
+    }
+    // The terminating run is the task's latest: a revision request closes the
+    // review run before preparing the revision.
+    let run = db
+        .latest_stage_run(source_task_id)
+        .map_err(|error| format!("db error: {error}"))?;
+    let recorded = run.as_ref().and_then(|run| {
+        run.feedback
+            .as_deref()
+            .filter(|feedback| !feedback.trim().is_empty())
+            .map(str::to_string)
+            .or_else(|| stage_run_result_summary(run.result.as_deref()))
+    });
+    match recorded {
+        Some(feedback) => {
+            log::warn!(
+                "revision for task {source_task_id} carried no feedback; \
+                 falling back to the terminating run's recorded verdict"
+            );
+            Ok(feedback)
+        }
+        None => Err(format!(
+            "revision requires reviewer feedback: the request carried none and task \
+             {source_task_id}'s terminating run recorded no verdict to fall back on"
+        )),
+    }
+}
+
+/// The `summary` of a stage run's `{status, summary, metadata}` result JSON,
+/// when it has one worth reading.
+fn stage_run_result_summary(result: Option<&str>) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(result?)
+        .ok()?
+        .get("summary")?
+        .as_str()
+        .filter(|summary| !summary.trim().is_empty())
+        .map(str::to_string)
+}
+
 pub(crate) fn prepare_revision_task_for_api(
     db: &Db,
     config: &Config,
@@ -507,6 +565,11 @@ pub(crate) fn prepare_revision_task_for_api(
     if identity.source_task.closed_at.is_some() {
         return Err(format!("task is closed: {}", source_task_id));
     }
+    // Whatever the request carried, the agent must be started on real
+    // feedback — an empty "Reviewer feedback:" section spends a budgeted
+    // round on nothing and silently loses the verdict that triggered it.
+    let revision_feedback = resolve_revision_feedback(db, source_task_id, revision_prompt)?;
+    let revision_prompt = revision_feedback.as_str();
     let loaded = load_stage_transition_source(identity, source_task_id)?;
     let context = StageTransitionContext {
         source_task: &loaded.source_task,

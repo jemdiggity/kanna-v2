@@ -1057,3 +1057,172 @@ fn revision_prompt_announces_the_round_and_holds_scope() {
     assert!(resumed.contains("Revision round 3 of 3"));
     assert!(resumed.contains("final automatic revision round"));
 }
+
+/// A revision whose reviewer-feedback section is empty is worse than no
+/// revision: the agent has nothing to act on, the budgeted round is spent
+/// anyway, and the verdict that triggered it is lost. A request that carries
+/// no feedback therefore falls back to the verdict already recorded on the
+/// terminating run — its `feedback` column, then its result `summary`.
+#[test]
+fn revision_without_request_feedback_falls_back_to_the_terminating_run_verdict() {
+    let repo_root = init_git_repo("revision-empty-feedback-fallback");
+    std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/agents/implement")).unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/workflows/qa.json"),
+        r#"{
+  "stages": [
+    { "name": "in progress", "policy": { "transition": "manual", "revision_transition": "auto" }, "agent": "implement", "prompt": "$TASK_PROMPT" },
+    { "name": "review", "transition": "manual" }
+  ]
+}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/agents/implement/AGENT.md"),
+        "---\nname: implement\ndescription: Implements requested revisions\nagent_provider: claude\n---\nImplement revision:\n$TASK_PROMPT",
+    )
+    .unwrap();
+    publish_origin_main(&repo_root, "publish empty-feedback fallback definitions");
+    for branch in ["task-feedback-column", "task-result-summary"] {
+        assert!(Command::new("git")
+            .args(["branch", branch])
+            .current_dir(&repo_root)
+            .status()
+            .unwrap()
+            .success());
+    }
+
+    let config = test_config("revision-empty-feedback-fallback");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    for (task_id, branch) in [
+        ("feedback-task", "task-feedback-column"),
+        ("summary-task", "task-result-summary"),
+    ] {
+        db.insert_test_pipeline_item(
+            task_id,
+            "repo-1",
+            "Original implementation prompt",
+            Some("Original task"),
+            "review",
+            "2026-08-20 09:00:00",
+        )
+        .unwrap();
+        db.update_test_pipeline_item_stage_context(task_id, branch, "qa", None, "claude")
+            .unwrap();
+    }
+    // The review run a `request_revision` has just closed: the verdict is on
+    // the `feedback` column.
+    db.insert_stage_run(NewStageRun {
+        id: "run-feedback-column",
+        task_id: "feedback-task",
+        stage: "review",
+        kind: "main",
+        agent: None,
+        agent_provider: None,
+        model: None,
+        effort: None,
+        status: "failed",
+        result: Some("{\"status\":\"failure\",\"summary\":\"headline only\"}"),
+        feedback: Some(
+            "Bare-pid daemon killing is still unsafe; gate it on the recorded start time.",
+        ),
+        session_id: Some("daemon-review"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    // A review that recorded its verdict through `complete_stage` before
+    // asking for the revision: only the result summary survives.
+    db.insert_stage_run(NewStageRun {
+        id: "run-result-summary",
+        task_id: "summary-task",
+        stage: "review",
+        kind: "main",
+        agent: None,
+        agent_provider: None,
+        model: None,
+        effort: None,
+        status: "failed",
+        result: Some("{\"status\":\"failure\",\"summary\":\"Inventory cleanup has crash gaps\"}"),
+        feedback: None,
+        session_id: Some("daemon-review-2"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+
+    let from_feedback =
+        prepare_revision_task_for_api(&db, &config, "feedback-task", "in progress", "", None)
+            .unwrap();
+    assert_eq!(
+        from_feedback.feedback.as_deref(),
+        Some("Bare-pid daemon killing is still unsafe; gate it on the recorded start time.")
+    );
+
+    let from_summary =
+        prepare_revision_task_for_api(&db, &config, "summary-task", "in progress", "   \n ", None)
+            .unwrap();
+    assert_eq!(
+        from_summary.feedback.as_deref(),
+        Some("Inventory cleanup has crash gaps")
+    );
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn revision_without_any_recorded_verdict_is_refused_rather_than_started_empty() {
+    let config = test_config("revision-no-verdict-anywhere");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "review-task",
+        "repo-1",
+        "Fix the mobile shell",
+        Some("Mobile shell"),
+        "review",
+        "2026-08-20 09:00:00",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context(
+        "review-task",
+        "task-reviewed-branch",
+        "qa",
+        None,
+        "claude",
+    )
+    .unwrap();
+    db.insert_stage_run(NewStageRun {
+        id: "run-review-silent",
+        task_id: "review-task",
+        stage: "review",
+        kind: "main",
+        agent: None,
+        agent_provider: None,
+        model: None,
+        effort: None,
+        status: "failed",
+        result: Some("{\"status\":\"failure\",\"summary\":\"\"}"),
+        feedback: Some("   "),
+        session_id: Some("daemon-review"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+
+    let err =
+        match prepare_revision_task_for_api(&db, &config, "review-task", "in progress", "", None) {
+            Ok(_) => panic!("a revision with no feedback anywhere must not be prepared"),
+            Err(err) => err,
+        };
+    assert!(
+        err.contains("revision requires reviewer feedback"),
+        "unexpected error: {err}"
+    );
+}

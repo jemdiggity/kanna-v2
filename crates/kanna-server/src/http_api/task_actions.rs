@@ -1708,6 +1708,23 @@ pub(super) async fn request_revision(
     }
 
     let origin = payload.origin.unwrap_or_default();
+    // The reviewer's findings live in `prompt`; `summary` is only the headline
+    // shown to the user. An agent that sends an empty `prompt` starts an agent
+    // with nothing to act on and burns a budgeted round proving it, so the
+    // request is refused here — before the round is claimed and before the
+    // review run is closed — leaving the reviewer able to retry with the
+    // findings. A human request is never refused: the compose path falls back
+    // to the terminating run's verdict for it.
+    if origin.is_agent() && payload.prompt.trim().is_empty() {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "revision request carried no reviewer feedback: `prompt` must contain the findings \
+             the revising agent has to act on (what is wrong, where, and what must change). \
+             `summary` is only the one-line headline shown to the user. No revision was started \
+             and no revision round was spent — retry this request with the findings in `prompt`."
+                .to_string(),
+        ));
+    }
     // `resolve_task_id_for_mutation` returned the durable id before either
     // ownership guard was acquired. The nonblocking revision guard is taken
     // before waiting for the broader mutation lease so a duplicate revision
