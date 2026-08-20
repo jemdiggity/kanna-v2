@@ -1675,10 +1675,16 @@ function getStatusCopy(status: TaskTerminalStatus): string {
 }
 
 function terminalChunksFromOutput(output: TerminalOutputLike): string[] {
+  // Region order is the buffer's contiguity contract: pulled scrollback, then
+  // the attach snapshot, then live output.
   const segments =
     typeof output === "string"
       ? [output]
-      : [output.snapshot, ...output.liveSegments];
+      : [
+          ...output.scrollbackSegments,
+          output.snapshot,
+          ...output.liveSegments
+        ];
   const chunks: string[] = [];
   for (const segment of segments) {
     for (const chunk of segment.split("\n")) {

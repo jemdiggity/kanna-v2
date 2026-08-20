@@ -40,6 +40,7 @@ import type {
   SessionStore,
   TaskCreationAttempt
 } from "./sessionStore";
+import { MAX_TERMINAL_SCROLLBACK_CHARS } from "./terminalOutputBuffer";
 import type { PersistedSessionContext } from "./sessionPersistence";
 import { isTaskBlocked } from "../lib/api/taskIdentity";
 import { resolveAgentProviderForDesktop } from "../lib/api/agentProviders";
@@ -132,6 +133,11 @@ const MARK_READ_RETRY_BASE_MS = 1_000;
 /// desktop's per-request ceiling: on a poor link a chunk that renders now beats
 /// a chunk that arrives complete.
 const TERMINAL_SCROLLBACK_CHUNK_LINES = 200;
+/// The largest chunk the desktop can answer with, in base64 chars plus its
+/// frame newline: `TERMINAL_SCROLLBACK_CHUNK_MAX_BYTES` (64 KiB) encodes to
+/// 87,384 chars. Used to stop the walk one chunk before the buffer's own bound
+/// so no chunk is fetched that would then have to be refused.
+const MAX_TERMINAL_SCROLLBACK_CHUNK_CHARS = 88_000;
 const REPO_COMMAND_TASK_LOAD_ERROR =
   "The command launched successfully, but its task could not be loaded. Check your connection and try again.";
 
@@ -3002,8 +3008,26 @@ export function createMobileController(
       if (activeTaskTerminal?.taskId !== taskId) {
         return;
       }
-      const scrollback = store.getState().taskTerminalScrollback;
-      if (!scrollback || scrollback.loading || scrollback.remainingLines <= 0) {
+      const { taskTerminalScrollback: scrollback, taskTerminalOutput: output } =
+        store.getState();
+      if (
+        !scrollback ||
+        scrollback.loading ||
+        scrollback.atClientLimit ||
+        scrollback.remainingLines <= 0
+      ) {
+        return;
+      }
+      // The walk stops where the buffer would stop being contiguous. Making
+      // room for an older chunk means dropping the frames directly below it —
+      // a hole in the middle of the terminal — so the limit is a refusal, and
+      // it is checked before the request rather than after the bytes have
+      // already crossed the link.
+      if (
+        output.scrollbackLength + MAX_TERMINAL_SCROLLBACK_CHUNK_CHARS >
+        MAX_TERMINAL_SCROLLBACK_CHARS
+      ) {
+        store.markTaskTerminalScrollbackAtClientLimit(taskId);
         return;
       }
       if (!store.setTaskTerminalScrollbackLoading(taskId, true)) {

@@ -1,4 +1,8 @@
 import { Window } from "happy-dom";
+import {
+  createTerminalOutput,
+  prependTerminalScrollback
+} from "../state/terminalOutputBuffer";
 import { describe, expect, it, vi } from "vitest";
 import {
   buildTerminalAppendScript,
@@ -1848,6 +1852,7 @@ describe("buildTerminalDocument", () => {
     });
     terminal.scrollToLine(1);
     const viewportBefore = terminal.buffer.active.viewportY;
+    const linesBefore = terminal.buffer.normal.length;
     const resetsBefore = terminal.resets;
     const scrollToBottomBefore = terminal.scrollToBottomCalls;
 
@@ -1858,9 +1863,16 @@ describe("buildTerminalDocument", () => {
 
     expect(terminal.resets).toBe(resetsBefore + 1);
     expect(terminal.scrollToBottomCalls).toBe(scrollToBottomBefore);
-    // Two rows arrived above the buffer, so the same content is now two rows
-    // further down.
+    // The store refuses a chunk it cannot fit rather than evicting to make
+    // room, so a prepend only ever grows the buffer upward: every row that was
+    // loaded is still loaded, two arrived above them, and restoring
+    // `viewportY + addedRows` therefore lands on the same content.
+    expect(terminal.buffer.normal.length).toBe(linesBefore + 2);
     expect(terminal.scrollToLineCalls.at(-1)).toBe(viewportBefore + 2);
+    const rendered = [...terminal.bufferLines.values()].join("\n");
+    for (const line of ["older one", "older two", "newer one", "newer two", "newer three"]) {
+      expect(rendered).toContain(line);
+    }
   });
 
   it("builds prepend scripts that keep the whole buffer in order", () => {
@@ -1874,6 +1886,32 @@ describe("buildTerminalDocument", () => {
     expect(script).toContain(b64("older\n"));
     expect(script).toContain(b64("newer\n"));
     expect(script).toContain('"contentRevision":7');
+  });
+
+  it("carries pulled scrollback above the snapshot into the injected script", () => {
+    const withHistory = prependTerminalScrollback(
+      createTerminalOutput(`${b64("window\n")}\n${b64("live\n")}\n`),
+      `${b64("older\n")}\n`
+    );
+    expect(withHistory.accepted).toBe(true);
+
+    const script = buildTerminalPrependScript({
+      contentRevision: 8,
+      output: withHistory.output,
+      status: "live"
+    });
+
+    const chunks = JSON.parse(
+      script.slice(
+        script.indexOf("(") + 1,
+        script.lastIndexOf(")")
+      )
+    ) as { chunksB64: string[] };
+    expect(chunks.chunksB64).toEqual([
+      b64("older\n"),
+      b64("window\n"),
+      b64("live\n")
+    ]);
   });
 
   it("builds resize scripts for the WebView terminal dimension bridge", () => {

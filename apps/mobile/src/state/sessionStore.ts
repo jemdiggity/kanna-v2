@@ -46,7 +46,7 @@ import {
   appendTerminalOutput,
   createTerminalOutput,
   EMPTY_TERMINAL_OUTPUT,
-  terminalOutputToString,
+  prependTerminalScrollback,
   type TerminalOutputBuffer
 } from "./terminalOutputBuffer";
 
@@ -207,6 +207,14 @@ export interface TaskTerminalScrollback {
   remainingLines: number;
   /** A chunk request is in flight. */
   loading: boolean;
+  /**
+   * The loaded buffer has taken all the history this client will hold
+   * (`MAX_TERMINAL_SCROLLBACK_CHARS`). `remainingLines` may still be non-zero —
+   * the desktop has them, this viewer will not load them — and no further
+   * chunk is requested, because making room would mean dropping content out of
+   * the middle of the terminal.
+   */
+  atClientLimit: boolean;
 }
 
 function scrollbackFromWindow(
@@ -218,7 +226,8 @@ function scrollbackFromWindow(
   return {
     historyId: window.historyId,
     remainingLines: window.scrollbackLines,
-    loading: false
+    loading: false,
+    atClientLimit: false
   };
 }
 
@@ -369,6 +378,8 @@ export interface SessionStore {
   /** Record that a scrollback chunk request is in flight, so the viewer asks
    * once per scroll rather than once per frame. */
   setTaskTerminalScrollbackLoading(taskId: string, loading: boolean): boolean;
+  /** Stop the walk: the loaded buffer has no room for another chunk. */
+  markTaskTerminalScrollbackAtClientLimit(taskId: string): void;
   appendTaskTerminal(taskId: string, chunk: string): void;
   setTaskTerminalStatus(taskId: string, status: TaskTerminalStatus): void;
   setTaskTerminalDims(taskId: string, cols: number, rows: number): void;
@@ -1509,12 +1520,30 @@ export function createSessionStore(): SessionStore {
         return;
       }
 
-      const olderFirst = `${chunk.dataB64}\n${terminalOutputToString(
-        state.taskTerminalOutput
-      )}`;
+      const prepended = prependTerminalScrollback(
+        state.taskTerminalOutput,
+        `${chunk.dataB64}\n`
+      );
+      if (!prepended.accepted) {
+        // The buffer keeps what it has rather than evicting to make room: the
+        // frames that would go are the ones directly below this chunk, and the
+        // reader is looking at them.
+        state = {
+          ...state,
+          taskTerminalScrollback: {
+            ...scrollback,
+            remainingLines: chunk.remainingLines,
+            loading: false,
+            atClientLimit: true
+          }
+        };
+        publish();
+        return;
+      }
+
       state = {
         ...state,
-        taskTerminalOutput: createTerminalOutput(olderFirst),
+        taskTerminalOutput: prepended.output,
         taskTerminalOutputEpoch: state.taskTerminalOutputEpoch + 1,
         taskTerminalOutputStart: 0,
         taskTerminalScrollback: {
@@ -1524,6 +1553,25 @@ export function createSessionStore(): SessionStore {
         }
       };
       publishTerminalOutput(true);
+      publish();
+    },
+    markTaskTerminalScrollbackAtClientLimit(taskId) {
+      const scrollback = state.taskTerminalScrollback;
+      if (
+        state.taskTerminalTaskId !== taskId ||
+        !scrollback ||
+        scrollback.atClientLimit
+      ) {
+        return;
+      }
+      state = {
+        ...state,
+        taskTerminalScrollback: {
+          ...scrollback,
+          loading: false,
+          atClientLimit: true
+        }
+      };
       publish();
     },
     setTaskTerminalScrollbackLoading(taskId, loading) {

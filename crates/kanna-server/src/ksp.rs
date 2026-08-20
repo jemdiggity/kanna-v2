@@ -10,7 +10,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-#[cfg(test)]
 use std::sync::OnceLock;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
@@ -3778,10 +3777,41 @@ const TERMINAL_TAP_BROADCAST_CAPACITY: usize = 512;
 /// viewers; this only bounds the idle ones still holding their grace window.
 const MAX_IDLE_TERMINAL_TAPS: usize = 16;
 
+/// Random per-process base for tap and history ids.
+///
+/// A counter that restarts at 1 in every server process is not enough: a
+/// client's `TermResumePosition` outlives a desktop restart and is presented on
+/// every reconnect, so an id minted by the *previous* process would match a tap
+/// in this one and be answered with a byte range from a stream those bytes
+/// never belonged to — silent terminal corruption where the intended answer is
+/// a bounded snapshot. Seeding from `RandomState`, whose keys the OS seeds per
+/// process, makes an id from another process not match by construction. No new
+/// dependency for one nonce.
+///
+/// Drawn from `[2^51, 2^52)`, so `base + counter` is both far above anything a
+/// process-local counter could mint — no id is ever ambiguous with one — and
+/// under 2^53, which it has to be: these ids travel as JSON numbers and the
+/// client compares them as doubles, so a larger one would not survive the round
+/// trip.
+static TERMINAL_TAP_ID_BASE: OnceLock<u64> = OnceLock::new();
 static NEXT_TERMINAL_TAP_ID: AtomicU64 = AtomicU64::new(1);
+/// Ids one process may mint before it would leave the exactly-representable
+/// range. A tap mints one id per attach and one per snapshot; 16M is far past
+/// any real process lifetime.
+const MAX_TERMINAL_TAP_IDS_PER_PROCESS: u64 = 1 << 24;
+
+fn terminal_tap_id_base() -> u64 {
+    *TERMINAL_TAP_ID_BASE.get_or_init(|| {
+        use std::hash::{BuildHasher, Hasher};
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u32(std::process::id());
+        (hasher.finish() % (1 << 51)) + (1 << 51)
+    })
+}
 
 fn next_terminal_tap_id() -> u64 {
-    NEXT_TERMINAL_TAP_ID.fetch_add(1, Ordering::Relaxed)
+    let offset = NEXT_TERMINAL_TAP_ID.fetch_add(1, Ordering::Relaxed);
+    terminal_tap_id_base() + (offset % MAX_TERMINAL_TAP_IDS_PER_PROCESS)
 }
 
 /// The session taps this server process is holding, keyed by daemon session id.
@@ -11959,6 +11989,80 @@ mod tests {
         }
 
         drop(resumed);
+    }
+
+    #[tokio::test]
+    async fn a_resume_id_from_another_server_process_is_refused() {
+        // A client's resume position outlives a desktop restart. Under a
+        // per-process counter that restarts at 1, an id minted by the previous
+        // process matched a tap in this one, and the client was replayed a byte
+        // range from a stream those bytes never belonged to.
+        let vt = scrollback_vt(2_000);
+        let outputs: Vec<Vec<u8>> = (0..8)
+            .map(|index| format!("live-{index:04}\r\n").into_bytes())
+            .collect();
+        let total_output: usize = outputs.iter().map(|chunk| chunk.len()).sum();
+        let fixture = WindowedTerminalFixture::new("stale-process-id", vt.clone(), outputs).await;
+
+        // Warm the tap so its ring holds a range a stale offset could land in.
+        let mut warming = ws_connect(&fixture.url).await;
+        send_frame(&mut warming, &windowed_client_auth_frame()).await;
+        assert_eq!(recv_frame(&mut warming).await, auth_ok_frame_for(false));
+        send_frame(&mut warming, &attach_terminal_frame(None)).await;
+        let (stream_id, base_offset) = match recv_frame(&mut warming).await {
+            ServerFrame::TermSnapshot {
+                stream_id,
+                stream_offset,
+                ..
+            } => (
+                stream_id.expect("stream id"),
+                stream_offset.expect("stream offset"),
+            ),
+            other => panic!("expected a windowed terminal snapshot, got {other:?}"),
+        };
+        let mut consumed = 0usize;
+        while consumed < total_output {
+            match recv_frame(&mut warming).await {
+                ServerFrame::TermOutput { data_b64, .. } => {
+                    consumed += decode_frame_bytes(&data_b64).len();
+                }
+                other => panic!("expected live terminal output, got {other:?}"),
+            }
+        }
+
+        // Ids are drawn from a per-process random base, so the small ids a
+        // from-1 counter mints are not this process's to answer for.
+        assert!(
+            stream_id > 1_000_000,
+            "stream id {stream_id} looks like a process-local counter"
+        );
+
+        for stale_stream_id in [1u64, 2, 3] {
+            let mut stale = ws_connect(&fixture.url).await;
+            send_frame(&mut stale, &windowed_client_auth_frame()).await;
+            assert_eq!(recv_frame(&mut stale).await, auth_ok_frame_for(false));
+            send_frame(
+                &mut stale,
+                &attach_terminal_frame(Some(TermResumePosition {
+                    stream_id: stale_stream_id,
+                    // Inside this tap's ring, so only the id can refuse it.
+                    offset: base_offset + (total_output / 2) as u64,
+                })),
+            )
+            .await;
+
+            match recv_frame(&mut stale).await {
+                ServerFrame::TermSnapshot {
+                    stream_id: fresh, ..
+                } => {
+                    assert_eq!(fresh, Some(stream_id));
+                }
+                other => panic!("a resume id from another process must not be replayed: {other:?}"),
+            }
+            drop(stale);
+        }
+
+        drop(warming);
     }
 
     #[tokio::test]

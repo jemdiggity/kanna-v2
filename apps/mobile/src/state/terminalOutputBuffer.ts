@@ -1,7 +1,30 @@
 export const MAX_TERMINAL_LIVE_OUTPUT_CHARS = 1_000_000;
+/**
+ * How much older scrollback this buffer will hold above its snapshot.
+ *
+ * The desktop retains ~1 MiB of history per attachment
+ * (`TERMINAL_HISTORY_RETENTION_BYTES`), which is ~1.4M base64 chars, so a
+ * reader who keeps walking upward *will* reach a client bound. It is a refusal
+ * bound, not an eviction bound: the loaded buffer must stay contiguous, and the
+ * only way to make room for older content would be to drop content below it.
+ */
+export const MAX_TERMINAL_SCROLLBACK_CHARS = 1_000_000;
 export const TERMINAL_OUTPUT_SEGMENT_TARGET_CHARS = 64 * 1024;
 
+/**
+ * The retained terminal stream, in three regions that are always contiguous in
+ * this order: `scrollbackSegments` (older history pulled on demand, oldest
+ * first), `snapshot` (the attach frame), then `liveSegments`.
+ *
+ * Only `liveSegments` is evicted, and only from its front — the boundary that
+ * existed before scrollback could be pulled at all. `scrollbackSegments` grows
+ * at the head and is bounded by refusal
+ * ([`prependTerminalScrollback`]), because evicting to make room for a prepend
+ * would take frames out of the *middle* of the terminal.
+ */
 export interface TerminalOutputBuffer {
+  readonly scrollbackSegments: readonly string[];
+  readonly scrollbackLength: number;
   readonly snapshot: string;
   readonly liveSegments: readonly string[];
   readonly liveLength: number;
@@ -15,7 +38,15 @@ export interface AppendedTerminalOutput {
   droppedChars: number;
 }
 
+export interface PrependedTerminalScrollback {
+  output: TerminalOutputBuffer;
+  /** False when the chunk did not fit and the buffer was left untouched. */
+  accepted: boolean;
+}
+
 export const EMPTY_TERMINAL_OUTPUT: TerminalOutputBuffer = Object.freeze({
+  scrollbackSegments: Object.freeze([]) as readonly string[],
+  scrollbackLength: 0,
   snapshot: "",
   liveSegments: Object.freeze([]) as readonly string[],
   liveLength: 0,
@@ -116,6 +147,8 @@ export function createTerminalOutput(output: string): TerminalOutputBuffer {
   const snapshotEnd = output.indexOf("\n") + 1;
   if (snapshotEnd === 0) {
     return {
+      scrollbackSegments: [],
+      scrollbackLength: 0,
       snapshot: output,
       liveSegments: [],
       liveLength: 0,
@@ -128,10 +161,43 @@ export function createTerminalOutput(output: string): TerminalOutputBuffer {
   const packed = packFrames([], outputFrames(liveOutput));
   const capped = capLiveSegments(packed, liveOutput.length);
   return {
+    scrollbackSegments: [],
+    scrollbackLength: 0,
     snapshot,
     liveSegments: capped.liveSegments,
     liveLength: capped.liveLength,
     length: snapshot.length + capped.liveLength
+  };
+}
+
+/**
+ * Splice one chunk of older scrollback above the buffer.
+ *
+ * Refused — buffer returned unchanged, `accepted: false` — when the chunk would
+ * take the retained history past [`MAX_TERMINAL_SCROLLBACK_CHARS`]. Refusing is
+ * the whole point: the alternative is dropping frames that sit *below* the new
+ * chunk, which leaves a hole in the middle of the terminal and puts the reader
+ * back on content that is not what they were looking at.
+ */
+export function prependTerminalScrollback(
+  output: TerminalOutputBuffer,
+  chunk: string
+): PrependedTerminalScrollback {
+  if (!chunk) return { output, accepted: true };
+  if (output.scrollbackLength + chunk.length > MAX_TERMINAL_SCROLLBACK_CHARS) {
+    return { output, accepted: false };
+  }
+
+  return {
+    output: {
+      scrollbackSegments: [chunk, ...output.scrollbackSegments],
+      scrollbackLength: output.scrollbackLength + chunk.length,
+      snapshot: output.snapshot,
+      liveSegments: output.liveSegments,
+      liveLength: output.liveLength,
+      length: output.length + chunk.length
+    },
+    accepted: true
   };
 }
 
@@ -145,10 +211,13 @@ export function appendTerminalOutput(
   const capped = capLiveSegments(packed, output.liveLength + chunk.length);
   return {
     output: {
+      scrollbackSegments: output.scrollbackSegments,
+      scrollbackLength: output.scrollbackLength,
       snapshot: output.snapshot,
       liveSegments: capped.liveSegments,
       liveLength: capped.liveLength,
-      length: output.snapshot.length + capped.liveLength
+      length:
+        output.scrollbackLength + output.snapshot.length + capped.liveLength
     },
     droppedChars: capped.droppedChars
   };
@@ -160,7 +229,7 @@ export function terminalOutputLength(output: TerminalOutputLike): number {
 
 export function terminalOutputToString(output: TerminalOutputLike): string {
   if (typeof output === "string") return output;
-  return `${output.snapshot}${output.liveSegments.join("")}`;
+  return `${output.scrollbackSegments.join("")}${output.snapshot}${output.liveSegments.join("")}`;
 }
 
 export function sliceTerminalOutput(
@@ -173,6 +242,14 @@ export function sliceTerminalOutput(
 
   const parts: string[] = [];
   let remaining = start;
+  for (const segment of output.scrollbackSegments) {
+    if (remaining >= segment.length) {
+      remaining -= segment.length;
+      continue;
+    }
+    parts.push(segment.slice(remaining));
+    remaining = 0;
+  }
   if (remaining < output.snapshot.length) {
     parts.push(output.snapshot.slice(remaining));
     remaining = 0;

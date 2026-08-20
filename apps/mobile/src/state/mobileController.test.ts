@@ -7594,6 +7594,51 @@ describe("createMobileController", () => {
     });
   });
 
+  it("stops asking once the loaded buffer has no room for another chunk", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+    const requestScrollback =
+      client.__terminalStream.subscription.requestScrollback;
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    client.__terminalStream.emit({
+      type: "snapshot",
+      taskId: "task-1",
+      cols: 80,
+      rows: 24,
+      dataB64: "d2luZG93",
+      window: { streamId: 4, historyId: 11, scrollbackLines: 5_000 }
+    });
+
+    controller.requestTaskTerminalScrollback("task-1");
+    expect(requestScrollback).toHaveBeenCalledTimes(1);
+    // One chunk that all but fills the client's scrollback budget.
+    client.__terminalStream.emit({
+      type: "scrollback",
+      taskId: "task-1",
+      chunk: {
+        requestId: 1,
+        historyId: 11,
+        startLine: 3_000,
+        endLine: 5_000,
+        dataB64: "o".repeat(950_000),
+        remainingLines: 3_000
+      }
+    });
+
+    // The desktop still has 3,000 lines, but loading them would mean evicting
+    // content below them, so the walk stops here instead.
+    controller.requestTaskTerminalScrollback("task-1");
+    expect(requestScrollback).toHaveBeenCalledTimes(1);
+    expect(store.getState().taskTerminalScrollback).toMatchObject({
+      remainingLines: 3_000,
+      loading: false,
+      atClientLimit: true
+    });
+  });
+
   it("asks for nothing once the retained scrollback runs out", async () => {
     const store = createSessionStore();
     const client = createClientMock();
