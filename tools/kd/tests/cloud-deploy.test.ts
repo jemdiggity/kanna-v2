@@ -122,6 +122,14 @@ describe("cloud deploy runtime", () => {
     });
   });
 
+  it("defaults the portal price to the launch price when the deploy names none", () => {
+    // Owner ruling, 2026-08-21 (`docs/specs/accounts-and-billing.md`): ¥500 /
+    // $5 / €5 / £5 a month, of which the portal headline is the USD face.
+    const buildEnv = resolveWebPortalBuildEnvironment(PORTAL_ENV, "kanna-staging");
+
+    expect(buildEnv.VITE_KANNA_CLOUD_PRICE).toBe("$5/month");
+  });
+
   it("refuses to build a deploy with missing portal configuration", () => {
     expect(() => resolveWebPortalBuildEnvironment({}, "kanna-staging"))
       .toThrow("cloud deploy requires KANNA_WEB_PORTAL_FIREBASE_API_KEY");

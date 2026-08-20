@@ -11,6 +11,23 @@ a second owner addition (verbatim): "Also I'll need a leech flag for users who
 don't need to pay" — the complimentary `comp` entitlement source in
 Decision 3.
 
+Amended again 2026-08-21 by task `ed6c7f7b` on two further owner rulings,
+recorded verbatim:
+
+> "Cloud access is paid; connecting to machines the user manually adds with the
+> QR method is free — the user can remotely control them when they're on the
+> same LAN."
+
+> "¥500 JPY, $5 USD, $5 CAD, $5 AUD, €5, £5 per month" — "possibly revised
+> pending our new opex estimation."
+
+The first settles the enforcement boundary: **everything that crosses the relay
+is entitlement-gated**, phone→desktop `invoke` (remote task control) included —
+the question Slice 1 left open (Decision 5, and `docs/task-specs/03389bf0.md`).
+LAN stays free, permanently, including remote control of a machine the user
+paired by QR on the same network. The second sets the launch price
+(Decision 4, "Pricing").
+
 Apple App Store analysis in this spec reflects knowledge current to
 January 2026. Every item under "Human verification required" must be checked
 against Apple's live guidelines before the paid launch.
@@ -440,12 +457,43 @@ The unentitled-but-not-buying states elsewhere in the app keep the neutral
 subscribe screen — a paywall existing in-app makes that pointer legal and
 correct where it was steering before. LAN surfaces never gate or upsell.
 
+### Pricing
+
+**The launch price (owner ruling, 2026-08-21, verbatim): "¥500 JPY, $5 USD,
+$5 CAD, $5 AUD, €5, £5 per month" — "possibly revised pending our new opex
+estimation."** One plan, "Kanna Cloud", billed monthly:
+
+| Currency | Monthly | Stripe `unit_amount` |
+|---|---|---|
+| JPY | ¥500 | `500` (zero-decimal currency) |
+| USD | $5 | `500` |
+| CAD | $5 | `500` |
+| AUD | $5 | `500` |
+| EUR | €5 | `500` |
+| GBP | £5 | `500` |
+
+The revision caveat is part of the ruling, not an editorial hedge: the number
+may move once the opex estimate lands. The portal headline is
+`VITE_KANNA_CLOUD_PRICE` — defaulted by `kd cloud deploy` and overridable per
+deploy — beside the matrix above as static copy on the subscribe page; the iOS
+app renders StoreKit's own localized price and never hardcodes one. A re-price
+is therefore new Stripe price points, an App Store Connect change, and one line
+of portal copy.
+
+**The ruling prices the monthly plan only.** The earlier default of "~2 months
+free annual" is not part of it and no annual amount is decided here, while
+`createCheckoutSession` still requires a `STRIPE_PRICE_ANNUAL` id beside the
+monthly one (`services/firebase-functions/src/billing/config.ts`). Slice 0 must
+therefore either get an annual price from the owner or drop the annual plan and
+that requirement with it — an open item, deliberately not decided by this
+amendment.
+
 ### Pricing parity
 
 **Default (owner decision, revisit post-launch): same nominal price on both
 channels; the owner absorbs Apple's 15% Small Business Program commission on
 app-channel revenue.** Rationale: price-splitting by channel invites
-storefront-rule complexity (and looks petty at a ~$10 price point), and the
+storefront-rule complexity (and looks petty at a $5 price point), and the
 margin question is a spreadsheet problem, not an architecture problem. Apple
 price points are a grid — pick the tier nearest the Stripe price and accept
 small regional divergence. Small Business Program enrollment is a Slice-0
@@ -455,9 +503,9 @@ default.
 ## Decision 5 — Entitlement enforcement
 
 - **The relay is the enforcement point.** It already terminates every unit of
-  remote value — tunnels, snapshot publication, push — and already re-reads
-  Firestore for credential revalidation. After identity verification
-  (`services/relay/src/auth.ts`), resolve uid → read
+  remote value — tunnels, snapshot publication, push, remote task control —
+  and already re-reads Firestore for credential revalidation. After identity
+  verification (`services/relay/src/auth.ts`), resolve uid → read
   `users/{uid}/entitlements/cloud_access` (in-memory TTL cache ~60s, same
   pattern as credential revalidation). Unentitled sessions still get
   `auth_ok` but with no advertised `tunnelServices`, publication and
@@ -481,13 +529,28 @@ default.
   entitlement doc) and render active/grace/inactive. Mobile's inactive state
   now routes to the subscribe screen (Decision 4) instead of being a dead
   end.
+- **The enforced set is everything that crosses the relay** (owner ruling,
+  2026-08-21, quoted at the top of this spec — no longer an open decision).
+  Enumerated, so a reader knows what flag day turns off for an unentitled
+  account:
+  - `tunnel_request` and the tunnel socket itself — `cloud_relay`;
+  - `task_snapshot_publish` — `cloud_task_index`;
+  - `mobile_notification_publish` — `cloud_relay`;
+  - **`invoke` — `remote_task_control`**: phone→desktop remote task control,
+    and desktop→desktop routing (`desktopRouting`), which crosses the same
+    relay and is therefore paid on the same terms. An unentitled session is
+    advertised neither `tunnelServices` nor `desktopRouting`, and each refused
+    request answers 4402 rather than closing the session.
 - **Expired subscription**: relay tunnel refused, publication refused (index
-  frozen), push stops. Nothing is deleted — data returns on renewal.
+  frozen), push stops, `invoke` refused. Nothing is deleted — data returns on
+  renewal.
 - **What stays free — stated explicitly**: LAN is free, permanently. The
   desktop app is fully functional with no account; LAN QR pairing and the
-  mobile LAN companion need no account and no subscription. The funnel is:
+  mobile LAN companion need no account and no subscription — **including
+  remote task control of a QR-paired machine over the LAN**, which reaches no
+  relay code and is gated by nothing (owner ruling, 2026-08-21). The funnel is:
   free local product → paid remote access (`cloud_access` = relay + cloud
-  task index + push). This spec endorses that shape.
+  task index + push + remote task control). This spec endorses that shape.
 - **Grandfathering / flag day** (owner default): seed existing
   manually-provisioned accounts as `source: grandfathered, status: active`
   (they are few and were invited); enforcement turns on for everyone else on
@@ -563,21 +626,40 @@ Fast-follow (weeks after, in rough order):
     Firestore-rule hardening; self-serve Apple-transaction relink if support
     volume warrants it.
 
-Owner decisions needed (defaults supplied, none block spec-writing): price
-(default: one plan, "Kanna Cloud", ~$10/month, ~2 months free annual — same
-nominal price on both channels, owner absorbs Apple's commission, Decision
-4); trial shape (default: 14-day, card required, cross-channel policy
+Owner decisions needed (defaults supplied, none block spec-writing): price —
+**decided 2026-08-21**: one plan, "Kanna Cloud", ¥500/$5/€5/£5 monthly, no
+annual plan priced yet, same nominal price on both channels with the owner
+absorbing Apple's commission (Decision 4, "Pricing"); trial shape (default: 14-day, card required, cross-channel policy
 resolved when trials ship); grandfathering (default: permanent for existing
 invited accounts).
 
 ## Decision 7 — Sequencing
 
 - **Slice 0 (human, unblocks everything)**: Stripe account for Tampopo LLC
-  (test + live), ToS/legal/特商法 pages, price + parity decision, verify
-  Firebase console signup settings, the Apple verification list from
-  Decision 2 — including Paid Applications Agreement, banking/tax,
-  subscription products + price points, Small Business Program enrollment,
-  and grace-period enablement in App Store Connect.
+  (test + live), ToS/legal/特商法 pages, verify Firebase console signup
+  settings, the Apple verification list from Decision 2 — including Paid
+  Applications Agreement, banking/tax, subscription products + price points,
+  Small Business Program enrollment, and grace-period enablement in App Store
+  Connect. The price decision itself landed 2026-08-21 (Decision 4,
+  "Pricing"); what remains is creating it in Stripe:
+  - One **Product**, "Kanna Cloud", in **each** of test mode and live mode.
+  - Under it, a **recurring monthly Price per currency** — JPY 500, USD 500,
+    CAD 500, AUD 500, EUR 500, GBP 500 in Stripe's minor units (JPY is
+    zero-decimal, so `500` is ¥500; the rest are $5.00 / €5.00 / £5.00) —
+    **twelve price points in total, six test and six live**. Multi-currency
+    price options on a single Price are equivalent and preferable if the
+    dashboard offers them; what matters is that one price id per mode is what
+    `createCheckoutSession` passes, with the currency selected per customer.
+  - Record the price ids in Secret Manager beside the API keys, per project
+    (`kanna-staging` ↔ test, `kanna-build` ↔ live) — `createCheckoutSession`
+    reads them as `STRIPE_PRICE_MONTHLY` / `STRIPE_PRICE_ANNUAL`. Live-mode
+    creation is human-only, same rule as production deploys.
+  - **The annual plan is still unpriced** (the ruling covers monthly only) and
+    the checkout resolver requires its id: price it, or drop the annual plan
+    and that requirement together. Owner call, Slice 0.
+  - Apple's grid has no exact ¥500/$5 equivalents in every storefront: pick
+    the nearest tier per the parity default in Decision 4 and accept small
+    regional divergence.
 - **Slice 1 — one stranger can sign up and pay on the web** (rough edges
   fine):
   - `services/firebase-functions`: revive function deploys via `kd cloud
@@ -671,7 +753,9 @@ carry StoreKit.
 - **Unit/integration — relay**: entitlement gate (entitled / grace /
   expired / absent / unverified-email / sandbox-stamped) for both phone and
   desktop auth paths, including the 4402 refusal semantics and TTL-cache
-  revalidation on revocation.
+  revalidation on revocation, and covering every path in the enforced set of
+  Decision 5 — tunnels, publication, push, and `invoke` (phone→desktop and
+  desktop→desktop) — with the flag off proving each one unchanged.
 - **Mobile/local**: a checked-in **StoreKit configuration file** in
   `apps/mobile` drives simulator purchase, restore, renewal, and refund
   flows without App Store Connect; sandbox Apple IDs cover

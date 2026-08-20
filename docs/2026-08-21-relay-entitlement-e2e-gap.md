@@ -39,6 +39,11 @@ off, speaking the real protocol:
   refused publication and push with `code: 4402`;
 - an unentitled phone's `tunnel_request` is refused with the same code, while an
   entitled one reaches the router;
+- an unentitled `invoke` is refused with the same code — phone→desktop and
+  desktop→desktop alike, and `desktopRouting` is not advertised to an
+  unentitled desktop — while an entitled one reaches the router, and with the
+  flag off both route exactly as they do today (added 2026-08-21 by task
+  `ed6c7f7b`, on the owner ruling that everything crossing the relay is paid);
 - an unentitled desktop opening a tunnel socket directly — no phone involved —
   is closed with 4402 at the handshake, and the same connection against the
   flag-off relay gets past it to the router's own 4404;

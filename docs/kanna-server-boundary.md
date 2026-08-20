@@ -162,7 +162,10 @@ always returns the current machine and reports `relayAvailable` plus an error
 when sibling discovery is unavailable. Remote calls fail closed when the
 target is offline or the relay disconnects. The server enables the bridge only
 after `auth_ok` advertises `desktopRouting` capability version 1, so deploying
-the desktop ahead of the relay fails fast instead of hanging. Outstanding and
+the desktop ahead of the relay fails fast instead of hanging. That capability is
+also the entitlement's: with relay enforcement on, an unentitled account is
+advertised neither it nor `tunnelServices`, and a sibling `invoke` sent anyway
+is refused with 4402 (`docs/specs/accounts-and-billing.md`, Decision 5). Outstanding and
 queued requests are bound to that relay-connection generation and fail instead
 of being replayed after reconnect. Task waits retain the normal 240-second MCP
 window, with the server-side relay handoff bounded below the MCP client's
