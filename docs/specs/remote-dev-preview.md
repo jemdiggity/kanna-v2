@@ -398,20 +398,61 @@ Pending state and failure cleanup, on every side:
   explicit `DELETE`): the desktop closes the tunnel; that close *is* the
   revocation signal the relay needs — no separate control message exists.
 
-Tunnel framing (JSON control + binary chunks, chunk size 64 KiB — well under
-the 16 MiB `maxPayload`):
+Tunnel framing — one closed rule, safe under arbitrary interleaving. Two
+frame families share the tunnel, and **every frame is atomically
+self-describing**; no frame's meaning ever depends on the frame before or
+after it:
+
+- **Text (JSON) control frames** — never carry payload bytes:
 
 ```
 desktop → relay  preview_accept {enterPath, expiresAt}   (first frame, exactly once)
-relay → desktop  preview_req   {stream, method, path, headers}
-both directions  preview_body  {stream} + chunk        (binary, interleaved)
-                 preview_end   {stream, trailers?}
-desktop → relay  preview_res   {stream, status, headers}
-relay → desktop  preview_ws    {stream, path, headers}  (upgrade request)
-desktop → relay  preview_ws_ok {stream, status, headers}
-both directions  preview_ws_data {stream} + raw ws bytes
-both directions  preview_abort {stream, reason}
+relay → desktop  preview_req    {stream, method, path, headers}
+desktop → relay  preview_res    {stream, status, headers}
+relay → desktop  preview_ws     {stream, path, headers}  (upgrade request)
+desktop → relay  preview_ws_ok  {stream, status, headers}
+both directions  preview_end    {stream, trailers?}      (half-close: no more
+                                                          payload this direction)
+both directions  preview_abort  {stream, reason}
 ```
+
+- **Binary frames** — exactly one payload chunk each, bound to its stream
+  and kind by a fixed 5-byte envelope header, payload ≤ 64 KiB (so a whole
+  frame sits well under the 16 MiB `maxPayload`):
+
+```
+[kind: u8][stream: u32 BE][payload bytes]
+kind 0x01 = HTTP body chunk     kind 0x02 = WS bytes
+```
+
+Association rules, closed:
+
+- **Stream ids are allocated only by the relay** (it opens every stream —
+  HTTP request or WS upgrade), monotonically increasing, **never reused
+  within a tunnel**. Per-stream chunk ordering is the WebSocket connection's
+  own per-direction message ordering; because every chunk names its stream
+  in its own header, frames of different streams (and control frames)
+  interleave freely with no adjacency requirement.
+- **Kind must match the stream**: a `0x01` chunk on a WS stream, a `0x02`
+  chunk on an HTTP stream, or payload after that direction's `preview_end`
+  is a protocol error.
+- **Malformed frame ⇒ tunnel close, not stream close**: a binary frame
+  shorter than the 5-byte header, an unknown `kind`, a chunk for a stream id
+  that was never allocated (i.e. ≥ the relay's next id), an unparseable or
+  unknown-type text frame, or a second `preview_accept` — the receiver
+  closes the tunnel with 1002 (protocol error), which tears down the whole
+  session (framing corruption is not per-stream recoverable). All in-flight
+  streams abort with it; the desktop destroys the session as with any
+  tunnel death.
+- **Per-stream abort is unacknowledged and race-tolerant**: either side
+  sends `preview_abort {stream, reason}` (relay: client connection died,
+  per-stream cap hit; desktop: upstream connect/reset failure, revocation of
+  one request), immediately stops sending frames for that stream, and
+  retires the id. Because ids are never reused, frames for a retired id that
+  were already in flight are recognized and **silently dropped** — an abort
+  never corrupts a neighbor stream, and no drain handshake is needed. WS
+  close for a `0x02` stream travels as `preview_abort` with
+  `reason:"ws_close"` (code/reason in the payload of the JSON frame).
 
 The relay maps each inbound HTTP request (Node `request` event) or upgrade
 (Node `upgrade` event — it never completes the WS handshake itself, it
@@ -613,21 +654,38 @@ Boundary: `services/relay` — `"preview"` service class, the
 with the 4402 gate and the `PendingTunnel`-based pending lifecycle
 (timeout, phone-disconnect, desktop-disconnect cleanup), `preview_accept`
 handling and host-token binding, wildcard-host routing, HTTP↔frame gateway
-with streaming and the preview caps, `"preview"` odometer class;
-`crates/kanna-server` — `preview_establish` handler, session/credential
-minting, tunnel dial-back with `preview_accept` as first frame, framing over
-the existing forwarder, session teardown on tunnel close/4404; `apps/mobile`
+with streaming and the preview caps — implementing the closed framing rule
+(5-byte binary envelope, relay-side monotonic never-reused stream-id
+allocation, kind/stream validation, malformed-frame → 1002 tunnel close,
+unacknowledged race-tolerant `preview_abort`) — and the `"preview"` odometer
+class; `crates/kanna-server` — `preview_establish` handler,
+session/credential minting, tunnel dial-back with `preview_accept` as first
+frame, the same framing rule over the existing forwarder (envelope
+encode/decode, retired-id drop, malformed → 1002), session teardown on
+tunnel close/4404; `apps/mobile`
 — relay routing in the preview controller. Includes the dev-mode plain-HTTP
 Host-routing path for tests.
 E2E: Layer A (`services/relay/test/integration.test.ts`) — 4402 refusal on
 unentitled `preview_request`; framed request/response; WS splice;
 stalled-reader cap → 1013; byte-class attribution; pending-entry cleanup on
-timeout and on either peer's disconnect, including 4404 on a late dial-back.
+timeout and on either peer's disconnect, including 4404 on a late dial-back;
+**concurrent multiplexing correctness**: at least two HTTP response bodies
+interleaved chunk-by-chunk on one tunnel (distinct per-stream byte patterns,
+reassembled byte-perfect on the far side) with WS `0x02` traffic interleaved
+through the same framing, an abort of one mid-transfer stream leaving the
+concurrent streams byte-perfect and the aborted stream's late in-flight
+chunks dropped without error, and malformed-frame cases (short header,
+unknown kind, never-allocated stream id, kind/stream mismatch) each closing
+the tunnel with 1002.
 `tests/remote-e2e/` cloud flow — this is asynchronous phone↔relay↔desktop
 coordination, so isolated tests cannot prove the wiring; the full stack must
 cover: **successful credential binding** (the URL the phone receives is the
 relay's host token composed with the desktop's `enterPath`, proven by
 enter → cookie → absolute-path asset fetch → WS echo through the tunnel);
+**interleaved-stream integrity under the real stack** (two concurrent
+fixture responses plus live WS traffic through one preview tunnel arriving
+byte-perfect, and one aborted stream not disturbing the others — the framing
+rule proven end-to-end, not just relay-side);
 **typed refusal** (`preview_refuse: not_listening` reaching the phone as its
 "not running" state); **timeout/disconnect cleanup** (a desktop that never
 dials back → phone gets the timeout error and the relay holds no residual
