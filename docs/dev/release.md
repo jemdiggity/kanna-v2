@@ -300,6 +300,21 @@ unbound: it is optional with a documented default, and adding it to the list in
 `src/billing/config.ts` is what would make it overridable in a deployed
 environment.
 
+**Price ids are not configuration at all.** The catalog lives in Stripe
+itself: the idempotent provisioning script
+
+```sh
+STRIPE_SECRET_KEY=... pnpm --filter @kanna/firebase-functions stripe:provision
+```
+
+creates (or finds) one "Kanna Cloud" product per mode plus a recurring
+monthly price per currency — JPY/USD/CAD/AUD/EUR/GBP, each under a stable
+lookup key `cloud_monthly_<currency>` (`--dry-run` prints the plan without
+contacting Stripe). `createCheckoutSession` accepts the monthly plan only,
+takes the caller's currency (default `usd`), and resolves the active price by
+that lookup key at session time — so no price id is ever stored in Secret
+Manager or the repo.
+
 The Stripe account exists; remaining key and endpoint setup is tracked in the
 Slice-0 runbook (`docs/specs/accounts-and-billing.md`).
 

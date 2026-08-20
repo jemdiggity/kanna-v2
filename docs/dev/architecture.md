@@ -182,8 +182,13 @@ The user-facing surface is described in
     `./kd relay stats` with the operator token from Secret Manager
     (`kanna-relay-stats-token`). `permessage-deflate` is negotiated per client
     (the mobile leg; the desktop's tokio-tungstenite client connects plain).
-    Abuse bounds: 16 MiB `maxPayload` on decompressed frames plus pre-auth
-    per-IP admission caps. Successful desktop-credential validations and
+    Abuse bounds: `maxPayload` is 16 MiB, applied by `ws` to the
+    **decompressed** frame size (which is what keeps compression safe
+    pre-auth), derived as 2× the largest enforced legitimate frame — the
+    8 MiB task-input body — and overridable per VM with
+    `KANNA_RELAY_MAX_PAYLOAD_BYTES`; pre-auth per-IP admission caps bound
+    unauthenticated connections and upgrade rate. Successful
+    desktop-credential validations and
     entitlement reads are each cached for 60 s; a new desktop-credential
     connection always re-reads Firestore (so a revoked desktop cannot
     reconnect), while entitlement resolution at authentication may be served
@@ -243,14 +248,21 @@ there for the same reason.
 
 Task creation and terminal streaming, end to end:
 
-1. User creates a task (⇧⌘N) → worktree at `{repo}/.kanna-worktrees/task-{uuid}`,
-   branch `task-{id}`, DB row, repo-config `setup` commands run.
-2. App asks the daemon to `Spawn` — the daemon forks the agent CLI in a PTY and
-   starts the single per-session reader feeding the headless terminal.
+1. User creates a task (⇧⌘N) → the frontend store calls `createDesktopTask`
+   against the `kanna-server` HTTP API (`apps/desktop/src/stores/taskItemActions.ts`
+   → `services/desktopServerClient`). **`kanna-server` owns creation**
+   (`crates/kanna-server/src/task_creator/`): it writes the DB row, creates
+   the worktree at `{repo}/.kanna-worktrees/task-{uuid}` on branch
+   `task-{id}`, and runs the repo-config `setup` commands.
+2. `kanna-server` then asks the daemon to `SpawnAgent` — the daemon forks the
+   agent CLI in a PTY and starts the single per-session reader feeding the
+   headless terminal.
 3. Frontend `AttachSnapshot` hydrates xterm.js from the headless terminal, then
    streams live output; typed input goes back through `send_input` → PTY.
-4. Agent finishes → the daemon's terminal-state verdict marks the task
-   `unread`; the user reviews the diff (⌘D) and advances the workflow (⌘S).
+4. The daemon emits terminal-state events; `kanna-server`'s terminal watcher
+   persists them as the task's `runtimeState` and derives the
+   `activity`/read-state effects (a stopped, unviewed task shows `unread`).
+   The user reviews the diff (⌘D) and advances the workflow (⌘S).
 5. Stage transitions fork a fresh workspace (new branch + worktree cut from
    the task's **latest committed tip**, resolved across all of the task's
    workspace branches — see `crates/kanna-server/src/task_creator/work_tip.rs`)
@@ -259,9 +271,12 @@ Task creation and terminal streaming, end to end:
 
 Workflow semantics are split across three places: task/workflow/workspace/post
 definitions and close behavior are in [`AGENTS.md`](../../AGENTS.md) under
-"Core concepts"; the stage-advance, revision-budget, and revision-resume
-contracts are under its "Common Pitfalls"; and the user-facing task flows,
-close steps, and shortcuts are in
+"Core concepts"; the stage-advance contract is under its "Common Pitfalls";
+and the user-facing task flows, close steps, shortcuts, and the **revision
+contracts** — provider-neutral session resume, the default budget of 5
+agent-requested rounds (`0` = unlimited), exhausted-agent parking vs. the
+human reset, and the committed task spec at `docs/task-specs/<task-id>.md`
+that later stages review against — are in
 [Product Behavior](product-behavior.md).
 
 ### Beyond the desktop: events, inputs, and the cloud path
@@ -278,7 +293,25 @@ The contracts below are specified in
   16 event kinds exist today, covering task lifecycle, runs and stage
   changes, input delivery/blocking, awaiting-input and activity edges, merge
   signaling, teardown failures, and transfer finalization
-  (`crates/kanna-server/src/db/task_events.rs`). Cross-machine consumption is
+  (`crates/kanna-server/src/db/task_events.rs`). Two of those kinds carry
+  the agent-supervision contract and must not be conflated:
+  - `task.awaiting_input` is a **positive** signal — the daemon matched
+    prompt chrome the agent CLI actually rendered (`Waiting`). It is never
+    inferred from a session merely going quiet.
+  - `task.activity_changed` is the provider-neutral **settled** display
+    transition, debounced server-side (`activity_event_debounce_seconds`,
+    default 20 s): every activity direction emits once after the new value
+    has held, for every provider, with no waiting-prompt placeholder
+    required; a flicker inside the window emits nothing. The payload carries
+    `previousActivity`, `activity`, the authoritative `runtimeState`, and
+    `latestRunFinishedWithoutCompletion` — the parked-awaiting-advance
+    signature — so a manager acts on the shared server verdict instead of
+    running its own polling or debounce loop. It does not prove a question
+    was asked; `task.awaiting_input` remains the question signal. (This
+    server-side debounce is task `6b9fb72a` / PR #1164, which replaced the
+    earlier `task.idle_sustained` design — no such event exists.)
+
+  Cross-machine consumption is
   the **`ks1.` aggregated cursor**: when the caller is account-authorized and
   relay routing is up, the local server fans the wait out to sibling desktops
   as relay invokes, stamps every event with `machineId`, keeps one opaque
@@ -286,11 +319,9 @@ The contracts below are specified in
   unreachable peers as `machineErrors` with `stale: true`. `kanna-mcp` keeps
   its own older `km1.` client-side fan-in for explicit multi-machine task-id
   sets. A task manager consumes the feed by looping `kanna_wait_events` with
-  the returned cursor and reconciling each wake-up through `kanna_get_task`
-  (reading `runtimeState`, not `activity`). The mobile app does **not** use
+  the returned cursor. The mobile app does **not** use
   this feed — its cross-machine view is the Firestore task index plus KSP
-  task-summary streams. (A server-emitted `task.idle_sustained` event for
-  parked-task detection is in flight — task `6b9fb72a`.)
+  task-summary streams.
 - **Task input pipeline.** `POST /v1/tasks/{id}/input` (and the server's own
   completion notifications) write into the live PTY through the daemon. A
   success now means *submitted* — the daemon acknowledges only after the
@@ -315,7 +346,9 @@ The contracts below are specified in
   a per-session index so a converged publish costs zero Firestore reads and
   writes. Continuously changing output snippets are kept off this path
   entirely — they stream over KSP `task_summary` frames while Firestore holds
-  only the **resting** snippet, written at boundaries (close, working→idle).
+  only the **resting** snippet, refreshed at boundaries: task close, a
+  `working` → `idle`/`unread` transition, or a changed `transition_revision`
+  (`crates/kanna-server/src/cloud_task_publisher.rs`).
 
 ## Source-of-truth boundaries
 

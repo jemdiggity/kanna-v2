@@ -12,9 +12,10 @@ semantics, and the MCP task-management rule — stay in the repo-root
 
 **Create a task:**
 1. ⇧⌘N → enter prompt (choose an available agent provider)
-2. App creates git worktree (`{repo}/.kanna-worktrees/task-{uuid}`)
-3. Runs `.kanna/config.json` setup scripts if present (e.g., `pnpm install`)
-4. Spawns agent CLI in the worktree via daemon
+2. The frontend calls `kanna-server`, which creates the git worktree
+   (`{repo}/.kanna-worktrees/task-{uuid}`)
+3. …runs `.kanna/config.json` setup scripts if present (e.g., `pnpm install`)
+4. …and asks the daemon to spawn the agent CLI in the worktree
 5. Agent starts working. User watches in real-time terminal.
 
 **Review and merge:**
@@ -24,11 +25,35 @@ semantics, and the MCP task-management rule — stay in the repo-root
 4. Cmd+S → advance the workflow (commit post runs in-session; the pr-stage agent creates the GitHub PR and reports its URL)
 5. Human reviews the PR, then Cmd+S (or the diff modal's approve button) advances the pr stage: when the task's pinned workflow ships the `approve` post, the button reads "Approve & Merge" and the post signals the merge master, which merges it; pinned workflows without the post get a plain "Approve" that only advances. Approval is single-flight: while the post runs the button is disabled and repeated Cmd+S is ignored — only the post's completion closes the task. Shift+Cmd+S in the diff modal sends the task back to `in progress` for revisions instead.
 
-A revision must carry reviewer feedback: an agent-originated revision request
-with an empty prompt is refused (400) before a revision round is spent or the
-review run is closed, and other callers fall back to the terminating run's
-recorded verdict. Human-originated revisions are never refused and reset the
-round count.
+**Revisions.** Sending a task back for revision follows these contracts
+(engine code: `crates/kanna-server/src/task_creator/{stages,resume}.rs`):
+
+- *Feedback is required.* An agent-originated revision request with an empty
+  prompt is refused (400) before a revision round is spent or the review run
+  is closed; other callers fall back to the terminating run's recorded
+  verdict. Human-originated revisions are never refused.
+- *Revisions resume by default, provider-neutrally.* `request_revision`
+  reopens the target stage's previous PTY agent session in that run's **own
+  worktree** — Claude, Copilot, Codex, and OpenCode all resume when their
+  recorded session/transcript preconditions hold (each CLI keys transcripts
+  differently; the engine checks the recorded session id against the
+  provider's own store and the run's cwd). Antigravity and headless SDK
+  sessions cannot resume, and any failed precondition (missing transcript,
+  worktree gone, tip diverged from the committed one) falls back to a fresh
+  fork — with the reason recorded durably on the replacement run
+  (`stage_run.resume_fallback_reason`).
+- *Rounds are budgeted.* A workflow's `revision_limit` defaults to **5**
+  (`0` = unlimited) and counts only *agent-requested* revisions. Once spent,
+  an agent's `request_revision` starts nothing: the review verdict is still
+  recorded, the task parks `unread` at its current stage, and the response
+  carries `revisionBudget.exhausted: true`. A *human* revision is never
+  refused and **resets** the count.
+- *The task's terms live in its committed spec* —
+  `docs/task-specs/<task-id>.md`, written by the implement agent, updated in
+  the same commits as the work, and judged by later review stages
+  ([`docs/specs/task-spec-artifact.md`](../specs/task-spec-artifact.md)).
+  Reviewer feedback and scope decisions land there, so a revision round
+  changes the spec as well as the code.
 
 **Manual intervention:**
 1. Cmd+J → shell modal opens in the task's worktree
