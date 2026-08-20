@@ -10,7 +10,7 @@ Vue/Firebase account and Stripe Checkout funnel for Kanna Cloud. Local browser c
 
 Optional overrides are `KANNA_WEB_PORTAL_FIREBASE_AUTH_DOMAIN`, `KANNA_WEB_PORTAL_FIREBASE_FUNCTIONS_REGION`, and `KANNA_WEB_PORTAL_CLOUD_PRICE`. These are public browser identifiers/display configuration, not server secrets. Stripe secret keys remain in the Functions secret store.
 
-The opt-in emulator integration test expects Auth and Functions emulators plus the Slice-1 `createCheckoutSession` callable:
+The opt-in emulator integration test expects Auth and Functions emulators plus the Slice-1 `createCheckoutSession` callable. It uses this worktree's reserved `KANNA_FIREBASE_*_PORT` values and falls back to the standard Firebase emulator ports outside a Kanna task:
 
 ```sh
 pnpm --dir apps/web-portal test:integration

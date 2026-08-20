@@ -1,13 +1,16 @@
 import { beforeAll, describe, expect, it } from "vitest";
-import { portalFirebase } from "../src/firebase";
+import { applyActionCode } from "firebase/auth";
+import { auth, portalFirebase } from "../src/firebase";
 
 const run = process.env.KANNA_RUN_WEB_PORTAL_EMULATOR_INTEGRATION === "1";
 const integration = run ? describe : describe.skip;
 const projectId = "kanna-local";
-const authPort = process.env.FIREBASE_AUTH_EMULATOR_PORT || "9099";
+const authPort = process.env.KANNA_FIREBASE_AUTH_PORT || process.env.VITE_FIREBASE_AUTH_EMULATOR_PORT || "9099";
 
-interface EmulatorUser {
-  localId: string;
+interface OutOfBandCode {
+  email: string;
+  oobCode: string;
+  requestType: string;
 }
 
 integration("web portal Firebase emulator flow", () => {
@@ -22,15 +25,12 @@ integration("web portal Firebase emulator flow", () => {
     const registered = await portalFirebase.register(email, password);
     expect(registered.emailVerified).toBe(false);
 
-    const usersResponse = await fetch(`http://127.0.0.1:${authPort}/emulator/v1/projects/${projectId}/accounts`);
-    const users = await usersResponse.json() as { users: EmulatorUser[] };
-    const localId = users.users.find((candidate) => candidate.localId === registered.uid)?.localId;
-    expect(localId).toBe(registered.uid);
-    await fetch(`http://127.0.0.1:${authPort}/identitytoolkit.googleapis.com/v1/accounts:update?key=fake-api-key`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ localId, emailVerified: true })
-    });
+    const codesResponse = await fetch(`http://127.0.0.1:${authPort}/emulator/v1/projects/${projectId}/oobCodes`);
+    const codes = await codesResponse.json() as { oobCodes: OutOfBandCode[] };
+    const verification = codes.oobCodes.find((code) => code.email === email && code.requestType === "VERIFY_EMAIL");
+    expect(verification).toBeDefined();
+    if (!verification) throw new Error("Auth emulator did not create an email verification code");
+    await applyActionCode(auth, verification.oobCode);
 
     await portalFirebase.signOut();
     const signedIn = await portalFirebase.signIn(email, password);
