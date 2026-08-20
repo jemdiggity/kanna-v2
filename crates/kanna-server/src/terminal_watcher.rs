@@ -532,7 +532,8 @@ mod tests {
     use crate::config::Config;
     use crate::db::Db;
     use kanna_daemon::protocol::{
-        Command as DaemonCommand, Event as DaemonEvent, SessionInfo, SessionState,
+        Command as DaemonCommand, ComposerAttestation, Event as DaemonEvent, SessionInfo,
+        SessionState,
     };
     use std::path::{Path, PathBuf};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -1243,6 +1244,143 @@ mod tests {
         drop(listener);
         let _ = std::fs::remove_file(socket_path);
         let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    /// The seam between the daemon's ledger and the API. Both ends are proven
+    /// on their own — the daemon's verdicts in its own unit and socket tests,
+    /// the payload shape in `core_routes` against columns written by hand —
+    /// but this is the only path that ever writes `composer_text` and
+    /// `composer_attestation` in production. Wired to the wrong id, or with
+    /// the `List` reconcile never running, every other test on this branch
+    /// still passes and the field simply never populates.
+    #[tokio::test]
+    async fn watcher_records_the_composer_from_adoption_and_from_its_own_edges() {
+        let unique = unique_name("terminal-watcher-composer");
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        let config = test_config(&unique, &daemon_dir);
+        seed_plain_task(&config);
+        let replacements = session_replacements::SessionReplacements::default();
+        let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
+
+        let state = Arc::new(http_api::AppState::new(config.clone()));
+        let mut state_changes = state.subscribe_state_changes();
+        let watcher_state = Arc::clone(&state);
+        let watcher_replacements = replacements.clone();
+        let watcher = tokio::spawn(async move {
+            terminal_state_watcher_once(&watcher_state, &watcher_replacements).await
+        });
+
+        // Adoption: the composer a session was already rendering when this
+        // daemon generation took it over arrives on the List, not on an event.
+        let mut subscriber = expect_subscribe_with_sessions(
+            &listener,
+            vec![SessionInfo {
+                session_id: "task-child".to_string(),
+                pid: 42,
+                cwd: "/tmp".to_string(),
+                state: SessionState::Active,
+                idle_seconds: 0,
+                status: kanna_daemon::protocol::SessionStatus::Idle,
+                kind: Default::default(),
+                logical_input_blocked: false,
+                composer_text: Some("check again in a minute".to_string()),
+                composer_attestation: ComposerAttestation::NotTyped,
+            }],
+        )
+        .await;
+
+        let db = Db::open(&config.db_path).unwrap();
+        await_composer(&db, Some("check again in a minute"), Some("not-typed")).await;
+        expect_tasks_state_change(&mut state_changes).await;
+
+        // What the watcher stored is what the API reports. This is the whole
+        // point of the seam: a value that lands in the columns but never
+        // reaches `composer` on task detail is no better than one that never
+        // landed.
+        let detail =
+            crate::mobile_api::MobileApi::new(config.clone(), Db::open(&config.db_path).unwrap())
+                .get_task("task-child")
+                .unwrap()
+                .expect("the seeded task");
+        let composer = detail.composer.expect("task detail reports the composer");
+        assert_eq!(composer.text.as_deref(), Some("check again in a minute"));
+        assert_eq!(composer.attestation, "not-typed");
+
+        // A human starts typing: the composer moves on its own edge, which is
+        // neither a status change nor anything else the feed reports.
+        write_event(
+            &mut subscriber,
+            &DaemonEvent::ComposerChanged {
+                session_id: "task-child".to_string(),
+                composer_text: Some("half typed".to_string()),
+                composer_attestation: ComposerAttestation::Typed,
+            },
+        )
+        .await;
+        await_composer(&db, Some("half typed"), Some("typed")).await;
+
+        // The text goes away — a repaint with nothing at the prompt — while
+        // the verdict about who typed there stands until a boundary moves it.
+        write_event(
+            &mut subscriber,
+            &DaemonEvent::ComposerChanged {
+                session_id: "task-child".to_string(),
+                composer_text: None,
+                composer_attestation: ComposerAttestation::Typed,
+            },
+        )
+        .await;
+        await_composer(&db, None, Some("typed")).await;
+
+        write_event(&mut subscriber, &DaemonEvent::ShuttingDown).await;
+        timeout(Duration::from_secs(2), watcher)
+            .await
+            .expect("watcher did not finish")
+            .unwrap()
+            .unwrap();
+        drop(listener);
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    /// Poll the task row until the watcher has written this composer, so the
+    /// assertion never races the watcher's own loop.
+    async fn await_composer(db: &Db, text: Option<&str>, attestation: Option<&str>) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let item = db
+                .get_pipeline_item("task-child")
+                .unwrap()
+                .expect("the seeded task");
+            if item.composer_text.as_deref() == text
+                && item.composer_attestation.as_deref() == attestation
+            {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "composer was never recorded as {text:?}/{attestation:?}; \
+                 last read {:?}/{:?}",
+                item.composer_text,
+                item.composer_attestation
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    async fn expect_tasks_state_change(
+        receiver: &mut tokio::sync::broadcast::Receiver<kanna_agent_protocol::ServerFrame>,
+    ) {
+        let frame = timeout(Duration::from_secs(2), receiver.recv())
+            .await
+            .expect("no state change was published")
+            .expect("the state-change channel closed");
+        assert!(matches!(
+            frame,
+            kanna_agent_protocol::ServerFrame::StateChanged {
+                scope: kanna_agent_protocol::StateChangeScope::Tasks
+            }
+        ));
     }
 
     #[tokio::test]
