@@ -900,7 +900,17 @@ struct RevisionBudgetFixture {
     socket_path: PathBuf,
 }
 
+/// The same fixture with its whole revision budget already spent, which is
+/// what the exhausted-budget tests need.
 fn setup_revision_budget_fixture(label: &str, revision_limit: i64) -> RevisionBudgetFixture {
+    setup_revision_budget_fixture_with_spent_rounds(label, revision_limit, revision_limit)
+}
+
+fn setup_revision_budget_fixture_with_spent_rounds(
+    label: &str,
+    revision_limit: i64,
+    spent_rounds: i64,
+) -> RevisionBudgetFixture {
     let unique = format!("{label}-{}", super::unique_test_suffix());
     let repo_root = std::env::temp_dir().join(format!("kanna-http-revision-budget-{unique}"));
     init_test_git_repo(&repo_root);
@@ -987,9 +997,9 @@ fn setup_revision_budget_fixture(label: &str, revision_limit: i64) -> RevisionBu
         "claude",
     )
     .unwrap();
-    // Spend the whole budget, as a task that has already been round-tripped
-    // through review this many times would have.
-    for _ in 0..revision_limit {
+    // Spend the requested rounds, as a task that has already been
+    // round-tripped through review that many times would have.
+    for _ in 0..spent_rounds {
         db.try_claim_agent_revision_round("budget-1", 0).unwrap();
     }
     db.insert_stage_run(crate::db::NewStageRun {
@@ -1276,6 +1286,187 @@ async fn human_revision_request_ignores_the_budget_and_hands_it_back() {
     let task = super::actions::wait_for_running_task_stage(&db, "budget-1", "in progress").await;
     assert_eq!(task.stage.as_deref(), Some("in progress"));
     assert_eq!(db.task_revision_rounds("budget-1").unwrap(), 0);
+
+    daemon_server.await.unwrap();
+    drop(db);
+    cleanup_revision_budget_fixture(&fixture);
+}
+
+/// A reviewer that asks for a revision without findings would start an agent
+/// on an empty "Reviewer feedback:" section: the revising agent has nothing to
+/// act on, the budgeted round is spent proving that, and the verdict is lost.
+/// The request is refused at the boundary instead — with no round spent and
+/// the review run left open — so the reviewer can resend the findings.
+#[tokio::test]
+async fn agent_revision_request_without_feedback_is_refused_without_spending_a_round() {
+    let fixture = setup_revision_budget_fixture_with_spent_rounds("empty-feedback", 5, 0);
+
+    // No daemon is listening: a refused request must start nothing, so it
+    // cannot need one.
+    let app = super::router(Arc::new(super::AppState::new(fixture.config.clone())));
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/budget-1/actions/request-revision")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "targetStage": "in progress",
+                        "summary": "Inventory cleanup still has crash and concurrency gaps",
+                        "prompt": "   \n  "
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let message = String::from_utf8_lossy(&body);
+    assert!(
+        message.contains("`prompt` must contain the findings"),
+        "the reviewer must be told what to resend: {message}"
+    );
+    assert!(
+        message.contains("no revision round was spent"),
+        "the reviewer must be told retrying is free: {message}"
+    );
+
+    let db = Db::open(&fixture.config.db_path).unwrap();
+    assert_eq!(
+        db.task_revision_rounds("budget-1").unwrap(),
+        0,
+        "a refused request must not spend a round"
+    );
+    let task = db.get_task_stage_source("budget-1").unwrap().unwrap();
+    assert_eq!(task.stage.as_deref(), Some("review"));
+    let runs = db.list_stage_runs_for_task("budget-1").unwrap();
+    assert_eq!(runs.len(), 1, "no revision run may be created");
+    // The review run is left open so the reviewer's retry records the verdict
+    // it is about to send, rather than closing it on an empty one.
+    assert_eq!(runs[0].status, "running");
+    assert_eq!(runs[0].result, None);
+
+    drop(db);
+    cleanup_revision_budget_fixture(&fixture);
+}
+
+/// The compose-side backstop for every caller the boundary refusal does not
+/// cover: a revision request that carries no feedback of its own still starts
+/// the agent on the verdict recorded on the terminating review run, so a
+/// review's findings reach the implementer instead of being dropped.
+#[tokio::test]
+async fn revision_prompt_falls_back_to_the_review_verdict_when_the_request_has_no_feedback() {
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+    use tokio::io::{AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    const VERDICT: &str = "Inventory cleanup still has unsafe bare-pid daemon killing";
+
+    let fixture = setup_revision_budget_fixture("verdict-fallback", 1);
+
+    let daemon_listener = UnixListener::bind(&fixture.socket_path).unwrap();
+    let daemon_server = tokio::spawn(async move {
+        let (stream, _) = daemon_listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        loop {
+            let command = read_test_daemon_command(&mut reader, &mut write_half).await;
+            let session_id = match command {
+                DaemonCommand::Kill { .. } => {
+                    let response = DaemonEvent::Error {
+                        code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
+                        message: "session not found".to_string(),
+                    };
+                    write_half
+                        .write_all(
+                            format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                    continue;
+                }
+                DaemonCommand::SpawnAgent { session_id, params } => {
+                    assert!(
+                        params
+                            .prompt
+                            .contains(&format!("Reviewer feedback:\n{VERDICT}")),
+                        "revision prompt lost the review verdict: {}",
+                        params.prompt
+                    );
+                    session_id
+                }
+                DaemonCommand::Spawn {
+                    session_id, args, ..
+                } => {
+                    let command_line = args.join(" ");
+                    assert!(
+                        command_line.contains(&format!("Reviewer feedback:\n{VERDICT}")),
+                        "revision prompt lost the review verdict: {command_line}"
+                    );
+                    session_id
+                }
+                other => panic!("expected revision spawn command, got {:?}", other),
+            };
+            write_half
+                .write_all(
+                    format!(
+                        "{}\n",
+                        serde_json::to_string(&DaemonEvent::SessionCreated { session_id }).unwrap()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            break;
+        }
+    });
+
+    // A human request is never refused for empty feedback, so it is what
+    // exercises the compose-side fallback end to end.
+    let app = super::router(Arc::new(super::AppState::new(fixture.config.clone())));
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/budget-1/actions/request-revision")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "targetStage": "in progress",
+                        "summary": VERDICT,
+                        "prompt": "",
+                        "origin": "human"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    if response.status() != StatusCode::OK {
+        daemon_server.abort();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        cleanup_revision_budget_fixture(&fixture);
+        panic!(
+            "revision must fall back to the recorded verdict, got {status}: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+
+    let db = Db::open(&fixture.config.db_path).unwrap();
+    super::actions::wait_for_running_task_stage(&db, "budget-1", "in progress").await;
+    let revision_run = wait_for_revision_run(&db, "budget-1", "in progress").await;
+    assert_eq!(
+        revision_run.feedback.as_deref(),
+        Some(VERDICT),
+        "the revision run must record the feedback the agent actually got"
+    );
 
     daemon_server.await.unwrap();
     drop(db);
