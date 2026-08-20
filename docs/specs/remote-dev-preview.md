@@ -173,9 +173,15 @@ Remote: WebView ─ https://p-<token>.relay.kanna.build/ ─► relay preview  �
 
 ### Session lifecycle
 
-- `POST /v1/tasks/{task_id}/preview` (paired-device or loopback auth — the
-  same auth the rest of the task API uses) with body
-  `{ portName?: string, transport: "lan" | "relay" }`. The server:
+- `POST /v1/tasks/{task_id}/preview` — **opens LAN sessions only**
+  (paired-device or loopback auth — the same auth the rest of the task API
+  uses) with body `{ portName?: string }`. Remote sessions are never opened
+  over REST: the phone opens them exclusively with `preview_request` on its
+  relay control socket, and the desktop's `preview_establish` handler runs
+  the same validation, probe, and minting (steps 1–3 below) before dialing
+  back the tunnel — with refusals surfaced as `preview_refuse` control
+  messages instead of REST 409s (see "Wire design" under Remote path). The
+  server:
   1. Refuses unless the task is open and has claimed ports; resolves
      `portName` against the task's `task_port` claims (default: the first
      port). **Only claimed ports are ever eligible** — the request names a
@@ -189,21 +195,21 @@ Remote: WebView ─ https://p-<token>.relay.kanna.build/ ─► relay preview  �
      timeout (default 30 min), hard cap (default 12 h). Both credentials are
      desktop-owned on every path: only the desktop's forwarder ever stores or
      validates them (see "Wire design" for what the relay holds instead).
-  4. LAN: binds an OS-assigned ephemeral TCP listener on `lan_host` (the
+  4. Binds an OS-assigned ephemeral TCP listener on `lan_host` (the
      `cloud_transfer_proxy` pattern) and returns
      `{ port: <ephemeral>, enterPath: "/__kanna_preview__/enter?t=<enterSecret>",
         ports: [...] }`. The phone composes the URL from its already
      validated Bonjour host for that desktop — the server never guesses its
      own LAN IP.
-  5. Relay: returns the session descriptor; the phone then performs the
-     relay-side open (below), or — simpler and recommended — the phone does
-     the relay-side open *first* and this endpoint is only used for the LAN
-     path plus port listing. See "Remote path".
-- `DELETE /v1/tasks/{task_id}/preview` closes the session. Sessions are also
-  revoked on: task close, stage transition (workspace teardown — the same
-  hook that kills the daemon session), idle/hard expiry, and desktop restart
-  (in-memory). Revocation closes the LAN listener / relay tunnel; in-flight
-  responses are aborted.
+- `DELETE /v1/tasks/{task_id}/preview` closes the task's preview session of
+  either kind: for a LAN session it closes the ephemeral listener; for a
+  remote session it closes the tunnel, which is the relay-side revocation
+  signal (see the cleanup rules under Remote path). Reachable like the rest
+  of the task API — LAN REST directly, or the relay `invoke` path. Sessions
+  are also revoked on: task close, stage transition (workspace teardown —
+  the same hook that kills the daemon session), idle/hard expiry, and
+  desktop restart (in-memory). Revocation closes the LAN listener / relay
+  tunnel; in-flight responses are aborted.
 - `mobile_api::TaskDetail` gains `ports: [{name, port}] | null` (serialized
   from `pipeline_item.port_env`) so the phone can show the affordance without
   a second request. Field absence = old desktop = hide the affordance (this
@@ -253,7 +259,7 @@ residual).
 Phone on the same network, desktop paired via QR:
 
 1. Task detail shows `ports` → Preview pill appears.
-2. Tap → `POST /v1/tasks/{id}/preview {transport:"lan"}` over the validated
+2. Tap → `POST /v1/tasks/{id}/preview {portName?}` over the validated
    LAN base URL → `{port, enterPath}`.
 3. WebView (or "Open in Safari" share) loads
    `http://<validated-host>:<ephemeral-port>/__kanna_preview__/enter?t=…`.
@@ -509,7 +515,9 @@ themselves.
   row, exactly the visual-companion pill pattern (conditional, with the same
   styling), shown when `TaskDetail.ports` is non-empty. Also an entry in the
   `+` action sheet (`taskActionMenu.ts`) for discoverability.
-- **Opening**: tap → route via `routeForTask` (LAN if validated, else relay)
+- **Opening**: tap → route via `routeForTask` — LAN if validated
+  (`POST /v1/tasks/{id}/preview` over the LAN base URL), else relay
+  (`preview_request` on the relay control socket; never REST)
   → session open → fullscreen `TaskPreviewModal` (sibling of
   `VisualCompanionModal`) hosting the WebView, with an address-less chrome:
   title = task title + port name, refresh button, "Open in browser" share
@@ -578,8 +586,9 @@ emulators + local relay + kanna-server + daemon) and
 **P0 — Desktop preview sessions + LAN path (kanna-server only).**
 Boundary: `crates/kanna-server` — preview session manager, forwarder (hyper
 loopback client, Host/Origin/Location rewrites, WS upgrade splice, caps),
-ephemeral LAN listener, enter/cookie flow, `POST/DELETE
-/v1/tasks/{id}/preview`, probe, revocation hooks on close/stage-transition,
+ephemeral LAN listener, enter/cookie flow, the LAN-only `POST` and the
+either-kind `DELETE` on `/v1/tasks/{id}/preview`, probe, revocation hooks on
+close/stage-transition,
 `ports` on `mobile_api::TaskDetail`. No relay, no mobile.
 E2E (`tests/remote-e2e/`, LAN layer): fixture task with a claimed port and a
 fixture HTTP+WS server on it → open preview via paired-device auth → enter
