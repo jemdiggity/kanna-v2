@@ -210,7 +210,8 @@ function createModel() {
     initialize: vi.fn().mockResolvedValue(undefined),
     navigator: { tabs: [], utilityActions: [] },
     sessionStore,
-    setForceCloud: vi.fn()
+    setForceCloud: vi.fn(),
+    setForeground: vi.fn()
   } as unknown as AppModel;
   harness.currentModel = model;
   return { controller, model, sessionStore };
@@ -552,6 +553,8 @@ describe("App component wiring", () => {
       });
 
       expect(refresh).toHaveBeenCalledOnce();
+      expect(model.setForeground).toHaveBeenNthCalledWith(1, false);
+      expect(model.setForeground).toHaveBeenLastCalledWith(true);
       expect(harness.addMobileCrashBreadcrumb).toHaveBeenCalledWith(
         "app-state",
         "background->active action=refresh"

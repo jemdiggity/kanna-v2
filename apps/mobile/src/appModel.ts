@@ -70,6 +70,7 @@ export interface AppModel {
   getAuthIdToken(forceRefresh?: boolean): Promise<string | null>;
   sessionStore: SessionStore;
   setForceCloud(enabled: boolean): void;
+  setForeground?(foreground: boolean): void;
 }
 
 interface AppModelOptions {
@@ -92,6 +93,7 @@ interface ResolvedAppClient {
     onSupplement: (tasks: TaskSummary[]) => void
   ) => Promise<TaskSummary[]>;
   dispose(): void;
+  setForeground(foreground: boolean): void;
 }
 
 export interface CreateAppModelInput {
@@ -268,6 +270,7 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
       taskIndex: options.taskIndex,
       desktopRepoWaitMs: options.desktopRepoWaitMs
     });
+  let appForeground = true;
   let activeClient = resolveClient(clientGeneration);
   const replaceActiveClient = () => {
     const currentState = sessionStore.getState();
@@ -292,6 +295,7 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
     // belong to the incoming generation, not the one being replaced.
     const nextGeneration = ++clientGeneration;
     const nextClient = resolveClient(nextGeneration);
+    nextClient.setForeground(appForeground);
     activeClient = nextClient;
     previousClient.dispose();
     publishTaskRouteChange();
@@ -671,6 +675,10 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
     setForceCloud(enabled) {
       forceCloud = enabled;
       replaceActiveClient();
+    },
+    setForeground(foreground) {
+      appForeground = foreground;
+      activeClient.setForeground(foreground);
     }
   };
 }
@@ -860,6 +868,9 @@ function createClientForMode({
         if (disposed) return;
         disposed = true;
         relayClient.close();
+      },
+      setForeground(foreground) {
+        relayClient.setForeground?.(foreground);
       }
     };
   }
@@ -885,12 +896,13 @@ function createClientForMode({
     };
     return {
       client: sourceTrackingClient,
-      dispose() {}
+      dispose() {},
+      setForeground() {}
     };
   }
 
   onMachineSourcesChanged({ account: [], local: [] });
-  return { client: createDisconnectedClient(), dispose() {} };
+  return { client: createDisconnectedClient(), dispose() {}, setForeground() {} };
 }
 
 function normalizeOptionalString(value: string | null | undefined): string | null {

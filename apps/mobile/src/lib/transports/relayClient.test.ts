@@ -237,6 +237,99 @@ describe("createRelayDesktopClient", () => {
     );
   });
 
+  it("reuses one control connection for sequential presence refreshes", async () => {
+    const sockets: RelaySocketLike[] = [];
+    let nextId = 0;
+    const client = createRelayDesktopClient({
+      createSocket: () => {
+        const socket = createSocket();
+        sockets.push(socket);
+        return socket;
+      },
+      getIdToken: async () => "id-token-1",
+      nextId: () => `active-${++nextId}`,
+      relayUrl: "wss://relay.example"
+    });
+
+    const first = client.listActiveDesktopIds();
+    sockets[0].onopen?.();
+    await flushPromises();
+    sockets[0].onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
+    await flushPromises();
+    sockets[0].onmessage?.({
+      data: JSON.stringify({ type: "response", id: "active-1", data: { desktopIds: [] } })
+    });
+    await first;
+
+    const second = client.listActiveDesktopIds();
+    await flushPromises();
+    sockets[0].onmessage?.({
+      data: JSON.stringify({ type: "response", id: "active-2", data: { desktopIds: ["desktop-1"] } })
+    });
+
+    await expect(second).resolves.toEqual(new Set(["desktop-1"]));
+    expect(sockets).toHaveLength(1);
+    client.close();
+  });
+
+  it("reconnects a dropped control connection with backoff", async () => {
+    vi.useFakeTimers();
+    try {
+      const sockets: RelaySocketLike[] = [];
+      const client = createRelayDesktopClient({
+        createSocket: () => {
+          const socket = createSocket();
+          sockets.push(socket);
+          return socket;
+        },
+        getIdToken: async () => "id-token-1",
+        relayUrl: "wss://relay.example",
+        reconnectDelaysMs: [250, 500]
+      });
+
+      const refresh = client.listActiveDesktopIds();
+      sockets[0].onopen?.();
+      await flushPromises();
+      sockets[0].onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
+      await flushPromises();
+      sockets[0].onmessage?.({
+        data: JSON.stringify({ type: "response", id: "mobile-1", data: { desktopIds: [] } })
+      });
+      await refresh;
+      sockets[0].onclose?.();
+
+      await vi.advanceTimersByTimeAsync(249);
+      expect(sockets).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(sockets).toHaveLength(2);
+      client.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("closes the control connection in background and reopens in foreground", async () => {
+    const sockets: RelaySocketLike[] = [];
+    const client = createRelayDesktopClient({
+      createSocket: () => {
+        const socket = createSocket();
+        sockets.push(socket);
+        return socket;
+      },
+      getIdToken: async () => "id-token-1",
+      relayUrl: "wss://relay.example"
+    });
+
+    const refresh = client.listActiveDesktopIds();
+    client.setForeground(false);
+    await expect(refresh).rejects.toThrow("background");
+    expect(sockets[0].close).toHaveBeenCalledTimes(1);
+
+    client.setForeground(true);
+    expect(sockets).toHaveLength(2);
+    client.close();
+  });
+
   it("opens a fresh invoke socket after a relay socket error", async () => {
     const sockets: RelaySocketLike[] = [];
     const client = createRelayDesktopClient({

@@ -28,6 +28,7 @@ export type RelaySocketFactory = (url: string) => RelaySocketLike;
 
 export interface RelayDesktopClient {
   close(): void;
+  setForeground?(foreground: boolean): void;
   invokeDesktop: RemoteDesktopInvoker;
   listActiveDesktopIds(): Promise<Set<string>>;
   observeTaskTerminal: RemoteTaskTerminalObserver;
@@ -43,6 +44,7 @@ export interface RelayDesktopClientDependencies {
   /** Called when the relay rejects auth even after a forced token refresh, so
    * the app can surface an auth-expired state and require re-login. */
   onAuthError?(): void;
+  reconnectDelaysMs?: readonly number[];
 }
 
 interface PendingInvoke {
@@ -74,12 +76,18 @@ export function createRelayDesktopClient({
   getIdToken,
   nextId = createSequentialIdFactory(),
   relayUrl,
-  onAuthError
+  onAuthError,
+  reconnectDelaysMs = [250, 500, 1000, 2000]
 }: RelayDesktopClientDependencies): RelayDesktopClient {
   let socket: RelaySocketLike | null = null;
   let readyPromise: Promise<void> | null = null;
   let resolveReady: (() => void) | null = null;
   let rejectReady: ((error: Error) => void) | null = null;
+  let foreground = true;
+  let disposed = false;
+  let reconnectAttempt = 0;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let hasOpenedControlSocket = false;
   const pendingInvokes = new Map<string, PendingInvoke>();
   const terminalObservers = new Map<string, TerminalObserver>();
   const streamClients = new Map<string, StreamClient>();
@@ -105,17 +113,38 @@ export function createRelayDesktopClient({
     return client;
   };
 
+  const scheduleReconnect = () => {
+    if (!foreground || disposed || reconnectTimer || !hasOpenedControlSocket) {
+      return;
+    }
+    const delay = reconnectDelaysMs[
+      Math.min(reconnectAttempt, reconnectDelaysMs.length - 1)
+    ] ?? 0;
+    reconnectAttempt += 1;
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      if (foreground && !disposed) {
+        ensureSocket();
+      }
+    }, delay);
+  };
+
   const ensureSocket = () => {
+    if (!foreground || disposed) {
+      return null;
+    }
     if (socket && socket.readyState <= 1) {
       return socket;
     }
 
     const openSocket = createSocket(relayUrl);
+    hasOpenedControlSocket = true;
     socket = openSocket;
     readyPromise = new Promise<void>((resolve, reject) => {
       resolveReady = resolve;
       rejectReady = reject;
     });
+    void readyPromise.catch(() => undefined);
     openSocket.onopen = () => {
       void sendAuth(openSocket);
     };
@@ -134,6 +163,7 @@ export function createRelayDesktopClient({
       readyPromise = null;
       resolveReady = null;
       rejectReady = null;
+      scheduleReconnect();
     };
     openSocket.onclose = () => {
       if (openSocket !== socket) {
@@ -144,6 +174,7 @@ export function createRelayDesktopClient({
       readyPromise = null;
       resolveReady = null;
       rejectReady = null;
+      scheduleReconnect();
     };
 
     return openSocket;
@@ -181,6 +212,11 @@ export function createRelayDesktopClient({
     payload: Record<string, unknown>
   ): Promise<unknown> => {
     const openSocket = ensureSocket();
+    if (!openSocket) {
+      throw new Error(
+        "Relay connection is paused while the app is in the background."
+      );
+    }
     await readyPromise;
     const id = nextId();
 
@@ -208,6 +244,7 @@ export function createRelayDesktopClient({
     }
 
     if (parsed.type === "auth_ok") {
+      reconnectAttempt = 0;
       resolveReady?.();
       resolveReady = null;
       rejectReady = null;
@@ -336,11 +373,35 @@ export function createRelayDesktopClient({
 
   return {
     close() {
+      disposed = true;
+      foreground = false;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      reconnectTimer = null;
       socket?.close();
       for (const client of streamClients.values()) {
         client.close();
       }
       streamClients.clear();
+    },
+    setForeground(nextForeground) {
+      if (disposed || foreground === nextForeground) {
+        return;
+      }
+      foreground = nextForeground;
+      if (!foreground) {
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+        const openSocket = socket;
+        socket = null;
+        readyPromise = null;
+        failAll(
+          new Error("Relay connection closed while the app is in the background.")
+        );
+        openSocket?.close();
+        return;
+      }
+      reconnectAttempt = 0;
+      if (hasOpenedControlSocket) ensureSocket();
     },
     invokeDesktop(request: RemoteDesktopInvocationRequest) {
       return sendInvoke(request.desktopId, {
