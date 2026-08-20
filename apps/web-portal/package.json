@@ -6,7 +6,7 @@
   "scripts": {
     "build": "vue-tsc --noEmit && vite build",
     "test": "vitest run",
-    "test:integration": "KANNA_RUN_WEB_PORTAL_EMULATOR_INTEGRATION=1 vitest run tests/emulator.integration.test.ts --maxWorkers=1",
+    "test:integration": "node tests/run-emulator-integration.mjs",
     "typecheck": "vue-tsc --noEmit"
   },
   "dependencies": {
