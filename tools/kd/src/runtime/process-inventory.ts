@@ -170,11 +170,19 @@ function mutateInventory(path: string, mutation: (resources: InventoryResource[]
   mkdirSync(dirname(path), { recursive: true });
   const deadline = Date.now() + 5_000;
   while (true) {
+    const candidate = `${lock}.pending-${process.pid}-${Math.random().toString(16).slice(2)}`;
     try {
-      mkdirSync(lock);
-      writeFileSync(lockOwner, JSON.stringify({ pid: process.pid, identity: processIdentity(process.pid) }));
+      mkdirSync(candidate);
+      writeFileSync(join(candidate, "owner.json"), JSON.stringify({
+        pid: process.pid,
+        identity: processIdentity(process.pid)
+      }));
+      const publishDelay = Number(process.env.KANNA_TEST_INVENTORY_LOCK_PUBLISH_DELAY_MS ?? 0);
+      if (publishDelay > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, publishDelay);
+      renameSync(candidate, lock);
       break;
     } catch (error) {
+      rmSync(candidate, { recursive: true, force: true });
       if (!isAlreadyExists(error) || Date.now() >= deadline) throw error;
       if (isAbandonedLock(lock, lockOwner)) {
         const abandoned = `${lock}.abandoned-${process.pid}-${Math.random().toString(16).slice(2)}`;
@@ -191,7 +199,14 @@ function mutateInventory(path: string, mutation: (resources: InventoryResource[]
   try {
     writeInventory(path, mutation(readProcessInventory(path)));
   } finally {
-    rmSync(lock, { recursive: true, force: true });
+    const released = `${lock}.released-${process.pid}-${Math.random().toString(16).slice(2)}`;
+    try {
+      renameSync(lock, released);
+      rmSync(released, { recursive: true, force: true });
+    } catch {
+      // A failed release must never remove a lock subsequently acquired by
+      // another writer. Its owner metadata allows ordinary crash recovery.
+    }
   }
 }
 
@@ -254,5 +269,5 @@ function isNoSuchProcess(error: unknown): boolean {
 }
 
 function isAlreadyExists(error: unknown): boolean {
-  return isRecord(error) && error.code === "EEXIST";
+  return isRecord(error) && (error.code === "EEXIST" || error.code === "ENOTEMPTY");
 }

@@ -74,9 +74,32 @@ fn record_spawned_daemon(worktree: &std::path::Path, pid: u32) -> Result<(), Str
     let lock = std::path::PathBuf::from(format!("{}.lock", path.display()));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
-        match std::fs::create_dir(&lock) {
+        let candidate = std::path::PathBuf::from(format!(
+            "{}.pending-{}-{}",
+            lock.display(),
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default()
+        ));
+        let owner = serde_json::json!({
+            "pid": std::process::id(),
+            "identity": process_identity(std::process::id())
+                .ok_or_else(|| "could not establish inventory writer identity".to_string())?
+        });
+        let acquisition = std::fs::create_dir(&candidate)
+            .and_then(|()| std::fs::write(candidate.join("owner.json"), owner.to_string()))
+            .and_then(|()| std::fs::rename(&candidate, &lock));
+        match acquisition {
             Ok(()) => break,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::DirectoryNotEmpty
+                ) =>
+            {
+                let _ = std::fs::remove_dir_all(&candidate);
                 if std::time::Instant::now() >= deadline {
                     return Err(format!(
                         "timed out acquiring process inventory lock: {error}"
@@ -98,17 +121,13 @@ fn record_spawned_daemon(worktree: &std::path::Path, pid: u32) -> Result<(), Str
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
-            Err(error) => return Err(format!("could not acquire process inventory lock: {error}")),
+            Err(error) => {
+                let _ = std::fs::remove_dir_all(&candidate);
+                return Err(format!("could not acquire process inventory lock: {error}"));
+            }
         }
     }
     let result = (|| {
-        let owner = serde_json::json!({
-            "pid": std::process::id(),
-            "identity": process_identity(std::process::id())
-                .ok_or_else(|| "could not establish inventory writer identity".to_string())?
-        });
-        std::fs::write(lock.join("owner.json"), owner.to_string())
-            .map_err(|error| format!("could not write process inventory lock owner: {error}"))?;
         let mut inventory = std::fs::read(&path)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<ProcessInventory>(&bytes).ok())
@@ -140,7 +159,18 @@ fn record_spawned_daemon(worktree: &std::path::Path, pid: u32) -> Result<(), Str
         std::fs::rename(&temp, &path)
             .map_err(|error| format!("could not publish process inventory: {error}"))
     })();
-    let _ = std::fs::remove_dir_all(lock);
+    let released = std::path::PathBuf::from(format!(
+        "{}.released-{}-{}",
+        lock.display(),
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default()
+    ));
+    if std::fs::rename(&lock, &released).is_ok() {
+        let _ = std::fs::remove_dir_all(released);
+    }
     result
 }
 
@@ -495,7 +525,12 @@ mod tests {
         std::fs::create_dir_all(&worktree).unwrap();
         let mut command = std::process::Command::new("/bin/sleep");
         command.arg("30");
-        let mut child = spawn_inventoried_daemon(&mut command, Some(&worktree)).unwrap();
+        let child = spawn_inventoried_daemon(&mut command, Some(&worktree)).unwrap();
+        let child_pid = child.id();
+        let mut unrelated = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
 
         let inventory: ProcessInventory = serde_json::from_slice(
             &std::fs::read(worktree.join(".kanna/kd-state/process-inventory.json")).unwrap(),
@@ -508,14 +543,37 @@ mod tests {
                 label,
                 identity,
             } => {
-                assert_eq!(*pid, child.id());
+                assert_eq!(*pid, child_pid);
                 assert_eq!(label, "kanna-daemon");
                 assert_eq!(Some(identity.clone()), process_identity(*pid));
             }
             InventoryResource::TmuxServer { .. } => panic!("expected daemon process record"),
         }
-        child.kill().unwrap();
-        child.wait().unwrap();
+        drop(child);
+
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .unwrap();
+        let script = format!(
+            r#"import {{ executeDevDownWithContext }} from './src/tasks/registry.ts'; import {{ nodeCommandRunner }} from './src/runtime/process.ts'; await executeDevDownWithContext({{ killDaemon: true }}, {{ runner: nodeCommandRunner, context: {{ repoRoot: {}, ports: {{}}, env: {{ KANNA_DAEMON_DIR: {} }}, tmux: {{ server: 'kanna-rust-inventory-test', session: 'kanna-rust-inventory-test' }} }} }});"#,
+            serde_json::to_string(&worktree).unwrap(),
+            serde_json::to_string(&worktree.join(".kanna-daemon")).unwrap()
+        );
+        let cleanup = std::process::Command::new("pnpm")
+            .args(["exec", "tsx", "-e", &script])
+            .current_dir(repo_root.join("tools/kd"))
+            .status()
+            .unwrap();
+        assert!(cleanup.success());
+        assert!(process_identity(child_pid).is_none());
+        assert!(process_identity(unrelated.id()).is_some());
+        assert!(!worktree
+            .join(".kanna/kd-state/process-inventory.json")
+            .exists());
+
+        unrelated.kill().unwrap();
+        unrelated.wait().unwrap();
         std::fs::remove_dir_all(worktree).unwrap();
     }
 

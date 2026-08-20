@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -104,6 +104,36 @@ describe("kd process inventory", () => {
       .toEqual(Array.from({ length: 8 }, (_, index) => `socket-${index}`).sort());
     expect(readFileSync(path, "utf8")).toContain('"version": 1');
   }, 20_000);
+
+  it("publishes owner metadata atomically with the inventory lock", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "kanna-inventory-publication-"));
+    const path = join(directory, "inventory.json");
+    const modulePath = resolve("src/runtime/process-inventory.ts");
+    const script = (socket: string) => `import { recordInventoryResource } from ${JSON.stringify(modulePath)}; recordInventoryResource(${JSON.stringify(path)}, { kind: 'tmux-server', socket: ${JSON.stringify(socket)} });`;
+    const delayed = spawn(process.execPath, ["--experimental-strip-types", "-e", script("delayed")], {
+      stdio: ["ignore", "ignore", "pipe"],
+      env: { ...process.env, KANNA_TEST_INVENTORY_LOCK_PUBLISH_DELAY_MS: "500" }
+    });
+    const pendingDeadline = Date.now() + 2_000;
+    while (!readdirSync(directory).some((entry) => entry.startsWith("inventory.json.lock.pending-"))) {
+      if (Date.now() >= pendingDeadline) throw new Error("delayed writer never prepared its lock metadata");
+      await new Promise<void>((resolveWait) => setTimeout(resolveWait, 10));
+    }
+    expect(existsSync(`${path}.lock`)).toBe(false);
+
+    const contender = spawn(process.execPath, ["--experimental-strip-types", "-e", script("contender")], {
+      stdio: ["ignore", "ignore", "pipe"], env: process.env
+    });
+    const waitForExit = (child: ReturnType<typeof spawn>) => new Promise<void>((resolveExit, reject) => {
+      let stderr = "";
+      child.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+      child.once("error", reject);
+      child.once("exit", (code) => code === 0 ? resolveExit() : reject(new Error(`writer exited ${code}: ${stderr}`)));
+    });
+    await Promise.all([waitForExit(delayed), waitForExit(contender)]);
+    expect(readProcessInventory(path).map((resource) => resource.kind === "tmux-server" ? resource.socket : "").sort())
+      .toEqual(["contender", "delayed"]);
+  }, 10_000);
 
   it("recovers an inventory lock abandoned by a crashed writer", () => {
     const directory = mkdtempSync(join(tmpdir(), "kanna-inventory-abandoned-"));
