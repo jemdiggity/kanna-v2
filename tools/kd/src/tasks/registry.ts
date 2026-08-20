@@ -381,6 +381,7 @@ const cloudDeployInputSchema = z.object({
   staging: z.boolean().default(false),
   production: z.boolean().default(false),
   relay: z.boolean().default(false),
+  functions: z.boolean().default(false),
   ref: z.string().optional()
 });
 
@@ -2485,7 +2486,8 @@ export const taskDefinitions = [
   },
   {
     id: "cloud.deploy",
-    description: "Deploy Kanna Firebase cloud services from an explicit source ref.",
+    description:
+      "Deploy Kanna Firebase cloud services from an explicit source ref. Deploys Firestore rules and indexes; pass --functions to also build and deploy services/firebase-functions.",
     inputSchema: cloudDeployInputSchema,
     execute: async (_context, input) => {
       const parsed = cloudDeployInputSchema.parse(input);
@@ -2504,12 +2506,13 @@ export const taskDefinitions = [
           runner: nodeCommandRunner,
           environment,
           relay: parsed.relay,
+          functions: parsed.functions,
           ref: parsed.ref
         });
         return {
           ok: true,
           message: [
-            `Deployed ${environment} cloud services to ${result.projectId} from ${result.source.ref} (${result.source.shortCommit}).`,
+            `Deployed ${environment} ${result.targets.join(", ")} to ${result.projectId} from ${result.source.ref} (${result.source.shortCommit}).`,
             formatJsonResult(result)
           ].join("\n"),
           data: result

@@ -35,6 +35,7 @@ const booleanFlagMap: Record<string, string> = {
   "--staging": "staging",
   "--production": "production",
   "--relay": "relay",
+  "--functions": "functions",
   "--device": "device",
   "--remote": "remote",
   "--dev": "dev",
@@ -787,7 +788,10 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
     return { taskId: "release.status", input: {} };
   }
   if (group === "cloud" && command === "deploy") {
-    return { taskId: "cloud.deploy", input: parseFlagInput(rest, { staging: false, production: false, relay: false }) };
+    return {
+      taskId: "cloud.deploy",
+      input: parseFlagInput(rest, { staging: false, production: false, relay: false, functions: false })
+    };
   }
   if (group === "cloud" && command === "relay-provision") {
     return { taskId: "cloud.relay-provision", input: parseFlagInput(rest, { staging: false, production: false }) };
@@ -922,7 +926,7 @@ const helpTopics: Record<string, string[]> = {
     "  release cut [--major|--minor|--patch] [--version X.Y.0] [--abandon-series X.Y[,X.Y]] [--reason <why>]",
     "  release reset-staging --to main|release/X.Y --reason <why> --confirm-abandon <staging-version> [--dry-run]",
     "  release status",
-    "  cloud deploy --staging|--production [--ref <branch|tag|sha>] [--relay]",
+    "  cloud deploy --staging|--production [--ref <branch|tag|sha>] [--functions] [--relay]",
     "  cloud relay-provision --staging|--production",
     "  pages build-schema --out-dir <dir>",
     "  test rust",
@@ -1367,17 +1371,21 @@ const helpTopics: Record<string, string[]> = {
     "Usage: kd cloud <command>",
     "",
     "Commands:",
-    "  cloud deploy --staging|--production [--ref <branch|tag|sha>] [--relay]",
+    "  cloud deploy --staging|--production [--ref <branch|tag|sha>] [--functions] [--relay]",
     "  cloud relay-provision --staging|--production"
   ],
   "cloud deploy": [
-    "Usage: kd cloud deploy --staging|--production [--ref <branch|tag|sha>] [--relay]",
+    "Usage: kd cloud deploy --staging|--production [--ref <branch|tag|sha>] [--functions] [--relay]",
     "",
     "Deploy Kanna Firebase cloud services.",
     "",
     "  --ref <branch|tag|sha>  Source ref the deploy builds from. Required with --production.",
     "                          The build consumes the working tree, so the ref must be checked",
-    "                          out and the tree clean."
+    "                          out and the tree clean.",
+    "  --functions             Also build and deploy services/firebase-functions. Off by default",
+    "                          so reviving function deployment stays deliberate; without it the",
+    "                          deploy is scoped to Firestore rules and indexes.",
+    "  --relay                 Also build and deploy the relay VM image."
   ],
   "cloud relay-provision": [
     "Usage: kd cloud relay-provision --staging|--production",

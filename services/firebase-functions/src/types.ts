@@ -1,4 +1,4 @@
-import type { AgentProvider } from "./generated/AgentProvider";
+import type { AgentProvider } from "./generated/AgentProvider.js";
 
 export const emulatorPorts = {
   auth: 9099,

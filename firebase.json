@@ -5,7 +5,19 @@
   },
   "functions": {
     "source": "services/firebase-functions",
-    "runtime": "nodejs24"
+    "runtime": "nodejs24",
+    "ignore": [
+      "node_modules",
+      ".git",
+      "firebase-debug.log",
+      "firebase-debug.*.log",
+      "*.local",
+      "src",
+      "test",
+      "scripts",
+      "tsconfig*.json",
+      "vitest.config.ts"
+    ]
   },
   "hosting": {
     "target": "account",

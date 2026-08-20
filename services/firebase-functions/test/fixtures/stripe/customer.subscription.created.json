@@ -1,0 +1,48 @@
+{
+  "id": "evt_subscription_created",
+  "object": "event",
+  "api_version": "2026-06-30.preview",
+  "created": 1787097601,
+  "livemode": false,
+  "pending_webhooks": 1,
+  "request": {
+    "id": null,
+    "idempotency_key": null
+  },
+  "type": "customer.subscription.created",
+  "data": {
+    "object": {
+      "id": "sub_TestSlice1",
+      "object": "subscription",
+      "customer": "cus_TestSlice1",
+      "status": "active",
+      "created": 1787097601,
+      "cancel_at_period_end": false,
+      "currency": "usd",
+      "metadata": {
+        "firebase_uid": "fixture-checkout-user"
+      },
+      "items": {
+        "object": "list",
+        "data": [
+          {
+            "id": "si_TestSlice1",
+            "object": "subscription_item",
+            "current_period_start": 1787097601,
+            "current_period_end": 1789776000,
+            "price": {
+              "id": "price_kanna_cloud_monthly",
+              "object": "price",
+              "recurring": {
+                "interval": "month",
+                "interval_count": 1
+              },
+              "unit_amount": 1000
+            },
+            "quantity": 1
+          }
+        ]
+      }
+    }
+  }
+}

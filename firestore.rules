@@ -76,9 +76,43 @@ service cloud.firestore {
         allow read: if isSignedInAs(uid);
         allow write: if false;
       }
+
+      // Derived entitlement record. Owner-readable so the portal, desktop and
+      // mobile can render active/grace/inactive; written only by the
+      // recomputeEntitlement reducer through the admin SDK, never by a client.
+      match /entitlements/{entitlementId} {
+        allow read: if isSignedInAs(uid);
+        allow write: if false;
+      }
+
+      // Per-source billing state (stripe | app_store | comp). Owner-readable,
+      // admin-written. `comp` lives here too: a client that could write its own
+      // comp grant would grant itself cloud access.
+      match /billing/{sourceId} {
+        allow read: if isSignedInAs(uid);
+        allow write: if false;
+      }
     }
 
     match /desktopPresence/{desktopId} {
+      allow read, write: if false;
+    }
+
+    // Reverse map from Apple's appAccountToken to a uid (written in Slice 2).
+    // Neither readable nor writable by clients: the token is the binding
+    // between an App Store transaction and an account, and a client that could
+    // read or forge one could bind a purchase to somebody else's account.
+    match /appAccountTokens/{appAccountToken} {
+      allow read, write: if false;
+    }
+
+    // Stripe webhook dedupe ledger and the Stripe customer reverse map. Server
+    // bookkeeping; no client has any business reading or writing either.
+    match /stripeEvents/{eventId} {
+      allow read, write: if false;
+    }
+
+    match /stripeCustomers/{customerId} {
       allow read, write: if false;
     }
 

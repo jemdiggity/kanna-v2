@@ -209,10 +209,56 @@ release path does not forward direct Apple credential variables into Bazel.
 ## Cloud services
 
 ```sh
-./kd cloud deploy --staging                              # Firebase (functions, rules, …)
+./kd cloud deploy --staging                              # Firestore rules + indexes
+./kd cloud deploy --staging --functions                  # + services/firebase-functions
 ./kd cloud deploy --production --ref release/0.2
 ./kd cloud deploy --staging --relay                      # + relay VM
 ```
+
+**`--functions` is opt-in on purpose.** `services/firebase-functions` exported
+nothing at all for most of its life, precisely so a stray `firebase deploy`
+could not resurrect a retired endpoint, and it now carries the billing backend
+that writes entitlements (`docs/specs/accounts-and-billing.md`). Without the
+flag a deploy is scoped to `firestore:rules,firestore:indexes` and never builds
+or ships a function; with it, kd builds the package first and adds `functions`
+to the deploy scope. The scope kd used is reported back as `targets`.
+
+**The Secret Manager entries must exist before `--functions` can deploy.** Each
+function declares the entries it needs (`src/index.ts`, lists in
+`src/billing/config.ts`), and `firebase deploy` refuses to deploy a function
+whose declared secret is absent from the target project, naming it. So until
+someone creates them, `./kd cloud deploy --staging --functions` fails — which is
+the intended failure: it is better than publishing a billing backend whose
+environment is empty, which would answer every Stripe delivery with a 500 until
+Stripe disabled the endpoint. Create them per project (`kanna-staging` ↔ Stripe
+test mode, `kanna-build` ↔ live mode):
+
+| Secret | Bound to | What it holds |
+|---|---|---|
+| `STRIPE_SECRET_KEY` | `createCheckoutSession` | Stripe API key for that mode |
+| `STRIPE_PRICE_MONTHLY` | `createCheckoutSession` | Monthly `cloud_access` price id |
+| `STRIPE_PRICE_ANNUAL` | `createCheckoutSession` | Annual `cloud_access` price id |
+| `KANNA_PORTAL_BASE_URL` | `createCheckoutSession` | Portal origin for the Checkout return URLs |
+| `STRIPE_WEBHOOK_SECRET` | `stripeWebhook` | Signing secret of that project's endpoint |
+
+```sh
+printf '%s' "$VALUE" | gcloud secrets create STRIPE_SECRET_KEY \
+  --project kanna-staging --data-file=-
+```
+
+Bindings are per function, so each carries only what it uses: the webhook never
+sees the API key and checkout never sees the signing secret. The price ids and
+the portal URL are not secrets; they are bound this way because it is the one
+mechanism that commits nothing to this public repository — the alternative, a
+`.env.<project>` file in the functions source directory, would mean checking
+per-environment values into git. `STRIPE_GRACE_FALLBACK_DAYS` is deliberately
+unbound: it is optional with a documented default, and adding it to the list in
+`src/billing/config.ts` is what would make it overridable in a deployed
+environment.
+
+Creating these is a Slice-0 human item (`docs/specs/accounts-and-billing.md`);
+no Stripe account exists yet, so no deploy of these functions has been run
+against a real project.
 
 Never run `firebase deploy` directly. If `kd cloud deploy` misbehaves, fix the
 `kd` workflow and redeploy through it. Environments: `kanna-build`

@@ -1,0 +1,30 @@
+{
+  "id": "evt_checkout_unpaid",
+  "object": "event",
+  "api_version": "2026-06-30.preview",
+  "created": 1787097600,
+  "livemode": false,
+  "pending_webhooks": 1,
+  "request": {
+    "id": null,
+    "idempotency_key": null
+  },
+  "type": "checkout.session.completed",
+  "data": {
+    "object": {
+      "id": "cs_test_TestSlice1Unpaid",
+      "object": "checkout.session",
+      "client_reference_id": "fixture-checkout-user",
+      "customer": "cus_TestSlice1",
+      "subscription": "sub_TestSlice1",
+      "mode": "subscription",
+      "status": "open",
+      "payment_status": "unpaid",
+      "currency": "usd",
+      "amount_total": 1000,
+      "metadata": {
+        "firebase_uid": "fixture-checkout-user"
+      }
+    }
+  }
+}

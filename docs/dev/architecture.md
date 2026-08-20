@@ -141,10 +141,15 @@ display name) is keyed by `KANNA_APP_ENV`; OTA compatibility is keyed by
 - `services/firebase-functions/`, `firestore.rules`, `firebase.json` — Firebase
   Auth, Firestore (device pairing/auth records), and functions. Projects:
   `kanna-build` (production), `kanna-staging` (staging), `kanna-local`
-  (emulators).
+  (emulators). The deployed functions are the billing backend
+  (`createCheckoutSession`, `stripeWebhook`); the Stripe webhook writes only
+  `users/{uid}/billing/stripe`, and a shared reducer derives the single
+  `users/{uid}/entitlements/cloud_access` record from every source
+  (`docs/specs/accounts-and-billing.md`).
 
 Deploy only via `./kd cloud deploy` (with `--staging` or `--production`),
-never the Firebase CLI directly.
+never the Firebase CLI directly; function deploys additionally require
+`--functions`, so reviving them stays a deliberate act.
 
 ### Supporting crates and packages
 

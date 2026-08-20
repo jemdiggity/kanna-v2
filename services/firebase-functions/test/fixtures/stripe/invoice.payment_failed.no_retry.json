@@ -1,0 +1,50 @@
+{
+  "id": "evt_invoice_payment_failed_no_retry",
+  "object": "event",
+  "api_version": "2026-06-30.preview",
+  "created": 1789689600,
+  "livemode": false,
+  "pending_webhooks": 1,
+  "request": {
+    "id": null,
+    "idempotency_key": null
+  },
+  "type": "invoice.payment_failed",
+  "data": {
+    "object": {
+      "id": "in_TestSlice1",
+      "object": "invoice",
+      "customer": "cus_TestSlice1",
+      "status": "open",
+      "billing_reason": "subscription_cycle",
+      "currency": "usd",
+      "amount_paid": 0,
+      "attempt_count": 2,
+      "next_payment_attempt": null,
+      "metadata": {},
+      "parent": {
+        "type": "subscription_details",
+        "subscription_details": {
+          "subscription": "sub_TestSlice1",
+          "metadata": {
+            "firebase_uid": "fixture-checkout-user"
+          }
+        }
+      },
+      "lines": {
+        "object": "list",
+        "data": [
+          {
+            "id": "il_TestSlice1",
+            "object": "line_item",
+            "period": {
+              "start": 1787097601,
+              "end": 1789776000
+            },
+            "quantity": 1
+          }
+        ]
+      }
+    }
+  }
+}

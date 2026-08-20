@@ -459,4 +459,96 @@ describeWithEmulator("firestore security rules", () => {
       clientUpdate("user-1", "users/user-1/tasks/cloud-task-2", { title: "spoofed" })
     );
   });
+
+  it("keeps the entitlement record owner-readable and unwritable by any client", async () => {
+    await seedDoc("users/alice/entitlements/cloud_access", {
+      status: "active",
+      source: "stripe",
+      duplicateSources: false,
+      currentPeriodEndsAt: "2026-09-20T00:00:00.000Z",
+      environment: "staging",
+      updatedAt: "2026-08-20T00:00:00.000Z",
+    });
+
+    await expectSucceeds(readDoc(mockUserToken("alice"), "users/alice/entitlements/cloud_access"));
+    await expectDenied(readDoc(mockUserToken("bob"), "users/alice/entitlements/cloud_access"));
+    await expectDenied(
+      clientUpdate("alice", "users/alice/entitlements/cloud_access", { status: "active" })
+    );
+    await expectDenied(
+      clientUpdate("alice", "users/alice/entitlements/cloud_access_self_granted", {
+        status: "active",
+        source: "comp",
+      })
+    );
+    await expectDenied(deleteDoc("alice", "users/alice/entitlements/cloud_access"));
+  });
+
+  it("keeps every billing source doc owner-readable and unwritable by any client", async () => {
+    for (const source of ["stripe", "app_store", "comp"]) {
+      await seedDoc(`users/alice/billing/${source}`, {
+        source,
+        updatedAt: "2026-08-20T00:00:00.000Z",
+      });
+
+      await expectSucceeds(readDoc(mockUserToken("alice"), `users/alice/billing/${source}`));
+      await expectDenied(readDoc(mockUserToken("bob"), `users/alice/billing/${source}`));
+      await expectDenied(
+        clientUpdate("alice", `users/alice/billing/${source}`, { status: "active" })
+      );
+      await expectDenied(deleteDoc("alice", `users/alice/billing/${source}`));
+    }
+  });
+
+  it("denies a client granting itself a comp entitlement", async () => {
+    await expectDenied(
+      clientUpdate("alice", "users/alice/billing/comp", {
+        source: "comp",
+        active: true,
+        reason: "self-granted",
+        updatedAt: "2026-08-20T00:00:00.000Z",
+      })
+    );
+    await expectDenied(
+      clientUpdate("alice", "users/alice/billing/some_new_source", {
+        source: "some_new_source",
+        status: "active",
+        updatedAt: "2026-08-20T00:00:00.000Z",
+      })
+    );
+  });
+
+  it("keeps appAccountToken bindings neither readable nor writable by clients", async () => {
+    await expectSucceeds(
+      seedDoc("appAccountTokens/2c9b4e64-6a1f-4d0f-9f4f-7b8f6a2a5f11", {
+        uid: "alice",
+        updatedAt: "2026-08-20T00:00:00.000Z",
+      })
+    );
+
+    await expectDenied(
+      readDoc(mockUserToken("alice"), "appAccountTokens/2c9b4e64-6a1f-4d0f-9f4f-7b8f6a2a5f11")
+    );
+    await expectDenied(
+      clientUpdate("alice", "appAccountTokens/2c9b4e64-6a1f-4d0f-9f4f-7b8f6a2a5f11", {
+        uid: "alice",
+      })
+    );
+    await expectDenied(
+      clientUpdate("bob", "appAccountTokens/9f0d2c31-1c2b-4a0e-8b23-2f0b1f6d4c77", { uid: "bob" })
+    );
+    await expectDenied(deleteDoc("alice", "appAccountTokens/2c9b4e64-6a1f-4d0f-9f4f-7b8f6a2a5f11"));
+  });
+
+  it("keeps the Stripe webhook ledger and customer map server-only", async () => {
+    await expectSucceeds(
+      seedDoc("stripeEvents/evt_1", { uid: "alice", type: "invoice.paid" })
+    );
+    await expectSucceeds(seedDoc("stripeCustomers/cus_1", { uid: "alice" }));
+
+    await expectDenied(readDoc(mockUserToken("alice"), "stripeEvents/evt_1"));
+    await expectDenied(readDoc(mockUserToken("alice"), "stripeCustomers/cus_1"));
+    await expectDenied(clientUpdate("alice", "stripeEvents/evt_2", { uid: "alice" }));
+    await expectDenied(clientUpdate("alice", "stripeCustomers/cus_2", { uid: "alice" }));
+  });
 });

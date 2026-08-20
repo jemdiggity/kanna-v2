@@ -91,7 +91,8 @@ identity are documented in detail in
 ### Cloud & release
 
 ```sh
-./kd cloud deploy --staging            # Firebase; add --relay for the relay
+./kd cloud deploy --staging            # Firestore rules + indexes
+./kd cloud deploy --staging --functions  # + services/firebase-functions
 ./kd cloud deploy --production --ref release/0.2   # --ref required for production
 ./kd release ship --dry-run            # build/sign without publishing
 ./kd release ship --release            # tag, publish, upload manifest
