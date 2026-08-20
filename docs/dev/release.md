@@ -56,11 +56,35 @@ rely on Homebrew or other machine-local libraries.
 ./kd release ship --release    # tag, publish, upload updater manifest
 ```
 
+`release ship` refuses a dirty git worktree, and `--release` requires both
+architectures to be built.
+
 **Staging channel:** `./kd release ship --staging --release` builds
 `X.Y.Z-staging.N` without persisting a version bump, publishes an immutable
 prerelease tagged `vX.Y.Z-staging.N`, and repoints only `latest-staging.json`
 on the `desktop-staging` pointer release. Roll back by repointing:
 `./kd release ship --staging --rollback-to <version>`.
+
+How the version is derived depends on the source branch (`--branch
+main|release/X.Y`, defaulting to the current branch when it is a
+`release/X.Y`, else `main`):
+
+- **main**: the bump (`--patch` default, `--minor`, `--major`) is applied to
+  the greater of the root `VERSION` and the greatest published production
+  version — the *version floor*, reported as `versionFloor` on the ship result
+  when it raised a stale trunk `VERSION`.
+- **release/X.Y**: the base is the next patch after the series' existing tags;
+  the bump flags are ignored. The branch must exist on origin, must not be an
+  abandoned series, and its remote tip must be the checked-out commit.
+
+Either way `N` is one past the highest existing `v<base>-staging.N` tag, and
+each staging publish prunes the channel down to the five newest staging
+prereleases and their assets.
+
+Note: as of this writing the staging-publish gate is enforced purely by **git
+ancestry** — there is no semver-ordering check, so a version-number regression
+on a descendant commit is currently accepted. A fix adding a semver-regression
+refusal plus automatic series continuation is in flight (task `8275f44c`).
 
 ### The release lifecycle
 
@@ -79,12 +103,17 @@ short:
 - While an **unpromoted** `release/X.Y` candidate is soaking, main staging
   publishes are refused. Main resumes after promotion, or after an explicit
   reset.
-- Only `--rollback-to` and `kd release reset-staging` may move the channel
-  non-linearly.
+- Three paths may move the channel non-linearly: `--rollback-to`,
+  `kd release reset-staging`, and — automatically, with no operator action —
+  the post-promotion trunk resumption: once a `release/X.Y` candidate has been
+  promoted (its production tag exists), the next main publish is allowed to
+  diverge from it, and the publish writes a `Post-Promotion-Trunk-Resumption:`
+  audit block onto the `desktop-staging` release body.
 
 ```sh
 ./kd release status                                   # channel state and every promotion blocker
 ./kd release cut --minor                              # cut release/X.Y at origin/main
+                                                      # (--version must be strictly ahead of origin/main's VERSION)
 ./kd release promote 1.2.4-staging.3                  # promote a soaked candidate
 ./kd release reset-staging --to main \
   --reason "<why>" --confirm-abandon 1.3.0-staging.2   # abandon a lineage (audited, never implicit)
@@ -107,8 +136,9 @@ reports any mismatch as a promotion blocker before a build starts.
 
 **Soak gate.** Production promotion requires the candidate to have been
 published for at least `productionSoakHours` from `release-policy.json` at the
-repository root (default 24; `0` disables it), validated by
-`release-policy.schema.json`. A missing file uses the default; a malformed file
+repository root (default 24; `0` disables it). `kd` validates the file with its
+own parser; `release-policy.schema.json` is editor-facing completion, not the
+enforcement. A missing file uses the default; a malformed file
 or an unknown key is an error naming the file. Status, `--dry-run`, and the real
 promotion run the same decision code. The only override is explicit and
 reasoned, and it waives the soak window and nothing else:
@@ -287,7 +317,10 @@ for a relay deploy) and is baked into the relay image, which reports it as
 
 To see what a deployed relay is actually doing — live connections, bytes by
 class, tunnel buffer pressure, refused upgrades — use `./kd relay stats
---staging|--production`, or `--open` for the live dashboard. It reads the
+--staging|--production`, `--open` for the live dashboard, or `--dry-run` to
+print the resolved URLs and token source without touching Secret Manager.
+Treat the `--open` output as a credential: the printed URL carries the
+operator token in its query string. It reads the
 operator token from Secret Manager, so no `gcloud compute ssh` is involved;
 provisioning that token is in the same runbook.
 

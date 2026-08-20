@@ -50,7 +50,9 @@ Grouped highlights — run `./kd` for the full surface (task ids live in
 ./kd dev up --emulators      # + Firebase emulators
 ./kd dev up --seed           # + seed data (from a worktree)
 ./kd dev up --attach         # attach to the tmux session
-./kd dev down                # stop; --kill-daemon also kills workspace daemons
+./kd dev down                # stop + reap inventoried processes; --kill-daemon also
+                             #   kills the workspace daemon (pidfile + identity-matched
+                             #   inventory record required, otherwise a no-op)
 ./kd dev restart             # stop + start (optional component: desktop|mobile|backend)
 ./kd dev status              # inspect tmux session status
 ./kd dev log                 # recent desktop output
@@ -94,15 +96,22 @@ identity are documented in detail in
 ./kd cloud deploy --staging            # Firestore rules + indexes + account portal
 ./kd cloud deploy --staging --functions  # services/firebase-functions only
 ./kd cloud deploy --staging --portal     # account portal only
+./kd cloud deploy --staging --relay      # relay VM only
 ./kd cloud deploy --production --ref release/0.2   # --ref required for production
+./kd relay stats --staging             # deployed relay's /stats (--open: dashboard)
 ./kd release ship --dry-run            # build/sign without publishing
 ./kd release ship --release            # tag, publish, upload manifest
 ./kd release ship --staging --release  # staging channel prerelease
+./kd release status                    # channel state + promotion blockers
+./kd release cut / promote / reset-staging   # RC lifecycle — see release.md
 ./kd pages build-schema --out-dir <dir>  # build the config-schema Pages artifact (CI runs this)
 ```
 
 See [Release](release.md). Never run `firebase deploy` or `pnpm exec tauri`
-directly; if a `kd` workflow is broken, fix `kd` and rerun through it.
+directly; if a `kd` workflow is broken, fix `kd` and rerun through it. Every
+refused `kd` invocation — unknown flag, missing prerequisite, failed
+precondition — prints its message to stderr and exits nonzero, so `kd` gates
+can be scripted.
 
 ## Repo-level Kanna config: `.kanna/`
 
@@ -110,7 +119,9 @@ Per-repo product configuration, used by Kanna when running tasks against this
 repo (and dogfooded by this repo on itself):
 
 - `config.json` — worktree `setup` commands (here: `pnpm install`,
-  `./kd env sync`), `teardown`, `test`, base `ports`, default workflow.
+  `./kd env sync`, `./kd rust-cache warm`, and the optional
+  `.kanna/setup.local.sh` hook), `teardown`, `test`, base `ports`, default
+  workflow.
 - `agents/{name}/AGENT.md` (+ optional `EXTEND.md`) — agent definitions and
   repo-local extensions.
 - `workflows/{name}.json` — workflow definitions.
@@ -124,14 +135,25 @@ repo (and dogfooded by this repo on itself):
 Built-in agents/workflows ship as Tauri bundled resources; per-repo files
 override them by name.
 
-Long-lived processes started by `kd` and the E2E harnesses are spawn-owned.
-Their exact PIDs and tmux socket names are recorded under
-`.kanna/kd-state/process-inventory.json`; normal harness `finally` paths remove
-their entries, while `kd dev down` and `kd clean` consume surviving entries
-after a crash. Cleanup never discovers targets from process names, arguments,
-or working directories. Detached repository teardown remains best-effort, but
-startup failures and hard timeouts are logged and appended to the task event
-feed as `task.teardown_failed`.
+Long-lived processes started by `kd`, the E2E harnesses, and the desktop app's
+own daemon spawn path (when running from a worktree) are spawn-owned. Each
+entry in `.kanna/kd-state/process-inventory.json` records the PID or tmux
+socket **plus a spawn identity** — the kernel process start time (`ps -o
+lstart=`) captured at spawn. Normal harness `finally` paths remove their
+entries, while `kd dev down` and `kd clean` consume surviving entries after a
+crash. Cleanup never discovers targets from process names, arguments, or
+working directories, and never signals on a PID alone: the identity is
+re-validated before SIGTERM and again before escalating to SIGKILL (grace 2 s),
+so a reused PID can never be killed; an entry whose exit could not be
+confirmed is retained rather than dropped. Inventory mutations are serialized
+by an atomically published lock directory with owner metadata, and abandoned
+locks (dead owner) are recovered — the same protocol is implemented in both the
+kd TypeScript and the desktop Rust spawn path. The counterpart contract for
+agents is one line in the shared task-environment prompt
+(`packages/core/src/workflow/kanna-task-environment.md`): stop every background
+process you start before recording stage completion. Detached repository
+teardown remains best-effort, but startup failures and hard timeouts (30 min)
+are logged and appended to the task event feed as `task.teardown_failed`.
 
 ### Machine-local config: `.kanna/config.local.json`
 
