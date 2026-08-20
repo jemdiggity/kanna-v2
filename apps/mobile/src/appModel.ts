@@ -821,6 +821,7 @@ function createClientForMode({
         observeTaskTerminal: relayClient.observeTaskTerminal,
         observeTaskAgent: relayClient.observeTaskAgent,
         observeTaskCompanion: relayClient.observeTaskCompanion,
+        observeDesktopTaskSummaries: relayClient.observeDesktopTaskSummaries,
         listCloudTasks: listCloudTasksForRouting,
         desktopRepoWaitMs,
       }),

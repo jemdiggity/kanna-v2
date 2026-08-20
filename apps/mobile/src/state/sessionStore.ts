@@ -267,6 +267,12 @@ export interface SessionStore {
     activity: TaskActivity,
     activityRevision?: number
   ): void;
+  setTaskLiveSummary(
+    taskId: string,
+    snippet: string | undefined,
+    activity: TaskActivity,
+    runtimeState: TaskSummary["runtimeState"]
+  ): void;
   setLocalTaskListPreferences(preferences: LocalTaskListPreferences): void;
   setTaskPrompt(taskId: string, prompt: string): void;
   setSelectedTask(taskId: string | null): void;
@@ -1019,6 +1025,32 @@ export function createSessionStore(): SessionStore {
         searchResults,
         taskUiSlots
       };
+      publish();
+    },
+    setTaskLiveSummary(taskId, snippet, activity, runtimeState) {
+      let changed = false;
+      const updateTask = (task: TaskSummary): TaskSummary => {
+        if (task.id !== taskId) return task;
+        changed = true;
+        return {
+          ...task,
+          waitingPromptSnippet: snippet ?? null,
+          activity,
+          runtimeState
+        };
+      };
+      const updateTasks = (tasks: readonly TaskSummary[]): TaskSummary[] =>
+        tasks.map(updateTask);
+      const repoTasks = updateTasks(state.repoTasks);
+      const recentTasks = updateTasks(state.recentTasks);
+      const searchResults = updateTasks(state.searchResults);
+      const taskUiSlots = state.taskUiSlots.map((slot) =>
+        slot.state === "ready" && slot.task.id === taskId
+          ? { ...slot, task: updateTask(slot.task) }
+          : slot
+      );
+      if (!changed) return;
+      state = { ...state, repoTasks, recentTasks, searchResults, taskUiSlots };
       publish();
     },
     setLocalTaskListPreferences(preferences) {

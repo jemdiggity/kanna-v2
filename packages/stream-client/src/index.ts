@@ -112,6 +112,20 @@ export interface CompanionStreamHandlers {
   onError?(code: string, message: string): void;
 }
 
+export interface TaskSummaryFrame {
+  taskId: string;
+  snippet?: string;
+  activity: string;
+  runtimeState: string;
+  revision: number;
+}
+
+export interface TaskSummaryStreamHandlers {
+  onSummary(summary: TaskSummaryFrame): void;
+  onConnectionChange?(connected: boolean): void;
+  onError?(code: string, message: string): void;
+}
+
 export interface CompanionAttachmentOptions {
   /** Request embedded asset bytes. Defaults to true for desktop and older peers. */
   includeAssets?: boolean;
@@ -173,7 +187,12 @@ interface CompanionAttachment {
   generation: number;
 }
 
-type Attachment = AgentAttachment | TerminalAttachment | CompanionAttachment;
+interface TaskSummaryAttachment {
+  kind: "task_summary";
+  handlers: TaskSummaryStreamHandlers;
+}
+
+type Attachment = AgentAttachment | TerminalAttachment | CompanionAttachment | TaskSummaryAttachment;
 type StateChangedListener = (scope: StateChangeScope) => void;
 
 interface PendingRequest {
@@ -322,6 +341,19 @@ export class StreamClient {
       handlers,
     });
     this.sendFrame({ type: "attach", task_id: taskId, kind: "terminal", from_seq: 0 });
+  }
+
+  attachTaskSummaries(handlers: TaskSummaryStreamHandlers): void {
+    const taskId = "__desktop__";
+    this.attachments.set(attachmentKey(taskId, "task_summary"), {
+      kind: "task_summary",
+      handlers,
+    });
+    this.sendFrame({ type: "attach", task_id: taskId, kind: "task_summary", from_seq: 0 });
+  }
+
+  detachTaskSummaries(): void {
+    this.detach("__desktop__", "task_summary");
   }
 
   attachCompanion(
@@ -556,7 +588,7 @@ export class StreamClient {
     this.pendingCompanionEvents.clear();
     this.companionChunkAssemblies.clear();
     for (const attachment of this.attachments.values()) {
-      if (attachment.kind === "companion") {
+      if (attachment.kind === "companion" || attachment.kind === "task_summary") {
         attachment.handlers.onConnectionChange?.(false);
       }
     }
@@ -647,7 +679,7 @@ export class StreamClient {
         this.authRetryConsumed = false;
         this.options.onConnectionChange?.(true);
         for (const attachment of this.attachments.values()) {
-          if (attachment.kind === "companion") {
+          if (attachment.kind === "companion" || attachment.kind === "task_summary") {
             attachment.handlers.onConnectionChange?.(true);
           }
         }
@@ -739,6 +771,16 @@ export class StreamClient {
       case "term_output": {
         this.terminalAttachment(frame.task_id)?.handlers.onOutput(frame.data_b64, {
           receivedAtMs: this.now(),
+        });
+        return;
+      }
+      case "task_summary": {
+        this.taskSummaryAttachment()?.handlers.onSummary({
+          taskId: frame.task_id,
+          ...(frame.snippet == null ? {} : { snippet: frame.snippet }),
+          activity: frame.activity,
+          runtimeState: frame.runtime_state,
+          revision: Number(frame.revision),
         });
         return;
       }
@@ -886,6 +928,11 @@ export class StreamClient {
   private companionAttachment(taskId: string): CompanionAttachment | undefined {
     const attachment = this.attachments.get(attachmentKey(taskId, "companion"));
     return attachment?.kind === "companion" ? attachment : undefined;
+  }
+
+  private taskSummaryAttachment(): TaskSummaryAttachment | undefined {
+    const attachment = this.attachments.get(attachmentKey("__desktop__", "task_summary"));
+    return attachment?.kind === "task_summary" ? attachment : undefined;
   }
 
   private companionFrameMatchesAttachment(

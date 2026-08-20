@@ -11,6 +11,7 @@ import type {
   TaskCompanionStreamEvent,
   TaskCompanionSubscription,
   KannaClient,
+  TaskSummaryStreamEvent,
   TaskTerminalStreamEvent,
   TaskTerminalSubscription
 } from "../lib/api/client";
@@ -286,6 +287,82 @@ function createAuthSessionMock(): MobileAuthSession {
 }
 
 describe("createMobileController", () => {
+  it("scopes live task summaries to foreground list views", async () => {
+    const client = createClientMock();
+    const close = vi.fn();
+    let summaryListener: ((event: TaskSummaryStreamEvent) => void) | null = null;
+    const observe = vi.fn((_desktopId, listener: (event: TaskSummaryStreamEvent) => void) => {
+      summaryListener = listener;
+      return { close };
+    });
+    client.observeDesktopTaskSummaries = observe;
+    client.listRecentTasks.mockResolvedValue([{
+      id: "cloud-task-1",
+      repoId: "repo-1",
+      title: "Streaming summary",
+      stage: "in progress",
+      ownerDesktopId: "desktop-1",
+      ownerLocalTaskId: "task-1",
+      waitingPromptSnippet: "resting snippet",
+      activity: "idle",
+      runtimeState: "idle"
+    }]);
+    client.listRepoTasks.mockResolvedValue([{
+      id: "cloud-task-1",
+      repoId: "repo-1",
+      title: "Streaming summary",
+      stage: "in progress",
+      ownerDesktopId: "desktop-1",
+      ownerLocalTaskId: "task-1",
+      waitingPromptSnippet: "resting snippet",
+      activity: "idle",
+      runtimeState: "idle"
+    }]);
+    const store = createSessionStore();
+    const controller = createMobileController(client, store, createAuthSessionMock());
+
+    controller.setNavigationView("recent");
+    await controller.bootstrap();
+    expect(observe).toHaveBeenCalledOnce();
+
+    summaryListener?.({
+      type: "summary",
+      taskId: "task-1",
+      snippet: "live snippet",
+      activity: "working",
+      runtimeState: "busy",
+      revision: 1
+    });
+    expect(store.getState().recentTasks[0]?.waitingPromptSnippet).toBe("live snippet");
+
+    summaryListener?.({ type: "connection", connected: false });
+    expect(store.getState().recentTasks[0]?.waitingPromptSnippet).toBe("resting snippet");
+    expect(store.getState().recentTasks[0]?.runtimeState).toBe("idle");
+
+    controller.setTaskDetailVisible(true);
+    expect(close).toHaveBeenCalledOnce();
+    controller.setTaskDetailVisible(false);
+    expect(observe).toHaveBeenCalledTimes(2);
+
+    summaryListener?.({
+      type: "summary",
+      taskId: "task-1",
+      snippet: "live snippet after revision reset",
+      activity: "working",
+      runtimeState: "busy",
+      revision: 0
+    });
+    expect(store.getState().recentTasks[0]?.waitingPromptSnippet).toBe(
+      "live snippet after revision reset"
+    );
+
+    controller.setAppForeground(false);
+    expect(close).toHaveBeenCalledTimes(2);
+    controller.setAppForeground(true);
+    expect(observe).toHaveBeenCalledTimes(3);
+    controller.dispose();
+  });
+
   const trustedDesktop = {
     desktopId: "desktop-1",
     displayName: "Studio Mac",

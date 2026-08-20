@@ -10,6 +10,48 @@ const ACK_TIMEOUT: Duration = Duration::from_secs(15);
 const CLOUD_TASK_SCHEMA_V1: u8 = 1;
 const CLOUD_TASK_SCHEMA_V2: u8 = 2;
 
+#[derive(Debug, Clone)]
+struct RestingSnippet {
+    value: Option<String>,
+    activity: String,
+    transition_revision: Option<String>,
+    closed: bool,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct RestingSnippetCache {
+    tasks: HashMap<String, RestingSnippet>,
+}
+
+impl RestingSnippetCache {
+    fn retain_boundary_value(&mut self, item: &SnapshotPipelineItem) -> Option<String> {
+        let live = truncate_option(item.last_output_preview.clone(), 240);
+        let closed = item.closed_at.is_some();
+        let previous = self.tasks.get(&item.id);
+        let boundary = previous.is_none_or(|previous| {
+            (!previous.closed && closed)
+                || (previous.activity == "working"
+                    && matches!(item.activity.as_str(), "idle" | "unread"))
+                || previous.transition_revision != item.transition_revision
+        });
+        let value = if boundary {
+            live
+        } else {
+            previous.and_then(|previous| previous.value.clone())
+        };
+        self.tasks.insert(
+            item.id.clone(),
+            RestingSnippet {
+                value: value.clone(),
+                activity: item.activity.clone(),
+                transition_revision: item.transition_revision.clone(),
+                closed,
+            },
+        );
+        value
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CloudTaskSnapshotEnvelope {
@@ -131,11 +173,38 @@ impl CloudTransferSnapshot {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn map_ui_snapshot(
     desktop_id: &str,
     desktop_name: &str,
     agent_providers: Vec<AgentProvider>,
     snapshot: UiSnapshot,
+) -> CloudTaskSnapshotEnvelope {
+    map_ui_snapshot_with_snippets(desktop_id, desktop_name, agent_providers, snapshot, None)
+}
+
+pub(crate) fn map_ui_snapshot_for_publication(
+    desktop_id: &str,
+    desktop_name: &str,
+    agent_providers: Vec<AgentProvider>,
+    snapshot: UiSnapshot,
+    resting_snippets: &mut RestingSnippetCache,
+) -> CloudTaskSnapshotEnvelope {
+    map_ui_snapshot_with_snippets(
+        desktop_id,
+        desktop_name,
+        agent_providers,
+        snapshot,
+        Some(resting_snippets),
+    )
+}
+
+fn map_ui_snapshot_with_snippets(
+    desktop_id: &str,
+    desktop_name: &str,
+    agent_providers: Vec<AgentProvider>,
+    snapshot: UiSnapshot,
+    mut resting_snippets: Option<&mut RestingSnippetCache>,
 ) -> CloudTaskSnapshotEnvelope {
     let desktop_transfer = snapshot
         .settings
@@ -170,7 +239,16 @@ pub(crate) fn map_ui_snapshot(
     for entry in snapshot.entries {
         for item in entry.items {
             let blocked_by_task_ids = blockers.get(&item.id).cloned().unwrap_or_default();
-            tasks.push(map_task(desktop_id, &entry.repo, item, blocked_by_task_ids));
+            let resting_snippet = resting_snippets
+                .as_deref_mut()
+                .map(|cache| cache.retain_boundary_value(&item));
+            tasks.push(map_task(
+                desktop_id,
+                &entry.repo,
+                item,
+                blocked_by_task_ids,
+                resting_snippet,
+            ));
         }
     }
     tasks.sort_by(|left, right| {
@@ -203,6 +281,7 @@ fn map_task(
     repo: &crate::db::SnapshotRepo,
     item: SnapshotPipelineItem,
     blocked_by_task_ids: Vec<String>,
+    resting_snippet: Option<Option<String>>,
 ) -> CloudTaskSnapshot {
     let transfer = map_transfer(&item);
     let prompt = item.prompt.unwrap_or_default();
@@ -246,7 +325,8 @@ fn map_task(
         owner_local_task_id: item.id,
         title: truncate(&title, 512),
         prompt_snippet: (!prompt.is_empty()).then(|| prompt.chars().take(500).collect()),
-        waiting_prompt_snippet: truncate_option(item.last_output_preview, 240),
+        waiting_prompt_snippet: resting_snippet
+            .unwrap_or_else(|| truncate_option(item.last_output_preview, 240)),
         display_name: truncate_option(item.display_name, 512),
         stage: truncate(&item.stage, 64),
         activity: truncate(&item.activity, 32),
@@ -480,7 +560,10 @@ impl PublisherState {
 
 #[cfg(test)]
 mod tests {
-    use super::{map_ui_snapshot, PublisherState, PublisherStep};
+    use super::{
+        map_ui_snapshot, map_ui_snapshot_for_publication, PublisherState, PublisherStep,
+        RestingSnippetCache,
+    };
     use kanna_agent_protocol::AgentProvider;
 
     fn test_agent_providers() -> Vec<AgentProvider> {
@@ -617,6 +700,61 @@ mod tests {
         assert_eq!(json["tasks"][0]["parentTaskId"], serde_json::Value::Null);
         assert_eq!(json["tasks"][0]["pinned"], false);
         assert_eq!(json["tasks"][0]["pinOrder"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn publisher_skips_continuous_output_writes_until_resting_boundary() {
+        let mut cache = RestingSnippetCache::default();
+        let mut publisher = PublisherState::new();
+        publisher.on_authenticated(Some(2));
+        let now = Instant::now();
+        let first = map_ui_snapshot_for_publication(
+            "desktop-1",
+            "Studio Mac",
+            test_agent_providers(),
+            ui_snapshot("working"),
+            &mut cache,
+        );
+        publisher.observe(first);
+        let PublisherStep::Publish(first_request) = publisher.next_step(now) else {
+            panic!("expected initial publication");
+        };
+        publisher
+            .on_ack(&first_request.id, true, None, now)
+            .unwrap();
+        for index in 0..10 {
+            let mut continuous = ui_snapshot("working");
+            continuous.entries[0].items[0].last_output_preview =
+                Some(format!("hot output {index}"));
+            let continuous = map_ui_snapshot_for_publication(
+                "desktop-1",
+                "Studio Mac",
+                test_agent_providers(),
+                continuous,
+                &mut cache,
+            );
+            publisher.observe(continuous);
+            assert!(matches!(publisher.next_step(now), PublisherStep::Wait));
+        }
+
+        let mut idle = ui_snapshot("idle");
+        idle.entries[0].items[0].last_output_preview = Some("finished output".into());
+        let idle = map_ui_snapshot_for_publication(
+            "desktop-1",
+            "Studio Mac",
+            test_agent_providers(),
+            idle,
+            &mut cache,
+        );
+        publisher.observe(idle.clone());
+        assert!(matches!(
+            publisher.next_step(now),
+            PublisherStep::Publish(_)
+        ));
+        assert_eq!(
+            serde_json::to_value(idle).unwrap()["tasks"][0]["waitingPromptSnippet"],
+            "finished output"
+        );
     }
 
     #[test]

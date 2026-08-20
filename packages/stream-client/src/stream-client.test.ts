@@ -169,6 +169,40 @@ describe("StreamClient", () => {
     client.close();
   });
 
+  it("attaches, routes, detaches, and reconnects desktop task summaries", () => {
+    const { client, socket } = connectedClient(["task_summary"]);
+    const summaries: unknown[] = [];
+    client.attachTaskSummaries({ onSummary: (summary) => summaries.push(summary) });
+    expect(socket.sent.at(-1)).toEqual({
+      type: "attach",
+      task_id: "__desktop__",
+      kind: "task_summary",
+      from_seq: 0,
+    });
+    socket.receive({
+      type: "task_summary",
+      task_id: "task-1",
+      snippet: "still working",
+      activity: "working",
+      runtime_state: "busy",
+      revision: 4,
+    });
+    expect(summaries).toEqual([{
+      taskId: "task-1",
+      snippet: "still working",
+      activity: "working",
+      runtimeState: "busy",
+      revision: 4,
+    }]);
+    client.detachTaskSummaries();
+    expect(socket.sent.at(-1)).toEqual({
+      type: "detach",
+      task_id: "__desktop__",
+      kind: "task_summary",
+    });
+    client.close();
+  });
+
   it("correlates request frames with responses", async () => {
     const { client, socket } = connectedClient();
 

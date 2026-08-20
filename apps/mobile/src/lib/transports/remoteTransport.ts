@@ -7,6 +7,8 @@ import type {
   TaskCompanionSubscription,
   TaskTerminalStreamEvent,
   TaskTerminalSubscription,
+  TaskSummaryStreamEvent,
+  TaskSummarySubscription,
 } from "../api/client";
 import { RepoNotRegisteredError } from "../api/client";
 import type {
@@ -106,6 +108,10 @@ export interface RemoteTransportDependencies {
   observeTaskTerminal?: RemoteTaskTerminalObserver;
   observeTaskAgent?: RemoteTaskAgentObserver;
   observeTaskCompanion?: RemoteTaskCompanionObserver;
+  observeDesktopTaskSummaries?: (
+    desktopId: string,
+    listener: (event: TaskSummaryStreamEvent) => void
+  ) => TaskSummarySubscription;
   listCloudTasks?: () => Promise<CloudIndexedTaskSummary[]>;
   desktopRepoWaitMs?: number;
   desktopRepoRefreshIntervalMs?: number;
@@ -137,6 +143,7 @@ export function createRemoteTransport({
   observeTaskTerminal,
   observeTaskAgent,
   observeTaskCompanion,
+  observeDesktopTaskSummaries,
   listCloudTasks,
   desktopRepoWaitMs = DEFAULT_DESKTOP_REPO_WAIT_MS,
   desktopRepoRefreshIntervalMs = DEFAULT_DESKTOP_REPO_REFRESH_INTERVAL_MS
@@ -570,6 +577,7 @@ export function createRemoteTransport({
   };
 
   return {
+    ...(observeDesktopTaskSummaries ? { observeDesktopTaskSummaries } : {}),
     getTaskRouteIdentity(taskId: string): string {
       const route = taskRouteForId(taskId);
       return JSON.stringify([

@@ -24,6 +24,7 @@ pub enum StreamKind {
     Agent,
     Terminal,
     Companion,
+    TaskSummary,
 }
 
 /// Optional KSP behaviors that require both peers to agree on wire semantics.
@@ -248,6 +249,16 @@ pub enum ServerFrame {
         task_id: String,
         data_b64: String,
     },
+    /// Debounced live state used by task cards while list views are visible.
+    TaskSummary {
+        task_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        snippet: Option<String>,
+        activity: String,
+        runtime_state: String,
+        #[cfg_attr(feature = "typescript", ts(type = "number"))]
+        revision: u64,
+    },
     /// Latest visual companion document for a task.
     CompanionSnapshot {
         task_id: String,
@@ -425,6 +436,20 @@ mod tests {
 
         let back: ServerFrame = serde_json::from_value(json).unwrap();
         assert_eq!(frame, back);
+
+        let summary = ServerFrame::TaskSummary {
+            task_id: "t1".into(),
+            snippet: Some("working".into()),
+            activity: "working".into(),
+            runtime_state: "busy".into(),
+            revision: 9,
+        };
+        let summary_json = serde_json::to_value(&summary).unwrap();
+        assert_eq!(summary_json["type"], "task_summary");
+        assert_eq!(
+            serde_json::from_value::<ServerFrame>(summary_json).unwrap(),
+            summary
+        );
     }
 
     #[test]

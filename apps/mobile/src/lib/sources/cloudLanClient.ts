@@ -1324,6 +1324,9 @@ export function createCloudLanClient(
   };
 
   return {
+    ...(cloud.observeDesktopTaskSummaries
+      ? { observeDesktopTaskSummaries: cloud.observeDesktopTaskSummaries }
+      : {}),
     getTaskRouteIdentity(taskId: string): string {
       const route = routeForTaskStream(taskId);
       if (route.source === "cloud") {
