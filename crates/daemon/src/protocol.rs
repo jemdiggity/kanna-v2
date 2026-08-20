@@ -137,6 +137,14 @@ pub struct HandoffSession {
     /// producer-declared boundary resolves the ambiguity.
     #[serde(default)]
     pub raw_input_draft_state_known: bool,
+    /// Bytes this daemon saw typed into the composer since the session's last
+    /// producer-declared submission boundary.
+    ///
+    /// `None` is not zero: it identifies a sender with no ledger to hand over,
+    /// and the successor must treat a declared draft it cannot count as a real
+    /// one. Only `Some(0)` is the proof that releases a held message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub typed_draft_bytes: Option<u64>,
     /// Logical messages accepted but not yet submitted through the PTY. The
     /// adopting daemon keeps their order and any raw-draft boundary.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -182,6 +190,33 @@ pub enum SessionStatus {
     Waiting,
     #[default]
     Idle,
+}
+
+/// What this daemon can prove about the text rendered on a session's composer
+/// line.
+///
+/// The frame cannot answer it: a human's unsent line and the CLI's own
+/// tab-to-accept suggestion are painted the same shape, and reading the
+/// suggestion as a draft is what wedged a task for a day. What *can* answer it
+/// is the daemon's own record of the keystrokes it accepted for a session it
+/// spawned, which is why this verdict travels beside the composer text
+/// everywhere the text goes.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ComposerAttestation {
+    /// Keystrokes reached this composer since the last producer-declared
+    /// submission boundary. Anything rendered there may be a human's unsent
+    /// line, so it is treated as one.
+    Typed,
+    /// An attested session with zero typed bytes since its last boundary.
+    /// Nobody here typed anything, so whatever the `❯` line renders is the
+    /// provider's own chrome or suggestion — not session content, and not a
+    /// draft to protect.
+    NotTyped,
+    /// Inherited from before attestation: this daemon never watched what was
+    /// typed, so it can prove nothing either way and says so.
+    #[default]
+    Unknown,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -417,6 +452,18 @@ pub enum Event {
         session_id: String,
         logical_input_blocked: bool,
     },
+    /// The composer line, and what this daemon can prove about it, changed.
+    ///
+    /// Emitted on the edge from the session's own status loop rather than
+    /// folded into `StatusChanged`, because the composer moves on its own
+    /// edges: a suggestion appears, a human starts typing, a boundary clears
+    /// the ledger — none of which is a status transition.
+    ComposerChanged {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        composer_text: Option<String>,
+        composer_attestation: ComposerAttestation,
+    },
     SessionList {
         sessions: Vec<SessionInfo>,
     },
@@ -472,6 +519,16 @@ pub struct SessionInfo {
     /// Absent on a daemon that predates the field, which reports `false`.
     #[serde(default)]
     pub logical_input_blocked: bool,
+    /// The text rendered on this session's composer line, when its frame draws
+    /// a readable one. Reported as its own field — never folded into a status
+    /// snippet — so a reader cannot mistake it for something the session said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composer_text: Option<String>,
+    /// What the daemon can prove about that text. Absent on a daemon that
+    /// predates the field, which reports `unknown` — the honest answer for a
+    /// daemon with no ledger.
+    #[serde(default)]
+    pub composer_attestation: ComposerAttestation,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -908,6 +965,7 @@ mod tests {
                 input_policy_classified: true,
                 raw_input_draft_active: true,
                 raw_input_draft_state_known: true,
+                typed_draft_bytes: Some(9),
                 pending_logical_inputs: vec![b"manager message".to_vec()],
             }],
         };
@@ -1036,6 +1094,8 @@ mod tests {
             status: SessionStatus::Idle,
             kind: SessionKind::Pty,
             logical_input_blocked: false,
+            composer_text: None,
+            composer_attestation: ComposerAttestation::NotTyped,
         };
         let json = serde_json::to_string(&info).unwrap();
         let decoded: SessionInfo = serde_json::from_str(&json).unwrap();
@@ -1065,6 +1125,8 @@ mod tests {
                 status: SessionStatus::Idle,
                 kind: SessionKind::Pty,
                 logical_input_blocked: true,
+                composer_text: Some("half typed".to_string()),
+                composer_attestation: ComposerAttestation::Typed,
             }],
         };
         let json = serde_json::to_string(&evt).unwrap();

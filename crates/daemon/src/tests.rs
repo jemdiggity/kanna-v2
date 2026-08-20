@@ -69,6 +69,7 @@ fn parse_handoff_response_accepts_v2_payload() {
             input_policy_classified: false,
             raw_input_draft_active: false,
             raw_input_draft_state_known: true,
+            typed_draft_bytes: Some(0),
             pending_logical_inputs: Vec::new(),
         }],
     })
@@ -663,6 +664,7 @@ fn handoff_session(kind: protocol::SessionKind, agent_fd_count: u8) -> protocol:
         input_policy_classified: true,
         raw_input_draft_active: false,
         raw_input_draft_state_known: true,
+        typed_draft_bytes: Some(0),
         pending_logical_inputs: Vec::new(),
     }
 }
@@ -1460,6 +1462,7 @@ async fn forged_agent_handoff_cannot_target_unrelated_processes() {
         input_policy_classified: true,
         raw_input_draft_active: false,
         raw_input_draft_state_known: true,
+        typed_draft_bytes: Some(0),
         pending_logical_inputs: Vec::new(),
     };
     crate::agent_runtime::adopt_agent_session(
@@ -1537,6 +1540,7 @@ async fn legacy_handoff_without_identity_keeps_live_agents_killable() {
         input_policy_classified: false,
         raw_input_draft_active: false,
         raw_input_draft_state_known: false,
+        typed_draft_bytes: Some(0),
         pending_logical_inputs: Vec::new(),
     };
     crate::agent_runtime::adopt_agent_session(

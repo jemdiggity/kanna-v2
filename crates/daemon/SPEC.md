@@ -405,12 +405,44 @@ session nobody types into produces no output at all, so nothing else would ever
 run it — and once more on the withholding path of a `SubmitInput` that would
 otherwise be refused or parked.
 
+**A frame is not the only evidence. The typed-byte ledger is the other, and it
+is the stronger one.** The daemon counts the bytes a producer declared a draft
+since the session's last submission boundary, resets that count at every
+boundary and at every successful attestation, and carries it across v3 handoff.
+`Some(0)` is positive proof that no unsent line exists — and unlike a frame it
+survives the CLI painting *anything* at its own prompt. So a declared draft that
+typed nothing never withholds a message: the message is written immediately, and
+the provider throws its own suggestion away the moment it arrives. This is what
+ends the wedge a rendered suggestion used to create — no frame would ever read
+that composer empty again, so the hold became permanent and answered
+`logical_input_held_by_draft` with "a human has an unsent line at that terminal"
+when nobody had typed a byte. `None` is *not* zero: it is a draft inherited
+without its ledger, and it holds exactly like a counted one.
+
+The ledger is also what labels the composer for everything outside the daemon.
+The verdict is `typed` (bytes counted since the last boundary), `not-typed`
+(an attested session with none, so any rendered `❯`-line text is provably the
+provider's own chrome or suggestion), or `unknown` (draft state inherited from
+before attestation). Bytes are counted, never interpreted: the daemon does not
+decide from byte values whether a keystroke "really" left text, for the same
+reason it refuses to infer submission from them. A session typed into and then
+cleared by its human therefore stays `typed` until a boundary or an
+empty-composer frame resolves it — the conservative side of the trade.
+
 A session that stays unknown refuses `SubmitInput` with
 `inherited_draft_state_unknown`, and that refusal is visible before anything
 tries to deliver into it: `List` reports `logical_input_blocked` per session,
 and `InputBlockedChanged` is broadcast on every edge — adoption, a human
 keystroke, attestation — from the session's own status loop, so one publisher
 covers every cause.
+
+The composer itself travels the same way and for the same reason: `List`
+reports `composer_text` and `composer_attestation` per session, and
+`ComposerChanged` is broadcast from that same status loop on the composer's own
+edges. It is published only once a session has actually drawn a readable
+composer — most sessions never do — so a daemon full of worktree shells stays
+quiet. Consumers must keep the text out of anything that means "what the
+session said": it is the input line, not output.
 
 | Env Var | Description | Default |
 |---------|-------------|---------|

@@ -728,6 +728,47 @@ decision about that screen, and it is surfaced rather than discovered:
   the finishing task parks at its final stage instead of disappearing with an
   un-handed-off PR.
 
+## The Composer Is Not Session Output
+
+A CLI's composer line — the `❯` a Claude session sits at, the `›` Codex draws —
+is where somebody is *about* to speak. It is not something the session said,
+and the Claude CLI fills it with a tab-to-accept suggestion whenever it goes
+idle. Presented as undifferentiated content it reads exactly like a directive:
+"run it on my phone so i can see it" was read as one by a task manager and
+stalled a task for a day.
+
+So the composer is reported as its own labelled field and is excluded from
+every surface that means "what the session said":
+
+- `GET /v1/tasks/{task_id}` reports
+  `composer: { text?, attestation }`. `attestation` is `typed` (keystrokes
+  reached that composer since its last producer-declared submission boundary,
+  so `text` may be a human's unsent line), `not-typed` (the daemon watched the
+  session and counted none, so `text` is provably the provider's own chrome or
+  suggestion), or `unknown` (a session inherited from before attestation, where
+  nothing can be proven). The field is **absent** until a session reports one,
+  which is a different answer from `unknown`.
+- `waitingPromptSnippet` / `snippet` never contain composer-line text. The
+  daemon's snippet extraction cuts at the composer's *position*, not by a
+  per-line rule, because a composer long enough to wrap leaves continuation
+  rows carrying no prompt glyph.
+- `GET /v1/tasks/{task_id}/logs` keeps the composer line in the rendered tail
+  but labels it — `[composer (not-typed), not session output: …]` — because a
+  reader deserves to know a composer is there without being able to mistake it
+  for transcript.
+
+The values come from the daemon, which is the only thing that knows what was
+typed: it publishes `ComposerChanged` on the composer's own edges (a suggestion
+appearing, a human starting to type, a boundary clearing the ledger) and
+carries the same two fields on `SessionInfo`, so the watcher reconciles them
+from `List` against every daemon generation. Raw PTY transcripts are unchanged;
+this is a rule about derived surfaces.
+
+The same ledger decides whether a delivered message is held — see
+"Refused Task Input" above and `crates/daemon/SPEC.md`. Zero typed bytes is
+positive proof that no unsent line exists, so the message is written even while
+the CLI renders suggestion text; `typed` and `unknown` still hold.
+
 ## Task Parentage
 
 `pipeline_item.parent_task_id` is read from both ends: `GET /v1/tasks/{task_id}`

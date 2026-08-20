@@ -79,7 +79,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, pipeline, stage,
              pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at,
-             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision, cloud_task_id, revision_rounds, runtime_status, input_blocked
+             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision, cloud_task_id, revision_rounds, runtime_status, input_blocked, composer_text, composer_attestation
              FROM pipeline_item
              WHERE closed_at IS NULL
              ORDER BY updated_at DESC, created_at DESC",
@@ -117,6 +117,8 @@ impl Db {
                 revision_rounds: row.get(28)?,
                 runtime_status: row.get(29)?,
                 input_blocked: row.get(30)?,
+                composer_text: row.get(31)?,
+                composer_attestation: row.get(32)?,
             })
         })?;
         rows.collect()
@@ -127,7 +129,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, pipeline, stage,
              pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at,
-             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision, cloud_task_id, revision_rounds, runtime_status, input_blocked
+             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision, cloud_task_id, revision_rounds, runtime_status, input_blocked, composer_text, composer_attestation
              FROM pipeline_item
              WHERE closed_at IS NULL
                AND (
@@ -169,6 +171,8 @@ impl Db {
                 revision_rounds: row.get(28)?,
                 runtime_status: row.get(29)?,
                 input_blocked: row.get(30)?,
+                composer_text: row.get(31)?,
+                composer_attestation: row.get(32)?,
             })
         })?;
         rows.collect()
@@ -178,7 +182,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, pipeline, stage, \
              pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at, \
-             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision, cloud_task_id, revision_rounds, runtime_status, input_blocked \
+             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision, cloud_task_id, revision_rounds, runtime_status, input_blocked, composer_text, composer_attestation \
              FROM pipeline_item WHERE repo_id = ? AND closed_at IS NULL \
              ORDER BY pin_order ASC, created_at DESC",
         )?;
@@ -215,6 +219,8 @@ impl Db {
                 revision_rounds: row.get(28)?,
                 runtime_status: row.get(29)?,
                 input_blocked: row.get(30)?,
+                composer_text: row.get(31)?,
+                composer_attestation: row.get(32)?,
             })
         })?;
         rows.collect()
@@ -252,7 +258,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, pipeline, stage, \
              pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at, \
-             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision, cloud_task_id, revision_rounds, runtime_status, input_blocked \
+             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision, cloud_task_id, revision_rounds, runtime_status, input_blocked, composer_text, composer_attestation \
              FROM pipeline_item WHERE id = ?",
         )?;
         let mut rows = stmt.query_map([id], |row| {
@@ -288,6 +294,8 @@ impl Db {
                 revision_rounds: row.get(28)?,
                 runtime_status: row.get(29)?,
                 input_blocked: row.get(30)?,
+                composer_text: row.get(31)?,
+                composer_attestation: row.get(32)?,
             })
         })?;
         match rows.next() {
@@ -311,6 +319,41 @@ impl Db {
                AND closed_at IS NULL
                AND COALESCE(last_output_preview, '') != ?",
             (prompt, &task_id, prompt),
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Record what the task's agent session renders on its composer line, and
+    /// what the daemon can prove about it.
+    ///
+    /// Deliberately not folded into `update_pipeline_item_waiting_prompt`:
+    /// that writes `last_output_preview`, which every consumer reads as
+    /// something the session said. The composer is the opposite — it is what
+    /// has not been said yet, and on a Claude session it is frequently the
+    /// CLI's own suggestion. Keeping the two columns apart is the whole point.
+    pub fn update_pipeline_item_composer(
+        &self,
+        id: &str,
+        composer_text: Option<&str>,
+        composer_attestation: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        let Some(task_id) = self.resolve_pipeline_item_id(id)? else {
+            return Ok(false);
+        };
+        let changed = self.conn.execute(
+            "UPDATE pipeline_item
+             SET composer_text = ?, composer_attestation = ?, updated_at = datetime('now')
+             WHERE id = ?
+               AND closed_at IS NULL
+               AND (COALESCE(composer_text, '') != COALESCE(?, '')
+                    OR COALESCE(composer_attestation, '') != ?)",
+            (
+                composer_text,
+                composer_attestation,
+                &task_id,
+                composer_text,
+                composer_attestation,
+            ),
         )?;
         Ok(changed > 0)
     }

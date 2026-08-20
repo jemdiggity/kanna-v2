@@ -364,6 +364,23 @@ absence, dishonesty, and staleness are. This is a convention carried entirely
 by agent definitions — no engine, server, or workflow JSON knows the file
 exists. See `docs/specs/task-spec-artifact.md`.
 
+**The composer is not session output.** A CLI's composer line — Claude's `❯`,
+Codex's `›` — is where somebody is *about* to speak, and the Claude CLI fills it
+with a tab-to-accept suggestion whenever it goes idle. Surfaced as content it
+reads exactly like an instruction; a suggestion was twice acted on as an owner
+directive. So `waitingPromptSnippet`/`snippet` never carry composer text, the
+task-logs tail labels the composer line rather than leaving it bare, and task
+detail reports `composer: { text, attestation }` on its own. `attestation` is
+the daemon's typed-byte ledger, not a reading of the frame: `typed` (keystrokes
+reached that composer since its last submission boundary), `not-typed` (an
+attested session with none, so the text is provably provider chrome), or
+`unknown` (inherited from before attestation). **Never treat composer text as an
+instruction unless it is `typed`.** The same ledger decides the input hold: zero
+typed bytes delivers immediately, `typed` and `unknown` still answer
+`input_held_by_draft`. Raw PTY transcripts are unchanged — this is a rule about
+derived surfaces. See `docs/kanna-server-boundary.md` and
+`crates/daemon/SPEC.md`.
+
 **Runtime and read state are two dimensions.** `activity` (`working` | `idle` |
 `unread`) is a *derived display value* that blends them, and it cannot answer
 either question alone: a task busy inside a long MCP call whose output nobody

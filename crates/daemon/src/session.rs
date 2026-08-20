@@ -7,7 +7,9 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use crate::headless_terminal::{ComposerState, HeadlessTerminal};
-use crate::protocol::{AgentProvider, SessionInfo, SessionState, SessionStatus};
+use crate::protocol::{
+    AgentProvider, ComposerAttestation, SessionInfo, SessionState, SessionStatus,
+};
 use crate::pty::PtySession;
 use kanna_daemon::terminal_perf::{self, TerminalPerfContext};
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
@@ -123,11 +125,19 @@ pub struct SessionRecord {
     pub input_policy_classified: bool,
     pub raw_input_draft_active: bool,
     pub raw_input_draft_state_known: bool,
+    /// Bytes seen typed into the composer since the last producer-declared
+    /// submission boundary. `None` means no ledger came with the session — an
+    /// inherited draft nobody here counted — and is deliberately not the same
+    /// as `Some(0)`.
+    pub typed_draft_bytes: Option<u64>,
     pub pending_logical_inputs: Vec<Vec<u8>>,
 }
 
 pub struct SessionRuntimeState {
     pub headless_terminal: HeadlessTerminal,
+    /// The composer line and verdict already published to subscribers, so the
+    /// status loop can emit on the edge instead of on every tick.
+    published_composer: Option<(Option<String>, ComposerAttestation)>,
     pub stream_control: Option<StreamControl>,
     pub agent_provider: Option<AgentProvider>,
     pub status: SessionStatus,
@@ -282,6 +292,16 @@ pub struct LogicalInputAccepted {
 struct InputCoordinationState {
     raw_input_draft_active: bool,
     raw_input_draft_state_known: bool,
+    /// What the daemon actually saw typed into this composer since the last
+    /// producer-declared submission boundary.
+    ///
+    /// This is the whole of the attestation. `Some(0)` is positive proof that
+    /// nothing anybody wrote is sitting at that prompt, so any text rendered
+    /// there is the CLI's own suggestion and a delivered message can be
+    /// written immediately. `None` is the inherited case — a declared draft
+    /// with no ledger behind it — and holds exactly like a counted one, so
+    /// "cannot prove" never reads as "proved empty".
+    typed_draft_bytes: Option<u64>,
     /// Producer-declared draft writes accepted, and how many have finished
     /// reaching the PTY. Attestation may clear an *active* draft only when
     /// these agree: a declared byte still queued in the writer, or written but
@@ -316,6 +336,7 @@ impl InputCoordinationState {
         Self {
             raw_input_draft_active: record.raw_input_draft_active,
             raw_input_draft_state_known: record.raw_input_draft_state_known,
+            typed_draft_bytes: record.typed_draft_bytes,
             declared_draft_writes_enqueued: 0,
             declared_draft_writes_completed: 0,
             mirrored_chunks_at_last_draft_write: 0,
@@ -330,6 +351,30 @@ impl InputCoordinationState {
                     written: None,
                 })
                 .collect(),
+        }
+    }
+}
+
+impl InputCoordinationState {
+    /// Whether a declared draft is actually holding logical input back.
+    ///
+    /// A producer declares a draft; only the ledger says whether anything was
+    /// typed into it. Zero typed bytes means there is no unsent line to append
+    /// to and nothing a delivered message could corrupt — the CLI throws its
+    /// own suggestion away the moment real input arrives — so the message goes
+    /// out instead of being parked behind a draft that does not exist.
+    fn draft_holds_input(&self) -> bool {
+        self.raw_input_draft_active && self.typed_draft_bytes != Some(0)
+    }
+
+    fn composer_attestation(&self) -> ComposerAttestation {
+        if !self.raw_input_draft_state_known {
+            return ComposerAttestation::Unknown;
+        }
+        match self.typed_draft_bytes {
+            Some(0) => ComposerAttestation::NotTyped,
+            Some(_) => ComposerAttestation::Typed,
+            None => ComposerAttestation::Unknown,
         }
     }
 }
@@ -410,7 +455,7 @@ fn dispatch_accepted_logical_inputs(
     input_tx: &mpsc::UnboundedSender<PendingInput>,
     state: &mut InputCoordinationState,
 ) -> Result<(), InputQueueError> {
-    if !state.raw_input_draft_state_known || state.raw_input_draft_active {
+    if !state.raw_input_draft_state_known || state.draft_holds_input() {
         return Ok(());
     }
     for logical_input in &mut state.logical_inputs {
@@ -440,6 +485,7 @@ impl SessionHandle {
             teardown_claimed: std::sync::atomic::AtomicBool::new(false),
             state: Mutex::new(SessionRuntimeState {
                 headless_terminal: record.headless_terminal,
+                published_composer: None,
                 stream_control: record.stream_control,
                 agent_provider: record.agent_provider,
                 status: record.status,
@@ -503,6 +549,11 @@ impl SessionHandle {
             RawInputKind::Submission => {
                 state.raw_input_draft_active = false;
                 state.raw_input_draft_state_known = true;
+                // The boundary empties the composer, so the ledger restarts
+                // from proven-empty — including for a session that inherited
+                // an uncounted draft, which is how such a session ever earns
+                // an attestation at all.
+                state.typed_draft_bytes = Some(0);
                 let mut logical_after_write = Vec::new();
                 for logical_input in &mut state.logical_inputs {
                     if !logical_input.dispatched {
@@ -529,6 +580,15 @@ impl SessionHandle {
                 // there is nothing for a frame to have to post-date.
                 if !data.is_empty() {
                     state.declared_draft_writes_enqueued += 1;
+                }
+                // Counted, not interpreted. The daemon does not decide from
+                // the byte values whether a keystroke "really" left text —
+                // that is the same inference this file refuses to make about
+                // submission — so anything a producer declared a draft counts
+                // against the composer until a boundary or a rendered empty
+                // frame clears it.
+                if let Some(typed) = state.typed_draft_bytes.as_mut() {
+                    *typed = typed.saturating_add(data.len() as u64);
                 }
                 routed.push(PendingInput::raw_draft(data, written));
             }
@@ -562,7 +622,7 @@ impl SessionHandle {
             dispatched: false,
             written: Some(written_tx),
         });
-        if state.raw_input_draft_active {
+        if state.draft_holds_input() {
             return Ok(LogicalInputAccepted {
                 written,
                 held_by_raw_draft: true,
@@ -608,7 +668,7 @@ impl SessionHandle {
     fn logical_input_withheld(&self) -> bool {
         self.input_coordination
             .lock()
-            .map(|state| !state.raw_input_draft_state_known || state.raw_input_draft_active)
+            .map(|state| !state.raw_input_draft_state_known || state.draft_holds_input())
             .unwrap_or(true)
     }
 
@@ -696,6 +756,11 @@ impl SessionHandle {
         }
         state.raw_input_draft_state_known = true;
         state.raw_input_draft_active = false;
+        // The frame proved the composer holds nothing, so the ledger restarts
+        // from proven-empty too: an inherited session earns its first
+        // attestation here, and a counted draft that left no line stops
+        // reading as typed.
+        state.typed_draft_bytes = Some(0);
         dispatch_accepted_logical_inputs(&self.input_tx, &mut state)
             .map_err(|error| format!("{error:?}"))?;
         Ok(true)
@@ -738,7 +803,7 @@ impl SessionHandle {
             .lock()
             .map_err(|_| InputQueueError::CoordinationUnavailable)?;
         Ok(!state.raw_input_draft_state_known
-            || state.raw_input_draft_active
+            || state.draft_holds_input()
             || !state.logical_inputs.is_empty())
     }
 
@@ -1025,7 +1090,83 @@ impl SessionHandle {
             status,
             kind: crate::protocol::SessionKind::Pty,
             logical_input_blocked: self.logical_input_blocked(),
+            composer_text: self.composer_line().await,
+            composer_attestation: self.composer_attestation(),
         }
+    }
+
+    /// What this daemon can prove about the text on this session's composer.
+    ///
+    /// A poisoned coordination lock answers `Unknown` for the same reason
+    /// [`SessionHandle::logical_input_blocked`] answers "blocked": the
+    /// pessimistic verdict is the one a caller can act on safely, and a
+    /// confident answer that the delivery path then contradicts is worse.
+    pub fn composer_attestation(&self) -> ComposerAttestation {
+        self.input_coordination
+            .lock()
+            .map(|state| state.composer_attestation())
+            .unwrap_or(ComposerAttestation::Unknown)
+    }
+
+    /// The text currently rendered on this session's composer line, when its
+    /// frame draws a readable one.
+    async fn composer_line(&self) -> Option<String> {
+        let mut state = self.state.lock().await;
+        let provider = state.agent_provider;
+        match state.headless_terminal.composer_line(provider) {
+            Ok(text) => text,
+            Err(error) => {
+                log::warn!("[composer] failed to read composer line: {error}");
+                None
+            }
+        }
+    }
+
+    /// The rendered composer verdict, for tests that pin the difference
+    /// between what a frame can prove and what the ledger can.
+    #[cfg(test)]
+    pub(crate) async fn headless_composer_state_for_test(
+        &self,
+    ) -> Result<ComposerState, Box<dyn std::error::Error + Send + Sync>> {
+        let mut state = self.state.lock().await;
+        let provider = state.agent_provider;
+        state.headless_terminal.composer_state(provider)
+    }
+
+    /// The composer change this session has not published yet, if any.
+    ///
+    /// Edge-triggered like the blocked-input transition and polled from the
+    /// same loop, because the composer moves on edges nothing else reports: a
+    /// CLI suggestion appearing, a human starting to type, a submission
+    /// boundary emptying the ledger.
+    pub async fn take_composer_transition(&self) -> Option<(Option<String>, ComposerAttestation)> {
+        let attestation = self.composer_attestation();
+        let mut state = self.state.lock().await;
+        let provider = state.agent_provider;
+        let text = match state.headless_terminal.composer_line(provider) {
+            Ok(text) => text,
+            Err(error) => {
+                log::warn!("[composer] failed to read composer line: {error}");
+                return None;
+            }
+        };
+        // A frame with no readable composer has nothing to say about one, and
+        // most sessions never draw one at all — a plain worktree shell has no
+        // provider chrome to read. Reporting "still no composer" on every tick
+        // would put a message on the wire for every session in the daemon
+        // forever, so the transition is published only once a composer has
+        // actually appeared, and once more when one that existed goes away.
+        let had_composer = matches!(state.published_composer, Some((Some(_), _)));
+        if text.is_none() && !had_composer {
+            state.published_composer = Some((None, attestation));
+            return None;
+        }
+        let current = (text, attestation);
+        if state.published_composer.as_ref() == Some(&current) {
+            return None;
+        }
+        state.published_composer = Some(current.clone());
+        Some(current)
     }
 
     pub async fn handoff_parts(
@@ -1062,6 +1203,7 @@ impl SessionHandle {
             input_policy_classified: state.input_policy_classified,
             raw_input_draft_active: input_coordination.raw_input_draft_active,
             raw_input_draft_state_known: input_coordination.raw_input_draft_state_known,
+            typed_draft_bytes: input_coordination.typed_draft_bytes,
             pending_logical_inputs: input_coordination
                 .logical_inputs
                 .iter()
@@ -1087,6 +1229,7 @@ pub struct SessionHandoffParts {
     pub input_policy_classified: bool,
     pub raw_input_draft_active: bool,
     pub raw_input_draft_state_known: bool,
+    pub typed_draft_bytes: Option<u64>,
     pub pending_logical_inputs: Vec<Vec<u8>>,
     pub fd: std::os::fd::OwnedFd,
 }
@@ -1413,6 +1556,7 @@ pub mod test_support {
             input_policy_classified: true,
             raw_input_draft_active: false,
             raw_input_draft_state_known: true,
+            typed_draft_bytes: Some(0),
             pending_logical_inputs: Vec::new(),
         })
     }
@@ -1440,6 +1584,7 @@ pub mod test_support {
             input_policy_classified: true,
             raw_input_draft_active: false,
             raw_input_draft_state_known: true,
+            typed_draft_bytes: Some(0),
             pending_logical_inputs: Vec::new(),
         })
     }
@@ -1550,7 +1695,7 @@ mod tests {
         StreamControl,
     };
     use crate::bench::transcript::{BenchmarkMode, BenchmarkProvider, TranscriptSpec};
-    use crate::headless_terminal::{initial_session_status, HeadlessTerminal};
+    use crate::headless_terminal::{initial_session_status, ComposerState, HeadlessTerminal};
     use crate::protocol::{AgentProvider, SessionStatus};
     use crate::pty::PtySession;
 
@@ -1579,6 +1724,7 @@ mod tests {
             input_policy_classified: true,
             raw_input_draft_active: false,
             raw_input_draft_state_known: true,
+            typed_draft_bytes: Some(0),
             pending_logical_inputs: Vec::new(),
         })
     }
@@ -2521,6 +2667,198 @@ mod tests {
             SessionStatus::Busy | SessionStatus::Idle
         ));
         assert!(state.status_observed);
+    }
+
+    /// The Claude composer as the CLI actually paints its tab-to-accept
+    /// suggestion: the prompt glyph, a non-breaking space, and dim placeholder
+    /// text. Read off the 2026-08-20 handoff payload for task d846edb7, whose
+    /// suggestion "check again in a minute" is what a task manager read as an
+    /// owner directive.
+    const CLAUDE_FRAME_WITH_SUGGESTION: &[u8] =
+        "\x1b[2J\x1b[H* Done.\r\n\u{276F}\u{a0}check again in a minute\r\n".as_bytes();
+
+    /// Verdict one of three: a session this daemon spawned and nobody has
+    /// typed into is attested not-typed, whatever the CLI paints on the
+    /// composer line.
+    #[tokio::test]
+    async fn an_untouched_session_attests_not_typed_however_its_composer_renders() {
+        let handle = spawn_test_handle(AgentProvider::Claude, SessionStatus::Idle).unwrap();
+        assert_eq!(
+            handle.composer_attestation(),
+            crate::protocol::ComposerAttestation::NotTyped
+        );
+
+        handle
+            .mirror_output(CLAUDE_FRAME_WITH_SUGGESTION, false)
+            .await
+            .expect("render the CLI's own suggestion at the prompt");
+
+        assert_eq!(
+            handle.composer_attestation(),
+            crate::protocol::ComposerAttestation::NotTyped,
+            "rendered text cannot make an untyped composer typed"
+        );
+        let (text, attestation) = handle
+            .take_composer_transition()
+            .await
+            .expect("the composer changed");
+        assert_eq!(text.as_deref(), Some("check again in a minute"));
+        assert_eq!(
+            attestation,
+            crate::protocol::ComposerAttestation::NotTyped,
+            "the label is what tells a reader this text is the CLI's, not a human's"
+        );
+        assert!(
+            handle.take_composer_transition().await.is_none(),
+            "an unchanged composer publishes nothing"
+        );
+        handle.kill().await.unwrap();
+    }
+
+    /// Verdict two: keystrokes reached the composer, so whatever is rendered
+    /// there may be a human's unsent line and is labelled as one.
+    #[tokio::test]
+    async fn a_typed_composer_attests_typed_until_its_next_boundary() {
+        let handle = spawn_test_handle(AgentProvider::Claude, SessionStatus::Idle).unwrap();
+        let mut input_rx = handle.take_input_rx().await.expect("input queue");
+
+        handle
+            .enqueue_raw_input(b"half typed".to_vec(), RawInputKind::Draft)
+            .expect("declare a raw draft");
+        assert_eq!(
+            handle.composer_attestation(),
+            crate::protocol::ComposerAttestation::Typed
+        );
+
+        handle
+            .enqueue_raw_input(b"\r".to_vec(), RawInputKind::Submission)
+            .expect("submit the line");
+        assert_eq!(
+            handle.composer_attestation(),
+            crate::protocol::ComposerAttestation::NotTyped,
+            "a submission empties the composer, so the ledger restarts proven-empty"
+        );
+        assert_eq!(input_rx.recv().await.expect("draft").data, b"half typed");
+        assert_eq!(input_rx.recv().await.expect("boundary").data, b"\r");
+        handle.kill().await.unwrap();
+    }
+
+    /// Verdict three: a session inherited from before attestation. The daemon
+    /// never watched what was typed, so it says so rather than guessing.
+    #[tokio::test]
+    async fn an_inherited_session_attests_unknown() {
+        let mut record = spawn_test_record(AgentProvider::Claude, SessionStatus::Idle).unwrap();
+        record.raw_input_draft_state_known = false;
+        record.typed_draft_bytes = None;
+        let handle = Arc::new(SessionHandle::new(record));
+
+        assert_eq!(
+            handle.composer_attestation(),
+            crate::protocol::ComposerAttestation::Unknown
+        );
+        handle.kill().await.unwrap();
+    }
+
+    /// A declared draft that is inherited without its ledger is not
+    /// proven-empty. `None` and `Some(0)` are different answers, and reading
+    /// the first as the second would release a message onto a real unsent
+    /// line the successor never saw typed.
+    #[tokio::test]
+    async fn an_uncounted_inherited_draft_holds_like_a_counted_one() {
+        let mut record = spawn_test_record(AgentProvider::Claude, SessionStatus::Idle).unwrap();
+        record.raw_input_draft_active = true;
+        record.typed_draft_bytes = None;
+        let handle = Arc::new(SessionHandle::new(record));
+        let mut input_rx = handle.take_input_rx().await.expect("input queue");
+
+        assert_eq!(
+            handle.composer_attestation(),
+            crate::protocol::ComposerAttestation::Unknown
+        );
+        let accepted = handle
+            .enqueue_logical_input(b"manager message".to_vec())
+            .expect("accept logical input");
+        assert!(accepted.held_by_raw_draft);
+        assert!(input_rx.try_recv().is_err());
+        handle.kill().await.unwrap();
+    }
+
+    /// The refusal this whole change exists to end. The CLI paints a
+    /// suggestion at the prompt, so no frame will ever read the composer
+    /// empty; before the ledger that made the hold permanent, and the message
+    /// it answered with — "a human has an unsent line at that terminal" — was
+    /// false. Zero typed bytes is the proof the frame cannot give.
+    #[tokio::test]
+    async fn a_rendered_suggestion_over_an_untyped_composer_never_holds_a_message() {
+        let handle = spawn_test_handle(AgentProvider::Claude, SessionStatus::Idle).unwrap();
+        let mut input_rx = handle.take_input_rx().await.expect("input queue");
+
+        // A producer declares a draft for a keystroke that leaves nothing
+        // behind, and the CLI is rendering its suggestion.
+        handle
+            .enqueue_raw_input(Vec::new(), RawInputKind::Draft)
+            .expect("declare a draft that writes no bytes");
+        assert_eq!(input_rx.recv().await.expect("draft").data, b"");
+        handle
+            .mirror_output(CLAUDE_FRAME_WITH_SUGGESTION, false)
+            .await
+            .expect("render the CLI's own suggestion at the prompt");
+        assert_eq!(
+            handle
+                .headless_composer_state_for_test()
+                .await
+                .expect("read the rendered composer"),
+            ComposerState::Unknown,
+            "the frame cannot tell the suggestion from a draft — only the ledger can"
+        );
+
+        let accepted = handle
+            .enqueue_logical_input(b"owner reply".to_vec())
+            .expect("accept logical input");
+        assert!(
+            !accepted.held_by_raw_draft,
+            "nothing was typed, so there is no unsent line to append to"
+        );
+        let delivered = input_rx.try_recv().expect("the message reaches the writer");
+        assert_eq!(delivered.data, b"owner reply");
+        handle.kill().await.unwrap();
+    }
+
+    /// The other half of the same rule: once a human really has typed, the
+    /// suggestion-shaped frame proves nothing and the message stays queued.
+    #[tokio::test]
+    async fn a_genuinely_typed_draft_still_holds_behind_a_suggestion_shaped_frame() {
+        let handle = spawn_test_handle(AgentProvider::Claude, SessionStatus::Idle).unwrap();
+        let mut input_rx = handle.take_input_rx().await.expect("input queue");
+
+        handle
+            .enqueue_raw_input(b"check again in a minute".to_vec(), RawInputKind::Draft)
+            .expect("declare a real human draft");
+        assert_eq!(
+            handle.composer_attestation(),
+            crate::protocol::ComposerAttestation::Typed
+        );
+        handle
+            .complete_declared_draft_write()
+            .expect("the declared draft reaches the PTY");
+        handle
+            .mirror_output(CLAUDE_FRAME_WITH_SUGGESTION, false)
+            .await
+            .expect("render the typed line at the prompt");
+
+        let accepted = handle
+            .enqueue_logical_input(b"owner reply".to_vec())
+            .expect("accept logical input");
+        assert!(
+            accepted.held_by_raw_draft,
+            "a counted draft is protected exactly as before"
+        );
+        assert_eq!(
+            input_rx.recv().await.expect("draft").data,
+            b"check again in a minute"
+        );
+        assert!(input_rx.try_recv().is_err());
+        handle.kill().await.unwrap();
     }
 
     #[test]

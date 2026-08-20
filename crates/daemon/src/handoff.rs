@@ -1123,6 +1123,7 @@ pub(crate) async fn handle_handoff(
                     input_policy_classified: parts.input_policy_classified,
                     raw_input_draft_active: parts.raw_input_draft_active,
                     raw_input_draft_state_known: parts.raw_input_draft_state_known,
+                    typed_draft_bytes: parts.typed_draft_bytes,
                     pending_logical_inputs: parts.pending_logical_inputs,
                 });
                 fds.push(fd);
@@ -1218,6 +1219,7 @@ pub(crate) async fn handle_handoff(
             input_policy_classified: true,
             raw_input_draft_active: false,
             raw_input_draft_state_known: true,
+            typed_draft_bytes: Some(0),
             pending_logical_inputs: Vec::new(),
         });
         fds.extend(session_fds);

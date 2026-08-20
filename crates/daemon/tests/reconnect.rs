@@ -371,6 +371,120 @@ fn a_navigation_key_draft_holds_a_logical_message_and_the_daemon_says_so() {
     }
 }
 
+/// The refusal this change exists to end, end to end.
+///
+/// The Claude CLI paints a tab-to-accept suggestion on its own `❯` line, so no
+/// frame will ever read that composer empty and attestation can never clear a
+/// declared draft again. A message delivered into such a session was answered
+/// `409 input_held_by_draft` — "a human has an unsent line at that terminal" —
+/// when nobody had typed a byte into it. What the daemon can prove is its own
+/// ledger: zero typed bytes means there is no line to append to, whatever the
+/// screen says.
+#[test]
+fn a_declared_draft_that_typed_nothing_delivers_through_a_rendered_suggestion() {
+    let daemon = DaemonHandle::start();
+    let mut conn = daemon.connect();
+    let session_id = "untyped-composer";
+    spawn_claude_shaped_session(
+        &mut conn,
+        session_id,
+        // A composer holding the CLI's suggestion, then a reader loop, so a
+        // delivered line is echoed back where the snapshot can see it.
+        "stty -echo; printf '\\xe2\\x9d\\xaf check again in a minute\\n'; \
+         while IFS= read -r line; do printf 'LINE:<%s>\\n' \"$line\"; done",
+    );
+
+    // A producer declares a draft for something that types nothing.
+    conn.send(&Cmd::Input {
+        session_id: session_id.to_string(),
+        data: Vec::new(),
+    });
+    expect_ok(&mut conn);
+
+    conn.send(&Cmd::SubmitInput {
+        session_id: session_id.to_string(),
+        data: b"owner reply".to_vec(),
+    });
+    match conn.recv() {
+        Evt::Ok => {}
+        Evt::Error { code, message } => {
+            panic!("nothing was typed, so nothing could be corrupted: {code:?} {message:?}")
+        }
+        other => panic!("expected Ok, got: {other:?}"),
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let snapshot = recv_snapshot_for(&mut conn, session_id);
+        if snapshot.vt.contains("LINE:<owner reply>") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the message never reached the PTY: {:?}",
+            snapshot.vt
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    // And the composer is reported as its own labelled field rather than as
+    // something the session said.
+    conn.send(&Cmd::List);
+    match conn.recv() {
+        Evt::SessionList { sessions } => {
+            let session = sessions
+                .iter()
+                .find(|session| session["session_id"] == session_id)
+                .expect("the session is listed");
+            assert_eq!(session["composer_attestation"], "not-typed");
+        }
+        other => panic!("expected SessionList, got: {other:?}"),
+    }
+}
+
+/// The other half of the same rule, over the same wire: once a human really
+/// has typed, the identical frame proves nothing and the message stays queued
+/// for their boundary.
+#[test]
+fn a_typed_draft_still_holds_a_message_behind_a_rendered_suggestion() {
+    let daemon = DaemonHandle::start();
+    let mut conn = daemon.connect();
+    let session_id = "typed-composer";
+    spawn_claude_shaped_session(
+        &mut conn,
+        session_id,
+        "stty -echo; printf '\\xe2\\x9d\\xaf check again in a minute\\n'; \
+         while IFS= read -r line; do printf 'LINE:<%s>\\n' \"$line\"; done",
+    );
+
+    conn.send(&Cmd::Input {
+        session_id: session_id.to_string(),
+        data: b"human draft".to_vec(),
+    });
+    expect_ok(&mut conn);
+
+    conn.send(&Cmd::SubmitInput {
+        session_id: session_id.to_string(),
+        data: b"owner reply".to_vec(),
+    });
+    match conn.recv() {
+        Evt::Error { code, .. } => assert_eq!(code, Some(ErrorCode::LogicalInputHeldByDraft)),
+        other => panic!("a typed draft must still hold the message, got: {other:?}"),
+    }
+
+    conn.send(&Cmd::List);
+    match conn.recv() {
+        Evt::SessionList { sessions } => {
+            let session = sessions
+                .iter()
+                .find(|session| session["session_id"] == session_id)
+                .expect("the session is listed");
+            assert_eq!(session["composer_attestation"], "typed");
+        }
+        other => panic!("expected SessionList, got: {other:?}"),
+    }
+}
+
 /// `Ok` means submitted, not queued. The message and its terminating Enter
 /// are one delivery in two writes separated by the submit delay, so an answer
 /// that arrives before that delay elapsed cannot have seen the Enter written.
@@ -1056,6 +1170,27 @@ fn expect_session_created_with_timeout(conn: &mut ClientConn, session_id: &str, 
             Ok(other) => panic!("expected SessionCreated, got: {:?}", other),
             Err(_) => continue,
         }
+    }
+}
+
+/// A shell session the daemon reads as a Claude terminal, so the composer
+/// matchers apply to whatever the script paints.
+fn spawn_claude_shaped_session(conn: &mut ClientConn, session_id: &str, script: &str) {
+    conn.send_json(&serde_json::json!({
+        "type": "Spawn",
+        "session_id": session_id,
+        "executable": "/bin/sh",
+        "args": ["-c", script],
+        "cwd": "/tmp",
+        "env": {},
+        "cols": 80,
+        "rows": 24,
+        "agent_provider": "claude",
+    }));
+
+    match conn.recv() {
+        Evt::SessionCreated { session_id: sid } => assert_eq!(sid, session_id),
+        other => panic!("expected SessionCreated, got: {other:?}"),
     }
 }
 

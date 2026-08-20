@@ -294,7 +294,7 @@ async fn guide_json_command_fetches_env_task_id_and_prints_workflow_context_and_
         .contains("stage-complete"));
     assert!(guide["workflow"]["eventSupervision"]
         .as_array()
-        .is_some_and(|lines| lines.len() == 4));
+        .is_some_and(|lines| lines.len() == 5));
     let tool_names = guide["tools"]
         .as_array()
         .unwrap()

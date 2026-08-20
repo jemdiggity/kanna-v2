@@ -1601,6 +1601,102 @@ async fn task_detail_reports_the_runtime_and_read_dimensions_separately() {
     assert_eq!(tasks[0]["readState"], serde_json::json!("read"));
 }
 
+/// The split this exists for. `waitingPromptSnippet` is what the session said;
+/// the composer is what somebody is about to say into it — and on a Claude
+/// session that line is usually the CLI's own tab-to-accept suggestion. Once
+/// they shared a field, a suggestion read as an owner directive and stalled a
+/// task for a day.
+#[tokio::test]
+async fn task_detail_reports_the_composer_apart_from_what_the_session_said() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "prompt",
+            Some("Task One"),
+            "in progress",
+            "2026-08-18 08:00:00",
+        )
+        .unwrap();
+        db.update_pipeline_item_waiting_prompt("task-1", "Ready for review.")
+            .unwrap();
+        db.update_pipeline_item_composer(
+            "task-1",
+            Some("run it on my phone so i can see it"),
+            "not-typed",
+        )
+        .unwrap();
+    });
+
+    let response = app
+        .oneshot(
+            Request::get("/v1/tasks/task-1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let detail: serde_json::Value = from_slice(&body).unwrap();
+
+    assert_eq!(
+        detail["waitingPromptSnippet"],
+        serde_json::json!("Ready for review.")
+    );
+    assert_eq!(detail["snippet"], serde_json::json!("Ready for review."));
+    assert_eq!(
+        detail["composer"],
+        serde_json::json!({
+            "text": "run it on my phone so i can see it",
+            "attestation": "not-typed",
+        }),
+        "the composer line is reported, but only as its own labelled field"
+    );
+    for field in ["waitingPromptSnippet", "snippet"] {
+        assert!(
+            !detail[field].as_str().unwrap_or_default().contains("phone"),
+            "{field} must never carry composer text"
+        );
+    }
+}
+
+/// A task nothing has reported a composer for says nothing about one. Absent
+/// is not `unknown`: `unknown` is a session that reported and could prove
+/// nothing.
+#[tokio::test]
+async fn task_detail_omits_the_composer_until_a_session_reports_one() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "prompt",
+            Some("Task One"),
+            "in progress",
+            "2026-08-18 08:00:00",
+        )
+        .unwrap();
+    });
+
+    let response = app
+        .oneshot(
+            Request::get("/v1/tasks/task-1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let detail: serde_json::Value = from_slice(&body).unwrap();
+    assert!(detail.get("composer").is_none());
+}
+
 #[tokio::test]
 async fn task_activity_routes_persist_runtime_status_and_mark_read() {
     let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {

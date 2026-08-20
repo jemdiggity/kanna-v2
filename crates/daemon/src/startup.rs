@@ -321,6 +321,9 @@ pub(crate) async fn run_daemon() {
                 input_policy_classified: handoff.input_policy_classified,
                 raw_input_draft_active: handoff.raw_input_draft_active,
                 raw_input_draft_state_known: handoff.raw_input_draft_state_known,
+                // A sender with no ledger hands over `None`, which holds like
+                // a real draft rather than reading as proven-empty.
+                typed_draft_bytes: handoff.typed_draft_bytes,
                 pending_logical_inputs: handoff.pending_logical_inputs,
             }));
             let reader = match handle.try_clone_io_fd().await {

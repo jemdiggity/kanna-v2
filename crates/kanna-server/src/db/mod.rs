@@ -117,6 +117,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "051_repo_remote_hash_task_event_indexes",
     "052_task_input_log",
     "053_pipeline_item_input_blocked",
+    "054_pipeline_item_composer",
 ];
 
 #[derive(Debug, Serialize)]
@@ -153,6 +154,18 @@ pub struct PipelineItem {
     /// restart or handoff and its composer holds text nobody here saw typed,
     /// so submitting would append to an unsent line.
     pub input_blocked: Option<String>,
+    /// The text the task's agent session currently renders on its composer
+    /// line, or `None` when it draws no readable composer. Never folded into
+    /// `last_output_preview`: this is what somebody is about to say, or what
+    /// the CLI is suggesting they say, and a reader that cannot tell it from
+    /// transcript acts on a sentence nobody wrote.
+    pub composer_text: Option<String>,
+    /// What the daemon can prove about that text: `typed` (keystrokes reached
+    /// it since the last submission boundary), `not-typed` (an attested
+    /// session with none, so the text is provably CLI chrome), or `unknown`
+    /// (a session inherited from before attestation). `None` when no session
+    /// has reported one yet.
+    pub composer_attestation: Option<String>,
     pub closed_at: Option<String>,
     pub pinned: Option<i64>,
     pub pin_order: Option<i64>,
@@ -1763,6 +1776,17 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         // delivery failing against it. Recorded here, it is on task detail and
         // in the event feed like every other state a watcher acts on.
         add_column(conn, "pipeline_item", "input_blocked", "TEXT")
+    })?;
+
+    run_migration(conn, "054_pipeline_item_composer", |conn| {
+        // The composer line, kept apart from everything the session actually
+        // said. `last_output_preview` — where the waiting-prompt snippet lives
+        // — is read by agents as content, and a CLI that paints a suggestive
+        // placeholder at its own prompt turned that into an owner directive
+        // twice. Two columns rather than one: the text is useless without the
+        // verdict on whether anybody typed it.
+        add_column(conn, "pipeline_item", "composer_text", "TEXT")?;
+        add_column(conn, "pipeline_item", "composer_attestation", "TEXT")
     })?;
 
     Ok(())

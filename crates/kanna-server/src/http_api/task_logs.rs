@@ -62,7 +62,8 @@ pub(super) async fn task_logs(
     let text = if item.agent_type.as_deref() == Some("agent") {
         render_agent_journal_logs(&state.config.daemon_dir, &pipeline_item_id, tail)?
     } else {
-        render_pty_snapshot_logs(&state.config.daemon_dir, &pipeline_item_id).await
+        let rendered = render_pty_snapshot_logs(&state.config.daemon_dir, &pipeline_item_id).await;
+        label_composer_line(&rendered, item.composer_attestation.as_deref())
     };
     let text = if is_missing_live_log_response(&text) {
         persisted.unwrap_or(text)
@@ -77,6 +78,41 @@ pub(super) async fn task_logs(
         text,
     )
         .into_response())
+}
+
+/// Mark the composer line in a rendered PTY tail so nothing reads it as
+/// transcript.
+///
+/// The tail is a terminal frame flattened to text, and the last line of a
+/// Claude frame is its `❯` composer — which the CLI fills with a tab-to-accept
+/// *suggestion* when it is idle. Left bare, that line reads exactly like
+/// something the session said; it was read as an owner directive twice, once
+/// stalling a task for a day. The line is kept rather than dropped — a reader
+/// deserves to know a composer is there and what is in it — but it is labelled
+/// with what the daemon can prove about who put it there.
+fn label_composer_line(rendered: &str, attestation: Option<&str>) -> String {
+    use kanna_daemon::headless_terminal::{composer_line_text, line_is_composer};
+
+    let mut lines = rendered.lines().collect::<Vec<_>>();
+    let Some(index) = lines.iter().rposition(|line| line_is_composer(line)) else {
+        return rendered.to_string();
+    };
+    // Absent means no session has reported an attestation for this task, which
+    // is the same thing a reader should do with it as `unknown`: prove
+    // nothing, assume nothing.
+    let attestation = attestation.unwrap_or("unknown");
+    let labelled = format!(
+        "[composer ({attestation}), not session output: {}]",
+        composer_line_text(lines[index])
+    );
+    // Everything below the composer row goes with it. Those rows are the hint
+    // bar, the box rule, and — the reason this is a truncation rather than a
+    // one-line substitution — the composer's own wrapped continuation, which
+    // carries no prompt glyph and would otherwise be left behind reading
+    // exactly like transcript.
+    lines.truncate(index);
+    lines.push(&labelled);
+    lines.join("\n")
 }
 
 fn render_persisted_stage_run_logs(
@@ -200,7 +236,77 @@ async fn render_pty_snapshot_logs(daemon_dir: &str, session_id: &str) -> String 
 
 #[cfg(test)]
 mod tests {
+    use super::label_composer_line;
     use kanna_runtime_defaults::strip_ansi_for_display;
+
+    /// The tail is a terminal frame flattened to text, and its last line is
+    /// the composer — which the Claude CLI fills with a tab-to-accept
+    /// suggestion. Read bare, "run it on my phone so i can see it" is
+    /// indistinguishable from something the agent said; it was acted on as an
+    /// owner directive. The line stays, but says what it is.
+    #[test]
+    fn composer_line_is_labelled_rather_than_read_as_transcript() {
+        let rendered = concat!(
+            "⏺ Ready for review.\n",
+            "────────────\n",
+            "❯ run it on my phone so i can see it\n",
+            "⏵⏵ bypass permissions on",
+        );
+
+        let labelled = label_composer_line(rendered, Some("not-typed"));
+
+        assert!(labelled.contains("⏺ Ready for review."));
+        assert!(
+            labelled.contains(
+                "[composer (not-typed), not session output: run it on my phone so i can see it]"
+            ),
+            "{labelled}"
+        );
+        assert!(
+            !labelled.contains("❯ run it on my phone"),
+            "the bare composer line must not survive: {labelled}"
+        );
+    }
+
+    /// No attestation recorded reads the same way as `unknown`: prove nothing,
+    /// assume nothing.
+    #[test]
+    fn composer_line_without_a_recorded_attestation_is_labelled_unknown() {
+        let labelled = label_composer_line("❯ half typed", None);
+        assert_eq!(
+            labelled,
+            "[composer (unknown), not session output: half typed]"
+        );
+    }
+
+    /// A composer long enough to wrap leaves continuation rows below it that
+    /// carry no prompt glyph. Labelling the prompt row alone would leave "ht
+    /// now please" sitting in the tail as if the agent had said it.
+    #[test]
+    fn a_wrapped_composer_leaves_no_continuation_behind() {
+        let rendered = concat!(
+            "⏺ Ready for review.\n",
+            "❯ run it on my phone so i can see it rig\n",
+            "ht now please\n",
+            "⏵⏵ bypass permissions on",
+        );
+
+        let labelled = label_composer_line(rendered, Some("not-typed"));
+
+        assert!(labelled.starts_with("⏺ Ready for review."));
+        assert!(
+            !labelled.contains("ht now please"),
+            "a wrapped composer row is not transcript: {labelled}"
+        );
+    }
+
+    /// A frame with no composer is returned untouched — a plain shell session
+    /// has no prompt line to label.
+    #[test]
+    fn a_frame_without_a_composer_is_left_alone() {
+        let rendered = "$ cargo test\ntest result: ok.";
+        assert_eq!(label_composer_line(rendered, Some("typed")), rendered);
+    }
 
     #[test]
     fn strip_ansi_removes_color_codes() {
