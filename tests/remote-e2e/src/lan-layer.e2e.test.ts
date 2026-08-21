@@ -733,7 +733,12 @@ class LanTerminalCollectorImpl implements LanTerminalCollector {
 
   async waitForScrollback(timeoutMs = 10_000): Promise<TerminalScrollbackChunk> {
     return await new Promise<TerminalScrollbackChunk>((resolve, reject) => {
-      const waiter = { resolve: (chunk: TerminalScrollbackChunk) => resolve(chunk) };
+      const waiter = {
+        resolve: (chunk: TerminalScrollbackChunk) => {
+          clearTimeout(timeout);
+          resolve(chunk);
+        }
+      };
       const timeout = setTimeout(() => {
         const index = this.scrollbackWaiters.indexOf(waiter);
         if (index >= 0) {
@@ -741,12 +746,7 @@ class LanTerminalCollectorImpl implements LanTerminalCollector {
         }
         reject(new Error(`timed out waiting for a scrollback chunk from ${this.taskId}`));
       }, timeoutMs);
-      this.scrollbackWaiters.push({
-        resolve: (chunk) => {
-          clearTimeout(timeout);
-          resolve(chunk);
-        }
-      });
+      this.scrollbackWaiters.push(waiter);
     });
   }
 
