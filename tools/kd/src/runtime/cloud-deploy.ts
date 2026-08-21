@@ -15,6 +15,24 @@ interface Firebaserc {
   }>;
 }
 
+interface CloudRunServiceDescription {
+  metadata?: {
+    name?: unknown;
+  };
+}
+
+interface CloudRunIamPolicy {
+  bindings?: Array<{
+    role?: unknown;
+    members?: unknown;
+  }>;
+}
+
+export interface PublicFirebaseFunctionsManifest {
+  region: string;
+  serviceNames: string[];
+}
+
 export type CloudDeployEnvironment = "staging" | "production";
 
 export interface CloudDeployInput {
@@ -88,6 +106,150 @@ const WEB_PORTAL_CONFIG_KEYS = [
   "FIREBASE_APP_ID",
   "STRIPE_PUBLISHABLE_KEY"
 ] as const;
+
+const PRIVATE_FUNCTION_ANNOTATION = "@kanna-private-function";
+
+/**
+ * Read the public Cloud Functions surface from the source Firebase deploys.
+ *
+ * Direct `onCall` and `onRequest` exports are public by default. A future
+ * function that must not receive an unauthenticated Cloud Run invoker binding
+ * must put `@kanna-private-function` in the JSDoc immediately above its export.
+ * The annotation only excludes kd reconciliation; the function must also set
+ * its Firebase `invoker` option so Firebase itself deploys it as private.
+ */
+export function parsePublicFirebaseFunctions(source: string): PublicFirebaseFunctionsManifest {
+  const regionMatch = source.match(/setGlobalOptions\s*\(\s*\{[\s\S]*?\bregion\s*:\s*["']([^"']+)["']/);
+  if (!regionMatch?.[1]) {
+    throw new Error("Firebase functions source must declare a string region in setGlobalOptions().");
+  }
+
+  const serviceNames: string[] = [];
+  const exportPattern = /(?:\/\*\*([\s\S]*?)\*\/\s*)?export\s+const\s+([A-Za-z_$][\w$]*)\s*=\s*(?:onCall|onRequest)\s*\(/g;
+  for (const match of source.matchAll(exportPattern)) {
+    const documentation = match[1] ?? "";
+    const exportName = match[2];
+    if (!exportName || documentation.includes(PRIVATE_FUNCTION_ANNOTATION)) continue;
+    serviceNames.push(exportName.toLowerCase());
+  }
+
+  if (serviceNames.length === 0) {
+    throw new Error("Firebase functions source exports no public onCall/onRequest functions.");
+  }
+  return { region: regionMatch[1], serviceNames };
+}
+
+function publicInvokerCommand(serviceName: string, projectId: string, region: string): string[] {
+  return [
+    "run",
+    "services",
+    "add-iam-policy-binding",
+    serviceName,
+    "--member=allUsers",
+    "--role=roles/run.invoker",
+    `--project=${projectId}`,
+    `--region=${region}`
+  ];
+}
+
+function hasPublicInvoker(policy: CloudRunIamPolicy): boolean {
+  return policy.bindings?.some(
+    (binding) => binding.role === "roles/run.invoker" &&
+      Array.isArray(binding.members) && binding.members.includes("allUsers")
+  ) === true;
+}
+
+function parseJson<T>(output: string, description: string): T {
+  try {
+    return JSON.parse(output) as T;
+  } catch (error) {
+    throw new Error(`Failed to parse ${description} JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+export async function ensurePublicFunctionInvokers(input: {
+  repoRoot: string;
+  env: NodeJS.ProcessEnv;
+  runner: CommandRunner;
+  projectId: string;
+}): Promise<void> {
+  const functionsSourcePath = join(input.repoRoot, "services/firebase-functions/src/index.ts");
+  const manifest = parsePublicFirebaseFunctions(readFileSync(functionsSourcePath, "utf8"));
+  const list = await input.runner.run(
+    "gcloud",
+    [
+      "run",
+      "services",
+      "list",
+      `--project=${input.projectId}`,
+      `--region=${manifest.region}`,
+      "--platform=managed",
+      "--format=json"
+    ],
+    { cwd: input.repoRoot, env: input.env }
+  );
+  if (list.exitCode !== 0) {
+    throw new Error(list.stderr || list.stdout || "Failed to list deployed Cloud Run services.");
+  }
+  const deployedServices = new Set(
+    parseJson<CloudRunServiceDescription[]>(list.stdout, "Cloud Run service list")
+      .map((service) => service.metadata?.name)
+      .filter((name): name is string => typeof name === "string")
+  );
+
+  for (const serviceName of manifest.serviceNames) {
+    const repairArgs = publicInvokerCommand(serviceName, input.projectId, manifest.region);
+    const repairCommand = `gcloud ${repairArgs.join(" ")}`;
+    if (!deployedServices.has(serviceName)) {
+      throw new Error(
+        `Firebase deployed public function ${serviceName}, but its Cloud Run service was not found. ` +
+        `After the service exists, run exactly:\n${repairCommand}`
+      );
+    }
+
+    const inspect = await input.runner.run(
+      "gcloud",
+      [
+        "run",
+        "services",
+        "get-iam-policy",
+        serviceName,
+        `--project=${input.projectId}`,
+        `--region=${manifest.region}`,
+        "--format=json"
+      ],
+      { cwd: input.repoRoot, env: input.env }
+    );
+    if (inspect.exitCode !== 0) {
+      throw new Error(
+        `${inspect.stderr || inspect.stdout || `Failed to inspect Cloud Run IAM for ${serviceName}.`}\n` +
+        `Run exactly:\n${repairCommand}`
+      );
+    }
+    let policy: CloudRunIamPolicy;
+    try {
+      policy = parseJson<CloudRunIamPolicy>(inspect.stdout, `${serviceName} IAM policy`);
+    } catch (error) {
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}\n` +
+        `Run exactly:\n${repairCommand}`
+      );
+    }
+    if (hasPublicInvoker(policy)) continue;
+
+    const repair = await input.runner.run("gcloud", repairArgs, {
+      cwd: input.repoRoot,
+      env: input.env,
+      streamOutput: true
+    });
+    if (repair.exitCode !== 0) {
+      throw new Error(
+        `${repair.stderr || repair.stdout || `Failed to grant public Cloud Run invocation for ${serviceName}.`}\n` +
+        `Run exactly:\n${repairCommand}`
+      );
+    }
+  }
+}
 
 /**
  * The launch price as the portal renders it when a deploy names none
@@ -291,6 +453,14 @@ export async function deployFirebaseCloud(input: CloudDeployInput & { relay?: bo
     );
     if (deploy.exitCode !== 0) {
       throw new Error(deploy.stderr || deploy.stdout || "Firebase deploy failed.");
+    }
+    if (functions) {
+      await ensurePublicFunctionInvokers({
+        repoRoot: input.repoRoot,
+        env: input.env,
+        runner: input.runner,
+        projectId
+      });
     }
   }
 
