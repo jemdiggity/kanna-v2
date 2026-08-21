@@ -130,7 +130,7 @@ describe("checkout pages", () => {
     expect(wrapper.text()).toContain("No charge was made");
   });
 
-  it("surfaces the Stripe session id on the success page", () => {
+  it("confirms the active subscription without displaying the Stripe session id", () => {
     const host = {
       template: '<CheckoutReturnPage result="success" session-id="cs_test_return" />',
       components: { CheckoutReturnPage },
@@ -138,7 +138,9 @@ describe("checkout pages", () => {
     };
     const wrapper = mount(host, { global: { stubs: { RouterLink: true } } });
 
-    expect(wrapper.text()).toContain("Checkout reference: cs_test_return");
+    expect(wrapper.text()).toContain("Your subscription is active.");
+    expect(wrapper.text()).not.toContain("cs_test_return");
+    expect(wrapper.get("router-link-stub").attributes("to")).toBe("/account");
   });
 });
 

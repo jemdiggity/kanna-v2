@@ -22,8 +22,7 @@ onMounted(() => {
     <p class="eyebrow">{{ succeeded ? "Welcome to Kanna Cloud" : "No charge was made" }}</p>
     <h1>{{ succeeded ? "Checkout complete" : "Checkout cancelled" }}</h1>
     <template v-if="succeeded">
-      <p>Stripe accepted your checkout. Your account will show access as soon as the billing update arrives.</p>
-      <p v-if="sessionId" class="quiet">Checkout reference: {{ sessionId }}</p>
+      <p>Your subscription is active.</p>
     </template>
     <p v-else>Your account is unchanged. You can return to the plan whenever you're ready.</p>
     <RouterLink class="button" :to="succeeded ? '/account' : '/subscribe'">{{ succeeded ? "View account" : "Return to plan" }}</RouterLink>
