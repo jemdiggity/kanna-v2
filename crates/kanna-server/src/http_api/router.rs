@@ -15,9 +15,9 @@ use super::pairing::{claim_pairing_session, create_pairing_session};
 use super::repo_commands::{list_repo_commands, run_repo_command};
 use super::repos::{
     add_repo, dependent_tasks_exist, get_repo_agent_definition, get_repo_by_path,
-    get_repo_kanna_definitions, get_repo_workflow_definition, list_available_agent_providers,
-    list_recent_repo_workflows, list_repo_agents, list_repo_tasks, list_repos, patch_repo,
-    refresh_repo_origin, reorder_repos,
+    get_repo_checkout, get_repo_kanna_definitions, get_repo_workflow_definition,
+    list_available_agent_providers, list_recent_repo_workflows, list_repo_agents, list_repo_tasks,
+    list_repos, patch_repo, refresh_repo_origin, reorder_repos, start_repo_checkout,
 };
 use super::settings::{delete_setting, get_setting, put_cloud_transfer_identity, put_setting};
 use super::signal_agent::{signal_agent, signal_merge_handoff};
@@ -100,6 +100,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v2/stream", get(ksp_stream))
         .route("/v1/desktops", get(list_desktops))
         .route("/v1/repos", get(list_repos).post(add_repo))
+        .route("/v1/repo-checkouts", post(start_repo_checkout))
+        .route("/v1/repo-checkouts/{operation_id}", get(get_repo_checkout))
         .route("/v1/repos/by-path", get(get_repo_by_path))
         .route("/v1/repos/actions/reorder", post(reorder_repos))
         .route("/v1/repos/{repo_id}", axum::routing::patch(patch_repo))

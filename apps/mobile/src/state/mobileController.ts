@@ -93,6 +93,9 @@ export interface MobileController {
   dismissActivity(taskId: string): Promise<void>;
   setTaskPinned(taskId: string, pinned: boolean): Promise<void>;
   createTask(terminalGeometry?: MobileTerminalGeometry): Promise<string | null>;
+  confirmRepoCheckout(
+    terminalGeometry?: MobileTerminalGeometry
+  ): Promise<string | null>;
   recoverTaskCreation(slotId?: string): Promise<string | null>;
   abortTaskCreation(slotId: string): Promise<void>;
   runMergeAgent(taskId: string): Promise<string | null>;
@@ -144,6 +147,7 @@ const REPO_COMMAND_TASK_LOAD_ERROR =
   "The command launched successfully, but its task could not be loaded. Check your connection and try again.";
 const REPO_COMMAND_TASK_LOAD_ATTEMPTS = 3;
 const REPO_COMMAND_TASK_LOAD_RETRY_MS = 200;
+const DEFAULT_REPO_CHECKOUT_POLL_INTERVAL_MS = 500;
 
 export interface CloudTaskPublication {
   cloudAuthoritative: boolean;
@@ -168,6 +172,7 @@ export interface MobileControllerOptions {
   subscribeTaskRouteChanges?: (listener: () => void) => () => void;
   /** Phone-local pin/dismiss record. Defaults to AsyncStorage. */
   taskListPreferencesStore?: TaskListPreferencesStore;
+  repoCheckoutPollIntervalMs?: number;
 }
 
 let fallbackTaskCreationCounter = 0;
@@ -325,6 +330,7 @@ export function createMobileController(
   >();
   const taskCreationPersistenceFlights = new Map<string, Promise<void>>();
   const recoveryStartedTaskIds = new Set<string>();
+  let repoCheckoutFlight: Promise<string | null> | null = null;
   let lastSubmittedTaskCreationId: string | null = null;
   let repoCommandLoadGeneration = 0;
   const repoCommandCatalogs = new Map<string, RepoCommandCatalog>();
@@ -2120,6 +2126,28 @@ export function createMobileController(
         attempt.terminalRows ?? DEFAULT_MOBILE_TERMINAL_GEOMETRY.rows
     });
 
+  const offerRepoCheckout = (
+    action: "create-task" | "repo-command",
+    repo: RepoSummary,
+    desktopId: string,
+    desktopName: string,
+    commandId?: string
+  ): boolean => {
+    if (!repo.remoteUrl || !repo.remoteUrlHash) {
+      return false;
+    }
+    store.setRepoCheckoutOffer({
+      action,
+      status: "offered",
+      repoId: repo.id,
+      repoName: repo.name,
+      desktopId,
+      desktopName,
+      ...(commandId ? { commandId } : {})
+    });
+    return true;
+  };
+
   const findTaskCreationAttempt = (
     selectionOrSlotId?: string | null
   ): TaskCreationAttempt | null => {
@@ -2428,6 +2456,29 @@ export function createMobileController(
           openedTaskId = response.taskId;
         }
       } catch (error) {
+        const commandState = store.getState();
+        const repo = commandState.repos.find(
+          (candidate) => candidate.id === repoId
+        );
+        const desktopId = commandState.selectedDesktopId;
+        const desktopName = desktopId
+          ? commandState.desktops.find((desktop) => desktop.id === desktopId)?.name ?? desktopId
+          : null;
+        if (
+          error instanceof RepoNotRegisteredError &&
+          repo &&
+          desktopId &&
+          desktopName
+        ) {
+          offerRepoCheckout(
+            "repo-command",
+            repo,
+            desktopId,
+            desktopName,
+            commandId
+          );
+        }
+        fail(error);
         reloadCatalog = isStaleRepoCommandError(error);
         if (!reloadCatalog) {
           const message =
@@ -2535,10 +2586,12 @@ export function createMobileController(
       );
       store.setComposerOptionsExpanded(!composerDesktopId);
       lastSubmittedTaskCreationId = null;
+      store.setRepoCheckoutOffer(null);
       store.setComposerState(true, "");
     },
 
     closeComposer() {
+      store.setRepoCheckoutOffer(null);
       store.setComposerState(false, "");
     },
 
@@ -2549,6 +2602,7 @@ export function createMobileController(
     selectComposerDesktop(desktopId) {
       const previous = store.getState().composerAgentProvider;
       store.setComposerDesktop(desktopId);
+      store.setRepoCheckoutOffer(null);
       // A provider chosen for another machine must not follow the selection
       // onto a machine that cannot run it.
       store.setComposerAgentProvider(
@@ -2626,7 +2680,6 @@ export function createMobileController(
         store.setComposerErrorMessage("Choose a repo and enter a task prompt first.");
         return Promise.resolve(null);
       }
-
       const composerDesktopId = resolveKnownDesktopId(state.composerDesktopId);
       if (!composerDesktopId) {
         store.setComposerDesktop(null);
@@ -2645,9 +2698,14 @@ export function createMobileController(
         const desktopName = state.desktops.find(
           (desktop) => desktop.id === composerDesktopId
         )?.name ?? composerDesktopId;
-        store.setComposerErrorMessage(
-          new RepoNotRegisteredError(composerRepo.name, desktopName).message
+        const error = new RepoNotRegisteredError(composerRepo.name, desktopName);
+        offerRepoCheckout(
+          "create-task",
+          composerRepo,
+          composerDesktopId,
+          desktopName
         );
+        store.setComposerErrorMessage(error.message);
         store.setComposerOptionsExpanded(true);
         return Promise.resolve(null);
       }
@@ -2747,6 +2805,117 @@ export function createMobileController(
       });
       ordinaryTaskCreationFlights.set(attempt.taskId, taskCreationPromise);
       return taskCreationPromise;
+    },
+
+    confirmRepoCheckout(terminalGeometry) {
+      if (repoCheckoutFlight) {
+        return repoCheckoutFlight;
+      }
+      const offer = store.getState().repoCheckoutOffer;
+      const repo = offer
+        ? store.getState().repos.find((candidate) => candidate.id === offer.repoId)
+        : null;
+      if (
+        !offer ||
+        offer.status === "running" ||
+        !repo?.remoteUrl ||
+        !repo.remoteUrlHash
+      ) {
+        return Promise.resolve(null);
+      }
+      const remoteUrl = repo.remoteUrl;
+      const remoteUrlHash = repo.remoteUrlHash;
+
+      const startRepoCheckout = client.startRepoCheckout;
+      const getRepoCheckout = client.getRepoCheckout;
+      const setCheckoutError = (message: string) => {
+        store.setRepoCheckoutOffer({
+          ...offer,
+          status: "failed",
+          errorMessage: message
+        });
+        if (offer.action === "create-task") {
+          store.setComposerErrorMessage(message);
+        } else {
+          store.setRepoCommandError(offer.repoId, message);
+        }
+      };
+      if (!startRepoCheckout || !getRepoCheckout) {
+        setCheckoutError(
+          `${offer.desktopName} must be updated before it can check out repositories remotely.`
+        );
+        return Promise.resolve(null);
+      }
+
+      store.setRepoCheckoutOffer({ ...offer, status: "running" });
+      const progressMessage = `Checking out ${offer.repoName} on ${offer.desktopName}…`;
+      if (offer.action === "create-task") {
+        store.setComposerErrorMessage(progressMessage);
+      } else {
+        store.setRepoCommandError(offer.repoId, progressMessage);
+      }
+
+      let checkoutPromise!: Promise<string | null>;
+      checkoutPromise = (async () => {
+        try {
+          let operation = await startRepoCheckout({
+            desktopId: offer.desktopId,
+            name: offer.repoName,
+            remoteUrl,
+            remoteUrlHash
+          });
+          while (operation.state === "running") {
+            await new Promise<void>((resolve) => {
+              setTimeout(
+                resolve,
+                options.repoCheckoutPollIntervalMs ??
+                  DEFAULT_REPO_CHECKOUT_POLL_INTERVAL_MS
+              );
+            });
+            operation = await getRepoCheckout(offer.desktopId, operation.id);
+          }
+          if (operation.state === "failed") {
+            throw new Error(operation.error ?? "git clone failed");
+          }
+
+          const repos = await client.listRepos();
+          lastExplicitRepos = repos;
+          store.setRepos(
+            mergeReposWithTaskRepos(repos, store.getState().recentTasks)
+          );
+          const currentOffer = store.getState().repoCheckoutOffer;
+          if (
+            currentOffer?.repoId !== offer.repoId ||
+            currentOffer.desktopId !== offer.desktopId
+          ) {
+            return null;
+          }
+          store.setRepoCheckoutOffer(null);
+          if (offer.action === "create-task") {
+            store.setComposerErrorMessage(null);
+            return this.createTask(terminalGeometry);
+          }
+          store.resetRepoCommandAvailability();
+          if (!offer.commandId) {
+            await loadRepoCommands();
+            return null;
+          }
+          return this.runRepoCommand(offer.commandId);
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          setCheckoutError(
+            `Could not check out ${offer.repoName} on ${offer.desktopName}: ${detail}. ` +
+              `For a private repository, configure git credentials on ${offer.desktopName} and try again.`
+          );
+          return null;
+        }
+      })().finally(() => {
+        if (repoCheckoutFlight === checkoutPromise) {
+          repoCheckoutFlight = null;
+        }
+      });
+      repoCheckoutFlight = checkoutPromise;
+      return checkoutPromise;
     },
 
     recoverTaskCreation(slotId) {

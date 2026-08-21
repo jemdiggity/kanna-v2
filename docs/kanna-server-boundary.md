@@ -151,6 +151,8 @@ the client falls back to a bounded snapshot.
 - `GET /v1/stream` (KSP WebSocket for terminal, agent, and streamed task API frames)
 - `GET /v1/desktops`
 - `GET /v1/repos`
+- `POST /v1/repo-checkouts` (confirmed clone-and-register intent)
+- `GET /v1/repo-checkouts/{operation_id}` (poll `running` / `done` / `failed`)
 - `GET /v1/repos/{repo_id}/tasks`
 - `GET /v1/repos/{repo_id}/agents` (resolved named agent definitions available to task creation)
 - `GET /v1/repos/{repo_id}/recent-workflows` (workflow names the repo's tasks were most recently created with, newest first)
@@ -172,6 +174,23 @@ the client falls back to a bounded snapshot.
 - `POST /v1/tasks/{task_id}/actions/set-notify`
 - `POST /v1/mobile/notifications`
 - `POST /v1/pairing/sessions`
+
+### Remote repository checkout
+
+Authenticated repo inventory includes optional `remoteUrl` alongside the
+cross-machine `remoteUrlHash`. `POST /v1/repo-checkouts` accepts `{ name,
+remoteUrl, remoteUrlHash }`, rejects a URL whose SHA-256 identity does not match,
+and starts a non-blocking clone into the desktop convention
+`~/.kanna/repos/<name>[-N]`. The worker uses the same `MobileApi::add_repo`
+registration path as `POST /v1/repos`, then persists the remote metadata.
+
+The returned operation is polled through
+`GET /v1/repo-checkouts/{operation_id}`. A failed clone or registration removes
+the operation-owned destination and rolls back any row it inserted. Git uses
+only credentials already configured on the target desktop; this API does not
+provision credentials. Relay invocation is a control operation: repository
+bytes flow directly from the git remote to the target desktop, not through the
+relay.
 
 ## Multi-machine Agent Routing
 

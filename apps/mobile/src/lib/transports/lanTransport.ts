@@ -13,6 +13,7 @@ import type {
   DesktopSummary,
   MobileServerStatus,
   RepoSummary,
+  RepoCheckoutOperation,
   RepoCommandCatalog,
   RunRepoCommandResponse,
   TaskActionResponse,
@@ -150,6 +151,16 @@ export function createLanTransport(
       return desktops.map(mapDesktopSummary);
     },
     listRepos: () => request<RepoSummary[]>("/v1/repos"),
+    startRepoCheckout: ({ desktopId: _desktopId, ...input }) =>
+      request<RepoCheckoutOperation>("/v1/repo-checkouts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(input)
+      }),
+    getRepoCheckout: (_desktopId, operationId) =>
+      request<RepoCheckoutOperation>(
+        `/v1/repo-checkouts/${encodeURIComponent(operationId)}`
+      ),
     listRepoTasks: (repoId: string) =>
       request<TaskSummary[]>(`/v1/repos/${encodeURIComponent(repoId)}/tasks`),
     listRepoCommands: (repoId: string) =>

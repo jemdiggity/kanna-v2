@@ -549,11 +549,13 @@ async fn list_repos_route_returns_repo_summaries() {
                 id: "repo-1".to_string(),
                 name: "Repo One".to_string(),
                 remote_url_hash: None,
+                remote_url: None,
             },
             crate::mobile_api::RepoSummary {
                 id: "repo-2".to_string(),
                 name: "Repo Two".to_string(),
                 remote_url_hash: None,
+                remote_url: None,
             },
         ]
     );
@@ -2711,6 +2713,164 @@ async fn add_repo_route_rejects_duplicate_path() {
 
     assert_eq!(second.status(), StatusCode::CONFLICT);
     let _ = std::fs::remove_dir_all(repo_root);
+}
+
+#[tokio::test]
+async fn repo_checkout_clones_registers_and_reports_done() {
+    use sha2::{Digest, Sha256};
+
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos()
+    );
+    let fixture_root = std::env::temp_dir().join(format!("kanna-checkout-happy-{unique}"));
+    let remote = fixture_root.join("remote");
+    let checkouts = fixture_root.join("checkouts");
+    init_test_git_repo(&remote);
+    let remote_url = format!("file://{}", remote.display());
+    let remote_url_hash = format!("{:x}", Sha256::digest(remote_url.as_bytes()));
+    let app =
+        super::test_router_with_repo_checkout_root("desktop-1", "Studio Mac", checkouts.clone());
+
+    let started = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/repo-checkouts")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "name": "kanji-kongbu",
+                        "remoteUrl": remote_url,
+                        "remoteUrlHash": remote_url_hash,
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(started.status(), StatusCode::OK);
+    let started: serde_json::Value = from_slice(
+        &axum::body::to_bytes(started.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let operation_id = started["id"].as_str().expect("operation id");
+
+    let operation = wait_for_repo_checkout(&app, operation_id).await;
+    assert_eq!(operation["state"], "done");
+    assert!(operation["repoId"].as_str().is_some());
+    assert!(checkouts.join("kanji-kongbu/.git").is_dir());
+
+    let repos = app
+        .clone()
+        .oneshot(Request::get("/v1/repos").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let repos: serde_json::Value = from_slice(
+        &axum::body::to_bytes(repos.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(repos[0]["name"], "kanji-kongbu");
+    assert_eq!(repos[0]["remoteUrl"], remote_url);
+    assert_eq!(repos[0]["remoteUrlHash"], remote_url_hash);
+
+    let _ = std::fs::remove_dir_all(fixture_root);
+}
+
+#[tokio::test]
+async fn repo_checkout_failure_cleans_destination_and_registry() {
+    use sha2::{Digest, Sha256};
+
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos()
+    );
+    let fixture_root = std::env::temp_dir().join(format!("kanna-checkout-fail-{unique}"));
+    let checkouts = fixture_root.join("checkouts");
+    let remote_url = format!("file://{}/missing-private-repo", fixture_root.display());
+    let remote_url_hash = format!("{:x}", Sha256::digest(remote_url.as_bytes()));
+    let app =
+        super::test_router_with_repo_checkout_root("desktop-1", "Studio Mac", checkouts.clone());
+
+    let started = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/repo-checkouts")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "name": "private-repo",
+                        "remoteUrl": remote_url,
+                        "remoteUrlHash": remote_url_hash,
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let started: serde_json::Value = from_slice(
+        &axum::body::to_bytes(started.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let operation =
+        wait_for_repo_checkout(&app, started["id"].as_str().expect("operation id")).await;
+    assert_eq!(operation["state"], "failed");
+    assert!(operation["error"].as_str().unwrap().contains("git clone"));
+    assert!(!checkouts.join("private-repo").exists());
+
+    let repos = app
+        .oneshot(Request::get("/v1/repos").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let repos: serde_json::Value = from_slice(
+        &axum::body::to_bytes(repos.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(repos, serde_json::json!([]));
+    let _ = std::fs::remove_dir_all(fixture_root);
+}
+
+async fn wait_for_repo_checkout(app: &axum::Router, operation_id: &str) -> serde_json::Value {
+    for _ in 0..200 {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/v1/repo-checkouts/{operation_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let operation: serde_json::Value = from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        if operation["state"] != "running" {
+            return operation;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("repository checkout did not finish");
 }
 
 #[tokio::test]

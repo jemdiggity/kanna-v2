@@ -17,6 +17,7 @@ import type {
   DesktopSummary,
   MobileServerStatus,
   RepoSummary,
+  RepoCheckoutOperation,
   RepoCommandCatalog,
   RunRepoCommandResponse,
   TaskActionResponse,
@@ -651,6 +652,25 @@ export function createRemoteTransport({
         }
       }
       return mergeRepoSummaries([...taskRepos.values(), ...desktopRepos]);
+    },
+    startRepoCheckout: async ({ desktopId, ...input }) =>
+      requestDesktop<RepoCheckoutOperation>(
+        desktopId,
+        "POST",
+        "/v1/repo-checkouts",
+        input
+      ),
+    getRepoCheckout: async (desktopId, operationId) => {
+      const operation = await requestDesktop<RepoCheckoutOperation>(
+        desktopId,
+        "GET",
+        `/v1/repo-checkouts/${encodeURIComponent(operationId)}`,
+        null
+      );
+      if (operation.state === "done") {
+        await readDesktopRepos(desktopId);
+      }
+      return operation;
     },
     listRepoTasks: async (repoId: string) => {
       if (listCloudTasks) {
@@ -1352,6 +1372,9 @@ function parseRepoSummaries(value: unknown): RepoSummary[] {
       repos.push({
         id: entry.id,
         name: entry.name,
+        ...(typeof entry.remoteUrl === "string" && entry.remoteUrl
+          ? { remoteUrl: entry.remoteUrl }
+          : {}),
         ...(typeof entry.remoteUrlHash === "string" && entry.remoteUrlHash
           ? { remoteUrlHash: entry.remoteUrlHash }
           : {})

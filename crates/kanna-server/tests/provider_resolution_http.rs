@@ -6,6 +6,7 @@ use kanna_daemon::protocol::{
 use reqwest::{Client, StatusCode};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::net::TcpListener;
 use std::os::unix::fs::symlink;
 use std::os::unix::fs::PermissionsExt;
@@ -1169,6 +1170,94 @@ async fn unsupported_headless_provider_is_rejected_before_durable_state_through_
         !repo.join(".kanna-worktrees").exists(),
         "rejected task must not create the worktree root"
     );
+
+    stop_server(&mut server).await;
+    daemon.abort();
+    assert!(daemon.await.unwrap_err().is_cancelled());
+    std::fs::remove_dir_all(root).expect("test root should be removed");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn checkout_then_create_task_succeeds_through_running_server() {
+    let _fixture_guard = PROCESS_FIXTURE_LOCK.lock().await;
+    let root = unique_test_root("repo-checkout-create");
+    std::fs::create_dir_all(&root).expect("test root should be created");
+    let remote = init_provider_repo(&root);
+    let remote_url = format!("file://{}", remote.display());
+    let remote_url_hash = format!("{:x}", Sha256::digest(remote_url.as_bytes()));
+    let ports = ServerPortReservations::new();
+    let port = ports.lan_port();
+    let (config_path, daemon_dir, _) = write_server_config(&root, port, ports.transfer_port());
+    let ServerPortReservations { lan, transfer } = ports;
+    let (command_tx, mut commands) = mpsc::unbounded_channel();
+    let daemon = tokio::spawn(fake_daemon_persistent(daemon_dir, command_tx));
+    let mut server = start_server(&config_path, &root, port, lan, transfer).await;
+    let client = Client::new();
+
+    let started = client
+        .post(format!("http://127.0.0.1:{port}/v1/repo-checkouts"))
+        .json(&json!({
+            "name": "provider-clone",
+            "remoteUrl": remote_url,
+            "remoteUrlHash": remote_url_hash,
+        }))
+        .send()
+        .await
+        .expect("checkout request should reach kanna-server")
+        .error_for_status()
+        .expect("checkout request should start")
+        .json::<Value>()
+        .await
+        .expect("checkout response should be JSON");
+    let operation_id = started["id"].as_str().expect("checkout id");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let checkout = loop {
+        let operation = client
+            .get(format!(
+                "http://127.0.0.1:{port}/v1/repo-checkouts/{operation_id}"
+            ))
+            .send()
+            .await
+            .expect("checkout status should reach kanna-server")
+            .error_for_status()
+            .expect("checkout status should succeed")
+            .json::<Value>()
+            .await
+            .expect("checkout status should be JSON");
+        if operation["state"] != "running" {
+            break operation;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "repository checkout timed out"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+    assert_eq!(checkout["state"], "done", "{checkout}");
+    let repo_id = checkout["repoId"].as_str().expect("checked-out repo id");
+
+    let created = client
+        .post(format!("http://127.0.0.1:{port}/v1/tasks"))
+        .json(&json!({
+            "repoId": repo_id,
+            "prompt": "Create after remote checkout",
+            "agent": "fallback"
+        }))
+        .send()
+        .await
+        .expect("task creation should reach kanna-server")
+        .error_for_status()
+        .expect("task creation should succeed after checkout")
+        .json::<Value>()
+        .await
+        .expect("task response should be JSON");
+    assert!(created["taskId"].as_str().is_some());
+    let spawned = tokio::time::timeout(Duration::from_secs(5), commands.recv())
+        .await
+        .expect("daemon spawn should arrive")
+        .expect("daemon command channel should remain open");
+    assert!(matches!(spawned, DaemonCommand::Spawn { .. }));
+    assert!(root.join("home/.kanna/repos/provider-clone/.git").is_dir());
 
     stop_server(&mut server).await;
     daemon.abort();

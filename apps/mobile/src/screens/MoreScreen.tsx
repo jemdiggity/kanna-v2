@@ -11,7 +11,7 @@ import {
 import { BuildInfoPanel } from "../components/BuildInfoPanel";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { RepoCommandCatalog, RepoSummary } from "../lib/api/types";
-import type { RepoCommandStatus } from "../state/sessionStore";
+import type { RepoCheckoutOffer, RepoCommandStatus } from "../state/sessionStore";
 import { buildRepoCommandSections } from "./repoCommandPresentation";
 
 interface MoreScreenProps {
@@ -21,10 +21,12 @@ interface MoreScreenProps {
   status: RepoCommandStatus;
   errorMessage: string | null;
   runningCommandId: string | null;
+  checkoutOffer?: RepoCheckoutOffer | null;
   scrollViewRef?: React.RefObject<ScrollView | null>;
   onSelectRepo(repoId: string): void;
   onRunCommand(commandId: string): void;
   onRetry(): void;
+  onCheckout?(): void;
 }
 
 export function MoreScreen({
@@ -34,10 +36,12 @@ export function MoreScreen({
   status,
   errorMessage,
   runningCommandId,
+  checkoutOffer = null,
   scrollViewRef,
   onSelectRepo,
   onRunCommand,
-  onRetry
+  onRetry,
+  onCheckout
 }: MoreScreenProps) {
   const [query, setQuery] = useState("");
   const sections = useMemo(
@@ -136,6 +140,22 @@ export function MoreScreen({
             >
               <Text style={styles.retryLabel}>Try Again</Text>
             </Pressable>
+            {checkoutOffer && onCheckout ? (
+              <Pressable
+                disabled={checkoutOffer.status === "running"}
+                onPress={onCheckout}
+                style={({ pressed }) => [
+                  styles.retryButton,
+                  pressed ? styles.commandPressed : null
+                ]}
+              >
+                <Text style={styles.retryLabel}>
+                  {checkoutOffer.status === "running"
+                    ? `Checking out on ${checkoutOffer.desktopName}…`
+                    : `Check out on ${checkoutOffer.desktopName}`}
+                </Text>
+              </Pressable>
+            ) : null}
           </View>
         ) : sections.length === 0 ? (
           <EmptyState

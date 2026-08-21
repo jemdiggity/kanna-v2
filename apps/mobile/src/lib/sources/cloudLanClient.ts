@@ -1349,6 +1349,26 @@ export function createCloudLanClient(
     getStatus: () => cloud.getStatus(),
     listDesktops,
     listRepos,
+    startRepoCheckout: async (input) => {
+      const destinationLan = options.isLanEnabled()
+        ? lanClientForDesktop(input.desktopId)
+        : null;
+      const destination = destinationLan ?? cloud;
+      if (!destination.startRepoCheckout) {
+        throw new Error("Repository checkout is not supported by this machine.");
+      }
+      return destination.startRepoCheckout(input);
+    },
+    getRepoCheckout: async (desktopId, operationId) => {
+      const destinationLan = options.isLanEnabled()
+        ? lanClientForDesktop(desktopId)
+        : null;
+      const destination = destinationLan ?? cloud;
+      if (!destination.getRepoCheckout) {
+        throw new Error("Repository checkout is not supported by this machine.");
+      }
+      return destination.getRepoCheckout(desktopId, operationId);
+    },
     listRepoTasks: async (repoId) =>
       (await listRecentTasks()).filter((task) => task.repoId === repoId),
     listRepoCommands: async (repoId) => {

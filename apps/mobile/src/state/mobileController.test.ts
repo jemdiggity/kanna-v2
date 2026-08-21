@@ -168,6 +168,20 @@ function createClientMock(): ClientMock {
       { id: "repo-1", name: "Repo One" },
       { id: "repo-2", name: "Repo Two" }
     ]),
+    startRepoCheckout: vi.fn().mockResolvedValue({
+      id: "checkout-1",
+      state: "done",
+      repoName: "Repo One",
+      remoteUrlHash: "hash-repo-one",
+      repoId: "repo-1"
+    }),
+    getRepoCheckout: vi.fn().mockResolvedValue({
+      id: "checkout-1",
+      state: "done",
+      repoName: "Repo One",
+      remoteUrlHash: "hash-repo-one",
+      repoId: "repo-1"
+    }),
     listRepoTasks: vi.fn().mockImplementation(async (repoId: string) => {
       if (repoId === "repo-2") {
         return [
@@ -3983,6 +3997,89 @@ describe("createMobileController", () => {
       composerErrorMessage:
         "kanji-kongbu is not registered on Laptop. Register it on that machine before creating a task."
     });
+  });
+
+  it("confirms checkout, shows clone progress, and retries task creation", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const checkoutDone = createDeferred<{
+      id: string;
+      state: "done";
+      repoName: string;
+      remoteUrlHash: string;
+      repoId: string;
+    }>();
+    const missingRepo: RepoSummary = {
+      id: "git:hash-kanji",
+      name: "kanji-kongbu",
+      remoteUrl: "file:///tmp/kanji-kongbu.git",
+      remoteUrlHash: "hash-kanji",
+      registeredDesktopIds: ["desktop-1"]
+    };
+    const checkedOutRepo: RepoSummary = {
+      ...missingRepo,
+      registeredDesktopIds: ["desktop-1", "desktop-2"]
+    };
+    client.listRepos
+      .mockResolvedValueOnce([missingRepo])
+      .mockResolvedValueOnce([checkedOutRepo]);
+    client.listRecentTasks.mockResolvedValue([]);
+    client.listRepoTasks.mockResolvedValue([]);
+    client.startRepoCheckout.mockResolvedValueOnce({
+      id: "checkout-kanji",
+      state: "running",
+      repoName: "kanji-kongbu",
+      remoteUrlHash: "hash-kanji"
+    });
+    client.getRepoCheckout.mockReturnValueOnce(checkoutDone.promise);
+    const controller = createMobileController(client, store, undefined, {
+      repoCheckoutPollIntervalMs: 0
+    });
+
+    await controller.bootstrap();
+    store.selectRepo(missingRepo.id);
+    controller.openComposer();
+    controller.selectComposerDesktop("desktop-2");
+    controller.updateComposerPrompt("Study kanji");
+
+    await expect(controller.createTask()).resolves.toBeNull();
+    expect(store.getState().repoCheckoutOffer).toMatchObject({
+      action: "create-task",
+      status: "offered",
+      repoName: "kanji-kongbu",
+      desktopName: "Laptop"
+    });
+
+    const confirmation = controller.confirmRepoCheckout();
+    await flushMicrotasks();
+    expect(client.startRepoCheckout).toHaveBeenCalledWith({
+      desktopId: "desktop-2",
+      name: "kanji-kongbu",
+      remoteUrl: "file:///tmp/kanji-kongbu.git",
+      remoteUrlHash: "hash-kanji"
+    });
+    expect(store.getState()).toMatchObject({
+      repoCheckoutOffer: { status: "running" },
+      composerErrorMessage: "Checking out kanji-kongbu on Laptop…"
+    });
+
+    checkoutDone.resolve({
+      id: "checkout-kanji",
+      state: "done",
+      repoName: "kanji-kongbu",
+      remoteUrlHash: "hash-kanji",
+      repoId: "repo-kanji-on-laptop"
+    });
+    await expect(confirmation).resolves.toBeTruthy();
+    expect(client.createTask).toHaveBeenCalledOnce();
+    expect(client.createTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        repoId: missingRepo.id,
+        desktopId: "desktop-2",
+        prompt: "Study kanji"
+      })
+    );
+    expect(store.getState().repoCheckoutOffer).toBeNull();
   });
 
   it("opens a fresh composer and starts another task while an earlier creation is uncertain", async () => {

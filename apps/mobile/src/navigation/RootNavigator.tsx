@@ -39,6 +39,7 @@ import { resolveMobileTerminalGeometry } from "../mobileTerminalGeometry";
 import { resolveBlockerTasks } from "../lib/api/taskIdentity";
 import { MachinesScreen } from "../screens/MachinesScreen";
 import { MoreScreen } from "../screens/MoreScreen";
+import { confirmRepoCheckout } from "../screens/repoCheckoutConfirmation";
 import { filterCommandAvailableRepos } from "../screens/repoCommandPresentation";
 import { SearchScreen } from "../screens/SearchScreen";
 import { TaskScreen } from "../screens/TaskScreen";
@@ -48,9 +49,11 @@ import { unreadActivityCount } from "../screens/activityTaskOrder";
 import type { MobileController } from "../state/mobileController";
 import { buildMachineInventory } from "../state/machineInventory";
 import type {
+  RepoCheckoutOffer,
   SessionState,
   TaskTerminalOutputSource
 } from "../state/sessionStore";
+
 import {
   projectTaskUiSlots,
   taskUiSlotForSelection,
@@ -498,6 +501,18 @@ function MoreRouteContent({
     <MoreScreen
       catalog={state.repoCommandCatalog}
       errorMessage={state.repoCommandErrorMessage}
+      checkoutOffer={
+        state.repoCheckoutOffer?.action === "repo-command"
+          ? state.repoCheckoutOffer
+          : null
+      }
+      onCheckout={state.repoCheckoutOffer?.action === "repo-command"
+        ? () => confirmRepoCheckout(state.repoCheckoutOffer as RepoCheckoutOffer, () => {
+            void controller.confirmRepoCheckout().then((taskId) => {
+              if (taskId) pushPreparedTask(taskId);
+            });
+          })
+        : undefined}
       onRetry={() => {
         void controller.retryRepoCommand().then((taskId) => {
           if (taskId) pushPreparedTask(taskId);
@@ -804,6 +819,11 @@ function ComposerOverlay() {
       selectedAgentProvider={state.composerAgentProvider}
       isOptionsExpanded={state.isComposerOptionsExpanded}
       errorMessage={state.composerErrorMessage}
+      checkoutOffer={
+        state.repoCheckoutOffer?.action === "create-task"
+          ? state.repoCheckoutOffer
+          : null
+      }
       onClose={() => controller.closeComposer()}
       onSelectDesktop={(desktopId) => controller.selectComposerDesktop(desktopId)}
       onSelectAgentProvider={(provider) => controller.selectComposerAgentProvider(provider)}
@@ -811,6 +831,15 @@ function ComposerOverlay() {
         controller.setComposerOptionsExpanded(!state.isComposerOptionsExpanded)
       }
       onChangePrompt={(prompt) => controller.updateComposerPrompt(prompt)}
+      onCheckout={state.repoCheckoutOffer?.action === "create-task"
+        ? () => confirmRepoCheckout(state.repoCheckoutOffer as RepoCheckoutOffer, () => {
+            void controller.confirmRepoCheckout(
+              resolveMobileTerminalGeometry(taskDetailViewportRef.current)
+            ).then((taskId) => {
+              if (taskId) pushPreparedTask(taskId);
+            });
+          })
+        : undefined}
       onSubmit={() => {
         void controller.createTask(
           resolveMobileTerminalGeometry(taskDetailViewportRef.current)

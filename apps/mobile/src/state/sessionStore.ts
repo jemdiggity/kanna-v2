@@ -72,6 +72,18 @@ export type AuthState = MobileAuthState;
 export type ComposerAgentProvider = AgentProvider;
 export type TaskCreationPhase = "idle" | "pending" | "recovering" | "uncertain";
 export type RepoCommandStatus = "idle" | "loading" | "ready" | "error";
+export type RepoCheckoutStatus = "offered" | "running" | "failed";
+
+export interface RepoCheckoutOffer {
+  action: "create-task" | "repo-command";
+  status: RepoCheckoutStatus;
+  repoId: string;
+  repoName: string;
+  desktopId: string;
+  desktopName: string;
+  commandId?: string;
+  errorMessage?: string;
+}
 
 export interface PendingRepoCommandTask {
   commandId: string;
@@ -154,6 +166,7 @@ export interface SessionState {
   runningRepoCommandId: string | null;
   pendingRepoCommandTask: PendingRepoCommandTask | null;
   unavailableRepoCommandIds: string[];
+  repoCheckoutOffer: RepoCheckoutOffer | null;
   recentTasks: TaskSummary[];
   /** This phone's own pinned/dismissed rows. Never published to the desktop. */
   localTaskListPreferences: LocalTaskListPreferences;
@@ -325,6 +338,7 @@ export interface SessionStore {
   finishRepoCommandRun(commandId: string): void;
   markRepoCommandsUnavailable(repoId: string): void;
   resetRepoCommandAvailability(): void;
+  setRepoCheckoutOffer(offer: RepoCheckoutOffer | null): void;
   setRecentTasks(tasks: TaskSummary[]): void;
   setSearchResults(query: string, results: TaskSummary[]): void;
   setTaskActivity(
@@ -456,6 +470,7 @@ export function createSessionStore(): SessionStore {
     runningRepoCommandId: null,
     pendingRepoCommandTask: null,
     unavailableRepoCommandIds: [],
+    repoCheckoutOffer: null,
     recentTasks: [],
     localTaskListPreferences: emptyLocalTaskListPreferences(),
     searchQuery: "",
@@ -1077,6 +1092,10 @@ export function createSessionStore(): SessionStore {
     resetRepoCommandAvailability() {
       if (state.unavailableRepoCommandIds.length === 0) return;
       state = { ...state, unavailableRepoCommandIds: [] };
+      publish();
+    },
+    setRepoCheckoutOffer(repoCheckoutOffer) {
+      state = { ...state, repoCheckoutOffer };
       publish();
     },
     setRecentTasks(tasks) {

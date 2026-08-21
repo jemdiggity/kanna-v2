@@ -35,6 +35,8 @@ pub struct AppState {
     pub(crate) agent_histories: crate::ksp::AgentHistoryRegistry,
     pub(super) repo_definitions: Arc<crate::task_creator::RepoDefinitionsCache>,
     requested_task_operations: Arc<RequestedTaskOperations>,
+    pub(super) repo_checkouts: Arc<StdMutex<HashMap<String, RepoCheckoutOperation>>>,
+    pub(super) repo_checkout_root: std::path::PathBuf,
     relay_reconnect: Arc<Notify>,
     relay_desktop_routing_available: Arc<AtomicBool>,
     relay_desktop_routing_generation: Arc<AtomicU64>,
@@ -65,6 +67,19 @@ pub struct AppState {
     pub(super) revision_requester: Option<TestRevisionRequester>,
     #[cfg(test)]
     pub(super) task_file_resolution_hook: Option<TestTaskFileResolutionHook>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct RepoCheckoutOperation {
+    pub id: String,
+    pub state: &'static str,
+    pub repo_name: String,
+    pub remote_url_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 pub(crate) struct MobileNotificationRequest {
@@ -278,6 +293,11 @@ impl AppState {
             config.clone(),
             Arc::clone(&transfer_work),
         ));
+        let repo_checkout_root = std::env::var("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join(".kanna")
+            .join("repos");
         Self {
             config,
             local_task_events_token,
@@ -294,6 +314,8 @@ impl AppState {
             agent_histories: crate::ksp::AgentHistoryRegistry::default(),
             repo_definitions: Arc::new(crate::task_creator::RepoDefinitionsCache::default()),
             requested_task_operations: Arc::new(RequestedTaskOperations::default()),
+            repo_checkouts: Arc::new(StdMutex::new(HashMap::new())),
+            repo_checkout_root,
             relay_reconnect: Arc::new(Notify::new()),
             relay_desktop_routing_available: Arc::new(AtomicBool::new(false)),
             relay_desktop_routing_generation: Arc::new(AtomicU64::new(0)),

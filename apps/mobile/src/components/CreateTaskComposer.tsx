@@ -19,7 +19,8 @@ import {
   desktopReportsNoAgentProvider
 } from "../lib/api/agentProviders";
 import type {
-  ComposerAgentProvider
+  ComposerAgentProvider,
+  RepoCheckoutOffer
 } from "../state/sessionStore";
 
 interface CreateTaskComposerProps {
@@ -32,12 +33,14 @@ interface CreateTaskComposerProps {
   selectedAgentProvider: ComposerAgentProvider | null;
   isOptionsExpanded: boolean;
   errorMessage: string | null;
+  checkoutOffer?: RepoCheckoutOffer | null;
   onClose(): void;
   onSelectDesktop(desktopId: string): void;
   onSelectAgentProvider(provider: ComposerAgentProvider): void;
   onToggleOptions(): void;
   onChangePrompt(prompt: string): void;
   onSubmit(): void;
+  onCheckout?(): void;
 }
 
 const AGENT_LABELS: Record<AgentProvider, string> = {
@@ -71,12 +74,14 @@ export function CreateTaskComposer({
   selectedAgentProvider = null,
   isOptionsExpanded = false,
   errorMessage = null,
+  checkoutOffer = null,
   onClose,
   onSelectDesktop,
   onSelectAgentProvider,
   onToggleOptions,
   onChangePrompt,
-  onSubmit
+  onSubmit,
+  onCheckout
 }: CreateTaskComposerProps) {
   const selectedRepo = repos.find((repo) => repo.id === selectedRepoId) ?? null;
   const eligibleDesktops = selectedRepo
@@ -244,6 +249,23 @@ export function CreateTaskComposer({
               <Text style={styles.errorText} testID={MOBILE_E2E_IDS.createTaskError}>
                 {errorMessage}
               </Text>
+            ) : null}
+
+            {checkoutOffer && onCheckout ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityState={{ disabled: checkoutOffer.status === "running" }}
+                disabled={checkoutOffer.status === "running"}
+                onPress={onCheckout}
+                style={styles.checkoutButton}
+                testID={MOBILE_E2E_IDS.createTaskCheckoutButton}
+              >
+                <Text style={styles.checkoutLabel}>
+                  {checkoutOffer.status === "running"
+                    ? `Checking out on ${checkoutOffer.desktopName}…`
+                    : `Check out on ${checkoutOffer.desktopName}`}
+                </Text>
+              </Pressable>
             ) : null}
 
             <View style={styles.actions}>
@@ -424,6 +446,17 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: "700",
     lineHeight: 18
+  },
+  checkoutButton: {
+    backgroundColor: "#244D7C",
+    borderRadius: 14,
+    paddingVertical: 12
+  },
+  checkoutLabel: {
+    color: "#E8F1FF",
+    fontSize: 14,
+    fontWeight: "800",
+    textAlign: "center"
   },
   secondaryLabel: {
     color: "#D5DEEC",

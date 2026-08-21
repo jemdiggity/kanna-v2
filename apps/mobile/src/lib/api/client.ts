@@ -16,6 +16,8 @@ import type {
   CreateTaskRequest,
   CreateTaskResponse,
   RepoSummary,
+  RepoCheckoutOperation,
+  StartRepoCheckoutRequest,
   RepoCommandCatalog,
   RunRepoCommandResponse,
   DesktopSummary,
@@ -165,6 +167,13 @@ export interface KannaTransport {
   getStatus(): Promise<MobileServerStatus>;
   listDesktops(): Promise<DesktopSummary[]>;
   listRepos(): Promise<RepoSummary[]>;
+  startRepoCheckout?(
+    input: StartRepoCheckoutRequest
+  ): Promise<RepoCheckoutOperation>;
+  getRepoCheckout?(
+    desktopId: string,
+    operationId: string
+  ): Promise<RepoCheckoutOperation>;
   listRepoTasks(repoId: string): Promise<TaskSummary[]>;
   listRepoCommands(repoId: string): Promise<RepoCommandCatalog>;
   runRepoCommand(
@@ -230,6 +239,13 @@ export interface KannaClient {
   getStatus(): Promise<MobileServerStatus>;
   listDesktops(): Promise<DesktopSummary[]>;
   listRepos(): Promise<RepoSummary[]>;
+  startRepoCheckout?(
+    input: StartRepoCheckoutRequest
+  ): Promise<RepoCheckoutOperation>;
+  getRepoCheckout?(
+    desktopId: string,
+    operationId: string
+  ): Promise<RepoCheckoutOperation>;
   listRepoTasks(repoId: string): Promise<TaskSummary[]>;
   listRepoCommands(repoId: string): Promise<RepoCommandCatalog>;
   runRepoCommand(
@@ -337,6 +353,18 @@ export function createKannaClient(transport: KannaTransport): KannaClient {
     getStatus: () => transport.getStatus(),
     listDesktops: () => transport.listDesktops(),
     listRepos: () => transport.listRepos(),
+    ...(transport.startRepoCheckout
+      ? {
+          startRepoCheckout: (input: StartRepoCheckoutRequest) =>
+            transport.startRepoCheckout!(input)
+        }
+      : {}),
+    ...(transport.getRepoCheckout
+      ? {
+          getRepoCheckout: (desktopId: string, operationId: string) =>
+            transport.getRepoCheckout!(desktopId, operationId)
+        }
+      : {}),
     listRepoTasks: (repoId) => transport.listRepoTasks(repoId),
     listRepoCommands: (repoId) => transport.listRepoCommands(repoId),
     runRepoCommand: (repoId, commandId, catalogRevision) =>
