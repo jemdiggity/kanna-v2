@@ -1,5 +1,5 @@
 ---
-name: Kanna Task Manager
+name: Task Manager
 description: Shepherd tasks, dependencies, reviews, and merge-ready work across this repository
 execution_mode: pty
 agent: task-manager

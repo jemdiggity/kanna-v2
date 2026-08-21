@@ -142,7 +142,7 @@ describe("QA workflow assets", () => {
     }
   });
 
-  it("ships Kanna Task Manager as a Codex-first singleton palette task", () => {
+  it("ships Task Manager as a Codex-first singleton palette task", () => {
     const agent = parseAgentDefinition(readRepoFile(".kanna/agents/task-manager/AGENT.md"));
     const task = readRepoFile(".kanna/tasks/task-manager/agent.md");
 
@@ -214,7 +214,7 @@ describe("QA workflow assets", () => {
       "short human-readable name or purpose followed by its id in parentheses"
     );
     expect(agent.prompt).toContain("Never make a human decode a bare task id");
-    expect(task).toContain("name: Kanna Task Manager");
+    expect(task).toContain("name: Task Manager");
     expect(task).toContain("agent: task-manager");
   });
 

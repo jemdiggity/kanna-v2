@@ -779,7 +779,7 @@ Deploy safely.
             .1
             .expect("task-manager launch");
 
-        assert_eq!(launch.display_name, "Kanna Task Manager");
+        assert_eq!(launch.display_name, "Task Manager");
         assert_eq!(launch.agent.as_deref(), Some("task-manager"));
         assert_eq!(launch.agent_type.as_deref(), Some("pty"));
         assert_eq!(launch.singleton_agent.as_deref(), Some("task-manager"));
