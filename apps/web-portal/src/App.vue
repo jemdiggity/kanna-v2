@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { watch } from "vue";
 import { RouterLink, RouterView, useRoute, useRouter } from "vue-router";
+import { portalFirebase } from "./firebase";
 import { authRedirect } from "./router";
-import { providePortalSession, usePortalFirebase } from "./session";
+import { providePortalSession } from "./session";
 
 const session = providePortalSession();
-const api = usePortalFirebase();
 const route = useRoute();
 const appRouter = useRouter();
 
@@ -24,7 +24,7 @@ watch(
 );
 
 async function leave(): Promise<void> {
-  await api.signOut();
+  await portalFirebase.signOut();
   await appRouter.push("/sign-in");
 }
 </script>
