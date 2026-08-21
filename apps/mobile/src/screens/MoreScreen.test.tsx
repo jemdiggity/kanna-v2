@@ -150,7 +150,7 @@ describe("MoreScreen", () => {
       ...props(),
       status: "error" as const,
       errorMessage:
-        "The command launched successfully, but its task could not be loaded. Check your connection and try again."
+        "The task was created, but it could not be opened here yet. Find it on the Tasks tab, or try again."
     };
 
     await act(async () => {
@@ -161,8 +161,8 @@ describe("MoreScreen", () => {
       .findAll((node) => node.type === "Text")
       .flatMap((node) => node.children)
       .join(" ");
-    expect(copy).toContain("command launched successfully");
-    expect(copy).toContain("Check your connection and try again");
+    expect(copy).toContain("task was created");
+    expect(copy).toContain("Find it on the Tasks tab");
 
     const retry = rendered.root.find(
       (node) => node.type === "Pressable" && node.props.onPress === input.onRetry

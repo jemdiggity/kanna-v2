@@ -721,23 +721,26 @@ export function createRemoteTransport({
       if (!listCloudTasks) {
         return response;
       }
+      const ownerDesktopId = response.ownerDesktopId ?? repoRoute.desktopId;
+      const ownerLocalRepoId = response.ownerLocalRepoId ?? repoRoute.localRepoId;
+      const ownerLocalTaskId = response.ownerLocalTaskId ?? response.taskId;
       const canonicalTaskId = buildCloudTaskId({
-        ownerDesktopId: repoRoute.desktopId,
-        localRepoId: repoRoute.localRepoId,
-        ownerLocalTaskId: response.taskId
+        ownerDesktopId,
+        localRepoId: ownerLocalRepoId,
+        ownerLocalTaskId
       });
       provisionalTaskRoutes.set(canonicalTaskId, {
-        desktopId: repoRoute.desktopId,
+        desktopId: ownerDesktopId,
         repoId,
-        localRepoId: repoRoute.localRepoId,
-        taskId: response.taskId
+        localRepoId: ownerLocalRepoId,
+        taskId: ownerLocalTaskId
       });
       return {
         ...response,
         taskId: canonicalTaskId,
-        ownerDesktopId: repoRoute.desktopId,
-        ownerLocalRepoId: repoRoute.localRepoId,
-        ownerLocalTaskId: response.taskId
+        ownerDesktopId,
+        ownerLocalRepoId,
+        ownerLocalTaskId
       };
     },
     listRecentTasks: () =>

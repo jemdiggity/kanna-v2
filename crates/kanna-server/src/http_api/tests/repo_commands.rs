@@ -176,7 +176,13 @@ async fn runs_factory_commands_through_the_shared_task_creator() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response_json(response).await,
-        serde_json::json!({ "taskId": "created-command-task", "reused": false })
+        serde_json::json!({
+            "taskId": "created-command-task",
+            "reused": false,
+            "ownerDesktopId": "repo-command-run",
+            "ownerLocalRepoId": "repo-1",
+            "ownerLocalTaskId": "created-command-task"
+        })
     );
     let request = captured
         .lock()

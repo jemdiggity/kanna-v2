@@ -22,6 +22,9 @@ pub(super) struct RunRepoCommandRequest {
 pub(crate) struct RunRepoCommandResponse {
     pub(crate) task_id: String,
     pub(crate) reused: bool,
+    pub(crate) owner_desktop_id: String,
+    pub(crate) owner_local_repo_id: String,
+    pub(crate) owner_local_task_id: String,
 }
 
 pub(super) async fn list_repo_commands(
@@ -62,22 +65,26 @@ pub(super) async fn run_repo_command(
     if let Some(agent) = launch.singleton_agent.as_deref() {
         let response = super::signal_agent::signal_agent_request(
             Arc::clone(&state),
-            repo_id,
+            repo_id.clone(),
             agent.to_string(),
             launch.prompt,
             crate::task_creator::SingletonAgentOverrides::default(),
         )
         .await?;
+        let task_id = response.task_id;
         return Ok(Json(RunRepoCommandResponse {
-            task_id: response.task_id,
+            task_id: task_id.clone(),
             reused: !response.created,
+            owner_desktop_id: state.config.desktop_id.clone(),
+            owner_local_repo_id: repo_id,
+            owner_local_task_id: task_id,
         }));
     }
 
     let response = super::tasks::create_task_with_requested_id(
         Arc::clone(&state),
         crate::mobile_api::CreateTaskRequest {
-            repo_id,
+            repo_id: repo_id.clone(),
             prompt: launch.prompt,
             display_name: Some(launch.display_name),
             workflow_name: None,
@@ -108,9 +115,13 @@ pub(super) async fn run_repo_command(
     )
     .await?;
     state.publish_state_changed(StateChangeScope::Tasks);
+    let task_id = response.0.task_id;
     Ok(Json(RunRepoCommandResponse {
-        task_id: response.0.task_id,
+        task_id: task_id.clone(),
         reused: false,
+        owner_desktop_id: state.config.desktop_id.clone(),
+        owner_local_repo_id: repo_id,
+        owner_local_task_id: task_id,
     }))
 }
 

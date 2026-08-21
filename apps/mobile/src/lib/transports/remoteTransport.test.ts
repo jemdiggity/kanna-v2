@@ -2643,6 +2643,103 @@ describe("remote transport", () => {
     );
   });
 
+  it("loads a command-created task from the desktop that launched it when two desktops share a repo", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>(async (request) => {
+      if (request.method === "GET" && request.path === "/v1/repos") {
+        return request.desktopId === "desktop-macbook"
+          ? [{
+              id: "repo-aminiti",
+              name: "aminiti",
+              remoteUrlHash: "hash-aminiti"
+            }]
+          : [{
+              id: "repo-aminiti-2",
+              name: "aminiti-2",
+              remoteUrlHash: "hash-aminiti"
+            }];
+      }
+      if (
+        request.desktopId === "desktop-studio" &&
+        request.method === "POST" &&
+        request.path === "/v1/repos/repo-aminiti-2/commands/custom%3Atask-manager/run"
+      ) {
+        return {
+          taskId: "task-manager",
+          reused: false,
+          ownerDesktopId: "desktop-studio",
+          ownerLocalRepoId: "repo-aminiti-2",
+          ownerLocalTaskId: "task-manager"
+        };
+      }
+      if (
+        request.desktopId === "desktop-studio" &&
+        request.method === "GET" &&
+        request.path === "/v1/tasks/task-manager"
+      ) {
+        return {
+          id: "task-manager",
+          repoId: "repo-aminiti-2",
+          title: "Kanna Task Manager",
+          stage: "in progress"
+        };
+      }
+      throw new Error(`unexpected request ${request.method} ${request.path}`);
+    });
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [
+        {
+          desktopId: "desktop-macbook",
+          displayName: "MacBook",
+          online: true,
+          reachableViaRelay: true,
+          connectionMode: "internet"
+        },
+        {
+          desktopId: "desktop-studio",
+          displayName: "Mac Studio",
+          online: true,
+          reachableViaRelay: true,
+          connectionMode: "internet"
+        }
+      ],
+      getSelectedDesktopId: () => null,
+      invokeDesktop,
+      listCloudTasks: async () => []
+    });
+
+    await transport.listRepos();
+    const launch = await transport.runRepoCommand(
+      "git:hash-aminiti",
+      "custom:task-manager",
+      "catalog-v1"
+    );
+    const task = await transport.getTask?.(launch.taskId);
+
+    expect(launch).toMatchObject({
+      ownerDesktopId: "desktop-studio",
+      ownerLocalRepoId: "repo-aminiti-2",
+      ownerLocalTaskId: "task-manager"
+    });
+    expect(task).toMatchObject({
+      id: launch.taskId,
+      ownerDesktopId: "desktop-studio",
+      ownerLocalRepoId: "repo-aminiti-2",
+      ownerLocalTaskId: "task-manager"
+    });
+    expect(invokeDesktop).toHaveBeenCalledWith({
+      desktopId: "desktop-studio",
+      method: "GET",
+      path: "/v1/tasks/task-manager",
+      body: null
+    });
+    expect(invokeDesktop).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        desktopId: "desktop-macbook",
+        path: "/v1/tasks/task-manager"
+      })
+    );
+  });
+
   it("rejects a requested-desktop snapshot without an owner-local repo id after a fresh read", async () => {
     const invokeDesktop = vi.fn<RemoteDesktopInvoker>(async (request) => {
       if (request.method === "GET" && request.path === "/v1/repos") {
