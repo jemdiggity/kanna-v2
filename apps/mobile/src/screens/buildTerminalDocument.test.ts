@@ -1888,6 +1888,17 @@ describe("buildTerminalDocument", () => {
     expect(script).toContain('"contentRevision":7');
   });
 
+  it("builds an empty prepend with the chunks shape the page consumes", () => {
+    const script = buildTerminalPrependScript({
+      contentRevision: 8,
+      output: "",
+      status: "live"
+    });
+
+    expect(script).toContain('"chunksB64":[]');
+    expect(script).not.toContain('"text"');
+  });
+
   it("carries pulled scrollback above the snapshot into the injected script", () => {
     const withHistory = prependTerminalScrollback(
       createTerminalOutput(`${b64("window\n")}\n${b64("live\n")}\n`),

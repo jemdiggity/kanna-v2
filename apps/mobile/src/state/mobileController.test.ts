@@ -7594,6 +7594,40 @@ describe("createMobileController", () => {
     });
   });
 
+  it("re-arms scrollback without a banner when no base is available yet", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+    const requestScrollback =
+      client.__terminalStream.subscription.requestScrollback;
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    client.__terminalStream.emit({
+      type: "snapshot",
+      taskId: "task-1",
+      cols: 80,
+      rows: 24,
+      dataB64: "d2luZG93",
+      window: { streamId: 4, historyId: 11, scrollbackLines: 900 }
+    });
+
+    controller.requestTaskTerminalScrollback("task-1");
+    expect(store.getState().taskTerminalScrollback?.loading).toBe(true);
+
+    client.__terminalStream.emit({
+      type: "error",
+      taskId: "task-1",
+      code: "no_scrollback",
+      message: "terminal scrollback has no base snapshot"
+    });
+
+    expect(store.getState().taskTerminalScrollback?.loading).toBe(false);
+    expect(store.getState().taskTerminalErrorMessage).toBeNull();
+    controller.requestTaskTerminalScrollback("task-1");
+    expect(requestScrollback).toHaveBeenCalledTimes(2);
+  });
+
   it("stops asking once the loaded buffer has no room for another chunk", async () => {
     const store = createSessionStore();
     const client = createClientMock();

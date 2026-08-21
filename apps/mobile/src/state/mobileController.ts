@@ -129,14 +129,14 @@ const BACKGROUND_REFRESH_INTERVAL_MS = 3_000;
 const MARK_READ_DEBOUNCE_MS = 1_000;
 const MARK_READ_MAX_ATTEMPTS = 3;
 const MARK_READ_RETRY_BASE_MS = 1_000;
-/// Lines asked for per scrollback chunk. Deliberately smaller than the
-/// desktop's per-request ceiling: on a poor link a chunk that renders now beats
-/// a chunk that arrives complete.
+// Lines asked for per scrollback chunk. Deliberately smaller than the
+// desktop's per-request ceiling: on a poor link a chunk that renders now beats
+// a chunk that arrives complete.
 const TERMINAL_SCROLLBACK_CHUNK_LINES = 200;
-/// The largest chunk the desktop can answer with, in base64 chars plus its
-/// frame newline: `TERMINAL_SCROLLBACK_CHUNK_MAX_BYTES` (64 KiB) encodes to
-/// 87,384 chars. Used to stop the walk one chunk before the buffer's own bound
-/// so no chunk is fetched that would then have to be refused.
+// The largest chunk the desktop can answer with, in base64 chars plus its
+// frame newline: `TERMINAL_SCROLLBACK_CHUNK_MAX_BYTES` (64 KiB) encodes to
+// 87,384 chars. Used to stop the walk one chunk before the buffer's own bound
+// so no chunk is fetched that would then have to be refused.
 const MAX_TERMINAL_SCROLLBACK_CHUNK_CHARS = 88_000;
 const REPO_COMMAND_TASK_LOAD_ERROR =
   "The command launched successfully, but its task could not be loaded. Check your connection and try again.";
@@ -1212,6 +1212,10 @@ export function createMobileController(
             store.setTaskTerminalStatus(streamTaskId, "closed");
             break;
           case "error":
+            if (event.code === "no_scrollback") {
+              store.setTaskTerminalScrollbackLoading(streamTaskId, false);
+              break;
+            }
             store.setTaskTerminalError(streamTaskId, event.message);
             break;
         }

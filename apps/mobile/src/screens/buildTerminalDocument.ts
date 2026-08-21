@@ -1635,13 +1635,10 @@ export function buildTerminalReplaceScript({
 
 export function buildTerminalPrependScript({
   contentRevision,
-  output,
-  status
+  output
 }: BuildTerminalUpdateScriptOptions): string {
   const chunksB64 = terminalChunksFromOutput(output);
-  const state = chunksB64.length > 0
-    ? { chunksB64, contentRevision }
-    : { text: getStatusCopy(status), contentRevision };
+  const state = { chunksB64, contentRevision };
   return `window.__prependTerminalScrollback(${JSON.stringify(state)}); true;`;
 }
 

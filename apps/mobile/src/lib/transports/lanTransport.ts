@@ -300,8 +300,8 @@ export function createLanTransport(
         onSessionExit(code) {
           listener({ type: "exit", taskId, code });
         },
-        onError(_code, message) {
-          listener({ type: "error", taskId, message });
+        onError(code, message) {
+          listener({ type: "error", taskId, code, message });
         }
       });
 

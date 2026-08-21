@@ -3851,7 +3851,13 @@ impl TerminalTapRegistry {
     /// Drop taps whose grace has run out, then the least recently idle ones if
     /// the idle population is still over its bound.
     fn evict_idle(taps: &mut HashMap<String, Arc<TerminalTap>>) {
-        taps.retain(|_, tap| !tap.is_finished() && !tap.idle_expired());
+        taps.retain(|_, tap| {
+            let retain = !tap.is_finished() && !tap.idle_expired();
+            if !retain {
+                tap.finish();
+            }
+            retain
+        });
         let mut idle: Vec<(Instant, String)> = taps
             .iter()
             .filter_map(|(session_id, tap)| {
@@ -4185,6 +4191,9 @@ async fn run_terminal_tap(
     let daemon_dir = state.config().daemon_dir.clone();
     let mut retry_attempt = 0usize;
     loop {
+        if tap.is_finished() || tap.idle_expired() {
+            break;
+        }
         match run_terminal_tap_once(&tap, &state, &daemon_dir).await {
             TapRunEnd::Done | TapRunEnd::Idle => break,
             TapRunEnd::Restart => {
@@ -4198,7 +4207,12 @@ async fn run_terminal_tap(
                 );
                 tap.invalidate_stream();
                 let _ = tap.events.send(TapEvent::Snapshot);
-                daemon_stream_retry_delay(retry_attempt).await;
+                tokio::select! {
+                    biased;
+                    () = tap.restart.notified() => {}
+                    () = daemon_stream_retry_delay(retry_attempt) => {}
+                    () = tokio::time::sleep(TERMINAL_TAP_IDLE_POLL) => {}
+                }
                 retry_attempt += 1;
             }
         }
@@ -11683,6 +11697,67 @@ mod tests {
         base64::engine::general_purpose::STANDARD
             .decode(data_b64)
             .expect("decode terminal frame")
+    }
+
+    #[tokio::test]
+    async fn idle_taps_finish_when_evicted_or_reconnecting_without_a_daemon() {
+        let expired = Arc::new(TerminalTap::new("expired-tap", "task-1"));
+        *expired
+            .idle_since
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some(Instant::now() - TERMINAL_TAP_IDLE_GRACE);
+        let mut taps = HashMap::from([("expired-tap".to_string(), Arc::clone(&expired))]);
+
+        TerminalTapRegistry::evict_idle(&mut taps);
+
+        assert!(taps.is_empty());
+        assert!(expired.is_finished(), "eviction must stop the tap task");
+
+        let unique = format!(
+            "ksp-idle-reconnect-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let mut config = test_config(&unique, "KSP Idle Reconnect");
+        config.daemon_dir = std::env::temp_dir()
+            .join(format!("{unique}-missing-daemon"))
+            .to_string_lossy()
+            .to_string();
+        let state = Arc::new(AppState::new(config));
+        let registry = TerminalTapRegistry::default();
+        let reconnecting = Arc::new(TerminalTap::new("reconnecting-tap", "task-1"));
+        reconnecting.attached_once.store(true, Ordering::Release);
+        *reconnecting
+            .idle_since
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some(Instant::now() - TERMINAL_TAP_IDLE_GRACE + Duration::from_millis(50));
+        registry
+            .taps
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(reconnecting.session_id.clone(), Arc::clone(&reconnecting));
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            run_terminal_tap(Arc::clone(&reconnecting), state, registry.clone()),
+        )
+        .await
+        .expect("idle reconnecting tap should stop during backoff");
+
+        assert!(reconnecting.is_finished());
+        assert!(
+            registry
+                .taps
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty(),
+            "the stopped reconnecting tap must leave the registry"
+        );
     }
 
     fn attach_terminal_frame(term_resume: Option<TermResumePosition>) -> ClientFrame {
