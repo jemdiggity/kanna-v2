@@ -638,12 +638,16 @@ estimation."** One plan, "Kanna Cloud", billed monthly:
 | GBP | £5 | `500` |
 
 The revision caveat is part of the ruling, not an editorial hedge: the number
-may move once the opex estimate lands. The portal headline is
-`VITE_KANNA_CLOUD_PRICE` — defaulted by `kd cloud deploy` and overridable per
-deploy — beside the matrix above as static copy on the subscribe page; the iOS
-app renders StoreKit's own localized price and never hardcodes one. A re-price
-is therefore a replacement Stripe multi-currency Price, an App Store Connect
-change, and one line of portal copy.
+may move once the opex estimate lands. The portal infers one currency from the
+browser locale's region and renders the corresponding static amount with
+`Intl.NumberFormat`; unknown regions fall back to USD.
+`VITE_KANNA_CLOUD_PRICE` remains overridable per deploy: its standard
+`$5/month` value enables locale pricing, while a non-default value explicitly
+replaces the localized headline. The portal notes that Checkout makes the
+actual local-currency decision. The iOS app renders StoreKit's own localized
+price and never hardcodes one. A re-price is therefore a replacement Stripe
+multi-currency Price, an App Store Connect change, and an update to the portal's
+static price map.
 
 **The ruling prices the monthly plan only.** The earlier default of "~2 months
 free annual" is not part of it and no annual amount is decided here, while

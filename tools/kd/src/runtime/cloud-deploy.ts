@@ -255,9 +255,11 @@ export async function ensurePublicFunctionInvokers(input: {
  * The launch price as the portal renders it when a deploy names none
  * (`docs/specs/accounts-and-billing.md`, pricing). One nominal price per
  * currency — ¥500 / $5 / €5 / £5 a month — of which this string is the USD
- * face; the subscribe page lists the rest. Owner ruling of 2026-08-21, "possibly
- * revised pending our new opex estimation", so an operator can still override
- * it per deploy with `KANNA_WEB_PORTAL_CLOUD_PRICE` without a code change.
+ * face; the subscribe page treats this default as the signal to infer one
+ * localized card from its static currency map. Owner ruling of 2026-08-21,
+ * "possibly revised pending our new opex estimation", so an operator can still
+ * set a non-default `KANNA_WEB_PORTAL_CLOUD_PRICE` to override the headline
+ * without a code change.
  */
 export const DEFAULT_WEB_PORTAL_CLOUD_PRICE = "$5/month";
 
