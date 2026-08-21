@@ -16,6 +16,7 @@ export type BillingErrorCode =
 export type BillingErrorReason =
   | "sign_in_required"
   | "account_deleted"
+  | "checkout_in_progress"
   | "email_verification_required"
   | "comp_active"
   | "app_store_active"

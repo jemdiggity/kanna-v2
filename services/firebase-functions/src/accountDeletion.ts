@@ -8,6 +8,7 @@ import { BillingRequestError } from "./billing/errors.js";
 import { requireEnv, STRIPE_SECRET_KEY_ENV } from "./billing/config.js";
 import { stripeSubscriptionGateway, type StripeSubscriptionGateway } from "./billing/stripeGateway.js";
 import {
+  accountCheckoutPath,
   accountDeletionPath,
   billingSourcePath,
   userDocPath,
@@ -20,7 +21,7 @@ export interface DeleteAccountCaller {
 
 export interface AccountDeletionStore {
   activeStripeSubscriptionId(uid: string): Promise<string | null>;
-  markAccountDeletionStarted(uid: string): Promise<void>;
+  markAccountDeletionStarted(uid: string): Promise<string[]>;
   deleteUserTree(uid: string): Promise<void>;
   deleteBillingIndexes(uid: string): Promise<void>;
   revokeDesktopPairings(uid: string): Promise<void>;
@@ -64,7 +65,10 @@ export async function deleteAccount(
     await dependencies.stripe.cancelSubscription(subscriptionId);
   }
 
-  await dependencies.store.markAccountDeletionStarted(caller.uid);
+  const checkoutSessionIds = await dependencies.store.markAccountDeletionStarted(caller.uid);
+  for (const sessionId of checkoutSessionIds) {
+    await dependencies.stripe.closeCheckoutSession(sessionId);
+  }
   await dependencies.store.revokeDesktopPairings(caller.uid);
   await dependencies.store.deleteLegacyDevicePairings(caller.uid);
   await dependencies.store.deleteUserTree(caller.uid);
@@ -87,9 +91,25 @@ export function firestoreAccountDeletionStore(db: Firestore): AccountDeletionSto
         : null;
     },
     async markAccountDeletionStarted(uid) {
-      await db.doc(accountDeletionPath(uid)).set({
-        uid,
-        started: true,
+      const deletionRef = db.doc(accountDeletionPath(uid));
+      const checkoutRef = db.doc(accountCheckoutPath(uid));
+      return db.runTransaction(async (transaction) => {
+        const checkout = await transaction.get(checkoutRef);
+        const data = checkout.data() as {
+          creating?: unknown;
+          sessionIds?: unknown;
+        } | undefined;
+        if (data?.creating === true) {
+          throw new BillingRequestError(
+            "failed-precondition",
+            "checkout_in_progress",
+            "Account deletion is waiting for an active checkout operation. Please retry.",
+          );
+        }
+        transaction.set(deletionRef, { uid, started: true });
+        return Array.isArray(data?.sessionIds)
+          ? data.sessionIds.filter((value): value is string => typeof value === "string")
+          : [];
       });
     },
     async deleteUserTree(uid) {
@@ -101,6 +121,7 @@ export function firestoreAccountDeletionStore(db: Firestore): AccountDeletionSto
         db.collection("stripeEvents").where("uid", "==", uid),
         db.collection("appAccountTokens").where("uid", "==", uid),
       ]);
+      await db.doc(accountCheckoutPath(uid)).delete();
     },
     async revokeDesktopPairings(uid) {
       await deleteQuery(db, db.collection("desktopCredentials").where("uid", "==", uid));

@@ -147,24 +147,33 @@ The callable performs these phases strictly in order:
 1. Read `users/{uid}/billing/stripe`; if it contains an `active` or `grace`
    subscription, cancel that Stripe subscription immediately. Cancellation is
    cancel-at-once with no refund or proration logic.
-2. Create the durable `accountDeletions/{uid}` tombstone. Relay publication
-   transactions and Stripe webhook transactions read this document before any
-   uid-owned write. Firestore Rules require its absence for the desktop
-   client's direct `users/{uid}` profile and `desktopCredentials/{desktopId}`
-   create/update operations, and `createCheckoutSession` checks it before
-   creating a Stripe customer or checkout session or writing the user/customer
-   reverse map. A transaction already in flight conflicts with tombstone
-   creation and retries into rejection; cached desktop credentials and ID
-   tokens therefore cannot recreate cloud state once this phase commits.
-3. Revoke cloud/relay pairings by deleting `desktopCredentials` rows whose
-   `uid` matches, then delete legacy `devices` rows whose `userId` matches.
-4. Recursively delete `users/{uid}`. This removes the user profile, all billing
+2. Atomically coordinate checkout and deletion through
+   `accountCheckouts/{uid}`. Checkout transactionally admits one Stripe-creation
+   operation only while no deletion tombstone exists, and does not write
+   `users/{uid}` or `stripeCustomers` until a second transaction records the
+   resulting session and releases that admission. Deletion refuses retryably
+   while an admitted operation is still creating Stripe state. Once it has
+   finished, deletion atomically creates the durable
+   `accountDeletions/{uid}` tombstone and reads every recorded session. No new
+   checkout can pass admission after that transaction commits.
+3. Close every recorded Stripe Checkout session. An open session is expired;
+   if it already completed, its subscription is canceled immediately. This is
+   idempotent, and deletion cannot report success while an admitted checkout
+   can still be used or charge in the future.
+4. Relay publication transactions and Stripe webhook transactions read the
+   tombstone before any uid-owned write. Firestore Rules require its absence
+   for the desktop client's direct `users/{uid}` profile and
+   `desktopCredentials/{desktopId}` create/update operations. Revoke cloud/relay
+   pairings by deleting `desktopCredentials` rows whose `uid` matches, then
+   delete legacy `devices` rows whose `userId` matches.
+5. Recursively delete `users/{uid}`. This removes the user profile, all billing
    source documents (including `billing/comp`), the derived entitlement,
    `pushDevices`, published `desktops`, and every published `tasks` mirror
    below those desktops.
-5. Delete the code-enumerated uid indexes: `stripeCustomers` (`uid`),
-   `stripeEvents` (`uid`), and `appAccountTokens` (`uid`).
-6. Revoke Firebase refresh tokens, then delete the Firebase Auth user last.
+6. Delete the code-enumerated uid indexes: `stripeCustomers` (`uid`),
+   `stripeEvents` (`uid`), and `appAccountTokens` (`uid`), plus the completed
+   `accountCheckouts/{uid}` coordination record.
+7. Revoke Firebase refresh tokens, then delete the Firebase Auth user last.
 
 Every deletion is safe when the document is already absent, and a Stripe
 “resource missing” response is treated as already canceled. If a phase fails,
@@ -172,13 +181,21 @@ Auth still exists and the caller can run the operation again. Auth goes last
 specifically so no mid-pipeline failure strands an account that can no longer
 authenticate to retry. The tombstone is written idempotently and remains
 present across retries. Stripe webhook application, every relay desktop/task
-publication transaction, the Firestore Rules governing direct desktop profile
-and credential writes, and checkout all read it as their durable write fence.
+publication transaction, and the Firestore Rules governing direct desktop
+profile and credential writes read it as their durable write fence. Checkout
+uses the tombstone and its `accountCheckouts/{uid}` admission record as one
+transactional coordination boundary rather than relying on a one-time read.
 Cancellation events, cached or in-flight publishers, direct desktop writes,
 and cached-token checkout calls following deletion are rejected without
 recreating Stripe, dedupe, billing, entitlement, profile, credential, desktop,
 or task state. A direct client write committed before the tombstone remains
 eligible for the deletion sweep; one committing after it is denied.
+
+The Firestore-emulator suite exercises the adversarial checkout race by pausing
+the mocked Stripe gateway after transactional admission, attempting deletion,
+then releasing Stripe. The first deletion is retryable; the rerun fences the
+uid, closes the recorded session, removes the user tree and billing reverse
+map, and deletes Auth last.
 
 There is no soft-disable, grace period, undo window, or refund path. No user
 content or credential survives: no account, complimentary grant, entitlement,

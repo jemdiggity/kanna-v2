@@ -31,10 +31,12 @@ export interface StripeCheckoutGateway {
   createCustomer(input: StripeCustomerInput): Promise<{ id: string }>;
   resolvePriceId(lookupKey: string): Promise<string | null>;
   createCheckoutSession(input: StripeCheckoutSessionInput): Promise<StripeCheckoutSession>;
+  closeCheckoutSession(sessionId: string): Promise<void>;
 }
 
 export interface StripeSubscriptionGateway {
   cancelSubscription(subscriptionId: string): Promise<void>;
+  closeCheckoutSession(sessionId: string): Promise<void>;
 }
 
 /**
@@ -72,6 +74,9 @@ export function stripeCheckoutGateway(secretKey: string): StripeCheckoutGateway 
       });
       return { id: session.id, url: session.url };
     },
+    async closeCheckoutSession(sessionId) {
+      await closeStripeCheckoutSession(stripe, sessionId);
+    },
   };
 }
 
@@ -92,5 +97,32 @@ export function stripeSubscriptionGateway(secretKey: string): StripeSubscription
         throw error;
       }
     },
+    async closeCheckoutSession(sessionId) {
+      await closeStripeCheckoutSession(stripe, sessionId);
+    },
   };
+}
+
+async function closeStripeCheckoutSession(stripe: Stripe, sessionId: string): Promise<void> {
+  try {
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
+    if (session.status === "open") {
+      await stripe.checkout.sessions.expire(sessionId);
+      return;
+    }
+    const subscriptionId = typeof session.subscription === "string"
+      ? session.subscription
+      : session.subscription?.id;
+    if (subscriptionId) {
+      await stripe.subscriptions.cancel(subscriptionId);
+    }
+  } catch (error) {
+    // Closing an already-closed or removed session is idempotent. A completed
+    // session is handled above by canceling the subscription it created.
+    if (error instanceof Stripe.errors.StripeInvalidRequestError
+      && error.code === "resource_missing") {
+      return;
+    }
+    throw error;
+  }
 }

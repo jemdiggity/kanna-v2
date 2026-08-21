@@ -6,7 +6,10 @@ import {
 } from "../src/accountDeletion.js";
 import type { StripeSubscriptionGateway } from "../src/billing/stripeGateway.js";
 
-function harness(options: { failBillingIndexesOnce?: boolean } = {}) {
+function harness(options: {
+  failBillingIndexesOnce?: boolean;
+  checkoutSessionIds?: string[];
+} = {}) {
   const calls: string[] = [];
   let subscriptionPresent = true;
   let userTreePresent = true;
@@ -18,6 +21,7 @@ function harness(options: { failBillingIndexesOnce?: boolean } = {}) {
     },
     async markAccountDeletionStarted() {
       calls.push("mark-account-deletion-started");
+      return options.checkoutSessionIds ?? [];
     },
     async deleteUserTree() {
       calls.push("delete-user-tree");
@@ -41,6 +45,9 @@ function harness(options: { failBillingIndexesOnce?: boolean } = {}) {
   const stripe: StripeSubscriptionGateway = {
     cancelSubscription: vi.fn(async () => {
       calls.push("cancel-stripe");
+    }),
+    closeCheckoutSession: vi.fn(async () => {
+      calls.push("close-checkout-session");
     }),
   };
   const auth: AccountDeletionAuth = {
@@ -68,7 +75,7 @@ describe("deleteAccount", () => {
   });
 
   it("cancels Stripe first and deletes Auth last", async () => {
-    const { calls, dependencies } = harness();
+    const { calls, dependencies } = harness({ checkoutSessionIds: ["cs_open"] });
     await expect(deleteAccount({ uid: "user-1" }, dependencies)).resolves.toEqual({
       deleted: true,
     });
@@ -76,6 +83,7 @@ describe("deleteAccount", () => {
       "read-subscription",
       "cancel-stripe",
       "mark-account-deletion-started",
+      "close-checkout-session",
       "revoke-desktop-pairings",
       "delete-legacy-device-pairings",
       "delete-user-tree",

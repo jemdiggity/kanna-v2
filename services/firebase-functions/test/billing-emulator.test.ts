@@ -27,6 +27,7 @@ import type { StripeCheckoutGateway } from "../src/billing/stripeGateway.js";
 import { signStripePayload } from "../src/billing/stripeSignature.js";
 import { handleStripeWebhook } from "../src/billing/stripeWebhook.js";
 import {
+  accountCheckoutPath,
   accountDeletionPath,
   billingSourcePath,
   entitlementPath,
@@ -99,11 +100,11 @@ async function readDoc<T>(db: Firestore, path: string): Promise<T | null> {
 }
 
 interface StubGateway extends StripeCheckoutGateway {
-  calls: { customers: number; sessions: unknown[] };
+  calls: { customers: number; sessions: unknown[]; closedSessions: string[] };
 }
 
 function stubGateway(): StubGateway {
-  const calls = { customers: 0, sessions: [] as unknown[] };
+  const calls = { customers: 0, sessions: [] as unknown[], closedSessions: [] as string[] };
   return {
     calls,
     async createCustomer() {
@@ -117,7 +118,18 @@ function stubGateway(): StubGateway {
       calls.sessions.push(input);
       return { id: "cs_test_TestSlice1", url: "https://checkout.stripe.com/c/pay/cs_test" };
     },
+    async closeCheckoutSession(sessionId) {
+      calls.closedSessions.push(sessionId);
+    },
   };
+}
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolvePromise = (): void => {};
+  const promise = new Promise<void>((resolve) => {
+    resolvePromise = resolve;
+  });
+  return { promise, resolve: resolvePromise };
 }
 
 describeWithEmulator("billing backend against the Firestore emulator", () => {
@@ -550,6 +562,74 @@ describeWithEmulator("billing backend against the Firestore emulator", () => {
   });
 
   describe("account deletion", () => {
+    it("serializes deletion against an admitted checkout and closes its Stripe session", async () => {
+      const uid = CHECKOUT_UID;
+      const enteredStripe = deferred();
+      const releaseStripe = deferred();
+      const usableSessions = new Set<string>();
+      const gateway: StripeCheckoutGateway = {
+        async createCustomer() {
+          return { id: "cus_racing_delete" };
+        },
+        async resolvePriceId() {
+          return "price_for_cloud_monthly_usd";
+        },
+        async createCheckoutSession() {
+          enteredStripe.resolve();
+          await releaseStripe.promise;
+          usableSessions.add("cs_racing_delete");
+          return {
+            id: "cs_racing_delete",
+            url: "https://checkout.stripe.test/cs_racing_delete",
+          };
+        },
+        async closeCheckoutSession(sessionId) {
+          usableSessions.delete(sessionId);
+        },
+      };
+      const cancelSubscription = vi.fn(async () => undefined);
+      const closeCheckoutSession = vi.fn(async (sessionId: string) => {
+        await gateway.closeCheckoutSession(sessionId);
+      });
+      const auth = {
+        revokeRefreshTokens: vi.fn(async () => undefined),
+        deleteUser: vi.fn(async () => undefined),
+      };
+      const deletionDependencies = {
+        store: firestoreAccountDeletionStore(db),
+        stripe: { cancelSubscription, closeCheckoutSession },
+        auth,
+      };
+
+      const checkout = createCheckoutSession(
+        { plan: "monthly" },
+        { uid, email: "checkout@example.com", emailVerified: true },
+        { db, env: checkoutEnv, gateway, logger: silentLogger },
+      );
+      await enteredStripe.promise;
+
+      await expect(deleteAccount({ uid }, deletionDependencies)).rejects.toMatchObject({
+        code: "failed-precondition",
+        reason: "checkout_in_progress",
+      });
+      expect(auth.deleteUser).not.toHaveBeenCalled();
+
+      releaseStripe.resolve();
+      await expect(checkout).resolves.toMatchObject({ sessionId: "cs_racing_delete" });
+      expect(usableSessions).toEqual(new Set(["cs_racing_delete"]));
+
+      await expect(deleteAccount({ uid }, deletionDependencies)).resolves.toEqual({ deleted: true });
+
+      expect(closeCheckoutSession).toHaveBeenCalledWith("cs_racing_delete");
+      expect(usableSessions.size).toBe(0);
+      expect((await db.doc(userDocPath(uid)).get()).exists).toBe(false);
+      expect((await db.collection("stripeCustomers").where("uid", "==", uid).get()).empty)
+        .toBe(true);
+      expect((await db.doc(accountCheckoutPath(uid)).get()).exists).toBe(false);
+      expect((await db.doc(accountDeletionPath(uid)).get()).exists).toBe(true);
+      expect(auth.deleteUser).toHaveBeenCalledWith(uid);
+    });
+
     it("removes every uid-owned Firestore record, including nested mirrors and relay pairings", async () => {
       const uid = "fixture-delete-user";
       await Promise.all([
@@ -568,6 +648,7 @@ describeWithEmulator("billing backend against the Firestore emulator", () => {
         db.doc("users/other-user/desktops/desktop-other").set({ desktopId: "desktop-other" }),
       ]);
       const cancelSubscription = vi.fn(async () => undefined);
+      const closeCheckoutSession = vi.fn(async () => undefined);
       const auth = {
         revokeRefreshTokens: vi.fn(async () => undefined),
         deleteUser: vi.fn(async () => undefined),
@@ -575,7 +656,11 @@ describeWithEmulator("billing backend against the Firestore emulator", () => {
 
       await deleteAccount(
         { uid },
-        { store: firestoreAccountDeletionStore(db), stripe: { cancelSubscription }, auth },
+        {
+          store: firestoreAccountDeletionStore(db),
+          stripe: { cancelSubscription, closeCheckoutSession },
+          auth,
+        },
       );
 
       expect(cancelSubscription).toHaveBeenCalledWith("sub_delete");

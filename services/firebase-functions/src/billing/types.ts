@@ -106,6 +106,11 @@ export function accountDeletionPath(uid: string): string {
   return `accountDeletions/${uid}`;
 }
 
+/** Durable serialization point between checkout creation and account deletion. */
+export function accountCheckoutPath(uid: string): string {
+  return `accountCheckouts/${uid}`;
+}
+
 export function billingSourcePath(uid: string, source: BillingSourceId): string {
   return `users/${uid}/billing/${source}`;
 }

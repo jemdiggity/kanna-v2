@@ -14,6 +14,7 @@ import { BillingRequestError } from "./errors.js";
 import { consoleBillingLogger, type BillingLogger } from "./logger.js";
 import type { StripeCheckoutGateway, StripePriceCurrency } from "./stripeGateway.js";
 import {
+  accountCheckoutPath,
   accountDeletionPath,
   stripeCustomerPath,
   userDocPath,
@@ -94,14 +95,6 @@ export async function createCheckoutSession(
       "Sign in before starting a subscription."
     );
   }
-  const deletion = await deps.db.doc(accountDeletionPath(caller.uid)).get();
-  if (deletion.exists) {
-    throw new BillingRequestError(
-      "failed-precondition",
-      "account_deleted",
-      "This account has been permanently deleted.",
-    );
-  }
   if (!caller.emailVerified) {
     throw new BillingRequestError(
       "failed-precondition",
@@ -147,18 +140,19 @@ export async function createCheckoutSession(
   }
 
   const gateway = deps.gateway ?? (await liveGateway(config.secretKey));
-  const customerId = await resolveCustomerId({
-    db: deps.db,
-    gateway,
-    caller,
-    existing: state.sources.stripe?.stripeCustomerId ?? null,
-    now: now(),
-  });
-
   const base = config.portalBaseUrl.replace(/\/+$/, "");
+  const startedAt = now();
+  await admitCheckout(deps.db, caller.uid, startedAt);
 
-  let session: Awaited<ReturnType<StripeCheckoutGateway["createCheckoutSession"]>>;
+  let session: Awaited<ReturnType<StripeCheckoutGateway["createCheckoutSession"]>> | null = null;
+  let customerId: string | null = null;
   try {
+    customerId = await resolveCustomerId({
+      db: deps.db,
+      gateway,
+      caller,
+      existing: state.sources.stripe?.stripeCustomerId ?? null,
+    });
     const lookupKey = `cloud_monthly_${currency}`;
     const priceId = await gateway.resolvePriceId(lookupKey);
     if (!priceId) {
@@ -171,7 +165,21 @@ export async function createCheckoutSession(
       successUrl: `${base}/billing/success?session_id={CHECKOUT_SESSION_ID}`,
       cancelUrl: `${base}/billing/canceled`,
     });
+    await completeCheckoutAdmission({
+      db: deps.db,
+      uid: caller.uid,
+      customerId,
+      sessionId: session.id,
+      now: now(),
+    });
   } catch (error) {
+    if (session) {
+      await recordAbortedCheckout(deps.db, caller.uid, session.id, now());
+      await gateway.closeCheckoutSession(session.id);
+    } else {
+      await releaseCheckoutAdmission(deps.db, caller.uid, now());
+    }
+    if (error instanceof BillingRequestError) throw error;
     const message = error instanceof Error ? error.message : String(error);
     logger.error("Stripe rejected a checkout session request", { uid: caller.uid, message });
     throw new BillingRequestError(
@@ -187,6 +195,9 @@ export async function createCheckoutSession(
     currency,
     sessionId: session.id,
   });
+  if (!customerId || !session) {
+    throw new BillingRequestError("internal", "stripe_error", "Could not start checkout.");
+  }
   return { sessionId: session.id, url: session.url, customerId, plan, currency };
 }
 
@@ -202,9 +213,8 @@ async function resolveCustomerId(input: {
   gateway: StripeCheckoutGateway;
   caller: CheckoutCaller;
   existing: string | null;
-  now: string;
 }): Promise<string> {
-  const { db, gateway, caller, now } = input;
+  const { db, gateway, caller } = input;
   if (input.existing) return input.existing;
 
   const userDoc = await db.doc(userDocPath(caller.uid)).get();
@@ -212,13 +222,124 @@ async function resolveCustomerId(input: {
   if (typeof stored === "string" && stored.length > 0) return stored;
 
   const customer = await gateway.createCustomer({ uid: caller.uid, email: caller.email });
-  await db
-    .doc(userDocPath(caller.uid))
-    .set({ stripeCustomerId: customer.id, updatedAt: now }, { merge: true });
-  await db
-    .doc(stripeCustomerPath(customer.id))
-    .set({ uid: caller.uid, stripeCustomerId: customer.id, updatedAt: now }, { merge: true });
   return customer.id;
+}
+
+interface CheckoutCoordination {
+  creating?: unknown;
+  sessionIds?: unknown;
+}
+
+function sessionIds(data: CheckoutCoordination | undefined): string[] {
+  return Array.isArray(data?.sessionIds)
+    ? data.sessionIds.filter((value): value is string => typeof value === "string")
+    : [];
+}
+
+async function admitCheckout(db: Firestore, uid: string, now: string): Promise<void> {
+  const deletionRef = db.doc(accountDeletionPath(uid));
+  const checkoutRef = db.doc(accountCheckoutPath(uid));
+  await db.runTransaction(async (transaction) => {
+    const [deletion, checkout] = await Promise.all([
+      transaction.get(deletionRef),
+      transaction.get(checkoutRef),
+    ]);
+    if (deletion.exists) {
+      throw new BillingRequestError(
+        "failed-precondition",
+        "account_deleted",
+        "This account has been permanently deleted.",
+      );
+    }
+    const coordination = checkout.data() as CheckoutCoordination | undefined;
+    if (coordination?.creating === true) {
+      throw new BillingRequestError(
+        "failed-precondition",
+        "checkout_in_progress",
+        "Another checkout is already being created. Please try again.",
+      );
+    }
+    transaction.set(checkoutRef, {
+      uid,
+      creating: true,
+      sessionIds: sessionIds(coordination),
+      updatedAt: now,
+    });
+  });
+}
+
+async function completeCheckoutAdmission(input: {
+  db: Firestore;
+  uid: string;
+  customerId: string;
+  sessionId: string;
+  now: string;
+}): Promise<void> {
+  const checkoutRef = input.db.doc(accountCheckoutPath(input.uid));
+  const deletionRef = input.db.doc(accountDeletionPath(input.uid));
+  await input.db.runTransaction(async (transaction) => {
+    const [deletion, checkout] = await Promise.all([
+      transaction.get(deletionRef),
+      transaction.get(checkoutRef),
+    ]);
+    if (deletion.exists) {
+      throw new BillingRequestError(
+        "failed-precondition",
+        "account_deleted",
+        "This account has been permanently deleted.",
+      );
+    }
+    const coordination = checkout.data() as CheckoutCoordination | undefined;
+    transaction.set(input.db.doc(userDocPath(input.uid)), {
+      stripeCustomerId: input.customerId,
+      updatedAt: input.now,
+    }, { merge: true });
+    transaction.set(input.db.doc(stripeCustomerPath(input.customerId)), {
+      uid: input.uid,
+      stripeCustomerId: input.customerId,
+      updatedAt: input.now,
+    }, { merge: true });
+    transaction.set(checkoutRef, {
+      uid: input.uid,
+      creating: false,
+      sessionIds: [...new Set([...sessionIds(coordination), input.sessionId])],
+      updatedAt: input.now,
+    });
+  });
+}
+
+async function recordAbortedCheckout(
+  db: Firestore,
+  uid: string,
+  sessionId: string,
+  now: string,
+): Promise<void> {
+  const checkoutRef = db.doc(accountCheckoutPath(uid));
+  await db.runTransaction(async (transaction) => {
+    const checkout = await transaction.get(checkoutRef);
+    const coordination = checkout.data() as CheckoutCoordination | undefined;
+    transaction.set(checkoutRef, {
+      uid,
+      creating: false,
+      sessionIds: [...new Set([...sessionIds(coordination), sessionId])],
+      updatedAt: now,
+    });
+  });
+}
+
+async function releaseCheckoutAdmission(db: Firestore, uid: string, now: string): Promise<void> {
+  const checkoutRef = db.doc(accountCheckoutPath(uid));
+  await db.runTransaction(async (transaction) => {
+    const checkout = await transaction.get(checkoutRef);
+    if (!checkout.exists) return;
+    const coordination = checkout.data() as CheckoutCoordination | undefined;
+    transaction.set(checkoutRef, {
+      uid,
+      creating: false,
+      sessionIds: sessionIds(coordination),
+      updatedAt: now,
+    });
+  });
 }
 
 /** Imported lazily so a missing Stripe key never breaks module load or deploy. */
