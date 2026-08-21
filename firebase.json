@@ -6,15 +6,16 @@
   "functions": {
     "source": "services/firebase-functions",
     "runtime": "nodejs24",
+    "_ignoreComment": "Keep source-directory ignores anchored: unanchored src also matches the compiled dist/src entrypoint.",
     "ignore": [
       "node_modules",
       ".git",
       "firebase-debug.log",
       "firebase-debug.*.log",
       "*.local",
-      "src",
-      "test",
-      "scripts",
+      "/src",
+      "/test",
+      "/scripts",
       "tsconfig*.json",
       "vitest.config.ts"
     ]

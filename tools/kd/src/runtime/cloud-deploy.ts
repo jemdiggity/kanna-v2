@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { cloudEnvironmentToKdEnvironment, resolveKdEnvironment } from "./environment";
 import type { CommandRunner } from "./process";
@@ -245,6 +245,16 @@ export async function deployFirebaseCloud(input: CloudDeployInput & { relay?: bo
     });
     if (build.exitCode !== 0) {
       throw new Error(build.stderr || build.stdout || "Firebase functions build failed.");
+    }
+    const functionsEntrypoint = join(
+      input.repoRoot,
+      "services/firebase-functions/dist/src/index.js"
+    );
+    if (!existsSync(functionsEntrypoint)) {
+      throw new Error(
+        "Firebase functions build did not create services/firebase-functions/dist/src/index.js; " +
+        "refusing to deploy a package without its compiled entrypoint."
+      );
     }
   }
   if (portal) {
