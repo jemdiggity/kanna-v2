@@ -4,6 +4,7 @@ import { getFirebaseServices } from "./firebase.js";
 export const MAX_TASK_SNAPSHOT_BYTES = 512 * 1024;
 const MAX_TASKS = 250;
 const MAX_BATCH_OPERATIONS = 400;
+const ACCOUNT_DELETIONS_COLLECTION = "accountDeletions";
 
 export type CloudTaskDocument = Record<string, unknown> & {
   localRepoId: string;
@@ -396,7 +397,9 @@ export function createFirestoreCloudTaskPublicationStore(
       const desktopDocId = cloudDesktopDocumentId(desktopId);
       const desktopsRef = db.collection(`users/${userId}/desktops`);
       const desktopRef = desktopsRef.doc(desktopDocId);
+      const deletionRef = db.collection(ACCOUNT_DELETIONS_COLLECTION).doc(userId);
       const generation = await db.runTransaction(async (transaction) => {
+        await requireAccountNotDeleting(transaction, deletionRef);
         const current = await transaction.get(desktopRef);
         const currentGeneration = storedGenerationPart(
           current.data()?.publicationSessionGeneration,
@@ -428,7 +431,9 @@ export function createFirestoreCloudTaskPublicationStore(
     async endSession({ userId, desktopId, generation }) {
       const desktopDocId = cloudDesktopDocumentId(desktopId);
       const desktopRef = db.doc(`users/${userId}/desktops/${desktopDocId}`);
+      const deletionRef = db.collection(ACCOUNT_DELETIONS_COLLECTION).doc(userId);
       const ended = await db.runTransaction(async (transaction) => {
+        await requireAccountNotDeleting(transaction, deletionRef);
         const current = await transaction.get(desktopRef);
         if (storedGenerationPart(
           current.data()?.publicationSessionGeneration,
@@ -458,6 +463,7 @@ export function createFirestoreCloudTaskPublicationStore(
       const desktopDocId = cloudDesktopDocumentId(desktopId);
       const desktopsRef = db.collection(`users/${userId}/desktops`);
       const desktopRef = desktopsRef.doc(desktopDocId);
+      const deletionRef = db.collection(ACCOUNT_DELETIONS_COLLECTION).doc(userId);
       const stateKey = publicationSessionKey(userId, desktopId, generation.session);
       let sessionState = sessionStates.get(stateKey);
       if (!sessionState) {
@@ -479,78 +485,79 @@ export function createFirestoreCloudTaskPublicationStore(
       });
       await previousReconciliation;
       try {
-      await db.runTransaction(async (transaction) => {
-        const current = await transaction.get(desktopRef);
-        const currentGeneration = storedPublicationGeneration(current.data());
-        if (
-          currentGeneration.session !== generation.session
-          || currentGeneration.sequence > generation.sequence
-        ) {
-          throw stalePublicationError(generation, currentGeneration);
-        }
-        transaction.set(desktopRef, {
-          desktopId,
-          displayName,
-          agentProviders: agentProviders ?? FieldValue.delete(),
-          transfer: transfer ?? FieldValue.delete(),
-          publicationSequence: generation.sequence,
-          updatedAt: FieldValue.serverTimestamp(),
-        }, { merge: true });
-      });
-      await faultInjection?.afterGenerationClaim?.(generation);
-
-      const tasksRef = desktopRef.collection("tasks");
-      const existing = [...sessionState.tasksByIdentity.values()].flat();
-      const plan = planTaskReconciliation(
-        existing,
-        tasks,
-        () => tasksRef.doc().id,
-      );
-      const operations: Array<
-        | { kind: "set"; id: string; data: CloudTaskDocument }
-        | { kind: "delete"; id: string }
-      > = [
-        ...plan.sets.map((operation) => ({ kind: "set" as const, ...operation })),
-        ...plan.deleteIds.map((id) => ({ kind: "delete" as const, id })),
-      ];
-      if (operations.length === 0) {
         await db.runTransaction(async (transaction) => {
-          await requireCurrentPublication(transaction, desktopRef, generation);
-        });
-      }
-      for (let offset = 0; offset < operations.length; offset += MAX_BATCH_OPERATIONS) {
-        await db.runTransaction(async (transaction) => {
-          await requireCurrentPublication(transaction, desktopRef, generation);
-          for (const operation of operations.slice(offset, offset + MAX_BATCH_OPERATIONS)) {
-            const ref = tasksRef.doc(operation.id);
-            if (operation.kind === "set") transaction.set(ref, operation.data);
-            else transaction.delete(ref);
-            faultInjection?.onTaskDocumentWrite?.(operation.kind, operation.id);
+          await requireAccountNotDeleting(transaction, deletionRef);
+          const current = await transaction.get(desktopRef);
+          const currentGeneration = storedPublicationGeneration(current.data());
+          if (
+            currentGeneration.session !== generation.session
+            || currentGeneration.sequence > generation.sequence
+          ) {
+            throw stalePublicationError(generation, currentGeneration);
           }
+          transaction.set(desktopRef, {
+            desktopId,
+            displayName,
+            agentProviders: agentProviders ?? FieldValue.delete(),
+            transfer: transfer ?? FieldValue.delete(),
+            publicationSequence: generation.sequence,
+            updatedAt: FieldValue.serverTimestamp(),
+          }, { merge: true });
         });
-      }
-      sessionState.tasksByIdentity = indexTaskDocuments(planResultDocuments(existing, plan));
+        await faultInjection?.afterGenerationClaim?.(generation);
 
-      // Older renderer publishers created auto-id desktop documents. The full
-      // server reconciliation makes the canonical document authoritative, so
-      // remove every duplicate subtree after its tasks have been replaced.
-      const matchingDesktops = await desktopsRef.where("desktopId", "==", desktopId).get();
-      for (const duplicate of matchingDesktops.docs) {
-        if (duplicate.id === desktopRef.id) continue;
-        const duplicateTasks = await duplicate.ref.collection("tasks").get();
-        for (let offset = 0; offset < duplicateTasks.docs.length; offset += MAX_BATCH_OPERATIONS) {
+        const tasksRef = desktopRef.collection("tasks");
+        const existing = [...sessionState.tasksByIdentity.values()].flat();
+        const plan = planTaskReconciliation(
+          existing,
+          tasks,
+          () => tasksRef.doc().id,
+        );
+        const operations: Array<
+          | { kind: "set"; id: string; data: CloudTaskDocument }
+          | { kind: "delete"; id: string }
+        > = [
+          ...plan.sets.map((operation) => ({ kind: "set" as const, ...operation })),
+          ...plan.deleteIds.map((id) => ({ kind: "delete" as const, id })),
+        ];
+        if (operations.length === 0) {
           await db.runTransaction(async (transaction) => {
-            await requireCurrentPublication(transaction, desktopRef, generation);
-            for (const document of duplicateTasks.docs.slice(offset, offset + MAX_BATCH_OPERATIONS)) {
-              transaction.delete(document.ref);
+            await requireCurrentPublication(transaction, deletionRef, desktopRef, generation);
+          });
+        }
+        for (let offset = 0; offset < operations.length; offset += MAX_BATCH_OPERATIONS) {
+          await db.runTransaction(async (transaction) => {
+            await requireCurrentPublication(transaction, deletionRef, desktopRef, generation);
+            for (const operation of operations.slice(offset, offset + MAX_BATCH_OPERATIONS)) {
+              const ref = tasksRef.doc(operation.id);
+              if (operation.kind === "set") transaction.set(ref, operation.data);
+              else transaction.delete(ref);
+              faultInjection?.onTaskDocumentWrite?.(operation.kind, operation.id);
             }
           });
         }
-        await db.runTransaction(async (transaction) => {
-          await requireCurrentPublication(transaction, desktopRef, generation);
-          transaction.delete(duplicate.ref);
-        });
-      }
+        sessionState.tasksByIdentity = indexTaskDocuments(planResultDocuments(existing, plan));
+
+        // Older renderer publishers created auto-id desktop documents. The full
+        // server reconciliation makes the canonical document authoritative, so
+        // remove every duplicate subtree after its tasks have been replaced.
+        const matchingDesktops = await desktopsRef.where("desktopId", "==", desktopId).get();
+        for (const duplicate of matchingDesktops.docs) {
+          if (duplicate.id === desktopRef.id) continue;
+          const duplicateTasks = await duplicate.ref.collection("tasks").get();
+          for (let offset = 0; offset < duplicateTasks.docs.length; offset += MAX_BATCH_OPERATIONS) {
+            await db.runTransaction(async (transaction) => {
+              await requireCurrentPublication(transaction, deletionRef, desktopRef, generation);
+              for (const document of duplicateTasks.docs.slice(offset, offset + MAX_BATCH_OPERATIONS)) {
+                transaction.delete(document.ref);
+              }
+            });
+          }
+          await db.runTransaction(async (transaction) => {
+            await requireCurrentPublication(transaction, deletionRef, desktopRef, generation);
+            transaction.delete(duplicate.ref);
+          });
+        }
       } finally {
         releaseReconciliation();
       }
@@ -566,9 +573,11 @@ function cloudDesktopDocumentId(desktopId: string): string {
 
 async function requireCurrentPublication(
   transaction: FirebaseFirestore.Transaction,
+  deletionRef: FirebaseFirestore.DocumentReference,
   desktopRef: FirebaseFirestore.DocumentReference,
   generation: CloudTaskPublicationGeneration,
 ): Promise<void> {
+  await requireAccountNotDeleting(transaction, deletionRef);
   const current = await transaction.get(desktopRef);
   const stored = storedPublicationGeneration(current.data());
   if (
@@ -576,6 +585,15 @@ async function requireCurrentPublication(
     || stored.sequence !== generation.sequence
   ) {
     throw stalePublicationError(generation, stored);
+  }
+}
+
+async function requireAccountNotDeleting(
+  transaction: FirebaseFirestore.Transaction,
+  deletionRef: FirebaseFirestore.DocumentReference,
+): Promise<void> {
+  if ((await transaction.get(deletionRef)).exists) {
+    throw new Error("account deletion is in progress");
   }
 }
 

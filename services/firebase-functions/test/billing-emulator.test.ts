@@ -27,6 +27,7 @@ import type { StripeCheckoutGateway } from "../src/billing/stripeGateway.js";
 import { signStripePayload } from "../src/billing/stripeSignature.js";
 import { handleStripeWebhook } from "../src/billing/stripeWebhook.js";
 import {
+  accountDeletionPath,
   billingSourcePath,
   entitlementPath,
   stripeCustomerPath,
@@ -227,7 +228,7 @@ describeWithEmulator("billing backend against the Firestore emulator", () => {
     });
 
     it("does not let a delayed cancellation webhook write after deletion starts", async () => {
-      await db.doc(userDocPath(CHECKOUT_UID)).update({ accountDeletionStarted: true });
+      await db.doc(accountDeletionPath(CHECKOUT_UID)).set({ uid: CHECKOUT_UID, started: true });
 
       const result = await deliver(db, "customer.subscription.deleted.json");
 
@@ -572,6 +573,10 @@ describeWithEmulator("billing backend against the Firestore emulator", () => {
       ]) {
         expect((await db.doc(path).get()).exists, path).toBe(false);
       }
+      expect((await db.doc(accountDeletionPath(uid)).get()).data()).toMatchObject({
+        uid,
+        started: true,
+      });
       expect((await db.doc("users/other-user/desktops/desktop-other").get()).exists).toBe(true);
       expect(auth.revokeRefreshTokens).toHaveBeenCalledWith(uid);
       expect(auth.deleteUser).toHaveBeenCalledWith(uid);

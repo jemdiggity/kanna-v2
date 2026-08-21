@@ -7,7 +7,12 @@ import type {
 import { BillingRequestError } from "./billing/errors.js";
 import { requireEnv, STRIPE_SECRET_KEY_ENV } from "./billing/config.js";
 import { stripeSubscriptionGateway, type StripeSubscriptionGateway } from "./billing/stripeGateway.js";
-import { billingSourcePath, userDocPath, type BilledSourceState } from "./billing/types.js";
+import {
+  accountDeletionPath,
+  billingSourcePath,
+  userDocPath,
+  type BilledSourceState,
+} from "./billing/types.js";
 
 export interface DeleteAccountCaller {
   uid: string;
@@ -60,10 +65,10 @@ export async function deleteAccount(
   }
 
   await dependencies.store.markAccountDeletionStarted(caller.uid);
-  await dependencies.store.deleteUserTree(caller.uid);
-  await dependencies.store.deleteBillingIndexes(caller.uid);
   await dependencies.store.revokeDesktopPairings(caller.uid);
   await dependencies.store.deleteLegacyDevicePairings(caller.uid);
+  await dependencies.store.deleteUserTree(caller.uid);
+  await dependencies.store.deleteBillingIndexes(caller.uid);
   await revokeRefreshTokensIdempotently(dependencies.auth, caller.uid);
   await deleteAuthUserIdempotently(dependencies.auth, caller.uid);
   return { deleted: true };
@@ -82,11 +87,9 @@ export function firestoreAccountDeletionStore(db: Firestore): AccountDeletionSto
         : null;
     },
     async markAccountDeletionStarted(uid) {
-      const userRef = db.doc(userDocPath(uid));
-      await db.runTransaction(async (transaction) => {
-        const snapshot = await transaction.get(userRef);
-        if (!snapshot.exists) return;
-        transaction.update(userRef, { accountDeletionStarted: true });
+      await db.doc(accountDeletionPath(uid)).set({
+        uid,
+        started: true,
       });
     },
     async deleteUserTree(uid) {

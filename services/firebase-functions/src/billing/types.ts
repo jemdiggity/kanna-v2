@@ -101,6 +101,11 @@ export function userDocPath(uid: string): string {
   return `users/${uid}`;
 }
 
+/** Durable fence that prevents uid-owned cloud data from being recreated. */
+export function accountDeletionPath(uid: string): string {
+  return `accountDeletions/${uid}`;
+}
+
 export function billingSourcePath(uid: string, source: BillingSourceId): string {
   return `users/${uid}/billing/${source}`;
 }

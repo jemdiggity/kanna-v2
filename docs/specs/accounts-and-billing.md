@@ -147,35 +147,44 @@ The callable performs these phases strictly in order:
 1. Read `users/{uid}/billing/stripe`; if it contains an `active` or `grace`
    subscription, cancel that Stripe subscription immediately. Cancellation is
    cancel-at-once with no refund or proration logic.
-2. Transactionally mark `users/{uid}` with `accountDeletionStarted`, then
-   recursively delete it. The temporary marker closes the delayed-webhook race
-   and is deleted with the account; it is not a retained tombstone. Recursive
-   deletion removes the user profile, all billing source documents (including
-   `billing/comp`), the derived entitlement, `pushDevices`, published
-   `desktops`, and every published `tasks` mirror below those desktops.
-3. Delete the code-enumerated uid indexes: `stripeCustomers` (`uid`),
-   `stripeEvents` (`uid`), and `appAccountTokens` (`uid`).
-4. Revoke cloud/relay pairings by deleting `desktopCredentials` rows whose
+2. Create the durable `accountDeletions/{uid}` tombstone. Relay publication
+   transactions and Stripe webhook transactions read this document before any
+   uid-owned write. A transaction already in flight conflicts with tombstone
+   creation and retries into rejection; a cached desktop credential therefore
+   cannot recreate a desktop or task mirror once this phase commits.
+3. Revoke cloud/relay pairings by deleting `desktopCredentials` rows whose
    `uid` matches, then delete legacy `devices` rows whose `userId` matches.
-5. Revoke Firebase refresh tokens, then delete the Firebase Auth user last.
+4. Recursively delete `users/{uid}`. This removes the user profile, all billing
+   source documents (including `billing/comp`), the derived entitlement,
+   `pushDevices`, published `desktops`, and every published `tasks` mirror
+   below those desktops.
+5. Delete the code-enumerated uid indexes: `stripeCustomers` (`uid`),
+   `stripeEvents` (`uid`), and `appAccountTokens` (`uid`).
+6. Revoke Firebase refresh tokens, then delete the Firebase Auth user last.
 
 Every deletion is safe when the document is already absent, and a Stripe
 “resource missing” response is treated as already canceled. If a phase fails,
 Auth still exists and the caller can run the operation again. Auth goes last
 specifically so no mid-pipeline failure strands an account that can no longer
-authenticate to retry. Stripe webhook application transactionally requires the
-`users/{uid}` account root to exist without the deletion marker, so cancellation
-events racing or following deletion are acknowledged without recreating a
-dedupe, billing, or entitlement document.
+authenticate to retry. The tombstone is written idempotently and remains
+present across retries. Stripe webhook application and every relay desktop/task
+publication transaction read it as their durable write fence, so cancellation
+events and cached or in-flight publishers racing or following deletion are
+rejected without recreating a dedupe, billing, entitlement, desktop, or task
+document.
 
-There is no soft-disable, grace period, undo window, or refund path. Nothing in
-Kanna's cloud survives: no account, complimentary grant, entitlement, task or
-desktop mirror, push token, billing source/index, app-account-token mapping, or
-relay credential. Stripe may retain its canceled subscription/customer and
-financial records under Stripe's own retention obligations; Kanna does not use
-those records to restore an account. A person may register the same email
-again, but receives a new Firebase uid and a blank account. Complimentary
-access and prior paid entitlement are not inherited.
+There is no soft-disable, grace period, undo window, or refund path. No user
+content or credential survives: no account, complimentary grant, entitlement,
+task or desktop mirror, push token, billing source/index, app-account-token
+mapping, or relay credential. The sole Kanna-side remnant is the minimal
+`accountDeletions/{uid}` safety tombstone; it is not account content and exists
+only to prevent old tokens, cached relay credentials, and delayed writers from
+resurrecting deleted data. Stripe may retain its canceled subscription/customer
+and financial records under Stripe's own retention obligations; Kanna does not
+use those records to restore an account. A person may register the same email
+again, but receives a new Firebase uid and a blank account, so the old uid's
+tombstone does not apply. Complimentary access and prior paid entitlement are
+not inherited.
 
 The desktop loses relay access when its canonical credential is next checked
 and its Firebase session becomes visibly signed out when credential refresh

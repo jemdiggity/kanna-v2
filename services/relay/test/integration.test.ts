@@ -10,6 +10,11 @@ import { getFirestore } from "firebase-admin/firestore";
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import WebSocket from "ws";
 import {
+  deleteAccount,
+  firestoreAccountDeletionStore,
+  type AccountDeletionStore,
+} from "../../firebase-functions/src/accountDeletion.js";
+import {
   beginCloudTaskPublicationSession,
   createFirestoreCloudTaskPublicationStore,
   handleCloudTaskPublication,
@@ -1214,6 +1219,110 @@ describe("Relay integration", () => {
       `users/${TEST_USER_ID}/desktops/desktop-other`,
     ).get()).exists).toBe(false);
     await closeAndWait(ws);
+  });
+
+  it("fences cached and in-flight desktop publication once account deletion starts", async () => {
+    const deletionRef = testFirestore.doc(`accountDeletions/${TEST_USER_ID}`);
+    const credentialRef = testFirestore.doc(`desktopCredentials/${SECRET_DESKTOP_ID}`);
+    const userRef = testFirestore.doc(`users/${TEST_USER_ID}`);
+    const desktopRef = userRef.collection("desktops").doc(SECRET_DESKTOP_ID);
+    const claimed = deferredVoid();
+    const release = deferredVoid();
+    const deletionStarted = deferredVoid();
+    const continueDeletion = deferredVoid();
+    const inFlightStore = createFirestoreCloudTaskPublicationStore(testFirestore, {
+      async afterGenerationClaim() {
+        claimed.resolve();
+        await release.promise;
+      },
+    });
+    const { ws } = await connectAndAuth({
+      desktop_id: SECRET_DESKTOP_ID,
+      desktop_secret: SECRET_DESKTOP_SECRET,
+    });
+
+    try {
+      const warmAck = waitForMessage(ws, (message) =>
+        message.type === "task_snapshot_ack" && message.id === "delete-race-warm");
+      ws.send(JSON.stringify({
+        type: "task_snapshot_publish",
+        id: "delete-race-warm",
+        snapshot: publishedSnapshot("idle"),
+      }));
+      await expect(warmAck).resolves.toMatchObject({ ok: true });
+
+      const session = await beginCloudTaskPublicationSession({
+        userId: TEST_USER_ID,
+        desktopId: SECRET_DESKTOP_ID,
+        store: inFlightStore,
+      });
+      const inFlight = handleCloudTaskPublication({
+        userId: TEST_USER_ID,
+        desktopId: SECRET_DESKTOP_ID,
+        generation: { session, sequence: 1 },
+        snapshot: publishedSnapshot("working"),
+        store: inFlightStore,
+      });
+      await claimed.promise;
+
+      const deletionStore = firestoreAccountDeletionStore(testFirestore);
+      const pausedDeletionStore: AccountDeletionStore = {
+        ...deletionStore,
+        async markAccountDeletionStarted(uid) {
+          await deletionStore.markAccountDeletionStarted(uid);
+          deletionStarted.resolve();
+          await continueDeletion.promise;
+        },
+      };
+      const deletion = deleteAccount(
+        { uid: TEST_USER_ID },
+        {
+          store: pausedDeletionStore,
+          stripe: { cancelSubscription: vi.fn(async () => undefined) },
+          auth: {
+            revokeRefreshTokens: vi.fn(async () => undefined),
+            deleteUser: vi.fn(async () => undefined),
+          },
+        },
+      );
+      await deletionStarted.promise;
+      release.resolve();
+
+      await expect(inFlight).rejects.toThrow("account deletion is in progress");
+      const cachedAck = waitForMessage(ws, (message) =>
+        message.type === "task_snapshot_ack" && message.id === "delete-race-cached");
+      ws.send(JSON.stringify({
+        type: "task_snapshot_publish",
+        id: "delete-race-cached",
+        snapshot: publishedSnapshot("working"),
+      }));
+      await expect(cachedAck).resolves.toMatchObject({
+        ok: false,
+        error: expect.stringMatching(/account deletion is in progress/),
+      });
+      continueDeletion.resolve();
+      await expect(deletion).resolves.toEqual({ deleted: true });
+      expect((await desktopRef.get()).exists).toBe(false);
+      expect((await desktopRef.collection("tasks").get()).empty).toBe(true);
+    } finally {
+      release.resolve();
+      continueDeletion.resolve();
+      if (ws.readyState < WebSocket.CLOSING) await closeAndWait(ws);
+      await testFirestore.recursiveDelete(userRef);
+      await deletionRef.delete();
+      await credentialRef.set({
+        desktopId: SECRET_DESKTOP_ID,
+        desktopSecretHash: sha256Hex(SECRET_DESKTOP_SECRET),
+        displayName: "Studio Mac",
+        revokedAt: null,
+        uid: TEST_USER_ID,
+        updatedAt: new Date(0).toISOString(),
+      });
+      await testFirestore.doc(`devices/${TEST_DEVICE_TOKEN}`).set({
+        userId: TEST_USER_ID,
+        createdAt: new Date(0).toISOString(),
+      });
+    }
   });
 
   it("diffs task documents after warm-up and reseeds safely after restart", async () => {
