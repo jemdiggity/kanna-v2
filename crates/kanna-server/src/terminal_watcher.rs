@@ -548,7 +548,7 @@ mod tests {
     use kanna_daemon::headless_terminal::{initial_session_status, HeadlessTerminal};
     use kanna_daemon::protocol::{
         AgentProvider, Command as DaemonCommand, ComposerAttestation, Event as DaemonEvent,
-        SessionInfo, SessionState,
+        SessionInfo, SessionState, SessionStatus,
     };
     use kanna_daemon::session::{replay_headless_terminal_for_benchmark, BenchmarkStatusState};
     use std::path::{Path, PathBuf};
@@ -1668,11 +1668,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(daemon_dir);
     }
 
-    /// Feed the structural byte sequence from the checked-in Codex v0.140 PTY
-    /// capture through the daemon classifier and this server's real DB mapping.
-    /// Codex opens DEC synchronized output, temporarily paints the working
-    /// footer, then closes the bracket on an idle composer. The intermediate
-    /// frame must never reach `runtime_status` or re-arm sidebar working state.
+    /// Feed the parked prefix of the checked-in Codex v0.140 PTY capture
+    /// byte-for-byte through the daemon classifier and this server's real DB
+    /// mapping. Before the recorded user prompt is submitted, the interactive
+    /// TUI sits at its composer while its update banner, title spinner, and
+    /// synchronized idle frames repaint. Capture provenance is recorded in
+    /// `tests/tui-fidelity/README.md`. One-byte replay preserves every original
+    /// byte and ordering while exercising every possible PTY read split,
+    /// including splits inside ANSI and DEC synchronized-output sequences.
     #[test]
     fn recorded_codex_idle_chrome_does_not_flap_server_activity_to_working() {
         let unique = unique_name("terminal-watcher-codex-idle-chrome");
@@ -1685,62 +1688,56 @@ mod tests {
             .unwrap();
 
         let provider = AgentProvider::Codex;
-        let mut terminal = HeadlessTerminal::new(120, 40, 10_000).unwrap();
+        let mut terminal = HeadlessTerminal::new(220, 48, 10_000).unwrap();
         let mut classifier = BenchmarkStatusState::new(initial_session_status(Some(provider)));
+        // Model the owner-observed session after it has previously published
+        // Busy; absence of a busy marker can only settle an observed session.
+        classifier.status_observed = true;
         let started_at = std::time::Instant::now();
-        let captured_chunks: [(u64, &[u8]); 4] = [
-            (
-                0,
-                concat!(
-                    "\x1b[?2026h\x1b[2J\x1b[H• Working (43s • esc to interrupt)\r\n",
-                    "› Improve documentation in @filename\r\n",
-                    "gpt-5.5 high · /tmp/kanna-codex-fixture-root\x1b[?2026l",
-                )
-                .as_bytes(),
-            ),
-            (
-                600,
-                concat!(
-                    "\x1b[?2026h\x1b[2J\x1b[H• Finished the requested work.\r\n",
-                    "› Improve documentation in @filename\r\n",
-                    "gpt-5.5 high · /tmp/kanna-codex-fixture-root\x1b[?2026l",
-                )
-                .as_bytes(),
-            ),
-            (
-                1_200,
-                concat!(
-                    "\x1b]0;⠹ kanna-codex-fixture-root\x07",
-                    "\x1b[?2026h\x1b[2J\x1b[H• Working (43s • esc to interrupt)\r\n",
-                )
-                .as_bytes(),
-            ),
-            (
-                1_210,
-                concat!(
-                    "\x1b[2J\x1b[H• Finished the requested work.\r\n",
-                    "› Improve documentation in @filename\r\n",
-                    "gpt-5.5 high · /tmp/kanna-codex-fixture-root\x1b[?2026l",
-                )
-                .as_bytes(),
-            ),
-        ];
+        let capture = include_bytes!("../../../tests/tui-fidelity/fixtures/codex-pwd-tool.ansi");
+        let submitted_prompt = b"Use the shell to run pwd";
+        let parked_end = capture
+            .windows(submitted_prompt.len())
+            .position(|window| window == submitted_prompt)
+            .expect("recorded Codex submission boundary");
+        let parked_capture = &capture[..parked_end];
+        let mut reached_parked_idle = false;
+        let mut later_idle_repaint_frames = 0;
 
-        for (at_ms, bytes) in captured_chunks {
+        for (byte_offset, bytes) in parked_capture.chunks(1).enumerate() {
+            let was_parked_idle = reached_parked_idle;
+            let frame_was_complete = terminal.status_frame_complete();
             let changed = replay_headless_terminal_for_benchmark(
                 &mut terminal,
                 Some(provider),
                 &mut classifier,
                 started_at,
-                at_ms,
+                u64::try_from(byte_offset).unwrap(),
                 bytes,
             )
             .unwrap();
             if let Some(status) = changed {
+                assert!(
+                    !(was_parked_idle && status == SessionStatus::Busy),
+                    "recorded idle chrome published Busy at capture byte {byte_offset}"
+                );
                 classifier.status = status;
                 apply_watcher_runtime_status(&state, "task-child", status, None).unwrap();
+                reached_parked_idle |= status == SessionStatus::Idle;
+            }
+            if was_parked_idle && !frame_was_complete && terminal.status_frame_complete() {
+                later_idle_repaint_frames += 1;
             }
         }
+
+        assert!(
+            reached_parked_idle,
+            "recorded parked composer never became idle"
+        );
+        assert!(
+            later_idle_repaint_frames > 0,
+            "fixture did not exercise a synchronized repaint after reaching idle"
+        );
 
         let item = db.get_pipeline_item("task-child").unwrap().unwrap();
         assert_eq!(item.runtime_status.as_deref(), Some("idle"));
