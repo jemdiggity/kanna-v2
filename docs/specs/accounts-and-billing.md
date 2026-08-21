@@ -185,6 +185,12 @@ publication transaction, and the Firestore Rules governing direct desktop
 profile and credential writes read it as their durable write fence. Checkout
 uses the tombstone and its `accountCheckouts/{uid}` admission record as one
 transactional coordination boundary rather than relying on a one-time read.
+The relay's `/register` and `/push/register` handlers likewise read the
+tombstone and write `devices/{token}` or `users/{uid}/pushDevices/{id}` in one
+transaction. A registration that commits first is included in the subsequent
+deletion sweep; a transaction that would commit after the tombstone is written
+conflicts, retries against the tombstone, and is rejected even if Firebase
+still accepts its already-issued ID token.
 Cancellation events, cached or in-flight publishers, direct desktop writes,
 and cached-token checkout calls following deletion are rejected without
 recreating Stripe, dedupe, billing, entitlement, profile, credential, desktop,

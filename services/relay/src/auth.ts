@@ -8,6 +8,14 @@ import { getFirebaseServices } from "./firebase.js";
  * secret-hash comparison below still selects the correct owner.
  */
 const DESKTOP_LOOKUP_LIMIT = 10;
+const ACCOUNT_DELETIONS_COLLECTION = "accountDeletions";
+
+export class AccountDeletionInProgressError extends Error {
+  constructor() {
+    super("account deletion is in progress");
+    this.name = "AccountDeletionInProgressError";
+  }
+}
 
 /**
  * How long a successful `desktopCredentials` validation stays usable for
@@ -372,14 +380,21 @@ export async function registerDevice(
 ): Promise<void> {
   try {
     const { db } = getFirebaseServices();
-    await db.collection("devices").doc(deviceToken).set({
-      userId,
-      createdAt: new Date().toISOString(),
+    await db.runTransaction(async (transaction) => {
+      const deletion = await transaction.get(
+        db.collection(ACCOUNT_DELETIONS_COLLECTION).doc(userId),
+      );
+      if (deletion.exists) throw new AccountDeletionInProgressError();
+      transaction.set(db.collection("devices").doc(deviceToken), {
+        userId,
+        createdAt: new Date().toISOString(),
+      });
     });
     console.log(
       `[auth] Registered device ${deviceToken} for user ${userId}`
     );
   } catch (err) {
+    if (err instanceof AccountDeletionInProgressError) throw err;
     console.error("[auth] Failed to register device:", err);
     throw err;
   }
@@ -392,20 +407,30 @@ export async function registerPushDevice(
 ): Promise<void> {
   try {
     const { db } = getFirebaseServices();
-    await db
-      .collection("users")
-      .doc(userId)
-      .collection("pushDevices")
-      .doc(hashPushDeviceId(deviceId))
-      .set({
-        deviceId,
-        token: deviceToken,
-        updatedAt: new Date().toISOString(),
-      }, { merge: true });
+    await db.runTransaction(async (transaction) => {
+      const deletion = await transaction.get(
+        db.collection(ACCOUNT_DELETIONS_COLLECTION).doc(userId),
+      );
+      if (deletion.exists) throw new AccountDeletionInProgressError();
+      transaction.set(
+        db
+          .collection("users")
+          .doc(userId)
+          .collection("pushDevices")
+          .doc(hashPushDeviceId(deviceId)),
+        {
+          deviceId,
+          token: deviceToken,
+          updatedAt: new Date().toISOString(),
+        },
+        { merge: true },
+      );
+    });
     console.log(
       `[auth] Registered mobile push device ${deviceId} for user ${userId}`
     );
   } catch (err) {
+    if (err instanceof AccountDeletionInProgressError) throw err;
     console.error("[auth] Failed to register mobile push device:", err);
     throw err;
   }

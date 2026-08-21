@@ -1221,11 +1221,15 @@ describe("Relay integration", () => {
     await closeAndWait(ws);
   });
 
-  it("fences cached and in-flight desktop publication once account deletion starts", async () => {
+  it("fences relay registrations and cached or in-flight publication once deletion starts", async () => {
     const deletionRef = testFirestore.doc(`accountDeletions/${TEST_USER_ID}`);
     const credentialRef = testFirestore.doc(`desktopCredentials/${SECRET_DESKTOP_ID}`);
     const userRef = testFirestore.doc(`users/${TEST_USER_ID}`);
     const desktopRef = userRef.collection("desktops").doc(SECRET_DESKTOP_ID);
+    const registrationToken = "delete-race-device-token";
+    const deviceRef = testFirestore.doc(`devices/${registrationToken}`);
+    const pushDeviceId = "delete-race-push-device";
+    const pushDeviceRef = userRef.collection("pushDevices").doc(sha256Hex(pushDeviceId));
     const claimed = deferredVoid();
     const release = deferredVoid();
     const deletionStarted = deferredVoid();
@@ -1242,6 +1246,25 @@ describe("Relay integration", () => {
     });
 
     try {
+      const registerDeviceBeforeDeletion = await fetch(relayHttpUrl("/register"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ idToken, deviceToken: registrationToken }),
+      });
+      expect(registerDeviceBeforeDeletion.status).toBe(200);
+      const registerPushBeforeDeletion = await fetch(relayHttpUrl("/push/register"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          idToken,
+          deviceId: pushDeviceId,
+          deviceToken: "delete-race-fcm-token",
+        }),
+      });
+      expect(registerPushBeforeDeletion.status).toBe(200);
+      expect((await deviceRef.get()).exists).toBe(true);
+      expect((await pushDeviceRef.get()).exists).toBe(true);
+
       const warmAck = waitForMessage(ws, (message) =>
         message.type === "task_snapshot_ack" && message.id === "delete-race-warm");
       ws.send(JSON.stringify({
@@ -1263,22 +1286,29 @@ describe("Relay integration", () => {
         snapshot: publishedSnapshot("working"),
         store: inFlightStore,
       });
+      const inFlightRejection = expect(inFlight).rejects.toThrow(
+        "account deletion is in progress",
+      );
       await claimed.promise;
 
       const deletionStore = firestoreAccountDeletionStore(testFirestore);
       const pausedDeletionStore: AccountDeletionStore = {
         ...deletionStore,
         async markAccountDeletionStarted(uid) {
-          await deletionStore.markAccountDeletionStarted(uid);
+          const sessionIds = await deletionStore.markAccountDeletionStarted(uid);
           deletionStarted.resolve();
           await continueDeletion.promise;
+          return sessionIds;
         },
       };
       const deletion = deleteAccount(
         { uid: TEST_USER_ID },
         {
           store: pausedDeletionStore,
-          stripe: { cancelSubscription: vi.fn(async () => undefined) },
+          stripe: {
+            cancelSubscription: vi.fn(async () => undefined),
+            closeCheckoutSession: vi.fn(async () => undefined),
+          },
           auth: {
             revokeRefreshTokens: vi.fn(async () => undefined),
             deleteUser: vi.fn(async () => undefined),
@@ -1288,7 +1318,30 @@ describe("Relay integration", () => {
       await deletionStarted.promise;
       release.resolve();
 
-      await expect(inFlight).rejects.toThrow("account deletion is in progress");
+      const registerDeviceAfterFence = await fetch(relayHttpUrl("/register"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ idToken, deviceToken: registrationToken }),
+      });
+      expect(registerDeviceAfterFence.status).toBe(409);
+      expect(await registerDeviceAfterFence.json()).toEqual({
+        error: "account deletion is in progress",
+      });
+      const registerPushAfterFence = await fetch(relayHttpUrl("/push/register"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          idToken,
+          deviceId: pushDeviceId,
+          deviceToken: "replacement-fcm-token",
+        }),
+      });
+      expect(registerPushAfterFence.status).toBe(409);
+      expect(await registerPushAfterFence.json()).toEqual({
+        error: "account deletion is in progress",
+      });
+
+      await inFlightRejection;
       const cachedAck = waitForMessage(ws, (message) =>
         message.type === "task_snapshot_ack" && message.id === "delete-race-cached");
       ws.send(JSON.stringify({
@@ -1304,11 +1357,14 @@ describe("Relay integration", () => {
       await expect(deletion).resolves.toEqual({ deleted: true });
       expect((await desktopRef.get()).exists).toBe(false);
       expect((await desktopRef.collection("tasks").get()).empty).toBe(true);
+      expect((await deviceRef.get()).exists).toBe(false);
+      expect((await pushDeviceRef.get()).exists).toBe(false);
     } finally {
       release.resolve();
       continueDeletion.resolve();
       if (ws.readyState < WebSocket.CLOSING) await closeAndWait(ws);
       await testFirestore.recursiveDelete(userRef);
+      await deviceRef.delete();
       await deletionRef.delete();
       await credentialRef.set({
         desktopId: SECRET_DESKTOP_ID,
