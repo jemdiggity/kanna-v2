@@ -28,7 +28,12 @@ import {
 } from "./desktopAuthStorage";
 
 let sessionPromise: Promise<DesktopAuthSession> | null = null;
+let firebaseConfigPromise: ReturnType<typeof resolveDesktopFirebaseConfig> | null = null;
 let connectedAuthEmulatorUrl: string | null = null;
+
+export async function getConfiguredDesktopPortalBaseUrl(): Promise<string> {
+  return (await resolveConfiguredDesktopFirebaseConfig()).portalBaseUrl;
+}
 
 export function getConfiguredDesktopAuthSession(): Promise<DesktopAuthSession> {
   sessionPromise ??= createConfiguredDesktopAuthSession();
@@ -36,10 +41,7 @@ export function getConfiguredDesktopAuthSession(): Promise<DesktopAuthSession> {
 }
 
 async function createConfiguredDesktopAuthSession(): Promise<DesktopAuthSession> {
-  const config = await resolveDesktopFirebaseConfig({
-    readEnv: (name) => invoke<string>("read_env_var", { name }),
-    dev: import.meta.env.DEV,
-  });
+  const config = await resolveConfiguredDesktopFirebaseConfig();
 
   if (!config.app) {
     return createDisabledDesktopAuthSession("Firebase Auth is not configured.");
@@ -78,6 +80,14 @@ async function createConfiguredDesktopAuthSession(): Promise<DesktopAuthSession>
   return createDesktopAuthSession({
     sdk: createFirebaseDesktopAuthSdk(auth, app),
   });
+}
+
+function resolveConfiguredDesktopFirebaseConfig() {
+  firebaseConfigPromise ??= resolveDesktopFirebaseConfig({
+    readEnv: (name) => invoke<string>("read_env_var", { name }),
+    dev: import.meta.env.DEV,
+  });
+  return firebaseConfigPromise;
 }
 
 function resolveDesktopAuthPersistence(

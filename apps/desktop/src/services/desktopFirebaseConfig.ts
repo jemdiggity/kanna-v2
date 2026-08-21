@@ -19,6 +19,7 @@ export interface DesktopFirebaseConfig {
   authEmulator: DesktopFirebaseAuthEmulatorConfig | null;
   firestoreEmulator: DesktopFirebaseAuthEmulatorConfig | null;
   functionsEndpoint: string | null;
+  portalBaseUrl: string;
 }
 
 export interface ResolveDesktopFirebaseConfigOptions {
@@ -32,12 +33,22 @@ export async function resolveDesktopFirebaseConfig({
   readEnv,
   dev,
 }: ResolveDesktopFirebaseConfigOptions): Promise<DesktopFirebaseConfig> {
-  const [runtimeApp, authPort, firestorePort, runtimeFunctionsEndpoint, cloudEnvRaw] =
+  const [
+    runtimeApp,
+    authPort,
+    firestorePort,
+    runtimeFunctionsEndpoint,
+    runtimePortalBaseUrl,
+    webPortalPort,
+    cloudEnvRaw,
+  ] =
     await Promise.all([
       readRuntimeAppConfig(readEnv),
       readEnv("KANNA_FIREBASE_AUTH_PORT").catch(() => ""),
       readEnv("KANNA_FIREBASE_FIRESTORE_PORT").catch(() => ""),
       readEnv("KANNA_CLOUD_FUNCTIONS_ENDPOINT").catch(() => ""),
+      readEnv("KANNA_PORTAL_BASE_URL").catch(() => ""),
+      readEnv("KANNA_WEB_PORTAL_PORT").catch(() => ""),
       readEnv("KANNA_CLOUD_ENV").catch(() => ""),
     ]);
 
@@ -55,7 +66,29 @@ export async function resolveDesktopFirebaseConfig({
     authEmulator: useEmulators ? parseAuthEmulatorPort(authPort) : null,
     firestoreEmulator: useEmulators ? parseAuthEmulatorPort(firestorePort) : null,
     functionsEndpoint: useEmulators ? parseFunctionsEndpoint(runtimeFunctionsEndpoint) : null,
+    portalBaseUrl: resolvePortalBaseUrl({
+      runtimePortalBaseUrl,
+      webPortalPort,
+      cloudEnv,
+      dev,
+    }),
   };
+}
+
+function resolvePortalBaseUrl(input: {
+  runtimePortalBaseUrl: string;
+  webPortalPort: string;
+  cloudEnv: DesktopCloudEnv | null;
+  dev: boolean;
+}): string {
+  const runtime = parseHttpBaseUrl(input.runtimePortalBaseUrl);
+  if (runtime) return runtime;
+  if (input.cloudEnv === "staging") return "https://kanna-staging-account.web.app";
+  if (input.cloudEnv === "production") return "https://kanna-build-account.web.app";
+  if (!input.dev) return "https://kanna-build-account.web.app";
+
+  const port = parsePort(input.webPortalPort) ?? 5173;
+  return `http://127.0.0.1:${port}`;
 }
 
 function normalizeCloudEnv(raw: string | undefined): DesktopCloudEnv | null {
@@ -176,17 +209,22 @@ function compactAppConfig(config: DesktopFirebaseAppConfig): DesktopFirebaseAppC
 function parseAuthEmulatorPort(
   rawPort: string | undefined
 ): DesktopFirebaseAuthEmulatorConfig | null {
-  const normalized = normalizeEnvValue(rawPort);
-  if (!normalized) return null;
-
-  const port = Number(normalized);
-  if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+  const port = parsePort(rawPort);
+  if (!port) return null;
 
   return {
     host: "127.0.0.1",
     port,
     url: `http://127.0.0.1:${port}`,
   };
+}
+
+function parsePort(rawPort: string | undefined): number | null {
+  const normalized = normalizeEnvValue(rawPort);
+  if (!normalized) return null;
+
+  const port = Number(normalized);
+  return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null;
 }
 
 function parseFunctionsEndpoint(
@@ -207,6 +245,20 @@ function parseRuntimeFunctionsEndpoint(rawEndpoint: string | undefined): string 
     return url.protocol === "http:" || url.protocol === "https:" ? normalized : null;
   } catch (error) {
     console.debug("[firebase-config] invalid runtime functions endpoint:", error);
+    return null;
+  }
+}
+
+function parseHttpBaseUrl(rawUrl: string | undefined): string | null {
+  const normalized = normalizeEnvValue(rawUrl);
+  if (!normalized) return null;
+
+  try {
+    const url = new URL(normalized);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    return normalized.replace(/\/$/, "");
+  } catch (error) {
+    console.debug("[firebase-config] invalid portal base URL:", error);
     return null;
   }
 }

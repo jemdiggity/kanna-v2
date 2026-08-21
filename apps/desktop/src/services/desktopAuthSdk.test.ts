@@ -83,9 +83,22 @@ describe("getConfiguredDesktopAuthSession", () => {
       authEmulator: null,
       firestoreEmulator: null,
       functionsEndpoint: null,
+      portalBaseUrl: "http://127.0.0.1:5173",
     });
     mocks.createDesktopAuthSettingsPersistence.mockReset().mockReturnValue(MockDesktopPersistence);
     mocks.verifyFirebaseAuthIndexedDbStorage.mockReset().mockResolvedValue({ available: true });
+  });
+
+  it("shares the resolved cloud environment with the portal URL", async () => {
+    const {
+      getConfiguredDesktopAuthSession,
+      getConfiguredDesktopPortalBaseUrl,
+    } = await import("./desktopAuthSdk");
+
+    await expect(getConfiguredDesktopPortalBaseUrl()).resolves.toBe("http://127.0.0.1:5173");
+    await getConfiguredDesktopAuthSession();
+
+    expect(mocks.resolveDesktopFirebaseConfig).toHaveBeenCalledOnce();
   });
 
   it("initializes Firebase Auth with non-IndexedDB persistence when Auth IndexedDB storage is unavailable", async () => {

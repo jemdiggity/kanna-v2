@@ -13,8 +13,18 @@ const authSession = {
   getIdToken: vi.fn(),
 };
 
+const portal = vi.hoisted(() => ({
+  baseUrl: "http://127.0.0.1:5173",
+  openUrl: vi.fn(),
+}));
+
 vi.mock("../../services/desktopAuthSdk", () => ({
   getConfiguredDesktopAuthSession: vi.fn(async () => authSession),
+  getConfiguredDesktopPortalBaseUrl: vi.fn(async () => portal.baseUrl),
+}));
+
+vi.mock("@tauri-apps/plugin-opener", () => ({
+  openUrl: portal.openUrl,
 }));
 
 vi.mock("vue-i18n", () => ({
@@ -83,6 +93,8 @@ describe("PreferencesPanel account sign-in", () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
+    portal.baseUrl = "http://127.0.0.1:5173";
+    portal.openUrl.mockResolvedValue(undefined);
     signedOutSession();
     PreferencesPanel = (await import("../PreferencesPanel.vue")).default;
   });
@@ -149,5 +161,43 @@ describe("PreferencesPanel account sign-in", () => {
 
     expect(wrapper.text()).toContain("Desktop ID");
     expect(wrapper.text()).toContain("desktop-current");
+  });
+
+  it.each([
+    ["development", "http://127.0.0.1:5173"],
+    ["staging", "https://kanna-staging-account.web.app"],
+    ["production", "https://kanna-build-account.web.app"],
+  ])("opens the %s portal registration route for signed-out users", async (_environment, baseUrl) => {
+    portal.baseUrl = baseUrl;
+    const wrapper = mountPreferences();
+    await flushPromises();
+
+    await wrapper.get('[data-testid="preferences-account-tab"]').trigger("click");
+    await wrapper.get('[data-testid="account-create"]').trigger("click");
+    await flushPromises();
+
+    expect(portal.openUrl).toHaveBeenCalledExactlyOnceWith(`${baseUrl}/register`);
+  });
+
+  it.each([
+    ["development", "http://127.0.0.1:5173"],
+    ["staging", "https://kanna-staging-account.web.app"],
+    ["production", "https://kanna-build-account.web.app"],
+  ])("opens the %s portal account route for signed-in users", async (_environment, baseUrl) => {
+    portal.baseUrl = baseUrl;
+    const wrapper = mountPreferences();
+    await flushPromises();
+
+    await wrapper.get('[data-testid="preferences-account-tab"]').trigger("click");
+    await wrapper.get('[data-testid="account-email"]').setValue("upvote.sieve.7t@icloud.com");
+    await wrapper.get('[data-testid="account-password"]').setValue("password123");
+    await wrapper.get('[data-testid="account-sign-in"]').trigger("submit");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("Sign in with your Kanna account.");
+    await wrapper.get('[data-testid="account-manage-subscription"]').trigger("click");
+    await flushPromises();
+
+    expect(portal.openUrl).toHaveBeenCalledExactlyOnceWith(`${baseUrl}/account`);
   });
 });

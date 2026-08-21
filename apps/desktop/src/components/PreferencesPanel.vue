@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { openUrl } from '@tauri-apps/plugin-opener'
 import {
   AGENT_PROVIDERS,
   AGENT_PROVIDER_SPECS,
@@ -13,7 +14,10 @@ import { invoke } from "../invoke"
 import { useModalZIndex } from '../composables/useModalZIndex'
 import MobileAccessPanel from './MobileAccessPanel.vue'
 import { macOsTextInputAttrs } from '../utils/textInput'
-import { getConfiguredDesktopAuthSession } from '../services/desktopAuthSdk'
+import {
+  getConfiguredDesktopAuthSession,
+  getConfiguredDesktopPortalBaseUrl,
+} from '../services/desktopAuthSdk'
 import type { DesktopAuthSession, DesktopAuthState } from '../services/desktopAuth'
 import type { AppThemePreference, CodeThemePreference } from '../theme/theme'
 import type { AgentMessageAppearance } from '../stores/state'
@@ -196,6 +200,17 @@ async function signOutAccount() {
   }
 }
 
+async function openAccountPortal(path: "/register" | "/account") {
+  accountMessage.value = ""
+  try {
+    const baseUrl = await getConfiguredDesktopPortalBaseUrl()
+    await openUrl(`${baseUrl}${path}`)
+  } catch (error) {
+    console.error("[PreferencesPanel] failed to open the account portal:", error)
+    accountMessage.value = "Could not open the Kanna account portal."
+  }
+}
+
 function handleDefaultAgentChange(value: string) {
   const headless = value.endsWith("-sdk")
   const rawProvider = headless ? value.slice(0, -4) : value
@@ -366,6 +381,15 @@ defineExpose({ cycleTab })
             <button
               type="button"
               class="secondary-button"
+              data-testid="account-manage-subscription"
+              @click="openAccountPortal('/account')"
+            >
+              Manage subscription
+            </button>
+            <p class="account-help">Opens the web portal. Sign in with your Kanna account.</p>
+            <button
+              type="button"
+              class="secondary-button"
               data-testid="account-sign-out"
               @click="signOutAccount"
             >
@@ -411,6 +435,14 @@ defineExpose({ cycleTab })
 
             <button type="submit" class="primary-button" :disabled="isSigningIn">
               {{ isSigningIn ? "Signing in..." : "Sign in" }}
+            </button>
+            <button
+              type="button"
+              class="account-link"
+              data-testid="account-create"
+              @click="openAccountPortal('/register')"
+            >
+              Create account
             </button>
           </form>
 
@@ -642,6 +674,25 @@ defineExpose({ cycleTab })
   color: var(--kn-danger);
   font-size: 12px;
   line-height: 1.4;
+}
+
+.account-help {
+  margin: -2px 0 0;
+  color: var(--kn-text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.account-link {
+  align-self: flex-start;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--kn-accent);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  text-decoration: underline;
 }
 
 .primary-button,
