@@ -10,6 +10,7 @@ export interface KdPorts {
   KANNA_FIREBASE_FIRESTORE_PORT: number;
   KANNA_FIREBASE_FUNCTIONS_PORT: number;
   KANNA_FIREBASE_UI_PORT: number;
+  KANNA_WEB_PORTAL_PORT: number;
 }
 
 export const defaultPorts: KdPorts = {
@@ -23,7 +24,8 @@ export const defaultPorts: KdPorts = {
   KANNA_FIREBASE_AUTH_PORT: 9099,
   KANNA_FIREBASE_FIRESTORE_PORT: 8080,
   KANNA_FIREBASE_FUNCTIONS_PORT: 5001,
-  KANNA_FIREBASE_UI_PORT: 4000
+  KANNA_FIREBASE_UI_PORT: 4000,
+  KANNA_WEB_PORTAL_PORT: 5173
 };
 
 export interface ResolvePortsInput {
@@ -55,6 +57,7 @@ export function resolvePorts(input: ResolvePortsInput): KdPorts {
     KANNA_FIREBASE_AUTH_PORT: resolvePort("KANNA_FIREBASE_AUTH_PORT", input),
     KANNA_FIREBASE_FIRESTORE_PORT: resolvePort("KANNA_FIREBASE_FIRESTORE_PORT", input),
     KANNA_FIREBASE_FUNCTIONS_PORT: resolvePort("KANNA_FIREBASE_FUNCTIONS_PORT", input),
-    KANNA_FIREBASE_UI_PORT: resolvePort("KANNA_FIREBASE_UI_PORT", input)
+    KANNA_FIREBASE_UI_PORT: resolvePort("KANNA_FIREBASE_UI_PORT", input),
+    KANNA_WEB_PORTAL_PORT: resolvePort("KANNA_WEB_PORTAL_PORT", input)
   };
 }

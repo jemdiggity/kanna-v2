@@ -11,6 +11,24 @@ a second owner addition (verbatim): "Also I'll need a leech flag for users who
 don't need to pay" — the complimentary `comp` entitlement source in
 Decision 3.
 
+Amended again 2026-08-21 by task `1d70926f` on the owner's account-surface
+decision: **the web account portal is the sole account-creation and payment
+surface**. Desktop remains sign-in-only in-app and opens the environment's
+portal in the system browser for registration (`/register`) and subscription
+management (`/account`); it never embeds signup or billing and never transfers
+an auth token to the browser. The browser has its own session, so desktop copy
+directs the user to sign in there with their Kanna account. Mobile likewise
+remains sign-in-only in-app. This ruling supersedes the in-app mobile
+registration and IAP launch-channel portions below wherever they conflict;
+in-app account deletion remains available for lifecycle compliance.
+
+Whether mobile may or should link to the external payment surface is a parked
+owner decision, not an implementation assumption. Before deciding, verify the
+then-current storefront and entitlement requirements for US external-payment
+link-outs, the EU Digital Markets Act, and Japan's smartphone competition law.
+Until that decision is made, mobile exposes neither portal signup nor payment
+links.
+
 Amended again 2026-08-21 by task `ed6c7f7b` on two further owner rulings,
 recorded verbatim:
 
@@ -92,37 +110,21 @@ Confirmed by source inspection; corrections to the consultation prompt noted.
 mobile, desktop, relay verification, and Firestore rules; replacing it buys
 nothing. Additions:
 
-- **Registration ships on both surfaces at launch.** The web account portal
-  at `kanna.build` (register → verify email → subscribe → manage billing →
-  delete account) remains the web channel's funnel and the only place Stripe
-  Checkout is reachable. The iOS app **additionally gets in-app registration**
-  (Firebase email/password `createUser` + `sendEmailVerification`) in the same
-  binary that carries IAP: with purchase available in the app, sending a
-  stranger to the website to make an account before they can buy is bad UX
-  and plausible App Review friction. Email/password only at launch on both
-  surfaces; no social providers (adding Google would drag in mandatory Sign
-  in with Apple on iOS — defer both; plain email/password registration does
-  not trigger guideline 4.8, verify item).
-- **In-app registration triggers Apple's in-app account deletion requirement
-  (5.1.1(v))**, so the same binary must carry an in-app deletion screen
-  backed by the `deleteAccount` pipeline below. Deletion thereby moves from
-  "lifecycle completeness" into the launch-blocking set for the app channel
-  (Decision 7). The prior verdict's "mobile registration is a fast-follow"
-  paragraph is superseded by this amendment.
-- **Account-first purchase, always.** A purchase requires a signed-in,
-  email-verified Firebase account before StoreKit is invoked; the purchase is
-  bound to the account via `appAccountToken` (Decision 4). Anonymous
-  purchase-then-bind-later is rejected: it requires parking orphaned
-  transactions keyed only by Apple identity, a claim/merge flow, and a
-  support queue for every edge (device shared, wrong account claimed,
-  restore-before-claim). Account-first with `appAccountToken` is simpler,
-  honest, and what the reconciliation rules in Decision 4 assume.
-- **Email verification**: required before an entitlement can activate, on
-  both channels. The billing backend refuses to create a Stripe Checkout
-  session for an unverified account, refuses to mint an `appAccountToken`
-  for one (the IAP-side enforcement point — the purchase UI stays disabled
-  until verified), and the relay treats `email_verified: false` phone tokens
-  as unentitled.
+- **Registration ships only in the web account portal.** The portal (register
+  → verify email → subscribe → manage billing → delete account) is also the
+  only payment funnel. Desktop links to it in the system browser; mobile stays
+  sign-in-only in-app. Email/password is the only launch identity method; no
+  social providers.
+- **Mobile keeps in-app account deletion** backed by the `deleteAccount`
+  pipeline below even though registration has moved exclusively to the web.
+  Removing signup does not remove the user's lifecycle or compliance need to
+  delete an account from the signed-in app.
+- **Account-first purchase, always.** Portal payment requires a signed-in,
+  email-verified Firebase account. Anonymous purchase-then-bind-later remains
+  rejected because it creates orphaned purchases and account-claim ambiguity.
+- **Email verification** is required before a portal purchase can activate an
+  entitlement, and the relay treats `email_verified: false` phone tokens as
+  unentitled.
 - **Password reset**: Firebase `sendPasswordResetEmail`, surfaced on the
   portal sign-in page and as a "Forgot password?" link in the mobile
   `AccountSheet`.
@@ -239,9 +241,15 @@ Data export is a separate follow-up. The deliberate no-undo choice keeps this
 operation honest and immediate; export support does not weaken or delay
 deletion.
 
-## Decision 2 — The Apple question
+## Decision 2 — The Apple question (superseded; mobile link-out decision parked)
 
-**Answered by the owner (2026-08-20): the iOS app sells `cloud_access` as an
+The 2026-08-21 surface ruling above supersedes this earlier launch plan:
+payment now occurs only in the web portal, and mobile remains sign-in-only
+in-app. Whether mobile can link to that external payment surface remains the
+explicit regional owner decision recorded above. The historical design below
+is retained as context, not current implementation authority.
+
+**Earlier owner decision (2026-08-20): the iOS app sells `cloud_access` as an
 auto-renewable In-App Purchase from the start.** This is Model 1 of the
 strategy doc — the same entitlement sold through StoreKit on iOS and Stripe
 on the web, normalized into one backend entitlement record. The original

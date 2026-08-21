@@ -2,6 +2,39 @@ import { describe, expect, it, vi } from "vitest";
 import { resolveDesktopFirebaseConfig } from "./desktopFirebaseConfig";
 
 describe("resolveDesktopFirebaseConfig", () => {
+  it("resolves the local portal from the workspace port", async () => {
+    const config = await resolveDesktopFirebaseConfig({
+      readEnv: async (name) => (name === "KANNA_WEB_PORTAL_PORT" ? "15173" : ""),
+      dev: true,
+    });
+
+    expect(config.portalBaseUrl).toBe("http://127.0.0.1:15173");
+  });
+
+  it.each([
+    ["staging", "https://kanna-staging-account.web.app"],
+    ["production", "https://kanna-build-account.web.app"],
+  ])("resolves the %s account portal", async (cloudEnv, expectedUrl) => {
+    const config = await resolveDesktopFirebaseConfig({
+      readEnv: async (name) => (name === "KANNA_CLOUD_ENV" ? cloudEnv : ""),
+      dev: true,
+    });
+
+    expect(config.portalBaseUrl).toBe(expectedUrl);
+  });
+
+  it("allows an explicit portal base URL override", async () => {
+    const config = await resolveDesktopFirebaseConfig({
+      readEnv: async (name) => ({
+        KANNA_CLOUD_ENV: "staging",
+        KANNA_PORTAL_BASE_URL: "https://portal.example.test/",
+      })[name] ?? "",
+      dev: true,
+    });
+
+    expect(config.portalBaseUrl).toBe("https://portal.example.test");
+  });
+
   it("uses the workspace-provided auth emulator port", async () => {
     const readEnv = vi.fn(async (name: string) => {
       if (name === "KANNA_FIREBASE_AUTH_PORT") return "19100";
