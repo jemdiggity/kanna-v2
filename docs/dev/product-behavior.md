@@ -28,10 +28,13 @@ semantics, and the MCP task-management rule — stay in the repo-root
 **Revisions.** Sending a task back for revision follows these contracts
 (engine code: `crates/kanna-server/src/task_creator/{stages,resume}.rs`):
 
-- *Feedback is required.* An agent-originated revision request with an empty
-  prompt is refused (400) before a revision round is spent or the review run
-  is closed; other callers fall back to the terminating run's recorded
-  verdict. Human-originated revisions are never refused.
+- *Feedback is required — for every caller.* An agent-originated request with
+  an empty prompt is refused (400) at the API boundary, before a revision
+  round is spent or the review run is closed, so the reviewer can resend its
+  findings. Every other caller — the human path included — falls back to the
+  terminating run's recorded `feedback`, then to its result `summary`; if
+  neither holds anything to act on, preparation is refused rather than
+  started empty (and any claimed round is handed back).
 - *Revisions resume by default, provider-neutrally.* `request_revision`
   reopens the target stage's previous PTY agent session in that run's **own
   worktree** — Claude, Copilot, Codex, and OpenCode all resume when their
@@ -46,8 +49,9 @@ semantics, and the MCP task-management rule — stay in the repo-root
   (`0` = unlimited) and counts only *agent-requested* revisions. Once spent,
   an agent's `request_revision` starts nothing: the review verdict is still
   recorded, the task parks `unread` at its current stage, and the response
-  carries `revisionBudget.exhausted: true`. A *human* revision is never
-  refused and **resets** the count.
+  carries `revisionBudget.exhausted: true`. A *human* revision bypasses the
+  budget and **resets** the count — but only the budget: it is still subject
+  to feedback resolution and every other preparation precondition.
 - *The task's terms live in its committed spec* —
   `docs/task-specs/<task-id>.md`, written by the implement agent, updated in
   the same commits as the work, and judged by later review stages

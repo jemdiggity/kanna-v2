@@ -327,12 +327,24 @@ The contracts below are specified in
   success now means *submitted* — the daemon acknowledges only after the
   message bytes and the delayed Enter both landed. Deliveries the daemon
   accepts are appended to the durable `task_input` ledger with source
-  (`operator`/`manager`/`notify`/`unspecified`), stage, and run. A human draft
-  in the composer holds delivery (409 `input_held_by_draft`) — but only a
-  draft with typed bytes: the daemon keeps a **composer attestation** ledger
-  (`typed` / `not-typed` / `unknown`), task detail reports
-  `composer: { text, attestation }`, and the task-logs tail labels the
-  composer line instead of presenting it as session output.
+  (`operator`/`manager`/`notify`/`unspecified`), stage, and run. Whether a
+  composer draft holds delivery follows the daemon's **composer attestation**
+  ledger, a three-way evidence state
+  (`crates/daemon/SPEC.md`, protected-input and composer-attestation):
+  - `not-typed` (zero bytes counted since the last submission boundary) is
+    *proven empty* — the message delivers immediately, even while provider
+    chrome renders a tab-to-accept suggestion on the composer line;
+  - `typed` holds the queued message and answers 409 `input_held_by_draft`
+    until the human's next submission boundary;
+  - `unknown` is **not** zero: it conservatively stays held or blocked until
+    a submission boundary or a valid empty-composer attestation resolves it,
+    and a session inherited with unknown draft state answers 409
+    `input_blocked` (`inputBlocked: "inherited-draft-unknown"`) until then.
+
+  Composer text is never session output: task detail reports it separately as
+  `composer: { text, attestation }`, the task-logs tail labels the composer
+  line, and text whose attestation is not `typed` must never be read as an
+  instruction.
 - **Completion notify.** `kanna-server` subscribes to daemon terminal-state
   events directly (never through the desktop frontend) and delivers
   `TASK <child-id> DONE [success|failure|closed]: <title>` to the notify
