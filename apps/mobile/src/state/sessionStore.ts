@@ -293,12 +293,14 @@ export interface SessionStore {
   setRepoCommandCatalog(catalog: RepoCommandCatalog): void;
   setRepoCommandError(repoId: string, message: string): void;
   beginRepoCommandRun(commandId: string): boolean;
+  setRepoCommandRunError(commandId: string, message: string): void;
   setRepoCommandTaskLoadError(
     task: PendingRepoCommandTask,
     message: string
   ): void;
   beginRepoCommandTaskRefresh(): PendingRepoCommandTask | null;
   resolveRepoCommandTask(taskId: string): void;
+  dismissRepoCommandTaskLoadError(): void;
   finishRepoCommandRun(commandId: string): void;
   markRepoCommandsUnavailable(repoId: string): void;
   resetRepoCommandAvailability(): void;
@@ -870,8 +872,7 @@ export function createSessionStore(): SessionStore {
     },
     setRepos(repos) {
       const hasSelectedRepo = repos.some((repo) => repo.id === state.selectedRepoId);
-      const repoSelectionLocked =
-        state.runningRepoCommandId !== null || state.pendingRepoCommandTask !== null;
+      const repoSelectionLocked = state.runningRepoCommandId !== null;
       const selectedRepoId =
         hasSelectedRepo || repoSelectionLocked
           ? state.selectedRepoId
@@ -895,8 +896,7 @@ export function createSessionStore(): SessionStore {
     selectRepo(repoId) {
       if (
         repoId === state.selectedRepoId ||
-        state.runningRepoCommandId !== null ||
-        state.pendingRepoCommandTask !== null
+        state.runningRepoCommandId !== null
       ) {
         return;
       }
@@ -933,8 +933,12 @@ export function createSessionStore(): SessionStore {
       state = {
         ...state,
         repoCommandCatalog: null,
-        repoCommandStatus: "loading",
-        repoCommandErrorMessage: null
+        ...(state.pendingRepoCommandTask
+          ? {}
+          : {
+              repoCommandStatus: "loading" as const,
+              repoCommandErrorMessage: null
+            })
       };
       publish();
     },
@@ -949,8 +953,12 @@ export function createSessionStore(): SessionStore {
       state = {
         ...state,
         repoCommandCatalog,
-        repoCommandStatus: "ready",
-        repoCommandErrorMessage: null,
+        ...(state.pendingRepoCommandTask
+          ? {}
+          : {
+              repoCommandStatus: "ready" as const,
+              repoCommandErrorMessage: null
+            }),
         unavailableRepoCommandIds
       };
       publish();
@@ -963,8 +971,12 @@ export function createSessionStore(): SessionStore {
       state = {
         ...state,
         repoCommandCatalog: null,
-        repoCommandStatus: "error",
-        repoCommandErrorMessage
+        ...(state.pendingRepoCommandTask
+          ? {}
+          : {
+              repoCommandStatus: "error" as const,
+              repoCommandErrorMessage
+            })
       };
       publish();
     },
@@ -973,6 +985,15 @@ export function createSessionStore(): SessionStore {
       state = { ...state, runningRepoCommandId };
       publish();
       return true;
+    },
+    setRepoCommandRunError(commandId, repoCommandErrorMessage) {
+      if (state.runningRepoCommandId !== commandId) return;
+      state = {
+        ...state,
+        repoCommandStatus: "error",
+        repoCommandErrorMessage
+      };
+      publish();
     },
     setRepoCommandTaskLoadError(pendingRepoCommandTask, repoCommandErrorMessage) {
       state = {
@@ -996,6 +1017,16 @@ export function createSessionStore(): SessionStore {
     },
     resolveRepoCommandTask(taskId) {
       if (state.pendingRepoCommandTask?.taskId !== taskId) return;
+      state = {
+        ...state,
+        pendingRepoCommandTask: null,
+        repoCommandStatus: state.repoCommandCatalog ? "ready" : "idle",
+        repoCommandErrorMessage: null
+      };
+      publish();
+    },
+    dismissRepoCommandTaskLoadError() {
+      if (!state.pendingRepoCommandTask || state.runningRepoCommandId) return;
       state = {
         ...state,
         pendingRepoCommandTask: null,

@@ -79,6 +79,7 @@ export interface MobileController {
   loadRepoCommands(): Promise<void>;
   runRepoCommand(commandId: string): Promise<string | null>;
   retryRepoCommand(): Promise<string | null>;
+  dismissRepoCommandTaskLoadError(): void;
   subscribeRepoCommandTaskOpen(listener: (taskId: string) => void): () => void;
   openTask(taskId: string): void;
   closeTask(taskId?: string): void;
@@ -140,6 +141,8 @@ const TERMINAL_SCROLLBACK_CHUNK_LINES = 200;
 const MAX_TERMINAL_SCROLLBACK_CHUNK_CHARS = 88_000;
 const REPO_COMMAND_TASK_LOAD_ERROR =
   "The command launched successfully, but its task could not be loaded. Check your connection and try again.";
+const REPO_COMMAND_TASK_LOAD_ATTEMPTS = 3;
+const REPO_COMMAND_TASK_LOAD_RETRY_MS = 200;
 
 export interface CloudTaskPublication {
   cloudAuthoritative: boolean;
@@ -1637,26 +1640,35 @@ export function createMobileController(
   const loadCreatedRepoCommandTask = async (
     pendingTask: PendingRepoCommandTask
   ): Promise<boolean> => {
-    try {
-      await refreshTaskCollections();
-      if (!findCollectionTask(pendingTask.taskId)) {
-        store.setRepoCommandTaskLoadError(
-          pendingTask,
-          REPO_COMMAND_TASK_LOAD_ERROR
-        );
-        return false;
+    for (
+      let attempt = 0;
+      attempt < REPO_COMMAND_TASK_LOAD_ATTEMPTS;
+      attempt += 1
+    ) {
+      try {
+        await refreshTaskCollections();
+        if (findCollectionTask(pendingTask.taskId)) {
+          store.resolveRepoCommandTask(pendingTask.taskId);
+          setUnownedErrorMessage(null);
+          return true;
+        }
+      } catch {
+        // A collection read can race publication or briefly lose its route.
+        // Retry through the same authoritative collection boundary below.
       }
-    } catch {
-      store.setRepoCommandTaskLoadError(
-        pendingTask,
-        REPO_COMMAND_TASK_LOAD_ERROR
-      );
-      return false;
+
+      if (attempt + 1 < REPO_COMMAND_TASK_LOAD_ATTEMPTS) {
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, REPO_COMMAND_TASK_LOAD_RETRY_MS);
+        });
+      }
     }
 
-    store.resolveRepoCommandTask(pendingTask.taskId);
-    setUnownedErrorMessage(null);
-    return true;
+    store.setRepoCommandTaskLoadError(
+      pendingTask,
+      REPO_COMMAND_TASK_LOAD_ERROR
+    );
+    return false;
   };
 
   const applyLiveCloudTasks = (
@@ -2364,10 +2376,7 @@ export function createMobileController(
 
     async selectRepo(repoId) {
       const state = store.getState();
-      if (
-        state.runningRepoCommandId !== null ||
-        state.pendingRepoCommandTask !== null
-      ) {
+      if (state.runningRepoCommandId !== null) {
         return;
       }
       taskCollectionsRevision += 1;
@@ -2418,8 +2427,19 @@ export function createMobileController(
           openedTaskId = response.taskId;
         }
       } catch (error) {
-        fail(error);
         reloadCatalog = isStaleRepoCommandError(error);
+        if (!reloadCatalog) {
+          const message =
+            error instanceof RepoNotRegisteredError
+              ? `${error.repoName} is not registered on ${error.desktopName}. Choose a machine that has this repo and try again.`
+              : error instanceof Error
+                ? error.message
+                : "Repository command failed";
+          store.setRepoCommandRunError(
+            commandId,
+            message
+          );
+        }
       } finally {
         store.finishRepoCommandRun(commandId);
       }
@@ -2458,6 +2478,10 @@ export function createMobileController(
       store.resetRepoCommandAvailability();
       await loadRepoCommands();
       return openedTaskId;
+    },
+
+    dismissRepoCommandTaskLoadError() {
+      store.dismissRepoCommandTaskLoadError();
     },
 
     subscribeRepoCommandTaskOpen(listener) {

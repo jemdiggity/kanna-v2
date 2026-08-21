@@ -274,6 +274,10 @@ export function createRemoteTransport({
       }
       return { desktopId: requestedDesktopId, localRepoId };
     }
+    const inventoryRoute = cloudRepoOwners.get(repoId);
+    if (inventoryRoute) {
+      return inventoryRoute;
+    }
     if (routeTask) {
       return {
         desktopId: routeTask.ownerDesktopId,

@@ -218,6 +218,30 @@ describe("createSessionStore", () => {
     });
   });
 
+  it("clears a failed command-task load and releases only the command guard", () => {
+    const store = createSessionStore();
+    store.selectRepo("repo-1");
+    store.setRepoCommandTaskLoadError({
+      commandId: "factory:create-agent",
+      taskId: "task-command"
+    }, "Task not visible yet");
+
+    store.selectRepo("repo-2");
+    expect(store.getState()).toMatchObject({
+      selectedRepoId: "repo-2",
+      pendingRepoCommandTask: null,
+      repoCommandErrorMessage: null
+    });
+
+    store.setRepoCommandTaskLoadError({
+      commandId: "factory:create-agent",
+      taskId: "task-command"
+    }, "Task not visible yet");
+    expect(store.beginRepoCommandRun("factory:create-agent")).toBe(false);
+    store.dismissRepoCommandTaskLoadError();
+    expect(store.beginRepoCommandRun("factory:create-agent")).toBe(true);
+  });
+
   it("commits a recovered catalog while retaining a created command task", () => {
     const store = createSessionStore();
     store.selectRepo("repo-1");
@@ -240,8 +264,9 @@ describe("createSessionStore", () => {
 
     expect(store.getState()).toMatchObject({
       repoCommandCatalog: { revision: "catalog-v2" },
-      repoCommandStatus: "ready",
-      repoCommandErrorMessage: null,
+      repoCommandStatus: "error",
+      repoCommandErrorMessage:
+        "The command launched successfully, but its task could not be loaded.",
       pendingRepoCommandTask: {
         commandId: "factory:create-agent",
         taskId: "task-command"

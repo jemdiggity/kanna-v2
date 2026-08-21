@@ -2561,6 +2561,88 @@ describe("remote transport", () => {
     );
   });
 
+  it("runs a repo command on its current inventory owner instead of a stale task owner", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>(async (request) => {
+      if (request.method === "GET" && request.path === "/v1/repos") {
+        return request.desktopId === "desktop-macbook"
+          ? [{
+              id: "repo-macbook",
+              name: "kanji-kongbu",
+              remoteUrlHash: "hash-kanji"
+            }]
+          : [{ id: "repo-kanna", name: "kanna", remoteUrlHash: "hash-kanna" }];
+      }
+      if (
+        request.desktopId === "desktop-macbook" &&
+        request.method === "GET" &&
+        request.path === "/v1/repos/repo-macbook/commands"
+      ) {
+        return {
+          repoId: "repo-macbook",
+          revision: "catalog-v1",
+          commands: []
+        };
+      }
+      if (
+        request.desktopId === "desktop-macbook" &&
+        request.method === "POST" &&
+        request.path === "/v1/repos/repo-macbook/commands/custom%3Atask-manager/run"
+      ) {
+        return { taskId: "task-manager", reused: false };
+      }
+      throw new Error(`unexpected request ${request.method} ${request.path}`);
+    });
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [
+        {
+          desktopId: "desktop-macbook",
+          displayName: "MacBook Pro",
+          online: true,
+          reachableViaRelay: true,
+          connectionMode: "internet"
+        },
+        {
+          desktopId: "desktop-studio",
+          displayName: "Mac Studio",
+          online: true,
+          reachableViaRelay: true,
+          connectionMode: "internet"
+        }
+      ],
+      getSelectedDesktopId: () => "desktop-studio",
+      invokeDesktop,
+      listCloudTasks: async () => [{
+        id: "cloud:desktop-studio:repo-old:task-old",
+        repoId: "git:hash-kanji",
+        repoName: "kanji-kongbu",
+        title: "Old kanji task",
+        stage: "in progress",
+        ownerDesktopId: "desktop-studio",
+        ownerLocalRepoId: "repo-old",
+        ownerLocalTaskId: "task-old"
+      }]
+    });
+
+    await transport.listRepos();
+    invokeDesktop.mockClear();
+    await transport.listRepoCommands("git:hash-kanji");
+    await transport.runRepoCommand(
+      "git:hash-kanji",
+      "custom:task-manager",
+      "catalog-v1"
+    );
+
+    expect(invokeDesktop).toHaveBeenCalledWith({
+      desktopId: "desktop-macbook",
+      method: "POST",
+      path: "/v1/repos/repo-macbook/commands/custom%3Atask-manager/run",
+      body: { catalogRevision: "catalog-v1" }
+    });
+    expect(invokeDesktop).not.toHaveBeenCalledWith(
+      expect.objectContaining({ desktopId: "desktop-studio" })
+    );
+  });
+
   it("rejects a requested-desktop snapshot without an owner-local repo id after a fresh read", async () => {
     const invokeDesktop = vi.fn<RemoteDesktopInvoker>(async (request) => {
       if (request.method === "GET" && request.path === "/v1/repos") {

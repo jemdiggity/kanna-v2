@@ -431,6 +431,65 @@ describe("mergeCloudAndLanTasks", () => {
 });
 
 describe("createCloudLanClient", () => {
+  it("routes a repo command to the current LAN owner instead of a stale cloud-task owner", async () => {
+    const cloud = createClientMock({
+      listRepos: vi.fn().mockResolvedValue([]),
+      listRecentTasks: vi.fn().mockResolvedValue([
+        task({
+          id: "cloud:desktop-studio:repo-old:task-old",
+          repoId: "git:hash-kanji",
+          repoName: "kanji-kongbu",
+          ownerDesktopId: "desktop-studio",
+          ownerLocalRepoId: "repo-old",
+          ownerLocalTaskId: "task-old"
+        })
+      ])
+    });
+    const lan = createClientMock({
+      getStatus: vi.fn().mockResolvedValue(runningStatus("desktop-macbook"))
+    });
+    const macbook = createClientMock({
+      listRepos: vi.fn().mockResolvedValue([
+        {
+          id: "repo-kanji",
+          name: "kanji-kongbu",
+          remoteUrlHash: "hash-kanji"
+        }
+      ]),
+      listRecentTasks: vi.fn().mockResolvedValue([]),
+      listRepoCommands: vi.fn().mockResolvedValue({
+        repoId: "repo-kanji",
+        revision: "catalog-v1",
+        commands: []
+      }),
+      runRepoCommand: vi.fn().mockResolvedValue({
+        taskId: "task-manager",
+        reused: false
+      })
+    });
+    const client = createCloudLanClient(cloud, lan, {
+      isLanEnabled: () => true,
+      lanClientForDesktop: (desktopId) =>
+        desktopId === "desktop-macbook" ? macbook : null
+    });
+
+    await client.listRepos();
+    await client.listRecentTasks();
+    await client.listRepoCommands("git:hash-kanji");
+    await client.runRepoCommand(
+      "git:hash-kanji",
+      "custom:task-manager",
+      "catalog-v1"
+    );
+
+    expect(macbook.runRepoCommand).toHaveBeenCalledWith(
+      "repo-kanji",
+      "custom:task-manager",
+      "catalog-v1"
+    );
+    expect(cloud.runRepoCommand).not.toHaveBeenCalled();
+  });
+
   it("routes commands for a taskless LAN repository through its owning desktop", async () => {
     const cloud = createClientMock({
       listRepos: vi.fn().mockResolvedValue([]),
