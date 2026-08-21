@@ -225,6 +225,7 @@ function createClientMock(): ClientMock {
         stage: "in progress"
       }
     ]),
+    getTask: vi.fn().mockRejectedValue(new Error("task not found")),
     searchTasks: vi.fn().mockResolvedValue([
       {
         id: "task-2",
@@ -1054,6 +1055,13 @@ describe("createMobileController", () => {
       stage: "in progress",
       agentType: "agent" as const
     };
+    client.runRepoCommand.mockResolvedValueOnce({
+      taskId: "task-command",
+      reused: false,
+      ownerDesktopId: "desktop-macbook",
+      ownerLocalRepoId: "repo-1",
+      ownerLocalTaskId: "task-command"
+    });
     client.listRecentTasks.mockRejectedValue(
       new Error("canonical refresh failed")
     );
@@ -1067,13 +1075,14 @@ describe("createMobileController", () => {
       errorMessage: null,
       repoCommandStatus: "error",
       repoCommandErrorMessage:
-        "The command launched successfully, but its task could not be loaded. Check your connection and try again.",
+        "The task was created, but it could not be opened here yet. Find it on the Tasks tab, or try again.",
       pendingRepoCommandTask: {
         commandId: "factory:create-agent",
         taskId: "task-command"
       },
       runningRepoCommandId: null
     });
+    expect(client.getTask).toHaveBeenCalledTimes(3);
     expect(client.observeTaskTerminal).not.toHaveBeenCalled();
     expect(client.observeTaskAgent).not.toHaveBeenCalled();
 
@@ -1098,6 +1107,55 @@ describe("createMobileController", () => {
       expect.any(Function)
     );
     expect(openedTaskIds).toEqual([]);
+  });
+
+  it("loads a created command task from its reported owner with bounded retries", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+    const createdTask = {
+      id: "task-manager",
+      repoId: "repo-aminiti",
+      title: "Kanna Task Manager",
+      stage: "in progress"
+    };
+    client.runRepoCommand.mockResolvedValueOnce({
+      taskId: "task-manager",
+      reused: false,
+      ownerDesktopId: "desktop-macbook",
+      ownerLocalRepoId: "repo-aminiti",
+      ownerLocalTaskId: "task-manager"
+    });
+    vi.mocked(client.getTask!)
+      .mockRejectedValueOnce(new Error("task publication is pending"))
+      .mockRejectedValueOnce(new Error("task publication is pending"))
+      .mockResolvedValueOnce(createdTask);
+
+    await controller.bootstrap();
+    controller.setNavigationView("more");
+    await flushMicrotasks();
+
+    await expect(
+      controller.runRepoCommand("factory:create-agent")
+    ).resolves.toBe("task-manager");
+
+    // Three post-launch attempts precede the ordinary prompt-detail read that
+    // starts after the task opens.
+    expect(client.getTask).toHaveBeenCalledTimes(4);
+    expect(client.getTask).toHaveBeenNthCalledWith(1, "task-manager");
+    expect(client.getTask).toHaveBeenNthCalledWith(3, "task-manager");
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: "task-manager",
+      repoCommandStatus: "ready",
+      repoCommandErrorMessage: null,
+      pendingRepoCommandTask: null
+    });
+    expect(store.getState().recentTasks[0]).toMatchObject({
+      id: "task-manager",
+      ownerDesktopId: "desktop-macbook",
+      ownerLocalRepoId: "repo-aminiti",
+      ownerLocalTaskId: "task-manager"
+    });
   });
 
   it("retries a newly created command task until it appears in collections", async () => {
@@ -1324,7 +1382,7 @@ describe("createMobileController", () => {
       },
       repoCommandStatus: "error",
       repoCommandErrorMessage:
-        "The command launched successfully, but its task could not be loaded. Check your connection and try again.",
+        "The task was created, but it could not be opened here yet. Find it on the Tasks tab, or try again.",
       pendingRepoCommandTask: { taskId: "task-command" },
       runningRepoCommandId: null,
       unavailableRepoCommandIds: []
@@ -1362,7 +1420,7 @@ describe("createMobileController", () => {
     expect(store.getState()).toMatchObject({
       repoCommandStatus: "error",
       repoCommandErrorMessage:
-        "The command launched successfully, but its task could not be loaded. Check your connection and try again.",
+        "The task was created, but it could not be opened here yet. Find it on the Tasks tab, or try again.",
       pendingRepoCommandTask: { taskId: "task-command" },
       runningRepoCommandId: null
     });

@@ -1392,24 +1392,27 @@ export function createCloudLanClient(
       if (route.source !== "lan") {
         return response;
       }
+      const ownerDesktopId = response.ownerDesktopId ?? route.desktopId;
+      const ownerLocalRepoId = response.ownerLocalRepoId ?? route.repoId;
+      const ownerLocalTaskId = response.ownerLocalTaskId ?? response.taskId;
       const canonicalTaskId = buildCloudTaskId({
-        ownerDesktopId: route.desktopId,
-        localRepoId: route.repoId,
-        ownerLocalTaskId: response.taskId
+        ownerDesktopId,
+        localRepoId: ownerLocalRepoId,
+        ownerLocalTaskId
       });
       provisionalTaskRoutes.set(canonicalTaskId, {
         source: "lan",
-        taskId: response.taskId,
-        desktopId: route.desktopId,
-        localRepoId: route.repoId,
+        taskId: ownerLocalTaskId,
+        desktopId: ownerDesktopId,
+        localRepoId: ownerLocalRepoId,
         displayRepoId: repoId
       });
       return {
         ...response,
         taskId: canonicalTaskId,
-        ownerDesktopId: route.desktopId,
-        ownerLocalRepoId: route.repoId,
-        ownerLocalTaskId: response.taskId
+        ownerDesktopId,
+        ownerLocalRepoId,
+        ownerLocalTaskId
       };
     },
     listRecentTasks,

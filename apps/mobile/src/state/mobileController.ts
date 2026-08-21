@@ -144,7 +144,7 @@ const TERMINAL_SCROLLBACK_CHUNK_LINES = 200;
 // so no chunk is fetched that would then have to be refused.
 const MAX_TERMINAL_SCROLLBACK_CHUNK_CHARS = 88_000;
 const REPO_COMMAND_TASK_LOAD_ERROR =
-  "The command launched successfully, but its task could not be loaded. Check your connection and try again.";
+  "The task was created, but it could not be opened here yet. Find it on the Tasks tab, or try again.";
 const REPO_COMMAND_TASK_LOAD_ATTEMPTS = 3;
 const REPO_COMMAND_TASK_LOAD_RETRY_MS = 200;
 const DEFAULT_REPO_CHECKOUT_POLL_INTERVAL_MS = 500;
@@ -1638,11 +1638,31 @@ export function createMobileController(
   const loadCreatedRepoCommandTask = async (
     pendingTask: PendingRepoCommandTask
   ): Promise<boolean> => {
+    const pendingIdentity = pendingTaskIdentities.get(pendingTask.taskId);
     for (
       let attempt = 0;
       attempt < REPO_COMMAND_TASK_LOAD_ATTEMPTS;
       attempt += 1
     ) {
+      if (pendingIdentity && client.getTask) {
+        try {
+          const detail = await client.getTask(pendingTask.taskId);
+          rememberActionTaskSummary({
+            ...detail,
+            id: pendingTask.taskId,
+            ownerDesktopId: pendingIdentity.ownerDesktopId,
+            ownerLocalRepoId: pendingIdentity.ownerLocalRepoId,
+            ownerLocalTaskId: pendingIdentity.ownerLocalTaskId
+          });
+          store.resolveRepoCommandTask(pendingTask.taskId);
+          setUnownedErrorMessage(null);
+          return true;
+        } catch {
+          // The owner accepted the launch before its task detail became
+          // readable. Retry this exact owner route before falling back to the
+          // broader task collections used by older desktop responses.
+        }
+      }
       try {
         await refreshTaskCollections();
         if (findCollectionTask(pendingTask.taskId)) {
