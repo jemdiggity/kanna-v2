@@ -37,13 +37,25 @@ integration("web portal account deletion system flow", () => {
     await router.isReady();
     const wrapper = mount(host, { global: { plugins: [router] } });
 
-    await wrapper.get(".danger-button").trigger("click");
-    await wrapper.get(".delete-confirmation input").setValue("DELETE");
-    await wrapper.get(".delete-confirmation").trigger("submit");
+    try {
+      await wrapper.get(".danger-button").trigger("click");
+      await wrapper.get(".delete-confirmation input").setValue("DELETE");
+      await wrapper.get(".delete-confirmation").trigger("submit");
+      await expect.poll(
+        () => wrapper.get(".delete-confirmation .danger-button").text(),
+        { timeout: 10_000 },
+      ).toBe("Deleting…");
 
-    await expect.poll(() => auth.currentUser).toBeNull();
-    await expect(portalFirebase.signIn(email, password)).rejects.toMatchObject({
-      code: "auth/user-not-found",
-    });
-  }, 30_000);
+      // The first callable invocation cold-starts the Functions emulator. Give
+      // the UI-owned promise time to complete instead of inheriting poll's
+      // one-second default and tearing the emulator down around an active call.
+      await expect.poll(() => auth.currentUser, { timeout: 60_000, interval: 100 }).toBeNull();
+      await expect(portalFirebase.signIn(email, password)).rejects.toMatchObject({
+        code: "auth/user-not-found",
+      });
+    } finally {
+      wrapper.unmount();
+      if (auth.currentUser) await portalFirebase.signOut();
+    }
+  }, 75_000);
 });

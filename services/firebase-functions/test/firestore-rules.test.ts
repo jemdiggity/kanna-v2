@@ -123,6 +123,13 @@ async function deleteDoc(uid: string, path: string): Promise<Response> {
   });
 }
 
+async function deleteDocAsOwner(path: string): Promise<Response> {
+  return fetch(`${baseUrl()}/${path}`, {
+    method: "DELETE",
+    headers: { Authorization: "Bearer owner" },
+  });
+}
+
 async function expectSucceeds(response: Promise<Response>): Promise<Response> {
   const resolved = await response;
   expect(resolved.status).toBeGreaterThanOrEqual(200);
@@ -175,6 +182,36 @@ describeWithEmulator("firestore security rules", () => {
         updatedAt: "2026-05-08T00:00:00.000Z",
       }, "alice@example.com")
     );
+  });
+
+  it("fences cached owner writes once account deletion commits", async () => {
+    const profile = {
+      primaryEmail: "alice@example.com",
+      updatedAt: "2026-08-21T00:00:00.000Z",
+    };
+    const credential = {
+      desktopId: "desktop-1",
+      desktopSecretHash: "hash-1",
+      displayName: "Alice Mac",
+      revokedAt: null,
+      uid: "alice",
+      updatedAt: "2026-08-21T00:00:00.000Z",
+    };
+
+    // Writes committed before the tombstone are allowed and remain eligible
+    // for the deletion sweep.
+    await expectSucceeds(clientUpdate("alice", "users/alice", profile, "alice@example.com"));
+    await expectSucceeds(clientUpdate("alice", "desktopCredentials/desktop-1", credential));
+    await expectSucceeds(seedDoc("accountDeletions/alice", { uid: "alice", started: true }));
+    await expectSucceeds(deleteDocAsOwner("users/alice"));
+    await expectSucceeds(deleteDocAsOwner("desktopCredentials/desktop-1"));
+
+    // The same still-cached token cannot commit either direct desktop write
+    // after the durable deletion fence exists.
+    await expectDenied(clientUpdate("alice", "users/alice", profile, "alice@example.com"));
+    await expectDenied(clientUpdate("alice", "desktopCredentials/desktop-1", credential));
+    expect((await readDoc("owner", "users/alice")).status).toBe(404);
+    expect((await readDoc("owner", "desktopCredentials/desktop-1")).status).toBe(404);
   });
 
   it("denies updates to other users", async () => {

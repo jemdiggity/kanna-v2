@@ -6,6 +6,10 @@ service cloud.firestore {
       return request.auth != null && request.auth.uid == uid;
     }
 
+    function accountDeletionHasNotStarted(uid) {
+      return !exists(/databases/$(database)/documents/accountDeletions/$(uid));
+    }
+
     function expectedProfileFields() {
       return [
         'displayName',
@@ -54,8 +58,12 @@ service cloud.firestore {
     match /users/{uid} {
       allow get: if isSignedInAs(uid);
       allow list, delete: if false;
-      allow create: if isSignedInAs(uid) && isExpectedProfileCreate();
-      allow update: if isSignedInAs(uid) && isExpectedProfileUpdate();
+      allow create: if isSignedInAs(uid)
+        && accountDeletionHasNotStarted(uid)
+        && isExpectedProfileCreate();
+      allow update: if isSignedInAs(uid)
+        && accountDeletionHasNotStarted(uid)
+        && isExpectedProfileUpdate();
 
       match /tasks/{taskId} {
         allow read: if isSignedInAs(uid);
@@ -136,10 +144,12 @@ service cloud.firestore {
       allow read: if false;
       allow delete: if false;
       allow create: if request.auth != null
+        && accountDeletionHasNotStarted(request.auth.uid)
         && request.resource.data.uid == request.auth.uid
         && request.resource.data.desktopId == desktopId
         && hasCanonicalCredentialFields();
       allow update: if request.auth != null
+        && accountDeletionHasNotStarted(request.auth.uid)
         && request.resource.data.uid == request.auth.uid
         && resource.data.desktopId == desktopId
         && request.resource.data.desktopId == desktopId

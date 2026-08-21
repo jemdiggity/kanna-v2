@@ -382,6 +382,28 @@ describeWithEmulator("billing backend against the Firestore emulator", () => {
       await expectRefusal({ ...verified, emailVerified: false }, "email_verification_required");
     });
 
+    it("refuses a tombstoned account before creating Stripe or Firestore state", async () => {
+      await db.doc(accountDeletionPath(CHECKOUT_UID)).set({
+        uid: CHECKOUT_UID,
+        started: true,
+      });
+      const before = await readDoc<Record<string, unknown>>(db, userDocPath(CHECKOUT_UID));
+      const gateway = stubGateway();
+
+      await expect(
+        createCheckoutSession({ plan: "monthly" }, verified, deps(gateway)),
+      ).rejects.toMatchObject({
+        code: "failed-precondition",
+        reason: "account_deleted",
+      });
+
+      expect(gateway.calls.customers).toBe(0);
+      expect(gateway.calls.sessions).toHaveLength(0);
+      expect(await readDoc(db, userDocPath(CHECKOUT_UID))).toEqual(before);
+      expect((await db.collection("stripeCustomers").where("uid", "==", CHECKOUT_UID).get()).empty)
+        .toBe(true);
+    });
+
     it("refuses an unknown plan", async () => {
       const gateway = stubGateway();
       await expect(

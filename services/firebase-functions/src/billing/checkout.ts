@@ -13,7 +13,12 @@ import { readBillingState } from "./entitlement.js";
 import { BillingRequestError } from "./errors.js";
 import { consoleBillingLogger, type BillingLogger } from "./logger.js";
 import type { StripeCheckoutGateway, StripePriceCurrency } from "./stripeGateway.js";
-import { stripeCustomerPath, userDocPath, type BilledSourceState } from "./types.js";
+import {
+  accountDeletionPath,
+  stripeCustomerPath,
+  userDocPath,
+  type BilledSourceState,
+} from "./types.js";
 
 export type CheckoutPlan = "monthly";
 
@@ -87,6 +92,14 @@ export async function createCheckoutSession(
       "unauthenticated",
       "sign_in_required",
       "Sign in before starting a subscription."
+    );
+  }
+  const deletion = await deps.db.doc(accountDeletionPath(caller.uid)).get();
+  if (deletion.exists) {
+    throw new BillingRequestError(
+      "failed-precondition",
+      "account_deleted",
+      "This account has been permanently deleted.",
     );
   }
   if (!caller.emailVerified) {

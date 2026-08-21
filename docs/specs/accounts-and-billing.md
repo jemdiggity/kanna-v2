@@ -149,9 +149,13 @@ The callable performs these phases strictly in order:
    cancel-at-once with no refund or proration logic.
 2. Create the durable `accountDeletions/{uid}` tombstone. Relay publication
    transactions and Stripe webhook transactions read this document before any
-   uid-owned write. A transaction already in flight conflicts with tombstone
-   creation and retries into rejection; a cached desktop credential therefore
-   cannot recreate a desktop or task mirror once this phase commits.
+   uid-owned write. Firestore Rules require its absence for the desktop
+   client's direct `users/{uid}` profile and `desktopCredentials/{desktopId}`
+   create/update operations, and `createCheckoutSession` checks it before
+   creating a Stripe customer or checkout session or writing the user/customer
+   reverse map. A transaction already in flight conflicts with tombstone
+   creation and retries into rejection; cached desktop credentials and ID
+   tokens therefore cannot recreate cloud state once this phase commits.
 3. Revoke cloud/relay pairings by deleting `desktopCredentials` rows whose
    `uid` matches, then delete legacy `devices` rows whose `userId` matches.
 4. Recursively delete `users/{uid}`. This removes the user profile, all billing
@@ -167,11 +171,14 @@ Every deletion is safe when the document is already absent, and a Stripe
 Auth still exists and the caller can run the operation again. Auth goes last
 specifically so no mid-pipeline failure strands an account that can no longer
 authenticate to retry. The tombstone is written idempotently and remains
-present across retries. Stripe webhook application and every relay desktop/task
-publication transaction read it as their durable write fence, so cancellation
-events and cached or in-flight publishers racing or following deletion are
-rejected without recreating a dedupe, billing, entitlement, desktop, or task
-document.
+present across retries. Stripe webhook application, every relay desktop/task
+publication transaction, the Firestore Rules governing direct desktop profile
+and credential writes, and checkout all read it as their durable write fence.
+Cancellation events, cached or in-flight publishers, direct desktop writes,
+and cached-token checkout calls following deletion are rejected without
+recreating Stripe, dedupe, billing, entitlement, profile, credential, desktop,
+or task state. A direct client write committed before the tombstone remains
+eligible for the deletion sweep; one committing after it is denied.
 
 There is no soft-disable, grace period, undo window, or refund path. No user
 content or credential survives: no account, complimentary grant, entitlement,
