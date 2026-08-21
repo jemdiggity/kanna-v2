@@ -1,11 +1,76 @@
 import { describe, expect, it } from "vitest";
 import {
+  applyEnvironmentProfile,
   cloudEnvironmentToKdEnvironment,
+  resolveEnvironmentProfile,
   resolveCloudRuntimeEnv,
   resolveKdEnvironment
 } from "../src/runtime/environment";
 
 describe("kd environment registry", () => {
+  it("resolves the supported development profiles across three explicit axes", () => {
+    expect(resolveEnvironmentProfile({ command: "dev", cloud: "staging" })).toEqual({
+      clientBuild: "dev",
+      desktopOwner: "worktree",
+      cloud: "staging"
+    });
+    expect(resolveEnvironmentProfile({ command: "mobile", build: "dev", owner: "staging" })).toEqual({
+      clientBuild: "dev",
+      desktopOwner: "staging",
+      cloud: "staging"
+    });
+    expect(resolveEnvironmentProfile({ command: "mobile", staging: true })).toEqual({
+      clientBuild: "staging",
+      desktopOwner: "staging",
+      cloud: "staging"
+    });
+  });
+
+  it("rejects incoherent profiles and keeps production behind its compatibility guard", () => {
+    expect(() => resolveEnvironmentProfile({
+      command: "mobile",
+      build: "staging",
+      owner: "worktree",
+      cloud: "staging"
+    })).toThrow("Unsupported mobile profile");
+    expect(() => resolveEnvironmentProfile({
+      command: "mobile",
+      build: "production",
+      owner: "production",
+      cloud: "production"
+    })).toThrow("Production mobile targeting remains guarded");
+    expect(() => resolveEnvironmentProfile({
+      command: "dev",
+      build: "dev",
+      owner: "staging",
+      cloud: "staging"
+    })).toThrow("Desktop development supports build=dev, owner=worktree");
+  });
+
+  it("applies staging cloud settings without changing the dev client identity", () => {
+    const env = applyEnvironmentProfile(
+      {
+        EXPO_PUBLIC_FIREBASE_APP_ID: "inherited-production-app",
+        EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_HOST: "127.0.0.1"
+      },
+      {
+        clientBuild: "dev",
+        desktopOwner: "staging",
+        cloud: "staging"
+      }
+    );
+    expect(env).toMatchObject({
+      KANNA_APP_ENV: "dev",
+      KANNA_DESKTOP_OWNER_ENV: "staging",
+      KANNA_CLOUD_ENV: "staging",
+      EXPO_PUBLIC_KANNA_CLOUD_ENV: "staging",
+      EXPO_PUBLIC_FIREBASE_PROJECT_ID: "kanna-staging",
+      EXPO_PUBLIC_KANNA_RELAY_URL: "wss://relay-staging.kanna.build"
+    });
+    expect(env.EXPO_PUBLIC_FIREBASE_APP_ID).toBeUndefined();
+    expect(env.EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_HOST).toBeUndefined();
+  });
+
   it("keeps confirmed dev, staging, and production identities in one registry", () => {
     expect(resolveKdEnvironment("dev")).toMatchObject({
       name: "dev",

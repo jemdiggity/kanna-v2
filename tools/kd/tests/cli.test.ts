@@ -535,11 +535,16 @@ describe("kd CLI", () => {
     await expect(runCli(["dev", "up", "--help"])).resolves.toBe(0);
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd dev up"));
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("--firebase-env-from <task-or-path>"));
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("--cloud emulators|staging"));
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("worktree server/daemon"));
 
     await expect(runCli(["mobile", "run", "--help"])).resolves.toBe(0);
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd mobile run --device"));
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("defaults to apps/mobile/VERSION"));
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("KANNA_APP_VERSION is an explicit"));
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("--build <identity>"));
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("--owner <owner>"));
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("--cloud <target>"));
 
     await expect(runCli(["mobile", "uninstall", "--help"])).resolves.toBe(0);
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd mobile uninstall --device"));
@@ -957,7 +962,7 @@ describe("kd CLI", () => {
       }
     });
     expect(() => parseCliArgs(["mobile", "up", "--production", "--emulators"])).toThrow(
-      "mobile up only accepts --production or --staging"
+      "mobile up only accepts --build, --owner, --cloud, --production, or --staging"
     );
     expect(parseCliArgs(["emulators", "up"])).toEqual({
       taskId: "emulators.up",
@@ -980,6 +985,18 @@ describe("kd CLI", () => {
     expect(parseCliArgs(["mobile", "run", "--device", "--staging"])).toEqual({
       taskId: "mobile.run",
       input: { device: true, production: false, staging: true }
+    });
+    expect(
+      parseCliArgs(["mobile", "run", "--device", "--build", "dev", "--owner", "staging"])
+    ).toEqual({
+      taskId: "mobile.run",
+      input: {
+        device: true,
+        production: false,
+        staging: false,
+        build: "dev",
+        owner: "staging"
+      }
     });
     expect(parseCliArgs(["mobile", "run", "--device", "--staging", "--install"])).toEqual({
       taskId: "mobile.run",
@@ -1023,6 +1040,24 @@ describe("kd CLI", () => {
       taskId: "mobile.doctor",
       input: { device: true, production: false, staging: false }
     });
+  });
+
+  it("parses desktop staging cloud as an explicit cloud axis", () => {
+    expect(parseCliArgs(["dev", "up", "--cloud", "staging"])).toEqual({
+      taskId: "dev.up",
+      input: {
+        mobile: false,
+        emulators: false,
+        seed: false,
+        attach: false,
+        deleteDb: false,
+        killDaemon: false,
+        cloud: "staging"
+      }
+    });
+    expect(() => parseCliArgs(["dev", "up", "--owner", "staging"])).toThrow(
+      "dev up owns its worktree server and daemon"
+    );
   });
 
   it("parses only explicitly confirmed physical-device mobile uninstall commands", () => {

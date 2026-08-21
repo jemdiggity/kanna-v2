@@ -64,8 +64,8 @@ export function parseMobileFirebaseConfig(
   const firestoreEmulator = parseFirestoreEmulator(env);
   const profileDefaults = profileMobileFirebaseAppConfig(env);
   const appDefaults = authEmulator
-    ? extra ?? null
-    : extra ?? profileDefaults;
+    ? profileDefaults ?? extra ?? null
+    : profileDefaults ?? extra ?? productionMobileFirebaseAppConfig;
   const app = resolveMobileFirebaseAppConfig(env, appDefaults);
 
   return {
@@ -106,7 +106,9 @@ export function resolveMobileFirebaseAppConfig(
     : null;
 }
 
-function profileMobileFirebaseAppConfig(env: ExpoFirebaseEnv): MobileFirebaseAppConfig {
+function profileMobileFirebaseAppConfig(
+  env: ExpoFirebaseEnv
+): MobileFirebaseAppConfig | null {
   const cloudEnv = normalizeEnvValue(env.EXPO_PUBLIC_KANNA_CLOUD_ENV);
   if (cloudEnv === "staging") {
     return stagingMobileFirebaseAppConfig;
@@ -114,7 +116,10 @@ function profileMobileFirebaseAppConfig(env: ExpoFirebaseEnv): MobileFirebaseApp
   if (cloudEnv === "local") {
     return localMobileFirebaseAppConfig;
   }
-  return productionMobileFirebaseAppConfig;
+  if (cloudEnv === "production" || cloudEnv === "prod") {
+    return productionMobileFirebaseAppConfig;
+  }
+  return null;
 }
 
 const localMobileFirebaseAppConfig: MobileFirebaseAppConfig = {

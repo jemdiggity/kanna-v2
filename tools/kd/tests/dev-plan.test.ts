@@ -304,6 +304,26 @@ Run '\\''copilot update'\\'' to check for updates.
     expect(plan.windows[0]?.command).toContain("RCT_METRO_PORT='8084'");
   });
 
+  it("keeps a dev mobile build identity while targeting the installed staging owner and cloud", () => {
+    const plan = buildProductionMobilePlan({
+      repoRoot: "/repo",
+      env: { KANNA_MOBILE_PORT: "8084" },
+      profile: {
+        clientBuild: "dev",
+        desktopOwner: "staging",
+        cloud: "staging"
+      }
+    });
+
+    expect(plan.windows.map((window) => window.name)).toEqual(["mobile"]);
+    expect(plan.windows[0]?.command).toContain("KANNA_APP_ENV='dev'");
+    expect(plan.windows[0]?.command).toContain("KANNA_DESKTOP_OWNER_ENV='staging'");
+    expect(plan.windows[0]?.command).toContain("EXPO_PUBLIC_KANNA_CLOUD_ENV='staging'");
+    expect(plan.windows[0]?.command).toContain("EXPO_PUBLIC_FIREBASE_PROJECT_ID='kanna-staging'");
+    expect(plan.windows[0]?.command).toContain("EXPO_PUBLIC_KANNA_RELAY_URL='wss://relay-staging.kanna.build'");
+    expect(plan.windows[0]?.command).not.toContain("apps/desktop");
+  });
+
   it("passes a staging KANNA_APP_ENV through to the dev-up mobile window", () => {
     // The registry's staging branch sets this on the env it hands the plan.
     const plan = buildDevPlan({

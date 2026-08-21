@@ -61,6 +61,23 @@ describe("parseMobileFirebaseConfig", () => {
     });
   });
 
+  it("lets an explicit staging cloud target override a dev build's baked Firebase defaults", () => {
+    const config = parseMobileFirebaseConfig(
+      { EXPO_PUBLIC_KANNA_CLOUD_ENV: "staging" },
+      {
+        apiKey: "kanna-local",
+        authDomain: "kanna-local.firebaseapp.com",
+        projectId: "kanna-local",
+        appId: "kanna-mobile-local"
+      }
+    );
+
+    expect(config.app).toMatchObject({
+      projectId: "kanna-staging",
+      appId: "1:1073113006696:web:3bca4e7586f5587e1c71dd"
+    });
+  });
+
   it("uses explicit Expo Firebase env over the staging profile", () => {
     const config = parseMobileFirebaseConfig({
       EXPO_PUBLIC_KANNA_CLOUD_ENV: "staging",

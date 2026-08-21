@@ -1,9 +1,11 @@
 import { buildFirebaseCommandEnv, buildFirebaseEmulatorArgs } from "./firebase";
 import {
+  applyEnvironmentProfile,
   cloudEnvironmentToKdEnvironment,
   resolveCloudRuntimeEnv,
   resolveKdEnvironment,
-  type CloudEnvironmentName
+  type CloudEnvironmentName,
+  type KdEnvironmentProfile
 } from "./environment";
 import { selectPreferredLanAddress } from "./lan-address";
 
@@ -33,6 +35,7 @@ export interface BuildProductionMobilePlanInput {
   repoRoot: string;
   env: NodeJS.ProcessEnv;
   environment?: CloudEnvironmentName;
+  profile?: KdEnvironmentProfile;
 }
 
 function shellEnvPrefix(env: Record<string, string | undefined>): string {
@@ -173,21 +176,29 @@ function e2eEnv(input: BuildDevPlanInput): Record<string, string | undefined> {
 }
 
 function productionMobileEnv(input: BuildProductionMobilePlanInput): Record<string, string | undefined> {
+  const profiledEnv = input.profile
+    ? applyEnvironmentProfile(input.env, input.profile)
+    : input.env;
   const identity = input.environment
     ? resolveKdEnvironment(cloudEnvironmentToKdEnvironment(input.environment))
     : undefined;
   return {
-    KANNA_APP_ENV: identity?.name === "prod" ? "production" : identity?.name,
-    EXPO_PUBLIC_KANNA_RELAY_URL: input.env.EXPO_PUBLIC_KANNA_RELAY_URL ?? identity?.relayUrl,
-    EXPO_PUBLIC_FIREBASE_API_KEY: input.env.EXPO_PUBLIC_FIREBASE_API_KEY,
-    EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN: input.env.EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN,
-    EXPO_PUBLIC_FIREBASE_PROJECT_ID: input.env.EXPO_PUBLIC_FIREBASE_PROJECT_ID ?? identity?.firebaseProjectId,
-    EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET: input.env.EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET,
+    KANNA_APP_ENV: profiledEnv.KANNA_APP_ENV ?? (identity?.name === "prod" ? "production" : identity?.name),
+    KANNA_CLIENT_BUILD_ENV: profiledEnv.KANNA_CLIENT_BUILD_ENV,
+    KANNA_DESKTOP_OWNER_ENV: profiledEnv.KANNA_DESKTOP_OWNER_ENV,
+    KANNA_CLOUD_ENV: profiledEnv.KANNA_CLOUD_ENV,
+    EXPO_PUBLIC_KANNA_CLOUD_ENV: profiledEnv.EXPO_PUBLIC_KANNA_CLOUD_ENV,
+    EXPO_PUBLIC_KANNA_RELAY_URL: profiledEnv.EXPO_PUBLIC_KANNA_RELAY_URL ?? identity?.relayUrl,
+    EXPO_PUBLIC_FIREBASE_API_KEY: profiledEnv.EXPO_PUBLIC_FIREBASE_API_KEY,
+    EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN: profiledEnv.EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN,
+    EXPO_PUBLIC_FIREBASE_PROJECT_ID: profiledEnv.EXPO_PUBLIC_FIREBASE_PROJECT_ID ?? identity?.firebaseProjectId,
+    EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET: profiledEnv.EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET,
     EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID:
-      input.env.EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
-    EXPO_PUBLIC_FIREBASE_APP_ID: input.env.EXPO_PUBLIC_FIREBASE_APP_ID,
-    EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID: input.env.EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID,
-    RCT_METRO_PORT: input.env.KANNA_MOBILE_PORT ?? "8081"
+      profiledEnv.EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
+    EXPO_PUBLIC_FIREBASE_APP_ID: profiledEnv.EXPO_PUBLIC_FIREBASE_APP_ID,
+    EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID: profiledEnv.EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID,
+    REACT_NATIVE_PACKAGER_HOSTNAME: profiledEnv.REACT_NATIVE_PACKAGER_HOSTNAME,
+    RCT_METRO_PORT: profiledEnv.KANNA_MOBILE_PORT ?? "8081"
   };
 }
 
@@ -263,13 +274,17 @@ export function buildDevPlan(input: BuildDevPlanInput): DevPlan {
 
 export function buildProductionMobilePlan(input: BuildProductionMobilePlanInput): DevPlan {
   const mobileEnv = shellEnvPrefix(productionMobileEnv(input));
+  const startCommand = `${mobileEnv} pnpm run dev -- --port ${input.env.KANNA_MOBILE_PORT ?? "8081"} --dev-client`;
+  const resilientStartCommand = isPhysicalDeviceTarget(input.env)
+    ? `while true; do ${startCommand}; echo 'Metro exited; restarting in 2s'; sleep 2; done`
+    : startCommand;
   return {
     windows: [
       {
         name: "mobile",
         cwd: `${input.repoRoot}/apps/mobile`,
-        env: { ...input.env },
-        command: `unset NO_COLOR; ${mobileEnv} pnpm run dev -- --port ${input.env.KANNA_MOBILE_PORT ?? "8081"} --dev-client`
+        env: input.profile ? applyEnvironmentProfile(input.env, input.profile) : { ...input.env },
+        command: `unset NO_COLOR; ${resilientStartCommand}`
       }
     ]
   };

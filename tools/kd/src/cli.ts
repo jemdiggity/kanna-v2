@@ -88,11 +88,18 @@ function parseDevRestartInput(rest: string[]): ParsedCliCommand {
 
 function parseMobileUpInput(rest: string[]): ParsedCliCommand {
   const input = parseFlagInput(rest, { production: false, staging: false });
-  const unsupportedFlags = Object.entries(input)
-    .filter(([key, value]) => !["production", "staging", "withCredentials"].includes(key) && value === true)
-    .map(([key]) => key);
-  if (unsupportedFlags.length > 0) {
-    throw new Error("mobile up only accepts --production or --staging");
+  const allowedKeys = new Set([
+    "production",
+    "staging",
+    "withCredentials",
+    "build",
+    "owner",
+    "cloud"
+  ]);
+  if (Object.keys(input).some((key) => !allowedKeys.has(key))) {
+    throw new Error(
+      "mobile up only accepts --build, --owner, --cloud, --production, or --staging"
+    );
   }
   if (input.production === true && input.staging === true) {
     throw new Error("mobile up accepts only one of --production or --staging");
@@ -100,12 +107,21 @@ function parseMobileUpInput(rest: string[]): ParsedCliCommand {
   if (input.withCredentials === true && (input.production === true || input.staging === true)) {
     throw new Error(CREDENTIALS_FLAG_ERROR);
   }
-  if (input.production === true || input.staging === true) {
+  if (
+    input.production === true ||
+    input.staging === true ||
+    typeof input.build === "string" ||
+    typeof input.owner === "string" ||
+    typeof input.cloud === "string"
+  ) {
     return {
       taskId: "mobile.up",
       input: {
         production: input.production === true,
         staging: input.staging === true,
+        ...(typeof input.build === "string" ? { build: input.build } : {}),
+        ...(typeof input.owner === "string" ? { owner: input.owner } : {}),
+        ...(typeof input.cloud === "string" ? { cloud: input.cloud } : {}),
         ...(input.withCredentials === true ? { withCredentials: true } : {})
       }
     };
@@ -129,7 +145,19 @@ function parseMobileRunInput(rest: string[]): ParsedCliCommand {
     { "--install": "install" }
   );
   const unsupportedFlags = Object.entries(input)
-    .filter(([key, value]) => !["device", "production", "staging", "withCredentials", "install"].includes(key) && value === true)
+    .filter(
+      ([key, value]) =>
+        ![
+          "device",
+          "production",
+          "staging",
+          "withCredentials",
+          "install",
+          "build",
+          "owner",
+          "cloud"
+        ].includes(key) && value === true
+    )
     .map(([key]) => key);
   if (unsupportedFlags.length > 0) {
     throw new Error("mobile run only accepts --device, --production, --staging, or --install");
@@ -149,6 +177,9 @@ function parseMobileRunInput(rest: string[]): ParsedCliCommand {
       device: true,
       production: input.production === true,
       staging: input.staging === true,
+      ...(typeof input.build === "string" ? { build: input.build } : {}),
+      ...(typeof input.owner === "string" ? { owner: input.owner } : {}),
+      ...(typeof input.cloud === "string" ? { cloud: input.cloud } : {}),
       ...(input.install === true ? { install: true } : {}),
       ...(input.withCredentials === true ? { withCredentials: true } : {})
     }
@@ -402,6 +433,15 @@ function parseFlagInput(
       index += 1;
       continue;
     }
+    if (arg === "--build" || arg === "--owner" || arg === "--cloud") {
+      const value = rest[index + 1];
+      if (!value || value.startsWith("--")) {
+        throw new Error(`${arg} requires a value`);
+      }
+      input[arg.slice(2)] = value;
+      index += 1;
+      continue;
+    }
     if (arg === "--daemon-dir") {
       const value = rest[index + 1];
       if (!value) {
@@ -628,6 +668,12 @@ function rejectUnsupportedCredentialsFlag(input: Record<string, unknown>): void 
 function validateDevUpCloudFlags(input: Record<string, unknown>): void {
   if (input.production === true) {
     throw new Error("dev up only supports --staging for cloud launch");
+  }
+  if (input.build !== undefined && input.build !== "dev") {
+    throw new Error("dev up only supports --build dev");
+  }
+  if (input.owner !== undefined && input.owner !== "worktree") {
+    throw new Error("dev up owns its worktree server and daemon; --owner must be worktree");
   }
 }
 
@@ -902,7 +948,7 @@ const helpTopics: Record<string, string[]> = {
     "Usage: kd <command>",
     "",
     "Commands:",
-    "  dev up [--staging] [--with-credentials] [--mobile] [--emulators] [--seed] [--attach] [--db <path-or-name>] [--delete-db] [--firebase-env-from <task-or-path>]",
+    "  dev up [--cloud emulators|staging] [--staging] [--with-credentials] [--mobile] [--emulators] [--seed] [--attach] [--db <path-or-name>] [--delete-db] [--firebase-env-from <task-or-path>]",
     "  dev up --remote",
     "  dev down [--kill-daemon]",
     "  dev restart [desktop|mobile|backend] [--staging|--production] [--with-credentials] [--mobile] [--emulators] [--seed] [--attach] [--delete-db]",
@@ -910,8 +956,8 @@ const helpTopics: Record<string, string[]> = {
     "  dev log [window]",
     "  dev seed [--db <path-or-name>] [--delete-db]",
     "  daemon kill",
-    "  mobile up [--production|--staging] [--with-credentials]",
-    "  mobile run --device [--production|--staging] [--install] [--with-credentials]",
+    "  mobile up [--build dev|staging] [--owner staging] [--cloud staging] [--production|--staging]",
+    "  mobile run --device [--build dev|staging] [--owner worktree|staging] [--cloud emulators|staging] [--production|--staging] [--install]",
     "  mobile uninstall --device --staging|--production --confirm-bundle <bundle-id> [--confirm-production]",
     "  mobile archive --production --ref <branch|tag|sha> --build-number <number> [--version <version>] [--out-dir <dir>] [--upload] [--dry-run]",
     "  mobile publish --production --ref release/X.Y [--build-number <number>|auto] [--release-type <type>] [--dry-run]",
@@ -970,7 +1016,7 @@ const helpTopics: Record<string, string[]> = {
     "  dev seed [options]"
   ],
   "dev up": [
-    "Usage: kd dev up [--mobile] [--emulators] [--seed] [--attach] [--db <path-or-name>] [--delete-db] [--firebase-env-from <task-or-path>]",
+    "Usage: kd dev up [--cloud emulators|staging] [--mobile] [--emulators] [--seed] [--attach] [--db <path-or-name>] [--delete-db] [--firebase-env-from <task-or-path>]",
     "Usage: kd dev up --remote",
     "",
     "Start the Kanna dev environment.",
@@ -978,6 +1024,8 @@ const helpTopics: Record<string, string[]> = {
     "Options:",
     "  --mobile, -m                       Start desktop and mobile.",
     "  --emulators, -e                    Start Firebase emulators.",
+    "  --cloud emulators|staging           Select cloud infrastructure; staging keeps the worktree server/daemon.",
+    "  --staging                           Compatibility alias for --cloud staging.",
     "  --remote                           Start a remote-poking dev stack.",
     "  --seed, -s                         Seed the dev database after startup.",
     "  --attach, -a                       Attach to the tmux session.",
@@ -1050,8 +1098,8 @@ const helpTopics: Record<string, string[]> = {
     "Usage: kd mobile <command>",
     "",
     "Commands:",
-    "  mobile up [--production|--staging] [--with-credentials]",
-    "  mobile run --device [--production|--staging] [--install] [--with-credentials]",
+    "  mobile up [--build dev|staging] [--owner staging] [--cloud staging] [--production|--staging]",
+    "  mobile run --device [--build dev|staging] [--owner worktree|staging] [--cloud emulators|staging] [--production|--staging] [--install]",
     "  mobile uninstall --device --staging|--production --confirm-bundle <bundle-id> [--confirm-production]",
     "  mobile archive --production --ref <branch|tag|sha> --build-number <number> [--version <version>] [--out-dir <dir>] [--upload] [--dry-run]",
     "  mobile doctor --device",
@@ -1061,23 +1109,29 @@ const helpTopics: Record<string, string[]> = {
     "  mobile device-smoke"
   ],
   "mobile up": [
-    "Usage: kd mobile up [--production|--staging]",
+    "Usage: kd mobile up [--build dev|staging] [--owner staging] [--cloud staging] [--production|--staging]",
     "",
-    "Start Kanna mobile against production or staging cloud.",
+    "Start Metro for a mobile client against an installed desktop owner.",
     "",
     "Options:",
     "  --production        Use the installed production desktop server.",
-    "  --staging           Use the installed staging desktop server and staging cloud services."
+    "  --staging           Compatibility profile: staging build + installed staging owner + staging cloud.",
+    "  --build <identity>  Mobile client identity: dev or staging.",
+    "  --owner staging     Use the installed staging desktop server and daemon.",
+    "  --cloud staging     Use staging Firebase and relay services."
   ],
   "mobile run": [
-    "Usage: kd mobile run --device [--production|--staging] [--install]",
+    "Usage: kd mobile run --device [--build dev|staging] [--owner worktree|staging] [--cloud emulators|staging] [--production|--staging] [--install]",
     "",
     "Build, install, and launch Kanna mobile on a physical iOS device.",
     "",
     "Options:",
     "  --device            Required. Target a physical iOS device.",
-    "  --production        Launch against production settings.",
-    "  --staging           Launch against installed staging desktop settings.",
+    "  --production        Guarded compatibility profile for the production build, owner, and cloud.",
+    "  --staging           Compatibility profile: staging build + installed staging owner + staging cloud.",
+    "  --build <identity>  Client build identity (dev or staging for development).",
+    "  --owner <owner>     Desktop owner: worktree or installed staging.",
+    "  --cloud <target>    Cloud target: emulators or staging.",
     "  --install           Build and install a bundled Release app; skips Metro and dev-client hot loading.",
     "",
     "Marketing version defaults to apps/mobile/VERSION in every environment.",
@@ -1144,7 +1198,7 @@ const helpTopics: Record<string, string[]> = {
     "  --build-number <number>   Expected build number. Not asserted when omitted."
   ],
   "mobile doctor": [
-    "Usage: kd mobile doctor --device [--production|--staging]",
+    "Usage: kd mobile doctor --device [--build dev|staging] [--owner worktree|staging] [--cloud emulators|staging] [--production|--staging]",
     "",
     "Check physical iOS device mobile development readiness."
   ],

@@ -1,5 +1,23 @@
 export type KdEnvironmentName = "dev" | "staging" | "prod";
 export type CloudEnvironmentName = "staging" | "production";
+export type ClientBuildIdentity = "dev" | "staging" | "production";
+export type DesktopOwnerEnvironment = "worktree" | "staging" | "production";
+export type CloudTarget = "emulators" | "staging" | "production";
+
+export interface KdEnvironmentProfile {
+  clientBuild: ClientBuildIdentity;
+  desktopOwner: DesktopOwnerEnvironment;
+  cloud: CloudTarget;
+}
+
+export interface ResolveEnvironmentProfileInput {
+  command: "dev" | "mobile";
+  build?: string;
+  owner?: string;
+  cloud?: string;
+  staging?: boolean;
+  production?: boolean;
+}
 
 export interface KdEnvironmentIdentity {
   name: KdEnvironmentName;
@@ -51,6 +69,140 @@ const environmentRegistry: Record<KdEnvironmentName, KdEnvironmentIdentity> = {
     staticIpName: "kanna-relay-ip"
   }
 };
+
+function parseAxis<T extends string>(
+  flag: string,
+  value: string | undefined,
+  values: readonly T[]
+): T | undefined {
+  if (value === undefined) return undefined;
+  if ((values as readonly string[]).includes(value)) return value as T;
+  throw new Error(`${flag} must be one of ${values.join(", ")}; got ${JSON.stringify(value)}.`);
+}
+
+function formatProfile(profile: KdEnvironmentProfile): string {
+  return `build=${profile.clientBuild}, owner=${profile.desktopOwner}, cloud=${profile.cloud}`;
+}
+
+export function formatEnvironmentProfile(profile: KdEnvironmentProfile): string {
+  return formatProfile(profile);
+}
+
+export function resolveEnvironmentProfile(
+  input: ResolveEnvironmentProfileInput
+): KdEnvironmentProfile {
+  if (input.staging && input.production) {
+    throw new Error("Only one compatibility environment flag may be used.");
+  }
+  const hasExplicitAxes =
+    input.build !== undefined || input.owner !== undefined || input.cloud !== undefined;
+  if (hasExplicitAxes && (input.staging || input.production)) {
+    throw new Error("Do not combine --staging or --production with --build, --owner, or --cloud.");
+  }
+
+  if (input.production) {
+    return { clientBuild: "production", desktopOwner: "production", cloud: "production" };
+  }
+  if (input.staging && input.command === "mobile") {
+    return { clientBuild: "staging", desktopOwner: "staging", cloud: "staging" };
+  }
+
+  const clientBuild =
+    parseAxis("--build", input.build, ["dev", "staging", "production"] as const) ?? "dev";
+  const desktopOwner =
+    parseAxis("--owner", input.owner, ["worktree", "staging", "production"] as const) ??
+    (clientBuild === "staging"
+      ? "staging"
+      : clientBuild === "production"
+        ? "production"
+        : "worktree");
+  const cloud =
+    parseAxis("--cloud", input.cloud, ["emulators", "staging", "production"] as const) ??
+    (input.staging || desktopOwner === "staging" || clientBuild === "staging"
+      ? "staging"
+      : desktopOwner === "production" || clientBuild === "production"
+        ? "production"
+        : "emulators");
+  const profile = { clientBuild, desktopOwner, cloud } satisfies KdEnvironmentProfile;
+
+  if (input.command === "dev") {
+    if (clientBuild !== "dev" || desktopOwner !== "worktree" || cloud === "production") {
+      throw new Error(
+        `Unsupported desktop development profile (${formatProfile(profile)}). ` +
+        "Desktop development supports build=dev, owner=worktree, cloud=emulators|staging."
+      );
+    }
+    return profile;
+  }
+
+  const supported =
+    (clientBuild === "dev" && desktopOwner === "worktree" && cloud === "emulators") ||
+    (clientBuild === "dev" && desktopOwner === "staging" && cloud === "staging") ||
+    (clientBuild === "staging" && desktopOwner === "staging" && cloud === "staging") ||
+    (clientBuild === "production" && desktopOwner === "production" && cloud === "production");
+  if (!supported) {
+    throw new Error(
+      `Unsupported mobile profile (${formatProfile(profile)}). Supported profiles are ` +
+      "dev/worktree/emulators, dev/staging/staging, staging/staging/staging, and guarded production/production/production."
+    );
+  }
+  if (clientBuild === "production" && !input.production) {
+    throw new Error(
+      "Production mobile targeting remains guarded; use the existing --production flag instead of explicit production axes."
+    );
+  }
+  return profile;
+}
+
+export function applyEnvironmentProfile(
+  env: NodeJS.ProcessEnv,
+  profile: KdEnvironmentProfile
+): NodeJS.ProcessEnv {
+  const resolved: NodeJS.ProcessEnv = {
+    ...env,
+    KANNA_CLIENT_BUILD_ENV: profile.clientBuild,
+    KANNA_DESKTOP_OWNER_ENV: profile.desktopOwner,
+    KANNA_APP_ENV: profile.clientBuild === "production" ? "prod" : profile.clientBuild,
+    EXPO_PUBLIC_KANNA_CLOUD_ENV: profile.cloud === "emulators" ? "local" : profile.cloud
+  };
+  for (const key of [
+    "KANNA_FIREBASE_API_KEY",
+    "KANNA_FIREBASE_AUTH_DOMAIN",
+    "KANNA_FIREBASE_APP_ID",
+    "KANNA_FIREBASE_STORAGE_BUCKET",
+    "KANNA_FIREBASE_MESSAGING_SENDER_ID",
+    "KANNA_FIREBASE_MEASUREMENT_ID",
+    "EXPO_PUBLIC_FIREBASE_API_KEY",
+    "EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN",
+    "EXPO_PUBLIC_FIREBASE_APP_ID",
+    "EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET",
+    "EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID",
+    "EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID"
+  ]) {
+    delete resolved[key];
+  }
+  if (profile.cloud === "emulators") {
+    delete resolved.KANNA_CLOUD_ENV;
+    delete resolved.KANNA_FIREBASE_PROJECT_ID;
+    delete resolved.KANNA_RELAY_URL;
+    delete resolved.EXPO_PUBLIC_FIREBASE_PROJECT_ID;
+    delete resolved.EXPO_PUBLIC_KANNA_RELAY_URL;
+    return resolved;
+  }
+
+  delete resolved.EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_HOST;
+  delete resolved.EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_PORT;
+  delete resolved.EXPO_PUBLIC_FIREBASE_FIRESTORE_EMULATOR_HOST;
+  delete resolved.EXPO_PUBLIC_FIREBASE_FIRESTORE_EMULATOR_PORT;
+
+  resolved.KANNA_CLOUD_ENV = profile.cloud;
+  const identity = resolveKdEnvironment(profile.cloud === "staging" ? "staging" : "prod");
+  resolved.KANNA_FIREBASE_PROJECT_ID = identity.firebaseProjectId;
+  resolved.KANNA_RELAY_URL = identity.relayUrl;
+  resolved.EXPO_PUBLIC_KANNA_RELAY_URL = identity.relayUrl;
+  resolved.EXPO_PUBLIC_FIREBASE_PROJECT_ID = identity.firebaseProjectId;
+  return resolveCloudRuntimeEnv(resolved);
+}
 
 export function resolveKdEnvironment(name: KdEnvironmentName): KdEnvironmentIdentity {
   return environmentRegistry[name];

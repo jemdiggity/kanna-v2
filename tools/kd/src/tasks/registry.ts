@@ -19,7 +19,13 @@ import { buildLanLabPlan, parseLanLabInventory } from "../runtime/lan-lab";
 import { buildLanLabScenarioCommand } from "../runtime/lan-lab-runner";
 import { selectPreferredLanAddress } from "../runtime/lan-address";
 import { buildDevPlan, buildProductionMobilePlan } from "../runtime/dev-plan";
-import { resolveKdEnvironment } from "../runtime/environment";
+import {
+  applyEnvironmentProfile,
+  formatEnvironmentProfile,
+  resolveEnvironmentProfile,
+  resolveKdEnvironment,
+  type KdEnvironmentProfile
+} from "../runtime/environment";
 import { assertNotProductionDb, resetSqliteDb, seedSqliteDb, type DevDbTarget } from "../runtime/db";
 import { killWorkspaceDaemons } from "../runtime/daemon";
 import { checkRequiredCommands } from "../runtime/doctor";
@@ -117,6 +123,9 @@ export interface DevUpInput {
   transferRoot?: string;
   firebaseEnvFrom?: string;
   staging?: boolean;
+  build?: string;
+  owner?: string;
+  cloud?: string;
 }
 
 export type RestartComponent = "desktop" | "mobile" | "backend";
@@ -136,6 +145,9 @@ export interface MobileUpInput {
   production: boolean;
   staging: boolean;
   withCredentials?: boolean;
+  build?: string;
+  owner?: string;
+  cloud?: string;
 }
 
 export interface MobileRunInput {
@@ -144,6 +156,9 @@ export interface MobileRunInput {
   staging?: boolean;
   install?: boolean;
   withCredentials?: boolean;
+  build?: string;
+  owner?: string;
+  cloud?: string;
 }
 
 export interface MobileUninstallInput {
@@ -172,6 +187,9 @@ export const devUpInputSchema = z.object({
   transferRoot: z.string().optional(),
   firebaseEnvFrom: z.string().optional(),
   staging: z.boolean().default(false),
+  build: z.string().optional(),
+  owner: z.string().optional(),
+  cloud: z.string().optional(),
   withCredentials: z.boolean().default(false)
 });
 
@@ -189,7 +207,10 @@ const devDownInputSchema = z.object({
 const mobileUpInputSchema = z.object({
   production: z.boolean().default(false),
   staging: z.boolean().default(false),
-  withCredentials: z.boolean().default(false)
+  withCredentials: z.boolean().default(false),
+  build: z.string().optional(),
+  owner: z.string().optional(),
+  cloud: z.string().optional()
 });
 
 const mobileRunInputSchema = z.object({
@@ -197,7 +218,10 @@ const mobileRunInputSchema = z.object({
   production: z.boolean().default(false),
   staging: z.boolean().default(false),
   install: z.boolean().default(false),
-  withCredentials: z.boolean().default(false)
+  withCredentials: z.boolean().default(false),
+  build: z.string().optional(),
+  owner: z.string().optional(),
+  cloud: z.string().optional()
 });
 
 const mobileUninstallInputSchema = z.object({
@@ -487,6 +511,13 @@ export async function executeDevStatus(input: ExecutorInput): Promise<TaskResult
 }
 
 export async function executeDevUpWithContext(input: DevUpInput, executor: ExecutorInput): Promise<TaskResult> {
+  const profile = resolveEnvironmentProfile({
+    command: "dev",
+    build: input.build,
+    owner: input.owner,
+    cloud: input.cloud,
+    staging: input.staging
+  });
   const dbTarget = devDbTarget(executor.context);
   assertNotProductionDb(dbTarget);
   const devPorts = requireMobileDeviceDevPorts(executor.context.ports);
@@ -508,22 +539,17 @@ export async function executeDevUpWithContext(input: DevUpInput, executor: Execu
     await resetSqliteDb(executor.runner, dbTarget);
   }
 
-  const env: NodeJS.ProcessEnv = input.staging
-    ? {
-        ...executor.context.env,
-        KANNA_CLOUD_ENV: "staging",
-        KANNA_APP_ENV: executor.context.env.KANNA_APP_ENV ?? "staging"
-      }
-    : executor.context.env;
+  const env = applyEnvironmentProfile(executor.context.env, profile);
   const emulators = input.emulators ||
+    input.cloud === "emulators" ||
     input.remote === true ||
-    (input.withCredentials === true && input.staging !== true && !input.firebaseEnvFrom);
+    (input.withCredentials === true && profile.cloud === "emulators" && !input.firebaseEnvFrom);
   const firebaseConfigPath = writeFirebaseEmulatorConfig(executor.context.repoRoot, devPorts);
   writeTauriLocalConfig(executor.context.repoRoot, devPorts.KANNA_DEV_PORT);
   const plan = buildDevPlan({
     repoRoot: executor.context.repoRoot,
     env,
-    desktopSecretEnv: desktopCredentialEnv(input, env, input.staging ? "staging" : "dev"),
+    desktopSecretEnv: desktopCredentialEnv(input, env, profile.cloud === "staging" ? "staging" : "dev"),
     mobile: input.mobile,
     emulators,
     firebaseConfigPath,
@@ -540,8 +566,16 @@ export async function executeDevUpWithContext(input: DevUpInput, executor: Execu
 
   return {
     ok: true,
-    message: `Started tmux session '${executor.context.tmux.session}'.`,
-    data: { windows: plan.windows.map((window) => window.name), remote: input.remote }
+    message:
+      `Started tmux session '${executor.context.tmux.session}'.\n` +
+      `Profile: ${formatEnvironmentProfile(profile)}.\n` +
+      `Desktop owner: worktree (${resolveMobileServerUrl(env)}).`,
+    data: {
+      profile,
+      ownerEndpoint: resolveMobileServerUrl(env),
+      windows: plan.windows.map((window) => window.name),
+      remote: input.remote
+    }
   };
 }
 
@@ -697,6 +731,7 @@ export async function executeDevRestartWithContext(
 
 interface ProductionDesktopStatus {
   desktopId?: string;
+  environment?: string;
   version?: string;
   relay_url?: string;
   relayUrl?: string;
@@ -739,6 +774,24 @@ async function readInstalledStagingDesktopStatus(runner: CommandRunner): Promise
   } catch {
     return null;
   }
+}
+
+function requireInstalledStagingDesktopStatus(
+  status: ProductionDesktopStatus | null
+): ProductionDesktopStatus {
+  if (!status?.desktopId?.trim()) {
+    throw new Error(
+      "Installed staging desktop owner is not reachable at http://127.0.0.1:48121/v1/status. " +
+      "Start /Applications/Kanna Staging.app; kd will not substitute the worktree desktop/server."
+    );
+  }
+  if (status.environment && status.environment !== "staging") {
+    throw new Error(
+      `The desktop owner at http://127.0.0.1:48121 reported environment=${status.environment}; ` +
+      "refusing to treat it as the installed staging owner."
+    );
+  }
+  return status;
 }
 
 async function checkInstalledStagingDesktopRelayOwner(input: {
@@ -811,38 +864,43 @@ export async function executeProductionMobileUpWithContext(
   input: MobileUpInput,
   executor: ExecutorInput
 ): Promise<TaskResult> {
-  if (input.production && input.staging) {
-    throw new Error("mobile.up accepts only one of --production or --staging.");
-  }
-  if (!input.production && !input.staging) {
-    throw new Error("mobile.up requires --production or --staging.");
+  const profile = resolveEnvironmentProfile({
+    command: "mobile",
+    build: input.build,
+    owner: input.owner,
+    cloud: input.cloud,
+    staging: input.staging,
+    production: input.production
+  });
+  if (profile.desktopOwner === "worktree") {
+    throw new Error("Use `kd mobile up` without explicit axes for the worktree-owned dev stack.");
   }
 
-  if (input.staging) {
+  if (profile.desktopOwner === "staging") {
     const staging = resolveKdEnvironment("staging");
-    const env = {
-      ...executor.context.env,
-      KANNA_CLOUD_ENV: "staging",
-      KANNA_APP_ENV: executor.context.env.KANNA_APP_ENV ?? "staging"
-    };
+    const status = requireInstalledStagingDesktopStatus(
+      await readInstalledStagingDesktopStatus(executor.runner)
+    );
+    const env = applyEnvironmentProfile(executor.context.env, profile);
     const mobilePlan = buildProductionMobilePlan({
       repoRoot: executor.context.repoRoot,
       env,
-      environment: "staging"
+      profile
     });
 
     await startTmuxSession(executor.runner, executor.context.tmux, mobilePlan.windows);
-    const ownerCheck = await checkInstalledStagingDesktopRelayOwner({
-      runner: executor.runner,
-      repoRoot: executor.context.repoRoot,
-      env
-    });
-    if (ownerCheck) return ownerCheck;
 
     return {
       ok: true,
-      message: "Started mobile against staging cloud environment.",
+      message:
+        `Started mobile against the installed staging owner.\n` +
+        `Profile: ${formatEnvironmentProfile(profile)}.\n` +
+        `Desktop owner endpoint: http://127.0.0.1:48121/v1/status\n` +
+        `Device endpoint: ${staging.relayUrl}`,
       data: {
+        profile,
+        desktopId: status.desktopId,
+        ownerEndpoint: "http://127.0.0.1:48121/v1/status",
         relayUrl: staging.relayUrl,
         windows: mobilePlan.windows.map((window) => window.name)
       }
@@ -862,7 +920,7 @@ export async function executeProductionMobileUpWithContext(
   const plan = buildProductionMobilePlan({
     repoRoot: executor.context.repoRoot,
     env,
-    environment: "production"
+    profile
   });
 
   await startTmuxSession(executor.runner, executor.context.tmux, plan.windows);
@@ -871,8 +929,11 @@ export async function executeProductionMobileUpWithContext(
   const version = status.version ?? "unknown version";
   return {
     ok: true,
-    message: `Started mobile against production desktop ${desktopId} (${version}).`,
+    message:
+      `Started mobile against production desktop ${desktopId} (${version}).\n` +
+      `Profile: ${formatEnvironmentProfile(profile)}.`,
     data: {
+      profile,
       desktopId: status.desktopId,
       version: status.version,
       relayUrl,
@@ -962,11 +1023,17 @@ function formatPhysicalDeviceRunSuccess(input: {
   metroUrl: string;
   recoveryMessage?: string;
   checks: Awaited<ReturnType<typeof checkPhysicalDeviceRunPreflight>>["checks"];
+  profile: KdEnvironmentProfile;
+  ownerEndpoint: string;
+  deviceEndpoint: string;
 }): string {
   return [
     `Launched Kanna mobile on ${input.deviceName}.`,
     `Bundle ID: ${input.bundleId}`,
     `Metro: ${input.metroUrl}`,
+    `Profile: ${formatEnvironmentProfile(input.profile)}.`,
+    `Desktop owner endpoint: ${input.ownerEndpoint}`,
+    `Device endpoint: ${input.deviceEndpoint}`,
     "App: installed and launched.",
     ...(input.recoveryMessage ? [input.recoveryMessage] : []),
     formatPhysicalDevicePreflight(input.checks)
@@ -1044,6 +1111,14 @@ export async function executeMobileDeviceRunWithContext(
   executor: ExecutorInput,
   options: MobileDeviceRunExecutionOptions = {}
 ): Promise<TaskResult> {
+  const profile = resolveEnvironmentProfile({
+    command: "mobile",
+    build: input.build,
+    owner: input.owner,
+    cloud: input.cloud,
+    staging: input.staging,
+    production: input.production
+  });
   if (!input.device) {
     throw new Error("mobile.run requires --device.");
   }
@@ -1051,30 +1126,36 @@ export async function executeMobileDeviceRunWithContext(
     throw new Error("mobile.run accepts only one of --production or --staging.");
   }
 
-  const device = await resolvePhysicalDevice(executor.runner, {
-    requestedUdid: executor.context.env.KANNA_IOS_DEVICE_UDID?.trim() || undefined,
-    requestedName: executor.context.env.KANNA_IOS_PHYSICAL_DEVICE_NAME?.trim() || undefined
-  });
-  const buildEnv = mobileDeviceInstallEnv(input, executor, device.udid);
-  if (input.install) {
-    return executeMobileDeviceReleaseInstall(input, executor, device, buildEnv);
-  }
-
-  const lanHost = requireMobileDeviceLanHost(options);
-  const launch = prepareMobileDeviceLaunch(input, executor, lanHost, buildEnv);
-  await launch.resetTmux();
-  await startTmuxSession(executor.runner, executor.context.tmux, launch.plan.windows);
-  if (input.staging) {
+  let stagingOwnerStatus: ProductionDesktopStatus | null = null;
+  if (profile.desktopOwner === "staging") {
+    stagingOwnerStatus = requireInstalledStagingDesktopStatus(
+      await (options.readInstalledStagingDesktopStatus ?? readInstalledStagingDesktopStatus)(
+        executor.runner
+      )
+    );
     const ownerCheck = await checkInstalledStagingDesktopRelayOwner({
       runner: executor.runner,
       repoRoot: executor.context.repoRoot,
-      env: launch.env,
-      readStatus: options.readInstalledStagingDesktopStatus,
+      env: applyEnvironmentProfile(executor.context.env, profile),
+      readStatus: async () => stagingOwnerStatus,
       listActiveDesktopIds: options.listStagingRelayActiveDesktopIds
     });
     if (ownerCheck) return ownerCheck;
   }
 
+  const device = await resolvePhysicalDevice(executor.runner, {
+    requestedUdid: executor.context.env.KANNA_IOS_DEVICE_UDID?.trim() || undefined,
+    requestedName: executor.context.env.KANNA_IOS_PHYSICAL_DEVICE_NAME?.trim() || undefined
+  });
+  const buildEnv = mobileDeviceInstallEnv(profile, executor, device.udid);
+  if (input.install) {
+    return executeMobileDeviceReleaseInstall(profile, executor, device, buildEnv);
+  }
+
+  const lanHost = requireMobileDeviceLanHost(options);
+  const launch = prepareMobileDeviceLaunch(input, profile, executor, lanHost, buildEnv);
+  await launch.resetTmux();
+  await startTmuxSession(executor.runner, executor.context.tmux, launch.plan.windows);
   const metroPort = Number.parseInt(launch.env.KANNA_MOBILE_PORT ?? "8081", 10);
   if (Number.isNaN(metroPort)) {
     throw new Error(`KANNA_MOBILE_PORT must be an integer, got: ${launch.env.KANNA_MOBILE_PORT}`);
@@ -1110,6 +1191,7 @@ export async function executeMobileDeviceRunWithContext(
           reason: `Failed to prebuild Kanna mobile for ${nativeIdentity.bundleId}.`
         }),
       data: {
+        profile,
         bundleId: nativeIdentity.bundleId,
         device,
         metroUrl: preflight.metroUrl,
@@ -1135,6 +1217,7 @@ export async function executeMobileDeviceRunWithContext(
         reason: `FAIL metro-lan: ${initialMetroReadiness.message}`
       }),
       data: {
+        profile,
         bundleId: nativeIdentity.bundleId,
         device,
         metroUrl: initialMetroReadiness.metroUrl,
@@ -1170,6 +1253,13 @@ export async function executeMobileDeviceRunWithContext(
         bundleId: nativeIdentity.bundleId,
         deviceName: device.name,
         metroUrl: postLaunchMetroReadiness.metroUrl,
+        profile,
+        ownerEndpoint: profile.desktopOwner === "staging"
+          ? "http://127.0.0.1:48121/v1/status"
+          : resolveMobileServerUrl(launch.env),
+        deviceEndpoint: profile.cloud === "staging"
+          ? resolveKdEnvironment("staging").relayUrl
+          : resolveMobileServerUrl(launch.env),
         checks: physicalDeviceChecksWithMetroReadiness({
           checks: preflight.checks,
           metroMessage: postLaunchMetroReadiness.message,
@@ -1177,6 +1267,7 @@ export async function executeMobileDeviceRunWithContext(
         })
       }),
       data: {
+        profile,
         bundleId: nativeIdentity.bundleId,
         device,
         metroUrl: postLaunchMetroReadiness.metroUrl,
@@ -1213,6 +1304,13 @@ export async function executeMobileDeviceRunWithContext(
           deviceName: device.name,
           metroUrl: postLaunchMetroReadiness.metroUrl,
           recoveryMessage: `Recovered by relaunching ${nativeIdentity.bundleId} after Metro became reachable.`,
+          profile,
+          ownerEndpoint: profile.desktopOwner === "staging"
+            ? "http://127.0.0.1:48121/v1/status"
+            : resolveMobileServerUrl(launch.env),
+          deviceEndpoint: profile.cloud === "staging"
+            ? resolveKdEnvironment("staging").relayUrl
+            : resolveMobileServerUrl(launch.env),
           checks: physicalDeviceChecksWithMetroReadiness({
             checks: preflight.checks,
             metroMessage: postLaunchMetroReadiness.message,
@@ -1220,6 +1318,7 @@ export async function executeMobileDeviceRunWithContext(
           })
         }),
         data: {
+          profile,
           bundleId: nativeIdentity.bundleId,
           device,
           metroUrl: postLaunchMetroReadiness.metroUrl,
@@ -1284,39 +1383,18 @@ export async function executeMobileDeviceRunWithContext(
 }
 
 function mobileDeviceInstallEnv(
-  input: MobileRunInput,
+  profile: KdEnvironmentProfile,
   executor: ExecutorInput,
   deviceUdid: string
 ): NodeJS.ProcessEnv {
-  if (input.staging) {
-    return {
-      ...executor.context.env,
-      KANNA_CLOUD_ENV: "staging",
-      KANNA_APP_ENV: "staging",
-      KANNA_IOS_DEVICE_UDID: deviceUdid
-    };
-  }
-
-  if (input.production) {
-    const production = resolveKdEnvironment("prod");
-    return {
-      ...executor.context.env,
-      KANNA_APP_ENV: executor.context.env.KANNA_APP_ENV ?? "prod",
-      KANNA_IOS_DEVICE_UDID: deviceUdid,
-      EXPO_PUBLIC_KANNA_RELAY_URL:
-        executor.context.env.EXPO_PUBLIC_KANNA_RELAY_URL ?? production.relayUrl
-    };
-  }
-
   return {
-    ...executor.context.env,
-    KANNA_APP_ENV: executor.context.env.KANNA_APP_ENV ?? "dev",
+    ...applyEnvironmentProfile(executor.context.env, profile),
     KANNA_IOS_DEVICE_UDID: deviceUdid
   };
 }
 
 async function executeMobileDeviceReleaseInstall(
-  input: MobileRunInput,
+  profile: KdEnvironmentProfile,
   executor: ExecutorInput,
   device: Awaited<ReturnType<typeof resolvePhysicalDevice>>,
   env: NodeJS.ProcessEnv
@@ -1441,11 +1519,12 @@ async function executeMobileDeviceReleaseInstall(
     message: formatPhysicalDeviceInstallSuccess({
       bundleId: nativeIdentity.bundleId,
       deviceName: device.name,
-      environment: nativeIdentity.appEnv
+      environment: `${nativeIdentity.appEnv}; ${formatEnvironmentProfile(profile)}`
     }),
     data: {
       bundleId: nativeIdentity.bundleId,
       environment: nativeIdentity.appEnv,
+      profile,
       device,
       appPath
     }
@@ -1454,6 +1533,7 @@ async function executeMobileDeviceReleaseInstall(
 
 function prepareMobileDeviceLaunch(
   input: MobileRunInput,
+  profile: KdEnvironmentProfile,
   executor: ExecutorInput,
   lanHost: string,
   env: NodeJS.ProcessEnv
@@ -1462,29 +1542,19 @@ function prepareMobileDeviceLaunch(
   plan: ReturnType<typeof buildDevPlan>;
   resetTmux: () => Promise<void>;
 } {
-  if (input.staging) {
+  if (profile.desktopOwner !== "worktree") {
+    const mobileEnv = {
+      ...env,
+      REACT_NATIVE_PACKAGER_HOSTNAME: lanHost
+    };
     const mobilePlan = buildProductionMobilePlan({
       repoRoot: executor.context.repoRoot,
-      env,
-      environment: "staging"
+      env: mobileEnv,
+      profile
     });
     return {
-      env,
+      env: mobileEnv,
       plan: mobilePlan,
-      resetTmux: () => stopTmuxWindow(executor.runner, executor.context.tmux, "mobile")
-        .then(() => undefined)
-    };
-  }
-
-  if (input.production) {
-    const plan = buildProductionMobilePlan({
-      repoRoot: executor.context.repoRoot,
-      env,
-      environment: "production"
-    });
-    return {
-      env,
-      plan,
       resetTmux: () => stopTmuxWindow(executor.runner, executor.context.tmux, "mobile")
         .then(() => undefined)
     };
@@ -1644,6 +1714,14 @@ export async function executeMobileDeviceDoctorWithContext(
   executor: ExecutorInput,
   options: MobileDeviceRunExecutionOptions = {}
 ): Promise<TaskResult> {
+  const profile = resolveEnvironmentProfile({
+    command: "mobile",
+    build: input.build,
+    owner: input.owner,
+    cloud: input.cloud,
+    staging: input.staging,
+    production: input.production
+  });
   if (!input.device) {
     throw new Error("mobile.doctor requires --device.");
   }
@@ -1658,8 +1736,7 @@ export async function executeMobileDeviceDoctorWithContext(
     throw new Error(`KANNA_MOBILE_PORT must be an integer, got: ${executor.context.env.KANNA_MOBILE_PORT}`);
   }
   const nativeIdentity = resolveMobileNativeIdentity({
-    ...executor.context.env,
-    KANNA_APP_ENV: executor.context.env.KANNA_APP_ENV ?? "dev"
+    ...applyEnvironmentProfile(executor.context.env, profile)
   });
   const preflight = await checkPhysicalDeviceRunPreflight(executor.runner, {
     bundleId: nativeIdentity.bundleId,
@@ -1670,8 +1747,12 @@ export async function executeMobileDeviceDoctorWithContext(
 
   return {
     ok: preflight.ok,
-    message: `Physical-device mobile doctor for ${device.name}. Metro: ${preflight.metroUrl}\n${formatPhysicalDevicePreflight(preflight.checks)}`,
+    message:
+      `Physical-device mobile doctor for ${device.name}. Metro: ${preflight.metroUrl}\n` +
+      `Profile: ${formatEnvironmentProfile(profile)}.\n` +
+      `${formatPhysicalDevicePreflight(preflight.checks)}`,
     data: {
+      profile,
       bundleId: nativeIdentity.bundleId,
       device,
       metroUrl: preflight.metroUrl,
