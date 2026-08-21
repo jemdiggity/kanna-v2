@@ -13,7 +13,6 @@ import {
 } from "react-native";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { DesktopSummary, RepoSummary } from "../lib/api/types";
-import { repoIsRegisteredOnDesktop } from "../lib/api/repoIdentity";
 import {
   agentProviderOptionsForDesktop,
   desktopReportsNoAgentProvider
@@ -84,13 +83,8 @@ export function CreateTaskComposer({
   onCheckout
 }: CreateTaskComposerProps) {
   const selectedRepo = repos.find((repo) => repo.id === selectedRepoId) ?? null;
-  const eligibleDesktops = selectedRepo
-    ? desktops.filter((desktop) =>
-        repoIsRegisteredOnDesktop(selectedRepo, desktop.id)
-      )
-    : desktops;
   const selectedDesktop =
-    eligibleDesktops.find((desktop) => desktop.id === selectedDesktopId) ?? null;
+    desktops.find((desktop) => desktop.id === selectedDesktopId) ?? null;
   // Only the providers the selected machine can actually run. A machine that
   // reported no inventory (an older desktop) still offers everything Kanna
   // supports, which is the behaviour that shipped before inventory existed.
@@ -101,7 +95,11 @@ export function CreateTaskComposer({
     agentOptions.find((option) => option.provider === selectedAgentProvider)?.label ??
     (machineHasNoAgent ? "No agent installed" : "Choose agent");
   const canSubmit = Boolean(
-    selectedRepoId && selectedDesktop && prompt.trim() && !machineHasNoAgent
+    selectedRepoId &&
+      selectedDesktop &&
+      prompt.trim() &&
+      !machineHasNoAgent &&
+      !checkoutOffer
   );
   const selectedDesktopLabel = selectedDesktop
     ? `${selectedDesktop.name} (${selectedDesktop.online ? "online" : "offline"})`
@@ -154,7 +152,7 @@ export function CreateTaskComposer({
                 <View style={styles.optionSection}>
                   <Text style={styles.optionLabel}>Machine</Text>
                   <View style={styles.choiceGroup}>
-                    {eligibleDesktops.map((desktop) => {
+                    {desktops.map((desktop) => {
                       const selected = desktop.id === selectedDesktop?.id;
                       return (
                         <Pressable

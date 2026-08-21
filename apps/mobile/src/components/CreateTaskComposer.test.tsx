@@ -93,11 +93,13 @@ function renderComposer(
     selectedAgentProvider: string | null;
     isOptionsExpanded: boolean;
     errorMessage: string | null;
+    checkoutOffer: Parameters<NonNullable<typeof CreateTaskComposer>>[0]["checkoutOffer"];
     onClose: () => void;
     onSelectDesktop: (desktopId: string) => void;
     onSelectAgentProvider: (provider: string) => void;
     onToggleOptions: () => void;
     onSubmit: () => void;
+    onCheckout: () => void;
   }> = {}
 ): ElementNode {
   if (!CreateTaskComposer) {
@@ -123,12 +125,14 @@ function renderComposer(
     isOptionsExpanded: overrides.isOptionsExpanded ?? false,
     errorMessage:
       overrides.errorMessage === undefined ? null : overrides.errorMessage,
+    checkoutOffer: overrides.checkoutOffer ?? null,
     onChangePrompt: vi.fn(),
     onClose: overrides.onClose ?? vi.fn(),
     onSelectDesktop: overrides.onSelectDesktop ?? vi.fn(),
     onSelectAgentProvider: overrides.onSelectAgentProvider ?? vi.fn(),
     onToggleOptions: overrides.onToggleOptions ?? vi.fn(),
-    onSubmit: overrides.onSubmit ?? vi.fn()
+    onSubmit: overrides.onSubmit ?? vi.fn(),
+    onCheckout: overrides.onCheckout ?? vi.fn()
   } as Parameters<NonNullable<typeof CreateTaskComposer>>[0] & {
     selectedAgentProvider: string | null;
     errorMessage: string | null;
@@ -312,7 +316,7 @@ describe("CreateTaskComposer", () => {
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
-  it("offers only machines where the selected canonical repo is registered", () => {
+  it("offers a target machine where the selected canonical repo is not registered", () => {
     const tree = renderComposer({
       isOptionsExpanded: true,
       repos: [
@@ -329,12 +333,41 @@ describe("CreateTaskComposer", () => {
         { id: "desktop-3", name: "Mac Studio", online: true, mode: "remote" }
       ],
       selectedRepoId: "git:hash-kanji",
-      selectedDesktopId: "desktop-1"
+      selectedDesktopId: "desktop-3"
     });
 
     expect(findNodeByText(tree, "MacBook Pro")).not.toBeNull();
     expect(findNodeByText(tree, "Mac mini")).not.toBeNull();
-    expect(findNodeByText(tree, "Mac Studio")).toBeNull();
+    expect(findNodeByText(tree, "Mac Studio")).not.toBeNull();
+    expect(findNodeByText(tree, "Mac Studio (online) · Claude")).not.toBeNull();
+    expect(findNodeByTestId(tree, "mobile.create-task.submit")?.props?.disabled).toBe(
+      false
+    );
+  });
+
+  it("disables ordinary creation while checkout is offered", () => {
+    const onSubmit = vi.fn();
+    const onCheckout = vi.fn();
+    const tree = renderComposer({
+      onSubmit,
+      onCheckout,
+      checkoutOffer: {
+        action: "create-task",
+        status: "offered",
+        repoId: "repo-1",
+        repoName: "Repo One",
+        desktopId: "desktop-1",
+        desktopName: "Studio Mac"
+      }
+    });
+    const submit = findNodeByTestId(tree, "mobile.create-task.submit");
+    const checkout = findNodeByTestId(tree, "mobile.create-task.checkout");
+
+    expect(submit?.props?.disabled).toBe(true);
+    expect(submit?.props?.onPress).toBeUndefined();
+    (checkout?.props?.onPress as (() => void) | undefined)?.();
+    expect(onCheckout).toHaveBeenCalledOnce();
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 
   it("calls submit when the create button is enabled", () => {

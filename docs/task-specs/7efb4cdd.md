@@ -28,6 +28,11 @@ the separate mobile-wedge fix in task `3ccb7e4d` are out of scope.
   target machine. It displays the running state, then refreshes repo inventory
   and automatically retries the frozen task-create or repo-command action once.
   This is JS-only and does not change `runtimeVersion`.
+- The task composer lists the currently targeted machine even when the selected
+  repo is absent there. Submitting against that machine reaches the checkout
+  offer, while ordinary task creation remains unavailable until checkout
+  succeeds. This UI seam and its automatic retry are covered through the
+  rendered composer/navigation flow.
 - Fresh checkout performs exactly the current clone-and-register semantics.
   It does not launch setup commands; task/repo-command execution continues to
   apply the repository's existing `.kanna/config.json` setup semantics.
@@ -47,3 +52,11 @@ Server happy-path and cleanup tests, a mobile confirm/progress/retry test, and a
 real-server `file://` remote E2E prove task creation succeeds after checkout;
 `cargo test -p kanna-server`, `pnpm test`, and `./kd test all` are run and results
 reported.
+
+## Revision history
+
+- 2026-08-21 reviewer feedback (revision 1): expose machines absent from
+  `registeredDesktopIds` in the composer so selecting and submitting reaches
+  the existing named confirmation/progress/automatic-retry flow; replace the
+  contradictory composer test and add component/navigation integration
+  coverage. Full device E2E remains out of scope for this revision.
