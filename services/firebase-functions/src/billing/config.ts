@@ -51,6 +51,9 @@ export const CHECKOUT_SECRET_ENVS = [
   PORTAL_BASE_URL_ENV,
 ] as const;
 
+/** Account deletion calls Stripe only to cancel an existing subscription. */
+export const DELETE_ACCOUNT_SECRET_ENVS = [STRIPE_SECRET_KEY_ENV] as const;
+
 export const STRIPE_WEBHOOK_SECRET_ENVS = [STRIPE_WEBHOOK_SECRET_ENV] as const;
 
 export class BillingConfigError extends Error {

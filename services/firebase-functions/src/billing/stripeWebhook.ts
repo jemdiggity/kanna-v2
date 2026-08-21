@@ -26,9 +26,11 @@ import {
   type StripeSourcePatch,
 } from "./stripeEvents.js";
 import {
+  accountDeletionPath,
   billingSourcePath,
   stripeCustomerPath,
   stripeEventPath,
+  userDocPath,
   type BilledSourceState,
   type BillingEnvironment,
   type EntitlementRecord,
@@ -46,6 +48,7 @@ export type StripeWebhookOutcomeCode =
   | "stale"
   | "ignored"
   | "unresolved_account"
+  | "deleted_account"
   | "invalid_payload"
   | "invalid_signature"
   | "not_configured";
@@ -169,10 +172,26 @@ async function applyStripeEvent(
 ): Promise<Omit<StripeWebhookOutcome, "eventId" | "uid">> {
   const { transaction, db, uid, event, patch, customerId, environment, now } = input;
   const eventRef = db.doc(stripeEventPath(event.id));
+  const userRef = db.doc(userDocPath(uid));
+  const deletionRef = db.doc(accountDeletionPath(uid));
 
   // Every read first: Firestore transactions forbid a read after a write.
+  // The durable top-level deletion tombstone is the synchronization boundary.
+  // A webhook transaction already in flight conflicts with the tombstone write
+  // and retries; later events cannot race recursiveDelete into recreating data.
+  const deletionDoc = await transaction.get(deletionRef);
+  const userDoc = await transaction.get(userRef);
   const eventDoc = await transaction.get(eventRef);
   const state = await readBillingState(db, uid, transaction);
+
+  if (deletionDoc.exists || !userDoc.exists) {
+    return {
+      httpStatus: 200,
+      code: "deleted_account",
+      entitlement: null,
+      entitlementWritten: false,
+    };
+  }
 
   if (eventDoc.exists) {
     return {

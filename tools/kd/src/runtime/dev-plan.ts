@@ -122,7 +122,13 @@ function mobileFirebaseEnv(input: BuildDevPlanInput): Record<string, string | un
       resolveMobileHost(input),
     EXPO_PUBLIC_FIREBASE_FIRESTORE_EMULATOR_PORT:
       input.env.EXPO_PUBLIC_FIREBASE_FIRESTORE_EMULATOR_PORT ??
-      input.env.KANNA_FIREBASE_FIRESTORE_PORT
+      input.env.KANNA_FIREBASE_FIRESTORE_PORT,
+    EXPO_PUBLIC_FIREBASE_FUNCTIONS_EMULATOR_HOST:
+      input.env.EXPO_PUBLIC_FIREBASE_FUNCTIONS_EMULATOR_HOST ??
+      resolveMobileHost(input),
+    EXPO_PUBLIC_FIREBASE_FUNCTIONS_EMULATOR_PORT:
+      input.env.EXPO_PUBLIC_FIREBASE_FUNCTIONS_EMULATOR_PORT ??
+      input.env.KANNA_FIREBASE_FUNCTIONS_PORT
   };
 }
 

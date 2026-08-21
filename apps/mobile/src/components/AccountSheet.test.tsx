@@ -391,4 +391,44 @@ describe("AccountSheet", () => {
     expect(passwordInput?.props?.secureTextEntry).toBe(true);
     expect(toggle?.props?.accessibilityLabel).toBe("Show password");
   });
+
+  it("requires DELETE before invoking permanent account deletion", async () => {
+    if (!AccountSheet) throw new Error("AccountSheet was not loaded");
+    const onDeleteAccount = vi.fn(async () => undefined);
+    const props = {
+      auth: {
+        status: "signedIn" as const,
+        user: { uid: "user-1", email: "dev@example.com", displayName: "Dev" }
+      },
+      machineCount: 1,
+      availableMachineCount: 1,
+      quickRepliesReady: true,
+      visible: true,
+      onClose: vi.fn(),
+      onOpenMachines: vi.fn(),
+      onOpenQuickReplies: vi.fn(),
+      onSignIn: vi.fn(),
+      onSignOut: vi.fn(),
+      onDeleteAccount
+    };
+
+    reactState.index = 0;
+    let tree = AccountSheet(props) as ElementNode;
+    findNodeByTestId(tree, "mobile.account-delete")?.props?.onPress?.();
+
+    reactState.index = 0;
+    tree = AccountSheet(props) as ElementNode;
+    expect(textContent(tree)).toContain("subscription");
+    expect(textContent(tree)).toContain("cloud data");
+    expect(textContent(tree)).toContain("cloud desktop pairings");
+    expect(findNodeByTestId(tree, "mobile.account-delete-confirm")?.props?.disabled).toBe(true);
+
+    findNodeByTestId(tree, "mobile.account-delete-input")?.props?.onChangeText?.("DELETE");
+    reactState.index = 0;
+    tree = AccountSheet(props) as ElementNode;
+    const confirm = findNodeByTestId(tree, "mobile.account-delete-confirm");
+    expect(confirm?.props?.disabled).toBe(false);
+    await confirm?.props?.onPress?.();
+    expect(onDeleteAccount).toHaveBeenCalledOnce();
+  });
 });

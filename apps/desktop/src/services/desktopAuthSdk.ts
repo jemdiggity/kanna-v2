@@ -131,9 +131,26 @@ export function createFirebaseDesktopAuthSdk(auth: Auth, _app: FirebaseApp): Des
       return { desktopCredentialError };
     },
     async getIdToken(forceRefresh) {
-      return auth.currentUser?.getIdToken(forceRefresh) ?? null;
+      try {
+        return await auth.currentUser?.getIdToken(forceRefresh) ?? null;
+      } catch (error) {
+        if (!isDeletedAccountTokenError(error)) throw error;
+        // Account deletion invalidates refresh credentials. Convert that
+        // authoritative Firebase response into the same signed-out state as a
+        // local sign-out, so cloud subscriptions stop while LAN remains alive.
+        await firebaseSignOut(auth);
+        return null;
+      }
     },
   };
+}
+
+function isDeletedAccountTokenError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || !("code" in error)) return false;
+  const code = (error as { code?: unknown }).code;
+  return code === "auth/user-token-expired"
+    || code === "auth/user-disabled"
+    || code === "auth/user-not-found";
 }
 
 function mapFirebaseUser(user: User | null): DesktopAuthUser | null {

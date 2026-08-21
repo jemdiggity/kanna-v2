@@ -26,4 +26,11 @@ button:disabled { opacity: .55; cursor: wait; }
 .status-row strong { text-transform: capitalize; }
 .active { color: #23714b; }
 .inactive { color: #7a625b; }
+.danger-zone { margin-top: 28px; border-color: #e2b7ba; }
+.danger-zone h2 { margin-bottom: 8px; }
+.danger-text { color: #a1262d; }
+.danger-button { background: #a1262d; }
+.delete-confirmation { margin-top: 18px; }
+.confirmation-actions { display: flex; gap: 12px; align-items: center; }
+.confirmation-actions .link-button { color: #657069; padding: 12px 17px; }
 @media (max-width: 540px) { main { margin-top: 32px; } .site-header nav { gap: 12px; } }

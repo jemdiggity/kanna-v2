@@ -128,25 +128,116 @@ nothing. Additions:
   `AccountSheet`.
 - **Account deletion** is a first-class backend pipeline regardless of where
   the button lives (APPI/GDPR, the existing 30-day manual promise, and now
-  5.1.1(v) all demand it): a callable function `deleteAccount` that, in
-  order — cancels any Stripe subscription immediately (`cancel_now`, no
-  proration surprises), recursively deletes `users/{uid}` (task index,
-  desktops, pushDevices, entitlements, billing source docs), tombstones the
-  `appAccountTokens/{token}` mapping (so later App Store Server Notifications
-  for the dead account resolve to "deleted" and are logged and dropped, not
-  errored), deletes/tombstones `desktopCredentials` docs whose `uid` matches,
-  deletes legacy `devices/{token}` rows, revokes refresh tokens, then deletes
-  the Firebase Auth user. **An active Apple subscription cannot be canceled
-  by Kanna** — before deleting, the flow must warn "your App Store
-  subscription keeps renewing until you cancel it in Apple's subscription
-  settings", open/deep-link those settings, and require acknowledgment; it
-  must never block deletion on the Apple state (Apple requires deletion to
-  work regardless). The Stripe Customer object and invoices are retained
-  (financial record-keeping obligation) — say so in the privacy policy.
-  Paired desktops: LAN pairing is untouched (accountless by design); the
-  desktop's cloud session dies with token revocation and it falls back to
-  local-only. The portal and the iOS app both expose deletion at their
-  respective channel launches.
+  [App Store Review Guideline 5.1.1(v)](https://developer.apple.com/app-store/review/guidelines/#data-collection-and-storage)
+  all demand it). The implemented contract is detailed below. Apple IAP is not
+  part of the currently shipping deletion operation; when that billing source
+  ships, its inability to be canceled by Kanna and the required
+  manage-subscriptions warning must be added before release.
+
+### Permanent account deletion contract (implemented 2026-08-21)
+
+`deleteAccount` is an authenticated callable shared by the native mobile app
+and the account portal. Both surfaces require a hard `DELETE` confirmation
+that names the subscription, cloud data, and cloud desktop pairings being
+lost. This is native-initiated on iOS, as required by Guideline 5.1.1(v), not a
+link that leaves account deletion available only on the web.
+
+The callable performs these phases strictly in order:
+
+1. Atomically coordinate checkout and deletion through
+   `accountCheckouts/{uid}`. Checkout transactionally admits one Stripe-creation
+   operation only while no deletion tombstone exists, and does not write
+   `users/{uid}` or `stripeCustomers` until a second transaction records the
+   resulting session and releases that admission. Deletion refuses retryably
+   while an admitted operation is still creating Stripe state. Once it has
+   finished, deletion atomically creates the durable
+   `accountDeletions/{uid}` tombstone and reads every recorded session. No new
+   checkout can pass admission after that transaction commits.
+2. Before deleting any local billing/customer index, collect every Stripe
+   customer attributable to the uid from the code-enumerated legacy and current
+   records: `users/{uid}.stripeCustomerId`,
+   `users/{uid}/billing/stripe.stripeCustomerId`, and every
+   `stripeCustomers` document whose `uid` matches. Cancel every locally
+   recorded subscription immediately, close every session recorded in
+   `accountCheckouts/{uid}`, then exhaustively page through every collected
+   Stripe customer's Checkout sessions and subscriptions. Open Checkout
+   sessions are expired, completed sessions' subscriptions are canceled, and
+   every other live subscription for every mapping is canceled. This covers
+   Checkout URLs created by the original implementation before the session
+   ledger existed, including multiple historical customer mappings.
+   Cancellation is cancel-at-once with no refund or proration logic. Missing,
+   expired, and already-canceled Stripe resources make reruns no-ops.
+3. Relay publication transactions and Stripe webhook transactions read the
+   tombstone before any uid-owned write. Firestore Rules require its absence
+   for the desktop client's direct `users/{uid}` profile and
+   `desktopCredentials/{desktopId}` create/update operations. Revoke cloud/relay
+   pairings by deleting `desktopCredentials` rows whose `uid` matches, then
+   delete legacy `devices` rows whose `userId` matches.
+4. Recursively delete `users/{uid}`. This removes the user profile, all billing
+   source documents (including `billing/comp`), the derived entitlement,
+   `pushDevices`, published `desktops`, and every published `tasks` mirror
+   below those desktops.
+5. Delete the code-enumerated uid indexes: `stripeCustomers` (`uid`),
+   `stripeEvents` (`uid`), and `appAccountTokens` (`uid`), plus the completed
+   `accountCheckouts/{uid}` coordination record.
+6. Revoke Firebase refresh tokens, then delete the Firebase Auth user last.
+
+Every deletion is safe when the document is already absent, and a Stripe
+“resource missing” response is treated as already canceled. If a phase fails,
+Auth still exists and the caller can run the operation again. Auth goes last
+specifically so no mid-pipeline failure strands an account that can no longer
+authenticate to retry. The tombstone is written idempotently and remains
+present across retries. Stripe webhook application, every relay desktop/task
+publication transaction, and the Firestore Rules governing direct desktop
+profile and credential writes read it as their durable write fence. Checkout
+uses the tombstone and its `accountCheckouts/{uid}` admission record as one
+transactional coordination boundary rather than relying on a one-time read.
+The relay's `/register` and `/push/register` handlers likewise read the
+tombstone and write `devices/{token}` or `users/{uid}/pushDevices/{id}` in one
+transaction. A registration that commits first is included in the subsequent
+deletion sweep; a transaction that would commit after the tombstone is written
+conflicts, retries against the tombstone, and is rejected even if Firebase
+still accepts its already-issued ID token.
+Cancellation events, cached or in-flight publishers, direct desktop writes,
+and cached-token checkout calls following deletion are rejected without
+recreating Stripe, dedupe, billing, entitlement, profile, credential, desktop,
+or task state. A direct client write committed before the tombstone remains
+eligible for the deletion sweep; one committing after it is denied.
+
+The Firestore-emulator suite exercises the adversarial checkout race by pausing
+the mocked Stripe gateway after transactional admission, attempting deletion,
+then releasing Stripe. The first deletion is retryable; the rerun fences the
+uid, closes the recorded session, removes the user tree and billing reverse
+map, and deletes Auth last.
+
+It also seeds a pre-ledger open Checkout session with no
+`accountCheckouts/{uid}` record plus completed/live subscriptions across
+multiple customer mappings. The mocked Stripe boundary proves deletion makes
+the old URL unusable, cancels all subscriptions, and repeats safely after an
+injected mid-pipeline failure without making live Stripe calls.
+
+There is no soft-disable, grace period, undo window, or refund path. No user
+content or credential survives: no account, complimentary grant, entitlement,
+task or desktop mirror, push token, billing source/index, app-account-token
+mapping, or relay credential. The sole Kanna-side remnant is the minimal
+`accountDeletions/{uid}` safety tombstone; it is not account content and exists
+only to prevent old tokens, cached relay credentials, and delayed writers from
+resurrecting deleted data. Stripe may retain its canceled subscription/customer
+and financial records under Stripe's own retention obligations; Kanna does not
+use those records to restore an account. A person may register the same email
+again, but receives a new Firebase uid and a blank account, so the old uid's
+tombstone does not apply. Complimentary access and prior paid entitlement are
+not inherited.
+
+The desktop loses relay access when its canonical credential is next checked
+and its Firebase session becomes visibly signed out when credential refresh
+reports the deleted identity. Local databases, worktrees, LAN discovery, and
+QR/LAN pairings are installation-local and remain usable; deletion is of the
+cloud account, not the local install.
+
+Data export is a separate follow-up. The deliberate no-undo choice keeps this
+operation honest and immediate; export support does not weaken or delay
+deletion.
 
 ## Decision 2 — The Apple question
 

@@ -176,4 +176,40 @@ describe("getConfiguredDesktopAuthSession", () => {
 
     expect(session.getState()).toEqual({ status: "signedOut" });
   });
+
+  it("degrades a deleted account to signed out on credential refresh", async () => {
+    const getIdToken = vi.fn().mockRejectedValue(
+      Object.assign(new Error("The user's credential is no longer valid."), {
+        code: "auth/user-token-expired",
+      }),
+    );
+    const firebaseUser = {
+      uid: "deleted-user",
+      email: "deleted@example.com",
+      displayName: null,
+      getIdToken,
+    };
+    const auth: { currentUser: typeof firebaseUser | null } = { currentUser: firebaseUser };
+    mocks.initializeAuth.mockReturnValue(auth);
+    let authObserver: ((user: typeof firebaseUser | null) => void) | null = null;
+    mocks.onAuthStateChanged.mockImplementation((_auth, onNext) => {
+      authObserver = onNext;
+      onNext(firebaseUser);
+      return () => undefined;
+    });
+    mocks.firebaseSignOut.mockImplementation(async () => {
+      auth.currentUser = null;
+      authObserver?.(null);
+    });
+
+    const { getConfiguredDesktopAuthSession } = await import("./desktopAuthSdk");
+    const session = await getConfiguredDesktopAuthSession();
+    await session.initialize();
+    expect(session.getState().status).toBe("signedIn");
+
+    await expect(session.getIdToken(true)).resolves.toBeNull();
+    expect(mocks.firebaseSignOut).toHaveBeenCalledWith(auth);
+    expect(getIdToken).toHaveBeenCalledWith(true);
+    expect(session.getState()).toEqual({ status: "signedOut" });
+  });
 });

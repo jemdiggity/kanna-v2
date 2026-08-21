@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { pathToFileURL } from "node:url";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import {
+  AccountDeletionInProgressError,
   verifyPhoneToken,
   verifyPhoneIdentity,
   verifyDeviceToken,
@@ -356,6 +357,10 @@ export const server = createServer(async (req, res) => {
     // 404 for everything else
     jsonResponse(res, 404, { error: "Not found" });
   } catch (err) {
+    if (err instanceof AccountDeletionInProgressError) {
+      jsonResponse(res, 409, { error: err.message });
+      return;
+    }
     console.error("[http] Unhandled error:", err);
     jsonResponse(res, 500, { error: "Internal server error" });
   }

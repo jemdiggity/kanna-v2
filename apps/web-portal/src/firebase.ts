@@ -62,6 +62,10 @@ export const portalFirebase = {
   async createCheckoutSession(request: CheckoutSessionRequest): Promise<CheckoutSessionResponse> {
     const callable = httpsCallable<CheckoutSessionRequest, CheckoutSessionResponse>(functions, "createCheckoutSession");
     return (await callable(request)).data;
+  },
+  async deleteAccount(): Promise<void> {
+    const callable = httpsCallable<Record<string, never>, { deleted: true }>(functions, "deleteAccount");
+    await callable({});
   }
 };
 
