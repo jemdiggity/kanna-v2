@@ -92,6 +92,14 @@ sessions untouched. A timeout is not evidence that any session was lost.
     AttachSnapshot (reattach) ──► snapshot + live stream
 ```
 
+Runtime status is classified from the headless terminal's rendered grid, after
+ANSI control sequences have been interpreted. A DEC synchronized-output frame
+is not observable provider state until its closing `CSI ? 2026 l`: intermediate
+spinner, footer, and banner paint must not publish a status or consume the
+per-session classification throttle. The periodic status tick performs an
+independent settled-frame classification, so cosmetic output checks cannot
+starve convergence to the provider's idle composer.
+
 ## Reconnection
 
 The daemon does **not** buffer raw scrollback. Reconnection uses the headless terminal snapshot:

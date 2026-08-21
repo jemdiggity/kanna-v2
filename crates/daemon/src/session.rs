@@ -883,7 +883,7 @@ impl SessionHandle {
         &self,
         quiet_for: Duration,
     ) -> Result<Option<SessionStatus>, Box<dyn std::error::Error + Send + Sync>> {
-        self.refresh_quiet_status_at(quiet_for, Instant::now(), status_detection_throttle())
+        self.refresh_quiet_status_at(quiet_for, Instant::now())
             .await
     }
 
@@ -891,7 +891,6 @@ impl SessionHandle {
         &self,
         quiet_for: Duration,
         now: Instant,
-        throttle: Duration,
     ) -> Result<Option<SessionStatus>, Box<dyn std::error::Error + Send + Sync>> {
         let last_active_at = self.pty.lock().await.last_active_at;
         if last_active_at.elapsed() < quiet_for {
@@ -899,7 +898,12 @@ impl SessionHandle {
         }
 
         let mut state = self.state.lock().await;
-        detect_runtime_status_if_due(&mut state, now, throttle)
+        // This periodic settled-state read is the convergence boundary. TUI
+        // chrome can produce output indefinitely, so output-triggered checks
+        // must not be able to starve it by continually consuming the shared
+        // throttle slot. Synchronized partial frames are still rejected by
+        // the classifier itself.
+        detect_runtime_status_if_due(&mut state, now, Duration::ZERO)
     }
 
     pub async fn debug_status_observation(
@@ -1613,6 +1617,13 @@ fn detect_headless_terminal_status_if_due(
     now: Instant,
     throttle: Duration,
 ) -> Result<Option<SessionStatus>, Box<dyn std::error::Error + Send + Sync>> {
+    // A synchronized TUI redraw is not observable provider state. In
+    // particular, do not consume the throttle slot here: the chunk that ends
+    // the frame must be eligible for classification immediately.
+    if !headless_terminal.status_frame_complete() {
+        return Ok(None);
+    }
+
     if last_status_check_at
         .is_some_and(|last_check_at| now.saturating_duration_since(last_check_at) < throttle)
     {
@@ -2583,7 +2594,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn quiet_refresh_observes_status_after_throttle_window() {
+    async fn quiet_refresh_bypasses_output_detection_throttle() {
         let mut record = spawn_test_record(AgentProvider::Codex, SessionStatus::Idle).unwrap();
         record.pty.last_active_at = Instant::now() - Duration::from_secs(2);
         let handle = Arc::new(SessionHandle::new(record));
@@ -2618,21 +2629,133 @@ mod tests {
             .refresh_quiet_status_at(
                 Duration::from_millis(500),
                 started_at + Duration::from_millis(300),
-                throttle,
             )
             .await
             .unwrap();
-        assert_eq!(early_refresh, None);
+        assert_eq!(early_refresh, Some(SessionStatus::Idle));
+        assert!(handle.update_status(SessionStatus::Idle).await);
 
         let refreshed_status = handle
             .refresh_quiet_status_at(
                 Duration::from_millis(500),
                 started_at + Duration::from_millis(600),
+            )
+            .await
+            .unwrap();
+        assert_eq!(refreshed_status, None);
+
+        handle.kill().await.unwrap();
+    }
+
+    /// Codex v0.140's real PTY capture brackets every spinner/status redraw
+    /// with DEC synchronized output (see
+    /// `tests/tui-fidelity/fixtures/codex-pwd-tool.ansi`). The owner-reported
+    /// stuck sessions were sampled after the bracket opened, consuming the
+    /// throttle slot on temporary `esc to interrupt` chrome; the completed
+    /// idle composer then arrived too soon to be classified.
+    #[tokio::test]
+    async fn synchronized_codex_idle_repaint_cannot_publish_a_busy_flap() {
+        let mut record = spawn_test_record(AgentProvider::Codex, SessionStatus::Idle).unwrap();
+        record.status_observed = true;
+        record.headless_terminal.write(
+            concat!(
+                "\x1b[2J\x1b[H• Finished the requested work.\r\n",
+                "› Improve documentation in @filename\r\n",
+                "gpt-5.5 high · /tmp/kanna-codex-fixture-root\r\n",
+            )
+            .as_bytes(),
+        );
+        record.pty.last_active_at = Instant::now() - Duration::from_secs(2);
+        let handle = Arc::new(SessionHandle::new(record));
+        let started_at = Instant::now();
+        let throttle = Duration::from_millis(500);
+
+        // Exact structural shape from the capture: title-spinner repaint,
+        // synchronized frame start, then a temporary working footer. This is
+        // paint in progress, not an observable agent-state transition.
+        let partial = handle
+            .mirror_output_at(
+                concat!(
+                    "\x1b]0;⠹ kanna-codex-fixture-root\x07",
+                    "\x1b[?2026h\x1b[2J\x1b[H",
+                    "• Working (43s • esc to interrupt)\r\n",
+                )
+                .as_bytes(),
+                false,
+                started_at + Duration::from_millis(600),
                 throttle,
             )
             .await
             .unwrap();
-        assert_eq!(refreshed_status, Some(SessionStatus::Idle));
+        assert_eq!(partial.status, None);
+
+        let completed = handle
+            .mirror_output_at(
+                concat!(
+                    "\x1b[2J\x1b[H",
+                    "• Finished the requested work.\r\n",
+                    "› Improve documentation in @filename\r\n",
+                    "gpt-5.5 high · /tmp/kanna-codex-fixture-root",
+                    "\x1b[?2026l",
+                )
+                .as_bytes(),
+                false,
+                started_at + Duration::from_millis(610),
+                throttle,
+            )
+            .await
+            .unwrap();
+        assert_eq!(completed.status, None);
+        assert_eq!(handle.status().await, SessionStatus::Idle);
+
+        handle.kill().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn settled_status_refresh_cannot_be_starved_by_chrome_checks() {
+        let mut record = spawn_test_record(AgentProvider::Codex, SessionStatus::Busy).unwrap();
+        record.status_observed = true;
+        record
+            .headless_terminal
+            .write("• Working (43s • esc to interrupt)\r\n".as_bytes());
+        record.pty.last_active_at = Instant::now() - Duration::from_secs(2);
+        let handle = Arc::new(SessionHandle::new(record));
+        let started_at = Instant::now();
+        let throttle = Duration::from_millis(500);
+
+        // A cosmetic output check immediately before the settled idle frame
+        // consumes the ordinary output throttle slot.
+        let chrome = handle
+            .mirror_output_at(
+                "\x1b]0;⠹ kanna-codex-fixture-root\x07".as_bytes(),
+                false,
+                started_at + Duration::from_millis(600),
+                throttle,
+            )
+            .await
+            .unwrap();
+        assert_eq!(chrome.status, None);
+        let idle = handle
+            .mirror_output_at(
+                "\x1b[2J\x1b[HDone\r\n› Improve documentation in @filename".as_bytes(),
+                false,
+                started_at + Duration::from_millis(610),
+                throttle,
+            )
+            .await
+            .unwrap();
+        assert_eq!(idle.status, None, "ordinary output detection is throttled");
+
+        // The periodic convergence read is independent of that throttle and
+        // therefore cannot remain Busy while idle chrome keeps repainting.
+        let settled = handle
+            .refresh_quiet_status_at(
+                Duration::from_millis(500),
+                started_at + Duration::from_millis(620),
+            )
+            .await
+            .unwrap();
+        assert_eq!(settled, Some(SessionStatus::Idle));
 
         handle.kill().await.unwrap();
     }

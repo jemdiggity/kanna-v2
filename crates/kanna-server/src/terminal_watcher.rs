@@ -545,10 +545,12 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::db::Db;
+    use kanna_daemon::headless_terminal::{initial_session_status, HeadlessTerminal};
     use kanna_daemon::protocol::{
-        Command as DaemonCommand, ComposerAttestation, Event as DaemonEvent, SessionInfo,
-        SessionState,
+        AgentProvider, Command as DaemonCommand, ComposerAttestation, Event as DaemonEvent,
+        SessionInfo, SessionState, SessionStatus,
     };
+    use kanna_daemon::session::{replay_headless_terminal_for_benchmark, BenchmarkStatusState};
     use std::path::{Path, PathBuf};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
@@ -1666,11 +1668,104 @@ mod tests {
         let _ = std::fs::remove_dir_all(daemon_dir);
     }
 
-    /// The premise the MCP-layer activity debounce is built on. The daemon
-    /// classifies each frame on its own, so one mid-redraw frame that loses the
-    /// busy marker arrives here as a lone `Idle` between two `Busy` events —
-    /// and this layer, correctly, stores it: `activity` is a record of the
-    /// latest verdict, not a judgement about whether that verdict is plausible.
+    /// Feed the parked prefix of the checked-in Codex v0.140 PTY capture
+    /// byte-for-byte through the daemon classifier and this server's real DB
+    /// mapping. Before the recorded user prompt is submitted, the interactive
+    /// TUI sits at its composer while its update banner, title spinner, and
+    /// synchronized idle frames repaint. Capture provenance is recorded in
+    /// `tests/tui-fidelity/README.md`. One-byte replay preserves every original
+    /// byte and ordering while exercising every possible PTY read split,
+    /// including splits inside ANSI and DEC synchronized-output sequences.
+    #[test]
+    fn recorded_codex_idle_chrome_does_not_flap_server_activity_to_working() {
+        let unique = unique_name("terminal-watcher-codex-idle-chrome");
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        let config = test_config(&unique, &daemon_dir);
+        seed_plain_task(&config);
+        let state = http_api::AppState::new(config.clone());
+        let db = Db::open(&config.db_path).unwrap();
+        db.update_pipeline_item_activity("task-child", "working")
+            .unwrap();
+
+        let provider = AgentProvider::Codex;
+        let mut terminal = HeadlessTerminal::new(220, 48, 10_000).unwrap();
+        let mut classifier = BenchmarkStatusState::new(initial_session_status(Some(provider)));
+        // Model the owner-observed session after it has previously published
+        // Busy; absence of a busy marker can only settle an observed session.
+        classifier.status_observed = true;
+        let started_at = std::time::Instant::now();
+        let capture = include_bytes!("../../../tests/tui-fidelity/fixtures/codex-pwd-tool.ansi");
+        let submitted_prompt = b"Use the shell to run pwd";
+        let parked_end = capture
+            .windows(submitted_prompt.len())
+            .position(|window| window == submitted_prompt)
+            .expect("recorded Codex submission boundary");
+        let parked_capture = &capture[..parked_end];
+        let mut reached_parked_idle = false;
+        let mut later_idle_repaint_frames = 0;
+
+        for (byte_offset, bytes) in parked_capture.chunks(1).enumerate() {
+            let was_parked_idle = reached_parked_idle;
+            let frame_was_complete = terminal.status_frame_complete();
+            let changed = replay_headless_terminal_for_benchmark(
+                &mut terminal,
+                Some(provider),
+                &mut classifier,
+                started_at,
+                u64::try_from(byte_offset).unwrap(),
+                bytes,
+            )
+            .unwrap();
+            if let Some(status) = changed {
+                assert!(
+                    !(was_parked_idle && status == SessionStatus::Busy),
+                    "recorded idle chrome published Busy at capture byte {byte_offset}"
+                );
+                classifier.status = status;
+                apply_watcher_runtime_status(&state, "task-child", status, None).unwrap();
+                reached_parked_idle |= status == SessionStatus::Idle;
+            }
+            if was_parked_idle && !frame_was_complete && terminal.status_frame_complete() {
+                later_idle_repaint_frames += 1;
+            }
+        }
+
+        assert!(
+            reached_parked_idle,
+            "recorded parked composer never became idle"
+        );
+        assert!(
+            later_idle_repaint_frames > 0,
+            "fixture did not exercise a synchronized repaint after reaching idle"
+        );
+
+        let item = db.get_pipeline_item("task-child").unwrap().unwrap();
+        assert_eq!(item.runtime_status.as_deref(), Some("idle"));
+        assert_eq!(item.activity.as_deref(), Some("unread"));
+        db.flush_debounced_activity_events(0).unwrap();
+        let events = db
+            .list_task_events(
+                &crate::db::TaskEventScope::Tasks(vec!["task-child".to_string()]),
+                0,
+                i64::MAX,
+                10,
+            )
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].payload["activity"], "unread");
+
+        let _ = std::fs::remove_file(&config.db_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    /// The premise the MCP-layer activity debounce is built on. When a daemon
+    /// publishes a real status edge, this layer stores it immediately:
+    /// `activity` is a record of the latest authoritative verdict, not a
+    /// second terminal classifier.
+    ///
+    /// One complete frame that loses the busy marker can therefore arrive as
+    /// a lone `Idle` between two `Busy` events; the event debounce suppresses
+    /// that transient edge for managers.
     /// A task read taken inside that window sees `unread` for an agent that
     /// never stopped, which is exactly what `kanna-mcp` confirms before
     /// reporting (see `crates/kanna-mcp/tests/activity_debounce.rs`).
