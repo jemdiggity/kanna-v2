@@ -708,6 +708,10 @@ function TaskDetailRoute({
         const durableTaskId = resolveDurableTaskId(state, routeTaskId);
         if (durableTaskId) controller.interruptTaskAgent(durableTaskId);
       }}
+      onRequestAgentHistory={() => {
+        const durableTaskId = resolveDurableTaskId(state, routeTaskId);
+        if (durableTaskId) controller.requestTaskAgentHistory(durableTaskId);
+      }}
       onResolveAgentPermission={(requestId, decision) => {
         const durableTaskId = resolveDurableTaskId(state, routeTaskId);
         if (durableTaskId) {

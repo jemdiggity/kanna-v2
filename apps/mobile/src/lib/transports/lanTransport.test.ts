@@ -852,7 +852,14 @@ describe("createLanTransport", () => {
 
     expect(socketFactory).toHaveBeenCalledWith("ws://127.0.0.1:48120/v1/stream");
     expect(sent).toEqual([
-      { type: "auth", capabilities: ["companion_event_epoch", "term_input_boundary"] },
+      {
+        type: "auth",
+        capabilities: [
+          "companion_event_epoch",
+          "term_input_boundary",
+          "agent_history_window"
+        ]
+      },
       { type: "attach", task_id: "task-1", kind: "agent", from_seq: 0 },
       { type: "agent_input", task_id: "task-1", text: "continue" },
       {

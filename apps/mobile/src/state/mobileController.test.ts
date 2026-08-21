@@ -116,6 +116,7 @@ function createAgentSubscriptionMock(): {
       sendInput: vi.fn(),
       sendPermission: vi.fn(),
       interrupt: vi.fn(),
+      requestHistory: vi.fn(),
       setListener(nextListener) {
         listener = nextListener;
       }
@@ -6762,6 +6763,97 @@ describe("createMobileController", () => {
       { seq: 0, event: { type: "user_message", text: "hello" } },
       { seq: 1, event: { type: "assistant_text", text: "hi", truncated: false } }
     ]);
+  });
+
+  it("walks bounded agent history and preserves loaded events across reconnect", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const agentTask = {
+      id: "task-agent",
+      repoId: "repo-1",
+      title: "Themed task",
+      stage: "in progress",
+      agentType: "agent" as const
+    };
+    client.listRecentTasks.mockResolvedValueOnce([agentTask]);
+    client.listRepoTasks.mockResolvedValueOnce([agentTask]);
+    const controller = createMobileController(client, store);
+    await controller.bootstrap();
+    controller.openTask("task-agent");
+
+    client.__agentStream.emit({
+      type: "snapshot",
+      taskId: "task-agent",
+      events: [
+        {
+          seq: 8,
+          event: { type: "assistant_text", text: "recent", truncated: false }
+        }
+      ],
+      nextSeq: 9,
+      historyStartSeq: 8,
+      historyFromSeq: 0,
+      resumed: false
+    });
+    controller.requestTaskAgentHistory("task-agent");
+    expect(client.__agentStream.subscription.requestHistory).toHaveBeenCalledWith({
+      beforeSeq: 8,
+      afterSeq: 0,
+      maxEvents: 100
+    });
+    client.__agentStream.emit({
+      type: "history",
+      taskId: "task-agent",
+      events: [{ seq: 4, event: { type: "user_message", text: "older" } }],
+      startSeq: 4,
+      endSeq: 8,
+      afterSeq: 0
+    });
+
+    client.__agentStream.emit({
+      type: "snapshot",
+      taskId: "task-agent",
+      events: [
+        {
+          seq: 9,
+          event: { type: "assistant_text", text: "missed", truncated: false }
+        }
+      ],
+      nextSeq: 10,
+      historyStartSeq: 9,
+      historyFromSeq: 9,
+      resumed: true
+    });
+    expect(store.getState().taskAgentEvents.map((entry) => entry.seq)).toEqual([
+      4, 8, 9
+    ]);
+    expect(store.getState().taskAgentHistory).toMatchObject({
+      beforeSeq: 4,
+      afterSeq: 0,
+      loading: false
+    });
+
+    controller.requestTaskAgentHistory("task-agent");
+    expect(client.__agentStream.subscription.requestHistory).toHaveBeenLastCalledWith({
+      beforeSeq: 4,
+      afterSeq: 0,
+      maxEvents: 100
+    });
+    client.__agentStream.emit({
+      type: "history",
+      taskId: "task-agent",
+      events: [0, 1, 2, 3].map((seq) => ({
+        seq,
+        event: { type: "assistant_text" as const, text: `old-${seq}`, truncated: false }
+      })),
+      startSeq: 0,
+      endSeq: 4,
+      afterSeq: 0
+    });
+    expect(store.getState().taskAgentEvents.map((entry) => entry.seq)).toEqual([
+      0, 1, 2, 3, 4, 8, 9
+    ]);
+    expect(store.getState().taskAgentHistory).toBeNull();
   });
 
   it("ignores buffered agent events from the previous route after rebinding", async () => {

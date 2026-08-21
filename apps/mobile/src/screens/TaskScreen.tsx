@@ -134,6 +134,7 @@ interface TaskScreenProps {
   onRequestTerminalScrollback?(): void;
   onResizeTerminal?(cols: number, rows: number): void;
   onStopAgent(): void;
+  onRequestAgentHistory?(): void;
   onResolveAgentPermission(requestId: string, decision: PermissionDecision): void;
   onRecoverTaskCreation(): void;
   onCompanionOpenChange?(isOpen: boolean): void;
@@ -184,6 +185,7 @@ export function TaskScreen({
   onRequestTerminalScrollback,
   onResizeTerminal,
   onStopAgent,
+  onRequestAgentHistory,
   onResolveAgentPermission,
   onRecoverTaskCreation,
   onCompanionOpenChange,
@@ -693,6 +695,7 @@ export function TaskScreen({
             events={agentEvents}
             status={agentStatus}
             onInterrupt={onStopAgent}
+            onRequestHistory={onRequestAgentHistory}
             onResolvePermission={onResolveAgentPermission}
           />
         ) : model.isTerminalHealthy ? (
