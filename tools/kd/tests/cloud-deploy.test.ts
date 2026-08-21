@@ -9,6 +9,8 @@ import {
   deployRelayCloud,
   deployFirebaseCloud,
   ensureAccountHostingSite,
+  ensurePublicFunctionInvokers,
+  parsePublicFirebaseFunctions,
   resolveAccountHostingSite,
   resolveFirebaseProject,
   resolveProductionFirebaseProject,
@@ -25,6 +27,14 @@ const PORTAL_ENV = {
   KANNA_WEB_PORTAL_STRIPE_PUBLISHABLE_KEY: "pk_test_kanna"
 };
 
+const PUBLIC_FUNCTION_SOURCE = `
+import { setGlobalOptions } from "firebase-functions/v2";
+import { onCall, onRequest } from "firebase-functions/v2/https";
+setGlobalOptions({ region: "us-central1" });
+export const createCheckoutSession = onCall({}, async () => undefined);
+export const stripeWebhook = onRequest({}, async () => undefined);
+`;
+
 /** Answers the git probes `resolveSourceRef` makes before a deploy touches anything. */
 function gitSourceResult(
   command: string,
@@ -38,6 +48,19 @@ function gitSourceResult(
 }
 
 describe("cloud deploy runtime", () => {
+  it("derives the deployed public function services from the real source entrypoint", () => {
+    const repoRoot = resolve(import.meta.dirname, "..", "..", "..");
+    const source = readFileSync(
+      join(repoRoot, "services/firebase-functions/src/index.ts"),
+      "utf8"
+    );
+
+    expect(parsePublicFirebaseFunctions(source)).toEqual({
+      region: "us-central1",
+      serviceNames: ["createcheckoutsession", "deleteaccount", "stripewebhook"]
+    });
+  });
+
   it("includes workspace patched dependencies in the relay Docker build context", () => {
     const repoRoot = resolve(import.meta.dirname, "..", "..", "..");
     const dockerfile = readFileSync(resolve(repoRoot, "services/relay/Dockerfile"), "utf8");
@@ -281,7 +304,8 @@ describe("cloud deploy runtime", () => {
 
   it("builds functions before deploying them when --functions is passed", async () => {
     const repoRoot = mkdtempSync(join(tmpdir(), "kd-cloud-deploy-"));
-    mkdirSync(join(repoRoot, "services/firebase-functions"), { recursive: true });
+    mkdirSync(join(repoRoot, "services/firebase-functions/src"), { recursive: true });
+    writeFileSync(join(repoRoot, "services/firebase-functions/src/index.ts"), PUBLIC_FUNCTION_SOURCE);
     const calls: Array<{ command: string; args: string[]; cwd?: string; streamOutput?: boolean }> = [];
     const runner: CommandRunner = {
       async run(command, args, options) {
@@ -294,6 +318,25 @@ describe("cloud deploy runtime", () => {
         if (command === "pnpm" && args.includes("services/firebase-functions") && args.includes("build")) {
           mkdirSync(join(repoRoot, "services/firebase-functions/dist/src"), { recursive: true });
           writeFileSync(join(repoRoot, "services/firebase-functions/dist/src/index.js"), "export {};\n");
+        }
+        if (command === "gcloud" && args.includes("list")) {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify([
+              { metadata: { name: "createcheckoutsession" } },
+              { metadata: { name: "stripewebhook" } }
+            ]),
+            stderr: ""
+          };
+        }
+        if (command === "gcloud" && args.includes("get-iam-policy")) {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              bindings: [{ role: "roles/run.invoker", members: ["allUsers"] }]
+            }),
+            stderr: ""
+          };
         }
         return gitSourceResult(command, args) ?? { exitCode: 0, stdout: "", stderr: "" };
       }
@@ -350,8 +393,217 @@ describe("cloud deploy runtime", () => {
           ],
           cwd: repoRoot,
           streamOutput: true
+        },
+        {
+          command: "gcloud",
+          args: [
+            "run",
+            "services",
+            "list",
+            "--project=prod-project",
+            "--region=us-central1",
+            "--platform=managed",
+            "--format=json"
+          ],
+          cwd: repoRoot
+        },
+        {
+          command: "gcloud",
+          args: [
+            "run",
+            "services",
+            "get-iam-policy",
+            "createcheckoutsession",
+            "--project=prod-project",
+            "--region=us-central1",
+            "--format=json"
+          ],
+          cwd: repoRoot
+        },
+        {
+          command: "gcloud",
+          args: [
+            "run",
+            "services",
+            "get-iam-policy",
+            "stripewebhook",
+            "--project=prod-project",
+            "--region=us-central1",
+            "--format=json"
+          ],
+          cwd: repoRoot
         }
       ]);
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves public functions with an existing allUsers invoker binding unchanged", async () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), "kd-cloud-invoker-"));
+    mkdirSync(join(repoRoot, "services/firebase-functions/src"), { recursive: true });
+    writeFileSync(join(repoRoot, "services/firebase-functions/src/index.ts"), PUBLIC_FUNCTION_SOURCE);
+    const calls: string[][] = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push([command, ...args]);
+        if (args.includes("list")) {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify([
+              { metadata: { name: "createcheckoutsession" } },
+              { metadata: { name: "stripewebhook" } }
+            ]),
+            stderr: ""
+          };
+        }
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({
+            bindings: [{ role: "roles/run.invoker", members: ["allUsers"] }]
+          }),
+          stderr: ""
+        };
+      }
+    };
+
+    try {
+      await ensurePublicFunctionInvokers({ repoRoot, env: {}, runner, projectId: "kanna-staging" });
+      expect(calls.filter((call) => call.includes("add-iam-policy-binding"))).toEqual([]);
+      expect(calls.filter((call) => call.includes("get-iam-policy"))).toHaveLength(2);
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("repairs a missing public invoker binding", async () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), "kd-cloud-invoker-"));
+    mkdirSync(join(repoRoot, "services/firebase-functions/src"), { recursive: true });
+    writeFileSync(join(repoRoot, "services/firebase-functions/src/index.ts"), `
+      import { setGlobalOptions } from "firebase-functions/v2";
+      import { onCall } from "firebase-functions/v2/https";
+      setGlobalOptions({ region: "us-central1" });
+      export const deleteAccount = onCall({}, async () => undefined);
+    `);
+    const calls: string[][] = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push([command, ...args]);
+        if (args.includes("list")) {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify([{ metadata: { name: "deleteaccount" } }]),
+            stderr: ""
+          };
+        }
+        if (args.includes("get-iam-policy")) {
+          return { exitCode: 0, stdout: JSON.stringify({ bindings: [] }), stderr: "" };
+        }
+        return { exitCode: 0, stdout: "binding added", stderr: "" };
+      }
+    };
+
+    try {
+      await ensurePublicFunctionInvokers({ repoRoot, env: {}, runner, projectId: "kanna-staging" });
+      expect(calls.at(-1)).toEqual([
+        "gcloud",
+        "run",
+        "services",
+        "add-iam-policy-binding",
+        "deleteaccount",
+        "--member=allUsers",
+        "--role=roles/run.invoker",
+        "--project=kanna-staging",
+        "--region=us-central1"
+      ]);
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("fails loudly with the exact gcloud command when invoker repair fails", async () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), "kd-cloud-invoker-"));
+    mkdirSync(join(repoRoot, "services/firebase-functions/src"), { recursive: true });
+    writeFileSync(join(repoRoot, "services/firebase-functions/src/index.ts"), `
+      import { setGlobalOptions } from "firebase-functions/v2";
+      import { onRequest } from "firebase-functions/v2/https";
+      setGlobalOptions({ region: "us-central1" });
+      export const stripeWebhook = onRequest({}, async () => undefined);
+    `);
+    const runner: CommandRunner = {
+      async run(_command, args) {
+        if (args.includes("list")) {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify([{ metadata: { name: "stripewebhook" } }]),
+            stderr: ""
+          };
+        }
+        if (args.includes("get-iam-policy")) {
+          return { exitCode: 0, stdout: JSON.stringify({ bindings: [] }), stderr: "" };
+        }
+        return { exitCode: 1, stdout: "", stderr: "permission denied" };
+      }
+    };
+
+    try {
+      await expect(ensurePublicFunctionInvokers({
+        repoRoot,
+        env: {},
+        runner,
+        projectId: "kanna-staging"
+      })).rejects.toThrow(
+        "Run exactly:\ngcloud run services add-iam-policy-binding stripewebhook " +
+        "--member=allUsers --role=roles/run.invoker --project=kanna-staging --region=us-central1"
+      );
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("excludes deliberately private HTTP functions from IAM verification", async () => {
+    const source = `
+      import { setGlobalOptions } from "firebase-functions/v2";
+      import { onCall, onRequest } from "firebase-functions/v2/https";
+      setGlobalOptions({ region: "us-central1" });
+      /** Browser entry point. */
+      export const publicEndpoint = onCall({}, async () => undefined);
+      /** @kanna-private-function Invoked only by an authenticated service. */
+      export const internalEndpoint = onRequest({}, async () => undefined);
+    `;
+    expect(parsePublicFirebaseFunctions(source)).toEqual({
+      region: "us-central1",
+      serviceNames: ["publicendpoint"]
+    });
+
+    const repoRoot = mkdtempSync(join(tmpdir(), "kd-cloud-invoker-"));
+    mkdirSync(join(repoRoot, "services/firebase-functions/src"), { recursive: true });
+    writeFileSync(join(repoRoot, "services/firebase-functions/src/index.ts"), source);
+    const inspected: string[] = [];
+    const runner: CommandRunner = {
+      async run(_command, args) {
+        if (args.includes("list")) {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify([
+              { metadata: { name: "publicendpoint" } },
+              { metadata: { name: "internalendpoint" } }
+            ]),
+            stderr: ""
+          };
+        }
+        const serviceName = args[3];
+        if (serviceName) inspected.push(serviceName);
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({ bindings: [{ role: "roles/run.invoker", members: ["allUsers"] }] }),
+          stderr: ""
+        };
+      }
+    };
+    try {
+      await ensurePublicFunctionInvokers({ repoRoot, env: {}, runner, projectId: "kanna-staging" });
+      expect(inspected).toEqual(["publicendpoint"]);
     } finally {
       rmSync(repoRoot, { recursive: true, force: true });
     }
