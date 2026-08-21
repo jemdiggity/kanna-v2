@@ -42,7 +42,7 @@
       "enum": ["public", "internal"]
     },
     "revision_limit": {
-      "description": "Agent-requested revision rounds a task may spend before Kanna stops forking revisions and parks the task for its human. Defaults to 3 when omitted; 0 disables the cap. A human-requested revision is never refused and resets the count.",
+      "description": "Agent-requested revision rounds a task may spend before Kanna stops forking revisions and parks the task for its human. Defaults to 5 when omitted; 0 disables the cap. A human-requested revision is never refused and resets the count.",
       "type": "integer",
       "minimum": 0
     },
