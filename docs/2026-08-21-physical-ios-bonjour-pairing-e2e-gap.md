@@ -15,6 +15,15 @@ camera at a changing QR, or assert the native browse callbacks. Simulator
 automation would not cover Wi-Fi multicast and previously masked address bugs
 because its loopback is the Mac.
 
+The other remaining system boundary is forcibly restarting or disrupting the
+host `mDNSResponder` while an unprivileged test is running. Automating that
+would require privileged mutation of a shared macOS service and could disrupt
+unrelated Kanna instances and network discovery on the developer machine. The
+supervisor's initial-failure recovery and terminal DNS-SD socket-event handling
+are therefore covered with deterministic injected attempts/event tests; the
+real multi-process E2E continues to cover publication and cleanup through the
+live system responder.
+
 ## Attached iPhone 15 manual verification
 
 1. Start Production, installed Staging, Dev, and at least one additional

@@ -169,21 +169,23 @@ mod macos {
                 .map_err(|error| format!("failed to start mobile Bonjour supervisor: {error}"))?;
 
             match startup_receiver.recv_timeout(REGISTRATION_TIMEOUT) {
-                Ok(Ok(())) => Ok(Self {
+                Ok(()) => Ok(Self {
                     stop,
                     worker: Some(worker),
                 }),
-                Ok(Err(error)) => {
-                    let _ = stop.send(());
-                    let _ = worker.join();
-                    Err(error)
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    log::warn!(
+                        "mobile Bonjour registration was not observable within {:?}; supervisor remains active and will retry",
+                        REGISTRATION_TIMEOUT
+                    );
+                    Ok(Self {
+                        stop,
+                        worker: Some(worker),
+                    })
                 }
-                Err(error) => {
-                    let _ = stop.send(());
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
                     let _ = worker.join();
-                    Err(format!(
-                        "timed out waiting for observable mobile Bonjour registration: {error}"
-                    ))
+                    Err("mobile Bonjour supervisor stopped before publication".to_string())
                 }
             }
         }
@@ -200,10 +202,21 @@ mod macos {
         }
     }
 
-    fn supervise(config: Config, stop: Receiver<()>, startup: SyncSender<Result<(), String>>) {
-        let mut startup = Some(startup);
+    fn supervise(config: Config, stop: Receiver<()>, startup: SyncSender<()>) {
+        supervise_with(config, stop, startup, RETRY_INTERVAL, register_once);
+    }
+
+    fn supervise_with<F>(
+        config: Config,
+        stop: Receiver<()>,
+        startup: SyncSender<()>,
+        retry_interval: Duration,
+        mut attempt: F,
+    ) where
+        F: FnMut(&Config, &Receiver<()>, &SyncSender<()>) -> RunResult,
+    {
         loop {
-            match register_once(&config, &stop, startup.take()) {
+            match attempt(&config, &stop, &startup) {
                 RunResult::Stopped => return,
                 RunResult::Retry(error) => {
                     log::warn!(
@@ -214,7 +227,7 @@ mod macos {
                         config.port,
                         error
                     );
-                    match stop.recv_timeout(RETRY_INTERVAL) {
+                    match stop.recv_timeout(retry_interval) {
                         Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                     }
@@ -223,37 +236,27 @@ mod macos {
         }
     }
 
-    fn register_once(
-        config: &Config,
-        stop: &Receiver<()>,
-        startup: Option<SyncSender<Result<(), String>>>,
-    ) -> RunResult {
+    fn register_once(config: &Config, stop: &Receiver<()>, startup: &SyncSender<()>) -> RunResult {
         let name = match CString::new(config.desktop_id.as_str()) {
             Ok(value) => value,
-            Err(error) => return startup_failure(startup, format!("invalid desktop id: {error}")),
+            Err(error) => return RunResult::Retry(format!("invalid desktop id: {error}")),
         };
         let registration_type =
             match CString::new(MOBILE_BONJOUR_SERVICE_TYPE.trim_end_matches(".local.")) {
                 Ok(value) => value,
                 Err(error) => {
-                    return startup_failure(
-                        startup,
-                        format!("invalid Bonjour service type: {error}"),
-                    );
+                    return RunResult::Retry(format!("invalid Bonjour service type: {error}"));
                 }
             };
         let domain = match CString::new("local.") {
             Ok(value) => value,
             Err(error) => {
-                return startup_failure(startup, format!("invalid Bonjour domain: {error}"));
+                return RunResult::Retry(format!("invalid Bonjour domain: {error}"));
             }
         };
         let txt_value = format!("desktopId={}", config.desktop_id);
         if txt_value.len() > u8::MAX as usize {
-            return startup_failure(
-                startup,
-                "desktop id is too long for Bonjour TXT".to_string(),
-            );
+            return RunResult::Retry("desktop id is too long for Bonjour TXT".to_string());
         }
         let mut txt_record = Vec::with_capacity(txt_value.len() + 1);
         txt_record.push(txt_value.len() as u8);
@@ -288,7 +291,7 @@ mod macos {
             // SAFETY: DNSServiceRegister failed, so no callback can retain or
             // use the context pointer.
             unsafe { drop(Box::from_raw(context_ptr)) };
-            return startup_failure(startup, dns_error("register", error));
+            return RunResult::Retry(dns_error("register", error));
         }
 
         // SAFETY: A successful DNSServiceRegister initialized `service_ref`.
@@ -298,13 +301,10 @@ mod macos {
             unsafe { DNSServiceRefDeallocate(service_ref) };
             // SAFETY: Deallocation prevents future callbacks.
             unsafe { drop(Box::from_raw(context_ptr)) };
-            return startup_failure(
-                startup,
-                "mobile Bonjour registration has no event socket".to_string(),
-            );
+            return RunResult::Retry("mobile Bonjour registration has no event socket".to_string());
         }
 
-        let mut startup = startup;
+        let mut published = false;
         let result = loop {
             match stop.try_recv() {
                 Ok(()) | Err(mpsc::TryRecvError::Disconnected) => {
@@ -321,6 +321,9 @@ mod macos {
             let poll_result = unsafe { libc::poll(&mut descriptor, 1, POLL_INTERVAL_MS) };
             if poll_result < 0 {
                 break RunResult::Retry(std::io::Error::last_os_error().to_string());
+            }
+            if let Some(error) = terminal_poll_error(descriptor.revents) {
+                break RunResult::Retry(error);
             }
             if poll_result > 0 && descriptor.revents & libc::POLLIN != 0 {
                 // SAFETY: Only this worker thread processes and deallocates the
@@ -347,8 +350,9 @@ mod macos {
                             config.environment,
                             config.port
                         );
-                        if let Some(sender) = startup.take() {
-                            let _ = sender.send(Ok(()));
+                        if !published {
+                            let _ = startup.try_send(());
+                            published = true;
                         }
                     }
                     RegistrationEvent::Removed => {
@@ -383,18 +387,76 @@ mod macos {
         result
     }
 
-    fn startup_failure(
-        startup: Option<SyncSender<Result<(), String>>>,
-        error: String,
-    ) -> RunResult {
-        if let Some(sender) = startup {
-            let _ = sender.send(Err(error.clone()));
+    fn terminal_poll_error(revents: libc::c_short) -> Option<String> {
+        let terminal = revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL);
+        if terminal == 0 {
+            None
+        } else {
+            Some(format!(
+                "macOS mDNSResponder connection reported terminal poll events 0x{terminal:x}"
+            ))
         }
-        RunResult::Retry(error)
     }
 
     fn dns_error(action: &str, error: DnsServiceError) -> String {
         format!("failed to {action} through macOS mDNSResponder (DNS-SD error {error})")
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::sync::{Arc, Mutex};
+
+        #[test]
+        fn supervisor_retries_initial_failure_until_publication() {
+            let config = Config {
+                desktop_name: "Test Mac".to_string(),
+                desktop_id: "desktop-test".to_string(),
+                environment: "development".to_string(),
+                port: 48_120,
+            };
+            let (stop_sender, stop_receiver) = mpsc::sync_channel(1);
+            let (startup_sender, startup_receiver) = mpsc::sync_channel(1);
+            let attempts = Arc::new(Mutex::new(0));
+            let attempt_counts = Arc::clone(&attempts);
+            let worker = std::thread::spawn(move || {
+                supervise_with(
+                    config,
+                    stop_receiver,
+                    startup_sender,
+                    Duration::from_millis(1),
+                    move |_config, stop, startup| {
+                        let mut count = attempt_counts.lock().unwrap();
+                        *count += 1;
+                        if *count == 1 {
+                            RunResult::Retry("mDNSResponder unavailable".to_string())
+                        } else {
+                            let _ = startup.try_send(());
+                            drop(count);
+                            let _ = stop.recv();
+                            RunResult::Stopped
+                        }
+                    },
+                );
+            });
+
+            startup_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .expect("publication should follow the initial failure");
+            stop_sender.send(()).unwrap();
+            worker.join().unwrap();
+            assert_eq!(*attempts.lock().unwrap(), 2);
+        }
+
+        #[test]
+        fn terminal_poll_events_require_connection_retry() {
+            for event in [libc::POLLERR, libc::POLLHUP, libc::POLLNVAL] {
+                let error = terminal_poll_error(event).expect("terminal event must be rejected");
+                assert!(error.contains("terminal poll events"));
+            }
+            assert!(terminal_poll_error(libc::POLLIN).is_none());
+            assert!(terminal_poll_error(0).is_none());
+        }
     }
 }
 
