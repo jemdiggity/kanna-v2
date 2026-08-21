@@ -29,6 +29,11 @@ function api(overrides: Partial<PortalFirebase> = {}): PortalFirebase {
 }
 
 describe("checkout pages", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
+
   it("sends the shared monthly checkout request without choosing a currency", async () => {
     const mockApi = api();
     const redirect = vi.fn();
@@ -66,10 +71,16 @@ describe("checkout pages", () => {
     expect(wrapper.get("button").attributes("disabled")).toBeUndefined();
   });
 
-  it("shows the launch price and every currency it is sold in", async () => {
-    // The headline comes from the build environment (`VITE_KANNA_CLOUD_PRICE`,
-    // defaulted by `kd cloud deploy`); the matrix is the owner's 2026-08-21
-    // pricing ruling — `docs/specs/accounts-and-billing.md`.
+  it.each([
+    ["ja-JP", "¥500/month"],
+    ["en-US", "$5/month"],
+    ["en-CA", "C$5/month"],
+    ["en-AU", "A$5/month"],
+    ["en-GB", "£5/month"],
+    ["de-DE", "€5/month"],
+    ["es-MX", "$5/month"],
+  ])("maps browser locale %s to the formatted local price %s", (locale, expectedPrice) => {
+    vi.spyOn(window.navigator, "language", "get").mockReturnValue(locale);
     const mockApi = api();
     const host = {
       template: "<SubscribePage />",
@@ -77,13 +88,26 @@ describe("checkout pages", () => {
       setup() { providePortalSession(mockApi); }
     };
     const wrapper = mount(host);
-    expect(wrapper.get(".price").text()).toBe("$5/month");
-    const currencies = wrapper.get(".currencies").text();
-    for (const amount of ["¥500 JPY", "$5 USD", "$5 CAD", "$5 AUD", "€5 EUR", "£5 GBP"]) {
-      expect(currencies).toContain(amount);
-    }
+
+    expect(wrapper.get(".price").text()).toBe(expectedPrice);
+    expect(wrapper.get(".local-currency").text()).toBe("Charged in your local currency at checkout.");
+    expect(wrapper.find(".currencies").exists()).toBe(false);
     expect(wrapper.find("select").exists()).toBe(false);
-    expect(currencies).not.toContain("$10");
+  });
+
+  it("keeps a non-default build price as an explicit headline override", () => {
+    vi.stubEnv("VITE_KANNA_CLOUD_PRICE", "$12/month");
+    vi.spyOn(window.navigator, "language", "get").mockReturnValue("ja-JP");
+    const mockApi = api();
+    const host = {
+      template: "<SubscribePage />",
+      components: { SubscribePage },
+      setup() { providePortalSession(mockApi); }
+    };
+
+    const wrapper = mount(host);
+
+    expect(wrapper.get(".price").text()).toBe("$12/month");
   });
 
   it("renders the cancelled return state", async () => {
