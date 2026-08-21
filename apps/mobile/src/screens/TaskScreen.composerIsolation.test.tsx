@@ -48,6 +48,7 @@ vi.mock("react-native", () => ({
   View: "View"
 }));
 
+vi.mock("@expo/vector-icons", () => ({ Ionicons: "Ionicons" }));
 vi.mock("react-native-webview", async () => {
   const ReactModule = await import("react");
   const WebView = ReactModule.forwardRef(

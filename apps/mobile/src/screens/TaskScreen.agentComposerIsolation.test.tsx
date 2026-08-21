@@ -48,6 +48,7 @@ vi.mock("react-native", async () => {
   };
 });
 
+vi.mock("@expo/vector-icons", () => ({ Ionicons: "Ionicons" }));
 vi.mock("../components/LoadingText", () => ({ LoadingText: "LoadingText" }));
 vi.mock("./TerminalWebView", () => ({ TerminalWebView: "TerminalWebView" }));
 vi.mock("./TaskFilePreview", () => ({ TaskFilePreview: "TaskFilePreview" }));
