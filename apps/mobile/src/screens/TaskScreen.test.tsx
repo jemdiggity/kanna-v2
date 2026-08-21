@@ -107,6 +107,7 @@ vi.mock("react-native", () => ({
   View: "View"
 }));
 
+vi.mock("@expo/vector-icons", () => ({ Ionicons: "Ionicons" }));
 vi.mock("./AgentMessageView", () => ({
   AgentMessageView: "AgentMessageView"
 }));

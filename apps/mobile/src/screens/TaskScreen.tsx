@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
+import { Ionicons } from "@expo/vector-icons";
 import {
   ActivityIndicator,
   Image,
@@ -994,9 +995,7 @@ export function TaskScreen({
         <View style={styles.inputComposer}>
           {canAttachPhoto ? (
             <Pressable
-              accessibilityLabel={
-                isPickingAttachment ? "Attaching photo" : "Attach a photo"
-              }
+              accessibilityLabel="Attach photo"
               accessibilityRole="button"
               accessibilityState={{
                 busy: isPickingAttachment,
@@ -1013,7 +1012,7 @@ export function TaskScreen({
               {isPickingAttachment ? (
                 <ActivityIndicator color="#9BB0CC" size="small" />
               ) : (
-                <Text style={styles.attachButtonLabel}>📎</Text>
+                <Ionicons color="#9BB0CC" name="add" size={24} />
               )}
             </Pressable>
           ) : null}
@@ -1402,11 +1401,6 @@ const styles = StyleSheet.create({
   },
   attachButtonDisabled: {
     opacity: 0.45
-  },
-  attachButtonLabel: {
-    color: "#9BB0CC",
-    fontSize: 16,
-    lineHeight: 20
   },
   inputComposer: {
     alignItems: "center",

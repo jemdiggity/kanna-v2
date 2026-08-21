@@ -39,6 +39,7 @@ vi.mock("react-native", () => ({
   View: "View"
 }));
 
+vi.mock("@expo/vector-icons", () => ({ Ionicons: "Ionicons" }));
 vi.mock("expo-clipboard", () => ({ setStringAsync: vi.fn() }));
 vi.mock("../lib/diagnostics/mobileCrashDiagnostics", () => ({
   captureMobileCrashDiagnostic: vi.fn()
@@ -194,6 +195,28 @@ function has(tree: ReactTestRenderer, testID: string): boolean {
 }
 
 describe("TaskScreen photo attachments", () => {
+  it("uses a minimal composer plus without changing the attach control", async () => {
+    const tree = await renderScreen(createHarness());
+    const attachButton = tree.root.findByProps({
+      testID: MOBILE_E2E_IDS.taskAttachButton
+    });
+    const icon = attachButton.findByType(
+      "Ionicons" as unknown as React.ComponentType
+    );
+
+    expect(attachButton.props.accessibilityLabel).toBe("Attach photo");
+    expect(attachButton.props.accessibilityRole).toBe("button");
+    expect(attachButton.props.style[0]).toMatchObject({ height: 32, width: 32 });
+    expect(icon.props).toMatchObject({
+      color: "#9BB0CC",
+      name: "add",
+      size: 24
+    });
+    expect(
+      attachButton.findAllByType("Text" as unknown as React.ComponentType)
+    ).toHaveLength(0);
+  });
+
   it("shows the picked photo and sends it with the typed text in one submission", async () => {
     const harness = createHarness();
     const tree = await renderScreen(harness);
