@@ -54,7 +54,7 @@ async fn lists_repo_commands_with_revision_and_groups() {
         .iter()
         .any(|command| {
             command["id"] == "custom:task-manager"
-                && command["label"] == "Kanna Task Manager"
+                && command["label"] == "Task Manager"
                 && command["group"] == "automation"
         }));
 }
