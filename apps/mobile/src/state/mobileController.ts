@@ -2478,7 +2478,9 @@ export function createMobileController(
             commandId
           );
         }
-        fail(error);
+        if (!(error instanceof RepoNotRegisteredError)) {
+          fail(error);
+        }
         reloadCatalog = isStaleRepoCommandError(error);
         if (!reloadCatalog) {
           const message =

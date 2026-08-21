@@ -4082,6 +4082,43 @@ describe("createMobileController", () => {
     expect(store.getState().repoCheckoutOffer).toBeNull();
   });
 
+  it("keeps the connection healthy when a repo-command checkout fails", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const missingRepo: RepoSummary = {
+      id: "git:hash-kanji",
+      name: "kanji-kongbu",
+      remoteUrl: "https://example.test/kanji-kongbu.git",
+      remoteUrlHash: "hash-kanji",
+      registeredDesktopIds: ["desktop-1"]
+    };
+    client.listRepos.mockResolvedValue([missingRepo]);
+    client.runRepoCommand.mockRejectedValueOnce(
+      new RepoNotRegisteredError("kanji-kongbu", "Laptop")
+    );
+    client.startRepoCheckout.mockRejectedValueOnce(new Error("git clone failed"));
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    store.selectDesktop("desktop-2");
+    controller.setNavigationView("more");
+    await flushMicrotasks();
+
+    await controller.runRepoCommand("factory:create-agent");
+    await expect(controller.confirmRepoCheckout()).resolves.toBeNull();
+
+    expect(store.getState()).toMatchObject({
+      connectionState: "connected",
+      repoCommandStatus: "error",
+      repoCommandErrorMessage:
+        "Could not check out kanji-kongbu on Laptop. Configure a credential-free origin and git credentials on Laptop, then try again.",
+      repoCheckoutOffer: {
+        action: "repo-command",
+        status: "failed"
+      }
+    });
+  });
+
   it("shows a target-named credential limitation without echoing checkout errors", async () => {
     const store = createSessionStore();
     const client = createClientMock();
