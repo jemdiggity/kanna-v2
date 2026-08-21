@@ -70,10 +70,7 @@ export const createCheckoutSession = onCall(
   async (request) => {
     try {
       return await createCheckoutSessionCore(
-        {
-          plan: (request.data as { plan?: unknown } | undefined)?.plan,
-          currency: (request.data as { currency?: unknown } | undefined)?.currency,
-        },
+        request.data,
         request.auth
           ? {
               uid: request.auth.uid,

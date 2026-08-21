@@ -57,7 +57,10 @@ function startCheckoutCallableStub(): Promise<Server> {
     }
     response.end(JSON.stringify({
       data: {
-        url: "https://checkout.stripe.test/session/cs_test_portal"
+        sessionId: "cs_test_portal",
+        url: "https://checkout.stripe.test/session/cs_test_portal",
+        customerId: "cus_test_portal",
+        plan: "monthly",
       }
     }));
   });
@@ -87,16 +90,14 @@ integration("web portal Firebase emulator flow", () => {
 
   it("registers, verifies, signs in, and invokes createCheckoutSession", async () => {
     await expect(portalFirebase.createCheckoutSession({
-      successUrl: "http://localhost/checkout/success",
-      cancelUrl: "http://localhost/checkout/cancelled"
+      plan: "monthly",
     })).rejects.toMatchObject({ code: "functions/unauthenticated" });
 
     const registered = await portalFirebase.register(email, password);
     expect(registered.emailVerified).toBe(false);
 
     await expect(portalFirebase.createCheckoutSession({
-      successUrl: "http://localhost/checkout/success",
-      cancelUrl: "http://localhost/checkout/cancelled"
+      plan: "monthly",
     })).rejects.toMatchObject({ code: "functions/failed-precondition" });
 
     const codesResponse = await fetch(`http://127.0.0.1:${authPort}/emulator/v1/projects/${projectId}/oobCodes`);
@@ -111,8 +112,7 @@ integration("web portal Firebase emulator flow", () => {
     expect(signedIn.emailVerified).toBe(true);
 
     const checkout = await portalFirebase.createCheckoutSession({
-      successUrl: "http://localhost/checkout/success",
-      cancelUrl: "http://localhost/checkout/cancelled"
+      plan: "monthly",
     });
     expect(checkout.url).toMatch(/^https?:\/\//);
     // Redirect is deliberately outside this integration boundary; component tests mock it.

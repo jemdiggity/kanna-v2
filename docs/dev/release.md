@@ -304,13 +304,16 @@ itself: the idempotent provisioning script
 STRIPE_SECRET_KEY=... pnpm --filter @kanna/firebase-functions stripe:provision
 ```
 
-creates (or finds) one "Kanna Cloud" product per mode plus a recurring
-monthly price per currency — JPY/USD/CAD/AUD/EUR/GBP, each under a stable
-lookup key `cloud_monthly_<currency>` (`--dry-run` prints the plan without
-contacting Stripe). `createCheckoutSession` accepts the monthly plan only,
-takes the caller's currency (default `usd`), and resolves the active price by
-that lookup key at session time — so no price id is ever stored in Secret
-Manager or the repo.
+creates (or finds) one "Kanna Cloud" product per mode plus one recurring,
+multi-currency monthly Price under the stable lookup key `cloud_monthly`
+(`--dry-run` prints the plan without contacting Stripe). USD is the default;
+JPY/CAD/AUD/EUR/GBP are manual currency options at the price card amounts.
+Checkout selects the buyer's local supported currency itself. The script
+deactivates the retired `cloud_monthly_<currency>` Prices after the replacement
+is available; it retains them in Stripe for existing subscription history.
+`createCheckoutSession` accepts the monthly plan only and resolves this single
+active Price at session time, so no price id is stored in Secret Manager or the
+repo.
 
 The Stripe account exists; remaining key and endpoint setup is tracked in the
 Slice-0 runbook (`docs/specs/accounts-and-billing.md`).

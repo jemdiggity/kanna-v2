@@ -5,24 +5,54 @@ import { pathToFileURL } from "node:url";
 
 export const PRODUCT_NAME = "Kanna Cloud";
 export const PRODUCT_MARKER = "kanna_cloud";
-export const MONTHLY_PRICES = Object.freeze([
-  { currency: "jpy", unitAmount: 500, lookupKey: "cloud_monthly_jpy" },
-  { currency: "usd", unitAmount: 500, lookupKey: "cloud_monthly_usd" },
-  { currency: "cad", unitAmount: 500, lookupKey: "cloud_monthly_cad" },
-  { currency: "aud", unitAmount: 500, lookupKey: "cloud_monthly_aud" },
-  { currency: "eur", unitAmount: 500, lookupKey: "cloud_monthly_eur" },
-  { currency: "gbp", unitAmount: 500, lookupKey: "cloud_monthly_gbp" },
-]);
+export const MONTHLY_LOOKUP_KEY = "cloud_monthly";
+export const MONTHLY_AMOUNTS = Object.freeze({
+  jpy: 500,
+  usd: 500,
+  cad: 500,
+  aud: 500,
+  eur: 500,
+  gbp: 500,
+});
+export const LEGACY_MONTHLY_LOOKUP_KEYS = Object.freeze(
+  Object.keys(MONTHLY_AMOUNTS).map((currency) => `cloud_monthly_${currency}`),
+);
+
+function currencyOptions() {
+  return Object.fromEntries(
+    Object.entries(MONTHLY_AMOUNTS)
+      .filter(([currency]) => currency !== "usd")
+      .map(([currency, unitAmount]) => [currency, { unit_amount: unitAmount }]),
+  );
+}
+
+function matchesMonthlyPrice(price) {
+  if (price.currency !== "usd" || price.unit_amount !== MONTHLY_AMOUNTS.usd) return false;
+  if (price.recurring?.interval !== "month") return false;
+  const options = price.currency_options ?? {};
+  return Object.entries(currencyOptions()).every(
+    ([currency, definition]) => options[currency]?.unit_amount === definition.unit_amount,
+  );
+}
 
 export async function provisionStripeCatalog(client, { dryRun = false } = {}) {
   if (dryRun) {
-    return { dryRun: true, product: "would-create-if-absent", prices: MONTHLY_PRICES.map((price) => ({ ...price, action: "would-create-if-absent" })) };
+    return {
+      dryRun: true,
+      product: "would-create-if-absent",
+      price: { lookupKey: MONTHLY_LOOKUP_KEY, action: "would-create-or-update" },
+      legacyPrices: LEGACY_MONTHLY_LOOKUP_KEYS.map((lookupKey) => ({
+        lookupKey,
+        action: "would-deactivate-if-active",
+      })),
+    };
   }
 
   const existingPrices = await client.prices.list({
     active: true,
-    lookup_keys: MONTHLY_PRICES.map((price) => price.lookupKey),
+    lookup_keys: [MONTHLY_LOOKUP_KEY, ...LEGACY_MONTHLY_LOOKUP_KEYS],
     limit: 100,
+    expand: ["data.currency_options"],
   });
   const pricesByLookupKey = new Map(
     existingPrices.data.flatMap((price) => price.lookup_key ? [[price.lookup_key, price]] : [])
@@ -47,26 +77,50 @@ export async function provisionStripeCatalog(client, { dryRun = false } = {}) {
     productCreated = true;
   }
 
-  const prices = [];
-  for (const definition of MONTHLY_PRICES) {
-    const existing = pricesByLookupKey.get(definition.lookupKey);
-    if (existing) {
-      prices.push({ ...definition, id: existing.id, action: "existing" });
-      continue;
-    }
-    const created = await client.prices.create({
-      product: product.id,
-      currency: definition.currency,
-      unit_amount: definition.unitAmount,
-      recurring: { interval: "month" },
-      lookup_key: definition.lookupKey,
+  const existingMonthly = pricesByLookupKey.get(MONTHLY_LOOKUP_KEY);
+  let monthlyPrice;
+  let monthlyAction;
+  if (existingMonthly && matchesMonthlyPrice(existingMonthly)) {
+    monthlyPrice = existingMonthly;
+    monthlyAction = "existing";
+  } else if (existingMonthly
+    && existingMonthly.currency === "usd"
+    && existingMonthly.unit_amount === MONTHLY_AMOUNTS.usd
+    && existingMonthly.recurring?.interval === "month") {
+    monthlyPrice = await client.prices.update(existingMonthly.id, {
+      currency_options: currencyOptions(),
+      expand: ["currency_options"],
     });
-    prices.push({ ...definition, id: created.id, action: "created" });
+    monthlyAction = "updated";
+  } else {
+    monthlyPrice = await client.prices.create({
+      product: product.id,
+      currency: "usd",
+      unit_amount: MONTHLY_AMOUNTS.usd,
+      currency_options: currencyOptions(),
+      recurring: { interval: "month" },
+      lookup_key: MONTHLY_LOOKUP_KEY,
+      ...(existingMonthly ? { transfer_lookup_key: true } : {}),
+    });
+    monthlyAction = existingMonthly ? "replaced" : "created";
+    if (existingMonthly) await client.prices.update(existingMonthly.id, { active: false });
   }
+
+  const legacyPrices = [];
+  for (const lookupKey of LEGACY_MONTHLY_LOOKUP_KEYS) {
+    const legacy = pricesByLookupKey.get(lookupKey);
+    if (!legacy) continue;
+    // Archiving prevents new Checkouts while preserving the Price records used
+    // by existing subscriptions, invoices, and Stripe's audit history.
+    await client.prices.update(legacy.id, { active: false });
+    legacyPrices.push({ id: legacy.id, lookupKey, action: "deactivated" });
+  }
+
   return {
     dryRun: false,
     product: { id: product.id, action: productCreated ? "created" : "existing" },
-    prices,
+    price: { id: monthlyPrice.id, lookupKey: MONTHLY_LOOKUP_KEY, action: monthlyAction },
+    legacyPrices,
   };
 }
 

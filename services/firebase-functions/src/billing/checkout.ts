@@ -8,11 +8,16 @@
  * settings instead of into a second, parallel subscription.
  */
 import type { Firestore } from "firebase-admin/firestore";
+import {
+  CheckoutContractError,
+  parseCheckoutSessionRequest,
+  type CheckoutSessionResponse,
+} from "./contract.js";
 import { resolveCheckoutConfig } from "./config.js";
 import { readBillingState } from "./entitlement.js";
 import { BillingRequestError } from "./errors.js";
 import { consoleBillingLogger, type BillingLogger } from "./logger.js";
-import type { StripeCheckoutGateway, StripePriceCurrency } from "./stripeGateway.js";
+import type { StripeCheckoutGateway } from "./stripeGateway.js";
 import {
   accountCheckoutPath,
   accountDeletionPath,
@@ -21,25 +26,10 @@ import {
   type BilledSourceState,
 } from "./types.js";
 
-export type CheckoutPlan = "monthly";
-
-export interface CreateCheckoutSessionRequest {
-  plan?: unknown;
-  currency?: unknown;
-}
-
 export interface CheckoutCaller {
   uid: string;
   email: string | null;
   emailVerified: boolean;
-}
-
-export interface CreateCheckoutSessionResult {
-  sessionId: string;
-  url: string | null;
-  customerId: string;
-  plan: CheckoutPlan;
-  currency: StripePriceCurrency;
 }
 
 export interface CreateCheckoutSessionDependencies {
@@ -55,36 +45,11 @@ function isBlockingStatus(state: BilledSourceState | null): boolean {
   return state !== null && (state.status === "active" || state.status === "grace");
 }
 
-function parsePlan(value: unknown): CheckoutPlan {
-  if (value === "monthly") return value;
-  throw new BillingRequestError(
-    "invalid-argument",
-    "unknown_plan",
-    `Unknown plan: ${String(value)}. Expected "monthly".`
-  );
-}
-
-const SUPPORTED_CURRENCIES = new Set<StripePriceCurrency>([
-  "jpy", "usd", "cad", "aud", "eur", "gbp",
-]);
-
-function parseCurrency(value: unknown): StripePriceCurrency {
-  const currency = value === undefined ? "usd" : String(value).toLowerCase();
-  if (SUPPORTED_CURRENCIES.has(currency as StripePriceCurrency)) {
-    return currency as StripePriceCurrency;
-  }
-  throw new BillingRequestError(
-    "invalid-argument",
-    "unknown_currency",
-    `Unknown currency: ${String(value)}.`
-  );
-}
-
 export async function createCheckoutSession(
-  request: CreateCheckoutSessionRequest,
+  request: unknown,
   caller: CheckoutCaller | null,
   deps: CreateCheckoutSessionDependencies
-): Promise<CreateCheckoutSessionResult> {
+): Promise<CheckoutSessionResponse> {
   const logger = deps.logger ?? consoleBillingLogger;
   const now = deps.now ?? (() => new Date().toISOString());
 
@@ -103,8 +68,16 @@ export async function createCheckoutSession(
     );
   }
 
-  const plan = parsePlan(request.plan);
-  const currency = parseCurrency(request.currency);
+  let parsedRequest: ReturnType<typeof parseCheckoutSessionRequest>;
+  try {
+    parsedRequest = parseCheckoutSessionRequest(request);
+  } catch (error) {
+    if (error instanceof CheckoutContractError) {
+      throw new BillingRequestError("invalid-argument", error.reason, error.message);
+    }
+    throw error;
+  }
+  const { plan } = parsedRequest;
 
   let config: ReturnType<typeof resolveCheckoutConfig>;
   try {
@@ -153,7 +126,7 @@ export async function createCheckoutSession(
       caller,
       existing: state.sources.stripe?.stripeCustomerId ?? null,
     });
-    const lookupKey = `cloud_monthly_${currency}`;
+    const lookupKey = "cloud_monthly";
     const priceId = await gateway.resolvePriceId(lookupKey);
     if (!priceId) {
       throw new Error(`No active Stripe price has lookup_key ${lookupKey}`);
@@ -192,13 +165,12 @@ export async function createCheckoutSession(
   logger.info("Created a Stripe checkout session", {
     uid: caller.uid,
     plan,
-    currency,
     sessionId: session.id,
   });
   if (!customerId || !session) {
     throw new BillingRequestError("internal", "stripe_error", "Could not start checkout.");
   }
-  return { sessionId: session.id, url: session.url, customerId, plan, currency };
+  return { sessionId: session.id, url: session.url, customerId, plan };
 }
 
 /**

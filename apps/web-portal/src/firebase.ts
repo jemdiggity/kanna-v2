@@ -11,7 +11,8 @@ import {
 } from "firebase/auth";
 import { connectFirestoreEmulator, doc, getDoc, getFirestore } from "firebase/firestore";
 import { connectFunctionsEmulator, getFunctions, httpsCallable } from "firebase/functions";
-import type { CheckoutSessionRequest, CheckoutSessionResponse, CloudEntitlement } from "./types";
+import type { CheckoutSessionRequest, CheckoutSessionResponse } from "@kanna/firebase-functions/billing-contract";
+import type { CloudEntitlement } from "./types";
 
 function required(name: keyof ImportMetaEnv): string {
   const value = import.meta.env[name]?.trim();

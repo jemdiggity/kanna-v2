@@ -479,7 +479,7 @@ describeWithEmulator("billing backend against the Firestore emulator", () => {
       });
       expect(gateway.calls.sessions[0]).toMatchObject({
         uid: CHECKOUT_UID,
-        priceId: "price_for_cloud_monthly_usd",
+        priceId: "price_for_cloud_monthly",
         successUrl: "https://portal.kanna.build/billing/success?session_id={CHECKOUT_SESSION_ID}",
         cancelUrl: "https://portal.kanna.build/billing/canceled",
       });
@@ -497,10 +497,10 @@ describeWithEmulator("billing backend against the Firestore emulator", () => {
         .rejects.toMatchObject({ reason: "unknown_plan" });
     });
 
-    it("resolves the selected currency by stable lookup key", async () => {
+    it("resolves the multi-currency price by its stable lookup key", async () => {
       const gateway = stubGateway();
-      await createCheckoutSession({ plan: "monthly", currency: "jpy" }, verified, deps(gateway));
-      expect(gateway.calls.sessions[0]).toMatchObject({ priceId: "price_for_cloud_monthly_jpy" });
+      await createCheckoutSession({ plan: "monthly" }, verified, deps(gateway));
+      expect(gateway.calls.sessions[0]).toMatchObject({ priceId: "price_for_cloud_monthly" });
     });
 
     it("reuses the account's existing Stripe customer", async () => {
@@ -572,7 +572,7 @@ describeWithEmulator("billing backend against the Firestore emulator", () => {
           return { id: "cus_racing_delete" };
         },
         async resolvePriceId() {
-          return "price_for_cloud_monthly_usd";
+          return "price_for_cloud_monthly";
         },
         async createCheckoutSession() {
           enteredStripe.resolve();
