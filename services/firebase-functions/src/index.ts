@@ -26,7 +26,7 @@
  * beside the variables they name in `billing/config.ts`, so this module's own
  * exports stay exactly the functions it deploys.
  */
-import { getApps, initializeApp } from "firebase-admin/app";
+import { initializeApp } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
 import { getFirestore, type Firestore } from "firebase-admin/firestore";
 import { setGlobalOptions } from "firebase-functions/v2";
@@ -45,6 +45,13 @@ import { accountDeletionDependencies, deleteAccount as deleteAccountCore } from 
 
 setGlobalOptions({ region: "us-central1", maxInstances: 10 });
 
+// Firebase Functions 7 initializes its own named Admin app while verifying an
+// authenticated callable. That app does not satisfy service calls which look
+// up [DEFAULT], so initialize our app eagerly and pass it to every service.
+// initializeApp() without explicit options is idempotent in the pinned Admin
+// SDK, including when a test evaluates this module more than once.
+const firebaseApp = initializeApp();
+
 const logger: BillingLogger = {
   info: (message, context) => functionsLogger.info(message, context ?? {}),
   warn: (message, context) => functionsLogger.warn(message, context ?? {}),
@@ -52,10 +59,7 @@ const logger: BillingLogger = {
 };
 
 function db(): Firestore {
-  if (getApps().length === 0) {
-    initializeApp();
-  }
-  return getFirestore();
+  return getFirestore(firebaseApp);
 }
 
 /**
@@ -97,7 +101,7 @@ export const deleteAccount = onCall(
     try {
       return await deleteAccountCore(
         request.auth ? { uid: request.auth.uid } : null,
-        accountDeletionDependencies(db(), getAuth(), process.env),
+        accountDeletionDependencies(db(), getAuth(firebaseApp), process.env),
       );
     } catch (error) {
       if (error instanceof BillingRequestError) {
