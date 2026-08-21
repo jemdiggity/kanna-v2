@@ -1,5 +1,12 @@
 # Bonjour re-advertisement E2E gap (2026-08-05)
 
+> Superseded for macOS publication on 2026-08-21 by
+> `crates/kanna-server/tests/bonjour_multi_process.rs`. That test uses three
+> real server processes and the host `dns-sd` resolver to cover concurrent
+> publication, cleanup, and restart/port replacement. Physical iOS browsing
+> remains tracked in
+> `docs/2026-08-21-physical-ios-bonjour-pairing-e2e-gap.md`.
+
 The mobile discovery path crosses `kanna-server`, multicast DNS, the host's
 network interfaces, Apple's mDNS responder/cache on another device, and the
 mobile `/v1/status` trust probe. The repository's automated test environment

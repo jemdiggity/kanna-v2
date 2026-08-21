@@ -1,6 +1,7 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const reactState = vi.hoisted(() => ({ index: 0, values: [] as unknown[] }));
+const reactRefs = vi.hoisted(() => ({ index: 0, values: [] as Array<{ current: unknown }> }));
 const cameraPermission = vi.hoisted(() => ({
   current: { granted: true, canAskAgain: true }
 }));
@@ -22,7 +23,11 @@ vi.mock("react", async (importActual) => {
         }
       ] as const;
     },
-    useRef: <T,>(current: T) => ({ current })
+    useRef: <T,>(current: T) => {
+      const index = reactRefs.index++;
+      if (reactRefs.values.length <= index) reactRefs.values[index] = { current };
+      return reactRefs.values[index] as { current: T };
+    }
   };
 });
 
@@ -90,11 +95,14 @@ beforeAll(async () => {
 beforeEach(() => {
   reactState.index = 0;
   reactState.values = [];
+  reactRefs.index = 0;
+  reactRefs.values = [];
   cameraPermission.current = { granted: true, canAskAgain: true };
 });
 
 function render(overrides: Partial<Parameters<typeof MachinePairingSheet>[0]> = {}) {
   reactState.index = 0;
+  reactRefs.index = 0;
   return MachinePairingSheet({
     visible: true,
     onClose: vi.fn(),
@@ -127,6 +135,65 @@ describe("MachinePairingSheet", () => {
     expect(onPairPayload).toHaveBeenCalledTimes(1);
     resolve();
     await pending;
+  });
+
+  it("latches a failed visible QR until an explicit retry succeeds", async () => {
+    const onClose = vi.fn();
+    const onPairPayload = vi.fn(async () => undefined);
+    onPairPayload.mockRejectedValueOnce(new Error("No matching machine was found"));
+    let tree = render({ onClose, onPairPayload });
+
+    findByType(tree, "CameraView")?.props?.onBarcodeScanned?.({
+      type: "qr",
+      data: "continuously-visible-payload"
+    });
+    await Promise.resolve();
+    tree = render({ onClose, onPairPayload });
+
+    expect(findByTestId(tree, "mobile.machine-pairing.error")?.props?.children)
+      .toBe("No matching machine was found");
+    const camera = findByType(tree, "CameraView");
+    camera?.props?.onBarcodeScanned?.({
+      type: "qr",
+      data: "continuously-visible-payload"
+    });
+    camera?.props?.onBarcodeScanned?.({
+      type: "qr",
+      data: "continuously-visible-payload"
+    });
+    expect(onPairPayload).toHaveBeenCalledTimes(1);
+
+    findPressableByText(tree, "Retry scan")?.props?.onPress?.();
+    tree = render({ onClose, onPairPayload });
+    findByType(tree, "CameraView")?.props?.onBarcodeScanned?.({
+      type: "qr",
+      data: "continuously-visible-payload"
+    });
+    await Promise.resolve();
+
+    expect(onPairPayload).toHaveBeenCalledTimes(2);
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it("accepts a meaningfully different QR after a failed scan", async () => {
+    const onPairPayload = vi.fn(async () => undefined);
+    onPairPayload.mockRejectedValueOnce(new Error("No matching machine was found"));
+    let tree = render({ onPairPayload });
+
+    findByType(tree, "CameraView")?.props?.onBarcodeScanned?.({
+      type: "qr",
+      data: "failed-payload"
+    });
+    await Promise.resolve();
+    tree = render({ onPairPayload });
+    findByType(tree, "CameraView")?.props?.onBarcodeScanned?.({
+      type: "qr",
+      data: "different-payload"
+    });
+    await Promise.resolve();
+
+    expect(onPairPayload).toHaveBeenNthCalledWith(1, "failed-payload");
+    expect(onPairPayload).toHaveBeenNthCalledWith(2, "different-payload");
   });
 
   it("shows pairing progress instead of the scanner while a claim is in flight", async () => {

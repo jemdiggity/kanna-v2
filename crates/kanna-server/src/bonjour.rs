@@ -1,7 +1,14 @@
-use mdns_sd::{DaemonEvent, ServiceDaemon, ServiceInfo};
+#[cfg(any(test, not(target_os = "macos")))]
+use mdns_sd::ServiceInfo;
+#[cfg(not(target_os = "macos"))]
+use mdns_sd::{DaemonEvent, ServiceDaemon};
+#[cfg(any(test, not(target_os = "macos")))]
 use std::net::IpAddr;
+#[cfg(not(target_os = "macos"))]
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
+#[cfg(not(target_os = "macos"))]
 use std::thread::JoinHandle;
+#[cfg(not(target_os = "macos"))]
 use std::time::{Duration, Instant};
 
 pub const MOBILE_BONJOUR_SERVICE_TYPE: &str = "_kanna-mobile._tcp.local.";
@@ -10,14 +17,455 @@ pub const MOBILE_BONJOUR_SERVICE_TYPE: &str = "_kanna-mobile._tcp.local.";
 // the supervisor consumes those events instead of adding another address poll.
 // It also exposes no registration-presence query, so a coarse re-registration
 // is the only available health check for a silently lost service record.
+#[cfg(not(target_os = "macos"))]
 const REGISTRATION_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+#[cfg(not(target_os = "macos"))]
 const REGISTRATION_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+#[cfg(not(target_os = "macos"))]
 const SUPERVISOR_WAKE_INTERVAL: Duration = Duration::from_secs(1);
 
+#[cfg(target_os = "macos")]
+mod macos {
+    // Each `mdns_sd::ServiceDaemon` owns raw SO_REUSEPORT UDP/5353 sockets.
+    // Several independent Kanna processes therefore compete for multicast
+    // packets with one another and with Apple's responder. The DNS-SD API
+    // brokers every process through mDNSResponder instead; it is part of
+    // libSystem, so signed builds retain no developer-machine dependency.
+    use super::MOBILE_BONJOUR_SERVICE_TYPE;
+    use std::ffi::{c_char, c_void, CStr, CString};
+    use std::ptr;
+    use std::sync::mpsc::{self, Receiver, SyncSender};
+    use std::thread::JoinHandle;
+    use std::time::Duration;
+
+    type DnsServiceRef = *mut c_void;
+    type DnsServiceFlags = u32;
+    type DnsServiceError = i32;
+    type DnsServiceRegisterReply = unsafe extern "C" fn(
+        DnsServiceRef,
+        DnsServiceFlags,
+        DnsServiceError,
+        *const c_char,
+        *const c_char,
+        *const c_char,
+        *mut c_void,
+    );
+
+    const DNS_SERVICE_FLAGS_ADD: DnsServiceFlags = 0x2;
+    const DNS_SERVICE_FLAGS_NO_AUTO_RENAME: DnsServiceFlags = 0x8;
+    const DNS_SERVICE_ERR_NO_ERROR: DnsServiceError = 0;
+    const POLL_INTERVAL_MS: i32 = 250;
+    const REGISTRATION_TIMEOUT: Duration = Duration::from_secs(5);
+    const RETRY_INTERVAL: Duration = Duration::from_secs(5);
+
+    unsafe extern "C" {
+        fn DNSServiceRegister(
+            service_ref: *mut DnsServiceRef,
+            flags: DnsServiceFlags,
+            interface_index: u32,
+            name: *const c_char,
+            registration_type: *const c_char,
+            domain: *const c_char,
+            host: *const c_char,
+            port: u16,
+            txt_len: u16,
+            txt_record: *const c_void,
+            callback: DnsServiceRegisterReply,
+            context: *mut c_void,
+        ) -> DnsServiceError;
+        fn DNSServiceRefSockFD(service_ref: DnsServiceRef) -> libc::c_int;
+        fn DNSServiceProcessResult(service_ref: DnsServiceRef) -> DnsServiceError;
+        fn DNSServiceRefDeallocate(service_ref: DnsServiceRef);
+    }
+
+    #[derive(Clone)]
+    struct Config {
+        desktop_name: String,
+        desktop_id: String,
+        environment: String,
+        port: u16,
+    }
+
+    enum RegistrationEvent {
+        Published { name: String, domain: String },
+        Removed,
+        Failed(DnsServiceError),
+    }
+
+    struct CallbackContext {
+        events: mpsc::Sender<RegistrationEvent>,
+    }
+
+    unsafe extern "C" fn registration_callback(
+        _service_ref: DnsServiceRef,
+        flags: DnsServiceFlags,
+        error: DnsServiceError,
+        name: *const c_char,
+        _registration_type: *const c_char,
+        domain: *const c_char,
+        context: *mut c_void,
+    ) {
+        if context.is_null() {
+            return;
+        }
+        // SAFETY: `register_once` owns this boxed context until it deallocates
+        // the DNSServiceRef, after which no callback can run.
+        let callback = unsafe { &*(context.cast::<CallbackContext>()) };
+        let event = if error != DNS_SERVICE_ERR_NO_ERROR {
+            RegistrationEvent::Failed(error)
+        } else if flags & DNS_SERVICE_FLAGS_ADD == 0 {
+            RegistrationEvent::Removed
+        } else {
+            RegistrationEvent::Published {
+                // SAFETY: DNSServiceRegister supplies valid callback strings
+                // for a successful registration callback.
+                name: unsafe { callback_string(name) },
+                // SAFETY: Same callback contract as `name` above.
+                domain: unsafe { callback_string(domain) },
+            }
+        };
+        let _ = callback.events.send(event);
+    }
+
+    unsafe fn callback_string(value: *const c_char) -> String {
+        if value.is_null() {
+            return String::new();
+        }
+        // SAFETY: The caller establishes that `value` is a callback-owned,
+        // NUL-terminated C string for the duration of this call.
+        unsafe { CStr::from_ptr(value) }
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    enum RunResult {
+        Stopped,
+        Retry(String),
+    }
+
+    pub struct Advertisement {
+        stop: SyncSender<()>,
+        worker: Option<JoinHandle<()>>,
+    }
+
+    impl Advertisement {
+        pub fn start(
+            desktop_name: &str,
+            desktop_id: &str,
+            environment: &str,
+            port: u16,
+        ) -> Result<Self, String> {
+            let config = Config {
+                desktop_name: desktop_name.to_string(),
+                desktop_id: desktop_id.to_string(),
+                environment: environment.to_string(),
+                port,
+            };
+            let (stop, stop_receiver) = mpsc::sync_channel(1);
+            let (startup, startup_receiver) = mpsc::sync_channel(1);
+            let worker = std::thread::Builder::new()
+                .name("kanna-mobile-bonjour".to_string())
+                .spawn(move || supervise(config, stop_receiver, startup))
+                .map_err(|error| format!("failed to start mobile Bonjour supervisor: {error}"))?;
+
+            match startup_receiver.recv_timeout(REGISTRATION_TIMEOUT) {
+                Ok(()) => Ok(Self {
+                    stop,
+                    worker: Some(worker),
+                }),
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    log::warn!(
+                        "mobile Bonjour registration was not observable within {:?}; supervisor remains active and will retry",
+                        REGISTRATION_TIMEOUT
+                    );
+                    Ok(Self {
+                        stop,
+                        worker: Some(worker),
+                    })
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    let _ = worker.join();
+                    Err("mobile Bonjour supervisor stopped before publication".to_string())
+                }
+            }
+        }
+    }
+
+    impl Drop for Advertisement {
+        fn drop(&mut self) {
+            let _ = self.stop.send(());
+            if let Some(worker) = self.worker.take() {
+                if worker.join().is_err() {
+                    log::warn!("mobile Bonjour supervisor panicked during shutdown");
+                }
+            }
+        }
+    }
+
+    fn supervise(config: Config, stop: Receiver<()>, startup: SyncSender<()>) {
+        supervise_with(config, stop, startup, RETRY_INTERVAL, register_once);
+    }
+
+    fn supervise_with<F>(
+        config: Config,
+        stop: Receiver<()>,
+        startup: SyncSender<()>,
+        retry_interval: Duration,
+        mut attempt: F,
+    ) where
+        F: FnMut(&Config, &Receiver<()>, &SyncSender<()>) -> RunResult,
+    {
+        loop {
+            match attempt(&config, &stop, &startup) {
+                RunResult::Stopped => return,
+                RunResult::Retry(error) => {
+                    log::warn!(
+                        "mobile Bonjour advertisement failed for {} ({}, {}, port {}): {}; retrying",
+                        config.desktop_name,
+                        config.desktop_id,
+                        config.environment,
+                        config.port,
+                        error
+                    );
+                    match stop.recv_timeout(retry_interval) {
+                        Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                        Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    }
+                }
+            }
+        }
+    }
+
+    fn register_once(config: &Config, stop: &Receiver<()>, startup: &SyncSender<()>) -> RunResult {
+        let name = match CString::new(config.desktop_id.as_str()) {
+            Ok(value) => value,
+            Err(error) => return RunResult::Retry(format!("invalid desktop id: {error}")),
+        };
+        let registration_type =
+            match CString::new(MOBILE_BONJOUR_SERVICE_TYPE.trim_end_matches(".local.")) {
+                Ok(value) => value,
+                Err(error) => {
+                    return RunResult::Retry(format!("invalid Bonjour service type: {error}"));
+                }
+            };
+        let domain = match CString::new("local.") {
+            Ok(value) => value,
+            Err(error) => {
+                return RunResult::Retry(format!("invalid Bonjour domain: {error}"));
+            }
+        };
+        let txt_value = format!("desktopId={}", config.desktop_id);
+        if txt_value.len() > u8::MAX as usize {
+            return RunResult::Retry("desktop id is too long for Bonjour TXT".to_string());
+        }
+        let mut txt_record = Vec::with_capacity(txt_value.len() + 1);
+        txt_record.push(txt_value.len() as u8);
+        txt_record.extend_from_slice(txt_value.as_bytes());
+        let (event_sender, event_receiver) = mpsc::channel();
+        let context = Box::new(CallbackContext {
+            events: event_sender,
+        });
+        let context_ptr = Box::into_raw(context);
+        let mut service_ref: DnsServiceRef = ptr::null_mut();
+
+        // SAFETY: All C strings and TXT bytes remain valid for the duration of
+        // the call, which copies them. `context_ptr` remains allocated until
+        // after the resulting service reference is deallocated below.
+        let error = unsafe {
+            DNSServiceRegister(
+                &mut service_ref,
+                DNS_SERVICE_FLAGS_NO_AUTO_RENAME,
+                0,
+                name.as_ptr(),
+                registration_type.as_ptr(),
+                domain.as_ptr(),
+                ptr::null(),
+                config.port.to_be(),
+                txt_record.len() as u16,
+                txt_record.as_ptr().cast(),
+                registration_callback,
+                context_ptr.cast(),
+            )
+        };
+        if error != DNS_SERVICE_ERR_NO_ERROR {
+            // SAFETY: DNSServiceRegister failed, so no callback can retain or
+            // use the context pointer.
+            unsafe { drop(Box::from_raw(context_ptr)) };
+            return RunResult::Retry(dns_error("register", error));
+        }
+
+        // SAFETY: A successful DNSServiceRegister initialized `service_ref`.
+        let socket = unsafe { DNSServiceRefSockFD(service_ref) };
+        if socket < 0 {
+            // SAFETY: The reference is live and owned by this function.
+            unsafe { DNSServiceRefDeallocate(service_ref) };
+            // SAFETY: Deallocation prevents future callbacks.
+            unsafe { drop(Box::from_raw(context_ptr)) };
+            return RunResult::Retry("mobile Bonjour registration has no event socket".to_string());
+        }
+
+        let mut published = false;
+        let result = loop {
+            match stop.try_recv() {
+                Ok(()) | Err(mpsc::TryRecvError::Disconnected) => {
+                    break RunResult::Stopped;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+            let mut descriptor = libc::pollfd {
+                fd: socket,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: `descriptor` points to one initialized pollfd.
+            let poll_result = unsafe { libc::poll(&mut descriptor, 1, POLL_INTERVAL_MS) };
+            if poll_result < 0 {
+                break RunResult::Retry(std::io::Error::last_os_error().to_string());
+            }
+            if let Some(error) = terminal_poll_error(descriptor.revents) {
+                break RunResult::Retry(error);
+            }
+            if poll_result > 0 && descriptor.revents & libc::POLLIN != 0 {
+                // SAFETY: Only this worker thread processes and deallocates the
+                // service reference.
+                let process_error = unsafe { DNSServiceProcessResult(service_ref) };
+                if process_error != DNS_SERVICE_ERR_NO_ERROR {
+                    break RunResult::Retry(dns_error(
+                        "process registration result",
+                        process_error,
+                    ));
+                }
+            }
+
+            let mut terminal_event = None;
+            while let Ok(event) = event_receiver.try_recv() {
+                match event {
+                    RegistrationEvent::Published { name, domain } => {
+                        log::info!(
+                            "published mobile Bonjour service {}.{} for {} ({}, {}, port {})",
+                            name,
+                            domain,
+                            config.desktop_name,
+                            config.desktop_id,
+                            config.environment,
+                            config.port
+                        );
+                        if !published {
+                            let _ = startup.try_send(());
+                            published = true;
+                        }
+                    }
+                    RegistrationEvent::Removed => {
+                        terminal_event = Some(RegistrationEvent::Removed);
+                        break;
+                    }
+                    RegistrationEvent::Failed(error) => {
+                        terminal_event = Some(RegistrationEvent::Failed(error));
+                        break;
+                    }
+                }
+            }
+            if let Some(event) = terminal_event {
+                break match event {
+                    RegistrationEvent::Failed(error) => {
+                        RunResult::Retry(dns_error("registration callback", error))
+                    }
+                    RegistrationEvent::Removed => {
+                        RunResult::Retry("registration was removed by mDNSResponder".to_string())
+                    }
+                    RegistrationEvent::Published { .. } => continue,
+                };
+            }
+        };
+
+        // DNSServiceRefDeallocate closes the mDNSResponder connection, which
+        // withdraws the service and its records from all active interfaces.
+        // SAFETY: This worker exclusively owns the live reference.
+        unsafe { DNSServiceRefDeallocate(service_ref) };
+        // SAFETY: Deallocation prevents future callbacks.
+        unsafe { drop(Box::from_raw(context_ptr)) };
+        result
+    }
+
+    fn terminal_poll_error(revents: libc::c_short) -> Option<String> {
+        let terminal = revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL);
+        if terminal == 0 {
+            None
+        } else {
+            Some(format!(
+                "macOS mDNSResponder connection reported terminal poll events 0x{terminal:x}"
+            ))
+        }
+    }
+
+    fn dns_error(action: &str, error: DnsServiceError) -> String {
+        format!("failed to {action} through macOS mDNSResponder (DNS-SD error {error})")
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::sync::{Arc, Mutex};
+
+        #[test]
+        fn supervisor_retries_initial_failure_until_publication() {
+            let config = Config {
+                desktop_name: "Test Mac".to_string(),
+                desktop_id: "desktop-test".to_string(),
+                environment: "development".to_string(),
+                port: 48_120,
+            };
+            let (stop_sender, stop_receiver) = mpsc::sync_channel(1);
+            let (startup_sender, startup_receiver) = mpsc::sync_channel(1);
+            let attempts = Arc::new(Mutex::new(0));
+            let attempt_counts = Arc::clone(&attempts);
+            let worker = std::thread::spawn(move || {
+                supervise_with(
+                    config,
+                    stop_receiver,
+                    startup_sender,
+                    Duration::from_millis(1),
+                    move |_config, stop, startup| {
+                        let mut count = attempt_counts.lock().unwrap();
+                        *count += 1;
+                        if *count == 1 {
+                            RunResult::Retry("mDNSResponder unavailable".to_string())
+                        } else {
+                            let _ = startup.try_send(());
+                            drop(count);
+                            let _ = stop.recv();
+                            RunResult::Stopped
+                        }
+                    },
+                );
+            });
+
+            startup_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .expect("publication should follow the initial failure");
+            stop_sender.send(()).unwrap();
+            worker.join().unwrap();
+            assert_eq!(*attempts.lock().unwrap(), 2);
+        }
+
+        #[test]
+        fn terminal_poll_events_require_connection_retry() {
+            for event in [libc::POLLERR, libc::POLLHUP, libc::POLLNVAL] {
+                let error = terminal_poll_error(event).expect("terminal event must be rejected");
+                assert!(error.contains("terminal poll events"));
+            }
+            assert!(terminal_poll_error(libc::POLLIN).is_none());
+            assert!(terminal_poll_error(0).is_none());
+        }
+    }
+}
+
+#[cfg(any(test, not(target_os = "macos")))]
 pub fn mobile_service_txt(desktop_id: &str) -> Vec<(&str, &str)> {
     vec![("desktopId", desktop_id)]
 }
 
+#[cfg(any(test, not(target_os = "macos")))]
 pub fn build_mobile_service_info(
     desktop_name: &str,
     desktop_id: &str,
@@ -39,6 +487,7 @@ pub fn build_mobile_service_info(
 /// resolving the service hostname then connects to 127.0.0.1 or an
 /// unreachable fe80 address and times out. (The iOS Simulator masked this:
 /// there, loopback really is the desktop.)
+#[cfg(any(test, not(target_os = "macos")))]
 fn build_mobile_service_info_with_addresses(
     desktop_id: &str,
     port: u16,
@@ -62,6 +511,7 @@ fn build_mobile_service_info_with_addresses(
     })
 }
 
+#[cfg(any(test, not(target_os = "macos")))]
 fn routable_lan_addresses() -> Vec<IpAddr> {
     if_addrs::get_if_addrs()
         .map(|interfaces| {
@@ -74,6 +524,7 @@ fn routable_lan_addresses() -> Vec<IpAddr> {
         .unwrap_or_default()
 }
 
+#[cfg(any(test, not(target_os = "macos")))]
 fn is_routable_lan_address(address: &IpAddr) -> bool {
     match address {
         IpAddr::V4(v4) => !v4.is_loopback() && !v4.is_link_local() && !v4.is_unspecified(),
@@ -83,13 +534,16 @@ fn is_routable_lan_address(address: &IpAddr) -> bool {
     }
 }
 
+#[cfg(any(test, not(target_os = "macos")))]
 #[derive(Clone)]
 struct AdvertisementConfig {
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     desktop_name: String,
     desktop_id: String,
     port: u16,
 }
 
+#[cfg(any(test, not(target_os = "macos")))]
 impl AdvertisementConfig {
     fn new(desktop_name: &str, desktop_id: &str, port: u16) -> Self {
         Self {
@@ -104,16 +558,19 @@ impl AdvertisementConfig {
     }
 }
 
+#[cfg(any(test, not(target_os = "macos")))]
 trait AdvertisementDaemon {
     fn register(&self, service: ServiceInfo) -> Result<(), String>;
     fn shutdown(&self, fullname: &str);
 }
 
+#[cfg(not(target_os = "macos"))]
 struct MdnsAdvertisementDaemon {
     daemon: ServiceDaemon,
     events: flume::Receiver<DaemonEvent>,
 }
 
+#[cfg(not(target_os = "macos"))]
 impl MdnsAdvertisementDaemon {
     fn new() -> Result<Self, String> {
         let daemon = ServiceDaemon::new()
@@ -125,6 +582,7 @@ impl MdnsAdvertisementDaemon {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 impl AdvertisementDaemon for MdnsAdvertisementDaemon {
     fn register(&self, service: ServiceInfo) -> Result<(), String> {
         self.daemon
@@ -138,6 +596,7 @@ impl AdvertisementDaemon for MdnsAdvertisementDaemon {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 impl Drop for MdnsAdvertisementDaemon {
     fn drop(&mut self) {
         // `mdns-sd` retains an internal command sender, so dropping the public
@@ -146,6 +605,7 @@ impl Drop for MdnsAdvertisementDaemon {
     }
 }
 
+#[cfg(any(test, not(target_os = "macos")))]
 fn refresh_registration_with_recovery<D, F>(
     daemon: &mut D,
     mut create_daemon: F,
@@ -174,10 +634,12 @@ where
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 fn should_stop(stop: &Receiver<()>) -> bool {
     matches!(stop.try_recv(), Ok(()) | Err(TryRecvError::Disconnected))
 }
 
+#[cfg(not(target_os = "macos"))]
 fn supervise_advertisement(
     mut daemon: MdnsAdvertisementDaemon,
     config: AdvertisementConfig,
@@ -255,13 +717,23 @@ fn supervise_advertisement(
     daemon.shutdown(&fullname);
 }
 
+#[cfg(target_os = "macos")]
+pub use macos::Advertisement as MobileBonjourAdvertisement;
+
+#[cfg(not(target_os = "macos"))]
 pub struct MobileBonjourAdvertisement {
     stop: SyncSender<()>,
     supervisor: Option<JoinHandle<()>>,
 }
 
+#[cfg(not(target_os = "macos"))]
 impl MobileBonjourAdvertisement {
-    pub fn start(desktop_name: &str, desktop_id: &str, port: u16) -> Result<Self, String> {
+    pub fn start(
+        desktop_name: &str,
+        desktop_id: &str,
+        _environment: &str,
+        port: u16,
+    ) -> Result<Self, String> {
         let config = AdvertisementConfig::new(desktop_name, desktop_id, port);
         let daemon = MdnsAdvertisementDaemon::new()?;
         let service = build_mobile_service_info(desktop_name, desktop_id, port)?;
@@ -279,6 +751,7 @@ impl MobileBonjourAdvertisement {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 impl Drop for MobileBonjourAdvertisement {
     fn drop(&mut self) {
         let _ = self.stop.send(());

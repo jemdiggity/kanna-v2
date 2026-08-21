@@ -156,9 +156,17 @@ async fn main() {
 
     log::info!("Database opened: {}", config.db_path);
 
+    log::info!(
+        "starting mobile Bonjour advertisement for {} ({}, {}, port {})",
+        config.desktop_name,
+        config.desktop_id,
+        config.environment,
+        config.lan_port
+    );
     let _mobile_bonjour = bonjour::MobileBonjourAdvertisement::start(
         &config.desktop_name,
         &config.desktop_id,
+        &config.environment,
         config.lan_port,
     )
     .map_err(|error| {

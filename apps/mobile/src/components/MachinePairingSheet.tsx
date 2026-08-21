@@ -40,22 +40,26 @@ export function MachinePairingSheet({
   const [mode, setMode] = useState<"scan" | "code">("scan");
   const [submitting, setSubmitting] = useState(false);
   const [scanLocked, setScanLocked] = useState(false);
+  const [failedScan, setFailedScan] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const scanLockRef = useRef(false);
+  const failedScanPayloadRef = useRef<string | null>(null);
   const [permission, requestPermission] = useCameraPermissions();
   const normalizedCode = normalizePairingCode(code);
 
   const resetAndClose = () => {
     scanLockRef.current = false;
+    failedScanPayloadRef.current = null;
     setCode("");
     setMode("scan");
     setScanLocked(false);
+    setFailedScan(false);
     setSubmitting(false);
     setError(null);
     onClose();
   };
 
-  const submit = async (action: () => Promise<void>) => {
+  const submit = async (action: () => Promise<void>, scanPayload?: string) => {
     setSubmitting(true);
     setError(null);
     try {
@@ -63,6 +67,10 @@ export function MachinePairingSheet({
       resetAndClose();
     } catch (failure) {
       setError(pairingFailureMessage(failure));
+      if (scanPayload !== undefined) {
+        failedScanPayloadRef.current = scanPayload;
+        setFailedScan(true);
+      }
       scanLockRef.current = false;
       setScanLocked(false);
       setSubmitting(false);
@@ -70,10 +78,23 @@ export function MachinePairingSheet({
   };
 
   const submitPayload = (payload: string) => {
-    if (scanLockRef.current) return;
+    if (scanLockRef.current || failedScanPayloadRef.current === payload) return;
     scanLockRef.current = true;
     setScanLocked(true);
-    void submit(() => onPairPayload(payload));
+    void submit(() => onPairPayload(payload), payload);
+  };
+
+  const selectMode = (nextMode: "scan" | "code") => {
+    failedScanPayloadRef.current = null;
+    setFailedScan(false);
+    setError(null);
+    setMode(nextMode);
+  };
+
+  const retryFailedScan = () => {
+    failedScanPayloadRef.current = null;
+    setFailedScan(false);
+    setError(null);
   };
 
   return (
@@ -131,7 +152,7 @@ export function MachinePairingSheet({
                   accessibilityState={{ selected: mode === "scan" }}
                   style={styles.modeButton}
                   testID={MOBILE_E2E_IDS.machinePairingScanModeButton}
-                  onPress={() => setMode("scan")}
+                  onPress={() => selectMode("scan")}
                 >
                   <Text style={mode === "scan" ? styles.modeActive : styles.modeLabel}>Scan QR</Text>
                 </Pressable>
@@ -139,7 +160,7 @@ export function MachinePairingSheet({
                   accessibilityRole="tab"
                   accessibilityState={{ selected: mode === "code" }}
                   style={styles.modeButton}
-                  onPress={() => setMode("code")}
+                  onPress={() => selectMode("code")}
                 >
                   <Text style={mode === "code" ? styles.modeActive : styles.modeLabel}>Enter code</Text>
                 </Pressable>
@@ -221,9 +242,20 @@ export function MachinePairingSheet({
           </View>
 
           {error ? (
-            <Text style={styles.error} testID={MOBILE_E2E_IDS.machinePairingError}>
-              {error}
-            </Text>
+            <View style={styles.errorCard}>
+              <Text style={styles.error} testID={MOBILE_E2E_IDS.machinePairingError}>
+                {error}
+              </Text>
+              {failedScan ? (
+                <Pressable
+                  accessibilityRole="button"
+                  style={styles.secondaryButton}
+                  onPress={retryFailedScan}
+                >
+                  <Text style={styles.secondaryLabel}>Retry scan</Text>
+                </Pressable>
+              ) : null}
+            </View>
           ) : null}
         </View>
       </KeyboardAvoidingView>
@@ -302,5 +334,6 @@ const styles = StyleSheet.create({
   primaryLabel: { color: "#08111E", fontSize: 14, fontWeight: "800" },
   secondaryButton: { alignItems: "center", borderColor: "#3A5274", borderRadius: 12, borderWidth: 1, padding: 12 },
   secondaryLabel: { color: "#DCE8FA", fontSize: 14, fontWeight: "700" },
+  errorCard: { gap: 10 },
   error: { color: "#FF9B9B", fontSize: 13, lineHeight: 19 }
 });
