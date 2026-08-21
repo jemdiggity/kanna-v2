@@ -56,23 +56,27 @@ async function archiveWorkingTree(archivePath: string): Promise<void> {
     ["ls-files", "--cached", "--others", "--exclude-standard", "-z"],
     { cwd: repoRoot, stdio: ["ignore", "pipe", "inherit"] }
   );
+  const chunks: Buffer[] = [];
+  git.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
+  const gitExit = await new Promise<number | null>((resolveExit, reject) => {
+    git.once("error", reject);
+    git.once("exit", resolveExit);
+  });
+  expect(gitExit).toBe(0);
+
+  const existingPaths = Buffer.concat(chunks)
+    .toString("utf8")
+    .split("\0")
+    .filter((path) => path.length > 0 && existsSync(join(repoRoot, path)));
   const tar = spawn("tar", ["--null", "-T", "-", "-cf", archivePath], {
     cwd: repoRoot,
     stdio: ["pipe", "inherit", "inherit"]
   });
-  git.stdout.pipe(tar.stdin);
-
-  const [gitExit, tarExit] = await Promise.all([
-    new Promise<number | null>((resolveExit, reject) => {
-      git.once("error", reject);
-      git.once("exit", resolveExit);
-    }),
-    new Promise<number | null>((resolveExit, reject) => {
-      tar.once("error", reject);
-      tar.once("exit", resolveExit);
-    })
-  ]);
-  expect(gitExit).toBe(0);
+  tar.stdin.end(`${existingPaths.join("\0")}\0`);
+  const tarExit = await new Promise<number | null>((resolveExit, reject) => {
+    tar.once("error", reject);
+    tar.once("exit", resolveExit);
+  });
   expect(tarExit).toBe(0);
 }
 
@@ -153,7 +157,8 @@ async function buildSimulator(worktreeRoot: string, logPath: string): Promise<vo
       "build"
     ],
     worktreeRoot,
-    logPath
+    logPath,
+    { KANNA_APP_ENV: "dev" }
   );
 }
 
@@ -247,13 +252,20 @@ describeIntegration("ExpoModulesJSI shared pnpm store isolation", () => {
             [".DerivedData", ".build", ".swiftpm", ".build-context"].map((directory) =>
               rm(join(packageRoot, "apple", directory), {
                 recursive: true,
-                force: true
+                force: true,
+                maxRetries: 10,
+                retryDelay: 200
               })
             )
           );
         }
         if (succeeded || process.env.KANNA_KEEP_MOBILE_BUILD_FIXTURES !== "1") {
-          await rm(fixtureRoot, { recursive: true, force: true });
+          await rm(fixtureRoot, {
+            recursive: true,
+            force: true,
+            maxRetries: 10,
+            retryDelay: 200
+          });
         } else {
           console.error(`Retained failed worktree fixtures at ${fixtureRoot}`);
         }

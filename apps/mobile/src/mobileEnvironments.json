@@ -1,6 +1,6 @@
 {
   "dev": {
-    "runtimeVersion": "2.2.0",
+    "runtimeVersion": "2.2.1",
     "name": "dev",
     "displayName": "Kanna Dev",
     "scheme": "kanna-dev",
@@ -18,7 +18,7 @@
     "otaChannel": null
   },
   "staging": {
-    "runtimeVersion": "2.2.0",
+    "runtimeVersion": "2.2.1",
     "name": "staging",
     "displayName": "Kanna Staging",
     "scheme": "kanna-staging",
@@ -36,7 +36,7 @@
     "otaChannel": "staging"
   },
   "prod": {
-    "runtimeVersion": "2.2.0",
+    "runtimeVersion": "2.2.1",
     "name": "prod",
     "displayName": "Kanna",
     "scheme": "kanna",
