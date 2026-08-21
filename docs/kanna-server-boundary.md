@@ -895,14 +895,16 @@ is never reported as already gone.
 
 ## Activity Confirmation in `kanna-mcp`
 
-`pipeline_item.activity` is written from the daemon's per-frame verdict, and
-that classifier is stateless: `claude_status_from_lines` decides Busy from the
-literal "esc to interrupt" marker being present in the frame it was handed, with
-no hysteresis and no minimum dwell. A frame captured mid-redraw can lose the
-marker, fall through to the trailing-prompt test, and classify a mid-turn agent
-as idle — which the server correctly stores, because `activity` records the
-latest verdict rather than judging it. An orchestrator polling `activity` to
-decide whether a child stopped can therefore read a stop that never happened.
+`pipeline_item.activity` is written from the daemon's rendered-terminal
+verdict. ANSI control bytes are interpreted before provider patterns are
+matched, and a DEC synchronized-output redraw is not classified until the
+provider closes the frame. Intermediate spinner, status-line, and update-banner
+paint therefore cannot publish a false status or consume the classifier's
+per-session throttle slot. The daemon's periodic settled-frame check is
+independent of output-triggered throttling, so chrome repaints cannot starve
+convergence to an idle composer. Within a complete frame the provider matcher
+is stateless: `claude_status_from_lines` still decides Busy from the literal
+"esc to interrupt" marker without inventing a quiet-time heuristic.
 
 `kanna-mcp` smooths that at the point of consumption, asymmetrically:
 
@@ -933,10 +935,11 @@ route plus 1s, never one request per task:
 | `kanna_wait_task` | Never. Its predicate reads recorded terminations, not `activity`, so there is no frame classification to confirm. |
 | `kanna_list_recent_tasks`, `kanna_search_tasks`, `kanna_list_repo_tasks` | Whenever **any** task in the response looks stopped. For a repo listing that is the common case, so budget these at roughly +1s per call regardless of how many tasks come back. |
 
-The event feed is not debounced: events are appended by the writes that change
-the state they describe, and suppressing one would drop it rather than delay it.
-`kanna-cli` does not confirm either — it is the shell interface, where a human
-reads the value in context.
+The current task row is not debounced: it always stores the daemon's latest
+complete-frame verdict. `task.activity_changed` events use the server debounce
+described above, delaying rather than dropping a candidate transition until it
+holds. `kanna-cli` does not perform the MCP confirmation read — it is the shell
+interface, where a human reads the current value in context.
 
 ## Dynamic Workflow Changes
 

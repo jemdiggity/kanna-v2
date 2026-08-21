@@ -545,10 +545,12 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::db::Db;
+    use kanna_daemon::headless_terminal::{initial_session_status, HeadlessTerminal};
     use kanna_daemon::protocol::{
-        Command as DaemonCommand, ComposerAttestation, Event as DaemonEvent, SessionInfo,
-        SessionState,
+        AgentProvider, Command as DaemonCommand, ComposerAttestation, Event as DaemonEvent,
+        SessionInfo, SessionState,
     };
+    use kanna_daemon::session::{replay_headless_terminal_for_benchmark, BenchmarkStatusState};
     use std::path::{Path, PathBuf};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
@@ -1666,11 +1668,107 @@ mod tests {
         let _ = std::fs::remove_dir_all(daemon_dir);
     }
 
-    /// The premise the MCP-layer activity debounce is built on. The daemon
-    /// classifies each frame on its own, so one mid-redraw frame that loses the
-    /// busy marker arrives here as a lone `Idle` between two `Busy` events —
-    /// and this layer, correctly, stores it: `activity` is a record of the
-    /// latest verdict, not a judgement about whether that verdict is plausible.
+    /// Feed the structural byte sequence from the checked-in Codex v0.140 PTY
+    /// capture through the daemon classifier and this server's real DB mapping.
+    /// Codex opens DEC synchronized output, temporarily paints the working
+    /// footer, then closes the bracket on an idle composer. The intermediate
+    /// frame must never reach `runtime_status` or re-arm sidebar working state.
+    #[test]
+    fn recorded_codex_idle_chrome_does_not_flap_server_activity_to_working() {
+        let unique = unique_name("terminal-watcher-codex-idle-chrome");
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        let config = test_config(&unique, &daemon_dir);
+        seed_plain_task(&config);
+        let state = http_api::AppState::new(config.clone());
+        let db = Db::open(&config.db_path).unwrap();
+        db.update_pipeline_item_activity("task-child", "working")
+            .unwrap();
+
+        let provider = AgentProvider::Codex;
+        let mut terminal = HeadlessTerminal::new(120, 40, 10_000).unwrap();
+        let mut classifier = BenchmarkStatusState::new(initial_session_status(Some(provider)));
+        let started_at = std::time::Instant::now();
+        let captured_chunks: [(u64, &[u8]); 4] = [
+            (
+                0,
+                concat!(
+                    "\x1b[?2026h\x1b[2J\x1b[H• Working (43s • esc to interrupt)\r\n",
+                    "› Improve documentation in @filename\r\n",
+                    "gpt-5.5 high · /tmp/kanna-codex-fixture-root\x1b[?2026l",
+                )
+                .as_bytes(),
+            ),
+            (
+                600,
+                concat!(
+                    "\x1b[?2026h\x1b[2J\x1b[H• Finished the requested work.\r\n",
+                    "› Improve documentation in @filename\r\n",
+                    "gpt-5.5 high · /tmp/kanna-codex-fixture-root\x1b[?2026l",
+                )
+                .as_bytes(),
+            ),
+            (
+                1_200,
+                concat!(
+                    "\x1b]0;⠹ kanna-codex-fixture-root\x07",
+                    "\x1b[?2026h\x1b[2J\x1b[H• Working (43s • esc to interrupt)\r\n",
+                )
+                .as_bytes(),
+            ),
+            (
+                1_210,
+                concat!(
+                    "\x1b[2J\x1b[H• Finished the requested work.\r\n",
+                    "› Improve documentation in @filename\r\n",
+                    "gpt-5.5 high · /tmp/kanna-codex-fixture-root\x1b[?2026l",
+                )
+                .as_bytes(),
+            ),
+        ];
+
+        for (at_ms, bytes) in captured_chunks {
+            let changed = replay_headless_terminal_for_benchmark(
+                &mut terminal,
+                Some(provider),
+                &mut classifier,
+                started_at,
+                at_ms,
+                bytes,
+            )
+            .unwrap();
+            if let Some(status) = changed {
+                classifier.status = status;
+                apply_watcher_runtime_status(&state, "task-child", status, None).unwrap();
+            }
+        }
+
+        let item = db.get_pipeline_item("task-child").unwrap().unwrap();
+        assert_eq!(item.runtime_status.as_deref(), Some("idle"));
+        assert_eq!(item.activity.as_deref(), Some("unread"));
+        db.flush_debounced_activity_events(0).unwrap();
+        let events = db
+            .list_task_events(
+                &crate::db::TaskEventScope::Tasks(vec!["task-child".to_string()]),
+                0,
+                i64::MAX,
+                10,
+            )
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].payload["activity"], "unread");
+
+        let _ = std::fs::remove_file(&config.db_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    /// The premise the MCP-layer activity debounce is built on. When a daemon
+    /// publishes a real status edge, this layer stores it immediately:
+    /// `activity` is a record of the latest authoritative verdict, not a
+    /// second terminal classifier.
+    ///
+    /// One complete frame that loses the busy marker can therefore arrive as
+    /// a lone `Idle` between two `Busy` events; the event debounce suppresses
+    /// that transient edge for managers.
     /// A task read taken inside that window sees `unread` for an agent that
     /// never stopped, which is exactly what `kanna-mcp` confirms before
     /// reporting (see `crates/kanna-mcp/tests/activity_debounce.rs`).

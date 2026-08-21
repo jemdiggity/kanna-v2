@@ -335,6 +335,19 @@ impl HeadlessTerminal {
         Ok(status)
     }
 
+    /// Whether the provider has finished publishing its current terminal
+    /// frame.
+    ///
+    /// Codex brackets TUI redraws with DEC synchronized-output mode. While
+    /// that mode is active the rendered grid is an intermediate frame: the
+    /// old composer and a newly painted working line can coexist even though
+    /// neither is the frame Codex will expose when the bracket closes. Status
+    /// classification must wait for that boundary instead of turning a paint
+    /// operation into agent activity.
+    pub fn status_frame_complete(&self) -> bool {
+        !self.terminal.mode(Mode::SYNC_OUTPUT).unwrap_or(false)
+    }
+
     pub fn composer_state(
         &mut self,
         provider: Option<AgentProvider>,
@@ -1281,10 +1294,15 @@ mod tests {
         let mut headless_terminal = HeadlessTerminal::new(80, 24, 10_000).unwrap();
         headless_terminal.write(b"\x1b[?25l\x1b[?2026hhello");
 
+        assert!(!headless_terminal.status_frame_complete());
+
         let snapshot = headless_terminal.snapshot().unwrap();
 
         assert!(!snapshot.cursor_visible);
         assert!(!snapshot.vt.contains("\x1b[?2026h"));
+
+        headless_terminal.write(b"\x1b[?2026l");
+        assert!(headless_terminal.status_frame_complete());
     }
 
     #[test]

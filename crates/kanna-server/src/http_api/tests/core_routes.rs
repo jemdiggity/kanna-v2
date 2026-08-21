@@ -1601,6 +1601,41 @@ async fn task_detail_reports_the_runtime_and_read_dimensions_separately() {
     assert_eq!(tasks[0]["readState"], serde_json::json!("read"));
 }
 
+/// Tasks created before the daemon's first status observation have no runtime
+/// verdict yet. That is a supported transient state, not `busy`: consumers
+/// keep rendering the independently persisted activity until reconciliation.
+#[tokio::test]
+async fn task_detail_reports_null_runtime_state_without_losing_activity() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "prompt",
+            Some("Task One"),
+            "in progress",
+            "2026-08-21 08:00:00",
+        )
+        .unwrap();
+    });
+
+    let response = app
+        .oneshot(
+            Request::get("/v1/tasks/task-1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let detail: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(detail["runtimeState"], serde_json::Value::Null);
+    assert_eq!(detail["activity"], serde_json::json!("idle"));
+}
+
 /// The split this exists for. `waitingPromptSnippet` is what the session said;
 /// the composer is what somebody is about to say into it — and on a Claude
 /// session that line is usually the CLI's own tab-to-accept suggestion. Once

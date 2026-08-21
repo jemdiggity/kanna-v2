@@ -2963,6 +2963,80 @@ fn test_attach_snapshot_replays_current_status() {
     }
 }
 
+/// Cross the real socket, PTY reader, headless terminal, status timer, and
+/// broadcast path. The byte structure is taken from the checked-in Codex
+/// v0.140 capture (`tests/tui-fidelity/fixtures/codex-pwd-tool.ansi`): title
+/// spinner updates plus DEC synchronized-output redraws. A parked composer
+/// must converge to Idle and a later cosmetic redraw must not publish Busy.
+#[test]
+fn codex_idle_chrome_repaints_do_not_reactivate_a_real_daemon_session() {
+    let daemon = DaemonHandle::start();
+    let mut subscriber = daemon.connect();
+    subscriber.send(&Cmd::Subscribe);
+    assert!(matches!(subscriber.recv(), Evt::Ok));
+
+    let script = concat!(
+        "printf '\\033[?2026h\\033[2J\\033[H• Working (43s • esc to interrupt)\\r\\n",
+        "› Improve documentation in @filename\\r\\n",
+        "gpt-5.5 high · /tmp/kanna-codex-fixture-root\\033[?2026l'; ",
+        "sleep 1; ",
+        "printf '\\033[?2026h\\033[2J\\033[H• Finished the requested work.\\r\\n",
+        "› Improve documentation in @filename\\r\\n",
+        "gpt-5.5 high · /tmp/kanna-codex-fixture-root\\033[?2026l'; ",
+        "sleep 1; ",
+        "printf '\\033]0;⠹ kanna-codex-fixture-root\\007",
+        "\\033[?2026h\\033[2J\\033[H• Working (43s • esc to interrupt)\\r\\n'; ",
+        "sleep 1; ",
+        "printf '\\033[2J\\033[H• Finished the requested work.\\r\\n",
+        "› Improve documentation in @filename\\r\\n",
+        "gpt-5.5 high · /tmp/kanna-codex-fixture-root\\033[?2026l'; ",
+        "sleep 3",
+    );
+    let session_id = "codex-idle-chrome";
+    let mut control = daemon.connect();
+    control.send_json(&serde_json::json!({
+        "type": "Spawn",
+        "session_id": session_id,
+        "executable": "/bin/sh",
+        "args": ["-c", script],
+        "cwd": "/tmp",
+        "env": {},
+        "cols": 120,
+        "rows": 40,
+        "agent_provider": "codex",
+    }));
+    expect_session_created(&mut control, session_id);
+
+    let idle_deadline = Instant::now() + Duration::from_secs(4);
+    loop {
+        let remaining = idle_deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "parked Codex session never became idle"
+        );
+        match subscriber.recv_with_timeout(remaining.min(Duration::from_millis(250))) {
+            Ok(Evt::StatusChanged {
+                session_id: id,
+                status: SessionStatus::Idle,
+            }) if id == session_id => break,
+            Ok(_) | Err(_) => continue,
+        }
+    }
+
+    let repaint_deadline = Instant::now() + Duration::from_millis(2_500);
+    while Instant::now() < repaint_deadline {
+        match subscriber.recv_with_timeout(Duration::from_millis(100)) {
+            Ok(Evt::StatusChanged {
+                session_id: id,
+                status: SessionStatus::Busy,
+            }) if id == session_id => {
+                panic!("idle Codex chrome repaint reactivated the session")
+            }
+            Ok(_) | Err(_) => {}
+        }
+    }
+}
+
 #[test]
 fn test_atomic_attach_snapshot_uses_headless_terminal_snapshot_without_raw_replay() {
     let daemon = DaemonHandle::start();

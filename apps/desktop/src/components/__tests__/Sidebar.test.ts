@@ -237,6 +237,22 @@ describe("Sidebar", () => {
     getStageOrder.mockReturnValue(["merge", "pr", "review", "in progress"]);
   });
 
+  it("renders settled server activity when runtime status has not been observed", () => {
+    // Desktop snapshots deliberately carry the blended activity value, not
+    // the nullable runtime_status column. A pre-observation task follows this
+    // path and must not acquire working styling from the missing field.
+    const wrapper = mountSidebar([
+      item("task-runtime-pending", {
+        display_name: "Waiting for first runtime observation",
+        activity: "idle",
+      }),
+    ], "slot:task-runtime-pending");
+
+    const title = wrapper.get('[data-task-id="task-runtime-pending"] .item-title');
+    expect(title.attributes("style")).toContain("font-style: normal");
+    expect(title.text()).toBe("Waiting for first runtime observation");
+  });
+
   it("places a remotely blocked task in the blocked section with its blocker name", () => {
     const blocked = item("remote-blocked", {
       display_name: "Blocked remote",
