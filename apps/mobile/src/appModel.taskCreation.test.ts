@@ -169,7 +169,7 @@ describe("createAppModel task creation persistence", () => {
       ) {
         return response([]);
       }
-      const createMatch = url.match(/\/v1\/tasks\/([0-9a-f]{32})$/);
+      const createMatch = url.match(/\/v1\/tasks\/([0-9a-f]{8})$/);
       if (createMatch && init?.method === "PUT") {
         return response({
           taskId: createMatch[1],
@@ -210,7 +210,7 @@ describe("createAppModel task creation persistence", () => {
       expect.objectContaining({
         taskCreationAttempts: [
           expect.objectContaining({
-            taskId: expect.stringMatching(/^[0-9a-f]{32}$/),
+            taskId: expect.stringMatching(/^[0-9a-f]{8}$/),
             repoId: "repo-lan",
             prompt: "Persist this identity",
             desktopId: "desktop-lan",
@@ -221,7 +221,7 @@ describe("createAppModel task creation persistence", () => {
     );
     expect(
       requests.filter(({ method, url }) =>
-        method === "PUT" && /\/v1\/tasks\/[0-9a-f]{32}$/.test(url)
+        method === "PUT" && /\/v1\/tasks\/[0-9a-f]{8}$/.test(url)
       )
     ).toHaveLength(0);
 
@@ -229,7 +229,7 @@ describe("createAppModel task creation persistence", () => {
     await createPromise;
 
     const createRequests = requests.filter(({ method, url }) =>
-      method === "PUT" && /\/v1\/tasks\/[0-9a-f]{32}$/.test(url)
+      method === "PUT" && /\/v1\/tasks\/[0-9a-f]{8}$/.test(url)
     );
     expect(createRequests).toHaveLength(1);
     expect(JSON.parse(createRequests[0]!.body ?? "null")).toMatchObject({
