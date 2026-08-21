@@ -33,6 +33,10 @@ export interface StripeCheckoutGateway {
   createCheckoutSession(input: StripeCheckoutSessionInput): Promise<StripeCheckoutSession>;
 }
 
+export interface StripeSubscriptionGateway {
+  cancelSubscription(subscriptionId: string): Promise<void>;
+}
+
 /**
  * The live gateway.
  *
@@ -67,6 +71,26 @@ export function stripeCheckoutGateway(secretKey: string): StripeCheckoutGateway 
         metadata: { firebase_uid: input.uid },
       });
       return { id: session.id, url: session.url };
+    },
+  };
+}
+
+/** Live cancel-at-once gateway used by account deletion. */
+export function stripeSubscriptionGateway(secretKey: string): StripeSubscriptionGateway {
+  const stripe = new Stripe(secretKey);
+  return {
+    async cancelSubscription(subscriptionId) {
+      try {
+        await stripe.subscriptions.cancel(subscriptionId);
+      } catch (error) {
+        // A previous attempt may have canceled the subscription but failed
+        // before local deletion. Stripe's missing-resource response therefore
+        // means the desired state is already true.
+        if (error instanceof Stripe.errors.StripeInvalidRequestError && error.code === "resource_missing") {
+          return;
+        }
+        throw error;
+      }
     },
   };
 }

@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createMemoryHistory, createRouter } from "vue-router";
 import CheckoutReturnPage from "../src/pages/CheckoutReturnPage.vue";
 import SubscribePage from "../src/pages/SubscribePage.vue";
+import AccountPage from "../src/pages/AccountPage.vue";
 import { providePortalSession } from "../src/session";
 import type { PortalFirebase } from "../src/firebase";
 
@@ -15,6 +16,7 @@ function api(overrides: Partial<PortalFirebase> = {}): PortalFirebase {
     reloadUser: vi.fn(),
     entitlement: vi.fn(async () => null),
     createCheckoutSession: vi.fn(async () => ({ url: "https://checkout.stripe.test/session" })),
+    deleteAccount: vi.fn(async () => undefined),
     ...overrides
   } as PortalFirebase;
 }
@@ -70,5 +72,44 @@ describe("checkout pages", () => {
     const wrapper = mount(host, { global: { plugins: [router] } });
     expect(wrapper.text()).toContain("Checkout cancelled");
     expect(wrapper.text()).toContain("No charge was made");
+  });
+});
+
+describe("account deletion", () => {
+  it("requires typed confirmation, calls the backend, and signs out through the shared API", async () => {
+    const deleteAccount = vi.fn(async () => undefined);
+    const mockApi = api({ deleteAccount });
+    const host = {
+      template: "<AccountPage />",
+      components: { AccountPage },
+      setup() {
+        const session = providePortalSession(mockApi);
+        session.user.value = {
+          uid: "user-1",
+          email: "owner@example.com",
+          emailVerified: true,
+        } as typeof session.user.value;
+        session.entitlement.value = {
+          status: "active",
+          source: "stripe",
+          capabilities: [],
+          currentPeriodEndsAt: null,
+          graceEndsAt: null,
+          environment: "staging",
+        };
+      }
+    };
+    const wrapper = mount(host);
+
+    await wrapper.get(".danger-button").trigger("click");
+    expect(wrapper.text()).toContain("subscription is canceled immediately");
+    expect(wrapper.text()).toContain("cloud desktop pairings");
+    expect(wrapper.get('button[type="submit"]').attributes("disabled")).toBeDefined();
+
+    await wrapper.get(".delete-confirmation input").setValue("DELETE");
+    expect(wrapper.get('button[type="submit"]').attributes("disabled")).toBeUndefined();
+    await wrapper.get(".delete-confirmation").trigger("submit");
+    expect(deleteAccount).toHaveBeenCalledOnce();
+    expect(mockApi.signOut).toHaveBeenCalledOnce();
   });
 });

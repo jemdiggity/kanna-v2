@@ -29,15 +29,21 @@
  * exports stay exactly the two functions it deploys.
  */
 import { getApps, initializeApp } from "firebase-admin/app";
+import { getAuth } from "firebase-admin/auth";
 import { getFirestore, type Firestore } from "firebase-admin/firestore";
 import { setGlobalOptions } from "firebase-functions/v2";
 import { HttpsError, onCall, onRequest } from "firebase-functions/v2/https";
 import * as functionsLogger from "firebase-functions/logger";
 import { createCheckoutSession as createCheckoutSessionCore } from "./billing/checkout.js";
-import { CHECKOUT_SECRET_ENVS, STRIPE_WEBHOOK_SECRET_ENVS } from "./billing/config.js";
+import {
+  CHECKOUT_SECRET_ENVS,
+  DELETE_ACCOUNT_SECRET_ENVS,
+  STRIPE_WEBHOOK_SECRET_ENVS,
+} from "./billing/config.js";
 import { BillingRequestError } from "./billing/errors.js";
 import type { BillingLogger } from "./billing/logger.js";
 import { handleStripeWebhook } from "./billing/stripeWebhook.js";
+import { accountDeletionDependencies, deleteAccount as deleteAccountCore } from "./accountDeletion.js";
 
 setGlobalOptions({ region: "us-central1", maxInstances: 10 });
 
@@ -87,6 +93,24 @@ export const createCheckoutSession = onCall(
       throw error;
     }
   }
+);
+
+/** Permanently delete the signed-in caller's cloud account and Auth identity. */
+export const deleteAccount = onCall(
+  { secrets: [...DELETE_ACCOUNT_SECRET_ENVS] },
+  async (request) => {
+    try {
+      return await deleteAccountCore(
+        request.auth ? { uid: request.auth.uid } : null,
+        accountDeletionDependencies(db(), getAuth(), process.env),
+      );
+    } catch (error) {
+      if (error instanceof BillingRequestError) {
+        throw new HttpsError(error.code, error.message, { reason: error.reason });
+      }
+      throw error;
+    }
+  },
 );
 
 /**

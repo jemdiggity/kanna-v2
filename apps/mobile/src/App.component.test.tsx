@@ -24,7 +24,8 @@ const harness = vi.hoisted(() => ({
     save: vi.fn()
   },
   reloadToApplyUpdate: vi.fn().mockResolvedValue(undefined),
-  updateMobileCrashContext: vi.fn()
+  updateMobileCrashContext: vi.fn(),
+  requestMobileAccountDeletion: vi.fn().mockResolvedValue(undefined)
 }));
 
 vi.mock("react-native", async () => {
@@ -74,6 +75,10 @@ vi.mock("./appModel", () => ({
 vi.mock("./lib/updates/otaUpdates", () => ({
   checkAndFetchUpdate: (...args: unknown[]) => harness.checkAndFetchUpdate(...args),
   reloadToApplyUpdate: (...args: unknown[]) => harness.reloadToApplyUpdate(...args)
+}));
+
+vi.mock("./lib/firebase/accountDeletion", () => ({
+  requestMobileAccountDeletion: harness.requestMobileAccountDeletion
 }));
 
 vi.mock("./lib/diagnostics/mobileCrashDiagnostics", () => ({
@@ -138,6 +143,7 @@ beforeEach(() => {
     async (replies: Array<{ id: string; text: string }>) => replies
   );
   harness.reloadToApplyUpdate.mockReset().mockResolvedValue(undefined);
+  harness.requestMobileAccountDeletion.mockReset().mockResolvedValue(undefined);
   harness.updateMobileCrashContext.mockReset();
 });
 
@@ -227,6 +233,18 @@ async function mountModel(model: AppModel): Promise<ReactTestRenderer> {
 }
 
 describe("App component wiring", () => {
+  it("deletes through the callable and signs out locally", async () => {
+    const { model, controller } = createModel();
+    const signOut = vi.spyOn(controller, "signOut").mockResolvedValue(undefined);
+    const renderer = await mountModel(model);
+    const accountSheet = renderer.root.findByType("AccountSheet");
+
+    await act(async () => accountSheet.props.onDeleteAccount());
+
+    expect(harness.requestMobileAccountDeletion).toHaveBeenCalledOnce();
+    expect(signOut).toHaveBeenCalledOnce();
+  });
+
   it("mounts navigation only after hydration and restores Activity beneath task detail", async () => {
     const initialized = deferred<void>();
     const { model, sessionStore } = createModel();

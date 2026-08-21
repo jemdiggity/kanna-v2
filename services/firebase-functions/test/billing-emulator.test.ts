@@ -7,7 +7,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Firestore } from "firebase-admin/firestore";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createCheckoutSession,
   type CheckoutCaller,
@@ -35,6 +35,7 @@ import {
   type BilledSourceState,
   type EntitlementRecord,
 } from "../src/billing/types.js";
+import { deleteAccount, firestoreAccountDeletionStore } from "../src/accountDeletion.js";
 import {
   clearFirestoreEmulator,
   emulatorFirestore,
@@ -123,6 +124,13 @@ describeWithEmulator("billing backend against the Firestore emulator", () => {
 
   beforeAll(() => {
     db = emulatorFirestore();
+  });
+
+  beforeEach(async () => {
+    // A Stripe billing relationship is only valid for an existing account.
+    // Webhook application reads this root transactionally so delayed events
+    // cannot recreate cloud data after account deletion.
+    await db.doc(userDocPath(CHECKOUT_UID)).set({ createdAt: "2026-08-19T00:00:00.000Z" });
   });
 
   afterEach(async () => {
@@ -216,6 +224,17 @@ describeWithEmulator("billing backend against the Firestore emulator", () => {
 
       expect(await readDoc(db, billingSourcePath(CHECKOUT_UID, "stripe"))).toEqual(sourceBefore);
       expect(await readDoc(db, entitlementPath(CHECKOUT_UID))).toEqual(entitlementBefore);
+    });
+
+    it("does not let a delayed cancellation webhook write after deletion starts", async () => {
+      await db.doc(userDocPath(CHECKOUT_UID)).update({ accountDeletionStarted: true });
+
+      const result = await deliver(db, "customer.subscription.deleted.json");
+
+      expect(result).toMatchObject({ code: "deleted_account", uid: CHECKOUT_UID });
+      expect(await readDoc(db, stripeEventPath("evt_subscription_deleted"))).toBeNull();
+      expect(await readDoc(db, billingSourcePath(CHECKOUT_UID, "stripe"))).toBeNull();
+      expect(await readDoc(db, entitlementPath(CHECKOUT_UID))).toBeNull();
     });
 
     it("never lets a late older event walk back newer state", async () => {
@@ -504,6 +523,58 @@ describeWithEmulator("billing backend against the Firestore emulator", () => {
       expect(
         (await readDoc<EntitlementRecord>(db, entitlementPath("fixture-idempotent")))?.updatedAt
       ).toBe("2026-08-20T00:00:00.000Z");
+    });
+  });
+
+  describe("account deletion", () => {
+    it("removes every uid-owned Firestore record, including nested mirrors and relay pairings", async () => {
+      const uid = "fixture-delete-user";
+      await Promise.all([
+        db.doc(`users/${uid}`).set({ stripeCustomerId: "cus_delete" }),
+        db.doc(`users/${uid}/billing/stripe`).set(stripeSource({ stripeSubscriptionId: "sub_delete" })),
+        db.doc(`users/${uid}/billing/comp`).set(compSource()),
+        db.doc(`users/${uid}/entitlements/cloud_access`).set({ status: "active" }),
+        db.doc(`users/${uid}/desktops/desktop-1`).set({ desktopId: "desktop-1" }),
+        db.doc(`users/${uid}/desktops/desktop-1/tasks/task-1`).set({ title: "private" }),
+        db.doc(`users/${uid}/pushDevices/push-1`).set({ token: "push" }),
+        db.doc("stripeCustomers/cus_delete").set({ uid }),
+        db.doc("stripeEvents/evt_delete").set({ uid }),
+        db.doc("appAccountTokens/token-delete").set({ uid }),
+        db.doc("desktopCredentials/desktop-1").set({ uid }),
+        db.doc("devices/legacy-delete").set({ userId: uid }),
+        db.doc("users/other-user/desktops/desktop-other").set({ desktopId: "desktop-other" }),
+      ]);
+      const cancelSubscription = vi.fn(async () => undefined);
+      const auth = {
+        revokeRefreshTokens: vi.fn(async () => undefined),
+        deleteUser: vi.fn(async () => undefined),
+      };
+
+      await deleteAccount(
+        { uid },
+        { store: firestoreAccountDeletionStore(db), stripe: { cancelSubscription }, auth },
+      );
+
+      expect(cancelSubscription).toHaveBeenCalledWith("sub_delete");
+      for (const path of [
+        `users/${uid}`,
+        `users/${uid}/billing/stripe`,
+        `users/${uid}/billing/comp`,
+        `users/${uid}/entitlements/cloud_access`,
+        `users/${uid}/desktops/desktop-1`,
+        `users/${uid}/desktops/desktop-1/tasks/task-1`,
+        `users/${uid}/pushDevices/push-1`,
+        "stripeCustomers/cus_delete",
+        "stripeEvents/evt_delete",
+        "appAccountTokens/token-delete",
+        "desktopCredentials/desktop-1",
+        "devices/legacy-delete",
+      ]) {
+        expect((await db.doc(path).get()).exists, path).toBe(false);
+      }
+      expect((await db.doc("users/other-user/desktops/desktop-other").get()).exists).toBe(true);
+      expect(auth.revokeRefreshTokens).toHaveBeenCalledWith(uid);
+      expect(auth.deleteUser).toHaveBeenCalledWith(uid);
     });
   });
 });

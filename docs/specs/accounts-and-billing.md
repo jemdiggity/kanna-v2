@@ -128,25 +128,64 @@ nothing. Additions:
   `AccountSheet`.
 - **Account deletion** is a first-class backend pipeline regardless of where
   the button lives (APPI/GDPR, the existing 30-day manual promise, and now
-  5.1.1(v) all demand it): a callable function `deleteAccount` that, in
-  order — cancels any Stripe subscription immediately (`cancel_now`, no
-  proration surprises), recursively deletes `users/{uid}` (task index,
-  desktops, pushDevices, entitlements, billing source docs), tombstones the
-  `appAccountTokens/{token}` mapping (so later App Store Server Notifications
-  for the dead account resolve to "deleted" and are logged and dropped, not
-  errored), deletes/tombstones `desktopCredentials` docs whose `uid` matches,
-  deletes legacy `devices/{token}` rows, revokes refresh tokens, then deletes
-  the Firebase Auth user. **An active Apple subscription cannot be canceled
-  by Kanna** — before deleting, the flow must warn "your App Store
-  subscription keeps renewing until you cancel it in Apple's subscription
-  settings", open/deep-link those settings, and require acknowledgment; it
-  must never block deletion on the Apple state (Apple requires deletion to
-  work regardless). The Stripe Customer object and invoices are retained
-  (financial record-keeping obligation) — say so in the privacy policy.
-  Paired desktops: LAN pairing is untouched (accountless by design); the
-  desktop's cloud session dies with token revocation and it falls back to
-  local-only. The portal and the iOS app both expose deletion at their
-  respective channel launches.
+  [App Store Review Guideline 5.1.1(v)](https://developer.apple.com/app-store/review/guidelines/#data-collection-and-storage)
+  all demand it). The implemented contract is detailed below. Apple IAP is not
+  part of the currently shipping deletion operation; when that billing source
+  ships, its inability to be canceled by Kanna and the required
+  manage-subscriptions warning must be added before release.
+
+### Permanent account deletion contract (implemented 2026-08-21)
+
+`deleteAccount` is an authenticated callable shared by the native mobile app
+and the account portal. Both surfaces require a hard `DELETE` confirmation
+that names the subscription, cloud data, and cloud desktop pairings being
+lost. This is native-initiated on iOS, as required by Guideline 5.1.1(v), not a
+link that leaves account deletion available only on the web.
+
+The callable performs these phases strictly in order:
+
+1. Read `users/{uid}/billing/stripe`; if it contains an `active` or `grace`
+   subscription, cancel that Stripe subscription immediately. Cancellation is
+   cancel-at-once with no refund or proration logic.
+2. Transactionally mark `users/{uid}` with `accountDeletionStarted`, then
+   recursively delete it. The temporary marker closes the delayed-webhook race
+   and is deleted with the account; it is not a retained tombstone. Recursive
+   deletion removes the user profile, all billing source documents (including
+   `billing/comp`), the derived entitlement, `pushDevices`, published
+   `desktops`, and every published `tasks` mirror below those desktops.
+3. Delete the code-enumerated uid indexes: `stripeCustomers` (`uid`),
+   `stripeEvents` (`uid`), and `appAccountTokens` (`uid`).
+4. Revoke cloud/relay pairings by deleting `desktopCredentials` rows whose
+   `uid` matches, then delete legacy `devices` rows whose `userId` matches.
+5. Revoke Firebase refresh tokens, then delete the Firebase Auth user last.
+
+Every deletion is safe when the document is already absent, and a Stripe
+“resource missing” response is treated as already canceled. If a phase fails,
+Auth still exists and the caller can run the operation again. Auth goes last
+specifically so no mid-pipeline failure strands an account that can no longer
+authenticate to retry. Stripe webhook application transactionally requires the
+`users/{uid}` account root to exist without the deletion marker, so cancellation
+events racing or following deletion are acknowledged without recreating a
+dedupe, billing, or entitlement document.
+
+There is no soft-disable, grace period, undo window, or refund path. Nothing in
+Kanna's cloud survives: no account, complimentary grant, entitlement, task or
+desktop mirror, push token, billing source/index, app-account-token mapping, or
+relay credential. Stripe may retain its canceled subscription/customer and
+financial records under Stripe's own retention obligations; Kanna does not use
+those records to restore an account. A person may register the same email
+again, but receives a new Firebase uid and a blank account. Complimentary
+access and prior paid entitlement are not inherited.
+
+The desktop loses relay access when its canonical credential is next checked
+and its Firebase session becomes visibly signed out when credential refresh
+reports the deleted identity. Local databases, worktrees, LAN discovery, and
+QR/LAN pairings are installation-local and remain usable; deletion is of the
+cloud account, not the local install.
+
+Data export is a separate follow-up. The deliberate no-undo choice keeps this
+operation honest and immediate; export support does not weaken or delay
+deletion.
 
 ## Decision 2 — The Apple question
 

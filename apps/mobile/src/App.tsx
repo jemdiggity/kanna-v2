@@ -42,6 +42,7 @@ import {
   updateMobileCrashContext
 } from "./lib/diagnostics/mobileCrashDiagnostics";
 import { readKannaExpoExtra } from "./mobileEnvironment";
+import { requestMobileAccountDeletion } from "./lib/firebase/accountDeletion";
 import RootNavigator from "./navigation/RootNavigator";
 import { buildInitialNavigationState } from "./navigation/navigationState";
 import {
@@ -408,6 +409,11 @@ function AppContent() {
           }}
           onSignOut={() => {
             void controller.signOut();
+          }}
+          onDeleteAccount={async () => {
+            await requestMobileAccountDeletion();
+            await controller.signOut();
+            setAccountSheetVisible(false);
           }}
         />
         <QuickReplyEditorModal

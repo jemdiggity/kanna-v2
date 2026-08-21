@@ -27,6 +27,7 @@ interface AccountSheetProps {
   onOpenQuickReplies(): void;
   onSignIn(email: string, password: string): void;
   onSignOut(): void;
+  onDeleteAccount?(): Promise<void>;
 }
 
 export function AccountSheet({
@@ -39,11 +40,16 @@ export function AccountSheet({
   onOpenMachines,
   onOpenQuickReplies,
   onSignIn,
-  onSignOut
+  onSignOut,
+  onDeleteAccount
 }: AccountSheetProps) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [isPasswordVisible, setIsPasswordVisible] = useState(false);
+  const [deletionVisible, setDeletionVisible] = useState(false);
+  const [deletionConfirmation, setDeletionConfirmation] = useState("");
+  const [deletionPending, setDeletionPending] = useState(false);
+  const [deletionError, setDeletionError] = useState("");
   const presentation = getAccountBadgePresentation(auth);
   const canSubmit = email.trim().length > 3 && password.length > 0;
   const closeSheet = () => {
@@ -53,6 +59,22 @@ export function AccountSheet({
   const signOut = () => {
     setIsPasswordVisible(false);
     onSignOut();
+  };
+  const confirmDeletion = async () => {
+    if (deletionConfirmation !== "DELETE" || !onDeleteAccount) return;
+    setDeletionPending(true);
+    setDeletionError("");
+    try {
+      await onDeleteAccount();
+      setDeletionVisible(false);
+      setDeletionConfirmation("");
+    } catch (error) {
+      setDeletionError(
+        error instanceof Error ? error.message : "Could not delete your account.",
+      );
+    } finally {
+      setDeletionPending(false);
+    }
   };
 
   return (
@@ -124,14 +146,24 @@ export function AccountSheet({
           </Pressable>
 
           {auth.status === "signedIn" ? (
-            <Pressable
-              accessibilityLabel="Sign Out"
-              style={styles.secondaryButton}
-              testID={MOBILE_E2E_IDS.accountSignOutButton}
-              onPress={signOut}
-            >
-              <Text style={styles.secondaryLabel}>Sign Out</Text>
-            </Pressable>
+            <View style={styles.form}>
+              <Pressable
+                accessibilityLabel="Sign Out"
+                style={styles.secondaryButton}
+                testID={MOBILE_E2E_IDS.accountSignOutButton}
+                onPress={signOut}
+              >
+                <Text style={styles.secondaryLabel}>Sign Out</Text>
+              </Pressable>
+              <Pressable
+                accessibilityLabel="Delete account"
+                style={styles.deleteButton}
+                testID={MOBILE_E2E_IDS.accountDeleteButton}
+                onPress={() => setDeletionVisible(true)}
+              >
+                <Text style={styles.deleteLabel}>Delete account</Text>
+              </Pressable>
+            </View>
           ) : (
             <View style={styles.form}>
               <Text style={styles.accessNotice}>
@@ -201,6 +233,60 @@ export function AccountSheet({
           )}
         </View>
       </KeyboardAvoidingView>
+      <Modal
+        animationType="fade"
+        transparent
+        visible={visible && deletionVisible}
+        onRequestClose={() => setDeletionVisible(false)}
+      >
+        <View style={styles.confirmationBackdrop}>
+          <View style={styles.confirmationCard} testID={MOBILE_E2E_IDS.accountDeleteConfirmation}>
+            <Text style={styles.confirmationTitle}>Permanently delete account?</Text>
+            <Text style={styles.confirmationCopy}>
+              This immediately cancels your subscription and permanently deletes your cloud data
+              and cloud desktop pairings. Local Kanna data and LAN pairings stay on your devices.
+              This cannot be undone.
+            </Text>
+            <Text style={styles.confirmationCopy}>Type DELETE to continue.</Text>
+            <TextInput
+              autoCapitalize="characters"
+              autoCorrect={false}
+              editable={!deletionPending}
+              onChangeText={setDeletionConfirmation}
+              placeholder="DELETE"
+              placeholderTextColor="#6A7E9D"
+              style={styles.input}
+              testID={MOBILE_E2E_IDS.accountDeleteInput}
+              value={deletionConfirmation}
+            />
+            {deletionError ? <Text style={styles.errorText}>{deletionError}</Text> : null}
+            <View style={styles.confirmationActions}>
+              <Pressable
+                disabled={deletionPending}
+                style={styles.secondaryButton}
+                onPress={() => setDeletionVisible(false)}
+              >
+                <Text style={styles.secondaryLabel}>Cancel</Text>
+              </Pressable>
+              <Pressable
+                disabled={deletionConfirmation !== "DELETE" || deletionPending}
+                style={[
+                  styles.deleteConfirmButton,
+                  deletionConfirmation !== "DELETE" || deletionPending
+                    ? styles.primaryButtonDisabled
+                    : null,
+                ]}
+                testID={MOBILE_E2E_IDS.accountDeleteConfirmButton}
+                onPress={() => void confirmDeletion()}
+              >
+                <Text style={styles.deleteConfirmLabel}>
+                  {deletionPending ? "Deleting…" : "Delete permanently"}
+                </Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </Modal>
   );
 }
@@ -380,6 +466,53 @@ const styles = StyleSheet.create({
   },
   secondaryLabel: {
     color: "#F5F7FB",
+    fontSize: 15,
+    fontWeight: "800"
+  },
+  deleteButton: {
+    alignItems: "center",
+    paddingVertical: 10
+  },
+  deleteLabel: {
+    color: "#FF9CA5",
+    fontSize: 14,
+    fontWeight: "800"
+  },
+  confirmationBackdrop: {
+    backgroundColor: "rgba(2, 6, 14, 0.78)",
+    flex: 1,
+    justifyContent: "center",
+    padding: 24
+  },
+  confirmationCard: {
+    backgroundColor: "#0D1727",
+    borderColor: "#394761",
+    borderRadius: 20,
+    borderWidth: 1,
+    gap: 14,
+    padding: 20
+  },
+  confirmationTitle: {
+    color: "#F5F7FB",
+    fontSize: 20,
+    fontWeight: "800"
+  },
+  confirmationCopy: {
+    color: "#C3CEE0",
+    fontSize: 14,
+    lineHeight: 20
+  },
+  confirmationActions: {
+    gap: 10
+  },
+  deleteConfirmButton: {
+    alignItems: "center",
+    backgroundColor: "#A92B38",
+    borderRadius: 16,
+    paddingVertical: 14
+  },
+  deleteConfirmLabel: {
+    color: "#FFFFFF",
     fontSize: 15,
     fontWeight: "800"
   }
