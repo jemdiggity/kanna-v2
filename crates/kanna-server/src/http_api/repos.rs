@@ -78,6 +78,12 @@ pub(super) async fn start_repo_checkout(
             "name, remoteUrl, and remoteUrlHash are required".to_string(),
         ));
     }
+    if !crate::transfer_engine::git::is_credential_free_clone_source(&remote_url) {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            credential_free_origin_error(&state.config.desktop_name),
+        ));
+    }
     let actual_hash = format!("{:x}", Sha256::digest(remote_url.as_bytes()));
     if actual_hash != remote_url_hash {
         return Err((
@@ -144,12 +150,25 @@ pub(super) async fn start_repo_checkout(
     tokio::spawn(async move {
         let root = checkout_state.repo_checkout_root.clone();
         let worker_state = Arc::clone(&checkout_state);
-        let result = tokio::task::spawn_blocking(move || {
+        let worker_result = tokio::task::spawn_blocking(move || {
             clone_and_register_repo(worker_state, &root, &name, &remote_url, &remote_url_hash)
         })
-        .await
-        .map_err(|error| format!("repository checkout worker failed: {error}"))
-        .and_then(|result| result);
+        .await;
+        let result = match worker_result {
+            Ok(Ok(repo_id)) => Ok(repo_id),
+            Ok(Err(error)) => {
+                log::error!("repository checkout {operation_id} failed: {error}");
+                Err(credential_free_origin_error(
+                    &checkout_state.config.desktop_name,
+                ))
+            }
+            Err(error) => {
+                log::error!("repository checkout {operation_id} worker failed: {error}");
+                Err(credential_free_origin_error(
+                    &checkout_state.config.desktop_name,
+                ))
+            }
+        };
 
         let mut operations = checkout_state
             .repo_checkouts
@@ -209,8 +228,11 @@ fn clone_and_register_repo(
     remote_url_hash: &str,
 ) -> Result<String, String> {
     let destination = crate::transfer_engine::git::allocate_repo_path(root, name)?;
-    if let Err(error) = crate::transfer_engine::git::clone_remote(remote_url, &destination) {
-        return Err(cleanup_checkout_error(&destination, error));
+    if crate::transfer_engine::git::clone_remote(remote_url, &destination).is_err() {
+        return Err(cleanup_checkout_error(
+            &destination,
+            credential_free_origin_error(&state.config.desktop_name),
+        ));
     }
 
     let db = Db::open(&state.config.db_path)
@@ -249,6 +271,12 @@ fn clone_and_register_repo(
         ));
     }
     Ok(repo.id)
+}
+
+fn credential_free_origin_error(desktop_name: &str) -> String {
+    format!(
+        "Could not check out the repository on {desktop_name}. Configure a credential-free origin and git credentials on {desktop_name}, then try again."
+    )
 }
 
 fn rollback_registered_checkout(

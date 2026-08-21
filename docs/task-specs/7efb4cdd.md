@@ -10,10 +10,14 @@ the separate mobile-wedge fix in task `3ccb7e4d` are out of scope.
 
 ## Design contract
 
-- An authenticated source machine's `/v1/repos` inventory may include its
-  cloneable `remoteUrl` alongside `remoteUrlHash`; the hash remains the logical
-  cross-machine identity. Mobile sends the URL only to the explicitly targeted
-  machine after confirmation.
+- An authenticated source machine's `/v1/repos` inventory may include a
+  credential-free cloneable `remoteUrl` alongside `remoteUrlHash`; the hash
+  remains the logical cross-machine identity. HTTP(S) userinfo and query or
+  fragment data are credential-bearing: their raw values are never serialized,
+  and a crafted checkout request containing them is rejected before git,
+  filesystem, or database work. Ordinary HTTPS, SSH/scp-style, and `file://`
+  sources remain eligible. Mobile sends an eligible URL only to the explicitly
+  targeted machine after confirmation.
 - `POST /v1/repo-checkouts` starts one asynchronous server operation from
   `{name, remoteUrl, remoteUrlHash}` and returns a pollable id. The server clones
   under the existing `~/.kanna/repos/<name>[-N]` convention, registers through
@@ -23,7 +27,9 @@ the separate mobile-wedge fix in task `3ccb7e4d` are out of scope.
   registration failure removes the operation-owned destination and leaves no
   repo row. Private repositories use credentials already available to `git` on
   the target machine; credential provisioning is deliberately out of scope and
-  failures must name the target machine in mobile UI.
+  failures must name the target machine in mobile UI. Neither server operation
+  errors nor mobile messages may echo a clone source; they direct the user to
+  configure a credential-free origin and git credentials on the target.
 - Mobile's checkout action always presents a confirmation naming both repo and
   target machine. It displays the running state, then refreshes repo inventory
   and automatically retries the frozen task-create or repo-command action once.
@@ -60,3 +66,8 @@ reported.
   the existing named confirmation/progress/automatic-retry flow; replace the
   contradictory composer test and add component/navigation integration
   coverage. Full device E2E remains out of scope for this revision.
+- 2026-08-21 reviewer feedback (revision 2): credential-bearing HTTP(S)
+  origins (userinfo or query/fragment data) must never cross `/v1/repos`, be
+  accepted by `/v1/repo-checkouts`, persist on the target, or appear in an
+  error. Private-repo credentials must already be configured on the named
+  target machine; provisioning remains out of scope.

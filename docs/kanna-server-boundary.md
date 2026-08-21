@@ -177,18 +177,23 @@ the client falls back to a bounded snapshot.
 
 ### Remote repository checkout
 
-Authenticated repo inventory includes optional `remoteUrl` alongside the
-cross-machine `remoteUrlHash`. `POST /v1/repo-checkouts` accepts `{ name,
-remoteUrl, remoteUrlHash }`, rejects a URL whose SHA-256 identity does not match,
-and starts a non-blocking clone into the desktop convention
+Authenticated repo inventory includes an optional, credential-free `remoteUrl`
+alongside the cross-machine `remoteUrlHash`. HTTP(S) origins containing userinfo
+or query/fragment data are treated as credential-bearing and their raw values
+are never serialized. `POST /v1/repo-checkouts` independently rejects those
+sources before git, filesystem, or database work, accepts ordinary HTTPS,
+SSH/scp-style, and `file://` sources, verifies the URL's SHA-256 identity, and
+starts a non-blocking clone into the desktop convention
 `~/.kanna/repos/<name>[-N]`. The worker uses the same `MobileApi::add_repo`
 registration path as `POST /v1/repos`, then persists the remote metadata.
 
 The returned operation is polled through
 `GET /v1/repo-checkouts/{operation_id}`. A failed clone or registration removes
 the operation-owned destination and rolls back any row it inserted. Git uses
-only credentials already configured on the target desktop; this API does not
-provision credentials. Relay invocation is a control operation: repository
+only credentials already configured on the target desktop; this API neither
+forwards nor provisions credentials. Checkout errors do not echo the clone
+source and direct the user to configure a credential-free origin plus git
+credentials on the named target desktop. Relay invocation is a control operation: repository
 bytes flow directly from the git remote to the target desktop, not through the
 relay.
 

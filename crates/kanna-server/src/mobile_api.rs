@@ -31,8 +31,9 @@ pub struct RepoSummary {
     /// Cross-machine repo identity: hash of the git remote URL. Lets mobile
     /// clients recognize the same repository registered on several desktops.
     pub remote_url_hash: Option<String>,
-    /// Clone source retained by the authenticated mobile client so it can ask
-    /// a different paired desktop to check out the same logical repository.
+    /// Credential-free clone source retained by the authenticated mobile client
+    /// so it can ask a different paired desktop to check out the same logical
+    /// repository. Credential-bearing HTTP(S) origins are never serialized.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_url: Option<String>,
 }
@@ -573,7 +574,12 @@ impl MobileApi {
                 repos
                     .into_iter()
                     .map(|repo| {
-                        let remote_url = remote_urls.get(&repo.id).cloned();
+                        let remote_url = remote_urls
+                            .get(&repo.id)
+                            .filter(|url| {
+                                crate::transfer_engine::git::is_credential_free_clone_source(url)
+                            })
+                            .cloned();
                         map_repo_summary(repo, remote_url)
                     })
                     .collect()

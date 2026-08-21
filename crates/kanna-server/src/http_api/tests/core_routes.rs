@@ -561,6 +561,38 @@ async fn list_repos_route_returns_repo_summaries() {
     );
 }
 
+#[tokio::test]
+async fn list_repos_omits_credential_bearing_remote_url() {
+    let credential = "inventory-secret-token";
+    let remote_url = format!("https://{credential}@example.test/private.git");
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-private", "Private Repo").unwrap();
+        db.patch_repo(
+            "repo-private",
+            None,
+            Some(Some(&remote_url)),
+            Some(Some("private-hash")),
+            None,
+        )
+        .unwrap();
+    });
+
+    let response = app
+        .oneshot(Request::get("/v1/repos").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body_text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(!body_text.contains(credential));
+    let repos: serde_json::Value = from_slice(body_text.as_bytes()).unwrap();
+    assert_eq!(repos[0]["remoteUrlHash"], "private-hash");
+    assert!(repos[0].get("remoteUrl").is_none());
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn repo_agent_provider_route_stays_responsive_and_uses_workspace_local_executables() {
     use std::os::unix::fs::PermissionsExt;
@@ -2830,9 +2862,81 @@ async fn repo_checkout_failure_cleans_destination_and_registry() {
     let operation =
         wait_for_repo_checkout(&app, started["id"].as_str().expect("operation id")).await;
     assert_eq!(operation["state"], "failed");
-    assert!(operation["error"].as_str().unwrap().contains("git clone"));
+    assert_eq!(
+        operation["error"],
+        "Could not check out the repository on Studio Mac. Configure a credential-free origin and git credentials on Studio Mac, then try again."
+    );
+    assert!(!operation.to_string().contains(&remote_url));
     assert!(!checkouts.join("private-repo").exists());
 
+    let repos = app
+        .oneshot(Request::get("/v1/repos").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let repos: serde_json::Value = from_slice(
+        &axum::body::to_bytes(repos.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(repos, serde_json::json!([]));
+    let _ = std::fs::remove_dir_all(fixture_root);
+}
+
+#[tokio::test]
+async fn repo_checkout_rejects_credential_bearing_sources_without_side_effects_or_echo() {
+    use sha2::{Digest, Sha256};
+
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos()
+    );
+    let fixture_root = std::env::temp_dir().join(format!("kanna-checkout-secret-{unique}"));
+    let checkouts = fixture_root.join("checkouts");
+    let app =
+        super::test_router_with_repo_checkout_root("desktop-1", "Studio Mac", checkouts.clone());
+    let sources = [
+        "https://post-secret@example.test/private.git",
+        "https://example.test/private.git?signed=query-secret",
+        "https://example.test/private.git#fragment-secret",
+    ];
+
+    for (index, remote_url) in sources.iter().enumerate() {
+        let remote_url_hash = format!("{:x}", Sha256::digest(remote_url.as_bytes()));
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/repo-checkouts")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": format!("private-repo-{index}"),
+                            "remoteUrl": remote_url,
+                            "remoteUrlHash": remote_url_hash,
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("Studio Mac"), "{body}");
+        assert!(body.contains("credential-free origin"), "{body}");
+        assert!(body.contains("git credentials"), "{body}");
+        assert!(!body.contains(remote_url), "{body}");
+        assert!(!body.contains("secret"), "{body}");
+    }
+
+    assert!(!checkouts.exists());
     let repos = app
         .oneshot(Request::get("/v1/repos").body(Body::empty()).unwrap())
         .await

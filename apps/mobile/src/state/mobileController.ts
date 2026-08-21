@@ -2901,11 +2901,10 @@ export function createMobileController(
             return null;
           }
           return this.runRepoCommand(offer.commandId);
-        } catch (error) {
-          const detail = error instanceof Error ? error.message : String(error);
+        } catch {
           setCheckoutError(
-            `Could not check out ${offer.repoName} on ${offer.desktopName}: ${detail}. ` +
-              `For a private repository, configure git credentials on ${offer.desktopName} and try again.`
+            `Could not check out ${offer.repoName} on ${offer.desktopName}. ` +
+              `Configure a credential-free origin and git credentials on ${offer.desktopName}, then try again.`
           );
           return null;
         }

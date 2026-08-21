@@ -9,6 +9,32 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Whether a clone source is safe to move between paired machines.
+///
+/// HTTP credentials and signed URLs belong to the machine where the origin was
+/// configured. Forwarding them would provision those credentials on a second
+/// machine and could expose them through API or git error output.
+pub fn is_credential_free_clone_source(source: &str) -> bool {
+    let trimmed = source.trim();
+    let lowercase = trimmed.to_ascii_lowercase();
+    if !lowercase.starts_with("http://") && !lowercase.starts_with("https://") {
+        return true;
+    }
+
+    let authority_and_path = if lowercase.starts_with("https://") {
+        &trimmed["https://".len()..]
+    } else {
+        &trimmed["http://".len()..]
+    };
+    let authority = authority_and_path
+        .split_once('/')
+        .map_or(authority_and_path, |(authority, _)| authority);
+    !authority.is_empty()
+        && !authority.contains('@')
+        && !authority_and_path.contains('?')
+        && !authority_and_path.contains('#')
+}
+
 /// Runs one git invocation, returning its stderr on failure.
 ///
 /// Arguments are passed as a vector, never as a shell string: a repository
@@ -358,6 +384,33 @@ mod tests {
             "/private/var/folders/5k/tmp/fixture/repo-origin.git",
         ] {
             assert!(is_safe_clone_url(legitimate), "{legitimate}");
+        }
+    }
+
+    #[test]
+    fn cross_machine_clone_sources_exclude_http_credentials_and_signed_urls() {
+        for credential_bearing in [
+            "https://token@example.com/private.git",
+            "https://user:password@example.com/private.git",
+            "https://example.com/private.git?signed=value",
+            "https://example.com/private.git#signed-fragment",
+            "http://token@example.com/private.git",
+        ] {
+            assert!(
+                !is_credential_free_clone_source(credential_bearing),
+                "{credential_bearing}",
+            );
+        }
+        for credential_free in [
+            "https://example.com/repo.git",
+            "ssh://git@example.com/repo.git",
+            "git@example.com:repo.git",
+            "file:///tmp/repo.git",
+        ] {
+            assert!(
+                is_credential_free_clone_source(credential_free),
+                "{credential_free}",
+            );
         }
     }
 

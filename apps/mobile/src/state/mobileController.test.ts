@@ -4082,6 +4082,45 @@ describe("createMobileController", () => {
     expect(store.getState().repoCheckoutOffer).toBeNull();
   });
 
+  it("shows a target-named credential limitation without echoing checkout errors", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const secret = "mobile-secret-token";
+    const missingRepo: RepoSummary = {
+      id: "git:hash-private",
+      name: "private-repo",
+      remoteUrl: `https://${secret}@example.test/private.git`,
+      remoteUrlHash: "hash-private",
+      registeredDesktopIds: ["desktop-1"]
+    };
+    client.listRepos.mockResolvedValue([missingRepo]);
+    client.listRecentTasks.mockResolvedValue([]);
+    client.listRepoTasks.mockResolvedValue([]);
+    client.startRepoCheckout.mockRejectedValueOnce(
+      new Error(`clone failed for https://${secret}@example.test/private.git`)
+    );
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    store.selectRepo(missingRepo.id);
+    controller.openComposer();
+    controller.selectComposerDesktop("desktop-2");
+    controller.updateComposerPrompt("Use private repo");
+    await controller.createTask();
+
+    await expect(controller.confirmRepoCheckout()).resolves.toBeNull();
+    const expected =
+      "Could not check out private-repo on Laptop. Configure a credential-free origin and git credentials on Laptop, then try again.";
+    expect(store.getState()).toMatchObject({
+      repoCheckoutOffer: {
+        status: "failed",
+        errorMessage: expected
+      },
+      composerErrorMessage: expected
+    });
+    expect(store.getState().composerErrorMessage).not.toContain(secret);
+  });
+
   it("opens a fresh composer and starts another task while an earlier creation is uncertain", async () => {
     const store = createSessionStore();
     const client = createClientMock();
