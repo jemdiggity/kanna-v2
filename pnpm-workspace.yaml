@@ -27,7 +27,7 @@ packageExtensions:
   # Expo and @expo/dom-webview form a peer cycle. Pin Expo's optional web peer
   # to the SDK 57 React patch so pnpm does not auto-install React DOM 19.2.5
   # beside Expo's required React 19.2.3.
-  "expo@57.0.6":
+  "expo@57.0.15":
     dependencies:
       react-dom: 19.2.3
   # The React Native Firebase Expo plugin imports this package without
@@ -35,8 +35,3 @@ packageExtensions:
   "@react-native-firebase/app@26.0.0":
     dependencies:
       "@expo/config-plugins": 57.0.6
-patchedDependencies:
-  # SDK 57.0.6 pulls expo-modules-jsi 57.0.3, whose unqualified Swift `abs`
-  # is ambiguous with React Native's C++ JSI imports under Xcode 26.2/Swift 6.
-  # Remove this after Expo ships the upstream `Swift.abs` qualification.
-  expo-modules-jsi@57.0.3: patches/expo-modules-jsi@57.0.3.patch

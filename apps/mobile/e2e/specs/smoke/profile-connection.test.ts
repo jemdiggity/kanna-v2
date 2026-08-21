@@ -517,7 +517,7 @@ describe("About this build journey", () => {
       environment: "staging",
       nativeVersion: "1.0.0 (1)",
       runningSource: "Embedded bundle",
-      runtimeVersion: "2.2.0"
+      runtimeVersion: "2.2.1"
     });
   });
 
