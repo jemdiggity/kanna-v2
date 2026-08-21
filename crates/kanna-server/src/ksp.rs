@@ -1670,7 +1670,7 @@ struct StreamConn {
     /// The current capability-gated journal range for each agent attachment.
     /// The daemon remains the durable source; this copy serves bounded
     /// backwards requests over the already-open KSP connection.
-    agent_histories: HashMap<String, Arc<Mutex<AgentHistory>>>,
+    agent_histories: HashMap<String, AgentHistoryAttachment>,
     agent_commands: Option<AgentCommandWorker>,
     requests: Option<RequestWorker>,
     companion_events: Option<CompanionEventWorker>,
@@ -2317,7 +2317,11 @@ impl StreamConn {
             let _ = control.task.await;
         }
         self.terminal_taps.clear();
-        self.agent_histories.clear();
+        for (_, attachment) in self.agent_histories.drain() {
+            self.state
+                .agent_histories
+                .release(&attachment.session_id, &attachment.history);
+        }
         if let Some(worker) = self.agent_commands.take() {
             worker.task.abort();
         }
@@ -2750,7 +2754,11 @@ impl StreamConn {
                     }
                 }
                 if kind == StreamKind::Agent {
-                    self.agent_histories.remove(&task_id);
+                    if let Some(attachment) = self.agent_histories.remove(&task_id) {
+                        self.state
+                            .agent_histories
+                            .release(&attachment.session_id, &attachment.history);
+                    }
                 }
                 if kind == StreamKind::Companion {
                     self.companion_tx.invalidate(&task_id);
@@ -3082,6 +3090,7 @@ impl StreamConn {
             return;
         };
         let chunk = history
+            .history
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .chunk(before_seq, after_seq, max_events);
@@ -3204,9 +3213,22 @@ impl StreamConn {
         let key = (task_id.clone(), kind);
         let task = match kind {
             StreamKind::Agent => {
-                let history = Arc::new(Mutex::new(AgentHistory::default()));
-                self.agent_histories
-                    .insert(task_id.clone(), Arc::clone(&history));
+                let history = if self.supports_agent_history_window {
+                    self.state.agent_histories.get_or_create(&session_id)
+                } else {
+                    Arc::new(Mutex::new(AgentHistory::default()))
+                };
+                if let Some(previous) = self.agent_histories.insert(
+                    task_id.clone(),
+                    AgentHistoryAttachment {
+                        session_id: session_id.clone(),
+                        history: Arc::clone(&history),
+                    },
+                ) {
+                    self.state
+                        .agent_histories
+                        .release(&previous.session_id, &previous.history);
+                }
                 tokio::spawn(stream_agent(
                     daemon_dir,
                     task_id,
@@ -3638,10 +3660,92 @@ const AGENT_WINDOW_MAX_BYTES: usize = 512 * 1024;
 /// Leave room for the snapshot/chunk envelope, commas, and sequence fields.
 const AGENT_WINDOW_EVENT_BYTES: usize = AGENT_WINDOW_MAX_BYTES - 4 * 1024;
 const AGENT_HISTORY_MAX_EVENTS: usize = 200;
+/// Keep recently detached session histories long enough for transport
+/// reconnects, while bounding the number of unowned full journals retained by
+/// KSP. Active attachments do not count toward this idle bound.
+const AGENT_HISTORY_IDLE_GRACE: Duration = Duration::from_secs(120);
+const MAX_IDLE_AGENT_HISTORIES: usize = 16;
 
 #[derive(Default)]
 struct AgentHistory {
     events: Vec<FrameAgentEvent>,
+}
+
+struct AgentHistoryAttachment {
+    session_id: String,
+    history: Arc<Mutex<AgentHistory>>,
+}
+
+struct RetainedAgentHistory {
+    history: Arc<Mutex<AgentHistory>>,
+    idle_since: Option<Instant>,
+}
+
+/// Session-scoped agent journals retained across KSP connection lifetimes.
+///
+/// The daemon is still the durable source. This process-local copy exists so
+/// a reconnect can resume live delivery from the client's `next_seq` without
+/// losing the older range omitted from its bounded cold-open snapshot.
+#[derive(Clone, Default)]
+pub(crate) struct AgentHistoryRegistry {
+    histories: Arc<Mutex<HashMap<String, RetainedAgentHistory>>>,
+}
+
+impl AgentHistoryRegistry {
+    fn get_or_create(&self, session_id: &str) -> Arc<Mutex<AgentHistory>> {
+        let now = Instant::now();
+        let mut histories = self
+            .histories
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(retained) = histories.get_mut(session_id) {
+            retained.idle_since = None;
+            return Arc::clone(&retained.history);
+        }
+
+        histories.retain(|_, retained| {
+            Arc::strong_count(&retained.history) > 1
+                || retained
+                    .idle_since
+                    .is_some_and(|since| now.duration_since(since) < AGENT_HISTORY_IDLE_GRACE)
+        });
+        let mut idle = histories
+            .iter()
+            .filter_map(|(session_id, retained)| {
+                (Arc::strong_count(&retained.history) == 1)
+                    .then_some(retained.idle_since)
+                    .flatten()
+                    .map(|since| (since, session_id.clone()))
+            })
+            .collect::<Vec<_>>();
+        idle.sort_by_key(|(since, _)| *since);
+        let overflow = idle.len().saturating_sub(MAX_IDLE_AGENT_HISTORIES);
+        for (_, idle_session_id) in idle.into_iter().take(overflow) {
+            histories.remove(&idle_session_id);
+        }
+
+        let history = Arc::new(Mutex::new(AgentHistory::default()));
+        histories.insert(
+            session_id.to_string(),
+            RetainedAgentHistory {
+                history: Arc::clone(&history),
+                idle_since: None,
+            },
+        );
+        history
+    }
+
+    fn release(&self, session_id: &str, history: &Arc<Mutex<AgentHistory>>) {
+        let mut histories = self
+            .histories
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(retained) = histories.get_mut(session_id) {
+            if Arc::ptr_eq(&retained.history, history) {
+                retained.idle_since = Some(Instant::now());
+            }
+        }
+    }
 }
 
 struct AgentWindowConfig {
@@ -3651,8 +3755,10 @@ struct AgentWindowConfig {
 }
 
 impl AgentHistory {
-    fn replace(&mut self, events: Vec<FrameAgentEvent>) {
-        self.events = events;
+    fn merge(&mut self, events: Vec<FrameAgentEvent>) {
+        self.events.extend(events);
+        self.events.sort_by_key(|entry| entry.seq);
+        self.events.dedup_by_key(|entry| entry.seq);
     }
 
     fn chunk(&self, before_seq: u64, after_seq: u64, max_events: u32) -> Vec<FrameAgentEvent> {
@@ -3808,8 +3914,9 @@ async fn stream_agent_once(
                         .history
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    history.replace(events);
-                    bounded_agent_suffix(&history.events, AGENT_WINDOW_MAX_EVENTS)
+                    let recent = bounded_agent_suffix(&events, AGENT_WINDOW_MAX_EVENTS);
+                    history.merge(events);
+                    recent
                 };
                 let start = recent.first().map_or(next_seq, |entry| entry.seq);
                 (
@@ -10703,9 +10810,9 @@ mod tests {
 
         let daemon_listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
         let daemon = tokio::spawn(async move {
-            // Round 0: attach from seq 0, snapshot to next_seq=2, one live
-            // event at seq 2, then the connection dies without warning.
-            // Round 1: the replacement daemon must be asked for seq 3.
+            // Round 0: attach from seq 0 with enough history to omit a range,
+            // then send one live event before the connection dies. Round 1
+            // must resume after that event without erasing the omitted range.
             for round in 0..2u32 {
                 let (stream, _) = daemon_listener
                     .accept()
@@ -10731,7 +10838,7 @@ mod tests {
                     assert_eq!(from_seq, 0);
                 } else {
                     assert_eq!(
-                        from_seq, 3,
+                        from_seq, 226,
                         "re-attach must resume from the last forwarded seq"
                     );
                 }
@@ -10740,12 +10847,21 @@ mod tests {
                     vec![
                         DaemonEvent::AgentSnapshot {
                             session_id: "daemon-agent-reattach-1".to_string(),
-                            next_seq: 2,
-                            events: vec![],
+                            next_seq: 225,
+                            events: (0..225)
+                                .map(|seq| kanna_daemon::protocol::SeqAgentEvent {
+                                    seq,
+                                    event:
+                                        kanna_daemon::protocol::NeutralAgentEvent::AssistantText {
+                                            text: format!("history-{seq}-{}", "x".repeat(4_000)),
+                                            truncated: false,
+                                        },
+                                })
+                                .collect(),
                         },
                         DaemonEvent::AgentEvent {
                             session_id: "daemon-agent-reattach-1".to_string(),
-                            seq: 2,
+                            seq: 225,
                             event: kanna_daemon::protocol::NeutralAgentEvent::AssistantText {
                                 text: "before restart".to_string(),
                                 truncated: false,
@@ -10756,12 +10872,12 @@ mod tests {
                     vec![
                         DaemonEvent::AgentSnapshot {
                             session_id: "daemon-agent-reattach-1".to_string(),
-                            next_seq: 3,
+                            next_seq: 226,
                             events: vec![],
                         },
                         DaemonEvent::AgentEvent {
                             session_id: "daemon-agent-reattach-1".to_string(),
-                            seq: 3,
+                            seq: 226,
                             event: kanna_daemon::protocol::NeutralAgentEvent::AssistantText {
                                 text: "after restart".to_string(),
                                 truncated: false,
@@ -10833,20 +10949,26 @@ mod tests {
         )
         .await;
 
-        match recv_frame(&mut socket).await {
+        let cold_history_start = match recv_frame(&mut socket).await {
             ServerFrame::AgentSnapshot {
-                next_seq, resumed, ..
+                next_seq,
+                history_start_seq,
+                resumed,
+                ..
             } => {
-                assert_eq!(next_seq, 2);
+                assert_eq!(next_seq, 225);
                 assert_eq!(resumed, Some(false));
+                let history_start_seq = history_start_seq.expect("windowed history start");
+                assert!(history_start_seq > 0);
+                history_start_seq
             }
             other => panic!("expected first agent snapshot, got {other:?}"),
-        }
+        };
         match recv_frame(&mut socket).await {
-            ServerFrame::AgentEvent { seq, .. } => assert_eq!(seq, 2),
+            ServerFrame::AgentEvent { seq, .. } => assert_eq!(seq, 225),
             other => panic!("expected first agent event, got {other:?}"),
         }
-        // Daemon connection lost; the stream re-attaches from seq 3 and keeps
+        // Daemon connection lost; the stream re-attaches from seq 226 and keeps
         // flowing without any client-side action.
         match recv_frame(&mut socket).await {
             ServerFrame::AgentSnapshot {
@@ -10855,15 +10977,39 @@ mod tests {
                 resumed,
                 ..
             } => {
-                assert_eq!(next_seq, 3);
-                assert_eq!(history_from_seq, Some(3));
+                assert_eq!(next_seq, 226);
+                assert_eq!(history_from_seq, Some(226));
                 assert_eq!(resumed, Some(true));
             }
             other => panic!("expected re-attach agent snapshot, got {other:?}"),
         }
         match recv_frame(&mut socket).await {
-            ServerFrame::AgentEvent { seq, .. } => assert_eq!(seq, 3),
+            ServerFrame::AgentEvent { seq, .. } => assert_eq!(seq, 226),
             other => panic!("expected post-restart agent event, got {other:?}"),
+        }
+
+        send_frame(
+            &mut socket,
+            &ClientFrame::AgentHistoryRequest {
+                task_id: "task-1".into(),
+                request_id: 11,
+                before_seq: cold_history_start,
+                after_seq: 0,
+                max_events: 25,
+            },
+        )
+        .await;
+        match recv_frame(&mut socket).await {
+            ServerFrame::AgentHistoryChunk {
+                request_id: 11,
+                end_seq,
+                events,
+                ..
+            } => {
+                assert_eq!(end_seq, cold_history_start);
+                assert_eq!(events.len(), 25);
+            }
+            other => panic!("expected history retained across daemon re-attach, got {other:?}"),
         }
 
         daemon.await.expect("fake daemon task failed");
@@ -11014,6 +11160,194 @@ mod tests {
         }
         daemon.await.expect("fake daemon failed");
         drop(socket);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn windowed_agent_history_survives_websocket_reconnect_without_replaying_held_events() {
+        let unique = format!(
+            "ksp-agent-window-reconnect-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+        let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+        let _ = std::fs::remove_file(&socket_path);
+        let daemon_listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
+        let daemon = tokio::spawn(async move {
+            for round in 0..2u32 {
+                let (stream, _) = daemon_listener
+                    .accept()
+                    .await
+                    .expect("accept daemon connection");
+                let (read_half, mut write_half) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                let mut line = String::new();
+                reader.read_line(&mut line).await.expect("read command");
+                let command: DaemonCommand =
+                    serde_json::from_str(line.trim()).expect("parse command");
+                let from_seq = match command {
+                    DaemonCommand::AttachAgent {
+                        session_id,
+                        from_seq,
+                    } => {
+                        assert_eq!(session_id, "daemon-agent-window-reconnect-1");
+                        from_seq
+                    }
+                    other => panic!("expected AttachAgent, got {other:?}"),
+                };
+                let (next_seq, range) = if round == 0 {
+                    assert_eq!(from_seq, 0);
+                    (500, 0..500)
+                } else {
+                    assert_eq!(from_seq, 500, "reconnect must request only the delta");
+                    (502, 500..502)
+                };
+                let events = range
+                    .map(|seq| kanna_daemon::protocol::SeqAgentEvent {
+                        seq,
+                        event: kanna_daemon::protocol::NeutralAgentEvent::AssistantText {
+                            text: format!("event-{seq}-{}", "x".repeat(4_000)),
+                            truncated: false,
+                        },
+                    })
+                    .collect();
+                let snapshot = DaemonEvent::AgentSnapshot {
+                    session_id: "daemon-agent-window-reconnect-1".into(),
+                    next_seq,
+                    events,
+                };
+                write_half
+                    .write_all(
+                        format!("{}\n", serde_json::to_string(&snapshot).unwrap()).as_bytes(),
+                    )
+                    .await
+                    .expect("write daemon snapshot");
+            }
+        });
+
+        let mut config = test_config(&unique, "KSP Agent Window Reconnect");
+        config.daemon_dir = daemon_dir.to_string_lossy().to_string();
+        config.db_path = Db::test_db_path(&unique);
+        let db = Db::open_for_tests(&config.db_path).expect("open test db");
+        db.insert_test_repo("repo-1", "Repo One")
+            .expect("insert repo");
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "Agent window reconnect",
+            None,
+            "in progress",
+            "2026-08-21T00:00:00Z",
+        )
+        .expect("insert task");
+        db.insert_test_terminal_session(
+            "terminal-1",
+            "repo-1",
+            "task-1",
+            "agent",
+            "daemon-agent-window-reconnect-1",
+        )
+        .expect("insert agent session");
+        let url = serve_router(crate::http_api::router(Arc::new(AppState::new(config)))).await;
+
+        let mut first_socket = ws_connect(&url).await;
+        send_frame(
+            &mut first_socket,
+            &ClientFrame::Auth {
+                credential: None,
+                capabilities: vec![KspCapability::AgentHistoryWindow],
+            },
+        )
+        .await;
+        assert_eq!(
+            recv_frame(&mut first_socket).await,
+            auth_ok_frame_for(false)
+        );
+        send_frame(&mut first_socket, &attach_agent_frame(0)).await;
+        let cold_history_start = match recv_frame(&mut first_socket).await {
+            ServerFrame::AgentSnapshot {
+                next_seq: 500,
+                events,
+                history_start_seq: Some(history_start_seq),
+                history_from_seq: Some(0),
+                resumed: Some(false),
+                ..
+            } => {
+                assert!(events.iter().all(|entry| entry.seq < 500));
+                assert!(history_start_seq > 0);
+                history_start_seq
+            }
+            other => panic!("expected bounded cold snapshot, got {other:?}"),
+        };
+        first_socket
+            .close(None)
+            .await
+            .expect("close first websocket");
+
+        let mut resumed_socket = ws_connect(&url).await;
+        send_frame(
+            &mut resumed_socket,
+            &ClientFrame::Auth {
+                credential: None,
+                capabilities: vec![KspCapability::AgentHistoryWindow],
+            },
+        )
+        .await;
+        assert_eq!(
+            recv_frame(&mut resumed_socket).await,
+            auth_ok_frame_for(false)
+        );
+        send_frame(&mut resumed_socket, &attach_agent_frame(500)).await;
+        match recv_frame(&mut resumed_socket).await {
+            ServerFrame::AgentSnapshot {
+                next_seq: 502,
+                events,
+                history_start_seq: Some(500),
+                history_from_seq: Some(500),
+                resumed: Some(true),
+                ..
+            } => assert_eq!(
+                events.iter().map(|entry| entry.seq).collect::<Vec<_>>(),
+                vec![500, 501],
+                "the reconnect snapshot must contain only the missing delta"
+            ),
+            other => panic!("expected resumed delta snapshot, got {other:?}"),
+        }
+
+        send_frame(
+            &mut resumed_socket,
+            &ClientFrame::AgentHistoryRequest {
+                task_id: "task-1".into(),
+                request_id: 10,
+                before_seq: cold_history_start,
+                after_seq: 0,
+                max_events: 25,
+            },
+        )
+        .await;
+        match recv_frame(&mut resumed_socket).await {
+            ServerFrame::AgentHistoryChunk {
+                request_id: 10,
+                end_seq,
+                after_seq: 0,
+                events,
+                ..
+            } => {
+                assert_eq!(end_seq, cold_history_start);
+                assert_eq!(events.len(), 25);
+                assert!(events.iter().all(|entry| entry.seq < 500));
+            }
+            other => panic!("expected preserved pre-reconnect history, got {other:?}"),
+        }
+
+        daemon.await.expect("fake daemon failed");
+        drop(resumed_socket);
+        let _ = std::fs::remove_file(&socket_path);
         let _ = std::fs::remove_dir_all(daemon_dir);
     }
 

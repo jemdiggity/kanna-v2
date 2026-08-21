@@ -6832,6 +6832,28 @@ describe("createMobileController", () => {
       afterSeq: 0,
       loading: false
     });
+
+    controller.requestTaskAgentHistory("task-agent");
+    expect(client.__agentStream.subscription.requestHistory).toHaveBeenLastCalledWith({
+      beforeSeq: 4,
+      afterSeq: 0,
+      maxEvents: 100
+    });
+    client.__agentStream.emit({
+      type: "history",
+      taskId: "task-agent",
+      events: [0, 1, 2, 3].map((seq) => ({
+        seq,
+        event: { type: "assistant_text" as const, text: `old-${seq}`, truncated: false }
+      })),
+      startSeq: 0,
+      endSeq: 4,
+      afterSeq: 0
+    });
+    expect(store.getState().taskAgentEvents.map((entry) => entry.seq)).toEqual([
+      0, 1, 2, 3, 4, 8, 9
+    ]);
+    expect(store.getState().taskAgentHistory).toBeNull();
   });
 
   it("ignores buffered agent events from the previous route after rebinding", async () => {
