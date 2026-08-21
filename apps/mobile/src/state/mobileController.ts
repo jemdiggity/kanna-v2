@@ -187,7 +187,7 @@ function generateTaskCreationId(): string {
   try {
     const uuid = cryptoObject?.randomUUID?.().replace(/-/g, "").toLowerCase();
     if (uuid && /^[0-9a-f]{32}$/.test(uuid)) {
-      return uuid;
+      return uuid.slice(0, 8);
     }
   } catch {
     // Some React Native runtimes expose a partial crypto shim. Try the next
@@ -196,26 +196,17 @@ function generateTaskCreationId(): string {
 
   try {
     if (cryptoObject?.getRandomValues) {
-      const bytes = cryptoObject.getRandomValues(new Uint8Array(16));
+      const bytes = cryptoObject.getRandomValues(new Uint8Array(4));
       return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
     }
   } catch {
-    // Fall through to a process-local collision-resistant identity.
+    // Fall through to a process-local best-effort identity.
   }
 
   fallbackTaskCreationCounter = (fallbackTaskCreationCounter + 1) >>> 0;
-  const timestamp = Date.now().toString(16).padStart(12, "0").slice(-12);
-  const counter = fallbackTaskCreationCounter
-    .toString(16)
-    .padStart(8, "0")
-    .slice(-8);
-  let entropy = "";
-  while (entropy.length < 12) {
-    entropy += Math.floor(Math.random() * 0x100000000)
-      .toString(16)
-      .padStart(8, "0");
-  }
-  return `${timestamp}${counter}${entropy.slice(0, 12)}`;
+  const entropy = Math.floor(Math.random() * 0x100000000) >>> 0;
+  const mixed = ((Date.now() >>> 0) ^ fallbackTaskCreationCounter ^ entropy) >>> 0;
+  return mixed.toString(16).padStart(8, "0");
 }
 
 function isStaleRepoCommandError(error: unknown): boolean {

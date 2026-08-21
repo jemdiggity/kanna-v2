@@ -733,6 +733,10 @@ pub(super) async fn create_task_with_requested_id(
 pub(super) fn validate_requested_task_id(
     task_id: &str,
 ) -> Result<(), (axum::http::StatusCode, String)> {
+    // New clients generate the same 8-hex IDs as the server. Keep accepting
+    // longer IDs for mobile versions released before the short-ID change;
+    // tighten this to exactly 8 only after those versions are no longer in the
+    // supported mobile population. Existing long-ID tasks remain valid IDs.
     let valid_length = (8..=64).contains(&task_id.len());
     let lowercase_hex = task_id
         .bytes()

@@ -4721,7 +4721,41 @@ describe("createMobileController", () => {
     );
   });
 
-  it("falls back to a valid unique-shaped identity when native crypto is unavailable", async () => {
+  it("generates an eight-hex task id and reuses it for idempotent recovery", async () => {
+    vi.stubGlobal("crypto", {
+      randomUUID: () => "01234567-89ab-4cde-8f01-23456789abcd"
+    });
+    const store = createSessionStore();
+    const client = createClientMock();
+    client.createTask
+      .mockRejectedValueOnce(new Error("Creation response was lost"))
+      .mockResolvedValueOnce({
+        taskId: "01234567",
+        repoId: "repo-2",
+        title: "Recover the short id",
+        stage: "in progress"
+      });
+    const controller = createMobileController(client, store, undefined, {
+      createTaskSlotId: () => "create:short-id",
+      persistSessionContext: vi.fn().mockResolvedValue(undefined)
+    });
+
+    await controller.bootstrap();
+    store.selectRepo("repo-2");
+    controller.openComposer();
+    controller.updateComposerPrompt("Recover the short id");
+
+    await controller.createTask();
+    await controller.recoverTaskCreation("create:short-id");
+
+    expect(client.createTask).toHaveBeenCalledTimes(2);
+    for (const [request] of client.createTask.mock.calls) {
+      expect(request.taskId).toBe("01234567");
+      expect(request.taskId).toMatch(/^[0-9a-f]{8}$/);
+    }
+  });
+
+  it("falls back to a valid short identity when native crypto is unavailable", async () => {
     vi.stubGlobal("crypto", {
       randomUUID: () => {
         throw new Error("randomUUID unavailable");
@@ -4743,7 +4777,7 @@ describe("createMobileController", () => {
 
     expect(client.createTask).toHaveBeenCalledWith(
       expect.objectContaining({
-        taskId: expect.stringMatching(/^[0-9a-f]{32}$/)
+        taskId: expect.stringMatching(/^[0-9a-f]{8}$/)
       })
     );
   });
@@ -5639,7 +5673,7 @@ describe("createMobileController", () => {
     await controller.createTask();
 
     expect(client.createTask).toHaveBeenCalledWith({
-      taskId: expect.stringMatching(/^[0-9a-f]{32}$/),
+      taskId: expect.stringMatching(/^[0-9a-f]{8}$/),
       repoId: "repo-2",
       prompt: "Ship mobile shell",
       desktopId: "desktop-1",
@@ -5895,7 +5929,7 @@ describe("createMobileController", () => {
     await controller.createTask();
 
     expect(client.createTask).toHaveBeenCalledWith({
-      taskId: expect.stringMatching(/^[0-9a-f]{32}$/),
+      taskId: expect.stringMatching(/^[0-9a-f]{8}$/),
       repoId: "repo-2",
       prompt: "Ship mobile shell",
       desktopId: "desktop-1",
@@ -5988,7 +6022,7 @@ describe("createMobileController", () => {
     await controller.createTask({ cols: 104, rows: 72 });
 
     expect(client.createTask).toHaveBeenCalledWith({
-      taskId: expect.stringMatching(/^[0-9a-f]{32}$/),
+      taskId: expect.stringMatching(/^[0-9a-f]{8}$/),
       repoId: "repo-2",
       prompt: "Ship mobile shell",
       desktopId: "desktop-2",
@@ -6029,7 +6063,7 @@ describe("createMobileController", () => {
     expect(store.getState()).toMatchObject({
       taskCreationPhase: "pending",
       pendingTaskCreation: {
-        taskId: expect.stringMatching(/^[0-9a-f]{32}$/),
+        taskId: expect.stringMatching(/^[0-9a-f]{8}$/),
         repoId: "repo-2",
         prompt: "Ship mobile shell"
       },
@@ -6173,7 +6207,7 @@ describe("createMobileController", () => {
     await controller.createTask();
 
     expect(client.createTask).toHaveBeenCalledWith({
-      taskId: expect.stringMatching(/^[0-9a-f]{32}$/),
+      taskId: expect.stringMatching(/^[0-9a-f]{8}$/),
       repoId: "repo-2",
       prompt: "Ship mobile shell",
       desktopId: "desktop-1",

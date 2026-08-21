@@ -328,6 +328,14 @@ async fn create_task_route_rejects_invalid_requested_task_ids_before_creation() 
     assert_eq!(create_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
 
+#[test]
+fn requested_task_id_validation_keeps_64_hex_mobile_compatibility() {
+    let legacy_mobile_task_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    assert_eq!(legacy_mobile_task_id.len(), 64);
+    assert!(crate::http_api::tasks::validate_requested_task_id(legacy_mobile_task_id).is_ok());
+}
+
 #[tokio::test]
 async fn create_task_route_rejects_invalid_recovery_snapshot_geometry() {
     let create_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -530,7 +538,7 @@ async fn abort_waits_for_requested_creation_and_owns_the_id_until_release() {
 }
 
 #[tokio::test]
-async fn create_task_route_replays_requested_task_id_without_preparing_or_spawning_twice() {
+async fn create_task_route_round_trips_and_replays_eight_hex_requested_id() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
     use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
@@ -543,7 +551,7 @@ async fn create_task_route_replays_requested_task_id_without_preparing_or_spawni
             .unwrap()
             .as_nanos()
     );
-    let task_id = "a1b2c3d4e5f60718";
+    let task_id = "a1b2c3d4";
     let repo_root = std::env::temp_dir().join(format!("kanna-http-create-replay-{unique}"));
     init_test_git_repo(&repo_root);
 
