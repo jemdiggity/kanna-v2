@@ -168,6 +168,20 @@ function createClientMock(): ClientMock {
       { id: "repo-1", name: "Repo One" },
       { id: "repo-2", name: "Repo Two" }
     ]),
+    startRepoCheckout: vi.fn().mockResolvedValue({
+      id: "checkout-1",
+      state: "done",
+      repoName: "Repo One",
+      remoteUrlHash: "hash-repo-one",
+      repoId: "repo-1"
+    }),
+    getRepoCheckout: vi.fn().mockResolvedValue({
+      id: "checkout-1",
+      state: "done",
+      repoName: "Repo One",
+      remoteUrlHash: "hash-repo-one",
+      repoId: "repo-1"
+    }),
     listRepoTasks: vi.fn().mockImplementation(async (repoId: string) => {
       if (repoId === "repo-2") {
         return [
@@ -3983,6 +3997,165 @@ describe("createMobileController", () => {
       composerErrorMessage:
         "kanji-kongbu is not registered on Laptop. Register it on that machine before creating a task."
     });
+  });
+
+  it("confirms checkout, shows clone progress, and retries task creation", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const checkoutDone = createDeferred<{
+      id: string;
+      state: "done";
+      repoName: string;
+      remoteUrlHash: string;
+      repoId: string;
+    }>();
+    const missingRepo: RepoSummary = {
+      id: "git:hash-kanji",
+      name: "kanji-kongbu",
+      remoteUrl: "file:///tmp/kanji-kongbu.git",
+      remoteUrlHash: "hash-kanji",
+      registeredDesktopIds: ["desktop-1"]
+    };
+    const checkedOutRepo: RepoSummary = {
+      ...missingRepo,
+      registeredDesktopIds: ["desktop-1", "desktop-2"]
+    };
+    client.listRepos
+      .mockResolvedValueOnce([missingRepo])
+      .mockResolvedValueOnce([checkedOutRepo]);
+    client.listRecentTasks.mockResolvedValue([]);
+    client.listRepoTasks.mockResolvedValue([]);
+    client.startRepoCheckout.mockResolvedValueOnce({
+      id: "checkout-kanji",
+      state: "running",
+      repoName: "kanji-kongbu",
+      remoteUrlHash: "hash-kanji"
+    });
+    client.getRepoCheckout.mockReturnValueOnce(checkoutDone.promise);
+    const controller = createMobileController(client, store, undefined, {
+      repoCheckoutPollIntervalMs: 0
+    });
+
+    await controller.bootstrap();
+    store.selectRepo(missingRepo.id);
+    controller.openComposer();
+    controller.selectComposerDesktop("desktop-2");
+    controller.updateComposerPrompt("Study kanji");
+
+    await expect(controller.createTask()).resolves.toBeNull();
+    expect(store.getState().repoCheckoutOffer).toMatchObject({
+      action: "create-task",
+      status: "offered",
+      repoName: "kanji-kongbu",
+      desktopName: "Laptop"
+    });
+
+    const confirmation = controller.confirmRepoCheckout();
+    await flushMicrotasks();
+    expect(client.startRepoCheckout).toHaveBeenCalledWith({
+      desktopId: "desktop-2",
+      name: "kanji-kongbu",
+      remoteUrl: "file:///tmp/kanji-kongbu.git",
+      remoteUrlHash: "hash-kanji"
+    });
+    expect(store.getState()).toMatchObject({
+      repoCheckoutOffer: { status: "running" },
+      composerErrorMessage: "Checking out kanji-kongbu on Laptop…"
+    });
+
+    checkoutDone.resolve({
+      id: "checkout-kanji",
+      state: "done",
+      repoName: "kanji-kongbu",
+      remoteUrlHash: "hash-kanji",
+      repoId: "repo-kanji-on-laptop"
+    });
+    await expect(confirmation).resolves.toBeTruthy();
+    expect(client.createTask).toHaveBeenCalledOnce();
+    expect(client.createTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        repoId: missingRepo.id,
+        desktopId: "desktop-2",
+        prompt: "Study kanji"
+      })
+    );
+    expect(store.getState().repoCheckoutOffer).toBeNull();
+  });
+
+  it("keeps the connection healthy when a repo-command checkout fails", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const missingRepo: RepoSummary = {
+      id: "git:hash-kanji",
+      name: "kanji-kongbu",
+      remoteUrl: "https://example.test/kanji-kongbu.git",
+      remoteUrlHash: "hash-kanji",
+      registeredDesktopIds: ["desktop-1"]
+    };
+    client.listRepos.mockResolvedValue([missingRepo]);
+    client.runRepoCommand.mockRejectedValueOnce(
+      new RepoNotRegisteredError("kanji-kongbu", "Laptop")
+    );
+    client.startRepoCheckout.mockRejectedValueOnce(new Error("git clone failed"));
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    store.selectDesktop("desktop-2");
+    controller.setNavigationView("more");
+    await flushMicrotasks();
+
+    await controller.runRepoCommand("factory:create-agent");
+    await expect(controller.confirmRepoCheckout()).resolves.toBeNull();
+
+    expect(store.getState()).toMatchObject({
+      connectionState: "connected",
+      repoCommandStatus: "error",
+      repoCommandErrorMessage:
+        "Could not check out kanji-kongbu on Laptop. Configure a credential-free origin and git credentials on Laptop, then try again.",
+      repoCheckoutOffer: {
+        action: "repo-command",
+        status: "failed"
+      }
+    });
+  });
+
+  it("shows a target-named credential limitation without echoing checkout errors", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const secret = "mobile-secret-token";
+    const missingRepo: RepoSummary = {
+      id: "git:hash-private",
+      name: "private-repo",
+      remoteUrl: `https://${secret}@example.test/private.git`,
+      remoteUrlHash: "hash-private",
+      registeredDesktopIds: ["desktop-1"]
+    };
+    client.listRepos.mockResolvedValue([missingRepo]);
+    client.listRecentTasks.mockResolvedValue([]);
+    client.listRepoTasks.mockResolvedValue([]);
+    client.startRepoCheckout.mockRejectedValueOnce(
+      new Error(`clone failed for https://${secret}@example.test/private.git`)
+    );
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    store.selectRepo(missingRepo.id);
+    controller.openComposer();
+    controller.selectComposerDesktop("desktop-2");
+    controller.updateComposerPrompt("Use private repo");
+    await controller.createTask();
+
+    await expect(controller.confirmRepoCheckout()).resolves.toBeNull();
+    const expected =
+      "Could not check out private-repo on Laptop. Configure a credential-free origin and git credentials on Laptop, then try again.";
+    expect(store.getState()).toMatchObject({
+      repoCheckoutOffer: {
+        status: "failed",
+        errorMessage: expected
+      },
+      composerErrorMessage: expected
+    });
+    expect(store.getState().composerErrorMessage).not.toContain(secret);
   });
 
   it("opens a fresh composer and starts another task while an earlier creation is uncertain", async () => {

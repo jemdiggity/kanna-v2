@@ -1,8 +1,9 @@
 pub(super) use super::task_files::AuthenticatedTaskFileAccess;
 pub(super) use super::task_input::{submit_task_input, task_input_message};
 pub(super) use super::test_support::{
-    test_router, test_router_with_merge_agent_runner, test_router_with_revision_requester,
-    test_router_with_seed, test_router_with_seed_and_task_creator, test_router_with_stage_advancer,
+    test_router, test_router_with_merge_agent_runner, test_router_with_repo_checkout_root,
+    test_router_with_revision_requester, test_router_with_seed,
+    test_router_with_seed_and_task_creator, test_router_with_stage_advancer,
     test_router_with_stage_completer, test_router_with_stage_rerunner,
     test_router_with_task_closer, test_router_with_task_creator,
     test_router_with_task_input_sender, test_state_with_seed, test_state_with_task_input_sender,

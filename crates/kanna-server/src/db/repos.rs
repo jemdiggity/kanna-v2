@@ -1,6 +1,16 @@
 use super::{Db, NewRepo, Repo, SnapshotRepo};
 
 impl Db {
+    pub fn list_repo_remote_urls(
+        &self,
+    ) -> Result<std::collections::HashMap<String, String>, rusqlite::Error> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, remote_url FROM repo WHERE remote_url IS NOT NULL")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect()
+    }
+
     fn collect_repos(&self, sql: &str) -> Result<Vec<Repo>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt.query_map([], |row| {
@@ -87,6 +97,11 @@ impl Db {
                     row.get(0)
                 })?;
         Ok(count > 0)
+    }
+
+    pub fn delete_repo(&self, id: &str) -> Result<(), rusqlite::Error> {
+        self.conn.execute("DELETE FROM repo WHERE id = ?", [id])?;
+        Ok(())
     }
 
     pub fn get_snapshot_repo_by_path(

@@ -5,11 +5,25 @@ import { DEFAULT_TASK_QUICK_REPLIES } from "../screens/taskQuickReplies";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
+const alertMock = vi.hoisted(() => vi.fn());
+
 vi.mock("react-native", () => ({
+  Alert: {
+    alert: alertMock
+  },
+  KeyboardAvoidingView: "KeyboardAvoidingView",
+  Modal: "Modal",
+  Platform: {
+    OS: "ios"
+  },
+  Pressable: "Pressable",
+  ScrollView: "ScrollView",
   StyleSheet: {
+    absoluteFill: "absoluteFill",
     create: <T extends Record<string, unknown>>(styles: T) => styles
   },
   Text: "Text",
+  TextInput: "TextInput",
   View: "View"
 }));
 
@@ -62,9 +76,6 @@ vi.mock("@react-navigation/native-stack", () => ({
 }));
 
 vi.mock("../components/AccountBadge", () => ({ AccountBadge: "AccountBadge" }));
-vi.mock("../components/CreateTaskComposer", () => ({
-  CreateTaskComposer: "CreateTaskComposer"
-}));
 vi.mock("../components/FloatingToolbar", () => ({
   FloatingToolbar: "FloatingToolbar"
 }));
@@ -80,6 +91,7 @@ import RootNavigator from "./RootNavigator";
 let rendered: ReactTestRenderer | null = null;
 
 afterEach(async () => {
+  alertMock.mockReset();
   if (rendered) {
     await act(async () => rendered?.unmount());
     rendered = null;
@@ -187,15 +199,190 @@ describe("RootNavigator", () => {
       );
     });
 
-    const composer = rendered.root.findByType("CreateTaskComposer" as never);
-
-    expect(composer.props.desktops).toEqual([
-      expect.objectContaining({
-        id: "desktop-1",
-        agentProviders: ["opencode"]
+    expect(
+      rendered.root.findByProps({
+        testID: "mobile.create-task.agent.opencode"
       })
-    ]);
-    expect(composer.props.selectedAgentProvider).toBe("opencode");
+    ).toBeDefined();
+    expect(
+      rendered.root.findByProps({
+        testID: "mobile.create-task.machine.desktop-1"
+      })
+    ).toBeDefined();
+  });
+
+  it("selects a missing-repo machine and completes the checkout confirmation flow", async () => {
+    let checkoutCompleted: (() => void) | null = null;
+    const checkoutCompletion = new Promise<void>((resolve) => {
+      checkoutCompleted = resolve;
+    });
+    const createTask = vi
+      .fn<() => Promise<string | null>>()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce("task-after-checkout");
+    const controller = {
+      confirmRepoCheckout: vi.fn(async () => {
+        await checkoutCompletion;
+        return createTask();
+      }),
+      createTask,
+      selectComposerAgentProvider: vi.fn(),
+      selectComposerDesktop: vi.fn(),
+      setComposerOptionsExpanded: vi.fn(),
+      subscribeRepoCommandTaskOpen: () => () => undefined,
+      updateComposerPrompt: vi.fn(),
+      closeComposer: vi.fn()
+    } as never;
+    const baseState = {
+      accountDesktops: [],
+      composerAgentProvider: "claude",
+      composerDesktopId: "desktop-1",
+      composerErrorMessage: null,
+      composerPrompt: "Study kanji",
+      composerRepoId: "git:hash-kanji",
+      isComposerOpen: true,
+      isComposerOptionsExpanded: true,
+      liveLanDesktops: [
+        {
+          id: "desktop-1",
+          name: "MacBook Pro",
+          online: true,
+          mode: "lan"
+        },
+        {
+          id: "desktop-2",
+          name: "Mac Studio",
+          online: true,
+          mode: "lan"
+        }
+      ],
+      pendingTaskCreation: null,
+      repoCheckoutOffer: null,
+      repos: [
+        {
+          id: "git:hash-kanji",
+          name: "kanji-kongbu",
+          remoteUrl: "file:///tmp/kanji-kongbu.git",
+          remoteUrlHash: "hash-kanji",
+          registeredDesktopIds: ["desktop-1"]
+        }
+      ],
+      selectedTaskId: null,
+      trustedDesktops: []
+    } as const;
+    const initialState = {
+      index: 0,
+      key: "root",
+      routeNames: ["MainTabs"],
+      routes: [{ key: "main-tabs", name: "MainTabs" }],
+      stale: false,
+      type: "stack"
+    } as never;
+    const renderRoot = (state: unknown) => (
+      <RootNavigator
+        controller={controller}
+        forceCloudEnabled={false}
+        initialState={initialState}
+        onForceCloudChange={vi.fn()}
+        onOpenAccount={vi.fn()}
+        openMachinesRequestKey={0}
+        quickReplies={DEFAULT_TASK_QUICK_REPLIES}
+        quickRepliesHydrated
+        state={state as never}
+      />
+    );
+
+    await act(async () => {
+      rendered = create(renderRoot(baseState));
+    });
+
+    const studioOption = rendered.root.findByProps({
+      testID: "mobile.create-task.machine.desktop-2"
+    });
+    await act(async () => studioOption.props.onPress());
+    expect(controller.selectComposerDesktop).toHaveBeenCalledWith("desktop-2");
+
+    await act(async () => {
+      rendered?.update(
+        renderRoot({ ...baseState, composerDesktopId: "desktop-2" })
+      );
+    });
+    const initialSubmit = rendered.root.findByProps({
+      testID: "mobile.create-task.submit"
+    });
+    expect(initialSubmit.props.disabled).toBe(false);
+    await act(async () => initialSubmit.props.onPress());
+    expect(createTask).toHaveBeenCalledOnce();
+
+    const offeredCheckout = {
+      action: "create-task" as const,
+      status: "offered" as const,
+      repoId: "git:hash-kanji",
+      repoName: "kanji-kongbu",
+      desktopId: "desktop-2",
+      desktopName: "Mac Studio"
+    };
+    await act(async () => {
+      rendered?.update(
+        renderRoot({
+          ...baseState,
+          composerDesktopId: "desktop-2",
+          composerErrorMessage:
+            "kanji-kongbu is not registered on Mac Studio.",
+          repoCheckoutOffer: offeredCheckout
+        })
+      );
+    });
+    expect(
+      rendered.root.findByProps({ testID: "mobile.create-task.submit" }).props
+        .disabled
+    ).toBe(true);
+    const checkoutButton = rendered.root.findByProps({
+      testID: "mobile.create-task.checkout"
+    });
+    await act(async () => checkoutButton.props.onPress());
+    expect(alertMock).toHaveBeenCalledWith(
+      "Check out kanji-kongbu on Mac Studio?",
+      expect.stringContaining("Mac Studio"),
+      expect.any(Array)
+    );
+
+    const confirmationButtons = alertMock.mock.calls[0]?.[2] as
+      | Array<{ text: string; onPress?: () => void }>
+      | undefined;
+    const confirmButton = confirmationButtons?.find(
+      (button) => button.text === "Check Out"
+    );
+    await act(async () => confirmButton?.onPress?.());
+    expect(controller.confirmRepoCheckout).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      rendered?.update(
+        renderRoot({
+          ...baseState,
+          composerDesktopId: "desktop-2",
+          composerErrorMessage: "Checking out kanji-kongbu on Mac Studio…",
+          repoCheckoutOffer: { ...offeredCheckout, status: "running" as const }
+        })
+      );
+    });
+    const runningCheckout = rendered.root.findByProps({
+      testID: "mobile.create-task.checkout"
+    });
+    expect(runningCheckout.props.disabled).toBe(true);
+    expect(
+      rendered.root
+        .findAllByType("Text")
+        .some((node) =>
+          node.children.includes("Checking out on Mac Studio…")
+        )
+    ).toBe(true);
+
+    await act(async () => {
+      checkoutCompleted?.();
+      await checkoutCompletion;
+    });
+    expect(createTask).toHaveBeenCalledTimes(2);
   });
 
   it("gives navigation-managed surfaces the Kanna dark background", async () => {

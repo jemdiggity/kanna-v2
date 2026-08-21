@@ -63,6 +63,7 @@ export function mergeRepoSummaries(repos: RepoSummary[]): RepoSummary[] {
       merged.set(id, {
         id,
         name: repo.name,
+        ...(repo.remoteUrl ? { remoteUrl: repo.remoteUrl } : {}),
         ...(repo.remoteUrlHash ? { remoteUrlHash: repo.remoteUrlHash } : {}),
         ...(repo.registeredDesktopIds
           ? { registeredDesktopIds: [...new Set(repo.registeredDesktopIds)] }
@@ -72,6 +73,9 @@ export function mergeRepoSummaries(repos: RepoSummary[]): RepoSummary[] {
     }
     if (!existing.remoteUrlHash && repo.remoteUrlHash) {
       existing.remoteUrlHash = repo.remoteUrlHash;
+    }
+    if (!existing.remoteUrl && repo.remoteUrl) {
+      existing.remoteUrl = repo.remoteUrl;
     }
     if (repo.registeredDesktopIds) {
       existing.registeredDesktopIds = [

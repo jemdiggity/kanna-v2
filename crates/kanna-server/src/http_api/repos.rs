@@ -6,8 +6,15 @@ use axum::extract::{Path, State};
 use axum::Json;
 use kanna_agent_protocol::{AgentProvider, StateChangeScope};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
+use std::path::Path as FsPath;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+use super::state::RepoCheckoutOperation;
+
+static REPO_CHECKOUT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub(super) async fn list_repos(
     State(state): State<Arc<AppState>>,
@@ -48,6 +55,257 @@ pub(super) async fn add_repo(
     })?;
     state.publish_state_changed(StateChangeScope::Repos);
     Ok(Json(repo))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct StartRepoCheckoutRequest {
+    name: String,
+    remote_url: String,
+    remote_url_hash: String,
+}
+
+pub(super) async fn start_repo_checkout(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<StartRepoCheckoutRequest>,
+) -> Result<Json<RepoCheckoutOperation>, (axum::http::StatusCode, String)> {
+    let name = payload.name.trim().to_string();
+    let remote_url = payload.remote_url.trim().to_string();
+    let remote_url_hash = payload.remote_url_hash.trim().to_lowercase();
+    if name.is_empty() || remote_url.is_empty() || remote_url_hash.is_empty() {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "name, remoteUrl, and remoteUrlHash are required".to_string(),
+        ));
+    }
+    if !crate::transfer_engine::git::is_credential_free_clone_source(&remote_url) {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            credential_free_origin_error(&state.config.desktop_name),
+        ));
+    }
+    let actual_hash = format!("{:x}", Sha256::digest(remote_url.as_bytes()));
+    if actual_hash != remote_url_hash {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "remoteUrl does not match remoteUrlHash".to_string(),
+        ));
+    }
+
+    let db = Db::open(&state.config.db_path).map_err(|error| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {error}"),
+        )
+    })?;
+    if let Some(repo) = db
+        .list_repos_for_maintenance()
+        .map_err(|error| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("db error: {error}"),
+            )
+        })?
+        .into_iter()
+        .find(|repo| repo.remote_url_hash.as_deref() == Some(remote_url_hash.as_str()))
+    {
+        return Ok(Json(RepoCheckoutOperation {
+            id: new_repo_checkout_id(),
+            state: "done",
+            repo_name: repo.name,
+            remote_url_hash,
+            repo_id: Some(repo.id),
+            error: None,
+        }));
+    }
+
+    let operation = {
+        let mut operations = state
+            .repo_checkouts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(existing) = operations
+            .values()
+            .find(|operation| {
+                operation.remote_url_hash == remote_url_hash && operation.state == "running"
+            })
+            .cloned()
+        {
+            return Ok(Json(existing));
+        }
+        let operation = RepoCheckoutOperation {
+            id: new_repo_checkout_id(),
+            state: "running",
+            repo_name: name.clone(),
+            remote_url_hash: remote_url_hash.clone(),
+            repo_id: None,
+            error: None,
+        };
+        operations.insert(operation.id.clone(), operation.clone());
+        operation
+    };
+
+    let operation_id = operation.id.clone();
+    let checkout_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        let root = checkout_state.repo_checkout_root.clone();
+        let worker_state = Arc::clone(&checkout_state);
+        let worker_result = tokio::task::spawn_blocking(move || {
+            clone_and_register_repo(worker_state, &root, &name, &remote_url, &remote_url_hash)
+        })
+        .await;
+        let result = match worker_result {
+            Ok(Ok(repo_id)) => Ok(repo_id),
+            Ok(Err(error)) => {
+                log::error!("repository checkout {operation_id} failed: {error}");
+                Err(credential_free_origin_error(
+                    &checkout_state.config.desktop_name,
+                ))
+            }
+            Err(error) => {
+                log::error!("repository checkout {operation_id} worker failed: {error}");
+                Err(credential_free_origin_error(
+                    &checkout_state.config.desktop_name,
+                ))
+            }
+        };
+
+        let mut operations = checkout_state
+            .repo_checkouts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(stored) = operations.get_mut(&operation_id) {
+            match result {
+                Ok(repo_id) => {
+                    stored.state = "done";
+                    stored.repo_id = Some(repo_id);
+                    checkout_state.publish_state_changed(StateChangeScope::Repos);
+                }
+                Err(error) => {
+                    stored.state = "failed";
+                    stored.error = Some(error);
+                }
+            }
+        }
+    });
+
+    Ok(Json(operation))
+}
+
+pub(super) async fn get_repo_checkout(
+    State(state): State<Arc<AppState>>,
+    Path(operation_id): Path<String>,
+) -> Result<Json<RepoCheckoutOperation>, (axum::http::StatusCode, String)> {
+    state
+        .repo_checkouts
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&operation_id)
+        .cloned()
+        .map(Json)
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                format!("repository checkout not found: {operation_id}"),
+            )
+        })
+}
+
+fn new_repo_checkout_id() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let sequence = REPO_CHECKOUT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("checkout-{nanos:x}-{sequence:x}")
+}
+
+fn clone_and_register_repo(
+    state: Arc<AppState>,
+    root: &FsPath,
+    name: &str,
+    remote_url: &str,
+    remote_url_hash: &str,
+) -> Result<String, String> {
+    let destination = crate::transfer_engine::git::allocate_repo_path(root, name)?;
+    if crate::transfer_engine::git::clone_remote(remote_url, &destination).is_err() {
+        return Err(cleanup_checkout_error(
+            &destination,
+            credential_free_origin_error(&state.config.desktop_name),
+        ));
+    }
+
+    let db = Db::open(&state.config.db_path)
+        .map_err(|error| cleanup_checkout_error(&destination, format!("db error: {error}")))?;
+    let api = MobileApi::new(state.config.clone(), db);
+    let path = destination.to_string_lossy().to_string();
+    let repo = match api.add_repo(crate::mobile_api::AddRepoRequest {
+        path,
+        name: Some(name.to_string()),
+        default_branch: None,
+    }) {
+        Ok(repo) => repo,
+        Err(error) => return Err(cleanup_checkout_error(&destination, error.message())),
+    };
+
+    let db = Db::open(&state.config.db_path).map_err(|error| {
+        rollback_registered_checkout(
+            &state.config.db_path,
+            &repo.id,
+            &destination,
+            format!("db error: {error}"),
+        )
+    })?;
+    if let Err(error) = db.patch_repo(
+        &repo.id,
+        None,
+        Some(Some(remote_url)),
+        Some(Some(remote_url_hash)),
+        None,
+    ) {
+        return Err(rollback_registered_checkout(
+            &state.config.db_path,
+            &repo.id,
+            &destination,
+            format!("could not persist repository remote metadata: {error}"),
+        ));
+    }
+    Ok(repo.id)
+}
+
+fn credential_free_origin_error(desktop_name: &str) -> String {
+    format!(
+        "Could not check out the repository on {desktop_name}. Configure a credential-free origin and git credentials on {desktop_name}, then try again."
+    )
+}
+
+fn rollback_registered_checkout(
+    db_path: &str,
+    repo_id: &str,
+    destination: &FsPath,
+    error: String,
+) -> String {
+    let rollback_error = Db::open(db_path)
+        .and_then(|db| db.delete_repo(repo_id))
+        .err()
+        .map(|rollback| format!("; registry rollback failed: {rollback}"))
+        .unwrap_or_default();
+    format!(
+        "{}{}",
+        cleanup_checkout_error(destination, error),
+        rollback_error
+    )
+}
+
+fn cleanup_checkout_error(destination: &FsPath, error: String) -> String {
+    match std::fs::remove_dir_all(destination) {
+        Ok(()) => error,
+        Err(cleanup) if cleanup.kind() == std::io::ErrorKind::NotFound => error,
+        Err(cleanup) => format!(
+            "{error}; checkout cleanup failed for {}: {cleanup}",
+            destination.display()
+        ),
+    }
 }
 
 #[derive(Debug, serde::Deserialize)]

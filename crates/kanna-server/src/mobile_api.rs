@@ -31,6 +31,11 @@ pub struct RepoSummary {
     /// Cross-machine repo identity: hash of the git remote URL. Lets mobile
     /// clients recognize the same repository registered on several desktops.
     pub remote_url_hash: Option<String>,
+    /// Credential-free clone source retained by the authenticated mobile client
+    /// so it can ask a different paired desktop to check out the same logical
+    /// repository. Credential-bearing HTTP(S) origins are never serialized.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -559,9 +564,26 @@ impl MobileApi {
     }
 
     pub fn list_repos(&self) -> Result<Vec<RepoSummary>, String> {
+        let remote_urls = self
+            ._db
+            .list_repo_remote_urls()
+            .map_err(|e| format!("db error: {e}"))?;
         self._db
             .list_repos()
-            .map(|repos| repos.into_iter().map(map_repo_summary).collect())
+            .map(|repos| {
+                repos
+                    .into_iter()
+                    .map(|repo| {
+                        let remote_url = remote_urls
+                            .get(&repo.id)
+                            .filter(|url| {
+                                crate::transfer_engine::git::is_credential_free_clone_source(url)
+                            })
+                            .cloned();
+                        map_repo_summary(repo, remote_url)
+                    })
+                    .collect()
+            })
             .map_err(|e| format!("db error: {}", e))
     }
 
@@ -1104,11 +1126,12 @@ fn map_task_latest_run(run: crate::db::StageRun) -> TaskLatestRun {
     }
 }
 
-fn map_repo_summary(repo: crate::db::Repo) -> RepoSummary {
+fn map_repo_summary(repo: crate::db::Repo, remote_url: Option<String>) -> RepoSummary {
     RepoSummary {
         id: repo.id,
         name: repo.name,
         remote_url_hash: repo.remote_url_hash,
+        remote_url,
     }
 }
 
@@ -1463,11 +1486,13 @@ mod tests {
                     id: "repo-1".to_string(),
                     name: "Repo One".to_string(),
                     remote_url_hash: Some("hash-repo-one".to_string()),
+                    remote_url: None,
                 },
                 super::RepoSummary {
                     id: "repo-2".to_string(),
                     name: "Repo Two".to_string(),
                     remote_url_hash: None,
+                    remote_url: None,
                 },
             ]
         );

@@ -135,6 +135,7 @@ export const MOBILE_E2E_IDS = {
   createTaskCancelButton: "mobile.create-task.cancel",
   createTaskSubmitButton: "mobile.create-task.submit",
   createTaskError: "mobile.create-task.error",
+  createTaskCheckoutButton: "mobile.create-task.checkout",
   createTaskOptionsToggle: "mobile.create-task.options-toggle",
   createTaskMachineOption(desktopId: string): string {
     return `mobile.create-task.machine.${desktopId}`;

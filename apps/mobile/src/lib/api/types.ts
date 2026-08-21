@@ -66,6 +66,8 @@ export interface DesktopSummary {
 export interface RepoSummary {
   id: string;
   name: string;
+  /** Clone source reported by an authenticated desktop that has this repo. */
+  remoteUrl?: string | null;
   /** Cross-machine repo identity: hash of the git remote URL. The same
    * repository registered on several desktops shares this hash while each
    * desktop mints its own local id. */
@@ -74,6 +76,24 @@ export interface RepoSummary {
    * repository. Mobile derives this from per-desktop `/v1/repos` reads; it is
    * not a server-persisted repository identity. */
   registeredDesktopIds?: string[];
+}
+
+export interface StartRepoCheckoutRequest {
+  desktopId: string;
+  name: string;
+  remoteUrl: string;
+  remoteUrlHash: string;
+}
+
+export type RepoCheckoutState = "running" | "done" | "failed";
+
+export interface RepoCheckoutOperation {
+  id: string;
+  state: RepoCheckoutState;
+  repoName: string;
+  remoteUrlHash: string;
+  repoId?: string;
+  error?: string;
 }
 
 export type RepoCommandGroup = "automation" | "configure";
