@@ -3702,7 +3702,15 @@ impl AgentHistoryRegistry {
             .histories
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(retained) = histories.get_mut(session_id) {
+        let requested_history_expired = histories.get(session_id).is_some_and(|retained| {
+            Arc::strong_count(&retained.history) == 1
+                && retained
+                    .idle_since
+                    .is_some_and(|since| now.duration_since(since) >= AGENT_HISTORY_IDLE_GRACE)
+        });
+        if requested_history_expired {
+            histories.remove(session_id);
+        } else if let Some(retained) = histories.get_mut(session_id) {
             retained.idle_since = None;
             let needs_hydration = !retained
                 .history
@@ -11318,7 +11326,9 @@ mod tests {
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .get("daemon-agent-window-reconnect-1")
-                    .is_some_and(|retained| retained.idle_since.is_some());
+                    .is_some_and(|retained| {
+                        retained.idle_since.is_some() && Arc::strong_count(&retained.history) == 1
+                    });
                 if released {
                     break;
                 }
@@ -11337,14 +11347,13 @@ mod tests {
                 .expect("retained first-connection history")
                 .idle_since = Some(Instant::now() - AGENT_HISTORY_IDLE_GRACE);
         }
-        let _eviction_trigger = agent_histories.get_or_create("unrelated-session");
         assert!(
-            !agent_histories
+            agent_histories
                 .histories
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .contains_key("daemon-agent-window-reconnect-1"),
-            "the reconnect test must exercise the expired-history path"
+            "the requested session must remain registered until its own reconnect checks expiry"
         );
 
         let mut resumed_socket = ws_connect(&url).await;
