@@ -3213,10 +3213,10 @@ impl StreamConn {
         let key = (task_id.clone(), kind);
         let task = match kind {
             StreamKind::Agent => {
-                let history = if self.supports_agent_history_window {
+                let (history, hydrate_from_daemon_start) = if self.supports_agent_history_window {
                     self.state.agent_histories.get_or_create(&session_id)
                 } else {
-                    Arc::new(Mutex::new(AgentHistory::default()))
+                    (Arc::new(Mutex::new(AgentHistory::default())), false)
                 };
                 if let Some(previous) = self.agent_histories.insert(
                     task_id.clone(),
@@ -3233,9 +3233,12 @@ impl StreamConn {
                     daemon_dir,
                     task_id,
                     session_id,
-                    from_seq,
-                    self.supports_agent_history_window,
-                    history,
+                    AgentWindowConfig {
+                        client_from_seq: from_seq,
+                        enabled: self.supports_agent_history_window,
+                        hydrate_from_daemon_start,
+                        history,
+                    },
                     frame_tx,
                 ))
             }
@@ -3669,6 +3672,7 @@ const MAX_IDLE_AGENT_HISTORIES: usize = 16;
 #[derive(Default)]
 struct AgentHistory {
     events: Vec<FrameAgentEvent>,
+    hydrated_from_daemon_start: bool,
 }
 
 struct AgentHistoryAttachment {
@@ -3692,7 +3696,7 @@ pub(crate) struct AgentHistoryRegistry {
 }
 
 impl AgentHistoryRegistry {
-    fn get_or_create(&self, session_id: &str) -> Arc<Mutex<AgentHistory>> {
+    fn get_or_create(&self, session_id: &str) -> (Arc<Mutex<AgentHistory>>, bool) {
         let now = Instant::now();
         let mut histories = self
             .histories
@@ -3700,7 +3704,12 @@ impl AgentHistoryRegistry {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(retained) = histories.get_mut(session_id) {
             retained.idle_since = None;
-            return Arc::clone(&retained.history);
+            let needs_hydration = !retained
+                .history
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .hydrated_from_daemon_start;
+            return (Arc::clone(&retained.history), needs_hydration);
         }
 
         histories.retain(|_, retained| {
@@ -3732,7 +3741,7 @@ impl AgentHistoryRegistry {
                 idle_since: None,
             },
         );
-        history
+        (history, true)
     }
 
     fn release(&self, session_id: &str, history: &Arc<Mutex<AgentHistory>>) {
@@ -3751,6 +3760,7 @@ impl AgentHistoryRegistry {
 struct AgentWindowConfig {
     client_from_seq: u64,
     enabled: bool,
+    hydrate_from_daemon_start: bool,
     history: Arc<Mutex<AgentHistory>>,
 }
 
@@ -3801,19 +3811,12 @@ async fn stream_agent(
     daemon_dir: String,
     task_id: String,
     session_id: String,
-    from_seq: u64,
-    windowed: bool,
-    history: Arc<Mutex<AgentHistory>>,
+    window: AgentWindowConfig,
     frame_tx: mpsc::Sender<ServerFrame>,
 ) {
-    let mut next_from_seq = from_seq;
+    let mut next_from_seq = window.client_from_seq;
     let mut attached_once = false;
     let mut retry_attempt = 0usize;
-    let window = AgentWindowConfig {
-        client_from_seq: from_seq,
-        enabled: windowed,
-        history,
-    };
     loop {
         match stream_agent_once(
             &daemon_dir,
@@ -3889,10 +3892,19 @@ async fn stream_agent_once(
         }
     };
 
+    // A client's resume sequence is sufficient for live delivery, but not for
+    // rebuilding an evicted backfill cache. Replay the durable daemon journal
+    // from its start when this attachment owns that rebuild; the client-facing
+    // snapshot is filtered back to the requested delta below.
+    let daemon_from_seq = if window.enabled && window.hydrate_from_daemon_start && !*attached_once {
+        0
+    } else {
+        *next_from_seq
+    };
     let reply = client
         .send_command(&DaemonCommand::AttachAgent {
             session_id: session_id.to_string(),
-            from_seq: *next_from_seq,
+            from_seq: daemon_from_seq,
         })
         .await
         .map_err(|error| error.to_string());
@@ -3914,8 +3926,13 @@ async fn stream_agent_once(
                         .history
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    let recent = bounded_agent_suffix(&events, AGENT_WINDOW_MAX_EVENTS);
+                    let delta_start = events.partition_point(|entry| entry.seq < *next_from_seq);
+                    let recent =
+                        bounded_agent_suffix(&events[delta_start..], AGENT_WINDOW_MAX_EVENTS);
                     history.merge(events);
+                    if daemon_from_seq == 0 {
+                        history.hydrated_from_daemon_start = true;
+                    }
                     recent
                 };
                 let start = recent.first().map_or(next_seq, |entry| entry.seq);
@@ -11204,8 +11221,11 @@ mod tests {
                     assert_eq!(from_seq, 0);
                     (500, 0..500)
                 } else {
-                    assert_eq!(from_seq, 500, "reconnect must request only the delta");
-                    (502, 500..502)
+                    assert_eq!(
+                        from_seq, 0,
+                        "an evicted backfill source must be rebuilt from the daemon journal"
+                    );
+                    (502, 0..502)
                 };
                 let events = range
                     .map(|seq| kanna_daemon::protocol::SeqAgentEvent {
@@ -11253,7 +11273,9 @@ mod tests {
             "daemon-agent-window-reconnect-1",
         )
         .expect("insert agent session");
-        let url = serve_router(crate::http_api::router(Arc::new(AppState::new(config)))).await;
+        let state = Arc::new(AppState::new(config));
+        let agent_histories = state.agent_histories.clone();
+        let url = serve_router(crate::http_api::router(state)).await;
 
         let mut first_socket = ws_connect(&url).await;
         send_frame(
@@ -11288,6 +11310,42 @@ mod tests {
             .close(None)
             .await
             .expect("close first websocket");
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let released = agent_histories
+                    .histories
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .get("daemon-agent-window-reconnect-1")
+                    .is_some_and(|retained| retained.idle_since.is_some());
+                if released {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first websocket history was not released");
+        {
+            let mut histories = agent_histories
+                .histories
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            histories
+                .get_mut("daemon-agent-window-reconnect-1")
+                .expect("retained first-connection history")
+                .idle_since = Some(Instant::now() - AGENT_HISTORY_IDLE_GRACE);
+        }
+        let _eviction_trigger = agent_histories.get_or_create("unrelated-session");
+        assert!(
+            !agent_histories
+                .histories
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains_key("daemon-agent-window-reconnect-1"),
+            "the reconnect test must exercise the expired-history path"
+        );
 
         let mut resumed_socket = ws_connect(&url).await;
         send_frame(
