@@ -144,10 +144,7 @@ link that leaves account deletion available only on the web.
 
 The callable performs these phases strictly in order:
 
-1. Read `users/{uid}/billing/stripe`; if it contains an `active` or `grace`
-   subscription, cancel that Stripe subscription immediately. Cancellation is
-   cancel-at-once with no refund or proration logic.
-2. Atomically coordinate checkout and deletion through
+1. Atomically coordinate checkout and deletion through
    `accountCheckouts/{uid}`. Checkout transactionally admits one Stripe-creation
    operation only while no deletion tombstone exists, and does not write
    `users/{uid}` or `stripeCustomers` until a second transaction records the
@@ -156,24 +153,34 @@ The callable performs these phases strictly in order:
    finished, deletion atomically creates the durable
    `accountDeletions/{uid}` tombstone and reads every recorded session. No new
    checkout can pass admission after that transaction commits.
-3. Close every recorded Stripe Checkout session. An open session is expired;
-   if it already completed, its subscription is canceled immediately. This is
-   idempotent, and deletion cannot report success while an admitted checkout
-   can still be used or charge in the future.
-4. Relay publication transactions and Stripe webhook transactions read the
+2. Before deleting any local billing/customer index, collect every Stripe
+   customer attributable to the uid from the code-enumerated legacy and current
+   records: `users/{uid}.stripeCustomerId`,
+   `users/{uid}/billing/stripe.stripeCustomerId`, and every
+   `stripeCustomers` document whose `uid` matches. Cancel every locally
+   recorded subscription immediately, close every session recorded in
+   `accountCheckouts/{uid}`, then exhaustively page through every collected
+   Stripe customer's Checkout sessions and subscriptions. Open Checkout
+   sessions are expired, completed sessions' subscriptions are canceled, and
+   every other live subscription for every mapping is canceled. This covers
+   Checkout URLs created by the original implementation before the session
+   ledger existed, including multiple historical customer mappings.
+   Cancellation is cancel-at-once with no refund or proration logic. Missing,
+   expired, and already-canceled Stripe resources make reruns no-ops.
+3. Relay publication transactions and Stripe webhook transactions read the
    tombstone before any uid-owned write. Firestore Rules require its absence
    for the desktop client's direct `users/{uid}` profile and
    `desktopCredentials/{desktopId}` create/update operations. Revoke cloud/relay
    pairings by deleting `desktopCredentials` rows whose `uid` matches, then
    delete legacy `devices` rows whose `userId` matches.
-5. Recursively delete `users/{uid}`. This removes the user profile, all billing
+4. Recursively delete `users/{uid}`. This removes the user profile, all billing
    source documents (including `billing/comp`), the derived entitlement,
    `pushDevices`, published `desktops`, and every published `tasks` mirror
    below those desktops.
-6. Delete the code-enumerated uid indexes: `stripeCustomers` (`uid`),
+5. Delete the code-enumerated uid indexes: `stripeCustomers` (`uid`),
    `stripeEvents` (`uid`), and `appAccountTokens` (`uid`), plus the completed
    `accountCheckouts/{uid}` coordination record.
-7. Revoke Firebase refresh tokens, then delete the Firebase Auth user last.
+6. Revoke Firebase refresh tokens, then delete the Firebase Auth user last.
 
 Every deletion is safe when the document is already absent, and a Stripe
 “resource missing” response is treated as already canceled. If a phase fails,
@@ -202,6 +209,12 @@ the mocked Stripe gateway after transactional admission, attempting deletion,
 then releasing Stripe. The first deletion is retryable; the rerun fences the
 uid, closes the recorded session, removes the user tree and billing reverse
 map, and deletes Auth last.
+
+It also seeds a pre-ledger open Checkout session with no
+`accountCheckouts/{uid}` record plus completed/live subscriptions across
+multiple customer mappings. The mocked Stripe boundary proves deletion makes
+the old URL unusable, cancels all subscriptions, and repeats safely after an
+injected mid-pipeline failure without making live Stripe calls.
 
 There is no soft-disable, grace period, undo window, or refund path. No user
 content or credential survives: no account, complimentary grant, entitlement,

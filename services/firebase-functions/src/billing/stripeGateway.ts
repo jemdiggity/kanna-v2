@@ -37,6 +37,7 @@ export interface StripeCheckoutGateway {
 export interface StripeSubscriptionGateway {
   cancelSubscription(subscriptionId: string): Promise<void>;
   closeCheckoutSession(sessionId: string): Promise<void>;
+  closeCustomerBilling(customerId: string): Promise<void>;
 }
 
 /**
@@ -80,25 +81,46 @@ export function stripeCheckoutGateway(secretKey: string): StripeCheckoutGateway 
   };
 }
 
+async function cancelStripeSubscription(stripe: Stripe, subscriptionId: string): Promise<void> {
+  try {
+    await stripe.subscriptions.cancel(subscriptionId);
+  } catch (error) {
+    if (error instanceof Stripe.errors.StripeInvalidRequestError
+      && error.code === "resource_missing") {
+      return;
+    }
+    throw error;
+  }
+}
+
 /** Live cancel-at-once gateway used by account deletion. */
 export function stripeSubscriptionGateway(secretKey: string): StripeSubscriptionGateway {
   const stripe = new Stripe(secretKey);
   return {
     async cancelSubscription(subscriptionId) {
-      try {
-        await stripe.subscriptions.cancel(subscriptionId);
-      } catch (error) {
-        // A previous attempt may have canceled the subscription but failed
-        // before local deletion. Stripe's missing-resource response therefore
-        // means the desired state is already true.
-        if (error instanceof Stripe.errors.StripeInvalidRequestError && error.code === "resource_missing") {
-          return;
-        }
-        throw error;
-      }
+      await cancelStripeSubscription(stripe, subscriptionId);
     },
     async closeCheckoutSession(sessionId) {
       await closeStripeCheckoutSession(stripe, sessionId);
+    },
+    async closeCustomerBilling(customerId) {
+      const sessions = stripe.checkout.sessions.list({
+        customer: customerId,
+        status: "open",
+        limit: 100,
+      });
+      for await (const session of sessions) {
+        await closeStripeCheckoutSession(stripe, session.id);
+      }
+      for await (const subscription of stripe.subscriptions.list({
+        customer: customerId,
+        status: "all",
+        limit: 100,
+      })) {
+        if (subscription.status !== "canceled" && subscription.status !== "incomplete_expired") {
+          await cancelStripeSubscription(stripe, subscription.id);
+        }
+      }
     },
   };
 }
@@ -114,7 +136,7 @@ async function closeStripeCheckoutSession(stripe: Stripe, sessionId: string): Pr
       ? session.subscription
       : session.subscription?.id;
     if (subscriptionId) {
-      await stripe.subscriptions.cancel(subscriptionId);
+      await cancelStripeSubscription(stripe, subscriptionId);
     }
   } catch (error) {
     // Closing an already-closed or removed session is idempotent. A completed

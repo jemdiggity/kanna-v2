@@ -20,8 +20,11 @@ export interface DeleteAccountCaller {
 }
 
 export interface AccountDeletionStore {
-  activeStripeSubscriptionId(uid: string): Promise<string | null>;
   markAccountDeletionStarted(uid: string): Promise<string[]>;
+  stripeBillingReferences(uid: string): Promise<{
+    customerIds: string[];
+    subscriptionIds: string[];
+  }>;
   deleteUserTree(uid: string): Promise<void>;
   deleteBillingIndexes(uid: string): Promise<void>;
   revokeDesktopPairings(uid: string): Promise<void>;
@@ -60,14 +63,16 @@ export async function deleteAccount(
     );
   }
 
-  const subscriptionId = await dependencies.store.activeStripeSubscriptionId(caller.uid);
-  if (subscriptionId) {
+  const checkoutSessionIds = await dependencies.store.markAccountDeletionStarted(caller.uid);
+  const billing = await dependencies.store.stripeBillingReferences(caller.uid);
+  for (const subscriptionId of billing.subscriptionIds) {
     await dependencies.stripe.cancelSubscription(subscriptionId);
   }
-
-  const checkoutSessionIds = await dependencies.store.markAccountDeletionStarted(caller.uid);
   for (const sessionId of checkoutSessionIds) {
     await dependencies.stripe.closeCheckoutSession(sessionId);
+  }
+  for (const customerId of billing.customerIds) {
+    await dependencies.stripe.closeCustomerBilling(customerId);
   }
   await dependencies.store.revokeDesktopPairings(caller.uid);
   await dependencies.store.deleteLegacyDevicePairings(caller.uid);
@@ -80,16 +85,6 @@ export async function deleteAccount(
 
 export function firestoreAccountDeletionStore(db: Firestore): AccountDeletionStore {
   return {
-    async activeStripeSubscriptionId(uid) {
-      const snapshot = await db.doc(billingSourcePath(uid, "stripe")).get();
-      const source = snapshot.data() as Partial<BilledSourceState> | undefined;
-      return source
-        && (source.status === "active" || source.status === "grace")
-        && typeof source.stripeSubscriptionId === "string"
-        && source.stripeSubscriptionId.trim()
-        ? source.stripeSubscriptionId
-        : null;
-    },
     async markAccountDeletionStarted(uid) {
       const deletionRef = db.doc(accountDeletionPath(uid));
       const checkoutRef = db.doc(accountCheckoutPath(uid));
@@ -112,6 +107,26 @@ export function firestoreAccountDeletionStore(db: Firestore): AccountDeletionSto
           : [];
       });
     },
+    async stripeBillingReferences(uid) {
+      const [user, sourceSnapshot, mappings] = await Promise.all([
+        db.doc(userDocPath(uid)).get(),
+        db.doc(billingSourcePath(uid, "stripe")).get(),
+        db.collection("stripeCustomers").where("uid", "==", uid).get(),
+      ]);
+      const userData = user.data() as { stripeCustomerId?: unknown } | undefined;
+      const source = sourceSnapshot.data() as Partial<BilledSourceState> | undefined;
+      return {
+        customerIds: uniqueNonEmptyStrings([
+          userData?.stripeCustomerId,
+          source?.stripeCustomerId,
+          ...mappings.docs.flatMap((document) => {
+            const data = document.data() as { stripeCustomerId?: unknown };
+            return [document.id, data.stripeCustomerId];
+          }),
+        ]),
+        subscriptionIds: uniqueNonEmptyStrings([source?.stripeSubscriptionId]),
+      };
+    },
     async deleteUserTree(uid) {
       await db.recursiveDelete(db.doc(userDocPath(uid)));
     },
@@ -130,6 +145,12 @@ export function firestoreAccountDeletionStore(db: Firestore): AccountDeletionSto
       await deleteQuery(db, db.collection("devices").where("userId", "==", uid));
     },
   };
+}
+
+function uniqueNonEmptyStrings(values: readonly unknown[]): string[] {
+  return [...new Set(values.filter(
+    (value): value is string => typeof value === "string" && value.trim().length > 0,
+  ))];
 }
 
 export function accountDeletionDependencies(

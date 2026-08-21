@@ -9,19 +9,27 @@ import type { StripeSubscriptionGateway } from "../src/billing/stripeGateway.js"
 function harness(options: {
   failBillingIndexesOnce?: boolean;
   checkoutSessionIds?: string[];
+  customerIds?: string[];
+  legacySessionIds?: string[];
+  customerSubscriptionIds?: string[];
 } = {}) {
   const calls: string[] = [];
   let subscriptionPresent = true;
   let userTreePresent = true;
   let failBillingIndexesOnce = options.failBillingIndexesOnce ?? false;
+  const usableLegacySessions = new Set(options.legacySessionIds ?? []);
+  const liveCustomerSubscriptions = new Set(options.customerSubscriptionIds ?? []);
   const store: AccountDeletionStore = {
-    async activeStripeSubscriptionId() {
-      calls.push("read-subscription");
-      return subscriptionPresent ? "sub_active" : null;
-    },
     async markAccountDeletionStarted() {
       calls.push("mark-account-deletion-started");
       return options.checkoutSessionIds ?? [];
+    },
+    async stripeBillingReferences() {
+      calls.push("read-stripe-billing-references");
+      return {
+        customerIds: options.customerIds ?? [],
+        subscriptionIds: subscriptionPresent ? ["sub_active"] : [],
+      };
     },
     async deleteUserTree() {
       calls.push("delete-user-tree");
@@ -49,6 +57,11 @@ function harness(options: {
     closeCheckoutSession: vi.fn(async () => {
       calls.push("close-checkout-session");
     }),
+    closeCustomerBilling: vi.fn(async () => {
+      calls.push("close-customer-billing");
+      usableLegacySessions.clear();
+      liveCustomerSubscriptions.clear();
+    }),
   };
   const auth: AccountDeletionAuth = {
     revokeRefreshTokens: vi.fn(async () => {
@@ -62,6 +75,8 @@ function harness(options: {
     calls,
     dependencies: { store, stripe, auth },
     userTreePresent: () => userTreePresent,
+    usableLegacySessions,
+    liveCustomerSubscriptions,
   };
 }
 
@@ -80,9 +95,9 @@ describe("deleteAccount", () => {
       deleted: true,
     });
     expect(calls).toEqual([
-      "read-subscription",
-      "cancel-stripe",
       "mark-account-deletion-started",
+      "read-stripe-billing-references",
+      "cancel-stripe",
       "close-checkout-session",
       "revoke-desktop-pairings",
       "delete-legacy-device-pairings",
@@ -106,15 +121,15 @@ describe("deleteAccount", () => {
       deleted: true,
     });
     expect(calls).toEqual([
-      "read-subscription",
-      "cancel-stripe",
       "mark-account-deletion-started",
+      "read-stripe-billing-references",
+      "cancel-stripe",
       "revoke-desktop-pairings",
       "delete-legacy-device-pairings",
       "delete-user-tree",
       "delete-billing-indexes",
-      "read-subscription",
       "mark-account-deletion-started",
+      "read-stripe-billing-references",
       "revoke-desktop-pairings",
       "delete-legacy-device-pairings",
       "delete-user-tree",
@@ -126,7 +141,10 @@ describe("deleteAccount", () => {
 
   it("treats an already-absent Auth user as a completed rerun", async () => {
     const { dependencies } = harness();
-    dependencies.store.activeStripeSubscriptionId = vi.fn(async () => null);
+    dependencies.store.stripeBillingReferences = vi.fn(async () => ({
+      customerIds: [],
+      subscriptionIds: [],
+    }));
     const missing = Object.assign(new Error("missing"), { code: "auth/user-not-found" });
     dependencies.auth.revokeRefreshTokens = vi.fn(async () => { throw missing; });
     dependencies.auth.deleteUser = vi.fn(async () => { throw missing; });
@@ -134,5 +152,29 @@ describe("deleteAccount", () => {
     await expect(deleteAccount({ uid: "user-1" }, dependencies)).resolves.toEqual({
       deleted: true,
     });
+  });
+
+  it("closes pre-ledger customer sessions and subscriptions across a failed rerun", async () => {
+    const state = harness({
+      failBillingIndexesOnce: true,
+      customerIds: ["cus_legacy"],
+      legacySessionIds: ["cs_unrecorded"],
+      customerSubscriptionIds: ["sub_from_legacy", "sub_other_live"],
+    });
+
+    await expect(deleteAccount({ uid: "user-1" }, state.dependencies)).rejects.toThrow(
+      "injected index failure",
+    );
+    expect(state.dependencies.stripe.closeCheckoutSession).not.toHaveBeenCalled();
+    expect(state.dependencies.stripe.closeCustomerBilling).toHaveBeenCalledWith("cus_legacy");
+    expect(state.usableLegacySessions.size).toBe(0);
+    expect(state.liveCustomerSubscriptions.size).toBe(0);
+    expect(state.dependencies.auth.deleteUser).not.toHaveBeenCalled();
+
+    await expect(deleteAccount({ uid: "user-1" }, state.dependencies)).resolves.toEqual({
+      deleted: true,
+    });
+    expect(state.dependencies.stripe.closeCustomerBilling).toHaveBeenCalledTimes(2);
+    expect(state.dependencies.auth.deleteUser).toHaveBeenCalledWith("user-1");
   });
 });
