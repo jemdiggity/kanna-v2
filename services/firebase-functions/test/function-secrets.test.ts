@@ -6,8 +6,9 @@
  * declaration does not fail a normal build or emulator request, so these
  * assertions pin both deployment channels explicitly.
  *
- * No emulator is needed: `src/index.ts` builds its deployment manifest at
- * import time, and Firebase admin is initialized lazily per request.
+ * No emulator is needed: `src/index.ts` builds its deployment manifest and
+ * initializes Firebase Admin without making a credentialed request at import
+ * time.
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
