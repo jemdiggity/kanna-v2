@@ -6,6 +6,16 @@ import SignInPage from "./pages/SignInPage.vue";
 import SubscribePage from "./pages/SubscribePage.vue";
 import VerifyEmailPage from "./pages/VerifyEmailPage.vue";
 
+export function checkoutSuccessProps(route: RouteLocationNormalized): {
+  result: "success";
+  sessionId: string | null;
+} {
+  return {
+    result: "success",
+    sessionId: typeof route.query.session_id === "string" ? route.query.session_id : null,
+  };
+}
+
 export const router = createRouter({
   history: createWebHistory(),
   routes: [
@@ -14,8 +24,13 @@ export const router = createRouter({
     { path: "/sign-in", component: SignInPage, meta: { public: true } },
     { path: "/verify-email", component: VerifyEmailPage },
     { path: "/subscribe", component: SubscribePage, meta: { verified: true } },
-    { path: "/checkout/success", component: CheckoutReturnPage, props: { result: "success" }, meta: { verified: true } },
-    { path: "/checkout/cancelled", component: CheckoutReturnPage, props: { result: "cancelled" }, meta: { verified: true } },
+    {
+      path: "/billing/success",
+      component: CheckoutReturnPage,
+      props: checkoutSuccessProps,
+      meta: { verified: true },
+    },
+    { path: "/billing/canceled", component: CheckoutReturnPage, props: { result: "canceled" }, meta: { verified: true } },
     { path: "/account", component: AccountPage }
   ]
 });

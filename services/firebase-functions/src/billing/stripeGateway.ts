@@ -20,8 +20,6 @@ export interface StripeCheckoutSessionInput {
   cancelUrl: string;
 }
 
-export type StripePriceCurrency = "jpy" | "usd" | "cad" | "aud" | "eur" | "gbp";
-
 export interface StripeCheckoutSession {
   id: string;
   url: string | null;

@@ -8,12 +8,3 @@ export interface CloudEntitlement {
   graceEndsAt: unknown | null;
   environment: string;
 }
-
-export interface CheckoutSessionRequest {
-  successUrl: string;
-  cancelUrl: string;
-}
-
-export interface CheckoutSessionResponse {
-  url: string;
-}

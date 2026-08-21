@@ -642,8 +642,8 @@ may move once the opex estimate lands. The portal headline is
 `VITE_KANNA_CLOUD_PRICE` — defaulted by `kd cloud deploy` and overridable per
 deploy — beside the matrix above as static copy on the subscribe page; the iOS
 app renders StoreKit's own localized price and never hardcodes one. A re-price
-is therefore new Stripe price points, an App Store Connect change, and one line
-of portal copy.
+is therefore a replacement Stripe multi-currency Price, an App Store Connect
+change, and one line of portal copy.
 
 **The ruling prices the monthly plan only.** The earlier default of "~2 months
 free annual" is not part of it and no annual amount is decided here, while
@@ -814,14 +814,15 @@ invited accounts).
   explicitly named human production step.
   It creates what remains:
   - One **Product**, "Kanna Cloud", in **each** of test mode and live mode.
-  - Under it, a **recurring monthly Price per currency** — JPY 500, USD 500,
-    CAD 500, AUD 500, EUR 500, GBP 500 in Stripe's minor units (JPY is
-    zero-decimal, so `500` is ¥500; the rest are $5.00 / €5.00 / £5.00) —
-    **twelve price points in total, six test and six live**, with stable lookup
-    keys `cloud_monthly_jpy`, `cloud_monthly_usd`, `cloud_monthly_cad`,
-    `cloud_monthly_aud`, `cloud_monthly_eur`, and `cloud_monthly_gbp`.
-    `createCheckoutSession` resolves the selected currency by lookup key.
-    Live-mode creation is human-only, like production deploys.
+  - Under it, one **recurring multi-currency monthly Price** per mode with the
+    stable lookup key `cloud_monthly`: USD 500 is the default amount, with JPY
+    500, CAD 500, AUD 500, EUR 500, and GBP 500 as manual currency options
+    (JPY is zero-decimal, so `500` is ¥500; the rest are $5.00 / €5.00 /
+    £5.00). Checkout chooses a supported local currency from the buyer's
+    location; neither the portal nor the callable accepts a currency choice.
+    The script deactivates legacy `cloud_monthly_<currency>` Prices only after
+    the multi-currency replacement exists and retains them for historical
+    subscriptions. Live-mode creation is human-only, like production deploys.
   - **Still requiring dashboard/key access:** create restricted API keys for
     test and live mode; supply each portal build environment's publishable key
     as `KANNA_WEB_PORTAL_STRIPE_PUBLISHABLE_KEY`; after the deployed

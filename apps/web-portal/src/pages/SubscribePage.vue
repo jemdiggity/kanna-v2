@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref } from "vue";
+import { checkoutSessionRequest } from "../checkout";
 import { usePortalFirebase } from "../session";
 
 const api = usePortalFirebase();
@@ -12,7 +13,8 @@ const error = ref("");
  * The headline price, and the same amount in every currency Kanna Cloud is sold
  * in (owner ruling, 2026-08-21 — see `docs/specs/accounts-and-billing.md`). One
  * build-time string plus a static list, deliberately: there is no locale
- * framework in the portal and one price per currency does not need one.
+ * framework in the portal, while Stripe localizes Checkout from the buyer's
+ * location using the single multi-currency Price.
  */
 const price = import.meta.env.VITE_KANNA_CLOUD_PRICE || "$5/month";
 const currencies = ["¥500 JPY", "$5 USD", "$5 CAD", "$5 AUD", "€5 EUR", "£5 GBP"];
@@ -21,10 +23,8 @@ async function subscribe(): Promise<void> {
   pending.value = true;
   error.value = "";
   try {
-    const { url } = await api.createCheckoutSession({
-      successUrl: `${window.location.origin}/checkout/success`,
-      cancelUrl: `${window.location.origin}/checkout/cancelled`
-    });
+    const { url } = await api.createCheckoutSession(checkoutSessionRequest());
+    if (!url) throw new Error("Stripe did not return a Checkout URL. Please try again.");
     props.redirect(url);
   } catch (caught: unknown) {
     error.value = caught instanceof Error ? caught.message : "Could not start Checkout.";

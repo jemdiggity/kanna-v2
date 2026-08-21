@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "main": "dist/src/index.js",
+  "exports": {
+    ".": "./dist/src/index.js",
+    "./billing-contract": "./src/billing/contract.ts"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "test": "pnpm exec vitest run --maxWorkers=2 --exclude 'dist/**'",
