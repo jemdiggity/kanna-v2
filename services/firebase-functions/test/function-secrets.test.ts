@@ -1,19 +1,22 @@
 /**
  * The deployed functions' Secret Manager bindings.
  *
- * A deployed 2nd-gen function's environment is populated only from declared
- * secrets and committed `.env` files, so dropping a `secrets` declaration does
- * not fail a build, a typecheck, or any emulator test — it produces a billing
- * backend that answers every Stripe delivery with a 500 in production and
- * nowhere else. These assertions are the thing that would catch that.
+ * A deployed 2nd-gen function's environment is populated from declared secrets
+ * and committed `.env` parameters. Dropping a secret binding or parameter
+ * declaration does not fail a normal build or emulator request, so these
+ * assertions pin both deployment channels explicitly.
  *
  * No emulator is needed: `src/index.ts` builds its deployment manifest at
  * import time, and Firebase admin is initialized lazily per request.
  */
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { declaredParams } from "firebase-functions/params";
 import { describe, expect, it } from "vitest";
 import {
   CHECKOUT_SECRET_ENVS,
   DELETE_ACCOUNT_SECRET_ENVS,
+  PORTAL_BASE_URL_PARAM,
   STRIPE_WEBHOOK_SECRET_ENVS,
   resolveCheckoutConfig,
   resolveWebhookConfig,
@@ -45,10 +48,23 @@ describe("deployed function secret bindings", () => {
 
   it("binds createCheckoutSession to its declared Secret Manager entries", () => {
     expect(boundSecrets("createCheckoutSession")).toEqual([...CHECKOUT_SECRET_ENVS]);
-    expect(boundSecrets("createCheckoutSession")).toEqual([
-      "STRIPE_SECRET_KEY",
-      "KANNA_PORTAL_BASE_URL",
-    ]);
+    expect(boundSecrets("createCheckoutSession")).toEqual(["STRIPE_SECRET_KEY"]);
+  });
+
+  it("declares the portal URL as a required Firebase string parameter", () => {
+    expect(declaredParams.map((param) => param.name)).toContain("KANNA_PORTAL_BASE_URL");
+    expect(PORTAL_BASE_URL_PARAM.options.default).toBeUndefined();
+    expect(PORTAL_BASE_URL_PARAM.options.input).toEqual(
+      expect.objectContaining({ text: expect.objectContaining({ nonEmpty: true }) })
+    );
+  });
+
+  it.each([
+    [".env", "https://kanna-build-account.web.app"],
+    [".env.kanna-staging", "https://kanna-staging-account.web.app"],
+  ])("commits %s with the portal parameter", (filename, expectedUrl) => {
+    const contents = readFileSync(join(import.meta.dirname, "..", filename), "utf8");
+    expect(contents).toContain(`KANNA_PORTAL_BASE_URL=${expectedUrl}`);
   });
 
   it("binds stripeWebhook to the signing secret and nothing else", () => {
@@ -66,9 +82,14 @@ describe("deployed function secret bindings", () => {
     expect(boundSecrets("createCheckoutSession")).not.toContain("STRIPE_WEBHOOK_SECRET");
   });
 
-  describe("each binding list is exactly what its resolver requires", () => {
-    it("resolves the checkout config from its bound entries alone", () => {
-      expect(() => resolveCheckoutConfig(envFor(CHECKOUT_SECRET_ENVS))).not.toThrow();
+  describe("each secret binding list plus parameter is exactly what its resolver requires", () => {
+    it("resolves the checkout config from its secret and parameter", () => {
+      expect(() =>
+        resolveCheckoutConfig({
+          ...envFor(CHECKOUT_SECRET_ENVS),
+          KANNA_PORTAL_BASE_URL: "https://portal.example.test",
+        })
+      ).not.toThrow();
     });
 
     it("resolves the webhook config from its bound entries alone", () => {
@@ -78,10 +99,19 @@ describe("deployed function secret bindings", () => {
     it.each([...CHECKOUT_SECRET_ENVS])(
       "fails checkout when %s is the one entry missing",
       (missing) => {
-        const env = envFor(CHECKOUT_SECRET_ENVS.filter((name) => name !== missing));
+        const env = {
+          ...envFor(CHECKOUT_SECRET_ENVS.filter((name) => name !== missing)),
+          KANNA_PORTAL_BASE_URL: "https://portal.example.test",
+        };
         expect(() => resolveCheckoutConfig(env)).toThrow(missing);
       }
     );
+
+    it("fails checkout when the portal parameter is missing", () => {
+      expect(() => resolveCheckoutConfig(envFor(CHECKOUT_SECRET_ENVS))).toThrow(
+        "KANNA_PORTAL_BASE_URL"
+      );
+    });
 
     it.each([...STRIPE_WEBHOOK_SECRET_ENVS])(
       "fails the webhook when %s is the one entry missing",

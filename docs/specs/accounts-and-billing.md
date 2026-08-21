@@ -818,7 +818,23 @@ invited accounts).
     test and live mode; supply each portal build environment's publishable key
     as `KANNA_WEB_PORTAL_STRIPE_PUBLISHABLE_KEY`; after the deployed
     `stripeWebhook` function URL is registered as a Stripe endpoint, record its
-    webhook signing secret.
+    webhook signing secret. Store only `STRIPE_SECRET_KEY` and
+    `STRIPE_WEBHOOK_SECRET` with `firebase functions:secrets:set` in each
+    project. `KANNA_PORTAL_BASE_URL` is public Firebase Functions parameterized
+    configuration committed in `services/firebase-functions/.env` (production
+    and local default) and `.env.kanna-staging`; operators no longer set it as a
+    function secret.
+  - **One-time obsolete-secret cleanup, after a functions deploy using the
+    parameter:** the already-set Secret Manager value is unused and may be
+    deleted. Run the applicable commands if the value exists in those projects:
+
+    ```sh
+    pnpm exec firebase functions:secrets:destroy KANNA_PORTAL_BASE_URL --project kanna-staging
+    pnpm exec firebase functions:secrets:destroy KANNA_PORTAL_BASE_URL --project kanna-build
+    ```
+
+    This is an explicit operator runbook step; automation and agents must not
+    perform the destructive cleanup.
   - **The annual plan is still unpriced** (the ruling covers monthly only), so
     checkout deliberately exposes only monthly billing. Owner call, Slice 0.
   - Apple's grid has no exact ¥500/$5 equivalents in every storefront: pick
