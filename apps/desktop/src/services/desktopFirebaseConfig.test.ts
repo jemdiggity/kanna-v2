@@ -35,6 +35,15 @@ describe("resolveDesktopFirebaseConfig", () => {
     expect(config.portalBaseUrl).toBe("https://portal.example.test");
   });
 
+  it("defaults the portal to production outside dev", async () => {
+    const config = await resolveDesktopFirebaseConfig({
+      readEnv: async () => "",
+      dev: false,
+    });
+
+    expect(config.portalBaseUrl).toBe("https://kanna-build-account.web.app");
+  });
+
   it("uses the workspace-provided auth emulator port", async () => {
     const readEnv = vi.fn(async (name: string) => {
       if (name === "KANNA_FIREBASE_AUTH_PORT") return "19100";

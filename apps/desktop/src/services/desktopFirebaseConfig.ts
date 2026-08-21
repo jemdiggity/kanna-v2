@@ -70,6 +70,7 @@ export async function resolveDesktopFirebaseConfig({
       runtimePortalBaseUrl,
       webPortalPort,
       cloudEnv,
+      dev,
     }),
   };
 }
@@ -78,11 +79,13 @@ function resolvePortalBaseUrl(input: {
   runtimePortalBaseUrl: string;
   webPortalPort: string;
   cloudEnv: DesktopCloudEnv | null;
+  dev: boolean;
 }): string {
   const runtime = parseHttpBaseUrl(input.runtimePortalBaseUrl);
   if (runtime) return runtime;
   if (input.cloudEnv === "staging") return "https://kanna-staging-account.web.app";
   if (input.cloudEnv === "production") return "https://kanna-build-account.web.app";
+  if (!input.dev) return "https://kanna-build-account.web.app";
 
   const port = parsePort(input.webPortalPort) ?? 5173;
   return `http://127.0.0.1:${port}`;
