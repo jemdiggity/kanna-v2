@@ -46,6 +46,8 @@ Grouped highlights — run `./kd` for the full surface (task ids live in
 
 ```sh
 ./kd dev up                  # start desktop dev stack in background tmux
+./kd dev up --staging        # worktree desktop against staging cloud services
+./kd dev up --staging --with-credentials  # + local staging desktop auto-sign-in
 ./kd dev up --mobile         # + Expo mobile app
 ./kd dev up --emulators      # + Firebase emulators
 ./kd dev up --cloud staging  # dev desktop + worktree owner + staging cloud

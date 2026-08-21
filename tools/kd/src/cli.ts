@@ -1016,7 +1016,7 @@ const helpTopics: Record<string, string[]> = {
     "  dev seed [options]"
   ],
   "dev up": [
-    "Usage: kd dev up [--cloud emulators|staging] [--mobile] [--emulators] [--seed] [--attach] [--db <path-or-name>] [--delete-db] [--firebase-env-from <task-or-path>]",
+    "Usage: kd dev up [--cloud emulators|staging] [--staging] [--with-credentials] [--mobile] [--emulators] [--seed] [--attach] [--db <path-or-name>] [--delete-db] [--firebase-env-from <task-or-path>]",
     "Usage: kd dev up --remote",
     "",
     "Start the Kanna dev environment.",
@@ -1026,6 +1026,7 @@ const helpTopics: Record<string, string[]> = {
     "  --emulators, -e                    Start Firebase emulators.",
     "  --cloud emulators|staging           Select cloud infrastructure; staging keeps the worktree server/daemon.",
     "  --staging                           Compatibility alias for --cloud staging.",
+    "  --with-credentials                  Use local dev credentials, or staging credentials with --staging; local dev also starts emulators.",
     "  --remote                           Start a remote-poking dev stack.",
     "  --seed, -s                         Seed the dev database after startup.",
     "  --attach, -a                       Attach to the tmux session.",

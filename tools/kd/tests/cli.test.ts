@@ -607,6 +607,24 @@ describe("kd CLI", () => {
     expect(error).toHaveBeenLastCalledWith("Unknown help topic: not-a-command");
   });
 
+  it("keeps dev up staging flags aligned between parsing and command help", async () => {
+    expect(parseCliArgs(["dev", "up", "--staging", "--with-credentials"])).toMatchObject({
+      taskId: "dev.up",
+      input: {
+        staging: true,
+        withCredentials: true
+      }
+    });
+
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    await expect(runCli(["dev", "up", "--help"])).resolves.toBe(0);
+
+    const output = String(log.mock.lastCall?.[0]);
+    expect(output).toContain("[--cloud emulators|staging] [--staging] [--with-credentials]");
+    expect(output).toContain("--staging                           Compatibility alias for --cloud staging.");
+    expect(output).toContain("--with-credentials                  Use local dev credentials, or staging credentials with --staging; local dev also starts emulators.");
+  });
+
   it("returns a nonzero exit code for an unknown flag", async () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
 
