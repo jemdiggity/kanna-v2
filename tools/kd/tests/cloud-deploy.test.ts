@@ -291,6 +291,10 @@ describe("cloud deploy runtime", () => {
           cwd: options?.cwd,
           ...(options?.streamOutput === undefined ? {} : { streamOutput: options.streamOutput })
         });
+        if (command === "pnpm" && args.includes("services/firebase-functions") && args.includes("build")) {
+          mkdirSync(join(repoRoot, "services/firebase-functions/dist/src"), { recursive: true });
+          writeFileSync(join(repoRoot, "services/firebase-functions/dist/src/index.js"), "export {};\n");
+        }
         return gitSourceResult(command, args) ?? { exitCode: 0, stdout: "", stderr: "" };
       }
     };
@@ -348,6 +352,33 @@ describe("cloud deploy runtime", () => {
           streamOutput: true
         }
       ]);
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to deploy functions when the build produces no compiled entrypoint", async () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), "kd-cloud-deploy-"));
+    mkdirSync(join(repoRoot, "services/firebase-functions"), { recursive: true });
+    const calls: string[] = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push(`${command} ${args.join(" ")}`);
+        return gitSourceResult(command, args) ?? { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+
+    try {
+      await expect(deployFirebaseCloud({
+        repoRoot,
+        env: { KANNA_FIREBASE_STAGING_PROJECT: "kanna-staging" },
+        runner,
+        environment: "staging",
+        functions: true
+      })).rejects.toThrow(
+        "Firebase functions build did not create services/firebase-functions/dist/src/index.js"
+      );
+      expect(calls.some((call) => call.includes("firebase deploy"))).toBe(false);
     } finally {
       rmSync(repoRoot, { recursive: true, force: true });
     }

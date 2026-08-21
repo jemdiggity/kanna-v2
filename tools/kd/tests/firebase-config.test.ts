@@ -6,7 +6,12 @@ interface FirebaseHostingConfig {
   target?: string;
 }
 
+interface FirebaseFunctionsConfig {
+  ignore?: string[];
+}
+
 interface FirebaseConfig {
+  functions?: FirebaseFunctionsConfig;
   hosting?: FirebaseHostingConfig | FirebaseHostingConfig[];
 }
 
@@ -22,6 +27,20 @@ function readJson<T>(path: string): T {
 }
 
 describe("Firebase repository config", () => {
+  it("anchors source-only Functions ignores so they do not strip compiled output", () => {
+    const firebase = readJson<FirebaseConfig>(resolve(repoRoot, "firebase.json"));
+    const ignore = firebase.functions?.ignore;
+
+    expect(ignore).toEqual(expect.arrayContaining([
+      "/src",
+      "/test",
+      "/scripts"
+    ]));
+    for (const unanchored of ["src", "test", "scripts"]) {
+      expect(ignore).not.toContain(unanchored);
+    }
+  });
+
   it("maps every hosting target for the local, staging, and production projects", () => {
     const firebase = readJson<FirebaseConfig>(resolve(repoRoot, "firebase.json"));
     const firebaserc = readJson<Firebaserc>(resolve(repoRoot, ".firebaserc"));
