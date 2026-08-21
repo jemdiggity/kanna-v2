@@ -8,6 +8,12 @@ export interface TmuxTarget {
   inventoryPath?: string;
 }
 
+export interface StartTmuxSessionOptions {
+  reconcileKey?: string;
+}
+
+const RECONCILE_OPTION = "@kanna_reconcile_key";
+
 function tmuxWindowEnvArgs(env: NodeJS.ProcessEnv): string[] {
   const keys = [
     "KANNA_DESKTOP_AUTO_SIGN_IN_EMAIL",
@@ -98,7 +104,12 @@ export async function hasTmuxSession(runner: CommandRunner, target: TmuxTarget):
   return result.exitCode === 0;
 }
 
-export async function startTmuxSession(runner: CommandRunner, target: TmuxTarget, windows: DevWindow[]): Promise<void> {
+export async function startTmuxSession(
+  runner: CommandRunner,
+  target: TmuxTarget,
+  windows: DevWindow[],
+  options: StartTmuxSessionOptions = {}
+): Promise<void> {
   const [first, ...rest] = windows;
   if (!first) {
     throw new Error("Cannot start tmux session without windows");
@@ -122,6 +133,14 @@ export async function startTmuxSession(runner: CommandRunner, target: TmuxTarget
       if (target.inventoryPath) {
         recordInventoryResource(target.inventoryPath, { kind: "tmux-server", socket: target.server });
       }
+      if (options.reconcileKey && !(await tmuxSessionMatchesReconcileKey(runner, target, options.reconcileKey))) {
+        const stopped = await stopTmuxSession(runner, target);
+        if (!stopped) {
+          throw new Error(`tmux failed to reconcile existing session ${target.session}`);
+        }
+        await startTmuxSession(runner, target, windows, options);
+        return;
+      }
       await addMissingTmuxWindows(runner, target, windows);
       return;
     }
@@ -133,6 +152,9 @@ export async function startTmuxSession(runner: CommandRunner, target: TmuxTarget
   await recordTmuxServerSocketPath(runner, target);
 
   await setRemainOnExit(runner, target);
+  if (options.reconcileKey) {
+    await setTmuxSessionReconcileKey(runner, target, options.reconcileKey);
+  }
 
   if (hasTmuxWindowEnv(first.env)) {
     const respawned = await respawnTmuxWindow(runner, target, first);
@@ -165,6 +187,35 @@ export async function startTmuxSession(runner: CommandRunner, target: TmuxTarget
       throw new Error(`tmux failed to start ${target.session}:${window.name}: ${result.stderr}`);
     }
     await recordTmuxPane(runner, target, window.name);
+  }
+}
+
+async function tmuxSessionMatchesReconcileKey(
+  runner: CommandRunner,
+  target: TmuxTarget,
+  reconcileKey: string
+): Promise<boolean> {
+  const result = await runner.run("tmux", [
+    "-L", target.server,
+    "show-options", "-v",
+    "-t", target.session,
+    RECONCILE_OPTION
+  ]);
+  return result.exitCode === 0 && result.stdout.trim() === reconcileKey;
+}
+
+async function setTmuxSessionReconcileKey(
+  runner: CommandRunner,
+  target: TmuxTarget,
+  reconcileKey: string
+): Promise<void> {
+  const result = await runner.run("tmux", [
+    "-L", target.server,
+    "set-option", "-t", target.session,
+    RECONCILE_OPTION, reconcileKey
+  ]);
+  if (result.exitCode !== 0) {
+    throw new Error(`tmux failed to record launch profile for ${target.session}: ${result.stderr}`);
   }
 }
 

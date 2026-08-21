@@ -556,7 +556,9 @@ export async function executeDevUpWithContext(input: DevUpInput, executor: Execu
     mobileServerUrl: resolveMobileServerUrl(env)
   });
 
-  await startTmuxSession(executor.runner, executor.context.tmux, plan.windows);
+  await startTmuxSession(executor.runner, executor.context.tmux, plan.windows, {
+    reconcileKey: `dev:${formatEnvironmentProfile(profile)}`
+  });
   if (input.seed) {
     await seedSqliteDb(executor.runner, executor.context.repoRoot, env.KANNA_DB_PATH ?? "");
   }
@@ -888,7 +890,9 @@ export async function executeProductionMobileUpWithContext(
       profile
     });
 
-    await startTmuxSession(executor.runner, executor.context.tmux, mobilePlan.windows);
+    await startTmuxSession(executor.runner, executor.context.tmux, mobilePlan.windows, {
+      reconcileKey: `mobile:${formatEnvironmentProfile(profile)}`
+    });
 
     return {
       ok: true,
@@ -923,7 +927,9 @@ export async function executeProductionMobileUpWithContext(
     profile
   });
 
-  await startTmuxSession(executor.runner, executor.context.tmux, plan.windows);
+  await startTmuxSession(executor.runner, executor.context.tmux, plan.windows, {
+    reconcileKey: `mobile:${formatEnvironmentProfile(profile)}`
+  });
 
   const desktopId = status.desktopId ?? "unknown desktop";
   const version = status.version ?? "unknown version";
@@ -1155,7 +1161,9 @@ export async function executeMobileDeviceRunWithContext(
   const lanHost = requireMobileDeviceLanHost(options);
   const launch = prepareMobileDeviceLaunch(input, profile, executor, lanHost, buildEnv);
   await launch.resetTmux();
-  await startTmuxSession(executor.runner, executor.context.tmux, launch.plan.windows);
+  await startTmuxSession(executor.runner, executor.context.tmux, launch.plan.windows, {
+    reconcileKey: `mobile-device:${formatEnvironmentProfile(profile)}`
+  });
   const metroPort = Number.parseInt(launch.env.KANNA_MOBILE_PORT ?? "8081", 10);
   if (Number.isNaN(metroPort)) {
     throw new Error(`KANNA_MOBILE_PORT must be an integer, got: ${launch.env.KANNA_MOBILE_PORT}`);

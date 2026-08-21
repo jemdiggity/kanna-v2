@@ -417,6 +417,165 @@ describe("task executors", () => {
     expect(calls.map((call) => call.args.join(" ")).join("\n")).not.toContain("dev@example.com");
   });
 
+  it("reconciles a running worktree session when the desktop cloud profile changes", async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-dev-profile-switch-"));
+    await mkdir(join(repoRoot, "apps", "desktop", "src-tauri"), { recursive: true });
+    await writeFile(
+      join(repoRoot, "firebase.json"),
+      JSON.stringify({ functions: { source: "services/firebase-functions" }, emulators: {} })
+    );
+    const calls: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv }> = [];
+    let sessionExists = false;
+    let reconcileKey: string | undefined;
+    let panePid = 100;
+    const runner: CommandRunner = {
+      async run(command, args, options) {
+        calls.push({ command, args, env: options?.env });
+        if (args.includes("new-session")) {
+          if (sessionExists) {
+            return { exitCode: 1, stdout: "", stderr: "duplicate session: kanna-task-abc" };
+          }
+          sessionExists = true;
+          panePid += 1;
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (args.includes("show-options")) {
+          return reconcileKey
+            ? { exitCode: 0, stdout: `${reconcileKey}\n`, stderr: "" }
+            : { exitCode: 1, stdout: "", stderr: "unknown option" };
+        }
+        if (args.includes("set-option") && args.includes("@kanna_reconcile_key")) {
+          reconcileKey = args.at(-1);
+        }
+        if (args.includes("has-session")) {
+          return { exitCode: sessionExists ? 0 : 1, stdout: "", stderr: "" };
+        }
+        if (args.includes("list-windows")) {
+          return { exitCode: sessionExists ? 0 : 1, stdout: sessionExists ? "desktop\n" : "", stderr: "" };
+        }
+        if (args.includes("kill-session")) {
+          sessionExists = false;
+          reconcileKey = undefined;
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+    const executor = {
+      runner,
+      context: {
+        repoRoot,
+        tmux: { server: "kanna-task-abc", session: "kanna-task-abc" },
+        ports: {
+          KANNA_DEV_PORT: 1421,
+          KANNA_MOBILE_PORT: 8084,
+          KANNA_FIREBASE_AUTH_PORT: 9100,
+          KANNA_FIREBASE_FIRESTORE_PORT: 9101,
+          KANNA_FIREBASE_FUNCTIONS_PORT: 9102,
+          KANNA_FIREBASE_UI_PORT: 9103
+        },
+        env: {
+          KANNA_DEV_PORT: "1421",
+          KANNA_MOBILE_PORT: "8084",
+          KANNA_FIREBASE_AUTH_PORT: "9100",
+          KANNA_FIREBASE_FIRESTORE_PORT: "9101",
+          KANNA_FIREBASE_FUNCTIONS_PORT: "9102",
+          KANNA_FIREBASE_UI_PORT: "9103"
+        }
+      }
+    };
+    const baseInput = {
+      mobile: false,
+      emulators: false,
+      seed: false,
+      attach: false,
+      deleteDb: false,
+      killDaemon: false,
+      staging: false
+    };
+
+    await executeDevUpWithContext(baseInput, executor);
+    const firstPid = panePid;
+    await executeDevUpWithContext(baseInput, executor);
+    expect(panePid).toBe(firstPid);
+
+    await executeDevUpWithContext({ ...baseInput, cloud: "staging" }, executor);
+    expect(panePid).toBeGreaterThan(firstPid);
+    expect(calls.some((call) => call.args.includes("kill-session"))).toBe(true);
+    const stagingStart = calls.filter((call) => call.args.includes("new-session") && call.env?.KANNA_CLOUD_ENV === "staging");
+    expect(stagingStart).toHaveLength(2);
+    expect(reconcileKey).toBe("dev:build=dev, owner=worktree, cloud=staging");
+  });
+
+  it("replaces a worktree Metro plan before starting installed-owner mobile", async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-mobile-owner-switch-"));
+    const calls: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv }> = [];
+    let sessionExists = true;
+    let reconcileKey = "dev:build=dev, owner=worktree, cloud=emulators";
+    const runner: CommandRunner = {
+      async run(command, args, options) {
+        calls.push({ command, args, env: options?.env });
+        if (command === "curl") {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({ desktopId: "desktop-installed-staging", version: "0.2.0" }),
+            stderr: ""
+          };
+        }
+        if (args.includes("new-session")) {
+          if (sessionExists) {
+            return { exitCode: 1, stdout: "", stderr: "duplicate session: kanna-task-abc" };
+          }
+          sessionExists = true;
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (args.includes("show-options")) {
+          return { exitCode: 0, stdout: `${reconcileKey}\n`, stderr: "" };
+        }
+        if (args.includes("set-option") && args.includes("@kanna_reconcile_key")) {
+          reconcileKey = args.at(-1) ?? reconcileKey;
+        }
+        if (args.includes("has-session")) {
+          return { exitCode: sessionExists ? 0 : 1, stdout: "", stderr: "" };
+        }
+        if (args.includes("list-windows")) {
+          return {
+            exitCode: sessionExists ? 0 : 1,
+            stdout: sessionExists ? "mobile\nemulators\nrelay\ndesktop\n" : "",
+            stderr: ""
+          };
+        }
+        if (args.includes("kill-session")) {
+          sessionExists = false;
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+
+    await executeProductionMobileUpWithContext(
+      { production: false, staging: false, build: "dev", owner: "staging" },
+      {
+        runner,
+        context: {
+          repoRoot,
+          tmux: { server: "kanna-task-abc", session: "kanna-task-abc" },
+          ports: { KANNA_MOBILE_PORT: 8084 },
+          env: { KANNA_MOBILE_PORT: "8084" }
+        }
+      }
+    );
+
+    expect(calls.some((call) => call.args.includes("kill-session"))).toBe(true);
+    const stagingStarts = calls.filter(
+      (call) => call.args.includes("new-session") && call.env?.KANNA_DESKTOP_OWNER_ENV === "staging"
+    );
+    expect(stagingStarts).toHaveLength(2);
+    expect(stagingStarts.at(-1)?.args).toEqual(
+      expect.arrayContaining(["-n", "mobile", "-c", `${repoRoot}/apps/mobile`])
+    );
+    expect(reconcileKey).toBe("mobile:build=dev, owner=staging, cloud=staging");
+    expect(calls.filter((call) => call.args.includes("new-window"))).toHaveLength(0);
+  });
+
   it("starts dev desktop with emulator seed credentials when opt-in credentials are requested", async () => {
     const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-dev-up-creds-"));
     const home = await mkdtemp(join(tmpdir(), "kanna-kd-dev-up-creds-home-"));
