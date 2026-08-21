@@ -19,7 +19,10 @@ import {
   type CompanionState,
   type CompanionStatus
 } from "@kanna/visual-companion";
-import type { TaskCompanionStreamEvent } from "../lib/api/client";
+import type {
+  TaskAgentStreamEvent,
+  TaskCompanionStreamEvent
+} from "../lib/api/client";
 import type {
   TerminalScrollbackChunk,
   TerminalWindowMetadata
@@ -190,6 +193,7 @@ export interface SessionState {
   taskAgentTaskId: string | null;
   taskAgentStatus: TaskTerminalStatus;
   taskAgentEvents: FrameAgentEvent[];
+  taskAgentHistory: TaskAgentHistory | null;
   taskAgentErrorMessage: string | null;
   taskCompanionTaskId: string | null;
   taskCompanionStatus: TaskCompanionStatus;
@@ -215,6 +219,23 @@ export interface TaskTerminalScrollback {
    * the middle of the terminal.
    */
   atClientLimit: boolean;
+}
+
+export interface TaskAgentHistory {
+  beforeSeq: number;
+  afterSeq: number;
+  loading: boolean;
+  pendingRanges: readonly { beforeSeq: number; afterSeq: number }[];
+}
+
+function mergeAgentEvents(
+  current: readonly FrameAgentEvent[],
+  incoming: readonly FrameAgentEvent[]
+): FrameAgentEvent[] {
+  const bySeq = new Map<number, FrameAgentEvent>();
+  for (const entry of current) bySeq.set(entry.seq, entry);
+  for (const entry of incoming) bySeq.set(entry.seq, entry);
+  return [...bySeq.values()].sort((left, right) => left.seq - right.seq);
 }
 
 function scrollbackFromWindow(
@@ -387,7 +408,11 @@ export interface SessionStore {
   setTaskTerminalDims(taskId: string, cols: number, rows: number): void;
   setTaskTerminalError(taskId: string, message: string): void;
   beginTaskAgent(taskId: string): void;
-  applyTaskAgentStreamEvent(taskId: string, event: { type: "snapshot"; events: FrameAgentEvent[] } | { type: "event"; seq: number; event: FrameAgentEvent["event"] } | { type: "status"; status: string } | { type: "exit"; code: number } | { type: "error"; message: string }): void;
+  applyTaskAgentStreamEvent(
+    taskId: string,
+    event: TaskAgentStreamEvent | { type: "error"; message: string }
+  ): void;
+  setTaskAgentHistoryLoading(taskId: string, loading: boolean): boolean;
   beginTaskCompanion(taskId: string): void;
   applyTaskCompanionStreamEvent(
     taskId: string,
@@ -462,6 +487,7 @@ export function createSessionStore(): SessionStore {
     taskAgentTaskId: null,
     taskAgentStatus: "idle",
     taskAgentEvents: [],
+    taskAgentHistory: null,
     taskAgentErrorMessage: null,
     taskCompanionTaskId: null,
     taskCompanionStatus: "idle",
@@ -1202,6 +1228,8 @@ export function createSessionStore(): SessionStore {
           selectedTaskId === null ? "idle" : state.taskAgentStatus,
         taskAgentEvents:
           selectedTaskId === null ? [] : state.taskAgentEvents,
+        taskAgentHistory:
+          selectedTaskId === null ? null : state.taskAgentHistory,
         taskAgentErrorMessage:
           selectedTaskId === null ? null : state.taskAgentErrorMessage,
         taskCompanionTaskId:
@@ -1715,6 +1743,7 @@ export function createSessionStore(): SessionStore {
         taskAgentTaskId: taskId,
         taskAgentStatus: "connecting",
         taskAgentEvents: [],
+        taskAgentHistory: null,
         taskAgentErrorMessage: null
       };
       publish();
@@ -1725,11 +1754,67 @@ export function createSessionStore(): SessionStore {
       }
 
       if (event.type === "snapshot") {
+        const resumed = event.resumed === true;
+        const mergedEvents = resumed
+          ? mergeAgentEvents(state.taskAgentEvents, event.events)
+          : event.events;
+        let history = state.taskAgentHistory;
+        if (
+          typeof event.historyStartSeq === "number" &&
+          typeof event.historyFromSeq === "number"
+        ) {
+          if (event.historyStartSeq > event.historyFromSeq) {
+            const pendingRanges =
+              resumed && history
+                ? [
+                    {
+                      beforeSeq: history.beforeSeq,
+                      afterSeq: history.afterSeq
+                    },
+                    ...history.pendingRanges
+                  ]
+                : [];
+            history = {
+              beforeSeq: event.historyStartSeq,
+              afterSeq: event.historyFromSeq,
+              loading: false,
+              pendingRanges
+            };
+          } else if (resumed && history) {
+            history = { ...history, loading: false };
+          } else {
+            history = null;
+          }
+        }
         state = {
           ...state,
           taskAgentStatus: "live",
-          taskAgentEvents: event.events,
+          taskAgentEvents: mergedEvents,
+          taskAgentHistory: history,
           taskAgentErrorMessage: null
+        };
+        publish();
+        return;
+      }
+
+      if (event.type === "history") {
+        const current = state.taskAgentHistory;
+        if (!current || event.afterSeq !== current.afterSeq) return;
+        const reachedRangeStart =
+          event.startSeq <= current.afterSeq || event.events.length === 0;
+        const nextRange = reachedRangeStart ? current.pendingRanges[0] : undefined;
+        state = {
+          ...state,
+          taskAgentEvents: mergeAgentEvents(state.taskAgentEvents, event.events),
+          taskAgentHistory: reachedRangeStart
+            ? nextRange
+              ? {
+                  ...nextRange,
+                  loading: false,
+                  pendingRanges: current.pendingRanges.slice(1)
+                }
+              : null
+            : { ...current, beforeSeq: event.startSeq, loading: false }
         };
         publish();
         return;
@@ -1745,7 +1830,6 @@ export function createSessionStore(): SessionStore {
         publish();
         return;
       }
-
       if (event.type === "status") {
         state = {
           ...state,
@@ -1839,6 +1923,21 @@ export function createSessionStore(): SessionStore {
         }
       }
     },
+    setTaskAgentHistoryLoading(taskId, loading) {
+      if (
+        state.taskAgentTaskId !== taskId ||
+        !state.taskAgentHistory ||
+        state.taskAgentHistory.loading === loading
+      ) {
+        return false;
+      }
+      state = {
+        ...state,
+        taskAgentHistory: { ...state.taskAgentHistory, loading }
+      };
+      publish();
+      return true;
+    },
     markTaskCompanionViewed(taskId) {
       if (
         state.taskCompanionTaskId !== taskId ||
@@ -1879,6 +1978,7 @@ export function createSessionStore(): SessionStore {
         taskAgentTaskId: null,
         taskAgentStatus: "idle",
         taskAgentEvents: [],
+        taskAgentHistory: null,
         taskAgentErrorMessage: null,
         taskCompanionTaskId: null,
         taskCompanionStatus: "idle",
@@ -1910,6 +2010,7 @@ export function createSessionStore(): SessionStore {
         taskAgentTaskId: null,
         taskAgentStatus: "idle",
         taskAgentEvents: [],
+        taskAgentHistory: null,
         taskAgentErrorMessage: null
       };
       publish();

@@ -55,11 +55,36 @@ export const AUTH_FAILURE_CLOSE_CODE = 4005;
 
 export interface AgentStreamHandlers {
   /** Journal replay on (re)attach. `nextSeq` is where the live stream resumes. */
-  onSnapshot(events: FrameAgentEvent[], nextSeq: number): void;
+  onSnapshot(
+    events: FrameAgentEvent[],
+    nextSeq: number,
+    window: AgentHistoryWindowMetadata | null,
+  ): void;
+  onHistoryChunk?(chunk: AgentHistoryChunk): void;
   onEvent(seq: number, event: AgentEvent): void;
   onStatus?(status: string): void;
   onSessionExit?(code: number): void;
   onError?(code: string, message: string): void;
+}
+
+export interface AgentHistoryWindowMetadata {
+  historyStartSeq: number;
+  historyFromSeq: number;
+  resumed: boolean;
+}
+
+export interface AgentHistoryChunk {
+  requestId: number;
+  startSeq: number;
+  endSeq: number;
+  afterSeq: number;
+  events: FrameAgentEvent[];
+}
+
+export interface AgentHistoryRequest {
+  beforeSeq: number;
+  afterSeq: number;
+  maxEvents: number;
 }
 
 /**
@@ -210,6 +235,8 @@ export interface StreamClientOptions {
    * for bytes it does not pay for.
    */
   terminalScrollbackWindow?: boolean;
+  /** Negotiate bounded agent snapshots with backwards history requests. */
+  agentHistoryWindow?: boolean;
 }
 
 interface AgentAttachment {
@@ -316,6 +343,7 @@ export class StreamClient {
   private authFailurePending = false;
   private nextRequestId = 1;
   private nextScrollbackRequestId = 1;
+  private nextAgentHistoryRequestId = 1;
   private readonly pendingRequests = new Map<number, PendingRequest>();
   private readonly pendingCompanionEvents = new Map<string, PendingCompanionEvent>();
   private readonly attachments = new Map<string, Attachment>();
@@ -382,6 +410,18 @@ export class StreamClient {
       fromSeq,
     });
     this.sendFrame({ type: "attach", task_id: taskId, kind: "agent", from_seq: fromSeq });
+  }
+
+  requestAgentHistory(taskId: string, request: AgentHistoryRequest): void {
+    if (!this.supportsCapability("agent_history_window")) return;
+    this.sendFrame({
+      type: "agent_history_request",
+      task_id: taskId,
+      request_id: this.nextAgentHistoryRequestId++,
+      before_seq: request.beforeSeq,
+      after_seq: request.afterSeq,
+      max_events: request.maxEvents,
+    });
   }
 
   attachTerminal(taskId: string, handlers: TerminalStreamHandlers): void {
@@ -732,13 +772,16 @@ export class StreamClient {
     this.rawSend({
       type: "auth",
       ...(credential ? { credential } : {}),
-      capabilities: this.options.terminalScrollbackWindow
-        ? [
-            "companion_event_epoch",
-            "term_input_boundary",
-            "term_scrollback_window",
-          ]
-        : ["companion_event_epoch", "term_input_boundary"],
+      capabilities: [
+        "companion_event_epoch",
+        "term_input_boundary",
+        ...(this.options.terminalScrollbackWindow
+          ? (["term_scrollback_window"] as const)
+          : []),
+        ...(this.options.agentHistoryWindow
+          ? (["agent_history_window"] as const)
+          : []),
+      ],
     }, socket);
   }
 
@@ -814,7 +857,26 @@ export class StreamClient {
         const attachment = this.agentAttachment(frame.task_id);
         if (!attachment) return;
         attachment.fromSeq = Number(frame.next_seq);
-        attachment.handlers.onSnapshot(frame.events, Number(frame.next_seq));
+        const window =
+          typeof frame.history_start_seq === "number" &&
+          typeof frame.history_from_seq === "number"
+            ? {
+                historyStartSeq: frame.history_start_seq,
+                historyFromSeq: frame.history_from_seq,
+                resumed: frame.resumed === true,
+              }
+            : null;
+        attachment.handlers.onSnapshot(frame.events, Number(frame.next_seq), window);
+        return;
+      }
+      case "agent_history_chunk": {
+        this.agentAttachment(frame.task_id)?.handlers.onHistoryChunk?.({
+          requestId: frame.request_id,
+          startSeq: frame.start_seq,
+          endSeq: frame.end_seq,
+          afterSeq: frame.after_seq,
+          events: frame.events,
+        });
         return;
       }
       case "agent_event": {

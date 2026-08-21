@@ -38,7 +38,8 @@ interface ElementNode {
 
 function renderAgentView(
   events: FrameAgentEvent[],
-  status: TaskTerminalStatus = "live"
+  status: TaskTerminalStatus = "live",
+  onRequestHistory: () => void = vi.fn()
 ): ElementNode {
   if (!AgentMessageView) {
     throw new Error("AgentMessageView was not loaded");
@@ -49,6 +50,7 @@ function renderAgentView(
     events,
     status,
     onInterrupt: vi.fn(),
+    onRequestHistory,
     onResolvePermission: vi.fn()
   }) as ElementNode;
 }
@@ -131,6 +133,17 @@ function findByAccessibilityLabel(
 }
 
 describe("AgentMessageView", () => {
+  it("requests older agent history when the reader reaches the loaded top", () => {
+    const onRequestHistory = vi.fn();
+    const tree = renderAgentView([], "live", onRequestHistory);
+    const onScroll = findByType(tree, "ScrollView")?.props?.onScroll as
+      | ((event: { nativeEvent: { contentOffset: { y: number } } }) => void)
+      | undefined;
+
+    onScroll?.({ nativeEvent: { contentOffset: { y: 79 } } });
+    expect(onRequestHistory).toHaveBeenCalledOnce();
+  });
+
   it("renders neutral agent events as native chat, tools, permissions, stats, and debug", () => {
     const tree = renderAgentView([
       { seq: 0, event: { type: "user_message", text: "Please inspect auth" } },

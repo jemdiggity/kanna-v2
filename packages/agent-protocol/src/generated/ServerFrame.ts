@@ -11,7 +11,22 @@ import type { StreamKind } from "./StreamKind";
 /**
  * Frames sent by kanna-server to clients.
  */
-export type ServerFrame = { "type": "auth_ok", stream_kinds?: Array<StreamKind>, capabilities?: Array<KspCapability>, } | { "type": "agent_snapshot", task_id: string, next_seq: number, events: Array<FrameAgentEvent>, } | { "type": "agent_event", task_id: string, seq: number, event: AgentEvent, } | { "type": "term_snapshot", task_id: string, cols: number, rows: number, data_b64: string, agent_provider?: AgentProvider | null, 
+export type ServerFrame = { "type": "auth_ok", stream_kinds?: Array<StreamKind>, capabilities?: Array<KspCapability>, } | { "type": "agent_snapshot", task_id: string, next_seq: number, events: Array<FrameAgentEvent>, 
+/**
+ * Oldest sequence included in a capability-gated recent window.
+ */
+history_start_seq?: number, 
+/**
+ * Lower bound for on-demand history. On reconnect this is the
+ * `from_seq` presented by the client, not the beginning of the
+ * journal, so already-held events are never requested again.
+ */
+history_from_seq?: number, 
+/**
+ * True when the client must retain its existing transcript and merge
+ * this window by sequence rather than replacing it.
+ */
+resumed?: boolean | null, } | { "type": "agent_history_chunk", task_id: string, request_id: number, start_seq: number, end_seq: number, after_seq: number, events: Array<FrameAgentEvent>, } | { "type": "agent_event", task_id: string, seq: number, event: AgentEvent, } | { "type": "term_snapshot", task_id: string, cols: number, rows: number, data_b64: string, agent_provider?: AgentProvider | null, 
 /**
  * The tap generation `stream_offset` belongs to.
  */

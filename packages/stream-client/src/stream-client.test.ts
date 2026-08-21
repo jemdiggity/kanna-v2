@@ -338,6 +338,98 @@ describe("StreamClient", () => {
     client.close();
   });
 
+  it("negotiates bounded agent history, requests older events, and resumes without replacement", () => {
+    const client = new StreamClient({
+      url: "ws://test/v1/stream",
+      webSocketFactory: factory,
+      agentHistoryWindow: true,
+    });
+    const socket = sockets[0]!;
+    socket.open();
+    const snapshots: Array<{ seqs: number[]; resumed: boolean }> = [];
+    const chunks: number[][] = [];
+    client.attachAgent("task-window", {
+      onSnapshot(events, _nextSeq, window) {
+        snapshots.push({
+          seqs: events.map((entry) => entry.seq),
+          resumed: window?.resumed ?? false,
+        });
+      },
+      onHistoryChunk(chunk) {
+        chunks.push(chunk.events.map((entry) => entry.seq));
+      },
+      onEvent() {},
+    });
+
+    expect(socket.sent[0]).toEqual({
+      type: "auth",
+      capabilities: [
+        "companion_event_epoch",
+        "term_input_boundary",
+        "agent_history_window",
+      ],
+    });
+    socket.receive({ type: "auth_ok", capabilities: ["agent_history_window"] });
+    socket.receive({
+      type: "agent_snapshot",
+      task_id: "task-window",
+      next_seq: 10,
+      events: [{ seq: 9, event: { type: "assistant_text", text: "latest", truncated: false } }],
+      history_start_seq: 9,
+      history_from_seq: 0,
+      resumed: false,
+    });
+    client.requestAgentHistory("task-window", { beforeSeq: 9, afterSeq: 0, maxEvents: 3 });
+    expect(socket.sent.at(-1)).toEqual({
+      type: "agent_history_request",
+      task_id: "task-window",
+      request_id: 1,
+      before_seq: 9,
+      after_seq: 0,
+      max_events: 3,
+    });
+    socket.receive({
+      type: "agent_history_chunk",
+      task_id: "task-window",
+      request_id: 1,
+      start_seq: 6,
+      end_seq: 9,
+      after_seq: 0,
+      events: [6, 7, 8].map((seq) => ({
+        seq,
+        event: { type: "assistant_text" as const, text: `${seq}`, truncated: false },
+      })),
+    });
+
+    socket.drop();
+    vi.advanceTimersByTime(250);
+    const socket2 = sockets[1]!;
+    socket2.open();
+    socket2.receive({ type: "auth_ok", capabilities: ["agent_history_window"] });
+    expect(socket2.sent.at(-1)).toEqual({
+      type: "attach",
+      task_id: "task-window",
+      kind: "agent",
+      from_seq: 10,
+    });
+    socket2.receive({
+      type: "agent_snapshot",
+      task_id: "task-window",
+      next_seq: 12,
+      events: [{ seq: 11, event: { type: "assistant_text", text: "delta", truncated: false } }],
+      history_start_seq: 11,
+      history_from_seq: 10,
+      resumed: true,
+    });
+
+    expect(chunks).toEqual([[6, 7, 8]]);
+    expect(snapshots).toEqual([
+      { seqs: [9], resumed: false },
+      { seqs: [11], resumed: true },
+    ]);
+    client.close();
+  });
+
   it("attaches, routes, detaches, and reconnects desktop task summaries", () => {
     const { client, socket } = connectedClient(["task_summary"]);
     const summaries: unknown[] = [];

@@ -10,6 +10,7 @@ interface AgentMessageViewProps {
   status: TaskTerminalStatus;
   errorMessage: string | null;
   onInterrupt(): void;
+  onRequestHistory?(): void;
   onResolvePermission(requestId: string, decision: PermissionDecision): void;
 }
 
@@ -18,6 +19,7 @@ export function AgentMessageViewComponent({
   status,
   errorMessage,
   onInterrupt,
+  onRequestHistory,
   onResolvePermission
 }: AgentMessageViewProps) {
   const visibleEvents = events.filter(
@@ -38,6 +40,10 @@ export function AgentMessageViewComponent({
     <View style={styles.shell} testID={MOBILE_E2E_IDS.agentMessageView}>
       <ScrollView
         contentContainerStyle={styles.content}
+        onScroll={(event) => {
+          if (event.nativeEvent.contentOffset.y <= 80) onRequestHistory?.();
+        }}
+        scrollEventThrottle={100}
         testID={isStreamReady ? MOBILE_E2E_IDS.agentMessageReady : undefined}
       >
         {visibleEvents.map((item) => (

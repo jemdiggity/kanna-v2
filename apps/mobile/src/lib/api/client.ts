@@ -92,7 +92,23 @@ export interface TaskSummarySubscription {
 }
 
 export type TaskAgentStreamEvent =
-  | { type: "snapshot"; taskId: string; events: FrameAgentEvent[]; nextSeq: number }
+  | {
+      type: "snapshot";
+      taskId: string;
+      events: FrameAgentEvent[];
+      nextSeq: number;
+      historyStartSeq?: number;
+      historyFromSeq?: number;
+      resumed?: boolean;
+    }
+  | {
+      type: "history";
+      taskId: string;
+      events: FrameAgentEvent[];
+      startSeq: number;
+      endSeq: number;
+      afterSeq: number;
+    }
   | { type: "event"; taskId: string; seq: number; event: AgentEvent }
   | { type: "status"; taskId: string; status: string }
   | { type: "exit"; taskId: string; code: number }
@@ -103,6 +119,11 @@ export interface TaskAgentSubscription {
   sendInput(input: string): void;
   sendPermission(requestId: string, decision: PermissionDecision): void;
   interrupt(): void;
+  requestHistory?(request: {
+    beforeSeq: number;
+    afterSeq: number;
+    maxEvents: number;
+  }): void;
 }
 
 export type TaskCompanionStreamEvent =

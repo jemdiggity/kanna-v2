@@ -46,6 +46,10 @@ pub enum KspCapability {
     /// instead of the whole buffer. A client that does not advertise this gets
     /// the unbounded snapshot and the per-attachment daemon stream unchanged.
     TermScrollbackWindow,
+    /// The client accepts a bounded recent agent-journal window, requests
+    /// older sequence ranges on demand, and retains its existing events when
+    /// re-attaching from a non-zero sequence.
+    AgentHistoryWindow,
     #[serde(other)]
     Unknown,
 }
@@ -224,6 +228,19 @@ pub enum ClientFrame {
         before_line: u32,
         max_lines: u32,
     },
+    /// Pull a bounded journal range immediately before `before_seq`, never
+    /// crossing `after_seq`. The lower fence lets a reconnect backfill only
+    /// the gap and never re-ship events the client already retained.
+    AgentHistoryRequest {
+        task_id: String,
+        #[cfg_attr(feature = "typescript", ts(type = "number"))]
+        request_id: u64,
+        #[cfg_attr(feature = "typescript", ts(type = "number"))]
+        before_seq: u64,
+        #[cfg_attr(feature = "typescript", ts(type = "number"))]
+        after_seq: u64,
+        max_events: u32,
+    },
     /// Send a structured selection back to the currently displayed visual
     /// companion. The server validates both session and revision before
     /// appending it to the companion event stream.
@@ -267,6 +284,33 @@ pub enum ServerFrame {
         task_id: String,
         #[cfg_attr(feature = "typescript", ts(type = "number"))]
         next_seq: u64,
+        events: Vec<FrameAgentEvent>,
+        /// Oldest sequence included in a capability-gated recent window.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "typescript", ts(type = "number"))]
+        history_start_seq: Option<u64>,
+        /// Lower bound for on-demand history. On reconnect this is the
+        /// `from_seq` presented by the client, not the beginning of the
+        /// journal, so already-held events are never requested again.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "typescript", ts(type = "number"))]
+        history_from_seq: Option<u64>,
+        /// True when the client must retain its existing transcript and merge
+        /// this window by sequence rather than replacing it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resumed: Option<bool>,
+    },
+    /// One bounded answer to `agent_history_request`, ordered oldest-first.
+    AgentHistoryChunk {
+        task_id: String,
+        #[cfg_attr(feature = "typescript", ts(type = "number"))]
+        request_id: u64,
+        #[cfg_attr(feature = "typescript", ts(type = "number"))]
+        start_seq: u64,
+        #[cfg_attr(feature = "typescript", ts(type = "number"))]
+        end_seq: u64,
+        #[cfg_attr(feature = "typescript", ts(type = "number"))]
+        after_seq: u64,
         events: Vec<FrameAgentEvent>,
     },
     AgentEvent {

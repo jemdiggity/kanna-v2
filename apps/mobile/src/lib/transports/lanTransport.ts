@@ -325,12 +325,35 @@ export function createLanTransport(
         url: buildKspWebSocketUrl(baseUrl, kspStreamVersion),
         credential: streamCredential,
         webSocketFactory: (url) => createKspSocket(url) as unknown as StreamWebSocketLike,
-        reconnectDelaysMs: [250, 500, 1000, 2000]
+        reconnectDelaysMs: [250, 500, 1000, 2000],
+        agentHistoryWindow: true
       });
 
       client.attachAgent(taskId, {
-        onSnapshot(events, nextSeq) {
-          listener({ type: "snapshot", taskId, events, nextSeq });
+        onSnapshot(events, nextSeq, window) {
+          listener({
+            type: "snapshot",
+            taskId,
+            events,
+            nextSeq,
+            ...(window
+              ? {
+                  historyStartSeq: window.historyStartSeq,
+                  historyFromSeq: window.historyFromSeq,
+                  resumed: window.resumed
+                }
+              : {})
+          });
+        },
+        onHistoryChunk(chunk) {
+          listener({
+            type: "history",
+            taskId,
+            events: chunk.events,
+            startSeq: chunk.startSeq,
+            endSeq: chunk.endSeq,
+            afterSeq: chunk.afterSeq
+          });
         },
         onEvent(seq, event) {
           listener({ type: "event", taskId, seq, event });
@@ -358,6 +381,9 @@ export function createLanTransport(
         },
         interrupt() {
           client.sendAgentInterrupt(taskId);
+        },
+        requestHistory(request) {
+          client.requestAgentHistory(taskId, request);
         }
       } satisfies TaskAgentSubscription;
     },

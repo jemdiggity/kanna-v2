@@ -113,6 +113,7 @@ export interface MobileController {
   /** Pull the next older chunk of terminal scrollback, if the desktop kept any
    * back and no request is already in flight. */
   requestTaskTerminalScrollback(taskId: string): void;
+  requestTaskAgentHistory(taskId: string): void;
   sendTaskAgentPermission(taskId: string, requestId: string, decision: Parameters<TaskAgentSubscription["sendPermission"]>[1]): void;
   interruptTaskAgent(taskId: string): void;
   setTaskCompanionOpen(taskId: string, isOpen: boolean): void;
@@ -3065,6 +3066,20 @@ export function createMobileController(
         historyId: scrollback.historyId,
         beforeLine: scrollback.remainingLines,
         maxLines: TERMINAL_SCROLLBACK_CHUNK_LINES
+      });
+    },
+
+    requestTaskAgentHistory(taskId) {
+      if (activeTaskAgent?.taskId !== taskId) return;
+      const history = store.getState().taskAgentHistory;
+      if (!history || history.loading || history.beforeSeq <= history.afterSeq) {
+        return;
+      }
+      if (!store.setTaskAgentHistoryLoading(taskId, true)) return;
+      activeTaskAgent.subscription.requestHistory?.({
+        beforeSeq: history.beforeSeq,
+        afterSeq: history.afterSeq,
+        maxEvents: 100
       });
     },
 
