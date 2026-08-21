@@ -25,8 +25,8 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use kanna_agent_protocol::frames::TermResumePosition;
 use kanna_agent_protocol::{
-    ClientFrame, CompanionEvent, FrameAgentEvent, KspCapability, PermissionDecision, ServerFrame,
-    StreamKind,
+    AgentEvent, ClientFrame, CompanionEvent, FrameAgentEvent, KspCapability, PermissionDecision,
+    ServerFrame, StreamKind,
 };
 use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent, SessionStatus};
 use kanna_daemon::terminal_perf::{self, TerminalPerfContext, TerminalPerfMonitor};
@@ -3798,17 +3798,118 @@ impl AgentHistory {
 
 fn bounded_agent_suffix(events: &[FrameAgentEvent], max_events: usize) -> Vec<FrameAgentEvent> {
     let mut bytes = 0usize;
-    let mut start = events.len();
+    let mut suffix = Vec::new();
     for entry in events.iter().rev().take(max_events) {
+        let entry = bounded_agent_event(entry);
         let event_bytes =
-            serde_json::to_vec(entry).map_or(AGENT_WINDOW_EVENT_BYTES, |json| json.len());
-        if start < events.len() && bytes.saturating_add(event_bytes) > AGENT_WINDOW_EVENT_BYTES {
+            serde_json::to_vec(&entry).map_or(AGENT_WINDOW_EVENT_BYTES, |json| json.len());
+        if !suffix.is_empty() && bytes.saturating_add(event_bytes) > AGENT_WINDOW_EVENT_BYTES {
             break;
         }
         bytes = bytes.saturating_add(event_bytes);
-        start -= 1;
+        suffix.push(entry);
     }
-    events[start..].to_vec()
+    suffix.reverse();
+    suffix
+}
+
+/// Produce the capability-gated wire copy of one journal event.
+///
+/// The daemon's journal and legacy KSP representation remain untouched. An
+/// individual event can nevertheless exceed the entire window budget because
+/// user text and JSON tool inputs are unbounded by the shared event schema.
+/// Preserve its sequence and variant while reducing only the opted-in copy.
+fn bounded_agent_event(entry: &FrameAgentEvent) -> FrameAgentEvent {
+    let mut bounded = entry.clone();
+    if serialized_agent_event_len(&bounded) <= AGENT_WINDOW_EVENT_BYTES {
+        return bounded;
+    }
+
+    match &mut bounded.event {
+        AgentEvent::ToolCall { input, .. } | AgentEvent::PermissionRequest { input, .. } => {
+            *input = serde_json::json!({ "kanna_truncated": true });
+        }
+        _ => {}
+    }
+
+    while serialized_agent_event_len(&bounded) > AGENT_WINDOW_EVENT_BYTES {
+        halve_agent_event_strings(&mut bounded.event);
+    }
+    bounded
+}
+
+fn serialized_agent_event_len(entry: &FrameAgentEvent) -> usize {
+    serde_json::to_vec(entry).map_or(AGENT_WINDOW_EVENT_BYTES, |json| json.len())
+}
+
+fn halve_agent_event_strings(event: &mut AgentEvent) {
+    match event {
+        AgentEvent::TurnStarted { model } => halve_optional_string(model),
+        AgentEvent::UserMessage { text } => halve_string(text),
+        AgentEvent::AssistantText { text, truncated }
+        | AgentEvent::Thinking { text, truncated } => {
+            halve_string(text);
+            *truncated = true;
+        }
+        AgentEvent::ToolCall {
+            call_id, tool_name, ..
+        } => {
+            halve_string(call_id);
+            halve_string(tool_name);
+        }
+        AgentEvent::ToolResult {
+            call_id,
+            output,
+            truncated,
+            ..
+        } => {
+            halve_string(call_id);
+            halve_string(output);
+            *truncated = true;
+        }
+        AgentEvent::ToolProgress { call_id, message } => {
+            halve_optional_string(call_id);
+            halve_string(message);
+        }
+        AgentEvent::PermissionRequest {
+            request_id,
+            tool_name,
+            ..
+        } => {
+            halve_string(request_id);
+            halve_string(tool_name);
+        }
+        AgentEvent::PermissionResolved {
+            request_id,
+            decision,
+        } => {
+            halve_string(request_id);
+            if let PermissionDecision::Deny { reason } = decision {
+                halve_optional_string(reason);
+            }
+        }
+        AgentEvent::TurnCompleted { .. } => {}
+        AgentEvent::SessionEnded { message, .. } => halve_optional_string(message),
+        AgentEvent::Diagnostic { message } => halve_string(message),
+        AgentEvent::Raw { line, truncated } => {
+            halve_string(line);
+            *truncated = true;
+        }
+    }
+}
+
+fn halve_optional_string(value: &mut Option<String>) {
+    if let Some(value) = value {
+        halve_string(value);
+    }
+}
+
+fn halve_string(value: &mut String) {
+    let mut end = value.len() / 2;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value.truncate(end);
 }
 
 /// Per-attachment forwarding task: its own daemon connection attaches to the
@@ -11047,6 +11148,22 @@ mod tests {
         name: &str,
         event_count: u64,
     ) -> (String, JoinHandle<DaemonCommand>, std::path::PathBuf) {
+        let events = (0..event_count)
+            .map(|seq| kanna_daemon::protocol::SeqAgentEvent {
+                seq,
+                event: kanna_daemon::protocol::NeutralAgentEvent::AssistantText {
+                    text: format!("event-{seq}-{}", "x".repeat(4_000)),
+                    truncated: false,
+                },
+            })
+            .collect();
+        agent_window_fixture_with_events(name, events).await
+    }
+
+    async fn agent_window_fixture_with_events(
+        name: &str,
+        events: Vec<kanna_daemon::protocol::SeqAgentEvent>,
+    ) -> (String, JoinHandle<DaemonCommand>, std::path::PathBuf) {
         let unique = format!(
             "{name}-{}-{}",
             std::process::id(),
@@ -11057,20 +11174,12 @@ mod tests {
         );
         let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
         std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
-        let events = (0..event_count)
-            .map(|seq| kanna_daemon::protocol::SeqAgentEvent {
-                seq,
-                event: kanna_daemon::protocol::NeutralAgentEvent::AssistantText {
-                    text: format!("event-{seq}-{}", "x".repeat(4_000)),
-                    truncated: false,
-                },
-            })
-            .collect();
+        let next_seq = events.last().map_or(0, |entry| entry.seq + 1);
         let daemon = spawn_fake_daemon_once_with_response(
             daemon_dir.to_string_lossy().to_string(),
             DaemonEvent::AgentSnapshot {
                 session_id: "daemon-agent-window-1".into(),
-                next_seq: event_count,
+                next_seq,
                 events,
             },
         )
@@ -11183,6 +11292,125 @@ mod tests {
             }
             other => panic!("expected agent history chunk, got {other:?}"),
         }
+        daemon.await.expect("fake daemon failed");
+        drop(socket);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn windowed_agent_snapshot_bounds_one_oversized_event() {
+        let original_text = "\0".repeat(AGENT_WINDOW_MAX_BYTES);
+        let events = vec![kanna_daemon::protocol::SeqAgentEvent {
+            seq: 0,
+            event: kanna_daemon::protocol::NeutralAgentEvent::UserMessage {
+                text: original_text.clone(),
+            },
+        }];
+        let (url, daemon, daemon_dir) =
+            agent_window_fixture_with_events("ksp-agent-window-oversized-snapshot", events).await;
+        let mut socket = ws_connect(&url).await;
+        send_frame(
+            &mut socket,
+            &ClientFrame::Auth {
+                credential: None,
+                capabilities: vec![KspCapability::AgentHistoryWindow],
+            },
+        )
+        .await;
+        assert_eq!(recv_frame(&mut socket).await, auth_ok_frame_for(false));
+        send_frame(&mut socket, &attach_agent_frame(0)).await;
+
+        let snapshot = recv_frame(&mut socket).await;
+        assert!(
+            serde_json::to_vec(&snapshot).unwrap().len() <= AGENT_WINDOW_MAX_BYTES,
+            "the complete snapshot must fit even when its only event is oversized"
+        );
+        match snapshot {
+            ServerFrame::AgentSnapshot { events, .. } => match events.as_slice() {
+                [FrameAgentEvent {
+                    seq: 0,
+                    event: AgentEvent::UserMessage { text },
+                }] => assert!(text.len() < original_text.len()),
+                other => panic!("expected the bounded user event, got {other:?}"),
+            },
+            other => panic!("expected bounded agent snapshot, got {other:?}"),
+        }
+
+        daemon.await.expect("fake daemon failed");
+        drop(socket);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn windowed_agent_history_chunk_bounds_one_oversized_event() {
+        let mut events = vec![kanna_daemon::protocol::SeqAgentEvent {
+            seq: 0,
+            event: kanna_daemon::protocol::NeutralAgentEvent::ToolCall {
+                call_id: "oversized-call".into(),
+                tool_name: "test".into(),
+                input: serde_json::json!({
+                    "payload": "x".repeat(AGENT_WINDOW_MAX_BYTES * 2),
+                }),
+            },
+        }];
+        events.extend((1..=AGENT_WINDOW_MAX_EVENTS as u64).map(|seq| {
+            kanna_daemon::protocol::SeqAgentEvent {
+                seq,
+                event: kanna_daemon::protocol::NeutralAgentEvent::AssistantText {
+                    text: format!("event-{seq}"),
+                    truncated: false,
+                },
+            }
+        }));
+        let (url, daemon, daemon_dir) =
+            agent_window_fixture_with_events("ksp-agent-window-oversized-history", events).await;
+        let mut socket = ws_connect(&url).await;
+        send_frame(
+            &mut socket,
+            &ClientFrame::Auth {
+                credential: None,
+                capabilities: vec![KspCapability::AgentHistoryWindow],
+            },
+        )
+        .await;
+        assert_eq!(recv_frame(&mut socket).await, auth_ok_frame_for(false));
+        send_frame(&mut socket, &attach_agent_frame(0)).await;
+
+        match recv_frame(&mut socket).await {
+            ServerFrame::AgentSnapshot {
+                history_start_seq: Some(1),
+                events,
+                ..
+            } => assert_eq!(events.len(), AGENT_WINDOW_MAX_EVENTS),
+            other => panic!("expected the count-bounded snapshot, got {other:?}"),
+        }
+        send_frame(
+            &mut socket,
+            &ClientFrame::AgentHistoryRequest {
+                task_id: "task-1".into(),
+                request_id: 91,
+                before_seq: 1,
+                after_seq: 0,
+                max_events: 1,
+            },
+        )
+        .await;
+        let chunk = recv_frame(&mut socket).await;
+        assert!(
+            serde_json::to_vec(&chunk).unwrap().len() <= AGENT_WINDOW_MAX_BYTES,
+            "the complete history chunk must fit when its event is oversized"
+        );
+        match chunk {
+            ServerFrame::AgentHistoryChunk { events, .. } => match events.as_slice() {
+                [FrameAgentEvent {
+                    seq: 0,
+                    event: AgentEvent::ToolCall { input, .. },
+                }] => assert_eq!(input, &serde_json::json!({ "kanna_truncated": true })),
+                other => panic!("expected the bounded tool-call event, got {other:?}"),
+            },
+            other => panic!("expected bounded agent history chunk, got {other:?}"),
+        }
+
         daemon.await.expect("fake daemon failed");
         drop(socket);
         let _ = std::fs::remove_dir_all(daemon_dir);
@@ -11442,6 +11670,49 @@ mod tests {
             }
             other => panic!("expected legacy agent snapshot, got {other:?}"),
         }
+        daemon.await.expect("fake daemon failed");
+        drop(socket);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn oversized_agent_snapshot_is_byte_identical_without_the_window_capability() {
+        let original = FrameAgentEvent {
+            seq: 0,
+            event: AgentEvent::PermissionRequest {
+                request_id: "request-1".into(),
+                tool_name: "test".into(),
+                input: serde_json::json!({
+                    "payload": "x".repeat(AGENT_WINDOW_MAX_BYTES * 2),
+                }),
+            },
+        };
+        let daemon_events = vec![kanna_daemon::protocol::SeqAgentEvent {
+            seq: original.seq,
+            event: original.event.clone(),
+        }];
+        let (url, daemon, daemon_dir) =
+            agent_window_fixture_with_events("ksp-agent-legacy-oversized", daemon_events).await;
+        let mut socket = ws_connect(&url).await;
+        send_frame(&mut socket, &client_auth_frame()).await;
+        assert_eq!(recv_frame(&mut socket).await, auth_ok_frame_for(false));
+        send_frame(&mut socket, &attach_agent_frame(0)).await;
+
+        let actual = recv_frame(&mut socket).await;
+        let expected = ServerFrame::AgentSnapshot {
+            task_id: "task-1".into(),
+            next_seq: 1,
+            events: vec![original],
+            history_start_seq: None,
+            history_from_seq: None,
+            resumed: None,
+        };
+        assert_eq!(
+            serde_json::to_vec(&actual).unwrap(),
+            serde_json::to_vec(&expected).unwrap(),
+            "negotiating no window capability must not alter even an oversized event"
+        );
+
         daemon.await.expect("fake daemon failed");
         drop(socket);
         let _ = std::fs::remove_dir_all(daemon_dir);
