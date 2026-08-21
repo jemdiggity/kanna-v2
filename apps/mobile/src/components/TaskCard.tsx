@@ -174,16 +174,18 @@ export function TaskCard({
               </Text>
             </View>
           ) : null}
-          {shortId ? (
-            <Text
-              style={styles.shortId}
-              testID={MOBILE_E2E_IDS.taskListItemId(uiId)}
-            >
-              {shortId}
-            </Text>
-          ) : null}
         </View>
       </View>
+      {shortId ? (
+        <Text
+          ellipsizeMode="middle"
+          numberOfLines={1}
+          style={styles.shortId}
+          testID={MOBILE_E2E_IDS.taskListItemId(uiId)}
+        >
+          {shortId}
+        </Text>
+      ) : null}
       {model.waitingPromptSnippet ? (
         <Text
           numberOfLines={3}
@@ -269,10 +271,7 @@ const styles = StyleSheet.create({
     fontStyle: "italic",
     fontWeight: "normal"
   },
-  /**
-   * The title takes the slack and truncates; this column sizes to its own
-   * content and never shrinks, which is what keeps the task id complete.
-   */
+  /** The metadata column only competes with the title for the stage badges. */
   pillColumn: {
     alignItems: "flex-end",
     flexShrink: 0,
@@ -290,9 +289,11 @@ const styles = StyleSheet.create({
   // Subordinate to the title on purpose: legible for cross-checking, quiet
   // enough that the row still reads title-first.
   shortId: {
+    alignSelf: "flex-end",
     color: "#6F819E",
     fontFamily: "Menlo",
-    fontSize: 11
+    fontSize: 11,
+    maxWidth: "100%"
   },
   stageLabel: {
     fontSize: 11,

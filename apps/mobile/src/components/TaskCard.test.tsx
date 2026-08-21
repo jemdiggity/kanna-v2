@@ -80,7 +80,7 @@ function findNodeByProp(
   return null;
 }
 
-function findColumnContaining(
+function findImmediateParent(
   node: ElementChild,
   target: ElementNode | null
 ): ElementNode | null {
@@ -88,7 +88,7 @@ function findColumnContaining(
   const children = flattenChildren(node.props?.children);
   if (children.includes(target)) return node;
   for (const child of children) {
-    const match = findColumnContaining(child, target);
+    const match = findImmediateParent(child, target);
     if (match) return match;
   }
   return null;
@@ -403,7 +403,7 @@ describe("TaskCard", () => {
     expect(tree.props?.accessibilityLabel).toBe(`${title}. in progress`);
   });
 
-  it("keeps the complete short id on a row whose title has to truncate", () => {
+  it("keeps the id separate from a row whose title has to truncate", () => {
     if (!TaskCard) throw new Error("TaskCard was not loaded");
 
     const longTitle = `Long ${"mobile task title ".repeat(12)}end`;
@@ -425,7 +425,10 @@ describe("TaskCard", () => {
       "mobile.task-row-id.a6ea6b03"
     );
     expect(textContent(renderedId)).toBe("a6ea6b03");
-    expect(renderedId?.props?.numberOfLines).toBeUndefined();
+    expect(renderedId?.props).toMatchObject({
+      ellipsizeMode: "middle",
+      numberOfLines: 1
+    });
     // The title is what gives: it truncates with an ellipsis, and the id is
     // not part of the string that truncated.
     const title = findNodeByProp(tree, "numberOfLines", 2);
@@ -475,27 +478,67 @@ describe("TaskCard", () => {
     expect(tree.props?.accessibilityLabel).not.toContain("Task ID");
   });
 
-  it("holds the id column at its own width so the title takes the squeeze", () => {
+  it("keeps a current 64-hex id from displacing the stored title", () => {
     if (!TaskCard) throw new Error("TaskCard was not loaded");
+
+    const mobileCreatedId =
+      "3235f764375599b803c5751e2da246629ee062bf4df34ea4380c1c709243d349";
+    const storedTitle =
+      "Check how PR787 aligns with merged BLE OTA work";
 
     const tree = TaskCard({
       task: {
-        id: "a6ea6b03",
+        id: mobileCreatedId,
         repoId: "repo-1",
-        title: "Any title",
-        stage: "in progress"
+        title: storedTitle,
+        prompt: "A different canonical prompt",
+        stage: "pr"
       },
-      shortId: "a6ea6b03",
+      shortId: mobileCreatedId,
       onPress: vi.fn()
     }) as ElementNode;
 
-    const idNode = findNodeByProp(tree, "testID", "mobile.task-row-id.a6ea6b03");
-    const column = findColumnContaining(tree, idNode);
-    expect(flattenStyle(column?.props?.style)).toMatchObject({
-      flexShrink: 0
+    const titleNode = findTextNodeByCompleteText(tree, storedTitle);
+    expect(titleNode).not.toBeNull();
+    const idNode = findNodeByProp(
+      tree,
+      "testID",
+      `mobile.task-row-id.${mobileCreatedId}`
+    );
+    expect(textContent(idNode)).toBe(mobileCreatedId);
+    expect(idNode?.props).toMatchObject({
+      ellipsizeMode: "middle",
+      numberOfLines: 1
     });
-    const title = findNodeByProp(tree, "numberOfLines", 2);
-    expect(flattenStyle(title?.props?.style)).toMatchObject({ flex: 1 });
+    expect(flattenStyle(idNode?.props?.style)).toMatchObject({
+      alignSelf: "flex-end",
+      maxWidth: "100%"
+    });
+    expect(findImmediateParent(tree, titleNode)).not.toBe(
+      findImmediateParent(tree, idNode)
+    );
+  });
+
+  it("uses a prompt excerpt instead of a 64-hex id when the title is blank", () => {
+    if (!TaskCard) throw new Error("TaskCard was not loaded");
+
+    const mobileCreatedId =
+      "3235f764375599b803c5751e2da246629ee062bf4df34ea4380c1c709243d349";
+    const tree = TaskCard({
+      task: {
+        id: mobileCreatedId,
+        repoId: "repo-1",
+        title: "   ",
+        prompt: "\n  Check the BLE OTA behavior\nAdditional detail",
+        stage: "pr"
+      },
+      onPress: vi.fn()
+    }) as ElementNode;
+
+    expect(
+      findTextNodeByCompleteText(tree, "Check the BLE OTA behavior")
+    ).not.toBeNull();
+    expect(tree.props?.accessibilityLabel).not.toContain(mobileCreatedId);
   });
 
   it("styles the pre-capture ellipsis as a muted placeholder", () => {

@@ -260,6 +260,27 @@ describe("cloud task index", () => {
     });
   });
 
+  it("preserves a published title beside a current 64-hex owner task id", () => {
+    const mobileCreatedId =
+      "3235f764375599b803c5751e2da246629ee062bf4df34ea4380c1c709243d349";
+    const title = "Check how PR787 aligns with merged BLE OTA work";
+
+    const task = mapCloudTaskSnapshot({
+      ...legacySnapshot,
+      cloudTaskId: mobileCreatedId,
+      ownerLocalTaskId: mobileCreatedId,
+      title,
+      promptSnippet: "Canonical task prompt",
+      displayName: null
+    });
+
+    expect(task).toMatchObject({
+      id: mobileCreatedId,
+      ownerLocalTaskId: mobileCreatedId,
+      title
+    });
+  });
+
   it("carries unresolved blocker ids and defaults them to empty", () => {
     expect(
       mapCloudTaskSnapshot({

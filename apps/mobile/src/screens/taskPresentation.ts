@@ -52,12 +52,18 @@ function daemonWaitingPromptRepresentation(value: string): string {
 }
 
 export function buildTaskListItemModel(task: TaskSummary): TaskListItemModel {
+  const storedTitle = (task.title ?? "").trim() ? task.title : "";
+  const promptTitle = task.prompt
+    ?.split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean) ?? "";
+  const title = storedTitle || promptTitle || "Untitled task";
   const prompt = task.waitingPromptSnippet?.trim() ?? "";
   const isDuplicatePrompt =
-    Boolean(prompt) && prompt === daemonWaitingPromptRepresentation(task.title);
+    Boolean(prompt) && prompt === daemonWaitingPromptRepresentation(title);
   return {
     stageLabel: task.stage ?? "unknown",
-    title: truncateVisibleText(task.title, TASK_TITLE_LIMIT),
+    title: truncateVisibleText(title, TASK_TITLE_LIMIT),
     waitingPromptSnippet: isDuplicatePrompt
       ? null
       : prompt
