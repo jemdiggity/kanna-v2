@@ -56,11 +56,43 @@ rely on Homebrew or other machine-local libraries.
 ./kd release ship --release    # tag, publish, upload updater manifest
 ```
 
+`release ship` refuses a dirty git worktree, and `--release` requires both
+architectures to be built.
+
 **Staging channel:** `./kd release ship --staging --release` builds
 `X.Y.Z-staging.N` without persisting a version bump, publishes an immutable
 prerelease tagged `vX.Y.Z-staging.N`, and repoints only `latest-staging.json`
 on the `desktop-staging` pointer release. Roll back by repointing:
 `./kd release ship --staging --rollback-to <version>`.
+
+How the version is derived depends on the channel and the source branch
+(`--branch main|release/X.Y`, defaulting to the current branch when it is a
+`release/X.Y`, else `main`):
+
+- **Series continuation (the default).** A bare staging ship — no explicit
+  bump flag — whose source branch matches an **unpromoted** active candidate
+  continues that candidate's series: `X.Y.Z-staging.N` becomes the next unused
+  `X.Y.Z-staging.*`, with `N + 1` as its floor. It does not re-derive the
+  series from trunk's `VERSION`.
+- **main, new derivation**: an explicit `--patch` / `--minor` / `--major`
+  (or a bare ship with no matching active candidate) applies the bump to the
+  greater of the root `VERSION` and the greatest published production version
+  — the *version floor*, reported as `versionFloor` on the ship result when it
+  raised a stale trunk `VERSION`.
+- **release/X.Y**: the base is the next patch after the series' existing tags;
+  the bump flags are ignored. The branch must exist on origin, must not be an
+  abandoned series, and its remote tip must be the checked-out commit.
+
+Either way `N` is one past the highest existing `v<base>-staging.N` tag (and
+past the active channel's `N`), and each staging publish prunes the channel
+down to the five newest staging prereleases and their assets.
+
+**Forward-version gate.** Whatever derived it, the candidate version must be
+**strictly greater** than the version `desktop-staging` currently serves, by
+semantic-version ordering including prerelease identifiers — commit ancestry
+can never authorize a version rollback, and an explicit bump flag cannot roll
+the channel back either. The refusal is actionable (it names the served
+version and the two ways forward) and exits nonzero.
 
 ### The release lifecycle
 
@@ -71,7 +103,8 @@ in [`docs/specs/release-candidates.md`](../specs/release-candidates.md). In
 short:
 
 - A staging publish must be a **descendant** of (or a rebuild of) the candidate
-  the channel already serves. Divergence, rollback, and unverifiable channel
+  the channel already serves, and must carry a strictly greater semver.
+  Divergence, rollback (by commit or by version), and unverifiable channel
   metadata are refused **before** anything is built — including under
   `--dry-run`.
 - A `release/X.Y` RC must build that branch's **remote tip exactly**. Push
@@ -79,12 +112,17 @@ short:
 - While an **unpromoted** `release/X.Y` candidate is soaking, main staging
   publishes are refused. Main resumes after promotion, or after an explicit
   reset.
-- Only `--rollback-to` and `kd release reset-staging` may move the channel
-  non-linearly.
+- Three paths may move the channel non-linearly: `--rollback-to`,
+  `kd release reset-staging`, and — automatically, with no operator action —
+  the post-promotion trunk resumption: once a `release/X.Y` candidate has been
+  promoted (its production tag exists), the next main publish is allowed to
+  diverge from it, and the publish writes a `Post-Promotion-Trunk-Resumption:`
+  audit block onto the `desktop-staging` release body.
 
 ```sh
 ./kd release status                                   # channel state and every promotion blocker
 ./kd release cut --minor                              # cut release/X.Y at origin/main
+                                                      # (--version must be strictly ahead of origin/main's VERSION)
 ./kd release promote 1.2.4-staging.3                  # promote a soaked candidate
 ./kd release reset-staging --to main \
   --reason "<why>" --confirm-abandon 1.3.0-staging.2   # abandon a lineage (audited, never implicit)
@@ -107,8 +145,9 @@ reports any mismatch as a promotion blocker before a build starts.
 
 **Soak gate.** Production promotion requires the candidate to have been
 published for at least `productionSoakHours` from `release-policy.json` at the
-repository root (default 24; `0` disables it), validated by
-`release-policy.schema.json`. A missing file uses the default; a malformed file
+repository root (default 24; `0` disables it). `kd` validates the file with its
+own parser; `release-policy.schema.json` is editor-facing completion, not the
+enforcement. A missing file uses the default; a malformed file
 or an unknown key is an error naming the file. Status, `--dry-run`, and the real
 promotion run the same decision code. The only override is explicit and
 reasoned, and it waives the soak window and nothing else:
@@ -261,6 +300,21 @@ unbound: it is optional with a documented default, and adding it to the list in
 `src/billing/config.ts` is what would make it overridable in a deployed
 environment.
 
+**Price ids are not configuration at all.** The catalog lives in Stripe
+itself: the idempotent provisioning script
+
+```sh
+STRIPE_SECRET_KEY=... pnpm --filter @kanna/firebase-functions stripe:provision
+```
+
+creates (or finds) one "Kanna Cloud" product per mode plus a recurring
+monthly price per currency — JPY/USD/CAD/AUD/EUR/GBP, each under a stable
+lookup key `cloud_monthly_<currency>` (`--dry-run` prints the plan without
+contacting Stripe). `createCheckoutSession` accepts the monthly plan only,
+takes the caller's currency (default `usd`), and resolves the active price by
+that lookup key at session time — so no price id is ever stored in Secret
+Manager or the repo.
+
 The Stripe account exists; remaining key and endpoint setup is tracked in the
 Slice-0 runbook (`docs/specs/accounts-and-billing.md`).
 
@@ -287,7 +341,10 @@ for a relay deploy) and is baked into the relay image, which reports it as
 
 To see what a deployed relay is actually doing — live connections, bytes by
 class, tunnel buffer pressure, refused upgrades — use `./kd relay stats
---staging|--production`, or `--open` for the live dashboard. It reads the
+--staging|--production`, `--open` for the live dashboard, or `--dry-run` to
+print the resolved URLs and token source without touching Secret Manager.
+Treat the `--open` output as a credential: the printed URL carries the
+operator token in its query string. It reads the
 operator token from Secret Manager, so no `gcloud compute ssh` is involved;
 provisioning that token is in the same runbook.
 

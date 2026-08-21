@@ -21,13 +21,18 @@ lives.
                                                        │          │ persistent
                                                    LAN │          │ outbound WSS
                                                        │          ▼
-                                        ┌──────────────┴───┐   ┌───────────────┐
-                                        │    Mobile app    │──▶│ relay service │
-                                        │  Expo / RN (iOS) │   │ (Cloud Run,   │
-                                        └──────────┬───────┘   │  wss://…)     │
-                                              auth │           └───────┬───────┘
+                                        ┌──────────────┴───┐   ┌────────────────┐
+                                        │    Mobile app    │──▶│ relay service  │
+                                        │  Expo / RN (iOS) │   │ (GCE VM+Caddy, │
+                                        └──────────┬───────┘   │  wss://…)      │
+                                              auth │           └───────┬────────┘
                                                    ▼                   ▼
                                          Firebase (Auth, Firestore, Functions, GCS)
+                                                   ▲
+                                                   │ Stripe checkout/webhook → entitlements
+                                        ┌──────────┴───────┐
+                                        │  Account portal  │  apps/web-portal (Firebase Hosting)
+                                        └──────────────────┘
 ```
 
 Connections are client-initiated. The mobile app reaches `kanna-server`
@@ -119,33 +124,99 @@ control protocol (interrupt, set model/permission mode, `CanUseTool`).
 
 ### Mobile app — `apps/mobile/` + `packages/stream-client/`
 
-Expo / React Native iOS app. It talks only to `kanna-server` — directly over
-the LAN when the desktop is reachable, or through the relay when remote.
-`@kanna/stream-client`
-is the shared KSP WebSocket client (auth handshake, per-task attachments with
-seq-resume, request/response correlation, reconnect) used by both the mobile
-app and, increasingly, the desktop frontend. Native identity (bundle id,
-display name) is keyed by `KANNA_APP_ENV`; OTA compatibility is keyed by
-`runtimeVersion` in `apps/mobile/src/mobileEnvironments.json` — see
-[Release](release.md#mobile-ota).
+Expo / React Native iOS app, a first-class client. It has two data paths:
 
-### Cloud services — `services/`
+- **Desktop data** comes from `kanna-server` — plain `/v1/…` HTTP over the LAN
+  when a trusted desktop is reachable, or `invoke` frames and KSP tunnels
+  through the relay when remote. The two are raced per read (cloud read plus
+  an optional 1 s LAN read), and every task is routed to its owning desktop
+  (`ownerDesktopId`). While the app is foregrounded it keeps **one persistent
+  authenticated relay control socket** (bounded-backoff reconnect, paused in
+  the background) reused for desktop-presence refreshes and control invokes;
+  per-desktop terminal/agent/task-summary streams ride separate KSP tunnels.
+- **Cloud resting data** comes from Firebase directly: Auth for sign-in, and
+  the Firestore cloud task index (`users/{uid}/desktops/{id}/tasks`) that
+  `kanna-server` publishes through the relay. Live task-card snippets stream
+  over a desktop-wide KSP `task_summary` subscription and overlay the resting
+  Firestore rows; on disconnect the overlay falls back to the resting values.
 
-- `services/relay/` — Bun/TypeScript WebSocket relay (deployed to Cloud Run,
-  `wss://relay.kanna.build` / `wss://relay-staging.kanna.build`) connecting
-  remote mobile clients to a user's desktop `kanna-server`. The desktop side of
-  each bridge is the persistent outbound connection described above; over it
-  the relay forwards client invokes and tunnel requests, and `kanna-server`
-  publishes cloud task snapshots. The relay also serves mobile OTA
-  manifests/assets from GCS.
+Machines are merged from three sources — account desktops (Firestore),
+manually QR/code-paired desktops (a LAN pairing claim carrying its own device
+credential, independent of the account), and live LAN discovery. Task pins and
+Activity dismissals are deliberately phone-local (AsyncStorage), never
+published to the desktop.
+
+`@kanna/stream-client` is the shared KSP WebSocket client (auth handshake,
+per-task attachments with seq-resume, request/response correlation, reconnect)
+used by both the mobile app and, increasingly, the desktop frontend. Native
+identity (bundle id, display name) is keyed by `KANNA_APP_ENV`; OTA
+compatibility is keyed by `runtimeVersion` in
+`apps/mobile/src/mobileEnvironments.json` — see [Release](release.md#mobile-ota).
+The user-facing surface is described in
+[Product Behavior](product-behavior.md#mobile-app).
+
+### Cloud services — `services/`, `apps/web-portal/`
+
+- `services/relay/` — Node 22 / TypeScript WebSocket relay connecting remote
+  mobile clients to a user's desktop `kanna-server`
+  (`wss://relay.kanna.build` / `wss://relay-staging.kanna.build`). Each
+  environment runs **one GCE e2-micro VM** behind Caddy TLS via docker
+  compose; `./kd cloud deploy --relay` builds the image with Cloud Build,
+  pushes to Artifact Registry, and the VM pulls it — the full runbook is
+  [`docs/relay-vm-operations.md`](../relay-vm-operations.md), and the growth
+  plan is [`docs/specs/relay-scaling.md`](../specs/relay-scaling.md). What
+  moves over it:
+  - The desktop side of each bridge is the persistent outbound connection
+    described above. Over the control socket the relay forwards client
+    invokes (HTTP-over-relay, including `/v1/task-events` long polls under a
+    separate long-poll permit budget), mobile push notifications, and cloud
+    task snapshot publication.
+  - **Tunnels** carry the streaming protocols; exactly two tunnel service
+    classes exist — `ksp` (the Kanna Stream Protocol, including raw terminal
+    bytes) and `task-transfer` — each with its own backpressure watermarks.
+  - It also serves mobile OTA manifests/assets from GCS (`/ota/manifest`,
+    `/ota/assets`).
+  - Operations surface: a per-connection **byte odometer** (application bytes
+    per uid/desktop/message class: `tunnel`, `taskTransfer`, `terminalEvent`,
+    `control`), exposed at `GET /stats` and a live `/dashboard`, read via
+    `./kd relay stats` with the operator token from Secret Manager
+    (`kanna-relay-stats-token`). `permessage-deflate` is negotiated per client
+    (the mobile leg; the desktop's tokio-tungstenite client connects plain).
+    Abuse bounds: `maxPayload` is 16 MiB, applied by `ws` to the
+    **decompressed** frame size (which is what keeps compression safe
+    pre-auth), derived as 2× the largest enforced legitimate frame — the
+    8 MiB task-input body — and overridable per VM with
+    `KANNA_RELAY_MAX_PAYLOAD_BYTES`; pre-auth per-IP admission caps bound
+    unauthenticated connections and upgrade rate. Successful
+    desktop-credential validations and
+    entitlement reads are each cached for 60 s; a new desktop-credential
+    connection always re-reads Firestore (so a revoked desktop cannot
+    reconnect), while entitlement resolution at authentication may be served
+    from the entitlement cache.
+  - **Entitlement enforcement** exists behind `KANNA_RELAY_ENTITLEMENT_ENFORCEMENT`,
+    off in every environment until the billing flag day: when on, an
+    unentitled session still authenticates but is refused tunnels,
+    publication, and invokes with code 4402; a Firestore outage fails open.
+    LAN is permanently unaffected.
+  - A remote dev-server **preview** path over the relay is specified but not
+    yet built — see [`docs/specs/remote-dev-preview.md`](../specs/remote-dev-preview.md).
+- `apps/web-portal/` — the Vue 3 account portal (sign-in, email verification,
+  subscribe via Stripe Checkout, entitlement status), deployed as the
+  `account` Firebase Hosting target (`{project}-account` sites, mapped for all
+  three projects in `.firebaserc` and guarded by a kd test). It is part of the
+  default `./kd cloud deploy` payload.
 - `services/firebase-functions/`, `firestore.rules`, `firebase.json` — Firebase
-  Auth, Firestore (device pairing/auth records), and functions. Projects:
-  `kanna-build` (production), `kanna-staging` (staging), `kanna-local`
-  (emulators). The deployed functions are the billing backend
-  (`createCheckoutSession`, `stripeWebhook`); the Stripe webhook writes only
-  `users/{uid}/billing/stripe`, and a shared reducer derives the single
+  Auth, Firestore (device pairing/auth records, the cloud task index, billing),
+  and functions. Projects: `kanna-build` (production), `kanna-staging`
+  (staging), `kanna-local` (emulators). Exactly two functions are deployed —
+  the billing backend (`createCheckoutSession`, `stripeWebhook`). The webhook
+  is the only writer of the `users/{uid}/billing/stripe` source doc and never
+  writes the entitlement doc directly: a shared reducer derives the single
   `users/{uid}/entitlements/cloud_access` record from every source
-  (`docs/specs/accounts-and-billing.md`).
+  (stripe / app_store / comp) in the same transaction
+  (`docs/specs/accounts-and-billing.md`). Comp/grandfather grants are seeded
+  by `services/firebase-functions/scripts/grant-comp-access.mjs`
+  (`docs/comp-access-runbook.md`).
 
 Deploy only via `./kd cloud deploy` (with `--staging` or `--production`),
 never the Firebase CLI directly; function deploys additionally require
@@ -177,24 +248,119 @@ there for the same reason.
 
 Task creation and terminal streaming, end to end:
 
-1. User creates a task (⇧⌘N) → worktree at `{repo}/.kanna-worktrees/task-{uuid}`,
-   branch `task-{id}`, DB row, repo-config `setup` commands run.
-2. App asks the daemon to `Spawn` — the daemon forks the agent CLI in a PTY and
-   starts the single per-session reader feeding the headless terminal.
+1. User creates a task (⇧⌘N) → the frontend store calls `createDesktopTask`
+   against the `kanna-server` HTTP API (`apps/desktop/src/stores/taskItemActions.ts`
+   → `services/desktopServerClient`). **`kanna-server` owns creation**
+   (`crates/kanna-server/src/task_creator/`): it writes the DB row, creates
+   the worktree at `{repo}/.kanna-worktrees/task-{uuid}` on branch
+   `task-{id}`, and runs the repo-config `setup` commands.
+2. `kanna-server` then asks the daemon to `SpawnAgent` — the daemon forks the
+   agent CLI in a PTY and starts the single per-session reader feeding the
+   headless terminal.
 3. Frontend `AttachSnapshot` hydrates xterm.js from the headless terminal, then
    streams live output; typed input goes back through `send_input` → PTY.
-4. Agent finishes → hook/idle detection marks the task `unread`; the user
-   reviews the diff (⌘D) and advances the workflow (⌘S).
-5. Stage transitions fork a fresh workspace (new branch + worktree from the
-   committed tip) and respawn the session for the next stage's agent; only
-   committed work crosses stage boundaries.
+4. The daemon emits terminal-state events; `kanna-server`'s terminal watcher
+   persists them as the task's `runtimeState` and derives the
+   `activity`/read-state effects (a stopped, unviewed task shows `unread`).
+   The user reviews the diff (⌘D) and advances the workflow (⌘S).
+5. Stage transitions fork a fresh workspace (new branch + worktree cut from
+   the task's **latest committed tip**, resolved across all of the task's
+   workspace branches — see `crates/kanna-server/src/task_creator/work_tip.rs`)
+   and respawn the session for the next stage's agent; only committed work
+   crosses stage boundaries.
 
 Workflow semantics are split across three places: task/workflow/workspace/post
 definitions and close behavior are in [`AGENTS.md`](../../AGENTS.md) under
-"Core concepts"; the stage-advance, revision-budget, and revision-resume
-contracts are under its "Common Pitfalls"; and the user-facing task flows,
-close steps, and shortcuts are in
+"Core concepts"; the stage-advance contract is under its "Common Pitfalls";
+and the user-facing task flows, close steps, shortcuts, and the **revision
+contracts** — provider-neutral session resume, the default budget of 5
+agent-requested rounds (`0` = unlimited), exhausted-agent parking vs. the
+human reset, and the committed task spec at `docs/task-specs/<task-id>.md`
+that later stages review against — are in
 [Product Behavior](product-behavior.md).
+
+### Beyond the desktop: events, inputs, and the cloud path
+
+The contracts below are specified in
+[`docs/kanna-server-boundary.md`](../kanna-server-boundary.md); this is the map.
+
+- **Task event feed.** Events are appended by the same DB calls that change
+  the state they describe, inside the caller's transaction where there is one
+  — the log stays consistent with `pipeline_item`/`stage_run` by construction
+  rather than by call sites remembering to publish (not every task-state
+  write emits an event; pinning, for example, does not).
+  `GET /v1/task-events` is a cursor-based long poll over `task_event.seq`;
+  16 event kinds exist today, covering task lifecycle, runs and stage
+  changes, input delivery/blocking, awaiting-input and activity edges, merge
+  signaling, teardown failures, and transfer finalization
+  (`crates/kanna-server/src/db/task_events.rs`). Two of those kinds carry
+  the agent-supervision contract and must not be conflated:
+  - `task.awaiting_input` is a **positive** signal — the daemon matched
+    prompt chrome the agent CLI actually rendered (`Waiting`). It is never
+    inferred from a session merely going quiet.
+  - `task.activity_changed` is the provider-neutral **settled** display
+    transition, debounced server-side (`activity_event_debounce_seconds`,
+    default 20 s): every activity direction emits once after the new value
+    has held, for every provider, with no waiting-prompt placeholder
+    required; a flicker inside the window emits nothing. The payload carries
+    `previousActivity`, `activity`, the authoritative `runtimeState`, and
+    `latestRunFinishedWithoutCompletion` — the parked-awaiting-advance
+    signature — so a manager acts on the shared server verdict instead of
+    running its own polling or debounce loop. It does not prove a question
+    was asked; `task.awaiting_input` remains the question signal. (This
+    server-side debounce is task `6b9fb72a` / PR #1164, which replaced the
+    earlier `task.idle_sustained` design — no such event exists.)
+
+  Cross-machine consumption is
+  the **`ks1.` aggregated cursor**: when the caller is account-authorized and
+  relay routing is up, the local server fans the wait out to sibling desktops
+  as relay invokes, stamps every event with `machineId`, keeps one opaque
+  native cursor per machine (no fabricated global order), and reports
+  unreachable peers as `machineErrors` with `stale: true`. `kanna-mcp` keeps
+  its own older `km1.` client-side fan-in for explicit multi-machine task-id
+  sets. A task manager consumes the feed by looping `kanna_wait_events` with
+  the returned cursor. The mobile app does **not** use
+  this feed — its cross-machine view is the Firestore task index plus KSP
+  task-summary streams.
+- **Task input pipeline.** `POST /v1/tasks/{id}/input` (and the server's own
+  completion notifications) write into the live PTY through the daemon. A
+  success now means *submitted* — the daemon acknowledges only after the
+  message bytes and the delayed Enter both landed. Deliveries the daemon
+  accepts are appended to the durable `task_input` ledger with source
+  (`operator`/`manager`/`notify`/`unspecified`), stage, and run. Whether a
+  composer draft holds delivery follows the daemon's **composer attestation**
+  ledger, a three-way evidence state
+  (`crates/daemon/SPEC.md`, protected-input and composer-attestation):
+  - `not-typed` (zero bytes counted since the last submission boundary) is
+    *proven empty* — the message delivers immediately, even while provider
+    chrome renders a tab-to-accept suggestion on the composer line;
+  - `typed` holds the queued message and answers 409 `input_held_by_draft`
+    until the human's next submission boundary;
+  - `unknown` is **not** zero: it conservatively stays held or blocked until
+    a submission boundary or a valid empty-composer attestation resolves it,
+    and a session inherited with unknown draft state answers 409
+    `input_blocked` (`inputBlocked: "inherited-draft-unknown"`) until then.
+
+  Composer text is never session output: task detail reports it separately as
+  `composer: { text, attestation }`, the task-logs tail labels the composer
+  line, and text whose attestation is not `typed` must never be read as an
+  instruction.
+- **Completion notify.** `kanna-server` subscribes to daemon terminal-state
+  events directly (never through the desktop frontend) and delivers
+  `TASK <child-id> DONE [success|failure|closed]: <title>` to the notify
+  target — a closed three-word vocabulary derived from the completion trigger
+  plus the terminating `stage_run`, never from the daemon `Exit` alone.
+- **Cloud task publication.** `kanna-server` polls its own task snapshot
+  every 500 ms, fingerprints the envelope, and publishes changes through the
+  relay to Firestore (`users/{uid}/desktops/{id}/tasks`) under a
+  session-generation/sequence fence. Publication is **diff-aware** end to
+  end: an unchanged snapshot sends nothing, and the relay reconciles against
+  a per-session index so a converged publish costs zero Firestore reads and
+  writes. Continuously changing output snippets are kept off this path
+  entirely — they stream over KSP `task_summary` frames while Firestore holds
+  only the **resting** snippet, refreshed at boundaries: task close, a
+  `working` → `idle`/`unread` transition, or a changed `transition_revision`
+  (`crates/kanna-server/src/cloud_task_publisher.rs`).
 
 ## Source-of-truth boundaries
 
