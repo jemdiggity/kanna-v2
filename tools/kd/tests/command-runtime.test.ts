@@ -429,4 +429,61 @@ describe("command runtime helpers", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it.skipIf(!tmuxAvailable)("replaces real tmux processes on profile changes and preserves unchanged-profile idempotency", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kanna-kd-profile-reconcile-"));
+    const outputPath = join(root, "profile.txt");
+    const tmuxName = `kanna-profile-${process.pid}-${Date.now()}`;
+    const target = { server: tmuxName, session: tmuxName };
+    const command = [
+      "node",
+      "-e",
+      JSON.stringify(
+        `require("node:fs").writeFileSync(${JSON.stringify(outputPath)}, process.env.KANNA_CLOUD_ENV + ":" + process.pid); setTimeout(() => {}, 30000);`
+      )
+    ].join(" ");
+    const window = (profile: string) => ({
+      name: "desktop",
+      cwd: root,
+      command,
+      env: { PATH: process.env.PATH, KANNA_CLOUD_ENV: profile }
+    });
+
+    try {
+      await startTmuxSession(nodeCommandRunner, target, [window("emulators")], {
+        reconcileKey: "dev:cloud=emulators"
+      });
+      const first = await waitForFile(outputPath);
+      expect(first).toMatch(/^emulators:\d+$/);
+
+      await startTmuxSession(nodeCommandRunner, target, [window("emulators")], {
+        reconcileKey: "dev:cloud=emulators"
+      });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(await readFile(outputPath, "utf8")).toBe(first);
+
+      await startTmuxSession(nodeCommandRunner, target, [window("staging")], {
+        reconcileKey: "dev:cloud=staging"
+      });
+      const stagingPid = first.replace("emulators:", "staging:");
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const current = await readFile(outputPath, "utf8");
+        if (current.startsWith("staging:") && current !== stagingPid) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      const changed = await readFile(outputPath, "utf8");
+      expect(changed).toMatch(/^staging:\d+$/);
+      expect(changed.split(":")[1]).not.toBe(first.split(":")[1]);
+
+      await startTmuxSession(nodeCommandRunner, target, [window("staging")], {
+        reconcileKey: "dev:cloud=staging"
+      });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(await readFile(outputPath, "utf8")).toBe(changed);
+    } finally {
+      await nodeCommandRunner.run("tmux", ["-L", target.server, "kill-session", "-t", target.session])
+        .catch(() => ({ exitCode: 1, stdout: "", stderr: "" }));
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });

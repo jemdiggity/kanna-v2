@@ -48,6 +48,7 @@ Grouped highlights — run `./kd` for the full surface (task ids live in
 ./kd dev up                  # start desktop dev stack in background tmux
 ./kd dev up --mobile         # + Expo mobile app
 ./kd dev up --emulators      # + Firebase emulators
+./kd dev up --cloud staging  # dev desktop + worktree owner + staging cloud
 ./kd dev up --seed           # + seed data (from a worktree)
 ./kd dev up --attach         # attach to the tmux session
 ./kd dev down                # stop + reap inventoried processes; --kill-daemon also
@@ -76,6 +77,8 @@ pnpm test                    # JS/TS suite only
 
 ```sh
 ./kd mobile run --device     # dev stack + install/launch on a physical iPhone
+./kd mobile run --device --build dev --owner staging
+                             # dev iPhone app + installed staging owner/cloud
 ./kd mobile doctor --device  # on-device preflight without building
 ./kd mobile uninstall --device --staging --confirm-bundle build.kanna.app.staging
 ./kd mobile up --staging     # staging Metro against installed Kanna Staging
@@ -89,6 +92,24 @@ the desktop-side `kanna-server`, so the app boots but can't reach desktop
 data. Physical-device flows, staging installs, and the Buffy staging test
 identity are documented in detail in
 [Physical iPhone development](#physical-iphone-development) below.
+
+Development launches resolve three independent axes before starting anything:
+
+| Profile | Client build identity | Desktop owner (server + daemon) | Cloud |
+|---|---|---|---|
+| normal dev | dev | worktree | emulators |
+| mobile dev on staging | dev | installed staging | staging |
+| desktop dev on staging cloud | dev | worktree | staging |
+| full staging (`--staging`) | staging | installed staging | staging |
+| production (`--production`) | production | installed production | production |
+
+Use `--build`, `--owner`, and `--cloud` when a non-default axis needs to be
+explicit. `--staging` remains the full-staging compatibility profile for
+mobile commands and the `--cloud staging` compatibility alias for `dev up`.
+Production remains behind its existing `--production` guard; kd rejects
+explicit production axes. Server and daemon always move together with their
+desktop owner. Command results print the resolved profile and owner/device
+endpoints.
 
 ### Cloud & release
 
@@ -536,7 +557,9 @@ the daemon builds quickly but the full Tauri app takes several minutes.
 
 ## Physical iPhone development
 
-For physical iPhone dev-build launches, set `KANNA_IOS_DEVICE_UDID` or `KANNA_IOS_PHYSICAL_DEVICE_NAME`, then run `./kd mobile run --device` from a worktree. This is the canonical single-command flow: it starts or augments the worktree dev stack with Firebase emulators, relay, desktop, and a resilient dev-client Metro on `KANNA_MOBILE_PORT`; resolves the Mac LAN IP; prints the exact Metro URL (`http://<LAN-IP>:<KANNA_MOBILE_PORT>`); then runs `expo run:ios --device <udid> --port <KANNA_MOBILE_PORT>` with `REACT_NATIVE_PACKAGER_HOSTNAME=<LAN-IP>`. It reuses the kd-managed Metro and does not kill Metro after launch. Use `./kd mobile doctor --device` to run the same on-device preflight without building or launching.
+For physical iPhone dev-build launches, set `KANNA_IOS_DEVICE_UDID` or `KANNA_IOS_PHYSICAL_DEVICE_NAME`, then run `./kd mobile run --device` from a worktree. This is the canonical single-command normal-dev flow: it starts or augments the worktree dev stack with Firebase emulators, relay, desktop, and a resilient dev-client Metro on `KANNA_MOBILE_PORT`; resolves the Mac LAN IP; prints the exact Metro URL (`http://<LAN-IP>:<KANNA_MOBILE_PORT>`); then runs `expo run:ios --device <udid> --port <KANNA_MOBILE_PORT>` with `REACT_NATIVE_PACKAGER_HOSTNAME=<LAN-IP>`. It reuses the kd-managed Metro and does not kill Metro after launch. Use `./kd mobile doctor --device` to run the same on-device preflight without building or launching.
+
+To run the dev app identity against staging, use `./kd mobile run --device --build dev --owner staging`. kd first requires the authoritative installed staging owner at `http://127.0.0.1:48121/v1/status`, verifies that desktop in the staging relay, and only then starts a mobile-only Metro, prebuilds/installs `build.kanna.app.dev`, and launches it on the attached iPhone. The device uses staging Firebase and `wss://relay-staging.kanna.build`; kd never starts or silently substitutes the worktree desktop/server. This is a development build and does not enable staging OTA/signing behavior.
 
 iOS requires a one-time Local Network permission grant for the dev build: Settings -> Privacy & Security -> Local Network -> Kanna = ON. If this permission is denied or dismissed, the app can show "Could not connect to development server" even when the Metro URL is correct. Troubleshooting map: "No script URL provided" means Metro is down or the app launched against the wrong port; "Could not connect to development server" means Metro is down, the phone cannot reach the printed LAN URL, or Local Network permission is off.
 
@@ -546,7 +569,7 @@ If iOS cannot replace an installed app because its signing team's application-id
 
 Mobile OTA runtime compatibility is keyed by the `runtimeVersion` value in `apps/mobile/src/mobileEnvironments.json`. Bump this value whenever a change touches native code, native config, the Expo SDK, native dependencies, or `apps/mobile/plugins/withKannaNativeIdentity.js`; JS-only changes keep the same runtimeVersion and are OTA-deliverable.
 
-When targeting staging on a physical iPhone, first distinguish a dev-client launch from a standalone install. Set `KANNA_IOS_DEVICE_UDID` or `KANNA_IOS_PHYSICAL_DEVICE_NAME` for both workflows. Use `./kd mobile run --device --staging` for live development: it starts staging dev-client Metro with `KANNA_APP_ENV=staging`, uses staging Firebase/relay defaults (`kanna-staging`, `wss://relay-staging.kanna.build`), prebuilds the staging native identity, and runs `expo run:ios` with both `--port <KANNA_MOBILE_PORT>` and `RCT_METRO_PORT=<KANNA_MOBILE_PORT>`. The resulting app requires Metro to keep running. Use `./kd mobile run --device --staging --install` when the operator asks to install staging without Metro or wants a self-contained app: it builds the bundled Release app with `xcodebuild` (automatic signing with `-allowProvisioningUpdates`, so a changed entitlement can mint a fresh provisioning profile — this requires an Apple ID for the team in Xcode → Settings → Accounts), then installs and launches it with `devicectl`; it neither starts nor requires Metro. Both paths default their marketing version to `apps/mobile/VERSION`, independently of the active desktop staging RC, and do not query desktop release status to choose it. An explicit `KANNA_APP_VERSION` overrides only that marketing version. In both cases the installed `/Applications/Kanna Staging.app` desktop/server is the desktop owner; staging must not start a worktree desktop. Use `./kd mobile up --staging` only when a staging dev-client app is already installed and you only need staging Metro running; it does not install or relaunch a physical iPhone app. To use the committed persistent Buffy the Bug Slayer test identity, a human with `kanna-staging` credentials first provisions the real staging Firebase data with:
+For the full staging identity, first distinguish a dev-client launch from a standalone install. Set `KANNA_IOS_DEVICE_UDID` or `KANNA_IOS_PHYSICAL_DEVICE_NAME` for both workflows. Use the compatibility profile `./kd mobile run --device --staging` for live development: it is equivalent to staging build + installed staging owner + staging cloud, starts staging dev-client Metro with `KANNA_APP_ENV=staging`, uses staging Firebase/relay defaults (`kanna-staging`, `wss://relay-staging.kanna.build`), prebuilds the staging native identity, and runs `expo run:ios` with both `--port <KANNA_MOBILE_PORT>` and `RCT_METRO_PORT=<KANNA_MOBILE_PORT>`. The resulting app requires Metro to keep running. Use `./kd mobile run --device --staging --install` when the operator asks to install staging without Metro or wants a self-contained app: it builds the bundled Release app with `xcodebuild` (automatic signing with `-allowProvisioningUpdates`, so a changed entitlement can mint a fresh provisioning profile — this requires an Apple ID for the team in Xcode → Settings → Accounts), then installs and launches it with `devicectl`; it neither starts nor requires Metro. Both paths default their marketing version to `apps/mobile/VERSION`, independently of the active desktop staging RC, and do not query desktop release status to choose it. An explicit `KANNA_APP_VERSION` overrides only that marketing version. In both cases the installed `/Applications/Kanna Staging.app` desktop/server is the desktop owner; staging must not start a worktree desktop. Use `./kd mobile up --staging` only when a staging dev-client app is already installed and you only need staging Metro running; it does not install or relaunch a physical iPhone app. To use the committed persistent Buffy the Bug Slayer test identity, a human with `kanna-staging` credentials first provisions the real staging Firebase data with:
 
 ```bash
 gcloud auth application-default login
