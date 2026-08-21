@@ -61,20 +61,22 @@ and checked-in Stripe fixture payloads (`test/fixtures/stripe/`):
 ## What would close the gap
 
 1. Slice-0 lands the Stripe account and test-mode keys.
-2. The five Secret Manager entries created in `kanna-staging`
-   (`STRIPE_SECRET_KEY`, `STRIPE_PRICE_MONTHLY`, `STRIPE_PRICE_ANNUAL`,
-   `KANNA_PORTAL_BASE_URL` on `createCheckoutSession`; `STRIPE_WEBHOOK_SECRET`
-   on `stripeWebhook`), then `./kd cloud deploy --staging --functions`, then a
+2. The two Secret Manager entries created in `kanna-staging`
+   (`STRIPE_SECRET_KEY` on `createCheckoutSession`; `STRIPE_WEBHOOK_SECRET` on
+   `stripeWebhook`), then `./kd cloud deploy --staging --functions`, then a
    Stripe test-mode webhook endpoint pointed at the deployed `stripeWebhook`.
+   The public `KANNA_PORTAL_BASE_URL` parameter is already committed in the
+   Functions package's project-specific `.env` files.
 
    The bindings themselves are declared in the code (`src/index.ts`, lists in
    `src/billing/config.ts`), so this step is creating the secrets, not wiring
    them. Until they exist the deploy fails naming the missing one — deliberately,
    since the alternative is publishing a backend whose environment is empty.
-   That the declared bindings actually reach the deployment manifest is pinned
-   by `test/function-secrets.test.ts`; that Secret Manager then populates the
-   running function's environment is deploy-time Firebase behaviour no emulator
-   reproduces, and is part of this gap rather than something tests can close.
+   That the declared bindings and portal parameter reach the deployment
+   manifest is pinned by `test/function-secrets.test.ts`; that Secret Manager
+   then populates the running function's credentials is deploy-time Firebase
+   behaviour no emulator reproduces, and is part of this gap rather than
+   something tests can close.
 3. A staging E2E that creates an account, drives `createCheckoutSession`,
    completes payment with a test card, and asserts the entitlement doc and the
    relay's response — the flow Decision 8 names. The Checkout page itself stays

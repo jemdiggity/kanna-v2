@@ -9,12 +9,10 @@
  * stays deleted and unexported, and deploys go through
  * `./kd cloud deploy --functions` rather than bare `firebase deploy`.
  *
- * Stripe configuration is read from the environment at call time and bound to
- * each function from GCP Secret Manager by the `secrets` declarations below.
- * That binding is what puts the values in `process.env` at all: a deployed
- * 2nd-gen function's environment is populated only from declared secrets and
- * committed `.env` files, so an undeclared variable is simply absent at runtime,
- * however carefully it was stored in Secret Manager.
+ * Stripe configuration is read from the environment at call time. Credentials
+ * are bound to each function from GCP Secret Manager by the `secrets`
+ * declarations below; public parameters come from committed per-project `.env`
+ * files and are declared with the Firebase Functions parameter API.
  *
  * Declaring them also decides how a missing credential fails. `firebase deploy`
  * refuses to deploy a function whose declared secret does not exist in the
@@ -24,9 +22,9 @@
  *
  * Nothing secret is committed. Bindings are per function rather than global so
  * each carries only what it uses: the webhook never sees the Stripe API key,
- * and checkout never sees the webhook signing secret. The lists themselves live
+ * and checkout never sees the webhook signing secret. The declarations live
  * beside the variables they name in `billing/config.ts`, so this module's own
- * exports stay exactly the two functions it deploys.
+ * exports stay exactly the functions it deploys.
  */
 import { getApps, initializeApp } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
