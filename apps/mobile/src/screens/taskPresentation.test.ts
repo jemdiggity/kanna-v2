@@ -31,6 +31,31 @@ describe("buildTaskListItemModel", () => {
     expect(model.isWaitingPromptPlaceholder).toBe(true);
   });
 
+  it("uses the first nonblank prompt line when the stored title is blank", () => {
+    const model = buildTaskListItemModel({
+      id: "current-task-id",
+      repoId: "repo-1",
+      title: "  ",
+      prompt: "\n  A humane prompt excerpt  \nMore detail",
+      stage: "pr"
+    });
+
+    expect(model.title).toBe("A humane prompt excerpt");
+  });
+
+  it("uses a humane generic label when both title and prompt are blank", () => {
+    const model = buildTaskListItemModel({
+      id: "current-task-id",
+      repoId: "repo-1",
+      title: "",
+      prompt: " ",
+      stage: "pr"
+    });
+
+    expect(model.title).toBe("Untitled task");
+    expect(model.title).not.toContain("current-task-id");
+  });
+
   it("hides a short waiting prompt that duplicates the title", () => {
     const model = buildTaskListItemModel({
       id: "task-short-duplicate",
