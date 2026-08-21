@@ -202,6 +202,32 @@ describe("TasksScreen", () => {
     expect(findElement(renderedList, "LoadingText")).toBeNull();
   });
 
+  it("offers retry and dismiss for a repository command task load failure", () => {
+    if (!TasksScreen) throw new Error("TasksScreen was not loaded");
+    const onRetryRepoCommand = vi.fn();
+    const onDismissRepoCommandError = vi.fn();
+    const tree = TasksScreen({
+      heading: "Tasks",
+      repos: [{ id: "repo-1", name: "Repo One" }],
+      selectedRepoId: "repo-1",
+      taskCollectionStatus: "ready",
+      repoCommandErrorMessage: "The launched task could not be loaded.",
+      taskSlots: [],
+      onOpenTask: vi.fn(),
+      onSelectRepo: vi.fn(),
+      onRetryRepoCommand,
+      onDismissRepoCommandError
+    }) as ElementNode;
+
+    expect(textContent(tree)).toContain("Command task unavailable");
+    const retry = findPressableByText(tree, "Try Again");
+    const dismiss = findPressableByText(tree, "Dismiss");
+    retry?.props?.onPress?.();
+    dismiss?.props?.onPress?.();
+    expect(onRetryRepoCommand).toHaveBeenCalledOnce();
+    expect(onDismissRepoCommandError).toHaveBeenCalledOnce();
+  });
+
   it("keeps task content visible while status is loading", () => {
     const taskSlots = projectTaskUiSlots([{
       id: "task-1",

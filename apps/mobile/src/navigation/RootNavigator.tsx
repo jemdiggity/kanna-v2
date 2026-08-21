@@ -343,7 +343,13 @@ function NavigatorTabBar(props: BottomTabBarProps) {
 }
 
 function TasksTabRoute() {
-  const { controller, pushDesktops, pushTask, state } = useNavigationContent();
+  const {
+    controller,
+    pushDesktops,
+    pushPreparedTask,
+    pushTask,
+    state
+  } = useNavigationContent();
   const scrollViewRef = useTabReselectionScrollToTop();
   const needsDesktopSetup =
     state.auth.status === "signedOut" &&
@@ -357,10 +363,22 @@ function TasksTabRoute() {
         repos={state.repos}
         selectedRepoId={state.selectedRepoId}
         taskCollectionStatus={state.taskCollectionStatus}
+        repoCommandErrorMessage={
+          state.pendingRepoCommandTask ? state.repoCommandErrorMessage : null
+        }
+        repoSelectionDisabled={state.runningRepoCommandId !== null}
         taskListPreferences={state.localTaskListPreferences}
         taskSlots={projectTaskUiSlots(state.repoTasks, state.taskUiSlots)}
         scrollViewRef={scrollViewRef}
         onOpenMachines={pushDesktops}
+        onRetryRepoCommand={() => {
+          void controller.retryRepoCommand().then((taskId) => {
+            if (taskId) pushPreparedTask(taskId);
+          });
+        }}
+        onDismissRepoCommandError={() => {
+          controller.dismissRepoCommandTaskLoadError();
+        }}
         onSelectRepo={(repoId) => {
           void controller.selectRepo(repoId);
         }}
@@ -383,6 +401,7 @@ function ActivityTabRoute() {
         repos={state.repos}
         selectedRepoId={state.selectedRepoId}
         taskCollectionStatus={state.taskCollectionStatus}
+        repoSelectionDisabled={state.runningRepoCommandId !== null}
         taskListPreferences={state.localTaskListPreferences}
         taskSlots={projectTaskUiSlots(state.recentTasks, state.taskUiSlots)}
         scrollViewRef={scrollViewRef}

@@ -20,11 +20,15 @@ interface TasksScreenProps {
   repos: RepoSummary[];
   selectedRepoId: string | null;
   taskCollectionStatus: TaskCollectionStatus;
+  repoCommandErrorMessage?: string | null;
+  repoSelectionDisabled?: boolean;
   /** This phone's own pinned/dismissed rows. */
   taskListPreferences?: LocalTaskListPreferences;
   taskSlots: TaskUiSlot[];
   scrollViewRef?: React.RefObject<ScrollView | null>;
   onOpenMachines?(): void;
+  onRetryRepoCommand?(): void;
+  onDismissRepoCommandError?(): void;
   onSelectRepo(repoId: string): void;
   onOpenTask(taskId: string): void;
   onDismissActivity?(taskId: string): Promise<void>;
@@ -37,10 +41,14 @@ export function TasksScreen({
   repos,
   selectedRepoId,
   taskCollectionStatus,
+  repoCommandErrorMessage = null,
+  repoSelectionDisabled = false,
   taskListPreferences = emptyLocalTaskListPreferences(),
   taskSlots,
   scrollViewRef,
   onOpenMachines,
+  onRetryRepoCommand,
+  onDismissRepoCommandError,
   onSelectRepo,
   onOpenTask,
   onDismissActivity,
@@ -101,9 +109,17 @@ export function TasksScreen({
               return (
                 <Pressable
                   accessibilityRole="button"
-                  accessibilityState={{ selected }}
+                  accessibilityState={{
+                    disabled: repoSelectionDisabled,
+                    selected
+                  }}
+                  disabled={repoSelectionDisabled}
                   key={repo.id}
-                  style={[styles.repoChip, selected ? styles.repoChipSelected : null]}
+                  style={[
+                    styles.repoChip,
+                    selected ? styles.repoChipSelected : null,
+                    repoSelectionDisabled ? styles.repoChipDisabled : null
+                  ]}
                   testID={MOBILE_E2E_IDS.tasksRepo(repo.id)}
                   onPress={() => onSelectRepo(repo.id)}
                 >
@@ -119,6 +135,37 @@ export function TasksScreen({
               );
             })}
           </ScrollView>
+        ) : null}
+
+        {!isRecentView && repoCommandErrorMessage ? (
+          <View accessibilityRole="alert" style={styles.commandErrorCard}>
+            <Text style={styles.commandErrorTitle}>
+              Command task unavailable
+            </Text>
+            <Text style={styles.commandErrorCopy}>
+              {repoCommandErrorMessage}
+            </Text>
+            <View style={styles.commandErrorActions}>
+              {onRetryRepoCommand ? (
+                <Pressable
+                  onPress={onRetryRepoCommand}
+                  style={styles.commandErrorPrimary}
+                  testID={MOBILE_E2E_IDS.tasksRepoCommandRetry}
+                >
+                  <Text style={styles.commandErrorPrimaryLabel}>Try Again</Text>
+                </Pressable>
+              ) : null}
+              {onDismissRepoCommandError ? (
+                <Pressable
+                  onPress={onDismissRepoCommandError}
+                  style={styles.commandErrorSecondary}
+                  testID={MOBILE_E2E_IDS.tasksRepoCommandDismiss}
+                >
+                  <Text style={styles.commandErrorSecondaryLabel}>Dismiss</Text>
+                </Pressable>
+              ) : null}
+            </View>
+          </View>
         ) : null}
 
         {showDesktopSetup && onOpenMachines ? (
@@ -203,6 +250,7 @@ const styles = StyleSheet.create({
   repoChipSelected: {
     backgroundColor: "#E8F1FF"
   },
+  repoChipDisabled: { opacity: 0.6 },
   repoLabel: {
     color: "#D5DEEC",
     fontSize: 13,
@@ -210,6 +258,40 @@ const styles = StyleSheet.create({
   },
   repoLabelSelected: {
     color: "#0B1220"
+  },
+  commandErrorCard: {
+    backgroundColor: "#241A18",
+    borderColor: "#75483D",
+    borderRadius: 16,
+    borderWidth: 1,
+    gap: 8,
+    padding: 16
+  },
+  commandErrorTitle: { color: "#FFD7CE", fontSize: 15, fontWeight: "800" },
+  commandErrorCopy: { color: "#E8BEB4", fontSize: 13, lineHeight: 19 },
+  commandErrorActions: { flexDirection: "row", gap: 10 },
+  commandErrorPrimary: {
+    backgroundColor: "#E8F1FF",
+    borderRadius: 999,
+    paddingHorizontal: 14,
+    paddingVertical: 9
+  },
+  commandErrorPrimaryLabel: {
+    color: "#0B1220",
+    fontSize: 13,
+    fontWeight: "800"
+  },
+  commandErrorSecondary: {
+    borderColor: "#9C685B",
+    borderRadius: 999,
+    borderWidth: 1,
+    paddingHorizontal: 14,
+    paddingVertical: 9
+  },
+  commandErrorSecondaryLabel: {
+    color: "#FFD7CE",
+    fontSize: 13,
+    fontWeight: "800"
   },
   setupCard: {
     alignItems: "center",

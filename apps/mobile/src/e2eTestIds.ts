@@ -7,6 +7,8 @@ export const MOBILE_E2E_IDS = {
   moreRetryButton: "mobile.more-retry-button",
   tasksScreen: "mobile.tasks-screen",
   tasksPairMacButton: "mobile.tasks-pair-mac",
+  tasksRepoCommandRetry: "mobile.tasks-repo-command-retry",
+  tasksRepoCommandDismiss: "mobile.tasks-repo-command-dismiss",
   tasksRepo(repoId: string): string {
     return `mobile.tasks.repo.${repoId}`;
   },

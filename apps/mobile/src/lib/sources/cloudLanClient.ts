@@ -927,29 +927,29 @@ export function createCloudLanClient(
   };
 
   const routeForRepo = (repoId: string) => {
+    const owner = lanRepoOwners.get(repoId)?.entries().next().value;
+    if (owner && options.isLanEnabled()) {
+      const [desktopId, localRepoId] = owner;
+      const ownerClient = lanClientForDesktop(desktopId);
+      if (ownerClient) {
+        return {
+          source: "lan" as const,
+          client: ownerClient,
+          repoId: localRepoId,
+          desktopId
+        };
+      }
+      return {
+        source: "unavailable" as const,
+        taskId: repoId,
+        desktopId,
+        message: `LAN route for repository "${repoId}" is unavailable.`
+      };
+    }
     const sourceTask = acceptedTaskSnapshot?.tasks.find(
       (candidate) => candidate.repoId === repoId
     );
     if (!sourceTask) {
-      const owner = lanRepoOwners.get(repoId)?.entries().next().value;
-      if (owner && options.isLanEnabled()) {
-        const [desktopId, localRepoId] = owner;
-        const ownerClient = lanClientForDesktop(desktopId);
-        if (ownerClient) {
-          return {
-            source: "lan" as const,
-            client: ownerClient,
-            repoId: localRepoId,
-            desktopId
-          };
-        }
-        return {
-          source: "unavailable" as const,
-          taskId: repoId,
-          desktopId,
-          message: `LAN route for repository "${repoId}" is unavailable.`
-        };
-      }
       return { source: "cloud" as const, client: cloud, repoId };
     }
     const taskRoute = routeForTask(sourceTask.id);

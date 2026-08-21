@@ -15,7 +15,11 @@ import type {
   TaskTerminalStreamEvent,
   TaskTerminalSubscription
 } from "../lib/api/client";
-import { createKannaClient, TaskCreationError } from "../lib/api/client";
+import {
+  createKannaClient,
+  RepoNotRegisteredError,
+  TaskCreationError
+} from "../lib/api/client";
 import {
   INPUT_HELD_BY_DRAFT_REASON,
   ServerRefusalError
@@ -1035,9 +1039,9 @@ describe("createMobileController", () => {
       stage: "in progress",
       agentType: "agent" as const
     };
-    client.listRecentTasks
-      .mockRejectedValueOnce(new Error("canonical refresh failed"))
-      .mockResolvedValueOnce([canonicalTask]);
+    client.listRecentTasks.mockRejectedValue(
+      new Error("canonical refresh failed")
+    );
     client.listRepoTasks.mockResolvedValue([canonicalTask]);
 
     await controller.runRepoCommand("factory:create-agent");
@@ -1058,6 +1062,7 @@ describe("createMobileController", () => {
     expect(client.observeTaskTerminal).not.toHaveBeenCalled();
     expect(client.observeTaskAgent).not.toHaveBeenCalled();
 
+    client.listRecentTasks.mockResolvedValue([canonicalTask]);
     const commandCatalogReads = client.listRepoCommands.mock.calls.length;
     const retriedTaskId = await controller.retryRepoCommand();
 
@@ -1080,6 +1085,37 @@ describe("createMobileController", () => {
     expect(openedTaskIds).toEqual([]);
   });
 
+  it("retries a newly created command task until it appears in collections", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+    await controller.bootstrap();
+    controller.setNavigationView("more");
+    await flushMicrotasks();
+    const canonicalTask: TaskSummary = {
+      id: "task-command",
+      repoId: "repo-1",
+      title: "Task manager",
+      stage: "in progress",
+      agentType: "agent"
+    };
+    client.listRecentTasks
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([canonicalTask]);
+    client.listRepoTasks.mockResolvedValue([]);
+
+    await expect(
+      controller.runRepoCommand("factory:create-agent")
+    ).resolves.toBe("task-command");
+
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: "task-command",
+      pendingRepoCommandTask: null,
+      repoCommandErrorMessage: null
+    });
+  });
+
   it("opens a command task when a later collection refresh makes it visible", async () => {
     vi.useFakeTimers();
     const store = createSessionStore();
@@ -1095,7 +1131,9 @@ describe("createMobileController", () => {
     client.listRecentTasks.mockResolvedValueOnce([]);
     client.listRepoTasks.mockResolvedValueOnce([]);
 
-    await controller.runRepoCommand("factory:create-agent");
+    const launch = controller.runRepoCommand("factory:create-agent");
+    await vi.advanceTimersByTimeAsync(400);
+    await launch;
 
     expect(store.getState()).toMatchObject({
       selectedTaskId: null,
@@ -1128,6 +1166,74 @@ describe("createMobileController", () => {
     expect(openedTaskIds).toEqual(["task-command"]);
 
     unsubscribe();
+  });
+
+  it("keeps repo selection usable after a created command task cannot load", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+    await controller.bootstrap();
+    controller.setNavigationView("more");
+    await flushMicrotasks();
+    client.listRecentTasks.mockRejectedValue(new Error("route unavailable"));
+
+    await controller.runRepoCommand("factory:create-agent");
+
+    expect(store.getState().pendingRepoCommandTask).toMatchObject({
+      taskId: "task-command"
+    });
+    await controller.selectRepo("repo-2");
+
+    expect(store.getState()).toMatchObject({
+      selectedRepoId: "repo-2",
+      pendingRepoCommandTask: null,
+      repoCommandErrorMessage: null
+    });
+    expect(client.listRepoTasks).toHaveBeenCalledWith("repo-2");
+  });
+
+  it("surfaces a repo command routed to a machine without that repo", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+    await controller.bootstrap();
+    controller.setNavigationView("more");
+    await flushMicrotasks();
+    client.runRepoCommand.mockRejectedValueOnce(
+      new RepoNotRegisteredError("kanji-kongbu", "Mac Studio")
+    );
+
+    await controller.runRepoCommand("factory:create-agent");
+
+    expect(store.getState()).toMatchObject({
+      connectionState: "connected",
+      repoCommandStatus: "error",
+      repoCommandErrorMessage:
+        "kanji-kongbu is not registered on Mac Studio. Choose a machine that has this repo and try again.",
+      pendingRepoCommandTask: null,
+      runningRepoCommandId: null
+    });
+  });
+
+  it("dismisses a created-task load failure so another command can run", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+    await controller.bootstrap();
+    controller.setNavigationView("more");
+    await flushMicrotasks();
+    client.listRecentTasks.mockRejectedValue(new Error("route unavailable"));
+
+    await controller.runRepoCommand("factory:create-agent");
+    expect(await controller.runRepoCommand("factory:create-agent")).toBeNull();
+    expect(client.runRepoCommand).toHaveBeenCalledTimes(1);
+
+    controller.dismissRepoCommandTaskLoadError();
+    client.runRepoCommand.mockRejectedValueOnce(new Error("visible failure"));
+    await controller.runRepoCommand("factory:create-agent");
+
+    expect(store.getState().pendingRepoCommandTask).toBeNull();
+    expect(client.runRepoCommand).toHaveBeenCalledTimes(2);
   });
 
   it("retries both task resolution and the command catalog from a latched error", async () => {
@@ -1201,8 +1307,9 @@ describe("createMobileController", () => {
         repoId: "repo-1",
         revision: "catalog-v2"
       },
-      repoCommandStatus: "ready",
-      repoCommandErrorMessage: null,
+      repoCommandStatus: "error",
+      repoCommandErrorMessage:
+        "The command launched successfully, but its task could not be loaded. Check your connection and try again.",
       pendingRepoCommandTask: { taskId: "task-command" },
       runningRepoCommandId: null,
       unavailableRepoCommandIds: []
