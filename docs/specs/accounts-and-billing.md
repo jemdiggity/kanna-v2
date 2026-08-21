@@ -378,6 +378,72 @@ purchases") at flag day — both become false.
   Stripe test mode via the Stripe CLI (`stripe listen`/`trigger`); live keys
   and live-mode operations are human-only, same rule as production deploys.
 
+### Japan anti-fraud compliance
+
+The 2025 revision of METI's Credit Card Security Guidelines is the practical
+security standard under the amended Installment Sales Act (割賦販売法). For EC
+merchants it calls for EMV 3-D Secure and appropriate anti-fraud controls. See
+METI's [2025 revision announcement][meti-card-security-2025] and its
+[Installment Sales Act overview][meti-installment-sales-act].
+
+The owner confirmed on 2026-08-21 that the two measures declared during Stripe
+Japan onboarding were exactly:
+
+1. **EMV 3-D Secure (本人認証).** Every Kanna card Checkout Session sends
+   `payment_method_options.card.request_three_d_secure = "any"`. Unlike the
+   default `"automatic"`, which lets Stripe decide when to request 3DS from
+   regulatory and risk signals, `"any"` explicitly asks Stripe to attempt 3DS
+   whenever the card supports it. Stripe-hosted Checkout handles the
+   frictionless or challenge flow; the issuer makes the final flow decision.
+   This is stronger declaration evidence than `"automatic"`, at the UX cost
+   of more authentication attempts and potentially more challenge friction,
+   including for customers outside Japan. See Stripe's
+   [3DS authentication-flow documentation][stripe-3ds].
+2. **IP-based fraud detection (不正検知 / 属性・行動分析).** Standard Stripe
+   Radar screens every card payment attempt without a separate Kanna fraud
+   integration. Its network risk model incorporates the originating IP and
+   related reputation/context signals: IP reputation, proxy/VPN/anonymizer
+   risk, and geolocation mismatch. Its public rule attributes specifically
+   expose the client IP and geolocation, known proxy/Tor status, and
+   card-country/IP-country mismatch for fraud decisions. This maps the
+   onboarding description "suspicious IP addresses" to Radar's IP-informed
+   scoring and default high-risk action, rather than to a Kanna-maintained IP
+   denylist. See
+   Stripe's [Radar overview][stripe-radar], [supported IP attributes][stripe-radar-attributes],
+   and [default fraud-prevention rules][stripe-radar-rules].
+
+Kanna also employs **CVV/CVC verification (券面認証)** beyond the declared two.
+When a buyer enters card details, hosted Checkout collects the required
+security code and Stripe sends it to the issuer for verification; Kanna never
+handles or stores it. Wallets and later off-session subscription renewals do
+not re-collect a CVC, so this statement applies to Checkout card-detail entry,
+not every subsequent charge. See Stripe's [CVC collection requirements][stripe-cvc]
+and [card verification checks][stripe-card-checks]. Physical-goods delivery
+address confirmation is inapplicable because Kanna Cloud is a digital service.
+
+Operator runbook (live Stripe account):
+
+1. Open **Radar → Rules** and confirm Radar is active and the default
+   IP-informed risk protections are enabled, including the highest-risk block
+   rule and any default review rule shown for the account. Confirm recent live
+   Checkout card payments receive Radar risk evaluations with client-IP
+   context. If a review rule is unavailable on the standard tier, record that
+   fact; do not purchase Radar for Fraud Teams for this requirement.
+2. The explicit API-level `request_three_d_secure = "any"` is the 3DS control
+   and overrides dynamic 3DS Radar rules for these Checkout Sessions. A custom
+   Radar "request 3DS" rule is therefore unnecessary. If the API policy is
+   ever relaxed to `"automatic"`, add and verify the appropriate Dashboard
+   backstop before changing this declaration.
+
+[meti-card-security-2025]: https://www.meti.go.jp/press/2024/03/20250305002/20250305002.html
+[meti-installment-sales-act]: https://www.meti.go.jp/policy/economy/consumer/credit/kappuhanbaihoatobaraibunyanogaiyofaq.html
+[stripe-3ds]: https://docs.stripe.com/payments/3d-secure/authentication-flow?api-integration=checkout-session-api
+[stripe-radar]: https://docs.stripe.com/radar
+[stripe-radar-attributes]: https://docs.stripe.com/radar/rules/supported-attributes
+[stripe-radar-rules]: https://docs.stripe.com/radar/rules
+[stripe-cvc]: https://support.stripe.com/questions/cvc-collection-requirements
+[stripe-card-checks]: https://docs.stripe.com/disputes/prevention/verification
+
 ## Decision 4 — Apple IAP integration shape (new)
 
 ### Products and client library

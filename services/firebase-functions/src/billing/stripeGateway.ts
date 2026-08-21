@@ -70,6 +70,9 @@ export function stripeCheckoutGateway(secretKey: string): StripeCheckoutGateway 
         line_items: [{ price: input.priceId, quantity: 1 }],
         success_url: input.successUrl,
         cancel_url: input.cancelUrl,
+        payment_method_options: {
+          card: { request_three_d_secure: "any" },
+        },
         subscription_data: { metadata: { firebase_uid: input.uid } },
         metadata: { firebase_uid: input.uid },
       });
