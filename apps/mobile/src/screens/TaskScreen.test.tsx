@@ -119,6 +119,7 @@ vi.mock("../components/LoadingText", () => ({
 vi.mock("./TerminalWebView", () => ({
   TerminalWebView: "TerminalWebView"
 }));
+vi.mock("./RepoExplorer", () => ({ RepoExplorer: "RepoExplorer" }));
 
 vi.mock("./TaskFilePreview", () => ({
   TaskFilePreview: "TaskFilePreview"
@@ -338,6 +339,14 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     onRecoverTaskCreation,
     onResolveTaskFileMentions,
     onReadTaskFile,
+    onListTaskDirectory: vi.fn().mockResolvedValue({
+      path: "",
+      entries: [],
+      offset: 0,
+      nextOffset: null,
+      totalEntries: 0
+    }),
+    onReadTaskFileRange: vi.fn(),
     onReadTaskDiff,
     onCompanionOpenChange,
     onSendCompanionEvent
@@ -716,6 +725,26 @@ describe("TaskScreen", () => {
     (diffPreview?.props?.onClose as () => void)();
     tree = renderTaskScreen({ onReadTaskDiff });
     expect(findByType(tree, "TaskDiffPreview")).toBeNull();
+  });
+
+  it("opens the worktree browser and inserts its line reference into the composer", () => {
+    let tree = renderTaskScreen({ draftInput: "Check this" });
+    pressByTestId(tree, "mobile.task-more-button");
+    const onSelect = componentMocks.showTaskActionMenu.mock.calls[0]![1] as (
+      selectedAction: "browse-files"
+    ) => void;
+    onSelect("browse-files");
+    tree = renderTaskScreen({ draftInput: "Check this" });
+    const explorer = findByType(tree, "RepoExplorer");
+    expect(explorer).not.toBeNull();
+
+    (explorer?.props?.onInsertReference as (value: string) => void)(
+      "src/main.ts:12-18"
+    );
+
+    expect(componentMocks.draftSetter).toHaveBeenLastCalledWith(
+      "Check this\nsrc/main.ts:12-18"
+    );
   });
 
   it("keeps the plus button idle without a pending task action", () => {

@@ -686,6 +686,18 @@ function TaskDetailRoute({
           ? controller.readTaskFile(durableTaskId, path)
           : Promise.reject(new Error("Task creation is still in progress."));
       }}
+      onListTaskDirectory={(path, showAllFiles, offset, filter) => {
+        const durableTaskId = resolveDurableTaskId(state, routeTaskId);
+        return durableTaskId
+          ? controller.listTaskDirectory(durableTaskId, path, showAllFiles, offset, filter)
+          : Promise.reject(new Error("Task creation is still in progress."));
+      }}
+      onReadTaskFileRange={(path, startLine, lineCount, metadataOnly) => {
+        const durableTaskId = resolveDurableTaskId(state, routeTaskId);
+        return durableTaskId
+          ? controller.readTaskFileRange(durableTaskId, path, startLine, lineCount, metadataOnly)
+          : Promise.reject(new Error("Task creation is still in progress."));
+      }}
       onReadTaskDiff={(request) => {
         const durableTaskId = resolveDurableTaskId(state, routeTaskId);
         return durableTaskId

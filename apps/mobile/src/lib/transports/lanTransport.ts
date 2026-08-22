@@ -14,6 +14,8 @@ import type {
   MobileServerStatus,
   RepoSummary,
   RepoCheckoutOperation,
+  RepoDirectoryListing,
+  RepoFileRange,
   RepoCommandCatalog,
   RunRepoCommandResponse,
   TaskActionResponse,
@@ -246,10 +248,10 @@ export function createLanTransport(
       return typeof status.taskInputAttachmentVersion === "number";
     },
     readTaskFile: async (_taskId: string, _path: string): Promise<TaskFileContent> => {
-      throw new Error(
-        "Task file preview requires an authenticated relay connection."
-      );
+      throw new Error("Task file preview requires an authenticated relay connection.");
     },
+    listTaskDirectory: (taskId, path, showAllFiles = false, offset = 0, filter = "") => request<RepoDirectoryListing>(`/v1/tasks/${encodeURIComponent(taskId)}/browse?path=${encodeURIComponent(path)}&showAllFiles=${showAllFiles}&offset=${offset}&limit=60&filter=${encodeURIComponent(filter)}`),
+    readTaskFileRange: (taskId, path, startLine, lineCount, metadataOnly = false) => request<RepoFileRange>(`/v1/tasks/${encodeURIComponent(taskId)}/browse/content?path=${encodeURIComponent(path)}&startLine=${startLine}&lineCount=${lineCount}&metadataOnly=${metadataOnly}`),
     resolveTaskFileMentions: async (
       _taskId: string,
       _mentions: readonly TaskFileMentionInput[]

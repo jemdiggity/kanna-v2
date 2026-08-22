@@ -128,8 +128,8 @@ describe("stats payload visibility", () => {
         role: "server",
         tunnelService: "ksp",
         compressed: true,
-        received: { tunnel: 1_024, taskTransfer: 0, terminalEvent: 0, control: 0, total: 1_024 },
-        sent: { tunnel: 0, taskTransfer: 0, terminalEvent: 0, control: 0, total: 0 },
+        received: { tunnel: 1_024, taskTransfer: 0, terminalEvent: 0, fileBrowse: 0, control: 0, total: 1_024 },
+        sent: { tunnel: 0, taskTransfer: 0, terminalEvent: 0, fileBrowse: 0, control: 0, total: 0 },
         totalBytes: 1_024,
       }),
     ]);

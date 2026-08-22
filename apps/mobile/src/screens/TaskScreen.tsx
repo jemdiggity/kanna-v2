@@ -17,6 +17,8 @@ import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import { LoadingText } from "../components/LoadingText";
 import { displayTaskId } from "../lib/api/taskIdentity";
 import type {
+  RepoDirectoryListing,
+  RepoFileRange,
   TaskDiffContent,
   TaskDiffRequest,
   TaskFileContent,
@@ -54,6 +56,7 @@ import { AgentMessageView } from "./AgentMessageView";
 import { TaskDiffPreview } from "./TaskDiffPreview";
 import { TaskFilePreview } from "./TaskFilePreview";
 import { TaskMentionedFiles } from "./TaskMentionedFiles";
+import { RepoExplorer } from "./RepoExplorer";
 import { TerminalWebView } from "./TerminalWebView";
 import { showTaskActionMenu, type TaskAction } from "./taskActionMenu";
 import {
@@ -66,6 +69,7 @@ import {
 } from "./VisualCompanionModal";
 import {
   clampTaskComposerHeight,
+  appendComposerFileReference,
   TASK_COMPOSER_MAX_HEIGHT,
   TASK_COMPOSER_MIN_HEIGHT,
   TASK_COMPOSER_TEXT_INPUT_PROPS
@@ -126,6 +130,8 @@ interface TaskScreenProps {
     mentions: readonly TaskFileMentionInput[]
   ): Promise<TaskFileMentionResolution>;
   onReadTaskFile(path: string): Promise<TaskFileContent>;
+  onListTaskDirectory(path: string, showAllFiles?: boolean, offset?: number, filter?: string): Promise<RepoDirectoryListing>;
+  onReadTaskFileRange(path: string, startLine: number, lineCount: number, metadataOnly?: boolean): Promise<RepoFileRange>;
   onReadTaskDiff(request: TaskDiffRequest): Promise<TaskDiffContent>;
   onSendInput(input: string, attachment?: TaskInputAttachment): void;
   /** Injected by the attachment tests; production uses the Expo picker. */
@@ -179,6 +185,8 @@ export function TaskScreen({
   onCloseTask,
   onResolveTaskFileMentions,
   onReadTaskFile,
+  onListTaskDirectory,
+  onReadTaskFileRange,
   onReadTaskDiff,
   onSendInput,
   pickAttachment = pickImageAttachment,
@@ -244,6 +252,7 @@ export function TaskScreen({
     null
   );
   const [diffModalTaskId, setDiffModalTaskId] = useState<string | null>(null);
+  const [explorerTaskId, setExplorerTaskId] = useState<string | null>(null);
   const companionLifecycleRef = useRef<{
     isOpen: boolean;
     onOpenChange: ((isOpen: boolean) => void) | undefined;
@@ -497,6 +506,9 @@ export function TaskScreen({
       },
       (action: TaskAction) => {
         switch (action) {
+          case "browse-files":
+            setExplorerTaskId(task.id);
+            break;
           case "mentioned-files":
             setMentionedFilesRequest({
               autoSelectUnique: false,
@@ -1048,6 +1060,18 @@ export function TaskScreen({
           path={activeSelectedFile.path}
           readFile={() => onReadTaskFile(activeSelectedFile.path)}
           onClose={() => setSelectedFile(null)}
+        />
+      ) : null}
+      {explorerTaskId === task.id ? (
+        <RepoExplorer
+          title={task.title}
+          listDirectory={onListTaskDirectory}
+          readFile={onReadTaskFileRange}
+          onInsertReference={(reference) => {
+            const current = composerSnapshotRef.current.draftInput;
+            updateDraftInput(appendComposerFileReference(current, reference));
+          }}
+          onClose={() => setExplorerTaskId(null)}
         />
       ) : null}
       {activeMentionedFilesRequest ? (

@@ -52,6 +52,7 @@ vi.mock("./TaskMentionedFiles", () => ({
   TaskMentionedFiles: "TaskMentionedFiles"
 }));
 vi.mock("./TerminalWebView", () => ({ TerminalWebView: "TerminalWebView" }));
+vi.mock("./RepoExplorer", () => ({ RepoExplorer: "RepoExplorer" }));
 vi.mock("./VisualCompanionModal", () => ({
   VisualCompanionModal: "VisualCompanionModal"
 }));

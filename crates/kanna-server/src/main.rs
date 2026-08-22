@@ -15,6 +15,7 @@ mod pairing;
 mod register;
 mod relay;
 mod relay_client;
+mod repo_browser;
 mod repo_commands;
 mod runtime;
 mod session_replacements;

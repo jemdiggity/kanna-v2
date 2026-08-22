@@ -32,6 +32,7 @@ import type { RawData, WebSocket } from "ws";
  *   control channel to `observe_session` observers. This is how the mobile
  *   app's remote transport streams a terminal, so it is terminal traffic even
  *   though it is not a tunnel.
+ * - `fileBrowse` — bounded task-worktree directory/file browse invokes and their responses.
  * - `control` — everything else: auth, invokes, responses, task snapshot
  *   publication, mobile notifications, acks.
  */
@@ -39,6 +40,7 @@ export const RELAY_BYTE_CLASSES = [
   "tunnel",
   "taskTransfer",
   "terminalEvent",
+  "fileBrowse",
   "control",
 ] as const;
 
@@ -129,7 +131,7 @@ export const DEFAULT_BYTE_ROLLUP_INTERVAL_MS = 60 * 60 * 1_000;
 const MIN_BYTE_ROLLUP_INTERVAL_MS = 1_000;
 
 function emptyTotals(): RelayByteTotals {
-  return { tunnel: 0, taskTransfer: 0, terminalEvent: 0, control: 0 };
+  return { tunnel: 0, taskTransfer: 0, terminalEvent: 0, fileBrowse: 0, control: 0 };
 }
 
 const accounts = new WeakMap<WebSocket, ConnectionByteAccount>();
@@ -169,8 +171,11 @@ export function rawDataByteLength(data: RawData): number {
  * routes them to session observers), so classification is free here.
  */
 export function relayMessageByteClass(
-  message: { type?: unknown; payload?: unknown } | null | undefined,
+  message: { type?: unknown; payload?: unknown; path?: unknown } | null | undefined,
 ): RelayByteClass {
+  if (message?.type === "invoke" && typeof message.path === "string" && /\/v1\/tasks\/[^/]+\/browse(?:\/content)?(?:\?|$)/.test(message.path)) {
+    return "fileBrowse";
+  }
   if (message?.type !== "event") return "control";
   const payload = message.payload;
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {

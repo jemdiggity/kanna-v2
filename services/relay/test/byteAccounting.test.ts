@@ -104,6 +104,10 @@ describe("byte classification", () => {
     })).toBe("terminalEvent");
   });
 
+  it("classifies repository browse invokes separately", () => {
+    expect(relayMessageByteClass({ type: "invoke", path: "/v1/tasks/task-1/browse/content?path=README.md" })).toBe("fileBrowse");
+  });
+
   it("classifies events without a session id, invokes, and unparsed frames as control", () => {
     expect(relayMessageByteClass({ type: "event", payload: { type: "task_updated" } }))
       .toBe("control");

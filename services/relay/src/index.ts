@@ -28,6 +28,7 @@ import {
   setPhoneConnection,
   setServerConnection,
   routeMessage,
+  routedMessageByteClass,
   sendErrorResponse,
   getConnectionCount,
   getTunnelFlowStats,
@@ -65,7 +66,6 @@ import {
   rawDataByteLength,
   recordBytesReceived,
   recordBytesSent,
-  relayMessageByteClass,
   startByteRollups,
   stopByteRollups,
 } from "./byteAccounting.js";
@@ -678,7 +678,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
       }
       // That parse already identified the message, so the odometer classifies
       // it without a second one.
-      recordBytesReceived(ws, relayMessageByteClass(publication), receivedByteLength);
+      recordBytesReceived(ws, routedMessageByteClass(userId!, publication), receivedByteLength);
       if (
         publication?.type === "invoke"
         && serverAuthProof?.kind === "desktop"

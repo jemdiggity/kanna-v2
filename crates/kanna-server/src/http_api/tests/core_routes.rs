@@ -5073,3 +5073,65 @@ async fn create_pairing_session_route_uses_local_identity_without_desktop_secret
 
     let _ = std::fs::remove_dir_all(daemon_dir);
 }
+
+#[tokio::test]
+async fn paired_lan_client_pages_a_real_task_worktree_fixture() {
+    let fixture = TaskFileRouteFixture::new();
+    fixture.write("src/main.rs", b"fn one() {}\nfn two() {}\nfn three() {}\n");
+    let pairing_path = PathBuf::from(&fixture.state.config().pairing_store_path);
+    let mut pairing_store = crate::pairing::PairingStore::default();
+    pairing_store.add_trusted_device(
+        &fixture.state.config().desktop_id,
+        "phone-browser",
+        "Kanna Mobile",
+        &crate::pairing::hash_device_secret("browser-secret"),
+    );
+    pairing_store.save(&pairing_path).unwrap();
+
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let app = super::router(Arc::clone(&fixture.state));
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let lan_ip = if_addrs::get_if_addrs()
+        .unwrap()
+        .into_iter()
+        .map(|interface| interface.ip())
+        .find(|ip| ip.is_ipv4() && !ip.is_loopback())
+        .expect("test host must expose a non-loopback IPv4 address");
+    let base_url = format!("http://{lan_ip}:{port}");
+    let client = reqwest::Client::new();
+    let directory = client
+        .get(format!(
+            "{base_url}/v1/tasks/task-file/browse?path=src&limit=1"
+        ))
+        .header("x-kanna-device-id", "phone-browser")
+        .header("x-kanna-device-secret", "browser-secret")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(directory.status(), reqwest::StatusCode::OK);
+    let listing: serde_json::Value = directory.json().await.unwrap();
+    assert_eq!(listing["entries"][0]["path"], "src/main.rs");
+
+    let range = client
+        .get(format!(
+            "{base_url}/v1/tasks/task-file/browse/content?path=src%2Fmain.rs&startLine=1&lineCount=1"
+        ))
+        .header("x-kanna-device-id", "phone-browser")
+        .header("x-kanna-device-secret", "browser-secret")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(range.status(), reqwest::StatusCode::OK);
+    let content: serde_json::Value = range.json().await.unwrap();
+    assert_eq!(content["lines"], serde_json::json!(["fn two() {}"]));
+    server.abort();
+    let _ = std::fs::remove_file(pairing_path);
+}
