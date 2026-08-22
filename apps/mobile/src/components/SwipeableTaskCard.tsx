@@ -24,6 +24,25 @@ import {
 } from "./taskRowSwipe";
 
 const TASK_ROW_DEFAULT_EXIT_DISTANCE = 600;
+const TASK_ROW_ACTION_REVEAL_FADE_DISTANCE = 14;
+
+interface ActionColors {
+  idle: string;
+  armed: string;
+}
+
+const PIN_ACTION_COLORS: ActionColors = {
+  idle: "#435F96",
+  armed: "#2563EB"
+};
+const UNPIN_ACTION_COLORS: ActionColors = {
+  idle: "#743F4C",
+  armed: "#9F2D42"
+};
+const DISMISS_ACTION_COLORS: ActionColors = {
+  idle: "#803F4B",
+  armed: "#B4233C"
+};
 
 function startAnimation(
   animation: Animated.CompositeAnimation,
@@ -69,6 +88,7 @@ export function SwipeableTaskCard({
   const swipeOffset = useRef(new Animated.Value(0)).current;
   const completionOpacity = useRef(new Animated.Value(1)).current;
   const actionArmed = useRef(new Animated.Value(0)).current;
+  const actionColorArmed = useRef(new Animated.Value(0)).current;
   const [pinError, setPinError] = useState<string | null>(null);
   const [dismissError, setDismissError] = useState<string | null>(null);
   const [reduceMotionEnabled, setReduceMotionEnabled] = useState(false);
@@ -104,6 +124,7 @@ export function SwipeableTaskCard({
     swipeOffset.setValue(0);
     completionOpacity.setValue(1);
     actionArmed.setValue(0);
+    actionColorArmed.setValue(0);
     armedRef.current = false;
     completingRef.current = false;
   };
@@ -113,15 +134,23 @@ export function SwipeableTaskCard({
     armedRef.current = armed;
     if (reduceMotionRef.current) {
       actionArmed.setValue(armed ? 1 : 0);
+      actionColorArmed.setValue(armed ? 1 : 0);
       return;
     }
-    Animated.spring(actionArmed, {
-      damping: 14,
-      mass: 0.55,
-      stiffness: 360,
-      toValue: armed ? 1 : 0,
-      useNativeDriver: true
-    }).start();
+    Animated.parallel([
+      Animated.spring(actionArmed, {
+        damping: 14,
+        mass: 0.55,
+        stiffness: 360,
+        toValue: armed ? 1 : 0,
+        useNativeDriver: true
+      }),
+      Animated.timing(actionColorArmed, {
+        duration: 110,
+        toValue: armed ? 1 : 0,
+        useNativeDriver: false
+      })
+    ]).start();
   };
 
   const springClosed = () => {
@@ -319,22 +348,27 @@ export function SwipeableTaskCard({
   };
 
   const actionOpacity = reduceMotionEnabled
-    ? swipeOffset.interpolate({
-        inputRange: [-TASK_ROW_ACTION_WIDTH, 0],
-        outputRange: [1, 0]
-      })
+    ? 1
     : swipeOffset.interpolate({
         inputRange: [
           -TASK_ROW_ACTION_WIDTH,
-          -TASK_ROW_SWIPE_COMMIT_THRESHOLD,
-          -TASK_ROW_SWIPE_COMMIT_THRESHOLD + 1,
+          -TASK_ROW_ACTION_REVEAL_FADE_DISTANCE,
           0
         ],
-        outputRange: [1, 1, 0.72, 0.38]
+        outputRange: [1, 1, 0]
       });
   const actionScale = actionArmed.interpolate({
     inputRange: [0, 1],
-    outputRange: [0.84, 1.08]
+    outputRange: [0.88, 1.04]
+  });
+  const actionColors = onDismiss
+    ? DISMISS_ACTION_COLORS
+    : pinned
+      ? UNPIN_ACTION_COLORS
+      : PIN_ACTION_COLORS;
+  const actionBackgroundColor = actionColorArmed.interpolate({
+    inputRange: [0, 1],
+    outputRange: [actionColors.idle, actionColors.armed]
   });
   const reducedMotionRowOpacity = reduceMotionEnabled
     ? swipeOffset.interpolate({
@@ -362,6 +396,7 @@ export function SwipeableTaskCard({
               ? styles.unpinAction
               : styles.pinAction,
           {
+            backgroundColor: actionBackgroundColor,
             opacity: actionOpacity,
             transform: reduceMotionEnabled ? [] : [{ scale: actionScale }]
           }
@@ -434,13 +469,13 @@ const styles = StyleSheet.create({
     width: TASK_ROW_ACTION_WIDTH
   },
   pinAction: {
-    backgroundColor: "#2563EB"
+    backgroundColor: PIN_ACTION_COLORS.armed
   },
   unpinAction: {
-    backgroundColor: "#9F2D42"
+    backgroundColor: UNPIN_ACTION_COLORS.armed
   },
   dismissAction: {
-    backgroundColor: "#B4233C"
+    backgroundColor: DISMISS_ACTION_COLORS.armed
   },
   actionLabel: {
     color: "#FFFFFF",

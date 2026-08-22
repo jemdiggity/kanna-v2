@@ -19,8 +19,8 @@ export function taskRowCompletionMotion(
 /**
  * How the action under the row is drawn while the finger is down. The row
  * commits on release, so the only thing that tells the user what letting go
- * will do is the action itself: it sits back, dimmed, while a release would
- * cancel, and snaps to full size and full colour once a release would commit.
+ * will do is the action itself: it sits back at full opacity while a release
+ * would cancel, and changes scale and colour once a release would commit.
  */
 export interface TaskRowActionEmphasis {
   opacity: number;
@@ -28,13 +28,13 @@ export interface TaskRowActionEmphasis {
 }
 
 export const TASK_ROW_ACTION_IDLE_EMPHASIS: TaskRowActionEmphasis = {
-  opacity: 0.55,
-  transform: [{ scale: 0.86 }]
+  opacity: 1,
+  transform: [{ scale: 0.88 }]
 };
 
 export const TASK_ROW_ACTION_ARMED_EMPHASIS: TaskRowActionEmphasis = {
   opacity: 1,
-  transform: [{ scale: 1 }]
+  transform: [{ scale: 1.04 }]
 };
 
 export interface TaskRowSwipeDisplacement {

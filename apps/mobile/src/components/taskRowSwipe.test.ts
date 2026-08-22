@@ -38,9 +38,8 @@ describe("task row swipe gesture", () => {
     expect(taskRowActionEmphasis(-20)).toBe(TASK_ROW_ACTION_IDLE_EMPHASIS);
     expect(taskRowActionEmphasis(-47)).toBe(TASK_ROW_ACTION_IDLE_EMPHASIS);
     expect(taskRowActionEmphasis(-48)).toBe(TASK_ROW_ACTION_ARMED_EMPHASIS);
-    expect(TASK_ROW_ACTION_ARMED_EMPHASIS.opacity).toBeGreaterThan(
-      TASK_ROW_ACTION_IDLE_EMPHASIS.opacity
-    );
+    expect(TASK_ROW_ACTION_IDLE_EMPHASIS.opacity).toBe(1);
+    expect(TASK_ROW_ACTION_ARMED_EMPHASIS.opacity).toBe(1);
     expect(TASK_ROW_ACTION_ARMED_EMPHASIS.transform[0].scale).toBeGreaterThan(
       TASK_ROW_ACTION_IDLE_EMPHASIS.transform[0].scale
     );
