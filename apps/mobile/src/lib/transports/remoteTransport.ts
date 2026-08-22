@@ -926,8 +926,8 @@ export function createRemoteTransport({
       ),
     listTaskDirectory: (taskId, path, showAllFiles = false, offset = 0, filter = "") =>
       requestTask<RepoDirectoryListing>(taskId, "GET", (localTaskId) => `/v1/tasks/${encodeURIComponent(localTaskId)}/browse?path=${encodeURIComponent(path)}&showAllFiles=${showAllFiles}&offset=${offset}&limit=60&filter=${encodeURIComponent(filter)}`, null),
-    readTaskFileRange: (taskId, path, startLine, lineCount, metadataOnly = false) =>
-      requestTask<RepoFileRange>(taskId, "GET", (localTaskId) => `/v1/tasks/${encodeURIComponent(localTaskId)}/browse/content?path=${encodeURIComponent(path)}&startLine=${startLine}&lineCount=${lineCount}&metadataOnly=${metadataOnly}`, null),
+    readTaskFileRange: (taskId, path, startLine, lineCount, metadataOnly = false, startByte = 0) =>
+      requestTask<RepoFileRange>(taskId, "GET", (localTaskId) => `/v1/tasks/${encodeURIComponent(localTaskId)}/browse/content?path=${encodeURIComponent(path)}&startLine=${startLine}&startByte=${startByte}&lineCount=${lineCount}&metadataOnly=${metadataOnly}`, null),
     resolveTaskFileMentions: (
       taskId: string,
       mentions: readonly TaskFileMentionInput[]

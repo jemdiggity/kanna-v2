@@ -63,6 +63,10 @@ export function pendingResponseCountForTests(userId: string): number {
   return connections.get(userId)?.pendingResponses.size ?? 0;
 }
 
+export function pendingResponseClassCountForTests(userId: string): number {
+  return connections.get(userId)?.pendingResponseClasses.size ?? 0;
+}
+
 export function routedMessageByteClass(
   userId: string,
   message: RelayMessage | null | undefined,

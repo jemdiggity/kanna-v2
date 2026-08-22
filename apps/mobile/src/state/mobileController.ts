@@ -107,7 +107,7 @@ export interface MobileController {
   advanceDesktopTaskStage(taskId: string): Promise<string | null>;
   readTaskFile(taskId: string, path: string): Promise<TaskFileContent>;
   listTaskDirectory(taskId: string, path: string, showAllFiles?: boolean, offset?: number, filter?: string): Promise<RepoDirectoryListing>;
-  readTaskFileRange(taskId: string, path: string, startLine: number, lineCount: number, metadataOnly?: boolean): Promise<RepoFileRange>;
+  readTaskFileRange(taskId: string, path: string, startLine: number, lineCount: number, metadataOnly?: boolean, startByte?: number): Promise<RepoFileRange>;
   resolveTaskFileMentions(
     taskId: string,
     mentions: readonly TaskFileMentionInput[]
@@ -3221,8 +3221,8 @@ export function createMobileController(
       return client.listTaskDirectory(taskId, path, showAllFiles, offset, filter);
     },
 
-    readTaskFileRange(taskId, path, startLine, lineCount, metadataOnly) {
-      return client.readTaskFileRange(taskId, path, startLine, lineCount, metadataOnly);
+    readTaskFileRange(taskId, path, startLine, lineCount, metadataOnly, startByte) {
+      return client.readTaskFileRange(taskId, path, startLine, lineCount, metadataOnly, startByte);
     },
 
     resolveTaskFileMentions(taskId, mentions) {

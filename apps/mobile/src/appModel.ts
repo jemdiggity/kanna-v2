@@ -1181,8 +1181,8 @@ function createTrustedLanFallbackClient({
       (await resolveClient(desktopId)).readTaskFile(taskId, path),
     listTaskDirectory: async (taskId, path, showAllFiles, offset, filter) =>
       (await resolveClient(desktopId)).listTaskDirectory(taskId, path, showAllFiles, offset, filter),
-    readTaskFileRange: async (taskId, path, startLine, lineCount, metadataOnly) =>
-      (await resolveClient(desktopId)).readTaskFileRange(taskId, path, startLine, lineCount, metadataOnly),
+    readTaskFileRange: async (taskId, path, startLine, lineCount, metadataOnly, startByte) =>
+      (await resolveClient(desktopId)).readTaskFileRange(taskId, path, startLine, lineCount, metadataOnly, startByte),
     resolveTaskFileMentions: async (taskId, mentions) =>
       (await resolveClient(desktopId)).resolveTaskFileMentions(
         taskId,
@@ -1402,7 +1402,7 @@ function createDelegatingClient(getClient: () => KannaClient): KannaClient {
       getClient().supportsTaskInputAttachments(taskId),
     readTaskFile: (taskId, path) => getClient().readTaskFile(taskId, path),
     listTaskDirectory: (taskId, path, showAllFiles, offset, filter) => getClient().listTaskDirectory(taskId, path, showAllFiles, offset, filter),
-    readTaskFileRange: (taskId, path, startLine, lineCount, metadataOnly) => getClient().readTaskFileRange(taskId, path, startLine, lineCount, metadataOnly),
+    readTaskFileRange: (taskId, path, startLine, lineCount, metadataOnly, startByte) => getClient().readTaskFileRange(taskId, path, startLine, lineCount, metadataOnly, startByte),
     resolveTaskFileMentions: (taskId, mentions) =>
       getClient().resolveTaskFileMentions(taskId, mentions),
     readTaskDiff: (taskId, request) => getClient().readTaskDiff(taskId, request),

@@ -692,10 +692,10 @@ function TaskDetailRoute({
           ? controller.listTaskDirectory(durableTaskId, path, showAllFiles, offset, filter)
           : Promise.reject(new Error("Task creation is still in progress."));
       }}
-      onReadTaskFileRange={(path, startLine, lineCount, metadataOnly) => {
+      onReadTaskFileRange={(path, startLine, lineCount, metadataOnly, startByte) => {
         const durableTaskId = resolveDurableTaskId(state, routeTaskId);
         return durableTaskId
-          ? controller.readTaskFileRange(durableTaskId, path, startLine, lineCount, metadataOnly)
+          ? controller.readTaskFileRange(durableTaskId, path, startLine, lineCount, metadataOnly, startByte)
           : Promise.reject(new Error("Task creation is still in progress."));
       }}
       onReadTaskDiff={(request) => {

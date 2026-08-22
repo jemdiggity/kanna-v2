@@ -27,6 +27,8 @@ pub(super) struct FileQuery {
     path: String,
     #[serde(default)]
     start_line: usize,
+    #[serde(default)]
+    start_byte: usize,
     #[serde(default = "default_page_size")]
     line_count: usize,
     #[serde(default)]
@@ -76,6 +78,7 @@ pub(super) async fn read_task_file_range(
             &root,
             &query.path,
             query.start_line,
+            query.start_byte,
             query.line_count,
             query.metadata_only,
         )
@@ -104,9 +107,7 @@ fn open_db(state: &AppState) -> Result<Db, (StatusCode, String)> {
 }
 fn map_error(error: BrowseError) -> (StatusCode, String) {
     let status = match error {
-        BrowseError::InvalidPath | BrowseError::NotDirectory | BrowseError::NotFile => {
-            StatusCode::BAD_REQUEST
-        }
+        BrowseError::InvalidPath | BrowseError::NotFile => StatusCode::BAD_REQUEST,
         BrowseError::RootNotFound | BrowseError::TargetNotFound => StatusCode::NOT_FOUND,
         BrowseError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
     };

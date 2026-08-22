@@ -214,7 +214,7 @@ export interface KannaTransport {
   supportsTaskInputAttachments(taskId: string): Promise<boolean>;
   readTaskFile(taskId: string, path: string): Promise<TaskFileContent>;
   listTaskDirectory(taskId: string, path: string, showAllFiles?: boolean, offset?: number, filter?: string): Promise<RepoDirectoryListing>;
-  readTaskFileRange(taskId: string, path: string, startLine: number, lineCount: number, metadataOnly?: boolean): Promise<RepoFileRange>;
+  readTaskFileRange(taskId: string, path: string, startLine: number, lineCount: number, metadataOnly?: boolean, startByte?: number): Promise<RepoFileRange>;
   resolveTaskFileMentions(
     taskId: string,
     mentions: readonly TaskFileMentionInput[]
@@ -288,7 +288,7 @@ export interface KannaClient {
   supportsTaskInputAttachments(taskId: string): Promise<boolean>;
   readTaskFile(taskId: string, path: string): Promise<TaskFileContent>;
   listTaskDirectory(taskId: string, path: string, showAllFiles?: boolean, offset?: number, filter?: string): Promise<RepoDirectoryListing>;
-  readTaskFileRange(taskId: string, path: string, startLine: number, lineCount: number, metadataOnly?: boolean): Promise<RepoFileRange>;
+  readTaskFileRange(taskId: string, path: string, startLine: number, lineCount: number, metadataOnly?: boolean, startByte?: number): Promise<RepoFileRange>;
   resolveTaskFileMentions(
     taskId: string,
     mentions: readonly TaskFileMentionInput[]
@@ -408,7 +408,7 @@ export function createKannaClient(transport: KannaTransport): KannaClient {
       transport.supportsTaskInputAttachments(taskId),
     readTaskFile: (taskId, path) => transport.readTaskFile(taskId, path),
     listTaskDirectory: (taskId, path, showAllFiles, offset, filter) => transport.listTaskDirectory(taskId, path, showAllFiles, offset, filter),
-    readTaskFileRange: (taskId, path, startLine, lineCount, metadataOnly) => transport.readTaskFileRange(taskId, path, startLine, lineCount, metadataOnly),
+    readTaskFileRange: (taskId, path, startLine, lineCount, metadataOnly, startByte) => transport.readTaskFileRange(taskId, path, startLine, lineCount, metadataOnly, startByte),
     resolveTaskFileMentions: (taskId, mentions) =>
       transport.resolveTaskFileMentions(taskId, mentions),
     readTaskDiff: (taskId, request) => transport.readTaskDiff(taskId, request),

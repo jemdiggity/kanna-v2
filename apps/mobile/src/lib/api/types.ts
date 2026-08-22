@@ -228,8 +228,10 @@ export interface RepoDirectoryListing {
 export interface RepoFileRange {
   path: string;
   startLine: number;
+  startByte?: number;
   lines: string[];
   nextLine: number | null;
+  nextByte?: number | null;
   totalLines: number;
   totalBytes: number;
   binary: boolean;

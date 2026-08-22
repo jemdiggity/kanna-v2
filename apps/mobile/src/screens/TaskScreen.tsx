@@ -131,7 +131,7 @@ interface TaskScreenProps {
   ): Promise<TaskFileMentionResolution>;
   onReadTaskFile(path: string): Promise<TaskFileContent>;
   onListTaskDirectory(path: string, showAllFiles?: boolean, offset?: number, filter?: string): Promise<RepoDirectoryListing>;
-  onReadTaskFileRange(path: string, startLine: number, lineCount: number, metadataOnly?: boolean): Promise<RepoFileRange>;
+  onReadTaskFileRange(path: string, startLine: number, lineCount: number, metadataOnly?: boolean, startByte?: number): Promise<RepoFileRange>;
   onReadTaskDiff(request: TaskDiffRequest): Promise<TaskDiffContent>;
   onSendInput(input: string, attachment?: TaskInputAttachment): void;
   /** Injected by the attachment tests; production uses the Expo picker. */

@@ -66,6 +66,7 @@ import {
   rawDataByteLength,
   recordBytesReceived,
   recordBytesSent,
+  relayMessageByteClass,
   startByteRollups,
   stopByteRollups,
 } from "./byteAccounting.js";
@@ -825,8 +826,13 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         return;
       }
     } else {
-      // Phone clients only ever send control-plane requests.
-      recordBytesReceived(ws, "control", receivedByteLength);
+      let phoneMessage: { type?: unknown; payload?: unknown; path?: unknown } | null = null;
+      try {
+        phoneMessage = JSON.parse(data) as { type?: unknown; payload?: unknown; path?: unknown };
+      } catch {
+        // Malformed frames retain the control classification used by the router.
+      }
+      recordBytesReceived(ws, relayMessageByteClass(phoneMessage), receivedByteLength);
       // Everything a phone asks the relay to do is remote value, and remote
       // value is what the subscription buys (owner ruling, 2026-08-21): a
       // tunnel needs `cloud_relay`, an `invoke` needs `remote_task_control`.

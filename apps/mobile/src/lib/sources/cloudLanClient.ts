@@ -1507,8 +1507,8 @@ export function createCloudLanClient(
     },
     listTaskDirectory: (taskId, path, showAllFiles = false, offset = 0, filter = "") =>
       invokeTaskRoute(taskId, (client, routedTaskId) => client.listTaskDirectory(routedTaskId, path, showAllFiles, offset, filter)),
-    readTaskFileRange: (taskId, path, startLine, lineCount, metadataOnly = false) =>
-      invokeTaskRoute(taskId, (client, routedTaskId) => client.readTaskFileRange(routedTaskId, path, startLine, lineCount, metadataOnly)),
+    readTaskFileRange: (taskId, path, startLine, lineCount, metadataOnly = false, startByte = 0) =>
+      invokeTaskRoute(taskId, (client, routedTaskId) => client.readTaskFileRange(routedTaskId, path, startLine, lineCount, metadataOnly, startByte)),
     resolveTaskFileMentions: async (
       taskId,
       mentions: readonly TaskFileMentionInput[]
