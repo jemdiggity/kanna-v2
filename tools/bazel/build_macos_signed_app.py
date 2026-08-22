@@ -15,6 +15,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--app", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--deployment-target-config", required=True)
+    parser.add_argument("--deployment-target-tool", required=True)
     parser.add_argument("--signing-identity")
     return parser.parse_args()
 
@@ -54,6 +56,19 @@ def main() -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(app_path, output_path, symlinks=False)
     normalize_bundle_directory_modes(output_path)
+
+    subprocess.run(
+        [
+            "python3",
+            args.deployment_target_tool,
+            "verify-app",
+            "--bazelrc",
+            args.deployment_target_config,
+            "--app",
+            str(output_path),
+        ],
+        check=True,
+    )
 
     subprocess.run(
         [

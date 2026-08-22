@@ -4,6 +4,10 @@ Kanna ships four things: the desktop app (DMG + self-updater manifest), the
 mobile app (App Store builds + self-hosted OTA updates), the relay service, and
 Firebase cloud services. Everything goes through `kd`.
 
+The authoritative supported macOS floor is the `--macos_minimum_os` setting in
+the repository `.bazelrc`; Bazel bundle metadata and the release Mach-O gate
+both consume that setting directly.
+
 ## Versioning
 
 The root `VERSION` file is the single source of truth for the packaged desktop

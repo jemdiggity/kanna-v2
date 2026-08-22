@@ -21,6 +21,16 @@ py_test(
     python_version = "PY3",
 )
 
+py_test(
+    name = "macos_deployment_target_test",
+    srcs = [
+        "macos_deployment_target.py",
+        "macos_deployment_target_test.py",
+    ],
+    main = "macos_deployment_target_test.py",
+    python_version = "PY3",
+)
+
 sh_test(
     name = "zig_macos_toolchain_test",
     srcs = ["zig_macos_toolchain_test.sh"],
@@ -45,6 +55,7 @@ exports_files([
     "rules-zig-0.15.2-macos-clt-sdk.patch",
     "zig_macos_toolchain_test.sh",
     "make_tauri_manifest.py",
+    "macos_deployment_target.py",
     "normalize_tauri_context.py",
     "openssl-src-bazel-runfiles.patch",
     "tauri-utils-bazel-debug-assertions.patch",

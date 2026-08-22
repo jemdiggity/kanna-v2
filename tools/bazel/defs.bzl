@@ -758,11 +758,13 @@ def _macos_codesign_app_impl(ctx):
     args = ctx.actions.args()
     args.add("--app", app.path)
     args.add("--output", out_dir.path)
+    args.add("--deployment-target-config", ctx.file.deployment_target_config.path)
+    args.add("--deployment-target-tool", ctx.file._deployment_target_tool.path)
     if ctx.attr.signing_identity:
         args.add("--signing-identity", ctx.attr.signing_identity)
 
     ctx.actions.run_shell(
-        inputs = depset(direct = [app, tool]),
+        inputs = depset(direct = [app, tool, ctx.file.deployment_target_config, ctx.file._deployment_target_tool]),
         outputs = [out_dir],
         command = """
 set -euo pipefail
@@ -891,11 +893,19 @@ macos_codesign_app = rule(
     implementation = _macos_codesign_app_impl,
     attrs = {
         "app": attr.label(mandatory = True),
+        "deployment_target_config": attr.label(
+            allow_single_file = True,
+            default = "//:.bazelrc",
+        ),
         "output_name": attr.string(mandatory = True),
         "signing_identity": attr.string(),
         "_tool": attr.label(
             allow_single_file = True,
             default = "//tools/bazel:build_macos_signed_app.py",
+        ),
+        "_deployment_target_tool": attr.label(
+            allow_single_file = True,
+            default = "//tools/bazel:macos_deployment_target.py",
         ),
     },
 )
