@@ -408,6 +408,14 @@ in `docs/` (`YYYY-MM-DD-<topic>-e2e-gap.md` / `-e2e-note.md`) saying why it is
 not yet testable, what would make it testable, and what narrower tests were
 added meanwhile.
 
+Any change that affects rendered UI — mobile screens or components, or desktop
+Vue components or styling — must be visually verified before its PR is opened.
+Run the real app (`./kd mobile run` with the iOS Simulator for mobile, never
+bare `expo start`; `./kd dev up` for desktop), exercise the changed states and
+relevant accessibility variants such as Reduce Motion for animation work,
+capture and inspect screenshots, and summarize that verification in the PR
+description. Unit and component tests do not substitute for a render.
+
 ## Coding Style
 
 ### TypeScript
