@@ -78,6 +78,8 @@ Require E2E or integration coverage when the behavior crosses component or syste
 
 If E2E coverage is applicable but not feasible, the branch must document why it is not currently testable end to end, what would make it testable, and what narrower tests were added instead.
 
+Treat any UI-affecting diff without described visual verification of the changed states and relevant accessibility variants in the real app as not done; unit and component tests do not substitute for a render.
+
 ## Recording the Verdict
 
 Pass — the branch is ready for human PR review with no required changes:

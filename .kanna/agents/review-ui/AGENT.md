@@ -23,6 +23,7 @@ Judge the review range your prompt names (`<sha>..HEAD` — what changed since t
 2. Verify the changed behavior is proven at the right level: flows and journeys that cross component or system boundaries need E2E or interaction coverage, not just unit tests of extracted helpers. Run the most relevant focused tests when practical.
 3. Check regressions adjacent to the change: focus restoration, keyboard context, modal stacking, i18n keys, accessibility of new controls.
 4. If E2E coverage is applicable but missing, the branch must document why it is not yet testable, what would make it testable, and what narrower tests were added instead.
+5. Treat a UI-affecting diff without described visual verification of the changed states and relevant accessibility variants in the real app as not done; unit and component tests do not substitute for a render.
 
 ## Verdict
 
