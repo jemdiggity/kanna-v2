@@ -17,6 +17,7 @@ import {
 } from "react-native";
 import type { InitialState } from "@react-navigation/native";
 import {
+  createTerminalAppStateLifecycle,
   getForegroundTransitionAction,
   shouldCheckForOtaUpdateOnForeground
 } from "./appLifecycle";
@@ -251,11 +252,23 @@ function AppContent() {
 
   useEffect(() => {
     let previousState: AppStateStatus = AppState.currentState;
-    model.setForeground?.(previousState === "active");
-    controller.setAppForeground(previousState === "active");
+    const terminalLifecycle = createTerminalAppStateLifecycle({
+      initialState: previousState,
+      setTransportForeground(foreground) {
+        model.setForeground?.(foreground);
+      },
+      setControllerForeground(foreground) {
+        controller.setAppForeground(foreground);
+      },
+      setTerminalConsumptionPaused(paused) {
+        controller.setTaskTerminalConsumptionPaused(paused);
+      },
+      expireTerminalGrace() {
+        controller.expireTaskTerminalGrace();
+      }
+    });
     const subscription = AppState.addEventListener("change", (nextState) => {
-      model.setForeground?.(nextState === "active");
-      controller.setAppForeground(nextState === "active");
+      const terminalTransition = terminalLifecycle.transition(nextState);
       const foregroundAction = getForegroundTransitionAction({
         previousState,
         nextState,
@@ -273,7 +286,9 @@ function AppContent() {
       }
 
       if (foregroundAction === "refresh") {
-        void controller.refresh();
+        void controller.refresh({
+          preserveTaskSession: terminalTransition.preserveTerminal
+        });
       }
 
       const nowMs = Date.now();
@@ -294,6 +309,7 @@ function AppContent() {
 
     return () => {
       subscription.remove();
+      terminalLifecycle.dispose();
     };
   }, [controller, runOtaUpdateCheck]);
 

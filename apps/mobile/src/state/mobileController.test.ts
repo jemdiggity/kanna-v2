@@ -7899,6 +7899,63 @@ describe("createMobileController", () => {
     expect(store.getState().taskTerminalTaskId).toBe("task-1");
   });
 
+  it("buffers terminal output while hidden and flushes it without reconnecting", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    client.__terminalStream.emit({
+      type: "snapshot",
+      taskId: "task-1",
+      cols: 80,
+      rows: 24,
+      dataB64: "visible"
+    });
+    controller.setTaskTerminalConsumptionPaused(true);
+    client.__terminalStream.emit({
+      type: "output",
+      taskId: "task-1",
+      dataB64: "hidden"
+    });
+
+    expect(terminalText(store)).toBe("visible\n");
+    expect(client.__terminalStream.subscription.close).not.toHaveBeenCalled();
+
+    controller.setTaskTerminalConsumptionPaused(false);
+
+    expect(terminalText(store)).toBe("visible\nhidden\n");
+    expect(client.observeTaskTerminal).toHaveBeenCalledOnce();
+  });
+
+  it("preserves the live terminal during a grace refresh", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    await controller.refresh({ preserveTaskSession: true });
+
+    expect(client.__terminalStream.subscription.close).not.toHaveBeenCalled();
+    expect(client.observeTaskTerminal).toHaveBeenCalledOnce();
+  });
+
+  it("reconnects through the existing refresh path after terminal grace expires", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    controller.expireTaskTerminalGrace();
+    await controller.refresh();
+
+    expect(client.__terminalStream.subscription.close).toHaveBeenCalledOnce();
+    expect(client.observeTaskTerminal).toHaveBeenCalledTimes(2);
+  });
+
   it("reports explicit refresh progress and completion", async () => {
     const store = createSessionStore();
     const client = createClientMock();

@@ -1,9 +1,81 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+  createTerminalAppStateLifecycle,
   getForegroundTransitionAction,
   shouldCheckForOtaUpdateOnForeground,
   shouldRefreshOnAppStateTransition
 } from "./appLifecycle";
+
+function createTerminalLifecycle(
+  initialState: "active" | "inactive" | "background" = "active"
+) {
+  const actions = {
+    setTransportForeground: vi.fn(),
+    setControllerForeground: vi.fn(),
+    setTerminalConsumptionPaused: vi.fn(),
+    expireTerminalGrace: vi.fn()
+  };
+  const lifecycle = createTerminalAppStateLifecycle({
+    initialState,
+    graceMs: 20_000,
+    ...actions
+  });
+  for (const action of Object.values(actions)) action.mockClear();
+  return { actions, lifecycle };
+}
+
+describe("createTerminalAppStateLifecycle", () => {
+  it("preserves the attachment across a quick inactive switcher peek", () => {
+    vi.useFakeTimers();
+    const { actions, lifecycle } = createTerminalLifecycle();
+
+    lifecycle.transition("inactive");
+    vi.advanceTimersByTime(30_000);
+    const foreground = lifecycle.transition("active");
+
+    expect(foreground).toEqual({
+      returnedToActive: true,
+      preserveTerminal: true
+    });
+    expect(actions.expireTerminalGrace).not.toHaveBeenCalled();
+    expect(actions.setTransportForeground).toHaveBeenCalledWith(true);
+    expect(actions.setTerminalConsumptionPaused).toHaveBeenNthCalledWith(1, true);
+    expect(actions.setTerminalConsumptionPaused).toHaveBeenNthCalledWith(2, false);
+    lifecycle.dispose();
+    vi.useRealTimers();
+  });
+
+  it("preserves the attachment when background returns within the grace window", () => {
+    vi.useFakeTimers();
+    const { actions, lifecycle } = createTerminalLifecycle();
+
+    lifecycle.transition("background");
+    vi.advanceTimersByTime(19_999);
+    const foreground = lifecycle.transition("active");
+
+    expect(foreground.preserveTerminal).toBe(true);
+    expect(actions.expireTerminalGrace).not.toHaveBeenCalled();
+    expect(actions.setTransportForeground).not.toHaveBeenCalledWith(false);
+    lifecycle.dispose();
+    vi.useRealTimers();
+  });
+
+  it("expires the attachment after the background grace and reconnects on return", () => {
+    vi.useFakeTimers();
+    const { actions, lifecycle } = createTerminalLifecycle();
+
+    lifecycle.transition("background");
+    vi.advanceTimersByTime(20_000);
+    const foreground = lifecycle.transition("active");
+
+    expect(actions.expireTerminalGrace).toHaveBeenCalledOnce();
+    expect(actions.setTransportForeground).toHaveBeenNthCalledWith(1, false);
+    expect(actions.setTransportForeground).toHaveBeenNthCalledWith(2, true);
+    expect(foreground.preserveTerminal).toBe(false);
+    lifecycle.dispose();
+    vi.useRealTimers();
+  });
+});
 
 describe("shouldRefreshOnAppStateTransition", () => {
   it("refreshes when the app returns to the foreground", () => {
