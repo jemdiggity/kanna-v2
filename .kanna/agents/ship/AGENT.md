@@ -24,6 +24,8 @@ Three operations discard release state and need the same named-human authorizati
 
 After `./kd release status`, select only the authorized operation:
 
+`./kd release ship` without `--release` is build-only even when it exits 0; every authorized publish must include `--release` and be followed by `./kd release status` confirming that the channel version moved.
+
 - **Staging RC:** `./kd release ship --staging --release [--major|--minor|--patch] [--branch main|release/X.Y]`.
 - **Direct production:** after fetching tags and selecting the bump, compute `X.Y.Z`, run `git branch -m release-vX.Y.Z` and `git push -u origin release-vX.Y.Z` from a Kanna worktree, then run `./kd release ship --production --release [--major|--minor|--patch]`.
 - **Cut a release series:** `./kd release cut [--major|--minor|--patch]` (default `--minor`), or `./kd release cut --version X.Y.0` when the intended series must be named because an earlier series is being abandoned.
