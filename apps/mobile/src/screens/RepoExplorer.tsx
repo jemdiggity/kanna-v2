@@ -4,17 +4,23 @@ import { WebView as NativeWebView, type WebViewMessageEvent, type WebViewProps }
 import type { RepoBrowseEntry, RepoDirectoryListing, RepoFileRange } from "../lib/api/types";
 import { highlightTaskFileSource } from "./taskFileSyntaxHighlight";
 import { createLoiterRangeLoader, type LoiterRangeLoader } from "./repoExplorerLoiter";
-import { appendDirectoryPage, backExplorer, explorerFilterQuery, forwardExplorer, initialExplorerNavigation, navigateExplorer } from "./repoExplorerState";
+import { appendDirectoryPage, backExplorer, explorerFilterQuery, forwardExplorer, initialExplorerNavigation, navigateExplorer, type RepoExplorerLocation, type RepoExplorerNavigation } from "./repoExplorerState";
 import { buildViewerDocument, readCompleteRange } from "./repoExplorerViewer";
 
-const DIRECTORY_PAGE_SIZE = 60;
 const VIEWPORT_LINE_COUNT = 50;
 const NAVIGATION_EDGE_WIDTH = 28;
 const NAVIGATION_SWIPE_ACTIVATION = 10;
 const NAVIGATION_SWIPE_COMMIT_FRACTION = 0.22;
 const NAVIGATION_SWIPE_MIN_COMMIT = 72;
+const NAVIGATION_INCOMING_OFFSET_FRACTION = 0.28;
 const WebView = NativeWebView as unknown as React.ForwardRefExoticComponent<WebViewProps & React.RefAttributes<NativeWebView>>;
 
+interface ExplorerTransition {
+  direction: -1 | 1;
+  incoming: RepoExplorerLocation | null;
+  incomingEntries: RepoBrowseEntry[];
+  incomingFilter: string;
+}
 
 export interface RepoExplorerProps {
   title: string;
@@ -35,13 +41,26 @@ export function RepoExplorer({ title, listDirectory, readFile, onInsertReference
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [generation, setGeneration] = useState(0);
+  const [entriesKey, setEntriesKey] = useState("");
+  const [transition, setTransition] = useState<ExplorerTransition | null>(null);
+  const [navigationWidth, setNavigationWidth] = useState(390);
   const swipeOffset = useRef(new Animated.Value(0)).current;
   const navigationWidthRef = useRef(390);
   const swipeDirectionRef = useRef<-1 | 1 | null>(null);
+  const swipeStartOffsetRef = useRef(0);
+  const swipeSequenceRef = useRef(0);
+  const navigationRef = useRef(navigation);
+  const filterRef = useRef(filter);
+  const showAllFilesRef = useRef(showAllFiles);
+  const directoryCacheRef = useRef(new Map<string, RepoBrowseEntry[]>());
   const canGoForwardRef = useRef(false);
+  navigationRef.current = navigation;
+  filterRef.current = filter;
+  showAllFilesRef.current = showAllFiles;
   canGoForwardRef.current = navigation.forward.length > 0;
   const listRef = useRef(listDirectory); listRef.current = listDirectory;
   const scopeKey = `${path}\0${filter}\0${showAllFiles}\0${generation}`;
+  const listingKey = directoryListingKey(path, filter, showAllFiles);
   const directoryScopeRef = useRef({ key: "", generation: 0, inFlightOffsets: new Set<number>() });
   if (directoryScopeRef.current.key !== scopeKey) {
     directoryScopeRef.current = { key: scopeKey, generation: directoryScopeRef.current.generation + 1, inFlightOffsets: new Set() };
@@ -53,16 +72,17 @@ export function RepoExplorer({ title, listDirectory, readFile, onInsertReference
     setLoading(true); setError(null);
     void listRef.current(path, showAllFiles, 0, explorerFilterQuery(filter)).then((page) => {
       if (directoryScopeRef.current.generation === scope.generation) {
-        setEntries(page.entries); setNextOffset(page.nextOffset); setLoading(false); setRefreshing(false);
+        directoryCacheRef.current.set(listingKey, page.entries);
+        setEntries(page.entries); setEntriesKey(listingKey); setNextOffset(page.nextOffset); setLoading(false); setRefreshing(false);
       }
     }, (reason: unknown) => {
       if (directoryScopeRef.current.generation === scope.generation) {
         setError(message(reason)); setLoading(false); setRefreshing(false);
       }
     }).finally(() => { scope.inFlightOffsets.delete(0); });
-  }, [filter, generation, path, showAllFiles]);
+  }, [filter, generation, listingKey, path, showAllFiles]);
 
-  const visible = useMemo(() => entries, [entries]);
+  const visible = entriesKey === listingKey ? entries : directoryCacheRef.current.get(listingKey) ?? [];
   const goBack = () => {
     if (!filePath && !path) { onClose(); return; }
     setNavigation((current) => backExplorer(current));
@@ -76,37 +96,55 @@ export function RepoExplorer({ title, listDirectory, readFile, onInsertReference
   };
   const goBackRef = useRef(goBack); goBackRef.current = goBack;
   const goForwardRef = useRef(goForward); goForwardRef.current = goForward;
-  const springToRest = () => {
+  const spring = (toValue: number, sequence: number, onFinished?: () => void) => {
     Animated.spring(swipeOffset, {
       damping: 20,
       mass: 0.75,
       stiffness: 260,
-      toValue: 0,
+      toValue,
       useNativeDriver: true
-    }).start();
+    }).start(({ finished }) => {
+      if (finished && swipeSequenceRef.current === sequence) onFinished?.();
+    });
+  };
+  const springToRest = () => {
+    const sequence = swipeSequenceRef.current;
+    spring(0, sequence, () => setTransition(null));
   };
   const commitSwipe = (direction: -1 | 1) => {
     const width = navigationWidthRef.current;
-    Animated.timing(swipeOffset, {
-      duration: 160,
-      toValue: direction * width,
-      useNativeDriver: true
-    }).start(({ finished }) => {
-      if (!finished) { springToRest(); return; }
+    const sequence = swipeSequenceRef.current;
+    spring(direction * width, sequence, () => {
       if (direction === 1) goBackRef.current(); else goForwardRef.current();
-      swipeOffset.setValue(-direction * Math.min(width * 0.12, 48));
-      springToRest();
+      swipeStartOffsetRef.current = 0;
+      swipeOffset.setValue(0);
+      setTransition(null);
     });
+  };
+  const beginTransition = (direction: -1 | 1) => {
+    const currentNavigation = navigationRef.current;
+    const destinationNavigation: RepoExplorerNavigation = direction === 1
+      ? backExplorer(currentNavigation)
+      : forwardExplorer(currentNavigation);
+    const incoming = destinationNavigation === currentNavigation ? null : destinationNavigation.current;
+    const incomingFilter = incoming && incoming.path !== currentNavigation.current.path ? "" : filterRef.current;
+    const incomingEntries = incoming?.filePath
+      ? []
+      : directoryCacheRef.current.get(directoryListingKey(incoming?.path ?? "", incomingFilter, showAllFilesRef.current)) ?? [];
+    swipeSequenceRef.current += 1;
+    swipeOffset.stopAnimation((value) => { swipeStartOffsetRef.current = value; });
+    swipeDirectionRef.current = direction;
+    setTransition({ direction, incoming, incomingEntries, incomingFilter });
   };
   const beginsEdgeSwipe = (gestureState: PanResponderGestureState) => {
     const horizontal = Math.abs(gestureState.dx) > Math.abs(gestureState.dy) * 1.5;
     if (!horizontal || Math.abs(gestureState.dx) < NAVIGATION_SWIPE_ACTIVATION) return false;
     if (gestureState.dx > 0 && gestureState.x0 <= NAVIGATION_EDGE_WIDTH) {
-      swipeDirectionRef.current = 1;
+      if (swipeDirectionRef.current !== 1) beginTransition(1);
       return true;
     }
     if (gestureState.dx < 0 && gestureState.x0 >= navigationWidthRef.current - NAVIGATION_EDGE_WIDTH && canGoForwardRef.current) {
-      swipeDirectionRef.current = -1;
+      if (swipeDirectionRef.current !== -1) beginTransition(-1);
       return true;
     }
     return false;
@@ -116,15 +154,16 @@ export function RepoExplorer({ title, listDirectory, readFile, onInsertReference
     onMoveShouldSetPanResponderCapture: (_event, gestureState) => beginsEdgeSwipe(gestureState),
     onPanResponderMove: (_event, gestureState) => {
       const direction = swipeDirectionRef.current;
-      if (direction === 1) swipeOffset.setValue(Math.max(0, Math.min(navigationWidthRef.current, gestureState.dx)));
-      if (direction === -1) swipeOffset.setValue(Math.min(0, Math.max(-navigationWidthRef.current, gestureState.dx)));
+      const offset = swipeStartOffsetRef.current + gestureState.dx;
+      if (direction === 1) swipeOffset.setValue(Math.max(0, Math.min(navigationWidthRef.current, offset)));
+      if (direction === -1) swipeOffset.setValue(Math.min(0, Math.max(-navigationWidthRef.current, offset)));
     },
     onPanResponderRelease: (_event, gestureState) => {
       const direction = swipeDirectionRef.current;
       swipeDirectionRef.current = null;
       if (!direction) { springToRest(); return; }
       const threshold = Math.max(NAVIGATION_SWIPE_MIN_COMMIT, navigationWidthRef.current * NAVIGATION_SWIPE_COMMIT_FRACTION);
-      const committed = direction * gestureState.dx >= threshold || direction * gestureState.vx > 0.65;
+      const committed = direction * (swipeStartOffsetRef.current + gestureState.dx) >= threshold || direction * gestureState.vx > 0.65;
       if (committed) commitSwipe(direction); else springToRest();
     },
     onPanResponderTerminate: () => {
@@ -134,7 +173,9 @@ export function RepoExplorer({ title, listDirectory, readFile, onInsertReference
     onPanResponderTerminationRequest: () => false
   }), []);
   const measureNavigation = (event: LayoutChangeEvent) => {
-    navigationWidthRef.current = event.nativeEvent.layout.width;
+    const measuredWidth = event.nativeEvent.layout.width;
+    navigationWidthRef.current = measuredWidth;
+    setNavigationWidth(measuredWidth);
   };
   const loadNext = () => {
     if (nextOffset == null) return;
@@ -143,20 +184,32 @@ export function RepoExplorer({ title, listDirectory, readFile, onInsertReference
     if (scope.inFlightOffsets.has(offset)) return;
     scope.inFlightOffsets.add(offset); setLoading(true);
     void listRef.current(path,showAllFiles,offset,explorerFilterQuery(filter)).then((page)=>{
-      if(directoryScopeRef.current.generation===scope.generation){setEntries((current)=>appendDirectoryPage(current,page.entries));setNextOffset(page.nextOffset);setLoading(false);}
+      if(directoryScopeRef.current.generation===scope.generation){setEntries((current)=>{const next=appendDirectoryPage(current,page.entries);directoryCacheRef.current.set(listingKey,next);return next;});setEntriesKey(listingKey);setNextOffset(page.nextOffset);setLoading(false);}
     },(reason:unknown)=>{
       if(directoryScopeRef.current.generation===scope.generation){setError(message(reason));setLoading(false);}
     }).finally(()=>{scope.inFlightOffsets.delete(offset);});
   };
 
-  return <Modal animationType="slide" onRequestClose={goBack} presentationStyle="fullScreen" visible><SafeAreaView style={styles.safeArea} testID="mobile.repo-explorer"><Animated.View onLayout={measureNavigation} style={[styles.navigationPage,{transform:[{translateX:swipeOffset}]}]} testID="mobile.repo-explorer.navigation-surface" {...panResponder.panHandlers}>
-    <View style={styles.header}><Pressable onPress={goBack} testID="mobile.repo-explorer.back"><Text style={styles.action}>Back</Text></Pressable><View style={styles.headerCopy}><Text numberOfLines={1} style={styles.title}>{filePath ?? title}</Text><Text numberOfLines={1} style={styles.breadcrumb}>{path || "Task worktree"}</Text></View><Pressable onPress={onClose}><Text style={styles.action}>Close</Text></Pressable></View>
-    {filePath ? <LoiterFileViewer path={filePath} readFile={readFile} onInsertReference={onInsertReference} /> : <>
-      <View style={styles.controls}><TextInput autoCapitalize="none" autoCorrect={false} onChangeText={setFilter} placeholder="Filter this folder" placeholderTextColor="#7185A3" style={styles.filter} testID="mobile.repo-explorer.filter" value={filter}/><Pressable accessibilityRole="switch" accessibilityState={{checked:showAllFiles}} onPress={()=>setShowAllFiles((value)=>!value)}><Text style={styles.toggle}>{showAllFiles?"Hide ignored":"Show all"}</Text></Pressable></View>
-      {error?<Text style={styles.error}>{error}</Text>:null}
-      <FlatList data={visible} keyExtractor={(entry)=>entry.path} onEndReached={loadNext} onEndReachedThreshold={0.5} refreshControl={<RefreshControl refreshing={refreshing} onRefresh={()=>{setRefreshing(true);setGeneration((value)=>value+1);}} tintColor="#73B7FF"/>} renderItem={({item})=><Pressable onPress={()=>{setNavigation((current)=>navigateExplorer(current,{path:item.isDir?item.path:path,filePath:item.isDir?null:item.path}));if(item.isDir)setFilter("");}} style={styles.row} testID={`mobile.repo-explorer.entry.${item.path}`}><Text style={styles.icon}>{item.isDir?"▸":""}</Text><Text numberOfLines={1} style={styles.name}>{item.name}</Text>{!item.isDir&&item.size!=null?<Text style={styles.size}>{formatBytes(item.size)}</Text>:null}</Pressable>} ListFooterComponent={loading?<ActivityIndicator color="#73B7FF" style={styles.loader}/>:null}/>
+  const renderPage = (location: RepoExplorerLocation, pageEntries: RepoBrowseEntry[], pageFilter: string, interactive: boolean) => <View style={styles.navigationPage} testID={interactive ? "mobile.repo-explorer.current-page" : "mobile.repo-explorer.incoming-page"}>
+    <View style={styles.header}><Pressable onPress={interactive ? goBack : undefined} testID={interactive ? "mobile.repo-explorer.back" : undefined}><Text style={styles.action}>Back</Text></Pressable><View style={styles.headerCopy}><Text numberOfLines={1} style={styles.title}>{location.filePath ?? title}</Text><Text numberOfLines={1} style={styles.breadcrumb}>{location.path || "Task worktree"}</Text></View><Pressable onPress={interactive ? onClose : undefined}><Text style={styles.action}>Close</Text></Pressable></View>
+    {location.filePath ? <LoiterFileViewer path={location.filePath} readFile={readFile} onInsertReference={onInsertReference} /> : <>
+      <View style={styles.controls}><TextInput autoCapitalize="none" autoCorrect={false} editable={interactive} onChangeText={interactive ? setFilter : undefined} placeholder="Filter this folder" placeholderTextColor="#7185A3" style={styles.filter} testID={interactive ? "mobile.repo-explorer.filter" : undefined} value={pageFilter}/><Pressable accessibilityRole="switch" accessibilityState={{checked:showAllFiles}} disabled={!interactive} onPress={interactive ? ()=>setShowAllFiles((value)=>!value) : undefined}><Text style={styles.toggle}>{showAllFiles?"Hide ignored":"Show all"}</Text></Pressable></View>
+      {interactive && error?<Text style={styles.error}>{error}</Text>:null}
+      <FlatList contentContainerStyle={styles.listContent} data={pageEntries} keyExtractor={(entry)=>entry.path} onEndReached={interactive ? loadNext : undefined} onEndReachedThreshold={0.5} refreshControl={interactive?<RefreshControl refreshing={refreshing} onRefresh={()=>{setRefreshing(true);setGeneration((value)=>value+1);}} tintColor="#73B7FF"/>:undefined} renderItem={({item})=><Pressable disabled={!interactive} onPress={interactive ? ()=>{setNavigation((current)=>navigateExplorer(current,{path:item.isDir?item.path:location.path,filePath:item.isDir?null:item.path}));if(item.isDir)setFilter("");} : undefined} style={styles.row} testID={interactive ? `mobile.repo-explorer.entry.${item.path}` : undefined}><Text style={styles.icon}>{item.isDir?"▸":""}</Text><Text numberOfLines={1} style={styles.name}>{item.name}</Text>{!item.isDir&&item.size!=null?<Text style={styles.size}>{formatBytes(item.size)}</Text>:null}</Pressable>} ListFooterComponent={interactive&&loading?<ActivityIndicator color="#73B7FF" style={styles.loader}/>:null}/>
     </>}
-  </Animated.View></SafeAreaView></Modal>;
+  </View>;
+  const width = navigationWidth;
+  const incomingTranslate = transition?.direction === 1
+    ? swipeOffset.interpolate({ inputRange: [0, width], outputRange: [-width * NAVIGATION_INCOMING_OFFSET_FRACTION, 0], extrapolate: "clamp" })
+    : swipeOffset.interpolate({ inputRange: [-width, 0], outputRange: [0, width * NAVIGATION_INCOMING_OFFSET_FRACTION], extrapolate: "clamp" });
+  const incomingDim = transition?.direction === 1
+    ? swipeOffset.interpolate({ inputRange: [0, width], outputRange: [0.18, 0], extrapolate: "clamp" })
+    : swipeOffset.interpolate({ inputRange: [-width, 0], outputRange: [0, 0.18], extrapolate: "clamp" });
+
+  return <Modal animationType="slide" onRequestClose={goBack} presentationStyle="fullScreen" visible><SafeAreaView onLayout={measureNavigation} style={styles.safeArea} testID="mobile.repo-explorer"><View style={styles.gestureSurface} testID="mobile.repo-explorer.navigation-surface" {...panResponder.panHandlers}>
+    {transition?.incoming?<Animated.View key={explorerLocationKey(transition.incoming)} pointerEvents="none" style={[styles.incomingLayer,{transform:[{translateX:incomingTranslate}]}]} testID="mobile.repo-explorer.incoming-surface">{renderPage(transition.incoming,transition.incomingEntries,transition.incomingFilter,false)}<Animated.View style={[styles.incomingDim,{opacity:incomingDim}]}/></Animated.View>:null}
+    <Animated.View key={explorerLocationKey(navigation.current)} style={[styles.currentLayer,{transform:[{translateX:swipeOffset}]}]} testID="mobile.repo-explorer.outgoing-surface">{renderPage(navigation.current,visible,filter,true)}</Animated.View>
+  </View></SafeAreaView></Modal>;
 }
 
 export function LoiterFileViewer({ path, readFile, onInsertReference }: { path:string; readFile(path:string,startLine:number,lineCount:number,metadataOnly?:boolean,startByte?:number):Promise<RepoFileRange>; onInsertReference(value:string):void }) {
@@ -180,4 +233,6 @@ export function LoiterFileViewer({ path, readFile, onInsertReference }: { path:s
 
 function message(error:unknown):string{return error instanceof Error?error.message:String(error)}
 function formatBytes(bytes:number):string{return bytes<1024?`${bytes} B`:`${(bytes/1024).toFixed(bytes<10240?1:0)} KB`}
-const styles=StyleSheet.create({safeArea:{backgroundColor:"#08111E",flex:1},navigationPage:{backgroundColor:"#08111E",flex:1},header:{alignItems:"center",borderBottomColor:"#20304C",borderBottomWidth:1,flexDirection:"row",gap:12,padding:14},headerCopy:{flex:1},title:{color:"#F5F7FB",fontSize:17,fontWeight:"800"},breadcrumb:{color:"#8398B8",fontSize:12},action:{color:"#73B7FF",fontSize:15,fontWeight:"700"},controls:{alignItems:"center",flexDirection:"row",gap:10,padding:12},filter:{backgroundColor:"#111C30",borderColor:"#263754",borderRadius:10,borderWidth:1,color:"#F5F7FB",flex:1,padding:10},toggle:{color:"#9EC8F0",fontSize:12,fontWeight:"700"},row:{alignItems:"center",borderBottomColor:"#17243A",borderBottomWidth:1,flexDirection:"row",minHeight:50,paddingHorizontal:16},icon:{color:"#73B7FF",width:20},name:{color:"#E8EEF8",flex:1,fontSize:15},size:{color:"#7185A3",fontSize:12},loader:{padding:24},error:{color:"#FF9C9C",padding:16,textAlign:"center"},center:{alignItems:"center",flex:1,justifyContent:"center"},binaryTitle:{color:"#F5F7FB",fontSize:20,fontWeight:"800"},muted:{color:"#8398B8"},viewer:{flex:1},webView:{backgroundColor:"#08111E",flex:1}});
+function directoryListingKey(path:string,filter:string,showAllFiles:boolean):string{return `${path}\0${explorerFilterQuery(filter)}\0${showAllFiles}`}
+function explorerLocationKey(location:RepoExplorerLocation):string{return `${location.path}\0${location.filePath??""}`}
+const styles=StyleSheet.create({safeArea:{backgroundColor:"#08111E",flex:1},gestureSurface:{backgroundColor:"#08111E",flex:1,overflow:"hidden"},currentLayer:{backgroundColor:"#08111E",flex:1,shadowColor:"#000000",shadowOffset:{width:-3,height:0},shadowOpacity:0.28,shadowRadius:8},incomingLayer:{bottom:0,left:0,position:"absolute",right:0,top:0},incomingDim:{backgroundColor:"#000000",bottom:0,left:0,position:"absolute",right:0,top:0},navigationPage:{backgroundColor:"#08111E",flex:1},header:{alignItems:"center",borderBottomColor:"#20304C",borderBottomWidth:1,flexDirection:"row",gap:12,padding:14},headerCopy:{flex:1},title:{color:"#F5F7FB",fontSize:17,fontWeight:"800"},breadcrumb:{color:"#8398B8",fontSize:12},action:{color:"#73B7FF",fontSize:15,fontWeight:"700"},controls:{alignItems:"center",flexDirection:"row",gap:10,padding:12},filter:{backgroundColor:"#111C30",borderColor:"#263754",borderRadius:10,borderWidth:1,color:"#F5F7FB",flex:1,padding:10},toggle:{color:"#9EC8F0",fontSize:12,fontWeight:"700"},listContent:{flexGrow:1},row:{alignItems:"center",borderBottomColor:"#17243A",borderBottomWidth:1,flexDirection:"row",minHeight:50,paddingHorizontal:16},icon:{color:"#73B7FF",width:20},name:{color:"#E8EEF8",flex:1,fontSize:15},size:{color:"#7185A3",fontSize:12},loader:{padding:24},error:{color:"#FF9C9C",padding:16,textAlign:"center"},center:{alignItems:"center",flex:1,justifyContent:"center"},binaryTitle:{color:"#F5F7FB",fontSize:20,fontWeight:"800"},muted:{color:"#8398B8"},viewer:{flex:1},webView:{backgroundColor:"#08111E",flex:1}});

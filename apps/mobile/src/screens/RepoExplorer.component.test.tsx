@@ -12,6 +12,7 @@ vi.mock("react-native", async () => {
     value: number;
     constructor(value: number) { this.value = value; }
     setValue(value: number) { this.value = value; }
+    stopAnimation(callback?: (value: number) => void) { callback?.(this.value); }
     interpolate() { return this; }
   }
   const animation = (value: AnimatedValue, config: { toValue: number }) => ({
@@ -83,6 +84,43 @@ afterEach(async () => {
 });
 
 describe("RepoExplorer request ownership", () => {
+  it("owns edge gestures at the full-screen container below a short list", async () => {
+    const listDirectory = vi.fn((path: string) => Promise.resolve(listing(path === "src"
+      ? [{ name: "only.ts", path: "src/only.ts", isDir: false, size: 4 }]
+      : [{ name: "src", path: "src", isDir: true }], null)));
+    await act(async () => {
+      mounted = create(<RepoExplorer title="Files" listDirectory={listDirectory} readFile={vi.fn()} onInsertReference={vi.fn()} onClose={vi.fn()} />);
+    });
+    const rootList = mounted.root.findByType("FlatList");
+    const src = rootList.props.data[0];
+    await act(async () => { rootList.props.renderItem({ item: src }).props.onPress(); });
+
+    const surface = mounted.root.findByProps({ testID: "mobile.repo-explorer.navigation-surface" });
+    const currentPage = mounted.root.findByProps({ testID: "mobile.repo-explorer.current-page" });
+    expect(currentPage.props.onMoveShouldSetPanResponderCapture).toBeUndefined();
+    const blankAreaGesture = { dx: 100, dy: 2, vx: 0.2, x0: 1, y0: 700 };
+    await act(async () => {
+      expect(surface.props.onMoveShouldSetPanResponderCapture({}, blankAreaGesture)).toBe(true);
+      surface.props.onPanResponderMove({}, blankAreaGesture);
+    });
+    const incoming = mounted.root.findByProps({ testID: "mobile.repo-explorer.incoming-page" });
+    expect(incoming.findByType("FlatList").props.data.map((entry: { path: string }) => entry.path)).toEqual(["src"]);
+
+    await act(async () => { surface.props.onPanResponderRelease({}, blankAreaGesture); });
+    expect(mounted.root.findByType("FlatList").props.data.map((entry: { path: string }) => entry.path)).toEqual(["src"]);
+
+    const root = mounted.root.findByType("FlatList");
+    await act(async () => { root.props.renderItem({ item: root.props.data[0] }).props.onPress(); });
+    const cancelledGesture = { ...blankAreaGesture, dx: 30, vx: 0.1 };
+    await act(async () => {
+      expect(surface.props.onMoveShouldSetPanResponderCapture({}, cancelledGesture)).toBe(true);
+      surface.props.onPanResponderMove({}, cancelledGesture);
+      surface.props.onPanResponderRelease({}, cancelledGesture);
+    });
+    expect(mounted.root.findAllByProps({ testID: "mobile.repo-explorer.incoming-page" })).toHaveLength(0);
+    expect(mounted.root.findByType("FlatList").props.data.map((entry: { path: string }) => entry.path)).toEqual(["src/only.ts"]);
+  });
+
   it("puts header Back destinations in forward history for an edge swipe", async () => {
     const listDirectory = vi.fn((path: string) => Promise.resolve(listing(path === "src"
       ? [{ name: "file.ts", path: "src/file.ts", isDir: false, size: 4 }]
@@ -108,12 +146,16 @@ describe("RepoExplorer request ownership", () => {
     expect(surface?.props.onMoveShouldSetPanResponderCapture({}, { dx: -100, dy: 2, vx: -0.2, x0: 200 })).toBe(false);
     expect(surface?.props.onMoveShouldSetPanResponderCapture({}, { dx: -20, dy: 100, vx: -0.2, x0: 389 })).toBe(false);
     const gesture = { dx: -100, dy: 2, vx: -0.2, x0: 389 };
-    expect(surface?.props.onMoveShouldSetPanResponderCapture({}, gesture)).toBe(true);
     await act(async () => {
+      expect(surface?.props.onMoveShouldSetPanResponderCapture({}, gesture)).toBe(true);
       surface?.props.onPanResponderMove({}, gesture);
-      surface?.props.onPanResponderRelease({}, gesture);
     });
+    expect(mounted?.root.findByProps({ testID: "mobile.repo-explorer.incoming-page" })).toBeDefined();
+    expect(mounted?.root.findByProps({ testID: "mobile.repo-explorer.incoming-surface" })).toBeDefined();
+    expect(mounted?.root.findByProps({ testID: "mobile.repo-explorer.outgoing-surface" })).toBeDefined();
+    await act(async () => { surface?.props.onPanResponderRelease({}, gesture); });
     expect(mounted?.root.findAllByType("WebView")).toHaveLength(1);
+    expect(readFile).toHaveBeenCalledTimes(2);
   });
 
   it("drops stale and duplicate directory pages after the listing scope changes", async () => {
