@@ -61,7 +61,7 @@ describe("cloud deploy runtime", () => {
     });
   });
 
-  it("includes workspace patched dependencies in the relay Docker build context", () => {
+  it("copies relay workspace manifests before install without stale patch context", () => {
     const repoRoot = resolve(import.meta.dirname, "..", "..", "..");
     const dockerfile = readFileSync(resolve(repoRoot, "services/relay/Dockerfile"), "utf8");
     const manifests = dockerfile.indexOf("COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./");
@@ -72,8 +72,8 @@ describe("cloud deploy runtime", () => {
     );
 
     expect(manifests).toBeGreaterThanOrEqual(0);
-    expect(patches).toBeGreaterThan(manifests);
-    expect(install).toBeGreaterThan(patches);
+    expect(patches).toBe(-1);
+    expect(install).toBeGreaterThan(manifests);
     expect(deploy).toBeGreaterThan(install);
   });
 
