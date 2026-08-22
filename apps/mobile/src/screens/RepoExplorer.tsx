@@ -32,16 +32,41 @@ export function RepoExplorer({ title, listDirectory, readFile, onInsertReference
   const [error, setError] = useState<string | null>(null);
   const [generation, setGeneration] = useState(0);
   const listRef = useRef(listDirectory); listRef.current = listDirectory;
+  const scopeKey = `${path}\0${filter}\0${showAllFiles}\0${generation}`;
+  const directoryScopeRef = useRef({ key: "", generation: 0, inFlightOffsets: new Set<number>() });
+  if (directoryScopeRef.current.key !== scopeKey) {
+    directoryScopeRef.current = { key: scopeKey, generation: directoryScopeRef.current.generation + 1, inFlightOffsets: new Set() };
+  }
 
   useEffect(() => {
-    let active = true; setLoading(true); setError(null);
-    void listRef.current(path, showAllFiles, 0, explorerFilterQuery(filter)).then((page) => { if (active) { setEntries(page.entries); setNextOffset(page.nextOffset); setLoading(false); setRefreshing(false); } }, (reason: unknown) => { if (active) { setError(message(reason)); setLoading(false); setRefreshing(false); } });
-    return () => { active = false; };
+    const scope = directoryScopeRef.current;
+    scope.inFlightOffsets.add(0);
+    setLoading(true); setError(null);
+    void listRef.current(path, showAllFiles, 0, explorerFilterQuery(filter)).then((page) => {
+      if (directoryScopeRef.current.generation === scope.generation) {
+        setEntries(page.entries); setNextOffset(page.nextOffset); setLoading(false); setRefreshing(false);
+      }
+    }, (reason: unknown) => {
+      if (directoryScopeRef.current.generation === scope.generation) {
+        setError(message(reason)); setLoading(false); setRefreshing(false);
+      }
+    }).finally(() => { scope.inFlightOffsets.delete(0); });
   }, [filter, generation, path, showAllFiles]);
 
   const visible = useMemo(() => entries, [entries]);
   const goBack = () => { if (filePath) { setFilePath(null); return; } if (!path) { onClose(); return; } setPath(parentExplorerPath(path)); setFilter(""); };
-  const loadNext = () => { if (nextOffset == null || loading) return; setLoading(true); void listRef.current(path,showAllFiles,nextOffset,explorerFilterQuery(filter)).then((page)=>{setEntries((current)=>appendDirectoryPage(current,page.entries));setNextOffset(page.nextOffset);setLoading(false);},(reason:unknown)=>{setError(message(reason));setLoading(false);}); };
+  const loadNext = () => {
+    if (nextOffset == null) return;
+    const scope = directoryScopeRef.current;
+    const offset = nextOffset;
+    if (scope.inFlightOffsets.has(offset)) return;
+    scope.inFlightOffsets.add(offset); setLoading(true);
+    void listRef.current(path,showAllFiles,offset,explorerFilterQuery(filter)).then((page)=>{
+      if(directoryScopeRef.current.generation===scope.generation){setEntries((current)=>appendDirectoryPage(current,page.entries));setNextOffset(page.nextOffset);setLoading(false);}
+    },(reason:unknown)=>{
+      if(directoryScopeRef.current.generation===scope.generation){setError(message(reason));setLoading(false);}
+    }).finally(()=>{scope.inFlightOffsets.delete(offset);});
+  };
 
   return <Modal animationType="slide" onRequestClose={goBack} presentationStyle="fullScreen" visible><SafeAreaView style={styles.safeArea} testID="mobile.repo-explorer">
     <View style={styles.header}><Pressable onPress={goBack} testID="mobile.repo-explorer.back"><Text style={styles.action}>Back</Text></Pressable><View style={styles.headerCopy}><Text numberOfLines={1} style={styles.title}>{filePath ?? title}</Text><Text numberOfLines={1} style={styles.breadcrumb}>{path || "Task worktree"}</Text></View><Pressable onPress={onClose}><Text style={styles.action}>Close</Text></Pressable></View>
@@ -53,20 +78,22 @@ export function RepoExplorer({ title, listDirectory, readFile, onInsertReference
   </SafeAreaView></Modal>;
 }
 
-function LoiterFileViewer({ path, readFile, onInsertReference }: { path:string; readFile(path:string,startLine:number,lineCount:number,metadataOnly?:boolean,startByte?:number):Promise<RepoFileRange>; onInsertReference(value:string):void }) {
+export function LoiterFileViewer({ path, readFile, onInsertReference }: { path:string; readFile(path:string,startLine:number,lineCount:number,metadataOnly?:boolean,startByte?:number):Promise<RepoFileRange>; onInsertReference(value:string):void }) {
   const webRef = useRef<NativeWebView>(null);
   const contentRanges = useRef(new Set<string>());
   const metadataRanges = useRef(new Set<string>());
+  const readFileRef = useRef(readFile); readFileRef.current = readFile;
+  const viewerGenerationRef = useRef(0);
   const [initial, setInitial] = useState<RepoFileRange|null>(null);
   const [error,setError]=useState<string|null>(null);
-  useEffect(()=>{let active=true; contentRanges.current.clear();metadataRanges.current.clear();setInitial(null);void readFile(path,0,VIEWPORT_LINE_COUNT,true).then((range)=>{if(active)setInitial(range);},(reason:unknown)=>{if(active)setError(message(reason));});return()=>{active=false;};},[path,readFile]);
+  useEffect(()=>{const viewerGeneration=++viewerGenerationRef.current;contentRanges.current.clear();metadataRanges.current.clear();setInitial(null);setError(null);void readFileRef.current(path,0,VIEWPORT_LINE_COUNT,true).then((range)=>{if(viewerGenerationRef.current===viewerGeneration)setInitial(range);},(reason:unknown)=>{if(viewerGenerationRef.current===viewerGeneration)setError(message(reason));});return()=>{if(viewerGenerationRef.current===viewerGeneration)viewerGenerationRef.current++;};},[path]);
   const inject=(script:string)=>webRef.current?.injectJavaScript(`${script};true;`);
-  const fetchRange=(start:number, metadataOnly:boolean)=>{const key=`${start}:${VIEWPORT_LINE_COUNT}`;const cache=metadataOnly?metadataRanges.current:contentRanges.current;if(cache.has(key))return;cache.add(key);void readCompleteRange(readFile,path,start,VIEWPORT_LINE_COUNT,metadataOnly).then((range)=>{if(range.binary){inject("window.showBinary()");return;} const payload=metadataOnly?range.lines.map((length,index)=>({number:start+index,length:Number(length)})):range.lines.map((text,index)=>({number:start+index,text,html:highlightTaskFileSource(text,path)}));inject(`window.${metadataOnly?"applyMetadata":"applyContent"}(${JSON.stringify(payload)})`);},(reason:unknown)=>{cache.delete(key);setError(message(reason));});};
+  const fetchRange=(start:number, metadataOnly:boolean,startByte=0)=>{const key=`${start}:${VIEWPORT_LINE_COUNT}:${startByte}`;const cache=metadataOnly?metadataRanges.current:contentRanges.current;if(cache.has(key))return;const viewerGeneration=viewerGenerationRef.current;cache.add(key);void readCompleteRange(readFileRef.current,path,start,VIEWPORT_LINE_COUNT,metadataOnly,startByte).then((range)=>{if(viewerGenerationRef.current!==viewerGeneration)return;if(range.binary){inject("window.showBinary()");return;} const payload=metadataOnly?range.lines.map((length,index)=>({number:start+index,length:Number(length)})):range.lines.map((text,index)=>({number:start+index,text,html:highlightTaskFileSource(text,path)}));inject(metadataOnly?`window.applyMetadata(${JSON.stringify(payload)})`:`window.applyContent(${JSON.stringify(payload)},${startByte},${JSON.stringify(range.nextLine)},${JSON.stringify(range.nextByte??null)})`);},(reason:unknown)=>{if(viewerGenerationRef.current===viewerGeneration){cache.delete(key);setError(message(reason));}});};
   const rangeLoaderRef=useRef<LoiterRangeLoader|null>(null);
   useEffect(()=>{const loader=createLoiterRangeLoader((start)=>fetchRange(start,false));rangeLoaderRef.current=loader;return()=>{loader.dispose();if(rangeLoaderRef.current===loader)rangeLoaderRef.current=null;};},[path]);
-  const onMessage=(event:WebViewMessageEvent)=>{try{const data=JSON.parse(event.nativeEvent.data) as {type?:unknown;start?:unknown;reference?:unknown};if(data.type==="viewport"&&typeof data.start==="number"){fetchRange(data.start,true);rangeLoaderRef.current?.observe(data.start);}else if(data.type==="insert"&&typeof data.reference==="string"){onInsertReference(data.reference);}}catch(error){setError(message(error));}};
+  const onMessage=(event:WebViewMessageEvent)=>{try{const data=JSON.parse(event.nativeEvent.data) as {type?:unknown;start?:unknown;line?:unknown;byte?:unknown;reference?:unknown};if(data.type==="viewport"&&typeof data.start==="number"){fetchRange(data.start,true);rangeLoaderRef.current?.observe(data.start);}else if(data.type==="continue"&&typeof data.line==="number"&&typeof data.byte==="number"){fetchRange(data.line,false,data.byte);}else if(data.type==="insert"&&typeof data.reference==="string"){onInsertReference(data.reference);}}catch(error){setError(message(error));}};
   if(error)return <Text style={styles.error}>{error}</Text>; if(!initial)return <ActivityIndicator color="#73B7FF" style={styles.loader}/>; if(initial.binary)return <View style={styles.center}><Text style={styles.binaryTitle}>Binary file</Text><Text style={styles.muted}>Preview is unavailable for this file.</Text></View>;
-  metadataRanges.current.add(`0:${VIEWPORT_LINE_COUNT}`);
+  metadataRanges.current.add(`0:${VIEWPORT_LINE_COUNT}:0`);
   return <View style={styles.viewer}><WebView ref={webRef} originWhitelist={["about:blank"]} onMessage={onMessage} source={{html:buildViewerDocument(path,initial)}} style={styles.webView}/>{error?<Text style={styles.error}>{error}</Text>:null}</View>;
 }
 

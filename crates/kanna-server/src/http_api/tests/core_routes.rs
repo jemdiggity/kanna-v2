@@ -5133,11 +5133,12 @@ async fn paired_lan_client_pages_a_real_task_worktree_fixture() {
     let content: serde_json::Value = range.json().await.unwrap();
     assert_eq!(content["lines"], serde_json::json!(["fn two() {}"]));
 
-    let huge_line = "z".repeat(crate::repo_browser::FILE_RANGE_BYTES + 17_000);
+    let huge_line = "z".repeat(crate::repo_browser::FILE_RANGE_BYTES * 3 + 17_000);
     fixture.write("src/huge.txt", huge_line.as_bytes());
     let mut reconstructed = String::new();
     let mut start_line = 0_u64;
     let mut start_byte = 0_u64;
+    let mut range_requests = 0;
     loop {
         let response = client
             .get(format!("{base_url}/v1/tasks/task-file/browse/content?path=src%2Fhuge.txt&startLine={start_line}&startByte={start_byte}&lineCount=1"))
@@ -5146,6 +5147,7 @@ async fn paired_lan_client_pages_a_real_task_worktree_fixture() {
             .send().await.unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         let body: serde_json::Value = response.json().await.unwrap();
+        range_requests += 1;
         let fragment = body["lines"][0].as_str().unwrap_or("");
         assert!(fragment.len() <= crate::repo_browser::FILE_RANGE_BYTES);
         reconstructed.push_str(fragment);
@@ -5155,6 +5157,7 @@ async fn paired_lan_client_pages_a_real_task_worktree_fixture() {
         start_line = next_line;
         start_byte = body["nextByte"].as_u64().unwrap_or(0);
     }
+    assert!(range_requests >= 4);
     assert_eq!(reconstructed, huge_line);
 
     #[cfg(unix)]

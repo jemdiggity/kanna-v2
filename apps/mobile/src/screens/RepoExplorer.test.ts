@@ -29,12 +29,16 @@ describe("repository explorer loiter loading", () => {
     vi.useRealTimers();
   });
 
-  it("reconstructs a byte-chunked oversized line without gaps or duplication", async () => {
+  it("keeps a settled oversized-line load bounded and preserves explicit continuation bytes", async () => {
     const readFile = vi.fn()
       .mockResolvedValueOnce({ path:"huge.txt",startLine:0,startByte:0,lines:["abc"],nextLine:0,nextByte:3,totalLines:1,totalBytes:6,binary:false,metadataOnly:false })
       .mockResolvedValueOnce({ path:"huge.txt",startLine:0,startByte:3,lines:["def"],nextLine:null,nextByte:null,totalLines:1,totalBytes:6,binary:false,metadataOnly:false });
-    const range = await readCompleteRange(readFile, "huge.txt", 0, 50, false);
-    expect(range.lines).toEqual(["abcdef"]);
+    const first = await readCompleteRange(readFile, "huge.txt", 0, 50, false);
+    expect(first.lines).toEqual(["abc"]);
+    expect(first.nextByte).toBe(3);
+    expect(readFile).toHaveBeenCalledTimes(1);
+    const second = await readCompleteRange(readFile, "huge.txt", first.nextLine ?? 0, 50, false, first.nextByte ?? 0);
+    expect(first.lines[0] + second.lines[0]).toBe("abcdef");
     expect(readFile).toHaveBeenNthCalledWith(2, "huge.txt", 0, 50, false, 3);
   });
 
@@ -69,8 +73,12 @@ describe("repository explorer loiter loading", () => {
     Object.defineProperty(window, "scrollY", { configurable:true, value:2_000_000 });
     window.dispatchEvent(new window.Event("scroll"));
     expect(window.document.querySelectorAll(".line")).toHaveLength(90);
-    window.eval("applyContent([{number:100000,html:'selected'}])");
+    window.eval("applyContent([{number:100000,text:'selected',html:'selected'}],0,null,null)");
     expect(window.document.querySelector('[data-line="100000"] .code')?.textContent).toBe("selected");
+    window.eval("applyContent([{number:100001,text:'abc',html:'abc'}],0,100001,3)");
+    window.eval("applyContent([{number:100001,text:'def',html:'def'}],3,null,null)");
+    window.eval("applyContent([{number:100001,text:'def',html:'def'}],3,null,null)");
+    expect(window.document.querySelector('[data-line="100001"] .code')?.textContent).toBe("abcdef");
     Object.defineProperty(window, "scrollY", { configurable:true, value:0 });
     window.dispatchEvent(new window.Event("scroll"));
     Object.defineProperty(window, "scrollY", { configurable:true, value:2_000_000 });

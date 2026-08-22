@@ -230,6 +230,8 @@ export interface RepoFileRange {
   startLine: number;
   startByte?: number;
   lines: string[];
+  /** When both values point back into the final returned line, request the
+   * next bounded fragment explicitly with these start coordinates. */
   nextLine: number | null;
   nextByte?: number | null;
   totalLines: number;

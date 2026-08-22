@@ -183,70 +183,147 @@ pub fn read_file_range(
     }
     file.rewind().map_err(internal_io)?;
     let limit = line_count.clamp(1, MAX_LINE_RANGE);
-    let mut total_lines = 0;
-    let mut lines = Vec::new();
-    let mut response_bytes: usize = 0;
+    // Never ask `BufRead::lines` to materialize a physical line: a repository
+    // may legitimately contain a line many gigabytes long. The scanner keeps
+    // a fixed read buffer and stores at most FILE_RANGE_BYTES of content.
+    let mut reader = BufReader::new(file);
+    let mut buffer = [0_u8; 32 * 1024];
+    let mut utf8_tail = Vec::with_capacity(4);
+    let mut line_bytes: Vec<Vec<u8>> = Vec::new();
+    let mut metadata_lengths = Vec::new();
+    let mut current_line = 0_usize;
+    let mut current_line_bytes = 0_usize;
+    let mut response_bytes = 0_usize;
     let mut continuation = None;
-    for (index, line) in BufReader::new(file).lines().enumerate() {
-        let line = match line {
-            Ok(line) => line,
-            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
-                return Ok(FileRange {
-                    path: display_path(&relative),
+    let mut pending_byte = None;
+    let mut saw_bytes = false;
+    let mut ended_with_newline = false;
+    let mut requested_start_length = None;
+
+    loop {
+        let count = reader.read(&mut buffer).map_err(internal_io)?;
+        if count == 0 {
+            break;
+        }
+        saw_bytes = true;
+        if !validate_utf8_chunk(&buffer[..count], &mut utf8_tail) {
+            return Ok(binary_file_range(
+                &relative,
+                start_line,
+                start_byte,
+                metadata.len(),
+                metadata_only,
+            ));
+        }
+        for &byte in &buffer[..count] {
+            ended_with_newline = byte == b'\n';
+            if byte == b'\n' {
+                if let Some(previous) = pending_byte.take() {
+                    if previous != b'\r' {
+                        collect_line_byte(
+                            previous,
+                            current_line,
+                            current_line_bytes,
+                            start_line,
+                            start_byte,
+                            limit,
+                            metadata_only,
+                            &mut line_bytes,
+                            &mut response_bytes,
+                            &mut continuation,
+                        );
+                        current_line_bytes += 1;
+                    }
+                }
+                finish_scanned_line(
+                    current_line,
+                    current_line_bytes,
+                    start_line,
+                    limit,
+                    metadata_only,
+                    &continuation,
+                    &mut line_bytes,
+                    &mut metadata_lengths,
+                    &mut requested_start_length,
+                );
+                current_line += 1;
+                current_line_bytes = 0;
+            } else if let Some(previous) = pending_byte.replace(byte) {
+                collect_line_byte(
+                    previous,
+                    current_line,
+                    current_line_bytes,
                     start_line,
                     start_byte,
-                    lines: Vec::new(),
-                    next_line: None,
-                    next_byte: None,
-                    total_lines: 0,
-                    total_bytes: metadata.len(),
-                    binary: true,
+                    limit,
                     metadata_only,
-                });
+                    &mut line_bytes,
+                    &mut response_bytes,
+                    &mut continuation,
+                );
+                current_line_bytes += 1;
             }
-            Err(error) => return Err(internal_io(error)),
-        };
-        total_lines = index + 1;
-        if index < start_line || index >= start_line.saturating_add(limit) {
-            continue;
         }
-        if continuation.is_some() {
-            continue;
-        }
-        let value = if metadata_only {
-            line.len().to_string()
-        } else if index == start_line {
-            if start_byte > line.len() || !line.is_char_boundary(start_byte) {
-                return Err(BrowseError::InvalidPath);
-            }
-            line[start_byte..].to_string()
-        } else {
-            line
-        };
-        if response_bytes.saturating_add(value.len()) > FILE_RANGE_BYTES {
-            if !metadata_only && lines.is_empty() {
-                let remaining = FILE_RANGE_BYTES.saturating_sub(response_bytes);
-                let mut end = remaining.min(value.len());
-                while end > 0 && !value.is_char_boundary(end) {
-                    end -= 1;
-                }
-                lines.push(value[..end].to_string());
-                continuation = Some((
-                    index,
-                    if index == start_line {
-                        start_byte + end
-                    } else {
-                        end
-                    },
-                ));
-            } else {
-                continuation = Some((index, 0));
-            }
-            continue;
-        }
-        response_bytes += value.len();
-        lines.push(value);
     }
+    if !utf8_tail.is_empty() {
+        return Ok(binary_file_range(
+            &relative,
+            start_line,
+            start_byte,
+            metadata.len(),
+            metadata_only,
+        ));
+    }
+    if let Some(previous) = pending_byte {
+        collect_line_byte(
+            previous,
+            current_line,
+            current_line_bytes,
+            start_line,
+            start_byte,
+            limit,
+            metadata_only,
+            &mut line_bytes,
+            &mut response_bytes,
+            &mut continuation,
+        );
+        current_line_bytes += 1;
+    }
+    if saw_bytes && !ended_with_newline {
+        finish_scanned_line(
+            current_line,
+            current_line_bytes,
+            start_line,
+            limit,
+            metadata_only,
+            &continuation,
+            &mut line_bytes,
+            &mut metadata_lengths,
+            &mut requested_start_length,
+        );
+    }
+    let total_lines = current_line + usize::from(saw_bytes && !ended_with_newline);
+    if start_byte > requested_start_length.unwrap_or(0) {
+        return Err(BrowseError::InvalidPath);
+    }
+
+    if let Some((line, byte)) = continuation.as_mut() {
+        if let Some(fragment) = line_bytes.last_mut() {
+            while std::str::from_utf8(fragment).is_err() {
+                fragment.pop();
+                *byte = byte.saturating_sub(1);
+            }
+        }
+        debug_assert!(*line < total_lines);
+    }
+    let lines = if metadata_only {
+        metadata_lengths
+    } else {
+        line_bytes
+            .into_iter()
+            .map(|line| String::from_utf8(line).map_err(|_| BrowseError::InvalidPath))
+            .collect::<Result<Vec<_>, _>>()?
+    };
     let natural_next = start_line.saturating_add(lines.len());
     let (next_line, next_byte) = continuation
         .map(|(line, byte)| (Some(line), Some(byte)))
@@ -263,6 +340,106 @@ pub fn read_file_range(
         binary: false,
         metadata_only,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_scanned_line(
+    line: usize,
+    length: usize,
+    start_line: usize,
+    limit: usize,
+    metadata_only: bool,
+    continuation: &Option<(usize, usize)>,
+    line_bytes: &mut Vec<Vec<u8>>,
+    metadata_lengths: &mut Vec<String>,
+    requested_start_length: &mut Option<usize>,
+) {
+    if line == start_line {
+        *requested_start_length = Some(length);
+    }
+    if metadata_only && line >= start_line && line < start_line.saturating_add(limit) {
+        metadata_lengths.push(length.to_string());
+    } else if !metadata_only
+        && continuation.is_none()
+        && line >= start_line
+        && line < start_line.saturating_add(limit)
+        && line_bytes.len() <= line.saturating_sub(start_line)
+    {
+        line_bytes.push(Vec::new());
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_line_byte(
+    byte: u8,
+    line: usize,
+    byte_in_line: usize,
+    start_line: usize,
+    start_byte: usize,
+    limit: usize,
+    metadata_only: bool,
+    lines: &mut Vec<Vec<u8>>,
+    response_bytes: &mut usize,
+    continuation: &mut Option<(usize, usize)>,
+) {
+    if metadata_only
+        || continuation.is_some()
+        || line < start_line
+        || line >= start_line.saturating_add(limit)
+        || (line == start_line && byte_in_line < start_byte)
+    {
+        return;
+    }
+    let output_index = line.saturating_sub(start_line);
+    if *response_bytes < FILE_RANGE_BYTES {
+        while lines.len() <= output_index {
+            lines.push(Vec::new());
+        }
+        lines[output_index].push(byte);
+        *response_bytes += 1;
+    } else {
+        *continuation = Some((line, byte_in_line));
+    }
+}
+
+fn validate_utf8_chunk(chunk: &[u8], tail: &mut Vec<u8>) -> bool {
+    let mut candidate = Vec::with_capacity(tail.len() + chunk.len());
+    candidate.extend_from_slice(tail);
+    candidate.extend_from_slice(chunk);
+    match std::str::from_utf8(&candidate) {
+        Ok(_) => {
+            tail.clear();
+            true
+        }
+        Err(error) if error.error_len().is_none() => {
+            let valid = error.valid_up_to();
+            tail.clear();
+            tail.extend_from_slice(&candidate[valid..]);
+            tail.len() <= 3
+        }
+        Err(_) => false,
+    }
+}
+
+fn binary_file_range(
+    relative: &Path,
+    start_line: usize,
+    start_byte: usize,
+    total_bytes: u64,
+    metadata_only: bool,
+) -> FileRange {
+    FileRange {
+        path: display_path(relative),
+        start_line,
+        start_byte,
+        lines: Vec::new(),
+        next_line: None,
+        next_byte: None,
+        total_lines: 0,
+        total_bytes,
+        binary: true,
+        metadata_only,
+    }
 }
 
 fn normalize_requested_path(requested_path: &str) -> Result<PathBuf, BrowseError> {
@@ -562,13 +739,15 @@ mod tests {
     #[test]
     fn continues_a_single_line_by_byte_without_gaps() {
         let temp = tempfile::tempdir().unwrap();
-        let expected = "é".repeat(FILE_RANGE_BYTES);
+        let expected = "é".repeat(FILE_RANGE_BYTES * 2);
         std::fs::write(temp.path().join("single.txt"), &expected).unwrap();
         let mut line = 0;
         let mut byte = 0;
         let mut reconstructed = String::new();
+        let mut invocations = 0;
         loop {
             let range = read_file_range(temp.path(), "single.txt", line, byte, 1, false).unwrap();
+            invocations += 1;
             assert!(range.lines.iter().map(String::len).sum::<usize>() <= FILE_RANGE_BYTES);
             reconstructed.push_str(range.lines.first().map(String::as_str).unwrap_or(""));
             let Some(next_line) = range.next_line else {
@@ -577,6 +756,10 @@ mod tests {
             line = next_line;
             byte = range.next_byte.unwrap_or(0);
         }
+        assert!(
+            invocations >= 4,
+            "the fixture must span several bounded responses"
+        );
         assert_eq!(reconstructed, expected);
     }
 }

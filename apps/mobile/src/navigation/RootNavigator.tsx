@@ -569,8 +569,17 @@ function TaskDetailRoute({
   });
   const selectedTaskIdRef = useRef(state.selectedTaskId);
   const cleanupTaskIdRef = useRef(cleanupTaskId);
+  const taskFileAccessRef = useRef({ controller, routeTaskId, state });
   selectedTaskIdRef.current = state.selectedTaskId;
   cleanupTaskIdRef.current = cleanupTaskId;
+  taskFileAccessRef.current = { controller, routeTaskId, state };
+  const readTaskFileRange = useCallback((path: string, startLine: number, lineCount: number, metadataOnly?: boolean, startByte?: number) => {
+    const access = taskFileAccessRef.current;
+    const durableTaskId = resolveDurableTaskId(access.state, access.routeTaskId);
+    return durableTaskId
+      ? access.controller.readTaskFileRange(durableTaskId, path, startLine, lineCount, metadataOnly, startByte)
+      : Promise.reject(new Error("Task creation is still in progress."));
+  }, []);
 
   useFocusEffect(
     useCallback(() => {
@@ -692,12 +701,7 @@ function TaskDetailRoute({
           ? controller.listTaskDirectory(durableTaskId, path, showAllFiles, offset, filter)
           : Promise.reject(new Error("Task creation is still in progress."));
       }}
-      onReadTaskFileRange={(path, startLine, lineCount, metadataOnly, startByte) => {
-        const durableTaskId = resolveDurableTaskId(state, routeTaskId);
-        return durableTaskId
-          ? controller.readTaskFileRange(durableTaskId, path, startLine, lineCount, metadataOnly, startByte)
-          : Promise.reject(new Error("Task creation is still in progress."));
-      }}
+      onReadTaskFileRange={readTaskFileRange}
       onReadTaskDiff={(request) => {
         const durableTaskId = resolveDurableTaskId(state, routeTaskId);
         return durableTaskId
