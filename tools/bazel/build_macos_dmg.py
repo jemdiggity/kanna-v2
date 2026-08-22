@@ -20,6 +20,9 @@ DEFAULT_TEXT_SIZE = 16
 FINDER_INFO_LENGTH = 32
 VOLUME_CUSTOM_ICON_FLAG = 0x0400
 FINDER_LAYOUT_LOCK_PATH = Path("/tmp/kanna-build-macos-dmg-finder.lock")
+FINDER_REGISTRATION_WEDGED_MESSAGE = (
+    "Finder volume registration is wedged; relaunch Finder (killall Finder) and retry"
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -93,6 +96,53 @@ def finder_layout_lock(lock_path: Optional[Path] = None):
             yield
         finally:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def preflight_finder_volume_registration() -> None:
+    volume_name = f"Kanna Finder Preflight {os.getpid()}"
+    with tempfile.TemporaryDirectory(prefix="kanna-finder-preflight-") as temp_dir:
+        image_path = Path(temp_dir) / "finder-preflight.dmg"
+        run_checked(
+            [
+                "hdiutil",
+                "create",
+                "-size",
+                "1m",
+                "-fs",
+                "HFS+",
+                "-volname",
+                volume_name,
+                "-ov",
+                str(image_path),
+            ]
+        )
+        attach_result = subprocess.run(
+            ["hdiutil", "attach", str(image_path), "-nobrowse"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        mount_dir = parse_mount_dir(attach_result.stdout)
+        try:
+            finder_result = subprocess.run(
+                [
+                    "osascript",
+                    "-e",
+                    'on run argv\ntell application "Finder" to get disk (item 1 of argv)\nend run',
+                    volume_name,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if finder_result.returncode != 0:
+                details = finder_result.stderr.strip() or finder_result.stdout.strip()
+                message = FINDER_REGISTRATION_WEDGED_MESSAGE
+                if details:
+                    message = f"{message}\nFinder response: {details}"
+                raise RuntimeError(message)
+        finally:
+            run_checked(["hdiutil", "detach", str(mount_dir), "-quiet"])
 
 
 def mark_volume_icon(mount_dir: Path, icon_path: Path) -> None:
@@ -362,6 +412,8 @@ def main() -> None:
             run_checked(["hdiutil", "detach", str(private_mount_dir), "-quiet"])
 
         with finder_layout_lock():
+            if has_custom_layout:
+                preflight_finder_volume_registration()
             attach_command = [
                 "hdiutil",
                 "attach",

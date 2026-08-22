@@ -7,12 +7,24 @@ git_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:git.bzl", "g
 
 bazel_dep(name = "rules_tauri", version = "0.0.0")
 bazel_dep(name = "rules_shell", version = "0.6.1")
+bazel_dep(name = "rules_python", version = "1.7.0")
 bazel_dep(name = "rules_rust", version = "0.69.0")
 bazel_dep(name = "rules_zig", version = "0.12.3")
 bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "bazel_lib", version = "3.2.2")
 bazel_dep(name = "aspect_rules_js", version = "3.2.3")
 bazel_dep(name = "rules_nodejs", version = "6.7.3")
+
+# The Xcode 26.5 macOS SDK's top-level libSystem TBD targets omit arm64-macos,
+# while the Command Line Tools 26.2 SDK retains it. Official Zig 0.15.2 fails
+# to link against the former and links through the CLT-scoped wrapper below.
+# Keep Ghostty on its required 0.15.2 compiler and select the CLT SDK for it.
+single_version_override(
+    module_name = "rules_zig",
+    patch_strip = 1,
+    patches = ["//tools/bazel:rules-zig-0.15.2-macos-clt-sdk.patch"],
+    version = "0.12.3",
+)
 
 git_override(
     module_name = "rules_tauri",

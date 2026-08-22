@@ -1,3 +1,6 @@
+load("@rules_python//python:defs.bzl", "py_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
 package(default_visibility = ["//visibility:public"])
 
 platform(
@@ -6,6 +9,28 @@ platform(
         "@platforms//cpu:x86_64",
         "@platforms//os:osx",
     ],
+)
+
+py_test(
+    name = "build_macos_dmg_test",
+    srcs = [
+        "build_macos_dmg.py",
+        "build_macos_dmg_test.py",
+    ],
+    main = "build_macos_dmg_test.py",
+    python_version = "PY3",
+)
+
+sh_test(
+    name = "zig_macos_toolchain_test",
+    srcs = ["zig_macos_toolchain_test.sh"],
+    args = ["$(ZIG_BIN)"],
+    data = ["@rules_zig//zig:resolved_toolchain"],
+    target_compatible_with = [
+        "@platforms//cpu:arm64",
+        "@platforms//os:osx",
+    ],
+    toolchains = ["@rules_zig//zig:resolved_toolchain"],
 )
 
 exports_files([
@@ -17,6 +42,8 @@ exports_files([
     "ghostty-libvt-fast-path.patch",
     "ghostty-simdutf-include.patch",
     "libghostty-vt-sys-zig-env.patch",
+    "rules-zig-0.15.2-macos-clt-sdk.patch",
+    "zig_macos_toolchain_test.sh",
     "make_tauri_manifest.py",
     "normalize_tauri_context.py",
     "openssl-src-bazel-runfiles.patch",
