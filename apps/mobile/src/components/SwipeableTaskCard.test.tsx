@@ -213,6 +213,29 @@ function actionScale(
   return animatedNumber(animatedStyle.transform[0]?.scale);
 }
 
+function actionOpacity(renderer: ReactTestRenderer, testID: string): number {
+  const style = renderer.root.findByProps({ testID }).props.style as unknown[];
+  const animatedStyle = style.at(-1) as { opacity: unknown };
+  return animatedNumber(animatedStyle.opacity);
+}
+
+function actionBackgroundColor(
+  renderer: ReactTestRenderer,
+  testID: string
+): string {
+  const style = renderer.root.findByProps({ testID }).props.style as unknown[];
+  const animatedStyle = style.at(-1) as {
+    backgroundColor: {
+      source: { value: number };
+      config: { outputRange: string[] };
+    };
+  };
+  const { source, config } = animatedStyle.backgroundColor;
+  return source.value === 1
+    ? (config.outputRange.at(-1) ?? "")
+    : (config.outputRange[0] ?? "");
+}
+
 /** Where the card itself sits, which is `0` whenever the row is at rest. */
 function rowTranslation(renderer: ReactTestRenderer): number {
   const style = renderer.root.findByProps({ "data-pan-handlers": true }).props
@@ -395,6 +418,15 @@ describe("SwipeableTaskCard", () => {
 
     nativeHarness.animationKinds.length = 0;
     drag(-70);
+    expect(
+      actionOpacity(renderer, MOBILE_E2E_IDS.taskPinAction("task-1"))
+    ).toBe(1);
+    expect(
+      actionBackgroundColor(
+        renderer,
+        MOBILE_E2E_IDS.taskPinAction("task-1")
+      )
+    ).toBe("#2563EB");
     const rowStyle = renderer.root.findByProps({ "data-pan-handlers": true })
       .props.style as { transform: unknown[] };
     expect(rowStyle.transform).toEqual([]);
@@ -436,11 +468,11 @@ describe("SwipeableTaskCard", () => {
     // Swipe past the threshold, hold, then swipe the action back away again.
     drag(-70);
     expect(actionScale(renderer, MOBILE_E2E_IDS.taskPinAction("task-1"))).toBe(
-      1.08
+      1.04
     );
     drag(-70, -20);
     expect(actionScale(renderer, MOBILE_E2E_IDS.taskPinAction("task-1"))).toBe(
-      0.84
+      0.88
     );
 
     await act(async () => {
@@ -489,17 +521,56 @@ describe("SwipeableTaskCard", () => {
     const renderer = await renderCard(vi.fn().mockResolvedValue(undefined));
     const pinAction = MOBILE_E2E_IDS.taskPinAction("task-1");
 
-    expect(actionScale(renderer, pinAction)).toBe(0.84);
+    expect(actionScale(renderer, pinAction)).toBe(0.88);
     drag(-47);
-    expect(actionScale(renderer, pinAction)).toBe(0.84);
+    expect(actionScale(renderer, pinAction)).toBe(0.88);
     drag(-47, -48);
-    expect(actionScale(renderer, pinAction)).toBe(1.08);
+    expect(actionScale(renderer, pinAction)).toBe(1.04);
     // The action is drawn for the eye alone now — VoiceOver reaches pin
     // through the row's own accessibility action instead.
     expect(
       renderer.root.findByProps({ testID: pinAction }).props
         .importantForAccessibility
     ).toBe("no-hide-descendants");
+  });
+
+  it("keeps every action solid at mid-swipe and arms with color and scale", async () => {
+    const pinAction = MOBILE_E2E_IDS.taskPinAction("task-1");
+    const pinRenderer = await renderCard(vi.fn().mockResolvedValue(undefined));
+    drag(-30);
+    expect(actionOpacity(pinRenderer, pinAction)).toBeGreaterThanOrEqual(0.95);
+    expect(actionBackgroundColor(pinRenderer, pinAction)).toBe("#435F96");
+    drag(-48);
+    expect(actionBackgroundColor(pinRenderer, pinAction)).toBe("#2563EB");
+    expect(actionScale(pinRenderer, pinAction)).toBe(1.04);
+
+    const unpinRenderer = await renderCard(
+      vi.fn().mockResolvedValue(undefined),
+      true
+    );
+    drag(-30);
+    expect(actionOpacity(unpinRenderer, pinAction)).toBeGreaterThanOrEqual(0.95);
+    expect(actionBackgroundColor(unpinRenderer, pinAction)).toBe("#743F4C");
+    drag(-48);
+    expect(actionBackgroundColor(unpinRenderer, pinAction)).toBe("#9F2D42");
+    expect(actionScale(unpinRenderer, pinAction)).toBe(1.04);
+
+    const dismissAction = MOBILE_E2E_IDS.activityDismissAction("task-activity");
+    const dismissRenderer = await renderDismissCard(
+      vi.fn().mockResolvedValue(undefined)
+    );
+    drag(-30);
+    expect(actionOpacity(dismissRenderer, dismissAction)).toBeGreaterThanOrEqual(
+      0.95
+    );
+    expect(actionBackgroundColor(dismissRenderer, dismissAction)).toBe(
+      "#803F4B"
+    );
+    drag(-48);
+    expect(actionBackgroundColor(dismissRenderer, dismissAction)).toBe(
+      "#B4233C"
+    );
+    expect(actionScale(dismissRenderer, dismissAction)).toBe(1.04);
   });
 
   it("keeps the card tap opening the task, swiped or not", async () => {
@@ -606,7 +677,7 @@ describe("SwipeableTaskCard", () => {
 
     const dismissAction = MOBILE_E2E_IDS.activityDismissAction("task-activity");
     drag(-75);
-    expect(actionScale(renderer, dismissAction)).toBe(1.08);
+    expect(actionScale(renderer, dismissAction)).toBe(1.04);
     expect(
       renderer.root.findByProps({ testID: dismissAction }).findByType("Text")
         .props.children
