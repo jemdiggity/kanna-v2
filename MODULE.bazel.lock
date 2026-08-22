@@ -61751,7 +61751,7 @@
     },
     "@@rules_zig+//zig:extensions.bzl%zig": {
       "general": {
-        "bzlTransitiveDigest": "7s0bBkr6wpL0ZAY0YPMbgTft1pNCkx43VfDCMJr7bbQ=",
+        "bzlTransitiveDigest": "Kw+wFJBRtpknUoi8ZvG7hGjThq1POXUh9bq3JranFe4=",
         "usagesDigest": "4wSonJn7vtDzChqiXGUqIQcGXgboH6w+xV3DR91+pNA=",
         "recordedInputs": [
           "REPO_MAPPING:rules_zig+,bazel_skylib bazel_skylib+",

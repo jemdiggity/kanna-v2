@@ -7,11 +7,10 @@
 +
 +    zig_runtime_files = ""
 +    if repository_ctx.attr.platform == "aarch64-macos" and repository_ctx.attr.zig_version == "0.15.2":
-+        # Xcode 26.4 removed arm64-macos from its macOS TBD targets. Zig 0.15.2
-+        # does not understand the arm64e-macos replacement (ziglang/zig#31673),
-+        # while the CLT SDK remains compatible. The release build already
-+        # requires Apple's developer tools; keep the compiler itself fetched
-+        # and checked by rules_zig, and scope the SDK selection to Zig only.
++        # Xcode 26.5's top-level libSystem TBD targets omit arm64-macos, while
++        # the CLT 26.2 SDK retains it. Official Zig 0.15.2 fails with the Xcode
++        # SDK and links with the CLT SDK. Keep the compiler fetched and checked
++        # by rules_zig, and scope the compatible SDK selection to Zig only.
 +        zig_exe = "zig-macos-sdk-wrapper"
 +        zig_runtime_files = " + [\"zig\"]"
 +        repository_ctx.file(

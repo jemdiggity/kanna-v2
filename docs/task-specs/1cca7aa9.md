@@ -4,11 +4,13 @@
 
 Restore hermetic macOS release builds after the upstream static Zig 0.15.2 aarch64-macos binary stopped linking libSystem on Darwin 25.x, and make the related Ghostty dependency-fetch and Finder-volume failure modes explicit.
 
-The reproduced cause is Zig 0.15.2's inability to match Xcode 26.4+'s
-arm64e-only TAPI targets (`ziglang/zig#31673`). The pinned Ghostty source
-requires exactly Zig 0.15.2, so the toolchain fix keeps the official rules_zig
-compiler and selects the compatible Command Line Tools SDK only for that
-compiler.
+The local reproduction found that the Xcode 26.5 SDK's top-level
+`libSystem.tbd` targets omit `arm64-macos`, while the Command Line Tools 26.2
+SDK retains that target. Official Zig 0.15.2 fails to link against the former,
+and the CLT-scoped wrapper links successfully. No publicly verifiable upstream
+issue was found for this exact failure. The pinned Ghostty source requires
+exactly Zig 0.15.2, so the toolchain fix keeps the official rules_zig compiler
+and selects the compatible Command Line Tools SDK only for that compiler.
 
 ## Scope and constraints
 
@@ -26,6 +28,12 @@ compiler.
   adds roughly 245,000 lines while leaving other URL dependencies unresolved.
   Record the complete Bazel-prefetch design and remaining cold-cache network
   dependency for a dedicated follow-up.
+
+Revision directive (reviewer, 2026-08-22): remove the unavailable
+`ziglang/zig#31673` attribution and state only the local SDK/link evidence; add
+runnable Bazel targets for the DMG Python suite and a native macOS hello-world
+link through the resolved patched Zig wrapper. The real Finder GUI E2E remains
+out of scope for this revision.
 
 ## Done when
 
