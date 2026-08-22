@@ -54,58 +54,108 @@ vi.mock("@expo/vector-icons", () => ({
   Ionicons: "Ionicons"
 }));
 
-vi.mock("react-native", () => ({
-  ActivityIndicator: "ActivityIndicator",
-  Keyboard: {
-    addListener: vi.fn(
-      (
-        eventName: string,
-        listener: (event: { endCoordinates: { height: number } }) => void
-      ) => {
-        keyboardHarness.listeners.set(eventName, listener);
-        return {
-          remove: () => {
-            if (keyboardHarness.listeners.get(eventName) === listener) {
-              keyboardHarness.listeners.delete(eventName);
+vi.mock("react-native", () => {
+  class AnimatedValue {
+    value: number;
+
+    constructor(value: number) {
+      this.value = value;
+    }
+
+    setValue(value: number): void {
+      this.value = value;
+    }
+
+    interpolate(config: unknown): { source: AnimatedValue; config: unknown } {
+      return { source: this, config };
+    }
+  }
+  interface TestAnimation {
+    apply(): void;
+    start(callback?: (result: { finished: boolean }) => void): void;
+  }
+  const animation = (apply: () => void): TestAnimation => ({
+    apply,
+    start(callback) {
+      apply();
+      callback?.({ finished: true });
+    }
+  });
+
+  return {
+    AccessibilityInfo: {
+      addEventListener: () => ({ remove: () => undefined }),
+      isReduceMotionEnabled: async () => false
+    },
+    ActivityIndicator: "ActivityIndicator",
+    Animated: {
+      View: "AnimatedView",
+      Value: AnimatedValue,
+      multiply: (left: unknown, right: unknown) => ({ left, right }),
+      parallel: (animations: TestAnimation[]) =>
+        animation(() => animations.forEach((item) => item.apply())),
+      sequence: (animations: TestAnimation[]) =>
+        animation(() => animations.forEach((item) => item.apply())),
+      spring: (value: AnimatedValue, config: { toValue: number }) =>
+        animation(() => value.setValue(config.toValue)),
+      timing: (value: AnimatedValue, config: { toValue: number }) =>
+        animation(() => value.setValue(config.toValue))
+    },
+    Keyboard: {
+      addListener: vi.fn(
+        (
+          eventName: string,
+          listener: (event: { endCoordinates: { height: number } }) => void
+        ) => {
+          keyboardHarness.listeners.set(eventName, listener);
+          return {
+            remove: () => {
+              if (keyboardHarness.listeners.get(eventName) === listener) {
+                keyboardHarness.listeners.delete(eventName);
+              }
             }
-          }
-        };
-      }
-    ),
-    dismiss: keyboardHarness.dismiss
-  },
-  PanResponder: {
-    // The row spreads its `panHandlers` onto the view it drags, so handing the
-    // config through them is what lets a test drive the real gesture on the
-    // row it means, rather than on whichever row created its responder first.
-    create: (config: Record<string, unknown>) => ({
-      panHandlers: { "data-pan-config": config },
-      config
-    })
-  },
-  Pressable: "Pressable",
-  ScrollView: React.forwardRef(function ScrollView(
-    props: { children?: React.ReactNode; testID?: string },
-    ref: React.ForwardedRef<{
-      scrollTo(options: { animated: boolean; x: number; y: number }): void;
-    }>
-  ) {
-    React.useImperativeHandle(ref, () => ({
-      scrollTo: (options) => {
-        navigationHarness.scrollCalls.push({ options, testID: props.testID });
-      }
-    }));
-    const { children, testID: _testID, ...hostProps } = props;
-    return React.createElement("ScrollView", hostProps, children);
-  }),
-  StyleSheet: {
-    create: <T extends Record<string, unknown>>(styles: T) => styles
-  },
-  Text: "Text",
-  TextInput: "TextInput",
-  useWindowDimensions: () => ({ height: 800, width: 390 }),
-  View: "View"
-}));
+          };
+        }
+      ),
+      dismiss: keyboardHarness.dismiss
+    },
+    LayoutAnimation: {
+      Presets: { easeInEaseOut: {}, spring: {} },
+      configureNext: () => undefined
+    },
+    PanResponder: {
+      // The row spreads its `panHandlers` onto the view it drags, so handing the
+      // config through them is what lets a test drive the real gesture on the
+      // row it means, rather than on whichever row created its responder first.
+      create: (config: Record<string, unknown>) => ({
+        panHandlers: { "data-pan-config": config },
+        config
+      })
+    },
+    Pressable: "Pressable",
+    ScrollView: React.forwardRef(function ScrollView(
+      props: { children?: React.ReactNode; testID?: string },
+      ref: React.ForwardedRef<{
+        scrollTo(options: { animated: boolean; x: number; y: number }): void;
+      }>
+    ) {
+      React.useImperativeHandle(ref, () => ({
+        scrollTo: (options) => {
+          navigationHarness.scrollCalls.push({ options, testID: props.testID });
+        }
+      }));
+      const { children, testID: _testID, ...hostProps } = props;
+      return React.createElement("ScrollView", hostProps, children);
+    }),
+    StyleSheet: {
+      create: <T extends Record<string, unknown>>(styles: T) => styles
+    },
+    Text: "Text",
+    TextInput: "TextInput",
+    useWindowDimensions: () => ({ height: 800, width: 390 }),
+    View: "View"
+  };
+});
 
 vi.mock("@react-navigation/native", async () => {
   const ReactModule = await import("react");

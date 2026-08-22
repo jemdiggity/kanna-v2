@@ -3,33 +3,117 @@ import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { TaskSummary } from "../lib/api/types";
-import {
-  TASK_ROW_ACTION_ARMED_EMPHASIS,
-  TASK_ROW_ACTION_IDLE_EMPHASIS
-} from "./taskRowSwipe";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const nativeHarness = vi.hoisted(() => ({
+  animationKinds: [] as string[],
+  autoFinishAnimations: true,
+  layoutPresets: [] as unknown[],
   panResponderConfigs: [] as Array<
     Record<string, ((...args: never[]) => unknown) | undefined>
-  >
+  >,
+  pendingAnimations: [] as Array<() => void>,
+  reduceMotionEnabled: false,
+  reduceMotionListener: null as ((enabled: boolean) => void) | null
 }));
 
-vi.mock("react-native", () => ({
-  PanResponder: {
-    create: vi.fn((config) => {
-      nativeHarness.panResponderConfigs.push(config);
-      return { panHandlers: { "data-pan-handlers": true } };
-    })
-  },
-  Pressable: "Pressable",
-  StyleSheet: {
-    create: <T extends Record<string, unknown>>(styles: T) => styles
-  },
-  Text: "Text",
-  View: "View"
-}));
+vi.mock("react-native", () => {
+  class MockAnimatedValue {
+    value: number;
+
+    constructor(value: number) {
+      this.value = value;
+    }
+
+    setValue(value: number): void {
+      this.value = value;
+    }
+
+    interpolate(config: {
+      inputRange: number[];
+      outputRange: number[];
+    }): MockInterpolation {
+      return new MockInterpolation(this, config);
+    }
+  }
+
+  class MockInterpolation {
+    constructor(
+      readonly source: MockAnimatedValue,
+      readonly config: { inputRange: number[]; outputRange: number[] }
+    ) {}
+  }
+
+  interface MockAnimation {
+    apply(): void;
+    start(callback?: (result: { finished: boolean }) => void): void;
+  }
+
+  const animation = (
+    kind: string,
+    apply: () => void
+  ): MockAnimation => ({
+    apply,
+    start(callback) {
+      nativeHarness.animationKinds.push(kind);
+      const finish = () => {
+        apply();
+        callback?.({ finished: true });
+      };
+      if (nativeHarness.autoFinishAnimations) finish();
+      else nativeHarness.pendingAnimations.push(finish);
+    }
+  });
+
+  return {
+    AccessibilityInfo: {
+      addEventListener: vi.fn(
+        (_event: string, listener: (enabled: boolean) => void) => {
+          nativeHarness.reduceMotionListener = listener;
+          return { remove: vi.fn() };
+        }
+      ),
+      isReduceMotionEnabled: vi.fn(async () => nativeHarness.reduceMotionEnabled)
+    },
+    Animated: {
+      View: "AnimatedView",
+      Value: MockAnimatedValue,
+      multiply: (left: unknown, right: unknown) => ({ left, right }),
+      parallel: (animations: MockAnimation[]) =>
+        animation("parallel", () => {
+          for (const item of animations) item.apply();
+        }),
+      sequence: (animations: MockAnimation[]) =>
+        animation("sequence", () => {
+          for (const item of animations) item.apply();
+        }),
+      spring: (value: MockAnimatedValue, config: { toValue: number }) =>
+        animation("spring", () => value.setValue(config.toValue)),
+      timing: (value: MockAnimatedValue, config: { toValue: number }) =>
+        animation("timing", () => value.setValue(config.toValue))
+    },
+    Dimensions: { get: () => ({ width: 390 }) },
+    LayoutAnimation: {
+      Presets: { easeInEaseOut: "easeInEaseOut", spring: "spring" },
+      configureNext: vi.fn((preset: unknown) => {
+        nativeHarness.layoutPresets.push(preset);
+      })
+    },
+    PanResponder: {
+      create: vi.fn((config) => {
+        nativeHarness.panResponderConfigs.push(config);
+        return { panHandlers: { "data-pan-handlers": true } };
+      })
+    },
+    Pressable: "Pressable",
+    StyleSheet: {
+      create: <T extends Record<string, unknown>>(styles: T) => styles
+    },
+    Text: "Text",
+    View: "View"
+  };
+});
 
 let SwipeableTaskCard:
   | typeof import("./SwipeableTaskCard").SwipeableTaskCard
@@ -40,7 +124,13 @@ beforeAll(async () => {
 });
 
 beforeEach(() => {
+  nativeHarness.animationKinds.length = 0;
+  nativeHarness.autoFinishAnimations = true;
+  nativeHarness.layoutPresets.length = 0;
   nativeHarness.panResponderConfigs.length = 0;
+  nativeHarness.pendingAnimations.length = 0;
+  nativeHarness.reduceMotionEnabled = false;
+  nativeHarness.reduceMotionListener = null;
 });
 
 /** The gesture config the row handed to React Native for this render. */
@@ -83,19 +173,51 @@ function swipe(...dxs: number[]): void {
 }
 
 /** How the action under the row is drawn right now. */
-function actionEmphasis(
+function animatedNumber(value: unknown): number {
+  if (typeof value === "number") return value;
+  if (!value || typeof value !== "object") {
+    throw new Error("Expected an animated number");
+  }
+  if ("value" in value && typeof value.value === "number") return value.value;
+  if ("source" in value && "config" in value) {
+    const interpolation = value as {
+      source: { value: number };
+      config: { inputRange: number[]; outputRange: number[] };
+    };
+    const { inputRange, outputRange } = interpolation.config;
+    const source = interpolation.source.value;
+    const upperIndex = inputRange.findIndex((input) => source <= input);
+    if (upperIndex <= 0) return outputRange[0] ?? 0;
+    if (upperIndex === -1) return outputRange.at(-1) ?? 0;
+    const lowerIndex = upperIndex - 1;
+    const progress =
+      (source - (inputRange[lowerIndex] ?? 0)) /
+      ((inputRange[upperIndex] ?? 0) - (inputRange[lowerIndex] ?? 0));
+    return (
+      (outputRange[lowerIndex] ?? 0) +
+      progress *
+        ((outputRange[upperIndex] ?? 0) - (outputRange[lowerIndex] ?? 0))
+    );
+  }
+  throw new Error("Expected an animated number");
+}
+
+function actionScale(
   renderer: ReactTestRenderer,
   testID: string
-): unknown {
+): number {
   const style = renderer.root.findByProps({ testID }).props.style as unknown[];
-  return style.at(-1);
+  const animatedStyle = style.at(-1) as {
+    transform: Array<{ scale: unknown }>;
+  };
+  return animatedNumber(animatedStyle.transform[0]?.scale);
 }
 
 /** Where the card itself sits, which is `0` whenever the row is at rest. */
 function rowTranslation(renderer: ReactTestRenderer): number {
   const style = renderer.root.findByProps({ "data-pan-handlers": true }).props
     .style as { transform: { translateX: number }[] };
-  return style.transform[0].translateX;
+  return animatedNumber(style.transform[0].translateX);
 }
 
 async function renderCard(
@@ -240,9 +362,71 @@ describe("SwipeableTaskCard", () => {
     });
 
     expect(onTogglePin).toHaveBeenCalledWith(true);
+    expect(nativeHarness.animationKinds).toContain("sequence");
+    expect(nativeHarness.layoutPresets).toContain("spring");
     // Nothing rests open: the row is back where it started, with no revealed
     // button waiting for a second tap.
     expect(rowTranslation(renderer)).toBe(0);
+  });
+
+  it("waits for the completion spring before invoking the pin callback", async () => {
+    const onTogglePin = vi.fn().mockResolvedValue(undefined);
+    await renderCard(onTogglePin);
+
+    drag(-70);
+    nativeHarness.pendingAnimations.length = 0;
+    nativeHarness.autoFinishAnimations = false;
+    release(-70);
+
+    expect(onTogglePin).not.toHaveBeenCalled();
+    expect(nativeHarness.pendingAnimations).toHaveLength(1);
+
+    await act(async () => {
+      nativeHarness.pendingAnimations.shift()?.();
+      await Promise.resolve();
+    });
+    expect(onTogglePin).toHaveBeenCalledWith(true);
+  });
+
+  it("uses only a fade and no layout spring when reduced motion is enabled", async () => {
+    nativeHarness.reduceMotionEnabled = true;
+    const onTogglePin = vi.fn().mockResolvedValue(undefined);
+    const renderer = await renderCard(onTogglePin);
+
+    nativeHarness.animationKinds.length = 0;
+    drag(-70);
+    const rowStyle = renderer.root.findByProps({ "data-pan-handlers": true })
+      .props.style as { transform: unknown[] };
+    expect(rowStyle.transform).toEqual([]);
+
+    await act(async () => {
+      release(-70);
+      await Promise.resolve();
+    });
+
+    expect(nativeHarness.animationKinds).toEqual(["timing"]);
+    expect(nativeHarness.layoutPresets).toEqual([]);
+    expect(onTogglePin).toHaveBeenCalledWith(true);
+  });
+
+  it("fades a cancelled reduced-motion swipe back to rest", async () => {
+    nativeHarness.reduceMotionEnabled = true;
+    const onTogglePin = vi.fn().mockResolvedValue(undefined);
+    const renderer = await renderCard(onTogglePin);
+
+    nativeHarness.animationKinds.length = 0;
+    drag(-30);
+    await act(async () => {
+      release(-30);
+      await Promise.resolve();
+    });
+
+    expect(nativeHarness.animationKinds).toEqual(["parallel"]);
+    expect(onTogglePin).not.toHaveBeenCalled();
+    expect(
+      renderer.root.findByProps({ "data-pan-handlers": true }).props.style
+        .transform
+    ).toEqual([]);
   });
 
   it("performs nothing when the swipe is dragged back inside the threshold before release", async () => {
@@ -251,12 +435,12 @@ describe("SwipeableTaskCard", () => {
 
     // Swipe past the threshold, hold, then swipe the action back away again.
     drag(-70);
-    expect(actionEmphasis(renderer, MOBILE_E2E_IDS.taskPinAction("task-1"))).toBe(
-      TASK_ROW_ACTION_ARMED_EMPHASIS
+    expect(actionScale(renderer, MOBILE_E2E_IDS.taskPinAction("task-1"))).toBe(
+      1.08
     );
     drag(-70, -20);
-    expect(actionEmphasis(renderer, MOBILE_E2E_IDS.taskPinAction("task-1"))).toBe(
-      TASK_ROW_ACTION_IDLE_EMPHASIS
+    expect(actionScale(renderer, MOBILE_E2E_IDS.taskPinAction("task-1"))).toBe(
+      0.84
     );
 
     await act(async () => {
@@ -305,17 +489,11 @@ describe("SwipeableTaskCard", () => {
     const renderer = await renderCard(vi.fn().mockResolvedValue(undefined));
     const pinAction = MOBILE_E2E_IDS.taskPinAction("task-1");
 
-    expect(actionEmphasis(renderer, pinAction)).toBe(
-      TASK_ROW_ACTION_IDLE_EMPHASIS
-    );
+    expect(actionScale(renderer, pinAction)).toBe(0.84);
     drag(-47);
-    expect(actionEmphasis(renderer, pinAction)).toBe(
-      TASK_ROW_ACTION_IDLE_EMPHASIS
-    );
+    expect(actionScale(renderer, pinAction)).toBe(0.84);
     drag(-47, -48);
-    expect(actionEmphasis(renderer, pinAction)).toBe(
-      TASK_ROW_ACTION_ARMED_EMPHASIS
-    );
+    expect(actionScale(renderer, pinAction)).toBe(1.08);
     // The action is drawn for the eye alone now — VoiceOver reaches pin
     // through the row's own accessibility action instead.
     expect(
@@ -428,9 +606,7 @@ describe("SwipeableTaskCard", () => {
 
     const dismissAction = MOBILE_E2E_IDS.activityDismissAction("task-activity");
     drag(-75);
-    expect(actionEmphasis(renderer, dismissAction)).toBe(
-      TASK_ROW_ACTION_ARMED_EMPHASIS
-    );
+    expect(actionScale(renderer, dismissAction)).toBe(1.08);
     expect(
       renderer.root.findByProps({ testID: dismissAction }).findByType("Text")
         .props.children
@@ -447,6 +623,7 @@ describe("SwipeableTaskCard", () => {
       await Promise.resolve();
     });
     expect(onDismiss).toHaveBeenCalledOnce();
+    expect(nativeHarness.layoutPresets).toContain("easeInEaseOut");
     expect(rowTranslation(renderer)).toBe(0);
   });
 
