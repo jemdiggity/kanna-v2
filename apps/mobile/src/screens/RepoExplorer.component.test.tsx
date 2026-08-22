@@ -8,10 +8,31 @@ const { injectedScripts } = vi.hoisted(() => ({ injectedScripts: [] as string[] 
 
 vi.mock("react-native", async () => {
   const ReactModule = await import("react");
+  class AnimatedValue {
+    value: number;
+    constructor(value: number) { this.value = value; }
+    setValue(value: number) { this.value = value; }
+    interpolate() { return this; }
+  }
+  const animation = (value: AnimatedValue, config: { toValue: number }) => ({
+    start(callback?: (result: { finished: boolean }) => void) {
+      value.setValue(config.toValue);
+      callback?.({ finished: true });
+    }
+  });
   return {
     ActivityIndicator: "ActivityIndicator",
+    Animated: {
+      Value: AnimatedValue,
+      View: (props: Record<string, unknown>) => ReactModule.createElement("AnimatedView", props),
+      spring: animation,
+      timing: animation
+    },
     FlatList: (props: Record<string, unknown>) => ReactModule.createElement("FlatList", props),
     Modal: "Modal",
+    PanResponder: {
+      create: (handlers: Record<string, unknown>) => ({ panHandlers: handlers })
+    },
     Pressable: "Pressable",
     RefreshControl: "RefreshControl",
     SafeAreaView: "SafeAreaView",
@@ -62,6 +83,39 @@ afterEach(async () => {
 });
 
 describe("RepoExplorer request ownership", () => {
+  it("puts header Back destinations in forward history for an edge swipe", async () => {
+    const listDirectory = vi.fn((path: string) => Promise.resolve(listing(path === "src"
+      ? [{ name: "file.ts", path: "src/file.ts", isDir: false, size: 4 }]
+      : [{ name: "src", path: "src", isDir: true }], null)));
+    const readFile = vi.fn(() => Promise.resolve(range(0, true)));
+    await act(async () => {
+      mounted = create(<RepoExplorer title="Files" listDirectory={listDirectory} readFile={readFile} onInsertReference={vi.fn()} onClose={vi.fn()} />);
+    });
+    const pressEntry = async (path: string) => {
+      const list = mounted?.root.findByType("FlatList");
+      const item = list?.props.data.find((entry: { path: string }) => entry.path === path);
+      await act(async () => { list?.props.renderItem({ item }).props.onPress(); });
+    };
+    await pressEntry("src");
+    await pressEntry("src/file.ts");
+    expect(mounted?.root.findAllByType("WebView")).toHaveLength(1);
+
+    await act(async () => {
+      mounted?.root.findByProps({ testID: "mobile.repo-explorer.back" }).props.onPress();
+    });
+    expect(mounted?.root.findAllByType("WebView")).toHaveLength(0);
+    const surface = mounted?.root.findByProps({ testID: "mobile.repo-explorer.navigation-surface" });
+    expect(surface?.props.onMoveShouldSetPanResponderCapture({}, { dx: -100, dy: 2, vx: -0.2, x0: 200 })).toBe(false);
+    expect(surface?.props.onMoveShouldSetPanResponderCapture({}, { dx: -20, dy: 100, vx: -0.2, x0: 389 })).toBe(false);
+    const gesture = { dx: -100, dy: 2, vx: -0.2, x0: 389 };
+    expect(surface?.props.onMoveShouldSetPanResponderCapture({}, gesture)).toBe(true);
+    await act(async () => {
+      surface?.props.onPanResponderMove({}, gesture);
+      surface?.props.onPanResponderRelease({}, gesture);
+    });
+    expect(mounted?.root.findAllByType("WebView")).toHaveLength(1);
+  });
+
   it("drops stale and duplicate directory pages after the listing scope changes", async () => {
     const oldNext = deferred<RepoDirectoryListing>();
     const listDirectory = vi.fn((path: string, showAll: boolean, offset: number, filter?: string) => {
