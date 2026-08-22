@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RepoDirectoryListing, RepoFileRange } from "../lib/api/types";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+const { injectedScripts } = vi.hoisted(() => ({ injectedScripts: [] as string[] }));
 
 vi.mock("react-native", async () => {
   const ReactModule = await import("react");
@@ -25,7 +26,7 @@ vi.mock("react-native-webview", async () => {
   const ReactModule = await import("react");
   return {
     WebView: ReactModule.forwardRef(function WebView(props: Record<string, unknown>, ref: React.ForwardedRef<{injectJavaScript(script:string):void}>) {
-      ReactModule.useImperativeHandle(ref, () => ({ injectJavaScript: vi.fn() }));
+      ReactModule.useImperativeHandle(ref, () => ({ injectJavaScript: (script:string) => { injectedScripts.push(script); } }));
       return ReactModule.createElement("WebView", props);
     })
   };
@@ -55,6 +56,7 @@ function range(startLine: number, metadataOnly: boolean): RepoFileRange {
 let mounted: ReactTestRenderer | null = null;
 afterEach(async () => {
   vi.useRealTimers();
+  injectedScripts.length = 0;
   if (mounted) await act(async () => mounted?.unmount());
   mounted = null;
 });
@@ -103,5 +105,13 @@ describe("RepoExplorer request ownership", () => {
     await sendViewport(0);
     expect(underlying.mock.calls.filter((call) => call[3] === true && call[1] === 0)).toHaveLength(1);
     expect(underlying.mock.calls.filter((call) => call[3] === false && call[1] === 0)).toHaveLength(1);
+  });
+
+  it("forwards the native WebView scroll offset to the viewer document", async () => {
+    await act(async () => { mounted = create(<LoiterFileViewer path="src/file.ts" readFile={(path,startLine,lineCount,metadataOnly=false)=>Promise.resolve(range(startLine,metadataOnly))} onInsertReference={vi.fn()} />); });
+    await act(async () => {
+      mounted?.root.findByType("WebView").props.onScroll({nativeEvent:{contentOffset:{y:2380}}});
+    });
+    expect(injectedScripts.at(-1)).toBe("window.setNativeScrollY?.(2380);true;");
   });
 });

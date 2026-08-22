@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { ActivityIndicator, FlatList, Modal, Pressable, RefreshControl, SafeAreaView, StyleSheet, Text, TextInput, View } from "react-native";
+import { ActivityIndicator, FlatList, Modal, Pressable, RefreshControl, SafeAreaView, StyleSheet, Text, TextInput, View, type NativeScrollEvent, type NativeSyntheticEvent } from "react-native";
 import { WebView as NativeWebView, type WebViewMessageEvent, type WebViewProps } from "react-native-webview";
 import type { RepoBrowseEntry, RepoDirectoryListing, RepoFileRange } from "../lib/api/types";
 import { highlightTaskFileSource } from "./taskFileSyntaxHighlight";
@@ -94,7 +94,7 @@ export function LoiterFileViewer({ path, readFile, onInsertReference }: { path:s
   const onMessage=(event:WebViewMessageEvent)=>{try{const data=JSON.parse(event.nativeEvent.data) as {type?:unknown;start?:unknown;line?:unknown;byte?:unknown;reference?:unknown};if(data.type==="viewport"&&typeof data.start==="number"){fetchRange(data.start,true);rangeLoaderRef.current?.observe(data.start);}else if(data.type==="continue"&&typeof data.line==="number"&&typeof data.byte==="number"){fetchRange(data.line,false,data.byte);}else if(data.type==="insert"&&typeof data.reference==="string"){onInsertReference(data.reference);}}catch(error){setError(message(error));}};
   if(error)return <Text style={styles.error}>{error}</Text>; if(!initial)return <ActivityIndicator color="#73B7FF" style={styles.loader}/>; if(initial.binary)return <View style={styles.center}><Text style={styles.binaryTitle}>Binary file</Text><Text style={styles.muted}>Preview is unavailable for this file.</Text></View>;
   metadataRanges.current.add(`0:${VIEWPORT_LINE_COUNT}:0`);
-  return <View style={styles.viewer}><WebView ref={webRef} originWhitelist={["about:blank"]} onMessage={onMessage} source={{html:buildViewerDocument(path,initial)}} style={styles.webView}/>{error?<Text style={styles.error}>{error}</Text>:null}</View>;
+  return <View style={styles.viewer}><WebView ref={webRef} originWhitelist={["about:blank"]} onMessage={onMessage} onScroll={(event:NativeSyntheticEvent<NativeScrollEvent>)=>inject(`window.setNativeScrollY?.(${event.nativeEvent.contentOffset.y})`)} source={{html:buildViewerDocument(path,initial)}} style={styles.webView}/>{error?<Text style={styles.error}>{error}</Text>:null}</View>;
 }
 
 function message(error:unknown):string{return error instanceof Error?error.message:String(error)}

@@ -50,8 +50,43 @@ describe("repository explorer loiter loading", () => {
     expect(document).toContain("const end=Math.min(total,start+windowSize)");
     expect(document).not.toContain("for(let i=0;i<total;i++)");
     expect(document).toContain("row.dataset.line=i");
-    expect(document).toContain("Number(a.dataset.line)+1");
+    expect(document).toContain("window.setNativeScrollY=");
     expect(document).toContain("content=new Map()");
+  });
+
+  it("uses the native viewport offset for the fallback reference and button label", () => {
+    const { window, messages } = viewer("src/huge.ts");
+    Object.defineProperty(window, "scrollY", { configurable:true, value:0 });
+    window.eval("setNativeScrollY(2000000)");
+
+    expect(window.document.querySelector("#insert")?.textContent).toBe("Insert reference (L100001)");
+    window.eval("insertRef()");
+    expect(messages.at(-1)).toEqual({type:"insert",reference:"src/huge.ts:100001"});
+  });
+
+  it("selects a line-number range, previews it, prefers it over the viewport, and clears it", () => {
+    const { window, messages } = viewer("src/huge.ts");
+    const insert = () => window.document.querySelector("#insert")?.textContent;
+    const number = (line: number) => window.document.querySelector<HTMLElement>(`[data-line="${line - 1}"] .num`);
+
+    number(5)?.click();
+    expect(window.document.querySelector('[data-line="4"]')?.classList.contains("picked")).toBe(true);
+    expect(insert()).toBe("Insert reference (L5)");
+
+    number(9)?.click();
+    expect(window.document.querySelectorAll(".line.picked")).toHaveLength(5);
+    expect(insert()).toBe("Insert reference (L5–L9)");
+    window.eval("setNativeScrollY(400)");
+    expect(insert()).toBe("Insert reference (L5–L9)");
+    window.eval("insertRef()");
+    expect(messages.at(-1)).toEqual({type:"insert",reference:"src/huge.ts:5-9"});
+
+    window.eval("setNativeScrollY(0)");
+    number(9)?.click();
+    expect(window.document.querySelectorAll(".line.picked")).toHaveLength(0);
+    expect(insert()).toBe("Insert reference (L1)");
+    window.eval("insertRef()");
+    expect(messages.at(-1)).toEqual({type:"insert",reference:"src/huge.ts:1"});
   });
 
   it("keeps the live DOM bounded, reuses loitered content, and inserts an absolute selected line", () => {
@@ -93,7 +128,27 @@ describe("repository explorer loiter loading", () => {
     window.getSelection()?.addRange(range);
     const quote = window.document.querySelector<HTMLInputElement>("#quote");
     if (quote) quote.checked = true;
+    window.eval("updateInsertLabel()");
+    expect(window.document.querySelector("#insert")?.textContent).toBe("Insert reference (L100001)");
+    window.eval("captureTextSelection()");
+    window.getSelection()?.removeAllRanges();
     window.eval("insertRef()");
     expect(messages.at(-1)).toEqual({type:"insert",reference:"src/huge.ts:100001\n> selected"});
   });
 });
+
+function viewer(path: string) {
+  const html = buildViewerDocument(path, {
+    path,startLine:0,startByte:0,lines:Array.from({length:50},()=>"12"),nextLine:50,nextByte:null,totalLines:2_000_000,totalBytes:24_000_000,binary:false,metadataOnly:true,
+  });
+  const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1];
+  if (!script) throw new Error("viewer script missing");
+  const window = new Window();
+  const messages: Array<{type:string;reference?:string}> = [];
+  (window as unknown as {ReactNativeWebView:{postMessage(value:string):void}}).ReactNativeWebView = {
+    postMessage(value) { messages.push(JSON.parse(value) as {type:string;reference?:string}); },
+  };
+  window.document.write(html.replace(/<script>[\s\S]*<\/script>/, ""));
+  window.eval(script);
+  return { window, messages };
+}
