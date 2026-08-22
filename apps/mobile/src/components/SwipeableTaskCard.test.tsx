@@ -8,6 +8,7 @@ import type { TaskSummary } from "../lib/api/types";
 
 const nativeHarness = vi.hoisted(() => ({
   animationKinds: [] as string[],
+  animationNativeDrivers: [] as boolean[],
   autoFinishAnimations: true,
   layoutPresets: [] as unknown[],
   panResponderConfigs: [] as Array<
@@ -88,10 +89,20 @@ vi.mock("react-native", () => {
         animation("sequence", () => {
           for (const item of animations) item.apply();
         }),
-      spring: (value: MockAnimatedValue, config: { toValue: number }) =>
-        animation("spring", () => value.setValue(config.toValue)),
-      timing: (value: MockAnimatedValue, config: { toValue: number }) =>
-        animation("timing", () => value.setValue(config.toValue))
+      spring: (
+        value: MockAnimatedValue,
+        config: { toValue: number; useNativeDriver: boolean }
+      ) => {
+        nativeHarness.animationNativeDrivers.push(config.useNativeDriver);
+        return animation("spring", () => value.setValue(config.toValue));
+      },
+      timing: (
+        value: MockAnimatedValue,
+        config: { toValue: number; useNativeDriver: boolean }
+      ) => {
+        nativeHarness.animationNativeDrivers.push(config.useNativeDriver);
+        return animation("timing", () => value.setValue(config.toValue));
+      }
     },
     Dimensions: { get: () => ({ width: 390 }) },
     LayoutAnimation: {
@@ -125,6 +136,7 @@ beforeAll(async () => {
 
 beforeEach(() => {
   nativeHarness.animationKinds.length = 0;
+  nativeHarness.animationNativeDrivers.length = 0;
   nativeHarness.autoFinishAnimations = true;
   nativeHarness.layoutPresets.length = 0;
   nativeHarness.panResponderConfigs.length = 0;
@@ -214,26 +226,47 @@ function actionScale(
 }
 
 function actionOpacity(renderer: ReactTestRenderer, testID: string): number {
-  const style = renderer.root.findByProps({ testID }).props.style as unknown[];
-  const animatedStyle = style.at(-1) as { opacity: unknown };
-  return animatedNumber(animatedStyle.opacity);
+  const [idleBackground] = actionBackgrounds(renderer, testID);
+  const style = idleBackground?.props.style as unknown[] | undefined;
+  const idleStyle = style?.at(-1) as { opacity?: unknown } | undefined;
+  return idleStyle?.opacity === undefined
+    ? 1
+    : animatedNumber(idleStyle.opacity);
 }
 
 function actionBackgroundColor(
   renderer: ReactTestRenderer,
   testID: string
 ): string {
-  const style = renderer.root.findByProps({ testID }).props.style as unknown[];
-  const animatedStyle = style.at(-1) as {
-    backgroundColor: {
-      source: { value: number };
-      config: { outputRange: string[] };
-    };
+  const [idleBackground, armedBackground] = actionBackgrounds(renderer, testID);
+  const idleStyle = (idleBackground?.props.style as unknown[]).at(-1) as {
+    backgroundColor: string;
   };
-  const { source, config } = animatedStyle.backgroundColor;
-  return source.value === 1
-    ? (config.outputRange.at(-1) ?? "")
-    : (config.outputRange[0] ?? "");
+  const armedStyle = (armedBackground?.props.style as unknown[]).at(-1) as {
+    backgroundColor: string;
+    opacity: unknown;
+  };
+  return animatedNumber(armedStyle.opacity) === 1
+    ? armedStyle.backgroundColor
+    : idleStyle.backgroundColor;
+}
+
+function actionBackgrounds(renderer: ReactTestRenderer, testID: string) {
+  const action = renderer.root.findByProps({ testID });
+  const backgrounds = action.findAll((candidate) => {
+    const style = candidate.props.style as unknown;
+    if (!Array.isArray(style)) return false;
+    return style.some(
+      (item) =>
+        typeof item === "object" &&
+        item !== null &&
+        "backgroundColor" in item
+    );
+  });
+  if (backgrounds.length !== 2) {
+    throw new Error("The action does not have two solid background layers");
+  }
+  return backgrounds;
 }
 
 /** Where the card itself sits, which is `0` whenever the row is at rest. */
@@ -411,7 +444,7 @@ describe("SwipeableTaskCard", () => {
     expect(onTogglePin).toHaveBeenCalledWith(true);
   });
 
-  it("uses only a fade and no layout spring when reduced motion is enabled", async () => {
+  it("keeps card and action disjoint with timing under reduced motion", async () => {
     nativeHarness.reduceMotionEnabled = true;
     const onTogglePin = vi.fn().mockResolvedValue(undefined);
     const renderer = await renderCard(onTogglePin);
@@ -428,20 +461,25 @@ describe("SwipeableTaskCard", () => {
       )
     ).toBe("#2563EB");
     const rowStyle = renderer.root.findByProps({ "data-pan-handlers": true })
-      .props.style as { transform: unknown[] };
-    expect(rowStyle.transform).toEqual([]);
+      .props.style as { opacity: number; transform: unknown[] };
+    expect(rowStyle.opacity).toBe(1);
+    expect(rowTranslation(renderer)).toBe(-70);
+    expect(rowStyle.transform).toHaveLength(1);
+    expect(
+      actionScale(renderer, MOBILE_E2E_IDS.taskPinAction("task-1"))
+    ).toBe(1.04);
 
     await act(async () => {
       release(-70);
       await Promise.resolve();
     });
 
-    expect(nativeHarness.animationKinds).toEqual(["timing"]);
+    expect(nativeHarness.animationKinds).toEqual(["sequence"]);
     expect(nativeHarness.layoutPresets).toEqual([]);
     expect(onTogglePin).toHaveBeenCalledWith(true);
   });
 
-  it("fades a cancelled reduced-motion swipe back to rest", async () => {
+  it("times a cancelled reduced-motion swipe back to rest", async () => {
     nativeHarness.reduceMotionEnabled = true;
     const onTogglePin = vi.fn().mockResolvedValue(undefined);
     const renderer = await renderCard(onTogglePin);
@@ -453,12 +491,9 @@ describe("SwipeableTaskCard", () => {
       await Promise.resolve();
     });
 
-    expect(nativeHarness.animationKinds).toEqual(["parallel"]);
+    expect(nativeHarness.animationKinds).toEqual(["timing"]);
     expect(onTogglePin).not.toHaveBeenCalled();
-    expect(
-      renderer.root.findByProps({ "data-pan-handlers": true }).props.style
-        .transform
-    ).toEqual([]);
+    expect(rowTranslation(renderer)).toBe(0);
   });
 
   it("performs nothing when the swipe is dragged back inside the threshold before release", async () => {
@@ -571,6 +606,33 @@ describe("SwipeableTaskCard", () => {
       "#B4233C"
     );
     expect(actionScale(dismissRenderer, dismissAction)).toBe(1.04);
+  });
+
+  it("drives scale and armed-color cross-fade natively", async () => {
+    const testID = MOBILE_E2E_IDS.taskPinAction("task-1");
+    const renderer = await renderCard(vi.fn().mockResolvedValue(undefined));
+    const action = renderer.root.findByProps({ testID });
+    const actionAnimatedStyle = (action.props.style as unknown[]).at(-1) as {
+      backgroundColor?: unknown;
+      transform?: unknown;
+    };
+    const [, armedBackground] = actionBackgrounds(renderer, testID);
+    const backgroundAnimatedStyle = (
+      armedBackground?.props.style as unknown[]
+    ).at(-1) as {
+      backgroundColor?: unknown;
+      opacity?: unknown;
+      transform?: unknown;
+    };
+
+    expect(actionAnimatedStyle.transform).toBeDefined();
+    expect(actionAnimatedStyle.backgroundColor).toBeUndefined();
+    expect(backgroundAnimatedStyle.backgroundColor).toBeDefined();
+    expect(backgroundAnimatedStyle.opacity).toBeDefined();
+    expect(backgroundAnimatedStyle.transform).toBeUndefined();
+    nativeHarness.animationNativeDrivers.length = 0;
+    drag(-48);
+    expect(nativeHarness.animationNativeDrivers).toEqual([true, true]);
   });
 
   it("keeps the card tap opening the task, swiped or not", async () => {

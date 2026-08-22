@@ -1,19 +1,18 @@
 export const TASK_ROW_ACTION_WIDTH = 92;
 export const TASK_ROW_SWIPE_ACTIVATION = 14;
 export const TASK_ROW_SWIPE_COMMIT_THRESHOLD = 48;
-export const TASK_ROW_REDUCED_MOTION_FADE_MS = 140;
+export const TASK_ROW_REDUCED_MOTION_TIMING_MS = 140;
 
-export type TaskRowCompletionMotion = "spring" | "fade";
+export type TaskRowCompletionMotion = "spring" | "timing";
 
 /**
- * Reduced motion removes translation, scaling, and layout springs from the
- * gesture. The action still needs feedback, so its only transition is a short
- * opacity fade.
+ * Reduced motion keeps the row and action spatially separate, but replaces
+ * physical springs and overshoot with a short timing animation.
  */
 export function taskRowCompletionMotion(
   reduceMotionEnabled: boolean
 ): TaskRowCompletionMotion {
-  return reduceMotionEnabled ? "fade" : "spring";
+  return reduceMotionEnabled ? "timing" : "spring";
 }
 
 /**

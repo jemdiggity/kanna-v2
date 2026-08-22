@@ -15,7 +15,7 @@ import type { TaskSummary } from "../lib/api/types";
 import { TaskCard } from "./TaskCard";
 import {
   TASK_ROW_ACTION_WIDTH,
-  TASK_ROW_REDUCED_MOTION_FADE_MS,
+  TASK_ROW_REDUCED_MOTION_TIMING_MS,
   TASK_ROW_SWIPE_COMMIT_THRESHOLD,
   clampTaskRowSwipe,
   shouldBeginTaskRowSwipe,
@@ -24,7 +24,6 @@ import {
 } from "./taskRowSwipe";
 
 const TASK_ROW_DEFAULT_EXIT_DISTANCE = 600;
-const TASK_ROW_ACTION_REVEAL_FADE_DISTANCE = 14;
 
 interface ActionColors {
   idle: string;
@@ -86,12 +85,10 @@ export function SwipeableTaskCard({
   onTogglePin
 }: SwipeableTaskCardProps) {
   const swipeOffset = useRef(new Animated.Value(0)).current;
-  const completionOpacity = useRef(new Animated.Value(1)).current;
   const actionArmed = useRef(new Animated.Value(0)).current;
   const actionColorArmed = useRef(new Animated.Value(0)).current;
   const [pinError, setPinError] = useState<string | null>(null);
   const [dismissError, setDismissError] = useState<string | null>(null);
-  const [reduceMotionEnabled, setReduceMotionEnabled] = useState(false);
   const reduceMotionRef = useRef(false);
   const armedRef = useRef(false);
   const completingRef = useRef(false);
@@ -107,7 +104,6 @@ export function SwipeableTaskCard({
     const update = (enabled: boolean) => {
       if (!mounted) return;
       reduceMotionRef.current = enabled;
-      setReduceMotionEnabled(enabled);
     };
     void AccessibilityInfo.isReduceMotionEnabled().then(update);
     const subscription = AccessibilityInfo.addEventListener(
@@ -122,7 +118,6 @@ export function SwipeableTaskCard({
 
   const resetAnimatedRow = () => {
     swipeOffset.setValue(0);
-    completionOpacity.setValue(1);
     actionArmed.setValue(0);
     actionColorArmed.setValue(0);
     armedRef.current = false;
@@ -148,7 +143,7 @@ export function SwipeableTaskCard({
       Animated.timing(actionColorArmed, {
         duration: 110,
         toValue: armed ? 1 : 0,
-        useNativeDriver: false
+        useNativeDriver: true
       })
     ]).start();
   };
@@ -158,18 +153,11 @@ export function SwipeableTaskCard({
     animateArmedState(false);
     if (reduceMotionRef.current) {
       startAnimation(
-        Animated.parallel([
-          Animated.timing(swipeOffset, {
-            duration: TASK_ROW_REDUCED_MOTION_FADE_MS,
-            toValue: 0,
-            useNativeDriver: true
-          }),
-          Animated.timing(completionOpacity, {
-            duration: TASK_ROW_REDUCED_MOTION_FADE_MS,
-            toValue: 1,
-            useNativeDriver: true
-          })
-        ]),
+        Animated.timing(swipeOffset, {
+          duration: TASK_ROW_REDUCED_MOTION_TIMING_MS,
+          toValue: 0,
+          useNativeDriver: true
+        }),
         resetAnimatedRow
       );
       return;
@@ -204,13 +192,27 @@ export function SwipeableTaskCard({
 
   const completeSwipe = () => {
     completingRef.current = true;
-    if (taskRowCompletionMotion(reduceMotionRef.current) === "fade") {
+    if (taskRowCompletionMotion(reduceMotionRef.current) === "timing") {
+      const completionAnimation = onDismiss
+        ? Animated.timing(swipeOffset, {
+            duration: TASK_ROW_REDUCED_MOTION_TIMING_MS,
+            toValue: -exitDistanceRef.current,
+            useNativeDriver: true
+          })
+        : Animated.sequence([
+            Animated.timing(swipeOffset, {
+              duration: TASK_ROW_REDUCED_MOTION_TIMING_MS,
+              toValue: -TASK_ROW_ACTION_WIDTH,
+              useNativeDriver: true
+            }),
+            Animated.timing(swipeOffset, {
+              duration: TASK_ROW_REDUCED_MOTION_TIMING_MS,
+              toValue: 0,
+              useNativeDriver: true
+            })
+          ]);
       startAnimation(
-        Animated.timing(completionOpacity, {
-          duration: TASK_ROW_REDUCED_MOTION_FADE_MS,
-          toValue: 0,
-          useNativeDriver: true
-        }),
+        completionAnimation,
         () => {
           void finishCommittedAction();
         }
@@ -347,16 +349,6 @@ export function SwipeableTaskCard({
     return togglePin();
   };
 
-  const actionOpacity = reduceMotionEnabled
-    ? 1
-    : swipeOffset.interpolate({
-        inputRange: [
-          -TASK_ROW_ACTION_WIDTH,
-          -TASK_ROW_ACTION_REVEAL_FADE_DISTANCE,
-          0
-        ],
-        outputRange: [1, 1, 0]
-      });
   const actionScale = actionArmed.interpolate({
     inputRange: [0, 1],
     outputRange: [0.88, 1.04]
@@ -366,17 +358,6 @@ export function SwipeableTaskCard({
     : pinned
       ? UNPIN_ACTION_COLORS
       : PIN_ACTION_COLORS;
-  const actionBackgroundColor = actionColorArmed.interpolate({
-    inputRange: [0, 1],
-    outputRange: [actionColors.idle, actionColors.armed]
-  });
-  const reducedMotionRowOpacity = reduceMotionEnabled
-    ? swipeOffset.interpolate({
-        inputRange: [-TASK_ROW_ACTION_WIDTH, 0],
-        outputRange: [0.72, 1]
-      })
-    : 1;
-
   return (
     <View style={styles.container} onLayout={measureRow}>
       {/*
@@ -390,15 +371,8 @@ export function SwipeableTaskCard({
         importantForAccessibility="no-hide-descendants"
         style={[
           styles.action,
-          onDismiss
-            ? styles.dismissAction
-            : pinned
-              ? styles.unpinAction
-              : styles.pinAction,
           {
-            backgroundColor: actionBackgroundColor,
-            opacity: actionOpacity,
-            transform: reduceMotionEnabled ? [] : [{ scale: actionScale }]
+            transform: [{ scale: actionScale }]
           }
         ]}
         testID={
@@ -407,15 +381,27 @@ export function SwipeableTaskCard({
             : MOBILE_E2E_IDS.taskPinAction(uiId)
         }
       >
+        <View
+          style={[
+            styles.actionBackground,
+            { backgroundColor: actionColors.idle }
+          ]}
+        />
+        <Animated.View
+          style={[
+            styles.actionBackground,
+            {
+              backgroundColor: actionColors.armed,
+              opacity: actionColorArmed
+            }
+          ]}
+        />
         <Text style={styles.actionLabel}>{swipeLabel}</Text>
       </Animated.View>
       <Animated.View
         style={{
-          opacity: Animated.multiply(
-            completionOpacity,
-            reducedMotionRowOpacity
-          ),
-          transform: reduceMotionEnabled ? [] : [{ translateX: swipeOffset }]
+          opacity: 1,
+          transform: [{ translateX: swipeOffset }]
         }}
         {...panResponder.panHandlers}
       >
@@ -468,14 +454,12 @@ const styles = StyleSheet.create({
     top: 0,
     width: TASK_ROW_ACTION_WIDTH
   },
-  pinAction: {
-    backgroundColor: PIN_ACTION_COLORS.armed
-  },
-  unpinAction: {
-    backgroundColor: UNPIN_ACTION_COLORS.armed
-  },
-  dismissAction: {
-    backgroundColor: DISMISS_ACTION_COLORS.armed
+  actionBackground: {
+    bottom: 0,
+    left: 0,
+    position: "absolute",
+    right: 0,
+    top: 0
   },
   actionLabel: {
     color: "#FFFFFF",

@@ -3,7 +3,7 @@ import {
   TASK_ROW_ACTION_ARMED_EMPHASIS,
   TASK_ROW_ACTION_IDLE_EMPHASIS,
   TASK_ROW_ACTION_WIDTH,
-  TASK_ROW_REDUCED_MOTION_FADE_MS,
+  TASK_ROW_REDUCED_MOTION_TIMING_MS,
   clampTaskRowSwipe,
   shouldBeginTaskRowSwipe,
   shouldCommitTaskRowAction,
@@ -45,9 +45,9 @@ describe("task row swipe gesture", () => {
     );
   });
 
-  it("replaces physical completion motion with a short fade for reduced motion", () => {
+  it("replaces spring completion with short timing for reduced motion", () => {
     expect(taskRowCompletionMotion(false)).toBe("spring");
-    expect(taskRowCompletionMotion(true)).toBe("fade");
-    expect(TASK_ROW_REDUCED_MOTION_FADE_MS).toBeLessThanOrEqual(200);
+    expect(taskRowCompletionMotion(true)).toBe("timing");
+    expect(TASK_ROW_REDUCED_MOTION_TIMING_MS).toBeLessThanOrEqual(200);
   });
 });
