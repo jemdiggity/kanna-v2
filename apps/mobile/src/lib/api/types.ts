@@ -210,6 +210,36 @@ export interface TaskFileContent {
   content: string;
 }
 
+export interface RepoBrowseEntry {
+  name: string;
+  path: string;
+  isDir: boolean;
+  size?: number | null;
+}
+
+export interface RepoDirectoryListing {
+  path: string;
+  entries: RepoBrowseEntry[];
+  offset: number;
+  nextOffset: number | null;
+  totalEntries: number;
+}
+
+export interface RepoFileRange {
+  path: string;
+  startLine: number;
+  startByte?: number;
+  lines: string[];
+  /** When both values point back into the final returned line, request the
+   * next bounded fragment explicitly with these start coordinates. */
+  nextLine: number | null;
+  nextByte?: number | null;
+  totalLines: number;
+  totalBytes: number;
+  binary: boolean;
+  metadataOnly: boolean;
+}
+
 /**
  * One image sent with a task input.
  *

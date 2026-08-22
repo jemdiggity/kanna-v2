@@ -1,7 +1,7 @@
 import { ActionSheetIOS, Alert, Platform } from "react-native";
 import type { TaskStageAction } from "../state/sessionStore";
 
-export type TaskAction = "mentioned-files" | "view-diff" | TaskStageAction;
+export type TaskAction = "browse-files" | "mentioned-files" | "view-diff" | TaskStageAction;
 
 interface TaskActionDefinition {
   id: TaskAction;
@@ -23,6 +23,7 @@ export function showTaskActionMenu(
   onDismiss: () => void = () => undefined
 ): void {
   const allTaskActions: readonly TaskActionDefinition[] = [
+    { id: "browse-files", label: "Browse Files" },
     { id: "mentioned-files", label: options.mentionedFilesLabel },
     { id: "view-diff", label: "View Diff" },
     { id: "advance-stage", label: "Advance Stage" },

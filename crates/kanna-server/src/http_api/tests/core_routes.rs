@@ -5073,3 +5073,152 @@ async fn create_pairing_session_route_uses_local_identity_without_desktop_secret
 
     let _ = std::fs::remove_dir_all(daemon_dir);
 }
+
+#[tokio::test]
+async fn paired_lan_client_pages_a_real_task_worktree_fixture() {
+    let fixture = TaskFileRouteFixture::new();
+    fixture.write("src/main.rs", b"fn one() {}\nfn two() {}\nfn three() {}\n");
+    let pairing_path = PathBuf::from(&fixture.state.config().pairing_store_path);
+    let mut pairing_store = crate::pairing::PairingStore::default();
+    pairing_store.add_trusted_device(
+        &fixture.state.config().desktop_id,
+        "phone-browser",
+        "Kanna Mobile",
+        &crate::pairing::hash_device_secret("browser-secret"),
+    );
+    pairing_store.save(&pairing_path).unwrap();
+
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let app = super::router(Arc::clone(&fixture.state));
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let lan_ip = if_addrs::get_if_addrs()
+        .unwrap()
+        .into_iter()
+        .map(|interface| interface.ip())
+        .find(|ip| ip.is_ipv4() && !ip.is_loopback())
+        .expect("test host must expose a non-loopback IPv4 address");
+    let base_url = format!("http://{lan_ip}:{port}");
+    let client = reqwest::Client::new();
+    let directory = client
+        .get(format!(
+            "{base_url}/v1/tasks/task-file/browse?path=src&limit=1"
+        ))
+        .header("x-kanna-device-id", "phone-browser")
+        .header("x-kanna-device-secret", "browser-secret")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(directory.status(), reqwest::StatusCode::OK);
+    let listing: serde_json::Value = directory.json().await.unwrap();
+    assert_eq!(listing["entries"][0]["path"], "src/main.rs");
+
+    let range = client
+        .get(format!(
+            "{base_url}/v1/tasks/task-file/browse/content?path=src%2Fmain.rs&startLine=1&lineCount=1"
+        ))
+        .header("x-kanna-device-id", "phone-browser")
+        .header("x-kanna-device-secret", "browser-secret")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(range.status(), reqwest::StatusCode::OK);
+    let content: serde_json::Value = range.json().await.unwrap();
+    assert_eq!(content["lines"], serde_json::json!(["fn two() {}"]));
+
+    let huge_line = "z".repeat(crate::repo_browser::FILE_RANGE_BYTES * 3 + 17_000);
+    fixture.write("src/huge.txt", huge_line.as_bytes());
+    let mut reconstructed = String::new();
+    let mut start_line = 0_u64;
+    let mut start_byte = 0_u64;
+    let mut range_requests = 0;
+    loop {
+        let response = client
+            .get(format!("{base_url}/v1/tasks/task-file/browse/content?path=src%2Fhuge.txt&startLine={start_line}&startByte={start_byte}&lineCount=1"))
+            .header("x-kanna-device-id", "phone-browser")
+            .header("x-kanna-device-secret", "browser-secret")
+            .send().await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = response.json().await.unwrap();
+        range_requests += 1;
+        let fragment = body["lines"][0].as_str().unwrap_or("");
+        assert!(fragment.len() <= crate::repo_browser::FILE_RANGE_BYTES);
+        reconstructed.push_str(fragment);
+        let Some(next_line) = body["nextLine"].as_u64() else {
+            break;
+        };
+        start_line = next_line;
+        start_byte = body["nextByte"].as_u64().unwrap_or(0);
+    }
+    assert!(range_requests >= 4);
+    assert_eq!(reconstructed, huge_line);
+
+    #[cfg(unix)]
+    {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let outside = fixture._temp_dir.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("value.txt"), "SECRET-OUTSIDE").unwrap();
+        std::os::unix::fs::symlink(&outside, fixture.worktree.join("escape")).unwrap();
+        let escaped = client
+            .get(format!(
+                "{base_url}/v1/tasks/task-file/browse/content?path=escape%2Fvalue.txt"
+            ))
+            .header("x-kanna-device-id", "phone-browser")
+            .header("x-kanna-device-secret", "browser-secret")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(escaped.status(), reqwest::StatusCode::BAD_REQUEST);
+
+        let swap = fixture.worktree.join("swap");
+        let held = fixture.worktree.join("swap-held");
+        std::fs::create_dir(&swap).unwrap();
+        std::fs::write(swap.join("value.txt"), "SAFE-INSIDE").unwrap();
+        let running = Arc::new(AtomicBool::new(true));
+        let swap_running = Arc::clone(&running);
+        let swap_path = swap.clone();
+        let held_path = held.clone();
+        let outside_path = outside.clone();
+        let swapper = std::thread::spawn(move || {
+            while swap_running.load(Ordering::Relaxed) {
+                if std::fs::rename(&swap_path, &held_path).is_ok() {
+                    let _ = std::os::unix::fs::symlink(&outside_path, &swap_path);
+                    let _ = std::fs::remove_file(&swap_path);
+                    let _ = std::fs::rename(&held_path, &swap_path);
+                }
+            }
+        });
+        for _ in 0..100 {
+            let response = client
+                .get(format!(
+                    "{base_url}/v1/tasks/task-file/browse/content?path=swap%2Fvalue.txt"
+                ))
+                .header("x-kanna-device-id", "phone-browser")
+                .header("x-kanna-device-secret", "browser-secret")
+                .send()
+                .await
+                .unwrap();
+            if response.status() == reqwest::StatusCode::OK {
+                let body: serde_json::Value = response.json().await.unwrap();
+                assert_eq!(body["lines"], serde_json::json!(["SAFE-INSIDE"]));
+            } else {
+                assert!(matches!(
+                    response.status(),
+                    reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::NOT_FOUND
+                ));
+            }
+        }
+        running.store(false, Ordering::Relaxed);
+        swapper.join().unwrap();
+    }
+    server.abort();
+    let _ = std::fs::remove_file(pairing_path);
+}

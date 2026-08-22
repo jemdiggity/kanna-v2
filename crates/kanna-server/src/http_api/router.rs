@@ -12,6 +12,7 @@ use super::lan_trust::{attach_trusted_lan_device, require_privileged_task_access
 use super::mobile_notifications::notify_mobile;
 use super::operator_events::post_operator_events;
 use super::pairing::{claim_pairing_session, create_pairing_session};
+use super::repo_browser::{list_task_directory, read_task_file_range};
 use super::repo_commands::{list_repo_commands, run_repo_command};
 use super::repos::{
     add_repo, dependent_tasks_exist, get_repo_agent_definition, get_repo_by_path,
@@ -163,6 +164,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/tasks/{task_id}/children", get(get_task_children))
         .route("/v1/tasks/{task_id}/inputs", get(get_task_inputs))
         .route("/v1/tasks/{task_id}/files/content", get(get_task_file))
+        .route("/v1/tasks/{task_id}/browse", get(list_task_directory))
+        .route(
+            "/v1/tasks/{task_id}/browse/content",
+            get(read_task_file_range),
+        )
         .route(
             "/v1/tasks/{task_id}/files/resolve-mentions",
             post(resolve_task_file_mentions),

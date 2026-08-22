@@ -2144,6 +2144,7 @@ describe("Relay integration", () => {
     expect(body.status).toBe("ok");
     expect(Object.keys(body.bytes.received).sort()).toEqual([
       "control",
+      "fileBrowse",
       "taskTransfer",
       "terminalEvent",
       "total",

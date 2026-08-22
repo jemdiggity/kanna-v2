@@ -15,6 +15,7 @@ interface ConnectionPair {
   desktops: Map<string, WebSocket>;
   pendingTunnels: Map<string, PendingTunnel>;
   pendingResponses: Map<string, WebSocket>;
+  pendingResponseClasses: Map<string, RelayByteClass>;
   terminalObservers: Map<string, Set<WebSocket>>;
 }
 
@@ -27,7 +28,7 @@ interface PendingTunnel {
 
 export type TunnelService = "ksp" | "task-transfer";
 
-interface RelayMessage {
+export interface RelayMessage {
   type?: unknown;
   id?: unknown;
   desktopId?: unknown;
@@ -35,6 +36,7 @@ interface RelayMessage {
   args?: unknown;
   name?: unknown;
   payload?: unknown;
+  path?: unknown;
   service?: unknown;
 }
 
@@ -59,6 +61,19 @@ export function pendingTunnelCountForTests(userId: string): number {
 
 export function pendingResponseCountForTests(userId: string): number {
   return connections.get(userId)?.pendingResponses.size ?? 0;
+}
+
+export function pendingResponseClassCountForTests(userId: string): number {
+  return connections.get(userId)?.pendingResponseClasses.size ?? 0;
+}
+
+export function routedMessageByteClass(
+  userId: string,
+  message: RelayMessage | null | undefined,
+): RelayByteClass {
+  const idKey = message?.type === "response" ? messageIdKey(message.id) : null;
+  return (idKey ? connections.get(userId)?.pendingResponseClasses.get(idKey) : null)
+    ?? relayMessageByteClass(message);
 }
 
 export function hasConnectionPairForTests(userId: string): boolean {
@@ -253,6 +268,7 @@ function removeClient(pair: ConnectionPair, ws: WebSocket): void {
   for (const [id, client] of pair.pendingResponses.entries()) {
     if (client === ws) {
       pair.pendingResponses.delete(id);
+      pair.pendingResponseClasses.delete(id);
     }
   }
   for (const [key, clients] of pair.terminalObservers.entries()) {
@@ -346,6 +362,7 @@ function newConnectionPair(): ConnectionPair {
     desktops: new Map(),
     pendingTunnels: new Map(),
     pendingResponses: new Map(),
+    pendingResponseClasses: new Map(),
     terminalObservers: new Map(),
   };
 }
@@ -438,6 +455,7 @@ export function setServerConnection(
     for (const [id, requester] of current.pendingResponses.entries()) {
       if (requester === ws) {
         current.pendingResponses.delete(id);
+        current.pendingResponseClasses.delete(id);
       }
     }
 
@@ -722,6 +740,7 @@ export function routeMessage(
       const idKey = messageIdKey(parsed?.id);
       if (idKey && source) {
         pair.pendingResponses.set(idKey, source);
+        pair.pendingResponseClasses.set(idKey, byteClass);
       }
       const sessionId = getSessionIdFromMessage(parsed);
       if (sessionId && source && parsed?.command === "observe_session") {
@@ -738,6 +757,7 @@ export function routeMessage(
         clients?.delete(source);
         if (clients && clients.size > 0) {
           if (idKey) pair.pendingResponses.delete(idKey);
+          if (idKey) pair.pendingResponseClasses.delete(idKey);
           sendSuccessResponse(source, parsed?.id);
           return;
         }
@@ -766,8 +786,10 @@ export function routeMessage(
       const hadPendingResponse = pair.pendingResponses.has(idKey);
       const target = pair.pendingResponses.get(idKey);
       pair.pendingResponses.delete(idKey);
+      const responseClass = pair.pendingResponseClasses.get(idKey) ?? byteClass;
+      pair.pendingResponseClasses.delete(idKey);
       if (target && target.readyState === 1) {
-        sendControlFrame(target, data, dataByteLength, byteClass);
+        sendControlFrame(target, data, dataByteLength, responseClass);
       }
       if (hadPendingResponse) return;
     }
@@ -813,6 +835,7 @@ export function routeMessage(
       }
       if (idKey && source) {
         pair.pendingResponses.set(idKey, source);
+        pair.pendingResponseClasses.set(idKey, byteClass);
       }
       sendControlFrame(target, data, dataByteLength, byteClass);
       return;

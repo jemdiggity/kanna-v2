@@ -21,7 +21,10 @@ import {
 import {
   attachDesktopTunnel,
   forwardTunnelData,
+  pendingResponseClassCountForTests,
+  pendingResponseCountForTests,
   routeMessage,
+  routedMessageByteClass,
   setPhoneConnection,
   setServerConnection,
 } from "../src/router.js";
@@ -102,6 +105,10 @@ describe("byte classification", () => {
       type: "event",
       payload: { session_id: "sess-1", type: "terminal_output", data: "abc" },
     })).toBe("terminalEvent");
+  });
+
+  it("classifies repository browse invokes separately", () => {
+    expect(relayMessageByteClass({ type: "invoke", path: "/v1/tasks/task-1/browse/content?path=README.md" })).toBe("fileBrowse");
   });
 
   it("classifies events without a session id, invokes, and unparsed frames as control", () => {
@@ -305,6 +312,40 @@ describe("per-connection attribution", () => {
     const account = byteAccountFor(phone.server);
     expect(account?.sent.control).toBeGreaterThan(0);
     expect(account?.sent.tunnel).toBe(0);
+  });
+
+  it("charges routed browse invokes and correlated responses to fileBrowse", async () => {
+    const url = await startServer();
+    const desktop = await connect(url);
+    const phone = await connect(url);
+    setServerConnection("uid-browse", "desktop-browse", desktop.server);
+    setPhoneConnection("uid-browse", phone.server);
+
+    const invoke = JSON.stringify({
+      type: "invoke",
+      id: "browse-1",
+      desktopId: "desktop-browse",
+      path: "/v1/tasks/task-1/browse/content?path=README.md",
+    });
+    const invokeClass = relayMessageByteClass(JSON.parse(invoke));
+    recordBytesReceived(phone.server, invokeClass, Buffer.byteLength(invoke));
+    routeMessage("uid-browse", "phone", invoke, phone.server, null, null, Buffer.byteLength(invoke));
+    await waitUntil(() => byteAccountFor(desktop.server)?.sent.fileBrowse === Buffer.byteLength(invoke));
+    expect(pendingResponseCountForTests("uid-browse")).toBe(1);
+    expect(pendingResponseClassCountForTests("uid-browse")).toBe(1);
+
+    const response = JSON.stringify({ type: "response", id: "browse-1", data: { lines: ["hello"] } });
+    const responseClass = routedMessageByteClass("uid-browse", JSON.parse(response));
+    recordBytesReceived(desktop.server, responseClass, Buffer.byteLength(response));
+    routeMessage("uid-browse", "server", response, desktop.server, "desktop-browse", null, Buffer.byteLength(response));
+    await waitUntil(() => byteAccountFor(phone.server)?.sent.fileBrowse === Buffer.byteLength(response));
+
+    expect(byteAccountFor(phone.server)?.received).toMatchObject({ fileBrowse: Buffer.byteLength(invoke), control: 0 });
+    expect(byteAccountFor(desktop.server)?.sent).toMatchObject({ fileBrowse: Buffer.byteLength(invoke), control: 0 });
+    expect(byteAccountFor(desktop.server)?.received).toMatchObject({ fileBrowse: Buffer.byteLength(response), control: 0 });
+    expect(byteAccountFor(phone.server)?.sent).toMatchObject({ fileBrowse: Buffer.byteLength(response), control: 0 });
+    expect(pendingResponseCountForTests("uid-browse")).toBe(0);
+    expect(pendingResponseClassCountForTests("uid-browse")).toBe(0);
   });
 });
 

@@ -13,6 +13,7 @@ mod lan_trust;
 mod mobile_notifications;
 mod operator_events;
 mod pairing;
+mod repo_browser;
 mod repo_commands;
 mod repos;
 mod resume_recovery;

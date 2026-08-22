@@ -1132,6 +1132,29 @@ rolling upgrades, `runId` may be omitted only for a pre-upgrade run whose
 durable `completion_bound` bit is false, and new clients tolerate old task-detail
 responses that lack `latestRun.id`.
 
+## Mobile Task Worktree Browser
+
+The mobile file browser exists only in task context and resolves its root from
+the task's current durable worktree record. It does not browse a repository's
+main checkout and exposes no repo-level browse route. A stage advance therefore
+makes subsequent requests follow the task into its newly recorded worktree.
+
+`GET /v1/tasks/{task_id}/browse` lists one bounded directory page (`offset`,
+`limit`, `filter`, `showAllFiles`).
+`GET /v1/tasks/{task_id}/browse/content` reads one bounded line range
+(`startLine`, `lineCount`, `metadataOnly`); metadata ranges contain line lengths
+for skeleton sizing, while content ranges contain text for the same viewport.
+The server caps directory pages, line counts, and returned text bytes regardless
+of caller values. Binary files are identified without returning their contents.
+
+Both routes require either a paired LAN device or an authenticated relay
+invoke. Relay invokes remain behind `remote_task_control`; LAN access is free.
+The relay's byte odometer attributes browse invokes and responses to the
+dedicated `fileBrowse` class. Every requested root and target is canonicalized,
+and a target whose resolved path leaves the worktree root is rejected, including
+symlink escapes. The surface is read-only: there are no write, delete, download,
+git, or search-in-files operations.
+
 ## Mobile Notification Delivery
 
 `POST /v1/mobile/notifications` hands a validated notification to the

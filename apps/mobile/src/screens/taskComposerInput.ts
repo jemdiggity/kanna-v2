@@ -17,3 +17,10 @@ export const TASK_COMPOSER_TEXT_INPUT_PROPS = {
   multiline: true,
   returnKeyType: "default"
 } as const;
+
+export function appendComposerFileReference(
+  current: string,
+  reference: string
+): string {
+  return current ? `${current}\n${reference}` : reference;
+}
