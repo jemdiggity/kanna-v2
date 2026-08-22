@@ -115,12 +115,17 @@ export async function sendMobileNotification(input: {
 
   const staleDeviceDeletes = response.responses.flatMap((result, index) => {
     const code = result.error?.code;
-    return code && INVALID_TOKEN_CODES.has(code)
-      ? [devices[index]?.ref.delete()]
-      : [];
-  }).filter((deletion): deletion is Promise<FirebaseFirestore.WriteResult> =>
-    deletion !== undefined
-  );
+    const device = devices[index];
+    if (!code || !INVALID_TOKEN_CODES.has(code) || !device) {
+      return [];
+    }
+    return [db.runTransaction(async (transaction) => {
+      const current = await transaction.get(device.ref);
+      if (current.data()?.token === device.token) {
+        transaction.delete(device.ref);
+      }
+    })];
+  });
   if (staleDeviceDeletes.length > 0) {
     await Promise.allSettled(staleDeviceDeletes);
   }

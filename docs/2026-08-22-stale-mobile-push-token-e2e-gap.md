@@ -18,7 +18,8 @@ Narrower automated coverage now proves that:
 
 - each mobile launch and FCM rotation registers the current token;
 - registering the same mobile device replaces its document, while delayed
-  cleanup for the old token cannot remove the replacement;
+  cleanup transactionally compares the stored token and cannot remove a
+  replacement registered while Firebase is processing the old token;
 - per-device `messaging/invalid-argument` and unregistered-token failures evict
-  the rejected Firestore document and return an actionable `invalidToken`
-  reason through `kanna-server`.
+  an unchanged rejected Firestore document and return an actionable
+  `invalidToken` reason through `kanna-server`.
