@@ -8,7 +8,6 @@ export interface TerminalAppStateLifecycleOptions {
   now?: () => number;
   setTransportForeground(foreground: boolean): void;
   setControllerForeground(foreground: boolean): void;
-  setTerminalConsumptionPaused(paused: boolean): void;
   expireTerminalGrace(): void;
 }
 
@@ -29,7 +28,6 @@ export function createTerminalAppStateLifecycle({
   now = Date.now,
   setTransportForeground,
   setControllerForeground,
-  setTerminalConsumptionPaused,
   expireTerminalGrace
 }: TerminalAppStateLifecycleOptions): {
   transition(nextState: AppStateStatus): TerminalAppStateTransition;
@@ -67,7 +65,9 @@ export function createTerminalAppStateLifecycle({
 
   setTransportForeground(true);
   setControllerForeground(initialState === "active");
-  setTerminalConsumptionPaused(initialState !== "active");
+  // The retained WebView must consume live bytes throughout the short grace.
+  // Holding them in a second client queue makes foregrounding replay every
+  // historical TUI frame even though the socket itself never reattached.
   if (initialState === "background") startBackgroundGrace();
 
   return {
@@ -86,7 +86,6 @@ export function createTerminalAppStateLifecycle({
         clearGraceTimer();
         setTransportForeground(true);
         setControllerForeground(true);
-        setTerminalConsumptionPaused(false);
         graceExpired = false;
         backgroundedAtMs = null;
         return {
@@ -95,7 +94,6 @@ export function createTerminalAppStateLifecycle({
         };
       }
 
-      setTerminalConsumptionPaused(true);
       setControllerForeground(false);
       if (nextState === "background") {
         backgroundedAtMs ??= now();

@@ -260,9 +260,6 @@ function AppContent() {
       setControllerForeground(foreground) {
         controller.setAppForeground(foreground);
       },
-      setTerminalConsumptionPaused(paused) {
-        controller.setTaskTerminalConsumptionPaused(paused);
-      },
       expireTerminalGrace() {
         controller.expireTaskTerminalGrace();
       }

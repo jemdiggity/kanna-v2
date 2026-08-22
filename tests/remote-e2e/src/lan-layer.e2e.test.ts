@@ -1,5 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import WebSocket, { type RawData } from "ws";
+import {
+  createTerminalAppStateLifecycle
+} from "../../../apps/mobile/src/appLifecycle";
 import { createKannaClient } from "../../../apps/mobile/src/lib/api/client";
 import type { AgentProvider } from "../../../packages/agent-protocol/src/index";
 import type {
@@ -314,6 +317,50 @@ describe("LAN task loop E2E", () => {
       const older = Buffer.from(chunk.dataB64, "base64").toString("utf8");
       expect(older).toContain("MOBILE_PTY_HISTORY_");
       expect(older).not.toContain("MOBILE_PTY_HISTORY_10050");
+
+      // Exercise the mobile lifecycle against the same real daemon/server
+      // session. A return inside the grace keeps the attachment and its
+      // retained terminal current: foreground refresh must not introduce a
+      // second snapshot for xterm to replay.
+      const client = createKannaClient(createLanClient(harness));
+      const store = createSessionStore();
+      const controller = createMobileController(client, store);
+      const lifecycle = createTerminalAppStateLifecycle({
+        initialState: "active",
+        graceMs: 20_000,
+        setTransportForeground() {},
+        setControllerForeground(foreground) {
+          controller.setAppForeground(foreground);
+        },
+        expireTerminalGrace() {
+          controller.expireTaskTerminalGrace();
+        }
+      });
+      try {
+        await controller.bootstrap();
+        controller.openTask(task.taskId);
+        await waitForStoreTerminalOutput(
+          store,
+          "MOBILE_PTY_SNAPSHOT_SENTINEL",
+          30_000
+        );
+        const attached = store.taskTerminalOutputSource.getSnapshot();
+        expect(
+          Buffer.byteLength(decodeRetainedTerminalOutput(attached.output), "utf8")
+        ).toBeLessThan(300_000);
+
+        lifecycle.transition("background");
+        const foreground = lifecycle.transition("active");
+        expect(foreground.preserveTerminal).toBe(true);
+        await controller.refresh({ preserveTaskSession: true });
+
+        expect(store.taskTerminalOutputSource.getSnapshot().outputEpoch).toBe(
+          attached.outputEpoch
+        );
+      } finally {
+        lifecycle.dispose();
+        controller.dispose();
+      }
     } finally {
       seeding.close();
       events?.close();
