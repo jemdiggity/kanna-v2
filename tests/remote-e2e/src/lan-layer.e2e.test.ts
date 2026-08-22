@@ -322,7 +322,15 @@ describe("LAN task loop E2E", () => {
       // session. A return inside the grace keeps the attachment and its
       // retained terminal current: foreground refresh must not introduce a
       // second snapshot for xterm to replay.
-      const client = createKannaClient(createLanClient(harness));
+      const lanTransport = createLanClient(harness);
+      let terminalAttachCount = 0;
+      const client = createKannaClient({
+        ...lanTransport,
+        observeTaskTerminal(taskId, listener) {
+          terminalAttachCount += 1;
+          return lanTransport.observeTaskTerminal(taskId, listener);
+        }
+      });
       const store = createSessionStore();
       const controller = createMobileController(client, store);
       const lifecycle = createTerminalAppStateLifecycle({
@@ -348,15 +356,46 @@ describe("LAN task loop E2E", () => {
         expect(
           Buffer.byteLength(decodeRetainedTerminalOutput(attached.output), "utf8")
         ).toBeLessThan(300_000);
+        expect(terminalAttachCount).toBe(1);
 
         lifecycle.transition("background");
+
+        // Produce enough deterministic live output to exercise the app-state
+        // grace while the terminal is hidden. The #1193 implementation queued
+        // these frames in pendingEvents, so this wait timed out until the app
+        // foregrounded and flushed them through xterm.
+        await controller.sendTaskInput(task.taskId, "burst-output");
+        const backgroundOutput = await waitForStoreTerminalOutput(
+          store,
+          "SCRIPT_BURST_DONE",
+          30_000
+        );
+        expect(backgroundOutput).toContain("SCRIPT_BURST_0001_");
+        expect(backgroundOutput).toContain("SCRIPT_BURST_2000_");
+
+        const retainedWhileBackgrounded =
+          store.taskTerminalOutputSource.getSnapshot();
+        const retainedOutput = terminalOutputToString(
+          retainedWhileBackgrounded.output
+        );
         const foreground = lifecycle.transition("active");
         expect(foreground.preserveTerminal).toBe(true);
+
+        // Foregrounding has no hidden frame queue to drain: the retained
+        // terminal was already current while backgrounded.
+        const foregrounded = store.taskTerminalOutputSource.getSnapshot();
+        expect(terminalOutputToString(foregrounded.output)).toBe(retainedOutput);
+        expect(foregrounded.outputEpoch).toBe(
+          retainedWhileBackgrounded.outputEpoch
+        );
+        expect(terminalAttachCount).toBe(1);
+
         await controller.refresh({ preserveTaskSession: true });
 
         expect(store.taskTerminalOutputSource.getSnapshot().outputEpoch).toBe(
-          attached.outputEpoch
+          retainedWhileBackgrounded.outputEpoch
         );
+        expect(terminalAttachCount).toBe(1);
       } finally {
         lifecycle.dispose();
         controller.dispose();
