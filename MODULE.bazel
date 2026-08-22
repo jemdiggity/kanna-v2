@@ -14,6 +14,16 @@ bazel_dep(name = "bazel_lib", version = "3.2.2")
 bazel_dep(name = "aspect_rules_js", version = "3.2.3")
 bazel_dep(name = "rules_nodejs", version = "6.7.3")
 
+# Zig 0.15.2 cannot match Xcode 26.4+'s arm64e-only macOS TBD targets
+# (ziglang/zig#31673). Keep Ghostty on its required 0.15.2 compiler while
+# making the hermetic rules_zig executable use the compatible CLT SDK.
+single_version_override(
+    module_name = "rules_zig",
+    patch_strip = 1,
+    patches = ["//tools/bazel:rules-zig-0.15.2-macos-clt-sdk.patch"],
+    version = "0.12.3",
+)
+
 git_override(
     module_name = "rules_tauri",
     commit = "38064855850d88c1d7c579a58ffe6b9f95658461",

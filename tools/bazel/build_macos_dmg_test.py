@@ -302,6 +302,73 @@ class BuildMacosDmgTest(unittest.TestCase):
                 ],
             )
 
+    def test_preflight_finder_volume_registration_uses_scratch_volume(self) -> None:
+        attach_result = subprocess.CompletedProcess(
+            args=["hdiutil", "attach"],
+            returncode=0,
+            stdout="/dev/disk8s1\tApple_HFS\t/Volumes/Kanna Finder Preflight 123\n",
+            stderr="",
+        )
+        finder_result = subprocess.CompletedProcess(
+            args=["osascript"], returncode=0, stdout="disk Kanna Finder Preflight 123", stderr=""
+        )
+
+        with mock.patch.object(build_macos_dmg.os, "getpid", return_value=123):
+            with mock.patch.object(build_macos_dmg, "run_checked") as run_checked:
+                with mock.patch.object(
+                    build_macos_dmg.subprocess,
+                    "run",
+                    side_effect=[attach_result, finder_result],
+                ) as subprocess_run:
+                    build_macos_dmg.preflight_finder_volume_registration()
+
+        create_command = run_checked.call_args_list[0].args[0]
+        self.assertEqual(create_command[:2], ["hdiutil", "create"])
+        self.assertIn("Kanna Finder Preflight 123", create_command)
+        self.assertEqual(subprocess_run.call_args_list[0].args[0][:2], ["hdiutil", "attach"])
+        self.assertEqual(subprocess_run.call_args_list[1].args[0][0], "osascript")
+        self.assertEqual(
+            run_checked.call_args_list[-1],
+            mock.call(
+                [
+                    "hdiutil",
+                    "detach",
+                    "/Volumes/Kanna Finder Preflight 123",
+                    "-quiet",
+                ]
+            ),
+        )
+
+    def test_preflight_finder_volume_registration_reports_wedged_finder(self) -> None:
+        attach_result = subprocess.CompletedProcess(
+            args=["hdiutil", "attach"],
+            returncode=0,
+            stdout="/dev/disk8s1\tApple_HFS\t/Volumes/Kanna Finder Preflight 123\n",
+            stderr="",
+        )
+        finder_result = subprocess.CompletedProcess(
+            args=["osascript"],
+            returncode=1,
+            stdout="",
+            stderr="Finder got an error: Can’t get disk (-1728)",
+        )
+
+        with mock.patch.object(build_macos_dmg.os, "getpid", return_value=123):
+            with mock.patch.object(build_macos_dmg, "run_checked") as run_checked:
+                with mock.patch.object(
+                    build_macos_dmg.subprocess,
+                    "run",
+                    side_effect=[attach_result, finder_result],
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        r"Finder volume registration is wedged; relaunch Finder "
+                        r"\(killall Finder\) and retry",
+                    ):
+                        build_macos_dmg.preflight_finder_volume_registration()
+
+        self.assertEqual(run_checked.call_args_list[-1].args[0][:2], ["hdiutil", "detach"])
+
     def test_main_serializes_public_mount_when_custom_layout_is_requested(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -371,16 +438,21 @@ class BuildMacosDmgTest(unittest.TestCase):
                                     build_macos_dmg, "run_finder_layout"
                                 ) as run_finder_layout:
                                     with mock.patch.object(
-                                        build_macos_dmg.shutil,
-                                        "move",
-                                        side_effect=lambda src, dst: Path(dst).write_text(
-                                            Path(src).read_text(encoding="utf-8"),
-                                            encoding="utf-8",
-                                        ),
-                                    ):
-                                        build_macos_dmg.main()
+                                        build_macos_dmg,
+                                        "preflight_finder_volume_registration",
+                                    ) as finder_preflight:
+                                        with mock.patch.object(
+                                            build_macos_dmg.shutil,
+                                            "move",
+                                            side_effect=lambda src, dst: Path(dst).write_text(
+                                                Path(src).read_text(encoding="utf-8"),
+                                                encoding="utf-8",
+                                            ),
+                                        ):
+                                            build_macos_dmg.main()
 
             finder_layout_lock.assert_called_once_with()
+            finder_preflight.assert_called_once_with()
             run_finder_layout.assert_called_once_with(
                 mount_dir=public_mount_dir,
                 window_pos=(10, 60),

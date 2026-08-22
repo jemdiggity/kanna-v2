@@ -17,6 +17,7 @@ exports_files([
     "ghostty-libvt-fast-path.patch",
     "ghostty-simdutf-include.patch",
     "libghostty-vt-sys-zig-env.patch",
+    "rules-zig-0.15.2-macos-clt-sdk.patch",
     "make_tauri_manifest.py",
     "normalize_tauri_context.py",
     "openssl-src-bazel-runfiles.patch",
