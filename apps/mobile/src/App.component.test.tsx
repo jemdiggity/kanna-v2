@@ -152,6 +152,7 @@ afterEach(async () => {
     await act(async () => mounted?.unmount());
     mounted = null;
   }
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -570,8 +571,8 @@ describe("App component wiring", () => {
         await flushMicrotasks();
       });
 
-      expect(refresh).toHaveBeenCalledOnce();
-      expect(model.setForeground).toHaveBeenNthCalledWith(1, false);
+      expect(refresh).toHaveBeenCalledWith({ preserveTaskSession: true });
+      expect(model.setForeground).toHaveBeenNthCalledWith(1, true);
       expect(model.setForeground).toHaveBeenLastCalledWith(true);
       expect(harness.addMobileCrashBreadcrumb).toHaveBeenCalledWith(
         "app-state",
@@ -587,6 +588,42 @@ describe("App component wiring", () => {
       );
     }
   );
+
+  it("preserves the terminal across active -> inactive -> active", async () => {
+    harness.currentAppState = "active";
+    const { controller, model } = createModel();
+    const refresh = vi.spyOn(controller, "refresh").mockResolvedValue(undefined);
+    const expire = vi.spyOn(controller, "expireTaskTerminalGrace");
+    await mountModel(model);
+
+    await act(async () => {
+      harness.appStateListener?.("inactive");
+      harness.appStateListener?.("active");
+      await flushMicrotasks();
+    });
+
+    expect(expire).not.toHaveBeenCalled();
+    expect(refresh).toHaveBeenCalledWith({ preserveTaskSession: true });
+    expect(model.setForeground).not.toHaveBeenCalledWith(false);
+  });
+
+  it("uses the existing reconnect refresh after the background grace expires", async () => {
+    vi.useFakeTimers();
+    const { controller, model } = createModel();
+    const refresh = vi.spyOn(controller, "refresh").mockResolvedValue(undefined);
+    const expire = vi.spyOn(controller, "expireTaskTerminalGrace");
+    await mountModel(model);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20_000);
+      harness.appStateListener?.("active");
+      await flushMicrotasks();
+    });
+
+    expect(expire).toHaveBeenCalledOnce();
+    expect(model.setForeground).toHaveBeenCalledWith(false);
+    expect(refresh).toHaveBeenCalledWith({ preserveTaskSession: false });
+  });
 
   it("reloads a downloaded OTA on foreground without starting recovery", async () => {
     const { controller, model, sessionStore } = createModel();
