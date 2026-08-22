@@ -1,6 +1,9 @@
 package(default_visibility = ["//visibility:public"])
 
-exports_files(["VERSION"])
+exports_files([
+    ".bazelrc",
+    "VERSION",
+])
 
 load("@kanna_npm//:defs.bzl", "npm_link_all_packages")
 load("@rules_tauri//tauri:defs.bzl", "tauri_bundle_inputs", "tauri_macos_app")
@@ -206,6 +209,17 @@ filegroup(
     srcs = ["//apps/desktop/src-tauri:icons/icon.icns"],
 )
 
+genrule(
+    name = "desktop_macos_info_plist",
+    srcs = [
+        ".bazelrc",
+        "//apps/desktop/src-tauri:Info.plist",
+    ],
+    tools = ["//tools/bazel:macos_deployment_target.py"],
+    outs = ["Info.macos.plist"],
+    cmd = "python3 $(location //tools/bazel:macos_deployment_target.py) render-plist --bazelrc $(location .bazelrc) --base $(location //apps/desktop/src-tauri:Info.plist) --output $@",
+)
+
 filegroup(
     name = "kanna_builtin_resources",
     srcs = glob([
@@ -239,7 +253,7 @@ tauri_bundle_inputs(
     icons = [":desktop_macos_icon"],
     capabilities = ["//apps/desktop/src-tauri:capabilities/default.json"],
     tauri_config = "//apps/desktop/src-tauri:tauri.conf.json",
-    info_plist_fragments = ["//apps/desktop/src-tauri:Info.plist"],
+    info_plist_fragments = [":desktop_macos_info_plist"],
     bundle_id = "build.kanna",
     product_name = "Kanna",
     version_file = "VERSION",
@@ -270,7 +284,7 @@ tauri_bundle_inputs(
     icons = [":desktop_macos_icon"],
     capabilities = ["//apps/desktop/src-tauri:capabilities/default.json"],
     tauri_config = "//apps/desktop/src-tauri:tauri.conf.json",
-    info_plist_fragments = ["//apps/desktop/src-tauri:Info.plist"],
+    info_plist_fragments = [":desktop_macos_info_plist"],
     bundle_id = "build.kanna",
     product_name = "Kanna",
     version_file = "VERSION",
@@ -341,7 +355,7 @@ tauri_bundle_inputs(
     icons = [":desktop_macos_icon"],
     capabilities = ["//apps/desktop/src-tauri:capabilities/default.json"],
     tauri_config = "//apps/desktop/src-tauri:tauri.conf.json",
-    info_plist_fragments = ["//apps/desktop/src-tauri:Info.plist"],
+    info_plist_fragments = [":desktop_macos_info_plist"],
     bundle_id = "build.kanna",
     product_name = "Kanna",
     version_file = "VERSION",
@@ -412,7 +426,7 @@ tauri_bundle_inputs(
     icons = [":desktop_macos_icon"],
     capabilities = ["//apps/desktop/src-tauri:capabilities/default.json"],
     tauri_config = "//apps/desktop/src-tauri:tauri_staging_bazel_config",
-    info_plist_fragments = ["//apps/desktop/src-tauri:Info.plist"],
+    info_plist_fragments = [":desktop_macos_info_plist"],
     bundle_id = "build.kanna.staging",
     product_name = "Kanna Staging",
     version_file = "VERSION",
@@ -483,7 +497,7 @@ tauri_bundle_inputs(
     icons = [":desktop_macos_icon"],
     capabilities = ["//apps/desktop/src-tauri:capabilities/default.json"],
     tauri_config = "//apps/desktop/src-tauri:tauri_staging_bazel_config",
-    info_plist_fragments = ["//apps/desktop/src-tauri:Info.plist"],
+    info_plist_fragments = [":desktop_macos_info_plist"],
     bundle_id = "build.kanna.staging",
     product_name = "Kanna Staging",
     version_file = "VERSION",

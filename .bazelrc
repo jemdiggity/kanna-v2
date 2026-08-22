@@ -3,6 +3,11 @@ try-import %workspace%/.bazelrc.user
 build --disk_cache=~/Library/Caches/kanna-bazel/disk-cache
 build --repository_cache=~/Library/Caches/kanna-bazel/repository-cache
 
+# This is the single source of truth for Kanna's supported macOS floor. Bazel
+# applies it to every shipped Mach-O, while bundle plist generation and the
+# codesigning gate read the same value here.
+build --macos_minimum_os=15.0
+
 build --action_env=KANNA_UPDATER_PUBKEY
 build:notarize --action_env=APPLE_KEYCHAIN_PROFILE
 build:notarize --action_env=APPLE_KEYCHAIN_PATH
