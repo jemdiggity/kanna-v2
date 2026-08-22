@@ -1159,8 +1159,11 @@ git, or search-in-files operations.
 
 `POST /v1/mobile/notifications` hands a validated notification to the
 desktop-authenticated relay connection. The relay looks up only that Firebase
-user's `pushDevices`, submits one FCM multicast, removes tokens rejected as
-invalid or unregistered, and acknowledges the request over the same WebSocket.
+user's `pushDevices`, submits one FCM multicast, removes tokens rejected
+per-device as `messaging/invalid-argument`, invalid, or unregistered, and
+acknowledges the request over the same WebSocket. A payload-wide invalid
+argument rejects the multicast call itself rather than appearing as one
+device's result.
 The server response includes `acceptedCount`, `failedCount`, and aggregated
 `failureReasons`. Each reason has a safe provider code, category, count, and
 actionable message; it never identifies a device or includes its token, the
@@ -1175,6 +1178,11 @@ temporary provider failures, and an unknown-provider fallback. A
 reports `cloudmessaging.messages.create` denied is classified as
 `relayPermission`; other occurrences remain `firebaseProjectMismatch`. Relay
 logs record only the desktop id and these same aggregate safe reasons.
+
+Push registration is one replaceable document per mobile device id. Every app
+launch registers the current FCM token and token-rotation callbacks replace it;
+an unregister identifies the token it observed so delayed cleanup from an
+older app lifecycle cannot delete a newer registration.
 
 If the Firestore lookup or Firebase Admin call rejects as a whole, there are
 no per-device results to diagnose. The relay discards the exception rather

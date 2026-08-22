@@ -423,7 +423,6 @@ export async function registerPushDevice(
           token: deviceToken,
           updatedAt: new Date().toISOString(),
         },
-        { merge: true },
       );
     });
     console.log(
@@ -438,16 +437,28 @@ export async function registerPushDevice(
 
 export async function unregisterPushDevice(
   userId: string,
-  deviceId: string
+  deviceId: string,
+  deviceToken?: string,
 ): Promise<void> {
   try {
     const { db } = getFirebaseServices();
-    await db
+    const deviceRef = db
       .collection("users")
       .doc(userId)
       .collection("pushDevices")
-      .doc(hashPushDeviceId(deviceId))
-      .delete();
+      .doc(hashPushDeviceId(deviceId));
+    if (deviceToken === undefined) {
+      // Compatibility for mobile versions released before unregister requests
+      // identified the registration they were retiring.
+      await deviceRef.delete();
+      return;
+    }
+    await db.runTransaction(async (transaction) => {
+      const registration = await transaction.get(deviceRef);
+      if (registration.data()?.token === deviceToken) {
+        transaction.delete(deviceRef);
+      }
+    });
   } catch (err) {
     console.error("[auth] Failed to unregister mobile push device:", err);
     throw err;

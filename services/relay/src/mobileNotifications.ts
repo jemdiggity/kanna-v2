@@ -4,6 +4,10 @@ import { getFirebaseServices } from "./firebase.js";
 
 const MAX_PUSH_DEVICES = 500;
 const INVALID_TOKEN_CODES = new Set([
+  // Per-device invalid-argument responses are token failures. Invalid message
+  // payloads reject the whole multicast call instead of producing one result
+  // per registration token.
+  "messaging/invalid-argument",
   "messaging/invalid-registration-token",
   "messaging/registration-token-not-registered",
 ]);
@@ -209,7 +213,7 @@ export function diagnoseMessagingFailure(error: {
     return failureReason(
       providerCode,
       "invalidToken",
-      "The registered push token is invalid or expired and was removed. Reopen the matching mobile app environment to register a current token."
+      "No valid device token — the rejected token was removed. Open the matching mobile app environment to re-register."
     );
   }
   if (providerCode === "messaging/mismatched-credential") {
@@ -256,7 +260,6 @@ export function diagnoseMessagingFailure(error: {
 
 const PAYLOAD_ERROR_CODES = new Set([
   "messaging/data-payload-size-limit-exceeded",
-  "messaging/invalid-argument",
   "messaging/invalid-data-payload-key",
   "messaging/invalid-options",
   "messaging/invalid-package-name",

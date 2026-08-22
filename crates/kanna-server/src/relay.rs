@@ -1265,10 +1265,10 @@ mod tests {
                             "acceptedCount": 0,
                             "failedCount": 1,
                             "failureReasons": [{
-                                "providerCode": "messaging/registration-token-not-registered",
+                                "providerCode": "messaging/invalid-argument",
                                 "category": "invalidToken",
                                 "count": 1,
-                                "message": "The registered push token is invalid or expired and was removed. Reopen the matching mobile app environment to register a current token."
+                                "message": "No valid device token — the rejected token was removed. Open the matching mobile app environment to re-register."
                             }]
                         }
                     })
@@ -1358,10 +1358,10 @@ mod tests {
                 "acceptedCount": 0,
                 "failedCount": 1,
                 "failureReasons": [{
-                    "providerCode": "messaging/registration-token-not-registered",
+                    "providerCode": "messaging/invalid-argument",
                     "category": "invalidToken",
                     "count": 1,
-                    "message": "The registered push token is invalid or expired and was removed. Reopen the matching mobile app environment to register a current token."
+                    "message": "No valid device token — the rejected token was removed. Open the matching mobile app environment to re-register."
                 }]
             }))
         );

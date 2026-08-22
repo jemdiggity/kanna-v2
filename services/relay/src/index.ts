@@ -326,7 +326,7 @@ export const server = createServer(async (req, res) => {
 
     if (req.method === "POST" && req.url === "/push/unregister") {
       const body = await readBody(req);
-      let parsed: { idToken?: string; deviceId?: string };
+      let parsed: { idToken?: string; deviceId?: string; deviceToken?: string };
 
       try {
         parsed = JSON.parse(body);
@@ -339,7 +339,10 @@ export const server = createServer(async (req, res) => {
         jsonResponse(res, 400, { error: "Missing idToken or deviceId" });
         return;
       }
-      if (parsed.deviceId.length > 256) {
+      if (
+        parsed.deviceId.length > 256
+        || (parsed.deviceToken?.length ?? 0) > 4_096
+      ) {
         jsonResponse(res, 400, { error: "Push unregistration is oversized" });
         return;
       }
@@ -350,7 +353,7 @@ export const server = createServer(async (req, res) => {
         return;
       }
 
-      await unregisterPushDevice(userId, parsed.deviceId);
+      await unregisterPushDevice(userId, parsed.deviceId, parsed.deviceToken);
       jsonResponse(res, 200, { ok: true });
       return;
     }

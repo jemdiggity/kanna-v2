@@ -58,15 +58,19 @@ export async function startMobilePushNotifications(
     return openedUnsubscribe;
   }
 
-  let registeredIdToken: string | null = null;
+  let registration: { idToken: string; deviceToken: string } | null = null;
   let stopped = false;
-  const unregisterDevice = async (idToken: string) => {
+  const unregisterDevice = async (registered: {
+    idToken: string;
+    deviceToken: string;
+  }) => {
     const response = await (input.fetchImpl ?? fetch)(unregistrationUrl, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        idToken,
-        deviceId: input.deviceId
+        idToken: registered.idToken,
+        deviceId: input.deviceId,
+        deviceToken: registered.deviceToken
       })
     });
     if (!response.ok) {
@@ -95,9 +99,9 @@ export async function startMobilePushNotifications(
       );
     }
     if (stopped) {
-      await unregisterDevice(idToken);
+      await unregisterDevice({ idToken, deviceToken });
     } else {
-      registeredIdToken = idToken;
+      registration = { idToken, deviceToken };
     }
   };
 
@@ -111,8 +115,8 @@ export async function startMobilePushNotifications(
     stopped = true;
     tokenUnsubscribe();
     openedUnsubscribe();
-    if (registeredIdToken) {
-      void unregisterDevice(registeredIdToken).catch((error: unknown) => {
+    if (registration) {
+      void unregisterDevice(registration).catch((error: unknown) => {
         console.error("Mobile notification unregistration failed:", error);
       });
     }

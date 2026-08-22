@@ -6,11 +6,12 @@ afterEach(() => {
 });
 
 describe("relay mobile notification delivery", () => {
-  it("hands the minimal versioned payload to FCM and removes stale tokens", async () => {
-    const deleteStale = vi.fn(async () => ({ writeTime: null }));
+  it("hands the minimal versioned payload to FCM and removes permanently rejected tokens", async () => {
+    const deleteUnregistered = vi.fn(async () => ({ writeTime: null }));
+    const deleteInvalidArgument = vi.fn(async () => ({ writeTime: null }));
     const sendEachForMulticast = vi.fn(async () => ({
       successCount: 1,
-      failureCount: 2,
+      failureCount: 3,
       responses: [
         { success: true },
         {
@@ -18,6 +19,13 @@ describe("relay mobile notification delivery", () => {
           error: {
             code: "messaging/registration-token-not-registered",
             message: "Requested entity was not found."
+          }
+        },
+        {
+          success: false,
+          error: {
+            code: "messaging/invalid-argument",
+            message: "APNs device token is disabled."
           }
         },
         {
@@ -37,7 +45,11 @@ describe("relay mobile notification delivery", () => {
         },
         {
           data: () => ({ token: "fcm-stale" }),
-          ref: { delete: deleteStale }
+          ref: { delete: deleteUnregistered }
+        },
+        {
+          data: () => ({ token: "fcm-disabled-apns" }),
+          ref: { delete: deleteInvalidArgument }
         },
         {
           data: () => ({ token: "fcm-current-with-missing-iam" }),
@@ -81,8 +93,14 @@ describe("relay mobile notification delivery", () => {
       }
     })).resolves.toEqual({
       acceptedCount: 1,
-      failedCount: 2,
+      failedCount: 3,
       failureReasons: [
+        {
+          providerCode: "messaging/invalid-argument",
+          category: "invalidToken",
+          count: 1,
+          message: "No valid device token — the rejected token was removed. Open the matching mobile app environment to re-register."
+        },
         {
           providerCode: "messaging/mismatched-credential",
           category: "relayPermission",
@@ -93,14 +111,19 @@ describe("relay mobile notification delivery", () => {
           providerCode: "messaging/registration-token-not-registered",
           category: "invalidToken",
           count: 1,
-          message: "The registered push token is invalid or expired and was removed. Reopen the matching mobile app environment to register a current token."
+          message: "No valid device token — the rejected token was removed. Open the matching mobile app environment to re-register."
         }
       ]
     });
 
     expect(limit).toHaveBeenCalledWith(500);
     expect(sendEachForMulticast).toHaveBeenCalledWith({
-      tokens: ["fcm-current", "fcm-stale", "fcm-current-with-missing-iam"],
+      tokens: [
+        "fcm-current",
+        "fcm-stale",
+        "fcm-disabled-apns",
+        "fcm-current-with-missing-iam"
+      ],
       notification: {
         title: "Staging shipped",
         body: "The staging build is ready."
@@ -119,7 +142,8 @@ describe("relay mobile notification delivery", () => {
         }
       }
     });
-    expect(deleteStale).toHaveBeenCalledOnce();
+    expect(deleteUnregistered).toHaveBeenCalledOnce();
+    expect(deleteInvalidArgument).toHaveBeenCalledOnce();
   });
 
   it("rejects malformed payloads before they reach Firebase", async () => {
@@ -179,7 +203,7 @@ describe("relay mobile notification delivery", () => {
   it.each([
     ["messaging/mismatched-credential", "Sender ID mismatch.", "firebaseProjectMismatch"],
     ["messaging/third-party-auth-error", "APNs rejected the credential.", "apnsCredentials"],
-    ["messaging/invalid-argument", "Invalid payload.", "payload"],
+    ["messaging/invalid-argument", "APNs device token is disabled.", "invalidToken"],
     ["messaging/quota-exceeded", "Quota exhausted.", "rateLimit"],
     ["messaging/server-unavailable", "Backend unavailable.", "temporary"],
     ["messaging/new-provider-code", "Provider diagnostic with token-like text.", "provider"]
