@@ -14,7 +14,8 @@ import {
   resolveAccountHostingSite,
   resolveFirebaseProject,
   resolveProductionFirebaseProject,
-  resolveWebPortalBuildEnvironment
+  resolveWebPortalBuildEnvironment,
+  warnIfRelayStatsSecretIamMissing
 } from "../src/runtime/cloud-deploy";
 import type { CommandRunner } from "../src/runtime/process";
 
@@ -898,9 +899,23 @@ describe("cloud deploy runtime", () => {
             "KANNA_OTA_KEY_ID=kanna-mobile-ota-v1",
             "KANNA_OTA_PRIVATE_KEY_PATH=/run/secrets/kanna_ota_private_key.pem",
             "KANNA_RELAY_ENV",
-            "STATS_SECRET=$(curl -fsS -H \"Authorization: Bearer $TOKEN\" \"https://secretmanager.googleapis.com/v1/projects/kanna-build/secrets/kanna-relay-stats-token/versions/latest:access\" | sed -n 's/.*\"data\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p' || true)",
+            "STATS_RESPONSE_FILE=$(mktemp)",
+            "STATS_CURL_EXIT=0",
+            "STATS_HTTP_STATUS=$(curl -sS -o \"$STATS_RESPONSE_FILE\" -w '%{http_code}' -H \"Authorization: Bearer $TOKEN\" \"https://secretmanager.googleapis.com/v1/projects/kanna-build/secrets/kanna-relay-stats-token/versions/latest:access\") || STATS_CURL_EXIT=$?",
+            "STATS_HTTP_STATUS=${STATS_HTTP_STATUS:-000}",
+            "STATS_SECRET=$(sed -n 's/.*\"data\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p' \"$STATS_RESPONSE_FILE\")",
+            "rm -f \"$STATS_RESPONSE_FILE\"",
             "STATS_TOKEN=$(printf '%s' \"$STATS_SECRET\" | base64 -d | tr -d '\\r\\n')",
-            "if [ -n \"$STATS_TOKEN\" ]; then printf 'KANNA_RELAY_STATS_TOKEN=%s\\n' \"$STATS_TOKEN\" >> .env.tmp; else echo \"note: secret kanna-relay-stats-token is unset; the relay status dashboard stays disabled\"; fi",
+            "if [ \"$STATS_CURL_EXIT\" -eq 0 ] && [ \"$STATS_HTTP_STATUS\" = 200 ] && [ -n \"$STATS_TOKEN\" ]; then",
+            "  printf 'KANNA_RELAY_STATS_TOKEN=%s\\n' \"$STATS_TOKEN\" >> .env.tmp",
+            "elif { [ \"$STATS_CURL_EXIT\" -eq 0 ] && [ \"$STATS_HTTP_STATUS\" = 200 ]; } || [ \"$STATS_HTTP_STATUS\" = 404 ]; then",
+            "  echo \"note: secret kanna-relay-stats-token is unset; the relay status dashboard stays disabled\"",
+            "elif [ \"$STATS_HTTP_STATUS\" = 403 ]; then",
+            "  VM_SERVICE_ACCOUNT=$(curl -fsS -H 'Metadata-Flavor: Google' 'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email' || printf 'unknown service account')",
+            "  echo \"note: VM service account $VM_SERVICE_ACCOUNT lacks roles/secretmanager.secretAccessor on secret kanna-relay-stats-token; the relay status dashboard stays disabled\"",
+            "else",
+            "  echo \"note: fetching secret kanna-relay-stats-token failed (HTTP $STATS_HTTP_STATUS, curl exit $STATS_CURL_EXIT); the relay status dashboard stays disabled\"",
+            "fi",
             "sudo install -m 0644 .env.tmp /opt/kanna-relay/.env",
             "rm .env.tmp",
             "docker compose pull",
@@ -910,6 +925,68 @@ describe("cloud deploy runtime", () => {
         cwd: "/repo",
         streamOutput: true
       }
+    ]);
+  });
+
+  it("warns before relay deploy when the VM service account lacks direct stats-secret access", async () => {
+    const warnings: string[] = [];
+    const runner: CommandRunner = {
+      async run(_command, args) {
+        if (args.includes("instances") && args.includes("describe")) {
+          return {
+            exitCode: 0,
+            stdout: "kanna-relay-staging@kanna-staging.iam.gserviceaccount.com\n",
+            stderr: ""
+          };
+        }
+        return { exitCode: 0, stdout: JSON.stringify({ bindings: [] }), stderr: "" };
+      }
+    };
+
+    await warnIfRelayStatsSecretIamMissing({
+      repoRoot: "/repo",
+      env: {},
+      runner,
+      projectId: "kanna-staging",
+      vmName: "kanna-relay-staging",
+      zone: "us-central1-a",
+      writeWarning: (message) => warnings.push(message)
+    });
+
+    expect(warnings).toEqual([
+      "warning: relay VM service account kanna-relay-staging@kanna-staging.iam.gserviceaccount.com " +
+      "lacks roles/secretmanager.secretAccessor on secret kanna-relay-stats-token; " +
+      "the relay status dashboard will stay disabled unless access is inherited from project IAM\n"
+    ]);
+  });
+
+  it("keeps the stats-secret IAM preflight non-fatal when policy inspection is denied", async () => {
+    const warnings: string[] = [];
+    const runner: CommandRunner = {
+      async run(_command, args) {
+        if (args.includes("instances") && args.includes("describe")) {
+          return {
+            exitCode: 0,
+            stdout: "kanna-relay-staging@kanna-staging.iam.gserviceaccount.com\n",
+            stderr: ""
+          };
+        }
+        return { exitCode: 1, stdout: "", stderr: "permission denied" };
+      }
+    };
+
+    await expect(warnIfRelayStatsSecretIamMissing({
+      repoRoot: "/repo",
+      env: {},
+      runner,
+      projectId: "kanna-staging",
+      vmName: "kanna-relay-staging",
+      zone: "us-central1-a",
+      writeWarning: (message) => warnings.push(message)
+    })).resolves.toBeUndefined();
+    expect(warnings).toEqual([
+      "warning: could not inspect kanna-relay-stats-token IAM before deploy; " +
+      "continuing without the optional preflight\n"
     ]);
   });
 
@@ -924,6 +1001,25 @@ describe("cloud deploy runtime", () => {
           cwd: options?.cwd,
           ...(options?.streamOutput === undefined ? {} : { streamOutput: options.streamOutput })
         });
+        if (args.includes("instances") && args.includes("describe")) {
+          return {
+            exitCode: 0,
+            stdout: "kanna-relay-vm@kanna-build.iam.gserviceaccount.com\n",
+            stderr: ""
+          };
+        }
+        if (args.includes("secrets") && args.includes("get-iam-policy")) {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              bindings: [{
+                role: "roles/secretmanager.secretAccessor",
+                members: ["serviceAccount:kanna-relay-vm@kanna-build.iam.gserviceaccount.com"]
+              }]
+            }),
+            stderr: ""
+          };
+        }
         return { exitCode: 0, stdout: "", stderr: "" };
       }
     };
@@ -945,6 +1041,34 @@ describe("cloud deploy runtime", () => {
         commit: SHORT_COMMIT
       });
       expect(calls).toEqual([
+        {
+          command: "gcloud",
+          args: [
+            "compute",
+            "instances",
+            "describe",
+            "kanna-relay-vm",
+            "--project",
+            "kanna-build",
+            "--zone",
+            "us-central1-a",
+            "--format",
+            "value(serviceAccounts[0].email)"
+          ],
+          cwd: repoRoot
+        },
+        {
+          command: "gcloud",
+          args: [
+            "secrets",
+            "get-iam-policy",
+            "kanna-relay-stats-token",
+            "--project",
+            "kanna-build",
+            "--format=json"
+          ],
+          cwd: repoRoot
+        },
         {
           command: "gcloud",
           args: [
@@ -1022,9 +1146,23 @@ describe("cloud deploy runtime", () => {
               "KANNA_OTA_KEY_ID=kanna-mobile-ota-v1",
               "KANNA_OTA_PRIVATE_KEY_PATH=/run/secrets/kanna_ota_private_key.pem",
               "KANNA_RELAY_ENV",
-              "STATS_SECRET=$(curl -fsS -H \"Authorization: Bearer $TOKEN\" \"https://secretmanager.googleapis.com/v1/projects/kanna-build/secrets/kanna-relay-stats-token/versions/latest:access\" | sed -n 's/.*\"data\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p' || true)",
+              "STATS_RESPONSE_FILE=$(mktemp)",
+              "STATS_CURL_EXIT=0",
+              "STATS_HTTP_STATUS=$(curl -sS -o \"$STATS_RESPONSE_FILE\" -w '%{http_code}' -H \"Authorization: Bearer $TOKEN\" \"https://secretmanager.googleapis.com/v1/projects/kanna-build/secrets/kanna-relay-stats-token/versions/latest:access\") || STATS_CURL_EXIT=$?",
+              "STATS_HTTP_STATUS=${STATS_HTTP_STATUS:-000}",
+              "STATS_SECRET=$(sed -n 's/.*\"data\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p' \"$STATS_RESPONSE_FILE\")",
+              "rm -f \"$STATS_RESPONSE_FILE\"",
               "STATS_TOKEN=$(printf '%s' \"$STATS_SECRET\" | base64 -d | tr -d '\\r\\n')",
-              "if [ -n \"$STATS_TOKEN\" ]; then printf 'KANNA_RELAY_STATS_TOKEN=%s\\n' \"$STATS_TOKEN\" >> .env.tmp; else echo \"note: secret kanna-relay-stats-token is unset; the relay status dashboard stays disabled\"; fi",
+              "if [ \"$STATS_CURL_EXIT\" -eq 0 ] && [ \"$STATS_HTTP_STATUS\" = 200 ] && [ -n \"$STATS_TOKEN\" ]; then",
+              "  printf 'KANNA_RELAY_STATS_TOKEN=%s\\n' \"$STATS_TOKEN\" >> .env.tmp",
+              "elif { [ \"$STATS_CURL_EXIT\" -eq 0 ] && [ \"$STATS_HTTP_STATUS\" = 200 ]; } || [ \"$STATS_HTTP_STATUS\" = 404 ]; then",
+              "  echo \"note: secret kanna-relay-stats-token is unset; the relay status dashboard stays disabled\"",
+              "elif [ \"$STATS_HTTP_STATUS\" = 403 ]; then",
+              "  VM_SERVICE_ACCOUNT=$(curl -fsS -H 'Metadata-Flavor: Google' 'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email' || printf 'unknown service account')",
+              "  echo \"note: VM service account $VM_SERVICE_ACCOUNT lacks roles/secretmanager.secretAccessor on secret kanna-relay-stats-token; the relay status dashboard stays disabled\"",
+              "else",
+              "  echo \"note: fetching secret kanna-relay-stats-token failed (HTTP $STATS_HTTP_STATUS, curl exit $STATS_CURL_EXIT); the relay status dashboard stays disabled\"",
+              "fi",
               "sudo install -m 0644 .env.tmp /opt/kanna-relay/.env",
               "rm .env.tmp",
               "docker compose pull",

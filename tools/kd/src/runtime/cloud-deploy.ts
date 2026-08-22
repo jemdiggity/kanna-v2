@@ -21,7 +21,7 @@ interface CloudRunServiceDescription {
   };
 }
 
-interface CloudRunIamPolicy {
+interface IamPolicy {
   bindings?: Array<{
     role?: unknown;
     members?: unknown;
@@ -53,6 +53,8 @@ export interface CloudDeployInput {
   functions?: boolean;
   /** Build and deploy the web account portal. */
   portal?: boolean;
+  /** Receives best-effort preflight warnings without making deployment fatal. */
+  writeWarning?: (message: string) => void;
 }
 
 export interface CloudDeployResult {
@@ -152,7 +154,7 @@ function publicInvokerCommand(serviceName: string, projectId: string, region: st
   ];
 }
 
-function hasPublicInvoker(policy: CloudRunIamPolicy): boolean {
+function hasPublicInvoker(policy: IamPolicy): boolean {
   return policy.bindings?.some(
     (binding) => binding.role === "roles/run.invoker" &&
       Array.isArray(binding.members) && binding.members.includes("allUsers")
@@ -226,9 +228,9 @@ export async function ensurePublicFunctionInvokers(input: {
         `Run exactly:\n${repairCommand}`
       );
     }
-    let policy: CloudRunIamPolicy;
+    let policy: IamPolicy;
     try {
-      policy = parseJson<CloudRunIamPolicy>(inspect.stdout, `${serviceName} IAM policy`);
+      policy = parseJson<IamPolicy>(inspect.stdout, `${serviceName} IAM policy`);
     } catch (error) {
       throw new Error(
         `${error instanceof Error ? error.message : String(error)}\n` +
@@ -483,6 +485,15 @@ export async function deployRelayCloud(
     environment: input.environment,
     commit: input.source.shortCommit
   });
+  await warnIfRelayStatsSecretIamMissing({
+    repoRoot: input.repoRoot,
+    env: input.env,
+    runner: input.runner,
+    projectId: plan.projectId,
+    vmName: plan.vmName,
+    zone: plan.zone,
+    writeWarning: input.writeWarning
+  });
   for (const step of plan.commands) {
     const result = await input.runner.run(step.command, step.args, {
       cwd: step.cwd,
@@ -500,6 +511,87 @@ export async function deployRelayCloud(
     relayUrl: plan.relayUrl,
     commit: plan.commit
   };
+}
+
+export async function warnIfRelayStatsSecretIamMissing(input: {
+  repoRoot: string;
+  env: NodeJS.ProcessEnv;
+  runner: CommandRunner;
+  projectId: string;
+  vmName: string;
+  zone: string;
+  writeWarning?: (message: string) => void;
+}): Promise<void> {
+  const writeWarning = input.writeWarning ?? ((message: string) => process.stderr.write(message));
+  const serviceAccountResult = await input.runner.run(
+    "gcloud",
+    [
+      "compute",
+      "instances",
+      "describe",
+      input.vmName,
+      "--project",
+      input.projectId,
+      "--zone",
+      input.zone,
+      "--format",
+      "value(serviceAccounts[0].email)"
+    ],
+    { cwd: input.repoRoot, env: input.env }
+  );
+  const serviceAccount = serviceAccountResult.stdout.trim();
+  if (serviceAccountResult.exitCode !== 0 || serviceAccount.length === 0) {
+    writeWarning(
+      `warning: could not inspect relay VM service account before deploy; ` +
+      `${RELAY_STATS_TOKEN_SECRET_NAME} IAM preflight skipped\n`
+    );
+    return;
+  }
+
+  const policyResult = await input.runner.run(
+    "gcloud",
+    [
+      "secrets",
+      "get-iam-policy",
+      RELAY_STATS_TOKEN_SECRET_NAME,
+      "--project",
+      input.projectId,
+      "--format=json"
+    ],
+    { cwd: input.repoRoot, env: input.env }
+  );
+  if (policyResult.exitCode !== 0) {
+    // The stats secret is optional, and the operator may not be allowed to
+    // inspect IAM even when the VM can access it. Do not turn that into a gate.
+    writeWarning(
+      `warning: could not inspect ${RELAY_STATS_TOKEN_SECRET_NAME} IAM before deploy; ` +
+      `continuing without the optional preflight\n`
+    );
+    return;
+  }
+
+  let policy: IamPolicy;
+  try {
+    policy = parseJson<IamPolicy>(policyResult.stdout, `${RELAY_STATS_TOKEN_SECRET_NAME} IAM policy`);
+  } catch (error) {
+    writeWarning(
+      `warning: ${error instanceof Error ? error.message : String(error)}; ` +
+      `continuing without the optional preflight\n`
+    );
+    return;
+  }
+  const member = `serviceAccount:${serviceAccount}`;
+  const hasAccessor = policy.bindings?.some(
+    (binding) => binding.role === "roles/secretmanager.secretAccessor" &&
+      Array.isArray(binding.members) && binding.members.includes(member)
+  ) === true;
+  if (!hasAccessor) {
+    writeWarning(
+      `warning: relay VM service account ${serviceAccount} lacks ` +
+      `roles/secretmanager.secretAccessor on secret ${RELAY_STATS_TOKEN_SECRET_NAME}; ` +
+      `the relay status dashboard will stay disabled unless access is inherited from project IAM\n`
+    );
+  }
 }
 
 export function buildRelayProvisionPlan(input: { environment: CloudDeployEnvironment }): RelayProvisionPlan {
@@ -779,9 +871,23 @@ function buildRemoteRelayDeployCommand(input: {
     // The relay status token is optional by construction: an environment that
     // has not provisioned the secret still deploys, and the only consequence is
     // that GET /dashboard reports itself disabled.
-    "STATS_SECRET=$(curl -fsS -H \"Authorization: Bearer $TOKEN\" \"https://secretmanager.googleapis.com/v1/projects/" + input.projectId + "/secrets/" + RELAY_STATS_TOKEN_SECRET_NAME + "/versions/latest:access\" | sed -n 's/.*\"data\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p' || true)",
+    "STATS_RESPONSE_FILE=$(mktemp)",
+    "STATS_CURL_EXIT=0",
+    "STATS_HTTP_STATUS=$(curl -sS -o \"$STATS_RESPONSE_FILE\" -w '%{http_code}' -H \"Authorization: Bearer $TOKEN\" \"https://secretmanager.googleapis.com/v1/projects/" + input.projectId + "/secrets/" + RELAY_STATS_TOKEN_SECRET_NAME + "/versions/latest:access\") || STATS_CURL_EXIT=$?",
+    "STATS_HTTP_STATUS=${STATS_HTTP_STATUS:-000}",
+    "STATS_SECRET=$(sed -n 's/.*\"data\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p' \"$STATS_RESPONSE_FILE\")",
+    "rm -f \"$STATS_RESPONSE_FILE\"",
     "STATS_TOKEN=$(printf '%s' \"$STATS_SECRET\" | base64 -d | tr -d '\\r\\n')",
-    "if [ -n \"$STATS_TOKEN\" ]; then printf 'KANNA_RELAY_STATS_TOKEN=%s\\n' \"$STATS_TOKEN\" >> .env.tmp; else echo \"note: secret " + RELAY_STATS_TOKEN_SECRET_NAME + " is unset; the relay status dashboard stays disabled\"; fi",
+    "if [ \"$STATS_CURL_EXIT\" -eq 0 ] && [ \"$STATS_HTTP_STATUS\" = 200 ] && [ -n \"$STATS_TOKEN\" ]; then",
+    "  printf 'KANNA_RELAY_STATS_TOKEN=%s\\n' \"$STATS_TOKEN\" >> .env.tmp",
+    "elif { [ \"$STATS_CURL_EXIT\" -eq 0 ] && [ \"$STATS_HTTP_STATUS\" = 200 ]; } || [ \"$STATS_HTTP_STATUS\" = 404 ]; then",
+    "  echo \"note: secret " + RELAY_STATS_TOKEN_SECRET_NAME + " is unset; the relay status dashboard stays disabled\"",
+    "elif [ \"$STATS_HTTP_STATUS\" = 403 ]; then",
+    "  VM_SERVICE_ACCOUNT=$(curl -fsS -H 'Metadata-Flavor: Google' 'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email' || printf 'unknown service account')",
+    "  echo \"note: VM service account $VM_SERVICE_ACCOUNT lacks roles/secretmanager.secretAccessor on secret " + RELAY_STATS_TOKEN_SECRET_NAME + "; the relay status dashboard stays disabled\"",
+    "else",
+    "  echo \"note: fetching secret " + RELAY_STATS_TOKEN_SECRET_NAME + " failed (HTTP $STATS_HTTP_STATUS, curl exit $STATS_CURL_EXIT); the relay status dashboard stays disabled\"",
+    "fi",
     "sudo install -m 0644 .env.tmp /opt/kanna-relay/.env",
     "rm .env.tmp",
     "docker compose pull",
