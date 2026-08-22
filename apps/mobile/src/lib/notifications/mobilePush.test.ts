@@ -66,8 +66,44 @@ describe("mobile push notifications", () => {
         method: "POST",
         body: JSON.stringify({
           idToken: "firebase-id-token",
-          deviceId: "mobile-device-1"
+          deviceId: "mobile-device-1",
+          deviceToken: "fcm-token-2"
         })
+      })
+    ]);
+  });
+
+  it("re-registers the current FCM token on every app launch", async () => {
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 200 }));
+    const tokens = ["fcm-before-reinstall", "fcm-after-reinstall"];
+
+    for (const token of tokens) {
+      await startMobilePushNotifications({
+        deviceId: "mobile-device-1",
+        getIdToken: async () => "firebase-id-token",
+        onTaskOpen: vi.fn(),
+        relayUrl: "wss://relay-staging.kanna.build",
+        fetchImpl,
+        sdk: {
+          requestPermission: vi.fn(async () => 1),
+          getToken: vi.fn(async () => token),
+          onTokenRefresh: vi.fn(() => () => undefined),
+          getInitialNotification: vi.fn(async () => null),
+          onNotificationOpened: vi.fn(() => () => undefined)
+        }
+      });
+    }
+
+    expect(fetchImpl.mock.calls.map((call) => call[1]?.body)).toEqual([
+      JSON.stringify({
+        idToken: "firebase-id-token",
+        deviceId: "mobile-device-1",
+        deviceToken: "fcm-before-reinstall"
+      }),
+      JSON.stringify({
+        idToken: "firebase-id-token",
+        deviceId: "mobile-device-1",
+        deviceToken: "fcm-after-reinstall"
       })
     ]);
   });

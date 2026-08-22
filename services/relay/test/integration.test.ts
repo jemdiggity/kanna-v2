@@ -869,6 +869,35 @@ describe("Relay integration", () => {
         updatedAt: expect.any(String),
       });
 
+      await pushDeviceRef.set(
+        { legacyToken: "must-not-survive-replacement" },
+        { merge: true },
+      );
+      const replacementToken = "relay-integration-replacement-fcm-token";
+      const replace = await fetch(relayHttpUrl("/push/register"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          idToken,
+          deviceId,
+          deviceToken: replacementToken,
+        }),
+      });
+      expect(replace.status).toBe(200);
+      expect((await pushDeviceRef.get()).data()).toEqual({
+        deviceId,
+        token: replacementToken,
+        updatedAt: expect.any(String),
+      });
+
+      const staleUnregister = await fetch(relayHttpUrl("/push/unregister"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ idToken, deviceId, deviceToken }),
+      });
+      expect(staleUnregister.status).toBe(200);
+      expect((await pushDeviceRef.get()).data()?.token).toBe(replacementToken);
+
       const invalidUnregister = await fetch(relayHttpUrl("/push/unregister"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -890,7 +919,11 @@ describe("Relay integration", () => {
       const unregister = await fetch(relayHttpUrl("/push/unregister"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ idToken, deviceId }),
+        body: JSON.stringify({
+          idToken,
+          deviceId,
+          deviceToken: replacementToken,
+        }),
       });
       expect(unregister.status).toBe(200);
       expect(await unregister.json()).toEqual({ ok: true });

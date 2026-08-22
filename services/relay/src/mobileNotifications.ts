@@ -4,6 +4,10 @@ import { getFirebaseServices } from "./firebase.js";
 
 const MAX_PUSH_DEVICES = 500;
 const INVALID_TOKEN_CODES = new Set([
+  // Per-device invalid-argument responses are token failures. Invalid message
+  // payloads reject the whole multicast call instead of producing one result
+  // per registration token.
+  "messaging/invalid-argument",
   "messaging/invalid-registration-token",
   "messaging/registration-token-not-registered",
 ]);
@@ -111,12 +115,17 @@ export async function sendMobileNotification(input: {
 
   const staleDeviceDeletes = response.responses.flatMap((result, index) => {
     const code = result.error?.code;
-    return code && INVALID_TOKEN_CODES.has(code)
-      ? [devices[index]?.ref.delete()]
-      : [];
-  }).filter((deletion): deletion is Promise<FirebaseFirestore.WriteResult> =>
-    deletion !== undefined
-  );
+    const device = devices[index];
+    if (!code || !INVALID_TOKEN_CODES.has(code) || !device) {
+      return [];
+    }
+    return [db.runTransaction(async (transaction) => {
+      const current = await transaction.get(device.ref);
+      if (current.data()?.token === device.token) {
+        transaction.delete(device.ref);
+      }
+    })];
+  });
   if (staleDeviceDeletes.length > 0) {
     await Promise.allSettled(staleDeviceDeletes);
   }
@@ -209,7 +218,7 @@ export function diagnoseMessagingFailure(error: {
     return failureReason(
       providerCode,
       "invalidToken",
-      "The registered push token is invalid or expired and was removed. Reopen the matching mobile app environment to register a current token."
+      "No valid device token — the rejected token was removed. Open the matching mobile app environment to re-register."
     );
   }
   if (providerCode === "messaging/mismatched-credential") {
@@ -256,7 +265,6 @@ export function diagnoseMessagingFailure(error: {
 
 const PAYLOAD_ERROR_CODES = new Set([
   "messaging/data-payload-size-limit-exceeded",
-  "messaging/invalid-argument",
   "messaging/invalid-data-payload-key",
   "messaging/invalid-options",
   "messaging/invalid-package-name",
