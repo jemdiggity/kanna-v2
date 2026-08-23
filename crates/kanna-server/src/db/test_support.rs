@@ -125,6 +125,8 @@ impl Db {
                 revision_rounds INTEGER NOT NULL DEFAULT 0,
                 merge_signaled_at TEXT,
                 runtime_status TEXT,
+                runtime_event_baseline TEXT,
+                runtime_event_pending_at TEXT,
                 input_blocked TEXT,
                 composer_text TEXT,
                 composer_attestation TEXT

@@ -78,6 +78,10 @@ pub(super) struct TaskEventsQuery {
     /// does not recursively start the server-side fan-in too.
     #[serde(default)]
     local_only: bool,
+    /// Level-triggered manager wait: include synthetic current-state rows for
+    /// tasks already stopped, so a restart cannot miss an earlier edge.
+    #[serde(default)]
+    include_current_activity: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -107,6 +111,7 @@ struct AggregateWaitSession {
     pending: tokio::task::JoinSet<AggregateWaitCompletion>,
     pending_machines: HashSet<String>,
     last_touched: tokio::time::Instant,
+    include_current_activity: bool,
 }
 
 #[derive(Default)]
@@ -710,6 +715,116 @@ fn read_batch(
     read_sequence_batch(&db, scope, after_seq, limit, None)
 }
 
+const EVENT_SUMMARY_SNIPPET_CHARS: usize = 280;
+
+fn summary_snippet(summary: &str) -> String {
+    let mut chars = summary.chars();
+    let snippet = chars
+        .by_ref()
+        .take(EVENT_SUMMARY_SNIPPET_CHARS)
+        .collect::<String>();
+    if chars.next().is_some() {
+        format!("{snippet}…")
+    } else {
+        snippet
+    }
+}
+
+/// Add the current decision context a manager needs to every durable event.
+///
+/// The append-only row remains the lifecycle fact and cursor authority. These
+/// fields are deliberately resolved at delivery time because the contract asks
+/// for the task's *current* state: a retained event may be read after the task
+/// advanced, closed, or acquired a newer run.
+fn enrich_event_batch(
+    config: &crate::config::Config,
+    batch: &mut EventBatch,
+) -> Result<(), String> {
+    let db = Db::open(&config.db_path).map_err(|error| format!("db error: {error}"))?;
+    let api = crate::mobile_api::MobileApi::new(config.clone(), db);
+    for event in &mut batch.events {
+        let Some(event_object) = event.as_object_mut() else {
+            continue;
+        };
+        event_object.insert(
+            "machineId".to_string(),
+            Value::String(config.desktop_id.clone()),
+        );
+        let Some(task_id) = event_object.get("taskId").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(task) = api.get_task(task_id)? else {
+            continue;
+        };
+        let include_latest_run = matches!(
+            event_object.get("type").and_then(Value::as_str),
+            Some("run.finished" | "task.awaiting_input" | "task.awaiting_advance")
+        );
+        let payload = event_object.entry("payload").or_insert_with(|| json!({}));
+        let Some(payload) = payload.as_object_mut() else {
+            continue;
+        };
+        payload.insert("title".to_string(), Value::String(task.title));
+        payload.insert("stage".to_string(), json!(task.stage));
+        // `task.activity_changed` already owns `activity` as the value at the
+        // recorded edge. Preserve that historical meaning while still
+        // exposing the task's delivery-time value explicitly.
+        payload
+            .entry("activity".to_string())
+            .or_insert_with(|| json!(task.activity));
+        payload.insert("currentActivity".to_string(), json!(task.activity));
+        payload.insert("stageTransition".to_string(), json!(task.stage_transition));
+        payload.insert(
+            "machineId".to_string(),
+            Value::String(config.desktop_id.clone()),
+        );
+        if include_latest_run {
+            payload.insert(
+                "latestRun".to_string(),
+                task.latest_run.map_or(Value::Null, |run| {
+                    json!({
+                        "status": run.status,
+                        "summarySnippet": run.summary.as_deref().map(summary_snippet),
+                    })
+                }),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn append_current_activity_snapshots(
+    db_path: &str,
+    scope: &TaskEventScope,
+    batch: &mut EventBatch,
+    limit: i64,
+) -> Result<(), rusqlite::Error> {
+    let remaining = (limit as usize).saturating_sub(batch.events.len());
+    if remaining == 0 {
+        return Ok(());
+    }
+    let db = Db::open(db_path)?;
+    for (task_id, runtime_state) in db
+        .list_non_busy_task_runtime_states(scope)?
+        .into_iter()
+        .take(remaining)
+    {
+        batch.events.push(json!({
+            "seq": Value::Null,
+            "taskId": task_id,
+            "type": "task.runtime_settled",
+            "payload": {
+                "previousRuntimeState": Value::Null,
+                "runtimeState": runtime_state,
+                "currentState": true,
+            },
+            "createdAt": Value::Null,
+            "synthetic": true,
+        }));
+    }
+    Ok(())
+}
+
 async fn wait_local_task_events(
     state: Arc<AppState>,
     query: TaskEventsQuery,
@@ -746,7 +861,13 @@ async fn wait_local_task_events(
         // wake this call, not wait for the next re-check.
         let mut appended = Box::pin(crate::db::task_event_appended());
         appended.as_mut().enable();
-        let batch = read_batch(&db_path, &scope, cursor.as_ref(), limit)?;
+        let mut batch = read_batch(&db_path, &scope, cursor.as_ref(), limit)?;
+        if query.include_current_activity {
+            append_current_activity_snapshots(&db_path, &scope, &mut batch, limit)
+                .map_err(db_error)?;
+        }
+        enrich_event_batch(state.config(), &mut batch)
+            .map_err(|error| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))?;
         if !batch.events.is_empty() || batch.has_more {
             return Ok(Json(json!({
                 "waitOutcome": "events",
@@ -922,12 +1043,14 @@ fn local_query_for_aggregate(
     cursor: Option<String>,
     timeout_secs: u64,
     limit: i64,
+    include_current_activity: bool,
 ) -> TaskEventsQuery {
     let mut query = TaskEventsQuery {
         cursor,
         timeout_secs: Some(timeout_secs),
         limit: Some(limit),
         local_only: true,
+        include_current_activity,
         ..TaskEventsQuery::default()
     };
     match scope {
@@ -948,6 +1071,9 @@ fn aggregate_query_path(query: &TaskEventsQuery) -> String {
         format!("limit={}", query.limit.unwrap_or(DEFAULT_EVENT_LIMIT)),
         "localOnly=true".to_string(),
     ];
+    if query.include_current_activity {
+        params.push("includeCurrentActivity=true".to_string());
+    }
     if let Some(task_ids) = query.task_ids.as_deref() {
         params.push(format!("taskIds={}", encode_path_segment(task_ids)));
     }
@@ -981,6 +1107,7 @@ fn spawn_aggregate_wait(
         session.cursor.cursors_by_machine.get(&machine_id).cloned(),
         timeout_secs,
         limit,
+        session.include_current_activity,
     );
     let local_machine_id = session.cursor.local_machine_id.clone();
     let completed_machine_id = machine_id.clone();
@@ -1070,6 +1197,7 @@ fn apply_aggregate_completion(
     }
     let emitted_count = returned_events.len().min(remaining);
     let mut emitted_cursor = None;
+    let mut emitted_synthetic = false;
     for event in returned_events.iter().take(emitted_count) {
         let mut event = event.as_object().cloned().ok_or_else(|| {
             (
@@ -1085,12 +1213,22 @@ fn apply_aggregate_completion(
             Value::String(completion.machine_id.clone()),
         );
         emitted_cursor = event.get("seq").and_then(Value::as_i64);
+        emitted_synthetic = event
+            .get("synthetic")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         events.push(Value::Object(event));
     }
     let next_cursor = if emitted_count == returned_events.len() {
         Some(cursor.to_string())
     } else if emitted_count == 0 {
         None
+    } else if emitted_synthetic && emitted_cursor.is_none() {
+        // Synthetic level state has no sequence to acknowledge. The peer
+        // cursor already acknowledges every durable row it returned;
+        // adopting it is safe, and any un-emitted still-true level state
+        // is synthesized again on the next call.
+        Some(cursor.to_string())
     } else {
         let event_seq = emitted_cursor.ok_or_else(|| {
             (
@@ -1197,8 +1335,14 @@ async fn wait_aggregate_task_events(
                 pending: tokio::task::JoinSet::new(),
                 pending_machines: HashSet::new(),
                 last_touched: now,
+                include_current_activity: query.include_current_activity,
             })
     };
+    if session.include_current_activity != query.include_current_activity {
+        session.pending.abort_all();
+        session.pending_machines.clear();
+        session.include_current_activity = query.include_current_activity;
+    }
     let mut machine_errors = Vec::new();
     let mut active_machines = HashSet::from([local_machine_id.clone()]);
     match state.list_active_relay_desktops().await {
@@ -1440,6 +1584,7 @@ mod aggregate_wait_registry_tests {
             pending,
             pending_machines: HashSet::from([machine_id]),
             last_touched,
+            include_current_activity: false,
         }
     }
 

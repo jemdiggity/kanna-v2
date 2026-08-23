@@ -590,7 +590,7 @@ fn serve_forwards_get_and_post_tool_calls_to_configured_http_server() {
         },
         ExpectedRequest {
             method: "GET",
-            path: "/v1/tasks/task-1",
+            path: "/v1/tasks/task-1?agentView=true",
             body: None,
             response_status: "200 OK",
             response_body: json!({
@@ -1312,7 +1312,7 @@ fn start_task_detail_fixture(state: Arc<Mutex<Value>>) -> (String, Arc<AtomicUsi
             };
             let request = read_http_request(&mut stream);
             assert_eq!(request.method, "GET");
-            assert_eq!(request.path, "/v1/tasks/child-1");
+            assert_eq!(request.path, "/v1/tasks/child-1?agentView=true");
             served.fetch_add(1, Ordering::SeqCst);
             let body = state.lock().expect("state lock").to_string();
             let response = format!(
@@ -1707,7 +1707,7 @@ fn serve_fails_get_task_when_the_confirmation_read_fails() {
     let (base_url, server) = start_http_fixture(vec![
         ExpectedRequest {
             method: "GET",
-            path: "/v1/tasks/task-1",
+            path: "/v1/tasks/task-1?agentView=true",
             body: None,
             response_status: "200 OK",
             response_body: json!({
@@ -1721,7 +1721,7 @@ fn serve_fails_get_task_when_the_confirmation_read_fails() {
         },
         ExpectedRequest {
             method: "GET",
-            path: "/v1/tasks/task-1",
+            path: "/v1/tasks/task-1?agentView=true",
             body: None,
             response_status: "503 Service Unavailable",
             response_body: json!({ "error": "server restarting" }),
@@ -1764,14 +1764,14 @@ fn serve_does_not_resolve_a_wait_when_the_confirmation_read_fails() {
     let (base_url, server) = start_http_fixture(vec![
         ExpectedRequest {
             method: "GET",
-            path: "/v1/tasks/task-1",
+            path: "/v1/tasks/task-1?agentView=true",
             body: None,
             response_status: "200 OK",
             response_body: finished,
         },
         ExpectedRequest {
             method: "GET",
-            path: "/v1/tasks/task-1",
+            path: "/v1/tasks/task-1?agentView=true",
             body: None,
             response_status: "503 Service Unavailable",
             response_body: json!({ "error": "server restarting" }),

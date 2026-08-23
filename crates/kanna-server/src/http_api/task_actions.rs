@@ -1742,22 +1742,9 @@ pub(super) async fn request_revision(
                     format!("db error: {}", e),
                 )
             })?;
-            // A revision request always records the review verdict on the run
-            // it closes, even when the request itself cannot proceed — so a
-            // failure to resolve the budget still closes the run before it
-            // surfaces the error.
             let budget = match crate::task_creator::resolve_revision_budget(&db, &source_task_id) {
                 Ok(budget) => budget,
-                Err(error) => {
-                    let stage_result = revision_stage_result(&payload.summary, &payload.metadata)?;
-                    let _ = db.finish_latest_running_stage_run(
-                        &source_task_id,
-                        "failed",
-                        Some(&stage_result),
-                        Some(&payload.summary),
-                    );
-                    return Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, error));
-                }
+                Err(error) => return Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, error)),
             };
 
             // Claim a round atomically rather than checking and spending in
@@ -1787,20 +1774,6 @@ pub(super) async fn request_revision(
                 None
             };
 
-            let stage_result = revision_stage_result(&payload.summary, &payload.metadata)?;
-            let _ = db
-                .finish_latest_running_stage_run(
-                    &source_task_id,
-                    "failed",
-                    Some(&stage_result),
-                    Some(&payload.summary),
-                )
-                .map_err(|e| {
-                    (
-                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("db error: {}", e),
-                    )
-                })?;
             // Only a capped agent round is announced to the revising agent as
             // a round; a human-requested revision is the human's own call.
             let round = (origin.is_agent() && budget.limit > 0).then_some(
@@ -1809,12 +1782,21 @@ pub(super) async fn request_revision(
                     limit: budget.limit,
                 },
             );
+            // Historically an empty explicit prompt fell back to the verdict
+            // after that verdict had already been written to the current run.
+            // Resolve the same effective feedback before preparation so a
+            // preparation error cannot leave that run falsely terminated.
+            let revision_prompt = if payload.prompt.trim().is_empty() {
+                &payload.summary
+            } else {
+                &payload.prompt
+            };
             let prepared = match crate::task_creator::prepare_revision_task_for_api(
                 &db,
                 &state.config,
                 &source_task_id,
                 &payload.target_stage,
-                &payload.prompt,
+                revision_prompt,
                 round,
             ) {
                 Ok(prepared) => prepared,
@@ -1834,6 +1816,23 @@ pub(super) async fn request_revision(
                     return Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, error));
                 }
             };
+            // Only close the review run after revision preparation succeeds.
+            // An error response above therefore means the verdict and task
+            // lifecycle were not advanced behind the caller's back.
+            let stage_result = revision_stage_result(&payload.summary, &payload.metadata)?;
+            let _ = db
+                .finish_latest_running_stage_run(
+                    &source_task_id,
+                    "failed",
+                    Some(&stage_result),
+                    Some(&payload.summary),
+                )
+                .map_err(|e| {
+                    (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("db error: {}", e),
+                    )
+                })?;
             let rounds = match claimed_round {
                 Some(rounds) => rounds,
                 None => {

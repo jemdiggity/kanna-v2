@@ -339,6 +339,173 @@ fn start_run(db: &Db, run_id: &str, task_id: &str, stage: &str) {
     .expect("insert stage run");
 }
 
+#[tokio::test]
+async fn task_discovery_labels_cross_machine_rows_includes_closed_and_explains_remote_misses() {
+    use axum::body::to_bytes;
+    use tower::ServiceExt;
+
+    let source = test_state_with_seed("desktop-discovery-source", "Source", |db| {
+        db.insert_test_repo("repo-source", "Source Repo")
+            .expect("insert source repo");
+    });
+    let peer = test_state_with_seed("desktop-discovery-peer", "Peer", |db| {
+        db.insert_test_repo("repo-peer", "Peer Repo")
+            .expect("insert peer repo");
+        for task_id in ["remote-open", "remote-closed"] {
+            db.insert_test_pipeline_item(
+                task_id,
+                "repo-peer",
+                "remote searchable work",
+                Some(task_id),
+                "in progress",
+                "2026-08-23 00:00:00",
+            )
+            .expect("insert remote task");
+        }
+        db.close_pipeline_item("remote-closed")
+            .expect("close remote task");
+    });
+    let relay =
+        connect_test_relay_peer(&source, Arc::clone(&peer), Arc::new(AtomicBool::new(true)));
+    let app = router(Arc::clone(&source));
+
+    let miss = app
+        .clone()
+        .oneshot(
+            axum::http::Request::get("/v1/tasks/remote-open")
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("remote lookup response");
+    assert_eq!(miss.status(), axum::http::StatusCode::NOT_FOUND);
+    let miss_body = to_bytes(miss.into_body(), usize::MAX)
+        .await
+        .expect("read miss body");
+    let miss_body = String::from_utf8(miss_body.to_vec()).expect("utf8 miss body");
+    assert!(miss_body.contains("found on machine desktop-discovery-peer"));
+    assert!(miss_body.contains("pass machine_id"));
+
+    let recent = get_json_body(&app, "/v1/tasks/recent?allMachines=true&includeClosed=true").await;
+    assert!(recent["machineErrors"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
+    let tasks = recent["tasks"].as_array().expect("aggregated tasks");
+    assert!(tasks.iter().any(|task| {
+        task["id"] == "remote-open" && task["machineId"] == "desktop-discovery-peer"
+    }));
+    assert!(tasks.iter().any(|task| {
+        task["id"] == "remote-closed"
+            && task["machineId"] == "desktop-discovery-peer"
+            && !task["closedAt"].is_null()
+    }));
+
+    let search = get_json_body(
+        &app,
+        "/v1/tasks/search?query=searchable&allMachines=true&includeClosed=true",
+    )
+    .await;
+    assert_eq!(search["tasks"].as_array().map(Vec::len), Some(2));
+    relay.abort();
+}
+
+#[tokio::test]
+async fn level_triggered_activity_wait_returns_an_already_idle_task_immediately() {
+    let (app, db_path) = events_router();
+    let db = Db::open(&db_path).expect("open db");
+    db.update_pipeline_item_runtime_status("child-a", "busy", None)
+        .expect("mark busy");
+    db.update_pipeline_item_runtime_status("child-a", "idle", None)
+        .expect("mark idle");
+    db.connection_for_e2e_tests()
+        .execute(
+            "UPDATE pipeline_item SET runtime_event_pending_at = datetime('now', '-11 seconds') WHERE id = 'child-a'",
+            [],
+        )
+        .expect("age idle state through debounce");
+    db.flush_debounced_activity_events(300)
+        .expect("flush shared activity debounce");
+    assert_eq!(
+        db.list_non_busy_task_runtime_states(&crate::db::TaskEventScope::Tasks(vec![
+            "child-a".to_string(),
+        ]))
+        .expect("list settled runtime state"),
+        vec![("child-a".to_string(), "idle".to_string())]
+    );
+
+    let drained = get_json_body(
+        &app,
+        "/v1/task-events?taskIds=child-a&localOnly=true&timeoutSecs=0",
+    )
+    .await;
+    let response = get_json_body(
+        &app,
+        &format!(
+            "/v1/task-events?taskIds=child-a&localOnly=true&includeCurrentActivity=true&cursor={}&timeoutSecs=1",
+            cursor_of(&drained)
+        ),
+    )
+    .await;
+
+    assert_eq!(response["waitOutcome"], "events");
+    assert_eq!(response["events"].as_array().map(Vec::len), Some(1));
+    let event = &response["events"][0];
+    assert_eq!(event["type"], "task.runtime_settled");
+    assert_eq!(event["synthetic"], true);
+    assert_eq!(event["payload"]["currentState"], true);
+    assert_eq!(event["payload"]["runtimeState"], "idle");
+    assert_eq!(event["payload"]["title"], "child-a");
+    assert_eq!(event["payload"]["machineId"], "desktop-task-events");
+}
+
+#[test]
+fn runtime_settled_event_uses_fixed_debounce_and_suppresses_short_idle_blip() {
+    let (_, db_path) = events_router();
+    let db = Db::open(&db_path).expect("open db");
+    let start = db.latest_task_event_seq().expect("event head");
+    db.update_pipeline_item_runtime_status("child-a", "busy", None)
+        .expect("mark busy");
+    db.update_pipeline_item_runtime_status("child-a", "idle", None)
+        .expect("short idle");
+    assert_eq!(db.flush_debounced_activity_events(300).unwrap(), 0);
+    db.update_pipeline_item_runtime_status("child-a", "busy", None)
+        .expect("resume before debounce");
+    assert_eq!(db.flush_debounced_activity_events(300).unwrap(), 0);
+
+    db.update_pipeline_item_runtime_status("child-a", "idle", None)
+        .expect("settled idle");
+    db.connection_for_e2e_tests()
+        .execute(
+            "UPDATE pipeline_item SET runtime_event_pending_at = datetime('now', '-11 seconds') WHERE id = 'child-a'",
+            [],
+        )
+        .expect("age idle state");
+    assert_eq!(db.flush_debounced_activity_events(300).unwrap(), 0);
+    db.update_pipeline_item_runtime_status("child-a", "waiting", Some("Choose one"))
+        .expect("change between non-busy states");
+    assert_eq!(
+        db.flush_debounced_activity_events(300).unwrap(),
+        0,
+        "non-busy to non-busy changes are not another busy-to-idle signal"
+    );
+    let head = db.latest_task_event_seq().expect("event head after settle");
+    let events = db
+        .list_task_events(
+            &crate::db::TaskEventScope::Tasks(vec!["child-a".to_string()]),
+            start,
+            head,
+            20,
+        )
+        .expect("runtime events");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.event_type == "task.runtime_settled")
+            .count(),
+        1
+    );
+}
+
 /// One orchestrator, three children, events arriving in three different
 /// relationships to its polling: before the first call, while a call is
 /// blocked, and in the gap between two calls. Every event must arrive, in
@@ -679,6 +846,158 @@ async fn local_surface_aggregates_peer_repo_events_and_resumes_after_reconnect()
 /// debounce armed by the lifecycle write. Exercise that full path through the
 /// daemon socket, the real debounce loop, and the ks1 aggregate HTTP feed.
 #[tokio::test]
+async fn manual_stage_agent_exit_emits_enriched_awaiting_advance_event() {
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+
+    let unique = format!(
+        "task-event-awaiting-advance-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time before epoch")
+            .as_nanos()
+    );
+    let daemon_dir = std::env::temp_dir().join(&unique);
+    std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+    let socket_path = kanna_runtime_defaults::socket_path(&daemon_dir);
+    let listener = UnixListener::bind(&socket_path).expect("bind daemon socket");
+    let state = crate::http_api::test_state_with_daemon_dir_and_debounce(
+        "desktop-awaiting-advance",
+        "Awaiting Advance",
+        daemon_dir.to_str().expect("daemon path utf8"),
+        1,
+        |db| {
+            db.insert_test_repo("repo-awaiting-advance", "Awaiting Advance Repo")
+                .expect("insert repo");
+            db.insert_test_pipeline_item(
+                "manual-task",
+                "repo-awaiting-advance",
+                "Implement the change",
+                Some("Manual task title"),
+                "in progress",
+                "2026-08-23 00:00:00",
+            )
+            .expect("insert task");
+            start_run(db, "run-manual", "manual-task", "in progress");
+            db.connection_for_e2e_tests()
+                .execute(
+                    "UPDATE stage_run SET completion_transition = 'manual' WHERE id = 'run-manual'",
+                    [],
+                )
+                .expect("stamp manual completion policy");
+        },
+    );
+    let app = router(Arc::clone(&state));
+    let initial = get_json_body(
+        &app,
+        "/v1/task-events?taskIds=manual-task&localOnly=true&timeoutSecs=0",
+    )
+    .await;
+
+    let daemon = tokio::spawn(async move {
+        let (subscriber, _) = listener.accept().await.expect("accept subscription");
+        let (read_half, mut write_half) = subscriber.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.expect("read subscribe");
+        assert!(matches!(
+            serde_json::from_str::<DaemonCommand>(line.trim()).expect("decode subscribe"),
+            DaemonCommand::Subscribe
+        ));
+        write_half
+            .write_all(format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap()).as_bytes())
+            .await
+            .expect("ack subscribe");
+        let (control, _) = listener.accept().await.expect("accept list connection");
+        let (control_read, mut control_write) = control.into_split();
+        let mut control_reader = BufReader::new(control_read);
+        line.clear();
+        control_reader
+            .read_line(&mut line)
+            .await
+            .expect("read list command");
+        assert!(matches!(
+            serde_json::from_str::<DaemonCommand>(line.trim()).expect("decode list"),
+            DaemonCommand::List
+        ));
+        control_write
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&DaemonEvent::SessionList {
+                        sessions: Vec::new(),
+                    })
+                    .unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("write list response");
+        write_half
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&DaemonEvent::Exit {
+                        session_id: "manual-task".to_string(),
+                        code: 0,
+                        killed: false,
+                        resume_session_id: None,
+                    })
+                    .unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("write exit");
+        write_half
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&DaemonEvent::ShuttingDown).unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("stop watcher");
+    });
+    crate::terminal_watcher::terminal_state_watcher_once(
+        &state,
+        &crate::session_replacements::SessionReplacements::default(),
+    )
+    .await
+    .expect("watch daemon exit");
+    daemon.await.expect("daemon task");
+
+    let response = get_json_body(
+        &app,
+        &format!(
+            "/v1/task-events?taskIds=manual-task&localOnly=true&cursor={}&timeoutSecs=0",
+            cursor_of(&initial)
+        ),
+    )
+    .await;
+    let event = response["events"]
+        .as_array()
+        .expect("events array")
+        .iter()
+        .find(|event| event["type"] == "task.awaiting_advance")
+        .expect("awaiting advance event");
+    assert_eq!(event["machineId"], "desktop-awaiting-advance");
+    assert_eq!(event["payload"]["title"], "Manual task title");
+    assert_eq!(event["payload"]["stage"], "in progress");
+    assert_eq!(event["payload"]["activity"], "unread");
+    assert_eq!(event["payload"]["stageTransition"], "manual");
+    assert_eq!(event["payload"]["machineId"], "desktop-awaiting-advance");
+    assert_eq!(event["payload"]["latestRun"]["status"], "cancelled");
+    assert!(event["payload"]["latestRun"]["summarySnippet"]
+        .as_str()
+        .is_some_and(|summary| summary.contains("exit code 0")));
+
+    let _ = std::fs::remove_file(socket_path);
+    let _ = std::fs::remove_dir_all(daemon_dir);
+}
+
+#[tokio::test]
 async fn stage_start_emits_one_settled_working_edge_and_suppresses_a_resume_flicker() {
     use kanna_daemon::protocol::{
         Command as DaemonCommand, Event as DaemonEvent, SessionInfo, SessionState, SessionStatus,
@@ -862,8 +1181,13 @@ async fn stage_start_emits_one_settled_working_edge_and_suppresses_a_resume_flic
         json!({
             "previousActivity": "idle",
             "activity": "working",
+            "currentActivity": "working",
             "runtimeState": "busy",
             "latestRunFinishedWithoutCompletion": false,
+            "title": "settled-start",
+            "stage": "in progress",
+            "stageTransition": null,
+            "machineId": "desktop-start-peer",
         })
     );
 
@@ -1371,7 +1695,7 @@ async fn unauthenticated_loopback_waits_get_only_the_local_feed_for_all_browser_
             vec![("browser-local-child".into(), "run.started".into())]
         );
         assert!(!cursor_of(&body).starts_with("ks1."));
-        assert!(body["events"][0].get("machineId").is_none());
+        assert_eq!(body["events"][0]["machineId"], "desktop-browser-source");
     }
 
     relay.abort();

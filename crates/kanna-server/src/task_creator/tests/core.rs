@@ -3125,41 +3125,21 @@ fn read_agent_definition_loads_builtin_task_manager_agent_with_codex_first() {
         .contains("If this task-manager instance is not running on the Claude provider"));
     assert!(definition
         .prompt
-        .contains("never continuously re-arm an idle `kanna_wait_events` MCP call"));
-    assert!(definition.prompt.contains("connection.effectiveBaseUrl"));
-    assert!(definition.prompt.contains("serverStatus.desktop.id"));
+        .contains("there is no provider-specific shell watcher"));
     assert!(definition
         .prompt
-        .contains("server `ks1.` cursor that the direct route accepts"));
+        .contains("`include_current_activity: true`"));
     assert!(definition
         .prompt
-        .contains("[\"repoId\", \"taskIds\", \"parentTaskId\"]"));
-    assert!(definition
-        .prompt
-        .contains("url.searchParams.set(\"timeoutSecs\", String(timeoutSecs))"));
-    assert!(definition.prompt.contains("Math.min(60, remainingSecs)"));
-    assert!(definition
-        .prompt
-        .contains("new URL(`/v1/repos/${encodeURIComponent(repoId)}/tasks`, baseUrl)"));
-    assert!(definition
-        .prompt
-        .contains("const requiredNonWorkingSamples = 3"));
-    assert!(definition
-        .prompt
-        .contains("verify with kanna_get_task and the log tail"));
-    assert!(definition
-        .prompt
-        .contains("untracked tasks are covered only by events and the heartbeat"));
-    assert!(definition.prompt.contains("25 * 60 * 1000"));
-    assert!(definition.prompt.contains("run_in_background: true"));
-    assert!(definition
-        .prompt
-        .contains("response body rather than silently restarting"));
+        .contains("fixed 10-second server debounce"));
+    assert!(definition.prompt.contains("Never build a polling loop"));
+    assert!(definition.prompt.contains("\"all_machines\": true"));
+    assert!(definition.prompt.contains("`include_closed: true`"));
+    assert!(definition.prompt.contains("`task.runtime_settled`"));
+    assert!(definition.prompt.contains("`task.awaiting_advance`"));
+    assert!(definition.prompt.contains("`currentActivity`"));
     assert!(definition.prompt.contains("task.awaiting_input"));
     assert!(definition.prompt.contains("task.activity_changed"));
-    assert!(definition
-        .prompt
-        .contains("latestRunFinishedWithoutCompletion"));
     assert!(definition.prompt.contains("no_live_agent_session"));
     assert!(definition.prompt.contains("delivery_uncertain"));
     assert!(definition.prompt.contains("kanna_resume_task"));

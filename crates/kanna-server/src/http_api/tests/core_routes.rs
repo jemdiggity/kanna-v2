@@ -1699,6 +1699,7 @@ async fn task_detail_reports_the_composer_apart_from_what_the_session_said() {
     });
 
     let response = app
+        .clone()
         .oneshot(
             Request::get("/v1/tasks/task-1")
                 .body(Body::empty())
@@ -1731,6 +1732,23 @@ async fn task_detail_reports_the_composer_apart_from_what_the_session_said() {
             "{field} must never carry composer text"
         );
     }
+
+    let agent_response = app
+        .oneshot(
+            Request::get("/v1/tasks/task-1?agentView=true")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let agent_body = axum::body::to_bytes(agent_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let agent_detail: serde_json::Value = from_slice(&agent_body).unwrap();
+    assert!(agent_detail.get("composer").is_none());
+    assert!(!String::from_utf8(agent_body.to_vec())
+        .unwrap()
+        .contains("run it on my phone"));
 }
 
 /// A task nothing has reported a composer for says nothing about one. Absent

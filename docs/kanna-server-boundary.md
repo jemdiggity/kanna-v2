@@ -318,6 +318,14 @@ There is no global ordering between independent SQLite sequence spaces;
 ordering remains exact within each machine and `machineId` identifies the
 sequence space for every aggregated event.
 
+Task discovery follows the same explicit machine model. Recent-task and search
+routes accept `allMachines=true`; that response contains `tasks`, with a
+`machineId` on every row, plus `machineErrors` so a partial account view is
+never silent. Both routes accept `includeClosed=true`. A local task-detail miss
+checks reachable siblings and, when the id exists elsewhere, returns an error
+that names the owning machine and tells MCP callers to repeat
+`kanna_get_task` with that `machine_id`, rather than returning a bare 404.
+
 ## Task Transfer Transport
 
 `kanna-server` owns the `kanna-task-transfer` sidecar: it spawns the process,
@@ -618,6 +626,26 @@ cursor-based, not snapshot-diffed:
   is a positive match on a prompt the agent CLI rendered. It is deliberately
   never inferred from a session going quiet; see
   [2026-07-29-awaiting-input-detection-e2e-gap.md](2026-07-29-awaiting-input-detection-e2e-gap.md).
+- `task.runtime_settled` is the manager-grade activity signal. It is based only
+  on the daemon runtime dimension, never the sidebar's human `read`/`unread`
+  state. After transitioning from `busy`, a task must remain `idle`, `waiting`,
+  or `exited` for the fixed 10-second server debounce before the event is
+  appended; a busy→idle→busy blip inside that window emits nothing. It is unconditional —
+  no waiting-prompt snippet, provider heuristic, or worktree timestamp gates
+  it. Runtime settling extends the existing `activity_event_debounce_loop` and
+  `flush_debounced_activity_events` transaction; there is no second debounce
+  worker or snapshot-diff detector. With `includeCurrentActivity=true`, the
+  wait is also level-triggered:
+  every scoped task whose current non-busy state has already survived that
+  debounce is returned immediately as a synthetic `task.runtime_settled`
+  response row without consuming or inventing a sequence number. The durable
+  cursor remains unchanged, so restart cannot miss parked work and synthetic
+  state cannot weaken the append-log ordering contract.
+- `task.awaiting_advance` is appended atomically when an un-killed daemon Exit
+  ends a manual-transition main run without a stage verdict. It is useful
+  terminal context, but managers use the level-triggered runtime-settled wait
+  as the general primitive because an agent can stop at its composer without
+  exiting.
 - `task.activity_changed` is the provider-neutral settled display transition.
   Every activity direction (`working`, `idle`, or `unread`) is eligible for
   every provider; no waiting-prompt placeholder is required. The server waits
@@ -649,16 +677,14 @@ cursor-based, not snapshot-diffed:
   `quit-sent`, `exited`, `already-exited`, `degraded`). See
   [Source finalization](#source-finalization).
 
-A cursor-less wait drains retained history, so every working-to-stopped edge
-recorded after this guarantee ships returns immediately even when the caller
-starts waiting later. One legacy gap remains: a task already stopped without a
-retained edge has no event to drain. Adoption must begin with `kanna_get_task`
-today. Making that case return from `kanna_wait_events` itself is a follow-up:
-the narrow design is an `initialActivities` snapshot on cursor-less
-`taskIds`-scoped waits, confirmed once by the existing MCP debounce before it is
-reported. It cannot be synthesized as a sequenced event without weakening the
-cursor contract, and adding the snapshot here alone would bypass multi-machine
-fan-in and create a second, server-side debounce.
+Every delivered event is enriched with the task's current title, stage,
+`currentActivity`, stage transition, and machine id. The `activity` field is
+also current except on `task.activity_changed`, where it retains the historical
+edge value for compatibility. Finished and awaiting events also carry the
+latest run status and a bounded summary snippet. This current context is
+resolved at delivery time rather than frozen into the append row, which is
+intentional: a manager draining retained history needs to know what it can do
+now. `machineId` is present in the payload and at the aggregate row level.
 
 Four scopes, in precedence order: `taskIds`, then `parentTaskId`, then
 `repoId`, then `repoRemoteUrlHash`. `parentTaskId` exists because the other two do not cover a fan-out
@@ -799,7 +825,7 @@ stalled a task for a day.
 So the composer is reported as its own labelled field and is excluded from
 every surface that means "what the session said":
 
-- `GET /v1/tasks/{task_id}` reports
+- The ordinary human/UI `GET /v1/tasks/{task_id}` view reports
   `composer: { text?, attestation }`. `attestation` is `typed` (keystrokes
   reached that composer since its last producer-declared submission boundary,
   so `text` may be a human's unsent line), `not-typed` (the daemon watched the
@@ -811,10 +837,16 @@ every surface that means "what the session said":
   daemon's snippet extraction cuts at the composer's *position*, not by a
   per-line rule, because a composer long enough to wrap leaves continuation
   rows carrying no prompt glyph.
-- `GET /v1/tasks/{task_id}/logs` keeps the composer line in the rendered tail
+- The ordinary human/UI `GET /v1/tasks/{task_id}/logs` view keeps the composer line in the rendered tail
   but labels it — `[composer (not-typed), not session output: …]` — because a
   reader deserves to know a composer is there without being able to mistake it
   for transcript.
+- Agent tools request `agentView=true`. In that view, task detail omits the
+  entire composer field unless attestation is `typed`, and logs remove the
+  composer row plus wrapped continuation/hint rows unless it is typed. A typed
+  row remains as `[composer draft (typed), not session output: …]`. The bundled
+  MCP catalog and CLI read/wait/log paths always select this view, so provider
+  suggestions never reach an agent as content.
 
 The values come from the daemon, which is the only thing that knows what was
 typed: it publishes `ComposerChanged` on the composer's own edges (a suggestion
@@ -822,6 +854,10 @@ appearing, a human starting to type, a boundary clearing the ledger) and
 carries the same two fields on `SessionInfo`, so the watcher reconciles them
 from `List` against every daemon generation. Raw PTY transcripts are unchanged;
 this is a rule about derived surfaces.
+
+The broader meaning and future of `waitingPromptSnippet` is deliberately out of
+scope here and tracked by issue #1213. Event delivery never gates on snippet
+presence; beyond excluding composer rows, its existing semantics are unchanged.
 
 The same ledger decides whether a delivered message is held — see
 "Refused Task Input" above and `crates/daemon/SPEC.md`. Zero typed bytes is

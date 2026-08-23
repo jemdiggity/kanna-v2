@@ -560,7 +560,7 @@ async fn wait_task(
     let timeout_secs = clamp_wait_timeout_secs(timeout_secs);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
     let poll_interval = Duration::from_secs(poll_secs.max(1));
-    let path = format!("/v1/tasks/{}", encode_path_segment(task_id));
+    let path = format!("/v1/tasks/{}?agentView=true", encode_path_segment(task_id));
     loop {
         let task = get_routed_json(base_url, &path, machine_id).await?;
         // Every wait match now rests on a durable record — the task is closed,

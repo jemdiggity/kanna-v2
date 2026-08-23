@@ -304,7 +304,7 @@ async fn wait_catalog_task_routed(
     let timeout_secs = clamp_wait_timeout_secs(timeout_secs);
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     let poll_interval = std::time::Duration::from_secs(poll_secs.max(1));
-    let path = crate::api::task_get_path(task_id);
+    let path = crate::api::task_agent_get_path(task_id);
     loop {
         let task = get_routed_json(base_url, &path, machine_id).await?;
         if catalog_task_matches_wait_until(&task, until) {

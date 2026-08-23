@@ -11,6 +11,8 @@ use std::sync::Arc;
 #[serde(rename_all = "camelCase")]
 pub(super) struct TaskLogsQuery {
     tail: Option<usize>,
+    #[serde(default)]
+    agent_view: bool,
 }
 
 const DEFAULT_TASK_LOG_TAIL: usize = 50;
@@ -63,7 +65,11 @@ pub(super) async fn task_logs(
         render_agent_journal_logs(&state.config.daemon_dir, &pipeline_item_id, tail)?
     } else {
         let rendered = render_pty_snapshot_logs(&state.config.daemon_dir, &pipeline_item_id).await;
-        label_composer_line(&rendered, item.composer_attestation.as_deref())
+        label_composer_line(
+            &rendered,
+            item.composer_attestation.as_deref(),
+            query.agent_view,
+        )
     };
     let text = if is_missing_live_log_response(&text) {
         persisted.unwrap_or(text)
@@ -90,7 +96,7 @@ pub(super) async fn task_logs(
 /// stalling a task for a day. The line is kept rather than dropped — a reader
 /// deserves to know a composer is there and what is in it — but it is labelled
 /// with what the daemon can prove about who put it there.
-fn label_composer_line(rendered: &str, attestation: Option<&str>) -> String {
+fn label_composer_line(rendered: &str, attestation: Option<&str>, agent_view: bool) -> String {
     use kanna_daemon::headless_terminal::{composer_line_text, line_is_composer};
 
     let mut lines = rendered.lines().collect::<Vec<_>>();
@@ -101,8 +107,17 @@ fn label_composer_line(rendered: &str, attestation: Option<&str>) -> String {
     // is the same thing a reader should do with it as `unknown`: prove
     // nothing, assume nothing.
     let attestation = attestation.unwrap_or("unknown");
+    if agent_view && attestation != "typed" {
+        lines.truncate(index);
+        return lines.join("\n");
+    }
+    let label = if agent_view {
+        "composer draft"
+    } else {
+        "composer"
+    };
     let labelled = format!(
-        "[composer ({attestation}), not session output: {}]",
+        "[{label} ({attestation}), not session output: {}]",
         composer_line_text(lines[index])
     );
     // Everything below the composer row goes with it. Those rows are the hint
@@ -253,7 +268,7 @@ mod tests {
             "⏵⏵ bypass permissions on",
         );
 
-        let labelled = label_composer_line(rendered, Some("not-typed"));
+        let labelled = label_composer_line(rendered, Some("not-typed"), false);
 
         assert!(labelled.contains("⏺ Ready for review."));
         assert!(
@@ -272,7 +287,7 @@ mod tests {
     /// assume nothing.
     #[test]
     fn composer_line_without_a_recorded_attestation_is_labelled_unknown() {
-        let labelled = label_composer_line("❯ half typed", None);
+        let labelled = label_composer_line("❯ half typed", None, false);
         assert_eq!(
             labelled,
             "[composer (unknown), not session output: half typed]"
@@ -291,7 +306,7 @@ mod tests {
             "⏵⏵ bypass permissions on",
         );
 
-        let labelled = label_composer_line(rendered, Some("not-typed"));
+        let labelled = label_composer_line(rendered, Some("not-typed"), false);
 
         assert!(labelled.starts_with("⏺ Ready for review."));
         assert!(
@@ -305,7 +320,21 @@ mod tests {
     #[test]
     fn a_frame_without_a_composer_is_left_alone() {
         let rendered = "$ cargo test\ntest result: ok.";
-        assert_eq!(label_composer_line(rendered, Some("typed")), rendered);
+        assert_eq!(
+            label_composer_line(rendered, Some("typed"), false),
+            rendered
+        );
+    }
+
+    #[test]
+    fn agent_view_omits_idle_provider_suggestion_but_keeps_typed_draft_labelled() {
+        let suggestion = "⏺ Done.\n❯ Write tests for @filename\n⏵⏵ bypass permissions on";
+        let sanitized = label_composer_line(suggestion, Some("not-typed"), true);
+        assert_eq!(sanitized, "⏺ Done.");
+        assert!(!sanitized.contains("Write tests for @filename"));
+
+        let typed = label_composer_line("⏺ Done.\n❯ please rename this", Some("typed"), true);
+        assert!(typed.contains("[composer draft (typed), not session output: please rename this]"));
     }
 
     #[test]

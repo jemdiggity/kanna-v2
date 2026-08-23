@@ -5,6 +5,8 @@ use super::{
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::json;
 
+const MANAGER_ACTIVITY_DEBOUNCE_SECONDS: u64 = 10;
+
 /// Change an open task's activity and arm the settled-transition debounce in
 /// the same transaction. `None` means there is no open task; `Some(false)` is
 /// an unchanged value or a failed optimistic precondition.
@@ -118,16 +120,24 @@ impl Db {
         rows.collect()
     }
 
+    #[cfg(test)]
     pub fn list_recent_pipeline_items(&self) -> Result<Vec<PipelineItem>, rusqlite::Error> {
+        self.list_recent_pipeline_items_including_closed(false)
+    }
+
+    pub fn list_recent_pipeline_items_including_closed(
+        &self,
+        include_closed: bool,
+    ) -> Result<Vec<PipelineItem>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, pipeline, stage,
              pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at,
              closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision, cloud_task_id, revision_rounds, runtime_status, input_blocked, composer_text, composer_attestation
              FROM pipeline_item
-             WHERE closed_at IS NULL
+             WHERE (? OR closed_at IS NULL)
              ORDER BY updated_at DESC, created_at DESC",
         )?;
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map([include_closed], |row| {
             Ok(PipelineItem {
                 id: row.get(0)?,
                 repo_id: row.get(1)?,
@@ -167,57 +177,69 @@ impl Db {
         rows.collect()
     }
 
+    #[cfg(test)]
     pub fn search_pipeline_items(&self, query: &str) -> Result<Vec<PipelineItem>, rusqlite::Error> {
+        self.search_pipeline_items_including_closed(query, false)
+    }
+
+    pub fn search_pipeline_items_including_closed(
+        &self,
+        query: &str,
+        include_closed: bool,
+    ) -> Result<Vec<PipelineItem>, rusqlite::Error> {
         let like_query = format!("%{}%", query.to_lowercase());
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, pipeline, stage,
              pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at,
              closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision, cloud_task_id, revision_rounds, runtime_status, input_blocked, composer_text, composer_attestation
              FROM pipeline_item
-             WHERE closed_at IS NULL
+             WHERE (? OR closed_at IS NULL)
                AND (
                  lower(coalesce(display_name, '')) LIKE ?
                  OR lower(coalesce(prompt, '')) LIKE ?
                )
              ORDER BY updated_at DESC, created_at DESC",
         )?;
-        let rows = stmt.query_map([&like_query, &like_query], |row| {
-            Ok(PipelineItem {
-                id: row.get(0)?,
-                repo_id: row.get(1)?,
-                issue_number: row.get(2)?,
-                issue_title: row.get(3)?,
-                prompt: row.get(4)?,
-                pipeline: row.get(5)?,
-                stage: row.get(6)?,
-                pr_number: row.get(7)?,
-                pr_url: row.get(8)?,
-                branch: row.get(9)?,
-                agent_type: row.get(10)?,
-                agent_provider: row.get(11)?,
-                activity: row.get(12)?,
-                activity_changed_at: row.get(13)?,
-                closed_at: row.get(14)?,
-                pinned: row.get(15)?,
-                pin_order: row.get(16)?,
-                display_name: row.get(17)?,
-                last_output_preview: row.get(18)?,
-                created_at: row.get(19)?,
-                updated_at: row.get(20)?,
-                base_ref: row.get(21)?,
-                notify_task_id: row.get(22)?,
-                notified_at: row.get(23)?,
-                parent_task_id: row.get(24)?,
-                pipeline_def: row.get(25)?,
-                activity_revision: row.get(26)?,
-                cloud_task_id: row.get(27)?,
-                revision_rounds: row.get(28)?,
-                runtime_status: row.get(29)?,
-                input_blocked: row.get(30)?,
-                composer_text: row.get(31)?,
-                composer_attestation: row.get(32)?,
-            })
-        })?;
+        let rows = stmt.query_map(
+            rusqlite::params![include_closed, like_query, like_query],
+            |row| {
+                Ok(PipelineItem {
+                    id: row.get(0)?,
+                    repo_id: row.get(1)?,
+                    issue_number: row.get(2)?,
+                    issue_title: row.get(3)?,
+                    prompt: row.get(4)?,
+                    pipeline: row.get(5)?,
+                    stage: row.get(6)?,
+                    pr_number: row.get(7)?,
+                    pr_url: row.get(8)?,
+                    branch: row.get(9)?,
+                    agent_type: row.get(10)?,
+                    agent_provider: row.get(11)?,
+                    activity: row.get(12)?,
+                    activity_changed_at: row.get(13)?,
+                    closed_at: row.get(14)?,
+                    pinned: row.get(15)?,
+                    pin_order: row.get(16)?,
+                    display_name: row.get(17)?,
+                    last_output_preview: row.get(18)?,
+                    created_at: row.get(19)?,
+                    updated_at: row.get(20)?,
+                    base_ref: row.get(21)?,
+                    notify_task_id: row.get(22)?,
+                    notified_at: row.get(23)?,
+                    parent_task_id: row.get(24)?,
+                    pipeline_def: row.get(25)?,
+                    activity_revision: row.get(26)?,
+                    cloud_task_id: row.get(27)?,
+                    revision_rounds: row.get(28)?,
+                    runtime_status: row.get(29)?,
+                    input_blocked: row.get(30)?,
+                    composer_text: row.get(31)?,
+                    composer_attestation: row.get(32)?,
+                })
+            },
+        )?;
         rows.collect()
     }
 
@@ -875,6 +897,52 @@ impl Db {
                 )?;
                 appended += 1;
             }
+            // Extend the same authoritative debounce flush with the manager's
+            // runtime dimension. This deliberately shares the server loop and
+            // transaction with ActivityChanged, while retaining a fixed
+            // 10-second window independent of the legacy display-event knob.
+            let runtime_modifier = format!("-{MANAGER_ACTIVITY_DEBOUNCE_SECONDS} seconds");
+            let mut runtime_stmt = db.conn.prepare(
+                "SELECT id, runtime_event_baseline, runtime_status
+                 FROM pipeline_item
+                 WHERE closed_at IS NULL
+                   AND runtime_event_pending_at IS NOT NULL
+                   AND runtime_event_pending_at <= datetime('now', ?)",
+            )?;
+            let runtime_rows = runtime_stmt
+                .query_map([runtime_modifier], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(runtime_stmt);
+            for (id, baseline, runtime_state) in runtime_rows {
+                db.conn.execute(
+                    "UPDATE pipeline_item
+                     SET runtime_event_baseline = ?, runtime_event_pending_at = NULL
+                     WHERE id = ?",
+                    (&runtime_state, &id),
+                )?;
+                if baseline.as_deref() != Some("busy")
+                    || !matches!(runtime_state.as_deref(), Some("idle" | "waiting" | "exited"))
+                {
+                    continue;
+                }
+                db.append_task_event(
+                    &id,
+                    TaskEventKind::RuntimeSettled,
+                    json!({
+                        "previousRuntimeState": baseline,
+                        "runtimeState": runtime_state,
+                    }),
+                )?;
+            }
+            // Preserve the established return contract: callers and tests use
+            // this count for ActivityChanged rows, not all kinds sharing the
+            // flush transaction.
             Ok(appended)
         })
     }

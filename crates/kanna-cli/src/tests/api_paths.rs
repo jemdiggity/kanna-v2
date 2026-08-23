@@ -53,9 +53,12 @@ fn dependent_tasks_exist_uses_task_endpoint() {
 fn task_logs_uses_task_logs_endpoint() {
     assert_eq!(
         task_logs_path("task 1", Some(25)),
-        "/v1/tasks/task%201/logs?tail=25"
+        "/v1/tasks/task%201/logs?tail=25&agentView=true"
     );
-    assert_eq!(task_logs_path("task-1", None), "/v1/tasks/task-1/logs");
+    assert_eq!(
+        task_logs_path("task-1", None),
+        "/v1/tasks/task-1/logs?agentView=true"
+    );
 }
 
 #[test]

@@ -413,7 +413,7 @@ fn resolves_expected_requests_for_every_bundled_tool() {
             json!({ "task_id": "task 1" }),
             Method::Get,
             ResponseKind::Json,
-            "/v1/tasks/task%201",
+            "/v1/tasks/task%201?agentView=true",
             json!({}),
         ),
         (
@@ -429,7 +429,7 @@ fn resolves_expected_requests_for_every_bundled_tool() {
             json!({ "task_id": "task 1", "tail": 25 }),
             Method::Get,
             ResponseKind::Text,
-            "/v1/tasks/task%201/logs?tail=25",
+            "/v1/tasks/task%201/logs?tail=25&agentView=true",
             json!({}),
         ),
         (
@@ -767,7 +767,7 @@ fn resolves_expected_requests_for_every_bundled_tool() {
     )
     .expect("routed task");
     assert_eq!(routed.machine_id.as_deref(), Some("desktop-studio"));
-    assert_eq!(routed.path, "/v1/tasks/task-1");
+    assert_eq!(routed.path, "/v1/tasks/task-1?agentView=true");
     assert_eq!(routed.body, json!({}));
 
     let wait = resolve_request(

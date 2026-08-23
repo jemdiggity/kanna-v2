@@ -119,6 +119,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "053_pipeline_item_input_blocked",
     "054_pipeline_item_composer",
     "055_activity_event_debounce",
+    "056_runtime_settled_debounce",
 ];
 
 #[derive(Debug, Serialize)]
@@ -1796,6 +1797,18 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         conn.execute(
             "UPDATE pipeline_item SET activity_event_baseline = activity
              WHERE activity_event_baseline IS NULL",
+            [],
+        )?;
+        Ok(())
+    })?;
+
+    run_migration(conn, "056_runtime_settled_debounce", |conn| {
+        add_column(conn, "pipeline_item", "runtime_event_baseline", "TEXT")?;
+        add_column(conn, "pipeline_item", "runtime_event_pending_at", "TEXT")?;
+        conn.execute(
+            "UPDATE pipeline_item
+             SET runtime_event_baseline = runtime_status
+             WHERE runtime_event_baseline IS NULL",
             [],
         )?;
         Ok(())

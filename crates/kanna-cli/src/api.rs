@@ -60,6 +60,10 @@ pub(crate) fn task_get_path(task_id: &str) -> String {
     format!("/v1/tasks/{}", encode_path_segment(task_id))
 }
 
+pub(crate) fn task_agent_get_path(task_id: &str) -> String {
+    format!("{}?agentView=true", task_get_path(task_id))
+}
+
 pub(crate) fn task_children_path(task_id: &str) -> String {
     format!("{}/children", task_get_path(task_id))
 }
@@ -130,8 +134,8 @@ pub(crate) fn task_inputs_path(task_id: &str, tail: Option<usize>) -> String {
 pub(crate) fn task_logs_path(task_id: &str, tail: Option<usize>) -> String {
     let task_id = encode_path_segment(task_id);
     match tail {
-        Some(tail) => format!("/v1/tasks/{task_id}/logs?tail={tail}"),
-        None => format!("/v1/tasks/{task_id}/logs"),
+        Some(tail) => format!("/v1/tasks/{task_id}/logs?tail={tail}&agentView=true"),
+        None => format!("/v1/tasks/{task_id}/logs?agentView=true"),
     }
 }
 
@@ -352,7 +356,7 @@ pub(crate) async fn search_tasks_via_api(
 }
 
 pub(crate) async fn get_task_via_api(base_url: &str, task_id: &str) -> Result<TaskDetail, String> {
-    get_json(base_url, &task_get_path(task_id)).await
+    get_json(base_url, &task_agent_get_path(task_id)).await
 }
 
 pub(crate) async fn list_task_children_via_api(
@@ -458,7 +462,7 @@ pub(crate) async fn wait_catalog_task_via_api(
     let timeout_secs = clamp_wait_timeout_secs(timeout_secs);
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     let poll_interval = std::time::Duration::from_secs(poll_secs.max(1));
-    let path = task_get_path(task_id);
+    let path = task_agent_get_path(task_id);
     loop {
         let task: Value = get_json(base_url, &path).await?;
         if catalog_task_matches_wait_until(&task, until) {
