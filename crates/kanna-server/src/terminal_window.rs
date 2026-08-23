@@ -166,6 +166,125 @@ fn retain_history(history: &mut Vec<String>, retention_bytes: usize) -> bool {
     true
 }
 
+/// Appended to carried-over history so it cannot leak terminal state into the
+/// session it is seeded under. The serializer emits SGR *diffs* plus a trailing
+/// mode suffix (`ghostty-xterm-compat-serialize::serialize_terminal`); this
+/// resets every mode that suffix can set, so the replacement agent starts from
+/// the same terminal state it would have had without the seed.
+const CARRYOVER_MODE_RESET: &str = concat!(
+    "\x1b[0m",     // SGR reset — the serializer emits style diffs
+    "\x1b[?6l",    // origin mode off
+    "\x1b[?1l",    // application cursor keys off
+    "\x1b[?7h",    // autowrap on
+    "\x1b[?45l",   // reverse-wrap off
+    "\x1b[?66l",   // application keypad off
+    "\x1b[?69l",   // left/right margins off
+    "\x1b[r",      // scrolling region reset
+    "\x1b[4l",     // insert mode off
+    "\x1b[?2004l", // bracketed paste off
+    "\x1b[?1004l", // focus reporting off
+    "\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1006l", // mouse reporting off
+    "\x1b[?25h",   // cursor visible
+);
+
+/// Flatten a serialized terminal into history that can be seeded under a
+/// replacement session's terminal, so a stage transition carries the previous
+/// session's primary-screen scrollback instead of discarding it.
+///
+/// The alternate-screen segment is dropped, not flattened: it is the TUI's
+/// transient frame, its cursor addressing is only valid on the alt screen, and
+/// replaying it would hand the replacement session an active alt screen. What
+/// carries over is everything the previous session printed on the primary
+/// screen — setup output and any earlier carried-over history included.
+/// Dropping the segment also drops the serializer's trailing mode suffix; the
+/// no-alt shape keeps it inline, which is why [`CARRYOVER_MODE_RESET`] is
+/// appended either way.
+///
+/// Returns `None` when the primary screen holds nothing worth carrying.
+pub(crate) fn carryover_history_vt(vt: &str) -> Option<String> {
+    let primary = match vt.rfind(ALT_SCREEN_ENTER) {
+        Some(boundary) => &vt[..boundary],
+        None => vt,
+    };
+    if !has_renderable_text(primary) {
+        return None;
+    }
+    Some(format!("{primary}{CARRYOVER_MODE_RESET}"))
+}
+
+/// Build the snapshot seeded under a stage transition's replacement session
+/// from the outgoing session's snapshot, or `None` when there is nothing worth
+/// carrying.
+///
+/// The cursor is pinned so the replacement's first output lands below the
+/// carried history instead of overwriting it:
+/// - when an alt-screen segment was dropped, the snapshot's cursor described
+///   the alt screen and is meaningless on the primary one — pin to the bottom
+///   row, whose worst case is a blank gap, never clobbered history;
+/// - otherwise the snapshot's cursor is the real primary-screen cursor, and
+///   keeping it continues output exactly where the previous session stopped.
+pub(crate) fn carryover_seed_snapshot(
+    snapshot: &kanna_daemon::protocol::TerminalSnapshot,
+) -> Option<kanna_daemon::protocol::TerminalSnapshot> {
+    let vt = carryover_history_vt(&snapshot.vt)?;
+    let dropped_alt_segment = snapshot.vt.contains(ALT_SCREEN_ENTER);
+    let (cursor_row, cursor_col) = if dropped_alt_segment {
+        (snapshot.rows.saturating_sub(1), 0)
+    } else {
+        (snapshot.cursor_row, snapshot.cursor_col)
+    };
+    Some(kanna_daemon::protocol::TerminalSnapshot {
+        version: 1,
+        rows: snapshot.rows,
+        cols: snapshot.cols,
+        cursor_row,
+        cursor_col,
+        cursor_visible: true,
+        saved_at: snapshot.saved_at,
+        sequence: snapshot.sequence,
+        vt,
+    })
+}
+
+/// Whether a VT fragment renders any non-whitespace text — escape sequences
+/// alone (styling, cursor movement, modes) are not content.
+fn has_renderable_text(vt: &str) -> bool {
+    let mut chars = vt.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\x1b' {
+            if !ch.is_whitespace() && !ch.is_control() {
+                return true;
+            }
+            continue;
+        }
+        match chars.next() {
+            // CSI: parameter/intermediate bytes, then one final byte in @..=~.
+            Some('[') => {
+                for terminator in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&terminator) {
+                        break;
+                    }
+                }
+            }
+            // OSC: consume through BEL or ESC \ (ST).
+            Some(']') => {
+                while let Some(body) = chars.next() {
+                    if body == '\x07' {
+                        break;
+                    }
+                    if body == '\x1b' && chars.peek() == Some(&'\\') {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            // Two-byte escapes (ESC 7, ESC =, ESC c, …): already consumed.
+            Some(_) | None => {}
+        }
+    }
+    false
+}
+
 /// Scrollback older than a sent window, addressed by line index from its oldest
 /// retained line.
 #[derive(Debug, Default)]
@@ -433,6 +552,99 @@ mod tests {
         );
         assert!(windowed.window.ends_with("alt-29"));
         assert!(!windowed.history.iter().any(|line| line.contains("alt-")));
+    }
+
+    #[test]
+    fn carryover_drops_the_alt_screen_segment_and_its_mode_suffix() {
+        let primary = "setup: pnpm install\r\ndone";
+        let vt = format!(
+            "{primary}\x1b[0m{ALT_SCREEN_ENTER}\x1b[H\x1b[2Jclaude tui frame\x1b[?1002h\x1b[?1006h"
+        );
+
+        let carried = carryover_history_vt(&vt).expect("primary content must carry over");
+        assert!(carried.starts_with(primary));
+        assert!(!carried.contains(ALT_SCREEN_ENTER));
+        assert!(!carried.contains("claude tui frame"));
+        // The serializer's mouse-mode suffix sat after the alt segment; the
+        // carryover must end with the sanitize suffix instead.
+        assert!(!carried.contains("\x1b[?1002h"));
+        assert!(carried.ends_with(CARRYOVER_MODE_RESET));
+    }
+
+    #[test]
+    fn carryover_without_an_alt_segment_keeps_the_whole_vt_and_resets_modes() {
+        let vt = "codex output\r\nmore output\x1b[?2004h\x1b[?1000h";
+
+        let carried = carryover_history_vt(vt).expect("primary content must carry over");
+        assert!(carried.starts_with(vt));
+        assert!(carried.ends_with(CARRYOVER_MODE_RESET));
+        // The inline suffix survives, but the sanitize suffix after it turns
+        // every mode back off.
+        let paste_on = carried.find("\x1b[?2004h").unwrap();
+        let paste_off = carried.find("\x1b[?2004l").unwrap();
+        assert!(paste_off > paste_on);
+    }
+
+    #[test]
+    fn carryover_of_a_contentless_terminal_is_none() {
+        assert_eq!(carryover_history_vt(""), None);
+        // Escape sequences, whitespace, and an OSC title are not content.
+        assert_eq!(
+            carryover_history_vt("\x1b[0m\x1b[2J\x1b[H  \r\n\t\x1b]0;title\x07\x1b[?2004h"),
+            None
+        );
+        // A terminal that only ever drew an alt-screen TUI carries nothing.
+        assert_eq!(
+            carryover_history_vt(&format!("\x1b[0m{ALT_SCREEN_ENTER}\x1b[Htui")),
+            None
+        );
+    }
+
+    #[test]
+    fn carried_history_survives_a_replacement_terminal_round_trip() {
+        use kanna_daemon::headless_terminal::HeadlessTerminal;
+
+        // The outgoing session: setup output on the primary screen, then a
+        // Claude-shaped TUI takes the alternate screen with mouse reporting on.
+        let mut outgoing = HeadlessTerminal::new(80, 24, 1_000).unwrap();
+        outgoing.write(b"Running startup script...\r\n$ pnpm install\r\nadded 120 packages\r\n");
+        outgoing
+            .write(b"\x1b[?2004h\x1b[?1049h\x1b[2J\x1b[H\x1b[?1002h\x1b[?1006hCLAUDE TUI FRAME");
+        let snapshot = outgoing.snapshot().unwrap();
+        assert!(snapshot.vt.contains("CLAUDE TUI FRAME"));
+
+        // The stage transition seeds the flattened history under the
+        // replacement session, whose prelude marker and new output follow.
+        let seed = carryover_seed_snapshot(&snapshot).expect("setup output must carry over");
+        let mut replacement = HeadlessTerminal::from_snapshot(&seed, 1_000).unwrap();
+        replacement.write(
+            "\r\n\x1b[2m\u{2501}\u{2501} Stage advanced: in progress \u{2192} review \u{2501}\u{2501}\x1b[0m\r\n"
+                .as_bytes(),
+        );
+        replacement.write(b"review agent starting\r\n");
+
+        let vt = replacement.snapshot().unwrap().vt;
+        let setup = vt.find("added 120 packages").expect("setup output kept");
+        let marker = vt.find("Stage advanced").expect("stage marker kept");
+        let review = vt.find("review agent starting").expect("new output kept");
+        assert!(
+            setup < marker && marker < review,
+            "history stays above the new stage"
+        );
+        assert!(!vt.contains("CLAUDE TUI FRAME"));
+        // The dropped TUI's modes must not leak into the replacement terminal.
+        assert!(!vt.contains("\x1b[?1049h"));
+        assert!(!vt.contains("\x1b[?1002h"));
+        assert!(!vt.contains("\x1b[?2004h"));
+    }
+
+    #[test]
+    fn renderable_text_scanner_sees_through_escapes_but_not_past_content() {
+        assert!(has_renderable_text("\x1b[31mx"));
+        assert!(has_renderable_text("plain"));
+        assert!(!has_renderable_text("\x1b[31m\x1b[H"));
+        assert!(!has_renderable_text("\x1b]0;a window title\x1b\\"));
+        assert!(has_renderable_text("\x1b]0;title\x07real output"));
     }
 
     #[test]

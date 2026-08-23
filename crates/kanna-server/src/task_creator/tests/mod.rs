@@ -75,6 +75,35 @@ async fn read_fake_daemon_command(
     }
 }
 
+/// Answer a stage-transition terminal-carryover probe the way a daemon with
+/// no terminal to carry would: `Snapshot` (sent before the kill) gets
+/// session-not-found, so the transition proceeds without a seed, and a
+/// `SeedSnapshot` (sent after the kill when a snapshot did arrive) gets `Ok`.
+/// Returns whether the command was such a probe. Carryover is best-effort and
+/// invisible to the transition, so harnesses scripting the kill/spawn
+/// sequence answer probes without recording them; tests about carryover
+/// itself read the commands directly instead.
+async fn answer_terminal_carryover_probe(
+    command: &kanna_daemon::protocol::Command,
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
+) -> bool {
+    let response = match command {
+        kanna_daemon::protocol::Command::Snapshot { session_id } => {
+            kanna_daemon::protocol::Event::Error {
+                code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
+                message: format!("session not found: {session_id}"),
+            }
+        }
+        kanna_daemon::protocol::Command::SeedSnapshot { .. } => kanna_daemon::protocol::Event::Ok,
+        _ => return false,
+    };
+    writer
+        .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+        .await
+        .unwrap();
+    true
+}
+
 async fn spawn_fake_daemon_session_created_once(
     daemon_dir: String,
 ) -> tokio::task::JoinHandle<kanna_daemon::protocol::Command> {
@@ -107,7 +136,14 @@ async fn spawn_fake_daemon_read_then_stall(daemon_dir: String) -> tokio::task::J
         let (stream, _) = listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
-        let _ = read_fake_daemon_command(&mut reader, &mut write_half).await;
+        // Best-effort carryover probes are answered so the wedge lands on the
+        // first command whose failure the caller must surface (the Kill).
+        loop {
+            let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
+            if !answer_terminal_carryover_probe(&command, &mut write_half).await {
+                break;
+            }
+        }
         std::future::pending::<()>().await;
     })
 }
@@ -283,8 +319,11 @@ async fn spawn_fake_daemon_input_ok(
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         let mut commands = Vec::new();
-        for _ in 0..expected_commands {
+        while commands.len() < expected_commands {
             let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
+            if answer_terminal_carryover_probe(&command, &mut write_half).await {
+                continue;
+            }
             commands.push(command);
             let response = serde_json::to_string(&kanna_daemon::protocol::Event::Ok).unwrap();
             write_half.write_all(response.as_bytes()).await.unwrap();
@@ -314,6 +353,9 @@ async fn spawn_fake_daemon_fork_transition(
         let mut spawns = 0;
         loop {
             let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
+            if answer_terminal_carryover_probe(&command, &mut write_half).await {
+                continue;
+            }
             let response = match &command {
                 kanna_daemon::protocol::Command::Kill { .. } => kanna_daemon::protocol::Event::Ok,
                 kanna_daemon::protocol::Command::Spawn { session_id, .. }
@@ -351,8 +393,12 @@ async fn spawn_fake_daemon_fork_transition_with_teardown(
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         let mut commands = Vec::new();
-        for command_index in 0..5 {
+        while commands.len() < 5 {
+            let command_index = commands.len();
             let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
+            if answer_terminal_carryover_probe(&command, &mut write_half).await {
+                continue;
+            }
             let response = match &command {
                 kanna_daemon::protocol::Command::Kill { .. } => kanna_daemon::protocol::Event::Ok,
                 kanna_daemon::protocol::Command::Spawn { session_id, .. }

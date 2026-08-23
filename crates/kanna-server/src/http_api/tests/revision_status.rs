@@ -139,6 +139,9 @@ async fn request_revision_route_resolves_branch_style_task_id() {
         let mut reader = BufReader::new(read_half);
         loop {
             let command = read_test_daemon_command(&mut reader, &mut write_half).await;
+            if super::answer_terminal_carryover_probe(&command, &mut write_half).await {
+                continue;
+            }
             let session_id = match command {
                 // A durable revision replaces the task's session in place:
                 // the previous session is killed before the respawn.
@@ -391,6 +394,9 @@ async fn automatic_revision_completion_dispatches_commit_post_through_http_route
         let mut reader = BufReader::new(read_half);
         let revision_session_id = loop {
             let command = read_test_daemon_command(&mut reader, &mut write_half).await;
+            if super::answer_terminal_carryover_probe(&command, &mut write_half).await {
+                continue;
+            }
             let (response, spawned_session_id) = match command {
                 DaemonCommand::Kill { .. } => (
                     DaemonEvent::Error {
@@ -702,6 +708,9 @@ async fn request_revision_route_preserves_title_and_sends_revision_prompt() {
         let mut reader = BufReader::new(read_half);
         loop {
             let command = read_test_daemon_command(&mut reader, &mut write_half).await;
+            if super::answer_terminal_carryover_probe(&command, &mut write_half).await {
+                continue;
+            }
             let session_id = match command {
                 // A durable revision replaces the task's session in place:
                 // the previous session is killed before the respawn.
@@ -1214,6 +1223,9 @@ async fn human_revision_request_ignores_the_budget_and_hands_it_back() {
         let mut reader = BufReader::new(read_half);
         loop {
             let command = read_test_daemon_command(&mut reader, &mut write_half).await;
+            if super::answer_terminal_carryover_probe(&command, &mut write_half).await {
+                continue;
+            }
             let session_id = match command {
                 DaemonCommand::Kill { .. } => {
                     let response = DaemonEvent::Error {
@@ -1379,6 +1391,9 @@ async fn revision_prompt_falls_back_to_the_review_verdict_when_the_request_has_n
         let mut reader = BufReader::new(read_half);
         loop {
             let command = read_test_daemon_command(&mut reader, &mut write_half).await;
+            if super::answer_terminal_carryover_probe(&command, &mut write_half).await {
+                continue;
+            }
             let session_id = match command {
                 DaemonCommand::Kill { .. } => {
                     let response = DaemonEvent::Error {

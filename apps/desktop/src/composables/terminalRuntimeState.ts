@@ -26,6 +26,12 @@ export interface TerminalRuntimeState {
   pendingSessionCreatedRebind: boolean
   connectSpawnedSession: boolean
   preserveRecoveredScrollbackForNextSnapshot: boolean
+  /** A session_created rebind means a new PTY now backs this session id (a
+   * stage-swap respawn): whatever xterm shows is the dead incarnation's, and
+   * the next snapshot must replace it — even for providers whose ordinary
+   * reconnects skip the reset — or the carried-over history it now opens with
+   * would render below the stale copy and read twice. */
+  resetTerminalOnNextSnapshot: boolean
   streamClient: StreamClient | null
   respawningAfterAttachFailure: boolean
 }
@@ -54,6 +60,7 @@ export function createTerminalRuntimeState(): TerminalRuntimeState {
     pendingSessionCreatedRebind: false,
     connectSpawnedSession: false,
     preserveRecoveredScrollbackForNextSnapshot: false,
+    resetTerminalOnNextSnapshot: false,
     streamClient: null,
     respawningAfterAttachFailure: false,
   }

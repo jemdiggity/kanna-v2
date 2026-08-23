@@ -146,6 +146,78 @@ async fn seed_recovery_snapshot(
     }
 }
 
+/// Fetch the outgoing session's terminal and flatten it into the history seed
+/// for its replacement (`terminal_window::carryover_seed_snapshot`). `None` —
+/// a session without a terminal, a terminal with no primary-screen content, or
+/// any daemon error — means the replacement starts blank, exactly as before
+/// carryover existed. The daemon serves a live session's terminal directly and
+/// falls back to its persisted recovery snapshot for a dead one, so a post
+/// fallback whose session already exited still carries its history.
+async fn fetch_terminal_carryover(
+    daemon: &mut DaemonClient,
+    session_id: &str,
+) -> Option<TerminalSnapshot> {
+    let event = match daemon
+        .send_command_retrying_successor(&DaemonCommand::Snapshot {
+            session_id: session_id.to_string(),
+        })
+        .await
+    {
+        Ok(event) => event,
+        Err(error) => {
+            log::warn!(
+                "[stage-carryover] failed to snapshot outgoing session {session_id}: {error}"
+            );
+            return None;
+        }
+    };
+    match event {
+        DaemonEvent::Snapshot { snapshot, .. } => {
+            crate::terminal_window::carryover_seed_snapshot(&snapshot)
+        }
+        DaemonEvent::Error { message, .. } => {
+            log::info!("[stage-carryover] no terminal to carry over for {session_id}: {message}");
+            None
+        }
+        other => {
+            log::warn!(
+                "[stage-carryover] unexpected daemon snapshot response for {session_id}: {other:?}"
+            );
+            None
+        }
+    }
+}
+
+/// Seed the flattened history under the replacement session. Best-effort: the
+/// stage transition already committed to the replacement, and losing carryover
+/// only costs scrollback.
+async fn seed_terminal_carryover(
+    daemon: &mut DaemonClient,
+    session_id: &str,
+    snapshot: &TerminalSnapshot,
+) {
+    let event = daemon
+        .send_command(&DaemonCommand::SeedSnapshot {
+            session_id: session_id.to_string(),
+            snapshot: snapshot.clone(),
+        })
+        .await;
+    match event {
+        Ok(DaemonEvent::Ok) => {}
+        Ok(DaemonEvent::Error { message, .. }) => {
+            log::warn!("[stage-carryover] daemon refused history seed for {session_id}: {message}");
+        }
+        Ok(other) => {
+            log::warn!(
+                "[stage-carryover] unexpected daemon seed response for {session_id}: {other:?}"
+            );
+        }
+        Err(error) => {
+            log::warn!("[stage-carryover] failed to seed history for {session_id}: {error}");
+        }
+    }
+}
+
 pub(crate) async fn spawn_prepared_task_for_api(
     daemon: &mut DaemonClient,
     prepared: PreparedTaskSpawn,
@@ -340,6 +412,17 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
         outgoing_run_id
     };
 
+    // Capture the outgoing session's terminal before the kill discards it, so
+    // the replacement session can be seeded with its primary-screen history
+    // and the user can scroll back past the stage boundary. Best-effort in
+    // both directions: a task must never fail to advance over terminal
+    // continuity, and a missing terminal simply means a blank start.
+    let terminal_carryover = if matches!(prepared.session, PreparedSessionSpawn::Pty { .. }) {
+        fetch_terminal_carryover(daemon, &session_id).await
+    } else {
+        None
+    };
+
     // Only a freshly forked workspace is rolled back on failure; a resumed
     // workspace pre-exists this spawn and must survive it.
     if let Err(error) = kill_session_replacing_for_run(
@@ -369,6 +452,12 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
                 );
             }
         }
+    }
+
+    // The kill above deleted the session's persisted recovery snapshot, so the
+    // seed must land after it (mirroring the rerun transfer-seed ordering).
+    if let Some(snapshot) = terminal_carryover.as_ref() {
+        seed_terminal_carryover(daemon, &session_id, snapshot).await;
     }
 
     record_stage_transition_run(db_path, &prepared, &run_id)?;
@@ -1794,14 +1883,15 @@ fn uses_legacy_completion_context(daemon_dir: &str, task_id: &str, run_id: &str)
 #[cfg(test)]
 mod successor_retry_tests {
     use super::{
-        advance_server_completion_context, initialize_completion_context, kill_session_replacing,
-        legacy_shared_completion_directory, prune_completion_contexts_on_startup,
-        remove_completion_contexts, resolve_legacy_completion_retry_run,
+        advance_server_completion_context, fetch_terminal_carryover, initialize_completion_context,
+        kill_session_replacing, legacy_shared_completion_directory,
+        prune_completion_contexts_on_startup, remove_completion_contexts,
+        resolve_legacy_completion_retry_run, seed_terminal_carryover,
         uses_legacy_completion_context,
     };
     use crate::daemon_client::DaemonClient;
     use crate::session_replacements::SessionReplacements;
-    use kanna_daemon::protocol::{ErrorCode, Event};
+    use kanna_daemon::protocol::{Command, ErrorCode, Event, TerminalSnapshot};
     use std::path::Path;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
@@ -2132,6 +2222,102 @@ mod successor_retry_tests {
         assert!(!successor_path.exists());
         assert!(!successor_path.with_extension("lock").exists());
         std::fs::remove_dir_all(daemon_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stage_carryover_flattens_the_outgoing_terminal_into_the_replacement_seed() {
+        let daemon_dir =
+            std::env::temp_dir().join(format!("kanna-stage-carryover-test-{}", std::process::id()));
+        std::fs::create_dir_all(&daemon_dir).unwrap();
+        let socket_path = kanna_runtime_defaults::socket_path(&daemon_dir);
+        let pid_path = daemon_dir.join("daemon.pid");
+        let _ = std::fs::remove_file(&socket_path);
+        std::fs::write(&pid_path, "41\n").unwrap();
+        let listener = UnixListener::bind(&socket_path).unwrap();
+
+        // A scripted daemon serving one connection: the outgoing session's
+        // snapshot (setup output on the primary screen, a Claude-shaped TUI on
+        // the alternate one), then the kill, then the history seed.
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut commands = Vec::new();
+            for _ in 0..3 {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let command: Command = serde_json::from_str(&line).unwrap();
+                let reply = match &command {
+                    Command::Snapshot { session_id } => Event::Snapshot {
+                        session_id: session_id.clone(),
+                        snapshot: TerminalSnapshot {
+                            version: 1,
+                            rows: 24,
+                            cols: 80,
+                            cursor_row: 10,
+                            cursor_col: 5,
+                            cursor_visible: false,
+                            saved_at: 0,
+                            sequence: 0,
+                            vt: "setup output\r\ndone\x1b[?1049h\x1b[2JTUI FRAME\x1b[?1002h"
+                                .to_string(),
+                        },
+                        agent_provider: None,
+                    },
+                    _ => Event::Ok,
+                };
+                commands.push(command);
+                write_half
+                    .write_all(serde_json::to_string(&reply).unwrap().as_bytes())
+                    .await
+                    .unwrap();
+                write_half.write_all(b"\n").await.unwrap();
+                write_half.flush().await.unwrap();
+            }
+            commands
+        });
+
+        let mut daemon = DaemonClient::connect(daemon_dir.to_str().unwrap())
+            .await
+            .unwrap();
+        daemon.set_connected_pid_for_test(41);
+        let replacements = SessionReplacements::default();
+
+        let carryover = fetch_terminal_carryover(&mut daemon, "swap-me")
+            .await
+            .expect("primary-screen content must produce a carryover seed");
+        kill_session_replacing(&mut daemon, &replacements, "swap-me")
+            .await
+            .unwrap();
+        seed_terminal_carryover(&mut daemon, "swap-me", &carryover).await;
+
+        let commands = server.await.unwrap();
+        assert!(
+            matches!(&commands[0], Command::Snapshot { session_id } if session_id == "swap-me")
+        );
+        assert!(matches!(&commands[1], Command::Kill { session_id } if session_id == "swap-me"));
+        let Command::SeedSnapshot {
+            session_id,
+            snapshot,
+        } = &commands[2]
+        else {
+            panic!(
+                "third command must be the history seed, got {:?}",
+                commands[2]
+            );
+        };
+        assert_eq!(session_id, "swap-me");
+        assert!(snapshot.vt.starts_with("setup output\r\ndone"));
+        assert!(!snapshot.vt.contains("\x1b[?1049h"));
+        assert!(!snapshot.vt.contains("TUI FRAME"));
+        assert!(!snapshot.vt.contains("\x1b[?1002h"));
+        // The fetched cursor described the alt screen; the seed pins it to the
+        // bottom row so the replacement's output lands below the history.
+        assert_eq!(snapshot.cursor_row, 23);
+        assert_eq!(snapshot.cursor_col, 0);
+        assert!(snapshot.cursor_visible);
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(Path::new(&daemon_dir));
     }
 
     #[tokio::test]
