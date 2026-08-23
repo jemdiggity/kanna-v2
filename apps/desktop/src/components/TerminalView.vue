@@ -64,7 +64,14 @@ async function openHistoryOverlay() {
 function closeHistoryOverlay() {
   if (!historyOverlayOpen.value) return
   historyOverlayOpen.value = false
-  if (props.active !== false) terminal.value?.focus()
+  if (props.active !== false) {
+    // Refocus after the overlay leaves the DOM: WebKit's post-click focus
+    // handling for the removed Close button otherwise lands focus on <body>,
+    // undoing a synchronous terminal.focus().
+    void nextTick().then(() => {
+      if (!historyOverlayOpen.value) terminal.value?.focus()
+    })
+  }
 }
 
 // When the TUI leaves the alternate screen the buffer is scrollable again.

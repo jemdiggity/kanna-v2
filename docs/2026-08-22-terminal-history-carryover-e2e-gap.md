@@ -47,3 +47,55 @@ plus a `tauri-plugin-webdriver` scenario that asserts on the xterm buffer via
 - `apps/desktop/src/composables/terminalAltScreenHistory.test.ts` — buffer
   collapse (wrapped rows, trailing blanks), hidden-history detection on
   alt-screen switches, and terminal-swap re-subscription.
+
+## Visual verification (2026-08-24, review revision round 1)
+
+The chip and overlay were verified in the real running app: `./kd dev up` from
+the revision worktree (debug desktop build, its own kanna-server, daemon, and
+per-worktree DB), driven over `tauri-plugin-webdriver` on the worktree's
+`KANNA_WEBDRIVER_PORT`. The scenario was a scratch repo registered with the dev
+server whose committed `.kanna/config.json` (definitions are read from the
+`origin` snapshot, so the fixture needed a real origin) declares echo-based
+`setup` commands plus a `sleep`, and `claude` as the provider; tasks created
+through `POST /v1/tasks` spawned real Claude Code 2.1.241 PTY sessions. States
+were confirmed both visually (webdriver screenshots) and structurally (the
+dev build's Vue `setupState` for `altScreenActive`/`hasHiddenHistory`, and the
+`__KANNA_E2E__.terminalBuffers` xterm hook), because an occluded dev window
+throttles xterm's canvas renderer — the DOM chrome (chip, overlay) still
+renders and screenshots, but the canvas behind it can paint blank, so buffer
+content was asserted through the hooks rather than pixels.
+
+What was seen, and how each state was triggered:
+
+- **Chip appears only with an active alt screen over hidden content.** While
+  the setup commands ran on the normal screen, the chip was absent
+  (`alt:false`, setup lines visible in the buffer). The moment Claude's TUI
+  entered the alternate screen (~9s in, after the setup `sleep`), the chip
+  appeared top-right (`alt:true`, `hasHiddenHistory:true`). On a session whose
+  normal buffer was empty (a fixture without working setup), the chip
+  correctly never appeared despite the active alt screen. After Claude exited
+  (`/exit` → alt screen released), the chip disappeared again.
+- **Clicking the chip opens the overlay on the hidden text.** The overlay
+  showed the full setup transcript ("Running startup...", each dimmed `$ cmd`
+  line and its output) as the header "Earlier output — setup & previous
+  stages" with a Close button; the body was focused and at its bottom (the
+  transcript fit without scrolling, so scrolled-to-bottom held trivially);
+  the chip hides while the overlay is open.
+- **All three close paths.** Esc on the overlay body closed it and returned
+  focus to the terminal (xterm's helper textarea). The Close button closed it
+  — and revealed the one defect of this pass: WebKit's post-click focus
+  handling landed focus on `<body>`, defeating the synchronous
+  `terminal.focus()`. Fixed in `TerminalView.vue` by deferring the refocus to
+  `nextTick` after the overlay leaves the DOM; re-verified live (focus ends on
+  the terminal). With the overlay open, telling Claude to exit made the TUI
+  leave the alt screen, and the overlay auto-closed with focus returned to
+  the terminal, no interaction required.
+- **Legibility.** In the app's dark theme the chip (muted text on a raised
+  panel pill) and the overlay (terminal background, standard muted/monospace
+  text tokens) were clearly legible against the terminal background in the
+  screenshots.
+
+Incidental observation, not a defect: on a folder Claude does not yet trust,
+its workspace-trust prompt is drawn on the *primary* screen (no alt screen
+yet), so the chip correctly stays hidden until the prompt is accepted and the
+TUI enters the alternate screen.
