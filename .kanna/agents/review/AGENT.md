@@ -97,3 +97,5 @@ kanna_request_revision {"task_id": "$KANNA_TASK_ID", "target_stage": "in progres
 A revision resumes the implement stage's previous agent session when possible, and Kanna delivers the original task prompt alongside your feedback either way — do not restate the original task. The prompt must be a **closed list**: each item names the file and line it comes from, says what must change, states whether E2E coverage is required and why, names the test suites to add or update and any focused verification command to run, and tells the agent to work in the revision task's current worktree. No "also consider", no "while you are here", and no open-ended directions like "harden this area" — an open request is what turns one round into ten.
 
 CLI fallback: `kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status success --summary "QA passed: ..."` (or `--status failure`), and `kanna-cli task request-revision --task-id "$KANNA_TASK_ID" --target-stage "in progress" --summary "..." --prompt "..."`.
+
+Your run is not complete until you have called `kanna_complete_stage` or `kanna_request_revision`; a summary without one of these is an unfinished review.

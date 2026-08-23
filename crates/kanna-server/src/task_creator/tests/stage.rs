@@ -33,6 +33,14 @@ fn builtin_single_reviewer_workflow_ships_approve_as_pr_stage_post() {
         .unwrap_or_default()
         .contains("$PREV_RESULT"));
 
+    let review_agent = super::super::definitions::RepoDefinitions::resolve(&repo)
+        .unwrap()
+        .agent("review")
+        .unwrap();
+    assert!(review_agent
+        .prompt
+        .ends_with(super::super::stages::REREVIEW_VERDICT_COMPLETION_INSTRUCTION));
+
     let _ = std::fs::remove_dir_all(&repo_root);
 }
 
@@ -1319,23 +1327,23 @@ fn prepare_stage_completion_for_closed_task_is_idempotent_without_definitions() 
 }
 
 #[tokio::test]
-async fn prepare_advance_stage_forks_workspace_for_next_run_in_same_task() {
+async fn prepare_advance_stage_forks_workspace_and_reinforces_rereview_verdict() {
     let repo_root = init_git_repo("advance-stage-same-task-run");
     std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
-    std::fs::create_dir_all(repo_root.join(".kanna/agents/reviewer")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/agents/review")).unwrap();
     std::fs::write(
         repo_root.join(".kanna/workflows/default.json"),
         r#"{
   "stages": [
     { "name": "in progress", "transition": "manual" },
-    { "name": "review", "transition": "manual", "agent": "reviewer", "prompt": "Review $BRANCH in $SOURCE_WORKTREE after $PREV_RESULT" }
+    { "name": "review", "transition": "manual", "agent": "review", "prompt": "Review $BRANCH in $SOURCE_WORKTREE after $PREV_RESULT" }
   ]
 }"#,
     )
     .unwrap();
     std::fs::write(
-        repo_root.join(".kanna/agents/reviewer/AGENT.md"),
-        "---\nname: reviewer\ndescription: Reviews task changes\nagent_provider: claude\n---\nReview task: $TASK_PROMPT",
+        repo_root.join(".kanna/agents/review/AGENT.md"),
+        "---\nname: review\ndescription: Reviews task changes\nagent_provider: claude\n---\nReview task: $TASK_PROMPT",
     )
     .unwrap();
     assert!(Command::new("git")
@@ -1398,6 +1406,26 @@ async fn prepare_advance_stage_forks_workspace_for_next_run_in_same_task() {
         "task-source",
     )
     .unwrap();
+    // A previous review run is the durable marker that this transition is a
+    // re-review, including after either an automatic or human revision.
+    db.insert_stage_run(crate::db::NewStageRun {
+        id: "run-review-round-1",
+        task_id: "task-1",
+        stage: "review",
+        kind: "main",
+        agent: Some("review"),
+        agent_provider: Some("claude"),
+        model: None,
+        effort: None,
+        status: "failed",
+        result: Some("{\"status\":\"failure\",\"summary\":\"revision required\"}"),
+        feedback: Some("Add the missing regression coverage."),
+        session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
+    })
+    .unwrap();
     db.insert_stage_run(crate::db::NewStageRun {
         id: "run-in-progress",
         task_id: "task-1",
@@ -1428,6 +1456,19 @@ async fn prepare_advance_stage_forks_workspace_for_next_run_in_same_task() {
     assert_eq!(run.task_id, "task-1");
     assert_eq!(run.next_stage, "review");
     assert_eq!(run.session_id, "task-1");
+    match &run.session {
+        PreparedSessionSpawn::Pty { args, .. } => {
+            let command = args.join(" ");
+            assert!(
+                command.contains(super::super::stages::REREVIEW_VERDICT_COMPLETION_INSTRUCTION),
+                "re-review prompt did not end with the verdict contract: {command}"
+            );
+        }
+        PreparedSessionSpawn::Agent { prompt, .. } => assert!(
+            prompt.ends_with(super::super::stages::REREVIEW_VERDICT_COMPLETION_INSTRUCTION),
+            "re-review prompt did not end with the verdict contract: {prompt}"
+        ),
+    }
     assert_eq!(
         run.terminal_prelude,
         Some(
@@ -1525,13 +1566,13 @@ async fn prepare_advance_stage_forks_workspace_for_next_run_in_same_task() {
     );
 
     let runs = db.list_stage_runs_for_task("task-1").unwrap();
-    assert_eq!(runs.len(), 2);
-    assert_eq!(runs[0].stage, "in progress");
-    assert_eq!(runs[0].status, "succeeded");
-    assert!(runs[0].finished_at.is_some());
-    assert_eq!(runs[1].stage, "review");
-    assert_eq!(runs[1].status, "running");
-    assert_eq!(runs[1].session_id.as_deref(), Some("task-1"));
+    assert_eq!(runs.len(), 3);
+    assert_eq!(runs[1].stage, "in progress");
+    assert_eq!(runs[1].status, "succeeded");
+    assert!(runs[1].finished_at.is_some());
+    assert_eq!(runs[2].stage, "review");
+    assert_eq!(runs[2].status, "running");
+    assert_eq!(runs[2].session_id.as_deref(), Some("task-1"));
 
     // The counter skips workspaces that still exist: with `-2` live, the
     // next fork for this task is `-3`.

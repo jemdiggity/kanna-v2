@@ -21,6 +21,8 @@ use super::SpawnAgentOverrides;
 use super::FALLBACK_WORKFLOW_NAME;
 use crate::db::Repo;
 
+pub(super) const REREVIEW_VERDICT_COMPLETION_INSTRUCTION: &str = "Your run is not complete until you have called `kanna_complete_stage` or `kanna_request_revision`; a summary without one of these is an unfinished review.";
+
 /// Everything stage routing needs about the task being transitioned.
 struct StageTransitionContext<'a> {
     source_task: &'a TaskStageSource,
@@ -267,6 +269,16 @@ fn prepare_swap_to_index(
         .stage
         .as_deref()
         .ok_or_else(|| format!("task has no stage: {}", context.source_task_id))?;
+    let prompt_suffix = if next_stage.agent.as_deref() == Some("review")
+        && db
+            .latest_stage_run_for_stage(context.source_task_id, &next_stage.name, "main")
+            .map_err(|error| format!("db error: {error}"))?
+            .is_some()
+    {
+        Some(REREVIEW_VERDICT_COMPLETION_INSTRUCTION)
+    } else {
+        None
+    };
     let mut run = prepare_stage_run_for_target(
         db,
         config,
@@ -276,6 +288,7 @@ fn prepare_swap_to_index(
         "main",
         None,
         None,
+        prompt_suffix,
     )?;
     run.terminal_prelude = Some(super::terminal_marker::format_stage_transition_marker(
         from_stage,
@@ -315,6 +328,7 @@ fn prepare_post_dispatch(
         None,
         SpawnAgentOverrides::default(),
         Some(&completion_instruction),
+        None,
     )?;
 
     Ok(PreparedStageTransition::Post(Box::new(
@@ -338,6 +352,7 @@ fn prepare_stage_run_for_target(
     run_kind: &'static str,
     prompt_override: Option<&str>,
     feedback: Option<String>,
+    prompt_suffix: Option<&str>,
 ) -> Result<PreparedStageRunSpawn, String> {
     prepare_stage_run_for_target_with_provider(
         db,
@@ -350,6 +365,7 @@ fn prepare_stage_run_for_target(
         prompt_override,
         feedback,
         SpawnAgentOverrides::default(),
+        prompt_suffix,
     )
 }
 
@@ -365,6 +381,7 @@ fn prepare_stage_run_for_target_with_provider(
     prompt_override: Option<&str>,
     feedback: Option<String>,
     agent_overrides: SpawnAgentOverrides,
+    prompt_suffix: Option<&str>,
 ) -> Result<PreparedStageRunSpawn, String> {
     prepare_stage_run_for_target_returning_prompt(
         db,
@@ -378,6 +395,7 @@ fn prepare_stage_run_for_target_with_provider(
         feedback,
         agent_overrides,
         None,
+        prompt_suffix,
     )
     .map(|(run, _)| run)
 }
@@ -395,6 +413,7 @@ fn prepare_stage_run_for_target_returning_prompt(
     feedback: Option<String>,
     agent_overrides: SpawnAgentOverrides,
     additional_agent_instructions: Option<&str>,
+    prompt_suffix: Option<&str>,
 ) -> Result<(PreparedStageRunSpawn, String), String> {
     let source_task = context.source_task;
     let source_branch =
@@ -420,7 +439,7 @@ fn prepare_stage_run_for_target_returning_prompt(
         RunWorkspaceSpec::Fork { branch } => Some(branch.clone()),
         _ => source_branch.clone(),
     };
-    let final_prompt = build_target_stage_prompt(
+    let mut final_prompt = build_target_stage_prompt(
         context.definitions,
         &context.repo.path,
         target_stage,
@@ -431,6 +450,10 @@ fn prepare_stage_run_for_target_returning_prompt(
         source_task.base_ref.as_deref(),
         source_task.branch.as_deref(),
     )?;
+    if let Some(suffix) = prompt_suffix {
+        final_prompt.push_str("\n\n");
+        final_prompt.push_str(suffix);
+    }
     let returned_prompt = match additional_agent_instructions {
         Some(instructions) => build_target_stage_prompt_with_instructions(
             context.definitions,
@@ -666,6 +689,7 @@ pub(crate) fn prepare_revision_task_for_api(
         Some(&composed_prompt),
         Some(revision_prompt.to_string()),
         agent_overrides,
+        None,
     )?;
     prepared.resume_fallback_reason = resume_fallback_reason;
     Ok(prepared)
