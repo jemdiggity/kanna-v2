@@ -60,6 +60,36 @@ async fn read_test_daemon_command_optional(
     }
 }
 
+/// Answer a stage-transition terminal-carryover probe the way a daemon with
+/// no terminal to carry would: `Snapshot` (sent before the kill) gets
+/// session-not-found, so the transition proceeds without a seed, and a
+/// `SeedSnapshot` gets `Ok`. Returns whether the command was such a probe.
+/// Carryover is best-effort and invisible to the transition, so harnesses
+/// scripting the kill/spawn sequence answer probes without recording them;
+/// tests about seeding itself read the commands directly instead.
+async fn answer_terminal_carryover_probe(
+    command: &kanna_daemon::protocol::Command,
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
+) -> bool {
+    use tokio::io::AsyncWriteExt;
+
+    let response = match command {
+        kanna_daemon::protocol::Command::Snapshot { session_id } => {
+            kanna_daemon::protocol::Event::Error {
+                code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
+                message: format!("session not found: {session_id}"),
+            }
+        }
+        kanna_daemon::protocol::Command::SeedSnapshot { .. } => kanna_daemon::protocol::Event::Ok,
+        _ => return false,
+    };
+    writer
+        .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+        .await
+        .unwrap();
+    true
+}
+
 fn daemon_socket_path_for_dir(daemon_dir: &str) -> PathBuf {
     kanna_runtime_defaults::socket_path(Path::new(daemon_dir))
 }

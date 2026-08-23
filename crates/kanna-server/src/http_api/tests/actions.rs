@@ -330,6 +330,9 @@ async fn close_task_route_releases_claimed_ports() {
         let mut reader = BufReader::new(read_half);
         for expected_session_id in ["task-1", "shell-wt-task-1", "td-task-1"] {
             let command = read_test_daemon_command(&mut reader, &mut write_half).await;
+            if super::answer_terminal_carryover_probe(&command, &mut write_half).await {
+                continue;
+            }
             match command {
                 DaemonCommand::Kill { session_id } => assert_eq!(session_id, expected_session_id),
                 other => panic!("expected kill command, got {other:?}"),
@@ -956,6 +959,9 @@ async fn close_pr_task_sends_blocker_close_instruction_with_renamed_branch_to_ru
         let mut reader = BufReader::new(read_half);
         for index in 0..4 {
             let command = read_test_daemon_command(&mut reader, &mut write_half).await;
+            if super::answer_terminal_carryover_probe(&command, &mut write_half).await {
+                continue;
+            }
             match (index, command) {
                 (0, DaemonCommand::SubmitInput { session_id, data }) => {
                     assert_eq!(session_id, "task-b-session");
@@ -1308,6 +1314,9 @@ async fn close_task_route_resolves_branch_style_task_id() {
 
         for expected_session_id in expected {
             let command = read_test_daemon_command(&mut reader, &mut write_half).await;
+            if super::answer_terminal_carryover_probe(&command, &mut write_half).await {
+                continue;
+            }
             match command {
                 DaemonCommand::Kill { session_id } => {
                     assert_eq!(session_id, expected_session_id)
@@ -1497,6 +1506,9 @@ async fn close_task_route_tears_down_current_stage_environment_before_repo_teard
 
         for expected_session_id in expected_kills {
             let command = read_test_daemon_command(&mut reader, &mut write_half).await;
+            if super::answer_terminal_carryover_probe(&command, &mut write_half).await {
+                continue;
+            }
             match command {
                 DaemonCommand::Kill { session_id } => assert_eq!(session_id, expected_session_id),
                 other => panic!("expected kill command, got {other:?}"),
@@ -4607,6 +4619,9 @@ async fn advance_stage_route_records_stage_run_for_spawned_next_task() {
         let mut reader = BufReader::new(read_half);
         loop {
             let command = read_test_daemon_command(&mut reader, &mut write_half).await;
+            if super::answer_terminal_carryover_probe(&command, &mut write_half).await {
+                continue;
+            }
             let session_id = match command {
                 // Durable stage swap kills the previous session in place
                 // before respawning the same session id.
@@ -5014,6 +5029,9 @@ async fn advance_stage_detached_transition_aborts_when_task_closes_before_stage_
                 else {
                     continue 'connections;
                 };
+                if super::answer_terminal_carryover_probe(&command, &mut write_half).await {
+                    continue;
+                }
                 match command {
                     DaemonCommand::Kill { session_id, .. } if session_id == "source-1" => {
                         let response = DaemonEvent::Error {
@@ -5313,6 +5331,9 @@ async fn advance_stage_route_closes_final_stage_and_tears_down_environment_befor
 
         for expected_session_id in expected_kills {
             let command = read_test_daemon_command(&mut reader, &mut write_half).await;
+            if super::answer_terminal_carryover_probe(&command, &mut write_half).await {
+                continue;
+            }
             match command {
                 DaemonCommand::Kill { session_id } => assert_eq!(session_id, expected_session_id),
                 other => panic!("expected kill command, got {other:?}"),
@@ -6145,6 +6166,9 @@ async fn complete_stage_success_after_failed_post_refinishes_run_and_transitions
         let mut reader = BufReader::new(read_half);
         loop {
             let command = read_test_daemon_command(&mut reader, &mut write_half).await;
+            if super::answer_terminal_carryover_probe(&command, &mut write_half).await {
+                continue;
+            }
             let response = match &command {
                 DaemonCommand::Kill { .. } => DaemonEvent::Error {
                     code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
@@ -6448,6 +6472,9 @@ async fn advance_stage_route_stays_responsive_while_prepare_blocks_on_git() {
         let mut reader = BufReader::new(read_half);
         loop {
             let command = read_test_daemon_command(&mut reader, &mut write_half).await;
+            if super::answer_terminal_carryover_probe(&command, &mut write_half).await {
+                continue;
+            }
             let session_id = match command {
                 DaemonCommand::Kill { .. } => {
                     let response = DaemonEvent::Error {

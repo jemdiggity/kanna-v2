@@ -518,7 +518,12 @@ async fn acknowledged_stage_survives_db_failure_restart_and_can_complete() {
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         for expected in ["Kill", "Spawn"] {
-            let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
+            let command = loop {
+                let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
+                if !super::answer_terminal_carryover_probe(&command, &mut write_half).await {
+                    break command;
+                }
+            };
             let response = match command {
                 kanna_daemon::protocol::Command::Kill { .. } if expected == "Kill" => {
                     kanna_daemon::protocol::Event::Ok
@@ -3086,6 +3091,9 @@ async fn dispatch_post_falls_back_to_fresh_session_when_session_is_dead() {
         let mut commands = Vec::new();
         loop {
             let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
+            if super::answer_terminal_carryover_probe(&command, &mut write_half).await {
+                continue;
+            }
             let response = match &command {
                 kanna_daemon::protocol::Command::SubmitInput { .. }
                 | kanna_daemon::protocol::Command::Kill { .. } => {
@@ -3198,6 +3206,9 @@ async fn prompt_only_post_provider_overrides_source_task_provider_in_fallback_da
         let mut commands = Vec::new();
         loop {
             let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
+            if super::answer_terminal_carryover_probe(&command, &mut write_half).await {
+                continue;
+            }
             let response = match &command {
                 kanna_daemon::protocol::Command::SubmitInput { .. }
                 | kanna_daemon::protocol::Command::Kill { .. } => {

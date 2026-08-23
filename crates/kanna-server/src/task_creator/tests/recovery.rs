@@ -172,6 +172,9 @@ async fn spawn_rejected_resume_fake_daemon(
         let mut reader = BufReader::new(read_half);
         loop {
             let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
+            if super::answer_terminal_carryover_probe(&command, &mut write_half).await {
+                continue;
+            }
             let response = match &command {
                 kanna_daemon::protocol::Command::Kill { .. } => {
                     kanna_daemon::protocol::Event::Error {
@@ -374,6 +377,9 @@ async fn spawn_recovery_fake_daemon(
         let mut commands = Vec::new();
         loop {
             let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
+            if super::answer_terminal_carryover_probe(&command, &mut write_half).await {
+                continue;
+            }
             let response = match &command {
                 kanna_daemon::protocol::Command::Kill { .. } => {
                     kanna_daemon::protocol::Event::Error {
