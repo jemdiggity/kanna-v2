@@ -1130,6 +1130,11 @@ function createTrustedLanFallbackClient({
       : createDisconnectedClient();
   };
   const createResolvingClient = (desktopId: string | null): KannaClient => ({
+    observeMobileNotifications(listener) {
+      return currentClient(desktopId).observeMobileNotifications?.(listener) ?? {
+        close() {}
+      };
+    },
     getStatus: async () => (await resolveClient(desktopId)).getStatus(),
     listDesktops: async () => (await resolveClient(desktopId)).listDesktops(),
     listRepos: async () => (await resolveClient(desktopId)).listRepos(),
@@ -1199,6 +1204,16 @@ function createTrustedLanFallbackClient({
   });
   const client: KannaClient = {
     ...createResolvingClient(null),
+    observeMobileNotifications(listener) {
+      const subscriptions = [...validatedClients.values()]
+        .map(({ client }) => client.observeMobileNotifications?.(listener))
+        .filter((subscription) => subscription !== undefined);
+      return {
+        close() {
+          for (const subscription of subscriptions) subscription.close();
+        }
+      };
+    },
     async listDesktops() {
       const endpoints = await withPendingValidation(() =>
         resolveTrustedBonjourEndpoints({
@@ -1365,6 +1380,9 @@ function mapCloudDesktopRecord(
 
 function createDelegatingClient(getClient: () => KannaClient): KannaClient {
   return {
+    observeMobileNotifications(listener) {
+      return getClient().observeMobileNotifications?.(listener) ?? { close() {} };
+    },
     getTaskRouteIdentity: (taskId) =>
       getClient().getTaskRouteIdentity?.(taskId) ?? taskId,
     getStatus: () => getClient().getStatus(),

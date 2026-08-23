@@ -47,6 +47,7 @@ pub struct AppState {
     relay_mobile_notifications_available: Arc<AtomicBool>,
     mobile_notification_tx: mpsc::Sender<MobileNotificationRequest>,
     mobile_notification_rx: Arc<StdMutex<Option<mpsc::Receiver<MobileNotificationRequest>>>>,
+    lan_mobile_connections: Arc<StdMutex<LanMobileConnections>>,
     requested_task_mutations: Arc<RequestedTaskMutations>,
     state_changes: broadcast::Sender<ServerFrame>,
     #[cfg(test)]
@@ -85,6 +86,33 @@ pub(super) struct RepoCheckoutOperation {
 pub(crate) struct MobileNotificationRequest {
     pub notification: crate::relay_client::MobileNotificationPayload,
     pub response: oneshot::Sender<Result<crate::relay_client::MobileNotificationDelivery, String>>,
+}
+
+#[derive(Default)]
+struct LanMobileConnections {
+    next_connection_id: u64,
+    devices: HashMap<String, HashMap<u64, mpsc::Sender<ServerFrame>>>,
+}
+
+pub(crate) struct LanMobileConnection {
+    device_id: String,
+    connection_id: u64,
+    connections: Arc<StdMutex<LanMobileConnections>>,
+}
+
+impl Drop for LanMobileConnection {
+    fn drop(&mut self) {
+        let mut connections = self
+            .connections
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(device_connections) = connections.devices.get_mut(&self.device_id) {
+            device_connections.remove(&self.connection_id);
+            if device_connections.is_empty() {
+                connections.devices.remove(&self.device_id);
+            }
+        }
+    }
 }
 
 pub(crate) enum DesktopRelayRequest {
@@ -325,6 +353,7 @@ impl AppState {
             relay_mobile_notifications_available: Arc::new(AtomicBool::new(false)),
             mobile_notification_tx,
             mobile_notification_rx: Arc::new(StdMutex::new(Some(mobile_notification_rx))),
+            lan_mobile_connections: Arc::new(StdMutex::new(LanMobileConnections::default())),
             requested_task_mutations: Arc::new(RequestedTaskMutations::default()),
             state_changes: broadcast::channel(256).0,
             #[cfg(test)]
@@ -496,6 +525,62 @@ impl AppState {
         tokio::time::timeout(std::time::Duration::from_secs(10), handoff)
             .await
             .map_err(|_| "mobile notification relay timed out".to_string())?
+    }
+
+    pub(crate) fn register_lan_mobile_connection(
+        &self,
+        device_id: String,
+        frame_tx: mpsc::Sender<ServerFrame>,
+    ) -> LanMobileConnection {
+        let mut connections = self
+            .lan_mobile_connections
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        connections.next_connection_id = connections.next_connection_id.wrapping_add(1);
+        if connections.next_connection_id == 0 {
+            connections.next_connection_id = 1;
+        }
+        let connection_id = connections.next_connection_id;
+        connections
+            .devices
+            .entry(device_id.clone())
+            .or_default()
+            .insert(connection_id, frame_tx);
+        LanMobileConnection {
+            device_id,
+            connection_id,
+            connections: Arc::clone(&self.lan_mobile_connections),
+        }
+    }
+
+    pub(super) fn deliver_lan_mobile_notification(
+        &self,
+        title: &str,
+        body: &str,
+        task_id: Option<&str>,
+    ) -> u64 {
+        let frame = ServerFrame::MobileNotification {
+            desktop_id: self.config.desktop_id.clone(),
+            title: title.to_owned(),
+            body: body.to_owned(),
+            task_id: task_id.map(str::to_owned),
+        };
+        let mut connections = self
+            .lan_mobile_connections
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut delivered = 0_u64;
+        connections.devices.retain(|_, device_connections| {
+            device_connections.retain(|_, sender| !sender.is_closed());
+            let accepted = device_connections
+                .values()
+                .any(|sender| sender.try_send(frame.clone()).is_ok());
+            if accepted {
+                delivered = delivered.saturating_add(1);
+            }
+            !device_connections.is_empty()
+        });
+        delivered
     }
 
     pub(super) fn begin_requested_task_creation(

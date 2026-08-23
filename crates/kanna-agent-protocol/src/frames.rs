@@ -470,6 +470,15 @@ pub enum ServerFrame {
     StateChanged {
         scope: StateChangeScope,
     },
+    /// Operator notification delivered directly to one live paired mobile
+    /// device over its existing LAN stream.
+    MobileNotification {
+        desktop_id: String,
+        title: String,
+        body: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_id: Option<String>,
+    },
     SessionExit {
         task_id: String,
         code: i32,

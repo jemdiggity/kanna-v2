@@ -1612,6 +1612,7 @@ async fn handle_stream_channels(
         agent_commands: None,
         requests: None,
         companion_events: None,
+        lan_mobile_connection: None,
         authed: false,
         supports_companion_event_epoch: false,
         supports_term_input_boundary: false,
@@ -1674,6 +1675,7 @@ struct StreamConn {
     agent_commands: Option<AgentCommandWorker>,
     requests: Option<RequestWorker>,
     companion_events: Option<CompanionEventWorker>,
+    lan_mobile_connection: Option<crate::http_api::LanMobileConnection>,
     authed: bool,
     supports_companion_event_epoch: bool,
     supports_term_input_boundary: bool,
@@ -2949,6 +2951,22 @@ impl StreamConn {
         }
 
         self.authed = true;
+        let paired_device_id = matches!(
+            self.auth_mode,
+            AuthMode::AllowEmpty | AuthMode::LegacyReadOnlyOrPaired | AuthMode::RequirePairedDevice
+        )
+        .then(|| {
+            credential
+                .as_deref()
+                .and_then(|value| serde_json::from_str::<PairedDeviceCredential>(value).ok())
+                .filter(|_| {
+                    credential
+                        .as_deref()
+                        .is_some_and(|value| self.paired_device_credential_matches(value))
+                })
+                .map(|credential| credential.device_id)
+        })
+        .flatten();
         if self.auth_mode == AuthMode::LegacyReadOnlyOrPaired && credential.is_some() {
             self.auth_mode = AuthMode::AlreadyAuthenticated;
         }
@@ -2970,6 +2988,12 @@ impl StreamConn {
         self.supports_terminal_window = capabilities.contains(&KspCapability::TermScrollbackWindow);
         self.supports_agent_history_window =
             capabilities.contains(&KspCapability::AgentHistoryWindow);
+        if let Some(device_id) = paired_device_id {
+            self.lan_mobile_connection = Some(
+                self.state
+                    .register_lan_mobile_connection(device_id, self.frame_tx.clone()),
+            );
+        }
         self.send(auth_ok_frame_for(self.companion_access)).await;
         true
     }
@@ -5752,6 +5776,7 @@ mod tests {
                 agent_commands: None,
                 requests: None,
                 companion_events: None,
+                lan_mobile_connection: None,
                 authed: true,
                 supports_companion_event_epoch,
                 supports_term_input_boundary: true,
@@ -8755,6 +8780,7 @@ mod tests {
                 agent_commands: None,
                 requests: None,
                 companion_events: Some(worker),
+                lan_mobile_connection: None,
                 authed: true,
                 supports_companion_event_epoch: false,
                 supports_term_input_boundary: true,
@@ -8867,6 +8893,7 @@ mod tests {
             agent_commands: None,
             requests: None,
             companion_events: None,
+            lan_mobile_connection: None,
             authed: true,
             supports_companion_event_epoch: false,
             supports_term_input_boundary: true,
@@ -9969,6 +9996,7 @@ mod tests {
             agent_commands: None,
             requests: None,
             companion_events: None,
+            lan_mobile_connection: None,
             authed: true,
             supports_companion_event_epoch: false,
             supports_term_input_boundary: true,
@@ -10049,6 +10077,7 @@ mod tests {
             agent_commands: None,
             requests: None,
             companion_events: None,
+            lan_mobile_connection: None,
             authed: true,
             supports_companion_event_epoch: false,
             supports_term_input_boundary: true,
@@ -10117,6 +10146,7 @@ mod tests {
             agent_commands: None,
             requests: None,
             companion_events: None,
+            lan_mobile_connection: None,
             authed: true,
             supports_companion_event_epoch: false,
             supports_term_input_boundary: true,
@@ -10228,6 +10258,7 @@ mod tests {
             agent_commands: None,
             requests: None,
             companion_events: None,
+            lan_mobile_connection: None,
             authed: true,
             supports_companion_event_epoch: false,
             supports_term_input_boundary: true,

@@ -1357,6 +1357,7 @@ mod tests {
                 "status": "deliveryFailed",
                 "acceptedCount": 0,
                 "failedCount": 1,
+                "lanDeliveredCount": 0,
                 "failureReasons": [{
                     "providerCode": "messaging/invalid-argument",
                     "category": "invalidToken",

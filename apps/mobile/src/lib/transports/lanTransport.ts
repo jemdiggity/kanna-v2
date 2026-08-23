@@ -143,6 +143,21 @@ export function createLanTransport(
   };
 
   return {
+    observeMobileNotifications(listener) {
+      const client = new StreamClient({
+        url: buildKspWebSocketUrl(baseUrl, kspStreamVersion),
+        credential: streamCredential,
+        webSocketFactory: (url) => createKspSocket(url) as unknown as StreamWebSocketLike,
+        reconnectDelaysMs: [250, 500, 1000, 2000]
+      });
+      const unsubscribe = client.onMobileNotification(listener);
+      return {
+        close() {
+          unsubscribe();
+          client.close();
+        }
+      };
+    },
     getStatus: async () => {
       const status = await request<MobileServerStatus>("/v1/status");
       kspStreamVersion = status.kspStreamVersion === 2 ? 2 : 1;

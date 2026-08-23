@@ -1157,19 +1157,33 @@ git, or search-in-files operations.
 
 ## Mobile Notification Delivery
 
-`POST /v1/mobile/notifications` hands a validated notification to the
-desktop-authenticated relay connection. The relay looks up only that Firebase
-user's `pushDevices`, submits one FCM multicast, removes tokens rejected
+`POST /v1/mobile/notifications` first hands a validated notification to each
+distinct paired mobile device with a live LAN/KSP connection. The frame uses
+the existing stream and includes the desktop id, title, body, and optional task
+id. `lanDeliveredCount` counts devices whose connection accepted the frame.
+If at least one LAN device accepts it, the server does not also invoke push;
+this LAN-preferred fallback rule prevents a phone that is both LAN-connected
+and push-registered from buzzing twice. If no LAN device accepts it, the
+server hands the notification to the desktop-authenticated relay connection.
+The relay looks up only that Firebase user's `pushDevices`, submits one FCM multicast, removes tokens rejected
 per-device as `messaging/invalid-argument`, invalid, or unregistered, and
 acknowledges the request over the same WebSocket. A payload-wide invalid
 argument rejects the multicast call itself rather than appearing as one
 device's result.
-The server response includes `acceptedCount`, `failedCount`, and aggregated
+The server response includes `lanDeliveredCount`, `acceptedCount`,
+`failedCount`, and aggregated
 `failureReasons`. Each reason has a safe provider code, category, count, and
 actionable message; it never identifies a device or includes its token, the
 Firebase provider's uncontrolled raw message, credentials, or notification
 contents. Older relay acknowledgements without `failureReasons` deserialize as
 an empty list during rolling upgrades.
+
+LAN delivery is intentionally best-effort. iOS suspends a backgrounded app and
+its sockets after a short grace period, so this path reaches a foreground app
+or one still alive during that grace period; it does not provide APNs-like
+delivery to a suspended or terminated app. The mobile client presents a local
+notification while background-alive, or an in-app banner and haptic while
+foregrounded.
 
 The diagnostic categories distinguish invalid tokens, relay IAM permission,
 Firebase-project mismatch, APNs credentials, payload validation, rate limits,
