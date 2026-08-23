@@ -50,6 +50,23 @@ fn events_router() -> (Router, String) {
     (router(state), db_path)
 }
 
+fn settle_runtime_tasks(db: &Db, task_ids: &[&str]) {
+    for task_id in task_ids {
+        db.update_pipeline_item_runtime_status(task_id, "busy", None)
+            .expect("mark task busy");
+        db.update_pipeline_item_runtime_status(task_id, "idle", None)
+            .expect("mark task idle");
+    }
+    db.connection_for_e2e_tests()
+        .execute(
+            "UPDATE pipeline_item SET runtime_event_pending_at = datetime('now', '-11 seconds')",
+            [],
+        )
+        .expect("age settled runtime states through debounce");
+    db.flush_debounced_activity_events(300)
+        .expect("flush shared activity debounce");
+}
+
 fn connect_test_relay_peer(
     source: &Arc<AppState>,
     peer: Arc<AppState>,
@@ -318,6 +335,31 @@ fn aggregate_parent_cursor(
     )
 }
 
+fn aggregate_tasks_cursor(
+    local_machine_id: &str,
+    peer_machine_id: &str,
+    task_ids: &[&str],
+    local_cursor: &str,
+    peer_cursor: &str,
+) -> String {
+    let payload = serde_json::json!({
+        "localMachineId": local_machine_id,
+        "scope": {
+            "kind": "tasks",
+            "task_ids": task_ids,
+        },
+        "machineIds": [local_machine_id, peer_machine_id],
+        "cursorsByMachine": {
+            (local_machine_id): local_cursor,
+            (peer_machine_id): peer_cursor,
+        },
+    });
+    format!(
+        "ks1.{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.to_string())
+    )
+}
+
 fn start_run(db: &Db, run_id: &str, task_id: &str, stage: &str) {
     db.insert_stage_run(NewStageRun {
         id: run_id,
@@ -426,9 +468,11 @@ async fn level_triggered_activity_wait_returns_an_already_idle_task_immediately(
     db.flush_debounced_activity_events(300)
         .expect("flush shared activity debounce");
     assert_eq!(
-        db.list_non_busy_task_runtime_states(&crate::db::TaskEventScope::Tasks(vec![
-            "child-a".to_string(),
-        ]))
+        db.list_non_busy_task_runtime_states(
+            &crate::db::TaskEventScope::Tasks(vec!["child-a".to_string(),]),
+            None,
+            10
+        )
         .expect("list settled runtime state"),
         vec![("child-a".to_string(), "idle".to_string())]
     );
@@ -456,6 +500,232 @@ async fn level_triggered_activity_wait_returns_an_already_idle_task_immediately(
     assert_eq!(event["payload"]["runtimeState"], "idle");
     assert_eq!(event["payload"]["title"], "child-a");
     assert_eq!(event["payload"]["machineId"], "desktop-task-events");
+}
+
+#[tokio::test]
+async fn current_activity_pages_are_lossless_and_preserve_durable_events() {
+    let (app, db_path) = events_router();
+    let db = Db::open(&db_path).expect("open db");
+    for task_id in ["child-d", "child-e"] {
+        db.insert_test_pipeline_item(
+            task_id,
+            "repo-events",
+            "more child work",
+            Some(task_id),
+            "in progress",
+            "2026-08-23 00:00:00",
+        )
+        .expect("insert additional task");
+    }
+    settle_runtime_tasks(
+        &db,
+        &["child-a", "child-b", "child-c", "child-d", "child-e"],
+    );
+
+    let drained = get_json_body(
+        &app,
+        "/v1/task-events?repoId=repo-events&localOnly=true&limit=500&timeoutSecs=0",
+    )
+    .await;
+    let mut cursor = cursor_of(&drained);
+    let mut settled = Vec::new();
+    let mut durable = Vec::new();
+    let mut pages = 0;
+
+    loop {
+        let page = get_json_body(
+            &app,
+            &format!(
+                "/v1/task-events?repoId=repo-events&localOnly=true&includeCurrentActivity=true&limit=2&cursor={cursor}&timeoutSecs=0"
+            ),
+        )
+        .await;
+        pages += 1;
+        let next_cursor = cursor_of(&page);
+        assert_ne!(next_cursor, cursor, "every non-final page must advance");
+        cursor = next_cursor;
+        for event in page["events"].as_array().expect("events") {
+            if event["synthetic"] == true {
+                settled.push(event["taskId"].as_str().expect("task id").to_string());
+            } else {
+                durable.push((
+                    event["taskId"].as_str().expect("task id").to_string(),
+                    event["type"].as_str().expect("event type").to_string(),
+                ));
+            }
+        }
+        if pages == 1 {
+            db.update_pipeline_item_stage("child-e", "review")
+                .expect("append durable event while snapshots are paging");
+        }
+        if page["hasMore"] == false {
+            break;
+        }
+        assert_eq!(page["hasMore"], true);
+    }
+
+    assert_eq!(pages, 3);
+    assert_eq!(
+        settled,
+        ["child-a", "child-b", "child-c", "child-d", "child-e"]
+    );
+    assert_eq!(
+        durable,
+        vec![("child-e".to_string(), "stage.changed".to_string())],
+        "a durable edge arriving between snapshot pages must not be lost"
+    );
+    let final_page = get_json_body(
+        &app,
+        &format!(
+            "/v1/task-events?repoId=repo-events&localOnly=true&includeCurrentActivity=true&limit=2&cursor={cursor}&timeoutSecs=0"
+        ),
+    )
+    .await;
+    assert_eq!(final_page["waitOutcome"], "timeout");
+    assert_eq!(final_page["hasMore"], false);
+    assert!(final_page["events"].as_array().expect("events").is_empty());
+}
+
+#[tokio::test]
+async fn aggregate_current_activity_pages_drain_every_machine_without_starvation() {
+    let local_ids = ["local-settled-a", "local-settled-b", "local-settled-c"];
+    let peer_ids = ["peer-settled-a", "peer-settled-b", "peer-settled-c"];
+    let all_ids = local_ids
+        .iter()
+        .chain(peer_ids.iter())
+        .copied()
+        .collect::<Vec<_>>();
+    let source = test_state_with_seed("desktop-page-source", "Page Source", |db| {
+        db.insert_test_repo("repo-page-source", "Page Source Repo")
+            .expect("insert source repo");
+        for task_id in local_ids {
+            db.insert_test_pipeline_item(
+                task_id,
+                "repo-page-source",
+                "local settled task",
+                Some(task_id),
+                "in progress",
+                "2026-08-23 00:00:00",
+            )
+            .expect("insert local task");
+        }
+        settle_runtime_tasks(db, &local_ids);
+    });
+    let peer = test_state_with_seed("desktop-page-peer", "Page Peer", |db| {
+        db.insert_test_repo("repo-page-peer", "Page Peer Repo")
+            .expect("insert peer repo");
+        for task_id in peer_ids {
+            db.insert_test_pipeline_item(
+                task_id,
+                "repo-page-peer",
+                "peer settled task",
+                Some(task_id),
+                "in progress",
+                "2026-08-23 00:00:00",
+            )
+            .expect("insert peer task");
+        }
+        settle_runtime_tasks(db, &peer_ids);
+    });
+    let source_router = router(Arc::clone(&source));
+    let task_ids = all_ids.join(",");
+    let source_drained = Db::open(&source.config().db_path)
+        .expect("open source db")
+        .latest_task_event_seq()
+        .expect("source event head")
+        .to_string();
+    let peer_drained = Db::open(&peer.config().db_path)
+        .expect("open peer db")
+        .latest_task_event_seq()
+        .expect("peer event head")
+        .to_string();
+    let mut cursor = aggregate_tasks_cursor(
+        "desktop-page-source",
+        "desktop-page-peer",
+        &all_ids,
+        &source_drained,
+        &peer_drained,
+    );
+    let connected = Arc::new(AtomicBool::new(true));
+    let relay = connect_test_relay_peer(&source, Arc::clone(&peer), connected);
+    let mut settled = Vec::new();
+    let mut durable = Vec::new();
+    let mut page_has_more = Vec::new();
+
+    for page_index in 0..8 {
+        let page = get_account_json_body(
+            &source_router,
+            &source,
+            &format!(
+                "/v1/task-events?taskIds={task_ids}&includeCurrentActivity=true&limit=2&cursor={cursor}&timeoutSecs=2"
+            ),
+        )
+        .await;
+        cursor = cursor_of(&page);
+        page_has_more.push(page["hasMore"].as_bool().expect("hasMore"));
+        for event in page["events"].as_array().expect("events") {
+            if event["synthetic"] == true {
+                settled.push((
+                    event["machineId"].as_str().expect("machine id").to_string(),
+                    event["taskId"].as_str().expect("task id").to_string(),
+                ));
+            } else {
+                durable.push((
+                    event["machineId"].as_str().expect("machine id").to_string(),
+                    event["taskId"].as_str().expect("task id").to_string(),
+                    event["type"].as_str().expect("event type").to_string(),
+                ));
+            }
+        }
+        if page_index == 0 {
+            Db::open(&peer.config().db_path)
+                .expect("open peer db for durable append")
+                .update_pipeline_item_stage("peer-settled-c", "review")
+                .expect("append peer durable event during aggregate paging");
+        }
+        if page["hasMore"] == false {
+            break;
+        }
+    }
+
+    settled.sort();
+    let mut expected = local_ids
+        .iter()
+        .map(|task_id| ("desktop-page-source".to_string(), (*task_id).to_string()))
+        .chain(
+            peer_ids
+                .iter()
+                .map(|task_id| ("desktop-page-peer".to_string(), (*task_id).to_string())),
+        )
+        .collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(settled, expected);
+    assert_eq!(
+        durable,
+        vec![(
+            "desktop-page-peer".to_string(),
+            "peer-settled-c".to_string(),
+            "stage.changed".to_string(),
+        )],
+        "a peer durable edge arriving between aggregate pages must not be lost"
+    );
+    assert_eq!(page_has_more.last(), Some(&false));
+    assert!(page_has_more[..page_has_more.len() - 1]
+        .iter()
+        .all(|has_more| *has_more));
+
+    let drained = get_account_json_body(
+        &source_router,
+        &source,
+        &format!(
+            "/v1/task-events?taskIds={task_ids}&includeCurrentActivity=true&limit=2&cursor={cursor}&timeoutSecs=0"
+        ),
+    )
+    .await;
+    assert_eq!(drained["waitOutcome"], "timeout");
+    assert_eq!(drained["hasMore"], false);
+    assert!(drained["events"].as_array().expect("events").is_empty());
+    relay.abort();
 }
 
 #[test]

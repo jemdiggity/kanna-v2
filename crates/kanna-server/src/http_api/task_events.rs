@@ -30,7 +30,7 @@ use base64::Engine;
 use kanna_tool_catalog::encode_path_segment;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -53,6 +53,7 @@ const LEGACY_CURSOR_SCAN_LIMIT: i64 = 500;
 /// harness writing the database directly.
 const WAIT_RECHECK_SECS: u64 = 5;
 const AGGREGATE_CURSOR_PREFIX: &str = "ks1.";
+const CURRENT_ACTIVITY_CURSOR_PREFIX: &str = "kc1.";
 const AGGREGATE_WAIT_SESSION_TTL: Duration = Duration::from_secs(10 * 60);
 const ZERO_TIMEOUT_DRAIN_BUDGET: Duration = Duration::from_millis(100);
 const MAX_AGGREGATE_WAIT_SESSIONS: usize = 256;
@@ -99,6 +100,8 @@ struct AggregateCursor {
     scope: AggregateScope,
     machine_ids: Vec<String>,
     cursors_by_machine: BTreeMap<String, String>,
+    #[serde(default)]
+    machines_with_more: BTreeSet<String>,
 }
 
 struct AggregateWaitCompletion {
@@ -213,6 +216,22 @@ enum TaskEventsCursor {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CurrentActivityCursor {
+    durable_cursor: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    settled_after_task_id: Option<String>,
+    #[serde(default)]
+    settled_complete: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct CurrentActivityProgress {
+    settled_after_task_id: Option<String>,
+    settled_complete: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ParentTaskEventsCursorV1 {
     parent_task_id: String,
@@ -281,6 +300,53 @@ fn parse_cursor(
         return Err(invalid_cursor());
     }
     Ok(Some(TaskEventsCursor::Sequence(sequence)))
+}
+
+fn decode_current_activity_cursor(
+    cursor: &str,
+) -> Result<Option<CurrentActivityCursor>, (axum::http::StatusCode, String)> {
+    if cursor.len() > MAX_CURSOR_LEN {
+        return Err(invalid_cursor());
+    }
+    let Some(encoded) = cursor.strip_prefix(CURRENT_ACTIVITY_CURSOR_PREFIX) else {
+        return Ok(None);
+    };
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|_| invalid_cursor())?;
+    let parsed: CurrentActivityCursor =
+        serde_json::from_slice(&bytes).map_err(|_| invalid_cursor())?;
+    if parsed.durable_cursor.is_empty()
+        || parsed
+            .durable_cursor
+            .starts_with(CURRENT_ACTIVITY_CURSOR_PREFIX)
+        || parse_cursor(Some(&parsed.durable_cursor))?.is_none()
+    {
+        return Err(invalid_cursor());
+    }
+    Ok(Some(parsed))
+}
+
+fn encode_current_activity_cursor(
+    cursor: &CurrentActivityCursor,
+) -> Result<String, (axum::http::StatusCode, String)> {
+    let bytes = serde_json::to_vec(cursor).map_err(|error| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to encode current-activity cursor: {error}"),
+        )
+    })?;
+    let encoded = format!(
+        "{CURRENT_ACTIVITY_CURSOR_PREFIX}{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+    );
+    if encoded.len() > MAX_CURSOR_LEN {
+        return Err((
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to encode a bounded current-activity cursor".to_string(),
+        ));
+    }
+    Ok(encoded)
 }
 
 fn encode_parent_cursor<T: Serialize>(
@@ -450,6 +516,12 @@ fn cursor_after_truncated_parent_batch(
             },
         )
     }
+}
+
+fn durable_cursor_from_wire(cursor: &str) -> Result<String, (axum::http::StatusCode, String)> {
+    Ok(decode_current_activity_cursor(cursor)?
+        .map(|current| current.durable_cursor)
+        .unwrap_or_else(|| cursor.to_string()))
 }
 
 /// Drain one bounded slice of a deployed p1 cursor. This path exists only for
@@ -798,17 +870,22 @@ fn append_current_activity_snapshots(
     scope: &TaskEventScope,
     batch: &mut EventBatch,
     limit: i64,
+    progress: &mut CurrentActivityProgress,
 ) -> Result<(), rusqlite::Error> {
     let remaining = (limit as usize).saturating_sub(batch.events.len());
-    if remaining == 0 {
+    if remaining == 0 || progress.settled_complete {
         return Ok(());
     }
     let db = Db::open(db_path)?;
-    for (task_id, runtime_state) in db
-        .list_non_busy_task_runtime_states(scope)?
-        .into_iter()
-        .take(remaining)
-    {
+    let mut rows = db.list_non_busy_task_runtime_states(
+        scope,
+        progress.settled_after_task_id.as_deref(),
+        remaining.saturating_add(1) as i64,
+    )?;
+    let has_more = rows.len() > remaining;
+    rows.truncate(remaining);
+    for (task_id, runtime_state) in rows {
+        progress.settled_after_task_id = Some(task_id.clone());
         batch.events.push(json!({
             "seq": Value::Null,
             "taskId": task_id,
@@ -822,6 +899,8 @@ fn append_current_activity_snapshots(
             "synthetic": true,
         }));
     }
+    progress.settled_complete = !has_more;
+    batch.has_more |= has_more;
     Ok(())
 }
 
@@ -830,7 +909,25 @@ async fn wait_local_task_events(
     query: TaskEventsQuery,
     tolerate_missing_tasks: bool,
 ) -> Result<Json<Value>, (axum::http::StatusCode, String)> {
-    let mut cursor = parse_cursor(query.cursor.as_deref())?;
+    let supplied_current_cursor = query
+        .cursor
+        .as_deref()
+        .map(decode_current_activity_cursor)
+        .transpose()?
+        .flatten();
+    let mut current_progress = supplied_current_cursor
+        .as_ref()
+        .map(|cursor| CurrentActivityProgress {
+            settled_after_task_id: cursor.settled_after_task_id.clone(),
+            settled_complete: cursor.settled_complete,
+        })
+        .unwrap_or_default();
+    let mut cursor = parse_cursor(
+        supplied_current_cursor
+            .as_ref()
+            .map(|cursor| cursor.durable_cursor.as_str())
+            .or(query.cursor.as_deref()),
+    )?;
     let limit = query
         .limit
         .unwrap_or(DEFAULT_EVENT_LIMIT)
@@ -863,15 +960,30 @@ async fn wait_local_task_events(
         appended.as_mut().enable();
         let mut batch = read_batch(&db_path, &scope, cursor.as_ref(), limit)?;
         if query.include_current_activity {
-            append_current_activity_snapshots(&db_path, &scope, &mut batch, limit)
-                .map_err(db_error)?;
+            append_current_activity_snapshots(
+                &db_path,
+                &scope,
+                &mut batch,
+                limit,
+                &mut current_progress,
+            )
+            .map_err(db_error)?;
         }
         enrich_event_batch(state.config(), &mut batch)
             .map_err(|error| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))?;
+        let output_cursor = if query.include_current_activity {
+            encode_current_activity_cursor(&CurrentActivityCursor {
+                durable_cursor: batch.cursor.clone(),
+                settled_after_task_id: current_progress.settled_after_task_id.clone(),
+                settled_complete: current_progress.settled_complete,
+            })?
+        } else {
+            batch.cursor.clone()
+        };
         if !batch.events.is_empty() || batch.has_more {
             return Ok(Json(json!({
                 "waitOutcome": "events",
-                "cursor": batch.cursor.to_string(),
+                "cursor": output_cursor,
                 "events": batch.events,
                 "hasMore": batch.has_more,
             })));
@@ -881,7 +993,7 @@ async fn wait_local_task_events(
         if now >= deadline {
             return Ok(Json(json!({
                 "waitOutcome": "timeout",
-                "cursor": batch.cursor.to_string(),
+                "cursor": output_cursor,
                 "events": [],
                 "hasMore": false,
                 "waitTimeoutSecs": timeout_secs,
@@ -934,6 +1046,10 @@ fn decode_aggregate_cursor(
         || cursor
             .cursors_by_machine
             .keys()
+            .any(|machine_id| !cursor.machine_ids.contains(machine_id))
+        || cursor
+            .machines_with_more
+            .iter()
             .any(|machine_id| !cursor.machine_ids.contains(machine_id))
     {
         return Err(invalid_aggregate_cursor());
@@ -1175,7 +1291,7 @@ fn apply_aggregate_completion(
                 ),
             )
         })?;
-    *has_more |= response
+    let response_has_more = response
         .get("hasMore")
         .and_then(Value::as_bool)
         .unwrap_or(false);
@@ -1193,11 +1309,25 @@ fn apply_aggregate_completion(
         })?;
     let remaining = (limit as usize).saturating_sub(events.len());
     if returned_events.len() > remaining {
-        *has_more = true;
+        session
+            .cursor
+            .machines_with_more
+            .insert(completion.machine_id.clone());
+    } else if response_has_more {
+        session
+            .cursor
+            .machines_with_more
+            .insert(completion.machine_id.clone());
+    } else {
+        session
+            .cursor
+            .machines_with_more
+            .remove(&completion.machine_id);
     }
     let emitted_count = returned_events.len().min(remaining);
     let mut emitted_cursor = None;
     let mut emitted_synthetic = false;
+    let mut emitted_task_id = None;
     for event in returned_events.iter().take(emitted_count) {
         let mut event = event.as_object().cloned().ok_or_else(|| {
             (
@@ -1217,6 +1347,10 @@ fn apply_aggregate_completion(
             .get("synthetic")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        emitted_task_id = event
+            .get("taskId")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         events.push(Value::Object(event));
     }
     let next_cursor = if emitted_count == returned_events.len() {
@@ -1224,11 +1358,20 @@ fn apply_aggregate_completion(
     } else if emitted_count == 0 {
         None
     } else if emitted_synthetic && emitted_cursor.is_none() {
-        // Synthetic level state has no sequence to acknowledge. The peer
-        // cursor already acknowledges every durable row it returned;
-        // adopting it is safe, and any un-emitted still-true level state
-        // is synthesized again on the next call.
-        Some(cursor.to_string())
+        let returned = decode_current_activity_cursor(cursor)?.ok_or_else(|| {
+            (
+                axum::http::StatusCode::BAD_GATEWAY,
+                format!(
+                    "machine {} returned paged synthetic task state without a current-activity cursor",
+                    completion.machine_id
+                ),
+            )
+        })?;
+        Some(encode_current_activity_cursor(&CurrentActivityCursor {
+            durable_cursor: returned.durable_cursor,
+            settled_after_task_id: emitted_task_id,
+            settled_complete: false,
+        })?)
     } else {
         let event_seq = emitted_cursor.ok_or_else(|| {
             (
@@ -1239,18 +1382,39 @@ fn apply_aggregate_completion(
                 ),
             )
         })?;
-        Some(match &session.cursor.scope {
+        let previous_wire_cursor = session
+            .cursor
+            .cursors_by_machine
+            .get(&completion.machine_id);
+        let previous_current = previous_wire_cursor
+            .map(|cursor| decode_current_activity_cursor(cursor))
+            .transpose()?
+            .flatten();
+        let durable_cursor = match &session.cursor.scope {
             AggregateScope::Children { parent_task_id } => cursor_after_truncated_parent_batch(
                 parent_task_id,
-                session
-                    .cursor
-                    .cursors_by_machine
-                    .get(&completion.machine_id)
-                    .map(String::as_str),
+                previous_wire_cursor
+                    .map(String::as_str)
+                    .map(durable_cursor_from_wire)
+                    .transpose()?
+                    .as_deref(),
                 event_seq,
             )?,
             AggregateScope::Tasks { .. } | AggregateScope::Repo { .. } => event_seq.to_string(),
-        })
+        };
+        if session.include_current_activity {
+            Some(encode_current_activity_cursor(&CurrentActivityCursor {
+                durable_cursor,
+                settled_after_task_id: previous_current
+                    .as_ref()
+                    .and_then(|cursor| cursor.settled_after_task_id.clone()),
+                settled_complete: previous_current
+                    .as_ref()
+                    .is_some_and(|cursor| cursor.settled_complete),
+            })?)
+        } else {
+            Some(durable_cursor)
+        }
     };
     if let Some(next_cursor) = next_cursor {
         session
@@ -1258,6 +1422,7 @@ fn apply_aggregate_completion(
             .cursors_by_machine
             .insert(completion.machine_id.clone(), next_cursor);
     }
+    *has_more |= !session.cursor.machines_with_more.is_empty();
     Ok(!returned_events.is_empty())
 }
 
@@ -1311,6 +1476,7 @@ async fn wait_aggregate_task_events(
                 scope: requested_scope,
                 machine_ids: vec![local_machine_id.clone()],
                 cursors_by_machine,
+                machines_with_more: BTreeSet::new(),
             }
         }
     };
@@ -1385,7 +1551,7 @@ async fn wait_aggregate_task_events(
     let mut events = Vec::new();
     let mut completed_machines = HashSet::new();
     let mut failed_machines = HashSet::new();
-    let mut has_more = false;
+    let mut has_more = !session.cursor.machines_with_more.is_empty();
     loop {
         let remaining_secs = if timeout_secs == 0 {
             0
@@ -1580,6 +1746,7 @@ mod aggregate_wait_registry_tests {
                 },
                 machine_ids: vec![machine_id.clone()],
                 cursors_by_machine: BTreeMap::new(),
+                machines_with_more: BTreeSet::new(),
             },
             pending,
             pending_machines: HashSet::from([machine_id]),

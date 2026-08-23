@@ -281,17 +281,30 @@ impl Db {
     pub fn list_non_busy_task_runtime_states(
         &self,
         scope: &TaskEventScope,
+        after_task_id: Option<&str>,
+        limit: i64,
     ) -> Result<Vec<(String, String)>, rusqlite::Error> {
         let sql = format!(
             "SELECT id, runtime_status FROM pipeline_item
              WHERE closed_at IS NULL
                AND runtime_status IN ('idle', 'waiting', 'exited')
                AND runtime_event_pending_at IS NULL
+               AND (? IS NULL OR id > ?)
                AND {}
-             ORDER BY updated_at DESC, id ASC",
+             ORDER BY id ASC
+             LIMIT ?",
             scope.pipeline_item_where_clause()
         );
-        let params = scope.params();
+        let mut params = vec![
+            after_task_id
+                .map(|task_id| SqlValue::Text(task_id.to_string()))
+                .unwrap_or(SqlValue::Null),
+            after_task_id
+                .map(|task_id| SqlValue::Text(task_id.to_string()))
+                .unwrap_or(SqlValue::Null),
+        ];
+        params.extend(scope.params());
+        params.push(SqlValue::Integer(limit));
         let mut statement = self.conn.prepare(&sql)?;
         let rows = statement.query_map(rusqlite::params_from_iter(params), |row| {
             Ok((row.get(0)?, row.get(1)?))

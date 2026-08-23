@@ -639,8 +639,15 @@ cursor-based, not snapshot-diffed:
   every scoped task whose current non-busy state has already survived that
   debounce is returned immediately as a synthetic `task.runtime_settled`
   response row without consuming or inventing a sequence number. The durable
-  cursor remains unchanged, so restart cannot miss parked work and synthetic
-  state cannot weaken the append-log ordering contract.
+  sequence checkpoint remains independent, so restart cannot miss parked work
+  and synthetic state cannot weaken the append-log ordering contract. Synthetic
+  rows share the response limit with durable events. The opaque cursor also
+  carries a stable task-id keyset checkpoint: passing it back while `hasMore`
+  is true drains every scoped settled task once without an early row replay
+  starving later rows. An aggregate cursor additionally records which machines
+  still owe a native page, so it cannot report `hasMore: false` before every
+  peer continuation has been consumed. Durable events appended during that
+  drain remain ordered by, and advance, their own sequence checkpoint.
 - `task.awaiting_advance` is appended atomically when an un-killed daemon Exit
   ends a manual-transition main run without a stage verdict. It is useful
   terminal context, but managers use the level-triggered runtime-settled wait
