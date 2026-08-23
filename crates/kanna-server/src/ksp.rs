@@ -1612,6 +1612,7 @@ async fn handle_stream_channels(
         agent_commands: None,
         requests: None,
         companion_events: None,
+        lan_mobile_connection: None,
         authed: false,
         supports_companion_event_epoch: false,
         supports_term_input_boundary: false,
@@ -1674,6 +1675,7 @@ struct StreamConn {
     agent_commands: Option<AgentCommandWorker>,
     requests: Option<RequestWorker>,
     companion_events: Option<CompanionEventWorker>,
+    lan_mobile_connection: Option<crate::http_api::LanMobileConnection>,
     authed: bool,
     supports_companion_event_epoch: bool,
     supports_term_input_boundary: bool,
@@ -2949,6 +2951,22 @@ impl StreamConn {
         }
 
         self.authed = true;
+        let paired_device_id = matches!(
+            self.auth_mode,
+            AuthMode::AllowEmpty | AuthMode::LegacyReadOnlyOrPaired | AuthMode::RequirePairedDevice
+        )
+        .then(|| {
+            credential
+                .as_deref()
+                .and_then(|value| serde_json::from_str::<PairedDeviceCredential>(value).ok())
+                .filter(|_| {
+                    credential
+                        .as_deref()
+                        .is_some_and(|value| self.paired_device_credential_matches(value))
+                })
+                .map(|credential| credential.device_id)
+        })
+        .flatten();
         if self.auth_mode == AuthMode::LegacyReadOnlyOrPaired && credential.is_some() {
             self.auth_mode = AuthMode::AlreadyAuthenticated;
         }
@@ -2970,6 +2988,14 @@ impl StreamConn {
         self.supports_terminal_window = capabilities.contains(&KspCapability::TermScrollbackWindow);
         self.supports_agent_history_window =
             capabilities.contains(&KspCapability::AgentHistoryWindow);
+        if capabilities.contains(&KspCapability::MobileNotifications) {
+            if let Some(device_id) = paired_device_id {
+                self.lan_mobile_connection = Some(
+                    self.state
+                        .register_lan_mobile_connection(device_id, self.frame_tx.clone()),
+                );
+            }
+        }
         self.send(auth_ok_frame_for(self.companion_access)).await;
         true
     }
@@ -5752,6 +5778,7 @@ mod tests {
                 agent_commands: None,
                 requests: None,
                 companion_events: None,
+                lan_mobile_connection: None,
                 authed: true,
                 supports_companion_event_epoch,
                 supports_term_input_boundary: true,
@@ -8755,6 +8782,7 @@ mod tests {
                 agent_commands: None,
                 requests: None,
                 companion_events: Some(worker),
+                lan_mobile_connection: None,
                 authed: true,
                 supports_companion_event_epoch: false,
                 supports_term_input_boundary: true,
@@ -8867,6 +8895,7 @@ mod tests {
             agent_commands: None,
             requests: None,
             companion_events: None,
+            lan_mobile_connection: None,
             authed: true,
             supports_companion_event_epoch: false,
             supports_term_input_boundary: true,
@@ -9969,6 +9998,7 @@ mod tests {
             agent_commands: None,
             requests: None,
             companion_events: None,
+            lan_mobile_connection: None,
             authed: true,
             supports_companion_event_epoch: false,
             supports_term_input_boundary: true,
@@ -10049,6 +10079,7 @@ mod tests {
             agent_commands: None,
             requests: None,
             companion_events: None,
+            lan_mobile_connection: None,
             authed: true,
             supports_companion_event_epoch: false,
             supports_term_input_boundary: true,
@@ -10117,6 +10148,7 @@ mod tests {
             agent_commands: None,
             requests: None,
             companion_events: None,
+            lan_mobile_connection: None,
             authed: true,
             supports_companion_event_epoch: false,
             supports_term_input_boundary: true,
@@ -10228,6 +10260,7 @@ mod tests {
             agent_commands: None,
             requests: None,
             companion_events: None,
+            lan_mobile_connection: None,
             authed: true,
             supports_companion_event_epoch: false,
             supports_term_input_boundary: true,
@@ -12013,6 +12046,98 @@ mod tests {
             drop(incoming_tx);
             task.await.unwrap();
         }
+        let _ = std::fs::remove_file(pairing_path);
+    }
+
+    #[tokio::test]
+    async fn only_notification_capable_paired_streams_receive_mobile_notifications() {
+        let config = test_config("ksp-lan-notification-capability", "KSP Notifications");
+        let pairing_path = std::path::PathBuf::from(&config.pairing_store_path);
+        let mut pairing_store = crate::pairing::PairingStore::default();
+        pairing_store.add_trusted_device(
+            &config.desktop_id,
+            "phone-1",
+            "Kanna Mobile",
+            &crate::pairing::hash_device_secret("lan-secret"),
+        );
+        pairing_store.save(&pairing_path).unwrap();
+        let state = Arc::new(crate::http_api::AppState::new(config));
+        let credential = serde_json::json!({
+            "deviceId": "phone-1",
+            "deviceSecret": "lan-secret",
+        })
+        .to_string();
+
+        let (ordinary_tx, ordinary_rx) = mpsc::channel(8);
+        let (ordinary_frame_tx, ordinary_companion_tx, mut ordinary_outbound) =
+            outbound_frame_channel(8);
+        let ordinary_task = tokio::spawn(handle_stream_channels(
+            ordinary_rx,
+            ordinary_frame_tx,
+            ordinary_companion_tx,
+            Arc::clone(&state),
+            AuthMode::RequirePairedDevice,
+            false,
+        ));
+        ordinary_tx
+            .send(
+                serde_json::to_string(&ClientFrame::Auth {
+                    credential: Some(credential.clone()),
+                    capabilities: vec![],
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            ordinary_outbound.recv().await,
+            Some(ServerFrame::AuthOk { .. })
+        ));
+
+        let (notification_tx, notification_rx) = mpsc::channel(8);
+        let (notification_frame_tx, notification_companion_tx, mut notification_outbound) =
+            outbound_frame_channel(8);
+        let notification_task = tokio::spawn(handle_stream_channels(
+            notification_rx,
+            notification_frame_tx,
+            notification_companion_tx,
+            Arc::clone(&state),
+            AuthMode::RequirePairedDevice,
+            false,
+        ));
+        notification_tx
+            .send(
+                serde_json::to_string(&ClientFrame::Auth {
+                    credential: Some(credential),
+                    capabilities: vec![KspCapability::MobileNotifications],
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            notification_outbound.recv().await,
+            Some(ServerFrame::AuthOk { .. })
+        ));
+
+        assert_eq!(
+            state.deliver_lan_mobile_notification("Title", "Body", Some("task-1")),
+            1
+        );
+        assert!(matches!(
+            notification_outbound.recv().await,
+            Some(ServerFrame::MobileNotification { title, .. }) if title == "Title"
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), ordinary_outbound.recv())
+                .await
+                .is_err()
+        );
+
+        drop(ordinary_tx);
+        drop(notification_tx);
+        ordinary_task.await.unwrap();
+        notification_task.await.unwrap();
         let _ = std::fs::remove_file(pairing_path);
     }
 

@@ -7,6 +7,7 @@ import type {
 } from "@kanna/agent-protocol";
 import type {
   CompanionAssetSnapshot,
+  MobileNotificationFrame,
   TerminalScrollbackChunk,
   TerminalScrollbackRequest,
   TerminalWindowMetadata
@@ -95,6 +96,10 @@ export interface TaskSummarySubscription {
   close(): void;
 }
 
+export interface MobileNotificationSubscription {
+  close(): void;
+}
+
 export type TaskAgentStreamEvent =
   | {
       type: "snapshot";
@@ -161,6 +166,9 @@ export interface TaskCompanionSubscription {
 }
 
 export interface KannaTransport {
+  observeMobileNotifications?(
+    listener: (notification: MobileNotificationFrame) => void
+  ): MobileNotificationSubscription;
   observeDesktopTaskSummaries?(
     desktopId: string,
     listener: (event: TaskSummaryStreamEvent) => void
@@ -235,6 +243,9 @@ export interface KannaTransport {
 }
 
 export interface KannaClient {
+  observeMobileNotifications?(
+    listener: (notification: MobileNotificationFrame) => void
+  ): MobileNotificationSubscription;
   observeDesktopTaskSummaries?(
     desktopId: string,
     listener: (event: TaskSummaryStreamEvent) => void
@@ -344,6 +355,12 @@ export class RepoNotRegisteredError extends TaskCreationError {
 
 export function createKannaClient(transport: KannaTransport): KannaClient {
   return {
+    ...(transport.observeMobileNotifications
+      ? {
+          observeMobileNotifications: (listener: (notification: MobileNotificationFrame) => void) =>
+            transport.observeMobileNotifications?.(listener) ?? { close() {} }
+        }
+      : {}),
     ...(transport.observeDesktopTaskSummaries
       ? {
           observeDesktopTaskSummaries: (desktopId: string, listener: (event: TaskSummaryStreamEvent) => void) =>

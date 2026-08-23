@@ -238,6 +238,95 @@ describe("LAN task loop E2E", () => {
     });
   });
 
+  it("delivers a mobile notification through the authenticated LAN stream callback", async () => {
+    const pairing = await harness.createDesktopPairingSession();
+    const deviceId = `lan-notification-${Date.now()}`;
+    const claimResponse = await fetch(
+      `${harness.lanBaseUrl}/v1/pairing/sessions/claim`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          code: pairing.code,
+          deviceId,
+          deviceName: "LAN notification E2E"
+        })
+      }
+    );
+    expect(claimResponse.ok).toBe(true);
+    const claim = await claimResponse.json() as { deviceSecret: string };
+    const transport = createLanTransport(
+      harness.lanBaseUrl,
+      nodeFetch,
+      (url) => new NodeWebSocketAdapter(url),
+      { deviceCredentials: { deviceId, deviceSecret: claim.deviceSecret } }
+    );
+    let resolveNotification!: (notification: {
+      desktopId: string;
+      title: string;
+      body: string;
+      taskId?: string;
+    }) => void;
+    const notifications: Array<{
+      desktopId: string;
+      title: string;
+      body: string;
+      taskId?: string;
+    }> = [];
+    const received = new Promise<{
+      desktopId: string;
+      title: string;
+      body: string;
+      taskId?: string;
+    }>((resolve) => {
+      resolveNotification = (notification) => {
+        notifications.push(notification);
+        resolve(notification);
+      };
+    });
+    // This authenticated task stream deliberately competes for the same
+    // paired device. It must not register as a notification sink.
+    let resolveOrdinaryReady!: () => void;
+    const ordinaryReady = new Promise<void>((resolve) => {
+      resolveOrdinaryReady = resolve;
+    });
+    const ordinarySubscription = transport.observeTaskAgent(
+      "competing-ordinary-stream",
+      () => resolveOrdinaryReady()
+    );
+    const subscription = transport.observeMobileNotifications?.(resolveNotification);
+    expect(subscription).toBeDefined();
+
+    try {
+      await ordinaryReady;
+      const delivery = await retryUntilLanNotificationAccepted(
+        harness,
+        {
+          title: "Agent needs attention",
+          body: "Review the latest task result",
+          taskId: "task-lan-notification"
+        }
+      );
+      expect(delivery).toMatchObject({
+        status: "accepted",
+        acceptedCount: 0,
+        failedCount: 0,
+        lanDeliveredCount: 1
+      });
+      await expect(received).resolves.toEqual({
+        desktopId: harness.desktopId,
+        title: "Agent needs attention",
+        body: "Review the latest task result",
+        taskId: "task-lan-notification"
+      });
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+      expect(notifications).toHaveLength(1);
+    } finally {
+      ordinarySubscription.close();
+      subscription?.close();
+    }
+  });
+
   it("streams a deterministic PTY task over LAN and delivers LAN input to the PTY", async () => {
     const setupCommand = "echo setup-ran-$((6*7))";
     const task = await createScriptedTask(harness, {
@@ -698,6 +787,24 @@ async function fetchJson<T = unknown>(url: string): Promise<T> {
     throw new Error(`request failed (${response.status}) for ${url}`);
   }
   return response.json() as Promise<T>;
+}
+
+async function retryUntilLanNotificationAccepted(
+  harness: RemoteHarness,
+  notification: { title: string; body: string; taskId: string }
+): Promise<unknown> {
+  let lastStatus = 0;
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    const response = await fetch(`${harness.lanBaseUrl}/v1/mobile/notifications`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(notification)
+    });
+    lastStatus = response.status;
+    if (response.ok) return response.json();
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`LAN notification connection was not accepted (last status ${lastStatus})`);
 }
 
 /**

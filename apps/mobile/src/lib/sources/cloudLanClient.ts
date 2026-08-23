@@ -1326,6 +1326,9 @@ export function createCloudLanClient(
   };
 
   return {
+    ...(lan.observeMobileNotifications
+      ? { observeMobileNotifications: lan.observeMobileNotifications }
+      : {}),
     ...(cloud.observeDesktopTaskSummaries
       ? { observeDesktopTaskSummaries: cloud.observeDesktopTaskSummaries }
       : {}),

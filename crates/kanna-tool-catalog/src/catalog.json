@@ -106,7 +106,7 @@
     },
     {
       "name": "kanna_notify_mobile",
-      "description": "Send an operator-facing push notification to the signed-in Kanna mobile app. Use this for meaningful long-running-task milestones or when the operator needs to act; delivery is handed off immediately and the response reports how many registered devices accepted it plus token-free provider failure reasons. When task_id is present, tapping opens that task.",
+      "description": "Send an operator-facing notification to Kanna Mobile. A live paired LAN app is preferred and reported by lanDeliveredCount; otherwise delivery falls back to registered cloud push devices and reports acceptedCount, failedCount, and token-free provider failure reasons. Use this for meaningful long-running-task milestones or when the operator needs to act. When task_id is present, tapping opens that task. LAN delivery is best-effort while the app's socket is alive, not an APNs replacement for a suspended app.",
       "method": "POST",
       "path": "/v1/mobile/notifications",
       "response": "json",

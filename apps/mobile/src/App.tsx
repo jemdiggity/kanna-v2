@@ -27,6 +27,7 @@ import { MobileCrashBoundary } from "./components/MobileCrashBoundary";
 import { QuickReplyEditorModal } from "./components/QuickReplyEditorModal";
 import { UpdateReadyBanner } from "./components/UpdateReadyBanner";
 import { LoadingText } from "./components/LoadingText";
+import { LanNotificationBanner } from "./components/LanNotificationBanner";
 import { MOBILE_E2E_IDS } from "./e2eTestIds";
 import {
   checkAndFetchUpdate,
@@ -37,6 +38,8 @@ import {
   startMobilePushNotifications,
   type MobileNotificationTaskTarget
 } from "./lib/notifications/mobilePush";
+import { startLanMobileNotifications } from "./lib/notifications/lanNotifications";
+import type { MobileNotificationFrame } from "@kanna/stream-client";
 import { readExpoConfig } from "./lib/expoConfig";
 import {
   addMobileCrashBreadcrumb,
@@ -116,6 +119,8 @@ function AppContent() {
     key: number;
     target: MobileNotificationTaskTarget;
   } | null>(null);
+  const [lanNotificationBanner, setLanNotificationBanner] =
+    useState<MobileNotificationFrame | null>(null);
   const initialNavigationStateRef = useRef<InitialState | null>(null);
   const lastOtaCheckAtRef = useRef<number | null>(null);
   const hasDownloadedUpdateRef = useRef(false);
@@ -350,6 +355,50 @@ function AppContent() {
     };
   }, [model, state.auth.status, state.mobileDeviceId]);
 
+  const lanNotificationConnectionKey = state.trustedDesktops
+    .map((desktop) =>
+      [
+        desktop.desktopId,
+        desktop.deviceSecret,
+        ...desktop.lanEndpoints.map((endpoint) => endpoint.baseUrl)
+      ].join(":")
+    )
+    .sort()
+    .join("|");
+  useEffect(() => {
+    if (!initialized || forceCloudEnabled || !lanNotificationConnectionKey) {
+      return;
+    }
+    let disposed = false;
+    let stop: () => void = () => undefined;
+    void startLanMobileNotifications({
+      source: model.client,
+      onForeground(notification) {
+        setLanNotificationBanner(notification);
+      },
+      onTaskOpen(target) {
+        setNotificationTaskRequest((current) => ({
+          key: (current?.key ?? 0) + 1,
+          target
+        }));
+      }
+    })
+      .then((cleanup) => {
+        if (disposed) cleanup();
+        else stop = cleanup;
+      })
+      .catch((error: unknown) => {
+        console.error("LAN notification setup failed:", error);
+      });
+    void model.client.listDesktops().catch((error: unknown) => {
+      console.error("LAN desktop discovery failed:", error);
+    });
+    return () => {
+      disposed = true;
+      stop();
+    };
+  }, [forceCloudEnabled, initialized, lanNotificationConnectionKey, model]);
+
   return (
     <SafeAreaView style={styles.safeArea} testID={MOBILE_E2E_IDS.appShell}>
       <View style={styles.shell}>
@@ -442,6 +491,27 @@ function AppContent() {
             onRestart={() => {
               hasDownloadedUpdateRef.current = false;
               void reloadToApplyUpdate();
+            }}
+          />
+        ) : null}
+        {lanNotificationBanner ? (
+          <LanNotificationBanner
+            body={lanNotificationBanner.body}
+            canOpenTask={Boolean(lanNotificationBanner.taskId)}
+            title={lanNotificationBanner.title}
+            onDismiss={() => setLanNotificationBanner(null)}
+            onOpen={() => {
+              const taskId = lanNotificationBanner.taskId;
+              if (taskId) {
+                setNotificationTaskRequest((current) => ({
+                  key: (current?.key ?? 0) + 1,
+                  target: {
+                    desktopId: lanNotificationBanner.desktopId,
+                    taskId
+                  }
+                }));
+              }
+              setLanNotificationBanner(null);
             }}
           />
         ) : null}

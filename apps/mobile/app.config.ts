@@ -230,6 +230,7 @@ export function createExpoConfig(
         ? []
         : ["./plugins/withKannaFirebaseMessaging"]),
       "expo-font",
+      "expo-notifications",
       [
         "expo-camera",
         {

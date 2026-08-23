@@ -50,6 +50,9 @@ pub enum KspCapability {
     /// older sequence ranges on demand, and retains its existing events when
     /// re-attaching from a non-zero sequence.
     AgentHistoryWindow,
+    /// This connection owns the mobile notification listener for its paired
+    /// device and can surface `mobile_notification` server frames.
+    MobileNotifications,
     #[serde(other)]
     Unknown,
 }
@@ -469,6 +472,15 @@ pub enum ServerFrame {
     },
     StateChanged {
         scope: StateChangeScope,
+    },
+    /// Operator notification delivered directly to one live paired mobile
+    /// device over its existing LAN stream.
+    MobileNotification {
+        desktop_id: String,
+        title: String,
+        body: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_id: Option<String>,
     },
     SessionExit {
         task_id: String,

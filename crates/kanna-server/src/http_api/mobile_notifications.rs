@@ -24,6 +24,7 @@ pub(super) struct MobileNotificationResponse {
     status: &'static str,
     accepted_count: u64,
     failed_count: u64,
+    lan_delivered_count: u64,
     failure_reasons: Vec<crate::relay_client::MobileNotificationFailureReason>,
 }
 
@@ -39,17 +40,27 @@ pub(super) async fn notify_mobile(
         .map(|task_id| validate_text("taskId", task_id, MAX_TASK_ID_CHARS))
         .transpose()?;
 
-    let delivery = state
-        .queue_mobile_notification(MobileNotificationPayload {
-            title,
-            body,
-            task_id,
-        })
-        .await
-        .map_err(|error| (axum::http::StatusCode::SERVICE_UNAVAILABLE, error))?;
+    let lan_delivered_count =
+        state.deliver_lan_mobile_notification(&title, &body, task_id.as_deref());
+    let delivery = if lan_delivered_count > 0 {
+        crate::relay_client::MobileNotificationDelivery {
+            accepted_count: 0,
+            failed_count: 0,
+            failure_reasons: Vec::new(),
+        }
+    } else {
+        state
+            .queue_mobile_notification(MobileNotificationPayload {
+                title,
+                body,
+                task_id,
+            })
+            .await
+            .map_err(|error| (axum::http::StatusCode::SERVICE_UNAVAILABLE, error))?
+    };
 
     Ok(Json(MobileNotificationResponse {
-        status: if delivery.accepted_count > 0 {
+        status: if lan_delivered_count > 0 || delivery.accepted_count > 0 {
             "accepted"
         } else if delivery.failed_count > 0 {
             "deliveryFailed"
@@ -58,6 +69,7 @@ pub(super) async fn notify_mobile(
         },
         accepted_count: delivery.accepted_count,
         failed_count: delivery.failed_count,
+        lan_delivered_count,
         failure_reasons: delivery.failure_reasons,
     }))
 }
