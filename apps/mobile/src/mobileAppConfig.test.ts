@@ -96,6 +96,49 @@ describe("mobile app config", () => {
     expect(config.updates).toBeUndefined();
   });
 
+  it("bakes staging cloud config into the dev/staging/staging profile", () => {
+    const config = createExpoConfig({
+      KANNA_APP_ENV: "dev",
+      KANNA_CLOUD_ENV: "staging",
+      EXPO_PUBLIC_KANNA_CLOUD_ENV: "staging"
+    });
+
+    expect(config.name).toBe("Kanna Dev");
+    expect(config.ios.googleServicesFile).toBeUndefined();
+    expect(config.plugins).not.toContain("./plugins/withKannaFirebaseMessaging");
+    expect(config.extra.kanna).toMatchObject({
+      appEnv: "dev",
+      firebase: {
+        apiKey: "AIzaSyCRsov6oQu8Fg0clB2mdB5RgwM8GGwCQXk",
+        projectId: "kanna-staging",
+        appId: "1:1073113006696:ios:612ea270319b137c1c71dd"
+      },
+      relayUrl: "wss://relay-staging.kanna.build",
+      ota: {
+        channel: "staging",
+        manifestUrl: "https://relay-staging.kanna.build/ota/manifest"
+      }
+    });
+    expect(config.updates).toBeUndefined();
+  });
+
+  it("keeps emulator cloud config on the dev placeholders", () => {
+    const config = createExpoConfig({
+      KANNA_APP_ENV: "dev",
+      EXPO_PUBLIC_KANNA_CLOUD_ENV: "local"
+    });
+
+    expect(config.extra.kanna).toMatchObject({
+      firebase: {
+        apiKey: "kanna-local",
+        projectId: "kanna-local",
+        appId: "kanna-mobile-local"
+      },
+      relayUrl: "ws://127.0.0.1:9080",
+      ota: { channel: null, manifestUrl: null }
+    });
+  });
+
   it("produces the staging identity from KANNA_APP_ENV", () => {
     const config = createExpoConfig({
       KANNA_APP_ENV: "staging"

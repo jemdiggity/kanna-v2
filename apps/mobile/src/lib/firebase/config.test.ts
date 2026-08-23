@@ -160,6 +160,22 @@ describe("parseMobileFirebaseConfig", () => {
     });
   });
 
+  it("disables intentional local placeholders when no emulators are configured", () => {
+    const config = parseMobileFirebaseConfig(
+      { EXPO_PUBLIC_KANNA_CLOUD_ENV: "local" },
+      {
+        apiKey: "kanna-local",
+        authDomain: "kanna-local.firebaseapp.com",
+        projectId: "kanna-local",
+        appId: "kanna-mobile-local"
+      }
+    );
+
+    expect(config.app).toBeNull();
+    expect(config.authEmulator).toBeNull();
+    expect(config.firestoreEmulator).toBeNull();
+  });
+
   it("reads Firebase app config from Expo extra before production defaults", () => {
     const app = resolveMobileFirebaseAppConfig(
       {},

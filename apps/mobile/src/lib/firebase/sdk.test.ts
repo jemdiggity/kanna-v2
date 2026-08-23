@@ -73,4 +73,22 @@ describe("createConfiguredMobileAuthSession", () => {
     expect(persistence.type).toBe("LOCAL");
     vi.unstubAllGlobals();
   });
+
+  it("stays signed out without initializing Firebase when config is disabled", async () => {
+    mocks.initializeApp.mockClear();
+    mocks.initializeAuth.mockClear();
+    const { createConfiguredMobileAuthSession } = await import("./sdk");
+
+    const session = createConfiguredMobileAuthSession({
+      app: null,
+      authEmulator: null,
+      firestoreEmulator: null
+    });
+
+    await session.initialize();
+
+    expect(session.getState()).toEqual({ status: "signedOut" });
+    expect(mocks.initializeApp).not.toHaveBeenCalled();
+    expect(mocks.initializeAuth).not.toHaveBeenCalled();
+  });
 });

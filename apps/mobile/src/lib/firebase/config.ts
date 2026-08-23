@@ -67,9 +67,13 @@ export function parseMobileFirebaseConfig(
     ? profileDefaults ?? extra ?? null
     : profileDefaults ?? extra ?? productionMobileFirebaseAppConfig;
   const app = resolveMobileFirebaseAppConfig(env, appDefaults);
+  const usableApp =
+    app && isIntentionalLocalPlaceholder(app) && !authEmulator && !firestoreEmulator
+      ? null
+      : app;
 
   return {
-    app,
+    app: usableApp,
     authEmulator,
     firestoreEmulator
   };
@@ -148,6 +152,14 @@ const productionMobileFirebaseAppConfig: MobileFirebaseAppConfig = {
   appId: "1:402613185450:web:252b2c98d1ef13bed859d3",
   measurementId: "G-091WQZN4SS"
 };
+
+function isIntentionalLocalPlaceholder(config: MobileFirebaseAppConfig): boolean {
+  return (
+    config.apiKey === localMobileFirebaseAppConfig.apiKey &&
+    config.projectId === localMobileFirebaseAppConfig.projectId &&
+    config.appId === localMobileFirebaseAppConfig.appId
+  );
+}
 
 function compactAppConfig(config: MobileFirebaseAppConfig): MobileFirebaseAppConfig {
   const compacted: MobileFirebaseAppConfig = {
