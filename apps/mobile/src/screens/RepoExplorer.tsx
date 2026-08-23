@@ -46,6 +46,7 @@ export function RepoExplorer({ title, listDirectory, readFile, onInsertReference
   const [navigationWidth, setNavigationWidth] = useState(390);
   const swipeOffset = useRef(new Animated.Value(0)).current;
   const navigationWidthRef = useRef(390);
+  const previewBodyTopRef = useRef(Number.POSITIVE_INFINITY);
   const swipeDirectionRef = useRef<-1 | 1 | null>(null);
   const swipeStartOffsetRef = useRef(0);
   const swipeSequenceRef = useRef(0);
@@ -197,22 +198,14 @@ export function RepoExplorer({ title, listDirectory, readFile, onInsertReference
     if (swipeDirectionRef.current !== 1) beginTransition(1);
     return true;
   };
-  const claimRightEdge = () => {
-    if (canGoForwardRef.current) {
-      if (swipeDirectionRef.current !== -1) beginTransition(-1);
-    } else {
-      resetSwipeImmediately();
-    }
-    return true;
-  };
-  const claimNavigationEdge = (event: GestureResponderEvent) => {
-    const startX = event.nativeEvent.pageX;
-    if (startX <= NAVIGATION_EDGE_WIDTH) return claimLeftEdge();
-    if (startX >= navigationWidthRef.current - NAVIGATION_EDGE_WIDTH) return claimRightEdge();
-    return false;
-  };
   const panResponder = useMemo(() => PanResponder.create({
-    onStartShouldSetPanResponderCapture: claimNavigationEdge,
+    onStartShouldSetPanResponderCapture: (event: GestureResponderEvent) => {
+      const { locationY, pageX } = event.nativeEvent;
+      return Boolean(navigationRef.current.current.filePath)
+        && locationY >= previewBodyTopRef.current
+        && pageX <= NAVIGATION_EDGE_WIDTH
+        && claimLeftEdge();
+    },
     onMoveShouldSetPanResponder: (_event, gestureState) => beginsEdgeSwipe(gestureState),
     onMoveShouldSetPanResponderCapture: (_event, gestureState) => beginsEdgeSwipe(gestureState),
     onPanResponderMove: (_event, gestureState) => moveSwipe(gestureState),
@@ -252,9 +245,9 @@ export function RepoExplorer({ title, listDirectory, readFile, onInsertReference
   };
 
   const renderPage = (location: RepoExplorerLocation, pageEntries: RepoBrowseEntry[], pageFilter: string, interactive: boolean) => <View style={styles.navigationPage} testID={interactive ? "mobile.repo-explorer.current-page" : "mobile.repo-explorer.incoming-page"}>
-    <View style={styles.header}><Pressable onPress={interactive ? goBack : undefined} testID={interactive ? "mobile.repo-explorer.back" : undefined}><Text style={styles.action}>Back</Text></Pressable><View style={styles.headerCopy}><Text numberOfLines={1} style={styles.title}>{location.filePath ?? title}</Text><Text numberOfLines={1} style={styles.breadcrumb}>{location.path || "Task worktree"}</Text></View><Pressable onPress={interactive ? onClose : undefined}><Text style={styles.action}>Close</Text></Pressable></View>
+    <View style={styles.header}><Pressable onPress={interactive ? goBack : undefined} testID={interactive ? "mobile.repo-explorer.back" : undefined}><Text style={styles.action}>Back</Text></Pressable><View style={styles.headerCopy}><Text numberOfLines={1} style={styles.title}>{location.filePath ?? title}</Text><Text numberOfLines={1} style={styles.breadcrumb}>{location.path || "Task worktree"}</Text></View><Pressable onPress={interactive ? onClose : undefined} testID={interactive ? "mobile.repo-explorer.close" : undefined}><Text style={styles.action}>Close</Text></Pressable></View>
     {location.filePath
-      ? <View style={styles.viewer} testID={interactive ? "mobile.repo-explorer.file-preview-gesture-surface" : undefined}><LoiterFileViewer path={location.filePath} readFile={readFile} onInsertReference={onInsertReference} /></View>
+      ? <View onLayout={interactive ? (event) => { previewBodyTopRef.current = event.nativeEvent.layout.y; } : undefined} style={styles.viewer} testID={interactive ? "mobile.repo-explorer.file-preview-gesture-surface" : undefined}><LoiterFileViewer path={location.filePath} readFile={readFile} onInsertReference={onInsertReference} /></View>
       : <View style={styles.pageBody} testID={interactive ? "mobile.repo-explorer.directory-gesture-surface" : undefined}>
       <View style={styles.controls}><TextInput autoCapitalize="none" autoCorrect={false} editable={interactive} onChangeText={interactive ? setFilter : undefined} placeholder="Filter this folder" placeholderTextColor="#7185A3" style={styles.filter} testID={interactive ? "mobile.repo-explorer.filter" : undefined} value={pageFilter}/><Pressable accessibilityRole="switch" accessibilityState={{checked:showAllFiles}} disabled={!interactive} onPress={interactive ? ()=>setShowAllFiles((value)=>!value) : undefined}><Text style={styles.toggle}>{showAllFiles?"Hide ignored":"Show all"}</Text></Pressable></View>
       {interactive && error?<Text style={styles.error}>{error}</Text>:null}

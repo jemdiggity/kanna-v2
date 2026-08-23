@@ -92,19 +92,26 @@ afterEach(async () => {
 });
 
 describe("RepoExplorer request ownership", () => {
-  it("owns edge gestures at the full-screen container below a short list", async () => {
+  it("uses move capture for directory gestures without swallowing header or row taps", async () => {
+    const onClose = vi.fn();
     const listDirectory = vi.fn((path: string) => Promise.resolve(listing(path === "src"
       ? [{ name: "only.ts", path: "src/only.ts", isDir: false, size: 4 }]
       : [{ name: "src", path: "src", isDir: true }], null)));
     await act(async () => {
-      mounted = create(<RepoExplorer title="Files" listDirectory={listDirectory} readFile={vi.fn()} onInsertReference={vi.fn()} onClose={vi.fn()} />);
+      mounted = create(<RepoExplorer title="Files" listDirectory={listDirectory} readFile={vi.fn()} onInsertReference={vi.fn()} onClose={onClose} />);
     });
     const surface = mounted.root.findByProps({ testID: "mobile.repo-explorer.navigation-surface" });
     const directorySurface = mounted.root.findByProps({ testID: "mobile.repo-explorer.directory-gesture-surface" });
     const unavailableForwardGesture = { dx: -100, dy: 2, vx: -0.8, x0: 389, y0: 700 };
     expect(surface.props.onMoveShouldSetPanResponderCapture({}, unavailableForwardGesture)).toBe(true);
     expect(directorySurface.props.onStartShouldSetPanResponderCapture).toBeUndefined();
-    expect(surface.props.onStartShouldSetPanResponderCapture({ nativeEvent: { pageX: 389 } })).toBe(true);
+    expect(surface.props.onStartShouldSetPanResponderCapture({ nativeEvent: { locationY: 200, pageX: 1 } })).toBe(false);
+    expect(surface.props.onStartShouldSetPanResponderCapture({ nativeEvent: { locationY: 20, pageX: 1 } })).toBe(false);
+    await act(async () => {
+      mounted?.root.findByProps({ testID: "mobile.repo-explorer.back" }).props.onPress();
+      mounted?.root.findByProps({ testID: "mobile.repo-explorer.close" }).props.onPress();
+    });
+    expect(onClose).toHaveBeenCalledTimes(2);
     await act(async () => { surface.props.onPanResponderRelease({}, unavailableForwardGesture); });
     expect(mounted.root.findAllByProps({ testID: "mobile.repo-explorer.incoming-page" })).toHaveLength(0);
     expect(outgoingOffset(mounted)).toBe(0);
@@ -150,11 +157,12 @@ describe("RepoExplorer request ownership", () => {
   });
 
   it("captures preview edge swipes before the WebView while leaving mid-screen pans alone", async () => {
+    const onClose = vi.fn();
     const listDirectory = vi.fn((path: string) => Promise.resolve(listing(path === "src"
       ? [{ name: "file.ts", path: "src/file.ts", isDir: false, size: 4 }]
       : [{ name: "src", path: "src", isDir: true }], null)));
     await act(async () => {
-      mounted = create(<RepoExplorer title="Files" listDirectory={listDirectory} readFile={() => Promise.resolve(range(0, true))} onInsertReference={vi.fn()} onClose={vi.fn()} />);
+      mounted = create(<RepoExplorer title="Files" listDirectory={listDirectory} readFile={() => Promise.resolve(range(0, true))} onInsertReference={vi.fn()} onClose={onClose} />);
     });
     const pressEntry = async (path: string) => {
       const list = mounted?.root.findByType("FlatList");
@@ -165,12 +173,26 @@ describe("RepoExplorer request ownership", () => {
     await pressEntry("src/file.ts");
 
     const previewSurface = mounted.root.findByProps({ testID: "mobile.repo-explorer.file-preview-gesture-surface" });
-    expect(previewSurface.props.onStartShouldSetPanResponderCapture).toBeUndefined();
     const surface = mounted.root.findByProps({ testID: "mobile.repo-explorer.navigation-surface" });
+    previewSurface.props.onLayout({ nativeEvent: { layout: { y: 63 } } });
+    expect(previewSurface.props.onStartShouldSetPanResponderCapture).toBeUndefined();
+    expect(surface.props.onStartShouldSetPanResponderCapture({ nativeEvent: { locationY: 200, pageX: 200 } })).toBe(false);
+    expect(surface.props.onStartShouldSetPanResponderCapture({ nativeEvent: { locationY: 200, pageX: 389 } })).toBe(false);
+    expect(surface.props.onStartShouldSetPanResponderCapture({ nativeEvent: { locationY: 20, pageX: 1 } })).toBe(false);
+    expect(surface.props.onStartShouldSetPanResponderCapture({ nativeEvent: { locationY: 200, pageX: 1 } })).toBe(true);
+    await act(async () => { surface.props.onPanResponderTerminate(); });
+
+    await act(async () => { mounted?.root.findByProps({ testID: "mobile.repo-explorer.close" }).props.onPress(); });
+    expect(onClose).toHaveBeenCalledOnce();
+    await act(async () => { mounted?.root.findByProps({ testID: "mobile.repo-explorer.back" }).props.onPress(); });
+    expect(mounted.root.findAllByType("WebView")).toHaveLength(0);
+    await pressEntry("src/file.ts");
+
+    const reopenedPreviewSurface = mounted.root.findByProps({ testID: "mobile.repo-explorer.file-preview-gesture-surface" });
+    reopenedPreviewSurface.props.onLayout({ nativeEvent: { layout: { y: 63 } } });
     const edgeGesture = { dx: 100, dy: 2, vx: 0.2, x0: 1, y0: 400 };
     await act(async () => {
-      expect(surface.props.onStartShouldSetPanResponderCapture({ nativeEvent: { pageX: 200 } })).toBe(false);
-      expect(surface.props.onStartShouldSetPanResponderCapture({ nativeEvent: { pageX: 1 } })).toBe(true);
+      expect(surface.props.onStartShouldSetPanResponderCapture({ nativeEvent: { locationY: 200, pageX: 1 } })).toBe(true);
       surface.props.onPanResponderMove({}, edgeGesture);
     });
     const incoming = mounted.root.findByProps({ testID: "mobile.repo-explorer.incoming-page" });
