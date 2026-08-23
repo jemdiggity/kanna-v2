@@ -371,31 +371,28 @@ function AppContent() {
     }
     let disposed = false;
     let stop: () => void = () => undefined;
-    void model.client
-      .listDesktops()
-      .then(() => {
-        if (disposed) return null;
-        return startLanMobileNotifications({
-          source: model.client,
-          onForeground(notification) {
-            setLanNotificationBanner(notification);
-          },
-          onTaskOpen(target) {
-            setNotificationTaskRequest((current) => ({
-              key: (current?.key ?? 0) + 1,
-              target
-            }));
-          }
-        });
-      })
+    void startLanMobileNotifications({
+      source: model.client,
+      onForeground(notification) {
+        setLanNotificationBanner(notification);
+      },
+      onTaskOpen(target) {
+        setNotificationTaskRequest((current) => ({
+          key: (current?.key ?? 0) + 1,
+          target
+        }));
+      }
+    })
       .then((cleanup) => {
-        if (!cleanup) return;
         if (disposed) cleanup();
         else stop = cleanup;
       })
       .catch((error: unknown) => {
         console.error("LAN notification setup failed:", error);
       });
+    void model.client.listDesktops().catch((error: unknown) => {
+      console.error("LAN desktop discovery failed:", error);
+    });
     return () => {
       disposed = true;
       stop();

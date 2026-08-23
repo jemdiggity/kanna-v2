@@ -1158,9 +1158,13 @@ git, or search-in-files operations.
 ## Mobile Notification Delivery
 
 `POST /v1/mobile/notifications` first hands a validated notification to each
-distinct paired mobile device with a live LAN/KSP connection. The frame uses
-the existing stream and includes the desktop id, title, body, and optional task
-id. `lanDeliveredCount` counts devices whose connection accepted the frame.
+distinct paired mobile device with a live LAN/KSP connection that advertised
+the `mobile_notifications` auth capability. The capability identifies the
+stream whose mobile lifecycle owns a notification listener; ordinary task and
+companion streams for the same paired device are never delivery candidates.
+The frame uses that existing stream and includes the desktop id, title, body,
+and optional task id. `lanDeliveredCount` counts devices whose capable
+connection accepted the frame, at most once per device.
 If at least one LAN device accepts it, the server does not also invoke push;
 this LAN-preferred fallback rule prevents a phone that is both LAN-connected
 and push-registered from buzzing twice. If no LAN device accepts it, the

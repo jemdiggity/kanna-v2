@@ -447,6 +447,107 @@ describe("createAppModel cloud routing", () => {
     app.controller.dispose();
   });
 
+  it("owns notification subscriptions as trusted LAN desktops are discovered and removed", async () => {
+    const fixture = createTwoDesktopLanFixture();
+    const mutableBonjour = createMutableBonjourBrowser();
+    const { authSession } = createMutableAuthSession({ status: "signedOut" });
+    const sockets: Array<{
+      url: string;
+      close: ReturnType<typeof vi.fn>;
+      onopen: (() => void) | null;
+      onmessage: ((event: { data: string }) => void) | null;
+      send: ReturnType<typeof vi.fn>;
+    }> = [];
+    class TestWebSocket {
+      close = vi.fn();
+      onclose: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      onopen: (() => void) | null = null;
+      send = vi.fn();
+
+      constructor(readonly url: string) {
+        sockets.push(this);
+      }
+    }
+    vi.stubGlobal("WebSocket", TestWebSocket);
+    const trustedDesktops = ["desktop-a", "desktop-b"].map((desktopId) => ({
+      desktopId,
+      displayName: desktopId === "desktop-a" ? "LAN Mac A" : "LAN Mac B",
+      lanEndpoints: [],
+      lastSeenAt: "2026-08-23T00:00:00.000Z",
+      deviceSecret: `${desktopId}-secret`
+    }));
+    const app = createAppModel({
+      authSession,
+      fetchImpl: fixture.fetchImpl,
+      persistence: {
+        load: vi.fn().mockResolvedValue({
+          selectedDesktopId: "desktop-a",
+          mobileDeviceId: "phone-1",
+          trustedDesktops,
+          repoCreationProfiles: []
+        }),
+        save: vi.fn().mockResolvedValue(undefined)
+      },
+      options: {
+        forceCloud: false,
+        bonjourBrowser: mutableBonjour.browser
+      }
+    });
+
+    await app.initialize();
+    const received: string[] = [];
+    const subscription = app.client.observeMobileNotifications?.((notification) => {
+      received.push(`${notification.desktopId}:${notification.title}`);
+    });
+    expect(sockets).toEqual([]);
+
+    mutableBonjour.setServices(fixture.bonjourBrowser.getServices());
+    await app.client.listDesktops();
+    expect(sockets).toHaveLength(2);
+    for (const socket of sockets) {
+      socket.onopen?.();
+      expect(JSON.parse(socket.send.mock.calls[0]![0])).toMatchObject({
+        type: "auth",
+        capabilities: expect.arrayContaining(["mobile_notifications"])
+      });
+      socket.onmessage?.({
+        data: JSON.stringify({
+          type: "auth_ok",
+          capabilities: ["mobile_notifications"]
+        })
+      });
+      const desktopId = socket.url.includes("desktop-a") ? "desktop-a" : "desktop-b";
+      socket.onmessage?.({
+        data: JSON.stringify({
+          type: "mobile_notification",
+          desktop_id: desktopId,
+          title: "Later notification",
+          body: "Discovered after subscribe"
+        })
+      });
+    }
+    expect(received).toEqual([
+      "desktop-a:Later notification",
+      "desktop-b:Later notification"
+    ]);
+
+    mutableBonjour.setServices(
+      fixture.bonjourBrowser.getServices().filter(
+        (service) => service.txt.desktopId === "desktop-a"
+      )
+    );
+    await app.client.listDesktops();
+    const staleDesktopSocket = sockets.find((socket) => socket.url.includes("desktop-b"));
+    expect(staleDesktopSocket?.close).toHaveBeenCalledOnce();
+
+    subscription?.close();
+    const remainingSocket = sockets.find((socket) => socket.url.includes("desktop-a"));
+    expect(remainingSocket?.close).toHaveBeenCalledOnce();
+    app.controller.dispose();
+  });
+
   it("uses account-known machines over LAN without a manual trust record", async () => {
     const { authSession } = createMutableAuthSession(signedInState());
     let pushCloudTasks: ((tasks: CloudTaskSummary[]) => void) | null = null;

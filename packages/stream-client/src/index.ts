@@ -246,6 +246,8 @@ export interface StreamClientOptions {
   terminalScrollbackWindow?: boolean;
   /** Negotiate bounded agent snapshots with backwards history requests. */
   agentHistoryWindow?: boolean;
+  /** Register this paired-device connection as a mobile notification sink. */
+  mobileNotifications?: boolean;
 }
 
 interface AgentAttachment {
@@ -797,6 +799,9 @@ export class StreamClient {
           : []),
         ...(this.options.agentHistoryWindow
           ? (["agent_history_window"] as const)
+          : []),
+        ...(this.options.mobileNotifications
+          ? (["mobile_notifications"] as const)
           : []),
       ],
     }, socket);

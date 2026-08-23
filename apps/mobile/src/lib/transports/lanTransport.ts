@@ -148,7 +148,8 @@ export function createLanTransport(
         url: buildKspWebSocketUrl(baseUrl, kspStreamVersion),
         credential: streamCredential,
         webSocketFactory: (url) => createKspSocket(url) as unknown as StreamWebSocketLike,
-        reconnectDelaysMs: [250, 500, 1000, 2000]
+        reconnectDelaysMs: [250, 500, 1000, 2000],
+        mobileNotifications: true
       });
       const unsubscribe = client.onMobileNotification(listener);
       return {

@@ -1021,8 +1021,44 @@ function createTrustedLanFallbackClient({
     deviceSecret: string | null;
     client: KannaClient;
   }>();
+  const mobileNotificationListeners = new Set<
+    Parameters<NonNullable<KannaClient["observeMobileNotifications"]>>[0]
+  >();
+  const mobileNotificationSubscriptions = new Map<string, {
+    client: KannaClient;
+    close(): void;
+  }>();
   let lastValidatedDesktopId: string | null = null;
   let pendingValidationCount = 0;
+  const reconcileMobileNotificationSubscriptions = () => {
+    for (const [desktopId, subscription] of mobileNotificationSubscriptions) {
+      const validated = validatedClients.get(desktopId);
+      if (
+        mobileNotificationListeners.size === 0
+        || validated?.client !== subscription.client
+        || !validatedBaseUrls.has(desktopId)
+      ) {
+        subscription.close();
+        mobileNotificationSubscriptions.delete(desktopId);
+      }
+    }
+    if (mobileNotificationListeners.size === 0) return;
+    for (const [desktopId, baseUrl] of validatedBaseUrls) {
+      const client = clientForBaseUrl(baseUrl, desktopId);
+      if (mobileNotificationSubscriptions.has(desktopId)) continue;
+      const subscription = client.observeMobileNotifications?.((notification) => {
+        for (const listener of [...mobileNotificationListeners]) {
+          listener(notification);
+        }
+      });
+      if (subscription) {
+        mobileNotificationSubscriptions.set(desktopId, {
+          client,
+          close: () => subscription.close()
+        });
+      }
+    }
+  };
   const replaceValidatedBaseUrls = (
     endpoints: readonly { desktopId: string; baseUrl: string }[]
   ) => {
@@ -1039,6 +1075,7 @@ function createTrustedLanFallbackClient({
         validatedClients.delete(desktopId);
       }
     }
+    reconcileMobileNotificationSubscriptions();
     lastValidatedDesktopId = endpoints[0]?.desktopId ?? null;
     if (changed) onValidatedRoutesChanged();
   };
@@ -1046,6 +1083,7 @@ function createTrustedLanFallbackClient({
     const changed = validatedBaseUrls.get(desktopId) !== baseUrl;
     validatedBaseUrls.set(desktopId, baseUrl);
     if (changed) validatedClients.delete(desktopId);
+    if (changed) reconcileMobileNotificationSubscriptions();
     lastValidatedDesktopId = desktopId;
     if (changed) onValidatedRoutesChanged();
   };
@@ -1107,6 +1145,7 @@ function createTrustedLanFallbackClient({
       if (desktopId) {
         if (validatedBaseUrls.delete(desktopId)) {
           validatedClients.delete(desktopId);
+          reconcileMobileNotificationSubscriptions();
           if (lastValidatedDesktopId === desktopId) {
             lastValidatedDesktopId = validatedBaseUrls.keys().next().value ?? null;
           }
@@ -1205,12 +1244,12 @@ function createTrustedLanFallbackClient({
   const client: KannaClient = {
     ...createResolvingClient(null),
     observeMobileNotifications(listener) {
-      const subscriptions = [...validatedClients.values()]
-        .map(({ client }) => client.observeMobileNotifications?.(listener))
-        .filter((subscription) => subscription !== undefined);
+      mobileNotificationListeners.add(listener);
+      reconcileMobileNotificationSubscriptions();
       return {
         close() {
-          for (const subscription of subscriptions) subscription.close();
+          mobileNotificationListeners.delete(listener);
+          reconcileMobileNotificationSubscriptions();
         }
       };
     },

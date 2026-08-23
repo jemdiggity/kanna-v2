@@ -277,6 +277,36 @@ describe("StreamClient", () => {
     client.close();
   });
 
+  it("advertises mobile notification capability only for an owning listener connection", () => {
+    const client = new StreamClient({
+      url: "ws://test/v1/stream",
+      webSocketFactory: factory,
+      mobileNotifications: true,
+    });
+    const socket = sockets[0];
+    const notifications: string[] = [];
+    client.onMobileNotification((notification) => notifications.push(notification.title));
+
+    socket.open();
+    expect(socket.sent[0]).toEqual({
+      type: "auth",
+      capabilities: [
+        "companion_event_epoch",
+        "term_input_boundary",
+        "mobile_notifications",
+      ],
+    });
+    socket.receive({ type: "auth_ok", capabilities: ["mobile_notifications"] });
+    socket.receive({
+      type: "mobile_notification",
+      desktop_id: "desktop-1",
+      title: "Needs attention",
+      body: "Review the task",
+    });
+    expect(notifications).toEqual(["Needs attention"]);
+    client.close();
+  });
+
   it("sends agent_set_model frames", () => {
     const { client, socket } = connectedClient();
     client.sendAgentSetModel("task-1", "claude-haiku-4-5-20251001");

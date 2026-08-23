@@ -8,4 +8,4 @@
  * for one unknown string would make the negotiation unable to ever grow.
  * Unknown strings deserialize to [`KspCapability::Unknown`] and are ignored.
  */
-export type KspCapability = "companion_attachment_epoch" | "companion_event_epoch" | "term_input_boundary" | "term_scrollback_window" | "agent_history_window" | "unknown";
+export type KspCapability = "companion_attachment_epoch" | "companion_event_epoch" | "term_input_boundary" | "term_scrollback_window" | "agent_history_window" | "mobile_notifications" | "unknown";

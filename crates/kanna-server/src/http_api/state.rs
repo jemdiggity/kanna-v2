@@ -553,7 +553,7 @@ impl AppState {
         }
     }
 
-    pub(super) fn deliver_lan_mobile_notification(
+    pub(crate) fn deliver_lan_mobile_notification(
         &self,
         title: &str,
         body: &str,

@@ -267,18 +267,38 @@ describe("LAN task loop E2E", () => {
       body: string;
       taskId?: string;
     }) => void;
+    const notifications: Array<{
+      desktopId: string;
+      title: string;
+      body: string;
+      taskId?: string;
+    }> = [];
     const received = new Promise<{
       desktopId: string;
       title: string;
       body: string;
       taskId?: string;
     }>((resolve) => {
-      resolveNotification = resolve;
+      resolveNotification = (notification) => {
+        notifications.push(notification);
+        resolve(notification);
+      };
     });
+    // This authenticated task stream deliberately competes for the same
+    // paired device. It must not register as a notification sink.
+    let resolveOrdinaryReady!: () => void;
+    const ordinaryReady = new Promise<void>((resolve) => {
+      resolveOrdinaryReady = resolve;
+    });
+    const ordinarySubscription = transport.observeTaskAgent(
+      "competing-ordinary-stream",
+      () => resolveOrdinaryReady()
+    );
     const subscription = transport.observeMobileNotifications?.(resolveNotification);
     expect(subscription).toBeDefined();
 
     try {
+      await ordinaryReady;
       const delivery = await retryUntilLanNotificationAccepted(
         harness,
         {
@@ -299,7 +319,10 @@ describe("LAN task loop E2E", () => {
         body: "Review the latest task result",
         taskId: "task-lan-notification"
       });
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+      expect(notifications).toHaveLength(1);
     } finally {
+      ordinarySubscription.close();
       subscription?.close();
     }
   });
