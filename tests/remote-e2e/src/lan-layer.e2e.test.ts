@@ -1,5 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import WebSocket, { type RawData } from "ws";
+import {
+  createTerminalAppStateLifecycle
+} from "../../../apps/mobile/src/appLifecycle";
 import { createKannaClient } from "../../../apps/mobile/src/lib/api/client";
 import type { AgentProvider } from "../../../packages/agent-protocol/src/index";
 import type {
@@ -314,6 +317,89 @@ describe("LAN task loop E2E", () => {
       const older = Buffer.from(chunk.dataB64, "base64").toString("utf8");
       expect(older).toContain("MOBILE_PTY_HISTORY_");
       expect(older).not.toContain("MOBILE_PTY_HISTORY_10050");
+
+      // Exercise the mobile lifecycle against the same real daemon/server
+      // session. A return inside the grace keeps the attachment and its
+      // retained terminal current: foreground refresh must not introduce a
+      // second snapshot for xterm to replay.
+      const lanTransport = createLanClient(harness);
+      let terminalAttachCount = 0;
+      const client = createKannaClient({
+        ...lanTransport,
+        observeTaskTerminal(taskId, listener) {
+          terminalAttachCount += 1;
+          return lanTransport.observeTaskTerminal(taskId, listener);
+        }
+      });
+      const store = createSessionStore();
+      const controller = createMobileController(client, store);
+      const lifecycle = createTerminalAppStateLifecycle({
+        initialState: "active",
+        graceMs: 20_000,
+        setTransportForeground() {},
+        setControllerForeground(foreground) {
+          controller.setAppForeground(foreground);
+        },
+        expireTerminalGrace() {
+          controller.expireTaskTerminalGrace();
+        }
+      });
+      try {
+        await controller.bootstrap();
+        controller.openTask(task.taskId);
+        await waitForStoreTerminalOutput(
+          store,
+          "MOBILE_PTY_SNAPSHOT_SENTINEL",
+          30_000
+        );
+        const attached = store.taskTerminalOutputSource.getSnapshot();
+        expect(
+          Buffer.byteLength(decodeRetainedTerminalOutput(attached.output), "utf8")
+        ).toBeLessThan(300_000);
+        expect(terminalAttachCount).toBe(1);
+
+        lifecycle.transition("background");
+
+        // Produce enough deterministic live output to exercise the app-state
+        // grace while the terminal is hidden. The #1193 implementation queued
+        // these frames in pendingEvents, so this wait timed out until the app
+        // foregrounded and flushed them through xterm.
+        await controller.sendTaskInput(task.taskId, "burst-output");
+        const backgroundOutput = await waitForStoreTerminalOutput(
+          store,
+          "SCRIPT_BURST_DONE",
+          30_000
+        );
+        expect(backgroundOutput).toContain("SCRIPT_BURST_0001_");
+        expect(backgroundOutput).toContain("SCRIPT_BURST_2000_");
+
+        const retainedWhileBackgrounded =
+          store.taskTerminalOutputSource.getSnapshot();
+        const retainedOutput = terminalOutputToString(
+          retainedWhileBackgrounded.output
+        );
+        const foreground = lifecycle.transition("active");
+        expect(foreground.preserveTerminal).toBe(true);
+
+        // Foregrounding has no hidden frame queue to drain: the retained
+        // terminal was already current while backgrounded.
+        const foregrounded = store.taskTerminalOutputSource.getSnapshot();
+        expect(terminalOutputToString(foregrounded.output)).toBe(retainedOutput);
+        expect(foregrounded.outputEpoch).toBe(
+          retainedWhileBackgrounded.outputEpoch
+        );
+        expect(terminalAttachCount).toBe(1);
+
+        await controller.refresh({ preserveTaskSession: true });
+
+        expect(store.taskTerminalOutputSource.getSnapshot().outputEpoch).toBe(
+          retainedWhileBackgrounded.outputEpoch
+        );
+        expect(terminalAttachCount).toBe(1);
+      } finally {
+        lifecycle.dispose();
+        controller.dispose();
+      }
     } finally {
       seeding.close();
       events?.close();

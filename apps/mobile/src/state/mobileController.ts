@@ -77,7 +77,6 @@ export interface MobileController {
   setNavigationView(view: MobileView): void;
   setTaskDetailVisible(visible: boolean): void;
   setAppForeground(foreground: boolean): void;
-  setTaskTerminalConsumptionPaused(paused: boolean): void;
   expireTaskTerminalGrace(): void;
   selectDesktop(desktopId: string): Promise<void>;
   selectRepo(repoId: string): Promise<void>;
@@ -232,7 +231,6 @@ export function createMobileController(
         taskId: string;
         routeIdentity: string;
         subscription: TaskTerminalSubscription;
-        setConsumptionPaused(paused: boolean): void;
         retagTaskId(taskId: string): void;
       }
     | null = null;
@@ -257,7 +255,6 @@ export function createMobileController(
       }
     | null = null;
   let taskTerminalGeneration = 0;
-  let taskTerminalConsumptionPaused = false;
   let taskAgentGeneration = 0;
   let taskCompanionGeneration = 0;
   let taskDetailGeneration = 0;
@@ -1174,8 +1171,6 @@ export function createMobileController(
     try {
       let streamTaskId = taskId;
       let subscription: TaskTerminalSubscription | null = null;
-      let pendingEvents: TaskTerminalStreamEvent[] = [];
-      let pendingDataChars = 0;
       const resizeToRequestedGeometry = (snapshot?: {
         cols: number;
         rows: number;
@@ -1232,38 +1227,7 @@ export function createMobileController(
             break;
         }
       };
-      const flushPendingEvents = () => {
-        const events = pendingEvents;
-        pendingEvents = [];
-        pendingDataChars = 0;
-        for (const event of events) applyEvent(event);
-      };
-      const bufferEvent = (event: TaskTerminalStreamEvent) => {
-        if (event.type === "snapshot") {
-          pendingEvents = [event];
-          pendingDataChars = event.dataB64.length;
-          if (pendingDataChars > MAX_TERMINAL_SCROLLBACK_CHARS) {
-            pendingEvents = [];
-            stopTaskTerminal();
-          }
-          return;
-        }
-        pendingEvents.push(event);
-        if (event.type !== "output") return;
-        pendingDataChars += event.dataB64.length + 1;
-        if (pendingDataChars > MAX_TERMINAL_SCROLLBACK_CHARS) {
-          // A very noisy hidden terminal must not grow memory without bound or
-          // silently drop ANSI state. Release it early; foreground bootstrap
-          // will use the ordinary snapshot/resume reconnect path.
-          pendingEvents = [];
-          stopTaskTerminal();
-        }
-      };
       subscription = client.observeTaskTerminal(taskId, (event) => {
-        if (taskTerminalConsumptionPaused) {
-          bufferEvent(event);
-          return;
-        }
         applyEvent(event);
       });
 
@@ -1275,9 +1239,6 @@ export function createMobileController(
         taskId,
         routeIdentity,
         subscription,
-        setConsumptionPaused(paused) {
-          if (!paused) flushPendingEvents();
-        },
         retagTaskId(nextTaskId) {
           streamTaskId = nextTaskId;
         }
@@ -2452,12 +2413,6 @@ export function createMobileController(
       if (appForeground === foreground) return;
       appForeground = foreground;
       reconcileTaskSummarySubscriptions();
-    },
-
-    setTaskTerminalConsumptionPaused(paused) {
-      if (taskTerminalConsumptionPaused === paused) return;
-      taskTerminalConsumptionPaused = paused;
-      activeTaskTerminal?.setConsumptionPaused(paused);
     },
 
     expireTaskTerminalGrace() {

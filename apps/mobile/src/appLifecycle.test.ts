@@ -12,7 +12,6 @@ function createTerminalLifecycle(
   const actions = {
     setTransportForeground: vi.fn(),
     setControllerForeground: vi.fn(),
-    setTerminalConsumptionPaused: vi.fn(),
     expireTerminalGrace: vi.fn()
   };
   const lifecycle = createTerminalAppStateLifecycle({
@@ -39,8 +38,6 @@ describe("createTerminalAppStateLifecycle", () => {
     });
     expect(actions.expireTerminalGrace).not.toHaveBeenCalled();
     expect(actions.setTransportForeground).toHaveBeenCalledWith(true);
-    expect(actions.setTerminalConsumptionPaused).toHaveBeenNthCalledWith(1, true);
-    expect(actions.setTerminalConsumptionPaused).toHaveBeenNthCalledWith(2, false);
     lifecycle.dispose();
     vi.useRealTimers();
   });

@@ -7899,7 +7899,7 @@ describe("createMobileController", () => {
     expect(store.getState().taskTerminalTaskId).toBe("task-1");
   });
 
-  it("buffers terminal output while hidden and flushes it without reconnecting", async () => {
+  it("keeps the retained terminal current instead of replaying hidden output on foreground", async () => {
     const store = createSessionStore();
     const client = createClientMock();
     const controller = createMobileController(client, store);
@@ -7913,19 +7913,17 @@ describe("createMobileController", () => {
       rows: 24,
       dataB64: "visible"
     });
-    controller.setTaskTerminalConsumptionPaused(true);
     client.__terminalStream.emit({
       type: "output",
       taskId: "task-1",
       dataB64: "hidden"
     });
 
-    expect(terminalText(store)).toBe("visible\n");
-    expect(client.__terminalStream.subscription.close).not.toHaveBeenCalled();
-
-    controller.setTaskTerminalConsumptionPaused(false);
-
+    // Applying live bytes as they arrive leaves no historical frame queue for
+    // foregrounding to drain through xterm. The app is visually hidden, but
+    // the retained terminal remains the current screen throughout the grace.
     expect(terminalText(store)).toBe("visible\nhidden\n");
+    expect(client.__terminalStream.subscription.close).not.toHaveBeenCalled();
     expect(client.observeTaskTerminal).toHaveBeenCalledOnce();
   });
 
