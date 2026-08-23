@@ -17,6 +17,7 @@ import {
   shouldRespawnAfterAttachFailure,
   shouldEnableKittyKeyboard,
   shouldPushKittyKeyboardOnFreshAttach,
+  shouldResetTerminalForSnapshot,
   shouldResetTerminalOnReconnect,
   shouldRunTerminalDispose,
   shouldSupportKittyKeyboard,
@@ -329,6 +330,52 @@ describe("shouldResetTerminalOnReconnect", () => {
 
   it("avoids resetting xterm state for Codex reconnects", () => {
     expect(shouldResetTerminalOnReconnect({ agentProvider: "codex" })).toBe(false);
+  });
+});
+
+describe("shouldResetTerminalForSnapshot", () => {
+  it("always resets for a respawned session id, Codex included", () => {
+    expect(
+      shouldResetTerminalForSnapshot({
+        preserveRecoveredScrollback: false,
+        sessionRespawned: true,
+        agentProvider: "codex",
+      }),
+    ).toBe(true);
+    expect(
+      shouldResetTerminalForSnapshot({
+        preserveRecoveredScrollback: false,
+        sessionRespawned: true,
+        agentProvider: "claude",
+      }),
+    ).toBe(true);
+  });
+
+  it("keeps the provider-specific behavior on an ordinary reconnect", () => {
+    expect(
+      shouldResetTerminalForSnapshot({
+        preserveRecoveredScrollback: false,
+        sessionRespawned: false,
+        agentProvider: "codex",
+      }),
+    ).toBe(false);
+    expect(
+      shouldResetTerminalForSnapshot({
+        preserveRecoveredScrollback: false,
+        sessionRespawned: false,
+        agentProvider: "claude",
+      }),
+    ).toBe(true);
+  });
+
+  it("never resets over a recovered-scrollback restore", () => {
+    expect(
+      shouldResetTerminalForSnapshot({
+        preserveRecoveredScrollback: true,
+        sessionRespawned: true,
+        agentProvider: "claude",
+      }),
+    ).toBe(false);
   });
 });
 

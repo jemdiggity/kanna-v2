@@ -8,8 +8,20 @@ import TerminalView from "../TerminalView.vue";
 const markTaskSwitchMountedMock = vi.fn();
 const markTaskSwitchReadyMock = vi.fn();
 const setWebviewFocusMock = vi.fn(async () => {});
+const emptyBuffer = () => ({
+  type: "normal" as const,
+  length: 0,
+  getLine: () => undefined,
+});
 const useTerminalMock = vi.fn(() => ({
-  terminal: ref({ focus: focusMock }),
+  terminal: ref({
+    focus: focusMock,
+    buffer: {
+      active: emptyBuffer(),
+      normal: emptyBuffer(),
+      onBufferChange: () => ({ dispose: () => {} }),
+    },
+  }),
   init: initMock,
   startListening: startListeningMock,
   fit: fitMock,

@@ -25,7 +25,7 @@ import {
   isMissingDaemonSessionFailure,
   shouldForceDoubleResizeOnReconnect,
   shouldReattachOnDaemonReady,
-  shouldResetTerminalOnReconnect,
+  shouldResetTerminalForSnapshot,
   shouldRespawnAfterAttachFailure,
   shouldSkipReconnect,
 } from "./terminalSessionRecovery"
@@ -134,14 +134,17 @@ export function createTerminalSessionLifecycle(params: {
             if (!liveTerminal) return
             const vt = new TextDecoder().decode(base64ToBytes(dataB64))
             if (
-              !params.state.preserveRecoveredScrollbackForNextSnapshot &&
-              shouldResetTerminalOnReconnect({
+              shouldResetTerminalForSnapshot({
+                preserveRecoveredScrollback:
+                  params.state.preserveRecoveredScrollbackForNextSnapshot,
+                sessionRespawned: params.state.resetTerminalOnNextSnapshot,
                 agentProvider: agentProvider ?? params.options?.agentProvider,
               })
             ) {
               liveTerminal.reset()
             }
             params.state.preserveRecoveredScrollbackForNextSnapshot = false
+            params.state.resetTerminalOnNextSnapshot = false
             params.clipboardBridge.restoreTerminalModesFromSnapshot(vt)
             liveTerminal.write(vt)
           },
@@ -242,6 +245,7 @@ export function createTerminalSessionLifecycle(params: {
           params.state.sessionExited = false
           params.state.attached = false
           params.state.terminalStreamAttached = false
+          params.state.resetTerminalOnNextSnapshot = true
           void connectSession().catch((e) =>
             console.error("[terminal] deferred session_created re-attach failed:", e)
           )
@@ -281,6 +285,9 @@ export function createTerminalSessionLifecycle(params: {
     params.state.sessionExited = false
     params.state.attached = false
     params.state.terminalStreamAttached = false
+    // Same reasoning as the session_created rebind: a respawned id means the
+    // shown content belongs to a dead PTY, so the next snapshot replaces it.
+    params.state.resetTerminalOnNextSnapshot = true
   }
 
   async function handleAttachError(error: { code?: string; message: string }) {
@@ -422,6 +429,10 @@ export function createTerminalSessionLifecycle(params: {
           params.state.sessionExited = false
           params.state.attached = false
           params.state.terminalStreamAttached = false
+          // A new PTY backs this id now; the next snapshot must replace the
+          // dead incarnation's content, whatever the provider's ordinary
+          // reconnect behavior is (see TerminalRuntimeState).
+          params.state.resetTerminalOnNextSnapshot = true
           connectSession().catch((e) =>
             console.error("[terminal] session_created re-attach failed:", e)
           )

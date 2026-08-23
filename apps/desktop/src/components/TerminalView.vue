@@ -2,6 +2,7 @@
 import { ref, onMounted, onUnmounted, onActivated, onDeactivated, watch, nextTick } from "vue"
 import { getCurrentWebview } from "@tauri-apps/api/webview"
 import { useTerminal, type SpawnOptions } from "../composables/useTerminal"
+import { useAltScreenHistory } from "../composables/terminalAltScreenHistory"
 import { shouldDelayConnectUntilAfterInitialLayout } from "../composables/terminalSessionRecovery"
 import { nextFrameOrTimeout } from "../utils/animationFrame"
 import { shouldStartTerminalSession } from "../composables/terminalVisibility"
@@ -34,6 +35,41 @@ defineExpose({
   fit,
   redraw,
   ensureConnected,
+})
+
+// A full-screen TUI on the alternate screen hides the normal buffer — setup
+// output and prior-stage history — and xterm cannot scroll past it. Offer that
+// hidden text read-only while the TUI holds the screen.
+const {
+  altScreenActive,
+  hasHiddenHistory,
+  readHistoryLines,
+  dispose: disposeAltScreenHistory,
+} = useAltScreenHistory(terminal)
+const historyOverlayOpen = ref(false)
+const historyText = ref("")
+const historyBodyRef = ref<HTMLElement | null>(null)
+
+async function openHistoryOverlay() {
+  historyText.value = readHistoryLines().join("\n")
+  historyOverlayOpen.value = true
+  await nextTick()
+  const body = historyBodyRef.value
+  if (body) {
+    body.scrollTop = body.scrollHeight
+    body.focus()
+  }
+}
+
+function closeHistoryOverlay() {
+  if (!historyOverlayOpen.value) return
+  historyOverlayOpen.value = false
+  if (props.active !== false) terminal.value?.focus()
+}
+
+// When the TUI leaves the alternate screen the buffer is scrollable again.
+watch(altScreenActive, (active) => {
+  if (!active) closeHistoryOverlay()
 })
 
 let resizeObserver: ResizeObserver | null = null
@@ -145,6 +181,7 @@ watch(
 onUnmounted(() => {
   if (focusRafId) cancelAnimationFrame(focusRafId)
   resizeObserver?.disconnect()
+  disposeAltScreenHistory()
   dispose()
 })
 </script>
@@ -152,11 +189,32 @@ onUnmounted(() => {
 <template>
   <div class="terminal-wrapper">
     <div ref="containerRef" class="terminal-container"></div>
+    <button
+      v-if="hasHiddenHistory && !historyOverlayOpen"
+      class="terminal-history-chip"
+      title="The full-screen agent is hiding earlier terminal output (setup scripts, previous stages). Click to view it."
+      @click="openHistoryOverlay"
+    >
+      Earlier output
+    </button>
+    <div v-if="historyOverlayOpen" class="terminal-history-overlay">
+      <div class="terminal-history-header">
+        <span>Earlier output — setup &amp; previous stages</span>
+        <button class="terminal-history-close" @click="closeHistoryOverlay">Close</button>
+      </div>
+      <pre
+        ref="historyBodyRef"
+        class="terminal-history-body"
+        tabindex="-1"
+        @keydown.esc.stop.prevent="closeHistoryOverlay"
+      >{{ historyText }}</pre>
+    </div>
   </div>
 </template>
 
 <style scoped>
 .terminal-wrapper {
+  position: relative;
   flex: 1;
   min-height: 0;
   overflow: hidden;
@@ -166,5 +224,68 @@ onUnmounted(() => {
 .terminal-container {
   width: 100%;
   height: 100%;
+}
+.terminal-history-chip {
+  position: absolute;
+  top: 6px;
+  right: 18px;
+  z-index: 5;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: var(--kn-text-muted);
+  background: var(--kn-bg-panel-raised);
+  border: 1px solid var(--kn-border-default);
+  border-radius: 10px;
+  opacity: 0.75;
+  cursor: pointer;
+}
+.terminal-history-chip:hover {
+  opacity: 1;
+  color: var(--kn-text-primary);
+  border-color: var(--kn-border-strong);
+}
+.terminal-history-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  background: var(--kn-terminal-bg);
+}
+.terminal-history-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  font-size: 11px;
+  color: var(--kn-text-muted);
+  border-bottom: 1px solid var(--kn-border-default);
+}
+.terminal-history-close {
+  padding: 2px 8px;
+  font-size: 11px;
+  color: var(--kn-text-muted);
+  background: var(--kn-bg-panel-raised);
+  border: 1px solid var(--kn-border-default);
+  border-radius: 10px;
+  cursor: pointer;
+}
+.terminal-history-close:hover {
+  color: var(--kn-text-primary);
+  border-color: var(--kn-border-strong);
+}
+.terminal-history-body {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 8px 12px;
+  overflow: auto;
+  font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--kn-text-muted);
+  white-space: pre-wrap;
+  word-break: break-all;
+  outline: none;
 }
 </style>
