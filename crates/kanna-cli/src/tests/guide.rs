@@ -156,7 +156,7 @@ async fn guide_json_fetches_env_task_id_and_includes_workflow_context_and_tools(
     let guide = render_guide_json(&context).unwrap();
     let request = handle.await.unwrap();
 
-    assert!(request.starts_with("GET /v1/tasks/task-123 HTTP/1.1"));
+    assert!(request.starts_with("GET /v1/tasks/task-123?agentView=true HTTP/1.1"));
     assert_eq!(guide["taskId"], "task-123");
     assert_eq!(guide["task"]["workflowName"], "qa");
     assert_eq!(guide["task"]["stage"], "verify");
@@ -275,7 +275,7 @@ async fn guide_json_command_fetches_env_task_id_and_prints_workflow_context_and_
     let request = handle.await.unwrap();
     let guide: serde_json::Value = serde_json::from_slice(&output).unwrap();
 
-    assert!(request.starts_with("GET /v1/tasks/task-456 HTTP/1.1"));
+    assert!(request.starts_with("GET /v1/tasks/task-456?agentView=true HTTP/1.1"));
     assert_eq!(guide["taskId"], "task-456");
     assert_eq!(guide["task"]["workflowName"], "revision");
     assert_eq!(guide["task"]["stage"], "implement");

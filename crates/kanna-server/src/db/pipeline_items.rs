@@ -964,31 +964,41 @@ impl Db {
     /// The read and the increment share one immediate transaction so that two
     /// concurrent requests cannot both observe the last free slot and both
     /// spend it. `limit` of `0` means the workflow opted out of the cap.
+    #[cfg(test)]
     pub fn try_claim_agent_revision_round(
         &self,
         id: &str,
         limit: i64,
     ) -> Result<Option<i64>, rusqlite::Error> {
         self.with_immediate_transaction(|db| {
-            let rounds = db.task_revision_rounds(id)?;
-            if limit > 0 && rounds >= limit {
-                return Ok(None);
-            }
-            let rows_affected = db.conn.execute(
-                "UPDATE pipeline_item
-                 SET revision_rounds = revision_rounds + 1, updated_at = datetime('now')
-                 WHERE id = ?",
-                [id],
-            )?;
-            if rows_affected == 0 {
-                return Err(rusqlite::Error::QueryReturnedNoRows);
-            }
-            Ok(Some(rounds + 1))
+            db.claim_agent_revision_round_in_transaction(id, limit)
         })
+    }
+
+    pub(crate) fn claim_agent_revision_round_in_transaction(
+        &self,
+        id: &str,
+        limit: i64,
+    ) -> Result<Option<i64>, rusqlite::Error> {
+        let rounds = self.task_revision_rounds(id)?;
+        if limit > 0 && rounds >= limit {
+            return Ok(None);
+        }
+        let rows_affected = self.conn.execute(
+            "UPDATE pipeline_item
+             SET revision_rounds = revision_rounds + 1, updated_at = datetime('now')
+             WHERE id = ?",
+            [id],
+        )?;
+        if rows_affected == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        Ok(Some(rounds + 1))
     }
 
     /// Hand a claimed round back: preparation failed, so no agent ever ran and
     /// the round must not be charged to the task. Floors at zero.
+    #[cfg(test)]
     pub fn release_agent_revision_round(&self, id: &str) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "UPDATE pipeline_item

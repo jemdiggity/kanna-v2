@@ -78,7 +78,7 @@ fn task_get_prints_the_revision_round_budget() {
 
     let request = server.join().unwrap();
     assert!(
-        request.starts_with("GET /v1/tasks/task-1 HTTP/1.1"),
+        request.starts_with("GET /v1/tasks/task-1?agentView=true HTTP/1.1"),
         "{request}"
     );
     assert!(

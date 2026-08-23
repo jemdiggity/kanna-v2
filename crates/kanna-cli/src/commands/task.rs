@@ -4,13 +4,14 @@ use serde_json::Value;
 
 use crate::api::{
     advance_stage_via_api, block_task_via_api, close_task_via_api, create_task_via_api,
-    dependent_tasks_exist_via_api, get_task_via_api, list_repo_tasks_via_api,
-    list_task_children_via_api, list_tasks_via_api, notify_mobile_via_api, parse_wait_until,
-    rename_task_via_api, request_revision_via_api, rerun_stage_via_api, resume_task_via_api,
-    search_tasks_via_api, send_task_input_via_api, set_task_notify_via_api,
+    dependent_tasks_exist_via_api, get_task_via_api, get_task_with_agent_view_via_api,
+    list_repo_tasks_via_api, list_task_children_via_api, list_tasks_via_api,
+    list_tasks_with_options_via_api, notify_mobile_via_api, parse_wait_until, rename_task_via_api,
+    request_revision_via_api, rerun_stage_via_api, resume_task_via_api, search_tasks_via_api,
+    search_tasks_with_options_via_api, send_task_input_via_api, set_task_notify_via_api,
     set_task_parent_via_api, set_task_workflow_via_api, signal_merge_handoff_via_api,
-    task_inputs_via_api, task_logs_via_api, unblock_task_via_api, wait_task_events_via_api,
-    wait_task_via_api, WaitTaskOutcome,
+    task_inputs_via_api, task_logs_with_agent_view_via_api, unblock_task_via_api,
+    wait_task_events_via_api, wait_task_via_api, WaitTaskOutcome,
 };
 use crate::commands::{parse_metadata_json, print_json};
 use crate::config::resolve_server_base_url_from_env;
@@ -154,25 +155,72 @@ pub(crate) async fn run(command: TaskCommands) {
     match command {
         TaskCommands::List {
             repo_id,
+            all_machines,
+            include_closed,
             server_url,
         } => {
             let base_url = resolve_server_base_url_from_env(server_url.as_deref());
-            let tasks = match repo_id {
-                Some(repo_id) => list_repo_tasks_via_api(&base_url, &repo_id).await,
-                None => list_tasks_via_api(&base_url).await,
+            if let Some(repo_id) = repo_id {
+                let tasks = list_repo_tasks_via_api(&base_url, &repo_id)
+                    .await
+                    .unwrap_or_else(|e| {
+                        eprintln!("Error: {e}");
+                        process::exit(1);
+                    });
+                let rendered = format_task_list(&tasks).unwrap_or_else(|e| {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                });
+                println!("{rendered}");
+            } else if all_machines || include_closed {
+                let tasks =
+                    list_tasks_with_options_via_api(&base_url, all_machines, include_closed)
+                        .await
+                        .unwrap_or_else(|e| {
+                            eprintln!("Error: {e}");
+                            process::exit(1);
+                        });
+                print_json(&tasks).unwrap_or_else(|e| {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                });
+            } else {
+                let tasks = list_tasks_via_api(&base_url).await.unwrap_or_else(|e| {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                });
+                let rendered = format_task_list(&tasks).unwrap_or_else(|e| {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                });
+                println!("{rendered}");
             }
-            .unwrap_or_else(|e| {
-                eprintln!("Error: {e}");
-                process::exit(1);
-            });
-            let rendered = format_task_list(&tasks).unwrap_or_else(|e| {
-                eprintln!("Error: {e}");
-                process::exit(1);
-            });
-            println!("{rendered}");
         }
-        TaskCommands::Search { query, server_url } => {
+        TaskCommands::Search {
+            query,
+            all_machines,
+            include_closed,
+            server_url,
+        } => {
             let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+            if all_machines || include_closed {
+                let tasks = search_tasks_with_options_via_api(
+                    &base_url,
+                    &query,
+                    all_machines,
+                    include_closed,
+                )
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                });
+                print_json(&tasks).unwrap_or_else(|e| {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                });
+                return;
+            }
             let tasks = search_tasks_via_api(&base_url, &query)
                 .await
                 .unwrap_or_else(|e| {
@@ -205,10 +253,11 @@ pub(crate) async fn run(command: TaskCommands) {
         }
         TaskCommands::Get {
             task_id,
+            agent_view,
             server_url,
         } => {
             let base_url = resolve_server_base_url_from_env(server_url.as_deref());
-            let task = get_task_via_api(&base_url, &task_id)
+            let task = get_task_with_agent_view_via_api(&base_url, &task_id, agent_view)
                 .await
                 .unwrap_or_else(|e| {
                     eprintln!("Error: {e}");
@@ -298,10 +347,11 @@ pub(crate) async fn run(command: TaskCommands) {
         TaskCommands::Logs {
             task_id,
             tail,
+            agent_view,
             server_url,
         } => {
             let base_url = resolve_server_base_url_from_env(server_url.as_deref());
-            let logs = task_logs_via_api(&base_url, &task_id, tail)
+            let logs = task_logs_with_agent_view_via_api(&base_url, &task_id, tail, agent_view)
                 .await
                 .unwrap_or_else(|e| {
                     eprintln!("Error: {e}");
@@ -629,6 +679,7 @@ pub(crate) async fn run(command: TaskCommands) {
             repo_id,
             repo_remote_url_hash,
             local_only,
+            include_current_activity,
             cursor,
             timeout_secs,
             limit,
@@ -641,6 +692,7 @@ pub(crate) async fn run(command: TaskCommands) {
                 repo_id: repo_id.as_deref(),
                 repo_remote_url_hash: repo_remote_url_hash.as_deref(),
                 local_only,
+                include_current_activity,
                 cursor: cursor.as_deref(),
                 timeout_secs,
                 limit,
