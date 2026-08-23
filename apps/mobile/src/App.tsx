@@ -87,10 +87,15 @@ function AppContent() {
       createDefaultTaskQuickReplyPreferences();
   }
   const quickReplyMutationVersionRef = useRef(0);
+  const accountRefreshPromiseRef = useRef<Promise<void> | null>(null);
   const quickReplyLoadStatusRef = useRef<"pending" | "loaded" | "failed">(
     "pending"
   );
   const [accountSheetVisible, setAccountSheetVisible] = useState(false);
+  const accountSheetVisibleRef = useRef(accountSheetVisible);
+  accountSheetVisibleRef.current = accountSheetVisible;
+  const accountAuthRef = useRef(state.auth);
+  accountAuthRef.current = state.auth;
   const [quickReplyEditorVisible, setQuickReplyEditorVisible] = useState(false);
   const [quickReplies, setQuickReplies] = useState<TaskQuickReply[]>(() =>
     DEFAULT_TASK_QUICK_REPLIES.map((reply) => ({ ...reply }))
@@ -162,6 +167,25 @@ function AppContent() {
     }
   }, []);
 
+  const refreshAccount = useCallback(() => {
+    if (accountRefreshPromiseRef.current) {
+      return accountRefreshPromiseRef.current;
+    }
+
+    const refreshPromise = Promise.resolve()
+      .then(() => controller.refreshAccount())
+      .catch((error: unknown) => {
+        console.error("Could not refresh mobile account:", error);
+      });
+    accountRefreshPromiseRef.current = refreshPromise;
+    void refreshPromise.then(() => {
+      if (accountRefreshPromiseRef.current === refreshPromise) {
+        accountRefreshPromiseRef.current = null;
+      }
+    });
+    return refreshPromise;
+  }, [controller]);
+
   useEffect(() => {
     let cancelled = false;
     const hydrationMutationVersion = quickReplyMutationVersionRef.current;
@@ -203,10 +227,10 @@ function AppContent() {
       return;
     }
     const interval = setInterval(() => {
-      void controller.refreshAccount();
+      void refreshAccount();
     }, 3_000);
     return () => clearInterval(interval);
-  }, [accountSheetVisible, controller, state.auth]);
+  }, [accountSheetVisible, refreshAccount, state.auth]);
 
   const saveQuickReplies = useCallback(
     async (
@@ -307,6 +331,15 @@ function AppContent() {
         void controller.refresh({
           preserveTaskSession: terminalTransition.preserveTerminal
         });
+        const accountAuth = accountAuthRef.current;
+        if (
+          accountSheetVisibleRef.current &&
+          accountAuth.status === "signedIn" &&
+          accountAuth.user.emailVerified !== false &&
+          accountAuth.user.cloudAccess === "inactive"
+        ) {
+          void refreshAccount();
+        }
       }
 
       const nowMs = Date.now();
@@ -329,7 +362,7 @@ function AppContent() {
       subscription.remove();
       terminalLifecycle.dispose();
     };
-  }, [controller, runOtaUpdateCheck]);
+  }, [controller, refreshAccount, runOtaUpdateCheck]);
 
   useEffect(() => {
     if (
@@ -444,7 +477,16 @@ function AppContent() {
               model.setForceCloud(enabled);
               void controller.refresh();
             }}
-            onOpenAccount={() => setAccountSheetVisible(true)}
+            onOpenAccount={() => {
+              setAccountSheetVisible(true);
+              if (
+                state.auth.status === "signedIn" &&
+                state.auth.user.emailVerified !== false &&
+                state.auth.user.cloudAccess === "inactive"
+              ) {
+                void refreshAccount();
+              }
+            }}
           />
         ) : null}
         {initializationError ? (
@@ -489,7 +531,7 @@ function AppContent() {
             void controller.createUserWithEmailPassword(email, password);
           }}
           onRefreshAccount={() => {
-            void controller.refreshAccount();
+            void refreshAccount();
           }}
           onSignOut={() => {
             void controller.signOut();

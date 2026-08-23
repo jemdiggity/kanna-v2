@@ -174,9 +174,9 @@ integration("mobile Firebase account journey", () => {
     const app = getApps()[0];
     if (!app) throw new Error("Firebase app was not initialized");
     await applyActionCode(getAuth(app), await verificationCode(email));
-    await session.refreshAccount();
+    await appModel.controller.refreshAccount();
 
-    const verifiedState = session.getState();
+    const verifiedState = appModel.sessionStore.getState().auth;
     expect(verifiedState).toMatchObject({
       status: "signedIn",
       user: { emailVerified: true, cloudAccess: "inactive" }
@@ -193,8 +193,8 @@ integration("mobile Firebase account journey", () => {
     ).toMatchObject({ email_verified: true, user_id: uid });
 
     await seedCloudAccess(uid, "active");
-    await session.refreshAccount();
-    expect(session.getState()).toMatchObject({
+    await appModel.controller.refreshAccount();
+    expect(appModel.sessionStore.getState().auth).toMatchObject({
       status: "signedIn",
       user: { emailVerified: true, cloudAccess: "active" }
     });
