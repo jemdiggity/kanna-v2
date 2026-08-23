@@ -148,12 +148,21 @@ pub(crate) enum RepoAgentCommands {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum TaskCommands {
     /// List recent tasks from the running desktop server
     List {
         /// Limit results to one repo ID instead of recent tasks across repos
         #[arg(long)]
         repo_id: Option<String>,
+
+        /// Aggregate recent tasks from every reachable account machine
+        #[arg(long)]
+        all_machines: bool,
+
+        /// Include closed tasks in the result
+        #[arg(long)]
+        include_closed: bool,
 
         /// Override the local Kanna server base URL
         #[arg(long)]
@@ -164,6 +173,14 @@ pub(crate) enum TaskCommands {
         /// Query text to search for
         #[arg(long)]
         query: String,
+
+        /// Aggregate matches from every reachable account machine
+        #[arg(long)]
+        all_machines: bool,
+
+        /// Include closed tasks in the result
+        #[arg(long)]
+        include_closed: bool,
 
         /// Override the local Kanna server base URL
         #[arg(long)]
@@ -184,6 +201,10 @@ pub(crate) enum TaskCommands {
         /// The task ID
         #[arg(long)]
         task_id: String,
+
+        /// Omit unattested provider composer suggestions from task detail
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        agent_view: bool,
 
         /// Override the local Kanna server base URL
         #[arg(long)]
@@ -257,6 +278,10 @@ pub(crate) enum TaskCommands {
         /// Number of recent relevant log events
         #[arg(long)]
         tail: Option<usize>,
+
+        /// Remove unattested provider composer suggestions from logs
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        agent_view: bool,
 
         /// Override the local Kanna server base URL
         #[arg(long)]
@@ -565,6 +590,10 @@ pub(crate) enum TaskCommands {
         /// Restrict the wait to the connected server instead of aggregating peers
         #[arg(long)]
         local_only: bool,
+
+        /// Also return level-triggered settled runtime state
+        #[arg(long)]
+        include_current_activity: bool,
 
         /// Cursor from the previous call; omit to receive retained history
         #[arg(long)]

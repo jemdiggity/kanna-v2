@@ -50,6 +50,23 @@ fn events_router() -> (Router, String) {
     (router(state), db_path)
 }
 
+fn settle_runtime_tasks(db: &Db, task_ids: &[&str]) {
+    for task_id in task_ids {
+        db.update_pipeline_item_runtime_status(task_id, "busy", None)
+            .expect("mark task busy");
+        db.update_pipeline_item_runtime_status(task_id, "idle", None)
+            .expect("mark task idle");
+    }
+    db.connection_for_e2e_tests()
+        .execute(
+            "UPDATE pipeline_item SET runtime_event_pending_at = datetime('now', '-11 seconds')",
+            [],
+        )
+        .expect("age settled runtime states through debounce");
+    db.flush_debounced_activity_events(300)
+        .expect("flush shared activity debounce");
+}
+
 fn connect_test_relay_peer(
     source: &Arc<AppState>,
     peer: Arc<AppState>,
@@ -318,6 +335,31 @@ fn aggregate_parent_cursor(
     )
 }
 
+fn aggregate_tasks_cursor(
+    local_machine_id: &str,
+    peer_machine_id: &str,
+    task_ids: &[&str],
+    local_cursor: &str,
+    peer_cursor: &str,
+) -> String {
+    let payload = serde_json::json!({
+        "localMachineId": local_machine_id,
+        "scope": {
+            "kind": "tasks",
+            "task_ids": task_ids,
+        },
+        "machineIds": [local_machine_id, peer_machine_id],
+        "cursorsByMachine": {
+            (local_machine_id): local_cursor,
+            (peer_machine_id): peer_cursor,
+        },
+    });
+    format!(
+        "ks1.{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.to_string())
+    )
+}
+
 fn start_run(db: &Db, run_id: &str, task_id: &str, stage: &str) {
     db.insert_stage_run(NewStageRun {
         id: run_id,
@@ -337,6 +379,401 @@ fn start_run(db: &Db, run_id: &str, task_id: &str, stage: &str) {
         resumed_from_run_id: None,
     })
     .expect("insert stage run");
+}
+
+#[tokio::test]
+async fn task_discovery_labels_cross_machine_rows_includes_closed_and_explains_remote_misses() {
+    use axum::body::to_bytes;
+    use tower::ServiceExt;
+
+    let source = test_state_with_seed("desktop-discovery-source", "Source", |db| {
+        db.insert_test_repo("repo-source", "Source Repo")
+            .expect("insert source repo");
+    });
+    let peer = test_state_with_seed("desktop-discovery-peer", "Peer", |db| {
+        db.insert_test_repo("repo-peer", "Peer Repo")
+            .expect("insert peer repo");
+        for task_id in ["remote-open", "remote-closed"] {
+            db.insert_test_pipeline_item(
+                task_id,
+                "repo-peer",
+                "remote searchable work",
+                Some(task_id),
+                "in progress",
+                "2026-08-23 00:00:00",
+            )
+            .expect("insert remote task");
+        }
+        db.close_pipeline_item("remote-closed")
+            .expect("close remote task");
+    });
+    let relay =
+        connect_test_relay_peer(&source, Arc::clone(&peer), Arc::new(AtomicBool::new(true)));
+    let app = router(Arc::clone(&source));
+
+    let miss = app
+        .clone()
+        .oneshot(
+            axum::http::Request::get("/v1/tasks/remote-open")
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("remote lookup response");
+    assert_eq!(miss.status(), axum::http::StatusCode::NOT_FOUND);
+    let miss_body = to_bytes(miss.into_body(), usize::MAX)
+        .await
+        .expect("read miss body");
+    let miss_body = String::from_utf8(miss_body.to_vec()).expect("utf8 miss body");
+    assert!(miss_body.contains("found on machine desktop-discovery-peer"));
+    assert!(miss_body.contains("pass machine_id"));
+
+    let recent = get_json_body(&app, "/v1/tasks/recent?allMachines=true&includeClosed=true").await;
+    assert!(recent["machineErrors"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
+    let tasks = recent["tasks"].as_array().expect("aggregated tasks");
+    assert!(tasks.iter().any(|task| {
+        task["id"] == "remote-open" && task["machineId"] == "desktop-discovery-peer"
+    }));
+    assert!(tasks.iter().any(|task| {
+        task["id"] == "remote-closed"
+            && task["machineId"] == "desktop-discovery-peer"
+            && !task["closedAt"].is_null()
+    }));
+
+    let search = get_json_body(
+        &app,
+        "/v1/tasks/search?query=searchable&allMachines=true&includeClosed=true",
+    )
+    .await;
+    assert_eq!(search["tasks"].as_array().map(Vec::len), Some(2));
+    relay.abort();
+}
+
+#[tokio::test]
+async fn level_triggered_activity_wait_returns_an_already_idle_task_immediately() {
+    let (app, db_path) = events_router();
+    let db = Db::open(&db_path).expect("open db");
+    db.update_pipeline_item_runtime_status("child-a", "busy", None)
+        .expect("mark busy");
+    db.update_pipeline_item_runtime_status("child-a", "idle", None)
+        .expect("mark idle");
+    db.connection_for_e2e_tests()
+        .execute(
+            "UPDATE pipeline_item SET runtime_event_pending_at = datetime('now', '-11 seconds') WHERE id = 'child-a'",
+            [],
+        )
+        .expect("age idle state through debounce");
+    db.flush_debounced_activity_events(300)
+        .expect("flush shared activity debounce");
+    assert_eq!(
+        db.list_non_busy_task_runtime_states(
+            &crate::db::TaskEventScope::Tasks(vec!["child-a".to_string(),]),
+            None,
+            10
+        )
+        .expect("list settled runtime state"),
+        vec![("child-a".to_string(), "idle".to_string())]
+    );
+
+    let drained = get_json_body(
+        &app,
+        "/v1/task-events?taskIds=child-a&localOnly=true&timeoutSecs=0",
+    )
+    .await;
+    let response = get_json_body(
+        &app,
+        &format!(
+            "/v1/task-events?taskIds=child-a&localOnly=true&includeCurrentActivity=true&cursor={}&timeoutSecs=1",
+            cursor_of(&drained)
+        ),
+    )
+    .await;
+
+    assert_eq!(response["waitOutcome"], "events");
+    assert_eq!(response["events"].as_array().map(Vec::len), Some(1));
+    let event = &response["events"][0];
+    assert_eq!(event["type"], "task.runtime_settled");
+    assert_eq!(event["synthetic"], true);
+    assert_eq!(event["payload"]["currentState"], true);
+    assert_eq!(event["payload"]["runtimeState"], "idle");
+    assert_eq!(event["payload"]["title"], "child-a");
+    assert_eq!(event["payload"]["machineId"], "desktop-task-events");
+}
+
+#[tokio::test]
+async fn current_activity_pages_are_lossless_and_preserve_durable_events() {
+    let (app, db_path) = events_router();
+    let db = Db::open(&db_path).expect("open db");
+    for task_id in ["child-d", "child-e"] {
+        db.insert_test_pipeline_item(
+            task_id,
+            "repo-events",
+            "more child work",
+            Some(task_id),
+            "in progress",
+            "2026-08-23 00:00:00",
+        )
+        .expect("insert additional task");
+    }
+    settle_runtime_tasks(
+        &db,
+        &["child-a", "child-b", "child-c", "child-d", "child-e"],
+    );
+
+    let drained = get_json_body(
+        &app,
+        "/v1/task-events?repoId=repo-events&localOnly=true&limit=500&timeoutSecs=0",
+    )
+    .await;
+    let mut cursor = cursor_of(&drained);
+    let mut settled = Vec::new();
+    let mut durable = Vec::new();
+    let mut pages = 0;
+
+    loop {
+        let page = get_json_body(
+            &app,
+            &format!(
+                "/v1/task-events?repoId=repo-events&localOnly=true&includeCurrentActivity=true&limit=2&cursor={cursor}&timeoutSecs=0"
+            ),
+        )
+        .await;
+        pages += 1;
+        let next_cursor = cursor_of(&page);
+        assert_ne!(next_cursor, cursor, "every non-final page must advance");
+        cursor = next_cursor;
+        for event in page["events"].as_array().expect("events") {
+            if event["synthetic"] == true {
+                settled.push(event["taskId"].as_str().expect("task id").to_string());
+            } else {
+                durable.push((
+                    event["taskId"].as_str().expect("task id").to_string(),
+                    event["type"].as_str().expect("event type").to_string(),
+                ));
+            }
+        }
+        if pages == 1 {
+            db.update_pipeline_item_stage("child-e", "review")
+                .expect("append durable event while snapshots are paging");
+        }
+        if page["hasMore"] == false {
+            break;
+        }
+        assert_eq!(page["hasMore"], true);
+    }
+
+    assert_eq!(pages, 3);
+    assert_eq!(
+        settled,
+        ["child-a", "child-b", "child-c", "child-d", "child-e"]
+    );
+    assert_eq!(
+        durable,
+        vec![("child-e".to_string(), "stage.changed".to_string())],
+        "a durable edge arriving between snapshot pages must not be lost"
+    );
+    let final_page = get_json_body(
+        &app,
+        &format!(
+            "/v1/task-events?repoId=repo-events&localOnly=true&includeCurrentActivity=true&limit=2&cursor={cursor}&timeoutSecs=0"
+        ),
+    )
+    .await;
+    assert_eq!(final_page["waitOutcome"], "timeout");
+    assert_eq!(final_page["hasMore"], false);
+    assert!(final_page["events"].as_array().expect("events").is_empty());
+}
+
+#[tokio::test]
+async fn aggregate_current_activity_pages_drain_every_machine_without_starvation() {
+    let local_ids = ["local-settled-a", "local-settled-b", "local-settled-c"];
+    let peer_ids = ["peer-settled-a", "peer-settled-b", "peer-settled-c"];
+    let all_ids = local_ids
+        .iter()
+        .chain(peer_ids.iter())
+        .copied()
+        .collect::<Vec<_>>();
+    let source = test_state_with_seed("desktop-page-source", "Page Source", |db| {
+        db.insert_test_repo("repo-page-source", "Page Source Repo")
+            .expect("insert source repo");
+        for task_id in local_ids {
+            db.insert_test_pipeline_item(
+                task_id,
+                "repo-page-source",
+                "local settled task",
+                Some(task_id),
+                "in progress",
+                "2026-08-23 00:00:00",
+            )
+            .expect("insert local task");
+        }
+        settle_runtime_tasks(db, &local_ids);
+    });
+    let peer = test_state_with_seed("desktop-page-peer", "Page Peer", |db| {
+        db.insert_test_repo("repo-page-peer", "Page Peer Repo")
+            .expect("insert peer repo");
+        for task_id in peer_ids {
+            db.insert_test_pipeline_item(
+                task_id,
+                "repo-page-peer",
+                "peer settled task",
+                Some(task_id),
+                "in progress",
+                "2026-08-23 00:00:00",
+            )
+            .expect("insert peer task");
+        }
+        settle_runtime_tasks(db, &peer_ids);
+    });
+    let source_router = router(Arc::clone(&source));
+    let task_ids = all_ids.join(",");
+    let source_drained = Db::open(&source.config().db_path)
+        .expect("open source db")
+        .latest_task_event_seq()
+        .expect("source event head")
+        .to_string();
+    let peer_drained = Db::open(&peer.config().db_path)
+        .expect("open peer db")
+        .latest_task_event_seq()
+        .expect("peer event head")
+        .to_string();
+    let mut cursor = aggregate_tasks_cursor(
+        "desktop-page-source",
+        "desktop-page-peer",
+        &all_ids,
+        &source_drained,
+        &peer_drained,
+    );
+    let connected = Arc::new(AtomicBool::new(true));
+    let relay = connect_test_relay_peer(&source, Arc::clone(&peer), connected);
+    let mut settled = Vec::new();
+    let mut durable = Vec::new();
+    let mut page_has_more = Vec::new();
+
+    for page_index in 0..8 {
+        let page = get_account_json_body(
+            &source_router,
+            &source,
+            &format!(
+                "/v1/task-events?taskIds={task_ids}&includeCurrentActivity=true&limit=2&cursor={cursor}&timeoutSecs=2"
+            ),
+        )
+        .await;
+        cursor = cursor_of(&page);
+        page_has_more.push(page["hasMore"].as_bool().expect("hasMore"));
+        for event in page["events"].as_array().expect("events") {
+            if event["synthetic"] == true {
+                settled.push((
+                    event["machineId"].as_str().expect("machine id").to_string(),
+                    event["taskId"].as_str().expect("task id").to_string(),
+                ));
+            } else {
+                durable.push((
+                    event["machineId"].as_str().expect("machine id").to_string(),
+                    event["taskId"].as_str().expect("task id").to_string(),
+                    event["type"].as_str().expect("event type").to_string(),
+                ));
+            }
+        }
+        if page_index == 0 {
+            Db::open(&peer.config().db_path)
+                .expect("open peer db for durable append")
+                .update_pipeline_item_stage("peer-settled-c", "review")
+                .expect("append peer durable event during aggregate paging");
+        }
+        if page["hasMore"] == false {
+            break;
+        }
+    }
+
+    settled.sort();
+    let mut expected = local_ids
+        .iter()
+        .map(|task_id| ("desktop-page-source".to_string(), (*task_id).to_string()))
+        .chain(
+            peer_ids
+                .iter()
+                .map(|task_id| ("desktop-page-peer".to_string(), (*task_id).to_string())),
+        )
+        .collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(settled, expected);
+    assert_eq!(
+        durable,
+        vec![(
+            "desktop-page-peer".to_string(),
+            "peer-settled-c".to_string(),
+            "stage.changed".to_string(),
+        )],
+        "a peer durable edge arriving between aggregate pages must not be lost"
+    );
+    assert_eq!(page_has_more.last(), Some(&false));
+    assert!(page_has_more[..page_has_more.len() - 1]
+        .iter()
+        .all(|has_more| *has_more));
+
+    let drained = get_account_json_body(
+        &source_router,
+        &source,
+        &format!(
+            "/v1/task-events?taskIds={task_ids}&includeCurrentActivity=true&limit=2&cursor={cursor}&timeoutSecs=0"
+        ),
+    )
+    .await;
+    assert_eq!(drained["waitOutcome"], "timeout");
+    assert_eq!(drained["hasMore"], false);
+    assert!(drained["events"].as_array().expect("events").is_empty());
+    relay.abort();
+}
+
+#[test]
+fn runtime_settled_event_uses_fixed_debounce_and_suppresses_short_idle_blip() {
+    let (_, db_path) = events_router();
+    let db = Db::open(&db_path).expect("open db");
+    let start = db.latest_task_event_seq().expect("event head");
+    db.update_pipeline_item_runtime_status("child-a", "busy", None)
+        .expect("mark busy");
+    db.update_pipeline_item_runtime_status("child-a", "idle", None)
+        .expect("short idle");
+    assert_eq!(db.flush_debounced_activity_events(300).unwrap(), 0);
+    db.update_pipeline_item_runtime_status("child-a", "busy", None)
+        .expect("resume before debounce");
+    assert_eq!(db.flush_debounced_activity_events(300).unwrap(), 0);
+
+    db.update_pipeline_item_runtime_status("child-a", "idle", None)
+        .expect("settled idle");
+    db.connection_for_e2e_tests()
+        .execute(
+            "UPDATE pipeline_item SET runtime_event_pending_at = datetime('now', '-11 seconds') WHERE id = 'child-a'",
+            [],
+        )
+        .expect("age idle state");
+    assert_eq!(db.flush_debounced_activity_events(300).unwrap(), 0);
+    db.update_pipeline_item_runtime_status("child-a", "waiting", Some("Choose one"))
+        .expect("change between non-busy states");
+    assert_eq!(
+        db.flush_debounced_activity_events(300).unwrap(),
+        0,
+        "non-busy to non-busy changes are not another busy-to-idle signal"
+    );
+    let head = db.latest_task_event_seq().expect("event head after settle");
+    let events = db
+        .list_task_events(
+            &crate::db::TaskEventScope::Tasks(vec!["child-a".to_string()]),
+            start,
+            head,
+            20,
+        )
+        .expect("runtime events");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.event_type == "task.runtime_settled")
+            .count(),
+        1
+    );
 }
 
 /// One orchestrator, three children, events arriving in three different
@@ -679,6 +1116,158 @@ async fn local_surface_aggregates_peer_repo_events_and_resumes_after_reconnect()
 /// debounce armed by the lifecycle write. Exercise that full path through the
 /// daemon socket, the real debounce loop, and the ks1 aggregate HTTP feed.
 #[tokio::test]
+async fn manual_stage_agent_exit_emits_enriched_awaiting_advance_event() {
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+
+    let unique = format!(
+        "task-event-awaiting-advance-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time before epoch")
+            .as_nanos()
+    );
+    let daemon_dir = std::env::temp_dir().join(&unique);
+    std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+    let socket_path = kanna_runtime_defaults::socket_path(&daemon_dir);
+    let listener = UnixListener::bind(&socket_path).expect("bind daemon socket");
+    let state = crate::http_api::test_state_with_daemon_dir_and_debounce(
+        "desktop-awaiting-advance",
+        "Awaiting Advance",
+        daemon_dir.to_str().expect("daemon path utf8"),
+        1,
+        |db| {
+            db.insert_test_repo("repo-awaiting-advance", "Awaiting Advance Repo")
+                .expect("insert repo");
+            db.insert_test_pipeline_item(
+                "manual-task",
+                "repo-awaiting-advance",
+                "Implement the change",
+                Some("Manual task title"),
+                "in progress",
+                "2026-08-23 00:00:00",
+            )
+            .expect("insert task");
+            start_run(db, "run-manual", "manual-task", "in progress");
+            db.connection_for_e2e_tests()
+                .execute(
+                    "UPDATE stage_run SET completion_transition = 'manual' WHERE id = 'run-manual'",
+                    [],
+                )
+                .expect("stamp manual completion policy");
+        },
+    );
+    let app = router(Arc::clone(&state));
+    let initial = get_json_body(
+        &app,
+        "/v1/task-events?taskIds=manual-task&localOnly=true&timeoutSecs=0",
+    )
+    .await;
+
+    let daemon = tokio::spawn(async move {
+        let (subscriber, _) = listener.accept().await.expect("accept subscription");
+        let (read_half, mut write_half) = subscriber.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.expect("read subscribe");
+        assert!(matches!(
+            serde_json::from_str::<DaemonCommand>(line.trim()).expect("decode subscribe"),
+            DaemonCommand::Subscribe
+        ));
+        write_half
+            .write_all(format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap()).as_bytes())
+            .await
+            .expect("ack subscribe");
+        let (control, _) = listener.accept().await.expect("accept list connection");
+        let (control_read, mut control_write) = control.into_split();
+        let mut control_reader = BufReader::new(control_read);
+        line.clear();
+        control_reader
+            .read_line(&mut line)
+            .await
+            .expect("read list command");
+        assert!(matches!(
+            serde_json::from_str::<DaemonCommand>(line.trim()).expect("decode list"),
+            DaemonCommand::List
+        ));
+        control_write
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&DaemonEvent::SessionList {
+                        sessions: Vec::new(),
+                    })
+                    .unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("write list response");
+        write_half
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&DaemonEvent::Exit {
+                        session_id: "manual-task".to_string(),
+                        code: 0,
+                        killed: false,
+                        resume_session_id: None,
+                    })
+                    .unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("write exit");
+        write_half
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&DaemonEvent::ShuttingDown).unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("stop watcher");
+    });
+    crate::terminal_watcher::terminal_state_watcher_once(
+        &state,
+        &crate::session_replacements::SessionReplacements::default(),
+    )
+    .await
+    .expect("watch daemon exit");
+    daemon.await.expect("daemon task");
+
+    let response = get_json_body(
+        &app,
+        &format!(
+            "/v1/task-events?taskIds=manual-task&localOnly=true&cursor={}&timeoutSecs=0",
+            cursor_of(&initial)
+        ),
+    )
+    .await;
+    let event = response["events"]
+        .as_array()
+        .expect("events array")
+        .iter()
+        .find(|event| event["type"] == "task.awaiting_advance")
+        .expect("awaiting advance event");
+    assert_eq!(event["machineId"], "desktop-awaiting-advance");
+    assert_eq!(event["payload"]["title"], "Manual task title");
+    assert_eq!(event["payload"]["stage"], "in progress");
+    assert_eq!(event["payload"]["activity"], "unread");
+    assert_eq!(event["payload"]["stageTransition"], "manual");
+    assert_eq!(event["payload"]["machineId"], "desktop-awaiting-advance");
+    assert_eq!(event["payload"]["latestRun"]["status"], "cancelled");
+    assert!(event["payload"]["latestRun"]["summarySnippet"]
+        .as_str()
+        .is_some_and(|summary| summary.contains("exit code 0")));
+
+    let _ = std::fs::remove_file(socket_path);
+    let _ = std::fs::remove_dir_all(daemon_dir);
+}
+
+#[tokio::test]
 async fn stage_start_emits_one_settled_working_edge_and_suppresses_a_resume_flicker() {
     use kanna_daemon::protocol::{
         Command as DaemonCommand, Event as DaemonEvent, SessionInfo, SessionState, SessionStatus,
@@ -862,8 +1451,13 @@ async fn stage_start_emits_one_settled_working_edge_and_suppresses_a_resume_flic
         json!({
             "previousActivity": "idle",
             "activity": "working",
+            "currentActivity": "working",
             "runtimeState": "busy",
             "latestRunFinishedWithoutCompletion": false,
+            "title": "settled-start",
+            "stage": "in progress",
+            "stageTransition": null,
+            "machineId": "desktop-start-peer",
         })
     );
 
@@ -1371,7 +1965,7 @@ async fn unauthenticated_loopback_waits_get_only_the_local_feed_for_all_browser_
             vec![("browser-local-child".into(), "run.started".into())]
         );
         assert!(!cursor_of(&body).starts_with("ks1."));
-        assert!(body["events"][0].get("machineId").is_none());
+        assert_eq!(body["events"][0]["machineId"], "desktop-browser-source");
     }
 
     relay.abort();

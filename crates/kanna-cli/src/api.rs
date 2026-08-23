@@ -36,6 +36,13 @@ pub(crate) fn task_list_path() -> &'static str {
     "/v1/tasks/recent"
 }
 
+pub(crate) fn task_list_path_with_options(all_machines: bool, include_closed: bool) -> String {
+    format!(
+        "{}?allMachines={all_machines}&includeClosed={include_closed}",
+        task_list_path()
+    )
+}
+
 pub(crate) fn repo_task_list_path(repo_id: &str) -> String {
     format!("/v1/repos/{}/tasks", encode_path_segment(repo_id))
 }
@@ -56,8 +63,27 @@ pub(crate) fn task_search_path(query: &str) -> String {
     format!("/v1/tasks/search?query={}", encode_path_segment(query))
 }
 
+pub(crate) fn task_search_path_with_options(
+    query: &str,
+    all_machines: bool,
+    include_closed: bool,
+) -> String {
+    format!(
+        "{}&allMachines={all_machines}&includeClosed={include_closed}",
+        task_search_path(query)
+    )
+}
+
 pub(crate) fn task_get_path(task_id: &str) -> String {
     format!("/v1/tasks/{}", encode_path_segment(task_id))
+}
+
+pub(crate) fn task_agent_get_path(task_id: &str) -> String {
+    format!("{}?agentView=true", task_get_path(task_id))
+}
+
+pub(crate) fn task_get_path_with_agent_view(task_id: &str, agent_view: bool) -> String {
+    format!("{}?agentView={agent_view}", task_get_path(task_id))
 }
 
 pub(crate) fn task_children_path(task_id: &str) -> String {
@@ -76,6 +102,7 @@ pub(crate) struct TaskEventsParams<'a> {
     pub(crate) repo_id: Option<&'a str>,
     pub(crate) repo_remote_url_hash: Option<&'a str>,
     pub(crate) local_only: bool,
+    pub(crate) include_current_activity: bool,
     pub(crate) cursor: Option<&'a str>,
     pub(crate) timeout_secs: u64,
     pub(crate) limit: Option<i64>,
@@ -110,6 +137,9 @@ pub(crate) fn task_events_path(params: &TaskEventsParams<'_>) -> String {
     if params.local_only {
         query.push("localOnly=true".to_string());
     }
+    if params.include_current_activity {
+        query.push("includeCurrentActivity=true".to_string());
+    }
     if let Some(cursor) = params.cursor {
         query.push(format!("cursor={}", encode_path_segment(cursor)));
     }
@@ -127,11 +157,20 @@ pub(crate) fn task_inputs_path(task_id: &str, tail: Option<usize>) -> String {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn task_logs_path(task_id: &str, tail: Option<usize>) -> String {
+    task_logs_path_with_agent_view(task_id, tail, true)
+}
+
+pub(crate) fn task_logs_path_with_agent_view(
+    task_id: &str,
+    tail: Option<usize>,
+    agent_view: bool,
+) -> String {
     let task_id = encode_path_segment(task_id);
     match tail {
-        Some(tail) => format!("/v1/tasks/{task_id}/logs?tail={tail}"),
-        None => format!("/v1/tasks/{task_id}/logs"),
+        Some(tail) => format!("/v1/tasks/{task_id}/logs?tail={tail}&agentView={agent_view}"),
+        None => format!("/v1/tasks/{task_id}/logs?agentView={agent_view}"),
     }
 }
 
@@ -337,6 +376,18 @@ pub(crate) async fn list_tasks_via_api(base_url: &str) -> Result<Vec<TaskSummary
     get_json(base_url, task_list_path()).await
 }
 
+pub(crate) async fn list_tasks_with_options_via_api(
+    base_url: &str,
+    all_machines: bool,
+    include_closed: bool,
+) -> Result<Value, String> {
+    get_json(
+        base_url,
+        &task_list_path_with_options(all_machines, include_closed),
+    )
+    .await
+}
+
 pub(crate) async fn list_repo_tasks_via_api(
     base_url: &str,
     repo_id: &str,
@@ -351,8 +402,33 @@ pub(crate) async fn search_tasks_via_api(
     get_json(base_url, &task_search_path(query)).await
 }
 
+pub(crate) async fn search_tasks_with_options_via_api(
+    base_url: &str,
+    query: &str,
+    all_machines: bool,
+    include_closed: bool,
+) -> Result<Value, String> {
+    get_json(
+        base_url,
+        &task_search_path_with_options(query, all_machines, include_closed),
+    )
+    .await
+}
+
 pub(crate) async fn get_task_via_api(base_url: &str, task_id: &str) -> Result<TaskDetail, String> {
-    get_json(base_url, &task_get_path(task_id)).await
+    get_json(base_url, &task_agent_get_path(task_id)).await
+}
+
+pub(crate) async fn get_task_with_agent_view_via_api(
+    base_url: &str,
+    task_id: &str,
+    agent_view: bool,
+) -> Result<TaskDetail, String> {
+    get_json(
+        base_url,
+        &task_get_path_with_agent_view(task_id, agent_view),
+    )
+    .await
 }
 
 pub(crate) async fn list_task_children_via_api(
@@ -377,12 +453,17 @@ pub(crate) async fn task_inputs_via_api(
     get_json(base_url, &task_inputs_path(task_id, tail)).await
 }
 
-pub(crate) async fn task_logs_via_api(
+pub(crate) async fn task_logs_with_agent_view_via_api(
     base_url: &str,
     task_id: &str,
     tail: Option<usize>,
+    agent_view: bool,
 ) -> Result<String, String> {
-    get_text(base_url, &task_logs_path(task_id, tail)).await
+    get_text(
+        base_url,
+        &task_logs_path_with_agent_view(task_id, tail, agent_view),
+    )
+    .await
 }
 
 pub(crate) fn parse_wait_until(value: &str) -> Result<WaitUntil, String> {
@@ -458,7 +539,7 @@ pub(crate) async fn wait_catalog_task_via_api(
     let timeout_secs = clamp_wait_timeout_secs(timeout_secs);
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     let poll_interval = std::time::Duration::from_secs(poll_secs.max(1));
-    let path = task_get_path(task_id);
+    let path = task_agent_get_path(task_id);
     loop {
         let task: Value = get_json(base_url, &path).await?;
         if catalog_task_matches_wait_until(&task, until) {

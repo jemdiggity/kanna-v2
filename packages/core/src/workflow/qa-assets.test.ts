@@ -149,36 +149,14 @@ describe("QA workflow assets", () => {
     expect(agent.name).toBe("task-manager");
     expect(agent.agent_provider?.[0]).toBe("codex");
     expect(agent.prompt).toContain("kanna_wait_events");
-    expect(agent.prompt).toContain(
-      "If this task-manager instance is not running on the Claude provider"
-    );
-    expect(agent.prompt).toContain(
-      "never continuously re-arm an idle `kanna_wait_events` MCP call"
-    );
-    expect(agent.prompt).toContain("connection.effectiveBaseUrl");
-    expect(agent.prompt).toContain("serverStatus.desktop.id");
-    expect(agent.prompt).toContain("km1 is an MCP client cursor");
-    expect(agent.prompt).toContain("server `ks1.` cursor");
-    expect(agent.prompt).toContain("machines are stale or unreachable");
-    expect(agent.prompt).toContain("const observedMachineErrors = new Map()");
-    expect(agent.prompt).toContain('["timeout", "partial"].includes(payload.waitOutcome)');
-    expect(agent.prompt).toContain("staleness observed");
-    expect(agent.prompt).toContain('["repoId", "taskIds", "parentTaskId"]');
-    expect(agent.prompt).toContain(
-      'url.searchParams.set("timeoutSecs", String(timeoutSecs))'
-    );
-    expect(agent.prompt).toContain("Math.min(60, remainingSecs)");
-    expect(agent.prompt).toContain(
-      "new URL(`/v1/repos/${encodeURIComponent(repoId)}/tasks`, baseUrl)"
-    );
-    expect(agent.prompt).toContain("const requiredNonWorkingSamples = 3");
-    expect(agent.prompt).toContain("verify with kanna_get_task and the log tail");
-    expect(agent.prompt).toContain(
-      "untracked tasks are covered only by events and the heartbeat"
-    );
-    expect(agent.prompt).toContain("25 * 60 * 1000");
-    expect(agent.prompt).toContain("run_in_background: true");
-    expect(agent.prompt).toContain("response body rather than silently restarting");
+    expect(agent.prompt).toContain("include_current_activity: true");
+    expect(agent.prompt).toContain("every reachable account machine");
+    expect(agent.prompt).toContain("task.runtime_settled");
+    expect(agent.prompt).toContain("task.awaiting_advance");
+    expect(agent.prompt).toContain('"all_machines": true');
+    expect(agent.prompt).toContain("Never build a polling loop");
+    expect(agent.prompt).toContain("there is no provider-specific shell watcher");
+    expect(agent.prompt).toContain("use a private HTTP/shell watcher");
     expect(agent.prompt).toContain("kanna_set_task_notify");
     expect(agent.prompt).toContain(
       "Product work, bug fixes, investigations, releases, and other durable repository tasks"

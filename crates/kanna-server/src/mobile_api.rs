@@ -116,6 +116,9 @@ pub struct TaskSummary {
     pub title: String,
     pub prompt: Option<String>,
     pub stage: Option<String>,
+    pub closed_at: Option<String>,
+    #[serde(default)]
+    pub machine_id: Option<String>,
     pub created_at: Option<String>,
     /// Derived display value blending both dimensions below: `working` |
     /// `idle` | `unread`. Kept for every existing consumer; read
@@ -648,21 +651,36 @@ impl MobileApi {
     }
 
     pub fn list_recent_tasks(&self) -> Result<Vec<TaskSummary>, String> {
+        self.list_recent_tasks_including_closed(false)
+    }
+
+    pub fn list_recent_tasks_including_closed(
+        &self,
+        include_closed: bool,
+    ) -> Result<Vec<TaskSummary>, String> {
         record_orphaned_initialized_tasks(&self._db)?;
         let repo_names = self.repo_names_by_id()?;
         let items = self
             ._db
-            .list_recent_pipeline_items()
+            .list_recent_pipeline_items_including_closed(include_closed)
             .map_err(|e| format!("db error: {}", e))?;
         self.map_task_summaries(items, &repo_names)
     }
 
     pub fn search_tasks(&self, query: &str) -> Result<Vec<TaskSummary>, String> {
+        self.search_tasks_including_closed(query, false)
+    }
+
+    pub fn search_tasks_including_closed(
+        &self,
+        query: &str,
+        include_closed: bool,
+    ) -> Result<Vec<TaskSummary>, String> {
         record_orphaned_initialized_tasks(&self._db)?;
         let repo_names = self.repo_names_by_id()?;
         let items = self
             ._db
-            .search_pipeline_items(query)
+            .search_pipeline_items_including_closed(query, include_closed)
             .map_err(|e| format!("db error: {}", e))?;
         self.map_task_summaries(items, &repo_names)
     }
@@ -680,7 +698,12 @@ impl MobileApi {
                     .list_open_task_blocker_ids(&item.id)
                     .map_err(|e| format!("db error: {}", e))?;
                 let repo_name = repo_names.get(&item.repo_id).cloned();
-                Ok(map_task_summary(item, repo_name, blocked_by_task_ids))
+                Ok(map_task_summary(
+                    item,
+                    repo_name,
+                    blocked_by_task_ids,
+                    &self.config.desktop_id,
+                ))
             })
             .collect()
     }
@@ -937,6 +960,7 @@ fn map_task_summary(
     item: crate::db::PipelineItem,
     repo_name: Option<String>,
     blocked_by_task_ids: Vec<String>,
+    machine_id: &str,
 ) -> TaskSummary {
     let prompt = item.prompt.clone();
     let title = item
@@ -952,6 +976,8 @@ fn map_task_summary(
         title,
         prompt,
         stage: item.stage,
+        closed_at: item.closed_at,
+        machine_id: Some(machine_id.to_string()),
         created_at: item.created_at,
         runtime_state: item.runtime_status,
         read_state: Some(read_state_for_activity(item.activity.as_deref()).to_string()),
@@ -1010,18 +1036,22 @@ fn map_task_detail(
         .unwrap_or_default();
     let existing_worktree_path = worktree_path.filter(|path| Path::new(path).exists());
     let workflow_name = item.pipeline.clone();
-    let stage_transition = repo
-        .zip(workflow_name.as_deref())
-        .zip(item.stage.as_deref())
-        .and_then(|((repo, workflow_name), stage_name)| {
-            crate::task_creator::resolve_stage_transition(
-                repo,
-                workflow_name,
-                item.pipeline_def.as_deref(),
-                stage_name,
-            )
-            .ok()
-            .flatten()
+    let stage_transition = latest_run
+        .as_ref()
+        .and_then(|run| run.completion_transition.clone())
+        .or_else(|| {
+            repo.zip(workflow_name.as_deref())
+                .zip(item.stage.as_deref())
+                .and_then(|((repo, workflow_name), stage_name)| {
+                    crate::task_creator::resolve_stage_transition(
+                        repo,
+                        workflow_name,
+                        item.pipeline_def.as_deref(),
+                        stage_name,
+                    )
+                    .ok()
+                    .flatten()
+                })
         });
     let revision_limit = repo
         .zip(workflow_name.as_deref())

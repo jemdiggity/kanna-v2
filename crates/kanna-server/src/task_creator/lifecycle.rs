@@ -591,6 +591,13 @@ fn rollback_prepared_stage_fork(prepared: &PreparedStageRunSpawn, error: String)
     error
 }
 
+pub(crate) fn rollback_prepared_stage_run_for_api(
+    prepared: &PreparedStageRunSpawn,
+    error: String,
+) -> String {
+    rollback_prepared_stage_fork(prepared, error)
+}
+
 pub(crate) async fn spawn_prepared_workspace_teardown_best_effort(
     daemon: &mut DaemonClient,
     prepared: Option<PreparedWorkspaceTeardown>,

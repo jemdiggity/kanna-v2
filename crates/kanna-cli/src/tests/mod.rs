@@ -75,14 +75,17 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
             "kanna_list_recent_tasks",
             TypedToolSurface {
                 command_path: &["task", "list"],
-                param_args: &[],
+                param_args: &[
+                    ("all_machines", "all_machines"),
+                    ("include_closed", "include_closed"),
+                ],
             },
         ),
         (
             "kanna_get_task",
             TypedToolSurface {
                 command_path: &["task", "get"],
-                param_args: &[("task_id", "task_id")],
+                param_args: &[("task_id", "task_id"), ("agent_view", "agent_view")],
             },
         ),
         (
@@ -128,6 +131,7 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
                     ("repo_id", "repo_id"),
                     ("repo_remote_url_hash", "repo_remote_url_hash"),
                     ("local_only", "local_only"),
+                    ("include_current_activity", "include_current_activity"),
                     ("cursor", "cursor"),
                     ("timeout_secs", "timeout_secs"),
                     ("limit", "limit"),
@@ -159,7 +163,11 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
             "kanna_task_logs",
             TypedToolSurface {
                 command_path: &["task", "logs"],
-                param_args: &[("task_id", "task_id"), ("tail", "tail")],
+                param_args: &[
+                    ("task_id", "task_id"),
+                    ("tail", "tail"),
+                    ("agent_view", "agent_view"),
+                ],
             },
         ),
         (
@@ -173,7 +181,11 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
             "kanna_search_tasks",
             TypedToolSurface {
                 command_path: &["task", "search"],
-                param_args: &[("query", "query")],
+                param_args: &[
+                    ("query", "query"),
+                    ("all_machines", "all_machines"),
+                    ("include_closed", "include_closed"),
+                ],
             },
         ),
         (

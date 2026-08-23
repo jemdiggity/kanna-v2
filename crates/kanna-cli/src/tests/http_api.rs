@@ -164,7 +164,7 @@ async fn get_task_via_api_fetches_single_task_path() {
         json!(["child-open", "child-closed"]),
         "the typed CLI must not drop the downward task view when it re-serializes the response"
     );
-    assert!(request.starts_with("GET /v1/tasks/task-123 HTTP/1.1"));
+    assert!(request.starts_with("GET /v1/tasks/task-123?agentView=true HTTP/1.1"));
 }
 
 #[tokio::test]

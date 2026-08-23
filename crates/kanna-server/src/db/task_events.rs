@@ -56,6 +56,15 @@ pub enum TaskEventKind {
     /// rendered — never inferred from a session merely going quiet, so a long
     /// build is never mislabelled as blocked.
     AwaitingInput,
+    /// A manual-transition main-stage agent session ended without recording a
+    /// stage verdict. The work is parked for an operator or manager to inspect
+    /// and advance; unlike `ActivityChanged`, this is an authoritative daemon
+    /// Exit lifecycle event rather than a display-state heuristic.
+    AwaitingAdvance,
+    /// The daemon's provider-neutral runtime classification settled from
+    /// `busy` to a non-busy state. This is the manager activity dimension,
+    /// never the human read/unread inbox dimension exposed as `activity`.
+    RuntimeSettled,
     /// A provider-neutral display transition that held past the server's
     /// debounce. Every direction and provider uses this same event; unlike
     /// `AwaitingInput`, it does not identify a question.
@@ -109,6 +118,8 @@ impl TaskEventKind {
             Self::PrCreated => "task.pr_created",
             Self::RevisionRequested => "task.revision_requested",
             Self::AwaitingInput => "task.awaiting_input",
+            Self::AwaitingAdvance => "task.awaiting_advance",
+            Self::RuntimeSettled => "task.runtime_settled",
             Self::ActivityChanged => "task.activity_changed",
             Self::MergeSignaled => "task.merge_signaled",
             Self::MergeHandoffMissing => "task.merge_handoff_missing",
@@ -130,6 +141,8 @@ impl TaskEventKind {
         Self::PrCreated,
         Self::RevisionRequested,
         Self::AwaitingInput,
+        Self::AwaitingAdvance,
+        Self::RuntimeSettled,
         Self::ActivityChanged,
         Self::MergeSignaled,
         Self::MergeHandoffMissing,
@@ -246,9 +259,59 @@ impl TaskEventScope {
             }
         }
     }
+
+    fn pipeline_item_where_clause(&self) -> String {
+        match self {
+            Self::Tasks(task_ids) => {
+                if task_ids.is_empty() {
+                    return "0".to_string();
+                }
+                format!("id IN ({})", vec!["?"; task_ids.len()].join(", "))
+            }
+            Self::Children(_) => "parent_task_id = ?".to_string(),
+            Self::Repo(_) => "repo_id = ?".to_string(),
+            Self::RepoRemoteUrlHash(_) => {
+                "repo_id IN (SELECT id FROM repo WHERE remote_url_hash = ?)".to_string()
+            }
+        }
+    }
 }
 
 impl Db {
+    pub fn list_non_busy_task_runtime_states(
+        &self,
+        scope: &TaskEventScope,
+        after_task_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<(String, String)>, rusqlite::Error> {
+        let sql = format!(
+            "SELECT id, runtime_status FROM pipeline_item
+             WHERE closed_at IS NULL
+               AND runtime_status IN ('idle', 'waiting', 'exited')
+               AND runtime_event_pending_at IS NULL
+               AND (? IS NULL OR id > ?)
+               AND {}
+             ORDER BY id ASC
+             LIMIT ?",
+            scope.pipeline_item_where_clause()
+        );
+        let mut params = vec![
+            after_task_id
+                .map(|task_id| SqlValue::Text(task_id.to_string()))
+                .unwrap_or(SqlValue::Null),
+            after_task_id
+                .map(|task_id| SqlValue::Text(task_id.to_string()))
+                .unwrap_or(SqlValue::Null),
+        ];
+        params.extend(scope.params());
+        params.push(SqlValue::Integer(limit));
+        let mut statement = self.conn.prepare(&sql)?;
+        let rows = statement.query_map(rusqlite::params_from_iter(params), |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?;
+        rows.collect()
+    }
+
     /// Append one event. Callers pass a JSON object payload; `task_id` must be
     /// a resolved task id (a `pipeline_item` row id, not a branch name).
     pub fn append_task_event(
@@ -446,36 +509,84 @@ impl Db {
         runtime_status: &str,
         waiting_prompt: Option<&str>,
     ) -> Result<bool, rusqlite::Error> {
-        self.with_immediate_transaction(|db| {
-            let previous: Option<Option<String>> = db
-                .conn
-                .query_row(
-                    "SELECT runtime_status FROM pipeline_item WHERE id = ? AND closed_at IS NULL",
-                    [task_id],
-                    |row| row.get(0),
+        if self.conn.is_autocommit() {
+            self.with_immediate_transaction(|db| {
+                db.update_pipeline_item_runtime_status_in_transaction(
+                    task_id,
+                    runtime_status,
+                    waiting_prompt,
                 )
-                .optional()?;
-            let Some(previous) = previous else {
-                return Ok(false);
-            };
-            if previous.as_deref() == Some(runtime_status) {
-                return Ok(false);
-            }
-            db.conn.execute(
+            })
+        } else {
+            self.update_pipeline_item_runtime_status_in_transaction(
+                task_id,
+                runtime_status,
+                waiting_prompt,
+            )
+        }
+    }
+
+    fn update_pipeline_item_runtime_status_in_transaction(
+        &self,
+        task_id: &str,
+        runtime_status: &str,
+        waiting_prompt: Option<&str>,
+    ) -> Result<bool, rusqlite::Error> {
+        let previous: Option<(Option<String>, Option<String>)> = self
+            .conn
+            .query_row(
+                "SELECT runtime_status, runtime_event_pending_at
+                 FROM pipeline_item WHERE id = ? AND closed_at IS NULL",
+                [task_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((previous, pending_at)) = previous else {
+            return Ok(false);
+        };
+        if previous.as_deref() == Some(runtime_status) {
+            return Ok(false);
+        }
+        if runtime_status == "busy" {
+            // Busy is asserted immediately. Only the following non-busy side
+            // needs damping, so it has an unambiguous busy baseline.
+            self.conn.execute(
                 "UPDATE pipeline_item
-                 SET runtime_status = ?, updated_at = datetime('now')
+                 SET runtime_status = ?, runtime_event_baseline = 'busy',
+                     runtime_event_pending_at = NULL, updated_at = datetime('now')
                  WHERE id = ?",
                 (runtime_status, task_id),
             )?;
-            if runtime_status == "waiting" {
-                db.append_task_event(
-                    task_id,
-                    TaskEventKind::AwaitingInput,
-                    json!({ "prompt": waiting_prompt }),
-                )?;
-            }
-            Ok(true)
-        })
+        } else if previous.as_deref() == Some("busy") || previous.is_none() || pending_at.is_some()
+        {
+            // A non-busy verdict must hold for the fixed window. A change
+            // between candidate non-busy states restarts that same window.
+            self.conn.execute(
+                "UPDATE pipeline_item
+                 SET runtime_status = ?,
+                     runtime_event_baseline = COALESCE(runtime_event_baseline, ?),
+                     runtime_event_pending_at = datetime('now'),
+                     updated_at = datetime('now')
+                 WHERE id = ?",
+                (runtime_status, previous.as_deref(), task_id),
+            )?;
+        } else {
+            self.conn.execute(
+                "UPDATE pipeline_item
+                 SET runtime_status = ?, runtime_event_baseline = ?,
+                     runtime_event_pending_at = NULL, updated_at = datetime('now')
+                 WHERE id = ?",
+                (runtime_status, runtime_status, task_id),
+            )?;
+        }
+        if runtime_status == "waiting" {
+            self.append_task_event(
+                task_id,
+                TaskEventKind::AwaitingInput,
+                json!({ "prompt": waiting_prompt }),
+            )?;
+        }
+        Ok(true)
     }
 
     /// Drop a stale `exited` verdict for a task whose session has been proven

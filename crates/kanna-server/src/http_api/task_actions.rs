@@ -633,11 +633,17 @@ pub(super) async fn close_task(
                 )
             })?;
             if !has_workspace_teardown {
-                crate::worktree_cleanup::cleanup_closed_task_worktrees_by_id(
+                if let Err(error) = crate::worktree_cleanup::cleanup_closed_task_worktrees_by_id(
                     &db,
                     &pipeline_item_id,
-                )
-                .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+                ) {
+                    // The close is already committed. Reconciliation retries
+                    // leftover worktree cleanup; reporting a 500 here would
+                    // falsely tell the caller that the close did not land.
+                    log::warn!(
+                        "post-close worktree cleanup failed for task {pipeline_item_id}: {error}"
+                    );
+                }
             }
             Ok(())
         })
@@ -1742,118 +1748,83 @@ pub(super) async fn request_revision(
                     format!("db error: {}", e),
                 )
             })?;
-            // A revision request always records the review verdict on the run
-            // it closes, even when the request itself cannot proceed — so a
-            // failure to resolve the budget still closes the run before it
-            // surfaces the error.
             let budget = match crate::task_creator::resolve_revision_budget(&db, &source_task_id) {
                 Ok(budget) => budget,
-                Err(error) => {
-                    let stage_result = revision_stage_result(&payload.summary, &payload.metadata)?;
-                    let _ = db.finish_latest_running_stage_run(
-                        &source_task_id,
-                        "failed",
-                        Some(&stage_result),
-                        Some(&payload.summary),
-                    );
-                    return Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, error));
-                }
+                Err(error) => return Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, error)),
             };
 
-            // Claim a round atomically rather than checking and spending in
-            // two steps: `try_claim_agent_revision_round` reads and increments
-            // inside one immediate transaction, so concurrent requests cannot
-            // both be admitted on the last free slot. `None` means the budget
-            // is spent. A human request claims nothing — it is never refused.
-            let claimed_round = if origin.is_agent() {
-                let claimed = db
-                    .try_claim_agent_revision_round(&source_task_id, budget.limit)
-                    .map_err(|e| {
-                        (
-                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                            format!("db error: {}", e),
-                        )
-                    })?;
-                if claimed.is_none() {
-                    // Budget spent: record the review verdict, park the task
-                    // where it is, and start nothing. This is the backstop
-                    // against a review agent driving a scoped task through
-                    // endless revise/review rounds — only a human can hand out
-                    // more rounds.
-                    return park_exhausted_revision(&db, source_task_id, &payload, budget);
-                }
-                claimed
-            } else {
-                None
-            };
+            if origin.is_agent() && budget.limit > 0 && budget.rounds >= budget.limit {
+                return park_exhausted_revision(&db, source_task_id, &payload, budget);
+            }
 
-            let stage_result = revision_stage_result(&payload.summary, &payload.metadata)?;
-            let _ = db
-                .finish_latest_running_stage_run(
-                    &source_task_id,
-                    "failed",
-                    Some(&stage_result),
-                    Some(&payload.summary),
-                )
-                .map_err(|e| {
-                    (
-                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("db error: {}", e),
-                    )
-                })?;
             // Only a capped agent round is announced to the revising agent as
             // a round; a human-requested revision is the human's own call.
             let round = (origin.is_agent() && budget.limit > 0).then_some(
                 crate::task_creator::RevisionRound {
-                    number: claimed_round.unwrap_or(budget.rounds + 1),
+                    number: budget.rounds + 1,
                     limit: budget.limit,
                 },
             );
-            let prepared = match crate::task_creator::prepare_revision_task_for_api(
+            // Historically an empty explicit prompt fell back to the verdict
+            // after that verdict had already been written to the current run.
+            // Resolve the same effective feedback before preparation so a
+            // preparation error cannot leave that run falsely terminated.
+            let revision_prompt = if payload.prompt.trim().is_empty() {
+                &payload.summary
+            } else {
+                &payload.prompt
+            };
+            let prepared = crate::task_creator::prepare_revision_task_for_api(
                 &db,
                 &state.config,
                 &source_task_id,
                 &payload.target_stage,
-                &payload.prompt,
+                revision_prompt,
                 round,
-            ) {
-                Ok(prepared) => prepared,
-                Err(error) => {
-                    // The round was claimed before preparation so the check
-                    // and the spend could not be split; preparation failing
-                    // means no agent ran, so hand the round back.
-                    if claimed_round.is_some() {
-                        if let Err(release_error) =
-                            db.release_agent_revision_round(&source_task_id)
-                        {
-                            log::error!(
-                                "failed to release revision round for task {source_task_id}: {release_error}"
-                            );
-                        }
-                    }
-                    return Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, error));
-                }
-            };
-            let rounds = match claimed_round {
-                Some(rounds) => rounds,
-                None => {
-                    // A human request spends no round and hands the budget
-                    // back, so the agents get a fresh set to satisfy it.
-                    db.reset_task_revision_rounds(&source_task_id)
-                        .map_err(|e| {
-                            (
-                                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                                format!("db error: {}", e),
-                            )
-                        })?;
+            )
+            .map_err(|error| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))?;
+            let stage_result = revision_stage_result(&payload.summary, &payload.metadata)?;
+            let revision_event_payload = revision_requested_event_payload(
+                &payload,
+                budget.rounds + i64::from(origin.is_agent()),
+                budget.limit,
+                false,
+            );
+            let finalized = db.with_immediate_transaction(|db| -> rusqlite::Result<i64> {
+                let rounds = if origin.is_agent() {
+                    db.claim_agent_revision_round_in_transaction(&source_task_id, budget.limit)?
+                        .ok_or(rusqlite::Error::QueryReturnedNoRows)?
+                } else {
+                    db.reset_task_revision_rounds(&source_task_id)?;
                     0
+                };
+                let _ = db.finish_latest_running_stage_run(
+                    &source_task_id,
+                    "failed",
+                    Some(&stage_result),
+                    Some(&payload.summary),
+                )?;
+                db.append_task_event(
+                    &source_task_id,
+                    crate::db::TaskEventKind::RevisionRequested,
+                    revision_event_payload,
+                )?;
+                Ok(rounds)
+            });
+            let rounds = match finalized {
+                Ok(rounds) => rounds,
+                Err(error) => {
+                    let error = crate::task_creator::rollback_prepared_stage_run_for_api(
+                        &prepared,
+                        format!("db error: {error}"),
+                    );
+                    return Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, error));
                 }
             };
             let budget = crate::task_creator::RevisionBudget {
                 rounds,
                 limit: budget.limit,
             };
-            append_revision_requested_event(&db, &source_task_id, &payload, &budget, false)?;
             Ok(RevisionOutcome::Started {
                 source_task_id,
                 prepared: Box::new(prepared),
@@ -2005,20 +1976,29 @@ fn append_revision_requested_event(
     db.append_task_event(
         task_id,
         crate::db::TaskEventKind::RevisionRequested,
-        serde_json::json!({
-            "targetStage": payload.target_stage,
-            "summary": payload.summary,
-            "origin": if payload.origin.unwrap_or_default().is_agent() { "agent" } else { "human" },
-            "rounds": budget.rounds,
-            "limit": budget.limit,
-            "exhausted": exhausted,
-        }),
+        revision_requested_event_payload(payload, budget.rounds, budget.limit, exhausted),
     )
     .map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             format!("db error: {}", e),
         )
+    })
+}
+
+fn revision_requested_event_payload(
+    payload: &crate::mobile_api::RequestRevisionRequest,
+    rounds: i64,
+    limit: i64,
+    exhausted: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "targetStage": payload.target_stage,
+        "summary": payload.summary,
+        "origin": if payload.origin.unwrap_or_default().is_agent() { "agent" } else { "human" },
+        "rounds": rounds,
+        "limit": limit,
+        "exhausted": exhausted,
     })
 }
 

@@ -145,6 +145,100 @@ async fn close_task_route_uses_task_closer() {
 }
 
 #[tokio::test]
+async fn close_task_route_reports_success_when_post_commit_worktree_cleanup_fails() {
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+    use tokio::io::{AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let unique = super::unique_test_suffix();
+    let repo_root = std::env::temp_dir().join(format!("kanna-http-close-broken-repo-{unique}"));
+    std::fs::create_dir_all(&repo_root).unwrap();
+    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-close-cleanup-d-{unique}"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let daemon_server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        for expected in ["task-1", "shell-wt-task-1", "td-task-1"] {
+            match read_test_daemon_command(&mut reader, &mut write_half).await {
+                DaemonCommand::Kill { session_id } => assert_eq!(session_id, expected),
+                other => panic!("expected kill command, got {other:?}"),
+            }
+            write_half
+                .write_all(
+                    format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap()).as_bytes(),
+                )
+                .await
+                .unwrap();
+        }
+    });
+
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: daemon_dir.to_string_lossy().to_string(),
+        db_path: Db::test_db_path(&format!("http-close-cleanup-{unique}")),
+        kanna_cli_path: None,
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        version: "test-version".to_string(),
+        environment: "development".to_string(),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
+        pairing_store_path: format!("/tmp/kanna-pairings-close-cleanup-{unique}.json"),
+    };
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    // This is deliberately a directory but not a git repository, so the
+    // post-close `git worktree prune` fails after `closed_at` commits.
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "task prompt",
+        Some("Task"),
+        "in progress",
+        "2026-04-17 07:00:00",
+    )
+    .unwrap();
+    drop(db);
+
+    let app = super::router(Arc::new(super::AppState::new(config.clone())));
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/close")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let db = Db::open(&config.db_path).unwrap();
+    assert!(
+        db.get_pipeline_item("task-1")
+            .unwrap()
+            .unwrap()
+            .closed_at
+            .is_some(),
+        "the successful response must reflect the committed close"
+    );
+
+    daemon_server.await.unwrap();
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_dir_all(&daemon_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[tokio::test]
 async fn abort_task_creation_succeeds_when_requested_id_is_absent() {
     let app = super::test_router("desktop-1", "Studio Mac");
 
@@ -2838,6 +2932,198 @@ fn git_branch_exists(repo_root: &Path, branch: &str) -> bool {
         .status()
         .unwrap()
         .success()
+}
+
+#[tokio::test]
+async fn request_revision_finalization_error_rolls_back_db_and_prepared_worktree() {
+    let unique = super::unique_test_suffix();
+    let repo_root = std::env::temp_dir().join(format!("kanna-http-revision-rollback-{unique}"));
+    init_test_git_repo(&repo_root);
+    std::fs::write(
+        repo_root.join(".kanna/workflows/reviewable.json"),
+        serde_json::json!({
+            "name": "reviewable",
+            "revision_limit": 5,
+            "stages": [
+                {
+                    "name": "in progress",
+                    "prompt": "$TASK_PROMPT",
+                    "policy": { "transition": "manual" }
+                },
+                { "name": "review", "policy": { "transition": "auto" } }
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .args(["add", ".kanna/workflows/reviewable.json"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-m", "add reviewable workflow"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    publish_test_origin_main(&repo_root);
+    let source_worktree = commit_branch_change(
+        &repo_root,
+        "task-revision-fault",
+        "work.txt",
+        "reviewed work",
+    );
+
+    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-revision-rollback-d-{unique}"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: daemon_dir.to_string_lossy().to_string(),
+        db_path: Db::test_db_path(&format!("http-revision-rollback-{unique}")),
+        kanna_cli_path: None,
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        version: "test-version".to_string(),
+        environment: "development".to_string(),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
+        pairing_store_path: format!("/tmp/kanna-pairings-revision-rollback-{unique}.json"),
+    };
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "revision-fault",
+        "repo-1",
+        "Implement reviewed work",
+        Some("Reviewed work"),
+        "review",
+        "2026-08-23 10:00:00",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context(
+        "revision-fault",
+        "task-revision-fault",
+        "reviewable",
+        None,
+        "claude",
+    )
+    .unwrap();
+    db.upsert_worktree(
+        "wt-revision-fault",
+        "revision-fault",
+        &source_worktree.to_string_lossy(),
+        "task-revision-fault",
+    )
+    .unwrap();
+    db.insert_stage_run(crate::db::NewStageRun {
+        id: "review-run",
+        task_id: "revision-fault",
+        stage: "review",
+        kind: "main",
+        agent: Some("review"),
+        agent_provider: Some("claude"),
+        model: None,
+        effort: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("revision-fault"),
+        provider_session_id: None,
+        cwd: Some(&source_worktree.to_string_lossy()),
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    db.connection_for_e2e_tests()
+        .execute_batch(
+            "CREATE TRIGGER fail_revision_requested_event
+             BEFORE INSERT ON task_event
+             WHEN NEW.type = 'task.revision_requested'
+             BEGIN
+                 SELECT RAISE(ABORT, 'forced revision finalization failure');
+             END;",
+        )
+        .unwrap();
+
+    let before_task = db.get_pipeline_item("revision-fault").unwrap().unwrap();
+    let before_runs = db.list_stage_runs_for_task("revision-fault").unwrap();
+    let before_event_seq = db.latest_task_event_seq().unwrap();
+    let before_branches = Command::new("git")
+        .args(["branch", "--format=%(refname:short)"])
+        .current_dir(&repo_root)
+        .output()
+        .unwrap()
+        .stdout;
+    let before_worktrees = Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(&repo_root)
+        .output()
+        .unwrap()
+        .stdout;
+    drop(db);
+
+    let app = super::router(Arc::new(super::AppState::new(config.clone())));
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/revision-fault/actions/request-revision")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "targetStage": "in progress",
+                        "summary": "Review found a focused defect",
+                        "prompt": "Fix the focused defect"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let db = Db::open(&config.db_path).unwrap();
+    let after_task = db.get_pipeline_item("revision-fault").unwrap().unwrap();
+    assert_eq!(after_task.stage, before_task.stage);
+    assert_eq!(after_task.branch, before_task.branch);
+    assert_eq!(after_task.activity, before_task.activity);
+    assert_eq!(after_task.revision_rounds, before_task.revision_rounds);
+    let after_runs = db.list_stage_runs_for_task("revision-fault").unwrap();
+    assert_eq!(after_runs.len(), before_runs.len());
+    assert_eq!(after_runs[0].status, "running");
+    assert_eq!(after_runs[0].result, None);
+    assert_eq!(db.latest_task_event_seq().unwrap(), before_event_seq);
+    assert_eq!(
+        Command::new("git")
+            .args(["branch", "--format=%(refname:short)"])
+            .current_dir(&repo_root)
+            .output()
+            .unwrap()
+            .stdout,
+        before_branches,
+        "a failed request must delete its prepared branch"
+    );
+    assert_eq!(
+        Command::new("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(&repo_root)
+            .output()
+            .unwrap()
+            .stdout,
+        before_worktrees,
+        "a failed request must delete its prepared worktree"
+    );
+
+    let _ = std::fs::remove_dir_all(&daemon_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
 }
 
 #[tokio::test]

@@ -7,11 +7,13 @@ use crate::mobile_api::MobileApi;
 use axum::extract::State;
 use axum::Json;
 use kanna_agent_protocol::StateChangeScope;
+use kanna_tool_catalog::encode_path_segment;
 use std::sync::Arc;
 
 pub(super) async fn list_recent_tasks(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<crate::mobile_api::TaskSummary>>, (axum::http::StatusCode, String)> {
+    axum::extract::Query(query): axum::extract::Query<ListTasksQuery>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     let db = Db::open(&state.config.db_path).map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -25,9 +27,20 @@ pub(super) async fn list_recent_tasks(
     }
     let api = MobileApi::new(state.config.clone(), db);
     let tasks = api
-        .list_recent_tasks()
+        .list_recent_tasks_including_closed(query.include_closed)
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(tasks))
+    if !query.all_machines {
+        return Ok(Json(serde_json::json!(tasks)));
+    }
+    aggregate_task_summaries(
+        &state,
+        tasks,
+        format!(
+            "/v1/tasks/recent?includeClosed={}&allMachines=false",
+            query.include_closed
+        ),
+    )
+    .await
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -54,6 +67,7 @@ pub(super) async fn list_closed_task_identities(
 pub(super) async fn get_task(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(task_id): axum::extract::Path<String>,
+    axum::extract::Query(query): axum::extract::Query<GetTaskQuery>,
 ) -> Result<Json<crate::mobile_api::TaskDetail>, (axum::http::StatusCode, String)> {
     let db = Db::open(&state.config.db_path).map_err(|e| {
         (
@@ -69,14 +83,62 @@ pub(super) async fn get_task(
     let api = MobileApi::new(state.config.clone(), db);
     let task = api
         .get_task(&task_id)
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?
-        .ok_or_else(|| {
-            (
-                axum::http::StatusCode::NOT_FOUND,
-                format!("task not found: {task_id}"),
-            )
-        })?;
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let Some(mut task) = task else {
+        if !query.local_only && state.desktop_routing_available() {
+            if let Ok(machine_ids) = state.list_active_relay_desktops().await {
+                for machine_id in machine_ids {
+                    if machine_id == state.config.desktop_id {
+                        continue;
+                    }
+                    let encoded_task_id = encode_path_segment(&task_id);
+                    let path = format!("/v1/tasks/{encoded_task_id}?localOnly=true");
+                    if let Ok(response) = state
+                        .invoke_relay_desktop(
+                            machine_id.clone(),
+                            "GET".to_string(),
+                            path,
+                            serde_json::Value::Null,
+                        )
+                        .await
+                    {
+                        if response.status == axum::http::StatusCode::OK.as_u16() {
+                            return Err((
+                                axum::http::StatusCode::NOT_FOUND,
+                                format!(
+                                    "task {task_id} was found on machine {machine_id}; pass machine_id: \"{machine_id}\" to kanna_get_task"
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        return Err((
+            axum::http::StatusCode::NOT_FOUND,
+            format!("task not found: {task_id}"),
+        ));
+    };
+    if query.agent_view
+        && task
+            .composer
+            .as_ref()
+            .is_some_and(|composer| composer.attestation != "typed")
+    {
+        task.composer = None;
+    }
     Ok(Json(task))
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct GetTaskQuery {
+    #[serde(default)]
+    local_only: bool,
+    /// Agent tools must not receive provider-authored composer suggestions as
+    /// content. Human UI callers omit this and keep the full visual state.
+    #[serde(default)]
+    agent_view: bool,
 }
 
 pub(super) async fn get_task_children(
@@ -279,12 +341,25 @@ pub(super) async fn set_task_notify(
 #[serde(rename_all = "camelCase")]
 pub(super) struct SearchTasksQuery {
     query: String,
+    #[serde(default)]
+    include_closed: bool,
+    #[serde(default)]
+    all_machines: bool,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ListTasksQuery {
+    #[serde(default)]
+    include_closed: bool,
+    #[serde(default)]
+    all_machines: bool,
 }
 
 pub(super) async fn search_tasks(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(query): axum::extract::Query<SearchTasksQuery>,
-) -> Result<Json<Vec<crate::mobile_api::TaskSummary>>, (axum::http::StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     let db = Db::open(&state.config.db_path).map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -298,9 +373,86 @@ pub(super) async fn search_tasks(
     }
     let api = MobileApi::new(state.config.clone(), db);
     let tasks = api
-        .search_tasks(&query.query)
+        .search_tasks_including_closed(&query.query, query.include_closed)
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(tasks))
+    if !query.all_machines {
+        return Ok(Json(serde_json::json!(tasks)));
+    }
+    let encoded_query = encode_path_segment(&query.query);
+    aggregate_task_summaries(
+        &state,
+        tasks,
+        format!(
+            "/v1/tasks/search?query={encoded_query}&includeClosed={}&allMachines=false",
+            query.include_closed
+        ),
+    )
+    .await
+}
+
+async fn aggregate_task_summaries(
+    state: &Arc<AppState>,
+    mut tasks: Vec<crate::mobile_api::TaskSummary>,
+    remote_path: String,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let mut machine_errors = Vec::new();
+    match state.list_active_relay_desktops().await {
+        Ok(machine_ids) => {
+            for machine_id in machine_ids {
+                if machine_id == state.config.desktop_id {
+                    continue;
+                }
+                match state
+                    .invoke_relay_desktop(
+                        machine_id.clone(),
+                        "GET".to_string(),
+                        remote_path.clone(),
+                        serde_json::Value::Null,
+                    )
+                    .await
+                {
+                    Ok(response) if response.status == 200 => match response.body {
+                        Some(body) => match serde_json::from_value::<
+                            Vec<crate::mobile_api::TaskSummary>,
+                        >(body)
+                        {
+                            Ok(mut remote_tasks) => {
+                                for task in &mut remote_tasks {
+                                    task.machine_id = Some(machine_id.clone());
+                                }
+                                tasks.append(&mut remote_tasks);
+                            }
+                            Err(error) => machine_errors.push(serde_json::json!({
+                                "machineId": machine_id,
+                                "error": format!("invalid task-list response: {error}"),
+                            })),
+                        },
+                        None => machine_errors.push(serde_json::json!({
+                            "machineId": machine_id,
+                            "error": "task-list response had no body",
+                        })),
+                    },
+                    Ok(response) => machine_errors.push(serde_json::json!({
+                        "machineId": machine_id,
+                        "error": response.error.unwrap_or_else(|| format!("HTTP {}", response.status)),
+                    })),
+                    Err(error) => machine_errors.push(serde_json::json!({
+                        "machineId": machine_id,
+                        "error": error,
+                    })),
+                }
+            }
+        }
+        Err(error) => machine_errors.push(serde_json::json!({
+            "machineId": serde_json::Value::Null,
+            "error": error,
+        })),
+    }
+    tasks.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    Ok(Json(serde_json::json!({
+        "tasks": tasks,
+        "machineErrors": machine_errors,
+    })))
 }
 
 pub(super) async fn create_task(
