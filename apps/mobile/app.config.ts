@@ -8,6 +8,12 @@ import { existsSync, readFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 
 type KannaAppEnvironmentName = "dev" | "staging" | "prod";
+type KannaCloudEnvironmentName =
+  | "local"
+  | "emulators"
+  | "staging"
+  | "production"
+  | "prod";
 type OtaChannel = "staging" | "production";
 
 interface MobileFirebaseExtraConfig {
@@ -69,6 +75,29 @@ export function resolveMobileAppEnvironment(
       rawName === undefined ? "unset" : JSON.stringify(rawName)
     }. Build through kd (\`./kd dev up --mobile\`, \`./kd mobile run --device\`, ` +
       "`./kd mobile publish`), which always sets it."
+  );
+}
+
+export function resolveMobileCloudEnvironment(
+  rawName: string | undefined,
+  appEnvironment: MobileAppEnvironment
+): MobileAppEnvironment {
+  const name = rawName?.trim() as KannaCloudEnvironmentName | undefined;
+  if (!name) {
+    return appEnvironment;
+  }
+  if (name === "local" || name === "emulators") {
+    return registry.dev;
+  }
+  if (name === "staging") {
+    return registry.staging;
+  }
+  if (name === "production" || name === "prod") {
+    return registry.prod;
+  }
+
+  throw new Error(
+    `KANNA_CLOUD_ENV/EXPO_PUBLIC_KANNA_CLOUD_ENV must be one of local, emulators, staging, production, or prod; got ${JSON.stringify(rawName)}.`
   );
 }
 
@@ -181,6 +210,8 @@ export function readRepoVersion(startDir: string = process.cwd()): string {
 export function createExpoConfig(
   env: {
     KANNA_APP_ENV?: string;
+    KANNA_CLOUD_ENV?: string;
+    EXPO_PUBLIC_KANNA_CLOUD_ENV?: string;
     KANNA_APP_VERSION?: string;
     KANNA_IOS_BUILD_NUMBER?: string;
     KANNA_SOURCE_REF?: string;
@@ -189,6 +220,10 @@ export function createExpoConfig(
   readNativeVersionFallback: () => string = readRepoVersion
 ): ExpoConfig {
   const appEnvironment = resolveMobileAppEnvironment(env.KANNA_APP_ENV);
+  const cloudEnvironment = resolveMobileCloudEnvironment(
+    env.KANNA_CLOUD_ENV ?? env.EXPO_PUBLIC_KANNA_CLOUD_ENV,
+    appEnvironment
+  );
   const explicitVersion = env.KANNA_APP_VERSION?.trim();
   const version = explicitVersion || readNativeVersionFallback();
   const buildNumber = env.KANNA_IOS_BUILD_NUMBER?.trim();
@@ -196,11 +231,14 @@ export function createExpoConfig(
   const sourceCommit = env.KANNA_SOURCE_COMMIT?.trim();
   const source =
     sourceRef && sourceCommit ? { ref: sourceRef, commit: sourceCommit } : undefined;
-  const otaManifestUrl = resolveOtaManifestUrl(appEnvironment);
+  // Native identity and cloud target are separate profile axes. In particular,
+  // dev/staging/staging keeps the dev plugins and OTA behavior unchanged while
+  // its JS Firebase, relay, and descriptive OTA metadata target staging.
+  const nativeOtaManifestUrl = resolveOtaManifestUrl(appEnvironment);
   const updates =
-    appEnvironment.otaChannel && otaManifestUrl
+    appEnvironment.otaChannel && nativeOtaManifestUrl
       ? {
-          url: otaManifestUrl,
+          url: nativeOtaManifestUrl,
           requestHeaders: {
             "expo-channel-name": appEnvironment.otaChannel
           },
@@ -284,12 +322,12 @@ export function createExpoConfig(
     extra: {
       kanna: {
         appEnv: appEnvironment.name,
-        firebase: appEnvironment.firebase,
-        relayUrl: appEnvironment.relayUrl,
+        firebase: cloudEnvironment.firebase,
+        relayUrl: cloudEnvironment.relayUrl,
         runtimeVersion: appEnvironment.runtimeVersion,
         ota: {
-          channel: appEnvironment.otaChannel,
-          manifestUrl: otaManifestUrl
+          channel: cloudEnvironment.otaChannel,
+          manifestUrl: resolveOtaManifestUrl(cloudEnvironment)
         },
         ...(source ? { source } : {})
       }
