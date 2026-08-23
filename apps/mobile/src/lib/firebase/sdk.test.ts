@@ -114,7 +114,8 @@ describe("createConfiguredMobileAuthSession", () => {
       email: "new@example.com",
       displayName: null,
       emailVerified: false,
-      reload: vi.fn()
+      reload: vi.fn(),
+      getIdToken: vi.fn().mockResolvedValue("fresh-id-token")
     };
     mocks.createUserWithEmailAndPassword.mockResolvedValue({ user: firebaseUser });
     mocks.doc.mockReturnValue({ path: "cloud-access" });
@@ -144,5 +145,8 @@ describe("createConfiguredMobileAuthSession", () => {
       "entitlements",
       "cloud_access"
     );
+    mocks.auth.currentUser = firebaseUser;
+    await expect(sdk.getIdToken(true)).resolves.toBe("fresh-id-token");
+    expect(firebaseUser.getIdToken).toHaveBeenCalledWith(true);
   });
 });

@@ -213,13 +213,14 @@ describe("Profile to Machines smoke helpers", () => {
       getPasswordInput: async () => createElement(),
       getPasswordToggle: async () => createElement(),
       getSignInButton: async () => createElement(),
+      getCreateAccountButton: async () => createElement(),
       waitUntil
     });
 
     expect(waitUntil).toHaveBeenCalledWith(
       expect.any(Function),
       expect.objectContaining({
-        timeoutMsg: "Expected Profile identity controls and Machines entry point to be reachable"
+        timeoutMsg: "Expected Profile sign-in, Create account, and Machines controls to be reachable"
       })
     );
   });

@@ -140,6 +140,10 @@ function signedInUid(authState: MobileAuthState): string | null {
   return authState.status === "signedIn" ? authState.user.uid : null;
 }
 
+function isVerified(authState: MobileAuthState): boolean {
+  return authState.status === "signedIn" && authState.user.emailVerified === true;
+}
+
 function formatCloudTaskIndexError(indexError: CloudTaskIndexError): Error {
   const scope = indexError.desktopId
     ? `${indexError.scope} (${indexError.desktopId})`
@@ -176,6 +180,7 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
   let currentLanDiscoveryRefresh: (() => Promise<void>) | null = null;
   let lanDiscoveryRefreshQueued = false;
   let activeAuthUid = signedInUid(authSession.getState());
+  let activeAuthVerified = isVerified(authSession.getState());
   const taskRouteListeners = new Set<() => void>();
   const publishTaskRouteChange = () => {
     for (const listener of taskRouteListeners) listener();
@@ -633,15 +638,25 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
   });
   authSession.subscribe((authState) => {
     const nextAuthUid = signedInUid(authState);
-    if (nextAuthUid !== activeAuthUid) {
+    const nextAuthVerified = isVerified(authState);
+    const accountChanged = nextAuthUid !== activeAuthUid;
+    const sameAccountBecameVerified =
+      nextAuthUid !== null &&
+      nextAuthUid === activeAuthUid &&
+      !activeAuthVerified &&
+      nextAuthVerified;
+    if (accountChanged || sameAccountBecameVerified) {
       invalidateLiveCloudState();
       activeAuthUid = nextAuthUid;
-      // Clear before the client is rebuilt: the next client seeds its desktop
-      // sources from the store, so the account's machines must already be gone
-      // or it republishes them as its own.
-      sessionStore.resetAccountScopedMachines();
+      if (accountChanged) {
+        // Clear before the client is rebuilt: the next client seeds its desktop
+        // sources from the store, so the account's machines must already be gone
+        // or it republishes them as its own.
+        sessionStore.resetAccountScopedMachines();
+      }
       replaceActiveClient();
     }
+    activeAuthVerified = nextAuthVerified;
   });
 
   if (options.enableE2eTrustSeed) {

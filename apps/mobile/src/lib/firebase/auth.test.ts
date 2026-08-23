@@ -172,6 +172,10 @@ describe("createMobileAuthSession", () => {
     vi.mocked(sdk.reloadUser).mockResolvedValueOnce(verified);
     await session.refreshAccount();
 
+    expect(sdk.getIdToken).toHaveBeenCalledWith(true);
+    expect(vi.mocked(sdk.getIdToken).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(sdk.getCloudAccess).mock.invocationCallOrder.at(-1) ?? Infinity
+    );
     expect(session.getState()).toEqual({
       status: "signedIn",
       user: { ...verified, cloudAccess: "active" }

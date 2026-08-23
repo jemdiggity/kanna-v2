@@ -64,6 +64,7 @@ interface ProfileMachinesUi {
   getPasswordInput(): Promise<ProfileMachinesElement>;
   getPasswordToggle(): Promise<ProfileMachinesElement>;
   getSignInButton(): Promise<ProfileMachinesElement>;
+  getCreateAccountButton(): Promise<ProfileMachinesElement>;
   getMoreTab(): Promise<ProfileMachinesElement>;
   getMoreScreen(): Promise<ProfileMachinesElement>;
   getBuildInfoToggle(): Promise<ScrollableProfileMachinesElement>;
@@ -116,6 +117,7 @@ function createProfileMachinesUi(driver: Browser): ProfileMachinesUi {
     getPasswordInput: async () => driver.$(selectors.accountPasswordInput),
     getPasswordToggle: async () => driver.$(selectors.accountPasswordToggle),
     getSignInButton: async () => driver.$(selectors.accountSignInButton),
+    getCreateAccountButton: async () => driver.$(selectors.accountCreateButton),
     getMoreTab: async () => driver.$(selectors.moreTab),
     getMoreScreen: async () => driver.$(selectors.moreScreen),
     getBuildInfoToggle: async () => driver.$(selectors.buildInfoToggle),
@@ -582,6 +584,7 @@ export async function assertProfileSignInControlsReachable(
     | "getPasswordInput"
     | "getPasswordToggle"
     | "getSignInButton"
+    | "getCreateAccountButton"
     | "waitUntil"
   >
 ): Promise<void> {
@@ -592,14 +595,15 @@ export async function assertProfileSignInControlsReachable(
         ui.getEmailInput(),
         ui.getPasswordInput(),
         ui.getPasswordToggle(),
-        ui.getSignInButton()
+        ui.getSignInButton(),
+        ui.getCreateAccountButton()
       ]);
       return (await Promise.all(controls.map((control) => control.isExisting()))).every(Boolean);
     },
     {
       interval: POLL_INTERVAL_MS,
       timeout: SCREEN_TIMEOUT_MS,
-      timeoutMsg: "Expected Profile identity controls and Machines entry point to be reachable"
+      timeoutMsg: "Expected Profile sign-in, Create account, and Machines controls to be reachable"
     }
   );
 }

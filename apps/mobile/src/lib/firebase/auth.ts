@@ -103,6 +103,12 @@ export function createMobileAuthSession({
     if (refreshed.emailVerified === false) {
       return { ...refreshed, cloudAccess: "inactive" };
     }
+    if (user.emailVerified === false && refreshed.emailVerified === true) {
+      // Firebase caches ID tokens independently from the mutable User record.
+      // Renew before publishing the verified state so relay clients created by
+      // that state transition cannot inherit an email_verified=false claim.
+      await sdk.getIdToken(true);
+    }
     return {
       ...refreshed,
       cloudAccess: await sdk.getCloudAccess(refreshed.uid)
