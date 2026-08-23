@@ -68,8 +68,10 @@ import {
   type VisualCompanionSnapshot
 } from "./VisualCompanionModal";
 import {
-  clampTaskComposerHeight,
   appendComposerFileReference,
+  clampTaskComposerHeight,
+  getTaskComposerExplicitLineHeight,
+  TASK_COMPOSER_LINE_HEIGHT,
   TASK_COMPOSER_MAX_HEIGHT,
   TASK_COMPOSER_MIN_HEIGHT,
   TASK_COMPOSER_TEXT_INPUT_PROPS
@@ -386,6 +388,7 @@ export function TaskScreen({
     isComposerDisabled,
     onSendInput
   });
+  const composerContentHeightRef = useRef(TASK_COMPOSER_MIN_HEIGHT);
   composerSnapshotRef.current = {
     taskId: task.id,
     draftInput,
@@ -396,13 +399,24 @@ export function TaskScreen({
   const updateDraftInput = (nextDraftInput: string) => {
     composerSnapshotRef.current.draftInput = nextDraftInput;
     if (!nextDraftInput) {
+      composerContentHeightRef.current = TASK_COMPOSER_MIN_HEIGHT;
       setComposerInputHeight(TASK_COMPOSER_MIN_HEIGHT);
+    } else {
+      // onContentSizeChange can precede onChangeText on iOS. Apply the native
+      // measurement retained by that event when the draft becomes current.
+      setComposerInputHeight(
+        Math.max(
+          composerContentHeightRef.current,
+          getTaskComposerExplicitLineHeight(nextDraftInput)
+        )
+      );
     }
     setDraftInput(nextDraftInput);
   };
   const clearDraftInput = () => {
     composerSnapshotRef.current.draftInput = "";
     composerSnapshotRef.current.attachment = null;
+    composerContentHeightRef.current = TASK_COMPOSER_MIN_HEIGHT;
     setComposerInputHeight(TASK_COMPOSER_MIN_HEIGHT);
     setDraftInput("");
     setAttachment(null);
@@ -451,11 +465,18 @@ export function TaskScreen({
   const updateComposerInputHeight = (
     event: TextInputContentSizeChangeEvent
   ) => {
-    setComposerInputHeight(
-      composerSnapshotRef.current.draftInput
-        ? clampTaskComposerHeight(event.nativeEvent.contentSize.height)
-        : TASK_COMPOSER_MIN_HEIGHT
+    // iOS can report the new content size before onChangeText publishes the
+    // corresponding draft. Clamp the native measurement directly so that
+    // first multiline insertion grows instead of being mistaken for empty.
+    // Retain the measurement until onChangeText arrives, while leaving an
+    // empty composer at baseline so a stale post-Send event cannot regrow it.
+    const nextHeight = clampTaskComposerHeight(
+      event.nativeEvent.contentSize.height
     );
+    composerContentHeightRef.current = nextHeight;
+    if (composerSnapshotRef.current.draftInput) {
+      setComposerInputHeight(nextHeight);
+    }
   };
   const submitInput = (input: string) => {
     const snapshot = composerSnapshotRef.current;
@@ -1427,7 +1448,7 @@ const styles = StyleSheet.create({
     opacity: 0.45
   },
   inputComposer: {
-    alignItems: "center",
+    alignItems: "flex-end",
     backgroundColor: "rgba(8, 15, 27, 0.88)",
     borderColor: "#20304C",
     borderRadius: 20,
@@ -1440,6 +1461,7 @@ const styles = StyleSheet.create({
     color: "#F5F7FB",
     flex: 1,
     fontSize: 14,
+    lineHeight: TASK_COMPOSER_LINE_HEIGHT,
     maxHeight: TASK_COMPOSER_MAX_HEIGHT,
     minHeight: TASK_COMPOSER_MIN_HEIGHT,
     paddingHorizontal: 8,

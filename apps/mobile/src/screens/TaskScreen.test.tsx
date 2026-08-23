@@ -1457,6 +1457,49 @@ describe("TaskScreen", () => {
     expect(componentMocks.keyboardDismiss).toHaveBeenCalledOnce();
   });
 
+  it.each([
+    [40, 40],
+    [80, 80],
+    [120, 120],
+    [180, 120]
+  ])(
+    "grows and caps the composer for native content height %s",
+    (contentHeight, expectedHeight) => {
+      let tree = renderTaskScreen({
+        draftInput: "A composed task reply"
+      });
+      const input = findByTestId(tree, MOBILE_E2E_IDS.taskInput);
+
+      (input?.props?.onContentSizeChange as (event: unknown) => void)({
+        nativeEvent: { contentSize: { height: contentHeight, width: 240 } }
+      });
+      tree = renderTaskScreen({ draftInput: "A composed task reply" });
+
+      expect(
+        styleEntries(findByTestId(tree, MOBILE_E2E_IDS.taskInput))
+      ).toContainEqual({ height: expectedHeight });
+    }
+  );
+
+  it("grows when iOS reports content size before publishing the draft text", () => {
+    let tree = renderTaskScreen({ draftInput: "" });
+    const input = findByTestId(tree, MOBILE_E2E_IDS.taskInput);
+
+    (input?.props?.onContentSizeChange as (event: unknown) => void)({
+      nativeEvent: { contentSize: { height: 80, width: 240 } }
+    });
+    (input?.props?.onChangeText as (value: string) => void)(
+      "First line\nSecond line\nThird line"
+    );
+    tree = renderTaskScreen({
+      draftInput: "First line\nSecond line\nThird line"
+    });
+
+    expect(
+      styleEntries(findByTestId(tree, MOBILE_E2E_IDS.taskInput))
+    ).toContainEqual({ height: 80 });
+  });
+
   it("shrinks an expanded composer when its draft is deleted", () => {
     let tree = renderTaskScreen({ draftInput: "First line.\nSecond line." });
     let input = findByTestId(tree, "mobile.task-input");
