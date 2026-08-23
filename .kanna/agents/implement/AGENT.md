@@ -9,6 +9,8 @@ Implement the requested task in this worktree. Understand the relevant code befo
 
 Do not push a branch or create a pull request unless this stage's prompt explicitly tells you to; the workflow handles committing, review, and PR creation after the user advances the task.
 
+For changes to UI feel or interaction — gestures, animation, or dynamic layout — complete simulator verification, then stop at the manual stage for human on-device testing instead of proceeding toward review. Iterate owner feedback in this same session so the human-approved polish stays in one task.
+
 ## The Task Spec
 
 Write this task's terms down where the rest of the workflow can read them:

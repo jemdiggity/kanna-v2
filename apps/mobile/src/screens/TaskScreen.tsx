@@ -69,8 +69,7 @@ import {
 } from "./VisualCompanionModal";
 import {
   appendComposerFileReference,
-  clampTaskComposerHeight,
-  getTaskComposerExplicitLineHeight,
+  shouldTaskComposerScroll,
   TASK_COMPOSER_LINE_HEIGHT,
   TASK_COMPOSER_MAX_HEIGHT,
   TASK_COMPOSER_MIN_HEIGHT,
@@ -219,9 +218,7 @@ export function TaskScreen({
     string | null
   >(null);
   const [isPickingAttachment, setIsPickingAttachment] = useState(false);
-  const [composerInputHeight, setComposerInputHeight] = useState(
-    TASK_COMPOSER_MIN_HEIGHT
-  );
+  const [isComposerScrollable, setIsComposerScrollable] = useState(false);
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [isBackPending, setIsBackPending] = useState(false);
   const [screenViewport, setScreenViewport] = useState<{
@@ -388,7 +385,6 @@ export function TaskScreen({
     isComposerDisabled,
     onSendInput
   });
-  const composerContentHeightRef = useRef(TASK_COMPOSER_MIN_HEIGHT);
   composerSnapshotRef.current = {
     taskId: task.id,
     draftInput,
@@ -399,25 +395,14 @@ export function TaskScreen({
   const updateDraftInput = (nextDraftInput: string) => {
     composerSnapshotRef.current.draftInput = nextDraftInput;
     if (!nextDraftInput) {
-      composerContentHeightRef.current = TASK_COMPOSER_MIN_HEIGHT;
-      setComposerInputHeight(TASK_COMPOSER_MIN_HEIGHT);
-    } else {
-      // onContentSizeChange can precede onChangeText on iOS. Apply the native
-      // measurement retained by that event when the draft becomes current.
-      setComposerInputHeight(
-        Math.max(
-          composerContentHeightRef.current,
-          getTaskComposerExplicitLineHeight(nextDraftInput)
-        )
-      );
+      setIsComposerScrollable(false);
     }
     setDraftInput(nextDraftInput);
   };
   const clearDraftInput = () => {
     composerSnapshotRef.current.draftInput = "";
     composerSnapshotRef.current.attachment = null;
-    composerContentHeightRef.current = TASK_COMPOSER_MIN_HEIGHT;
-    setComposerInputHeight(TASK_COMPOSER_MIN_HEIGHT);
+    setIsComposerScrollable(false);
     setDraftInput("");
     setAttachment(null);
     setAttachmentErrorMessage(null);
@@ -465,17 +450,15 @@ export function TaskScreen({
   const updateComposerInputHeight = (
     event: TextInputContentSizeChangeEvent
   ) => {
-    // iOS can report the new content size before onChangeText publishes the
-    // corresponding draft. Clamp the native measurement directly so that
-    // first multiline insertion grows instead of being mistaken for empty.
-    // Retain the measurement until onChangeText arrives, while leaving an
-    // empty composer at baseline so a stale post-Send event cannot regrow it.
-    const nextHeight = clampTaskComposerHeight(
-      event.nativeEvent.contentSize.height
-    );
-    composerContentHeightRef.current = nextHeight;
+    // With no explicit height, native intrinsic layout grows for both soft
+    // wraps and hard line breaks. Turn on internal scrolling only after the
+    // native content measurement passes the five-line maxHeight.
+    // Ignore the empty value so a delayed pre-Send measurement cannot turn
+    // scrolling back on after clearDraftInput resets the composer.
     if (composerSnapshotRef.current.draftInput) {
-      setComposerInputHeight(nextHeight);
+      setIsComposerScrollable(
+        shouldTaskComposerScroll(event.nativeEvent.contentSize.height)
+      );
     }
   };
   const submitInput = (input: string) => {
@@ -1058,9 +1041,9 @@ export function TaskScreen({
             placeholderTextColor="#6F89AE"
             style={[
               styles.inputField,
-              { height: composerInputHeight },
               isComposerDisabled ? styles.inputFieldDisabled : null
             ]}
+            scrollEnabled={isComposerScrollable}
             testID={MOBILE_E2E_IDS.taskInput}
             value={draftInput}
           />

@@ -1425,10 +1425,11 @@ describe("TaskScreen", () => {
     expect(componentMocks.draftSetter).toHaveBeenLastCalledWith("");
   });
 
-  it("shrinks an expanded composer and dismisses its keyboard after Send", () => {
+  it("resets a scrollable composer and dismisses its keyboard after Send", () => {
     let tree = renderTaskScreen({
       agentType: "agent",
-      draftInput: "First line.\nSecond line."
+      draftInput:
+        "One long run-on sentence with no explicit newlines that has wrapped past the five-line composer cap on the native input."
     });
     let input = findByTestId(tree, "mobile.task-input");
     const resizeComposer = input?.props?.onContentSizeChange as (
@@ -1436,85 +1437,78 @@ describe("TaskScreen", () => {
     ) => void;
 
     resizeComposer({
-      nativeEvent: { contentSize: { height: 82, width: 240 } }
+      nativeEvent: { contentSize: { height: 142, width: 240 } }
     });
     tree = renderTaskScreen({
       agentType: "agent",
-      draftInput: "First line.\nSecond line."
+      draftInput:
+        "One long run-on sentence with no explicit newlines that has wrapped past the five-line composer cap on the native input."
     });
     input = findByTestId(tree, "mobile.task-input");
-    expect(styleEntries(input)).toContainEqual({ height: 82 });
+    expect(input?.props?.scrollEnabled).toBe(true);
 
     pressSend(tree);
     resizeComposer({
-      nativeEvent: { contentSize: { height: 82, width: 240 } }
+      nativeEvent: { contentSize: { height: 142, width: 240 } }
     });
     tree = renderTaskScreen({ agentType: "agent" });
 
-    expect(styleEntries(findByTestId(tree, "mobile.task-input"))).toContainEqual({
-      height: 40
-    });
+    expect(findByTestId(tree, "mobile.task-input")?.props?.scrollEnabled).toBe(
+      false
+    );
     expect(componentMocks.keyboardDismiss).toHaveBeenCalledOnce();
   });
 
-  it.each([
-    [40, 40],
-    [80, 80],
-    [120, 120],
-    [180, 120]
-  ])(
-    "grows and caps the composer for native content height %s",
-    (contentHeight, expectedHeight) => {
-      let tree = renderTaskScreen({
-        draftInput: "A composed task reply"
-      });
-      const input = findByTestId(tree, MOBILE_E2E_IDS.taskInput);
-
-      (input?.props?.onContentSizeChange as (event: unknown) => void)({
-        nativeEvent: { contentSize: { height: contentHeight, width: 240 } }
-      });
-      tree = renderTaskScreen({ draftInput: "A composed task reply" });
-
-      expect(
-        styleEntries(findByTestId(tree, MOBILE_E2E_IDS.taskInput))
-      ).toContainEqual({ height: expectedHeight });
-    }
-  );
-
-  it("grows when iOS reports content size before publishing the draft text", () => {
-    let tree = renderTaskScreen({ draftInput: "" });
+  it("leaves height to native layout between the one- and five-line bounds", () => {
+    const tree = renderTaskScreen({ draftInput: "A composed task reply" });
     const input = findByTestId(tree, MOBILE_E2E_IDS.taskInput);
+
+    expect(styleEntries(input)).toContainEqual(
+      expect.objectContaining({ minHeight: 40, maxHeight: 120 })
+    );
+    expect(styleEntries(input).some((style) => "height" in style)).toBe(false);
+    expect(input?.props?.scrollEnabled).toBe(false);
+  });
+
+  it("uses wrapped native content height with zero newlines to toggle internal scrolling", () => {
+    const wrappedDraft =
+      "This run-on sentence contains no newline characters but soft-wraps across more than five visual lines in the native task composer.";
+    expect(wrappedDraft).not.toContain("\n");
+
+    let tree = renderTaskScreen({ draftInput: wrappedDraft });
+    let input = findByTestId(tree, MOBILE_E2E_IDS.taskInput);
+    (input?.props?.onContentSizeChange as (event: unknown) => void)({
+      nativeEvent: { contentSize: { height: 142, width: 240 } }
+    });
+    tree = renderTaskScreen({ draftInput: wrappedDraft });
+    input = findByTestId(tree, MOBILE_E2E_IDS.taskInput);
+    expect(input?.props?.scrollEnabled).toBe(true);
 
     (input?.props?.onContentSizeChange as (event: unknown) => void)({
       nativeEvent: { contentSize: { height: 80, width: 240 } }
     });
-    (input?.props?.onChangeText as (value: string) => void)(
-      "First line\nSecond line\nThird line"
-    );
-    tree = renderTaskScreen({
-      draftInput: "First line\nSecond line\nThird line"
-    });
+    tree = renderTaskScreen({ draftInput: "Shortened soft-wrap draft" });
 
-    expect(
-      styleEntries(findByTestId(tree, MOBILE_E2E_IDS.taskInput))
-    ).toContainEqual({ height: 80 });
+    expect(findByTestId(tree, MOBILE_E2E_IDS.taskInput)?.props?.scrollEnabled).toBe(
+      false
+    );
   });
 
-  it("shrinks an expanded composer when its draft is deleted", () => {
-    let tree = renderTaskScreen({ draftInput: "First line.\nSecond line." });
-    let input = findByTestId(tree, "mobile.task-input");
+  it("resets native scrolling when its draft is deleted", () => {
+    let tree = renderTaskScreen({ draftInput: "A long wrapped draft" });
+    let input = findByTestId(tree, MOBILE_E2E_IDS.taskInput);
     (input?.props?.onContentSizeChange as (event: unknown) => void)({
-      nativeEvent: { contentSize: { height: 82, width: 240 } }
+      nativeEvent: { contentSize: { height: 142, width: 240 } }
     });
-    tree = renderTaskScreen({ draftInput: "First line.\nSecond line." });
-    input = findByTestId(tree, "mobile.task-input");
+    tree = renderTaskScreen({ draftInput: "A long wrapped draft" });
+    input = findByTestId(tree, MOBILE_E2E_IDS.taskInput);
 
     (input?.props?.onChangeText as (value: string) => void)("");
     tree = renderTaskScreen();
 
-    expect(styleEntries(findByTestId(tree, "mobile.task-input"))).toContainEqual({
-      height: 40
-    });
+    expect(findByTestId(tree, MOBILE_E2E_IDS.taskInput)?.props?.scrollEnabled).toBe(
+      false
+    );
     expect(componentMocks.onSendInput).not.toHaveBeenCalled();
     expect(componentMocks.keyboardDismiss).not.toHaveBeenCalled();
   });

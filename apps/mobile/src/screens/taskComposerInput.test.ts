@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  clampTaskComposerHeight,
-  getTaskComposerExplicitLineHeight,
+  shouldTaskComposerScroll,
   TASK_COMPOSER_LINE_HEIGHT,
   TASK_COMPOSER_MAX_LINES,
   TASK_COMPOSER_MAX_HEIGHT,
@@ -15,27 +14,14 @@ describe("TASK_COMPOSER_TEXT_INPUT_PROPS", () => {
     expect(TASK_COMPOSER_TEXT_INPUT_PROPS).toMatchObject({
       blurOnSubmit: false,
       multiline: true,
-      returnKeyType: "default",
-      scrollEnabled: true
+      returnKeyType: "default"
     });
   });
 
-  it.each([
-    [24, 40],
-    [72, 72],
-    [160, 120],
-    [Number.POSITIVE_INFINITY, 40]
-  ])("clamps native content height %s to %s", (contentHeight, expected) => {
-    expect(clampTaskComposerHeight(contentHeight)).toBe(expected);
-  });
-
-  it("derives a clamped fallback height from explicit lines", () => {
-    expect(getTaskComposerExplicitLineHeight("")).toBe(40);
-    expect(getTaskComposerExplicitLineHeight("one\ntwo\nthree")).toBe(80);
-    expect(getTaskComposerExplicitLineHeight("1\n2\n3\n4\n5")).toBe(120);
-    expect(getTaskComposerExplicitLineHeight("1\n2\n3\n4\n5\n6\n7\n8")).toBe(
-      120
-    );
+  it("enables native scrolling only above the five-line cap", () => {
+    expect(shouldTaskComposerScroll(120)).toBe(false);
+    expect(shouldTaskComposerScroll(121)).toBe(true);
+    expect(shouldTaskComposerScroll(Number.POSITIVE_INFINITY)).toBe(false);
   });
 
   it("derives the input bounds from one baseline line through five lines", () => {
