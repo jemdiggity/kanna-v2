@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Grant or revoke complimentary (`comp`) cloud access — the owner's "leech
- * flag", and the mechanism the existing invited accounts are grandfathered
+ * flag", and the mechanism existing legacy accounts are grandfathered
  * onto (`docs/specs/accounts-and-billing.md`, Decisions 3 and 5).
  *
  *   # Emulator (default): the accounts must already exist in Firebase Auth.

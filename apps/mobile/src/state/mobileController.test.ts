@@ -301,6 +301,8 @@ function createAuthSessionMock(): MobileAuthSession {
     subscribe: vi.fn(() => () => undefined),
     initialize: vi.fn().mockResolvedValue(undefined),
     signInWithEmailPassword: vi.fn().mockResolvedValue(undefined),
+    createUserWithEmailPassword: vi.fn().mockResolvedValue(undefined),
+    refreshAccount: vi.fn().mockResolvedValue(undefined),
     signOut: vi.fn().mockResolvedValue(undefined),
     getIdToken: vi.fn().mockResolvedValue(null),
     notifyAuthExpired: vi.fn()
@@ -8830,18 +8832,25 @@ describe("createMobileController", () => {
     });
   });
 
-  it("delegates email sign-in and sign-out to the auth session", async () => {
+  it("delegates account creation, refresh, sign-in, and sign-out to the auth session", async () => {
     const store = createSessionStore();
     const auth = createAuthSessionMock();
     const controller = createMobileController(createClientMock(), store, auth);
 
     await controller.signInWithEmailPassword("dev@kanna.test", "secret");
+    await controller.createUserWithEmailPassword("new@kanna.test", "secret1");
+    await controller.refreshAccount();
     await controller.signOut();
 
     expect(auth.signInWithEmailPassword).toHaveBeenCalledWith({
       email: "dev@kanna.test",
       password: "secret"
     });
+    expect(auth.createUserWithEmailPassword).toHaveBeenCalledWith({
+      email: "new@kanna.test",
+      password: "secret1"
+    });
+    expect(auth.refreshAccount).toHaveBeenCalledOnce();
     expect(auth.signOut).toHaveBeenCalledTimes(1);
   });
 });

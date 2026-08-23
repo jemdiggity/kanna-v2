@@ -71,6 +71,8 @@ export interface MobileController {
   pairMachineByPayload(payload: string): Promise<string>;
   removeManualMachine(desktopId: string): Promise<void>;
   signInWithEmailPassword(email: string, password: string): Promise<void>;
+  createUserWithEmailPassword(email: string, password: string): Promise<void>;
+  refreshAccount(): Promise<void>;
   signOut(): Promise<void>;
   getIdToken(forceRefresh?: boolean): Promise<string | null>;
   refresh(options?: { preserveTaskSession?: boolean }): Promise<void>;
@@ -2359,6 +2361,26 @@ export function createMobileController(
       if (authState.status === "signedIn") {
         await bootstrap();
       }
+    },
+
+    async createUserWithEmailPassword(email, password) {
+      if (!authSession) {
+        store.setAuthState({
+          status: "error",
+          message: "Firebase Auth is not configured.",
+          user: null
+        });
+        return;
+      }
+
+      await authSession.createUserWithEmailPassword({ email, password });
+      store.setAuthState(authSession.getState());
+    },
+
+    async refreshAccount() {
+      if (!authSession) return;
+      await authSession.refreshAccount();
+      store.setAuthState(authSession.getState());
     },
 
     async signOut() {

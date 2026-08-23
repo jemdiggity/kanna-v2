@@ -1,15 +1,18 @@
 import { initializeApp, getApps, type FirebaseApp } from "firebase/app";
 import {
   connectAuthEmulator,
+  createUserWithEmailAndPassword,
   getAuth,
   inMemoryPersistence,
   initializeAuth,
   onAuthStateChanged,
+  sendEmailVerification,
   signInWithEmailAndPassword,
   signOut as firebaseSignOut,
   type Auth,
   type User
 } from "firebase/auth";
+import { doc, getDoc } from "firebase/firestore";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   parseMobileFirebaseConfig,
@@ -23,6 +26,7 @@ import {
   type MobileAuthUser
 } from "./auth";
 import { createReactNativeAuthPersistence } from "./authPersistence";
+import { getConfiguredFirestore } from "./configuredFirestore";
 
 export function createConfiguredMobileAuthSession(
   config: MobileFirebaseConfig = parseMobileFirebaseConfig()
@@ -75,7 +79,8 @@ function isReactNativeRuntime(): boolean {
   );
 }
 
-export function createFirebaseMobileAuthSdk(auth: Auth, _app: FirebaseApp): MobileAuthSdk {
+export function createFirebaseMobileAuthSdk(auth: Auth, app: FirebaseApp): MobileAuthSdk {
+  const db = getConfiguredFirestore(app);
   return {
     getCurrentUser: () => mapFirebaseUser(auth.currentUser),
     onAuthStateChanged(listener) {
@@ -84,6 +89,27 @@ export function createFirebaseMobileAuthSdk(auth: Auth, _app: FirebaseApp): Mobi
     async signInWithEmailPassword(email, password) {
       const credential = await signInWithEmailAndPassword(auth, email, password);
       return mapSignedInFirebaseUser(credential.user);
+    },
+    async createUserWithEmailPassword(email, password) {
+      const credential = await createUserWithEmailAndPassword(auth, email, password);
+      await sendEmailVerification(credential.user);
+      return mapSignedInFirebaseUser(credential.user);
+    },
+    async reloadUser() {
+      if (!auth.currentUser) return null;
+      await auth.currentUser.reload();
+      return mapFirebaseUser(auth.currentUser);
+    },
+    async getCloudAccess(uid) {
+      try {
+        const snapshot = await getDoc(doc(db, "users", uid, "entitlements", "cloud_access"));
+        if (!snapshot.exists()) return "inactive";
+        const status = snapshot.data().status;
+        return status === "active" || status === "grace" ? "active" : "inactive";
+      } catch (error) {
+        console.error("Could not load cloud entitlement:", error);
+        return "unknown";
+      }
     },
     async signOut() {
       await firebaseSignOut(auth);
@@ -102,7 +128,8 @@ function mapFirebaseUser(user: User | null): MobileAuthUser | null {
   return {
     uid: user.uid,
     email: user.email,
-    displayName: user.displayName
+    displayName: user.displayName,
+    emailVerified: user.emailVerified
   };
 }
 
@@ -110,6 +137,7 @@ function mapSignedInFirebaseUser(user: User): MobileAuthUser {
   return {
     uid: user.uid,
     email: user.email,
-    displayName: user.displayName
+    displayName: user.displayName,
+    emailVerified: user.emailVerified
   };
 }

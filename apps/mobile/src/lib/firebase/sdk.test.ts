@@ -10,7 +10,14 @@ const mocks = vi.hoisted(() => ({
   connectAuthEmulator: vi.fn(),
   onAuthStateChanged: vi.fn(),
   signInWithEmailAndPassword: vi.fn(),
+  createUserWithEmailAndPassword: vi.fn(),
+  sendEmailVerification: vi.fn(),
   signOut: vi.fn(),
+  firestore: { kind: "firestore" },
+  getFirestore: vi.fn(),
+  connectFirestoreEmulator: vi.fn(),
+  doc: vi.fn(),
+  getDoc: vi.fn(),
   inMemoryPersistence: { type: "NONE" },
   asyncStorage: {
     getItem: vi.fn(),
@@ -31,7 +38,16 @@ vi.mock("firebase/auth", () => ({
   connectAuthEmulator: mocks.connectAuthEmulator,
   onAuthStateChanged: mocks.onAuthStateChanged,
   signInWithEmailAndPassword: mocks.signInWithEmailAndPassword,
+  createUserWithEmailAndPassword: mocks.createUserWithEmailAndPassword,
+  sendEmailVerification: mocks.sendEmailVerification,
   signOut: mocks.signOut
+}));
+
+vi.mock("firebase/firestore", () => ({
+  getFirestore: mocks.getFirestore,
+  connectFirestoreEmulator: mocks.connectFirestoreEmulator,
+  doc: mocks.doc,
+  getDoc: mocks.getDoc
 }));
 
 vi.mock("@react-native-async-storage/async-storage", () => ({
@@ -45,6 +61,7 @@ describe("createConfiguredMobileAuthSession", () => {
     mocks.initializeApp.mockReturnValue(mocks.app);
     mocks.initializeAuth.mockReturnValue(mocks.auth);
     mocks.getAuth.mockReturnValue(mocks.auth);
+    mocks.getFirestore.mockReturnValue(mocks.firestore);
     mocks.onAuthStateChanged.mockImplementation((_auth, listener) => {
       listener(null);
       return () => undefined;
@@ -73,7 +90,6 @@ describe("createConfiguredMobileAuthSession", () => {
     expect(persistence.type).toBe("LOCAL");
     vi.unstubAllGlobals();
   });
-
   it("stays signed out without initializing Firebase when config is disabled", async () => {
     mocks.initializeApp.mockClear();
     mocks.initializeAuth.mockClear();
@@ -90,5 +106,43 @@ describe("createConfiguredMobileAuthSession", () => {
     expect(session.getState()).toEqual({ status: "signedOut" });
     expect(mocks.initializeApp).not.toHaveBeenCalled();
     expect(mocks.initializeAuth).not.toHaveBeenCalled();
+  });
+
+  it("creates an account, sends verification, and reads its entitlement", async () => {
+    const firebaseUser = {
+      uid: "new-user",
+      email: "new@example.com",
+      displayName: null,
+      emailVerified: false,
+      reload: vi.fn()
+    };
+    mocks.createUserWithEmailAndPassword.mockResolvedValue({ user: firebaseUser });
+    mocks.doc.mockReturnValue({ path: "cloud-access" });
+    mocks.getDoc.mockResolvedValue({
+      exists: () => true,
+      data: () => ({ status: "grace" })
+    });
+
+    const { createFirebaseMobileAuthSdk } = await import("./sdk");
+    const sdk = createFirebaseMobileAuthSdk(
+      mocks.auth as never,
+      mocks.app as never
+    );
+
+    await expect(
+      sdk.createUserWithEmailPassword("new@example.com", "secret1")
+    ).resolves.toMatchObject({
+      uid: "new-user",
+      emailVerified: false
+    });
+    expect(mocks.sendEmailVerification).toHaveBeenCalledWith(firebaseUser);
+    await expect(sdk.getCloudAccess("new-user")).resolves.toBe("active");
+    expect(mocks.doc).toHaveBeenCalledWith(
+      mocks.firestore,
+      "users",
+      "new-user",
+      "entitlements",
+      "cloud_access"
+    );
   });
 });

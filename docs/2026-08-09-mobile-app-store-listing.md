@@ -60,7 +60,7 @@ TWO WAYS TO CONNECT
 
 On your local network, pair directly with your Mac by scanning a QR code. No account, no sign-up, nothing leaves your network.
 
-Away from home, cloud access relays the connection between your phone and your Mac. Cloud access needs a Kanna account and is currently invite-only — request one at kanna.build/support.
+Away from home, cloud access relays the connection between your phone and your Mac. Create a Kanna account in the app, verify your email, and subscribe to Kanna Cloud to connect remotely.
 
 BUILT FOR PEOPLE RUNNING SEVERAL AGENTS
 

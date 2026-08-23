@@ -45,7 +45,7 @@ import {
   addMobileCrashBreadcrumb,
   updateMobileCrashContext
 } from "./lib/diagnostics/mobileCrashDiagnostics";
-import { readKannaExpoExtra } from "./mobileEnvironment";
+import { readKannaExpoExtra, resolveAccountPortalUrl } from "./mobileEnvironment";
 import { requestMobileAccountDeletion } from "./lib/firebase/accountDeletion";
 import RootNavigator from "./navigation/RootNavigator";
 import { buildInitialNavigationState } from "./navigation/navigationState";
@@ -133,6 +133,8 @@ function AppContent() {
     [state.accountDesktops, state.liveLanDesktops, state.trustedDesktops]
   );
   const machineSummary = useMemo(() => summarizeMachines(machines), [machines]);
+  const mobileExtra = readKannaExpoExtra(readExpoConfig());
+  const subscriptionUrl = resolveAccountPortalUrl(mobileExtra?.appEnv);
   const e2eTaskSnapshotMarker =
     process.env.EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED === "1"
       ? state.recentTasks
@@ -191,6 +193,20 @@ function AppContent() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (
+      !accountSheetVisible ||
+      state.auth.status !== "signedIn" ||
+      state.auth.user.emailVerified !== false
+    ) {
+      return;
+    }
+    const interval = setInterval(() => {
+      void controller.refreshAccount();
+    }, 3_000);
+    return () => clearInterval(interval);
+  }, [accountSheetVisible, controller, state.auth]);
 
   const saveQuickReplies = useCallback(
     async (
@@ -469,9 +485,16 @@ function AppContent() {
           onSignIn={(email, password) => {
             void controller.signInWithEmailPassword(email, password);
           }}
+          onCreateAccount={(email, password) => {
+            void controller.createUserWithEmailPassword(email, password);
+          }}
+          onRefreshAccount={() => {
+            void controller.refreshAccount();
+          }}
           onSignOut={() => {
             void controller.signOut();
           }}
+          subscriptionUrl={subscriptionUrl}
           onDeleteAccount={async () => {
             await requestMobileAccountDeletion();
             await controller.signOut();

@@ -234,6 +234,40 @@ async function mountModel(model: AppModel): Promise<ReactTestRenderer> {
 }
 
 describe("App component wiring", () => {
+  it("wires account creation and polls while the signed-in email is unverified", async () => {
+    vi.useFakeTimers();
+    const { model, controller, sessionStore } = createModel();
+    sessionStore.setAuthState({
+      status: "signedIn",
+      user: {
+        uid: "new-user",
+        email: "new@example.com",
+        displayName: null,
+        emailVerified: false,
+        cloudAccess: "inactive"
+      }
+    });
+    const createAccount = vi
+      .spyOn(controller, "createUserWithEmailPassword")
+      .mockResolvedValue(undefined);
+    const refreshAccount = vi
+      .spyOn(controller, "refreshAccount")
+      .mockResolvedValue(undefined);
+    const renderer = await mountModel(model);
+
+    await act(async () => {
+      renderer.root.findByType("RootNavigator").props.onOpenAccount();
+    });
+    const accountSheet = renderer.root.findByType("AccountSheet");
+    await act(async () => {
+      accountSheet.props.onCreateAccount("new@example.com", "secret1");
+      await vi.advanceTimersByTimeAsync(3_000);
+    });
+
+    expect(createAccount).toHaveBeenCalledWith("new@example.com", "secret1");
+    expect(refreshAccount).toHaveBeenCalledOnce();
+  });
+
   it("deletes through the callable and signs out locally", async () => {
     const { model, controller } = createModel();
     const signOut = vi.spyOn(controller, "signOut").mockResolvedValue(undefined);

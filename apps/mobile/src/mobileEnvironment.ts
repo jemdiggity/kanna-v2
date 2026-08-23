@@ -60,6 +60,15 @@ export function resolveMobileAppEnvironment(
   return mobileEnvironmentRegistry.prod;
 }
 
+export function resolveAccountPortalUrl(
+  appEnv: KannaAppEnvironmentName | undefined
+): string {
+  const host = appEnv === "staging" || appEnv === "dev"
+    ? "https://kanna-staging-account.web.app"
+    : "https://kanna-build-account.web.app";
+  return `${host}/subscribe`;
+}
+
 export function readKannaExpoExtra(
   expoConfig: { extra?: unknown } | null | undefined
 ): KannaExpoExtra["kanna"] {
