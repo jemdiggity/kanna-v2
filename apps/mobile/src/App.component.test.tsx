@@ -234,6 +234,155 @@ async function mountModel(model: AppModel): Promise<ReactTestRenderer> {
 }
 
 describe("App component wiring", () => {
+  it("wires account creation and polls while the signed-in email is unverified", async () => {
+    vi.useFakeTimers();
+    const { model, controller, sessionStore } = createModel();
+    sessionStore.setAuthState({
+      status: "signedIn",
+      user: {
+        uid: "new-user",
+        email: "new@example.com",
+        displayName: null,
+        emailVerified: false,
+        cloudAccess: "inactive"
+      }
+    });
+    const createAccount = vi
+      .spyOn(controller, "createUserWithEmailPassword")
+      .mockResolvedValue(undefined);
+    const refreshAccount = vi
+      .spyOn(controller, "refreshAccount")
+      .mockResolvedValue(undefined);
+    const renderer = await mountModel(model);
+
+    await act(async () => {
+      renderer.root.findByType("RootNavigator").props.onOpenAccount();
+    });
+    const accountSheet = renderer.root.findByType("AccountSheet");
+    await act(async () => {
+      accountSheet.props.onCreateAccount("new@example.com", "secret1");
+      await vi.advanceTimersByTimeAsync(3_000);
+    });
+
+    expect(createAccount).toHaveBeenCalledWith("new@example.com", "secret1");
+    expect(refreshAccount).toHaveBeenCalledOnce();
+  });
+
+  it("refreshes a verified inactive account when the Account sheet opens", async () => {
+    const { model, controller, sessionStore } = createModel();
+    sessionStore.setAuthState({
+      status: "signedIn",
+      user: {
+        uid: "subscriber",
+        email: "subscriber@example.com",
+        displayName: null,
+        emailVerified: true,
+        cloudAccess: "inactive"
+      }
+    });
+    const refreshAccount = vi
+      .spyOn(controller, "refreshAccount")
+      .mockImplementation(async () => {
+        sessionStore.setAuthState({
+          status: "signedIn",
+          user: {
+            uid: "subscriber",
+            email: "subscriber@example.com",
+            displayName: null,
+            emailVerified: true,
+            cloudAccess: "active"
+          }
+        });
+      });
+    const renderer = await mountModel(model);
+
+    await act(async () => {
+      renderer.root.findByType("RootNavigator").props.onOpenAccount();
+      await flushMicrotasks();
+    });
+
+    expect(refreshAccount).toHaveBeenCalledOnce();
+    expect(renderer.root.findByType("AccountSheet").props).toMatchObject({
+      auth: {
+        status: "signedIn",
+        user: { cloudAccess: "active" }
+      },
+      visible: true
+    });
+  });
+
+  it("refreshes an open inactive account on foreground and publishes active access", async () => {
+    const { model, controller, sessionStore } = createModel();
+    const inactiveUser = {
+      uid: "returning-subscriber",
+      email: "returning@example.com",
+      displayName: null,
+      emailVerified: true,
+      cloudAccess: "inactive" as const
+    };
+    sessionStore.setAuthState({ status: "signedIn", user: inactiveUser });
+    const refreshAccount = vi
+      .spyOn(controller, "refreshAccount")
+      .mockResolvedValue(undefined);
+    const renderer = await mountModel(model);
+
+    await act(async () => {
+      renderer.root.findByType("RootNavigator").props.onOpenAccount();
+      await flushMicrotasks();
+    });
+    expect(refreshAccount).toHaveBeenCalledOnce();
+
+    refreshAccount.mockImplementationOnce(async () => {
+      sessionStore.setAuthState({
+        status: "signedIn",
+        user: { ...inactiveUser, cloudAccess: "active" }
+      });
+    });
+    await act(async () => {
+      harness.appStateListener?.("active");
+      await flushMicrotasks();
+    });
+
+    expect(refreshAccount).toHaveBeenCalledTimes(2);
+    expect(renderer.root.findByType("AccountSheet").props.auth).toMatchObject({
+      status: "signedIn",
+      user: { cloudAccess: "active" }
+    });
+  });
+
+  it("coalesces overlapping Account-sheet and foreground account refreshes", async () => {
+    const refreshPending = deferred<void>();
+    const { model, controller, sessionStore } = createModel();
+    sessionStore.setAuthState({
+      status: "signedIn",
+      user: {
+        uid: "pending-subscriber",
+        email: "pending@example.com",
+        displayName: null,
+        emailVerified: true,
+        cloudAccess: "inactive"
+      }
+    });
+    const refreshAccount = vi
+      .spyOn(controller, "refreshAccount")
+      .mockReturnValue(refreshPending.promise);
+    const renderer = await mountModel(model);
+
+    await act(async () => {
+      renderer.root.findByType("RootNavigator").props.onOpenAccount();
+      harness.appStateListener?.("active");
+      renderer.root.findByType("AccountSheet").props.onRefreshAccount();
+      await flushMicrotasks();
+    });
+
+    expect(refreshAccount).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      refreshPending.resolve();
+      await flushMicrotasks();
+    });
+  });
+
   it("deletes through the callable and signs out locally", async () => {
     const { model, controller } = createModel();
     const signOut = vi.spyOn(controller, "signOut").mockResolvedValue(undefined);

@@ -42,6 +42,7 @@ vi.mock("react-native", () => ({
     OS: "ios"
   },
   Pressable: "Pressable",
+  ScrollView: "ScrollView",
   StyleSheet: {
     create: <T extends Record<string, unknown>>(styles: T) => styles
   },
@@ -51,12 +52,10 @@ vi.mock("react-native", () => ({
 }));
 
 let AccountSheet: typeof import("./AccountSheet").AccountSheet | null = null;
-let cloudAccessRequestUrl = "";
 
 beforeAll(async () => {
   const module = await import("./AccountSheet");
   AccountSheet = module.AccountSheet;
-  cloudAccessRequestUrl = module.CLOUD_ACCESS_REQUEST_URL;
 });
 
 beforeEach(() => {
@@ -151,13 +150,14 @@ function renderSignedOutSheet(): ElementNode {
     onOpenMachines: vi.fn(),
     onOpenQuickReplies: vi.fn(),
     onSignIn: vi.fn(),
-    onSignOut: vi.fn()
+    onCreateAccount: vi.fn(),
+    onRefreshAccount: vi.fn(),
+    onSignOut: vi.fn(),
+    subscriptionUrl: "https://portal.example.test/subscribe"
   }) as ElementNode;
 }
 
-function textContent(
-  node: ElementNode | ElementNode[] | string | null | undefined
-): string {
+function textContent(node: ElementNode | ElementNode[] | string | null | undefined): string {
   if (!node) return "";
   if (typeof node === "string") return node;
   if (Array.isArray(node)) return node.map(textContent).join("");
@@ -165,19 +165,137 @@ function textContent(
 }
 
 describe("AccountSheet", () => {
-  it("explains invite-only cloud access and links to request access", () => {
-    const tree = renderSignedOutSheet();
-    const requestAccessLink = findNodeByAccessibilityLabel(
-      tree,
-      "Request cloud access"
-    );
+  it("creates an account with the entered email and password", () => {
+    if (!AccountSheet) throw new Error("AccountSheet was not loaded");
+    const onCreateAccount = vi.fn();
+    const props = {
+      auth: { status: "signedOut" as const },
+      machineCount: 0,
+      availableMachineCount: 0,
+      quickRepliesReady: true,
+      visible: true,
+      onClose: vi.fn(),
+      onOpenMachines: vi.fn(),
+      onOpenQuickReplies: vi.fn(),
+      onSignIn: vi.fn(),
+      onCreateAccount,
+      onRefreshAccount: vi.fn(),
+      onSignOut: vi.fn(),
+      subscriptionUrl: "https://portal.example.test/subscribe"
+    };
 
-    expect(textContent(tree)).toContain("Cloud access is invite-only. Request access.");
-    expect(requestAccessLink?.props?.accessibilityRole).toBe("link");
+    let tree = AccountSheet(props) as ElementNode;
+    findNodeByTestId(tree, "mobile.account-email")?.props?.onChangeText?.(" new@example.com ");
+    findNodeByTestId(tree, "mobile.account-password")?.props?.onChangeText?.("secret1");
+    reactState.index = 0;
+    tree = AccountSheet(props) as ElementNode;
+    const createButton = findNodeByTestId(tree, "mobile.account-create");
 
-    requestAccessLink?.props?.onPress?.();
+    expect(textContent(tree)).not.toContain("invite-only");
+    expect(createButton?.props?.disabled).toBe(false);
+    createButton?.props?.onPress?.();
 
-    expect(openUrl).toHaveBeenCalledWith(cloudAccessRequestUrl);
+    expect(onCreateAccount).toHaveBeenCalledWith("new@example.com", "secret1");
+  });
+
+  it("shows the unverified email state and checks it manually", () => {
+    if (!AccountSheet) throw new Error("AccountSheet was not loaded");
+    const onRefreshAccount = vi.fn();
+    const tree = AccountSheet({
+      auth: {
+        status: "signedIn",
+        user: {
+          uid: "new-user",
+          email: "new@example.com",
+          displayName: null,
+          emailVerified: false,
+          cloudAccess: "inactive"
+        }
+      },
+      machineCount: 0,
+      availableMachineCount: 0,
+      quickRepliesReady: true,
+      visible: true,
+      onClose: vi.fn(),
+      onOpenMachines: vi.fn(),
+      onOpenQuickReplies: vi.fn(),
+      onSignIn: vi.fn(),
+      onCreateAccount: vi.fn(),
+      onRefreshAccount,
+      onSignOut: vi.fn(),
+      subscriptionUrl: "https://portal.example.test/subscribe"
+    }) as ElementNode;
+
+    expect(textContent(tree)).toContain("Verify your email");
+    expect(textContent(tree)).toContain("new@example.com");
+    findNodeByTestId(tree, "mobile.account-check-verification")?.props?.onPress?.();
+    expect(onRefreshAccount).toHaveBeenCalledOnce();
+  });
+
+  it("links verified users without entitlement to portal subscription", () => {
+    if (!AccountSheet) throw new Error("AccountSheet was not loaded");
+    const subscriptionUrl = "https://portal.example.test/subscribe";
+    const tree = AccountSheet({
+      auth: {
+        status: "signedIn",
+        user: {
+          uid: "new-user",
+          email: "new@example.com",
+          displayName: null,
+          emailVerified: true,
+          cloudAccess: "inactive"
+        }
+      },
+      machineCount: 0,
+      availableMachineCount: 0,
+      quickRepliesReady: true,
+      visible: true,
+      onClose: vi.fn(),
+      onOpenMachines: vi.fn(),
+      onOpenQuickReplies: vi.fn(),
+      onSignIn: vi.fn(),
+      onCreateAccount: vi.fn(),
+      onRefreshAccount: vi.fn(),
+      onSignOut: vi.fn(),
+      subscriptionUrl
+    }) as ElementNode;
+
+    expect(textContent(tree)).toContain("Subscription required");
+    const subscribeLink = findNodeByTestId(tree, "mobile.account-subscribe");
+    expect(subscribeLink?.props?.accessibilityRole).toBe("link");
+    subscribeLink?.props?.onPress?.();
+    expect(openUrl).toHaveBeenCalledWith(subscriptionUrl);
+  });
+
+  it("shows active cloud access for entitled users", () => {
+    if (!AccountSheet) throw new Error("AccountSheet was not loaded");
+    const tree = AccountSheet({
+      auth: {
+        status: "signedIn",
+        user: {
+          uid: "paid-user",
+          email: "paid@example.com",
+          displayName: null,
+          emailVerified: true,
+          cloudAccess: "active"
+        }
+      },
+      machineCount: 1,
+      availableMachineCount: 1,
+      quickRepliesReady: true,
+      visible: true,
+      onClose: vi.fn(),
+      onOpenMachines: vi.fn(),
+      onOpenQuickReplies: vi.fn(),
+      onSignIn: vi.fn(),
+      onCreateAccount: vi.fn(),
+      onRefreshAccount: vi.fn(),
+      onSignOut: vi.fn(),
+      subscriptionUrl: "https://portal.example.test/subscribe"
+    }) as ElementNode;
+
+    expect(textContent(tree)).toContain("Cloud access active");
+    expect(findNodeByTestId(tree, "mobile.account-entitled")).not.toBeNull();
   });
 
   it("lifts the sign-in drawer above the iOS keyboard", () => {
@@ -338,9 +456,7 @@ describe("AccountSheet", () => {
     showToggle?.props?.onPress?.();
 
     tree = renderSignedOutSheet();
-    expect(findNodeByTestId(tree, "mobile.account-password")?.props?.secureTextEntry).toBe(
-      false
-    );
+    expect(findNodeByTestId(tree, "mobile.account-password")?.props?.secureTextEntry).toBe(false);
 
     const closeButton = findNodeByTestId(tree, "mobile.account-close");
     closeButton?.props?.onPress?.();

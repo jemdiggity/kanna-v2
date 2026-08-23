@@ -2,7 +2,7 @@
 
 Complimentary access is the owner's "leech flag": cloud access with no billing
 relationship, for accounts that should not pay — the owner's own accounts, the
-App Review demo account, and the invited users who predate billing and are
+App Review demo account, and legacy users who predate billing and are
 grandfathered in. It is one of the three sources the entitlement reducer reads
 (`docs/specs/accounts-and-billing.md`, Decision 3).
 

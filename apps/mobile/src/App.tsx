@@ -45,7 +45,7 @@ import {
   addMobileCrashBreadcrumb,
   updateMobileCrashContext
 } from "./lib/diagnostics/mobileCrashDiagnostics";
-import { readKannaExpoExtra } from "./mobileEnvironment";
+import { readKannaExpoExtra, resolveAccountPortalUrl } from "./mobileEnvironment";
 import { requestMobileAccountDeletion } from "./lib/firebase/accountDeletion";
 import RootNavigator from "./navigation/RootNavigator";
 import { buildInitialNavigationState } from "./navigation/navigationState";
@@ -87,10 +87,15 @@ function AppContent() {
       createDefaultTaskQuickReplyPreferences();
   }
   const quickReplyMutationVersionRef = useRef(0);
+  const accountRefreshPromiseRef = useRef<Promise<void> | null>(null);
   const quickReplyLoadStatusRef = useRef<"pending" | "loaded" | "failed">(
     "pending"
   );
   const [accountSheetVisible, setAccountSheetVisible] = useState(false);
+  const accountSheetVisibleRef = useRef(accountSheetVisible);
+  accountSheetVisibleRef.current = accountSheetVisible;
+  const accountAuthRef = useRef(state.auth);
+  accountAuthRef.current = state.auth;
   const [quickReplyEditorVisible, setQuickReplyEditorVisible] = useState(false);
   const [quickReplies, setQuickReplies] = useState<TaskQuickReply[]>(() =>
     DEFAULT_TASK_QUICK_REPLIES.map((reply) => ({ ...reply }))
@@ -133,6 +138,8 @@ function AppContent() {
     [state.accountDesktops, state.liveLanDesktops, state.trustedDesktops]
   );
   const machineSummary = useMemo(() => summarizeMachines(machines), [machines]);
+  const mobileExtra = readKannaExpoExtra(readExpoConfig());
+  const subscriptionUrl = resolveAccountPortalUrl(mobileExtra?.appEnv);
   const e2eTaskSnapshotMarker =
     process.env.EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED === "1"
       ? state.recentTasks
@@ -159,6 +166,25 @@ function AppContent() {
       setUpdatePromptVisible(true);
     }
   }, []);
+
+  const refreshAccount = useCallback(() => {
+    if (accountRefreshPromiseRef.current) {
+      return accountRefreshPromiseRef.current;
+    }
+
+    const refreshPromise = Promise.resolve()
+      .then(() => controller.refreshAccount())
+      .catch((error: unknown) => {
+        console.error("Could not refresh mobile account:", error);
+      });
+    accountRefreshPromiseRef.current = refreshPromise;
+    void refreshPromise.then(() => {
+      if (accountRefreshPromiseRef.current === refreshPromise) {
+        accountRefreshPromiseRef.current = null;
+      }
+    });
+    return refreshPromise;
+  }, [controller]);
 
   useEffect(() => {
     let cancelled = false;
@@ -191,6 +217,20 @@ function AppContent() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (
+      !accountSheetVisible ||
+      state.auth.status !== "signedIn" ||
+      state.auth.user.emailVerified !== false
+    ) {
+      return;
+    }
+    const interval = setInterval(() => {
+      void refreshAccount();
+    }, 3_000);
+    return () => clearInterval(interval);
+  }, [accountSheetVisible, refreshAccount, state.auth]);
 
   const saveQuickReplies = useCallback(
     async (
@@ -291,6 +331,15 @@ function AppContent() {
         void controller.refresh({
           preserveTaskSession: terminalTransition.preserveTerminal
         });
+        const accountAuth = accountAuthRef.current;
+        if (
+          accountSheetVisibleRef.current &&
+          accountAuth.status === "signedIn" &&
+          accountAuth.user.emailVerified !== false &&
+          accountAuth.user.cloudAccess === "inactive"
+        ) {
+          void refreshAccount();
+        }
       }
 
       const nowMs = Date.now();
@@ -313,7 +362,7 @@ function AppContent() {
       subscription.remove();
       terminalLifecycle.dispose();
     };
-  }, [controller, runOtaUpdateCheck]);
+  }, [controller, refreshAccount, runOtaUpdateCheck]);
 
   useEffect(() => {
     if (
@@ -428,7 +477,16 @@ function AppContent() {
               model.setForceCloud(enabled);
               void controller.refresh();
             }}
-            onOpenAccount={() => setAccountSheetVisible(true)}
+            onOpenAccount={() => {
+              setAccountSheetVisible(true);
+              if (
+                state.auth.status === "signedIn" &&
+                state.auth.user.emailVerified !== false &&
+                state.auth.user.cloudAccess === "inactive"
+              ) {
+                void refreshAccount();
+              }
+            }}
           />
         ) : null}
         {initializationError ? (
@@ -469,9 +527,16 @@ function AppContent() {
           onSignIn={(email, password) => {
             void controller.signInWithEmailPassword(email, password);
           }}
+          onCreateAccount={(email, password) => {
+            void controller.createUserWithEmailPassword(email, password);
+          }}
+          onRefreshAccount={() => {
+            void refreshAccount();
+          }}
           onSignOut={() => {
             void controller.signOut();
           }}
+          subscriptionUrl={subscriptionUrl}
           onDeleteAccount={async () => {
             await requestMobileAccountDeletion();
             await controller.signOut();

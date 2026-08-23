@@ -62,6 +62,8 @@ function createMutableAuthSession(initialState: MobileAuthState) {
       return () => listeners.delete(listener);
     }),
     signInWithEmailPassword: vi.fn().mockResolvedValue(undefined),
+    createUserWithEmailPassword: vi.fn().mockResolvedValue(undefined),
+    refreshAccount: vi.fn().mockResolvedValue(undefined),
     signOut: vi.fn().mockImplementation(async () => {
       setState({ status: "signedOut" });
     }),
@@ -3028,6 +3030,60 @@ describe("createAppModel cloud routing", () => {
       { desktopId: "desktop-b", taskId: "task-b" },
       expect.any(Function)
     );
+  });
+
+  it("rebuilds the relay client when the same account becomes verified", async () => {
+    const auth = createMutableAuthSession({
+      status: "signedIn",
+      user: {
+        uid: "user-verify",
+        email: "verify@example.com",
+        displayName: null,
+        emailVerified: false,
+        cloudAccess: "inactive"
+      }
+    });
+    const relayClients: RelayDesktopClient[] = [];
+    const app = createAppModel({
+      authSession: auth.authSession,
+      persistence: {
+        load: vi.fn().mockResolvedValue(null),
+        save: vi.fn().mockResolvedValue(undefined)
+      },
+      options: {
+        forceCloud: true,
+        relayUrl: "wss://relay.test",
+        taskIndex: {
+          listDesktops: vi.fn().mockResolvedValue([]),
+          listRecentTasks: vi.fn().mockResolvedValue([]),
+          subscribeRecentTasks: vi.fn(() => vi.fn())
+        },
+        bonjourBrowser: createStaticBonjourBrowser([]),
+        createRelayClient: () => {
+          const relay = createRelayClientMock();
+          relayClients.push(relay);
+          return relay;
+        }
+      }
+    });
+
+    await app.initialize();
+    const clientsBeforeVerification = relayClients.length;
+    const previousRelay = relayClients.at(-1);
+
+    auth.setState({
+      status: "signedIn",
+      user: {
+        uid: "user-verify",
+        email: "verify@example.com",
+        displayName: null,
+        emailVerified: true,
+        cloudAccess: "inactive"
+      }
+    });
+
+    expect(relayClients).toHaveLength(clientsBeforeVerification + 1);
+    expect(previousRelay?.close).toHaveBeenCalledOnce();
   });
 
   it("closes each superseded relay client exactly once across client replacements", async () => {

@@ -59,14 +59,11 @@ acceptable to App Review.
 The app is **not** account-gated: `App.tsx` has no auth gate, and
 `appModel.ts` takes an explicit signed-out branch that builds a
 `createTrustedLanFallbackClient` once a desktop is paired by QR. LAN use needs
-no account; only the relay/WAN path needs one. Since no public sign-up exists
-anywhere in the product, the `AccountSheet` now states that cloud access is
-invite-only and links to `kanna.build/support`.
-
-Guideline 5.1.1(v) in-app account deletion is **not** triggered, because the app
-does not support account creation. Adding public sign-up later would make
-deletion mandatory, and it does not exist today in the app, the relay, or
-Firebase Functions.
+no account; only the relay/WAN path needs one. The `AccountSheet` now supports
+public Firebase email/password signup, email verification, and a handoff to the
+portal subscription page. In-app account deletion is present for Guideline
+5.1.1(v) lifecycle compliance. Revisit the external subscription link during
+production App Store review.
 
 ### B2. Privacy policy and support pages — live
 
@@ -101,7 +98,7 @@ Seven PRs, all reviewed, all with `./kd test all` passing, all merged to `main`:
 
 | PR | Change |
 |---|---|
-| [#1041](https://github.com/tampopogk/kanna/pull/1041) | Invite-only cloud access notice in `AccountSheet` |
+| [#1041](https://github.com/tampopogk/kanna/pull/1041) | Original cloud access notice in `AccountSheet` (superseded by open signup) |
 | [#1042](https://github.com/tampopogk/kanna/pull/1042) | `docs/2026-08-08-mobile-app-review-notes.md` |
 | [#1043](https://github.com/tampopogk/kanna/pull/1043) | `docs/2026-08-08-mobile-app-privacy-label.md` |
 | [#1044](https://github.com/tampopogk/kanna/pull/1044) | Fresh-install onboarding pointing at macOS + QR pairing |

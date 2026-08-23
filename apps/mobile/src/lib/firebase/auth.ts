@@ -2,6 +2,8 @@ export interface MobileAuthUser {
   uid: string;
   email: string | null;
   displayName: string | null;
+  emailVerified?: boolean;
+  cloudAccess?: "active" | "inactive" | "unknown";
 }
 
 export type MobileAuthState =
@@ -19,6 +21,9 @@ export interface MobileAuthSdk {
   getCurrentUser(): MobileAuthUser | null;
   onAuthStateChanged(listener: (user: MobileAuthUser | null) => void): () => void;
   signInWithEmailPassword(email: string, password: string): Promise<MobileAuthUser>;
+  createUserWithEmailPassword(email: string, password: string): Promise<MobileAuthUser>;
+  reloadUser(): Promise<MobileAuthUser | null>;
+  getCloudAccess(uid: string): Promise<"active" | "inactive" | "unknown">;
   signOut(): Promise<void>;
   getIdToken(forceRefresh?: boolean): Promise<string | null>;
 }
@@ -28,6 +33,8 @@ export interface MobileAuthSession {
   getState(): MobileAuthState;
   subscribe(listener: (state: MobileAuthState) => void): () => void;
   signInWithEmailPassword(input: EmailPasswordSignInInput): Promise<void>;
+  createUserWithEmailPassword(input: EmailPasswordSignInInput): Promise<void>;
+  refreshAccount(): Promise<void>;
   signOut(): Promise<void>;
   getIdToken(forceRefresh?: boolean): Promise<string | null>;
   /** Mark the session as expired after the relay rejected the ID token even
@@ -71,6 +78,16 @@ export function createMobileAuthSession({
       sdk.onAuthStateChanged((user) => {
         publish(normalizeUserState(user));
         resolveInitialAuth();
+        if (user) {
+          void loadAccountState(user).then((loadedUser) => {
+            const currentUser = state.status === "signedIn" ? state.user : null;
+            if (currentUser?.uid === loadedUser.uid) {
+              publish({ status: "signedIn", user: loadedUser });
+            }
+          }).catch((error: unknown) => {
+            console.error("Could not refresh restored account state:", error);
+          });
+        }
       });
     } catch (error) {
       rejectInitialAuth(error);
@@ -78,6 +95,25 @@ export function createMobileAuthSession({
 
     return initialAuthPromise;
   };
+
+  async function loadAccountState(
+    user: MobileAuthUser
+  ): Promise<MobileAuthUser> {
+    const refreshed = (await sdk.reloadUser()) ?? user;
+    if (refreshed.emailVerified === false) {
+      return { ...refreshed, cloudAccess: "inactive" };
+    }
+    if (user.emailVerified === false && refreshed.emailVerified === true) {
+      // Firebase caches ID tokens independently from the mutable User record.
+      // Renew before publishing the verified state so relay clients created by
+      // that state transition cannot inherit an email_verified=false claim.
+      await sdk.getIdToken(true);
+    }
+    return {
+      ...refreshed,
+      cloudAccess: await sdk.getCloudAccess(refreshed.uid)
+    };
+  }
 
   return {
     initialize() {
@@ -101,12 +137,45 @@ export function createMobileAuthSession({
 
       try {
         const user = await sdk.signInWithEmailPassword(input.email, input.password);
-        publish({ status: "signedIn", user });
+        publish({ status: "signedIn", user: await loadAccountState(user) });
       } catch (error) {
         publish({
           status: "error",
           message: error instanceof Error ? error.message : "Sign-in failed",
           user: null
+        });
+      }
+    },
+    async createUserWithEmailPassword(input) {
+      publish({ status: "signingIn", user: null });
+      try {
+        const user = await sdk.createUserWithEmailPassword(input.email, input.password);
+        publish({
+          status: "signedIn",
+          user: user.emailVerified === false
+            ? { ...user, cloudAccess: "inactive" }
+            : await loadAccountState(user)
+        });
+      } catch (error) {
+        publish({
+          status: "error",
+          message: error instanceof Error ? error.message : "Account creation failed",
+          user: null
+        });
+      }
+    },
+    async refreshAccount() {
+      const user = state.status === "signedIn" || state.status === "error"
+        ? state.user
+        : null;
+      if (!user) return;
+      try {
+        publish({ status: "signedIn", user: await loadAccountState(user) });
+      } catch (error) {
+        publish({
+          status: "error",
+          message: error instanceof Error ? error.message : "Could not refresh account",
+          user
         });
       }
     },
@@ -142,6 +211,11 @@ export function createDisabledMobileAuthSession(): MobileAuthSession {
     signInWithEmailPassword: async () => {
       throw new Error("Firebase Auth is not configured.");
     },
+    createUserWithEmailPassword: async () => {
+      throw new Error("Firebase Auth is not configured.");
+    },
+    reloadUser: async () => null,
+    getCloudAccess: async () => "unknown",
     signOut: async () => undefined,
     getIdToken: async () => null
   };

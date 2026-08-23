@@ -136,7 +136,16 @@ function parsePersistedAuthUser(value: unknown): MobileAuthUser | null {
   return {
     uid: candidate.uid,
     email: normalizeNullableString(candidate.email),
-    displayName: normalizeNullableString(candidate.displayName)
+    displayName: normalizeNullableString(candidate.displayName),
+    emailVerified: typeof candidate.emailVerified === "boolean"
+      ? candidate.emailVerified
+      : undefined,
+    cloudAccess:
+      candidate.cloudAccess === "active" ||
+      candidate.cloudAccess === "inactive" ||
+      candidate.cloudAccess === "unknown"
+        ? candidate.cloudAccess
+        : undefined
   };
 }
 

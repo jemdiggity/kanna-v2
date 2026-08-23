@@ -23,6 +23,7 @@
     "test:e2e:device:release-install": "KANNA_APP_ENV=staging pnpm exec tsx ./e2e/release-install-check.ts",
     "test:integration:agent-provider-inventory": "KANNA_RUN_AGENT_PROVIDER_INVENTORY_INTEGRATION=1 pnpm exec vitest run e2e/agentProviderInventory.integration.test.tsx --maxWorkers=1",
     "test:integration:expo-modules-jsi-worktrees": "KANNA_RUN_EXPO_MODULES_JSI_WORKTREE_CACHE_INTEGRATION=1 pnpm exec vitest run e2e/expoModulesJsiWorktreeCache.integration.test.ts --maxWorkers=1",
+    "test:integration:firebase-account": "KANNA_RUN_MOBILE_FIREBASE_ACCOUNT_INTEGRATION=1 pnpm exec vitest run src/lib/firebase/accountJourney.emulator.integration.test.ts --maxWorkers=1",
     "test:e2e:appium:install-xcuitest": "pnpm exec tsx ./e2e/helpers/appium.ts install-xcuitest",
     "test:e2e:appium:start": "pnpm exec tsx ./e2e/helpers/appium.ts start",
     "test": "sh -c 'if [ \"$1\" = \"--\" ]; then shift; fi; if [ \"$1\" = \"--runInBand\" ]; then shift; fi; exec pnpm exec vitest run --maxWorkers=2 \"$@\"' --",

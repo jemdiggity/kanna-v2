@@ -11,23 +11,17 @@ a second owner addition (verbatim): "Also I'll need a leech flag for users who
 don't need to pay" — the complimentary `comp` entitlement source in
 Decision 3.
 
-Amended again 2026-08-21 by task `1d70926f` on the owner's account-surface
-decision: **the web account portal is the sole account-creation and payment
-surface**. Desktop remains sign-in-only in-app and opens the environment's
-portal in the system browser for registration (`/register`) and subscription
-management (`/account`); it never embeds signup or billing and never transfers
-an auth token to the browser. The browser has its own session, so desktop copy
-directs the user to sign in there with their Kanna account. Mobile likewise
-remains sign-in-only in-app. This ruling supersedes the in-app mobile
-registration and IAP launch-channel portions below wherever they conflict;
-in-app account deletion remains available for lifecycle compliance.
-
-Whether mobile may or should link to the external payment surface is a parked
-owner decision, not an implementation assumption. Before deciding, verify the
-then-current storefront and entitlement requirements for US external-payment
-link-outs, the EU Digital Markets Act, and Japan's smartphone competition law.
-Until that decision is made, mobile exposes neither portal signup nor payment
-links.
+Amended again 2026-08-21 by task `1d70926f` to make the web portal the sole
+account-creation and payment surface at that time. The owner superseded the
+account-creation part on 2026-08-24 with: “We have payments set up, so let's
+just open it ALL.” Account creation is now open in the web portal and mobile;
+both use Firebase email/password registration and require email verification.
+Payment remains in the portal. Desktop opens that portal for registration and
+subscription management and never transfers an auth token to the browser.
+Mobile may link directly to the portal's subscription page; that external link
+must be reconsidered before production App Store review if storefront policy
+requires it. In-app account deletion remains available for lifecycle
+compliance.
 
 Amended again 2026-08-21 by task `ed6c7f7b` on two further owner rulings,
 recorded verbatim:
@@ -54,14 +48,16 @@ against Apple's live guidelines before the paid launch.
 
 Confirmed by source inspection; corrections to the consultation prompt noted.
 
-- Identity is Firebase Auth email/password everywhere. Mobile sign-in only
-  (`apps/mobile/src/lib/firebase/sdk.ts`, `AccountSheet.tsx` — invite-only copy
-  linking to `https://kanna.build/support`). The desktop also signs in as a
+- Identity is Firebase Auth email/password everywhere. Mobile supports sign-in
+  and account creation with verification email in `apps/mobile/src/lib/firebase/sdk.ts`
+  and `AccountSheet.tsx`. The desktop also signs in as a
   real Firebase user (`apps/desktop/src/services/desktopAuthSdk.ts`,
   `desktopAutoSignIn.ts`) and bootstraps a per-machine
   `desktopCredentials/{desktopId}` secret-hash record
-  (`desktopCloudAssociation.ts`). No registration, deletion, password-reset, or
-  email-verification flow exists anywhere in the product.
+  (`desktopCloudAssociation.ts`). The portal provides registration,
+  verification, subscription, and account management; mobile also provides
+  registration and verification. Account deletion is available in both
+  account surfaces.
 - The relay (`services/relay`, Node/TS on a single **e2-micro** GCE VM behind
   Caddy; prod `relay.kanna.build` in GCP project `kanna-build`, staging
   `relay-staging.kanna.build` in `kanna-staging`) authenticates phones by
@@ -93,12 +89,10 @@ Confirmed by source inspection; corrections to the consultation prompt noted.
   Operator is Tampopo LLC, governing law Japan, contact
   `support@tampopomyoko.com`. **No Terms of Service exist.** Account deletion
   today is a manual 30-day email process (`docs/legal/support.md`).
-- ⚠️ Correction to "accounts are provisioned manually": that is a **UI**
-  restriction, not a backend one. The Firebase email/password provider has no
-  in-repo allowlist; unless self-signup is disabled in the Firebase console,
-  the Identity Toolkit REST API may already allow anyone to create an account —
-  and today any account gets full relay service. Verify the console setting
-  now; once entitlement enforcement (below) ships, open signup becomes safe.
+- There is no in-repo signup allowlist in Firebase Functions or the relay.
+  Ordinary access is governed by verified Firebase identity plus the derived
+  cloud entitlement; complimentary/grandfathered accounts use the same `comp`
+  source as before.
 - ⚠️ Normalization of the amendment prompt's `source: "apple"`: the adopted
   entitlement schema already names this enum value `app_store`. This spec
   keeps `app_store`; introducing a second spelling for the same source would
@@ -110,15 +104,14 @@ Confirmed by source inspection; corrections to the consultation prompt noted.
 mobile, desktop, relay verification, and Firestore rules; replacing it buys
 nothing. Additions:
 
-- **Registration ships only in the web account portal.** The portal (register
-  → verify email → subscribe → manage billing → delete account) is also the
-  only payment funnel. Desktop links to it in the system browser; mobile stays
-  sign-in-only in-app. Email/password is the only launch identity method; no
-  social providers.
+- **Registration is open in the web account portal and mobile.** Both follow
+  register → verify email; verified users without entitlement continue to the
+  portal subscription page. The portal remains the only payment funnel, and
+  desktop links to it in the system browser. Email/password is the only launch
+  identity method; no social providers.
 - **Mobile keeps in-app account deletion** backed by the `deleteAccount`
-  pipeline below even though registration has moved exclusively to the web.
-  Removing signup does not remove the user's lifecycle or compliance need to
-  delete an account from the signed-in app.
+  pipeline below. Open mobile signup makes this lifecycle and compliance path
+  directly necessary in the signed-in app.
 - **Account-first purchase, always.** Portal payment requires a signed-in,
   email-verified Firebase account. Anonymous purchase-then-bind-later remains
   rejected because it creates orphaned purchases and account-claim ambiguity.
@@ -241,12 +234,12 @@ Data export is a separate follow-up. The deliberate no-undo choice keeps this
 operation honest and immediate; export support does not weaken or delay
 deletion.
 
-## Decision 2 — The Apple question (superseded; mobile link-out decision parked)
+## Decision 2 — The Apple question (superseded; portal link-out adopted for dogfood)
 
-The 2026-08-21 surface ruling above supersedes this earlier launch plan:
-payment now occurs only in the web portal, and mobile remains sign-in-only
-in-app. Whether mobile can link to that external payment surface remains the
-explicit regional owner decision recorded above. The historical design below
+The 2026-08-24 surface ruling above supersedes this earlier launch plan:
+payment occurs only in the web portal, mobile registration is open in-app, and
+verified unsubscribed users may open the portal subscription page. Production
+App Store review may require that link to change. The historical design below
 is retained as context, not current implementation authority.
 
 **Earlier owner decision (2026-08-20): the iOS app sells `cloud_access` as an
@@ -296,8 +289,8 @@ signs off); (7) **Small Business Program enrollment** (15% assumes it);
 from cutoff knowledge — re-verify maintenance status at implementation time);
 (9) whether the in-app "managed outside the App Store" copy for
 Stripe-sourced subscribers is acceptable, or must stay fully neutral. Also
-update the App Review notes and listing copy ("invite-only", "no in-app
-purchases") at flag day — both become false.
+update the App Review notes and listing copy at flag day; open signup and the
+external subscription link must be described accurately.
 
 ## Decision 3 — Stripe integration shape
 
@@ -719,7 +712,7 @@ default.
   task index + push + remote task control). This spec endorses that shape.
 - **Grandfathering / flag day** (owner default): seed existing
   manually-provisioned accounts as `source: grandfathered, status: active`
-  (they are few and were invited); enforcement turns on for everyone else on
+  (the legacy cohort is small); enforcement turns on for everyone else on
   a flag day after the portal + billing path is live. The cutoff is enforced
   in the backend seeding, never inferred by clients.
 
@@ -745,8 +738,8 @@ without these):
 5. **Deletion pipeline** (Decision 1) — replaces the manual 30-day email
    promise for self-serve accounts; the email route stays as fallback.
 6. **Relay viability as a paid service**: uptime monitoring/alerting and a
-   capacity plan. One unmonitored e2-micro is acceptable for invited friends,
-   not for paying customers; an unnoticed outage is churn plus refunds. An
+   capacity plan. One unmonitored e2-micro is acceptable for a small dogfood
+   cohort, not for paying customers; an unnoticed outage is churn plus refunds. An
    instance upsize plus an uptime check is enough for launch; HA/multi-region
    is not.
 7. **Website funnel**: landing page that explains the product, pricing page,
@@ -797,7 +790,7 @@ Owner decisions needed (defaults supplied, none block spec-writing): price —
 annual plan priced yet, same nominal price on both channels with the owner
 absorbing Apple's commission (Decision 4, "Pricing"); trial shape (default: 14-day, card required, cross-channel policy
 resolved when trials ship); grandfathering (default: permanent for existing
-invited accounts).
+legacy accounts).
 
 ## Decision 7 — Sequencing
 

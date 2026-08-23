@@ -1,8 +1,6 @@
 import {
   collection,
-  connectFirestoreEmulator,
   getDocs,
-  getFirestore,
   onSnapshot,
   query,
   where,
@@ -13,10 +11,7 @@ import type { TaskActivity, TaskSummary } from "../api/types";
 import { parseAgentProviderInventory } from "../api/agentProviders";
 import { buildCloudTaskId } from "../api/taskIdentity";
 import { canonicalRepoIdForHash } from "../api/repoIdentity";
-import {
-  parseMobileFirebaseConfig,
-  type MobileFirestoreEmulatorConfig
-} from "./config";
+import { getConfiguredFirestore } from "./configuredFirestore";
 
 export interface CloudTaskSnapshot {
   cloudTaskId?: string;
@@ -209,25 +204,6 @@ export function createFirestoreTaskIndex(
       };
     },
   };
-}
-
-const connectedFirestoreEmulators = new Set<string>();
-
-function getConfiguredFirestore(): Firestore {
-  const db = getFirestore();
-  connectConfiguredFirestoreEmulator(db, parseMobileFirebaseConfig().firestoreEmulator);
-  return db;
-}
-
-function connectConfiguredFirestoreEmulator(
-  db: Firestore,
-  emulator: MobileFirestoreEmulatorConfig | null
-): void {
-  if (!emulator) return;
-  const key = `${emulator.host}:${emulator.port}`;
-  if (connectedFirestoreEmulators.has(key)) return;
-  connectFirestoreEmulator(db, emulator.host, emulator.port);
-  connectedFirestoreEmulators.add(key);
 }
 
 interface CloudTaskDocumentLike {

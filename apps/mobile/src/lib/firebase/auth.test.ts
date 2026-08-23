@@ -33,6 +33,16 @@ function createSdkMock(initialUser: MobileAuthUser | null = null): MobileAuthSdk
       }
       return currentUser;
     }),
+    createUserWithEmailPassword: vi.fn(async (email: string) => {
+      currentUser = {
+        ...createUser("user-1", email),
+        emailVerified: false,
+        cloudAccess: "inactive"
+      };
+      return currentUser;
+    }),
+    reloadUser: vi.fn(async () => currentUser),
+    getCloudAccess: vi.fn(async () => "active" as const),
     signOut: vi.fn(async () => {
       currentUser = null;
       for (const listener of listeners) {
@@ -130,7 +140,45 @@ describe("createMobileAuthSession", () => {
     expect(states).toEqual(["signedOut", "signingIn", "signedIn"]);
     expect(session.getState()).toEqual({
       status: "signedIn",
-      user: createUser("user-1", "dev@kanna.test")
+      user: {
+        ...createUser("user-1", "dev@kanna.test"),
+        cloudAccess: "active"
+      }
+    });
+  });
+
+  it("creates an unverified account and refreshes it into subscribed access", async () => {
+    const sdk = createSdkMock();
+    const session = createMobileAuthSession({ sdk });
+
+    await session.createUserWithEmailPassword({
+      email: "new@kanna.test",
+      password: "secret1"
+    });
+
+    expect(sdk.createUserWithEmailPassword).toHaveBeenCalledWith(
+      "new@kanna.test",
+      "secret1"
+    );
+    expect(session.getState()).toEqual({
+      status: "signedIn",
+      user: expect.objectContaining({ emailVerified: false, cloudAccess: "inactive" })
+    });
+
+    const verified = {
+      ...createUser("user-1", "new@kanna.test"),
+      emailVerified: true
+    };
+    vi.mocked(sdk.reloadUser).mockResolvedValueOnce(verified);
+    await session.refreshAccount();
+
+    expect(sdk.getIdToken).toHaveBeenCalledWith(true);
+    expect(vi.mocked(sdk.getIdToken).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(sdk.getCloudAccess).mock.invocationCallOrder.at(-1) ?? Infinity
+    );
+    expect(session.getState()).toEqual({
+      status: "signedIn",
+      user: { ...verified, cloudAccess: "active" }
     });
   });
 

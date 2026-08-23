@@ -17,7 +17,7 @@
  *   entitlement the relay reads does not. Every function here writes and
  *   recomputes in that order.
  * - **Grandfathering rides on this same mechanism.** Decision 5 describes
- *   seeding existing invited accounts as `source: grandfathered`, but
+ *   seeding existing legacy accounts as `source: grandfathered`, but
  *   Decision 3 folds every manual grant into the one `comp` source with a
  *   `reason` field rather than three source spellings. So a grandfathered
  *   account is a comp grant whose `reason` says so, and the derived entitlement
