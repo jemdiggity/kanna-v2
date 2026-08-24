@@ -103,6 +103,7 @@ pub(crate) struct TaskEventsParams<'a> {
     pub(crate) repo_remote_url_hash: Option<&'a str>,
     pub(crate) local_only: bool,
     pub(crate) include_current_activity: bool,
+    pub(crate) short_cursor: bool,
     pub(crate) cursor: Option<&'a str>,
     pub(crate) timeout_secs: u64,
     pub(crate) limit: Option<i64>,
@@ -140,6 +141,7 @@ pub(crate) fn task_events_path(params: &TaskEventsParams<'_>) -> String {
     if params.include_current_activity {
         query.push("includeCurrentActivity=true".to_string());
     }
+    query.push(format!("shortCursor={}", params.short_cursor));
     if let Some(cursor) = params.cursor {
         query.push(format!("cursor={}", encode_path_segment(cursor)));
     }

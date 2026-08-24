@@ -1382,6 +1382,71 @@ fn short_aggregate_cursor_preserves_continuity_across_calls() {
 }
 
 #[test]
+fn routed_cursor_rejection_invalidates_the_fan_in_checkpoint() {
+    let cursor_body = serde_json::to_vec(&json!({
+        "localMachineId": "desktop-local",
+        "taskIdsByMachine": { "desktop-studio": ["task-remote"] },
+        "cursorsByMachine": { "desktop-studio": "ksh1.deadbeef" }
+    }))
+    .expect("encode cursor body");
+    let cursor = format!(
+        "km1.{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(cursor_body)
+    );
+    let machine_path = "/v1/task-events?taskIds=task-remote&localOnly=true&shortCursor=true&cursor=ksh1.deadbeef&timeoutSecs=0";
+    let (base_url, server) = start_http_fixture(vec![
+        ExpectedRequest {
+            method: "GET",
+            path: "/v1/status",
+            body: None,
+            response_status: "200 OK",
+            response_body: json!({ "desktopId": "desktop-local" }),
+        },
+        ExpectedRequest {
+            method: "POST",
+            path: "/v1/cloud/desktops/desktop-studio/invoke",
+            body: Some(json!({
+                "method": "GET",
+                "path": machine_path,
+                "body": null
+            })),
+            response_status: "200 OK",
+            response_body: json!({
+                "status": 400,
+                "body": "task-event cursor handle is invalid or expired; restart without a cursor to safely replay retained history",
+                "error": "task-event cursor handle is invalid or expired; restart without a cursor to safely replay retained history"
+            }),
+        },
+    ]);
+    let responses = run_kanna_mcp(
+        &base_url,
+        &[json!({
+            "jsonrpc": "2.0",
+            "id": 353,
+            "method": "tools/call",
+            "params": {
+                "name": "kanna_wait_events",
+                "arguments": {
+                    "task_ids": ["task-remote"],
+                    "cursor": cursor,
+                    "timeout_secs": 0
+                }
+            }
+        })],
+    );
+
+    server.join().expect("fixture server");
+    let error = tool_error_text(&responses[0]);
+    assert!(error.contains("machine desktop-studio rejected its embedded task-event cursor"));
+    assert!(error.contains("restart kanna_wait_events without a cursor"));
+    assert!(error.contains("replay retained history"));
+    assert!(
+        !error.contains("kmh1."),
+        "must not return a continuation: {error}"
+    );
+}
+
+#[test]
 fn aggregate_cursor_rejects_a_stale_or_tampered_local_machine_identity() {
     let cursor_body = serde_json::to_vec(&json!({
         "localMachineId": "desktop-stale",

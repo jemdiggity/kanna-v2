@@ -1181,6 +1181,66 @@ async fn local_surface_aggregates_peer_repo_events_and_resumes_after_reconnect()
     relay.abort();
 }
 
+#[tokio::test]
+async fn aggregate_rejects_a_peer_cursor_error_instead_of_returning_a_wedged_continuation() {
+    use axum::body::to_bytes;
+    use tower::ServiceExt;
+
+    let source = test_state_with_seed("desktop-cursor-source", "Source", |_| {});
+    let peer = test_state_with_seed("desktop-cursor-peer", "Peer", |db| {
+        db.insert_test_repo("repo-peer", "Peer Repo")
+            .expect("insert peer repo");
+        db.insert_test_pipeline_item(
+            "remote-task",
+            "repo-peer",
+            "remote task",
+            Some("Remote Task"),
+            "in progress",
+            "2026-08-24 00:00:00",
+        )
+        .expect("insert peer task");
+    });
+    let relay =
+        connect_test_relay_peer(&source, Arc::clone(&peer), Arc::new(AtomicBool::new(true)));
+    let app = router(Arc::clone(&source));
+    let poisoned = aggregate_tasks_cursor(
+        "desktop-cursor-source",
+        "desktop-cursor-peer",
+        &["remote-task"],
+        "0",
+        "ksh1.deadbeef",
+    );
+    let token = source
+        .local_task_events_token
+        .as_deref()
+        .expect("task-event credential");
+    let response = app
+        .oneshot(
+            Request::get(format!(
+                "/v1/task-events?taskIds=remote-task&cursor={poisoned}&timeoutSecs=0"
+            ))
+            .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .expect("request"),
+        )
+        .await
+        .expect("aggregate response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read error body");
+    let body = String::from_utf8(body.to_vec()).expect("utf8 error");
+    assert!(body.contains("machine desktop-cursor-peer rejected its embedded task-event cursor"));
+    assert!(body.contains("restart kanna_wait_events without a cursor"));
+    assert!(body.contains("replay retained history"));
+    assert!(
+        !body.contains("\"cursor\""),
+        "must not issue a continuation: {body}"
+    );
+
+    relay.abort();
+}
+
 /// Stage start is itself the authoritative stopped→working write. The daemon's
 /// first Busy reconciliation is consequently a no-op, but must not erase the
 /// debounce armed by the lifecycle write. Exercise that full path through the

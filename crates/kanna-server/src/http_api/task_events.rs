@@ -116,7 +116,12 @@ struct AggregateCursor {
 
 struct AggregateWaitCompletion {
     machine_id: String,
-    result: Result<Value, String>,
+    result: Result<Value, AggregateMachineWaitError>,
+}
+
+enum AggregateMachineWaitError {
+    CursorRejected(String),
+    Unavailable(String),
 }
 
 struct AggregateWaitSession {
@@ -1341,6 +1346,21 @@ fn aggregate_query_path(query: &TaskEventsQuery) -> String {
     format!("/v1/task-events?{}", params.join("&"))
 }
 
+fn aggregate_machine_wait_error(
+    status: axum::http::StatusCode,
+    error: String,
+) -> AggregateMachineWaitError {
+    let lower = error.to_ascii_lowercase();
+    if status == axum::http::StatusCode::BAD_REQUEST
+        && lower.contains("cursor")
+        && (lower.contains("invalid") || lower.contains("not a valid") || lower.contains("expired"))
+    {
+        AggregateMachineWaitError::CursorRejected(error)
+    } else {
+        AggregateMachineWaitError::Unavailable(error)
+    }
+}
+
 fn spawn_aggregate_wait(
     session: &mut AggregateWaitSession,
     state: Arc<AppState>,
@@ -1363,20 +1383,29 @@ fn spawn_aggregate_wait(
             wait_local_task_events(state, query, true)
                 .await
                 .map(|Json(value)| value)
-                .map_err(|(_, error)| error)
+                .map_err(|(status, error)| aggregate_machine_wait_error(status, error))
         } else {
             let path = aggregate_query_path(&query);
             match state
                 .invoke_relay_desktop(waited_machine_id, "GET".to_string(), path, Value::Null)
                 .await
             {
-                Ok(response) if (200..300).contains(&response.status) => response
-                    .body
-                    .ok_or_else(|| "peer returned an empty task-event response".to_string()),
-                Ok(response) => Err(response.error.unwrap_or_else(|| {
-                    format!("peer task-event wait failed with HTTP {}", response.status)
-                })),
-                Err(error) => Err(error),
+                Ok(response) if (200..300).contains(&response.status) => {
+                    response.body.ok_or_else(|| {
+                        AggregateMachineWaitError::Unavailable(
+                            "peer returned an empty task-event response".to_string(),
+                        )
+                    })
+                }
+                Ok(response) => {
+                    let status = axum::http::StatusCode::from_u16(response.status)
+                        .unwrap_or(axum::http::StatusCode::BAD_GATEWAY);
+                    let error = response.error.unwrap_or_else(|| {
+                        format!("peer task-event wait failed with HTTP {}", response.status)
+                    });
+                    Err(aggregate_machine_wait_error(status, error))
+                }
+                Err(error) => Err(AggregateMachineWaitError::Unavailable(error)),
             }
         };
         AggregateWaitCompletion {
@@ -1399,7 +1428,16 @@ fn apply_aggregate_completion(
     session.pending_machines.remove(&completion.machine_id);
     let response = match completion.result {
         Ok(response) => response,
-        Err(error) => {
+        Err(AggregateMachineWaitError::CursorRejected(error)) => {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                format!(
+                    "machine {} rejected its embedded task-event cursor ({error}); restart kanna_wait_events without a cursor to safely replay retained history",
+                    completion.machine_id
+                ),
+            ));
+        }
+        Err(AggregateMachineWaitError::Unavailable(error)) => {
             failed_machines.insert(completion.machine_id.clone());
             machine_errors.push(json!({
                 "machineId": completion.machine_id,

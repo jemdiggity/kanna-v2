@@ -595,6 +595,10 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         include_current_activity: bool,
 
+        /// Return a short process-local cursor handle for agent use
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        short_cursor: bool,
+
         /// Cursor from the previous call; omit to receive retained history
         #[arg(long)]
         cursor: Option<String>,

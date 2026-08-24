@@ -25,3 +25,7 @@ Out of scope: changing event retention, ordering, paging, debounce behavior, tas
 ## Done when
 
 Focused Rust tests prove lossless call-to-call continuity, clear corrupt/expired-handle recovery, acceptance and upgrade of old cursor formats, and that a bad embedded per-machine cursor cannot produce a permanently wedged aggregate continuation; formatting and clippy pass for the changed crates.
+
+## Revision 1
+
+Reviewer feedback delivered 2026-08-24 requires the server-side `ks1` HTTP aggregation path to fail actionably when a routed machine rejects its embedded cursor while retaining partial results for ordinary peer failures, with real routed-HTTP integration coverage in both `kanna-server` and `kanna-mcp`. It also requires the typed `kanna-cli task wait-events` surface and request builder to expose the catalog's `short_cursor` / `shortCursor` parameter, with CLI/catalog contract tests. Completion requires the focused server, MCP, and CLI tests plus `./kd test all`.
