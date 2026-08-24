@@ -4995,9 +4995,10 @@ async fn create_pairing_session_route_returns_pairing_payload() {
     assert_eq!(pairing.desktop_name, "Studio Mac");
     assert_eq!(pairing.lan_port, 48120);
     assert_eq!(pairing.code.len(), 6);
-    let payload: serde_json::Value = from_slice(pairing.pairing_payload.as_bytes()).unwrap();
-    assert_eq!(payload["desktopId"], "desktop-1");
-    assert_eq!(payload["code"], pairing.code);
+    assert_eq!(
+        pairing.pairing_payload,
+        format!("KANNA1:DESKTOP-1:{}", pairing.code)
+    );
 }
 
 #[tokio::test]
