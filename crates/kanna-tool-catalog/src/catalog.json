@@ -42,13 +42,16 @@
     },
     {
       "name": "kanna_list_recent_tasks",
-      "description": "List recent Kanna tasks across all repositories, newest first. Set all_machines to discover tasks on every currently reachable account machine; that response contains tasks plus explicit machineErrors, and every task row carries machineId. Set include_closed when reconciling historical work.",
+      "description": "List recent Kanna tasks, newest first by update time. Inside a task session this defaults to that task's repository; pass all_repos for the rare cross-repository view. Set all_machines to discover tasks on every currently reachable account machine; that preserves the account-wide aggregation and returns tasks plus explicit machineErrors. Rows carry a prompt bounded to 500 characters, the latest durable agent name in agent, and the session transport in agentType.",
       "method": "GET",
       "path": "/v1/tasks/recent",
       "response": "json",
       "params": [
         { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it to use the connected machine, unless all_machines is true.", "type": "string", "required": false, "location": "routing" },
-        { "name": "all_machines", "description": "Aggregate tasks from the connected machine and every currently reachable sibling. Every task row has machineId and unreachable peers appear in machineErrors.", "type": "boolean", "required": false, "location": "query", "key": "allMachines" },
+        { "name": "repo_id", "description": "Repository id to list on one machine. Inside a task session this defaults to the caller task's repository unless all_repos or all_machines is true. Cannot be combined with all_machines because repository ids are machine-local.", "type": "string", "required": false, "location": "query", "key": "repoId" },
+        { "name": "all_repos", "description": "List across repositories instead of applying the caller task's repository default. Cannot be combined with repo_id.", "type": "boolean", "required": false, "location": "query", "key": "allRepos" },
+        { "name": "limit", "description": "Maximum rows per machine, clamped to 200. Defaults to 50.", "type": "integer", "required": false, "location": "query", "min": 1, "max": 200 },
+        { "name": "all_machines", "description": "Aggregate tasks account-wide from the connected machine and every currently reachable sibling. Cannot be combined with repo_id because repository ids are machine-local. Every task row has machineId and unreachable peers appear in machineErrors.", "type": "boolean", "required": false, "location": "query", "key": "allMachines" },
         { "name": "include_closed", "description": "Include closed tasks as well as open tasks.", "type": "boolean", "required": false, "location": "query", "key": "includeClosed" }
       ]
     },
@@ -173,14 +176,16 @@
     },
     {
       "name": "kanna_search_tasks",
-      "description": "Search Kanna tasks by case-insensitive substring match against display name and prompt. Set all_machines for an account-wide result whose rows carry machineId and whose machineErrors make partial visibility explicit. Set include_closed to search historical tasks.",
+      "description": "Search Kanna tasks by case-insensitive substring match against display name and full stored prompt. Inside a task session this defaults to that task's repository; pass all_repos for the rare cross-repository search. Set all_machines for the existing account-wide result. Result rows carry only a prompt bounded to 500 characters, the latest durable agent name in agent, and the session transport in agentType.",
       "method": "GET",
       "path": "/v1/tasks/search",
       "response": "json",
       "params": [
         { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.", "type": "string", "required": false, "location": "routing" },
         { "name": "query", "description": "Text matched (case-insensitive) against task display names and prompts.", "type": "string", "required": true, "location": "query" },
-        { "name": "all_machines", "description": "Aggregate tasks from the connected machine and every currently reachable sibling. Every task row has machineId and unreachable peers appear in machineErrors.", "type": "boolean", "required": false, "location": "query", "key": "allMachines" },
+        { "name": "repo_id", "description": "Repository id to search on one machine. Inside a task session this defaults to the caller task's repository unless all_repos or all_machines is true. Cannot be combined with all_machines because repository ids are machine-local.", "type": "string", "required": false, "location": "query", "key": "repoId" },
+        { "name": "all_repos", "description": "Search across repositories instead of applying the caller task's repository default. Cannot be combined with repo_id.", "type": "boolean", "required": false, "location": "query", "key": "allRepos" },
+        { "name": "all_machines", "description": "Aggregate tasks account-wide from the connected machine and every currently reachable sibling. Cannot be combined with repo_id because repository ids are machine-local. Every task row has machineId and unreachable peers appear in machineErrors.", "type": "boolean", "required": false, "location": "query", "key": "allMachines" },
         { "name": "include_closed", "description": "Include closed tasks as well as open tasks.", "type": "boolean", "required": false, "location": "query", "key": "includeClosed" }
       ]
     },

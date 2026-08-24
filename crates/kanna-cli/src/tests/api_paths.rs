@@ -120,6 +120,41 @@ fn parses_task_summary_response_shape() {
 }
 
 #[test]
+fn task_summary_accepts_legacy_canonical_and_mixed_snippet_keys() {
+    let cases = [
+        (json!({ "snippet": "legacy" }), "legacy"),
+        (json!({ "waitingPromptSnippet": "canonical" }), "canonical"),
+        (
+            json!({
+                "snippet": "legacy",
+                "waitingPromptSnippet": "canonical"
+            }),
+            "canonical",
+        ),
+    ];
+
+    for (snippet_fields, expected) in cases {
+        let mut payload = json!({
+            "id": "task-1",
+            "repoId": "repo-1",
+            "title": "Compatibility",
+            "stage": "in progress",
+            "activity": "working"
+        });
+        payload
+            .as_object_mut()
+            .expect("summary object")
+            .extend(snippet_fields.as_object().expect("snippet fields").clone());
+
+        let task: TaskSummary = serde_json::from_value(payload).expect("deserialize summary");
+        assert_eq!(task.waiting_prompt_snippet.as_deref(), Some(expected));
+        let serialized = serde_json::to_value(task).expect("serialize summary");
+        assert_eq!(serialized["waitingPromptSnippet"], json!(expected));
+        assert!(serialized.get("snippet").is_none());
+    }
+}
+
+#[test]
 fn parses_task_detail_response_shape() {
     let task: TaskDetail = serde_json::from_value(json!({
         "id": "task-1",
@@ -166,6 +201,52 @@ fn parses_task_detail_response_shape() {
     assert_eq!(latest_run.id.as_deref(), Some("run-1"));
     assert_eq!(latest_run.status.as_deref(), Some("succeeded"));
     assert_eq!(latest_run.summary.as_deref(), Some("done"));
+}
+
+#[test]
+fn task_detail_accepts_legacy_canonical_and_mixed_snippet_keys() {
+    let cases = [
+        (json!({ "snippet": "legacy" }), "legacy"),
+        (json!({ "waitingPromptSnippet": "canonical" }), "canonical"),
+        (
+            json!({
+                "snippet": "legacy",
+                "waitingPromptSnippet": "canonical"
+            }),
+            "canonical",
+        ),
+    ];
+
+    for (snippet_fields, expected) in cases {
+        let mut payload = json!({
+            "id": "task-1",
+            "repoId": "repo-1",
+            "title": "Compatibility",
+            "stage": "in progress",
+            "workflowName": "default",
+            "stageTransition": "manual",
+            "activity": "working",
+            "agentType": "pty",
+            "agentProvider": "codex",
+            "branch": "task-task-1",
+            "prUrl": null,
+            "closedAt": null,
+            "worktreePath": null,
+            "commitsAhead": 0,
+            "commitsBehind": 0,
+            "dirty": false
+        });
+        payload
+            .as_object_mut()
+            .expect("detail object")
+            .extend(snippet_fields.as_object().expect("snippet fields").clone());
+
+        let task: TaskDetail = serde_json::from_value(payload).expect("deserialize detail");
+        assert_eq!(task.waiting_prompt_snippet.as_deref(), Some(expected));
+        let serialized = serde_json::to_value(task).expect("serialize detail");
+        assert_eq!(serialized["waitingPromptSnippet"], json!(expected));
+        assert!(serialized.get("snippet").is_none());
+    }
 }
 
 #[test]

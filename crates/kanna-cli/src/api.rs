@@ -36,11 +36,21 @@ pub(crate) fn task_list_path() -> &'static str {
     "/v1/tasks/recent"
 }
 
-pub(crate) fn task_list_path_with_options(all_machines: bool, include_closed: bool) -> String {
-    format!(
-        "{}?allMachines={all_machines}&includeClosed={include_closed}",
-        task_list_path()
-    )
+pub(crate) fn task_list_path_with_options(
+    all_repos: bool,
+    limit: Option<u32>,
+    all_machines: bool,
+    include_closed: bool,
+) -> String {
+    let mut params = vec![
+        format!("allRepos={all_repos}"),
+        format!("allMachines={all_machines}"),
+        format!("includeClosed={include_closed}"),
+    ];
+    if let Some(limit) = limit {
+        params.push(format!("limit={limit}"));
+    }
+    format!("{}?{}", task_list_path(), params.join("&"))
 }
 
 pub(crate) fn repo_task_list_path(repo_id: &str) -> String {
@@ -65,13 +75,20 @@ pub(crate) fn task_search_path(query: &str) -> String {
 
 pub(crate) fn task_search_path_with_options(
     query: &str,
+    repo_id: Option<&str>,
+    all_repos: bool,
     all_machines: bool,
     include_closed: bool,
 ) -> String {
-    format!(
-        "{}&allMachines={all_machines}&includeClosed={include_closed}",
+    let mut path = format!(
+        "{}&allRepos={all_repos}&allMachines={all_machines}&includeClosed={include_closed}",
         task_search_path(query)
-    )
+    );
+    if let Some(repo_id) = repo_id {
+        path.push_str("&repoId=");
+        path.push_str(&encode_path_segment(repo_id));
+    }
+    path
 }
 
 pub(crate) fn task_get_path(task_id: &str) -> String {
@@ -380,12 +397,14 @@ pub(crate) async fn list_tasks_via_api(base_url: &str) -> Result<Vec<TaskSummary
 
 pub(crate) async fn list_tasks_with_options_via_api(
     base_url: &str,
+    all_repos: bool,
+    limit: Option<u32>,
     all_machines: bool,
     include_closed: bool,
 ) -> Result<Value, String> {
     get_json(
         base_url,
-        &task_list_path_with_options(all_machines, include_closed),
+        &task_list_path_with_options(all_repos, limit, all_machines, include_closed),
     )
     .await
 }
@@ -407,12 +426,14 @@ pub(crate) async fn search_tasks_via_api(
 pub(crate) async fn search_tasks_with_options_via_api(
     base_url: &str,
     query: &str,
+    repo_id: Option<&str>,
+    all_repos: bool,
     all_machines: bool,
     include_closed: bool,
 ) -> Result<Value, String> {
     get_json(
         base_url,
-        &task_search_path_with_options(query, all_machines, include_closed),
+        &task_search_path_with_options(query, repo_id, all_repos, all_machines, include_closed),
     )
     .await
 }

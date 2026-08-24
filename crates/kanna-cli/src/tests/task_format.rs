@@ -7,7 +7,7 @@ fn formats_task_list_as_script_friendly_json_rows() {
         repo_id: "repo-1".to_string(),
         title: "Add status command".to_string(),
         stage: Some("in progress".to_string()),
-        snippet: Some("working...".to_string()),
+        waiting_prompt_snippet: Some("working...".to_string()),
         activity: Some("working".to_string()),
     }];
 
@@ -33,7 +33,7 @@ fn formats_task_status_for_exact_task_id_only() {
             repo_id: "repo-1".to_string(),
             title: "Wanted".to_string(),
             stage: Some("pr".to_string()),
-            snippet: None,
+            waiting_prompt_snippet: None,
             activity: Some("unread".to_string()),
         },
         TaskSummary {
@@ -41,7 +41,7 @@ fn formats_task_status_for_exact_task_id_only() {
             repo_id: "repo-1".to_string(),
             title: "Wrong".to_string(),
             stage: Some("in progress".to_string()),
-            snippet: None,
+            waiting_prompt_snippet: None,
             activity: Some("working".to_string()),
         },
     ];

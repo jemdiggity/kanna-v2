@@ -156,6 +156,14 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         repo_id: Option<String>,
 
+        /// List recent tasks across repositories
+        #[arg(long)]
+        all_repos: bool,
+
+        /// Maximum number of recent rows (server clamps to 200)
+        #[arg(long)]
+        limit: Option<u32>,
+
         /// Aggregate recent tasks from every reachable account machine
         #[arg(long)]
         all_machines: bool,
@@ -173,6 +181,14 @@ pub(crate) enum TaskCommands {
         /// Query text to search for
         #[arg(long)]
         query: String,
+
+        /// Limit matches to one repository ID
+        #[arg(long)]
+        repo_id: Option<String>,
+
+        /// Search across repositories explicitly
+        #[arg(long)]
+        all_repos: bool,
 
         /// Aggregate matches from every reachable account machine
         #[arg(long)]

@@ -114,6 +114,8 @@ pub struct TaskSummary {
     pub repo_id: String,
     pub repo_name: Option<String>,
     pub title: String,
+    /// Bounded creation prompt for list presentation. Fetch task detail for
+    /// the complete prompt.
     pub prompt: Option<String>,
     pub stage: Option<String>,
     pub closed_at: Option<String>,
@@ -133,8 +135,15 @@ pub struct TaskSummary {
     /// reports it.
     pub read_state: Option<String>,
     pub activity_revision: i64,
+    /// Deprecated input-only alias retained so mixed-version machine
+    /// aggregation can deserialize peers that still send `snippet`.
+    #[serde(default, skip_serializing)]
     pub snippet: Option<String>,
     pub waiting_prompt_snippet: Option<String>,
+    /// Name of the agent definition used by the latest durable stage run.
+    #[serde(default)]
+    pub agent: Option<String>,
+    /// Session transport (`pty` or `agent`), not the agent definition name.
     pub agent_type: Option<String>,
     pub parent_task_id: Option<String>,
     pub pinned: bool,
@@ -181,6 +190,8 @@ pub struct TaskDetail {
     /// terminal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_blocked: Option<String>,
+    /// Deprecated input-only alias retained for mixed-version clients.
+    #[serde(default, skip_serializing)]
     pub snippet: Option<String>,
     pub waiting_prompt_snippet: Option<String>,
     /// The task's agent-session composer, as its own labelled field.
@@ -264,6 +275,8 @@ pub struct TaskLatestRun {
     pub id: String,
     pub stage: String,
     pub kind: String,
+    #[serde(default)]
+    pub agent: Option<String>,
     pub status: String,
     pub summary: Option<String>,
     pub resumed_from_run_id: Option<String>,
@@ -651,36 +664,39 @@ impl MobileApi {
     }
 
     pub fn list_recent_tasks(&self) -> Result<Vec<TaskSummary>, String> {
-        self.list_recent_tasks_including_closed(false)
+        self.list_recent_tasks_including_closed(false, None, 50)
     }
 
     pub fn list_recent_tasks_including_closed(
         &self,
         include_closed: bool,
+        repo_id: Option<&str>,
+        limit: u32,
     ) -> Result<Vec<TaskSummary>, String> {
         record_orphaned_initialized_tasks(&self._db)?;
         let repo_names = self.repo_names_by_id()?;
         let items = self
             ._db
-            .list_recent_pipeline_items_including_closed(include_closed)
+            .list_recent_pipeline_items_including_closed(include_closed, repo_id, limit)
             .map_err(|e| format!("db error: {}", e))?;
         self.map_task_summaries(items, &repo_names)
     }
 
     pub fn search_tasks(&self, query: &str) -> Result<Vec<TaskSummary>, String> {
-        self.search_tasks_including_closed(query, false)
+        self.search_tasks_including_closed(query, false, None)
     }
 
     pub fn search_tasks_including_closed(
         &self,
         query: &str,
         include_closed: bool,
+        repo_id: Option<&str>,
     ) -> Result<Vec<TaskSummary>, String> {
         record_orphaned_initialized_tasks(&self._db)?;
         let repo_names = self.repo_names_by_id()?;
         let items = self
             ._db
-            .search_pipeline_items_including_closed(query, include_closed)
+            .search_pipeline_items_including_closed(query, include_closed, repo_id)
             .map_err(|e| format!("db error: {}", e))?;
         self.map_task_summaries(items, &repo_names)
     }
@@ -698,11 +714,17 @@ impl MobileApi {
                     .list_open_task_blocker_ids(&item.id)
                     .map_err(|e| format!("db error: {}", e))?;
                 let repo_name = repo_names.get(&item.repo_id).cloned();
+                let agent = self
+                    ._db
+                    .latest_stage_run(&item.id)
+                    .map_err(|e| format!("db error: {}", e))?
+                    .and_then(|run| run.agent);
                 Ok(map_task_summary(
                     item,
                     repo_name,
                     blocked_by_task_ids,
                     &self.config.desktop_id,
+                    agent,
                 ))
             })
             .collect()
@@ -961,8 +983,10 @@ fn map_task_summary(
     repo_name: Option<String>,
     blocked_by_task_ids: Vec<String>,
     machine_id: &str,
+    agent: Option<String>,
 ) -> TaskSummary {
-    let prompt = item.prompt.clone();
+    let full_prompt = item.prompt.clone();
+    let prompt = full_prompt.as_deref().map(bound_task_listing_prompt);
     let title = item
         .display_name
         .clone()
@@ -983,8 +1007,9 @@ fn map_task_summary(
         read_state: Some(read_state_for_activity(item.activity.as_deref()).to_string()),
         activity: item.activity,
         activity_revision: item.activity_revision,
-        snippet: waiting_prompt_snippet.clone(),
+        snippet: None,
         waiting_prompt_snippet,
+        agent,
         agent_type: item.agent_type,
         parent_task_id: item.parent_task_id,
         pinned: item.pinned.unwrap_or(0) != 0,
@@ -1097,7 +1122,7 @@ fn map_task_detail(
         read_state: Some(read_state_for_activity(item.activity.as_deref()).to_string()),
         input_blocked: item.input_blocked,
         activity: item.activity,
-        snippet: waiting_prompt_snippet.clone(),
+        snippet: None,
         waiting_prompt_snippet,
         composer,
         agent_type: item.agent_type,
@@ -1148,11 +1173,32 @@ fn map_task_latest_run(run: crate::db::StageRun) -> TaskLatestRun {
         id: run.id,
         stage: run.stage,
         kind: run.kind,
+        agent: run.agent,
         status: run.status,
         summary,
         resumed_from_run_id: run.resumed_from_run_id,
         resume_fallback_reason: run.resume_fallback_reason,
         finished_at: run.finished_at,
+    }
+}
+
+const TASK_LISTING_PROMPT_LIMIT: usize = 500;
+
+fn bound_task_listing_prompt(prompt: &str) -> String {
+    let mut characters = prompt.chars();
+    let bounded = characters
+        .by_ref()
+        .take(TASK_LISTING_PROMPT_LIMIT)
+        .collect::<String>();
+    if characters.next().is_some() {
+        let mut truncated = bounded
+            .chars()
+            .take(TASK_LISTING_PROMPT_LIMIT - 1)
+            .collect::<String>();
+        truncated.push('…');
+        truncated
+    } else {
+        bounded
     }
 }
 
@@ -1562,10 +1608,11 @@ mod tests {
             "2026-04-17 06:00:00",
         )
         .unwrap();
+        let long_prompt = format!("{}PROMPT_END_SENTINEL", "界".repeat(500));
         db.insert_test_pipeline_item(
             "task-newer",
             "repo-1",
-            "newer prompt",
+            &long_prompt,
             Some("Newer Task"),
             "pr",
             "2026-04-17 07:00:00",
@@ -1573,6 +1620,24 @@ mod tests {
         .unwrap();
         db.update_pipeline_item_activity("task-newer", "unread")
             .unwrap();
+        db.insert_stage_run(crate::db::NewStageRun {
+            id: "run-newer",
+            task_id: "task-newer",
+            stage: "pr",
+            kind: "main",
+            agent: Some("review"),
+            agent_provider: Some("codex"),
+            model: None,
+            effort: None,
+            status: "running",
+            result: None,
+            feedback: None,
+            session_id: Some("task-newer"),
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: None,
+        })
+        .unwrap();
         db.insert_test_pipeline_item(
             "task-done",
             "repo-1",
@@ -1592,6 +1657,11 @@ mod tests {
         assert_eq!(tasks[0].repo_name.as_deref(), Some("Repo One"));
         assert_eq!(tasks[0].activity.as_deref(), Some("unread"));
         assert_eq!(tasks[0].activity_revision, 1);
+        assert_eq!(tasks[0].agent.as_deref(), Some("review"));
+        let prompt = tasks[0].prompt.as_deref().expect("bounded prompt");
+        assert_eq!(prompt.chars().count(), super::TASK_LISTING_PROMPT_LIMIT);
+        assert!(prompt.ends_with('…'));
+        assert!(!prompt.contains("PROMPT_END_SENTINEL"));
         assert_eq!(tasks[1].id, "task-older");
         assert_eq!(tasks[1].repo_name.as_deref(), Some("Repo One"));
     }
@@ -1691,14 +1761,42 @@ mod tests {
         let tasks = api.list_recent_tasks().unwrap();
 
         assert_eq!(tasks.len(), 1);
-        assert_eq!(
-            tasks[0].snippet.as_deref(),
-            Some("Latest agent output preview")
-        );
+        assert_eq!(tasks[0].snippet, None);
         assert_eq!(
             tasks[0].waiting_prompt_snippet.as_deref(),
             Some("Latest agent output preview")
         );
+        let serialized = serde_json::to_value(&tasks[0]).unwrap();
+        assert!(serialized.get("snippet").is_none());
+        assert_eq!(
+            serialized["waitingPromptSnippet"],
+            "Latest agent output preview"
+        );
+
+        let legacy: super::TaskSummary = serde_json::from_value(serde_json::json!({
+            "id": "legacy",
+            "repoId": "repo-1",
+            "repoName": null,
+            "title": "Legacy task",
+            "prompt": null,
+            "stage": "review",
+            "closedAt": null,
+            "machineId": "desktop-old",
+            "createdAt": null,
+            "activity": "idle",
+            "runtimeState": "idle",
+            "readState": "read",
+            "activityRevision": 0,
+            "snippet": "Legacy output preview",
+            "waitingPromptSnippet": null,
+            "agentType": "pty",
+            "parentTaskId": null,
+            "pinned": false,
+            "pinOrder": null,
+            "blockedByTaskIds": []
+        }))
+        .unwrap();
+        assert_eq!(legacy.snippet.as_deref(), Some("Legacy output preview"));
     }
 
     #[test]
@@ -1962,6 +2060,7 @@ mod tests {
         let latest_run = detail.latest_run.expect("latest run");
         assert_eq!(latest_run.stage, "review");
         assert_eq!(latest_run.kind, "main");
+        assert_eq!(latest_run.agent.as_deref(), Some("review-security"));
         assert_eq!(latest_run.status, "failed");
         assert_eq!(
             latest_run.summary.as_deref(),

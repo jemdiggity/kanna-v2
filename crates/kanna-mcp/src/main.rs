@@ -1298,6 +1298,7 @@ async fn handle_mcp_tool_call(
     name: &str,
     mut args: Value,
 ) -> Result<Value, String> {
+    validate_task_listing_scope(name, &args)?;
     if name == "kanna_complete_stage" && args.get("machine_id").is_some() {
         return Err(
             "kanna_complete_stage cannot target another machine; an agent can only complete its own local stage"
@@ -1319,7 +1320,7 @@ async fn handle_mcp_tool_call(
     ) {
         return wait_events_across_machines(base_url, catalog, multi_machine_waits, args).await;
     }
-    let args = maybe_augment_create_task_args(base_url, name, args, machine_id.as_deref()).await?;
+    let args = maybe_augment_tool_args(base_url, name, args, machine_id.as_deref()).await?;
     let mut request = {
         let catalog = catalog
             .read()
@@ -1395,34 +1396,84 @@ async fn bind_request_to_spawned_run(
     Ok(())
 }
 
-async fn maybe_augment_create_task_args(
+fn validate_task_listing_scope(name: &str, args: &Value) -> Result<(), String> {
+    if !matches!(name, "kanna_list_recent_tasks" | "kanna_search_tasks") {
+        return Ok(());
+    }
+    let has_repo_id = args.get("repo_id").is_some() || args.get("repoId").is_some();
+    let all_machines = args
+        .get("all_machines")
+        .or_else(|| args.get("allMachines"))
+        .and_then(Value::as_bool)
+        == Some(true);
+    if has_repo_id && all_machines {
+        return Err(
+            "repo_id and all_machines cannot be used together; repository IDs are machine-local, so omit repo_id for an account-wide all_machines listing"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+async fn maybe_augment_tool_args(
     base_url: &str,
     name: &str,
     args: Value,
     machine_id: Option<&str>,
 ) -> Result<Value, String> {
-    if name != "kanna_create_task" || args.get("repo_id").is_some() {
+    let create_task = name == "kanna_create_task";
+    let repo_scoped_listing = matches!(name, "kanna_list_recent_tasks" | "kanna_search_tasks");
+    if !create_task && !repo_scoped_listing {
         return Ok(args);
     }
 
-    if let Some(machine_id) = machine_id {
-        return Err(format!(
-            "repo_id is required when creating a task on machine {machine_id}; call kanna_list_repos with the same machine_id first"
-        ));
+    if args.get("repo_id").is_some()
+        || (repo_scoped_listing && listing_requests_cross_repo_scope(&args))
+    {
+        return Ok(args);
     }
 
-    let task_id = env::var("KANNA_TASK_ID")
+    if create_task {
+        if let Some(machine_id) = machine_id {
+            return Err(format!(
+                "repo_id is required when creating a task on machine {machine_id}; call kanna_list_repos with the same machine_id first"
+            ));
+        }
+    }
+
+    let task_id = match env::var("KANNA_TASK_ID")
         .ok()
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| "repo_id is required when KANNA_TASK_ID is not available".to_string())?;
+    {
+        Some(task_id) => task_id,
+        None if repo_scoped_listing => return Ok(args),
+        None => return Err("repo_id is required when KANNA_TASK_ID is not available".to_string()),
+    };
+    if repo_scoped_listing {
+        ensure_listing_repo_inference_is_local(machine_id)?;
+    }
     let path = format!("/v1/tasks/{}", encode_path_segment(&task_id));
     let current_task: Value = get_json(base_url, &path)
         .await
         .map_err(|e| format!("failed to infer repo_id from KANNA_TASK_ID={task_id}: {e}"))?;
-    augment_create_task_args(args, Some(&current_task))
+    augment_repo_args(args, Some(&current_task))
 }
 
-fn augment_create_task_args(args: Value, current_task: Option<&Value>) -> Result<Value, String> {
+fn ensure_listing_repo_inference_is_local(machine_id: Option<&str>) -> Result<(), String> {
+    if let Some(machine_id) = machine_id {
+        return Err(format!(
+            "repo_id is required when listing tasks on machine {machine_id} from a task session; repository IDs are machine-local, so call kanna_list_repos with the same machine_id and pass its repo_id explicitly (or set all_repos=true)"
+        ));
+    }
+    Ok(())
+}
+
+fn listing_requests_cross_repo_scope(args: &Value) -> bool {
+    args.get("all_repos").and_then(Value::as_bool) == Some(true)
+        || args.get("all_machines").and_then(Value::as_bool) == Some(true)
+}
+
+fn augment_repo_args(args: Value, current_task: Option<&Value>) -> Result<Value, String> {
     if args.get("repo_id").is_some() {
         return Ok(args);
     }
@@ -2010,7 +2061,7 @@ mod tests {
         let args = json!({ "prompt": "Spin up a child task" });
         let current_task = json!({ "id": "task-1", "repoId": "repo-1" });
 
-        let augmented = augment_create_task_args(args, Some(&current_task)).unwrap();
+        let augmented = augment_repo_args(args, Some(&current_task)).unwrap();
 
         assert_eq!(
             augmented,
@@ -2023,20 +2074,116 @@ mod tests {
         let args = json!({ "repo_id": "repo-explicit", "prompt": "Spin up a child task" });
         let current_task = json!({ "id": "task-1", "repoId": "repo-current" });
 
-        let augmented = augment_create_task_args(args.clone(), Some(&current_task)).unwrap();
+        let augmented = augment_repo_args(args.clone(), Some(&current_task)).unwrap();
 
         assert_eq!(augmented, args);
     }
 
     #[test]
     fn create_task_without_repo_id_requires_current_task_context() {
-        let err = augment_create_task_args(json!({ "prompt": "Spin up a child task" }), None)
+        let err = augment_repo_args(json!({ "prompt": "Spin up a child task" }), None)
             .expect_err("missing current task should fail");
 
         assert_eq!(
             err,
             "repo_id is required when KANNA_TASK_ID is not available".to_string()
         );
+    }
+
+    #[test]
+    fn task_listing_args_can_infer_repo_id_from_current_task() {
+        let current_task = json!({ "id": "task-1", "repoId": "repo-1" });
+
+        let augmented = augment_repo_args(json!({ "query": "review" }), Some(&current_task))
+            .expect("augment listing");
+
+        assert_eq!(augmented, json!({ "query": "review", "repo_id": "repo-1" }));
+        let request = resolve_request(
+            &kanna_tool_catalog::bundled_catalog(),
+            "kanna_search_tasks",
+            &augmented,
+        )
+        .expect("resolve augmented listing");
+        assert_eq!(request.path, "/v1/tasks/search?query=review&repoId=repo-1");
+
+        let recent_args =
+            augment_repo_args(json!({}), Some(&current_task)).expect("augment recent listing");
+        let recent_request = resolve_request(
+            &kanna_tool_catalog::bundled_catalog(),
+            "kanna_list_recent_tasks",
+            &recent_args,
+        )
+        .expect("resolve augmented recent listing");
+        assert_eq!(recent_request.path, "/v1/tasks/recent?repoId=repo-1");
+    }
+
+    #[test]
+    fn explicit_listing_scope_is_not_replaced() {
+        let current_task = json!({ "id": "task-1", "repoId": "repo-current" });
+        let args = json!({ "repo_id": "repo-explicit" });
+
+        assert_eq!(
+            augment_repo_args(args.clone(), Some(&current_task)).unwrap(),
+            args
+        );
+        assert!(listing_requests_cross_repo_scope(
+            &json!({ "all_repos": true })
+        ));
+        assert!(listing_requests_cross_repo_scope(
+            &json!({ "all_machines": true })
+        ));
+        assert!(!listing_requests_cross_repo_scope(&json!({})));
+    }
+
+    #[test]
+    fn task_listing_scope_rejects_repo_id_with_all_machines_before_request_resolution() {
+        for tool in ["kanna_list_recent_tasks", "kanna_search_tasks"] {
+            for args in [
+                json!({ "repo_id": "repo-local", "all_machines": true }),
+                json!({ "repoId": "repo-local", "allMachines": true }),
+            ] {
+                let error = validate_task_listing_scope(tool, &args)
+                    .expect_err("machine-local repo id must not be aggregated across machines");
+                assert!(error.contains("repo_id and all_machines"), "{error}");
+                assert!(
+                    error.contains("repository IDs are machine-local"),
+                    "{error}"
+                );
+            }
+        }
+
+        let catalog = kanna_tool_catalog::bundled_catalog();
+        let recent_args = json!({ "all_machines": true });
+        validate_task_listing_scope("kanna_list_recent_tasks", &recent_args)
+            .expect("account-wide recent listing remains valid");
+        assert_eq!(
+            resolve_request(&catalog, "kanna_list_recent_tasks", &recent_args)
+                .expect("resolve account-wide recent listing")
+                .path,
+            "/v1/tasks/recent?allMachines=true"
+        );
+
+        let search_args = json!({ "query": "review", "repo_id": "repo-local" });
+        validate_task_listing_scope("kanna_search_tasks", &search_args)
+            .expect("single-machine repository search remains valid");
+        assert_eq!(
+            resolve_request(&catalog, "kanna_search_tasks", &search_args)
+                .expect("resolve repository search")
+                .path,
+            "/v1/tasks/search?query=review&repoId=repo-local"
+        );
+    }
+
+    #[test]
+    fn task_listing_repo_inference_rejects_a_sibling_machine() {
+        assert_eq!(ensure_listing_repo_inference_is_local(None), Ok(()));
+
+        let error = ensure_listing_repo_inference_is_local(Some("desktop-studio"))
+            .expect_err("a local task repo id must not be forwarded to a sibling");
+        assert!(error.contains("repo_id is required"));
+        assert!(error.contains("desktop-studio"));
+        assert!(error.contains("repository IDs are machine-local"));
+        assert!(error.contains("kanna_list_repos"));
     }
 
     #[test]
@@ -2448,7 +2595,13 @@ mod activity_debounce_tests {
         .await;
         let catalog = shared_bundled_catalog();
 
-        let tasks = call_tool(&base_url, &catalog, "kanna_list_recent_tasks", json!({})).await;
+        let tasks = call_tool(
+            &base_url,
+            &catalog,
+            "kanna_list_recent_tasks",
+            json!({ "all_repos": true }),
+        )
+        .await;
 
         assert_eq!(
             tasks[1]["activity"],
@@ -2469,7 +2622,13 @@ mod activity_debounce_tests {
         let catalog = shared_bundled_catalog();
 
         let started = tokio::time::Instant::now();
-        let tasks = call_tool(&base_url, &catalog, "kanna_list_recent_tasks", json!({})).await;
+        let tasks = call_tool(
+            &base_url,
+            &catalog,
+            "kanna_list_recent_tasks",
+            json!({ "all_repos": true }),
+        )
+        .await;
 
         assert_eq!(tasks[0]["activity"], json!("working"));
         assert!(started.elapsed() < ACTIVITY_CONFIRM_DELAY);
@@ -2485,9 +2644,13 @@ mod activity_debounce_tests {
         .await;
         let catalog = shared_bundled_catalog();
 
-        let error =
-            call_tool_expecting_error(&base_url, &catalog, "kanna_list_recent_tasks", json!({}))
-                .await;
+        let error = call_tool_expecting_error(
+            &base_url,
+            &catalog,
+            "kanna_list_recent_tasks",
+            json!({ "all_repos": true }),
+        )
+        .await;
 
         assert!(
             !error.contains("\"activity\""),

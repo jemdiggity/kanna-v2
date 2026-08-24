@@ -239,6 +239,7 @@ export interface DesktopTaskLatestRun {
   id: string;
   stage: string;
   kind: string;
+  agent?: string | null;
   status: string;
   summary: string | null;
   resumedFromRunId: string | null;
