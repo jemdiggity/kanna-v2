@@ -25,6 +25,7 @@ apps/mobile/ios/
 /.kanna/setup.local.sh
 /.kanna/config.local.json
 .superpowers/
+docs/task-specs/*-screenshots/
 bazel-*
 .firebase-*.kanna.json
 firestore-debug.log

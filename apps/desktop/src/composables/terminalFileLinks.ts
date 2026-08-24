@@ -47,14 +47,67 @@ export interface ResolvedTerminalFileLink {
   previewPath: string
   line?: number
   image: boolean
+  externalAbsolute: boolean
 }
 
 export interface TerminalFileLinkProvider {
   register(): void
   findLatest(): Promise<ResolvedTerminalFileLink | null>
   activateLatest(): Promise<boolean>
+  listMentions(): Promise<TerminalFileMentionList>
+  activateMention(mention: TerminalFileMention): void
   watchForFirstLink(onAvailable: () => void): () => void
   clearFileExistsCache(): void
+}
+
+export interface TerminalFileMention {
+  text: string
+  path: string
+  line?: number
+  available: boolean
+  unavailableReason?: string
+  resolvedLink?: ResolvedTerminalFileLink
+}
+
+export interface TerminalFileMentionList {
+  mentions: TerminalFileMention[]
+  overflow: boolean
+}
+
+const MAX_TERMINAL_FILE_MENTIONS = 20
+
+export function collectTerminalFileMentionCandidates(
+  term: Terminal,
+  limit = MAX_TERMINAL_FILE_MENTIONS,
+): { candidates: TerminalFileLinkCandidate[]; overflow: boolean } {
+  const candidates: TerminalFileLinkCandidate[] = []
+  const seen = new Set<string>()
+  const buffers = term.buffer.active === term.buffer.normal
+    ? [term.buffer.normal]
+    : [term.buffer.active, term.buffer.normal]
+  let overflow = false
+
+  for (const buffer of buffers) {
+    for (let row = buffer.length - 1; row >= 0; row -= 1) {
+      const lineText = buffer.getLine(row)?.translateToString(true)
+      if (!lineText) continue
+      const lineCandidates = detectTerminalFileLinkCandidates(lineText)
+      for (let index = lineCandidates.length - 1; index >= 0; index -= 1) {
+        const candidate = lineCandidates[index]
+        if (!candidate) continue
+        const key = `${candidate.path}:${candidate.line ?? ""}`
+        if (seen.has(key)) continue
+        seen.add(key)
+        if (candidates.length === limit) {
+          overflow = true
+          continue
+        }
+        candidates.push(candidate)
+      }
+    }
+  }
+
+  return { candidates, overflow }
 }
 
 export function createTerminalFileLinkProvider(params: {
@@ -71,14 +124,17 @@ export function createTerminalFileLinkProvider(params: {
     const { path, line } = candidate
     const normalizedWorktreePath = worktreePath.replace(/\/+$/, "")
     if (path.startsWith("/")) {
-      if (!path.startsWith(`${normalizedWorktreePath}/`)) return null
-      const previewPath = path.slice(normalizedWorktreePath.length + 1)
-      if (previewPath.split("/").includes("..")) return null
+      if (path.split("/").includes("..")) return null
+      const externalAbsolute = !path.startsWith(`${normalizedWorktreePath}/`)
+      const previewPath = externalAbsolute
+        ? path
+        : path.slice(normalizedWorktreePath.length + 1)
       return {
         checkPath: path,
         previewPath,
         line,
         image: IMAGE_FILE_EXTENSION.test(path),
+        externalAbsolute,
       }
     }
     if (path.split("/").includes("..")) return null
@@ -88,6 +144,7 @@ export function createTerminalFileLinkProvider(params: {
       previewPath: path,
       line,
       image: IMAGE_FILE_EXTENSION.test(checkPath),
+      externalAbsolute: false,
     }
   }
 
@@ -122,7 +179,11 @@ export function createTerminalFileLinkProvider(params: {
     }
     params.getContainer()?.dispatchEvent(new CustomEvent("file-link-activate", {
       bubbles: true,
-      detail: { path: link.previewPath, line: link.line },
+      detail: {
+        path: link.previewPath,
+        line: link.line,
+        ...(link.externalAbsolute ? { localAbsolutePath: link.checkPath } : {}),
+      },
     }))
   }
 
@@ -140,6 +201,49 @@ export function createTerminalFileLinkProvider(params: {
       }
     }
     return null
+  }
+
+  async function listMentions(): Promise<TerminalFileMentionList> {
+    const worktreePath = params.options?.worktreePath
+    if (!worktreePath) return { mentions: [], overflow: false }
+    const { candidates, overflow } = collectTerminalFileMentionCandidates(params.term)
+
+    const mentions = await Promise.all(candidates.map(async (candidate) => {
+      const resolved = resolveFileLink(candidate, worktreePath)
+      if (!resolved) {
+        return {
+          text: candidate.text,
+          path: candidate.path,
+          line: candidate.line,
+          available: false,
+          unavailableReason: "Invalid local path",
+        }
+      }
+      const resolvedLink: ResolvedTerminalFileLink = {
+        text: candidate.text,
+        start: candidate.start,
+        ...resolved,
+      }
+      if (!await checkFileExists(resolved.checkPath)) {
+        return {
+          text: candidate.text,
+          path: candidate.path,
+          line: candidate.line,
+          available: false,
+          unavailableReason: resolved.externalAbsolute
+            ? "File not found on this machine"
+            : "File not found in the task workspace",
+        }
+      }
+      return {
+        text: candidate.text,
+        path: resolved.previewPath,
+        line: candidate.line,
+        available: true,
+        resolvedLink,
+      }
+    }))
+    return { mentions, overflow }
   }
 
   function register(): void {
@@ -209,6 +313,10 @@ export function createTerminalFileLinkProvider(params: {
       if (!link) return false
       activateResolvedLink(link)
       return true
+    },
+    listMentions,
+    activateMention(mention) {
+      if (mention.resolvedLink) activateResolvedLink(mention.resolvedLink)
     },
     watchForFirstLink(onAvailable) {
       let disposed = false

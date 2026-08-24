@@ -4096,6 +4096,38 @@ async fn task_file_resolver_route_returns_unique_and_ambiguous_matches() {
     );
 }
 
+#[tokio::test]
+async fn task_file_resolver_route_returns_per_mention_results_for_mixed_batch() {
+    let fixture = TaskFileRouteFixture::new();
+    fixture.write("docs/available.md", b"available");
+
+    let response = fixture
+        .post_resolve(
+            "task-file",
+            serde_json::json!({
+                "mentions": [
+                    { "path": "docs/available.md", "line": 3 },
+                    { "path": "/tmp/kanna-verification.png" }
+                ]
+            }),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let resolved: crate::task_files::TaskFileMentionResolution = from_slice(&body).unwrap();
+    assert_eq!(resolved.mentions[0].matches[0].path, "docs/available.md");
+    assert_eq!(resolved.mentions[0].line, Some(3));
+    assert_eq!(resolved.mentions[0].unavailable_reason, None);
+    assert!(resolved.mentions[1].matches.is_empty());
+    assert_eq!(
+        resolved.mentions[1].unavailable_reason.as_deref(),
+        Some("file path must stay within the task workspace")
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn task_file_resolver_route_stays_responsive_during_blocking_resolution() {
     let (started_tx, started_rx) = std::sync::mpsc::channel();

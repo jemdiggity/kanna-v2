@@ -268,6 +268,7 @@ export interface TaskFileMentionMatch {
 export interface ResolvedTaskFileMention extends TaskFileMentionInput {
   matches: TaskFileMentionMatch[];
   truncated: boolean;
+  unavailableReason?: string | null;
 }
 
 export interface TaskFileMentionResolution {

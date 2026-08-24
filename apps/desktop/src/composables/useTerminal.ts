@@ -10,6 +10,7 @@ import { useToast } from "./useToast"
 import { createTerminalInputQueue } from "./terminalInputQueue"
 import { createTerminalClipboardBridge } from "./terminalClipboardBridge"
 import { initializeTerminalView } from "./terminalView"
+import type { TerminalFileMentionList, TerminalFileMention } from "./terminalFileLinks"
 import { createTerminalLayoutController } from "./terminalLayout"
 import { createTerminalRuntimeState } from "./terminalRuntimeState"
 import { createTerminalSessionLifecycle } from "./terminalSessionLifecycle"
@@ -140,6 +141,15 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     state.stopThemeWatch = state.terminalView.stopThemeWatch
   }
 
+  async function listMentionedFiles(): Promise<TerminalFileMentionList> {
+    return await state.terminalView?.fileLinkProvider.listMentions()
+      ?? { mentions: [], overflow: false }
+  }
+
+  function activateMentionedFile(mention: TerminalFileMention): void {
+    state.terminalView?.fileLinkProvider.activateMention(mention)
+  }
+
   onUnmounted(() => {
     lifecycle.dispose()
   })
@@ -152,6 +162,8 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     fitDeferred: layout.fitDeferred,
     redraw: lifecycle.redraw,
     ensureConnected: lifecycle.ensureConnected,
+    listMentionedFiles,
+    activateMentionedFile,
     pause: lifecycle.pause,
     dispose: lifecycle.dispose,
   }

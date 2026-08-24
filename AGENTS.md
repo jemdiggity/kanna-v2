@@ -414,7 +414,10 @@ Run the real app (`./kd mobile run` with the iOS Simulator for mobile, never
 bare `expo start`; `./kd dev up` for desktop), exercise the changed states and
 relevant accessibility variants such as Reduce Motion for animation work,
 capture and inspect screenshots, and summarize that verification in the PR
-description. Unit and component tests do not substitute for a render.
+description. Save artifacts under the in-worktree, gitignored
+`docs/task-specs/<task>-screenshots/`, never commit the binaries, and treat the
+written PR/task-spec description as the durable record after the worktree is
+removed. Unit and component tests do not substitute for a render.
 
 ## Coding Style
 

@@ -35,6 +35,7 @@ import { parseRecentAgentChoices } from "../utils/agentChoiceUsage";
 import type { useAppUpdate } from "./useAppUpdate";
 import type { useToast } from "./useToast";
 import { showTerminalFileLinkHintOnce } from "./terminalFileLinkHint";
+import { openPath } from "@tauri-apps/plugin-opener";
 
 type AppPreferences = ReturnType<typeof useAppPreferences>["preferences"];
 type AppUpdateController = ReturnType<typeof useAppUpdate>;
@@ -198,14 +199,37 @@ export function useAppLifecycle({
     event.preventDefault();
   }
 
-  function handleFileLinkActivate(event: Event) {
+  async function handleFileLinkActivate(event: Event) {
     const detail = (event as CustomEvent).detail as {
       path: string;
       line?: number;
       remoteContent?: string;
+      localAbsolutePath?: string;
     };
+    if (detail.localAbsolutePath) {
+      try {
+        const content = await invoke<string>("read_text_file", {
+          path: detail.localAbsolutePath,
+        });
+        openFilePreview(detail.path, detail.line, false, false, content);
+      } catch (error: unknown) {
+        console.warn("[App] local mentioned file is not text-renderable; opening with the OS:", error);
+        try {
+          await openPath(detail.localAbsolutePath);
+        } catch (openError: unknown) {
+          console.error("[App] failed to open local mentioned file:", openError);
+          toast.error(
+            openError instanceof Error ? openError.message : "Failed to open the mentioned file.",
+          );
+        }
+      }
+      return;
+    }
     openFilePreview(detail.path, detail.line, false, false, detail.remoteContent);
   }
+  const handleFileLinkActivateEvent = (event: Event) => {
+    void handleFileLinkActivate(event);
+  };
 
   function handleImageLinkActivate(event: Event) {
     const detail = (event as CustomEvent).detail as { url?: string };
@@ -283,7 +307,7 @@ export function useAppLifecycle({
     window.addEventListener("dragenter", suppressFileDropNavigation);
     window.addEventListener("dragover", suppressFileDropNavigation);
     window.addEventListener("drop", suppressFileDropNavigation);
-    document.addEventListener("file-link-activate", handleFileLinkActivate);
+    document.addEventListener("file-link-activate", handleFileLinkActivateEvent);
     document.addEventListener("image-link-activate", handleImageLinkActivate);
     document.addEventListener("terminal-file-link-available", handleTerminalFileLinkAvailable);
 
@@ -486,7 +510,7 @@ export function useAppLifecycle({
     window.removeEventListener("dragenter", suppressFileDropNavigation);
     window.removeEventListener("dragover", suppressFileDropNavigation);
     window.removeEventListener("drop", suppressFileDropNavigation);
-    document.removeEventListener("file-link-activate", handleFileLinkActivate);
+    document.removeEventListener("file-link-activate", handleFileLinkActivateEvent);
     document.removeEventListener("image-link-activate", handleImageLinkActivate);
     document.removeEventListener("terminal-file-link-available", handleTerminalFileLinkAvailable);
     stopSystemThemeListener();

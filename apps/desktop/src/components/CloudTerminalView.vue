@@ -12,6 +12,7 @@ import {
 import { createConfiguredDesktopLanTerminalClient } from "../services/desktopLanTerminal";
 import {
   createRemoteTerminalFileLinkProvider,
+  type RemoteTerminalFileMention,
   type RemoteTerminalFileLinkProvider,
 } from "../composables/remoteTerminalFileLinks";
 import {
@@ -29,6 +30,7 @@ import { registerE2ETerminalBuffer } from "../e2eTerminalBuffers";
 import { useToast } from "../composables/useToast";
 import { isShiftEnter, SHIFT_ENTER_CSI_U } from "../composables/terminalKeyboard";
 import { createTerminalInputProducerClassifier } from "../composables/terminalInputProducer";
+import MentionedFilesOverlay from "./MentionedFilesOverlay.vue";
 
 const props = withDefaults(defineProps<{
   active?: boolean;
@@ -58,6 +60,11 @@ let currentOwnerDesktopId: string | null = null;
 let currentOwnerTaskId: string | null = null;
 let unregisterE2ETerminalBuffer: (() => void) | null = null;
 let fileLinkProvider: RemoteTerminalFileLinkProvider | null = null;
+const mentionedFilesOpen = ref(false);
+const mentionedFilesLoading = ref(false);
+const mentionedFilesError = ref<string | null>(null);
+const mentionedFiles = ref<RemoteTerminalFileMention[]>([]);
+const mentionedFilesOverflow = ref(false);
 const MAX_PENDING_REMOTE_INPUT_CHARS = 64 * 1024;
 // LAN input is repeated in the authenticated peer envelope. A 4 KiB UTF-8
 // chunk stays below the task-transfer runtime's 64 KiB request-frame limit.
@@ -89,6 +96,49 @@ async function readRemoteTaskFile(path: string): Promise<string | null> {
     path,
   });
   return file.content;
+}
+
+async function openMentionedFiles() {
+  const provider = fileLinkProvider;
+  mentionedFilesOpen.value = true;
+  mentionedFilesLoading.value = true;
+  mentionedFilesError.value = null;
+  if (!provider) {
+    mentionedFilesLoading.value = false;
+    mentionedFilesError.value = "Remote terminal is not ready.";
+    return;
+  }
+  try {
+    const result = await provider.listMentions();
+    if (!mentionedFilesOpen.value || provider !== fileLinkProvider) return;
+    mentionedFiles.value = result.mentions;
+    mentionedFilesOverflow.value = result.overflow;
+  } catch (error: unknown) {
+    console.error("[cloud-terminal] failed to list mentioned files:", error);
+    if (mentionedFilesOpen.value) {
+      mentionedFilesError.value = error instanceof Error
+        ? error.message
+        : "Mentioned files are unavailable.";
+    }
+  } finally {
+    mentionedFilesLoading.value = false;
+  }
+}
+
+function closeMentionedFiles() {
+  mentionedFilesOpen.value = false;
+}
+
+function openMentionedFile(mention: RemoteTerminalFileMention) {
+  const provider = fileLinkProvider;
+  if (!provider || !mention.available) return;
+  closeMentionedFiles();
+  void provider.activateMention(mention);
+}
+
+function openMentionedFileAt(index: number) {
+  const mention = mentionedFiles.value[index];
+  if (mention) openMentionedFile(mention);
 }
 
 function writeRemoteTerminalError(message: string) {
@@ -508,6 +558,16 @@ onUnmounted(() => {
 <template>
   <div class="cloud-terminal-shell" :data-status="status">
     <button
+      v-if="!mentionedFilesOpen"
+      type="button"
+      class="mentioned-files-control"
+      data-testid="remote-mentioned-files-open"
+      title="Show files mentioned by the agent"
+      @click="openMentionedFiles"
+    >
+      Mentioned files
+    </button>
+    <button
       type="button"
       class="open-companion-control"
       :aria-label="t('visualCompanion.open')"
@@ -522,6 +582,16 @@ onUnmounted(() => {
     <div v-if="status === 'error' && errorMessage" class="cloud-terminal-status">
       {{ errorMessage }}
     </div>
+    <MentionedFilesOverlay
+      v-if="mentionedFilesOpen"
+      :rows="mentionedFiles"
+      :loading="mentionedFilesLoading"
+      :error="mentionedFilesError"
+      :overflow="mentionedFilesOverflow"
+      test-id="remote-mentioned-files-overlay"
+      @close="closeMentionedFiles"
+      @open="openMentionedFileAt"
+    />
   </div>
 </template>
 
@@ -553,6 +623,24 @@ onUnmounted(() => {
   cursor: pointer;
   opacity: 0.78;
 }
+
+.mentioned-files-control {
+  position: absolute;
+  z-index: 2;
+  top: 8px;
+  right: 138px;
+  padding: 5px 8px;
+  border: 1px solid var(--kn-border-default);
+  border-radius: 5px;
+  background: var(--kn-bg-panel-raised);
+  color: var(--kn-text-secondary);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  opacity: 0.78;
+}
+
+.mentioned-files-control:hover { opacity: 1; color: var(--kn-text-primary); }
 
 .open-companion-control:hover,
 .open-companion-control:focus-visible {
