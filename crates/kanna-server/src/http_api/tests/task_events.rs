@@ -869,6 +869,76 @@ async fn orchestrator_receives_every_child_event_exactly_once_across_polls() {
     assert_eq!(event_pairs(&drained), Vec::new());
 }
 
+#[tokio::test]
+async fn short_cursor_upgrades_legacy_state_and_preserves_call_to_call_continuity() {
+    let (app, db_path) = events_router();
+    let db = Db::open(&db_path).expect("open db");
+    start_run(&db, "short-run", "child-a", "in progress");
+
+    let legacy = get_json_body(
+        &app,
+        "/v1/task-events?taskIds=child-a&localOnly=true&timeoutSecs=0",
+    )
+    .await;
+    let legacy_cursor = cursor_of(&legacy);
+    assert!(legacy_cursor.parse::<i64>().is_ok());
+
+    let upgraded = get_json_body(
+        &app,
+        &format!(
+            "/v1/task-events?taskIds=child-a&localOnly=true&shortCursor=true&cursor={legacy_cursor}&timeoutSecs=0"
+        ),
+    )
+    .await;
+    let handle = cursor_of(&upgraded);
+    assert!(handle.starts_with("kh1."));
+    assert_eq!(handle.len(), "kh1.".len() + 8);
+    assert!(upgraded["events"].as_array().is_some_and(Vec::is_empty));
+
+    db.update_pipeline_item_stage("child-a", "review")
+        .expect("append event between calls");
+    let resumed = get_json_body(
+        &app,
+        &format!(
+            "/v1/task-events?taskIds=child-a&localOnly=true&shortCursor=true&cursor={handle}&timeoutSecs=0"
+        ),
+    )
+    .await;
+    assert_eq!(
+        event_pairs(&resumed),
+        vec![("child-a".to_string(), "stage.changed".to_string())]
+    );
+    assert!(cursor_of(&resumed).starts_with("kh1."));
+}
+
+#[tokio::test]
+async fn invalid_or_expired_short_cursor_names_the_safe_recovery() {
+    let state = test_state_with_seed("desktop-task-events", "Task Events", seed_orchestration);
+    let app = router(Arc::clone(&state));
+    let expired = crate::http_api::task_events::issue_expired_short_cursor_for_test(&state);
+
+    for cursor in ["kh1.nothex00", expired.as_str()] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/v1/task-events?taskIds=child-a&localOnly=true&shortCursor=true&cursor={cursor}&timeoutSecs=0"
+                ))
+                .body(Body::empty())
+                .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("error body");
+        let body = String::from_utf8_lossy(&body);
+        assert!(body.contains("restart without a cursor"), "{body}");
+        assert!(body.contains("replay retained history"), "{body}");
+    }
+}
+
 /// Replaying a cursor is how a crashed orchestrator resumes. The same cursor
 /// must yield the same events — the log is the source of truth, not the
 /// reader's position in it.
@@ -1106,6 +1176,66 @@ async fn local_surface_aggregates_peer_repo_events_and_resumes_after_reconnect()
         aggregate_events,
         event_pairs(&peer_all),
         "the aggregate feed must neither duplicate nor lose peer events"
+    );
+
+    relay.abort();
+}
+
+#[tokio::test]
+async fn aggregate_rejects_a_peer_cursor_error_instead_of_returning_a_wedged_continuation() {
+    use axum::body::to_bytes;
+    use tower::ServiceExt;
+
+    let source = test_state_with_seed("desktop-cursor-source", "Source", |_| {});
+    let peer = test_state_with_seed("desktop-cursor-peer", "Peer", |db| {
+        db.insert_test_repo("repo-peer", "Peer Repo")
+            .expect("insert peer repo");
+        db.insert_test_pipeline_item(
+            "remote-task",
+            "repo-peer",
+            "remote task",
+            Some("Remote Task"),
+            "in progress",
+            "2026-08-24 00:00:00",
+        )
+        .expect("insert peer task");
+    });
+    let relay =
+        connect_test_relay_peer(&source, Arc::clone(&peer), Arc::new(AtomicBool::new(true)));
+    let app = router(Arc::clone(&source));
+    let poisoned = aggregate_tasks_cursor(
+        "desktop-cursor-source",
+        "desktop-cursor-peer",
+        &["remote-task"],
+        "0",
+        "ksh1.deadbeef",
+    );
+    let token = source
+        .local_task_events_token
+        .as_deref()
+        .expect("task-event credential");
+    let response = app
+        .oneshot(
+            Request::get(format!(
+                "/v1/task-events?taskIds=remote-task&cursor={poisoned}&timeoutSecs=0"
+            ))
+            .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .expect("request"),
+        )
+        .await
+        .expect("aggregate response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read error body");
+    let body = String::from_utf8(body.to_vec()).expect("utf8 error");
+    assert!(body.contains("machine desktop-cursor-peer rejected its embedded task-event cursor"));
+    assert!(body.contains("restart kanna_wait_events without a cursor"));
+    assert!(body.contains("replay retained history"));
+    assert!(
+        !body.contains("\"cursor\""),
+        "must not issue a continuation: {body}"
     );
 
     relay.abort();
@@ -3001,10 +3131,8 @@ async fn legacy_p1_future_state_is_rejected_before_candidate_work() {
             || panic!("future cursor reached membership/candidate work"),
         )
         .expect_err("future p1 cursor must be rejected");
-        assert_eq!(
-            error,
-            "cursor is not a valid cursor returned by this endpoint"
-        );
+        assert!(error.starts_with("cursor is not a valid cursor returned by this endpoint"));
+        assert!(error.contains("restart without a cursor"));
     }
 }
 

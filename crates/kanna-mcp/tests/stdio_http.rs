@@ -276,6 +276,53 @@ fn run_kanna_mcp_with_env(
         .collect()
 }
 
+fn run_kanna_mcp_with_response_cursor(
+    base_url: &str,
+    messages: &[Value],
+    cursor_response_index: usize,
+    cursor_request_index: usize,
+) -> Vec<Value> {
+    let binary = env!("CARGO_BIN_EXE_kanna-mcp");
+    let mut child = Command::new(binary)
+        .args(["serve", "--server-url", base_url])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env_clear()
+        .spawn()
+        .expect("spawn kanna-mcp");
+    let mut stdin = child.stdin.take().expect("stdin");
+    let stdout = child.stdout.take().expect("stdout");
+    let mut stdout = BufReader::new(stdout);
+    let mut responses = Vec::new();
+
+    for (index, message) in messages.iter().enumerate() {
+        let mut message = message.clone();
+        if index == cursor_request_index {
+            let cursor = tool_text(&responses[cursor_response_index])["cursor"]
+                .as_str()
+                .expect("cursor from prior response")
+                .to_string();
+            message["params"]["arguments"]["cursor"] = Value::String(cursor);
+        }
+        writeln!(stdin, "{message}").expect("write MCP message");
+        stdin.flush().expect("flush MCP message");
+        let mut line = String::new();
+        stdout.read_line(&mut line).expect("read MCP response");
+        responses.push(serde_json::from_str(&line).expect("JSON-RPC response"));
+    }
+
+    drop(stdin);
+    let output = child.wait_with_output().expect("wait for kanna-mcp");
+    assert!(
+        output.status.success(),
+        "kanna-mcp exited with {:?}; stderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    responses
+}
+
 fn spawn_kanna_mcp_for_reload(cwd: &std::path::Path) -> std::process::Child {
     let binary = env!("CARGO_BIN_EXE_kanna-mcp");
     Command::new(binary)
@@ -1134,7 +1181,8 @@ fn wait_events_discovers_task_owners_and_waits_across_machines() {
     assert_eq!(result["events"][0]["machineId"], "desktop-studio");
     assert!(result["cursor"]
         .as_str()
-        .is_some_and(|cursor| cursor.starts_with("km1.")));
+        .is_some_and(|cursor| cursor.starts_with("kmh1.")));
+    assert_eq!(result["cursor"].as_str().map(str::len), Some(13));
     assert_eq!(result["machineErrors"], json!([]));
 
     assert!(observed.iter().any(|request| {
@@ -1158,7 +1206,7 @@ fn wait_events_discovers_task_owners_and_waits_across_machines() {
 fn repo_wait_reads_the_local_credential_file_and_sends_bearer_authorization() {
     let (base_url, server) = start_http_fixture(vec![ExpectedRequest {
         method: "GET",
-        path: "/v1/task-events?repoId=repo-1&timeoutSecs=0",
+        path: "/v1/task-events?repoId=repo-1&shortCursor=true&timeoutSecs=0",
         body: None,
         response_status: "200 OK",
         response_body: json!({
@@ -1218,7 +1266,8 @@ fn all_local_event_wait_does_not_require_relay_discovery() {
         },
         ExpectedRequest {
             method: "GET",
-            path: "/v1/task-events?taskIds=task-local&localOnly=true&timeoutSecs=5",
+            path:
+                "/v1/task-events?taskIds=task-local&localOnly=true&shortCursor=true&timeoutSecs=5",
             body: None,
             response_status: "200 OK",
             response_body: json!({
@@ -1251,6 +1300,150 @@ fn all_local_event_wait_does_not_require_relay_discovery() {
     let result = tool_text(&responses[0]);
     assert_eq!(result["waitOutcome"], "events", "{result}");
     assert_eq!(result["events"][0]["machineId"], "desktop-local");
+}
+
+#[test]
+fn short_aggregate_cursor_preserves_continuity_across_calls() {
+    let (base_url, server) = start_http_fixture(vec![
+        ExpectedRequest {
+            method: "GET",
+            path: "/v1/status",
+            body: None,
+            response_status: "200 OK",
+            response_body: json!({ "desktopId": "desktop-local" }),
+        },
+        ExpectedRequest {
+            method: "GET",
+            path: "/v1/tasks/task-local",
+            body: None,
+            response_status: "200 OK",
+            response_body: json!({ "id": "task-local" }),
+        },
+        ExpectedRequest {
+            method: "GET",
+            path: "/v1/task-events?taskIds=task-local&localOnly=true&shortCursor=true&timeoutSecs=0",
+            body: None,
+            response_status: "200 OK",
+            response_body: json!({
+                "waitOutcome": "events",
+                "cursor": "12",
+                "events": [{ "seq": 12, "taskId": "task-local", "type": "run.started", "payload": {} }],
+                "hasMore": false
+            }),
+        },
+        ExpectedRequest {
+            method: "GET",
+            path: "/v1/status",
+            body: None,
+            response_status: "200 OK",
+            response_body: json!({ "desktopId": "desktop-local" }),
+        },
+        ExpectedRequest {
+            method: "GET",
+            path: "/v1/task-events?taskIds=task-local&localOnly=true&shortCursor=true&cursor=12&timeoutSecs=0",
+            body: None,
+            response_status: "200 OK",
+            response_body: json!({
+                "waitOutcome": "events",
+                "cursor": "13",
+                "events": [{ "seq": 13, "taskId": "task-local", "type": "run.finished", "payload": {} }],
+                "hasMore": false
+            }),
+        },
+    ]);
+    let calls = [
+        json!({
+            "jsonrpc": "2.0", "id": 351, "method": "tools/call",
+            "params": { "name": "kanna_wait_events", "arguments": {
+                "task_ids": ["task-local"], "timeout_secs": 0
+            }}
+        }),
+        // Filled by the test harness below after the first response would be
+        // impossible over static input, so use the documented short handle's
+        // deterministic shape through a direct two-call MCP session fixture.
+        json!({
+            "jsonrpc": "2.0", "id": 352, "method": "tools/call",
+            "params": { "name": "kanna_wait_events", "arguments": {
+                "task_ids": ["task-local"], "cursor": "__FIRST_CURSOR__", "timeout_secs": 0
+            }}
+        }),
+    ];
+
+    let responses = run_kanna_mcp_with_response_cursor(&base_url, &calls, 0, 1);
+    server.join().expect("fixture server");
+    let first = tool_text(&responses[0]);
+    let second = tool_text(&responses[1]);
+    assert!(first["cursor"]
+        .as_str()
+        .is_some_and(|value| value.starts_with("kmh1.")));
+    assert_eq!(first["events"][0]["seq"], 12);
+    assert_eq!(second["events"][0]["seq"], 13);
+    assert_ne!(first["cursor"], second["cursor"]);
+}
+
+#[test]
+fn routed_cursor_rejection_invalidates_the_fan_in_checkpoint() {
+    let cursor_body = serde_json::to_vec(&json!({
+        "localMachineId": "desktop-local",
+        "taskIdsByMachine": { "desktop-studio": ["task-remote"] },
+        "cursorsByMachine": { "desktop-studio": "ksh1.deadbeef" }
+    }))
+    .expect("encode cursor body");
+    let cursor = format!(
+        "km1.{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(cursor_body)
+    );
+    let machine_path = "/v1/task-events?taskIds=task-remote&localOnly=true&shortCursor=true&cursor=ksh1.deadbeef&timeoutSecs=0";
+    let (base_url, server) = start_http_fixture(vec![
+        ExpectedRequest {
+            method: "GET",
+            path: "/v1/status",
+            body: None,
+            response_status: "200 OK",
+            response_body: json!({ "desktopId": "desktop-local" }),
+        },
+        ExpectedRequest {
+            method: "POST",
+            path: "/v1/cloud/desktops/desktop-studio/invoke",
+            body: Some(json!({
+                "method": "GET",
+                "path": machine_path,
+                "body": null
+            })),
+            response_status: "200 OK",
+            response_body: json!({
+                "status": 400,
+                "body": "task-event cursor handle is invalid or expired; restart without a cursor to safely replay retained history",
+                "error": "task-event cursor handle is invalid or expired; restart without a cursor to safely replay retained history"
+            }),
+        },
+    ]);
+    let responses = run_kanna_mcp(
+        &base_url,
+        &[json!({
+            "jsonrpc": "2.0",
+            "id": 353,
+            "method": "tools/call",
+            "params": {
+                "name": "kanna_wait_events",
+                "arguments": {
+                    "task_ids": ["task-remote"],
+                    "cursor": cursor,
+                    "timeout_secs": 0
+                }
+            }
+        })],
+    );
+
+    server.join().expect("fixture server");
+    let error = tool_error_text(&responses[0]);
+    assert!(error.contains("machine desktop-studio rejected its embedded task-event cursor"));
+    assert!(error.contains("restart kanna_wait_events without a cursor"));
+    assert!(error.contains("replay retained history"));
+    assert!(
+        !error.contains("kmh1."),
+        "must not return a continuation: {error}"
+    );
 }
 
 #[test]

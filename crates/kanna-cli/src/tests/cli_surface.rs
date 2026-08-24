@@ -726,6 +726,8 @@ fn parses_wait_events_and_set_notify_commands() {
         "child-c",
         "--cursor",
         "42",
+        "--short-cursor",
+        "false",
         "--timeout-secs",
         "30",
         "--limit",
@@ -741,6 +743,7 @@ fn parses_wait_events_and_set_notify_commands() {
                     repo_id,
                     repo_remote_url_hash,
                     local_only,
+                    short_cursor,
                     cursor,
                     timeout_secs,
                     limit,
@@ -752,6 +755,7 @@ fn parses_wait_events_and_set_notify_commands() {
             assert_eq!(repo_id, None);
             assert_eq!(repo_remote_url_hash, None);
             assert!(!local_only);
+            assert!(!short_cursor);
             assert_eq!(cursor.as_deref(), Some("42"));
             assert_eq!(timeout_secs, 30);
             assert_eq!(limit, Some(10));
@@ -806,6 +810,7 @@ fn typed_wait_events_path_matches_the_catalog_tool_path() {
         repo_remote_url_hash: None,
         local_only: false,
         include_current_activity: false,
+        short_cursor: true,
         cursor: Some("42"),
         timeout_secs: 30,
         limit: Some(10),
@@ -842,6 +847,7 @@ fn typed_wait_events_path_matches_the_catalog_tool_path() {
         repo_remote_url_hash: None,
         local_only: false,
         include_current_activity: false,
+        short_cursor: true,
         cursor: None,
         timeout_secs: 30,
         limit: None,
