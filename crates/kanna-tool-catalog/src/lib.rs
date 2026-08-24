@@ -900,6 +900,104 @@ pub fn resolve_request(
     })
 }
 
+/// Return the current task id whose repository must be resolved before this
+/// request can be serialized.
+///
+/// Repository defaulting is tool policy, so it lives beside request
+/// resolution rather than in either transport adapter. The adapters only own
+/// the HTTP read needed to turn the durable task id into its machine-local
+/// repository id.
+pub fn repo_context_task_id(
+    tool_name: &str,
+    args: &Value,
+    task_id: Option<&str>,
+    remote_machine_id: Option<&str>,
+) -> Result<Option<String>, String> {
+    let create_task = tool_name == "kanna_create_task";
+    let task_listing = matches!(tool_name, "kanna_list_recent_tasks" | "kanna_search_tasks");
+    let task_watch = tool_name == "kanna_wait_events";
+    if !create_task && !task_listing && !task_watch {
+        return Ok(None);
+    }
+
+    let has_repo_id = args.get("repo_id").is_some();
+    let all_repos = args.get("all_repos").and_then(Value::as_bool) == Some(true);
+    let all_machines = args.get("all_machines").and_then(Value::as_bool) == Some(true);
+    if task_listing && has_repo_id && all_machines {
+        return Err(
+            "repo_id and all_machines cannot be used together; repository IDs are machine-local, so omit repo_id for an account-wide all_machines listing"
+                .to_string(),
+        );
+    }
+    if task_listing && has_repo_id && all_repos {
+        return Err("repo_id and all_repos cannot be used together".to_string());
+    }
+
+    let watch_has_scope = args.get("task_ids").is_some()
+        || args.get("parent_task_id").is_some()
+        || args.get("repo_id").is_some()
+        || args.get("repo_remote_url_hash").is_some();
+    if has_repo_id
+        || (task_listing && (all_repos || all_machines))
+        || (task_watch && watch_has_scope)
+    {
+        return Ok(None);
+    }
+
+    let task_id = match task_id.filter(|value| !value.trim().is_empty()) {
+        Some(task_id) => task_id,
+        None if create_task => {
+            return Err("repo_id is required when KANNA_TASK_ID is not available".to_string())
+        }
+        None => return Ok(None),
+    };
+
+    if let Some(machine_id) = remote_machine_id {
+        let operation = if create_task {
+            "creating a task"
+        } else if task_listing {
+            "listing tasks"
+        } else {
+            "watching tasks"
+        };
+        return Err(format!(
+            "repo_id is required when {operation} on machine {machine_id} from a task session; repository IDs are machine-local, so call kanna_list_repos with the same machine_id and pass the remote repository explicitly"
+        ));
+    }
+
+    Ok(Some(task_id.to_string()))
+}
+
+/// Resolve a request after applying the caller task's repository context.
+/// `current_task` is the ordinary task-detail response fetched by the thin
+/// adapter named by [`repo_context_task_id`].
+pub fn resolve_request_with_repo_context(
+    catalog: &Catalog,
+    tool_name: &str,
+    args: &Value,
+    current_task: Option<&Value>,
+) -> Result<ResolvedRequest, String> {
+    let resolved_args = args_with_repo_context(args, current_task)?;
+    resolve_request(catalog, tool_name, &resolved_args)
+}
+
+pub fn args_with_repo_context(args: &Value, current_task: Option<&Value>) -> Result<Value, String> {
+    let mut resolved_args = args
+        .as_object()
+        .cloned()
+        .ok_or_else(|| "tool arguments must be a JSON object".to_string())?;
+    if let Some(current_task) = current_task.filter(|_| !resolved_args.contains_key("repo_id")) {
+        let repo_id = current_task
+            .get("repoId")
+            .or_else(|| current_task.get("repo_id"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "current task detail does not contain repo_id".to_string())?;
+        resolved_args.insert("repo_id".to_string(), Value::String(repo_id.to_string()));
+    }
+    Ok(Value::Object(resolved_args))
+}
+
 fn value_for_param(
     tool: &ToolDef,
     param: &ParamDef,

@@ -3122,18 +3122,23 @@ fn read_agent_definition_loads_builtin_task_manager_agent_with_codex_first() {
     assert!(definition.prompt.contains("kanna_wait_events"));
     assert!(definition
         .prompt
-        .contains("If this task-manager instance is not running on the Claude provider"));
+        .contains("Scope the watch to the whole repository"));
     assert!(definition
         .prompt
-        .contains("there is no provider-specific shell watcher"));
+        .contains("Use the same MCP long-poll loop on every provider"));
     assert!(definition
         .prompt
         .contains("`include_current_activity: true`"));
+    assert!(definition.prompt.contains("`from: \"now\"`"));
+    assert!(definition
+        .prompt
+        .contains("The last tool call of every turn is `kanna_wait_events`"));
     assert!(definition
         .prompt
         .contains("fixed 10-second server debounce"));
-    assert!(definition.prompt.contains("Never build a polling loop"));
-    assert!(definition.prompt.contains("\"all_machines\": true"));
+    assert!(definition
+        .prompt
+        .contains("including blocked tasks with no session yet"));
     assert!(definition.prompt.contains("`include_closed: true`"));
     assert!(definition.prompt.contains("`task.runtime_settled`"));
     assert!(definition.prompt.contains("`task.awaiting_advance`"));

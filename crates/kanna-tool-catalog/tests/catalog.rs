@@ -1,8 +1,9 @@
 use kanna_tool_catalog::{
-    bundled_catalog, clamp_wait_timeout_secs, resolve_request, runtime_info_snapshot,
-    task_value_matches_wait_until, wait_resolved_result, wait_timeout_result, Catalog, Method,
-    ParamLoc, ParamType, ResponseKind, RuntimeAdapterIdentity, WaitUntil,
-    CLIENT_TOOL_CALL_BUDGET_SECS, DEFAULT_WAIT_TIMEOUT_SECS, MAX_WAIT_TIMEOUT_SECS,
+    bundled_catalog, clamp_wait_timeout_secs, repo_context_task_id, resolve_request,
+    resolve_request_with_repo_context, runtime_info_snapshot, task_value_matches_wait_until,
+    wait_resolved_result, wait_timeout_result, Catalog, Method, ParamLoc, ParamType, ResponseKind,
+    RuntimeAdapterIdentity, WaitUntil, CLIENT_TOOL_CALL_BUDGET_SECS, DEFAULT_WAIT_TIMEOUT_SECS,
+    MAX_WAIT_TIMEOUT_SECS,
 };
 use serde_json::json;
 use std::fs;
@@ -861,6 +862,103 @@ fn wait_events_is_scoped_cursored_and_bounded_by_the_client_budget() {
             && description.contains("without cursor growth"),
         "the parent scope must document its bounded reparenting semantics: {description}"
     );
+}
+
+#[test]
+fn task_session_repo_defaulting_is_shared_by_every_catalog_client() {
+    let catalog = bundled_catalog();
+    let current_task = json!({ "id": "manager-1", "repoId": "repo-current" });
+
+    for (tool, args, expected_path) in [
+        (
+            "kanna_list_recent_tasks",
+            json!({}),
+            "/v1/tasks/recent?repoId=repo-current",
+        ),
+        (
+            "kanna_search_tasks",
+            json!({ "query": "review" }),
+            "/v1/tasks/search?query=review&repoId=repo-current",
+        ),
+        (
+            "kanna_wait_events",
+            json!({ "from": "now", "timeout_secs": 0 }),
+            "/v1/task-events?repoId=repo-current&shortCursor=true&from=now&timeoutSecs=0",
+        ),
+    ] {
+        assert_eq!(
+            repo_context_task_id(tool, &args, Some("manager-1"), None),
+            Ok(Some("manager-1".to_string()))
+        );
+        assert_eq!(
+            resolve_request_with_repo_context(&catalog, tool, &args, Some(&current_task))
+                .expect("resolve inferred repository request")
+                .path,
+            expected_path
+        );
+    }
+
+    let create_args = json!({ "prompt": "child work" });
+    assert_eq!(
+        repo_context_task_id("kanna_create_task", &create_args, Some("manager-1"), None),
+        Ok(Some("manager-1".to_string()))
+    );
+    assert_eq!(
+        resolve_request_with_repo_context(
+            &catalog,
+            "kanna_create_task",
+            &create_args,
+            Some(&current_task)
+        )
+        .expect("resolve inferred create")
+        .body["repoId"],
+        "repo-current"
+    );
+}
+
+#[test]
+fn explicit_repository_and_machine_wide_scopes_win_over_task_context() {
+    let catalog = bundled_catalog();
+    let explicit = resolve_request_with_repo_context(
+        &catalog,
+        "kanna_wait_events",
+        &json!({ "repo_id": "repo-explicit" }),
+        Some(&json!({ "repoId": "repo-current" })),
+    )
+    .expect("resolve explicit repository");
+    assert!(explicit.path.contains("repoId=repo-explicit"));
+
+    for (tool, args) in [
+        ("kanna_wait_events", json!({ "repo_id": "repo-explicit" })),
+        (
+            "kanna_wait_events",
+            json!({ "repo_remote_url_hash": "remote-hash" }),
+        ),
+        ("kanna_wait_events", json!({ "task_ids": ["task-a"] })),
+        ("kanna_wait_events", json!({ "parent_task_id": "parent-a" })),
+        ("kanna_list_recent_tasks", json!({ "all_repos": true })),
+        (
+            "kanna_search_tasks",
+            json!({ "query": "x", "all_machines": true }),
+        ),
+    ] {
+        assert_eq!(
+            repo_context_task_id(tool, &args, Some("manager-1"), None),
+            Ok(None),
+            "{tool} should preserve its explicit scope"
+        );
+    }
+
+    let error = repo_context_task_id(
+        "kanna_wait_events",
+        &json!({}),
+        Some("manager-1"),
+        Some("desktop-peer"),
+    )
+    .expect_err("a local task repo id cannot scope a remote machine");
+    assert!(error.contains("repo_id is required"));
+    assert!(error.contains("desktop-peer"));
+    assert!(error.contains("repository IDs are machine-local"));
 }
 
 /// `parentTaskId` upward and `childTaskIds` downward are the same relation read

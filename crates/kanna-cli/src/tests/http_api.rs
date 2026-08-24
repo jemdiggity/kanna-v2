@@ -1,9 +1,69 @@
 use super::*;
 use crate::api::notify_mobile_via_api;
+use crate::commands::tool::call_catalog_tool_with_task_id;
 use crate::models::MobileNotificationRequest;
 
 #[path = "../../../test-support/old_relay_mobile_notification.rs"]
 mod old_relay_mobile_notification;
+
+#[tokio::test]
+async fn catalog_cli_defaults_listing_search_and_watch_to_the_task_repository() {
+    let catalog = kanna_tool_catalog::bundled_catalog();
+    for (tool, args, expected_path, response_body) in [
+        (
+            "kanna_list_recent_tasks",
+            serde_json::json!({}),
+            "/v1/tasks/recent?repoId=repo-current",
+            serde_json::json!([]),
+        ),
+        (
+            "kanna_search_tasks",
+            serde_json::json!({ "query": "review" }),
+            "/v1/tasks/search?query=review&repoId=repo-current",
+            serde_json::json!([]),
+        ),
+        (
+            "kanna_wait_events",
+            serde_json::json!({ "from": "now", "timeout_secs": 0 }),
+            "/v1/task-events?repoId=repo-current&shortCursor=true&from=now&timeoutSecs=0",
+            serde_json::json!({
+                "waitOutcome": "timeout",
+                "cursor": "17",
+                "events": [],
+                "hasMore": false
+            }),
+        ),
+    ] {
+        let responses = vec![
+            http_json_response(
+                "200 OK",
+                &serde_json::json!({
+                    "id": "task-current",
+                    "repoId": "repo-current",
+                    "title": "Manager",
+                    "activity": "working"
+                })
+                .to_string(),
+            ),
+            http_json_response("200 OK", &response_body.to_string()),
+        ];
+        let (base_url, server) = serve_http_responses(responses).await;
+        call_catalog_tool_with_task_id(&base_url, &catalog, tool, &args, Some("task-current"))
+            .await
+            .expect("catalog CLI call");
+        let requests = server.await.expect("fixture server");
+        assert!(
+            requests[0].starts_with("GET /v1/tasks/task-current HTTP/1.1"),
+            "{}",
+            requests[0]
+        );
+        assert!(
+            requests[1].starts_with(&format!("GET {expected_path} HTTP/1.1")),
+            "{}",
+            requests[1]
+        );
+    }
+}
 
 #[tokio::test]
 async fn notify_mobile_surfaces_only_the_fixed_server_rejection_error() {
