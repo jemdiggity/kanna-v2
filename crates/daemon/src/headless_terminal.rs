@@ -370,8 +370,13 @@ impl HeadlessTerminal {
         let Some(provider) = provider else {
             return Ok(None);
         };
-        let footer_lines = self.visible_footer_lines(STATUS_ROWS)?;
-        Ok(composer_line_from_lines(&footer_lines, provider))
+        let status_lines = self.visible_footer_lines(STATUS_ROWS)?;
+        let frame_lines = self.visible_footer_lines(usize::from(self.rows).max(STATUS_ROWS))?;
+        Ok(composer_line_from_lines(
+            &frame_lines,
+            &status_lines,
+            provider,
+        ))
     }
 
     pub fn waiting_prompt_snippet(
@@ -381,12 +386,20 @@ impl HeadlessTerminal {
         let Some(provider) = provider else {
             return Ok(None);
         };
-        let rows = match provider {
+        let classification_rows = match provider {
             AgentProvider::Opencode => OPENCODE_WAITING_PROMPT_ROWS,
             _ => STATUS_ROWS,
         };
-        let footer_lines = self.visible_footer_lines_with_blank_boundaries(rows)?;
-        Ok(waiting_prompt_from_lines(&footer_lines, provider))
+        let classification_lines =
+            self.visible_footer_lines_with_blank_boundaries(classification_rows)?;
+        let frame_lines = self.visible_footer_lines_with_blank_boundaries(
+            usize::from(self.rows).max(classification_rows),
+        )?;
+        Ok(waiting_prompt_from_lines(
+            &classification_lines,
+            &frame_lines,
+            provider,
+        ))
     }
 
     pub fn codex_resume_session_id(&mut self) -> HeadlessTerminalResult<Option<String>> {
@@ -827,37 +840,46 @@ fn opencode_transcript_tail(lines: &[String]) -> Option<String> {
     bound_waiting_prompt(&content.join(" "))
 }
 
-fn waiting_prompt_from_lines(lines: &[String], provider: AgentProvider) -> Option<String> {
-    if let Some(question) = waiting_question_from_lines(lines) {
+fn waiting_prompt_from_lines(
+    classification_lines: &[String],
+    frame_lines: &[String],
+    provider: AgentProvider,
+) -> Option<String> {
+    // Nothing at or below the composer is session output. Claude can paint a
+    // slash-command palette below it whose entries look exactly like ordinary
+    // transcript, so locate this boundary in the whole visible frame before
+    // running *any* content classifier. When the bounded classification window
+    // no longer contains that boundary, every one of its rows is below it.
+    let (classification_transcript, frame_transcript) =
+        match composer_index_from_lines(frame_lines, provider) {
+            Some(composer_index) => {
+                let classification_transcript =
+                    composer_index_from_lines(classification_lines, provider)
+                        .map_or(&classification_lines[..0], |classification_composer| {
+                            &classification_lines[..classification_composer]
+                        });
+                (classification_transcript, &frame_lines[..composer_index])
+            }
+            None => (classification_lines, frame_lines),
+        };
+
+    if let Some(question) = waiting_question_from_lines(classification_transcript) {
         return Some(question);
     }
-    if let Some(question) = waiting_question_above_menu(lines) {
+    if let Some(question) = waiting_question_above_menu(classification_transcript) {
         return Some(question);
     }
     if provider == AgentProvider::Opencode {
-        if let Some(question) = opencode_permission_question(lines) {
+        if let Some(question) = opencode_permission_question(classification_transcript) {
             return Some(question);
         }
-        if let Some(tail) = opencode_transcript_tail(lines) {
+        if let Some(tail) = opencode_transcript_tail(classification_transcript) {
             return Some(tail);
         }
     }
 
-    // Where the composer starts, when the frame draws one. Nothing at or below
-    // it is session output: the composer line is what someone is about to say
-    // (or what the CLI is *suggesting* they say), and the rows under it are the
-    // hint bar, the box rule, and the composer's own wrapped continuation.
-    // Wrapping is why this is a position rather than a per-line rule — a
-    // continuation row carries no prompt glyph, so it reads as content and used
-    // to be collected as if the provider had said it.
-    let composer_index = lines.iter().rposition(|line| line_is_composer(line));
-
     let mut content = Vec::new();
-    for (index, line) in lines.iter().enumerate().rev() {
-        if Some(index) == composer_index {
-            content.clear();
-            continue;
-        }
+    for line in frame_transcript.iter().rev() {
         if line_is_provider_chrome(line, provider) {
             if content.is_empty() {
                 continue;
@@ -948,9 +970,22 @@ fn codex_status_from_lines(lines: &[String]) -> Option<SessionStatus> {
 /// screen is mid-repaint, and nothing needs an answer from a session that is
 /// still working.
 fn composer_state_from_lines(lines: &[String], provider: AgentProvider) -> ComposerState {
-    match composer_line_from_lines(lines, provider) {
-        Some(text) if text.is_empty() => ComposerState::Empty,
-        _ => ComposerState::Unknown,
+    if frame_is_busy_or_waiting(lines, provider) {
+        return ComposerState::Unknown;
+    }
+    let Some(composer_index) = composer_index_from_lines(lines, provider) else {
+        return ComposerState::Unknown;
+    };
+    if lines[composer_index + 1..]
+        .iter()
+        .any(|line| !line_is_provider_chrome(line, provider))
+    {
+        return ComposerState::Unknown;
+    }
+    if composer_line_text(&lines[composer_index]).is_empty() {
+        ComposerState::Empty
+    } else {
+        ComposerState::Unknown
     }
 }
 
@@ -963,34 +998,43 @@ fn composer_state_from_lines(lines: &[String], provider: AgentProvider) -> Compo
 /// answerable from the frame — both are painted the same shape — which is why
 /// the session's typed-byte attestation, not this function, decides how it is
 /// labelled.
-fn composer_line_from_lines(lines: &[String], provider: AgentProvider) -> Option<String> {
-    let prompt = match provider {
-        AgentProvider::Claude => CLAUDE_IDLE_PROMPT,
-        AgentProvider::Codex => CODEX_IDLE_PROMPT,
-        AgentProvider::Opencode | AgentProvider::Antigravity | AgentProvider::Copilot => {
-            return None
-        }
-    };
+fn composer_prompt(provider: AgentProvider) -> Option<char> {
+    match provider {
+        AgentProvider::Claude => Some(CLAUDE_IDLE_PROMPT),
+        AgentProvider::Codex => Some(CODEX_IDLE_PROMPT),
+        AgentProvider::Opencode | AgentProvider::Antigravity | AgentProvider::Copilot => None,
+    }
+}
+
+fn composer_index_from_lines(lines: &[String], provider: AgentProvider) -> Option<usize> {
+    let prompt = composer_prompt(provider)?;
+    lines.iter().rposition(|line| {
+        line_starts_with_prompt(line, &[prompt])
+            && !(provider == AgentProvider::Claude && line_is_selected_menu_option(line))
+    })
+}
+
+fn frame_is_busy_or_waiting(lines: &[String], provider: AgentProvider) -> bool {
     let status = match provider {
         AgentProvider::Claude => claude_status_from_lines(lines),
         AgentProvider::Codex => codex_status_from_lines(lines),
         _ => None,
     };
-    if matches!(
+    matches!(
         status,
         Some(SessionStatus::Busy) | Some(SessionStatus::Waiting)
-    ) {
+    )
+}
+
+fn composer_line_from_lines(
+    lines: &[String],
+    status_lines: &[String],
+    provider: AgentProvider,
+) -> Option<String> {
+    if frame_is_busy_or_waiting(status_lines, provider) {
         return None;
     }
-    let composer_index = lines
-        .iter()
-        .rposition(|line| line_starts_with_prompt(line, &[prompt]))?;
-    if lines[composer_index + 1..]
-        .iter()
-        .any(|line| !line_is_provider_chrome(line, provider))
-    {
-        return None;
-    }
+    let composer_index = composer_index_from_lines(lines, provider)?;
     Some(composer_line_text(&lines[composer_index]).to_string())
 }
 
@@ -1641,6 +1685,132 @@ mod tests {
         assert!(
             !snippet.unwrap_or_default().contains("phone"),
             "no part of the composer line, wrapped or not, is session output"
+        );
+    }
+
+    #[test]
+    fn claude_waiting_prompt_snippet_never_carries_three_palette_rows() {
+        let mut terminal = HeadlessTerminal::new(120, 12, 10_000).unwrap();
+        terminal.write(
+            concat!(
+                "⏺ Ready for review.\r\n",
+                "────────────────────────────────\r\n",
+                "❯ /\r\n",
+                "/loop Run a prompt or slash command on a recurring interval\r\n",
+                "/commit Commit the current changes\r\n",
+                "/review Review the current branch\r\n",
+            )
+            .as_bytes(),
+        );
+
+        assert_eq!(
+            terminal
+                .waiting_prompt_snippet(Some(AgentProvider::Claude))
+                .unwrap()
+                .as_deref(),
+            Some("⏺ Ready for review.")
+        );
+    }
+
+    #[test]
+    fn claude_waiting_prompt_finds_composer_above_status_window_palette() {
+        let mut terminal = HeadlessTerminal::new(120, 14, 10_000).unwrap();
+        terminal.write(
+            concat!(
+                "⏺ Ready for review.\r\n",
+                "────────────────────────────────\r\n",
+                "❯ /\r\n",
+                "/agents Manage agent configurations\r\n",
+                "/clear Clear conversation history\r\n",
+                "/commit Commit the current changes\r\n",
+                "/compact Compact conversation history\r\n",
+                "/config Open configuration\r\n",
+                "/doctor Diagnose installation\r\n",
+                "/help Show available commands\r\n",
+                "/loop Run a recurring prompt\r\n",
+                "/review Review the current branch\r\n",
+            )
+            .as_bytes(),
+        );
+
+        assert_eq!(
+            terminal
+                .waiting_prompt_snippet(Some(AgentProvider::Claude))
+                .unwrap()
+                .as_deref(),
+            Some("⏺ Ready for review."),
+            "the composer boundary must come from the visible frame, not the eight-row status window"
+        );
+    }
+
+    #[test]
+    fn claude_waiting_prompt_ignores_palette_below_interleaved_chrome() {
+        let mut terminal = HeadlessTerminal::new(120, 12, 10_000).unwrap();
+        terminal.write(
+            concat!(
+                "⏺ Ready for review.\r\n",
+                "────────────────────────────────\r\n",
+                "❯ /\r\n",
+                "⏵⏵ bypass permissions on (shift+tab to cycle)\r\n",
+                "/loop Run a recurring prompt\r\n",
+                "/commit Commit the current changes\r\n",
+                "/review Review the current branch\r\n",
+            )
+            .as_bytes(),
+        );
+
+        assert_eq!(
+            terminal
+                .waiting_prompt_snippet(Some(AgentProvider::Claude))
+                .unwrap()
+                .as_deref(),
+            Some("⏺ Ready for review.")
+        );
+    }
+
+    /// Palette entries are composer-owned frame content, but the composer
+    /// itself remains useful on its separately labelled surface. Its text is
+    /// still not proof of an empty composer, so attestation stays conservative.
+    #[test]
+    fn claude_palette_keeps_snippet_clean_and_composer_labelled() {
+        let mut terminal = HeadlessTerminal::new(120, 14, 10_000).unwrap();
+        terminal.write(
+            concat!(
+                "⏺ Ready for review.\r\n",
+                "────────────────────────────────\r\n",
+                "❯ /loop\r\n",
+                "/agents Manage agent configurations\r\n",
+                "/clear Clear conversation history\r\n",
+                "/commit Commit the current changes\r\n",
+                "/compact Compact conversation history\r\n",
+                "/config Open configuration\r\n",
+                "/doctor Diagnose installation\r\n",
+                "/help Show available commands\r\n",
+                "/loop Run a recurring prompt\r\n",
+                "/review Review the current branch\r\n",
+            )
+            .as_bytes(),
+        );
+
+        assert_eq!(
+            terminal
+                .waiting_prompt_snippet(Some(AgentProvider::Claude))
+                .unwrap()
+                .as_deref(),
+            Some("⏺ Ready for review.")
+        );
+        assert_eq!(
+            terminal
+                .composer_line(Some(AgentProvider::Claude))
+                .unwrap()
+                .as_deref(),
+            Some("/loop")
+        );
+        assert_eq!(
+            terminal
+                .composer_state(Some(AgentProvider::Claude))
+                .unwrap(),
+            ComposerState::Unknown
         );
     }
 
