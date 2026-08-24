@@ -13,6 +13,7 @@ use super::mobile_notifications::notify_mobile;
 use super::operator_events::post_operator_events;
 use super::pairing::{
     claim_pairing_session, create_pairing_session, reissue_push_pairing_certificate,
+    remove_trusted_device,
 };
 use super::repo_browser::{list_task_directory, read_task_file_range};
 use super::repo_commands::{list_repo_commands, run_repo_command};
@@ -358,6 +359,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/pairing/push-certificate",
             post(reissue_push_pairing_certificate),
+        )
+        .route(
+            "/v1/pairing/trusted-devices/{device_id}",
+            axum::routing::delete(remove_trusted_device),
         );
 
     #[cfg(debug_assertions)]

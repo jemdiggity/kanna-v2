@@ -176,6 +176,12 @@ pub enum RelayMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    #[serde(rename = "anonymous_push_revoke")]
+    AnonymousPushRevoke {
+        id: String,
+        #[serde(rename = "deviceId")]
+        device_id: String,
+    },
     #[serde(rename = "event")]
     Event {
         name: String,

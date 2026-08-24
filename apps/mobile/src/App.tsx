@@ -403,6 +403,7 @@ function AppContent() {
       getIdToken: (forceRefresh) => model.getAuthIdToken(forceRefresh),
       relayUrl,
       anonymousPairings: anonymousPushPairings,
+      anonymousBindingCoordinator: model.anonymousPushBindingCoordinator,
       onTaskOpen(target) {
         setNotificationTaskRequest((current) => ({
           key: (current?.key ?? 0) + 1,

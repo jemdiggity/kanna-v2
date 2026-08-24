@@ -33,9 +33,18 @@ pub struct TrustedDevice {
     pub push_identity_public_key: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingAnonymousPushRevocation {
+    pub desktop_public_key: String,
+    pub device_id: String,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct PairingStore {
     pub trusted_devices: HashMap<String, Vec<TrustedDevice>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_anonymous_push_revocations: Vec<PendingAnonymousPushRevocation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -266,6 +275,45 @@ impl PairingStore {
             .get(desktop_id)
             .map(|devices| devices.iter().any(|device| device.device_id == device_id))
             .unwrap_or(false)
+    }
+
+    pub fn remove_trusted_device(&mut self, desktop_id: &str, device_id: &str) -> bool {
+        let Some(devices) = self.trusted_devices.get_mut(desktop_id) else {
+            return false;
+        };
+        let Some(index) = devices
+            .iter()
+            .position(|device| device.device_id == device_id)
+        else {
+            return false;
+        };
+        let removed = devices.remove(index);
+        if devices.is_empty() {
+            self.trusted_devices.remove(desktop_id);
+        }
+        if let Some(desktop_public_key) = removed.push_identity_public_key {
+            let revocation = PendingAnonymousPushRevocation {
+                desktop_public_key,
+                device_id: removed.device_id,
+            };
+            if !self
+                .pending_anonymous_push_revocations
+                .contains(&revocation)
+            {
+                self.pending_anonymous_push_revocations.push(revocation);
+            }
+        }
+        true
+    }
+
+    pub fn acknowledge_anonymous_push_revocation(
+        &mut self,
+        revocation: &PendingAnonymousPushRevocation,
+    ) -> bool {
+        let before = self.pending_anonymous_push_revocations.len();
+        self.pending_anonymous_push_revocations
+            .retain(|pending| pending != revocation);
+        self.pending_anonymous_push_revocations.len() != before
     }
 
     fn trusted_device_mut(

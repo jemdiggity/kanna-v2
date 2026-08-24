@@ -1309,6 +1309,30 @@ describe("Relay integration", () => {
     expect((await pairings.where("desktopPubKey", "==", identity.publicKey).get()).empty).toBe(true);
   });
 
+  it("accepts a signed desktop revocation over its anonymous session", async () => {
+    const identity = createAnonymousPushIdentity();
+    const cert = createAnonymousPushCertificate(identity, "desktop-revoked-phone");
+    const pairings = testFirestore.collection("anonymousPushPairings");
+    await fetch(relayHttpUrl("/push/pairings"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(anonymousPairingBody(identity, cert, "desktop-revoked-token")),
+    });
+    expect((await pairings.where("desktopPubKey", "==", identity.publicKey).get()).size).toBe(1);
+
+    const { ws } = await connectAndAuthAnonymous(identity);
+    const ack = waitForMessage(ws, (message) =>
+      message.type === "response" && message.id === "desktop-revoke");
+    ws.send(JSON.stringify({
+      type: "anonymous_push_revoke",
+      id: "desktop-revoke",
+      deviceId: cert.deviceId,
+    }));
+    await expect(ack).resolves.toMatchObject({ data: null });
+    expect((await pairings.where("desktopPubKey", "==", identity.publicKey).get()).empty).toBe(true);
+    await closeAndWait(ws);
+  });
+
   it("refuses anonymous push registration without a valid desktop pairing certificate", async () => {
     const identity = createAnonymousPushIdentity();
     const cert = createAnonymousPushCertificate(identity, "unpaired-phone");

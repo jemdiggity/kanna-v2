@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { TaskSummary } from "../api/types";
 import {
+  createAnonymousPushBindingCoordinator,
   parseNotificationTaskTarget,
   pushRegistrationUrl,
   pushUnregistrationUrl,
@@ -193,10 +194,133 @@ describe("mobile push notifications", () => {
     }));
 
     stop();
-    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(3));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+
+    const coordinator = createAnonymousPushBindingCoordinator(fetchImpl);
+    const generation = coordinator.begin([pairing]);
+    coordinator.rememberToken(generation, "anonymous-token-2");
+    await coordinator.revoke(pairing);
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
     expect(fetchImpl.mock.calls[2]?.[1]).toEqual(expect.objectContaining({
       method: "DELETE",
       body: expect.stringContaining("anonymous-token-2")
+    }));
+  });
+
+  it("serializes removal before certificate replacement so stale cleanup cannot win", async () => {
+    let resolveDelete: (() => void) | null = null;
+    const bindings = new Map<string, string>();
+    const requests: string[] = [];
+    const fetchImpl = vi.fn(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as {
+        desktopPubKey: string;
+        deviceId: string;
+        cert: { signature: string };
+      };
+      const key = `${body.desktopPubKey}:${body.deviceId}`;
+      requests.push(`${init.method}:${body.cert.signature}`);
+      if (init.method === "DELETE") {
+        await new Promise<void>((resolve) => {
+          resolveDelete = resolve;
+        });
+        bindings.delete(key);
+      } else {
+        bindings.set(key, body.cert.signature);
+      }
+      return new Response(null, { status: 200 });
+    });
+    const oldPairing = {
+      desktopId: "desktop-1",
+      desktopPushIdentity: {
+        publicKey: "desktop-public-key",
+        relayUrl: "wss://relay-staging.kanna.build",
+        environment: "staging"
+      },
+      pushPairingCert: {
+        deviceId: "mobile-device-1",
+        issuedAt: 1_000,
+        expiresAt: 2_000,
+        signature: "old-certificate"
+      }
+    };
+    const replacement = {
+      ...oldPairing,
+      pushPairingCert: {
+        ...oldPairing.pushPairingCert,
+        expiresAt: 3_000,
+        signature: "new-certificate"
+      }
+    };
+    const coordinator = createAnonymousPushBindingCoordinator(fetchImpl);
+    const firstGeneration = coordinator.begin([oldPairing]);
+    await coordinator.register(firstGeneration, "fcm-current");
+
+    const removal = coordinator.revoke(oldPairing);
+    await vi.waitFor(() => expect(resolveDelete).not.toBeNull());
+    const replacementGeneration = coordinator.begin([replacement]);
+    const refresh = coordinator.register(replacementGeneration, "fcm-current");
+    resolveDelete?.();
+    await Promise.all([removal, refresh]);
+
+    expect(requests).toEqual([
+      "POST:old-certificate",
+      "DELETE:old-certificate",
+      "POST:new-certificate"
+    ]);
+    expect(bindings.get("desktop-public-key:mobile-device-1"))
+      .toBe("new-certificate");
+  });
+
+  it("ignores an obsolete effect registration and never revokes on effect cleanup", async () => {
+    let resolveOldToken: ((token: string) => void) | null = null;
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 200 }));
+    const coordinator = createAnonymousPushBindingCoordinator(fetchImpl);
+    const pairing = {
+      desktopId: "desktop-1",
+      desktopPushIdentity: {
+        publicKey: "desktop-public-key",
+        relayUrl: "wss://relay-staging.kanna.build",
+        environment: "staging"
+      },
+      pushPairingCert: {
+        deviceId: "mobile-device-1",
+        issuedAt: 1_000,
+        expiresAt: 2_000,
+        signature: "current-certificate"
+      }
+    };
+    const start = (getToken: () => Promise<string>) => startMobilePushNotifications({
+      deviceId: "mobile-device-1",
+      getIdToken: async () => null,
+      onTaskOpen: vi.fn(),
+      relayUrl: "wss://relay-staging.kanna.build",
+      anonymousPairings: [pairing],
+      anonymousBindingCoordinator: coordinator,
+      fetchImpl,
+      sdk: {
+        requestPermission: vi.fn(async () => 1),
+        getToken,
+        onTokenRefresh: vi.fn(() => () => undefined),
+        getInitialNotification: vi.fn(async () => null),
+        onNotificationOpened: vi.fn(() => () => undefined)
+      }
+    });
+    const obsolete = start(() => new Promise((resolve) => {
+      resolveOldToken = resolve;
+    }));
+    await vi.waitFor(() => expect(resolveOldToken).not.toBeNull());
+    const currentStop = await start(async () => "current-token");
+    resolveOldToken?.("obsolete-token");
+    const obsoleteStop = await obsolete;
+    obsoleteStop();
+    currentStop();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl.mock.calls[0]?.[1]).toEqual(expect.objectContaining({
+      method: "POST",
+      body: expect.stringContaining("current-token")
     }));
   });
 

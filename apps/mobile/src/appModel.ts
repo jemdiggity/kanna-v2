@@ -53,6 +53,10 @@ import type {
   TaskSummary
 } from "./lib/api/types";
 import { ServerRefusalError } from "./lib/transports/serverRefusal";
+import {
+  createAnonymousPushBindingCoordinator,
+  type AnonymousPushBindingCoordinator
+} from "./lib/notifications/mobilePush";
 
 const PRODUCTION_RELAY_URL = "wss://relay.kanna.build";
 const CLOUD_TASK_RECOVERY_INITIAL_RETRY_MS = 1_000;
@@ -76,6 +80,7 @@ export interface AppModel {
   sessionStore: SessionStore;
   setForceCloud(enabled: boolean): void;
   setForeground?(foreground: boolean): void;
+  anonymousPushBindingCoordinator: AnonymousPushBindingCoordinator;
 }
 
 interface AppModelOptions {
@@ -166,6 +171,9 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
   const options = input.options ?? {};
   const bonjourBrowser = options.bonjourBrowser ?? createBonjourBrowser();
   const sessionStore = createSessionStore();
+  const anonymousPushBindingCoordinator = createAnonymousPushBindingCoordinator(
+    (request, init) => fetchImpl(request, init)
+  );
   const extra = readKannaExpoExtra(readExpoConfig());
   let forceCloud = options.forceCloud ?? resolveForceCloud();
   // Lazily create the cloud task index only when the live subscription is
@@ -388,6 +396,14 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
     pairingService,
     persistSessionContext: persistContext,
     replaceClientForTrustChange: replaceActiveClient,
+    revokeAnonymousPushPairing: async (desktop) => {
+      if (!desktop.desktopPushIdentity || !desktop.pushPairingCert) return;
+      await anonymousPushBindingCoordinator.revoke({
+        desktopId: desktop.desktopId,
+        desktopPushIdentity: desktop.desktopPushIdentity,
+        pushPairingCert: desktop.pushPairingCert
+      });
+    },
     subscribeTaskRouteChanges(listener) {
       taskRouteListeners.add(listener);
       return () => taskRouteListeners.delete(listener);
@@ -703,6 +719,7 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
       await controller.bootstrap();
     },
     sessionStore,
+    anonymousPushBindingCoordinator,
     setForceCloud(enabled) {
       forceCloud = enabled;
       replaceActiveClient();

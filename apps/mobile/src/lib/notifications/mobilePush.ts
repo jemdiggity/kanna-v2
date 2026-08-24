@@ -53,18 +53,132 @@ interface StartMobilePushInput {
   fetchImpl?: typeof fetch;
   sdk?: MobilePushSdk;
   anonymousPairings?: readonly AnonymousPushPairing[];
+  anonymousBindingCoordinator?: AnonymousPushBindingCoordinator;
 }
+
+type AnonymousPushFetch = (
+  input: string,
+  init: {
+    method: "POST" | "DELETE";
+    headers: Record<string, string>;
+    body: string;
+  }
+) => Promise<{ ok: boolean; status: number }>;
+
+function anonymousPairingKey(pairing: AnonymousPushPairing): string {
+  return [
+    pairing.desktopPushIdentity.relayUrl,
+    pairing.desktopPushIdentity.publicKey,
+    pairing.pushPairingCert.deviceId
+  ].join("\0");
+}
+
+export interface AnonymousPushBindingCoordinator {
+  begin(pairings: readonly AnonymousPushPairing[]): number;
+  rememberToken(generation: number, deviceToken: string): void;
+  register(generation: number, deviceToken: string): Promise<void>;
+  revoke(pairing: AnonymousPushPairing): Promise<void>;
+  end(generation: number): void;
+}
+
+export function createAnonymousPushBindingCoordinator(
+  fetchImpl: AnonymousPushFetch = fetch
+): AnonymousPushBindingCoordinator {
+  let generation = 0;
+  let activeGeneration: number | null = null;
+  let currentDeviceToken: string | null = null;
+  let desiredPairings = new Map<string, AnonymousPushPairing>();
+  let operationTail = Promise.resolve();
+
+  const enqueue = (operation: () => Promise<void>): Promise<void> => {
+    const result = operationTail.then(operation);
+    operationTail = result.catch(() => undefined);
+    return result;
+  };
+  const updatePairing = async (
+    pairing: AnonymousPushPairing,
+    deviceToken: string,
+    method: "POST" | "DELETE"
+  ) => {
+    const url = pushEndpointUrl(
+      pairing.desktopPushIdentity.relayUrl,
+      "/push/pairings"
+    );
+    if (!url) {
+      throw new Error("Anonymous push pairing has an invalid relay URL.");
+    }
+    const response = await fetchImpl(url, {
+      method,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        desktopPubKey: pairing.desktopPushIdentity.publicKey,
+        deviceId: pairing.pushPairingCert.deviceId,
+        fcmToken: deviceToken,
+        cert: pairing.pushPairingCert
+      })
+    });
+    if (!response.ok) {
+      throw new Error(
+        `Anonymous push pairing ${method === "POST" ? "registration" : "revocation"} failed (${response.status}).`
+      );
+    }
+  };
+
+  return {
+    begin(pairings) {
+      generation += 1;
+      activeGeneration = generation;
+      desiredPairings = new Map(
+        pairings.map((pairing) => [anonymousPairingKey(pairing), pairing])
+      );
+      return generation;
+    },
+    rememberToken(sessionGeneration, deviceToken) {
+      if (activeGeneration === sessionGeneration) currentDeviceToken = deviceToken;
+    },
+    register(sessionGeneration, deviceToken) {
+      if (activeGeneration !== sessionGeneration) return Promise.resolve();
+      currentDeviceToken = deviceToken;
+      const registrations = [...desiredPairings.values()];
+      return enqueue(async () => {
+        if (activeGeneration !== sessionGeneration) return;
+        for (const pairing of registrations) {
+          if (desiredPairings.get(anonymousPairingKey(pairing)) !== pairing) continue;
+          await updatePairing(pairing, deviceToken, "POST");
+        }
+      });
+    },
+    revoke(pairing) {
+      desiredPairings.delete(anonymousPairingKey(pairing));
+      if (!currentDeviceToken) return Promise.resolve();
+      const deviceToken = currentDeviceToken;
+      return enqueue(() => updatePairing(pairing, deviceToken, "DELETE"));
+    },
+    end(sessionGeneration) {
+      if (activeGeneration === sessionGeneration) activeGeneration = null;
+    }
+  };
+}
+
+const defaultAnonymousBindingCoordinator = createAnonymousPushBindingCoordinator();
 
 export async function startMobilePushNotifications(
   input: StartMobilePushInput
 ): Promise<() => void> {
+  const anonymousBindingCoordinator = input.anonymousBindingCoordinator
+    ?? (input.fetchImpl
+      ? createAnonymousPushBindingCoordinator(input.fetchImpl)
+      : defaultAnonymousBindingCoordinator);
+  const anonymousGeneration = anonymousBindingCoordinator.begin(
+    input.anonymousPairings ?? []
+  );
   const registrationUrl = pushRegistrationUrl(input.relayUrl);
   const unregistrationUrl = pushUnregistrationUrl(input.relayUrl);
   if (
     (!registrationUrl || !unregistrationUrl)
     && (input.anonymousPairings?.length ?? 0) === 0
   ) {
-    return () => undefined;
+    return () => anonymousBindingCoordinator.end(anonymousGeneration);
   }
 
   const sdk = input.sdk ?? await loadMobilePushSdk();
@@ -101,14 +215,13 @@ export async function startMobilePushNotifications(
   const permission = await sdk.requestPermission();
   if (permission !== AUTHORIZED && permission !== PROVISIONAL) {
     return () => {
+      anonymousBindingCoordinator.end(anonymousGeneration);
       openedUnsubscribe();
       responseUnsubscribe();
     };
   }
 
   let registration: { idToken: string; deviceToken: string } | null = null;
-  let anonymousRegistrations: AnonymousPushPairing[] = [];
-  let currentDeviceToken: string | null = null;
   let stopped = false;
   const unregisterDevice = async (registered: {
     idToken: string;
@@ -130,36 +243,8 @@ export async function startMobilePushNotifications(
       );
     }
   };
-  const updateAnonymousPairing = async (
-    pairing: AnonymousPushPairing,
-    deviceToken: string,
-    method: "POST" | "DELETE"
-  ) => {
-    const url = pushEndpointUrl(
-      pairing.desktopPushIdentity.relayUrl,
-      "/push/pairings"
-    );
-    if (!url) {
-      throw new Error("Anonymous push pairing has an invalid relay URL.");
-    }
-    const response = await (input.fetchImpl ?? fetch)(url, {
-      method,
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        desktopPubKey: pairing.desktopPushIdentity.publicKey,
-        deviceId: pairing.pushPairingCert.deviceId,
-        fcmToken: deviceToken,
-        cert: pairing.pushPairingCert
-      })
-    });
-    if (!response.ok) {
-      throw new Error(
-        `Anonymous push pairing ${method === "POST" ? "registration" : "revocation"} failed (${response.status}).`
-      );
-    }
-  };
   const registerToken = async (deviceToken: string) => {
-    currentDeviceToken = deviceToken;
+    anonymousBindingCoordinator.rememberToken(anonymousGeneration, deviceToken);
     const idToken = await input.getIdToken();
     if (idToken) {
       if (!registrationUrl) {
@@ -184,18 +269,10 @@ export async function startMobilePushNotifications(
       if (pairings.length === 0) {
         throw new Error("Cannot register mobile notifications without an account or pairing.");
       }
-      await Promise.all(
-        pairings.map((pairing) => updateAnonymousPairing(pairing, deviceToken, "POST"))
-      );
-      anonymousRegistrations = [...pairings];
+      await anonymousBindingCoordinator.register(anonymousGeneration, deviceToken);
     }
     if (stopped) {
       if (idToken) await unregisterDevice({ idToken, deviceToken });
-      else await Promise.all(
-        anonymousRegistrations.map((pairing) =>
-          updateAnonymousPairing(pairing, deviceToken, "DELETE")
-        )
-      );
     } else if (idToken) {
       registration = { idToken, deviceToken };
     }
@@ -209,22 +286,13 @@ export async function startMobilePushNotifications(
   });
   return () => {
     stopped = true;
+    anonymousBindingCoordinator.end(anonymousGeneration);
     tokenUnsubscribe();
     openedUnsubscribe();
     responseUnsubscribe();
     if (registration) {
       void unregisterDevice(registration).catch((error: unknown) => {
         console.error("Mobile notification unregistration failed:", error);
-      });
-    }
-    if (anonymousRegistrations.length > 0 && currentDeviceToken) {
-      const deviceToken = currentDeviceToken;
-      void Promise.all(
-        anonymousRegistrations.map((pairing) =>
-          updateAnonymousPairing(pairing, deviceToken, "DELETE")
-        )
-      ).catch((error: unknown) => {
-        console.error("Anonymous mobile notification revocation failed:", error);
       });
     }
   };

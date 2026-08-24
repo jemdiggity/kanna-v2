@@ -39,6 +39,7 @@ pub struct AppState {
     pub(super) repo_checkouts: Arc<StdMutex<HashMap<String, RepoCheckoutOperation>>>,
     pub(super) repo_checkout_root: std::path::PathBuf,
     relay_reconnect: Arc<Notify>,
+    anonymous_push_revocations_changed: Arc<Notify>,
     relay_desktop_routing_available: Arc<AtomicBool>,
     relay_desktop_routing_generation: Arc<AtomicU64>,
     desktop_relay_tx: mpsc::Sender<DesktopRelayRequest>,
@@ -319,6 +320,7 @@ impl AppState {
             repo_checkouts: Arc::new(StdMutex::new(HashMap::new())),
             repo_checkout_root,
             relay_reconnect: Arc::new(Notify::new()),
+            anonymous_push_revocations_changed: Arc::new(Notify::new()),
             relay_desktop_routing_available: Arc::new(AtomicBool::new(false)),
             relay_desktop_routing_generation: Arc::new(AtomicU64::new(0)),
             desktop_relay_tx,
@@ -368,6 +370,45 @@ impl AppState {
 
     pub async fn wait_for_cloud_relay_reconnect(&self) {
         self.relay_reconnect.notified().await;
+    }
+
+    pub(crate) async fn wait_for_anonymous_push_revocations(&self) {
+        self.anonymous_push_revocations_changed.notified().await;
+    }
+
+    pub(crate) async fn remove_trusted_device(&self, device_id: &str) -> Result<bool, String> {
+        let _mutation = self.pairing_persistence_mutation.lock().await;
+        let path = Path::new(&self.config.pairing_store_path);
+        let mut store = pairing::PairingStore::load(path)?;
+        let removed = store.remove_trusted_device(&self.config.desktop_id, device_id);
+        if removed {
+            store.save(path)?;
+            self.anonymous_push_revocations_changed.notify_one();
+        }
+        Ok(removed)
+    }
+
+    pub(crate) async fn pending_anonymous_push_revocations(
+        &self,
+    ) -> Result<Vec<pairing::PendingAnonymousPushRevocation>, String> {
+        let _mutation = self.pairing_persistence_mutation.lock().await;
+        Ok(
+            pairing::PairingStore::load(Path::new(&self.config.pairing_store_path))?
+                .pending_anonymous_push_revocations,
+        )
+    }
+
+    pub(crate) async fn acknowledge_anonymous_push_revocation(
+        &self,
+        revocation: &pairing::PendingAnonymousPushRevocation,
+    ) -> Result<(), String> {
+        let _mutation = self.pairing_persistence_mutation.lock().await;
+        let path = Path::new(&self.config.pairing_store_path);
+        let mut store = pairing::PairingStore::load(path)?;
+        if store.acknowledge_anonymous_push_revocation(revocation) {
+            store.save(path)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn set_desktop_routing_available(&self, available: bool) -> u64 {
