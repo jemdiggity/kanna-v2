@@ -36,6 +36,7 @@ pub(super) async fn claim_pairing_session(
     Json(request): Json<PairingClaimRequest>,
 ) -> Result<Json<PairingClaimResponse>, (StatusCode, String)> {
     let mut active = state.pairing_session.lock().await;
+    let _persistence_mutation = state.pairing_persistence_mutation.lock().await;
     pairing_domain::claim_pairing_session(&state.config, &mut active, request)
         .map(Json)
         .map_err(|error| {
@@ -62,6 +63,7 @@ pub(super) async fn reissue_push_pairing_certificate(
             "pairing certificate re-issue requires a paired LAN device".to_string(),
         ));
     };
+    let _persistence_mutation = state.pairing_persistence_mutation.lock().await;
     pairing_domain::reissue_push_pairing_certificate(&state.config, trusted.device_id())
         .map(Json)
         .map_err(|error| {

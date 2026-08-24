@@ -23,6 +23,7 @@ pub struct AppState {
     pub(super) config: Config,
     pub(super) local_task_events_token: Option<String>,
     pub(super) pairing_session: Arc<Mutex<Option<ActivePairingSession>>>,
+    pub(super) pairing_persistence_mutation: Arc<Mutex<()>>,
     #[cfg(debug_assertions)]
     pub(super) e2e_lan_http_enabled: Arc<AtomicBool>,
     pub(super) session_replacements: crate::session_replacements::SessionReplacements,
@@ -333,6 +334,7 @@ impl AppState {
             transfer_work,
             cloud_transfer_proxies: Arc::new(Mutex::new(HashMap::new())),
             pairing_session: Arc::new(Mutex::new(None)),
+            pairing_persistence_mutation: Arc::new(Mutex::new(())),
             #[cfg(debug_assertions)]
             e2e_lan_http_enabled: Arc::new(AtomicBool::new(true)),
             session_replacements: crate::session_replacements::SessionReplacements::default(),
