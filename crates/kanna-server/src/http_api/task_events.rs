@@ -31,6 +31,8 @@ use kanna_tool_catalog::encode_path_segment;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -54,10 +56,13 @@ const LEGACY_CURSOR_SCAN_LIMIT: i64 = 500;
 const WAIT_RECHECK_SECS: u64 = 5;
 const AGGREGATE_CURSOR_PREFIX: &str = "ks1.";
 const CURRENT_ACTIVITY_CURSOR_PREFIX: &str = "kc1.";
+const SHORT_CURSOR_PREFIX: &str = "kh1.";
 const AGGREGATE_WAIT_SESSION_TTL: Duration = Duration::from_secs(10 * 60);
 const ZERO_TIMEOUT_DRAIN_BUDGET: Duration = Duration::from_millis(100);
 const MAX_AGGREGATE_WAIT_SESSIONS: usize = 256;
 const MAX_AGGREGATE_MACHINES: usize = 128;
+const MAX_SHORT_CURSOR_HANDLES: usize = 4_096;
+static SHORT_CURSOR_NONCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -83,6 +88,11 @@ pub(super) struct TaskEventsQuery {
     /// tasks already stopped, so a restart cannot miss an earlier edge.
     #[serde(default)]
     include_current_activity: bool,
+    /// Agent-facing callers ask the server to replace the full native or
+    /// aggregate checkpoint with a short, process-local handle. Direct HTTP
+    /// clients that omit this keep the deployed stateless wire format.
+    #[serde(default)]
+    short_cursor: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -117,9 +127,15 @@ struct AggregateWaitSession {
     include_current_activity: bool,
 }
 
+struct ShortCursorEntry {
+    cursor: String,
+    last_touched: tokio::time::Instant,
+}
+
 #[derive(Default)]
 pub(super) struct AggregateWaitRegistry {
     sessions: HashMap<String, AggregateWaitSession>,
+    short_cursors: HashMap<String, ShortCursorEntry>,
     reaper_started: bool,
 }
 
@@ -140,6 +156,45 @@ impl AggregateWaitRegistry {
         for key in expired {
             if let Some(session) = self.sessions.remove(&key) {
                 Self::abort_session(session);
+            }
+        }
+        self.short_cursors
+            .retain(|_, entry| now.duration_since(entry.last_touched) < AGGREGATE_WAIT_SESSION_TTL);
+    }
+
+    fn resolve_short_cursor(&mut self, handle: &str) -> Option<String> {
+        let now = tokio::time::Instant::now();
+        self.evict_expired(now);
+        let entry = self.short_cursors.get_mut(handle)?;
+        entry.last_touched = now;
+        Some(entry.cursor.clone())
+    }
+
+    fn issue_short_cursor(&mut self, cursor: String) -> String {
+        let now = tokio::time::Instant::now();
+        self.evict_expired(now);
+        while self.short_cursors.len() >= MAX_SHORT_CURSOR_HANDLES {
+            let Some(oldest) = self
+                .short_cursors
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_touched)
+                .map(|(handle, _)| handle.clone())
+            else {
+                break;
+            };
+            self.short_cursors.remove(&oldest);
+        }
+        loop {
+            let handle = new_short_cursor_handle(SHORT_CURSOR_PREFIX);
+            if !self.short_cursors.contains_key(&handle) {
+                self.short_cursors.insert(
+                    handle.clone(),
+                    ShortCursorEntry {
+                        cursor,
+                        last_touched: now,
+                    },
+                );
+                return handle;
             }
         }
     }
@@ -163,6 +218,80 @@ impl AggregateWaitRegistry {
         }
         self.sessions.insert(key, session);
     }
+}
+
+fn new_short_cursor_handle(prefix: &str) -> String {
+    let nonce = SHORT_CURSOR_NONCE.fetch_add(1, Ordering::Relaxed);
+    let mut hasher = DefaultHasher::new();
+    prefix.hash(&mut hasher);
+    nonce.hash(&mut hasher);
+    std::process::id().hash(&mut hasher);
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .hash(&mut hasher);
+    format!("{prefix}{:08x}", hasher.finish() as u32)
+}
+
+fn expired_short_cursor() -> (axum::http::StatusCode, String) {
+    (
+        axum::http::StatusCode::BAD_REQUEST,
+        "task-event cursor handle is invalid or expired; restart without a cursor to safely replay retained history"
+            .to_string(),
+    )
+}
+
+fn expand_short_cursor(
+    state: &Arc<AppState>,
+    cursor: Option<&str>,
+) -> Result<Option<String>, (axum::http::StatusCode, String)> {
+    let Some(handle) = cursor.filter(|cursor| cursor.starts_with(SHORT_CURSOR_PREFIX)) else {
+        return Ok(cursor.map(str::to_string));
+    };
+    state
+        .aggregate_task_event_waits
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .resolve_short_cursor(handle)
+        .map(Some)
+        .ok_or_else(expired_short_cursor)
+}
+
+fn shorten_response_cursor(
+    state: &Arc<AppState>,
+    Json(mut response): Json<Value>,
+) -> Result<Json<Value>, (axum::http::StatusCode, String)> {
+    let cursor = response
+        .get("cursor")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "task-event response did not contain a cursor".to_string(),
+            )
+        })?
+        .to_string();
+    let handle = state
+        .aggregate_task_event_waits
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .issue_short_cursor(cursor);
+    response["cursor"] = Value::String(handle);
+    Ok(Json(response))
+}
+
+#[cfg(test)]
+pub(super) fn issue_expired_short_cursor_for_test(state: &Arc<AppState>) -> String {
+    let mut registry = state
+        .aggregate_task_event_waits
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let handle = registry.issue_short_cursor("0".to_string());
+    if let Some(entry) = registry.short_cursors.get_mut(&handle) {
+        entry.last_touched = tokio::time::Instant::now() - AGGREGATE_WAIT_SESSION_TTL;
+    }
+    handle
 }
 
 fn ensure_aggregate_wait_reaper(state: &Arc<AppState>) {
@@ -256,7 +385,8 @@ const PARENT_CURSOR_V3_PREFIX: &str = "p3.";
 fn invalid_cursor() -> (axum::http::StatusCode, String) {
     (
         axum::http::StatusCode::BAD_REQUEST,
-        "cursor is not a valid cursor returned by this endpoint".to_string(),
+        "cursor is not a valid cursor returned by this endpoint; restart without a cursor to safely replay retained history"
+            .to_string(),
     )
 }
 
@@ -1308,12 +1438,7 @@ fn apply_aggregate_completion(
             )
         })?;
     let remaining = (limit as usize).saturating_sub(events.len());
-    if returned_events.len() > remaining {
-        session
-            .cursor
-            .machines_with_more
-            .insert(completion.machine_id.clone());
-    } else if response_has_more {
+    if returned_events.len() > remaining || response_has_more {
         session
             .cursor
             .machines_with_more
@@ -1664,16 +1789,20 @@ async fn wait_aggregate_task_events(
 
 pub(super) async fn wait_task_events(
     State(state): State<Arc<AppState>>,
-    Query(query): Query<TaskEventsQuery>,
+    Query(mut query): Query<TaskEventsQuery>,
     account_wide_access: AccountWideTaskEventAccess,
     tunneled: Option<Extension<TunneledHttpInvoke>>,
 ) -> Result<Json<Value>, (axum::http::StatusCode, String)> {
-    if tunneled.is_some() || query.local_only {
-        return wait_local_task_events(state, query, tunneled.is_some()).await;
-    }
+    let use_short_cursor = query.short_cursor
+        || query
+            .cursor
+            .as_deref()
+            .is_some_and(|cursor| cursor.starts_with(SHORT_CURSOR_PREFIX));
+    query.cursor = expand_short_cursor(&state, query.cursor.as_deref())?;
 
-    if !account_wide_access.is_authorized() {
-        let mut query = query;
+    let result = if tunneled.is_some() || query.local_only {
+        wait_local_task_events(Arc::clone(&state), query, tunneled.is_some()).await
+    } else if !account_wide_access.is_authorized() {
         if query
             .cursor
             .as_deref()
@@ -1685,32 +1814,39 @@ pub(super) async fn wait_task_events(
             ));
         }
         query.local_only = true;
-        return wait_local_task_events(state, query, false).await;
-    }
+        wait_local_task_events(Arc::clone(&state), query, false).await
+    } else {
+        let aggregate_cursor = query
+            .cursor
+            .as_deref()
+            .is_some_and(|cursor| cursor.starts_with(AGGREGATE_CURSOR_PREFIX));
+        if state.desktop_routing_available() || aggregate_cursor {
+            wait_aggregate_task_events(Arc::clone(&state), query).await
+        } else {
+            // Preserve native numeric/p3 cursors when this server has never had
+            // a relay route. The explicit error makes the incompleteness visible
+            // without forcing every single-machine caller into a composite cursor.
+            let Json(mut response) =
+                wait_local_task_events(Arc::clone(&state), query, false).await?;
+            if let Some(response) = response.as_object_mut() {
+                response.insert(
+                    "machineErrors".to_string(),
+                    json!([{
+                        "machineId": Value::Null,
+                        "error": "desktop relay routing is unavailable; sibling machines were not observed",
+                        "stale": true,
+                    }]),
+                );
+            }
+            Ok(Json(response))
+        }
+    }?;
 
-    let aggregate_cursor = query
-        .cursor
-        .as_deref()
-        .is_some_and(|cursor| cursor.starts_with(AGGREGATE_CURSOR_PREFIX));
-    if state.desktop_routing_available() || aggregate_cursor {
-        return wait_aggregate_task_events(state, query).await;
+    if use_short_cursor {
+        shorten_response_cursor(&state, result)
+    } else {
+        Ok(result)
     }
-
-    // Preserve native numeric/p3 cursors when this server has never had a
-    // relay route. The explicit error makes the incompleteness visible without
-    // forcing every single-machine caller into a composite cursor.
-    let Json(mut response) = wait_local_task_events(Arc::clone(&state), query, false).await?;
-    if let Some(response) = response.as_object_mut() {
-        response.insert(
-            "machineErrors".to_string(),
-            json!([{
-                "machineId": Value::Null,
-                "error": "desktop relay routing is unavailable; sibling machines were not observed",
-                "stale": true,
-            }]),
-        );
-    }
-    Ok(Json(response))
 }
 
 #[cfg(test)]

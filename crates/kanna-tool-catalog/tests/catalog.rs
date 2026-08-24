@@ -805,7 +805,7 @@ fn wait_events_is_scoped_cursored_and_bounded_by_the_client_budget() {
     assert_eq!(request.kind, ResponseKind::Json);
     assert_eq!(
         request.path,
-        format!("/v1/task-events?taskIds=task-a%2Ctask-b&cursor=42&timeoutSecs={DEFAULT_WAIT_TIMEOUT_SECS}")
+        format!("/v1/task-events?taskIds=task-a%2Ctask-b&shortCursor=true&cursor=42&timeoutSecs={DEFAULT_WAIT_TIMEOUT_SECS}")
     );
     let tools = catalog.tools_list_value();
     let schema = tools
@@ -830,7 +830,7 @@ fn wait_events_is_scoped_cursored_and_bounded_by_the_client_budget() {
     .path;
     assert_eq!(
         repo_scoped,
-        format!("/v1/task-events?repoId=repo%201&timeoutSecs={MAX_WAIT_TIMEOUT_SECS}&limit=5"),
+        format!("/v1/task-events?repoId=repo%201&shortCursor=true&timeoutSecs={MAX_WAIT_TIMEOUT_SECS}&limit=5"),
         "an over-long window must be clamped before the client can kill the call"
     );
 
@@ -845,7 +845,7 @@ fn wait_events_is_scoped_cursored_and_bounded_by_the_client_budget() {
     .path;
     assert_eq!(
         parent_scoped,
-        format!("/v1/task-events?parentTaskId=parent%201&timeoutSecs={DEFAULT_WAIT_TIMEOUT_SECS}")
+        format!("/v1/task-events?parentTaskId=parent%201&shortCursor=true&timeoutSecs={DEFAULT_WAIT_TIMEOUT_SECS}")
     );
     let description = &catalog
         .tools
@@ -854,7 +854,7 @@ fn wait_events_is_scoped_cursored_and_bounded_by_the_client_budget() {
         .expect("wait events tool")
         .description;
     assert!(
-        description.contains("opaque cursor")
+        description.contains("short cursor handle")
             && description.contains("constant-size cursor")
             && description.contains("read checkpoint")
             && description.contains("never rewinds acknowledged events")

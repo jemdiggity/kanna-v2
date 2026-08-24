@@ -10,18 +10,23 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::env;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime};
 
 const DEFAULT_SERVER_BASE_URL: &str = "http://127.0.0.1:48120";
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const MULTI_MACHINE_CURSOR_PREFIX: &str = "km1.";
+const SHORT_MULTI_MACHINE_CURSOR_PREFIX: &str = "kmh1.";
 const MAX_MULTI_MACHINE_CURSOR_LEN: usize = 64 * 1024;
 const MULTI_MACHINE_WAIT_SESSION_TTL: Duration = Duration::from_secs(10 * 60);
+const MAX_MULTI_MACHINE_WAIT_SESSIONS: usize = 256;
 const TASK_EVENTS_TOKEN_PATH_ENV: &str = "KANNA_TASK_EVENTS_TOKEN_PATH";
+static SHORT_CURSOR_NONCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -43,9 +48,15 @@ struct MultiMachineWaitSession {
     last_touched: tokio::time::Instant,
 }
 
+struct MultiMachineCursorCheckpoint {
+    cursor: String,
+    last_touched: tokio::time::Instant,
+}
+
 #[derive(Default)]
 struct MultiMachineWaitRegistry {
     sessions: HashMap<String, MultiMachineWaitSession>,
+    checkpoints: HashMap<String, MultiMachineCursorCheckpoint>,
 }
 
 type SharedMultiMachineWaits = Arc<Mutex<MultiMachineWaitRegistry>>;
@@ -638,6 +649,39 @@ fn encode_multi_machine_cursor(cursor: &MultiMachineCursor) -> Result<String, St
     Ok(encoded)
 }
 
+fn new_short_multi_machine_cursor(registry: &MultiMachineWaitRegistry) -> String {
+    loop {
+        let nonce = SHORT_CURSOR_NONCE.fetch_add(1, Ordering::Relaxed);
+        let mut hasher = DefaultHasher::new();
+        SHORT_MULTI_MACHINE_CURSOR_PREFIX.hash(&mut hasher);
+        nonce.hash(&mut hasher);
+        process::id().hash(&mut hasher);
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            .hash(&mut hasher);
+        let handle = format!(
+            "{SHORT_MULTI_MACHINE_CURSOR_PREFIX}{:08x}",
+            hasher.finish() as u32
+        );
+        if !registry.checkpoints.contains_key(&handle) {
+            return handle;
+        }
+    }
+}
+
+fn short_cursor_recovery_error() -> String {
+    "multi-machine task-event cursor handle is invalid or expired; restart without a cursor to safely replay retained history"
+        .to_string()
+}
+
+fn poisoned_machine_cursor_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("cursor")
+        && (lower.contains("invalid") || lower.contains("not a valid") || lower.contains("expired"))
+}
+
 fn decode_multi_machine_cursor(value: &str) -> Result<Option<MultiMachineCursor>, String> {
     let Some(encoded) = value.strip_prefix(MULTI_MACHINE_CURSOR_PREFIX) else {
         return Ok(None);
@@ -647,9 +691,13 @@ fn decode_multi_machine_cursor(value: &str) -> Result<Option<MultiMachineCursor>
     }
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(encoded)
-        .map_err(|_| "cursor is not a valid multi-machine event cursor".to_string())?;
+        .map_err(|_| {
+            "cursor is not a valid multi-machine event cursor; restart without a cursor to safely replay retained history".to_string()
+        })?;
     let cursor: MultiMachineCursor = serde_json::from_slice(&bytes)
-        .map_err(|_| "cursor is not a valid multi-machine event cursor".to_string())?;
+        .map_err(|_| {
+            "cursor is not a valid multi-machine event cursor; restart without a cursor to safely replay retained history".to_string()
+        })?;
     if cursor.local_machine_id.trim().is_empty()
         || cursor.task_ids_by_machine.is_empty()
         || cursor
@@ -667,7 +715,10 @@ fn decode_multi_machine_cursor(value: &str) -> Result<Option<MultiMachineCursor>
             .sum::<usize>()
             != cursor_task_ids(&cursor).len()
     {
-        return Err("cursor is not a valid multi-machine event cursor".to_string());
+        return Err(
+            "cursor is not a valid multi-machine event cursor; restart without a cursor to safely replay retained history"
+                .to_string(),
+        );
     }
     Ok(Some(cursor))
 }
@@ -948,6 +999,12 @@ fn apply_machine_wait_completion(
     let response = match completion.result {
         Ok(response) => response,
         Err(error) => {
+            if poisoned_machine_cursor_error(&error) {
+                return Err(format!(
+                    "machine {} rejected its embedded task-event cursor ({error}); restart kanna_wait_events without a cursor to safely replay retained history",
+                    completion.machine_id
+                ));
+            }
             failed_machines.insert(completion.machine_id.clone());
             errors.push(serde_json::json!({
                 "machineId": completion.machine_id,
@@ -1012,7 +1069,29 @@ async fn wait_events_across_machines(
     }
     let task_ids = normalized_task_ids(&args)?;
     let supplied_cursor = args.get("cursor").and_then(Value::as_str);
-    let decoded_cursor = match supplied_cursor {
+    let expanded_cursor = if let Some(handle) =
+        supplied_cursor.filter(|cursor| cursor.starts_with(SHORT_MULTI_MACHINE_CURSOR_PREFIX))
+    {
+        let mut registry = registry
+            .lock()
+            .map_err(|_| "multi-machine wait registry lock poisoned".to_string())?;
+        let now = tokio::time::Instant::now();
+        registry.sessions.retain(|_, session| {
+            now.duration_since(session.last_touched) <= MULTI_MACHINE_WAIT_SESSION_TTL
+        });
+        registry.checkpoints.retain(|_, checkpoint| {
+            now.duration_since(checkpoint.last_touched) <= MULTI_MACHINE_WAIT_SESSION_TTL
+        });
+        let checkpoint = registry
+            .checkpoints
+            .get_mut(handle)
+            .ok_or_else(short_cursor_recovery_error)?;
+        checkpoint.last_touched = now;
+        Some(checkpoint.cursor.clone())
+    } else {
+        supplied_cursor.map(str::to_string)
+    };
+    let decoded_cursor = match expanded_cursor.as_deref() {
         Some(cursor) => decode_multi_machine_cursor(cursor)?,
         None => None,
     };
@@ -1033,11 +1112,9 @@ async fn wait_events_across_machines(
         }
         None => discover_task_owners(base_url, &task_ids, &local_machine_id).await?,
     };
-    if let Some(native_cursor) = supplied_cursor.filter(|_| {
-        !args
-            .get("cursor")
-            .and_then(Value::as_str)
-            .is_some_and(|cursor| cursor.starts_with(MULTI_MACHINE_CURSOR_PREFIX))
+    if let Some(native_cursor) = supplied_cursor.filter(|cursor| {
+        !(cursor.starts_with(MULTI_MACHINE_CURSOR_PREFIX)
+            || cursor.starts_with(SHORT_MULTI_MACHINE_CURSOR_PREFIX))
     }) {
         if cursor
             .task_ids_by_machine
@@ -1151,12 +1228,46 @@ async fn wait_events_across_machines(
     }
 
     session.last_touched = tokio::time::Instant::now();
-    let output_cursor = encode_multi_machine_cursor(&session.cursor)?;
+    // Keep the full km1 value as a restart-compatible input alias, but expose
+    // only a short immutable handle to the agent. A new handle per response
+    // means concurrent resumes cannot overwrite or rewind one another.
+    let legacy_output_cursor = encode_multi_machine_cursor(&session.cursor)?;
+    let output_cursor;
     {
         let mut registry = registry
             .lock()
             .map_err(|_| "multi-machine wait registry lock poisoned".to_string())?;
-        registry.sessions.insert(output_cursor.clone(), session);
+        while registry.sessions.len() >= MAX_MULTI_MACHINE_WAIT_SESSIONS {
+            let Some(oldest) = registry
+                .sessions
+                .iter()
+                .min_by_key(|(_, session)| session.last_touched)
+                .map(|(cursor, _)| cursor.clone())
+            else {
+                break;
+            };
+            registry.sessions.remove(&oldest);
+        }
+        while registry.checkpoints.len() >= MAX_MULTI_MACHINE_WAIT_SESSIONS {
+            let Some(oldest) = registry
+                .checkpoints
+                .iter()
+                .min_by_key(|(_, checkpoint)| checkpoint.last_touched)
+                .map(|(cursor, _)| cursor.clone())
+            else {
+                break;
+            };
+            registry.checkpoints.remove(&oldest);
+        }
+        output_cursor = new_short_multi_machine_cursor(&registry);
+        registry.checkpoints.insert(
+            output_cursor.clone(),
+            MultiMachineCursorCheckpoint {
+                cursor: legacy_output_cursor.clone(),
+                last_touched: tokio::time::Instant::now(),
+            },
+        );
+        registry.sessions.insert(legacy_output_cursor, session);
     }
     let wait_outcome = if !events.is_empty() || has_more {
         "events"
@@ -1660,7 +1771,7 @@ mod tests {
         let description = wait_events["description"].as_str().expect("description");
 
         assert!(description.contains("different currently reachable machines"));
-        assert!(description.contains("aggregate opaque cursor"));
+        assert!(description.contains("short client-held aggregate cursor"));
         assert!(description.contains("tags every event with machineId"));
     }
 
@@ -1684,6 +1795,91 @@ mod tests {
             decode_multi_machine_cursor(&encoded).expect("decode cursor"),
             Some(cursor)
         );
+    }
+
+    #[test]
+    fn corrupt_legacy_cursor_names_cursorless_recovery() {
+        let error =
+            decode_multi_machine_cursor("km1.not-base64!").expect_err("corrupt cursor must fail");
+        assert!(error.contains("restart without a cursor"), "{error}");
+        assert!(error.contains("replay retained history"), "{error}");
+    }
+
+    #[test]
+    fn bad_embedded_machine_cursor_fails_instead_of_returning_a_wedged_partial() {
+        let machine_id = "desktop-local".to_string();
+        let mut session = MultiMachineWaitSession {
+            cursor: MultiMachineCursor {
+                local_machine_id: machine_id.clone(),
+                task_ids_by_machine: BTreeMap::from([(
+                    machine_id.clone(),
+                    vec!["task-a".to_string()],
+                )]),
+                cursors_by_machine: BTreeMap::from([(
+                    machine_id.clone(),
+                    "kc1.corrupt".to_string(),
+                )]),
+            },
+            pending: tokio::task::JoinSet::new(),
+            pending_machines: HashSet::from([machine_id.clone()]),
+            last_touched: tokio::time::Instant::now(),
+        };
+        let mut events = Vec::new();
+        let mut errors = Vec::new();
+        let mut failed = HashSet::new();
+        let mut completed = HashSet::new();
+        let mut has_more = false;
+
+        let error = apply_machine_wait_completion(
+            &mut session,
+            MachineWaitCompletion {
+                machine_id,
+                result: Err(
+                    "GET /v1/task-events failed with status 400: cursor is not a valid cursor returned by this endpoint"
+                        .to_string(),
+                ),
+            },
+            &mut events,
+            &mut errors,
+            &mut failed,
+            &mut completed,
+            &mut has_more,
+        )
+        .expect_err("poisoned cursor must invalidate the aggregate call");
+
+        assert!(error.contains("restart kanna_wait_events without a cursor"));
+        assert!(errors.is_empty(), "must not return a retryable partial");
+    }
+
+    #[tokio::test]
+    async fn expired_short_aggregate_cursor_names_cursorless_recovery() {
+        let handle = "kmh1.deadbeef".to_string();
+        let registry = Arc::new(Mutex::new(MultiMachineWaitRegistry {
+            sessions: HashMap::new(),
+            checkpoints: HashMap::from([(
+                handle.clone(),
+                MultiMachineCursorCheckpoint {
+                    cursor: "km1.legacy".to_string(),
+                    last_touched: tokio::time::Instant::now() - MULTI_MACHINE_WAIT_SESSION_TTL,
+                },
+            )]),
+        }));
+        let error = wait_events_across_machines(
+            "http://127.0.0.1:9",
+            &shared_bundled_catalog(),
+            &registry,
+            json!({
+                "task_ids": ["task-a"],
+                "cursor": handle,
+                "timeout_secs": 0,
+            }),
+        )
+        .await
+        .expect_err("expired handle must fail before any HTTP request");
+
+        assert!(error.contains("invalid or expired"), "{error}");
+        assert!(error.contains("restart without a cursor"), "{error}");
+        assert!(error.contains("replay retained history"), "{error}");
     }
 
     #[test]

@@ -869,6 +869,76 @@ async fn orchestrator_receives_every_child_event_exactly_once_across_polls() {
     assert_eq!(event_pairs(&drained), Vec::new());
 }
 
+#[tokio::test]
+async fn short_cursor_upgrades_legacy_state_and_preserves_call_to_call_continuity() {
+    let (app, db_path) = events_router();
+    let db = Db::open(&db_path).expect("open db");
+    start_run(&db, "short-run", "child-a", "in progress");
+
+    let legacy = get_json_body(
+        &app,
+        "/v1/task-events?taskIds=child-a&localOnly=true&timeoutSecs=0",
+    )
+    .await;
+    let legacy_cursor = cursor_of(&legacy);
+    assert!(legacy_cursor.parse::<i64>().is_ok());
+
+    let upgraded = get_json_body(
+        &app,
+        &format!(
+            "/v1/task-events?taskIds=child-a&localOnly=true&shortCursor=true&cursor={legacy_cursor}&timeoutSecs=0"
+        ),
+    )
+    .await;
+    let handle = cursor_of(&upgraded);
+    assert!(handle.starts_with("kh1."));
+    assert_eq!(handle.len(), "kh1.".len() + 8);
+    assert!(upgraded["events"].as_array().is_some_and(Vec::is_empty));
+
+    db.update_pipeline_item_stage("child-a", "review")
+        .expect("append event between calls");
+    let resumed = get_json_body(
+        &app,
+        &format!(
+            "/v1/task-events?taskIds=child-a&localOnly=true&shortCursor=true&cursor={handle}&timeoutSecs=0"
+        ),
+    )
+    .await;
+    assert_eq!(
+        event_pairs(&resumed),
+        vec![("child-a".to_string(), "stage.changed".to_string())]
+    );
+    assert!(cursor_of(&resumed).starts_with("kh1."));
+}
+
+#[tokio::test]
+async fn invalid_or_expired_short_cursor_names_the_safe_recovery() {
+    let state = test_state_with_seed("desktop-task-events", "Task Events", seed_orchestration);
+    let app = router(Arc::clone(&state));
+    let expired = crate::http_api::task_events::issue_expired_short_cursor_for_test(&state);
+
+    for cursor in ["kh1.nothex00", expired.as_str()] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/v1/task-events?taskIds=child-a&localOnly=true&shortCursor=true&cursor={cursor}&timeoutSecs=0"
+                ))
+                .body(Body::empty())
+                .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("error body");
+        let body = String::from_utf8_lossy(&body);
+        assert!(body.contains("restart without a cursor"), "{body}");
+        assert!(body.contains("replay retained history"), "{body}");
+    }
+}
+
 /// Replaying a cursor is how a crashed orchestrator resumes. The same cursor
 /// must yield the same events — the log is the source of truth, not the
 /// reader's position in it.
@@ -3001,10 +3071,8 @@ async fn legacy_p1_future_state_is_rejected_before_candidate_work() {
             || panic!("future cursor reached membership/candidate work"),
         )
         .expect_err("future p1 cursor must be rejected");
-        assert_eq!(
-            error,
-            "cursor is not a valid cursor returned by this endpoint"
-        );
+        assert!(error.starts_with("cursor is not a valid cursor returned by this endpoint"));
+        assert!(error.contains("restart without a cursor"));
     }
 }
 

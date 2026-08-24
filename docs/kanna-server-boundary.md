@@ -294,6 +294,15 @@ as aggregation becomes available initializes the local watermark and starts
 new peers from retained history. A server that has no relay route keeps the
 native cursor shape and, for an account-wide-authorized caller, adds a
 relay-unavailable `machineErrors` warning.
+Agent-facing catalog calls set `shortCursor=true`. The server then retains the
+full native or `ks1.` checkpoint behind an immutable `kh1.` plus eight-hex-digit
+handle for ten minutes after its last use. A fresh handle is issued for every
+response, so concurrent resumes cannot rewind one another. Handles are
+process-local by design: an expired, evicted, corrupt, or post-restart handle
+fails with an instruction to omit the cursor and safely replay retained
+history. Callers that omit `shortCursor` keep receiving the deployed stateless
+cursor shapes, and numeric, `p1.`, `p3.`, `kc1.`, and `ks1.` inputs remain
+accepted; resuming one with short cursors enabled upgrades the response.
 `localOnly=true` is the explicit compatibility escape hatch used by adapters
 that already own a per-machine fan-in; inbound relay invokes are local-only by
 transport provenance regardless of the query.
@@ -302,14 +311,20 @@ transport provenance regardless of the query.
 explicit `task_ids` belong to several reachable machines and `machine_id` is
 omitted, MCP discovers each task's owner, starts one native cursor wait per
 owner, and returns as soon as any owner has events. Every returned event gains
-`machineId`. Its `km1.` aggregate cursor records the immutable task-to-machine
-grouping plus each server's opaque native cursor; callers pass it back exactly
-like a local cursor. The MCP process retains the other in-flight long polls and
+`machineId`. Its legacy `km1.` aggregate cursor records the immutable
+task-to-machine grouping plus each server's opaque native cursor. New responses
+expose that checkpoint as a process-local `kmh1.` plus eight-hex-digit handle;
+old `km1.` values remain accepted and upgrade on resume. An unknown or expired
+handle tells the caller to omit it and replay retained history. The MCP process
+retains the other in-flight long polls and
 reuses them on the next call, rather than cancelling them, abandoning relay
 work, or replacing the server event feed with client polling. If MCP restarts,
 the aggregate cursor contains enough state to recreate those waits without
 losing events. Machine failures are returned in `machineErrors` without
-advancing that machine's cursor or discarding events received elsewhere.
+advancing that machine's cursor or discarding events received elsewhere. A 400
+that identifies an invalid or expired embedded machine cursor instead
+invalidates the aggregate call and gives the cursor-less recovery, rather than
+returning a partial continuation that can only fail again.
 
 On every aggregate-cursor resume, kanna-mcp compares the cursor's claimed
 `localMachineId` with the live local server identity before using its ownership
