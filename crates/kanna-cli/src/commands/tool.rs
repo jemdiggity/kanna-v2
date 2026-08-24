@@ -2,7 +2,8 @@ use std::env;
 use std::process;
 
 use kanna_tool_catalog::{
-    clamp_wait_timeout_secs, load_catalog, resolve_request, runtime_info_snapshot,
+    clamp_wait_timeout_secs, encode_path_segment, load_catalog, repo_context_task_id,
+    resolve_request, resolve_request_with_repo_context, runtime_info_snapshot,
     wait_resolved_result, wait_timeout_result, Catalog, Method as CatalogMethod, ResolvedRequest,
     ResponseKind, RuntimeAdapterIdentity,
 };
@@ -163,28 +164,45 @@ pub(crate) async fn call_catalog_tool(
     name: &str,
     args: &Value,
 ) -> Result<(ResponseKind, Value), String> {
+    let task_id = env::var("KANNA_TASK_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    call_catalog_tool_with_task_id(base_url, catalog, name, args, task_id.as_deref()).await
+}
+
+pub(crate) async fn call_catalog_tool_with_task_id(
+    base_url: &str,
+    catalog: &Catalog,
+    name: &str,
+    args: &Value,
+    task_id: Option<&str>,
+) -> Result<(ResponseKind, Value), String> {
     if name == "kanna_complete_stage" && args.get("machine_id").is_some() {
         return Err(
             "kanna_complete_stage cannot target another machine; an agent can only complete its own local stage"
                 .to_string(),
         );
     }
-    let mut request = resolve_request(catalog, name, args)?;
-    let requested_machine_id = request.machine_id.take();
-    let machine_id = resolve_remote_machine_id(base_url, requested_machine_id.as_deref()).await?;
-    if name == "kanna_create_task" && machine_id.is_some() && args.get("repo_id").is_none() {
-        return Err(format!(
-            "repo_id is required when creating a task on machine {}; call kanna_list_repos with the same machine_id first",
-            machine_id.as_deref().unwrap_or_default()
-        ));
-    }
+    let preliminary_request = resolve_request(catalog, name, args)?;
+    let requested_machine_id = preliminary_request.machine_id.as_deref();
+    let machine_id = resolve_remote_machine_id(base_url, requested_machine_id).await?;
+    let repo_task_id = repo_context_task_id(name, args, task_id, machine_id.as_deref())?;
+    let current_task = match repo_task_id {
+        Some(repo_task_id) => {
+            let path = format!("/v1/tasks/{}", encode_path_segment(&repo_task_id));
+            Some(get_json(base_url, &path).await.map_err(|error| {
+                format!("failed to infer repo_id from KANNA_TASK_ID={repo_task_id}: {error}")
+            })?)
+        }
+        None => None,
+    };
+    let mut request =
+        resolve_request_with_repo_context(catalog, name, args, current_task.as_ref())?;
+    request.machine_id = None;
     if name == "kanna_complete_stage" {
         bind_request_to_spawned_run(base_url, &mut request).await?;
     }
     let kind = request.kind;
-    let task_id = env::var("KANNA_TASK_ID")
-        .ok()
-        .filter(|value| !value.trim().is_empty());
     // The tools this client advertises — including any override catalog — are
     // what a skew report has to be measured against.
     let client_tool_names = catalog
@@ -199,7 +217,7 @@ pub(crate) async fn call_catalog_tool(
             name: "kanna-cli",
             version: env!("CARGO_PKG_VERSION"),
             mcp_protocol_version: None,
-            task_id: task_id.as_deref(),
+            task_id,
         },
         machine_id.as_deref(),
         &client_tool_names,

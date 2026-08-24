@@ -150,13 +150,17 @@ describe("QA workflow assets", () => {
     expect(agent.agent_provider?.[0]).toBe("codex");
     expect(agent.prompt).toContain("kanna_wait_events");
     expect(agent.prompt).toContain("include_current_activity: true");
-    expect(agent.prompt).toContain("every reachable account machine");
+    expect(agent.prompt).toContain("Scope the watch to the whole repository");
+    expect(agent.prompt).toContain("the task session supplies its repository by default");
+    expect(agent.prompt).toContain('from: "now"');
+    expect(agent.prompt).toContain(
+      "confirm the repository watch covers every open task, including blocked tasks with no session yet"
+    );
+    expect(agent.prompt).toContain(
+      "The last tool call of every turn is `kanna_wait_events`"
+    );
     expect(agent.prompt).toContain("task.runtime_settled");
     expect(agent.prompt).toContain("task.awaiting_advance");
-    expect(agent.prompt).toContain('"all_machines": true');
-    expect(agent.prompt).toContain("Never build a polling loop");
-    expect(agent.prompt).toContain("there is no provider-specific shell watcher");
-    expect(agent.prompt).toContain("use a private HTTP/shell watcher");
     expect(agent.prompt).toContain("kanna_set_task_notify");
     expect(agent.prompt).toContain(
       "Product work, bug fixes, investigations, releases, and other durable repository tasks"

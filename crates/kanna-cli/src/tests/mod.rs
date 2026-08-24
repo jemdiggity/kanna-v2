@@ -136,6 +136,7 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
                     ("local_only", "local_only"),
                     ("include_current_activity", "include_current_activity"),
                     ("short_cursor", "short_cursor"),
+                    ("from", "from"),
                     ("cursor", "cursor"),
                     ("timeout_secs", "timeout_secs"),
                     ("limit", "limit"),
@@ -378,6 +379,26 @@ async fn serve_single_http_response(response: String) -> (String, tokio::task::J
         request
     });
 
+    (base_url, handle)
+}
+
+async fn serve_http_responses(
+    responses: Vec<String>,
+) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+    let listener = TokioTcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{addr}");
+    let handle = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for response in responses {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = vec![0; 4096];
+            let bytes_read = socket.read(&mut buffer).await.unwrap();
+            requests.push(String::from_utf8_lossy(&buffer[..bytes_read]).to_string());
+            socket.write_all(response.as_bytes()).await.unwrap();
+        }
+        requests
+    });
     (base_url, handle)
 }
 

@@ -121,6 +121,7 @@ pub(crate) struct TaskEventsParams<'a> {
     pub(crate) local_only: bool,
     pub(crate) include_current_activity: bool,
     pub(crate) short_cursor: bool,
+    pub(crate) from: Option<&'a str>,
     pub(crate) cursor: Option<&'a str>,
     pub(crate) timeout_secs: u64,
     pub(crate) limit: Option<i64>,
@@ -159,6 +160,9 @@ pub(crate) fn task_events_path(params: &TaskEventsParams<'_>) -> String {
         query.push("includeCurrentActivity=true".to_string());
     }
     query.push(format!("shortCursor={}", params.short_cursor));
+    if let Some(from) = params.from {
+        query.push(format!("from={}", encode_path_segment(from)));
+    }
     if let Some(cursor) = params.cursor {
         query.push(format!("cursor={}", encode_path_segment(cursor)));
     }

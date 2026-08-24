@@ -615,6 +615,10 @@ pub(crate) enum TaskCommands {
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         short_cursor: bool,
 
+        /// Start a cursorless watch at the current event tail (`now`)
+        #[arg(long, value_parser = ["now"])]
+        from: Option<String>,
+
         /// Cursor from the previous call; omit to receive retained history
         #[arg(long)]
         cursor: Option<String>,

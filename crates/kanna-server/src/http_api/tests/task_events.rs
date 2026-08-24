@@ -477,17 +477,9 @@ async fn level_triggered_activity_wait_returns_an_already_idle_task_immediately(
         vec![("child-a".to_string(), "idle".to_string())]
     );
 
-    let drained = get_json_body(
-        &app,
-        "/v1/task-events?taskIds=child-a&localOnly=true&timeoutSecs=0",
-    )
-    .await;
     let response = get_json_body(
         &app,
-        &format!(
-            "/v1/task-events?taskIds=child-a&localOnly=true&includeCurrentActivity=true&cursor={}&timeoutSecs=1",
-            cursor_of(&drained)
-        ),
+        "/v1/task-events?taskIds=child-a&localOnly=true&includeCurrentActivity=true&from=now&timeoutSecs=1",
     )
     .await;
 
@@ -500,6 +492,76 @@ async fn level_triggered_activity_wait_returns_an_already_idle_task_immediately(
     assert_eq!(event["payload"]["runtimeState"], "idle");
     assert_eq!(event["payload"]["title"], "child-a");
     assert_eq!(event["payload"]["machineId"], "desktop-task-events");
+}
+
+#[tokio::test]
+async fn repo_watch_can_start_at_current_tail_without_changing_cursorless_replay() {
+    let (app, db_path) = events_router();
+
+    let tail = get_json_body(
+        &app,
+        "/v1/task-events?repoId=repo-events&localOnly=true&from=now&timeoutSecs=0",
+    )
+    .await;
+    assert_eq!(tail["waitOutcome"], "timeout");
+    assert!(tail["events"].as_array().expect("events").is_empty());
+    let tail_cursor = cursor_of(&tail);
+
+    let db = Db::open(&db_path).expect("open db");
+    db.update_pipeline_item_stage("child-a", "review")
+        .expect("append event after tail checkpoint");
+    let next = get_json_body(
+        &app,
+        &format!(
+            "/v1/task-events?repoId=repo-events&localOnly=true&from=now&cursor={tail_cursor}&timeoutSecs=0"
+        ),
+    )
+    .await;
+    assert_eq!(next["events"].as_array().map(Vec::len), Some(1));
+    assert_eq!(next["events"][0]["type"], "stage.changed");
+
+    let replay = get_json_body(
+        &app,
+        "/v1/task-events?repoId=repo-events&localOnly=true&timeoutSecs=0",
+    )
+    .await;
+    assert!(
+        replay["events"]
+            .as_array()
+            .is_some_and(|events| !events.is_empty()),
+        "omitting from must preserve retained-history replay"
+    );
+}
+
+#[tokio::test]
+async fn repo_watch_limit_allows_pages_larger_than_the_default_one_hundred() {
+    let (app, db_path) = events_router();
+    let tail = get_json_body(
+        &app,
+        "/v1/task-events?repoId=repo-events&localOnly=true&from=now&timeoutSecs=0",
+    )
+    .await;
+    let cursor = cursor_of(&tail);
+    let db = Db::open(&db_path).expect("open db");
+    for index in 0..150 {
+        let stage = if index % 2 == 0 {
+            "review"
+        } else {
+            "in progress"
+        };
+        db.update_pipeline_item_stage("child-a", stage)
+            .expect("append stage event");
+    }
+
+    let page = get_json_body(
+        &app,
+        &format!(
+            "/v1/task-events?repoId=repo-events&localOnly=true&cursor={cursor}&limit=150&timeoutSecs=0"
+        ),
+    )
+    .await;
+    assert_eq!(page["events"].as_array().map(Vec::len), Some(150));
+    assert_eq!(page["hasMore"], false);
 }
 
 #[tokio::test]

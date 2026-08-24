@@ -68,6 +68,9 @@ static SHORT_CURSOR_NONCE: AtomicU64 = AtomicU64::new(0);
 #[serde(rename_all = "camelCase")]
 pub(super) struct TaskEventsQuery {
     cursor: Option<String>,
+    /// On a cursorless request, establish the durable checkpoint at the
+    /// current event-log tail instead of replaying retained history.
+    from: Option<String>,
     /// Comma-separated task ids or branch names. Omit to watch a whole repo.
     task_ids: Option<String>,
     /// Watch this task's direct children instead of naming their ids — the
@@ -130,11 +133,25 @@ struct AggregateWaitSession {
     pending_machines: HashSet<String>,
     last_touched: tokio::time::Instant,
     include_current_activity: bool,
+    from_now: bool,
 }
 
 struct ShortCursorEntry {
     cursor: String,
     last_touched: tokio::time::Instant,
+}
+
+fn starts_at_current_tail(
+    query: &TaskEventsQuery,
+) -> Result<bool, (axum::http::StatusCode, String)> {
+    match query.from.as_deref() {
+        None => Ok(false),
+        Some("now") => Ok(true),
+        Some(value) => Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            format!("from must be now, got {value}"),
+        )),
+    }
 }
 
 #[derive(Default)]
@@ -1085,6 +1102,22 @@ async fn wait_local_task_events(
         })?;
         resolve_scope(&db, &query, tolerate_missing_tasks)?
     };
+    let from_now = starts_at_current_tail(&query)?;
+    if cursor.is_none() && from_now {
+        let db = Db::open(&db_path).map_err(db_error)?;
+        let head_seq = db.latest_task_event_seq().map_err(db_error)?;
+        cursor = Some(match &scope {
+            TaskEventScope::Children(parent_task_id) => {
+                TaskEventsCursor::ParentV3(ParentTaskEventsCursorV3 {
+                    parent_task_id: parent_task_id.clone(),
+                    event_seq: head_seq,
+                })
+            }
+            TaskEventScope::Tasks(_)
+            | TaskEventScope::Repo(_)
+            | TaskEventScope::RepoRemoteUrlHash(_) => TaskEventsCursor::Sequence(head_seq),
+        });
+    }
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
     loop {
@@ -1295,6 +1328,7 @@ fn local_query_for_aggregate(
     timeout_secs: u64,
     limit: i64,
     include_current_activity: bool,
+    from_now: bool,
 ) -> TaskEventsQuery {
     let mut query = TaskEventsQuery {
         cursor,
@@ -1302,6 +1336,7 @@ fn local_query_for_aggregate(
         limit: Some(limit),
         local_only: true,
         include_current_activity,
+        from: from_now.then(|| "now".to_string()),
         ..TaskEventsQuery::default()
     };
     match scope {
@@ -1324,6 +1359,9 @@ fn aggregate_query_path(query: &TaskEventsQuery) -> String {
     ];
     if query.include_current_activity {
         params.push("includeCurrentActivity=true".to_string());
+    }
+    if let Some(from) = query.from.as_deref() {
+        params.push(format!("from={}", encode_path_segment(from)));
     }
     if let Some(task_ids) = query.task_ids.as_deref() {
         params.push(format!("taskIds={}", encode_path_segment(task_ids)));
@@ -1374,6 +1412,7 @@ fn spawn_aggregate_wait(
         timeout_secs,
         limit,
         session.include_current_activity,
+        session.from_now,
     );
     let local_machine_id = session.cursor.local_machine_id.clone();
     let completed_machine_id = machine_id.clone();
@@ -1593,6 +1632,7 @@ async fn wait_aggregate_task_events(
     state: Arc<AppState>,
     query: TaskEventsQuery,
 ) -> Result<Json<Value>, (axum::http::StatusCode, String)> {
+    let from_now = starts_at_current_tail(&query)?;
     let timeout_secs = kanna_tool_catalog::clamp_wait_timeout_secs(
         query
             .timeout_secs
@@ -1665,6 +1705,7 @@ async fn wait_aggregate_task_events(
                 pending_machines: HashSet::new(),
                 last_touched: now,
                 include_current_activity: query.include_current_activity,
+                from_now,
             })
     };
     if session.include_current_activity != query.include_current_activity {
@@ -1926,6 +1967,7 @@ mod aggregate_wait_registry_tests {
             pending_machines: HashSet::from([machine_id]),
             last_touched,
             include_current_activity: false,
+            from_now: false,
         }
     }
 

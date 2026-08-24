@@ -68,6 +68,13 @@ fn guide_markdown_includes_live_context_and_all_catalog_tools() {
     assert!(guide.contains("kanna-cli tool call kanna_wait_events"));
     assert!(guide.contains("no_live_agent_session"));
     assert!(guide.contains("delivery_uncertain"));
+    assert!(guide.contains("## Machine-Local Repository Config"));
+    assert!(guide.contains("`.kanna/config.local.json`"));
+    assert!(
+        guide.contains("`agentProviders`, `workflow`, `ports`, `setup`, `teardown`, and `test`")
+    );
+    assert!(guide.contains("arrays never concatenate"));
+    assert!(guide.contains("`.kanna/config.schema.json`"));
     for tool in kanna_tool_catalog::bundled_catalog().tools {
         assert!(
             guide.contains(&format!("`{}`", tool.name)),
@@ -190,6 +197,12 @@ async fn guide_json_fetches_env_task_id_and_includes_workflow_context_and_tools(
         .as_str()
         .unwrap()
         .contains("Prefer kanna_complete_stage"));
+    assert_eq!(guide["localRepoConfig"]["path"], ".kanna/config.local.json");
+    assert!(guide["localRepoConfig"]["guidance"]
+        .as_array()
+        .is_some_and(|lines| lines.iter().any(|line| line
+            .as_str()
+            .is_some_and(|line| line.contains("arrays never concatenate")))));
     let event_supervision = guide["workflow"]["eventSupervision"]
         .as_array()
         .expect("event supervision guidance");

@@ -906,6 +906,94 @@ fn serve_infers_create_task_repo_from_current_task_context() {
 }
 
 #[test]
+fn serve_defaults_listing_search_and_tail_watch_to_current_task_repo() {
+    let current_task = json!({
+        "id": "task-current",
+        "repoId": "repo-current",
+        "title": "Current task",
+        "stage": "in progress",
+        "activity": "working"
+    });
+    let (base_url, server) = start_http_fixture(vec![
+        ExpectedRequest {
+            method: "GET",
+            path: "/v1/tasks/task-current",
+            body: None,
+            response_status: "200 OK",
+            response_body: current_task.clone(),
+        },
+        ExpectedRequest {
+            method: "GET",
+            path: "/v1/tasks/recent?repoId=repo-current",
+            body: None,
+            response_status: "200 OK",
+            response_body: json!([]),
+        },
+        ExpectedRequest {
+            method: "GET",
+            path: "/v1/tasks/task-current",
+            body: None,
+            response_status: "200 OK",
+            response_body: current_task.clone(),
+        },
+        ExpectedRequest {
+            method: "GET",
+            path: "/v1/tasks/search?query=review&repoId=repo-current",
+            body: None,
+            response_status: "200 OK",
+            response_body: json!([]),
+        },
+        ExpectedRequest {
+            method: "GET",
+            path: "/v1/tasks/task-current",
+            body: None,
+            response_status: "200 OK",
+            response_body: current_task,
+        },
+        ExpectedRequest {
+            method: "GET",
+            path: "/v1/task-events?repoId=repo-current&shortCursor=true&from=now&timeoutSecs=0",
+            body: None,
+            response_status: "200 OK",
+            response_body: json!({
+                "waitOutcome": "timeout",
+                "cursor": "kh1.tail",
+                "events": [],
+                "hasMore": false
+            }),
+        },
+    ]);
+
+    let responses = run_kanna_mcp_with_env(
+        &base_url,
+        &[
+            json!({
+                "jsonrpc": "2.0", "id": 13, "method": "tools/call",
+                "params": { "name": "kanna_list_recent_tasks", "arguments": {} }
+            }),
+            json!({
+                "jsonrpc": "2.0", "id": 14, "method": "tools/call",
+                "params": { "name": "kanna_search_tasks", "arguments": { "query": "review" } }
+            }),
+            json!({
+                "jsonrpc": "2.0", "id": 15, "method": "tools/call",
+                "params": { "name": "kanna_wait_events", "arguments": { "from": "now", "timeout_secs": 0 } }
+            }),
+        ],
+        &[("KANNA_TASK_ID", "task-current")],
+    );
+
+    assert_eq!(server.join().expect("fixture server").len(), 6);
+    assert!(
+        responses
+            .iter()
+            .all(|response| response.get("error").is_none()
+                && response["result"]["content"].is_array()),
+        "{responses:#?}"
+    );
+}
+
+#[test]
 fn serve_routes_task_listing_and_creation_to_an_explicit_machine() {
     let proxy_path = "/v1/cloud/desktops/desktop-studio/invoke";
     let (base_url, server) = start_http_fixture(vec![
