@@ -1429,11 +1429,23 @@ async fn maybe_augment_tool_args(
         None if repo_scoped_listing => return Ok(args),
         None => return Err("repo_id is required when KANNA_TASK_ID is not available".to_string()),
     };
+    if repo_scoped_listing {
+        ensure_listing_repo_inference_is_local(machine_id)?;
+    }
     let path = format!("/v1/tasks/{}", encode_path_segment(&task_id));
     let current_task: Value = get_json(base_url, &path)
         .await
         .map_err(|e| format!("failed to infer repo_id from KANNA_TASK_ID={task_id}: {e}"))?;
     augment_repo_args(args, Some(&current_task))
+}
+
+fn ensure_listing_repo_inference_is_local(machine_id: Option<&str>) -> Result<(), String> {
+    if let Some(machine_id) = machine_id {
+        return Err(format!(
+            "repo_id is required when listing tasks on machine {machine_id} from a task session; repository IDs are machine-local, so call kanna_list_repos with the same machine_id and pass its repo_id explicitly (or set all_repos=true)"
+        ));
+    }
+    Ok(())
 }
 
 fn listing_requests_cross_repo_scope(args: &Value) -> bool {
@@ -2101,6 +2113,18 @@ mod tests {
             &json!({ "all_machines": true })
         ));
         assert!(!listing_requests_cross_repo_scope(&json!({})));
+    }
+
+    #[test]
+    fn task_listing_repo_inference_rejects_a_sibling_machine() {
+        assert_eq!(ensure_listing_repo_inference_is_local(None), Ok(()));
+
+        let error = ensure_listing_repo_inference_is_local(Some("desktop-studio"))
+            .expect_err("a local task repo id must not be forwarded to a sibling");
+        assert!(error.contains("repo_id is required"));
+        assert!(error.contains("desktop-studio"));
+        assert!(error.contains("repository IDs are machine-local"));
+        assert!(error.contains("kanna_list_repos"));
     }
 
     #[test]

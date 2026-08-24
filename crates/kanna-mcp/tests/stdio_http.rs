@@ -1005,6 +1005,67 @@ fn serve_routes_task_listing_and_creation_to_an_explicit_machine() {
 }
 
 #[test]
+fn task_session_requires_explicit_repo_for_sibling_machine_listings() {
+    let (base_url, server) = start_http_fixture(vec![
+        ExpectedRequest {
+            method: "GET",
+            path: "/v1/status",
+            body: None,
+            response_status: "200 OK",
+            response_body: json!({ "desktopId": "desktop-local" }),
+        },
+        ExpectedRequest {
+            method: "GET",
+            path: "/v1/status",
+            body: None,
+            response_status: "200 OK",
+            response_body: json!({ "desktopId": "desktop-local" }),
+        },
+    ]);
+
+    let responses = run_kanna_mcp_with_env(
+        &base_url,
+        &[
+            json!({
+                "jsonrpc": "2.0",
+                "id": 32,
+                "method": "tools/call",
+                "params": {
+                    "name": "kanna_list_recent_tasks",
+                    "arguments": { "machine_id": "desktop-studio" }
+                }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 33,
+                "method": "tools/call",
+                "params": {
+                    "name": "kanna_search_tasks",
+                    "arguments": {
+                        "machine_id": "desktop-studio",
+                        "query": "review"
+                    }
+                }
+            }),
+        ],
+        &[("KANNA_TASK_ID", "task-current")],
+    );
+
+    let observed = server.join().expect("fixture server");
+    assert_eq!(observed.len(), 2);
+    for response in responses {
+        let message = tool_error_text(&response);
+        assert!(message.contains("repo_id is required"), "{message}");
+        assert!(message.contains("desktop-studio"), "{message}");
+        assert!(
+            message.contains("repository IDs are machine-local"),
+            "{message}"
+        );
+        assert!(message.contains("kanna_list_repos"), "{message}");
+    }
+}
+
+#[test]
 fn explicit_self_machine_id_uses_local_http_without_relay_discovery() {
     let (base_url, server) = start_http_fixture(vec![
         ExpectedRequest {

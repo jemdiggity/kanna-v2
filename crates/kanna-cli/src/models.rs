@@ -68,7 +68,7 @@ pub(crate) struct ResolvedAgentDefinition {
     pub(crate) source: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TaskSummary {
     pub(crate) id: String,
@@ -76,11 +76,32 @@ pub(crate) struct TaskSummary {
     pub(crate) title: String,
     pub(crate) stage: Option<String>,
     pub(crate) activity: Option<String>,
-    #[serde(default, alias = "snippet")]
+    #[serde(default)]
     pub(crate) waiting_prompt_snippet: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Deserialize)]
+#[serde(remote = "TaskSummary", rename_all = "camelCase")]
+struct TaskSummaryDef {
+    id: String,
+    repo_id: String,
+    title: String,
+    stage: Option<String>,
+    activity: Option<String>,
+    #[serde(default)]
+    waiting_prompt_snippet: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for TaskSummary {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserialize_task_with_compatible_snippet(deserializer, TaskSummaryDef::deserialize)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TaskDetail {
     pub(crate) id: String,
@@ -101,7 +122,7 @@ pub(crate) struct TaskDetail {
     /// Read dimension — `read` | `unread`. Optional for the same reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) read_state: Option<String>,
-    #[serde(default, alias = "snippet")]
+    #[serde(default)]
     pub(crate) waiting_prompt_snippet: Option<String>,
     pub(crate) agent_type: Option<String>,
     pub(crate) agent_provider: Option<String>,
@@ -128,6 +149,69 @@ pub(crate) struct TaskDetail {
     pub(crate) child_task_ids: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) latest_run: Option<TaskLatestRun>,
+}
+
+#[derive(Deserialize)]
+#[serde(remote = "TaskDetail", rename_all = "camelCase")]
+struct TaskDetailDef {
+    id: String,
+    repo_id: String,
+    title: String,
+    stage: Option<String>,
+    workflow_name: Option<String>,
+    stage_transition: Option<String>,
+    activity: Option<String>,
+    #[serde(default)]
+    runtime_state: Option<String>,
+    #[serde(default)]
+    read_state: Option<String>,
+    #[serde(default)]
+    waiting_prompt_snippet: Option<String>,
+    agent_type: Option<String>,
+    agent_provider: Option<String>,
+    branch: Option<String>,
+    pr_url: Option<String>,
+    closed_at: Option<String>,
+    worktree_path: Option<String>,
+    commits_ahead: i64,
+    commits_behind: i64,
+    dirty: bool,
+    #[serde(default)]
+    revision_rounds: Option<i64>,
+    #[serde(default)]
+    revision_limit: Option<i64>,
+    #[serde(default)]
+    child_task_ids: Option<Vec<String>>,
+    #[serde(default)]
+    latest_run: Option<TaskLatestRun>,
+}
+
+impl<'de> Deserialize<'de> for TaskDetail {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserialize_task_with_compatible_snippet(deserializer, TaskDetailDef::deserialize)
+    }
+}
+
+fn deserialize_task_with_compatible_snippet<'de, D, T>(
+    deserializer: D,
+    deserialize: impl FnOnce(Value) -> serde_json::Result<T>,
+) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let mut value = Value::deserialize(deserializer)?;
+    if let Some(object) = value.as_object_mut() {
+        let legacy = object.remove("snippet");
+        if !object.contains_key("waitingPromptSnippet") {
+            if let Some(legacy) = legacy {
+                object.insert("waitingPromptSnippet".to_string(), legacy);
+            }
+        }
+    }
+    deserialize(value).map_err(serde::de::Error::custom)
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
