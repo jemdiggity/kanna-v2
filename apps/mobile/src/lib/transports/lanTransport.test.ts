@@ -344,6 +344,50 @@ describe("createLanTransport", () => {
     );
   });
 
+  it("reissues a push pairing certificate with paired-device credentials", async () => {
+    const material = {
+      desktopPushIdentity: {
+        publicKey: "desktop-ed25519-public-key",
+        relayUrl: "wss://relay.example",
+        environment: "development"
+      },
+      pushPairingCert: {
+        deviceId: "phone-1",
+        issuedAt: 1_784_246_400_000,
+        expiresAt: 1_847_318_400_000,
+        signature: "desktop-signature"
+      }
+    };
+    const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => material
+    });
+    const transport = createLanTransport(
+      "http://127.0.0.1:48120",
+      fetchImpl,
+      undefined,
+      {
+        deviceCredentials: {
+          deviceId: "phone-1",
+          deviceSecret: "lan-secret"
+        }
+      }
+    );
+
+    await expect(transport.reissuePushPairingCertificate?.()).resolves.toEqual(material);
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "http://127.0.0.1:48120/v1/pairing/push-certificate",
+      expect.objectContaining({
+        method: "POST",
+        headers: {
+          "X-Kanna-Device-Id": "phone-1",
+          "X-Kanna-Device-Secret": "lan-secret"
+        }
+      })
+    );
+  });
+
   it("loads full task detail through the encoded LAN task route", async () => {
     const fullPrompt = `${"p".repeat(520)}END-OF-CANONICAL-PROMPT`;
     const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({

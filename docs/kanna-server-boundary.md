@@ -184,6 +184,33 @@ the client falls back to a bounded snapshot.
 - `POST /v1/tasks/{task_id}/actions/set-notify`
 - `POST /v1/mobile/notifications`
 - `POST /v1/pairing/sessions`
+- `POST /v1/pairing/sessions/claim`
+- `POST /v1/pairing/push-certificate` (paired-device authentication required)
+
+### Anonymous push pairing certificate
+
+The pairing claim response keeps the compact `KANNA1:{DESKTOP-ID}:{CODE}` QR
+payload unchanged and additively returns `desktopPushIdentity` and
+`pushPairingCert`. The identity contains the raw 32-byte Ed25519 public key as
+unpadded base64url plus the desktop's relay URL and environment. The
+certificate contains `deviceId`, Unix-millisecond `issuedAt` and `expiresAt`
+(730 days apart), and the raw 64-byte Ed25519 signature as unpadded base64url.
+
+The canonical signed bytes are the ASCII domain
+`kanna.push-pairing-cert.v1` followed by one NUL byte and compact JSON with
+fields in this exact order:
+`{"deviceId":...,"issuedAt":...,"expiresAt":...}`. This is the relay's
+proof that the desktop consented to bind that paired device to its anonymous
+push identity.
+
+`kanna-server` creates the private identity on first use in a mode-0600 JSON
+file beside the configured pairing store. A device paired before this surface
+may obtain and persist its first certificate through authenticated
+`POST /v1/pairing/push-certificate`; later calls transparently re-issue it with
+a fresh 730-day lifetime. The pairing store records which public identity
+issued a device's certificate. If the private key is lost or deliberately
+rotated, that marker no longer matches and re-issue returns `409`; recovery is
+a new LAN pairing ceremony, which binds the device to the new identity.
 
 ### Remote repository checkout
 

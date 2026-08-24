@@ -25,6 +25,7 @@ import type {
   RunRepoCommandResponse,
   DesktopSummary,
   MobileServerStatus,
+  PushPairingMaterial,
   TaskActionResponse,
   TaskActivityResponse,
   TaskDiffContent,
@@ -175,6 +176,7 @@ export interface KannaTransport {
   ): TaskSummarySubscription;
   getTaskRouteIdentity?(taskId: string): string;
   getStatus(): Promise<MobileServerStatus>;
+  reissuePushPairingCertificate?(): Promise<PushPairingMaterial>;
   listDesktops(): Promise<DesktopSummary[]>;
   listRepos(): Promise<RepoSummary[]>;
   startRepoCheckout?(
@@ -252,6 +254,7 @@ export interface KannaClient {
   ): TaskSummarySubscription;
   getTaskRouteIdentity?(taskId: string): string;
   getStatus(): Promise<MobileServerStatus>;
+  reissuePushPairingCertificate?(): Promise<PushPairingMaterial>;
   listDesktops(): Promise<DesktopSummary[]>;
   listRepos(): Promise<RepoSummary[]>;
   startRepoCheckout?(
@@ -354,6 +357,7 @@ export class RepoNotRegisteredError extends TaskCreationError {
 }
 
 export function createKannaClient(transport: KannaTransport): KannaClient {
+  const reissuePushPairingCertificate = transport.reissuePushPairingCertificate;
   return {
     ...(transport.observeMobileNotifications
       ? {
@@ -374,6 +378,12 @@ export function createKannaClient(transport: KannaTransport): KannaClient {
         }
       : {}),
     getStatus: () => transport.getStatus(),
+    ...(reissuePushPairingCertificate
+      ? {
+          reissuePushPairingCertificate: () =>
+            reissuePushPairingCertificate.call(transport)
+        }
+      : {}),
     listDesktops: () => transport.listDesktops(),
     listRepos: () => transport.listRepos(),
     ...(transport.startRepoCheckout

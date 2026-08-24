@@ -1,7 +1,8 @@
+use super::lan_trust::TrustedLanDeviceAccess;
 use super::state::{AppState, TunneledHttpInvoke};
 use crate::pairing::{
-    self as pairing_domain, PairingClaimError, PairingClaimRequest, PairingClaimResponse,
-    PairingSession,
+    self as pairing_domain, PairingCertificateError, PairingClaimError, PairingClaimRequest,
+    PairingClaimResponse, PairingSession, PushPairingMaterial,
 };
 use axum::extract::{ConnectInfo, State};
 use axum::http::StatusCode;
@@ -46,6 +47,28 @@ pub(super) async fn claim_pairing_session(
                 PairingClaimError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
                 PairingClaimError::NoActiveSession => StatusCode::CONFLICT,
                 PairingClaimError::Persistence(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            (status, error.to_string())
+        })
+}
+
+pub(super) async fn reissue_push_pairing_certificate(
+    State(state): State<Arc<AppState>>,
+    trusted: Option<Extension<TrustedLanDeviceAccess>>,
+) -> Result<Json<PushPairingMaterial>, (StatusCode, String)> {
+    let Some(Extension(trusted)) = trusted else {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "pairing certificate re-issue requires a paired LAN device".to_string(),
+        ));
+    };
+    pairing_domain::reissue_push_pairing_certificate(&state.config, trusted.device_id())
+        .map(Json)
+        .map_err(|error| {
+            let status = match error {
+                PairingCertificateError::NotPaired => StatusCode::UNAUTHORIZED,
+                PairingCertificateError::IdentityChanged => StatusCode::CONFLICT,
+                PairingCertificateError::Persistence(_) => StatusCode::INTERNAL_SERVER_ERROR,
             };
             (status, error.to_string())
         })

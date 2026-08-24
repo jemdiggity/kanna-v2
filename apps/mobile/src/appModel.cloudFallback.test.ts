@@ -406,6 +406,76 @@ async function rejectCloudRecovery(
 }
 
 describe("createAppModel cloud routing", () => {
+  it("reissues and persists pairing certificates when a trusted LAN route appears", async () => {
+    const fixture = createLanFixture(async () => []);
+    const material = {
+      desktopPushIdentity: {
+        publicKey: "desktop-ed25519-public-key",
+        relayUrl: "wss://relay.example",
+        environment: "development"
+      },
+      pushPairingCert: {
+        deviceId: "phone-1",
+        issuedAt: 1_784_246_400_000,
+        expiresAt: 1_847_318_400_000,
+        signature: "desktop-signature"
+      }
+    };
+    const fetchImpl = vi.fn<FetchLike>(async (input, init) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/v1/pairing/push-certificate")) {
+        expect(init).toMatchObject({
+          method: "POST",
+          headers: {
+            "X-Kanna-Device-Id": "phone-1",
+            "X-Kanna-Device-Secret": "lan-secret"
+          }
+        });
+        return response(material);
+      }
+      return fixture.fetchImpl(input, init);
+    });
+    const persistence = {
+      load: vi.fn().mockResolvedValue({
+        mobileDeviceId: "phone-1",
+        selectedDesktopId: "desktop-lan",
+        selectedRepoId: null,
+        selectedTaskId: null,
+        activeView: "tasks" as const,
+        trustedDesktops: [{
+          desktopId: "desktop-lan",
+          displayName: "LAN Mac",
+          lanEndpoints: [],
+          lastSeenAt: "2026-08-24T00:00:00.000Z",
+          deviceSecret: "lan-secret"
+        }]
+      }),
+      save: vi.fn().mockResolvedValue(undefined)
+    };
+    const { authSession } = createMutableAuthSession({ status: "signedOut" });
+    const app = createAppModel({
+      authSession,
+      fetchImpl,
+      persistence,
+      options: {
+        forceCloud: false,
+        bonjourBrowser: fixture.bonjourBrowser
+      }
+    });
+
+    await app.initialize();
+    await app.client.listDesktops();
+    await flushAsyncWork(5);
+
+    expect(app.sessionStore.getState().trustedDesktops[0]).toMatchObject(material);
+    expect(persistence.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        trustedDesktops: [expect.objectContaining(material)]
+      })
+    );
+    app.controller.dispose();
+  });
+
   it.each([
     ["current", 2 as const, "ws://desktop.lan:48120/v2/stream"],
     ["previous", undefined, "ws://desktop.lan:48120/v1/stream"],

@@ -47,7 +47,12 @@ import {
   type TrustedDesktopRecord
 } from "./state/sessionPersistence";
 import { readKannaExpoExtra } from "./mobileEnvironment";
-import type { DesktopSummary, TaskSummary } from "./lib/api/types";
+import type {
+  DesktopSummary,
+  PushPairingMaterial,
+  TaskSummary
+} from "./lib/api/types";
+import { ServerRefusalError } from "./lib/transports/serverRefusal";
 
 const PRODUCTION_RELAY_URL = "wss://relay.kanna.build";
 const CLOUD_TASK_RECOVERY_INITIAL_RETRY_MS = 1_000;
@@ -267,6 +272,14 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
           return;
         }
         sessionStore.setMachineSourceDesktops(sources);
+      },
+      onPushPairingMaterial: (desktopId, material) => {
+        if (generation !== clientGeneration) return;
+        const existing = sessionStore.getState().trustedDesktops.find(
+          (desktop) => desktop.desktopId === desktopId
+        );
+        if (!existing) return;
+        sessionStore.upsertTrustedDesktop({ ...existing, ...material });
       },
       onTaskRoutesChanged: publishTaskRouteChange,
       relayUrl: options.relayUrl ?? resolveRelayUrl(readExpoPublicEnv(), {
@@ -721,6 +734,7 @@ function createClientForMode({
   onActiveDesktopIdsChanged,
   onMachineSourceWarnings,
   onMachineSourcesChanged,
+  onPushPairingMaterial,
   onTaskRoutesChanged,
   relayUrl,
   taskIndex,
@@ -755,6 +769,10 @@ function createClientForMode({
     account: DesktopSummary[];
     local: DesktopSummary[];
   }): void;
+  onPushPairingMaterial(
+    desktopId: string,
+    material: PushPairingMaterial
+  ): void;
   onTaskRoutesChanged(): void;
   relayUrl: string | null;
   taskIndex?: CloudTaskIndex;
@@ -852,7 +870,8 @@ function createClientForMode({
       getTrustedDesktopIds,
       getLanDeviceCredentials: (desktopId) =>
         lanDeviceCredentialsForDesktop(getTrustedDesktops, getMobileDeviceId, desktopId),
-      onValidatedRoutesChanged: onTaskRoutesChanged
+      onValidatedRoutesChanged: onTaskRoutesChanged,
+      onPushPairingMaterial
     });
 
     const composedClient = createCloudLanClient(
@@ -900,7 +919,8 @@ function createClientForMode({
         getTrustedDesktops().map((desktop) => desktop.desktopId),
       getLanDeviceCredentials: (desktopId) =>
         lanDeviceCredentialsForDesktop(getTrustedDesktops, getMobileDeviceId, desktopId),
-      onValidatedRoutesChanged: onTaskRoutesChanged
+      onValidatedRoutesChanged: onTaskRoutesChanged,
+      onPushPairingMaterial
     });
     const sourceTrackingClient: KannaClient = {
       ...trustedLanClient.client,
@@ -1016,7 +1036,8 @@ function createTrustedLanFallbackClient({
   getSelectedDesktopId,
   getTrustedDesktopIds,
   getLanDeviceCredentials,
-  onValidatedRoutesChanged
+  onValidatedRoutesChanged,
+  onPushPairingMaterial
 }: {
   bonjourBrowser: BonjourBrowser;
   fetchImpl: FetchLike;
@@ -1024,12 +1045,14 @@ function createTrustedLanFallbackClient({
   getTrustedDesktopIds(): readonly string[];
   getLanDeviceCredentials(desktopId: string): LanDeviceCredentials | null;
   onValidatedRoutesChanged(): void;
+  onPushPairingMaterial(desktopId: string, material: PushPairingMaterial): void;
 }): {
   client: KannaClient;
   clientForDesktop(desktopId: string): KannaClient | null;
   invalidatePendingValidatedRoutes(): void;
 } {
   const validatedBaseUrls = new Map<string, string>();
+  const refreshedPushPairingRoutes = new Set<string>();
   const validatedClients = new Map<string, {
     baseUrl: string;
     deviceId: string | null;
@@ -1139,6 +1162,36 @@ function createTrustedLanFallbackClient({
     });
     return client;
   };
+  const refreshPushPairingCertificate = (
+    desktopId: string,
+    baseUrl: string,
+    client: KannaClient
+  ) => {
+    const credentials = getLanDeviceCredentials(desktopId);
+    const refreshKey = credentials
+      ? `${desktopId}\0${baseUrl}\0${credentials.deviceId}\0${credentials.deviceSecret}`
+      : null;
+    if (
+      !refreshKey ||
+      refreshedPushPairingRoutes.has(refreshKey) ||
+      !client.reissuePushPairingCertificate
+    ) {
+      return;
+    }
+    refreshedPushPairingRoutes.add(refreshKey);
+    void client
+      .reissuePushPairingCertificate()
+      .then((material) => {
+        onPushPairingMaterial(desktopId, material);
+      })
+      .catch((error: unknown) => {
+        if (error instanceof ServerRefusalError && error.status === 404) return;
+        if (!(error instanceof ServerRefusalError && error.status === 409)) {
+          refreshedPushPairingRoutes.delete(refreshKey);
+        }
+        console.error("Pairing certificate refresh failed:", error);
+      });
+  };
   const resolveClient = async (desktopId: string | null) => {
     const trustedDesktopIds = desktopId
       ? getTrustedDesktopIds().filter((trustedId) => trustedId === desktopId)
@@ -1172,7 +1225,9 @@ function createTrustedLanFallbackClient({
       return createDisconnectedClient();
     }
     setValidatedBaseUrl(endpoint.desktopId, endpoint.baseUrl);
-    return clientForBaseUrl(endpoint.baseUrl, endpoint.desktopId);
+    const client = clientForBaseUrl(endpoint.baseUrl, endpoint.desktopId);
+    refreshPushPairingCertificate(endpoint.desktopId, endpoint.baseUrl, client);
+    return client;
   };
   const currentClient = (desktopId: string | null) => {
     const cachedDesktopId = desktopId ?? lastValidatedDesktopId;
@@ -1278,6 +1333,13 @@ function createTrustedLanFallbackClient({
         })
       );
       replaceValidatedBaseUrls(endpoints);
+      for (const endpoint of endpoints) {
+        refreshPushPairingCertificate(
+          endpoint.desktopId,
+          endpoint.baseUrl,
+          clientForBaseUrl(endpoint.baseUrl, endpoint.desktopId)
+        );
+      }
       return endpoints.map((endpoint): DesktopSummary => ({
         id: endpoint.desktopId,
         name: endpoint.displayName,
