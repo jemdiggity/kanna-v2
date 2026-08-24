@@ -1171,7 +1171,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mobile_notification_endpoint_preserves_delivery_and_sanitizes_old_relay_rejection() {
+    async fn mobile_notification_endpoint_queues_push_with_active_lan_stream_and_sanitizes_rejection(
+    ) {
         use tokio::time::timeout;
         use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 
@@ -1216,6 +1217,47 @@ mod tests {
         };
         let database = crate::db::Db::open_for_tests(&database_path).expect("open test db");
         let state = Arc::new(http_api::AppState::new(config.clone()));
+
+        let lan_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind LAN server");
+        let lan_address = lan_listener.local_addr().expect("LAN server address");
+        let lan_state = Arc::clone(&state);
+        let lan_server = tokio::spawn(async move {
+            axum::serve(
+                lan_listener,
+                http_api::router(lan_state)
+                    .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .expect("serve active mobile LAN stream");
+        });
+        let (mut lan_socket, _) =
+            tokio_tungstenite::connect_async(format!("ws://{lan_address}/v1/stream"))
+                .await
+                .expect("connect active mobile LAN stream");
+        lan_socket
+            .send(TungsteniteMessage::Text(
+                serde_json::json!({
+                    "type": "auth",
+                    // Exercise rolling skew with an old mobile client that
+                    // still advertises the removed LAN notification feature.
+                    "capabilities": ["mobile_notifications"]
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .expect("authenticate active mobile LAN stream");
+        let lan_auth = lan_socket
+            .next()
+            .await
+            .expect("LAN auth response")
+            .expect("LAN auth frame");
+        assert!(
+            matches!(lan_auth, TungsteniteMessage::Text(text) if text.contains("auth_ok")),
+            "active LAN stream did not authenticate"
+        );
 
         let relay_server = tokio::spawn(async move {
             let (stream, _) = relay_listener.accept().await.expect("accept relay");
@@ -1357,7 +1399,6 @@ mod tests {
                 "status": "deliveryFailed",
                 "acceptedCount": 0,
                 "failedCount": 1,
-                "lanDeliveredCount": 0,
                 "failureReasons": [{
                     "providerCode": "messaging/invalid-argument",
                     "category": "invalidToken",
@@ -1395,6 +1436,8 @@ mod tests {
         }
 
         relay_server.await.expect("relay server");
+        lan_socket.close(None).await.expect("close LAN stream");
+        lan_server.abort();
         let _ = std::fs::remove_file(database_path);
     }
 

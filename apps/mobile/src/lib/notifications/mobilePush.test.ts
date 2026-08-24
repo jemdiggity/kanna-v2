@@ -13,8 +13,10 @@ describe("mobile push notifications", () => {
     let refreshToken: ((token: string) => void) | null = null;
     const stopRefresh = vi.fn();
     const stopOpened = vi.fn();
+    const stopResponse = vi.fn();
     const fetchImpl = vi.fn(async () => new Response(null, { status: 200 }));
     const sdk = {
+      setNotificationHandler: vi.fn(),
       requestPermission: vi.fn(async () => 1),
       getToken: vi.fn(async () => "fcm-token-1"),
       onTokenRefresh: vi.fn((listener: (token: string) => void) => {
@@ -22,7 +24,8 @@ describe("mobile push notifications", () => {
         return stopRefresh;
       }),
       getInitialNotification: vi.fn(async () => null),
-      onNotificationOpened: vi.fn(() => stopOpened)
+      onNotificationOpened: vi.fn(() => stopOpened),
+      onNotificationResponse: vi.fn(() => stopResponse)
     };
 
     const stop = await startMobilePushNotifications({
@@ -32,6 +35,15 @@ describe("mobile push notifications", () => {
       relayUrl: "wss://relay-staging.kanna.build",
       fetchImpl,
       sdk
+    });
+
+    expect(sdk.setNotificationHandler).toHaveBeenCalledOnce();
+    const handler = sdk.setNotificationHandler.mock.calls[0]?.[0];
+    await expect(handler?.handleNotification()).resolves.toEqual({
+      shouldShowBanner: true,
+      shouldShowList: true,
+      shouldPlaySound: true,
+      shouldSetBadge: false
     });
 
     expect(fetchImpl).toHaveBeenCalledWith(
@@ -59,6 +71,7 @@ describe("mobile push notifications", () => {
     stop();
     expect(stopRefresh).toHaveBeenCalledOnce();
     expect(stopOpened).toHaveBeenCalledOnce();
+    expect(stopResponse).toHaveBeenCalledOnce();
     await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(3));
     expect(fetchImpl.mock.calls[2]).toEqual([
       "https://relay-staging.kanna.build/push/unregister",
@@ -85,11 +98,13 @@ describe("mobile push notifications", () => {
         relayUrl: "wss://relay-staging.kanna.build",
         fetchImpl,
         sdk: {
+          setNotificationHandler: vi.fn(),
           requestPermission: vi.fn(async () => 1),
           getToken: vi.fn(async () => token),
           onTokenRefresh: vi.fn(() => () => undefined),
           getInitialNotification: vi.fn(async () => null),
-          onNotificationOpened: vi.fn(() => () => undefined)
+          onNotificationOpened: vi.fn(() => () => undefined),
+          onNotificationResponse: vi.fn(() => () => undefined)
         }
       });
     }
@@ -131,6 +146,69 @@ describe("mobile push notifications", () => {
     expect(parseNotificationTaskTarget({
       data: { unexpected: "safe to ignore" }
     })).toBeNull();
+  });
+
+  it("opens task targets from launch, background, and foreground notification taps", async () => {
+    let onOpened: ((message: { data?: Record<string, unknown> }) => void) | null = null;
+    let onResponse: ((message: { data?: Record<string, unknown> }) => void) | null = null;
+    const onTaskOpen = vi.fn();
+    const initialTarget = {
+      kannaNotificationVersion: "1",
+      kind: "task",
+      desktopId: "desktop-initial",
+      taskId: "task-initial"
+    };
+    await startMobilePushNotifications({
+      deviceId: "mobile-device-1",
+      getIdToken: async () => "firebase-id-token",
+      onTaskOpen,
+      relayUrl: "wss://relay-staging.kanna.build",
+      fetchImpl: vi.fn(async () => new Response(null, { status: 200 })),
+      sdk: {
+        setNotificationHandler: vi.fn(),
+        requestPermission: vi.fn(async () => 1),
+        getToken: vi.fn(async () => "fcm-token"),
+        onTokenRefresh: vi.fn(() => () => undefined),
+        getInitialNotification: vi.fn(async () => ({ data: initialTarget })),
+        onNotificationOpened: vi.fn((listener) => {
+          onOpened = listener;
+          return () => undefined;
+        }),
+        onNotificationResponse: vi.fn((listener) => {
+          onResponse = listener;
+          return () => undefined;
+        })
+      }
+    });
+
+    expect(onTaskOpen).toHaveBeenCalledWith({
+      desktopId: "desktop-initial",
+      taskId: "task-initial"
+    });
+    onOpened?.({
+      data: {
+        kannaNotificationVersion: "1",
+        kind: "task",
+        desktopId: "desktop-running",
+        taskId: "task-running"
+      }
+    });
+    expect(onTaskOpen).toHaveBeenLastCalledWith({
+      desktopId: "desktop-running",
+      taskId: "task-running"
+    });
+    onResponse?.({
+      data: {
+        kannaNotificationVersion: "1",
+        kind: "task",
+        desktopId: "desktop-foreground",
+        taskId: "task-foreground"
+      }
+    });
+    expect(onTaskOpen).toHaveBeenLastCalledWith({
+      desktopId: "desktop-foreground",
+      taskId: "task-foreground"
+    });
   });
 
   it("resolves a desktop-local task hint to the cloud display identity", () => {
