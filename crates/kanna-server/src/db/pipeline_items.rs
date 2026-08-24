@@ -122,22 +122,26 @@ impl Db {
 
     #[cfg(test)]
     pub fn list_recent_pipeline_items(&self) -> Result<Vec<PipelineItem>, rusqlite::Error> {
-        self.list_recent_pipeline_items_including_closed(false)
+        self.list_recent_pipeline_items_including_closed(false, None, 50)
     }
 
     pub fn list_recent_pipeline_items_including_closed(
         &self,
         include_closed: bool,
+        repo_id: Option<&str>,
+        limit: u32,
     ) -> Result<Vec<PipelineItem>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, pipeline, stage,
              pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at,
              closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision, cloud_task_id, revision_rounds, runtime_status, input_blocked, composer_text, composer_attestation
              FROM pipeline_item
-             WHERE (? OR closed_at IS NULL)
-             ORDER BY updated_at DESC, created_at DESC",
+             WHERE (?1 OR closed_at IS NULL)
+               AND (?2 IS NULL OR repo_id = ?2)
+             ORDER BY updated_at DESC, created_at DESC
+             LIMIT ?3",
         )?;
-        let rows = stmt.query_map([include_closed], |row| {
+        let rows = stmt.query_map(rusqlite::params![include_closed, repo_id, limit], |row| {
             Ok(PipelineItem {
                 id: row.get(0)?,
                 repo_id: row.get(1)?,
@@ -179,13 +183,14 @@ impl Db {
 
     #[cfg(test)]
     pub fn search_pipeline_items(&self, query: &str) -> Result<Vec<PipelineItem>, rusqlite::Error> {
-        self.search_pipeline_items_including_closed(query, false)
+        self.search_pipeline_items_including_closed(query, false, None)
     }
 
     pub fn search_pipeline_items_including_closed(
         &self,
         query: &str,
         include_closed: bool,
+        repo_id: Option<&str>,
     ) -> Result<Vec<PipelineItem>, rusqlite::Error> {
         let like_query = format!("%{}%", query.to_lowercase());
         let mut stmt = self.conn.prepare(
@@ -193,15 +198,16 @@ impl Db {
              pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at,
              closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision, cloud_task_id, revision_rounds, runtime_status, input_blocked, composer_text, composer_attestation
              FROM pipeline_item
-             WHERE (? OR closed_at IS NULL)
+             WHERE (?1 OR closed_at IS NULL)
+               AND (?2 IS NULL OR repo_id = ?2)
                AND (
-                 lower(coalesce(display_name, '')) LIKE ?
-                 OR lower(coalesce(prompt, '')) LIKE ?
+                 lower(coalesce(display_name, '')) LIKE ?3
+                 OR lower(coalesce(prompt, '')) LIKE ?3
                )
              ORDER BY updated_at DESC, created_at DESC",
         )?;
         let rows = stmt.query_map(
-            rusqlite::params![include_closed, like_query, like_query],
+            rusqlite::params![include_closed, repo_id, like_query],
             |row| {
                 Ok(PipelineItem {
                     id: row.get(0)?,

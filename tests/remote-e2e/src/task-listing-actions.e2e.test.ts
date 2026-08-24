@@ -66,6 +66,8 @@ interface TaskSummary {
   id: string;
   repoId: string;
   title: string;
+  prompt: string | null;
+  agent: string | null;
   stage: string | null;
 }
 
@@ -96,8 +98,10 @@ describe("remote task listing, creation, and actions E2E", () => {
   }, 30_000);
 
   it("lists repos and tasks from the desktop database through relay invokes", async () => {
+    const fullAlphaPrompt = `${"p".repeat(600)}END-OF-FULL-PROMPT`;
     const alpha = await createScriptedTask(harness, {
-      displayName: "Remote list alpha task"
+      displayName: "Remote list alpha task",
+      prompt: fullAlphaPrompt
     });
     const beta = await createScriptedTask(harness, {
       displayName: "Remote list beta task"
@@ -118,6 +122,22 @@ describe("remote task listing, creation, and actions E2E", () => {
     const recent = asTaskSummaries(await invokeDesktop(harness, "GET", "/v1/tasks/recent", null));
     expect(recent.map((task) => task.id)).toEqual(expect.arrayContaining([alpha.taskId, beta.taskId]));
 
+    const scopedRecentValue = await invokeDesktop(
+      harness,
+      "GET",
+      `/v1/tasks/recent?repoId=${encodeURIComponent(alpha.repoId)}&limit=1`,
+      null
+    );
+    const scopedRecent = asTaskSummaries(scopedRecentValue);
+    expect(scopedRecent.map((task) => task.id)).toEqual([alpha.taskId]);
+    expect(Array.from(scopedRecent[0]!.prompt ?? "")).toHaveLength(500);
+    expect(scopedRecent[0]!.prompt).not.toContain("END-OF-FULL-PROMPT");
+    expect(scopedRecent[0]!.agent).toBeTruthy();
+    if (!Array.isArray(scopedRecentValue)) {
+      throw new Error("expected scoped recent task array");
+    }
+    expect(asRecord(scopedRecentValue[0]).snippet).toBeUndefined();
+
     const search = asTaskSummaries(await invokeDesktop(
       harness,
       "GET",
@@ -126,6 +146,14 @@ describe("remote task listing, creation, and actions E2E", () => {
     ));
     expect(search.map((task) => task.id)).toContain(alpha.taskId);
     expect(search.map((task) => task.id)).not.toContain(beta.taskId);
+
+    const scopedSearch = asTaskSummaries(await invokeDesktop(
+      harness,
+      "GET",
+      `/v1/tasks/search?query=${encodeURIComponent("Remote list")}&repoId=${encodeURIComponent(alpha.repoId)}`,
+      null
+    ));
+    expect(scopedSearch.map((task) => task.id)).toEqual([alpha.taskId]);
 
     const dbRows = await querySql(
       harness,
@@ -720,6 +748,8 @@ function asTaskSummaries(value: unknown): TaskSummary[] {
       id: getString(record, "id"),
       repoId: getString(record, "repoId"),
       title: getString(record, "title"),
+      prompt: getOptionalString(record, "prompt"),
+      agent: getOptionalString(record, "agent"),
       stage: getOptionalString(record, "stage")
     };
   });
@@ -731,6 +761,8 @@ function asTaskDetail(value: unknown): TaskDetail {
     id: getString(record, "id"),
     repoId: getString(record, "repoId"),
     title: getString(record, "title"),
+    prompt: getOptionalString(record, "prompt"),
+    agent: getOptionalString(record, "agent"),
     stage: getOptionalString(record, "stage"),
     branch: getOptionalString(record, "branch"),
     closedAt: getOptionalString(record, "closedAt"),

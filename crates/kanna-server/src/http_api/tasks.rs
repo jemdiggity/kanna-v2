@@ -10,6 +10,9 @@ use kanna_agent_protocol::StateChangeScope;
 use kanna_tool_catalog::encode_path_segment;
 use std::sync::Arc;
 
+const DEFAULT_RECENT_TASK_LIMIT: u32 = 50;
+const MAX_RECENT_TASK_LIMIT: u32 = 200;
+
 pub(super) async fn list_recent_tasks(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(query): axum::extract::Query<ListTasksQuery>,
@@ -26,8 +29,13 @@ pub(super) async fn list_recent_tasks(
         state.publish_state_changed(StateChangeScope::Tasks);
     }
     let api = MobileApi::new(state.config.clone(), db);
+    let repo_id = task_listing_repo_filter(query.repo_id.as_deref(), query.all_repos)?;
+    let limit = query
+        .limit
+        .unwrap_or(DEFAULT_RECENT_TASK_LIMIT)
+        .clamp(1, MAX_RECENT_TASK_LIMIT);
     let tasks = api
-        .list_recent_tasks_including_closed(query.include_closed)
+        .list_recent_tasks_including_closed(query.include_closed, repo_id, limit)
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     if !query.all_machines {
         return Ok(Json(serde_json::json!(tasks)));
@@ -35,9 +43,15 @@ pub(super) async fn list_recent_tasks(
     aggregate_task_summaries(
         &state,
         tasks,
-        format!(
-            "/v1/tasks/recent?includeClosed={}&allMachines=false",
-            query.include_closed
+        task_listing_remote_path(
+            "/v1/tasks/recent",
+            &[
+                ("includeClosed", query.include_closed.to_string()),
+                ("allMachines", "false".to_string()),
+                ("allRepos", query.all_repos.to_string()),
+                ("limit", limit.to_string()),
+            ],
+            repo_id,
         ),
     )
     .await
@@ -341,6 +355,9 @@ pub(super) async fn set_task_notify(
 #[serde(rename_all = "camelCase")]
 pub(super) struct SearchTasksQuery {
     query: String,
+    repo_id: Option<String>,
+    #[serde(default)]
+    all_repos: bool,
     #[serde(default)]
     include_closed: bool,
     #[serde(default)]
@@ -350,6 +367,10 @@ pub(super) struct SearchTasksQuery {
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ListTasksQuery {
+    repo_id: Option<String>,
+    limit: Option<u32>,
+    #[serde(default)]
+    all_repos: bool,
     #[serde(default)]
     include_closed: bool,
     #[serde(default)]
@@ -372,22 +393,56 @@ pub(super) async fn search_tasks(
         state.publish_state_changed(StateChangeScope::Tasks);
     }
     let api = MobileApi::new(state.config.clone(), db);
+    let repo_id = task_listing_repo_filter(query.repo_id.as_deref(), query.all_repos)?;
     let tasks = api
-        .search_tasks_including_closed(&query.query, query.include_closed)
+        .search_tasks_including_closed(&query.query, query.include_closed, repo_id)
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     if !query.all_machines {
         return Ok(Json(serde_json::json!(tasks)));
     }
-    let encoded_query = encode_path_segment(&query.query);
     aggregate_task_summaries(
         &state,
         tasks,
-        format!(
-            "/v1/tasks/search?query={encoded_query}&includeClosed={}&allMachines=false",
-            query.include_closed
+        task_listing_remote_path(
+            "/v1/tasks/search",
+            &[
+                ("query", query.query),
+                ("includeClosed", query.include_closed.to_string()),
+                ("allMachines", "false".to_string()),
+                ("allRepos", query.all_repos.to_string()),
+            ],
+            repo_id,
         ),
     )
     .await
+}
+
+fn task_listing_repo_filter(
+    repo_id: Option<&str>,
+    all_repos: bool,
+) -> Result<Option<&str>, (axum::http::StatusCode, String)> {
+    if all_repos && repo_id.is_some() {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "repoId and allRepos cannot be used together".to_string(),
+        ));
+    }
+    Ok((!all_repos).then_some(repo_id).flatten())
+}
+
+fn task_listing_remote_path(
+    base: &str,
+    params: &[(&str, String)],
+    repo_id: Option<&str>,
+) -> String {
+    let mut query = params
+        .iter()
+        .map(|(key, value)| format!("{key}={}", encode_path_segment(value)))
+        .collect::<Vec<_>>();
+    if let Some(repo_id) = repo_id {
+        query.push(format!("repoId={}", encode_path_segment(repo_id)));
+    }
+    format!("{base}?{}", query.join("&"))
 }
 
 async fn aggregate_task_summaries(
@@ -419,6 +474,9 @@ async fn aggregate_task_summaries(
                             Ok(mut remote_tasks) => {
                                 for task in &mut remote_tasks {
                                     task.machine_id = Some(machine_id.clone());
+                                    if task.waiting_prompt_snippet.is_none() {
+                                        task.waiting_prompt_snippet = task.snippet.take();
+                                    }
                                 }
                                 tasks.append(&mut remote_tasks);
                             }

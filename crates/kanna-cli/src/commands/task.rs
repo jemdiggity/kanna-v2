@@ -155,12 +155,18 @@ pub(crate) async fn run(command: TaskCommands) {
     match command {
         TaskCommands::List {
             repo_id,
+            all_repos,
+            limit,
             all_machines,
             include_closed,
             server_url,
         } => {
             let base_url = resolve_server_base_url_from_env(server_url.as_deref());
             if let Some(repo_id) = repo_id {
+                if all_repos {
+                    eprintln!("Error: --repo-id and --all-repos cannot be used together");
+                    process::exit(1);
+                }
                 let tasks = list_repo_tasks_via_api(&base_url, &repo_id)
                     .await
                     .unwrap_or_else(|e| {
@@ -172,14 +178,19 @@ pub(crate) async fn run(command: TaskCommands) {
                     process::exit(1);
                 });
                 println!("{rendered}");
-            } else if all_machines || include_closed {
-                let tasks =
-                    list_tasks_with_options_via_api(&base_url, all_machines, include_closed)
-                        .await
-                        .unwrap_or_else(|e| {
-                            eprintln!("Error: {e}");
-                            process::exit(1);
-                        });
+            } else if all_repos || limit.is_some() || all_machines || include_closed {
+                let tasks = list_tasks_with_options_via_api(
+                    &base_url,
+                    all_repos,
+                    limit,
+                    all_machines,
+                    include_closed,
+                )
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                });
                 print_json(&tasks).unwrap_or_else(|e| {
                     eprintln!("Error: {e}");
                     process::exit(1);
@@ -198,15 +209,19 @@ pub(crate) async fn run(command: TaskCommands) {
         }
         TaskCommands::Search {
             query,
+            repo_id,
+            all_repos,
             all_machines,
             include_closed,
             server_url,
         } => {
             let base_url = resolve_server_base_url_from_env(server_url.as_deref());
-            if all_machines || include_closed {
+            if repo_id.is_some() || all_repos || all_machines || include_closed {
                 let tasks = search_tasks_with_options_via_api(
                     &base_url,
                     &query,
+                    repo_id.as_deref(),
+                    all_repos,
                     all_machines,
                     include_closed,
                 )

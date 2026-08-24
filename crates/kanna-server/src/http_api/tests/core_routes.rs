@@ -1725,7 +1725,7 @@ async fn task_detail_reports_the_composer_apart_from_what_the_session_said() {
         detail["waitingPromptSnippet"],
         serde_json::json!("Ready for review.")
     );
-    assert_eq!(detail["snippet"], serde_json::json!("Ready for review."));
+    assert!(detail.get("snippet").is_none());
     assert_eq!(
         detail["composer"],
         serde_json::json!({
@@ -1734,12 +1734,10 @@ async fn task_detail_reports_the_composer_apart_from_what_the_session_said() {
         }),
         "the composer line is reported, but only as its own labelled field"
     );
-    for field in ["waitingPromptSnippet", "snippet"] {
-        assert!(
-            !detail[field].as_str().unwrap_or_default().contains("phone"),
-            "{field} must never carry composer text"
-        );
-    }
+    assert!(!detail["waitingPromptSnippet"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("phone"));
 
     let agent_response = app
         .oneshot(
@@ -3195,12 +3193,46 @@ async fn list_recent_tasks_route_returns_open_tasks_in_updated_order() {
     let tasks: Vec<crate::mobile_api::TaskSummary> = from_slice(&body).unwrap();
     assert_eq!(tasks.len(), 2);
     assert_eq!(tasks[0].id, "task-newer");
+    assert!(raw_tasks[0].get("snippet").is_none());
     assert_eq!(
-        tasks[0].snippet.as_deref(),
-        Some("Latest agent output preview")
+        raw_tasks[0]["waitingPromptSnippet"],
+        "Latest agent output preview"
     );
     assert_eq!(tasks[0].activity.as_deref(), Some("idle"));
     assert_eq!(tasks[1].id, "task-older");
+}
+
+#[tokio::test]
+async fn list_recent_tasks_route_filters_by_repo_and_applies_the_requested_limit() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_repo("repo-2", "Repo Two").unwrap();
+        for (id, repo_id, created_at) in [
+            ("task-repo-1-old", "repo-1", "2026-08-24 08:00:00"),
+            ("task-repo-1-new", "repo-1", "2026-08-24 10:00:00"),
+            ("task-repo-2", "repo-2", "2026-08-24 11:00:00"),
+        ] {
+            db.insert_test_pipeline_item(id, repo_id, id, Some(id), "in progress", created_at)
+                .unwrap();
+        }
+    });
+
+    let response = app
+        .oneshot(
+            Request::get("/v1/tasks/recent?repoId=repo-1&limit=1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let tasks: Vec<crate::mobile_api::TaskSummary> = from_slice(&body).unwrap();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].id, "task-repo-1-new");
 }
 
 #[tokio::test]
@@ -3270,6 +3302,12 @@ async fn get_task_route_returns_full_task_detail_by_id() {
     assert_eq!(task.agent_provider.as_deref(), Some("claude"));
     assert_eq!(task.model.as_deref(), Some("claude-fable-5"));
     assert_eq!(task.effort.as_deref(), Some("high"));
+    assert_eq!(
+        task.latest_run
+            .as_ref()
+            .and_then(|run| run.agent.as_deref()),
+        Some("implement")
+    );
     assert_eq!(task.branch.as_deref(), Some("branch-task-1"));
     assert_eq!(task.pr_url, None);
     assert_eq!(task.closed_at, None);
@@ -3421,6 +3459,7 @@ async fn list_task_children_route_returns_open_and_closed_direct_children_with_v
                     "id": "run-security",
                     "stage": "review",
                     "kind": "main",
+                    "agent": "review-security",
                     "status": "succeeded",
                     "summary": "PASS: no security findings",
                     "resumedFromRunId": null,
@@ -3439,6 +3478,7 @@ async fn list_task_children_route_returns_open_and_closed_direct_children_with_v
                     "id": "run-compat",
                     "stage": "review",
                     "kind": "main",
+                    "agent": "review-compat",
                     "status": "failed",
                     "summary": "FAIL: mobile contract changed",
                     "resumedFromRunId": null,

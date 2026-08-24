@@ -2469,6 +2469,39 @@ fn task_listing_queries_exclude_closed_items_even_when_stage_is_not_done() {
 }
 
 #[test]
+fn recent_task_listing_applies_repo_filter_and_limit_before_returning_rows() {
+    let path = Db::test_db_path("recent-task-filter-limit");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").expect("repo one");
+    db.insert_test_repo("repo-2", "Repo Two").expect("repo two");
+    for (id, repo_id, created_at) in [
+        ("repo-1-old", "repo-1", "2026-08-24 08:00:00"),
+        ("repo-1-new", "repo-1", "2026-08-24 10:00:00"),
+        ("repo-2-newest", "repo-2", "2026-08-24 11:00:00"),
+    ] {
+        db.insert_test_pipeline_item(id, repo_id, id, Some(id), "in progress", created_at)
+            .expect("insert task");
+    }
+
+    let tasks = db
+        .list_recent_pipeline_items_including_closed(false, Some("repo-1"), 1)
+        .expect("list filtered recent tasks");
+
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].id, "repo-1-new");
+
+    let searched = db
+        .search_pipeline_items_including_closed("repo", false, Some("repo-1"))
+        .expect("search filtered tasks");
+    assert_eq!(
+        searched.into_iter().map(|task| task.id).collect::<Vec<_>>(),
+        vec!["repo-1-new", "repo-1-old"]
+    );
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn count_open_task_blockers_treats_pr_stage_with_pr_url_as_resolved() {
     let path = Db::test_db_path("open-blockers-pr-resolved");
     let db = Db::open_for_tests(&path).expect("open test db");

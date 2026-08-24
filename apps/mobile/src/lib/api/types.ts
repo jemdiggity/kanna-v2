@@ -325,11 +325,15 @@ export interface TaskSummary {
   repoId: string;
   repoName?: string | null;
   title: string;
+  /** Bounded in list responses; task detail returns the complete prompt. */
   prompt?: string | null;
   stage: string | null;
   createdAt?: string | null;
   waitingPromptSnippet?: string | null;
   agentProvider?: string | null;
+  /** Named agent definition used by the latest durable stage run. */
+  agent?: string | null;
+  /** Session transport, not the named agent definition. */
   agentType?: "pty" | "agent" | null;
   ownerDesktopId?: string;
   ownerLocalRepoId?: string;
@@ -356,6 +360,7 @@ export interface TaskLatestRun {
   id: string;
   stage: string;
   kind: string;
+  agent?: string | null;
   status: string;
   summary?: string | null;
   resumedFromRunId?: string | null;

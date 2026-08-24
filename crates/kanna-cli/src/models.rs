@@ -76,7 +76,8 @@ pub(crate) struct TaskSummary {
     pub(crate) title: String,
     pub(crate) stage: Option<String>,
     pub(crate) activity: Option<String>,
-    pub(crate) snippet: Option<String>,
+    #[serde(default, alias = "snippet")]
+    pub(crate) waiting_prompt_snippet: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -100,7 +101,8 @@ pub(crate) struct TaskDetail {
     /// Read dimension — `read` | `unread`. Optional for the same reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) read_state: Option<String>,
-    pub(crate) snippet: Option<String>,
+    #[serde(default, alias = "snippet")]
+    pub(crate) waiting_prompt_snippet: Option<String>,
     pub(crate) agent_type: Option<String>,
     pub(crate) agent_provider: Option<String>,
     pub(crate) branch: Option<String>,
@@ -137,6 +139,8 @@ pub(crate) struct TaskLatestRun {
     pub(crate) stage: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) status: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

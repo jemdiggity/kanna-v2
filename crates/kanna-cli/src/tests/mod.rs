@@ -76,6 +76,9 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
             TypedToolSurface {
                 command_path: &["task", "list"],
                 param_args: &[
+                    ("repo_id", "repo_id"),
+                    ("all_repos", "all_repos"),
+                    ("limit", "limit"),
                     ("all_machines", "all_machines"),
                     ("include_closed", "include_closed"),
                 ],
@@ -184,6 +187,8 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
                 command_path: &["task", "search"],
                 param_args: &[
                     ("query", "query"),
+                    ("repo_id", "repo_id"),
+                    ("all_repos", "all_repos"),
                     ("all_machines", "all_machines"),
                     ("include_closed", "include_closed"),
                 ],

@@ -212,6 +212,18 @@ issued a device's certificate. If the private key is lost or deliberately
 rotated, that marker no longer matches and re-issue returns `409`; recovery is
 a new LAN pairing ceremony, which binds the device to the new identity.
 
+Task-list rows are deliberately bounded summaries. `prompt` contains at most
+500 characters; `GET /v1/tasks/{task_id}` is the full-prompt surface.
+`waitingPromptSnippet` is the canonical latest-output preview key (the server
+still accepts the deprecated `snippet` key when aggregating an older peer, but
+does not serialize both). `agent` is the name recorded on the latest durable
+`stage_run`; `agentType` is only the session transport (`pty` or `agent`) and
+must not be presented as the agent name. Recent listings accept `repoId` and a
+`limit` (default 50, clamped to 200); search accepts the same repository
+filter. The MCP adapter supplies the calling task's repository by default and
+leaves the account-wide `all_machines` behavior unchanged; `all_repos` is the
+explicit local cross-repository escape hatch.
+
 ### Remote repository checkout
 
 Authenticated repo inventory includes an optional, credential-free `remoteUrl`
@@ -892,7 +904,8 @@ every surface that means "what the session said":
   suggestion), or `unknown` (a session inherited from before attestation, where
   nothing can be proven). The field is **absent** until a session reports one,
   which is a different answer from `unknown`.
-- `waitingPromptSnippet` / `snippet` never contain composer-line text. The
+- `waitingPromptSnippet` (and the deprecated input-only `snippet` alias) never
+  contains composer-line text. The
   daemon's snippet extraction cuts at the composer's *position*, not by a
   per-line rule, because a composer long enough to wrap leaves continuation
   rows carrying no prompt glyph.
