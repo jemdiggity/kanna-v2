@@ -39,6 +39,7 @@ export const MOBILE_E2E_IDS = {
   taskActionPendingSpinner: "mobile.task-action-pending",
   taskComposerChrome: "mobile.task-composer-chrome",
   taskInput: "mobile.task-input",
+  taskInputViewport: "mobile.task-input-viewport",
   taskSendButton: "mobile.task-send-button",
   taskAttachButton: "mobile.task-attach-button",
   taskAttachmentPreview: "mobile.task-attachment-preview",

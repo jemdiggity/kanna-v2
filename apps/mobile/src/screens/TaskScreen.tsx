@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Ionicons } from "@expo/vector-icons";
 import {
   ActivityIndicator,
@@ -69,8 +69,7 @@ import {
 } from "./VisualCompanionModal";
 import {
   appendComposerFileReference,
-  clampTaskComposerHeight,
-  getTaskComposerExplicitLineHeight,
+  shouldTaskComposerScroll,
   TASK_COMPOSER_LINE_HEIGHT,
   TASK_COMPOSER_MAX_HEIGHT,
   TASK_COMPOSER_MIN_HEIGHT,
@@ -219,9 +218,8 @@ export function TaskScreen({
     string | null
   >(null);
   const [isPickingAttachment, setIsPickingAttachment] = useState(false);
-  const [composerInputHeight, setComposerInputHeight] = useState(
-    TASK_COMPOSER_MIN_HEIGHT
-  );
+  const [isComposerScrollable, setIsComposerScrollable] = useState(false);
+  const [isComposerExpanded, setIsComposerExpanded] = useState(false);
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [isBackPending, setIsBackPending] = useState(false);
   const [screenViewport, setScreenViewport] = useState<{
@@ -388,7 +386,6 @@ export function TaskScreen({
     isComposerDisabled,
     onSendInput
   });
-  const composerContentHeightRef = useRef(TASK_COMPOSER_MIN_HEIGHT);
   composerSnapshotRef.current = {
     taskId: task.id,
     draftInput,
@@ -396,28 +393,72 @@ export function TaskScreen({
     isComposerDisabled,
     onSendInput
   };
+  const composerLayoutRef = useRef({
+    contentHeight: TASK_COMPOSER_MIN_HEIGHT,
+    deferredContentHeight: null as number | null,
+    draftChangedSinceExpansion: false,
+    isExpanded: false
+  });
+  const composerInputRef = useRef<TextInput>(null);
+  const composerScrollRef = useRef<ScrollView>(null);
+  const revealComposerCaret = useCallback(() => {
+    requestAnimationFrame(() => {
+      const end = composerSnapshotRef.current.draftInput.length;
+      composerInputRef.current?.setNativeProps({
+        selection: { end, start: end }
+      });
+      composerScrollRef.current?.scrollToEnd({ animated: false });
+    });
+  }, []);
+  const expandComposer = useCallback(() => {
+    if (!composerLayoutRef.current.isExpanded) {
+      composerLayoutRef.current.isExpanded = true;
+      composerLayoutRef.current.deferredContentHeight = null;
+      composerLayoutRef.current.draftChangedSinceExpansion = false;
+      setIsComposerExpanded(true);
+    }
+    const shouldScroll = shouldTaskComposerScroll(
+      composerLayoutRef.current.contentHeight
+    );
+    setIsComposerScrollable(shouldScroll);
+    if (shouldScroll) {
+      revealComposerCaret();
+    }
+  }, [revealComposerCaret]);
+  const collapseComposer = useCallback(() => {
+    composerLayoutRef.current.isExpanded = false;
+    composerScrollRef.current?.scrollTo({ animated: false, y: 0 });
+    setIsComposerExpanded(false);
+  }, []);
+  const applyComposerContentHeight = (contentHeight: number) => {
+    composerLayoutRef.current.contentHeight = contentHeight;
+    const shouldScroll = shouldTaskComposerScroll(contentHeight);
+    setIsComposerScrollable(shouldScroll);
+    if (shouldScroll) {
+      revealComposerCaret();
+    }
+  };
   const updateDraftInput = (nextDraftInput: string) => {
     composerSnapshotRef.current.draftInput = nextDraftInput;
+    composerLayoutRef.current.draftChangedSinceExpansion = true;
     if (!nextDraftInput) {
-      composerContentHeightRef.current = TASK_COMPOSER_MIN_HEIGHT;
-      setComposerInputHeight(TASK_COMPOSER_MIN_HEIGHT);
-    } else {
-      // onContentSizeChange can precede onChangeText on iOS. Apply the native
-      // measurement retained by that event when the draft becomes current.
-      setComposerInputHeight(
-        Math.max(
-          composerContentHeightRef.current,
-          getTaskComposerExplicitLineHeight(nextDraftInput)
-        )
-      );
+      composerLayoutRef.current.deferredContentHeight = null;
+      composerLayoutRef.current.contentHeight = TASK_COMPOSER_MIN_HEIGHT;
+      setIsComposerScrollable(false);
+    } else if (composerLayoutRef.current.deferredContentHeight !== null) {
+      const deferredContentHeight =
+        composerLayoutRef.current.deferredContentHeight;
+      composerLayoutRef.current.deferredContentHeight = null;
+      applyComposerContentHeight(deferredContentHeight);
     }
     setDraftInput(nextDraftInput);
   };
   const clearDraftInput = () => {
     composerSnapshotRef.current.draftInput = "";
     composerSnapshotRef.current.attachment = null;
-    composerContentHeightRef.current = TASK_COMPOSER_MIN_HEIGHT;
-    setComposerInputHeight(TASK_COMPOSER_MIN_HEIGHT);
+    composerLayoutRef.current.deferredContentHeight = null;
+    composerLayoutRef.current.contentHeight = TASK_COMPOSER_MIN_HEIGHT;
+    setIsComposerScrollable(false);
     setDraftInput("");
     setAttachment(null);
     setAttachmentErrorMessage(null);
@@ -465,17 +506,31 @@ export function TaskScreen({
   const updateComposerInputHeight = (
     event: TextInputContentSizeChangeEvent
   ) => {
-    // iOS can report the new content size before onChangeText publishes the
-    // corresponding draft. Clamp the native measurement directly so that
-    // first multiline insertion grows instead of being mistaken for empty.
-    // Retain the measurement until onChangeText arrives, while leaving an
-    // empty composer at baseline so a stale post-Send event cannot regrow it.
-    const nextHeight = clampTaskComposerHeight(
-      event.nativeEvent.contentSize.height
-    );
-    composerContentHeightRef.current = nextHeight;
-    if (composerSnapshotRef.current.draftInput) {
-      setComposerInputHeight(nextHeight);
+    // The input stays intrinsically sized so Fabric reports soft wraps. The
+    // surrounding native viewport owns the cap and scrolling, avoiding the
+    // controlled-height TextInput path that drops both measurements and caret
+    // following on device. Ignore collapsed measurements so refocus restores
+    // the last expanded content height.
+    if (
+      composerSnapshotRef.current.draftInput &&
+      composerLayoutRef.current.isExpanded
+    ) {
+      const contentHeight = event.nativeEvent.contentSize.height;
+      if (
+        !composerLayoutRef.current.draftChangedSinceExpansion &&
+        contentHeight < composerLayoutRef.current.contentHeight &&
+        composerLayoutRef.current.deferredContentHeight === null
+      ) {
+        // Refocusing expands the outer viewport from the retained intrinsic
+        // measurement. Fabric can emit one stale collapsed-height event during
+        // that transition. Defer the first smaller measurement until either a
+        // second measurement proves it stale or onChangeText proves it came
+        // from an edit; Fabric may deliver those callbacks in either order.
+        composerLayoutRef.current.deferredContentHeight = contentHeight;
+        return;
+      }
+      composerLayoutRef.current.deferredContentHeight = null;
+      applyComposerContentHeight(contentHeight);
     }
   };
   const submitInput = (input: string) => {
@@ -600,9 +655,11 @@ export function TaskScreen({
 
   useEffect(() => {
     const showSubscription = Keyboard.addListener("keyboardWillShow", (event) => {
+      expandComposer();
       setKeyboardHeight(event.endCoordinates.height);
     });
     const hideSubscription = Keyboard.addListener("keyboardWillHide", () => {
+      collapseComposer();
       setKeyboardHeight(0);
     });
 
@@ -611,7 +668,7 @@ export function TaskScreen({
       showSubscription.remove();
       hideSubscription.remove();
     };
-  }, []);
+  }, [collapseComposer, expandComposer]);
 
   useEffect(() => {
     if (
@@ -630,6 +687,11 @@ export function TaskScreen({
     terminalGeometry.cols,
     terminalGeometry.rows
   ]);
+
+  const isComposerViewportScrollable =
+    isComposerScrollable ||
+    (!isComposerExpanded &&
+      composerLayoutRef.current.contentHeight > TASK_COMPOSER_MIN_HEIGHT);
 
   return (
     <View
@@ -1049,21 +1111,48 @@ export function TaskScreen({
               )}
             </Pressable>
           ) : null}
-          <TextInput
-            {...TASK_COMPOSER_TEXT_INPUT_PROPS}
-            editable={!isComposerDisabled}
-            onChangeText={updateDraftInput}
-            onContentSizeChange={updateComposerInputHeight}
-            placeholder="Reply…"
-            placeholderTextColor="#6F89AE"
+          <ScrollView
+            ref={composerScrollRef}
+            contentContainerStyle={styles.inputFieldContent}
+            keyboardShouldPersistTaps="always"
+            scrollEnabled={isComposerViewportScrollable}
+            showsVerticalScrollIndicator={isComposerViewportScrollable}
             style={[
-              styles.inputField,
-              { height: composerInputHeight },
-              isComposerDisabled ? styles.inputFieldDisabled : null
+              styles.inputFieldViewport,
+              {
+                height: !isComposerExpanded
+                  ? TASK_COMPOSER_MIN_HEIGHT
+                  : Math.min(
+                      TASK_COMPOSER_MAX_HEIGHT,
+                      Math.max(
+                        TASK_COMPOSER_MIN_HEIGHT,
+                        composerLayoutRef.current.contentHeight
+                      )
+                    )
+              }
             ]}
-            testID={MOBILE_E2E_IDS.taskInput}
-            value={draftInput}
-          />
+            testID={MOBILE_E2E_IDS.taskInputViewport}
+          >
+            <TextInput
+              {...TASK_COMPOSER_TEXT_INPUT_PROPS}
+              ref={composerInputRef}
+              editable={!isComposerDisabled}
+              onChangeText={updateDraftInput}
+              onContentSizeChange={updateComposerInputHeight}
+              onBlur={collapseComposer}
+              onFocus={expandComposer}
+              onPressIn={expandComposer}
+              placeholder="Reply…"
+              placeholderTextColor="#6F89AE"
+              scrollEnabled={false}
+              style={[
+                styles.inputField,
+                isComposerDisabled ? styles.inputFieldDisabled : null
+              ]}
+              testID={MOBILE_E2E_IDS.taskInput}
+              value={draftInput}
+            />
+          </ScrollView>
           <QuickReplySendControl
             disabled={isComposerDisabled}
             gestureScopeKey={task.id}
@@ -1459,14 +1548,19 @@ const styles = StyleSheet.create({
   },
   inputField: {
     color: "#F5F7FB",
-    flex: 1,
     fontSize: 14,
     lineHeight: TASK_COMPOSER_LINE_HEIGHT,
-    maxHeight: TASK_COMPOSER_MAX_HEIGHT,
     minHeight: TASK_COMPOSER_MIN_HEIGHT,
     paddingHorizontal: 8,
     paddingVertical: 10,
-    textAlignVertical: "top"
+    textAlignVertical: "top",
+    width: "100%"
+  },
+  inputFieldContent: {
+    flexGrow: 1
+  },
+  inputFieldViewport: {
+    flex: 1
   },
   inputFieldDisabled: {
     color: "#6F89AE",

@@ -10,7 +10,14 @@ import {
 } from "./taskQuickReplies";
 import { getTerminalSelectionToolbarTop } from "./terminalSafeArea";
 
+vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+  callback(0);
+  return 0;
+});
+
 const hookHarness = vi.hoisted(() => ({
+  callbackIndex: 0,
+  callbacks: [] as unknown[],
   effectCleanups: [] as Array<(() => void) | undefined>,
   effectDependencies: [] as Array<readonly unknown[] | undefined>,
   effectIndex: 0,
@@ -35,6 +42,11 @@ vi.mock("react", async (importActual) => {
 
   return {
     ...actual,
+    useCallback: <T,>(callback: T) => {
+      const index = hookHarness.callbackIndex++;
+      hookHarness.callbacks[index] ??= callback;
+      return hookHarness.callbacks[index] as T;
+    },
     useEffect: vi.fn(
       (
         callback: () => void | (() => void),
@@ -152,6 +164,8 @@ beforeAll(async () => {
 });
 
 beforeEach(() => {
+  hookHarness.callbackIndex = 0;
+  hookHarness.callbacks.length = 0;
   hookHarness.effectDependencies = [];
   hookHarness.effectCleanups = [];
   hookHarness.effectIndex = 0;
@@ -292,6 +306,7 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     pendingTaskAction = null
   } = options;
 
+  hookHarness.callbackIndex = 0;
   hookHarness.effectIndex = 0;
   hookHarness.hookIndex = 0;
   hookHarness.refIndex = 0;
@@ -1425,98 +1440,192 @@ describe("TaskScreen", () => {
     expect(componentMocks.draftSetter).toHaveBeenLastCalledWith("");
   });
 
-  it("shrinks an expanded composer and dismisses its keyboard after Send", () => {
+  it("resets a scrollable composer and dismisses its keyboard after Send", () => {
     let tree = renderTaskScreen({
       agentType: "agent",
-      draftInput: "First line.\nSecond line."
+      draftInput:
+        "One long run-on sentence with no explicit newlines that has wrapped past the five-line composer cap on the native input."
     });
     let input = findByTestId(tree, "mobile.task-input");
+    expect(input?.props?.onPressIn).toBe(input?.props?.onFocus);
+    (input?.props?.onPressIn as () => void)();
+    tree = renderTaskScreen({
+      agentType: "agent",
+      draftInput:
+        "One long run-on sentence with no explicit newlines that has wrapped past the five-line composer cap on the native input."
+    });
+    input = findByTestId(tree, "mobile.task-input");
     const resizeComposer = input?.props?.onContentSizeChange as (
       event: unknown
     ) => void;
 
     resizeComposer({
-      nativeEvent: { contentSize: { height: 82, width: 240 } }
+      nativeEvent: { contentSize: { height: 142, width: 240 } }
     });
     tree = renderTaskScreen({
       agentType: "agent",
-      draftInput: "First line.\nSecond line."
+      draftInput:
+        "One long run-on sentence with no explicit newlines that has wrapped past the five-line composer cap on the native input."
     });
     input = findByTestId(tree, "mobile.task-input");
-    expect(styleEntries(input)).toContainEqual({ height: 82 });
+    expect(
+      findByTestId(tree, MOBILE_E2E_IDS.taskInputViewport)?.props?.scrollEnabled
+    ).toBe(true);
 
     pressSend(tree);
+    expect(componentMocks.onSendInput).toHaveBeenCalledOnce();
     resizeComposer({
-      nativeEvent: { contentSize: { height: 82, width: 240 } }
+      nativeEvent: { contentSize: { height: 142, width: 240 } }
     });
     tree = renderTaskScreen({ agentType: "agent" });
 
-    expect(styleEntries(findByTestId(tree, "mobile.task-input"))).toContainEqual({
-      height: 40
-    });
+    expect(
+      findByTestId(tree, MOBILE_E2E_IDS.taskInputViewport)?.props?.scrollEnabled
+    ).toBe(false);
     expect(componentMocks.keyboardDismiss).toHaveBeenCalledOnce();
   });
 
-  it.each([
-    [40, 40],
-    [80, 80],
-    [120, 120],
-    [180, 120]
-  ])(
-    "grows and caps the composer for native content height %s",
-    (contentHeight, expectedHeight) => {
-      let tree = renderTaskScreen({
-        draftInput: "A composed task reply"
-      });
-      const input = findByTestId(tree, MOBILE_E2E_IDS.taskInput);
-
-      (input?.props?.onContentSizeChange as (event: unknown) => void)({
-        nativeEvent: { contentSize: { height: contentHeight, width: 240 } }
-      });
-      tree = renderTaskScreen({ draftInput: "A composed task reply" });
-
-      expect(
-        styleEntries(findByTestId(tree, MOBILE_E2E_IDS.taskInput))
-      ).toContainEqual({ height: expectedHeight });
-    }
-  );
-
-  it("grows when iOS reports content size before publishing the draft text", () => {
-    let tree = renderTaskScreen({ draftInput: "" });
-    const input = findByTestId(tree, MOBILE_E2E_IDS.taskInput);
+  it("sizes the focused viewport from native layout between the one- and five-line bounds", () => {
+    let tree = renderTaskScreen({ draftInput: "A composed task reply" });
+    let input = findByTestId(tree, MOBILE_E2E_IDS.taskInput);
+    (input?.props?.onFocus as () => void)();
+    tree = renderTaskScreen({ draftInput: "A composed task reply" });
+    input = findByTestId(tree, MOBILE_E2E_IDS.taskInput);
 
     (input?.props?.onContentSizeChange as (event: unknown) => void)({
       nativeEvent: { contentSize: { height: 80, width: 240 } }
     });
-    (input?.props?.onChangeText as (value: string) => void)(
-      "First line\nSecond line\nThird line"
-    );
-    tree = renderTaskScreen({
-      draftInput: "First line\nSecond line\nThird line"
-    });
+    tree = renderTaskScreen({ draftInput: "A composed task reply" });
+    input = findByTestId(tree, MOBILE_E2E_IDS.taskInput);
+    const viewport = findByTestId(tree, MOBILE_E2E_IDS.taskInputViewport);
 
-    expect(
-      styleEntries(findByTestId(tree, MOBILE_E2E_IDS.taskInput))
-    ).toContainEqual({ height: 80 });
+    expect(styleEntries(input)).toContainEqual(
+      expect.objectContaining({ minHeight: 40, width: "100%" })
+    );
+    expect(styleEntries(input).some((style) => "height" in style)).toBe(false);
+    expect(styleEntries(viewport)).toContainEqual({ height: 80 });
+    expect(viewport?.props?.scrollEnabled).toBe(false);
+
+    (input?.props?.onBlur as () => void)();
+    tree = renderTaskScreen({ draftInput: "A composed task reply" });
+    const collapsedViewport = findByTestId(
+      tree,
+      MOBILE_E2E_IDS.taskInputViewport
+    );
+    expect(styleEntries(collapsedViewport)).toContainEqual({ height: 40 });
+    expect(collapsedViewport?.props?.scrollEnabled).toBe(true);
   });
 
-  it("shrinks an expanded composer when its draft is deleted", () => {
-    let tree = renderTaskScreen({ draftInput: "First line.\nSecond line." });
-    let input = findByTestId(tree, "mobile.task-input");
+  it("uses wrapped native content height with zero newlines to toggle internal scrolling", () => {
+    const wrappedDraft =
+      "This run-on sentence contains no newline characters but soft-wraps across more than five visual lines in the native task composer.";
+    expect(wrappedDraft).not.toContain("\n");
+
+    let tree = renderTaskScreen({ draftInput: wrappedDraft });
+    let input = findByTestId(tree, MOBILE_E2E_IDS.taskInput);
+    (input?.props?.onFocus as () => void)();
+    tree = renderTaskScreen({ draftInput: wrappedDraft });
+    input = findByTestId(tree, MOBILE_E2E_IDS.taskInput);
     (input?.props?.onContentSizeChange as (event: unknown) => void)({
-      nativeEvent: { contentSize: { height: 82, width: 240 } }
+      nativeEvent: { contentSize: { height: 142, width: 240 } }
     });
-    tree = renderTaskScreen({ draftInput: "First line.\nSecond line." });
-    input = findByTestId(tree, "mobile.task-input");
+    tree = renderTaskScreen({ draftInput: wrappedDraft });
+    input = findByTestId(tree, MOBILE_E2E_IDS.taskInput);
+    const viewport = findByTestId(tree, MOBILE_E2E_IDS.taskInputViewport);
+    expect(viewport?.props?.scrollEnabled).toBe(true);
+    expect(input?.props?.value).toBe(wrappedDraft);
+    expect(styleEntries(viewport)).toContainEqual({ height: 120 });
+
+    (input?.props?.onChangeText as (value: string) => void)(
+      "Shortened soft-wrap draft"
+    );
+    (input?.props?.onContentSizeChange as (event: unknown) => void)({
+      nativeEvent: { contentSize: { height: 80, width: 240 } }
+    });
+    tree = renderTaskScreen({ draftInput: "Shortened soft-wrap draft" });
+
+    expect(
+      findByTestId(tree, MOBILE_E2E_IDS.taskInputViewport)?.props?.scrollEnabled
+    ).toBe(false);
+  });
+
+  it("resets native scrolling when its draft is deleted", () => {
+    let tree = renderTaskScreen({ draftInput: "A long wrapped draft" });
+    let input = findByTestId(tree, MOBILE_E2E_IDS.taskInput);
+    (input?.props?.onFocus as () => void)();
+    tree = renderTaskScreen({ draftInput: "A long wrapped draft" });
+    input = findByTestId(tree, MOBILE_E2E_IDS.taskInput);
+    (input?.props?.onContentSizeChange as (event: unknown) => void)({
+      nativeEvent: { contentSize: { height: 142, width: 240 } }
+    });
+    tree = renderTaskScreen({ draftInput: "A long wrapped draft" });
+    input = findByTestId(tree, MOBILE_E2E_IDS.taskInput);
 
     (input?.props?.onChangeText as (value: string) => void)("");
     tree = renderTaskScreen();
 
-    expect(styleEntries(findByTestId(tree, "mobile.task-input"))).toContainEqual({
-      height: 40
-    });
+    expect(findByTestId(tree, MOBILE_E2E_IDS.taskInput)?.props?.scrollEnabled).toBe(
+      false
+    );
     expect(componentMocks.onSendInput).not.toHaveBeenCalled();
     expect(componentMocks.keyboardDismiss).not.toHaveBeenCalled();
+  });
+
+  it("restores on refocus and accepts shrink measured before the text change", () => {
+    const draftInput =
+      "Eight lines of wrapped content remain in the draft while the keyboard is dismissed and return to their capped scrolling viewport when editing resumes.";
+    let tree = renderTaskScreen({ draftInput });
+    let input = findByTestId(tree, MOBILE_E2E_IDS.taskInput);
+
+    expect(input?.props?.onPressIn).toBe(input?.props?.onFocus);
+    (input?.props?.onPressIn as () => void)();
+    tree = renderTaskScreen({ draftInput });
+    input = findByTestId(tree, MOBILE_E2E_IDS.taskInput);
+    (input?.props?.onContentSizeChange as (event: unknown) => void)({
+      nativeEvent: { contentSize: { height: 180, width: 240 } }
+    });
+    tree = renderTaskScreen({ draftInput });
+    input = findByTestId(tree, MOBILE_E2E_IDS.taskInput);
+    let viewport = findByTestId(tree, MOBILE_E2E_IDS.taskInputViewport);
+    expect(viewport?.props?.scrollEnabled).toBe(true);
+    expect(styleEntries(viewport)).toContainEqual({ height: 120 });
+
+    (input?.props?.onBlur as () => void)();
+    tree = renderTaskScreen({ draftInput });
+    input = findByTestId(tree, MOBILE_E2E_IDS.taskInput);
+    expect(input?.props?.value).toBe(draftInput);
+    viewport = findByTestId(tree, MOBILE_E2E_IDS.taskInputViewport);
+    expect(viewport?.props?.scrollEnabled).toBe(true);
+    expect(styleEntries(viewport)).toContainEqual({ height: 40 });
+
+    expect(input?.props?.onPressIn).toBe(input?.props?.onFocus);
+    (input?.props?.onPressIn as () => void)();
+    tree = renderTaskScreen({ draftInput });
+    input = findByTestId(tree, MOBILE_E2E_IDS.taskInput);
+    (input?.props?.onContentSizeChange as (event: unknown) => void)({
+      nativeEvent: { contentSize: { height: 40, width: 240 } }
+    });
+    tree = renderTaskScreen({ draftInput });
+    viewport = findByTestId(tree, MOBILE_E2E_IDS.taskInputViewport);
+    expect(viewport?.props?.scrollEnabled).toBe(true);
+    expect(styleEntries(viewport)).toContainEqual({ height: 120 });
+
+    (input?.props?.onContentSizeChange as (event: unknown) => void)({
+      nativeEvent: { contentSize: { height: 80, width: 240 } }
+    });
+    tree = renderTaskScreen({ draftInput });
+    input = findByTestId(tree, MOBILE_E2E_IDS.taskInput);
+    viewport = findByTestId(tree, MOBILE_E2E_IDS.taskInputViewport);
+    expect(styleEntries(viewport)).toContainEqual({ height: 80 });
+    expect(viewport?.props?.scrollEnabled).toBe(false);
+
+    (input?.props?.onChangeText as (value: string) => void)(
+      "Short refocused draft"
+    );
+    tree = renderTaskScreen({ draftInput: "Short refocused draft" });
+    viewport = findByTestId(tree, MOBILE_E2E_IDS.taskInputViewport);
+    expect(styleEntries(viewport)).toContainEqual({ height: 80 });
+    expect(viewport?.props?.scrollEnabled).toBe(false);
   });
 
   it.each(["", "  \n\t"])(

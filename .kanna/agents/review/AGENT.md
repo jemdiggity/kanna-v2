@@ -80,6 +80,8 @@ If E2E coverage is applicable but not feasible, the branch must document why it 
 
 Treat any UI-affecting diff without described visual verification of the changed states and relevant accessibility variants in the real app as not done; unit and component tests do not substitute for a render.
 
+Treat a UI-feel or interaction diff — gestures, animation, or dynamic layout — as reviewable only when the task record shows the required human on-device testing was completed and approved; simulator verification alone does not clear that gate.
+
 ## Recording the Verdict
 
 Pass — the branch is ready for human PR review with no required changes:

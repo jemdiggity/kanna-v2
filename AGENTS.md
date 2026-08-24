@@ -418,6 +418,7 @@ description. Save artifacts under the in-worktree, gitignored
 `docs/task-specs/<task>-screenshots/`, never commit the binaries, and treat the
 written PR/task-spec description as the durable record after the worktree is
 removed. Unit and component tests do not substitute for a render.
+For UI feel or interaction changes (animation, gesture, or dynamic layout), simulator verification is necessary but not sufficient: pause before review for human on-device testing, and iterate owner feedback in the same task so polish lands in as few PRs as possible.
 
 ## Coding Style
 
