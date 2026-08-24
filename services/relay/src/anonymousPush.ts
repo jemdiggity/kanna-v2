@@ -244,9 +244,23 @@ export async function revokeAnonymousPushPairing(
     .doc(`${anonymousDesktopId(request.desktopPubKey)}.${sha256(request.deviceId)}`);
   await db.runTransaction(async (transaction) => {
     const current = await transaction.get(ref);
-    if (current.data()?.certSignature === request.cert.signature) {
+    if (!current.exists) return;
+    const currentBinding = current.data();
+    if (
+      currentBinding?.certSignature === request.cert.signature
+      || (
+        typeof currentBinding?.certIssuedAt === "number"
+        && request.cert.issuedAt > currentBinding.certIssuedAt
+      )
+    ) {
       transaction.delete(ref);
+      return;
     }
+    throw new AnonymousPushRefusal(
+      409,
+      "stale_certificate",
+      "A newer anonymous push pairing is registered",
+    );
   });
 }
 

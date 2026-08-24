@@ -487,8 +487,8 @@ function createAnonymousPushIdentity(): AnonymousPushTestIdentity {
 function createAnonymousPushCertificate(
   identity: AnonymousPushTestIdentity,
   deviceId: string,
+  issuedAt = Date.now() - 1_000,
 ): AnonymousPushTestCertificate {
-  const issuedAt = Date.now() - 1_000;
   const expiresAt = issuedAt + 730 * 24 * 60 * 60_000;
   const payload = Buffer.concat([
     Buffer.from("kanna.push-pairing-cert.v1\0", "utf8"),
@@ -1317,6 +1317,69 @@ describe("Relay integration", () => {
     });
     expect(revoke.status).toBe(200);
     expect((await pairings.where("desktopPubKey", "==", identity.publicKey).get()).empty).toBe(true);
+  });
+
+  it("revokes an older binding with a newer certificate after its refresh registration was missed", async () => {
+    const identity = createAnonymousPushIdentity();
+    const oldIssuedAt = Date.now() - 2_000;
+    const oldCert = createAnonymousPushCertificate(identity, "missed-refresh-phone", oldIssuedAt);
+    const newerCert = createAnonymousPushCertificate(identity, "missed-refresh-phone", oldIssuedAt + 1_000);
+    const pairings = testFirestore.collection("anonymousPushPairings");
+
+    const register = await fetch(relayHttpUrl("/push/pairings"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(anonymousPairingBody(identity, oldCert, "missed-refresh-token")),
+    });
+    expect(register.status).toBe(200);
+
+    const revoke = await fetch(relayHttpUrl("/push/pairings"), {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        desktopPubKey: identity.publicKey,
+        deviceId: newerCert.deviceId,
+        cert: newerCert,
+      }),
+    });
+
+    expect(revoke.status).toBe(200);
+    expect((await pairings.where("desktopPubKey", "==", identity.publicKey).get()).empty).toBe(true);
+  });
+
+  it("refuses a stale certificate without revoking a newer binding", async () => {
+    const identity = createAnonymousPushIdentity();
+    const oldIssuedAt = Date.now() - 2_000;
+    const staleCert = createAnonymousPushCertificate(identity, "stale-delete-phone", oldIssuedAt);
+    const currentCert = createAnonymousPushCertificate(identity, "stale-delete-phone", oldIssuedAt + 1_000);
+    const pairings = testFirestore.collection("anonymousPushPairings");
+
+    const register = await fetch(relayHttpUrl("/push/pairings"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(anonymousPairingBody(identity, currentCert, "current-binding-token")),
+    });
+    expect(register.status).toBe(200);
+
+    const revoke = await fetch(relayHttpUrl("/push/pairings"), {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        desktopPubKey: identity.publicKey,
+        deviceId: staleCert.deviceId,
+        cert: staleCert,
+      }),
+    });
+
+    expect(revoke.status).toBe(409);
+    await expect(revoke.json()).resolves.toMatchObject({ code: "stale_certificate" });
+    const retained = await pairings.where("desktopPubKey", "==", identity.publicKey).get();
+    expect(retained.size).toBe(1);
+    expect(retained.docs[0]?.data()).toMatchObject({
+      certIssuedAt: currentCert.issuedAt,
+      certSignature: currentCert.signature,
+      fcmToken: "current-binding-token",
+    });
   });
 
   it("revokes only the certificate-selected pairing without an FCM token", async () => {

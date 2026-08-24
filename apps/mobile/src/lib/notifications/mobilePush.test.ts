@@ -245,6 +245,29 @@ describe("mobile push notifications", () => {
     );
   });
 
+  it("rejects a refused revocation so pairing trust remains retriable", async () => {
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 409 }));
+    const pairing = {
+      desktopId: "desktop-1",
+      desktopPushIdentity: {
+        publicKey: "desktop-public-key",
+        relayUrl: "wss://relay-staging.kanna.build",
+        environment: "staging"
+      },
+      pushPairingCert: {
+        deviceId: "mobile-device-1",
+        issuedAt: 1_000,
+        expiresAt: 2_000,
+        signature: "stale-certificate"
+      }
+    };
+    const coordinator = createAnonymousPushBindingCoordinator(fetchImpl);
+    coordinator.begin([pairing]);
+
+    await expect(coordinator.revoke(pairing))
+      .rejects.toThrow("Anonymous push pairing revocation failed (409).");
+  });
+
   it("serializes removal before certificate replacement so stale cleanup cannot win", async () => {
     let resolveDelete: (() => void) | null = null;
     const bindings = new Map<string, string>();
