@@ -1,5 +1,10 @@
 import { createHash, createPublicKey, verify } from "node:crypto";
-import type { Firestore, QueryDocumentSnapshot } from "firebase-admin/firestore";
+import type {
+  DocumentData,
+  DocumentReference,
+  Firestore,
+  QueryDocumentSnapshot,
+} from "firebase-admin/firestore";
 import { getFirebaseServices } from "./firebase.js";
 import {
   diagnoseMessagingFailure,
@@ -11,6 +16,7 @@ export const ANONYMOUS_PUSH_PAIRINGS_COLLECTION = "anonymousPushPairings";
 export const ANONYMOUS_AUTH_DOMAIN = Buffer.from("kanna.relay-auth.v1\0", "utf8");
 const PAIRING_CERT_DOMAIN = Buffer.from("kanna.push-pairing-cert.v1\0", "utf8");
 const STALE_BINDING_MS = 180 * 24 * 60 * 60 * 1_000;
+const MAX_CERTIFICATE_LIFETIME_MS = 731 * 24 * 60 * 60_000;
 const MAX_DEVICES_PER_DESKTOP = 10;
 const MAX_DESKTOPS_PER_TOKEN = 20;
 const INVALID_TOKEN_CODES = new Set([
@@ -42,13 +48,20 @@ export interface AnonymousPushPairingRevocation {
 interface AnonymousPushPairingRecord {
   desktopKeyHash: string;
   deviceIdHash: string;
-  tokenHash: string;
+  tokenHash: string | null;
   desktopPubKey: string;
-  fcmToken: string;
+  fcmToken: string | null;
   updatedAtMs: number;
   lastDeliveredAtMs: number | null;
   certIssuedAt: number;
+  certExpiresAt: number;
   certSignature: string;
+}
+
+interface CertificateOrdering {
+  issuedAt: number;
+  expiresAt: number;
+  signature: string;
 }
 
 interface WindowCounter {
@@ -172,7 +185,7 @@ export function validateAnonymousPushPairing(
     || issuedAt > nowMs + 5 * 60_000
     || expiresAt <= nowMs
     || expiresAt <= issuedAt
-    || expiresAt - issuedAt > 731 * 24 * 60 * 60_000
+    || expiresAt - issuedAt > MAX_CERTIFICATE_LIFETIME_MS
   ) {
     throw new AnonymousPushRefusal(401, "invalid_certificate", "Pairing certificate is invalid or expired");
   }
@@ -206,16 +219,22 @@ export async function registerAnonymousPushPairing(
     const [existing, desktopBindings, tokenBindings] = await Promise.all([
       transaction.get(ref),
       transaction.get(db.collection(ANONYMOUS_PUSH_PAIRINGS_COLLECTION)
-        .where("desktopKeyHash", "==", desktopKeyHash)
-        .limit(MAX_DEVICES_PER_DESKTOP + 1)),
+        .where("desktopKeyHash", "==", desktopKeyHash)),
       transaction.get(db.collection(ANONYMOUS_PUSH_PAIRINGS_COLLECTION)
         .where("tokenHash", "==", tokenHash)
         .limit(MAX_DESKTOPS_PER_TOKEN + 1)),
     ]);
-    if (!existing.exists && desktopBindings.size >= MAX_DEVICES_PER_DESKTOP) {
+    const activeDesktopBindingCount = desktopBindings.docs.filter((binding) =>
+      typeof binding.data().fcmToken === "string" && binding.data().fcmToken.length > 0
+    ).length;
+    const currentBinding = existing.data();
+    const existingIsActive = typeof currentBinding?.fcmToken === "string"
+      && currentBinding.fcmToken.length > 0;
+    if (!existingIsActive && activeDesktopBindingCount >= MAX_DEVICES_PER_DESKTOP) {
       throw new AnonymousPushRefusal(409, "desktop_binding_cap", "Desktop push pairing limit reached");
     }
-    const sameTokenBinding = existing.data()?.tokenHash === tokenHash;
+    assertCurrentOrNewerCertificate(request.cert, currentBinding);
+    const sameTokenBinding = currentBinding?.tokenHash === tokenHash;
     if (!sameTokenBinding && tokenBindings.size >= MAX_DESKTOPS_PER_TOKEN) {
       throw new AnonymousPushRefusal(409, "token_binding_cap", "Push token pairing limit reached");
     }
@@ -226,10 +245,11 @@ export async function registerAnonymousPushPairing(
       desktopPubKey: request.desktopPubKey,
       fcmToken: request.fcmToken,
       updatedAtMs: nowMs,
-      lastDeliveredAtMs: typeof existing.data()?.lastDeliveredAtMs === "number"
-        ? existing.data()?.lastDeliveredAtMs as number
+      lastDeliveredAtMs: typeof currentBinding?.lastDeliveredAtMs === "number"
+        ? currentBinding.lastDeliveredAtMs as number
         : null,
       certIssuedAt: request.cert.issuedAt,
+      certExpiresAt: request.cert.expiresAt,
       certSignature: request.cert.signature,
     };
     transaction.set(ref, record);
@@ -242,26 +262,7 @@ export async function revokeAnonymousPushPairing(
 ): Promise<void> {
   const ref = db.collection(ANONYMOUS_PUSH_PAIRINGS_COLLECTION)
     .doc(`${anonymousDesktopId(request.desktopPubKey)}.${sha256(request.deviceId)}`);
-  await db.runTransaction(async (transaction) => {
-    const current = await transaction.get(ref);
-    if (!current.exists) return;
-    const currentBinding = current.data();
-    if (
-      currentBinding?.certSignature === request.cert.signature
-      || (
-        typeof currentBinding?.certIssuedAt === "number"
-        && request.cert.issuedAt > currentBinding.certIssuedAt
-      )
-    ) {
-      transaction.delete(ref);
-      return;
-    }
-    throw new AnonymousPushRefusal(
-      409,
-      "stale_certificate",
-      "A newer anonymous push pairing is registered",
-    );
-  });
+  await retireAnonymousPushPairing(ref, request.cert, Date.now(), db);
 }
 
 export async function revokeAnonymousPushDevice(
@@ -270,9 +271,9 @@ export async function revokeAnonymousPushDevice(
   db = getFirebaseServices().db,
 ): Promise<void> {
   const normalizedDeviceId = boundedText(deviceId, 256);
-  await db.collection(ANONYMOUS_PUSH_PAIRINGS_COLLECTION)
-    .doc(`${anonymousDesktopId(desktopPubKey)}.${sha256(normalizedDeviceId)}`)
-    .delete();
+  const ref = db.collection(ANONYMOUS_PUSH_PAIRINGS_COLLECTION)
+    .doc(`${anonymousDesktopId(desktopPubKey)}.${sha256(normalizedDeviceId)}`);
+  await retireAnonymousPushPairing(ref, null, Date.now(), db);
 }
 
 export async function publishAnonymousPush(input: {
@@ -343,7 +344,7 @@ export async function publishAnonymousPush(input: {
     if (result.success) {
       await doc.ref.update({ lastDeliveredAtMs: nowMs });
     } else if (result.error?.code && INVALID_TOKEN_CODES.has(result.error.code)) {
-      await doc.ref.delete();
+      await reconcileInvalidAnonymousPushToken(doc, nowMs, db);
     }
   }));
   return {
@@ -353,6 +354,19 @@ export async function publishAnonymousPush(input: {
       response.responses.flatMap((result) => result.error ? [result.error] : []),
     ),
   };
+}
+
+export async function reconcileInvalidAnonymousPushToken(
+  binding: QueryDocumentSnapshot,
+  nowMs = Date.now(),
+  db = getFirebaseServices().db,
+): Promise<void> {
+  await retireAnonymousPushPairing(
+    binding.ref,
+    storedCertificate(binding.data()),
+    nowMs,
+    db,
+  );
 }
 
 export async function garbageCollectAnonymousPushPairings(
@@ -368,10 +382,114 @@ export async function garbageCollectAnonymousPushPairings(
     return typeof lastDelivered !== "number" || lastDelivered < nowMs - STALE_BINDING_MS;
   });
   if (expired.length === 0) return 0;
-  const batch = db.batch();
-  for (const doc of expired) batch.delete(doc.ref);
-  await batch.commit();
-  return expired.length;
+  const results = await Promise.all(expired.map(async (doc) => {
+    try {
+      return await retireAnonymousPushPairing(
+        doc.ref,
+        storedCertificate(doc.data()),
+        nowMs,
+        db,
+        nowMs - STALE_BINDING_MS,
+      );
+    } catch (error) {
+      if (error instanceof AnonymousPushRefusal && error.code === "stale_certificate") return false;
+      throw error;
+    }
+  }));
+  return results.filter(Boolean).length;
+}
+
+async function retireAnonymousPushPairing(
+  ref: DocumentReference,
+  candidate: CertificateOrdering | null,
+  nowMs: number,
+  db: Firestore,
+  staleBeforeMs?: number,
+): Promise<boolean> {
+  return db.runTransaction(async (transaction) => {
+    const current = await transaction.get(ref);
+    if (!current.exists) return false;
+    const currentBinding = current.data();
+    if (!currentBinding) throw new Error("Anonymous push pairing has no data");
+    const certificate = candidate ?? storedCertificate(currentBinding);
+    assertCurrentOrNewerCertificate(certificate, currentBinding);
+    if (staleBeforeMs !== undefined) {
+      const updatedAtMs = currentBinding.updatedAtMs;
+      const lastDeliveredAtMs = currentBinding.lastDeliveredAtMs;
+      if (
+        typeof updatedAtMs !== "number"
+        || updatedAtMs >= staleBeforeMs
+        || (typeof lastDeliveredAtMs === "number" && lastDeliveredAtMs >= staleBeforeMs)
+      ) {
+        return false;
+      }
+    }
+    if (certificate.issuedAt + MAX_CERTIFICATE_LIFETIME_MS <= nowMs) transaction.delete(ref);
+    else transaction.set(ref, revokedPairingRecord(currentBinding, certificate, nowMs));
+    return true;
+  });
+}
+
+function assertCurrentOrNewerCertificate(
+  candidate: CertificateOrdering,
+  currentBinding: DocumentData | undefined,
+): void {
+  if (typeof currentBinding?.certIssuedAt !== "number") return;
+  if (
+    candidate.issuedAt < currentBinding.certIssuedAt
+    || (
+      candidate.issuedAt === currentBinding.certIssuedAt
+      && candidate.signature !== currentBinding.certSignature
+    )
+  ) {
+    throw new AnonymousPushRefusal(
+      409,
+      "stale_certificate",
+      "A newer anonymous push pairing is registered",
+    );
+  }
+}
+
+function storedCertificate(currentBinding: DocumentData): CertificateOrdering {
+  const issuedAt = currentBinding.certIssuedAt;
+  const expiresAt = currentBinding.certExpiresAt;
+  const signature = currentBinding.certSignature;
+  if (
+    typeof issuedAt !== "number"
+    || typeof signature !== "string"
+    || (typeof expiresAt !== "number" && expiresAt !== undefined)
+  ) {
+    throw new Error("Anonymous push pairing has invalid certificate ordering metadata");
+  }
+  return {
+    issuedAt,
+    // Pre-ordering records did not retain expiry. Their issuance time still
+    // bounds every certificate that could be older than this watermark.
+    expiresAt: typeof expiresAt === "number" ? expiresAt : issuedAt + MAX_CERTIFICATE_LIFETIME_MS,
+    signature,
+  };
+}
+
+function revokedPairingRecord(
+  currentBinding: DocumentData,
+  certificate: CertificateOrdering,
+  nowMs: number,
+): AnonymousPushPairingRecord {
+  assertCurrentOrNewerCertificate(certificate, currentBinding);
+  return {
+    desktopKeyHash: currentBinding.desktopKeyHash as string,
+    deviceIdHash: currentBinding.deviceIdHash as string,
+    tokenHash: null,
+    desktopPubKey: currentBinding.desktopPubKey as string,
+    fcmToken: null,
+    updatedAtMs: nowMs,
+    lastDeliveredAtMs: typeof currentBinding.lastDeliveredAtMs === "number"
+      ? currentBinding.lastDeliveredAtMs
+      : null,
+    certIssuedAt: certificate.issuedAt,
+    certExpiresAt: certificate.expiresAt,
+    certSignature: certificate.signature,
+  };
 }
 
 function isActiveBinding(doc: QueryDocumentSnapshot, nowMs: number): boolean {
