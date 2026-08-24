@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { chromium } from "playwright";
 import WebSocket, { type RawData } from "ws";
 import {
   createTerminalAppStateLifecycle
@@ -44,6 +45,14 @@ import {
   createScriptedTask,
   waitForTerminalOutput
 } from "./terminalFlowTestUtils";
+import {
+  renderPathGrid,
+  renderRetainedMobileGrid
+} from "../../tui-fidelity/src/render";
+import type {
+  EmitterOutput,
+  TerminalFrame
+} from "../../tui-fidelity/src/types";
 
 describe("LAN task loop E2E", () => {
   let harness: RemoteHarness;
@@ -429,6 +438,9 @@ describe("LAN task loop E2E", () => {
         setControllerForeground(foreground) {
           controller.setAppForeground(foreground);
         },
+        reconcileTerminalAfterBackground() {
+          controller.reconcileTaskTerminalAfterBackground();
+        },
         expireTerminalGrace() {
           controller.expireTaskTerminalGrace();
         }
@@ -470,11 +482,12 @@ describe("LAN task loop E2E", () => {
         const foreground = lifecycle.transition("active");
         expect(foreground.preserveTerminal).toBe(true);
 
-        // Foregrounding has no hidden frame queue to drain: the retained
-        // terminal was already current while backgrounded.
+        // Foregrounding performs one authoritative local replacement. Native
+        // receipt while hidden does not prove that iOS let WKWebView apply the
+        // writes, so keeping the transport attachment is not enough by itself.
         const foregrounded = store.taskTerminalOutputSource.getSnapshot();
         expect(terminalOutputToString(foregrounded.output)).toBe(retainedOutput);
-        expect(foregrounded.outputEpoch).toBe(
+        expect(foregrounded.outputEpoch).toBeGreaterThan(
           retainedWhileBackgrounded.outputEpoch
         );
         expect(terminalAttachCount).toBe(1);
@@ -482,7 +495,7 @@ describe("LAN task loop E2E", () => {
         await controller.refresh({ preserveTaskSession: true });
 
         expect(store.taskTerminalOutputSource.getSnapshot().outputEpoch).toBe(
-          retainedWhileBackgrounded.outputEpoch
+          foregrounded.outputEpoch
         );
         expect(terminalAttachCount).toBe(1);
       } finally {
@@ -494,6 +507,153 @@ describe("LAN task loop E2E", () => {
       events?.close();
     }
   }, 150_000);
+
+  it("keeps the real mobile xterm byte-exact through hostile resume cuts and snapshot fallback", async () => {
+    const task = await createScriptedTask(harness, {
+      displayName: "LAN mobile reconnect fidelity",
+      snapshotHistory: { sentinel: "RECONNECT_INITIAL_HISTORY_READY" }
+    });
+    const referenceFrames: TerminalFrame[] = [];
+    let referenceCols = 80;
+    let referenceRows = 24;
+    const referenceTransport = createLanClient(harness);
+    const referenceSubscription = referenceTransport.observeTaskTerminal(
+      task.taskId,
+      (event) => {
+        if (event.type === "snapshot") {
+          referenceCols = event.cols;
+          referenceRows = event.rows;
+          referenceFrames.push({
+            type: "term_snapshot",
+            task_id: task.taskId,
+            cols: event.cols,
+            rows: event.rows,
+            data_b64: event.dataB64
+          });
+        } else if (event.type === "output") {
+          referenceFrames.push({
+            type: "term_output",
+            task_id: task.taskId,
+            data_b64: event.dataB64
+          });
+        }
+      }
+    );
+    const sockets = new ReconnectSocketController();
+    const controlledTransport = createLanTransport(
+      harness.lanBaseUrl,
+      nodeFetch,
+      (url) => sockets.create(url)
+    );
+    const store = createSessionStore();
+    const controller = createMobileController(
+      createKannaClient(controlledTransport),
+      store
+    );
+
+    try {
+      await controller.bootstrap();
+      controller.openTask(task.taskId);
+      await waitForStoreTerminalOutput(store, "SCRIPT_INPUT_READY", 30_000);
+      await waitForReferenceOutput(referenceFrames, "SCRIPT_INPUT_READY", 30_000);
+
+      await controller.sendTaskInput(task.taskId, "reconnect-fixture-start");
+      await waitForStoreTerminalOutput(store, "RECONNECT_REFERENCE_HEADER", 30_000);
+      await waitForReferenceOutput(referenceFrames, "RECONNECT_REFERENCE_HEADER", 30_000);
+
+      const hostileCuts = [
+        {
+          command: "reconnect-cut-ansi",
+          cut: Buffer.from("\x1b[", "latin1"),
+          marker: "ANSI_RED_SAFE"
+        },
+        {
+          command: "reconnect-cut-utf8",
+          cut: Buffer.from([0xe6]),
+          marker: "_UTF8_SAFE"
+        },
+        {
+          command: "reconnect-cut-sync",
+          cut: Buffer.from("\x1b[?2026", "latin1"),
+          marker: "SYNC_FRAME_SAFE"
+        }
+      ] as const;
+
+      for (const hostile of hostileCuts) {
+        const attachCount = sockets.terminalAttachCount();
+        const resumedEpoch =
+          store.taskTerminalOutputSource.getSnapshot().outputEpoch;
+        const disconnected = sockets.disconnectAfterOutputSuffix(hostile.cut);
+        await controller.sendTaskInput(task.taskId, hostile.command);
+        await disconnected;
+        await sockets.waitForTerminalAttachCount(attachCount + 1, 30_000);
+        await waitForStoreTerminalOutput(store, hostile.marker, 30_000);
+        await waitForReferenceOutput(referenceFrames, hostile.marker, 30_000);
+        expect(store.taskTerminalOutputSource.getSnapshot().outputEpoch).toBe(
+          resumedEpoch
+        );
+      }
+
+      // Hold the reconnect long enough for the daemon/server live ring to
+      // roll past this client's cursor. The next attach must therefore replace
+      // mobile state with one authoritative bounded snapshot, not overlap a
+      // stale replay cursor with the new snapshot.
+      const epochBeforeFallback =
+        store.taskTerminalOutputSource.getSnapshot().outputEpoch;
+      sockets.pauseNewConnections();
+      sockets.disconnectTerminal();
+      await controller.sendTaskInput(task.taskId, "reconnect-overflow");
+      await waitForReferenceOutput(
+        referenceFrames,
+        "RECONNECT_OVERFLOW_DONE",
+        60_000
+      );
+      sockets.resumeNewConnections();
+      await waitForStoreTerminalOutput(store, "RECONNECT_OVERFLOW_DONE", 60_000);
+      expect(
+        store.taskTerminalOutputSource.getSnapshot().outputEpoch
+      ).toBeGreaterThan(epochBeforeFallback);
+
+      const finalState = store.getState();
+      expect(finalState.taskTerminalCols).not.toBeNull();
+      expect(finalState.taskTerminalRows).not.toBeNull();
+      const browser = await chromium.launch();
+      try {
+        const actual = await renderRetainedMobileGrid(
+          browser,
+          "mobile-reconnect-fidelity",
+          store.taskTerminalOutputSource.getSnapshot().output,
+          finalState.taskTerminalCols ?? 80,
+          finalState.taskTerminalRows ?? 24
+        );
+        const reference: EmitterOutput = {
+          fixture: "mobile-reconnect-fidelity-reference.ansi",
+          cols: referenceCols,
+          rows: referenceRows,
+          snapshot_at: 0,
+          resnapshot_at: null,
+          used_visible_text_fallback: false,
+          frames: referenceFrames
+        };
+        const expected = await renderPathGrid(browser, reference);
+        expect({
+          cols: actual.cols,
+          rows: actual.rows,
+          cells: actual.cells
+        }).toEqual({
+          cols: expected.cols,
+          rows: expected.rows,
+          cells: expected.cells
+        });
+      } finally {
+        await browser.close();
+      }
+    } finally {
+      sockets.resumeNewConnections();
+      controller.dispose();
+      referenceSubscription.close();
+    }
+  }, 180_000);
 
   it("keeps a LAN terminal draft separate from a simultaneous logical task message", async () => {
     const task = await createScriptedTask(harness, {
@@ -781,6 +941,24 @@ async function waitForStoreTerminalOutput(
   });
 }
 
+async function waitForReferenceOutput(
+  frames: readonly TerminalFrame[],
+  marker: string,
+  timeoutMs: number
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const output = Buffer.concat(
+      frames.map((frame) => Buffer.from(frame.data_b64, "base64"))
+    ).toString("utf8");
+    if (output.includes(marker)) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(
+    `timed out waiting for uninterrupted terminal output ${marker}`
+  );
+}
+
 async function fetchJson<T = unknown>(url: string): Promise<T> {
   const response = await fetch(url);
   if (!response.ok) {
@@ -846,6 +1024,159 @@ class NodeWebSocketAdapter implements WebSocketLike {
 
   close(): void {
     this.socket.close();
+  }
+}
+
+class ReconnectSocketController {
+  private paused = false;
+  private readonly pending = new Set<ControlledNodeWebSocketAdapter>();
+  private terminalSocket: ControlledNodeWebSocketAdapter | null = null;
+  private terminalAttaches = 0;
+  private readonly attachWaiters = new Set<() => void>();
+  private armedCut: {
+    suffix: Buffer;
+    resolve(): void;
+    reject(error: Error): void;
+    timeout: ReturnType<typeof setTimeout>;
+  } | null = null;
+
+  create(url: string): WebSocketLike {
+    const socket = new ControlledNodeWebSocketAdapter(url, this);
+    if (this.paused) {
+      this.pending.add(socket);
+    } else {
+      socket.connect();
+    }
+    return socket;
+  }
+
+  pauseNewConnections(): void {
+    this.paused = true;
+  }
+
+  resumeNewConnections(): void {
+    this.paused = false;
+    for (const socket of this.pending) socket.connect();
+    this.pending.clear();
+  }
+
+  disconnectTerminal(): void {
+    this.terminalSocket?.terminate();
+  }
+
+  terminalAttachCount(): number {
+    return this.terminalAttaches;
+  }
+
+  disconnectAfterOutputSuffix(suffix: Buffer): Promise<void> {
+    if (this.armedCut) {
+      throw new Error("a reconnect cut is already armed");
+    }
+    return new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.armedCut = null;
+        reject(
+          new Error(
+            `timed out waiting for hostile output suffix ${suffix.toString("hex")}`
+          )
+        );
+      }, 30_000);
+      this.armedCut = { suffix, resolve, reject, timeout };
+    });
+  }
+
+  async waitForTerminalAttachCount(
+    expected: number,
+    timeoutMs: number
+  ): Promise<void> {
+    if (this.terminalAttaches >= expected) return;
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.attachWaiters.delete(check);
+        reject(new Error(`timed out waiting for terminal attach ${expected}`));
+      }, timeoutMs);
+      const check = () => {
+        if (this.terminalAttaches < expected) return;
+        clearTimeout(timeout);
+        this.attachWaiters.delete(check);
+        resolve();
+      };
+      this.attachWaiters.add(check);
+    });
+  }
+
+  onSend(socket: ControlledNodeWebSocketAdapter, data: string): void {
+    const frame = parseSocketFrame(data);
+    if (frame?.type !== "attach" || frame.kind !== "terminal") return;
+    this.terminalSocket = socket;
+    this.terminalAttaches += 1;
+    for (const waiter of [...this.attachWaiters]) waiter();
+  }
+
+  onMessage(socket: ControlledNodeWebSocketAdapter, data: string): void {
+    const armed = this.armedCut;
+    if (!armed || socket !== this.terminalSocket) return;
+    const frame = parseSocketFrame(data);
+    if (frame?.type !== "term_output" || typeof frame.data_b64 !== "string") return;
+    const bytes = Buffer.from(frame.data_b64, "base64");
+    if (!bytes.subarray(-armed.suffix.length).equals(armed.suffix)) return;
+    this.armedCut = null;
+    clearTimeout(armed.timeout);
+    socket.terminate();
+    armed.resolve();
+  }
+}
+
+class ControlledNodeWebSocketAdapter implements WebSocketLike {
+  private socket: WebSocket | null = null;
+  private closed = false;
+  onopen: (() => void) | null = null;
+  onclose: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  onmessage: ((event: { data: string }) => void) | null = null;
+
+  constructor(
+    private readonly url: string,
+    private readonly controller: ReconnectSocketController
+  ) {}
+
+  connect(): void {
+    if (this.socket || this.closed) return;
+    const socket = new WebSocket(this.url);
+    this.socket = socket;
+    socket.on("open", () => this.onopen?.());
+    socket.on("close", () => this.onclose?.());
+    socket.on("error", () => this.onerror?.());
+    socket.on("message", (raw) => {
+      const data = rawDataToString(raw);
+      this.onmessage?.({ data });
+      this.controller.onMessage(this, data);
+    });
+  }
+
+  send(data: string): void {
+    this.controller.onSend(this, data);
+    this.socket?.send(data);
+  }
+
+  close(): void {
+    this.closed = true;
+    this.socket?.close();
+  }
+
+  terminate(): void {
+    this.socket?.terminate();
+  }
+}
+
+function parseSocketFrame(data: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(data) as unknown;
+    return typeof parsed === "object" && parsed !== null
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
   }
 }
 

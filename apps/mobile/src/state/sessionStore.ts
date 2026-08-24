@@ -418,6 +418,10 @@ export interface SessionStore {
   /** Stop the walk: the loaded buffer has no room for another chunk. */
   markTaskTerminalScrollbackAtClientLimit(taskId: string): void;
   appendTaskTerminal(taskId: string, chunk: string): void;
+  /** Force one authoritative xterm replacement after iOS may have suspended
+   * the WebView while native state kept receiving output. Returns false when
+   * live-output compaction left a gap that requires a fresh snapshot. */
+  rehydrateTaskTerminal(taskId: string): boolean;
   setTaskTerminalStatus(taskId: string, status: TaskTerminalStatus): void;
   setTaskTerminalDims(taskId: string, cols: number, rows: number): void;
   setTaskTerminalError(taskId: string, message: string): void;
@@ -1717,6 +1721,21 @@ export function createSessionStore(): SessionStore {
       if (terminalMetadataChanged) {
         publish();
       }
+    },
+    rehydrateTaskTerminal(taskId) {
+      if (
+        state.taskTerminalTaskId !== taskId ||
+        state.taskTerminalOutputStart !== 0
+      ) {
+        return false;
+      }
+      state = {
+        ...state,
+        taskTerminalOutputEpoch: state.taskTerminalOutputEpoch + 1
+      };
+      publishTerminalOutput();
+      publish();
+      return true;
     },
     setTaskTerminalDims(taskId, cols, rows) {
       if (state.taskTerminalTaskId !== taskId) {

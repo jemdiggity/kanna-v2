@@ -7901,7 +7901,7 @@ describe("createMobileController", () => {
     expect(store.getState().taskTerminalTaskId).toBe("task-1");
   });
 
-  it("keeps the retained terminal current instead of replaying hidden output on foreground", async () => {
+  it("rehydrates the retained terminal once when foregrounding after hidden output", async () => {
     const store = createSessionStore();
     const client = createClientMock();
     const controller = createMobileController(client, store);
@@ -7921,12 +7921,47 @@ describe("createMobileController", () => {
       dataB64: "hidden"
     });
 
-    // Applying live bytes as they arrive leaves no historical frame queue for
-    // foregrounding to drain through xterm. The app is visually hidden, but
-    // the retained terminal remains the current screen throughout the grace.
+    const hiddenEpoch = store.getState().taskTerminalOutputEpoch;
+    controller.reconcileTaskTerminalAfterBackground();
+
+    // Native state remains current while hidden, but iOS may suspend WKWebView
+    // before it applies injected writes. One epoch change makes the view reset
+    // and replay the current contiguous state without a network reattach.
     expect(terminalText(store)).toBe("visible\nhidden\n");
+    expect(store.getState().taskTerminalOutputEpoch).toBe(hiddenEpoch + 1);
     expect(client.__terminalStream.subscription.close).not.toHaveBeenCalled();
     expect(client.observeTaskTerminal).toHaveBeenCalledOnce();
+  });
+
+  it("requests a fresh bounded snapshot when hidden output compacted past its base", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    client.__terminalStream.emit({
+      type: "snapshot",
+      taskId: "task-1",
+      cols: 80,
+      rows: 24,
+      dataB64: "visible"
+    });
+    for (const marker of ["A", "B", "C", "D"]) {
+      client.__terminalStream.emit({
+        type: "output",
+        taskId: "task-1",
+        dataB64: marker.repeat(300_000)
+      });
+    }
+    expect(store.getState().taskTerminalOutputStart).toBeGreaterThan(0);
+
+    controller.reconcileTaskTerminalAfterBackground();
+
+    expect(client.__terminalStream.subscription.close).toHaveBeenCalledOnce();
+    expect(client.observeTaskTerminal).toHaveBeenCalledTimes(2);
+    expect(store.getState().taskTerminalStatus).toBe("connecting");
+    expect(store.getState().taskTerminalOutputStart).toBe(0);
   });
 
   it("preserves the live terminal during a grace refresh", async () => {

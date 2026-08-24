@@ -12,6 +12,7 @@ function createTerminalLifecycle(
   const actions = {
     setTransportForeground: vi.fn(),
     setControllerForeground: vi.fn(),
+    reconcileTerminalAfterBackground: vi.fn(),
     expireTerminalGrace: vi.fn()
   };
   const lifecycle = createTerminalAppStateLifecycle({
@@ -53,6 +54,7 @@ describe("createTerminalAppStateLifecycle", () => {
     expect(foreground.preserveTerminal).toBe(true);
     expect(actions.expireTerminalGrace).not.toHaveBeenCalled();
     expect(actions.setTransportForeground).not.toHaveBeenCalledWith(false);
+    expect(actions.reconcileTerminalAfterBackground).toHaveBeenCalledOnce();
     lifecycle.dispose();
     vi.useRealTimers();
   });
@@ -69,6 +71,7 @@ describe("createTerminalAppStateLifecycle", () => {
     expect(actions.setTransportForeground).toHaveBeenNthCalledWith(1, false);
     expect(actions.setTransportForeground).toHaveBeenNthCalledWith(2, true);
     expect(foreground.preserveTerminal).toBe(false);
+    expect(actions.reconcileTerminalAfterBackground).not.toHaveBeenCalled();
     lifecycle.dispose();
     vi.useRealTimers();
   });

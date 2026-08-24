@@ -137,6 +137,35 @@ while :; do
 
     ${inputReport}
     case "$line" in
+      *reconnect-fixture-start*)
+        kill "$heartbeat_pid" 2>/dev/null || true
+        heartbeat_pid=""
+        printf '\\033[2J\\033[HRECONNECT_REFERENCE_HEADER\\r\\n'
+        printf 'stable row before hostile cuts\\r\\n'
+        ;;
+      *reconnect-cut-ansi*)
+        printf '\\033['
+        sleep 0.35
+        printf '31mANSI_RED_SAFE\\033[0m\\r\\n'
+        ;;
+      *reconnect-cut-utf8*)
+        printf '\\346'
+        sleep 0.35
+        printf '\\274\\242_UTF8_SAFE\\r\\n'
+        ;;
+      *reconnect-cut-sync*)
+        printf '\\033[?2026'
+        sleep 0.35
+        printf 'h\\033[4;1HSYNC_FRAME_SAFE\\033[?2026l\\r\\n'
+        ;;
+      *reconnect-overflow*)
+        reconnect_line=1
+        while [ $reconnect_line -le 5000 ]; do
+          printf 'RECONNECT_OVERFLOW_%04d_%s\\r\\n' "$reconnect_line" '${"Y".repeat(128)}'
+          reconnect_line=$((reconnect_line + 1))
+        done
+        printf 'RECONNECT_OVERFLOW_DONE\\r\\n'
+        ;;
       *burst-output*)
         burst_line=1
         while [ $burst_line -le 2000 ]; do

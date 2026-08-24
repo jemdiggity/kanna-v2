@@ -422,29 +422,34 @@ impl OutputRing {
         self.end_offset
     }
 
-    /// Bytes from `offset` onward, or `None` when the ring can no longer answer
-    /// — the caller must send a bounded fresh snapshot instead.
+    /// Complete output frames from `offset` onward, or `None` when the ring can
+    /// no longer answer safely — the caller must send a bounded fresh snapshot
+    /// instead.
+    ///
+    /// A transport cursor is only valid after a complete `term_output` frame.
+    /// Accepting an arbitrary byte inside one of those frames can begin replay
+    /// with an ANSI or UTF-8 continuation whose parser state the client does
+    /// not have. Keep frame boundaries as the resume-safe cut points rather
+    /// than slicing a retained chunk.
     pub(crate) fn replay_from(&self, offset: u64) -> Option<Vec<Arc<[u8]>>> {
         if offset > self.end_offset || offset < self.start_offset {
             return None;
         }
-        let mut position = self.start_offset;
-        let mut replay = Vec::new();
-        for chunk in &self.chunks {
-            let chunk_end = position + chunk.len() as u64;
-            if chunk_end <= offset {
-                position = chunk_end;
-                continue;
-            }
-            if position >= offset {
-                replay.push(Arc::clone(chunk));
-            } else {
-                let skip = (offset - position) as usize;
-                replay.push(Arc::from(&chunk[skip..]));
-            }
-            position = chunk_end;
+        if offset == self.end_offset {
+            return Some(Vec::new());
         }
-        Some(replay)
+
+        let mut position = self.start_offset;
+        for (index, chunk) in self.chunks.iter().enumerate() {
+            if position == offset {
+                return Some(self.chunks.iter().skip(index).cloned().collect());
+            }
+            position += chunk.len() as u64;
+            if position > offset {
+                return None;
+            }
+        }
+        None
     }
 }
 
@@ -711,9 +716,10 @@ mod tests {
         assert_eq!(replay.len(), 1);
         assert_eq!(&*replay[0], b"world");
 
-        let mid_chunk = ring.replay_from(3).expect("offset inside a chunk");
-        assert_eq!(&*mid_chunk[0], b"lo ");
-        assert_eq!(&*mid_chunk[1], b"world");
+        assert!(
+            ring.replay_from(3).is_none(),
+            "a cursor inside an output frame is not parser-safe"
+        );
 
         assert!(ring.replay_from(11).expect("caught up").is_empty());
         assert!(ring.replay_from(12).is_none(), "an impossible offset");

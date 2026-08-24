@@ -8,6 +8,7 @@ export interface TerminalAppStateLifecycleOptions {
   now?: () => number;
   setTransportForeground(foreground: boolean): void;
   setControllerForeground(foreground: boolean): void;
+  reconcileTerminalAfterBackground(): void;
   expireTerminalGrace(): void;
 }
 
@@ -28,6 +29,7 @@ export function createTerminalAppStateLifecycle({
   now = Date.now,
   setTransportForeground,
   setControllerForeground,
+  reconcileTerminalAfterBackground,
   expireTerminalGrace
 }: TerminalAppStateLifecycleOptions): {
   transition(nextState: AppStateStatus): TerminalAppStateTransition;
@@ -85,6 +87,9 @@ export function createTerminalAppStateLifecycle({
         const preserveTerminal = !graceExpired;
         clearGraceTimer();
         setTransportForeground(true);
+        if (previousState !== "active" && preserveTerminal) {
+          reconcileTerminalAfterBackground();
+        }
         setControllerForeground(true);
         graceExpired = false;
         backgroundedAtMs = null;

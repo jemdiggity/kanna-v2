@@ -1522,6 +1522,25 @@ describe("createSessionStore", () => {
     );
   });
 
+  it("rehydrates only a contiguous retained terminal", () => {
+    const store = createSessionStore();
+    store.beginTaskTerminal("task-1", "");
+    store.replaceTaskTerminalSnapshot("task-1", "c25hcHNob3Q=", 80, 24);
+    store.appendTaskTerminal("task-1", "bGl2ZQ==\n");
+    const before = store.getState().taskTerminalOutputEpoch;
+
+    expect(store.rehydrateTaskTerminal("task-1")).toBe(true);
+    expect(store.getState().taskTerminalOutputEpoch).toBe(before + 1);
+
+    for (const marker of ["A", "B", "C", "D"]) {
+      store.appendTaskTerminal("task-1", `${marker.repeat(300_000)}\n`);
+    }
+    const compactedEpoch = store.getState().taskTerminalOutputEpoch;
+    expect(store.getState().taskTerminalOutputStart).toBeGreaterThan(0);
+    expect(store.rehydrateTaskTerminal("task-1")).toBe(false);
+    expect(store.getState().taskTerminalOutputEpoch).toBe(compactedEpoch);
+  });
+
   it("publishes the one application-state transition when output recovers an error", () => {
     const store = createSessionStore();
     store.beginTaskTerminal("task-1", "");

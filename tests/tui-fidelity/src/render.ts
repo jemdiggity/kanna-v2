@@ -55,8 +55,16 @@ interface TerminalHookState {
   chunksB64?: string[];
 }
 
+interface HarnessTerminalOutputBuffer {
+  scrollbackSegments: readonly string[];
+  snapshot: string;
+  liveSegments: readonly string[];
+}
+
+type HarnessTerminalOutput = string | HarnessTerminalOutputBuffer;
+
 interface HarnessSessionState {
-  taskTerminalOutput: string;
+  taskTerminalOutput: HarnessTerminalOutput;
   taskTerminalOutputEpoch: number;
   taskTerminalOutputStart: number;
   taskTerminalCols: number | null;
@@ -80,18 +88,18 @@ type HarnessTerminalMutation =
   | { kind: "append"; chunk: string }
   | {
       kind: "replace";
-      output: string;
+      output: HarnessTerminalOutput;
       status: HarnessSessionState["taskTerminalStatus"];
     };
 
 interface TerminalMutationModule {
   planTerminalMutation(options: {
     previousEpoch: number;
-    previousOutput: string;
+    previousOutput: HarnessTerminalOutput;
     previousStart: number;
     previousStatus: HarnessSessionState["taskTerminalStatus"];
     nextEpoch: number;
-    nextOutput: string;
+    nextOutput: HarnessTerminalOutput;
     nextStart: number;
     nextStatus: HarnessSessionState["taskTerminalStatus"];
   }): HarnessTerminalMutation;
@@ -353,8 +361,12 @@ export async function verifyMobileAltScreenScrollInput(browser: Browser): Promis
   let page: Page | null = null;
   try {
     page = await context.newPage();
-    await page.setContent(await buildInstrumentedMobileDocument(), { waitUntil: "load" });
-    await page.waitForFunction(() => typeof window.__replaceTerminalState === "function");
+    await page.setContent(await buildInstrumentedMobileDocument(), {
+      waitUntil: "load"
+    });
+    await page.waitForFunction(
+      () => typeof window.__replaceTerminalState === "function"
+    );
     await page.evaluate((dims) => window.__setTerminalDims(dims), {
       cols: MOBILE_SCROLL_COLS,
       rows: MOBILE_SCROLL_ROWS
@@ -929,6 +941,43 @@ export async function renderSessionStorePathGrid(
   }
 }
 
+/** Render the exact retained output owned by the real mobile session store.
+ * Remote E2E uses this after transport reconnects so the assertion runs
+ * through the same bundled xterm document and byte-oriented write hooks as
+ * the shipped WebView. */
+export async function renderRetainedMobileGrid(
+  browser: Browser,
+  name: string,
+  output: HarnessTerminalOutput,
+  cols: number,
+  rows: number
+): Promise<GridSnapshot> {
+  const page = await browser.newPage({ viewport: VIEWPORT });
+  try {
+    await page.setContent(await buildInstrumentedMobileDocument(), { waitUntil: "load" });
+    await installSerializeAddon(page);
+    await page.waitForFunction(() => typeof window.__replaceTerminalState === "function");
+    await setTerminalDims(page, {
+      type: "term_snapshot",
+      task_id: "retained-mobile",
+      cols,
+      rows,
+      data_b64: ""
+    });
+    await callHook(page, "__replaceTerminalState", {
+      chunksB64: terminalChunksFromOutput(output)
+    });
+    await waitForWrites(page);
+    return await extractGrid(page);
+  } finally {
+    await page.screenshot({
+      path: path.join(ARTIFACT_DIR, `${name}.retained-mobile.png`),
+      fullPage: true
+    });
+    await page.close();
+  }
+}
+
 export async function renderReferenceGrid(
   browser: Browser,
   name: string,
@@ -1063,11 +1112,21 @@ async function callReferenceWrite(page: Page, text: string): Promise<void> {
   }, text);
 }
 
-function terminalChunksFromOutput(output: string): string[] {
-  return output
-    .split("\n")
-    .map((chunk) => chunk.trim())
-    .filter((chunk) => chunk.length > 0);
+function terminalChunksFromOutput(output: HarnessTerminalOutput): string[] {
+  const segments =
+    typeof output === "string"
+      ? [output]
+      : [
+          ...output.scrollbackSegments,
+          output.snapshot,
+          ...output.liveSegments
+        ];
+  return segments.flatMap((segment) =>
+    segment
+      .split("\n")
+      .map((chunk) => chunk.trim())
+      .filter((chunk) => chunk.length > 0)
+  );
 }
 
 export async function waitForWrites(page: Page): Promise<void> {
