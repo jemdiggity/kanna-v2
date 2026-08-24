@@ -779,6 +779,21 @@ async fn run_anonymous_push_revocation_loop(
                 continue;
             }
         };
+        let (pending, obsolete): (Vec<_>, Vec<_>) = pending
+            .into_iter()
+            .partition(|revocation| revocation.desktop_public_key == current_public_key);
+        for revocation in obsolete {
+            log::info!(
+                "Retiring anonymous push revocation for device {} after identity rotation",
+                revocation.device_id
+            );
+            http_state
+                .acknowledge_anonymous_push_revocation(&revocation)
+                .await?;
+        }
+        if pending.is_empty() {
+            continue;
+        }
         let (mut sink, mut stream) =
             match relay_client::connect_anonymous_push_to_relay(config).await {
                 Ok(connection) => connection,
@@ -814,13 +829,7 @@ async fn drain_anonymous_push_revocations(
     stream: &mut relay_client::WsStream,
 ) -> Result<(), String> {
     for revocation in pending {
-        if revocation.desktop_public_key != current_public_key {
-            log::error!(
-                "Cannot sign anonymous push revocation for device {} after identity rotation",
-                revocation.device_id
-            );
-            continue;
-        }
+        debug_assert_eq!(revocation.desktop_public_key, current_public_key);
         let id = format!(
             "anonymous-push-revoke:{}:{}",
             config.desktop_id, revocation.device_id
@@ -2088,6 +2097,201 @@ mod tests {
                 .and_then(|name| name.to_str())
                 .expect("pairing store file name")
         ));
+        let _ = std::fs::remove_file(pairing_store_path);
+        let _ = std::fs::remove_file(identity_path);
+    }
+
+    #[tokio::test]
+    async fn anonymous_push_revocation_rotation_retires_only_obsolete_namespace() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+        use tokio::time::timeout;
+        use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
+
+        let relay_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind relay stand-in");
+        let relay_address = relay_listener.local_addr().expect("relay address");
+        let unique = format!(
+            "relay-anonymous-revoke-rotation-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        );
+        let pairing_store_path = std::env::temp_dir().join(format!("{unique}-pairings.json"));
+        let config = Config {
+            relay_url: format!("ws://{relay_address}"),
+            device_token: "legacy-device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
+            daemon_dir: std::env::temp_dir()
+                .join(format!("{unique}-daemon"))
+                .to_string_lossy()
+                .into_owned(),
+            db_path: crate::db::Db::test_db_path(&unique),
+            kanna_cli_path: None,
+            desktop_id: "desktop-anonymous-revoke-rotation".to_string(),
+            desktop_secret: None,
+            desktop_name: "Anonymous Revoke Rotation Mac".to_string(),
+            version: "test-version".to_string(),
+            environment: "development".to_string(),
+            lan_host: "127.0.0.1".to_string(),
+            lan_port: 48120,
+            transfer_port: 4455,
+            activity_event_debounce_seconds: 300,
+            pairing_store_path: pairing_store_path.to_string_lossy().into_owned(),
+        };
+        let claim = |config: &Config, device_id: &str| {
+            let mut active = Some(
+                crate::pairing::create_active_pairing_session(config).expect("pairing session"),
+            );
+            let code = active
+                .as_ref()
+                .expect("active pairing")
+                .session
+                .code
+                .clone();
+            crate::pairing::claim_pairing_session(
+                config,
+                &mut active,
+                crate::pairing::PairingClaimRequest {
+                    code,
+                    device_id: device_id.to_string(),
+                    device_name: format!("{device_id} Phone"),
+                },
+            )
+            .expect("claim pairing")
+        };
+
+        let old_pairing = claim(&config, "phone-obsolete-key");
+        let state = Arc::new(http_api::AppState::new(config.clone()));
+        state
+            .remove_trusted_device("phone-obsolete-key")
+            .await
+            .expect("queue obsolete revocation");
+        let identity_path = pairing_store_path.with_file_name(format!(
+            "{}.anonymous-push-identity.json",
+            pairing_store_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("pairing store file name")
+        ));
+        std::fs::remove_file(&identity_path).expect("rotate anonymous identity");
+        let current_pairing = claim(&config, "phone-current-key");
+        assert_ne!(
+            old_pairing.desktop_push_identity.public_key,
+            current_pairing.desktop_push_identity.public_key
+        );
+        state
+            .remove_trusted_device("phone-current-key")
+            .await
+            .expect("queue current revocation");
+
+        let expected_public_key = current_pairing.desktop_push_identity.public_key;
+        let (revoke_seen_tx, revoke_seen_rx) = tokio::sync::oneshot::channel();
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        let relay_server = tokio::spawn(async move {
+            let (stream, _) = relay_listener
+                .accept()
+                .await
+                .expect("single relay connection");
+            let mut socket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("accept websocket");
+            let auth = socket.next().await.expect("auth").expect("auth frame");
+            let TungsteniteMessage::Text(auth) = auth else {
+                panic!("anonymous auth must be text");
+            };
+            let auth: serde_json::Value = serde_json::from_str(&auth).expect("parse auth");
+            assert_eq!(auth["anon_pub_key"], expected_public_key);
+            let nonce = URL_SAFE_NO_PAD.encode([13_u8; 32]);
+            socket
+                .send(TungsteniteMessage::Text(
+                    serde_json::json!({ "type": "auth_challenge", "nonce": nonce })
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .expect("challenge");
+            let proof = socket.next().await.expect("proof").expect("proof frame");
+            assert!(matches!(proof, TungsteniteMessage::Text(_)));
+            socket
+                .send(TungsteniteMessage::Text(
+                    serde_json::json!({
+                        "type": "auth_ok",
+                        "userId": "anonymous:test",
+                        "capabilities": { "mobileNotifications": { "version": 1 } }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .expect("auth success");
+            let revoke = socket.next().await.expect("revoke").expect("revoke frame");
+            let TungsteniteMessage::Text(revoke) = revoke else {
+                panic!("revocation must be text");
+            };
+            let revoke: serde_json::Value = serde_json::from_str(&revoke).expect("parse revoke");
+            assert_eq!(revoke["deviceId"], "phone-current-key");
+            revoke_seen_tx.send(()).expect("report current revocation");
+            ack_rx.await.expect("release acknowledgement");
+            socket
+                .send(TungsteniteMessage::Text(
+                    serde_json::json!({
+                        "type": "response",
+                        "id": revoke["id"],
+                        "data": null
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .expect("revoke ack");
+            assert!(
+                timeout(Duration::from_millis(250), relay_listener.accept())
+                    .await
+                    .is_err(),
+                "identity rotation caused relay connection churn"
+            );
+        });
+        let drain_config = config.clone();
+        let drain_state = Arc::clone(&state);
+        let drain = tokio::spawn(async move {
+            run_anonymous_push_revocation_loop(&drain_config, drain_state).await
+        });
+
+        timeout(Duration::from_secs(2), revoke_seen_rx)
+            .await
+            .expect("current revocation reached relay")
+            .expect("relay reported current revocation");
+        let pending = state
+            .pending_anonymous_push_revocations()
+            .await
+            .expect("read retained current revocation");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].device_id, "phone-current-key");
+        ack_tx.send(()).expect("release relay acknowledgement");
+        relay_server.await.expect("relay server");
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if state
+                    .pending_anonymous_push_revocations()
+                    .await
+                    .expect("read drained outbox")
+                    .is_empty()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("current revocation removed after acknowledgement");
+        drain.abort();
+
         let _ = std::fs::remove_file(pairing_store_path);
         let _ = std::fs::remove_file(identity_path);
     }

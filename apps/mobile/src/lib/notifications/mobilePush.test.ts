@@ -198,14 +198,51 @@ describe("mobile push notifications", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(2);
 
     const coordinator = createAnonymousPushBindingCoordinator(fetchImpl);
-    const generation = coordinator.begin([pairing]);
-    coordinator.rememberToken(generation, "anonymous-token-2");
+    coordinator.begin([pairing]);
     await coordinator.revoke(pairing);
     expect(fetchImpl).toHaveBeenCalledTimes(3);
     expect(fetchImpl.mock.calls[2]?.[1]).toEqual(expect.objectContaining({
       method: "DELETE",
-      body: expect.stringContaining("anonymous-token-2")
+      body: JSON.stringify({
+        desktopPubKey: "desktop-public-key",
+        deviceId: "mobile-device-1",
+        cert: pairing.pushPairingCert
+      })
     }));
+  });
+
+  it("revokes a pairing before FCM token initialization", async () => {
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 200 }));
+    const pairing = {
+      desktopId: "desktop-1",
+      desktopPushIdentity: {
+        publicKey: "desktop-public-key",
+        relayUrl: "wss://relay-staging.kanna.build",
+        environment: "staging"
+      },
+      pushPairingCert: {
+        deviceId: "mobile-device-1",
+        issuedAt: 1_000,
+        expiresAt: 2_000,
+        signature: "desktop-signature"
+      }
+    };
+    const coordinator = createAnonymousPushBindingCoordinator(fetchImpl);
+    coordinator.begin([pairing]);
+
+    await coordinator.revoke(pairing);
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "https://relay-staging.kanna.build/push/pairings",
+      expect.objectContaining({
+        method: "DELETE",
+        body: JSON.stringify({
+          desktopPubKey: "desktop-public-key",
+          deviceId: "mobile-device-1",
+          cert: pairing.pushPairingCert
+        })
+      })
+    );
   });
 
   it("serializes removal before certificate replacement so stale cleanup cannot win", async () => {

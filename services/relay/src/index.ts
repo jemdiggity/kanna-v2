@@ -83,7 +83,7 @@ import {
   AnonymousPushRefusal,
   anonymousAuthPayload,
   anonymousDesktopId,
-  consumePairingRegistrationLimit,
+  consumePairingRequestLimit,
   publishAnonymousPush,
   registerAnonymousPushPairing,
   revokeAnonymousPushDevice,
@@ -384,10 +384,7 @@ export const server = createServer(async (req, res) => {
       (req.method === "POST" || req.method === "DELETE")
       && req.url === "/push/pairings"
     ) {
-      if (
-        req.method === "POST"
-        && !consumePairingRegistrationLimit(clientAddressForRequest(req))
-      ) {
+      if (!consumePairingRequestLimit(clientAddressForRequest(req), req.method)) {
         jsonResponse(res, 429, { error: "Anonymous push pairing rate limit exceeded" });
         return;
       }
@@ -399,10 +396,11 @@ export const server = createServer(async (req, res) => {
         jsonResponse(res, 400, { error: "Invalid JSON" });
         return;
       }
-      const pairing = validateAnonymousPushPairing(parsed);
       if (req.method === "POST") {
+        const pairing = validateAnonymousPushPairing(parsed);
         await registerAnonymousPushPairing(pairing);
       } else {
+        const pairing = validateAnonymousPushPairing(parsed, Date.now(), false);
         await revokeAnonymousPushPairing(pairing);
       }
       jsonResponse(res, 200, { ok: true });

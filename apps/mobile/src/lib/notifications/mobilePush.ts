@@ -75,7 +75,6 @@ function anonymousPairingKey(pairing: AnonymousPushPairing): string {
 
 export interface AnonymousPushBindingCoordinator {
   begin(pairings: readonly AnonymousPushPairing[]): number;
-  rememberToken(generation: number, deviceToken: string): void;
   register(generation: number, deviceToken: string): Promise<void>;
   revoke(pairing: AnonymousPushPairing): Promise<void>;
   end(generation: number): void;
@@ -86,7 +85,6 @@ export function createAnonymousPushBindingCoordinator(
 ): AnonymousPushBindingCoordinator {
   let generation = 0;
   let activeGeneration: number | null = null;
-  let currentDeviceToken: string | null = null;
   let desiredPairings = new Map<string, AnonymousPushPairing>();
   let operationTail = Promise.resolve();
 
@@ -97,8 +95,8 @@ export function createAnonymousPushBindingCoordinator(
   };
   const updatePairing = async (
     pairing: AnonymousPushPairing,
-    deviceToken: string,
-    method: "POST" | "DELETE"
+    method: "POST" | "DELETE",
+    deviceToken?: string
   ) => {
     const url = pushEndpointUrl(
       pairing.desktopPushIdentity.relayUrl,
@@ -113,7 +111,7 @@ export function createAnonymousPushBindingCoordinator(
       body: JSON.stringify({
         desktopPubKey: pairing.desktopPushIdentity.publicKey,
         deviceId: pairing.pushPairingCert.deviceId,
-        fcmToken: deviceToken,
+        ...(deviceToken ? { fcmToken: deviceToken } : {}),
         cert: pairing.pushPairingCert
       })
     });
@@ -133,26 +131,20 @@ export function createAnonymousPushBindingCoordinator(
       );
       return generation;
     },
-    rememberToken(sessionGeneration, deviceToken) {
-      if (activeGeneration === sessionGeneration) currentDeviceToken = deviceToken;
-    },
     register(sessionGeneration, deviceToken) {
       if (activeGeneration !== sessionGeneration) return Promise.resolve();
-      currentDeviceToken = deviceToken;
       const registrations = [...desiredPairings.values()];
       return enqueue(async () => {
         if (activeGeneration !== sessionGeneration) return;
         for (const pairing of registrations) {
           if (desiredPairings.get(anonymousPairingKey(pairing)) !== pairing) continue;
-          await updatePairing(pairing, deviceToken, "POST");
+          await updatePairing(pairing, "POST", deviceToken);
         }
       });
     },
     revoke(pairing) {
       desiredPairings.delete(anonymousPairingKey(pairing));
-      if (!currentDeviceToken) return Promise.resolve();
-      const deviceToken = currentDeviceToken;
-      return enqueue(() => updatePairing(pairing, deviceToken, "DELETE"));
+      return enqueue(() => updatePairing(pairing, "DELETE"));
     },
     end(sessionGeneration) {
       if (activeGeneration === sessionGeneration) activeGeneration = null;
@@ -244,7 +236,6 @@ export async function startMobilePushNotifications(
     }
   };
   const registerToken = async (deviceToken: string) => {
-    anonymousBindingCoordinator.rememberToken(anonymousGeneration, deviceToken);
     const idToken = await input.getIdToken();
     if (idToken) {
       if (!registrationUrl) {

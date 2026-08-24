@@ -963,14 +963,52 @@ describe("createMobileController", () => {
 
     expect(revokeAnonymousPushPairing).toHaveBeenCalledOnce();
     expect(revokeAnonymousPushPairing).toHaveBeenCalledWith(pairedDesktop);
-    expect(store.getState().trustedDesktops).toEqual([retainedDesktop]);
+    expect(store.getState().trustedDesktops).toEqual([pairedDesktop, retainedDesktop]);
     let settled = false;
     void removal.then(() => { settled = true; });
     await flushMicrotasks();
     expect(settled).toBe(false);
     revocation.resolve();
     await removal;
+    expect(store.getState().trustedDesktops).toEqual([retainedDesktop]);
     expect(store.getState().desktops).toEqual([accountDesktop]);
+  });
+
+  it("retains manual trust when anonymous push revocation fails", async () => {
+    const store = createSessionStore();
+    const pairedDesktop = {
+      ...trustedDesktop,
+      desktopPushIdentity: {
+        publicKey: "desktop-public-key",
+        relayUrl: "wss://relay-staging.kanna.build",
+        environment: "staging"
+      },
+      pushPairingCert: {
+        deviceId: "phone-1",
+        issuedAt: 1_000,
+        expiresAt: 2_000,
+        signature: "pairing-certificate"
+      }
+    };
+    store.setTrustedDesktops([pairedDesktop]);
+    const persistSessionContext = vi.fn().mockResolvedValue(undefined);
+    const controller = createMobileController(
+      createClientMock(),
+      store,
+      undefined,
+      {
+        persistSessionContext,
+        revokeAnonymousPushPairing: vi.fn().mockRejectedValue(
+          new Error("relay unavailable")
+        )
+      }
+    );
+
+    await expect(controller.removeManualMachine("desktop-1"))
+      .rejects.toThrow("relay unavailable");
+
+    expect(store.getState().trustedDesktops).toEqual([pairedDesktop]);
+    expect(persistSessionContext).not.toHaveBeenCalled();
   });
 
   it("keeps manual trust published until durable removal succeeds", async () => {

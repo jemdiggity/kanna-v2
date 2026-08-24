@@ -2343,18 +2343,18 @@ export function createMobileController(
       );
       const nextTrustedDesktops = currentTrustedDesktops
         .filter((desktop) => desktop.desktopId !== desktopId);
-      await options.persistSessionContext?.({
-        ...store.getPersistedContext(),
-        trustedDesktops: nextTrustedDesktops
-      });
-      store.setTrustedDesktops(nextTrustedDesktops);
-      options.replaceClientForTrustChange?.();
       if (
         removedDesktop?.desktopPushIdentity
         && removedDesktop.pushPairingCert
       ) {
         await options.revokeAnonymousPushPairing?.(removedDesktop);
       }
+      await options.persistSessionContext?.({
+        ...store.getPersistedContext(),
+        trustedDesktops: nextTrustedDesktops
+      });
+      store.setTrustedDesktops(nextTrustedDesktops);
+      options.replaceClientForTrustChange?.();
       await refreshDesktops({ force: true });
     },
 

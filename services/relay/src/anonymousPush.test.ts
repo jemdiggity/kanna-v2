@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   AnonymousPushRefusal,
   anonymousAuthPayload,
-  consumePairingRegistrationLimit,
+  consumePairingRequestLimit,
   validateAnonymousPushPairing,
   verifyAnonymousSignature,
 } from "./anonymousPush.js";
@@ -83,8 +83,16 @@ describe("anonymous push trust", () => {
   it("refuses an IP after the registration burst", () => {
     const address = `registration-limit-${Date.now()}`;
     for (let index = 0; index < 30; index += 1) {
-      expect(consumePairingRegistrationLimit(address, 10_000)).toBe(true);
+      expect(consumePairingRequestLimit(address, "POST", 10_000)).toBe(true);
     }
-    expect(consumePairingRegistrationLimit(address, 10_000)).toBe(false);
+    expect(consumePairingRequestLimit(address, "POST", 10_000)).toBe(false);
+  });
+
+  it("independently refuses DELETE requests at the configured per-IP bound", () => {
+    const address = `deletion-limit-${Date.now()}`;
+    for (let index = 0; index < 30; index += 1) {
+      expect(consumePairingRequestLimit(address, "DELETE", 10_000)).toBe(true);
+    }
+    expect(consumePairingRequestLimit(address, "DELETE", 10_000)).toBe(false);
   });
 });

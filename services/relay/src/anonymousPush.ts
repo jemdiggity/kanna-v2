@@ -33,6 +33,12 @@ export interface AnonymousPushPairingRequest {
   cert: AnonymousPushCertificate;
 }
 
+export interface AnonymousPushPairingRevocation {
+  desktopPubKey: string;
+  deviceId: string;
+  cert: AnonymousPushCertificate;
+}
+
 interface AnonymousPushPairingRecord {
   desktopKeyHash: string;
   deviceIdHash: string;
@@ -85,8 +91,13 @@ export function anonymousDesktopId(publicKey: string): string {
   return sha256(publicKey);
 }
 
-export function consumePairingRegistrationLimit(address: string, nowMs = Date.now()): boolean {
-  if (!registrationCounters.has(address) && registrationCounters.size >= MAX_REGISTRATION_IPS) {
+export function consumePairingRequestLimit(
+  address: string,
+  method: "POST" | "DELETE",
+  nowMs = Date.now(),
+): boolean {
+  const counterKey = `${method}:${address}`;
+  if (!registrationCounters.has(counterKey) && registrationCounters.size >= MAX_REGISTRATION_IPS) {
     for (const [key, timestamps] of registrationCounters) {
       const retained = timestamps.filter((timestamp) => timestamp > nowMs - 60_000);
       if (retained.length === 0) registrationCounters.delete(key);
@@ -97,14 +108,14 @@ export function consumePairingRegistrationLimit(address: string, nowMs = Date.no
       if (!oldest.done) registrationCounters.delete(oldest.value);
     }
   }
-  const current = registrationCounters.get(address) ?? [];
+  const current = registrationCounters.get(counterKey) ?? [];
   const retained = current.filter((timestamp) => timestamp > nowMs - 60_000);
   if (retained.length >= REGISTRATIONS_PER_IP_MINUTE) {
-    registrationCounters.set(address, retained);
+    registrationCounters.set(counterKey, retained);
     return false;
   }
   retained.push(nowMs);
-  registrationCounters.set(address, retained);
+  registrationCounters.set(counterKey, retained);
   return true;
 }
 
@@ -134,14 +145,24 @@ export function anonymousAuthPayload(nonce: string): Buffer {
 
 export function validateAnonymousPushPairing(
   value: unknown,
+  nowMs?: number,
+): AnonymousPushPairingRequest;
+export function validateAnonymousPushPairing(
+  value: unknown,
+  nowMs: number,
+  requireFcmToken: false,
+): AnonymousPushPairingRevocation;
+export function validateAnonymousPushPairing(
+  value: unknown,
   nowMs = Date.now(),
-): AnonymousPushPairingRequest {
+  requireFcmToken = true,
+): AnonymousPushPairingRequest | AnonymousPushPairingRevocation {
   if (!isRecord(value) || !isRecord(value.cert)) {
     throw new AnonymousPushRefusal(400, "malformed", "Anonymous push pairing is malformed");
   }
   const desktopPubKey = boundedText(value.desktopPubKey, 128);
   const deviceId = boundedText(value.deviceId, 256);
-  const fcmToken = boundedText(value.fcmToken, 4_096);
+  const fcmToken = requireFcmToken ? boundedText(value.fcmToken, 4_096) : null;
   const certDeviceId = boundedText(value.cert.deviceId, 256);
   const issuedAt = safeInteger(value.cert.issuedAt);
   const expiresAt = safeInteger(value.cert.expiresAt);
@@ -165,7 +186,7 @@ export function validateAnonymousPushPairing(
   return {
     desktopPubKey,
     deviceId,
-    fcmToken,
+    ...(fcmToken ? { fcmToken } : {}),
     cert: { deviceId, issuedAt, expiresAt, signature },
   };
 }
@@ -216,7 +237,7 @@ export async function registerAnonymousPushPairing(
 }
 
 export async function revokeAnonymousPushPairing(
-  request: AnonymousPushPairingRequest,
+  request: AnonymousPushPairingRevocation,
   db = getFirebaseServices().db,
 ): Promise<void> {
   const ref = db.collection(ANONYMOUS_PUSH_PAIRINGS_COLLECTION)
@@ -246,6 +267,9 @@ export async function publishAnonymousPush(input: {
 }, db = getFirebaseServices().db): Promise<MobileNotificationDelivery> {
   const nowMs = Date.now();
   const desktopKeyHash = anonymousDesktopId(input.desktopPubKey);
+  if (!consumeCounter(desktopPublishCounters, desktopKeyHash, nowMs, DESKTOP_PER_MINUTE, DESKTOP_PER_DAY)) {
+    throw new AnonymousPushRefusal(429, "desktop_rate_limit", "Anonymous desktop push rate limit exceeded");
+  }
   const snapshot = await db.collection(ANONYMOUS_PUSH_PAIRINGS_COLLECTION)
     .where("desktopKeyHash", "==", desktopKeyHash)
     .limit(MAX_DEVICES_PER_DESKTOP)
@@ -253,9 +277,6 @@ export async function publishAnonymousPush(input: {
   const bindings = snapshot.docs.filter((doc) => isActiveBinding(doc, nowMs));
   if (bindings.length === 0) {
     throw new AnonymousPushRefusal(409, "no_bindings", "No anonymous push pairings are registered");
-  }
-  if (!consumeCounter(desktopPublishCounters, desktopKeyHash, nowMs, DESKTOP_PER_MINUTE, DESKTOP_PER_DAY)) {
-    throw new AnonymousPushRefusal(429, "desktop_rate_limit", "Anonymous desktop push rate limit exceeded");
   }
   const uniqueBindings = new Map<string, QueryDocumentSnapshot>();
   for (const binding of bindings) {
