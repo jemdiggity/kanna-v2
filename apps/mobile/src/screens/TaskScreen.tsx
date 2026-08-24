@@ -395,17 +395,26 @@ export function TaskScreen({
   };
   const composerLayoutRef = useRef({
     contentHeight: TASK_COMPOSER_MIN_HEIGHT,
+    draftChangedSinceExpansion: false,
     isExpanded: false
   });
+  const composerInputRef = useRef<TextInput>(null);
   const composerScrollRef = useRef<ScrollView>(null);
   const revealComposerCaret = useCallback(() => {
     requestAnimationFrame(() => {
+      const end = composerSnapshotRef.current.draftInput.length;
+      composerInputRef.current?.setNativeProps({
+        selection: { end, start: end }
+      });
       composerScrollRef.current?.scrollToEnd({ animated: false });
     });
   }, []);
   const expandComposer = useCallback(() => {
-    composerLayoutRef.current.isExpanded = true;
-    setIsComposerExpanded(true);
+    if (!composerLayoutRef.current.isExpanded) {
+      composerLayoutRef.current.isExpanded = true;
+      composerLayoutRef.current.draftChangedSinceExpansion = false;
+      setIsComposerExpanded(true);
+    }
     const shouldScroll = shouldTaskComposerScroll(
       composerLayoutRef.current.contentHeight
     );
@@ -421,6 +430,7 @@ export function TaskScreen({
   }, []);
   const updateDraftInput = (nextDraftInput: string) => {
     composerSnapshotRef.current.draftInput = nextDraftInput;
+    composerLayoutRef.current.draftChangedSinceExpansion = true;
     if (!nextDraftInput) {
       composerLayoutRef.current.contentHeight = TASK_COMPOSER_MIN_HEIGHT;
       setIsComposerScrollable(false);
@@ -489,6 +499,16 @@ export function TaskScreen({
       composerLayoutRef.current.isExpanded
     ) {
       const contentHeight = event.nativeEvent.contentSize.height;
+      if (
+        !composerLayoutRef.current.draftChangedSinceExpansion &&
+        contentHeight < composerLayoutRef.current.contentHeight
+      ) {
+        // Refocusing expands the outer viewport from the retained intrinsic
+        // measurement. Fabric can emit one stale collapsed-height event during
+        // that transition; do not let it erase the measurement before the user
+        // edits. Once the draft changes, genuine shrink measurements win.
+        return;
+      }
       composerLayoutRef.current.contentHeight = contentHeight;
       const shouldScroll = shouldTaskComposerScroll(contentHeight);
       setIsComposerScrollable(shouldScroll);
@@ -651,6 +671,11 @@ export function TaskScreen({
     terminalGeometry.cols,
     terminalGeometry.rows
   ]);
+
+  const isComposerViewportScrollable =
+    isComposerScrollable ||
+    (!isComposerExpanded &&
+      composerLayoutRef.current.contentHeight > TASK_COMPOSER_MIN_HEIGHT);
 
   return (
     <View
@@ -1074,8 +1099,8 @@ export function TaskScreen({
             ref={composerScrollRef}
             contentContainerStyle={styles.inputFieldContent}
             keyboardShouldPersistTaps="always"
-            scrollEnabled={isComposerExpanded && isComposerScrollable}
-            showsVerticalScrollIndicator={isComposerScrollable}
+            scrollEnabled={isComposerViewportScrollable}
+            showsVerticalScrollIndicator={isComposerViewportScrollable}
             style={[
               styles.inputFieldViewport,
               {
@@ -1094,11 +1119,13 @@ export function TaskScreen({
           >
             <TextInput
               {...TASK_COMPOSER_TEXT_INPUT_PROPS}
+              ref={composerInputRef}
               editable={!isComposerDisabled}
               onChangeText={updateDraftInput}
               onContentSizeChange={updateComposerInputHeight}
               onBlur={collapseComposer}
               onFocus={expandComposer}
+              onPressIn={expandComposer}
               placeholder="Reply…"
               placeholderTextColor="#6F89AE"
               scrollEnabled={false}
