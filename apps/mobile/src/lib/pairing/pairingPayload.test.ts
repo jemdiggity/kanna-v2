@@ -5,7 +5,16 @@ import {
 } from "./pairingPayload";
 
 describe("parseMachinePairingPayload", () => {
-  it("accepts the version-one desktop identity and code", () => {
+  it("accepts the compact version-one desktop identity and code", () => {
+    expect(parseMachinePairingPayload(
+      "  KANNA1:DESKTOP-21B320E8-A5AD-4FAE-9D87-1DB14090F0A9:ABC123\n"
+    )).toEqual({
+      desktopId: "DESKTOP-21B320E8-A5AD-4FAE-9D87-1DB14090F0A9",
+      code: "ABC123"
+    });
+  });
+
+  it("keeps accepting legacy JSON payloads from older desktops", () => {
     expect(parseMachinePairingPayload(JSON.stringify({
       type: "kanna.machine-pairing",
       version: 1,
@@ -16,6 +25,9 @@ describe("parseMachinePairingPayload", () => {
 
   it.each([
     ["not-json", "invalid"],
+    ["KANNA1:DESKTOP-1", "invalid"],
+    ["KANNA1:DESKTOP-1:ABC123:EXTRA", "invalid"],
+    ["KANNA2:DESKTOP-1:ABC123", "unsupported-version"],
     [JSON.stringify({ type: "other", version: 1 }), "invalid"],
     [JSON.stringify({ type: "kanna.machine-pairing", version: 2 }), "unsupported-version"]
   ])("rejects %s", (raw, reason) => {

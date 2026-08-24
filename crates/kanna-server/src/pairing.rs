@@ -216,13 +216,10 @@ pub fn create_active_pairing_session(config: &Config) -> Result<ActivePairingSes
 
 fn create_pairing_session_at(config: &Config, now_ms: u64) -> Result<ActivePairingSession, String> {
     let code = generate_pairing_code()?;
-    let pairing_payload = serde_json::to_string(&serde_json::json!({
-        "type": "kanna.machine-pairing",
-        "version": 1,
-        "desktopId": config.desktop_id,
-        "code": code,
-    }))
-    .map_err(|error| format!("failed to serialize pairing payload: {error}"))?;
+    let pairing_payload = format!("KANNA1:{}:{code}", config.desktop_id.to_ascii_uppercase());
+    if !pairing_payload.chars().all(is_qr_alphanumeric) {
+        return Err("desktop identity cannot be encoded in a compact pairing QR".to_string());
+    }
 
     Ok(ActivePairingSession {
         session: PairingSession {
@@ -236,6 +233,15 @@ fn create_pairing_session_at(config: &Config, now_ms: u64) -> Result<ActivePairi
         },
         failed_claims: 0,
     })
+}
+
+fn is_qr_alphanumeric(character: char) -> bool {
+    character.is_ascii_uppercase()
+        || character.is_ascii_digit()
+        || matches!(
+            character,
+            ' ' | '$' | '%' | '*' | '+' | '-' | '.' | '/' | ':'
+        )
 }
 
 pub fn claim_pairing_session(
@@ -441,16 +447,35 @@ mod tests {
     }
 
     #[test]
-    fn pairing_payload_is_versioned_and_contains_identity() {
-        let config = test_config("payload");
+    fn pairing_payload_is_compact_versioned_and_contains_identity() {
+        let mut config = test_config("payload");
+        config.desktop_id = "desktop-21b320e8-a5ad-4fae-9d87-1db14090f0a9".to_string();
         let active = super::create_pairing_session_at(&config, 1_000).unwrap();
-        let payload: serde_json::Value =
-            serde_json::from_str(&active.session.pairing_payload).unwrap();
 
-        assert_eq!(payload["type"], "kanna.machine-pairing");
-        assert_eq!(payload["version"], 1);
-        assert_eq!(payload["desktopId"], "desktop-1");
-        assert_eq!(payload["code"], active.session.code);
+        assert_eq!(
+            active.session.pairing_payload,
+            format!(
+                "KANNA1:DESKTOP-21B320E8-A5AD-4FAE-9D87-1DB14090F0A9:{}",
+                active.session.code
+            )
+        );
+        assert_eq!(active.session.pairing_payload.len(), 58);
+        assert!(active
+            .session
+            .pairing_payload
+            .chars()
+            .all(super::is_qr_alphanumeric));
+    }
+
+    #[test]
+    fn pairing_payload_rejects_identity_outside_qr_alphanumeric_mode() {
+        let mut config = test_config("payload-invalid-identity");
+        config.desktop_id = "desktop_not_transport_safe".to_string();
+
+        assert_eq!(
+            super::create_pairing_session_at(&config, 1_000).unwrap_err(),
+            "desktop identity cannot be encoded in a compact pairing QR"
+        );
     }
 
     #[test]

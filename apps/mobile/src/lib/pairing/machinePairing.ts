@@ -97,7 +97,7 @@ export function createMachinePairingService(input: {
     async claimPayload(rawPayload) {
       const payload = parseMachinePairingPayload(rawPayload);
       const candidates = input.bonjourBrowser.getServices().filter(
-        (service) => service.txt.desktopId === payload.desktopId
+        (service) => desktopIdsEqual(service.txt.desktopId, payload.desktopId)
       );
       return claimCandidates(payload.code, candidates, "payload");
     },
@@ -175,7 +175,7 @@ async function claimCandidate(input: {
     !claim ||
     typeof claim.desktopId !== "string" ||
     typeof claim.desktopName !== "string" ||
-    claim.desktopId !== desktopId
+    !desktopIdsEqual(claim.desktopId, desktopId)
   ) {
     throw pairingError("identity-mismatch");
   }
@@ -190,6 +190,10 @@ async function claimCandidate(input: {
       ? { deviceSecret: claim.deviceSecret }
       : {})
   };
+}
+
+function desktopIdsEqual(left: string, right: string): boolean {
+  return left.toUpperCase() === right.toUpperCase();
 }
 
 function pairingError(reason: MachinePairingFailure): MachinePairingError {

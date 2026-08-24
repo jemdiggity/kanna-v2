@@ -80,6 +80,22 @@ describe("machine pairing", () => {
     );
   });
 
+  it("matches the uppercased compact QR identity case-insensitively", async () => {
+    const fetchImpl = vi.fn<FetchLike>(async () => response(200, {
+      desktopId: "DeSkToP-2",
+      desktopName: "Studio Mac"
+    }));
+
+    await expect(
+      pairingService(fetchImpl).claimPayload("KANNA1:DESKTOP-2:ABC123")
+    ).resolves.toMatchObject({ desktopId: "DeSkToP-2" });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "http://10.0.0.3:48120/v1/pairing/sessions/claim",
+      expect.anything()
+    );
+  });
+
   it("stores the issued device secret from the claim response", async () => {
     const fetchImpl = vi.fn<FetchLike>(async () => response(200, {
       desktopId: "desktop-2",

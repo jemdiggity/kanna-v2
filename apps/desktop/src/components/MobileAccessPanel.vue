@@ -213,8 +213,8 @@ onBeforeUnmount(() => {
 }
 
 .pairing-qr {
-  width: 120px;
-  height: 120px;
+  width: 185px;
+  height: 185px;
   border-radius: 8px;
   background: #fff;
 }

@@ -20,9 +20,20 @@ export function normalizePairingCode(value: string): string {
 }
 
 export function parseMachinePairingPayload(raw: string): MachinePairingPayload {
+  const trimmed = raw.trim();
+  if (trimmed.startsWith("KANNA1:")) {
+    return parseCompactPayload(trimmed);
+  }
+  if (/^KANNA\d+:/.test(trimmed)) {
+    throw new PairingPayloadError(
+      "unsupported-version",
+      "This pairing code was made by an incompatible version of Kanna."
+    );
+  }
+
   let parsed: unknown;
   try {
-    parsed = JSON.parse(raw);
+    parsed = JSON.parse(trimmed);
   } catch {
     throw new PairingPayloadError("invalid", "This is not a Kanna machine pairing code.");
   }
@@ -52,5 +63,19 @@ export function parseMachinePairingPayload(raw: string): MachinePairingPayload {
     throw new PairingPayloadError("invalid", "This Kanna machine pairing code is incomplete.");
   }
 
+  return { desktopId, code };
+}
+
+function parseCompactPayload(raw: string): MachinePairingPayload {
+  const fields = raw.slice("KANNA1:".length).split(":");
+  if (fields.length !== 2) {
+    throw new PairingPayloadError("invalid", "This Kanna machine pairing code is incomplete.");
+  }
+
+  const desktopId = fields[0]?.trim() ?? "";
+  const code = normalizePairingCode(fields[1] ?? "");
+  if (!desktopId || !/^[0-9A-F]{6}$/.test(code)) {
+    throw new PairingPayloadError("invalid", "This Kanna machine pairing code is incomplete.");
+  }
   return { desktopId, code };
 }

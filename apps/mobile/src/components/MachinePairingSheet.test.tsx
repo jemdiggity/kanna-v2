@@ -137,6 +137,21 @@ describe("MachinePairingSheet", () => {
     await pending;
   });
 
+  it("forwards the exact desktop-generated compact payload from the camera", async () => {
+    const onPairPayload = vi.fn(async () => undefined);
+    const payload = "KANNA1:DESKTOP-21B320E8-A5AD-4FAE-9D87-1DB14090F0A9:386A02";
+    const tree = render({ onPairPayload });
+
+    findByType(tree, "CameraView")?.props?.onBarcodeScanned?.({
+      type: "qr",
+      data: payload
+    });
+    await Promise.resolve();
+
+    expect(onPairPayload).toHaveBeenCalledOnce();
+    expect(onPairPayload).toHaveBeenCalledWith(payload);
+  });
+
   it("latches a failed visible QR until an explicit retry succeeds", async () => {
     const onClose = vi.fn();
     const onPairPayload = vi.fn(async () => undefined);

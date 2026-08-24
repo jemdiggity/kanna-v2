@@ -384,13 +384,24 @@ async fn distinct_real_servers_publish_and_clean_up_through_macos_bonjour() {
         .await
         .expect("decode pairing session");
     assert_eq!(pairing["desktopId"], qr_desktop_id.as_str());
+    let pairing_payload = pairing["pairingPayload"]
+        .as_str()
+        .expect("pairing session must carry its QR payload");
+    let pairing_prefix = format!("KANNA1:{}:", qr_desktop_id.to_ascii_uppercase());
+    let scanned_code = pairing_payload
+        .strip_prefix(&pairing_prefix)
+        .expect("decode the exact generated compact QR payload");
+    assert_eq!(
+        scanned_code,
+        pairing["code"].as_str().expect("pairing code")
+    );
     let claimed: serde_json::Value = client
         .post(format!(
             "http://127.0.0.1:{}/v1/pairing/sessions/claim",
             discovered_port
         ))
         .json(&serde_json::json!({
-            "code": pairing["code"],
+            "code": scanned_code,
             "deviceId": "bonjour-e2e-phone",
             "deviceName": "Bonjour E2E Phone"
         }))

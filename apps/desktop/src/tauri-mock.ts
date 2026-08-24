@@ -193,7 +193,7 @@ const invokeHandlers: Record<string, (...args: any[]) => any> = {
     desktopId: "desktop-mock-current",
     desktopName: "Mock Desktop",
     code: "ABC123",
-    pairingPayload: '{"type":"kanna.machine-pairing","version":1,"desktopId":"desktop-mock-current","code":"ABC123"}',
+    pairingPayload: "KANNA1:DESKTOP-MOCK-CURRENT:ABC123",
     expiresAtUnixMs: Date.now() + 300_000,
   }),
   // Claude agent SDK commands

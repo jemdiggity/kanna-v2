@@ -3691,6 +3691,11 @@ fn build_agent_command_adds_claude_kanna_preamble_as_system_prompt() {
     assert!(!command.contains("authoritative server environment"));
     assert!(!command.contains("staging/production"));
     assert!(command.contains("You are not running inside a Kanna sandbox"));
+    assert!(command.contains(
+        "Put temporary files and directories you create under `.tmp/` at the current worktree root"
+    ));
+    assert!(preamble
+        .contains("Do not use the operating system's global `/tmp` for agent-created artifacts"));
     let mcp_index = command
         .find("Prefer the `kanna_*` MCP tools")
         .expect("preamble should prefer MCP tools");

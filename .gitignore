@@ -17,6 +17,7 @@ target/
 .vscode/
 .kanna-worktrees/
 .playwright-mcp/
+/.tmp/
 tauri.conf.local.json
 apps/desktop/src-tauri/binaries/
 apps/mobile/.expo/
