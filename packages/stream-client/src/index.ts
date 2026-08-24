@@ -188,15 +188,6 @@ export interface TaskSummaryStreamHandlers {
   onError?(code: string, message: string): void;
 }
 
-export interface MobileNotificationFrame {
-  desktopId: string;
-  title: string;
-  body: string;
-  taskId?: string;
-}
-
-type MobileNotificationListener = (notification: MobileNotificationFrame) => void;
-
 export interface CompanionAttachmentOptions {
   /** Request embedded asset bytes. Defaults to true for desktop and older peers. */
   includeAssets?: boolean;
@@ -246,8 +237,6 @@ export interface StreamClientOptions {
   terminalScrollbackWindow?: boolean;
   /** Negotiate bounded agent snapshots with backwards history requests. */
   agentHistoryWindow?: boolean;
-  /** Register this paired-device connection as a mobile notification sink. */
-  mobileNotifications?: boolean;
 }
 
 interface AgentAttachment {
@@ -363,7 +352,6 @@ export class StreamClient {
     CompanionChunkAssembly
   >();
   private readonly stateChangedListeners = new Set<StateChangedListener>();
-  private readonly mobileNotificationListeners = new Set<MobileNotificationListener>();
   private supportedStreamKinds = new Set<StreamKind>();
   private supportedCapabilities = new Set<KspCapability>();
   /** Companion task ids already attached on this socket. A replacement on a
@@ -630,13 +618,6 @@ export class StreamClient {
     };
   }
 
-  onMobileNotification(listener: MobileNotificationListener): () => void {
-    this.mobileNotificationListeners.add(listener);
-    return () => {
-      this.mobileNotificationListeners.delete(listener);
-    };
-  }
-
   /** Task-API request over the stream (replaces REST calls). */
   request(method: string, path: string, body?: unknown): Promise<{ status: number; body: unknown }> {
     const id = this.nextRequestId++;
@@ -800,9 +781,6 @@ export class StreamClient {
         ...(this.options.agentHistoryWindow
           ? (["agent_history_window"] as const)
           : []),
-        ...(this.options.mobileNotifications
-          ? (["mobile_notifications"] as const)
-          : []),
       ],
     }, socket);
   }
@@ -916,18 +894,6 @@ export class StreamClient {
       case "state_changed": {
         for (const listener of [...this.stateChangedListeners]) {
           listener(frame.scope);
-        }
-        return;
-      }
-      case "mobile_notification": {
-        const notification: MobileNotificationFrame = {
-          desktopId: frame.desktop_id,
-          title: frame.title,
-          body: frame.body,
-          ...(frame.task_id ? { taskId: frame.task_id } : {}),
-        };
-        for (const listener of [...this.mobileNotificationListeners]) {
-          listener(notification);
         }
         return;
       }

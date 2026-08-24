@@ -420,8 +420,6 @@ pub(crate) struct MobileNotificationResponse {
     pub(crate) accepted_count: u64,
     pub(crate) failed_count: u64,
     #[serde(default)]
-    pub(crate) lan_delivered_count: u64,
-    #[serde(default)]
     pub(crate) failure_reasons: Vec<MobileNotificationFailureReason>,
 }
 

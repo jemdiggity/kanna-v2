@@ -10,15 +10,30 @@ export interface MobileNotificationTaskTarget {
 }
 
 interface RemoteMessageLike {
-  data?: Record<string, string | object>;
+  data?: Record<string, unknown>;
+}
+
+interface ForegroundNotificationBehavior {
+  shouldShowBanner: boolean;
+  shouldShowList: boolean;
+  shouldPlaySound: boolean;
+  shouldSetBadge: boolean;
+}
+
+interface ForegroundNotificationHandler {
+  handleNotification(): Promise<ForegroundNotificationBehavior>;
 }
 
 interface MobilePushSdk {
+  setNotificationHandler(handler: ForegroundNotificationHandler): void;
   requestPermission(): Promise<number>;
   getToken(): Promise<string>;
   onTokenRefresh(listener: (token: string) => void): () => void;
   getInitialNotification(): Promise<RemoteMessageLike | null>;
   onNotificationOpened(
+    listener: (message: RemoteMessageLike) => void
+  ): () => void;
+  onNotificationResponse(
     listener: (message: RemoteMessageLike) => void
   ): () => void;
 }
@@ -45,7 +60,19 @@ export async function startMobilePushNotifications(
   }
 
   const sdk = input.sdk ?? await loadMobilePushSdk();
+  sdk.setNotificationHandler({
+    handleNotification: async () => ({
+      shouldShowBanner: true,
+      shouldShowList: true,
+      shouldPlaySound: true,
+      shouldSetBadge: false
+    })
+  });
   const openedUnsubscribe = sdk.onNotificationOpened((message) => {
+    const target = parseNotificationTaskTarget(message);
+    if (target) input.onTaskOpen(target);
+  });
+  const responseUnsubscribe = sdk.onNotificationResponse((message) => {
     const target = parseNotificationTaskTarget(message);
     if (target) input.onTaskOpen(target);
   });
@@ -55,7 +82,10 @@ export async function startMobilePushNotifications(
 
   const permission = await sdk.requestPermission();
   if (permission !== AUTHORIZED && permission !== PROVISIONAL) {
-    return openedUnsubscribe;
+    return () => {
+      openedUnsubscribe();
+      responseUnsubscribe();
+    };
   }
 
   let registration: { idToken: string; deviceToken: string } | null = null;
@@ -115,6 +145,7 @@ export async function startMobilePushNotifications(
     stopped = true;
     tokenUnsubscribe();
     openedUnsubscribe();
+    responseUnsubscribe();
     if (registration) {
       void unregisterDevice(registration).catch((error: unknown) => {
         console.error("Mobile notification unregistration failed:", error);
@@ -176,12 +207,15 @@ function pushEndpointUrl(relayUrl: string, path: string): string | null {
 }
 
 async function loadMobilePushSdk(): Promise<MobilePushSdk> {
-  const [{ getApp }, messagingModule] = await Promise.all([
+  const [{ getApp }, messagingModule, Notifications] = await Promise.all([
     import("@react-native-firebase/app"),
-    import("@react-native-firebase/messaging")
+    import("@react-native-firebase/messaging"),
+    import("expo-notifications")
   ]);
   const messaging = messagingModule.getMessaging(getApp());
   return {
+    setNotificationHandler: (handler) =>
+      Notifications.setNotificationHandler(handler),
     requestPermission: () => messagingModule.requestPermission(messaging),
     getToken: () => messagingModule.getToken(messaging),
     onTokenRefresh: (listener) =>
@@ -189,6 +223,14 @@ async function loadMobilePushSdk(): Promise<MobilePushSdk> {
     getInitialNotification: () =>
       messagingModule.getInitialNotification(messaging),
     onNotificationOpened: (listener) =>
-      messagingModule.onNotificationOpenedApp(messaging, listener)
+      messagingModule.onNotificationOpenedApp(messaging, listener),
+    onNotificationResponse: (listener) => {
+      const subscription = Notifications.addNotificationResponseReceivedListener(
+        (response) => {
+          listener({ data: response.notification.request.content.data });
+        }
+      );
+      return () => subscription.remove();
+    }
   };
 }

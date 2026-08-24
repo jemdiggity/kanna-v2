@@ -792,48 +792,6 @@ describe("createLanTransport", () => {
     subscription.close();
   });
 
-  it("marks only the mobile notification listener socket as notification-capable", () => {
-    const sent: ClientFrame[] = [];
-    const socket: WebSocketLike = {
-      send: vi.fn((payload: string) => {
-        sent.push(JSON.parse(payload) as ClientFrame);
-      }),
-      close: vi.fn(),
-      onopen: null,
-      onclose: null,
-      onerror: null,
-      onmessage: null
-    };
-    const transport = createLanTransport(
-      "http://127.0.0.1:48120",
-      vi.fn<FetchLike>(),
-      vi.fn(() => socket),
-      {
-        deviceCredentials: {
-          deviceId: "phone-1",
-          deviceSecret: "lan-secret"
-        }
-      }
-    );
-
-    const subscription = transport.observeMobileNotifications?.(() => undefined);
-    socket.onopen?.();
-
-    expect(sent).toEqual([{
-      type: "auth",
-      credential: JSON.stringify({
-        deviceId: "phone-1",
-        deviceSecret: "lan-secret"
-      }),
-      capabilities: [
-        "companion_event_epoch",
-        "term_input_boundary",
-        "mobile_notifications"
-      ]
-    }]);
-    subscription?.close();
-  });
-
   it("sends ordinary and explicit-boundary terminal input over the LAN KSP route", () => {
     const fetchImpl = vi.fn<FetchLike>();
     const sent: ClientFrame[] = [];
