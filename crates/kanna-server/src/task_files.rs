@@ -38,6 +38,7 @@ pub struct ResolvedTaskFileMention {
     pub line: Option<u32>,
     pub matches: Vec<TaskFileMatch>,
     pub truncated: bool,
+    pub unavailable_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -176,6 +177,7 @@ fn resolve_task_file_mentions_with_limit(
                 line: mention.line,
                 matches: Vec::new(),
                 truncated: false,
+                unavailable_reason: None,
             })
             .collect(),
     };
@@ -183,16 +185,23 @@ fn resolve_task_file_mentions_with_limit(
 
     for (index, mention) in mentions.iter().enumerate() {
         let requested = Path::new(&mention.path);
-        let relative = normalize_requested_path(root, requested)?;
+        let relative = match normalize_requested_path(root, requested) {
+            Ok(relative) => relative,
+            Err(error @ TaskFileError::InvalidPath(_)) => {
+                resolution.mentions[index].unavailable_reason = Some(error.to_string());
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         match open_task_file_from_root(&root_directory, &relative) {
             Ok(file) => {
                 let metadata = file.metadata().map_err(|error| {
                     TaskFileError::Internal(format!("failed to inspect task file: {error}"))
                 })?;
                 if !metadata.is_file() {
-                    return Err(TaskFileError::InvalidPath(
-                        "file path must identify a regular file".to_string(),
-                    ));
+                    resolution.mentions[index].unavailable_reason =
+                        Some("file path must identify a regular file".to_string());
+                    continue;
                 }
                 resolution.mentions[index].matches.push(TaskFileMatch {
                     path: display_path(&relative),
@@ -214,7 +223,13 @@ fn resolve_task_file_mentions_with_limit(
                     .or_default()
                     .push(index);
             }
-            Err(TaskFileError::FileNotFound) => {}
+            Err(TaskFileError::FileNotFound) => {
+                resolution.mentions[index].unavailable_reason =
+                    Some(TaskFileError::FileNotFound.to_string());
+            }
+            Err(error @ TaskFileError::InvalidPath(_)) => {
+                resolution.mentions[index].unavailable_reason = Some(error.to_string());
+            }
             Err(error) => return Err(error),
         }
     }
@@ -307,6 +322,9 @@ fn resolve_task_file_mentions_with_limit(
             if walk_incomplete {
                 mention.truncated = true;
             }
+            if mention.matches.is_empty() {
+                mention.unavailable_reason = Some(TaskFileError::FileNotFound.to_string());
+            }
         }
     }
 
@@ -328,15 +346,6 @@ fn validate_mention_batch(mentions: &[TaskFileMention]) -> Result<(), TaskFileEr
         {
             return Err(TaskFileError::RequestTooLarge);
         }
-        let requested = Path::new(&mention.path);
-        if mention.path.trim().is_empty()
-            || mention.path.contains('\0')
-            || requested
-                .components()
-                .any(|component| component == Component::ParentDir)
-        {
-            return Err(disallowed_path());
-        }
     }
     Ok(())
 }
@@ -346,6 +355,10 @@ fn disallowed_path() -> TaskFileError {
 }
 
 fn normalize_requested_path(root: &Path, requested: &Path) -> Result<PathBuf, TaskFileError> {
+    let requested_text = requested.as_os_str().to_string_lossy();
+    if requested_text.trim().is_empty() || requested_text.contains('\0') {
+        return Err(disallowed_path());
+    }
     let relative = if requested.is_absolute() {
         requested
             .strip_prefix(root)
@@ -725,20 +738,44 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_and_oversized_mention_requests() {
+    fn resolves_invalid_mentions_per_row_and_rejects_oversized_requests() {
         let fixture = TaskFileFixture::new();
+        fixture.write("src/available.ts", b"available");
 
-        assert!(matches!(
-            resolve_task_file_mentions(
-                &fixture.db,
-                "task-1",
-                vec![TaskFileMention {
+        let resolution = resolve_task_file_mentions(
+            &fixture.db,
+            "task-1",
+            vec![
+                TaskFileMention {
+                    path: "src/available.ts".into(),
+                    line: Some(4),
+                },
+                TaskFileMention {
+                    path: fixture.outside_file.to_string_lossy().into_owned(),
+                    line: None,
+                },
+                TaskFileMention {
                     path: "../secret.ts".into(),
                     line: None,
-                }]
-            ),
-            Err(TaskFileError::InvalidPath(_))
-        ));
+                },
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolution.mentions[0].matches,
+            vec![TaskFileMatch {
+                path: "src/available.ts".into(),
+            }]
+        );
+        assert_eq!(resolution.mentions[0].unavailable_reason, None);
+        for unavailable in &resolution.mentions[1..] {
+            assert!(unavailable.matches.is_empty());
+            assert_eq!(
+                unavailable.unavailable_reason.as_deref(),
+                Some("file path must stay within the task workspace")
+            );
+        }
 
         assert!(matches!(
             resolve_task_file_mentions(

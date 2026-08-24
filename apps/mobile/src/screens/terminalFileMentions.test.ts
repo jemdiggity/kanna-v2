@@ -126,18 +126,25 @@ describe("terminal file mention history", () => {
         {
           path: "Missing.rs",
           matches: [],
-          truncated: false
+          truncated: false,
+          unavailableReason: "file not found"
         }
       ]
     };
 
     expect(projectResolvedMentionRows(history, resolution)).toEqual({
       rows: [
-        { path: "src/Newest.ts", line: 9, mentionPath: "Newest.ts" },
-        { path: "a/Shared.ts", mentionPath: "Shared.ts" },
-        { path: "b/Shared.ts", mentionPath: "Shared.ts" }
+        { path: "src/Newest.ts", line: 9, mentionPath: "Newest.ts", available: true },
+        { path: "a/Shared.ts", mentionPath: "Shared.ts", available: true },
+        { path: "b/Shared.ts", mentionPath: "Shared.ts", available: true },
+        {
+          path: "Missing.rs",
+          mentionPath: "Missing.rs",
+          available: false,
+          unavailableReason: "file not found"
+        }
       ],
-      unmatchedCount: 1,
+      unmatchedCount: 0,
       truncated: false
     });
   });
@@ -169,7 +176,7 @@ describe("terminal file mention history", () => {
 
     expect(projectResolvedMentionRows(history, resolution)).toEqual({
       rows: [
-        { path: "src/App.ts", line: 31, mentionPath: "src/App.ts" }
+        { path: "src/App.ts", line: 31, mentionPath: "src/App.ts", available: true }
       ],
       unmatchedCount: 0,
       truncated: true

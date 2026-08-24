@@ -13,15 +13,14 @@ function createProviderWithReadFile(
   } | null = null
   const container = document.createElement("div")
 
+  const buffer = {
+    length: 1,
+    getLine: vi.fn((index: number) =>
+      index === 0 ? { translateToString: vi.fn(() => lineText) } : undefined,
+    ),
+  }
   const term = {
-    buffer: {
-      active: {
-        length: 1,
-        getLine: vi.fn((index: number) =>
-          index === 0 ? { translateToString: vi.fn(() => lineText) } : undefined,
-        ),
-      },
-    },
+    buffer: { active: buffer, normal: buffer },
     registerLinkProvider: vi.fn((provider) => {
       registeredProvider = provider
     }),
@@ -91,6 +90,25 @@ describe("resolveRemoteTerminalFileLinkPath", () => {
 })
 
 describe("remoteTerminalFileLinks", () => {
+  it("lists workspace matches and marks out-of-workspace mentions unavailable", async () => {
+    const { provider } = createProviderForLine(
+      "See src/app.ts and /tmp/kanna-verification.txt",
+      { "src/app.ts": "content" },
+    )
+
+    await expect(provider.listMentions()).resolves.toMatchObject({
+      mentions: [
+        {
+          path: "/tmp/kanna-verification.txt",
+          available: false,
+          unavailableReason: "Outside the remote task workspace",
+        },
+        { path: "src/app.ts", available: true },
+      ],
+      overflow: false,
+    })
+  })
+
   it("links only paths that are readable on the remote task", async () => {
     const { links } = await provideLinks(
       "edited src/app.ts and missing.ts",

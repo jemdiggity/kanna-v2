@@ -33,6 +33,8 @@ export interface ResolvedMentionRow {
   path: string;
   mentionPath: string;
   line?: number;
+  available: boolean;
+  unavailableReason?: string;
 }
 
 export interface ResolvedMentionProjection {
@@ -142,7 +144,17 @@ export function projectResolvedMentionRows(
       .slice()
       .sort((left, right) => left.path.localeCompare(right.path));
     if (matches.length === 0) {
-      unmatchedCount += 1;
+      rows.push({
+        path: mention.path,
+        mentionPath: mention.path,
+        ...(mention.line === undefined ? {} : { line: mention.line }),
+        available: false,
+        unavailableReason:
+          typeof resolved.unavailableReason === "string" &&
+          resolved.unavailableReason.trim().length > 0
+            ? resolved.unavailableReason
+            : "file not found"
+      });
       continue;
     }
     for (const match of matches) {
@@ -153,6 +165,7 @@ export function projectResolvedMentionRows(
       rows.push({
         path: match.path,
         mentionPath: mention.path,
+        available: true,
         ...(mention.line === undefined ? {} : { line: mention.line })
       });
     }

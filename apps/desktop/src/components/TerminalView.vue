@@ -8,6 +8,8 @@ import { nextFrameOrTimeout } from "../utils/animationFrame"
 import { shouldStartTerminalSession } from "../composables/terminalVisibility"
 import { markTaskSwitchMounted, markTaskSwitchReady } from "../perf/taskSwitchPerf"
 import { isTauri } from "../tauri-mock"
+import type { TerminalFileMention } from "../composables/terminalFileLinks"
+import MentionedFilesOverlay from "./MentionedFilesOverlay.vue"
 import "@xterm/xterm/css/xterm.css"
 
 const props = defineProps<{
@@ -22,7 +24,19 @@ const props = defineProps<{
 }>()
 
 const containerRef = ref<HTMLElement | null>(null)
-const { terminal, init, startListening, fit, fitDeferred, redraw, ensureConnected, pause, dispose } = useTerminal(props.sessionId, props.spawnOptions, {
+const {
+  terminal,
+  init,
+  startListening,
+  fit,
+  fitDeferred,
+  redraw,
+  ensureConnected,
+  listMentionedFiles,
+  activateMentionedFile,
+  pause,
+  dispose,
+} = useTerminal(props.sessionId, props.spawnOptions, {
   kittyKeyboard: props.kittyKeyboard,
   agentProvider: props.agentProvider,
   worktreePath: props.worktreePath,
@@ -49,6 +63,47 @@ const {
 const historyOverlayOpen = ref(false)
 const historyText = ref("")
 const historyBodyRef = ref<HTMLElement | null>(null)
+const mentionedFilesOpen = ref(false)
+const mentionedFilesLoading = ref(false)
+const mentionedFilesError = ref<string | null>(null)
+const mentionedFiles = ref<TerminalFileMention[]>([])
+const mentionedFilesOverflow = ref(false)
+
+async function openMentionedFiles() {
+  mentionedFilesOpen.value = true
+  mentionedFilesLoading.value = true
+  mentionedFilesError.value = null
+  try {
+    const result = await listMentionedFiles()
+    if (!mentionedFilesOpen.value) return
+    mentionedFiles.value = result.mentions
+    mentionedFilesOverflow.value = result.overflow
+  } catch (error: unknown) {
+    console.error("[terminal] failed to list mentioned files:", error)
+    if (mentionedFilesOpen.value) {
+      mentionedFilesError.value = error instanceof Error
+        ? error.message
+        : "Mentioned files are unavailable."
+    }
+  } finally {
+    mentionedFilesLoading.value = false
+  }
+}
+
+function closeMentionedFiles() {
+  mentionedFilesOpen.value = false
+}
+
+function openMentionedFile(mention: TerminalFileMention) {
+  if (!mention.available) return
+  closeMentionedFiles()
+  activateMentionedFile(mention)
+}
+
+function openMentionedFileAt(index: number) {
+  const mention = mentionedFiles.value[index]
+  if (mention) openMentionedFile(mention)
+}
 
 async function openHistoryOverlay() {
   historyText.value = readHistoryLines().join("\n")
@@ -169,6 +224,7 @@ onDeactivated(() => {
   }
   pause()
   started = false
+  closeMentionedFiles()
 })
 
 watch(
@@ -196,14 +252,25 @@ onUnmounted(() => {
 <template>
   <div class="terminal-wrapper">
     <div ref="containerRef" class="terminal-container"></div>
-    <button
-      v-if="hasHiddenHistory && !historyOverlayOpen"
-      class="terminal-history-chip"
-      title="The full-screen agent is hiding earlier terminal output (setup scripts, previous stages). Click to view it."
-      @click="openHistoryOverlay"
-    >
-      Earlier output
-    </button>
+    <div v-if="!historyOverlayOpen && !mentionedFilesOpen" class="terminal-tools">
+      <button
+        v-if="agentTerminal"
+        class="terminal-tool-chip"
+        data-testid="mentioned-files-open"
+        title="Show files mentioned by the agent"
+        @click="openMentionedFiles"
+      >
+        Mentioned files
+      </button>
+      <button
+        v-if="hasHiddenHistory"
+        class="terminal-tool-chip"
+        title="The full-screen agent is hiding earlier terminal output (setup scripts, previous stages). Click to view it."
+        @click="openHistoryOverlay"
+      >
+        Earlier output
+      </button>
+    </div>
     <div v-if="historyOverlayOpen" class="terminal-history-overlay">
       <div class="terminal-history-header">
         <span>Earlier output — setup &amp; previous stages</span>
@@ -216,6 +283,16 @@ onUnmounted(() => {
         @keydown.esc.stop.prevent="closeHistoryOverlay"
       >{{ historyText }}</pre>
     </div>
+    <MentionedFilesOverlay
+      v-if="mentionedFilesOpen"
+      :rows="mentionedFiles"
+      :loading="mentionedFilesLoading"
+      :error="mentionedFilesError"
+      :overflow="mentionedFilesOverflow"
+      test-id="mentioned-files-overlay"
+      @close="closeMentionedFiles"
+      @open="openMentionedFileAt"
+    />
   </div>
 </template>
 
@@ -232,11 +309,15 @@ onUnmounted(() => {
   width: 100%;
   height: 100%;
 }
-.terminal-history-chip {
+.terminal-tools {
   position: absolute;
   top: 6px;
   right: 18px;
   z-index: 5;
+  display: flex;
+  gap: 6px;
+}
+.terminal-tool-chip {
   padding: 2px 8px;
   font-size: 11px;
   color: var(--kn-text-muted);
@@ -246,7 +327,7 @@ onUnmounted(() => {
   opacity: 0.75;
   cursor: pointer;
 }
-.terminal-history-chip:hover {
+.terminal-tool-chip:hover {
   opacity: 1;
   color: var(--kn-text-primary);
   border-color: var(--kn-border-strong);

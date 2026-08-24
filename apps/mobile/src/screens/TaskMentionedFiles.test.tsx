@@ -145,7 +145,8 @@ const resolution: TaskFileMentionResolution = {
     {
       path: "Missing.ts",
       matches: [],
-      truncated: false
+      truncated: false,
+      unavailableReason: "file not found"
     }
   ]
 };
@@ -250,7 +251,8 @@ describe("TaskMentionedFiles", () => {
     expect(rows.map((row) => row.path)).toEqual([
       "src/Newest.ts",
       "a/Shared.ts",
-      "b/Shared.ts"
+      "b/Shared.ts",
+      "Missing.ts"
     ]);
     const firstRow = (
       list?.props?.renderItem as (input: { item: typeof rows[number] }) => ElementNode
@@ -260,9 +262,11 @@ describe("TaskMentionedFiles", () => {
       path: "src/Newest.ts",
       line: 9
     });
-    expect(textContent(list?.props?.ListFooterComponent)).toContain(
-      "1 mention couldn't be matched"
-    );
+    const unavailableRow = (
+      list?.props?.renderItem as (input: { item: typeof rows[number] }) => ElementNode
+    )({ item: rows[3]! });
+    expect(unavailableRow.props?.disabled).toBe(true);
+    expect(textContent(unavailableRow)).toContain("Unavailable · file not found");
   });
 
   it("shows bounded-result copy when history or resolution is truncated", async () => {
@@ -397,7 +401,7 @@ describe("TaskMentionedFiles", () => {
     expect(ambiguousOptions.onSelect).not.toHaveBeenCalled();
   });
 
-  it("shows unavailable state when direct resolution has no match", async () => {
+  it("shows a disabled unavailable row when direct resolution has no match", async () => {
     const options = {
       history: {
         mentions: [{ raw: "Missing.ts", path: "Missing.ts" }],
@@ -408,7 +412,8 @@ describe("TaskMentionedFiles", () => {
         mentions: [{
           path: "Missing.ts",
           matches: [],
-          truncated: false
+          truncated: false,
+          unavailableReason: "file not found"
         }]
       })
     };
@@ -416,6 +421,22 @@ describe("TaskMentionedFiles", () => {
     await runEffects();
     const tree = renderMentionedFiles(options);
 
-    expect(textContent(tree)).toContain("No matching file is available");
+    const list = findByType(tree, "FlatList");
+    const rows = list?.props?.data as Array<{
+      available: boolean;
+      path: string;
+      unavailableReason?: string;
+    }>;
+    expect(rows).toEqual([{
+      available: false,
+      mentionPath: "Missing.ts",
+      path: "Missing.ts",
+      unavailableReason: "file not found"
+    }]);
+    const row = (
+      list?.props?.renderItem as (input: { item: typeof rows[number] }) => ElementNode
+    )({ item: rows[0]! });
+    expect(row.props?.disabled).toBe(true);
+    expect(textContent(row)).toContain("Unavailable · file not found");
   });
 });

@@ -102,7 +102,8 @@ export function TaskMentionedFiles({
         if (
           autoSelectUnique &&
           projection.rows.length === 1 &&
-          projection.unmatchedCount === 0
+          projection.unmatchedCount === 0 &&
+          projection.rows[0]?.available
         ) {
           const row = projection.rows[0]!;
           onSelectRef.current({
@@ -133,6 +134,7 @@ export function TaskMentionedFiles({
     setRetryGeneration((generation) => generation + 1);
   };
   const selectRow = (row: ResolvedMentionRow) => {
+    if (!row.available) return;
     onSelect({
       path: row.path,
       ...(row.line === undefined ? {} : { line: row.line })
@@ -202,7 +204,7 @@ export function TaskMentionedFiles({
           <FlatList
             contentContainerStyle={styles.list}
             data={visibleState.projection.rows}
-            keyExtractor={(row) => row.path}
+            keyExtractor={(row) => `${row.available ? "available" : "unavailable"}:${row.path}`}
             ListFooterComponent={
               visibleState.projection.unmatchedCount > 0 ||
               visibleState.projection.truncated ? (
@@ -226,19 +228,37 @@ export function TaskMentionedFiles({
             }
             renderItem={({ item }) => (
               <Pressable
-                accessibilityLabel={`Open file ${item.path}`}
-                accessibilityRole="button"
+                accessibilityLabel={
+                  item.available
+                    ? `Open file ${item.path}`
+                    : `${item.path} unavailable: ${item.unavailableReason}`
+                }
+                accessibilityRole={item.available ? "button" : "text"}
+                accessibilityState={{ disabled: !item.available }}
+                disabled={!item.available}
                 onPress={() => selectRow(item)}
-                style={styles.row}
+                style={[styles.row, !item.available && styles.rowUnavailable]}
                 testID={MOBILE_E2E_IDS.taskMentionedFilesRow(item.path)}
               >
-                <Text numberOfLines={1} style={styles.filename}>
+                <Text
+                  numberOfLines={1}
+                  style={[styles.filename, !item.available && styles.textUnavailable]}
+                >
                   {item.path.split("/").pop()}
                   {item.line === undefined ? "" : `:${item.line}`}
                 </Text>
-                <Text ellipsizeMode="middle" numberOfLines={1} style={styles.path}>
+                <Text
+                  ellipsizeMode="middle"
+                  numberOfLines={1}
+                  style={[styles.path, !item.available && styles.textUnavailable]}
+                >
                   {item.path}
                 </Text>
+                {!item.available ? (
+                  <Text style={styles.unavailableReason}>
+                    Unavailable · {item.unavailableReason}
+                  </Text>
+                ) : null}
               </Pressable>
             )}
           />
@@ -323,6 +343,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 12
   },
+  rowUnavailable: {
+    backgroundColor: "#09111D",
+    borderColor: "#18263A"
+  },
   filename: {
     color: "#E8F3FF",
     fontFamily: "Menlo",
@@ -334,6 +358,14 @@ const styles = StyleSheet.create({
     fontFamily: "Menlo",
     fontSize: 11,
     marginTop: 5
+  },
+  textUnavailable: {
+    color: "#607087"
+  },
+  unavailableReason: {
+    color: "#687991",
+    fontSize: 11,
+    marginTop: 7
   },
   footer: {
     gap: 5,

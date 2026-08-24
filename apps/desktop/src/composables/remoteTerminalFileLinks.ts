@@ -1,6 +1,7 @@
 import { Terminal, type ILink } from "@xterm/xterm"
 import {
   detectTerminalFileLinkCandidates,
+  collectTerminalFileMentionCandidates,
   IMAGE_FILE_EXTENSION,
 } from "./terminalFileLinks"
 
@@ -16,6 +17,21 @@ export interface RemoteTerminalFileLink {
 export interface RemoteTerminalFileLinkProvider {
   register(): void
   clearFileCache(): void
+  listMentions(): Promise<RemoteTerminalFileMentionList>
+  activateMention(mention: RemoteTerminalFileMention): Promise<void>
+}
+
+export interface RemoteTerminalFileMention {
+  path: string
+  line?: number
+  available: boolean
+  unavailableReason?: string
+  resolvedLink?: RemoteTerminalFileLink
+}
+
+export interface RemoteTerminalFileMentionList {
+  mentions: RemoteTerminalFileMention[]
+  overflow: boolean
 }
 
 /**
@@ -150,8 +166,49 @@ export function createRemoteTerminalFileLinkProvider(params: {
     })
   }
 
+  async function listMentions(): Promise<RemoteTerminalFileMentionList> {
+    const { candidates, overflow } = collectTerminalFileMentionCandidates(params.term)
+
+    const mentions = await Promise.all(candidates.map(async (candidate) => {
+      const previewPath = resolveRemoteTerminalFileLinkPath(candidate.path)
+      if (previewPath === null) {
+        return {
+          path: candidate.path,
+          line: candidate.line,
+          available: false,
+          unavailableReason: "Outside the remote task workspace",
+        }
+      }
+      const resolvedLink: RemoteTerminalFileLink = {
+        text: candidate.text,
+        start: candidate.start,
+        previewPath,
+        line: candidate.line,
+      }
+      if (await fetchFileContent(previewPath) === null) {
+        return {
+          path: candidate.path,
+          line: candidate.line,
+          available: false,
+          unavailableReason: "File not found in the remote task workspace",
+        }
+      }
+      return {
+        path: previewPath,
+        line: candidate.line,
+        available: true,
+        resolvedLink,
+      }
+    }))
+    return { mentions, overflow }
+  }
+
   return {
     register,
+    listMentions,
+    async activateMention(mention) {
+      if (mention.resolvedLink) await activateLink(mention.resolvedLink)
+    },
     clearFileCache() {
       fileContentCache.clear()
     },
