@@ -20,7 +20,7 @@ describe("renderPairingQr", () => {
     expect(QRCode.toDataURL).toHaveBeenCalledWith("pairing-payload", {
       errorCorrectionLevel: "M",
       margin: 2,
-      width: 240,
+      width: 370,
       color: { dark: "#08111EFF", light: "#FFFFFFFF" },
     });
   });

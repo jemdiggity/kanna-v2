@@ -209,6 +209,9 @@ describe("KANNA_TASK_ENVIRONMENT_TEMPLATE", () => {
     expect(KANNA_TASK_ENVIRONMENT_TEMPLATE).toContain(
       "Stop every background process you start before recording stage completion."
     );
+    expect(KANNA_TASK_ENVIRONMENT_TEMPLATE).toContain(
+      "Put temporary files and directories you create under `.tmp/` at the current worktree root"
+    );
   });
 });
 
@@ -254,6 +257,7 @@ describe("buildKannaRuntimeSystemPrompt", () => {
     expect(result).toContain("record status `failure` with the reason");
     expect(result).toContain("Do not push a branch or create a pull request unless this stage's prompt explicitly tells you to");
     expect(result).toContain("Work only in this worktree");
+    expect(result).toContain("Do not use the operating system's global `/tmp` for agent-created artifacts");
     expect(result).toContain("Only committed work crosses a stage boundary");
     expect(result).toContain("each stage transition forks a fresh workspace");
     expect(result).toContain("Start dev servers and other services on the assigned ports so parallel tasks do not collide");

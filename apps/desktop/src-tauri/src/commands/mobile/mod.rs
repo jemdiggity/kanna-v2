@@ -1258,7 +1258,7 @@ mod tests {
     fn mobile_pairing_session_deserializes_privileged_response() {
         let session: MobilePairingSession = serde_json::from_value(serde_json::json!({
             "code": "ABC123",
-            "pairingPayload": "{\"type\":\"kanna.machine-pairing\"}",
+            "pairingPayload": "KANNA1:DESKTOP-1:ABC123",
             "desktopId": "desktop-1",
             "desktopName": "Studio Mac",
             "lanHost": "192.168.1.10",
@@ -1269,10 +1269,7 @@ mod tests {
 
         assert_eq!(session.code, "ABC123");
         assert_eq!(session.desktop_id, "desktop-1");
-        assert_eq!(
-            session.pairing_payload,
-            "{\"type\":\"kanna.machine-pairing\"}"
-        );
+        assert_eq!(session.pairing_payload, "KANNA1:DESKTOP-1:ABC123");
     }
 
     #[test]
@@ -2285,7 +2282,10 @@ mod tests {
             desktop_id(&second_config).expect("second desktop identity should generate");
 
         assert_eq!(first_id, first_again);
-        assert_ne!(first_id, second_id);
+        assert_ne!(
+            first_id.to_ascii_lowercase(),
+            second_id.to_ascii_lowercase()
+        );
         assert!(first_id.starts_with("desktop-"));
         assert_eq!(first_id.len(), "desktop-".len() + 36);
         assert!(

@@ -6,7 +6,7 @@ export async function renderPairingQr(payload: string): Promise<string> {
   return QRCode.toDataURL(payload, {
     errorCorrectionLevel: "M",
     margin: 2,
-    width: 240,
+    width: 370,
     color: { dark: "#08111EFF", light: "#FFFFFFFF" },
   });
 }

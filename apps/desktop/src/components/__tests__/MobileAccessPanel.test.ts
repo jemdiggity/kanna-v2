@@ -45,7 +45,7 @@ describe("MobileAccessPanel", () => {
         desktopName: "Studio Mac",
         serverStatus: "running",
         pairingCode: "ABC123",
-        pairingPayload: '{"type":"kanna.machine-pairing","version":1,"desktopId":"desktop-1","code":"ABC123"}',
+        pairingPayload: "KANNA1:DESKTOP-1:ABC123",
       },
     });
 
@@ -65,7 +65,7 @@ describe("MobileAccessPanel", () => {
         desktopName: "Studio Mac",
         serverStatus: "running",
         pairingCode: "ABC123",
-        pairingPayload: '{"type":"kanna.machine-pairing","version":1}',
+        pairingPayload: "KANNA1:DESKTOP-1:ABC123",
         expiresAtUnixMs: Date.now() + 1_000,
       },
     });

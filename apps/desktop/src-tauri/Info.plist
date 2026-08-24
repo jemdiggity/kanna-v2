@@ -4,11 +4,12 @@
 <dict>
   <key>NSBonjourServices</key>
   <array>
+    <string>_kanna-mobile._tcp</string>
     <string>_kanna-xfer._tcp</string>
   </array>
   <key>NSHumanReadableCopyright</key>
   <string>Copyright © 2026 Tampopo GK. All rights reserved.</string>
   <key>NSLocalNetworkUsageDescription</key>
-  <string>Kanna uses your local network to discover nearby machines for task transfer.</string>
+  <string>Kanna uses your local network for mobile access and to discover nearby machines for task transfer.</string>
 </dict>
 </plist>
