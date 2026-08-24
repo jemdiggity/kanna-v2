@@ -395,6 +395,7 @@ export function TaskScreen({
   };
   const composerLayoutRef = useRef({
     contentHeight: TASK_COMPOSER_MIN_HEIGHT,
+    deferredContentHeight: null as number | null,
     draftChangedSinceExpansion: false,
     isExpanded: false
   });
@@ -412,6 +413,7 @@ export function TaskScreen({
   const expandComposer = useCallback(() => {
     if (!composerLayoutRef.current.isExpanded) {
       composerLayoutRef.current.isExpanded = true;
+      composerLayoutRef.current.deferredContentHeight = null;
       composerLayoutRef.current.draftChangedSinceExpansion = false;
       setIsComposerExpanded(true);
     }
@@ -428,18 +430,33 @@ export function TaskScreen({
     composerScrollRef.current?.scrollTo({ animated: false, y: 0 });
     setIsComposerExpanded(false);
   }, []);
+  const applyComposerContentHeight = (contentHeight: number) => {
+    composerLayoutRef.current.contentHeight = contentHeight;
+    const shouldScroll = shouldTaskComposerScroll(contentHeight);
+    setIsComposerScrollable(shouldScroll);
+    if (shouldScroll) {
+      revealComposerCaret();
+    }
+  };
   const updateDraftInput = (nextDraftInput: string) => {
     composerSnapshotRef.current.draftInput = nextDraftInput;
     composerLayoutRef.current.draftChangedSinceExpansion = true;
     if (!nextDraftInput) {
+      composerLayoutRef.current.deferredContentHeight = null;
       composerLayoutRef.current.contentHeight = TASK_COMPOSER_MIN_HEIGHT;
       setIsComposerScrollable(false);
+    } else if (composerLayoutRef.current.deferredContentHeight !== null) {
+      const deferredContentHeight =
+        composerLayoutRef.current.deferredContentHeight;
+      composerLayoutRef.current.deferredContentHeight = null;
+      applyComposerContentHeight(deferredContentHeight);
     }
     setDraftInput(nextDraftInput);
   };
   const clearDraftInput = () => {
     composerSnapshotRef.current.draftInput = "";
     composerSnapshotRef.current.attachment = null;
+    composerLayoutRef.current.deferredContentHeight = null;
     composerLayoutRef.current.contentHeight = TASK_COMPOSER_MIN_HEIGHT;
     setIsComposerScrollable(false);
     setDraftInput("");
@@ -501,20 +518,19 @@ export function TaskScreen({
       const contentHeight = event.nativeEvent.contentSize.height;
       if (
         !composerLayoutRef.current.draftChangedSinceExpansion &&
-        contentHeight < composerLayoutRef.current.contentHeight
+        contentHeight < composerLayoutRef.current.contentHeight &&
+        composerLayoutRef.current.deferredContentHeight === null
       ) {
         // Refocusing expands the outer viewport from the retained intrinsic
         // measurement. Fabric can emit one stale collapsed-height event during
-        // that transition; do not let it erase the measurement before the user
-        // edits. Once the draft changes, genuine shrink measurements win.
+        // that transition. Defer the first smaller measurement until either a
+        // second measurement proves it stale or onChangeText proves it came
+        // from an edit; Fabric may deliver those callbacks in either order.
+        composerLayoutRef.current.deferredContentHeight = contentHeight;
         return;
       }
-      composerLayoutRef.current.contentHeight = contentHeight;
-      const shouldScroll = shouldTaskComposerScroll(contentHeight);
-      setIsComposerScrollable(shouldScroll);
-      if (shouldScroll) {
-        revealComposerCaret();
-      }
+      composerLayoutRef.current.deferredContentHeight = null;
+      applyComposerContentHeight(contentHeight);
     }
   };
   const submitInput = (input: string) => {

@@ -1571,7 +1571,7 @@ describe("TaskScreen", () => {
     expect(componentMocks.keyboardDismiss).not.toHaveBeenCalled();
   });
 
-  it("collapses on blur with its draft intact and restores the capped viewport on refocus", () => {
+  it("restores on refocus and accepts shrink measured before the text change", () => {
     const draftInput =
       "Eight lines of wrapped content remain in the draft while the keyboard is dismissed and return to their capped scrolling viewport when editing resumes.";
     let tree = renderTaskScreen({ draftInput });
@@ -1609,6 +1609,23 @@ describe("TaskScreen", () => {
     viewport = findByTestId(tree, MOBILE_E2E_IDS.taskInputViewport);
     expect(viewport?.props?.scrollEnabled).toBe(true);
     expect(styleEntries(viewport)).toContainEqual({ height: 120 });
+
+    (input?.props?.onContentSizeChange as (event: unknown) => void)({
+      nativeEvent: { contentSize: { height: 80, width: 240 } }
+    });
+    tree = renderTaskScreen({ draftInput });
+    input = findByTestId(tree, MOBILE_E2E_IDS.taskInput);
+    viewport = findByTestId(tree, MOBILE_E2E_IDS.taskInputViewport);
+    expect(styleEntries(viewport)).toContainEqual({ height: 80 });
+    expect(viewport?.props?.scrollEnabled).toBe(false);
+
+    (input?.props?.onChangeText as (value: string) => void)(
+      "Short refocused draft"
+    );
+    tree = renderTaskScreen({ draftInput: "Short refocused draft" });
+    viewport = findByTestId(tree, MOBILE_E2E_IDS.taskInputViewport);
+    expect(styleEntries(viewport)).toContainEqual({ height: 80 });
+    expect(viewport?.props?.scrollEnabled).toBe(false);
   });
 
   it.each(["", "  \n\t"])(
