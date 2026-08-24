@@ -10,6 +10,13 @@ use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 pub type WsSink = SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
 pub type WsStream = SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountAuthProbe {
+    Authorized,
+    Rejected,
+    Unavailable,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TunnelService {
@@ -116,7 +123,13 @@ pub enum RelayMessage {
         desktop_secret: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         tunnel_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        anon_pub_key: Option<String>,
     },
+    #[serde(rename = "auth_challenge")]
+    AuthChallenge { nonce: String },
+    #[serde(rename = "auth_proof")]
+    AuthProof { signature: String },
     #[serde(rename = "invoke")]
     Invoke {
         id: RelayId,
@@ -204,12 +217,23 @@ fn build_auth_message(config: &Config, tunnel_id: Option<String>) -> RelayMessag
             desktop_id: Some(config.desktop_id.clone()),
             desktop_secret: Some(desktop_secret.clone()),
             tunnel_id,
+            anon_pub_key: None,
         },
-        None => RelayMessage::Auth {
-            device_token: Some(config.device_token.clone()),
-            desktop_id: Some(config.desktop_id.clone()),
-            desktop_secret: None,
-            tunnel_id,
+        None => match crate::pairing::anonymous_push_public_key(config) {
+            Ok(public_key) => RelayMessage::Auth {
+                device_token: None,
+                desktop_id: None,
+                desktop_secret: None,
+                tunnel_id,
+                anon_pub_key: Some(public_key),
+            },
+            Err(_) => RelayMessage::Auth {
+                device_token: Some(config.device_token.clone()),
+                desktop_id: Some(config.desktop_id.clone()),
+                desktop_secret: None,
+                tunnel_id,
+                anon_pub_key: None,
+            },
         },
     }
 }
@@ -218,16 +242,145 @@ pub async fn connect_to_relay(
     config: &Config,
 ) -> Result<(WsSink, WsStream), Box<dyn std::error::Error + Send + Sync>> {
     let (ws_stream, _response) = connect_async(&config.relay_url).await?;
-    let (mut sink, stream) = ws_stream.split();
+    let (mut sink, mut stream) = ws_stream.split();
 
     // Send auth message immediately after connecting
     let auth = build_auth_message(config, None);
+    let anonymous_auth = matches!(
+        &auth,
+        RelayMessage::Auth {
+            anon_pub_key: Some(_),
+            ..
+        }
+    );
     let auth_json = serde_json::to_string(&auth)?;
     sink.send(Message::Text(auth_json.into())).await?;
+
+    if anonymous_auth {
+        let challenge = stream
+            .next()
+            .await
+            .ok_or("relay closed before anonymous auth challenge")??;
+        let RelayMessage::AuthChallenge { nonce } =
+            serde_json::from_str::<RelayMessage>(challenge.to_text()?)?
+        else {
+            return Err("relay did not issue an anonymous auth challenge".into());
+        };
+        let (_, signature) = crate::pairing::sign_anonymous_push_auth_challenge(config, &nonce)?;
+        sink.send(Message::Text(
+            serde_json::to_string(&RelayMessage::AuthProof { signature })?.into(),
+        ))
+        .await?;
+        let auth_ok = stream
+            .next()
+            .await
+            .ok_or("relay closed before anonymous auth completed")??;
+        if !matches!(
+            serde_json::from_str::<RelayMessage>(auth_ok.to_text()?)?,
+            RelayMessage::AuthOk { .. }
+        ) {
+            return Err("relay refused anonymous push authentication".into());
+        }
+    }
 
     log::info!("Authenticated with relay");
 
     Ok((sink, stream))
+}
+
+pub async fn connect_anonymous_push_to_relay(
+    config: &Config,
+) -> Result<(WsSink, WsStream), Box<dyn std::error::Error + Send + Sync>> {
+    let public_key = crate::pairing::anonymous_push_public_key(config)?;
+    let (ws_stream, _) = connect_async(&config.relay_url).await?;
+    let (mut sink, mut stream) = ws_stream.split();
+    sink.send(Message::Text(
+        serde_json::to_string(&RelayMessage::Auth {
+            device_token: None,
+            desktop_id: None,
+            desktop_secret: None,
+            tunnel_id: None,
+            anon_pub_key: Some(public_key),
+        })?
+        .into(),
+    ))
+    .await?;
+    let challenge = stream
+        .next()
+        .await
+        .ok_or("relay closed before anonymous auth challenge")??;
+    let RelayMessage::AuthChallenge { nonce } =
+        serde_json::from_str::<RelayMessage>(challenge.to_text()?)?
+    else {
+        return Err("relay did not issue an anonymous auth challenge".into());
+    };
+    let (_, signature) = crate::pairing::sign_anonymous_push_auth_challenge(config, &nonce)?;
+    sink.send(Message::Text(
+        serde_json::to_string(&RelayMessage::AuthProof { signature })?.into(),
+    ))
+    .await?;
+    let auth_ok = stream
+        .next()
+        .await
+        .ok_or("relay closed before anonymous auth completed")??;
+    if !matches!(
+        serde_json::from_str::<RelayMessage>(auth_ok.to_text()?)?,
+        RelayMessage::AuthOk { .. }
+    ) {
+        return Err("relay refused anonymous push authentication".into());
+    }
+    Ok((sink, stream))
+}
+
+/// Distinguish a signed-out desktop (the relay authoritatively rejected its
+/// local credential) from a relay outage. The caller uses only the former to
+/// enter the lazy anonymous notification mode; outages retain normal account
+/// reconnect behavior.
+pub async fn probe_account_auth(config: &Config) -> AccountAuthProbe {
+    if config.desktop_secret.is_none() {
+        return AccountAuthProbe::Rejected;
+    }
+    let attempt = async {
+        let (mut socket, _) = connect_async(&config.relay_url).await?;
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&build_auth_message(config, None))?.into(),
+            ))
+            .await?;
+        while let Some(frame) = socket.next().await {
+            match frame? {
+                Message::Text(text) => {
+                    if matches!(
+                        serde_json::from_str::<RelayMessage>(&text),
+                        Ok(RelayMessage::AuthOk { .. })
+                    ) {
+                        let _ = socket.close(None).await;
+                        return Ok(AccountAuthProbe::Authorized);
+                    }
+                }
+                Message::Close(frame) => {
+                    return Ok(
+                        if frame
+                            .as_ref()
+                            .is_some_and(|frame| u16::from(frame.code) == 4005)
+                        {
+                            AccountAuthProbe::Rejected
+                        } else {
+                            AccountAuthProbe::Unavailable
+                        },
+                    );
+                }
+                _ => {}
+            }
+        }
+        Ok::<AccountAuthProbe, Box<dyn std::error::Error + Send + Sync>>(
+            AccountAuthProbe::Unavailable,
+        )
+    };
+    match tokio::time::timeout(std::time::Duration::from_secs(10), attempt).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) | Err(_) => AccountAuthProbe::Unavailable,
+    }
 }
 
 pub async fn connect_tunnel_to_relay(

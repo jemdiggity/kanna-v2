@@ -362,16 +362,38 @@ function AppContent() {
     };
   }, [controller, refreshAccount, runOtaUpdateCheck]);
 
+  const anonymousPushPairings = state.trustedDesktops.flatMap((desktop) =>
+    desktop.desktopPushIdentity && desktop.pushPairingCert
+      ? [{
+          desktopId: desktop.desktopId,
+          desktopPushIdentity: desktop.desktopPushIdentity,
+          pushPairingCert: desktop.pushPairingCert
+        }]
+      : []
+  );
+  const anonymousPushPairingKey = anonymousPushPairings
+    .map((pairing) => [
+      pairing.desktopPushIdentity.publicKey,
+      pairing.desktopId,
+      pairing.desktopPushIdentity.relayUrl,
+      pairing.pushPairingCert.deviceId,
+      pairing.pushPairingCert.expiresAt,
+      pairing.pushPairingCert.signature
+    ].join(":"))
+    .sort()
+    .join("|");
+
   useEffect(() => {
     if (
       Platform.OS !== "ios" ||
-      state.auth.status !== "signedIn" ||
-      !state.mobileDeviceId
+      !state.mobileDeviceId ||
+      (state.auth.status !== "signedIn" && anonymousPushPairings.length === 0)
     ) {
       return;
     }
     const mobileExtra = readKannaExpoExtra(readExpoConfig());
-    const relayUrl = mobileExtra?.relayUrl;
+    const relayUrl = mobileExtra?.relayUrl
+      ?? anonymousPushPairings[0]?.desktopPushIdentity.relayUrl;
     if (!relayUrl || mobileExtra?.appEnv === "dev") return;
 
     let disposed = false;
@@ -380,6 +402,7 @@ function AppContent() {
       deviceId: state.mobileDeviceId,
       getIdToken: (forceRefresh) => model.getAuthIdToken(forceRefresh),
       relayUrl,
+      anonymousPairings: anonymousPushPairings,
       onTaskOpen(target) {
         setNotificationTaskRequest((current) => ({
           key: (current?.key ?? 0) + 1,
@@ -400,8 +423,12 @@ function AppContent() {
       disposed = true;
       stop();
     };
-  }, [model, state.auth.status, state.mobileDeviceId]);
-
+  }, [
+    anonymousPushPairingKey,
+    model,
+    state.auth.status,
+    state.mobileDeviceId
+  ]);
   return (
     <SafeAreaView style={styles.safeArea} testID={MOBILE_E2E_IDS.appShell}>
       <View style={styles.shell}>

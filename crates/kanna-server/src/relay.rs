@@ -96,6 +96,21 @@ pub(crate) async fn run_relay_loop(
 
     // Reconnection loop
     loop {
+        let anonymous_identity_available =
+            crate::pairing::anonymous_push_public_key(&config).is_ok();
+        let use_anonymous_push = anonymous_identity_available
+            && (config.desktop_secret.is_none()
+                || relay_client::probe_account_auth(&config).await
+                    == relay_client::AccountAuthProbe::Rejected);
+        if use_anonymous_push {
+            run_anonymous_push_loop(
+                &config,
+                Arc::clone(&http_state),
+                &mut mobile_notification_requests,
+            )
+            .await?;
+            continue;
+        }
         http_state.set_desktop_routing_available(false);
         http_state.set_mobile_notifications_available(false);
         log::info!("Connecting to relay at {}...", config.relay_url);
@@ -733,6 +748,116 @@ pub(crate) async fn run_relay_loop(
 
         log::info!("Disconnected from relay. Reconnecting in 5 seconds...");
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
+}
+
+/// Signed-out desktops connect only when a notification is queued, reuse that
+/// authenticated session for a short burst, then release it after 60 seconds.
+async fn run_anonymous_push_loop(
+    config: &Config,
+    http_state: Arc<http_api::AppState>,
+    requests: &mut tokio::sync::mpsc::Receiver<http_api::MobileNotificationRequest>,
+) -> Result<(), String> {
+    http_state.set_desktop_routing_available(false);
+    http_state.set_mobile_notifications_available(true);
+    let mut next_id = 1_u64;
+
+    loop {
+        let first = tokio::select! {
+            request = requests.recv() => request,
+            _ = http_state.wait_for_cloud_relay_reconnect() => return Ok(()),
+        };
+        let Some(first) = first else {
+            return Err("mobile notification request channel closed".to_string());
+        };
+        let (mut sink, mut stream) =
+            match relay_client::connect_anonymous_push_to_relay(config).await {
+                Ok(connection) => connection,
+                Err(error) => {
+                    let _ = first.response.send(Err(format!(
+                        "anonymous mobile notification relay connection failed: {error}"
+                    )));
+                    continue;
+                }
+            };
+        let mut next_request = Some(first);
+        loop {
+            let request = match next_request.take() {
+                Some(request) => request,
+                None => tokio::select! {
+                    request = requests.recv() => match request {
+                        Some(request) => request,
+                        None => return Err("mobile notification request channel closed".to_string()),
+                    },
+                    _ = tokio::time::sleep(Duration::from_secs(60)) => break,
+                    _ = http_state.wait_for_cloud_relay_reconnect() => return Ok(()),
+                },
+            };
+            let id = format!(
+                "anonymous-mobile-notification:{}:{next_id}",
+                config.desktop_id
+            );
+            next_id = next_id.wrapping_add(1).max(1);
+            let message = RelayMessage::MobileNotificationPublish {
+                id: id.clone(),
+                notification: request.notification,
+            };
+            if let Err(error) = sink
+                .send(Message::Text(
+                    serde_json::to_string(&message)
+                        .map_err(|error| error.to_string())?
+                        .into(),
+                ))
+                .await
+            {
+                let _ = request.response.send(Err(error.to_string()));
+                break;
+            }
+            let delivery = loop {
+                let frame = tokio::select! {
+                    frame = stream.next() => frame,
+                    _ = http_state.wait_for_cloud_relay_reconnect() => {
+                        let _ = request.response.send(Err(
+                            "anonymous mobile notification interrupted by relay reconnect".to_string()
+                        ));
+                        return Ok(());
+                    }
+                };
+                let Some(frame) = frame else {
+                    break Err("anonymous mobile notification relay disconnected".to_string());
+                };
+                let frame = match frame {
+                    Ok(Message::Text(text)) => text,
+                    Ok(Message::Ping(payload)) => {
+                        let _ = sink.send(Message::Pong(payload)).await;
+                        continue;
+                    }
+                    Ok(_) => continue,
+                    Err(error) => break Err(error.to_string()),
+                };
+                match serde_json::from_str::<RelayMessage>(&frame) {
+                    Ok(RelayMessage::MobileNotificationAck {
+                        id: ack_id,
+                        ok: true,
+                        delivery: Some(delivery),
+                        ..
+                    }) if ack_id == id => break Ok(delivery),
+                    Ok(RelayMessage::MobileNotificationAck {
+                        id: ack_id, error, ..
+                    }) if ack_id == id => {
+                        break Err(error.unwrap_or_else(|| {
+                            "anonymous mobile notification was refused".to_string()
+                        }))
+                    }
+                    _ => continue,
+                }
+            };
+            let should_reconnect = delivery.is_err();
+            let _ = request.response.send(delivery);
+            if should_reconnect {
+                break;
+            }
+        }
     }
 }
 
@@ -1439,6 +1564,248 @@ mod tests {
         lan_socket.close(None).await.expect("close LAN stream");
         lan_server.abort();
         let _ = std::fs::remove_file(database_path);
+    }
+
+    #[tokio::test]
+    async fn signed_out_mobile_notification_connects_lazily_and_proves_anonymous_identity() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+        use tokio::time::timeout;
+        use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
+
+        let relay_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind relay stand-in");
+        let relay_address = relay_listener.local_addr().expect("relay address");
+        let unique = format!(
+            "relay-anonymous-mobile-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        );
+        let database_path = crate::db::Db::test_db_path(&unique);
+        let pairing_store_path = std::env::temp_dir().join(format!("{unique}-pairings.json"));
+        let config = Config {
+            relay_url: format!("ws://{relay_address}"),
+            device_token: "legacy-device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
+            daemon_dir: std::env::temp_dir()
+                .join(format!("{unique}-daemon"))
+                .to_string_lossy()
+                .into_owned(),
+            db_path: database_path.clone(),
+            kanna_cli_path: None,
+            desktop_id: "desktop-anonymous-push".to_string(),
+            desktop_secret: Some("signed-out-local-secret".to_string()),
+            desktop_name: "Anonymous Push Mac".to_string(),
+            version: "test-version".to_string(),
+            environment: "development".to_string(),
+            lan_host: "127.0.0.1".to_string(),
+            lan_port: 48120,
+            transfer_port: 4455,
+            activity_event_debounce_seconds: 300,
+            pairing_store_path: pairing_store_path.to_string_lossy().into_owned(),
+        };
+        let mut active = Some(
+            crate::pairing::create_active_pairing_session(&config).expect("create pairing session"),
+        );
+        let code = active
+            .as_ref()
+            .expect("active pairing")
+            .session
+            .code
+            .clone();
+        let pairing = crate::pairing::claim_pairing_session(
+            &config,
+            &mut active,
+            crate::pairing::PairingClaimRequest {
+                code,
+                device_id: "phone-anonymous".to_string(),
+                device_name: "Test Phone".to_string(),
+            },
+        )
+        .expect("claim pairing");
+        let database = crate::db::Db::open_for_tests(&database_path).expect("open test db");
+        let state = Arc::new(http_api::AppState::new(config.clone()));
+        let (accepted_tx, mut accepted_rx) = tokio::sync::oneshot::channel();
+
+        let expected_public_key = pairing.desktop_push_identity.public_key.clone();
+        let relay_server = tokio::spawn(async move {
+            let (probe_stream, _) = relay_listener.accept().await.expect("accept account probe");
+            let mut probe = tokio_tungstenite::accept_async(probe_stream)
+                .await
+                .expect("accept account probe websocket");
+            let account_auth = probe
+                .next()
+                .await
+                .expect("account auth")
+                .expect("account frame");
+            let TungsteniteMessage::Text(account_auth) = account_auth else {
+                panic!("account auth must be text");
+            };
+            let account_auth: serde_json::Value =
+                serde_json::from_str(&account_auth).expect("parse account auth");
+            assert_eq!(account_auth["desktop_secret"], "signed-out-local-secret");
+            probe
+                .send(TungsteniteMessage::Close(Some(
+                    tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                    code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Library(4005),
+                    reason: "Authentication failed".into(),
+                    },
+                )))
+                .await
+                .expect("reject signed-out account credential");
+            let _ = probe.next().await;
+
+            let (stream, _) = relay_listener.accept().await.expect("accept relay");
+            let _ = accepted_tx.send(());
+            let mut socket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("accept websocket");
+            let auth = socket
+                .next()
+                .await
+                .expect("auth message")
+                .expect("auth frame");
+            let TungsteniteMessage::Text(auth) = auth else {
+                panic!("anonymous auth must be text");
+            };
+            let auth: serde_json::Value = serde_json::from_str(&auth).expect("parse auth");
+            assert_eq!(auth["anon_pub_key"], expected_public_key);
+
+            let nonce_bytes = [7_u8; 32];
+            let nonce = URL_SAFE_NO_PAD.encode(nonce_bytes);
+            socket
+                .send(TungsteniteMessage::Text(
+                    serde_json::json!({ "type": "auth_challenge", "nonce": nonce })
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .expect("send challenge");
+            let proof = socket
+                .next()
+                .await
+                .expect("auth proof")
+                .expect("proof frame");
+            let TungsteniteMessage::Text(proof) = proof else {
+                panic!("anonymous proof must be text");
+            };
+            let proof: serde_json::Value = serde_json::from_str(&proof).expect("parse proof");
+            let public_key: [u8; 32] = URL_SAFE_NO_PAD
+                .decode(&expected_public_key)
+                .expect("decode public key")
+                .try_into()
+                .expect("public key length");
+            let signature = Signature::from_slice(
+                &URL_SAFE_NO_PAD
+                    .decode(proof["signature"].as_str().expect("signature"))
+                    .expect("decode signature"),
+            )
+            .expect("signature length");
+            let mut signed = b"kanna.relay-auth.v1\0".to_vec();
+            signed.extend(nonce_bytes);
+            VerifyingKey::from_bytes(&public_key)
+                .expect("valid public key")
+                .verify(&signed, &signature)
+                .expect("desktop proves anonymous identity");
+            socket
+                .send(TungsteniteMessage::Text(
+                    serde_json::json!({
+                        "type": "auth_ok",
+                        "userId": "anonymous:test",
+                        "capabilities": { "mobileNotifications": { "version": 1 } }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .expect("send auth success");
+            let publish = socket
+                .next()
+                .await
+                .expect("publish")
+                .expect("publish frame");
+            let TungsteniteMessage::Text(publish) = publish else {
+                panic!("publish must be text");
+            };
+            let publish: serde_json::Value = serde_json::from_str(&publish).expect("parse publish");
+            assert_eq!(publish["type"], "mobile_notification_publish");
+            assert_eq!(publish["notification"]["title"], "Signed out done");
+            socket
+                .send(TungsteniteMessage::Text(
+                    serde_json::json!({
+                        "type": "mobile_notification_ack",
+                        "id": publish["id"],
+                        "ok": true,
+                        "delivery": {
+                            "acceptedCount": 1,
+                            "failedCount": 0,
+                            "failureReasons": []
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .expect("send publish ack");
+        });
+
+        let relay_loop = run_relay_loop(config, database, Arc::clone(&state));
+        tokio::pin!(relay_loop);
+        let readiness = timeout(Duration::from_secs(2), async {
+            while !state.mobile_notifications_available() {
+                tokio::task::yield_now().await;
+            }
+        });
+        tokio::pin!(readiness);
+        tokio::select! {
+            ready = &mut readiness => ready.expect("anonymous notification queue becomes available"),
+            result = &mut relay_loop => panic!("relay loop exited early: {result:?}"),
+        }
+        assert!(
+            accepted_rx.try_recv().is_err(),
+            "relay connected before notification demand"
+        );
+
+        let request = http_api::dispatch_authenticated_http_invoke(
+            Arc::clone(&state),
+            "POST",
+            "/v1/mobile/notifications",
+            serde_json::json!({
+                "title": "Signed out done",
+                "body": "The paired phone should receive this."
+            }),
+        );
+        tokio::pin!(request);
+        let response = tokio::select! {
+            response = &mut request => response,
+            result = &mut relay_loop => panic!("relay loop exited early: {result:?}"),
+        };
+        assert_eq!(response.status, 200, "{response:?}");
+        assert_eq!(
+            response
+                .body
+                .as_ref()
+                .and_then(|body| body["acceptedCount"].as_u64()),
+            Some(1)
+        );
+        relay_server.await.expect("relay server");
+        let _ = std::fs::remove_file(database_path);
+        let identity_path = pairing_store_path.with_file_name(format!(
+            "{}.anonymous-push-identity.json",
+            pairing_store_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("pairing store file name")
+        ));
+        let _ = std::fs::remove_file(pairing_store_path);
+        let _ = std::fs::remove_file(identity_path);
     }
 
     #[tokio::test]

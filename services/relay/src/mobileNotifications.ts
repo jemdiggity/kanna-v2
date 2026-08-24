@@ -177,7 +177,7 @@ export async function publishMobileNotification(input: {
   input.sendAck({ ok: true, delivery });
 }
 
-function summarizeMessagingFailures(
+export function summarizeMessagingFailures(
   errors: readonly { code: string; message: string }[]
 ): MobileNotificationFailureReason[] {
   const summaries = new Map<string, MobileNotificationFailureReason>();

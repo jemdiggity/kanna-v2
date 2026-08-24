@@ -15,6 +15,7 @@ describe("mobile push notifications", () => {
     const stopOpened = vi.fn();
     const stopResponse = vi.fn();
     const fetchImpl = vi.fn(async () => new Response(null, { status: 200 }));
+    const onTaskOpen = vi.fn();
     const sdk = {
       setNotificationHandler: vi.fn(),
       requestPermission: vi.fn(async () => 1),
@@ -31,7 +32,7 @@ describe("mobile push notifications", () => {
     const stop = await startMobilePushNotifications({
       deviceId: "mobile-device-1",
       getIdToken: async () => "firebase-id-token",
-      onTaskOpen: vi.fn(),
+      onTaskOpen,
       relayUrl: "wss://relay-staging.kanna.build",
       fetchImpl,
       sdk
@@ -121,6 +122,82 @@ describe("mobile push notifications", () => {
         deviceToken: "fcm-after-reinstall"
       })
     ]);
+  });
+
+  it("registers, rotates, and revokes a signed-out phone's paired FCM token", async () => {
+    let refreshToken: ((token: string) => void) | null = null;
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 200 }));
+    const onTaskOpen = vi.fn();
+    const pairing = {
+      desktopId: "desktop-1",
+      desktopPushIdentity: {
+        publicKey: "desktop-public-key",
+        relayUrl: "wss://relay-staging.kanna.build",
+        environment: "staging"
+      },
+      pushPairingCert: {
+        deviceId: "mobile-device-1",
+        issuedAt: 1_000,
+        expiresAt: 2_000,
+        signature: "desktop-signature"
+      }
+    };
+    const stop = await startMobilePushNotifications({
+      deviceId: "mobile-device-1",
+      getIdToken: async () => null,
+      onTaskOpen,
+      relayUrl: "wss://relay-staging.kanna.build",
+      anonymousPairings: [pairing],
+      fetchImpl,
+      sdk: {
+        requestPermission: vi.fn(async () => 1),
+        getToken: vi.fn(async () => "anonymous-token-1"),
+        onTokenRefresh: vi.fn((listener: (token: string) => void) => {
+          refreshToken = listener;
+          return () => undefined;
+        }),
+        getInitialNotification: vi.fn(async () => ({
+          data: {
+            kannaNotificationVersion: "1",
+            kind: "task",
+            desktopId: "desktop-public-key",
+            taskId: "task-1"
+          }
+        })),
+        onNotificationOpened: vi.fn(() => () => undefined)
+      }
+    });
+
+    expect(onTaskOpen).toHaveBeenCalledWith({
+      desktopId: "desktop-1",
+      taskId: "task-1"
+    });
+
+    expect(fetchImpl.mock.calls[0]).toEqual([
+      "https://relay-staging.kanna.build/push/pairings",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          desktopPubKey: "desktop-public-key",
+          deviceId: "mobile-device-1",
+          fcmToken: "anonymous-token-1",
+          cert: pairing.pushPairingCert
+        })
+      })
+    ]);
+    refreshToken?.("anonymous-token-2");
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(2));
+    expect(fetchImpl.mock.calls[1]?.[1]).toEqual(expect.objectContaining({
+      method: "POST",
+      body: expect.stringContaining("anonymous-token-2")
+    }));
+
+    stop();
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(3));
+    expect(fetchImpl.mock.calls[2]?.[1]).toEqual(expect.objectContaining({
+      method: "DELETE",
+      body: expect.stringContaining("anonymous-token-2")
+    }));
   });
 
   it("accepts only the versioned task hint and ignores unknown payloads", () => {

@@ -280,6 +280,9 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
         );
         if (!existing) return;
         sessionStore.upsertTrustedDesktop({ ...existing, ...material });
+        void persistContext().catch((error: unknown) => {
+          console.error("Pairing certificate persistence failed:", error);
+        });
       },
       onTaskRoutesChanged: publishTaskRouteChange,
       relayUrl: options.relayUrl ?? resolveRelayUrl(readExpoPublicEnv(), {

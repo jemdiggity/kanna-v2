@@ -1,5 +1,11 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
+import {
+  createHash,
+  generateKeyPairSync,
+  randomBytes,
+  sign,
+  type KeyObject,
+} from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -31,6 +37,7 @@ const SECRET_DESKTOP_SECRET = "desktop-secret-for-relay";
 const ROUTING_TARGET_DESKTOP_ID = "desktop-secret-routing-target";
 const ROUTING_TARGET_DESKTOP_SECRET = "desktop-secret-routing-target-secret";
 const E2E_SHUTDOWN_TOKEN = "relay-integration-shutdown-capability";
+const ANONYMOUS_PUSH_CAPTURE_COLLECTION = "e2eAnonymousPushDeliveries";
 /**
  * The relay caches a successful desktop-credential validation for this long,
  * so a revocation lands on an already-open socket only once it expires.
@@ -450,6 +457,96 @@ function connectAndAuth(
   });
 }
 
+interface AnonymousPushTestIdentity {
+  publicKey: string;
+  privateKey: KeyObject;
+}
+
+interface AnonymousPushTestCertificate {
+  deviceId: string;
+  issuedAt: number;
+  expiresAt: number;
+  signature: string;
+}
+
+function createAnonymousPushIdentity(): AnonymousPushTestIdentity {
+  const pair = generateKeyPairSync("ed25519");
+  const spki = pair.publicKey.export({ format: "der", type: "spki" });
+  return {
+    publicKey: Buffer.from(spki).subarray(-32).toString("base64url"),
+    privateKey: pair.privateKey,
+  };
+}
+
+function createAnonymousPushCertificate(
+  identity: AnonymousPushTestIdentity,
+  deviceId: string,
+): AnonymousPushTestCertificate {
+  const issuedAt = Date.now() - 1_000;
+  const expiresAt = issuedAt + 730 * 24 * 60 * 60_000;
+  const payload = Buffer.concat([
+    Buffer.from("kanna.push-pairing-cert.v1\0", "utf8"),
+    Buffer.from(JSON.stringify({ deviceId, issuedAt, expiresAt }), "utf8"),
+  ]);
+  return {
+    deviceId,
+    issuedAt,
+    expiresAt,
+    signature: sign(null, payload, identity.privateKey).toString("base64url"),
+  };
+}
+
+function anonymousPairingBody(
+  identity: AnonymousPushTestIdentity,
+  cert: AnonymousPushTestCertificate,
+  fcmToken: string,
+): Record<string, unknown> {
+  return {
+    desktopPubKey: identity.publicKey,
+    deviceId: cert.deviceId,
+    fcmToken,
+    cert,
+  };
+}
+
+function connectAndAuthAnonymous(
+  identity: AnonymousPushTestIdentity,
+): Promise<{ ws: WebSocket; capabilities: Record<string, unknown> }> {
+  return new Promise((resolveConnection, reject) => {
+    const ws = new WebSocket(relayUrl());
+    const timeout = setTimeout(() => {
+      ws.close();
+      reject(new Error("Anonymous auth timed out"));
+    }, 5_000);
+    ws.on("open", () => {
+      ws.send(JSON.stringify({ type: "auth", anon_pub_key: identity.publicKey }));
+    });
+    ws.on("message", (raw: Buffer) => {
+      const message = JSON.parse(raw.toString()) as Record<string, unknown>;
+      if (message.type === "auth_challenge" && typeof message.nonce === "string") {
+        const payload = Buffer.concat([
+          Buffer.from("kanna.relay-auth.v1\0", "utf8"),
+          Buffer.from(message.nonce, "base64url"),
+        ]);
+        ws.send(JSON.stringify({
+          type: "auth_proof",
+          signature: sign(null, payload, identity.privateKey).toString("base64url"),
+        }));
+      } else if (message.type === "auth_ok") {
+        clearTimeout(timeout);
+        resolveConnection({
+          ws,
+          capabilities: message.capabilities as Record<string, unknown>,
+        });
+      }
+    });
+    ws.on("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+  });
+}
+
 /**
  * Open a socket and stop at the upgrade: no auth frame is ever sent, so the
  * connection holds its pre-auth admission slot until it closes or times out.
@@ -708,6 +805,7 @@ describe("Relay integration", () => {
   let firebaseConfigDir: string | null = null;
   let authPort = 0;
   let firestorePort = 0;
+  let firestoreWebsocketPort = 0;
   let firebaseHubPort = 0;
   let firebaseLoggingPort = 0;
   let idToken = "";
@@ -720,6 +818,7 @@ describe("Relay integration", () => {
     relayPort = await findFreePort();
     authPort = await findFreePort();
     firestorePort = await findFreePort();
+    firestoreWebsocketPort = await findFreePort();
     firebaseHubPort = await findFreePort();
     firebaseLoggingPort = await findFreePort();
     firebaseConfigDir = await mkdtemp(join(tmpdir(), "kanna-relay-firebase-"));
@@ -730,7 +829,11 @@ describe("Relay integration", () => {
         firestore: { rules: resolve(fileURLToPath(new URL("../../../firestore.rules", import.meta.url))) },
         emulators: {
           auth: { host: "127.0.0.1", port: authPort },
-          firestore: { host: "127.0.0.1", port: firestorePort },
+          firestore: {
+            host: "127.0.0.1",
+            port: firestorePort,
+            websocketPort: firestoreWebsocketPort,
+          },
           hub: { host: "127.0.0.1", port: firebaseHubPort },
           logging: { host: "127.0.0.1", port: firebaseLoggingPort },
           ui: { enabled: false },
@@ -758,8 +861,20 @@ describe("Relay integration", () => {
     });
     // Firebase is intentionally quiet on success, but its inherited stdout pipe
     // still needs a reader or a busy full-suite run can back-pressure startup.
-    firebaseProcess.stdout?.resume();
-    idToken = await waitForAuthEmulator(authPort);
+    let firebaseStdout = "";
+    firebaseProcess.stdout?.on("data", (chunk: Buffer) => {
+      firebaseStdout += chunk.toString();
+    });
+    idToken = await Promise.race([
+      waitForAuthEmulator(authPort),
+      new Promise<never>((_resolve, reject) => {
+        firebaseProcess?.once("exit", (code) => {
+          reject(new Error(
+            `Firebase emulator exited during startup (${code}): ${firebaseStdout}`,
+          ));
+        });
+      }),
+    ]);
     otherIdToken = await signInToAuthEmulator(authPort, OTHER_TEST_EMAIL, OTHER_TEST_PASSWORD) ?? "";
     if (!otherIdToken) throw new Error("Second seeded auth user is unavailable");
     await seedRelayDesktopCredentials(firestorePort);
@@ -791,6 +906,9 @@ describe("Relay integration", () => {
         KANNA_RELAY_MAX_UNAUTHENTICATED_CONNECTIONS_PER_IP: String(
           MAX_UNAUTHENTICATED_CONNECTIONS_PER_IP,
         ),
+        KANNA_E2E_ANON_PUSH_CAPTURE_COLLECTION: ANONYMOUS_PUSH_CAPTURE_COLLECTION,
+        KANNA_ANON_PUSH_DESKTOP_PER_MINUTE: "2",
+        KANNA_ANON_PUSH_TOKEN_PER_MINUTE: "2",
       },
       detached: true,
       stdio: "pipe",
@@ -1155,6 +1273,178 @@ describe("Relay integration", () => {
       error: expect.stringContaining("desktop-secret"),
     });
     await closeAndWait(legacyServer);
+  });
+
+  it("registers, rotates, and revokes anonymous push bindings", async () => {
+    const identity = createAnonymousPushIdentity();
+    const cert = createAnonymousPushCertificate(identity, "anonymous-phone-lifecycle");
+    const pairings = testFirestore.collection("anonymousPushPairings");
+
+    const register = await fetch(relayHttpUrl("/push/pairings"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(anonymousPairingBody(identity, cert, "fcm-token-one")),
+    });
+    expect(register.status).toBe(200);
+    const first = await pairings.where("desktopPubKey", "==", identity.publicKey).get();
+    expect(first.size).toBe(1);
+    expect(first.docs[0]?.data().fcmToken).toBe("fcm-token-one");
+
+    const rotate = await fetch(relayHttpUrl("/push/pairings"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(anonymousPairingBody(identity, cert, "fcm-token-two")),
+    });
+    expect(rotate.status).toBe(200);
+    const rotated = await pairings.where("desktopPubKey", "==", identity.publicKey).get();
+    expect(rotated.size).toBe(1);
+    expect(rotated.docs[0]?.data().fcmToken).toBe("fcm-token-two");
+
+    const revoke = await fetch(relayHttpUrl("/push/pairings"), {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(anonymousPairingBody(identity, cert, "fcm-token-two")),
+    });
+    expect(revoke.status).toBe(200);
+    expect((await pairings.where("desktopPubKey", "==", identity.publicKey).get()).empty).toBe(true);
+  });
+
+  it("refuses anonymous push registration without a valid desktop pairing certificate", async () => {
+    const identity = createAnonymousPushIdentity();
+    const cert = createAnonymousPushCertificate(identity, "unpaired-phone");
+    const response = await fetch(relayHttpUrl("/push/pairings"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ...anonymousPairingBody(identity, cert, "unpaired-token"),
+        cert: { ...cert, signature: randomBytes(64).toString("base64url") },
+      }),
+    });
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toMatchObject({ code: "invalid_certificate" });
+  });
+
+  it("authenticates an anonymous desktop and delivers only to its paired token", async () => {
+    const identity = createAnonymousPushIdentity();
+    const cert = createAnonymousPushCertificate(identity, "anonymous-phone-delivery");
+    await fetch(relayHttpUrl("/push/pairings"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(anonymousPairingBody(identity, cert, "anonymous-delivery-token")),
+    });
+    const { ws, capabilities } = await connectAndAuthAnonymous(identity);
+    expect(capabilities).toEqual({
+      tunnelServices: [],
+      mobileNotifications: { version: 1 },
+    });
+    const ack = waitForMessage(ws, (message) =>
+      message.type === "mobile_notification_ack" && message.id === "anonymous-delivery");
+    ws.send(JSON.stringify({
+      type: "mobile_notification_publish",
+      id: "anonymous-delivery",
+      notification: { title: "Done", body: "Anonymous delivery works." },
+    }));
+    await expect(ack).resolves.toMatchObject({
+      ok: true,
+      delivery: { acceptedCount: 1, failedCount: 0 },
+    });
+    const captures = await testFirestore.collection(ANONYMOUS_PUSH_CAPTURE_COLLECTION)
+      .where("notification.title", "==", "Done")
+      .get();
+    expect(captures.size).toBe(1);
+    expect(captures.docs[0]?.data().tokenHash).toBe(sha256Hex("anonymous-delivery-token"));
+    expect(captures.docs[0]?.data().desktopRoutingId).toBe(identity.publicKey);
+    await closeAndWait(ws);
+  });
+
+  it("refuses invoke, tunnel, and snapshot operations from an anonymous desktop", async () => {
+    const identity = createAnonymousPushIdentity();
+    const { ws } = await connectAndAuthAnonymous(identity);
+    const invoke = waitForMessage(ws, (message) =>
+      message.type === "response" && message.id === "anonymous-invoke");
+    ws.send(JSON.stringify({ type: "invoke", id: "anonymous-invoke", command: "list_active_desktops" }));
+    await expect(invoke).resolves.toMatchObject({ error: expect.stringContaining("cannot invoke") });
+
+    const tunnel = waitForMessage(ws, (message) =>
+      message.type === "response" && message.id === "anonymous-tunnel");
+    ws.send(JSON.stringify({ type: "tunnel_request", id: "anonymous-tunnel" }));
+    await expect(tunnel).resolves.toMatchObject({ error: expect.stringContaining("cannot open tunnels") });
+
+    const snapshot = waitForMessage(ws, (message) =>
+      message.type === "task_snapshot_ack" && message.id === "anonymous-snapshot");
+    ws.send(JSON.stringify({ type: "task_snapshot_publish", id: "anonymous-snapshot", snapshot: {} }));
+    await expect(snapshot).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining("desktop-secret"),
+    });
+    await closeAndWait(ws);
+  });
+
+  it("rate-limits anonymous desktop notification publication", async () => {
+    const identity = createAnonymousPushIdentity();
+    const cert = createAnonymousPushCertificate(identity, "anonymous-phone-rate-limit");
+    await fetch(relayHttpUrl("/push/pairings"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(anonymousPairingBody(identity, cert, "anonymous-rate-token")),
+    });
+    const { ws } = await connectAndAuthAnonymous(identity);
+    for (let index = 0; index < 2; index += 1) {
+      const id = `anonymous-rate-${index}`;
+      const ack = waitForMessage(ws, (message) =>
+        message.type === "mobile_notification_ack" && message.id === id);
+      ws.send(JSON.stringify({
+        type: "mobile_notification_publish",
+        id,
+        notification: { title: "Rate", body: "Allowed" },
+      }));
+      await expect(ack).resolves.toMatchObject({ ok: true });
+    }
+    const refused = waitForMessage(ws, (message) =>
+      message.type === "mobile_notification_ack" && message.id === "anonymous-rate-refused");
+    ws.send(JSON.stringify({
+      type: "mobile_notification_publish",
+      id: "anonymous-rate-refused",
+      notification: { title: "Rate", body: "Refused" },
+    }));
+    await expect(refused).resolves.toMatchObject({ ok: false, code: 429 });
+    await closeAndWait(ws);
+  });
+
+  it("rate-limits one anonymous push token across desktop identities", async () => {
+    const sharedToken = "anonymous-shared-rate-token";
+    const identities = Array.from({ length: 3 }, () => createAnonymousPushIdentity());
+    for (const [index, identity] of identities.entries()) {
+      const cert = createAnonymousPushCertificate(identity, `anonymous-shared-phone-${index}`);
+      const registration = await fetch(relayHttpUrl("/push/pairings"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(anonymousPairingBody(identity, cert, sharedToken)),
+      });
+      expect(registration.status).toBe(200);
+    }
+
+    for (const [index, identity] of identities.entries()) {
+      const { ws } = await connectAndAuthAnonymous(identity);
+      const id = `anonymous-shared-rate-${index}`;
+      const ack = waitForMessage(ws, (message) =>
+        message.type === "mobile_notification_ack" && message.id === id);
+      ws.send(JSON.stringify({
+        type: "mobile_notification_publish",
+        id,
+        notification: { title: "Shared rate", body: "Across desktops" },
+      }));
+      if (index < 2) {
+        await expect(ack).resolves.toMatchObject({ ok: true });
+      } else {
+        await expect(ack).resolves.toMatchObject({
+          ok: false,
+          code: 429,
+          error: expect.stringContaining("token rate limit"),
+        });
+      }
+      await closeAndWait(ws);
+    }
   });
 
   it("authenticates a desktop and clears its transfer capability when the session disconnects", async () => {
