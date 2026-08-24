@@ -429,6 +429,9 @@ describe("LAN task loop E2E", () => {
         setControllerForeground(foreground) {
           controller.setAppForeground(foreground);
         },
+        reconcileTerminalAfterBackground() {
+          controller.reconcileTaskTerminalAfterBackground();
+        },
         expireTerminalGrace() {
           controller.expireTaskTerminalGrace();
         }
@@ -470,11 +473,12 @@ describe("LAN task loop E2E", () => {
         const foreground = lifecycle.transition("active");
         expect(foreground.preserveTerminal).toBe(true);
 
-        // Foregrounding has no hidden frame queue to drain: the retained
-        // terminal was already current while backgrounded.
+        // Foregrounding performs one authoritative local replacement. Native
+        // receipt while hidden does not prove that iOS let WKWebView apply the
+        // writes, so keeping the transport attachment is not enough by itself.
         const foregrounded = store.taskTerminalOutputSource.getSnapshot();
         expect(terminalOutputToString(foregrounded.output)).toBe(retainedOutput);
-        expect(foregrounded.outputEpoch).toBe(
+        expect(foregrounded.outputEpoch).toBeGreaterThan(
           retainedWhileBackgrounded.outputEpoch
         );
         expect(terminalAttachCount).toBe(1);
@@ -482,7 +486,7 @@ describe("LAN task loop E2E", () => {
         await controller.refresh({ preserveTaskSession: true });
 
         expect(store.taskTerminalOutputSource.getSnapshot().outputEpoch).toBe(
-          retainedWhileBackgrounded.outputEpoch
+          foregrounded.outputEpoch
         );
         expect(terminalAttachCount).toBe(1);
       } finally {

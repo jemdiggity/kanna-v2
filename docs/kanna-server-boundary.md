@@ -136,7 +136,17 @@ its own daemon connection per attachment.
   `term_resume { stream_id, offset }` on re-attach. Inside the server's replay
   window it receives `term_resumed` and then only the bytes it missed, keeping
   the buffer it already rendered. Outside it, a *bounded* fresh snapshot. Never
-  the full history unconditionally.
+  the full history unconditionally. Resume offsets are accepted only at exact
+  `term_output` frame boundaries recorded by the ring; an offset inside a frame
+  falls back to a fresh snapshot rather than beginning with an ANSI or UTF-8
+  continuation byte.
+
+Mobile additionally reconciles transport receipt with emulator receipt after
+an app-background grace interval. iOS may suspend WKWebView while native code
+continues receiving bytes, so foregrounding resets and rehydrates xterm once
+from the contiguous retained buffer. If client compaction has created a gap
+between its snapshot and live tail, it discards the resume cursor and requests
+a bounded fresh snapshot instead of replaying that invalid local buffer.
 
 Capability clients attach through a session-scoped **terminal tap**: one daemon
 connection per session shared by its subscribers, recording live output into a

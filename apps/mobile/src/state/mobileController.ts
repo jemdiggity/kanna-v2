@@ -79,6 +79,7 @@ export interface MobileController {
   setNavigationView(view: MobileView): void;
   setTaskDetailVisible(visible: boolean): void;
   setAppForeground(foreground: boolean): void;
+  reconcileTaskTerminalAfterBackground(): void;
   expireTaskTerminalGrace(): void;
   selectDesktop(desktopId: string): Promise<void>;
   selectRepo(repoId: string): Promise<void>;
@@ -2435,6 +2436,22 @@ export function createMobileController(
       if (appForeground === foreground) return;
       appForeground = foreground;
       reconcileTaskSummarySubscriptions();
+    },
+
+    reconcileTaskTerminalAfterBackground() {
+      const taskId = activeTaskTerminal?.taskId;
+      if (!taskId) return;
+
+      // Transport/store receipt does not prove that a suspended iOS WKWebView
+      // ran the injected xterm writes. Rehydrate once on foreground so the
+      // emulator state corresponds to the cursor the stream will resume from.
+      if (store.rehydrateTaskTerminal(taskId)) return;
+
+      // Compaction left a gap between the retained snapshot and live tail.
+      // That buffer cannot seed an emulator: discard its resume cursor with
+      // the attachment and obtain a bounded fresh snapshot instead.
+      stopTaskTerminal();
+      startTaskTerminal(taskId);
     },
 
     expireTaskTerminalGrace() {

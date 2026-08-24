@@ -305,6 +305,9 @@ function AppContent() {
       setControllerForeground(foreground) {
         controller.setAppForeground(foreground);
       },
+      reconcileTerminalAfterBackground() {
+        controller.reconcileTaskTerminalAfterBackground();
+      },
       expireTerminalGrace() {
         controller.expireTaskTerminalGrace();
       }

@@ -55,8 +55,16 @@ interface TerminalHookState {
   chunksB64?: string[];
 }
 
+interface HarnessTerminalOutputBuffer {
+  scrollbackSegments: readonly string[];
+  snapshot: string;
+  liveSegments: readonly string[];
+}
+
+type HarnessTerminalOutput = string | HarnessTerminalOutputBuffer;
+
 interface HarnessSessionState {
-  taskTerminalOutput: string;
+  taskTerminalOutput: HarnessTerminalOutput;
   taskTerminalOutputEpoch: number;
   taskTerminalOutputStart: number;
   taskTerminalCols: number | null;
@@ -80,18 +88,18 @@ type HarnessTerminalMutation =
   | { kind: "append"; chunk: string }
   | {
       kind: "replace";
-      output: string;
+      output: HarnessTerminalOutput;
       status: HarnessSessionState["taskTerminalStatus"];
     };
 
 interface TerminalMutationModule {
   planTerminalMutation(options: {
     previousEpoch: number;
-    previousOutput: string;
+    previousOutput: HarnessTerminalOutput;
     previousStart: number;
     previousStatus: HarnessSessionState["taskTerminalStatus"];
     nextEpoch: number;
-    nextOutput: string;
+    nextOutput: HarnessTerminalOutput;
     nextStart: number;
     nextStatus: HarnessSessionState["taskTerminalStatus"];
   }): HarnessTerminalMutation;
@@ -1063,11 +1071,21 @@ async function callReferenceWrite(page: Page, text: string): Promise<void> {
   }, text);
 }
 
-function terminalChunksFromOutput(output: string): string[] {
-  return output
-    .split("\n")
-    .map((chunk) => chunk.trim())
-    .filter((chunk) => chunk.length > 0);
+function terminalChunksFromOutput(output: HarnessTerminalOutput): string[] {
+  const segments =
+    typeof output === "string"
+      ? [output]
+      : [
+          ...output.scrollbackSegments,
+          output.snapshot,
+          ...output.liveSegments
+        ];
+  return segments.flatMap((segment) =>
+    segment
+      .split("\n")
+      .map((chunk) => chunk.trim())
+      .filter((chunk) => chunk.length > 0)
+  );
 }
 
 export async function waitForWrites(page: Page): Promise<void> {

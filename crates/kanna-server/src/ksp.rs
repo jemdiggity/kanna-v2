@@ -5269,6 +5269,7 @@ async fn stream_terminal_once(
 mod tests {
     use super::*;
     use kanna_agent_protocol::{CompanionAsset, CompanionDocumentKind, CompanionEvent};
+    use kanna_daemon::headless_terminal::HeadlessTerminal;
     use kanna_daemon::terminal_perf::{format_event, TerminalPerfMonitor};
     use std::path::PathBuf;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -13196,6 +13197,92 @@ mod tests {
         );
 
         drop(resumed);
+    }
+
+    #[tokio::test]
+    async fn hostile_resume_offsets_fall_back_to_a_fidelity_preserving_snapshot() {
+        let vt = scrollback_vt(2_000);
+        let output = concat!(
+            "\x1b[?2026h",
+            "\x1b[2J\x1b[H",
+            "Publishing 漢字 safely\r\n",
+            "second complete line",
+            "\x1b[?2026l"
+        )
+        .as_bytes()
+        .to_vec();
+        let fixture = WindowedTerminalFixture::new(
+            "hostile-resume-boundaries",
+            vt.clone(),
+            vec![output.clone()],
+        )
+        .await;
+
+        let mut first = ws_connect(&fixture.url).await;
+        send_frame(&mut first, &windowed_client_auth_frame()).await;
+        assert_eq!(recv_frame(&mut first).await, auth_ok_frame_for(false));
+        send_frame(&mut first, &attach_terminal_frame(None)).await;
+        let (stream_id, base_offset) = match recv_frame(&mut first).await {
+            ServerFrame::TermSnapshot {
+                stream_id,
+                stream_offset,
+                ..
+            } => (
+                stream_id.expect("stream id"),
+                stream_offset.expect("stream offset"),
+            ),
+            other => panic!("expected initial snapshot, got {other:?}"),
+        };
+        assert!(matches!(
+            recv_frame(&mut first).await,
+            ServerFrame::TermOutput { .. }
+        ));
+        drop(first);
+
+        let utf8_start = output
+            .windows("漢".len())
+            .position(|bytes| bytes == "漢".as_bytes())
+            .expect("utf-8 marker");
+        let hostile_offsets = [1usize, utf8_start + 1, output.len() - 2];
+
+        for hostile in hostile_offsets {
+            let mut socket = ws_connect(&fixture.url).await;
+            send_frame(&mut socket, &windowed_client_auth_frame()).await;
+            assert_eq!(recv_frame(&mut socket).await, auth_ok_frame_for(false));
+            send_frame(
+                &mut socket,
+                &attach_terminal_frame(Some(TermResumePosition {
+                    stream_id,
+                    offset: base_offset + hostile as u64,
+                })),
+            )
+            .await;
+
+            let snapshot = match recv_frame(&mut socket).await {
+                ServerFrame::TermSnapshot { data_b64, .. } => decode_frame_bytes(&data_b64),
+                other => panic!(
+                    "a cursor inside an output frame must fall back to a snapshot, got {other:?}"
+                ),
+            };
+            let replay = match recv_frame(&mut socket).await {
+                ServerFrame::TermOutput { data_b64, .. } => decode_frame_bytes(&data_b64),
+                other => panic!("expected complete output replay, got {other:?}"),
+            };
+            assert_eq!(replay, output, "replay must neither overlap nor gap");
+
+            let mut reference = HeadlessTerminal::new(80, 24, 10_000).unwrap();
+            reference.write(vt.as_bytes());
+            reference.write(&output);
+            let mut reconnected = HeadlessTerminal::new(80, 24, 10_000).unwrap();
+            reconnected.write(&snapshot);
+            reconnected.write(&replay);
+            assert_eq!(
+                reconnected.debug_lines(24).unwrap(),
+                reference.debug_lines(24).unwrap(),
+                "full final screen must match after hostile reconnect offset {hostile}"
+            );
+            drop(socket);
+        }
     }
 
     #[tokio::test]
