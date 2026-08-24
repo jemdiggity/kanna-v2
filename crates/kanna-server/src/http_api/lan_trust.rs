@@ -20,8 +20,16 @@ const STREAM_COOKIE_TTL_SECONDS: u64 = 5 * 60;
 
 /// Marker inserted when a genuine LAN request presented a paired device's
 /// id + secret and the secret verified against the pairing store.
-#[derive(Debug, Clone, Copy)]
-pub(super) struct TrustedLanDeviceAccess;
+#[derive(Debug, Clone)]
+pub(super) struct TrustedLanDeviceAccess {
+    device_id: String,
+}
+
+impl TrustedLanDeviceAccess {
+    pub(super) fn device_id(&self) -> &str {
+        &self.device_id
+    }
+}
 
 /// Authorization extractor for privileged task controls.
 ///
@@ -216,12 +224,16 @@ pub(super) async fn attach_trusted_lan_device(
             let config = state.config();
             if let Ok(store) = PairingStore::load(Path::new(&config.pairing_store_path)) {
                 if store.verify_device_secret(&config.desktop_id, &device_id, &device_secret) {
-                    request.extensions_mut().insert(TrustedLanDeviceAccess);
+                    request.extensions_mut().insert(TrustedLanDeviceAccess {
+                        device_id: device_id.clone(),
+                    });
                     compatibility_cookie = issue_stream_cookie(config, &device_id);
                 }
             }
-        } else if stream_cookie_device(&request, state.config()).is_some() {
-            request.extensions_mut().insert(TrustedLanDeviceAccess);
+        } else if let Some(device_id) = stream_cookie_device(&request, state.config()) {
+            request
+                .extensions_mut()
+                .insert(TrustedLanDeviceAccess { device_id });
         }
     }
     let mut response = next.run(request).await;

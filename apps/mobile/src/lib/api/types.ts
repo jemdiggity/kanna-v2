@@ -125,12 +125,37 @@ export interface PairingClaimRequest {
   deviceName: string;
 }
 
+export interface DesktopPushIdentity {
+  /** Raw 32-byte Ed25519 public key encoded as unpadded base64url. */
+  publicKey: string;
+  relayUrl: string;
+  environment: string;
+}
+
+export interface PushPairingCertificate {
+  deviceId: string;
+  /** Unix epoch milliseconds. */
+  issuedAt: number;
+  /** Unix epoch milliseconds. */
+  expiresAt: number;
+  /** Raw 64-byte Ed25519 signature encoded as unpadded base64url. */
+  signature: string;
+}
+
+export interface PushPairingMaterial {
+  desktopPushIdentity: DesktopPushIdentity;
+  pushPairingCert: PushPairingCertificate;
+}
+
 export interface PairingClaimResponse {
   desktopId: string;
   desktopName: string;
   /** Per-device LAN credential issued at claim time; absent from desktops
    * that predate device secrets. */
   deviceSecret?: string;
+  /** Additive phase-2 fields; absent when pairing an older desktop. */
+  desktopPushIdentity?: DesktopPushIdentity;
+  pushPairingCert?: PushPairingCertificate;
 }
 
 export interface CreateTaskRequest {

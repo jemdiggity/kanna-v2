@@ -298,6 +298,69 @@ describe("createSessionPersistence", () => {
     );
   });
 
+  it("round-trips coherent anonymous push pairing material", async () => {
+    const storage = createMemoryStorage();
+    const persistence = createSessionPersistence(storage);
+    const desktopPushIdentity = {
+      publicKey: "desktop-ed25519-public-key",
+      relayUrl: "wss://relay.example",
+      environment: "development"
+    };
+    const pushPairingCert = {
+      deviceId: "mobile-device-1",
+      issuedAt: 1_784_246_400_000,
+      expiresAt: 1_847_318_400_000,
+      signature: "desktop-signature"
+    };
+
+    await persistence.save({
+      mobileDeviceId: "mobile-device-1",
+      selectedDesktopId: "desktop-e2e",
+      selectedRepoId: null,
+      selectedTaskId: null,
+      activeView: "tasks",
+      trustedDesktops: [{
+        desktopId: "desktop-e2e",
+        displayName: "E2E Mac",
+        lanEndpoints: [],
+        lastSeenAt: "2026-08-24T00:00:00.000Z",
+        desktopPushIdentity,
+        pushPairingCert
+      }]
+    });
+
+    await expect(persistence.load()).resolves.toMatchObject({
+      trustedDesktops: [{ desktopPushIdentity, pushPairingCert }]
+    });
+  });
+
+  it("drops incomplete anonymous push pairing material", async () => {
+    const storage = createMemoryStorage();
+    const persistence = createSessionPersistence(storage);
+    await storage.setItem("kanna.mobile.context.v1", JSON.stringify({
+      mobileDeviceId: "mobile-device-1",
+      selectedDesktopId: "desktop-e2e",
+      selectedRepoId: null,
+      selectedTaskId: null,
+      activeView: "tasks",
+      trustedDesktops: [{
+        desktopId: "desktop-e2e",
+        displayName: "E2E Mac",
+        lanEndpoints: [],
+        lastSeenAt: "2026-08-24T00:00:00.000Z",
+        desktopPushIdentity: {
+          publicKey: "desktop-ed25519-public-key",
+          relayUrl: "wss://relay.example",
+          environment: "development"
+        }
+      }]
+    }));
+
+    const loaded = await persistence.load();
+    expect(loaded?.trustedDesktops?.[0]).not.toHaveProperty("desktopPushIdentity");
+    expect(loaded?.trustedDesktops?.[0]).not.toHaveProperty("pushPairingCert");
+  });
+
   it("preserves local repo creation profiles", async () => {
     const storage = createMemoryStorage();
     const persistence = createSessionPersistence(storage);

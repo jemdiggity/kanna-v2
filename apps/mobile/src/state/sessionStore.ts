@@ -2078,6 +2078,17 @@ function mergeTrustedDesktop(
   const lastSeenAt = [existing.lastSeenAt, incoming.lastSeenAt].sort()[1] ?? incoming.lastSeenAt;
 
   const deviceSecret = incoming.deviceSecret ?? existing.deviceSecret;
+  const pushMaterial = incoming.desktopPushIdentity && incoming.pushPairingCert
+    ? {
+        desktopPushIdentity: incoming.desktopPushIdentity,
+        pushPairingCert: incoming.pushPairingCert
+      }
+    : existing.desktopPushIdentity && existing.pushPairingCert
+      ? {
+          desktopPushIdentity: existing.desktopPushIdentity,
+          pushPairingCert: existing.pushPairingCert
+        }
+      : {};
   return {
     desktopId: existing.desktopId,
     displayName: incoming.displayName || existing.displayName,
@@ -2085,7 +2096,8 @@ function mergeTrustedDesktop(
       right.lastSeenAt.localeCompare(left.lastSeenAt)
     ),
     lastSeenAt,
-    ...(deviceSecret ? { deviceSecret } : {})
+    ...(deviceSecret ? { deviceSecret } : {}),
+    ...pushMaterial
   };
 }
 

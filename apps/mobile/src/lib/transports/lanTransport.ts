@@ -12,6 +12,7 @@ import type {
   DesktopDescriptor,
   DesktopSummary,
   MobileServerStatus,
+  PushPairingMaterial,
   RepoSummary,
   RepoCheckoutOperation,
   RepoDirectoryListing,
@@ -164,6 +165,10 @@ export function createLanTransport(
       kspStreamVersion = status.kspStreamVersion === 2 ? 2 : 1;
       return status;
     },
+    reissuePushPairingCertificate: () =>
+      request<PushPairingMaterial>("/v1/pairing/push-certificate", {
+        method: "POST"
+      }),
     async listDesktops() {
       const desktops = await request<DesktopDescriptor[]>("/v1/desktops");
       return desktops.map(mapDesktopSummary);

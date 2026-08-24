@@ -181,6 +181,7 @@ async function claimCandidate(input: {
   }
 
   const lastSeenAt = input.now().toISOString();
+  const pushMaterial = pairingPushMaterial(claim, input.deviceIdentity.deviceId);
   return {
     desktopId: claim.desktopId,
     displayName: claim.desktopName,
@@ -188,7 +189,37 @@ async function claimCandidate(input: {
     lastSeenAt,
     ...(typeof claim.deviceSecret === "string" && claim.deviceSecret
       ? { deviceSecret: claim.deviceSecret }
-      : {})
+      : {}),
+    ...pushMaterial
+  };
+}
+
+function pairingPushMaterial(
+  claim: PairingClaimResponse,
+  deviceId: string
+): Pick<TrustedDesktopRecord, "desktopPushIdentity" | "pushPairingCert"> {
+  const identity = claim.desktopPushIdentity;
+  const certificate = claim.pushPairingCert;
+  if (
+    !identity ||
+    !certificate ||
+    typeof identity.publicKey !== "string" ||
+    !identity.publicKey ||
+    typeof identity.relayUrl !== "string" ||
+    typeof identity.environment !== "string" ||
+    !identity.environment ||
+    certificate.deviceId !== deviceId ||
+    !Number.isSafeInteger(certificate.issuedAt) ||
+    !Number.isSafeInteger(certificate.expiresAt) ||
+    certificate.expiresAt <= certificate.issuedAt ||
+    typeof certificate.signature !== "string" ||
+    !certificate.signature
+  ) {
+    return {};
+  }
+  return {
+    desktopPushIdentity: identity,
+    pushPairingCert: certificate
   };
 }
 

@@ -16,6 +16,14 @@ fn pairing_create_request(peer: [u8; 4]) -> Request<Body> {
     request
 }
 
+fn pairing_reissue_request(device_id: &str, device_secret: &str) -> Request<Body> {
+    Request::post("/v1/pairing/push-certificate")
+        .header("x-kanna-device-id", device_id)
+        .header("x-kanna-device-secret", device_secret)
+        .body(Body::empty())
+        .unwrap()
+}
+
 fn direct_lan_request(method: axum::http::Method, path: &str) -> Request<Body> {
     let mut request = Request::builder()
         .method(method)
@@ -5075,6 +5083,194 @@ async fn pairing_claim_route_is_single_use() {
         .await
         .unwrap();
     assert_eq!(replay_response.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_legacy_pairing_certificate_reissues_preserve_every_device_marker() {
+    let state =
+        super::test_state_with_seed("desktop-concurrent-reissues", "Concurrent Mac", |_| {});
+    let store_path = PathBuf::from(&state.config().pairing_store_path);
+    let devices = [
+        ("legacy-phone-1", "legacy-secret-1"),
+        ("legacy-phone-2", "legacy-secret-2"),
+        ("legacy-phone-3", "legacy-secret-3"),
+        ("legacy-phone-4", "legacy-secret-4"),
+    ];
+    let mut store = crate::pairing::PairingStore::default();
+    for (device_id, secret) in devices {
+        store.add_trusted_device(
+            &state.config().desktop_id,
+            device_id,
+            "Legacy Kanna Mobile",
+            &crate::pairing::hash_device_secret(secret),
+        );
+    }
+    store.save(&store_path).unwrap();
+
+    let mutation_guard = Arc::clone(&state.pairing_persistence_mutation)
+        .lock_owned()
+        .await;
+    let app = super::router(Arc::clone(&state));
+    let mut reissues = Vec::new();
+    for (device_id, secret) in devices {
+        let app = app.clone();
+        reissues.push(tokio::spawn(async move {
+            app.oneshot(pairing_reissue_request(device_id, secret))
+                .await
+                .unwrap()
+        }));
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        reissues.iter().all(|request| !request.is_finished()),
+        "every reissue must wait at the shared pairing-store mutation boundary"
+    );
+    let authenticated_read = tokio::time::timeout(
+        Duration::from_secs(1),
+        app.clone().oneshot(
+            Request::get("/v1/status")
+                .header("x-kanna-device-id", "legacy-phone-1")
+                .header("x-kanna-device-secret", "legacy-secret-1")
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    )
+    .await
+    .expect("read-only authentication must not wait for pairing-store mutation")
+    .unwrap();
+    let authenticated_body = axum::body::to_bytes(authenticated_read.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let authenticated_status: MobileServerStatus = from_slice(&authenticated_body).unwrap();
+    assert_eq!(authenticated_status.state, "running");
+    drop(mutation_guard);
+
+    for reissue in reissues {
+        assert_eq!(reissue.await.unwrap().status(), StatusCode::OK);
+    }
+    let persisted = crate::pairing::PairingStore::load(&store_path).unwrap();
+    let persisted_devices = persisted
+        .trusted_devices
+        .get(&state.config().desktop_id)
+        .unwrap();
+    for (device_id, _) in devices {
+        assert!(
+            persisted_devices.iter().any(|device| {
+                device.device_id == device_id && device.push_identity_public_key.is_some()
+            }),
+            "reissued identity marker was not persisted for {device_id}"
+        );
+    }
+
+    let _ = std::fs::remove_file(&store_path);
+    let _ = std::fs::remove_file(format!(
+        "{}.anonymous-push-identity.json",
+        store_path.display()
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pairing_claim_racing_legacy_reissue_preserves_secret_and_both_markers() {
+    let state = super::test_state_with_seed("desktop-claim-reissue-race", "Race Mac", |_| {});
+    let store_path = PathBuf::from(&state.config().pairing_store_path);
+    let mut store = crate::pairing::PairingStore::default();
+    store.add_trusted_device(
+        &state.config().desktop_id,
+        "legacy-phone",
+        "Legacy Kanna Mobile",
+        &crate::pairing::hash_device_secret("legacy-secret"),
+    );
+    store.save(&store_path).unwrap();
+    let app = super::router(Arc::clone(&state));
+    let created = app
+        .clone()
+        .oneshot(pairing_create_request([127, 0, 0, 1]))
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+    let created_body = axum::body::to_bytes(created.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let session: crate::pairing::PairingSession = from_slice(&created_body).unwrap();
+
+    let mutation_guard = Arc::clone(&state.pairing_persistence_mutation)
+        .lock_owned()
+        .await;
+    let claim_app = app.clone();
+    let claim = tokio::spawn(async move {
+        claim_app
+            .oneshot(
+                Request::post("/v1/pairing/sessions/claim")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "code": session.code,
+                            "deviceId": "new-phone",
+                            "deviceName": "New Kanna Mobile"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    });
+    let reissue = tokio::spawn(async move {
+        app.oneshot(pairing_reissue_request("legacy-phone", "legacy-secret"))
+            .await
+            .unwrap()
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !claim.is_finished() && !reissue.is_finished(),
+        "claim and reissue must wait at the same pairing-store mutation boundary"
+    );
+    drop(mutation_guard);
+
+    let claim_response = claim.await.unwrap();
+    assert_eq!(claim_response.status(), StatusCode::OK);
+    let claim_body = axum::body::to_bytes(claim_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let claimed: serde_json::Value = from_slice(&claim_body).unwrap();
+    let claimed_secret = claimed["deviceSecret"].as_str().unwrap();
+    assert_eq!(reissue.await.unwrap().status(), StatusCode::OK);
+
+    let authenticated = super::router(Arc::clone(&state))
+        .oneshot(
+            Request::get("/v1/status")
+                .header("x-kanna-device-id", "new-phone")
+                .header("x-kanna-device-secret", claimed_secret)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let authenticated_body = axum::body::to_bytes(authenticated.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let status: MobileServerStatus = from_slice(&authenticated_body).unwrap();
+    assert_eq!(status.state, "running");
+
+    let persisted = crate::pairing::PairingStore::load(&store_path).unwrap();
+    let persisted_devices = persisted
+        .trusted_devices
+        .get(&state.config().desktop_id)
+        .unwrap();
+    for device_id in ["legacy-phone", "new-phone"] {
+        assert!(
+            persisted_devices.iter().any(|device| {
+                device.device_id == device_id && device.push_identity_public_key.is_some()
+            }),
+            "identity marker was not persisted for {device_id}"
+        );
+    }
+
+    let _ = std::fs::remove_file(&store_path);
+    let _ = std::fs::remove_file(format!(
+        "{}.anonymous-push-identity.json",
+        store_path.display()
+    ));
 }
 
 #[tokio::test]

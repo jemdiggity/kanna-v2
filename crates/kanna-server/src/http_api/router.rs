@@ -11,7 +11,9 @@ use super::ksp::{ksp_stream, legacy_ksp_stream};
 use super::lan_trust::{attach_trusted_lan_device, require_privileged_task_access};
 use super::mobile_notifications::notify_mobile;
 use super::operator_events::post_operator_events;
-use super::pairing::{claim_pairing_session, create_pairing_session};
+use super::pairing::{
+    claim_pairing_session, create_pairing_session, reissue_push_pairing_certificate,
+};
 use super::repo_browser::{list_task_directory, read_task_file_range};
 use super::repo_commands::{list_repo_commands, run_repo_command};
 use super::repos::{
@@ -352,7 +354,11 @@ pub fn router(state: Arc<AppState>) -> Router {
             axum::routing::delete(remove_cloud_transfer_proxy),
         )
         .route("/v1/pairing/sessions", post(create_pairing_session))
-        .route("/v1/pairing/sessions/claim", post(claim_pairing_session));
+        .route("/v1/pairing/sessions/claim", post(claim_pairing_session))
+        .route(
+            "/v1/pairing/push-certificate",
+            post(reissue_push_pairing_certificate),
+        );
 
     #[cfg(debug_assertions)]
     let router = router

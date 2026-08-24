@@ -111,6 +111,65 @@ describe("machine pairing", () => {
     });
   });
 
+  it("stores the anonymous desktop identity and pairing certificate", async () => {
+    const desktopPushIdentity = {
+      publicKey: "desktop-ed25519-public-key",
+      relayUrl: "wss://relay.example",
+      environment: "development"
+    };
+    const pushPairingCert = {
+      deviceId: "phone-1",
+      issuedAt: 1_784_246_400_000,
+      expiresAt: 1_847_318_400_000,
+      signature: "desktop-signature"
+    };
+    const fetchImpl = vi.fn<FetchLike>(async () => response(200, {
+      desktopId: "desktop-2",
+      desktopName: "Studio Mac",
+      desktopPushIdentity,
+      pushPairingCert
+    }));
+
+    await expect(
+      pairingService(fetchImpl).claimPayload(validPayload)
+    ).resolves.toMatchObject({ desktopPushIdentity, pushPairingCert });
+  });
+
+  it("tolerates an older claim response without anonymous push fields", async () => {
+    const fetchImpl = vi.fn<FetchLike>(async () => response(200, {
+      desktopId: "desktop-2",
+      desktopName: "Studio Mac",
+      deviceSecret: "issued-lan-secret"
+    }));
+
+    const record = await pairingService(fetchImpl).claimPayload(validPayload);
+    expect(record.deviceSecret).toBe("issued-lan-secret");
+    expect("desktopPushIdentity" in record).toBe(false);
+    expect("pushPairingCert" in record).toBe(false);
+  });
+
+  it("does not persist a certificate issued for another device", async () => {
+    const fetchImpl = vi.fn<FetchLike>(async () => response(200, {
+      desktopId: "desktop-2",
+      desktopName: "Studio Mac",
+      desktopPushIdentity: {
+        publicKey: "desktop-ed25519-public-key",
+        relayUrl: "wss://relay.example",
+        environment: "development"
+      },
+      pushPairingCert: {
+        deviceId: "another-phone",
+        issuedAt: 1_784_246_400_000,
+        expiresAt: 1_847_318_400_000,
+        signature: "desktop-signature"
+      }
+    }));
+
+    const record = await pairingService(fetchImpl).claimPayload(validPayload);
+    expect("desktopPushIdentity" in record).toBe(false);
+    expect("pushPairingCert" in record).toBe(false);
+  });
+
   it("pairs against desktops that predate device secrets without storing one", async () => {
     const fetchImpl = vi.fn<FetchLike>(async () => response(200, {
       desktopId: "desktop-2",

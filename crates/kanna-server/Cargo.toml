@@ -23,6 +23,7 @@ base64 = "0.22"
 dirs = "6"
 serde_yaml = "0.9"
 sha2 = "0.10"
+ed25519-dalek = "2"
 kanna-daemon = { path = "../daemon" }
 kanna-agent-protocol = { path = "../kanna-agent-protocol" }
 kanna-runtime-defaults = { path = "../runtime-defaults" }

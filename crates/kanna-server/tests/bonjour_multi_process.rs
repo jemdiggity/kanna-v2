@@ -1,5 +1,8 @@
 #![cfg(target_os = "macos")]
 
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use std::io::{BufRead, BufReader, Read};
 use std::net::TcpListener;
 use std::path::Path;
@@ -174,6 +177,51 @@ struct DnsSdObservation {
 enum BrowserLine {
     Stdout(String),
     Stderr(String),
+}
+
+fn assert_valid_push_pairing_material(material: &serde_json::Value, device_id: &str) {
+    const CERT_TTL_MS: u64 = 730 * 24 * 60 * 60 * 1_000;
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct CertificatePayload<'a> {
+        device_id: &'a str,
+        issued_at: u64,
+        expires_at: u64,
+    }
+    let identity = &material["desktopPushIdentity"];
+    let certificate = &material["pushPairingCert"];
+    assert_eq!(certificate["deviceId"], device_id);
+    let issued_at = certificate["issuedAt"].as_u64().expect("issuedAt");
+    let expires_at = certificate["expiresAt"].as_u64().expect("expiresAt");
+    assert_eq!(expires_at - issued_at, CERT_TTL_MS);
+    let public_key: [u8; 32] = URL_SAFE_NO_PAD
+        .decode(identity["publicKey"].as_str().expect("desktop public key"))
+        .expect("decode desktop public key")
+        .try_into()
+        .expect("32-byte desktop public key");
+    let signature = Signature::from_slice(
+        &URL_SAFE_NO_PAD
+            .decode(
+                certificate["signature"]
+                    .as_str()
+                    .expect("certificate signature"),
+            )
+            .expect("decode certificate signature"),
+    )
+    .expect("64-byte certificate signature");
+    let mut payload = b"kanna.push-pairing-cert.v1\0".to_vec();
+    payload.extend(
+        serde_json::to_vec(&CertificatePayload {
+            device_id,
+            issued_at,
+            expires_at,
+        })
+        .expect("serialize canonical certificate payload"),
+    );
+    VerifyingKey::from_bytes(&public_key)
+        .expect("valid Ed25519 public key")
+        .verify(&payload, &signature)
+        .expect("desktop-signed pairing certificate");
 }
 
 fn spawn_line_reader<R: Read + Send + 'static>(
@@ -414,6 +462,48 @@ async fn distinct_real_servers_publish_and_clean_up_through_macos_bonjour() {
         .await
         .expect("decode pairing claim");
     assert_eq!(claimed["desktopId"], qr_desktop_id.as_str());
+    assert_eq!(claimed["desktopPushIdentity"]["environment"], "staging");
+    assert_eq!(claimed["desktopPushIdentity"]["relayUrl"], "");
+    assert_valid_push_pairing_material(&claimed, "bonjour-e2e-phone");
+
+    let unauthenticated_reissue = client
+        .post(format!(
+            "http://127.0.0.1:{}/v1/pairing/push-certificate",
+            discovered_port
+        ))
+        .send()
+        .await
+        .expect("attempt unauthenticated pairing certificate re-issue");
+    assert_eq!(
+        unauthenticated_reissue.status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+
+    let reissued: serde_json::Value = client
+        .post(format!(
+            "http://127.0.0.1:{}/v1/pairing/push-certificate",
+            discovered_port
+        ))
+        .header("x-kanna-device-id", "bonjour-e2e-phone")
+        .header(
+            "x-kanna-device-secret",
+            claimed["deviceSecret"]
+                .as_str()
+                .expect("pairing device secret"),
+        )
+        .send()
+        .await
+        .expect("re-issue pairing certificate through discovered server")
+        .error_for_status()
+        .expect("pairing certificate re-issue response")
+        .json()
+        .await
+        .expect("decode re-issued pairing certificate");
+    assert_eq!(
+        reissued["desktopPushIdentity"]["publicKey"],
+        claimed["desktopPushIdentity"]["publicKey"]
+    );
+    assert_valid_push_pairing_material(&reissued, "bonjour-e2e-phone");
 
     let removed = servers.swap_remove(1);
     let removed_id = removed.desktop_id.clone();
