@@ -91,9 +91,9 @@ The bundle used a temporary direct task fixture, editability override, and title
 
 | Screenshot | Explicit newlines? | Viewport height | Inspection |
 |---|---:|---:|---|
-| [Zero-newline overflow before blur](685968d3-screenshots-round4/a-overflow-before-refocus.png) | No | 120 pt | The run-on sentence wraps past five visual lines, remains capped, and shows its final text and caret through internal scrolling. |
-| [Immediate refocus](685968d3-screenshots-round4/b-refocused-capped.png) | No | 120 pt | After a real blur collapsed the retained draft to 40 points, refocusing immediately restored the capped viewport with the keyboard, final text, and caret visible. |
-| [Delete below cap after refocus](685968d3-screenshots-round4/c-refocus-delete-shrunk.png) | No | 40 pt | Replacing the refocused overflow with `Short zero newline draft.` visibly shrank the viewport to baseline while focus and the software keyboard remained active. The focused callback-order regression independently asserts that scrolling changes from enabled to disabled at this under-cap measurement. |
+| [Zero-newline overflow before blur](../../.kanna/kd-state/visual-verification/685968d3-round4/a-overflow-before-refocus.png) | No | 120 pt | The run-on sentence wraps past five visual lines, remains capped, and shows its final text and caret through internal scrolling. |
+| [Immediate refocus](../../.kanna/kd-state/visual-verification/685968d3-round4/b-refocused-capped.png) | No | 120 pt | After a real blur collapsed the retained draft to 40 points, refocusing immediately restored the capped viewport with the keyboard, final text, and caret visible. |
+| [Delete below cap after refocus](../../.kanna/kd-state/visual-verification/685968d3-round4/c-refocus-delete-shrunk.png) | No | 40 pt | Replacing the refocused overflow with `Short zero newline draft.` visibly shrank the viewport to baseline while focus and the software keyboard remained active. The focused callback-order regression independently asserts that scrolling changes from enabled to disabled at this under-cap measurement. |
 
 All three screenshots were inspected at full size. The measured native sequence was 120 pt capped → 40 pt blurred → 120 pt refocused → 40 pt after deletion. Both the long and short drafts contained zero literal newline characters, so this evidence exercises native soft wrapping rather than the explicit-newline fallback.
 
