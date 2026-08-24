@@ -82,3 +82,35 @@ pnpm --dir apps/mobile test
 ./kd test all
 passed; Turbo 17/17 lanes, canonical Rust tests, and canonical local verification all passed. The previously reported tools/kd temporary-directory ENOTEMPTY did not recur; tools/kd/tests/cli.test.ts passed all 30 tests.
 ```
+
+## Revision round 3: refocus callback ordering
+
+The refocus-then-delete path was verified on 2026-08-24 from the production composer source committed at `4e553af844a165921b284603af5c5853904ba1ba`. The self-contained `Release` bundle was built with Xcode 26.6 for the iPhone 17 Pro simulator `C48044E2-D11B-4A50-993D-D571CA8462E7` on iOS 26.5. Its embedded `main.jsbundle` was built at `2026-08-24T13:29:55+0900` and was 5,915,455 bytes; the app ran with `DEV=false` and no Metro-loaded JavaScript.
+
+The bundle used a temporary direct task fixture, editability override, and title-button blur/keyboard-dismiss hook so XCUITest could establish a real blur/refocus boundary without a live task session. Those verification-only changes were reverted before the final checks and commit. They did not alter the composer measurement, focus expansion, deferred callback guard, scrolling, or viewport sizing code; the production composer source in the bundle is exact to `4e553af84`.
+
+| Screenshot | Explicit newlines? | Viewport height | Inspection |
+|---|---:|---:|---|
+| [Zero-newline overflow before blur](685968d3-screenshots-round4/a-overflow-before-refocus.png) | No | 120 pt | The run-on sentence wraps past five visual lines, remains capped, and shows its final text and caret through internal scrolling. |
+| [Immediate refocus](685968d3-screenshots-round4/b-refocused-capped.png) | No | 120 pt | After a real blur collapsed the retained draft to 40 points, refocusing immediately restored the capped viewport with the keyboard, final text, and caret visible. |
+| [Delete below cap after refocus](685968d3-screenshots-round4/c-refocus-delete-shrunk.png) | No | 40 pt | Replacing the refocused overflow with `Short zero newline draft.` visibly shrank the viewport to baseline while focus and the software keyboard remained active. The focused callback-order regression independently asserts that scrolling changes from enabled to disabled at this under-cap measurement. |
+
+All three screenshots were inspected at full size. The measured native sequence was 120 pt capped → 40 pt blurred → 120 pt refocused → 40 pt after deletion. Both the long and short drafts contained zero literal newline characters, so this evidence exercises native soft wrapping rather than the explicit-newline fallback.
+
+Final checks after reverting every verification-only source change:
+
+```text
+pnpm --dir apps/mobile test -- src/screens/taskComposerInput.test.ts src/screens/TaskScreen.test.tsx src/screens/TaskScreen.attachment.test.tsx src/screens/TaskScreen.composerIsolation.test.tsx src/screens/TaskScreen.agentComposerIsolation.test.tsx
+5 files passed; 107 tests passed
+
+pnpm --dir apps/mobile run typecheck
+passed
+
+pnpm --dir apps/mobile test
+131 files passed, 2 skipped; 1,741 tests passed, 2 skipped
+
+./kd test all
+passed; Turbo 17/17 lanes, desktop production build, canonical Rust tests, and canonical local verification all passed. The reviewer-observed `No space left on device` failure did not recur.
+```
+
+This revision remains JS-only. `apps/mobile/src/mobileEnvironments.json` is unchanged at runtime version `2.2.2` for every environment. The owner’s merge-before-device-test override remains unchanged in the task spec.
