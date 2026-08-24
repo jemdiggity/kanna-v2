@@ -1,16 +1,18 @@
 # Mobile composer Release verification
 
+> Screenshot artifacts are not tracked in git (repo convention); local copies live under `.kanna/kd-state/visual-verification/`. The rows below record what each capture showed.
+
 Verified on 2026-08-23 in the available iPhone 17 Pro simulator with a bundled `Release`-configuration build (`DEV=false`, no Metro-loaded JavaScript). The task-isolated stack came from `./kd dev up --mobile --seed`. The seeded PTY deliberately has no live daemon session, so the verification build used a temporary E2E-only editability override; that override was reverted before the final tests and commit and did not alter composer layout or sizing.
 
 The original controlled-height design made soft-wrap growth depend on `onContentSizeChange`, while its only independent fallback counted literal newlines. The owner's iPhone 15 Release test established that this controlled event path stayed at one line for a soft-wrapped paragraph. In the fixed Release build, native intrinsic layout reported 80 points for three soft-wrapped lines, 120 points at the five-line cap, and 40 points after delete and Send.
 
 | Screenshot | Explicit newlines? | Native input height | Inspection |
 |---|---:|---:|---|
-| [Soft wrap, 2–3 lines](685968d3-screenshots/a-soft-wrap-2-3-lines.png) | No | 80 pt | One run-on sentence renders as three visible lines and the composer is visibly taller than baseline. |
-| [Continued soft wrap past five lines](685968d3-screenshots/b-soft-wrap-over-5-lines.png) | No | 120 pt | Text was appended to the first run-on sentence. The field stays at the five-line ceiling while overflow remains inside it; attachment and Send controls stay bottom-aligned. |
-| [Mixed newlines and wrapping](685968d3-screenshots/c-mixed-newlines-and-wrap.png) | Yes — two | 120 pt | Explicit first/final lines plus a soft-wrapped middle paragraph share the same cap without moving the controls. |
-| [Delete back down](685968d3-screenshots/d-delete-back-down.png) | No | 40 pt | Replacing the mixed draft with `Short again.` returns the field to its one-line baseline. |
-| [Send reset](685968d3-screenshots/e-send-reset.png) | No — empty | 40 pt | Send clears the draft, restores `Reply…`, keeps the keyboard dismissed, and returns the composer to baseline. |
+| Soft wrap, 2–3 lines | No | 80 pt | One run-on sentence renders as three visible lines and the composer is visibly taller than baseline. |
+| Continued soft wrap past five lines | No | 120 pt | Text was appended to the first run-on sentence. The field stays at the five-line ceiling while overflow remains inside it; attachment and Send controls stay bottom-aligned. |
+| Mixed newlines and wrapping | Yes — two | 120 pt | Explicit first/final lines plus a soft-wrapped middle paragraph share the same cap without moving the controls. |
+| Delete back down | No | 40 pt | Replacing the mixed draft with `Short again.` returns the field to its one-line baseline. |
+| Send reset | No — empty | 40 pt | Send clears the draft, restores `Reply…`, keeps the keyboard dismissed, and returns the composer to baseline. |
 
 All five screenshots were inspected at full size. Keyboard avoidance keeps the composer above the software keyboard in the editing states, the attachment row remains above it, and no control drifts as the native input grows or caps.
 
@@ -20,15 +22,15 @@ After the owner found that the intrinsic `TextInput` did not scroll internally p
 
 | Screenshot | Explicit newlines? | Viewport height | Inspection |
 |---|---:|---:|---|
-| [Soft wrap, 2–3 lines](685968d3-screenshots-round2/a-soft-wrap-2-3-lines.png) | No | 80 pt | The run-on sentence occupies three visible lines and the viewport grows above baseline. |
-| [Soft wrap past five lines](685968d3-screenshots-round2/b-soft-wrap-over-5-lines-caret-end.png) | No | 120 pt | The viewport remains capped and follows the caret to the end of the overflowing paragraph. |
-| [Mixed newlines and wrapping](685968d3-screenshots-round2/c-mixed-newlines-and-wrap.png) | Yes — two | 120 pt | The final explicit line and caret remain visible after the soft-wrapped middle paragraph. |
-| [Delete back down](685968d3-screenshots-round2/d-delete-back-down.png) | No | 40 pt | Replacing the long draft with `Short again.` shrinks to baseline. |
-| [Eight lines, caret end](685968d3-screenshots-round2/f-eight-lines-caret-end.png) | Yes — seven | 120 pt | Lines C–H are visible and the caret is visible at the end of H while typing. |
-| [Eight lines, scrolled earlier](685968d3-screenshots-round2/g-eight-lines-scrolled-to-earlier-text.png) | Yes — seven | 120 pt | A downward swipe reveals lines A–F and the native scroll indicator, proving earlier text remains reachable. |
-| [Keyboard dismissed](685968d3-screenshots-round2/h-keyboard-dismissed-collapsed.png) | Yes — seven | 40 pt | The keyboard is gone, the draft is intact, and the viewport is reset toward its first line at baseline height. |
-| [Refocused](685968d3-screenshots-round2/i-refocus-regrown.png) | Yes — seven | 120 pt | Focusing the intact draft restores the capped editing viewport. |
-| [Send reset](685968d3-screenshots-round2/e-send-reset.png) | No — empty | 40 pt | Send clears the text and returns the collapsed composer to `Reply…`. |
+| Soft wrap, 2–3 lines | No | 80 pt | The run-on sentence occupies three visible lines and the viewport grows above baseline. |
+| Soft wrap past five lines | No | 120 pt | The viewport remains capped and follows the caret to the end of the overflowing paragraph. |
+| Mixed newlines and wrapping | Yes — two | 120 pt | The final explicit line and caret remain visible after the soft-wrapped middle paragraph. |
+| Delete back down | No | 40 pt | Replacing the long draft with `Short again.` shrinks to baseline. |
+| Eight lines, caret end | Yes — seven | 120 pt | Lines C–H are visible and the caret is visible at the end of H while typing. |
+| Eight lines, scrolled earlier | Yes — seven | 120 pt | A downward swipe reveals lines A–F and the native scroll indicator, proving earlier text remains reachable. |
+| Keyboard dismissed | Yes — seven | 40 pt | The keyboard is gone, the draft is intact, and the viewport is reset toward its first line at baseline height. |
+| Refocused | Yes — seven | 120 pt | Focusing the intact draft restores the capped editing viewport. |
+| Send reset | No — empty | 40 pt | Send clears the text and returns the collapsed composer to `Reply…`. |
 
 All nine revision screenshots were inspected at full size. The eight-line screenshots used on-screen key taps; the caret-follow and manual-scroll views are visibly different. The seeded fixture again required a temporary E2E-only editability override. WebDriverAgent cannot dismiss this multiline software keyboard directly, so the verification bundle also used a temporary title-button call to `Keyboard.dismiss()` to trigger the production `keyboardWillHide`/blur path. Both verification-only changes were removed before final tests and commit.
 
@@ -53,17 +55,17 @@ The complete matrix was repeated on 2026-08-24 after the refocus fix, from Git t
 
 | Screenshot | Explicit newlines? | Viewport height | Inspection |
 |---|---:|---:|---|
-| [Soft wrap, 2–3 lines](685968d3-screenshots-round3/a-soft-wrap-2-3-lines.png) | No | 80 pt | The single paragraph occupies three visible lines and is taller than baseline. |
-| [Soft-wrap overflow, caret end](685968d3-screenshots-round3/b-soft-wrap-over-5-lines-caret-end.png) | No | 120 pt | Appending at the end leaves the caret and final text visible while the viewport stays capped. |
-| [Soft-wrap overflow, earlier text](685968d3-screenshots-round3/b2-soft-wrap-scrolled-earlier.png) | No | 120 pt | A downward swipe exposes earlier paragraph text, distinct from the caret-end view. |
-| [Mixed wrapping and newlines](685968d3-screenshots-round3/c-mixed-newlines-and-wrap.png) | Yes — two | 120 pt | The wrapped middle text and final explicit line share the cap; the final line and caret remain visible. |
-| [Delete back down](685968d3-screenshots-round3/d-delete-back-down.png) | No | 40 pt | Replacing the long draft with `Short again.` returns the viewport to one line. |
-| [Send reset](685968d3-screenshots-round3/e-send-reset.png) | No — empty | 40 pt | Send clears the draft and restores the baseline `Reply…` state. |
-| [Eight lines, caret end](685968d3-screenshots-round3/f-eight-lines-caret-end.png) | Yes — seven | 120 pt | Lines C–H are visible and the caret is visible after `caret end`. |
-| [Eight lines, earlier text](685968d3-screenshots-round3/g-eight-lines-scrolled-earlier.png) | Yes — seven | 120 pt | A downward swipe exposes lines A–F, proving manual access to earlier text. |
-| [Keyboard dismissed](685968d3-screenshots-round3/h-keyboard-dismissed-collapsed.png) | Yes — seven | 40 pt | The keyboard is gone, the eight-line draft remains, and the viewport collapses to baseline with earlier text still visible. |
-| [Immediate refocus](685968d3-screenshots-round3/i-refocus-regrown-caret-end.png) | Yes — seven | 120 pt | One tap immediately restores the capped height; the insertion caret and final line are visible for continued typing. |
-| [Refocus, earlier text](685968d3-screenshots-round3/j-refocus-scrolled-earlier.png) | Yes — seven | 120 pt | A downward swipe after refocus exposes lines A–F, proving restored scrolling remains usable. |
+| Soft wrap, 2–3 lines | No | 80 pt | The single paragraph occupies three visible lines and is taller than baseline. |
+| Soft-wrap overflow, caret end | No | 120 pt | Appending at the end leaves the caret and final text visible while the viewport stays capped. |
+| Soft-wrap overflow, earlier text | No | 120 pt | A downward swipe exposes earlier paragraph text, distinct from the caret-end view. |
+| Mixed wrapping and newlines | Yes — two | 120 pt | The wrapped middle text and final explicit line share the cap; the final line and caret remain visible. |
+| Delete back down | No | 40 pt | Replacing the long draft with `Short again.` returns the viewport to one line. |
+| Send reset | No — empty | 40 pt | Send clears the draft and restores the baseline `Reply…` state. |
+| Eight lines, caret end | Yes — seven | 120 pt | Lines C–H are visible and the caret is visible after `caret end`. |
+| Eight lines, earlier text | Yes — seven | 120 pt | A downward swipe exposes lines A–F, proving manual access to earlier text. |
+| Keyboard dismissed | Yes — seven | 40 pt | The keyboard is gone, the eight-line draft remains, and the viewport collapses to baseline with earlier text still visible. |
+| Immediate refocus | Yes — seven | 120 pt | One tap immediately restores the capped height; the insertion caret and final line are visible for continued typing. |
+| Refocus, earlier text | Yes — seven | 120 pt | A downward swipe after refocus exposes lines A–F, proving restored scrolling remains usable. |
 
 All eleven fresh screenshots were inspected at full size. The 80 → 120 → 40 → 120 point sequence directly covers soft-wrap growth, cap, delete/send shrink, keyboard-dismiss collapse, and immediate refocus regrowth against the final refocus implementation. The caret-end and earlier-text pairs are visibly different for both the zero-newline overflow and the eight-line/refocus states.
 
