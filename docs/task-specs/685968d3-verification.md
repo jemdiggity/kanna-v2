@@ -46,3 +46,39 @@ pnpm --dir apps/mobile test
 ```
 
 This is a JS-only change. All three values in `apps/mobile/src/mobileEnvironments.json` remain at runtime version `2.2.2`.
+
+## Final revision verification
+
+The complete matrix was repeated on 2026-08-24 after the refocus fix, from Git tip `a3354f0d8ef114326f22198b903d1cd862fdb501`. The embedded bundle was built at `2026-08-24T12:26:04+0900` (5,925,840 bytes) with Xcode's `Release` configuration and run without Metro-loaded JavaScript on an iPhone 17 Pro simulator (iOS 26.5). The measured native viewport width was 242 points. The task fixture, editability override, dev-flavor E2E URL handling/direct route, and title-button keyboard dismissal were verification-only changes; all were reverted before tests and commit. None changed composer sizing, focus, selection, or scrolling code.
+
+| Screenshot | Explicit newlines? | Viewport height | Inspection |
+|---|---:|---:|---|
+| [Soft wrap, 2–3 lines](685968d3-screenshots-round3/a-soft-wrap-2-3-lines.png) | No | 80 pt | The single paragraph occupies three visible lines and is taller than baseline. |
+| [Soft-wrap overflow, caret end](685968d3-screenshots-round3/b-soft-wrap-over-5-lines-caret-end.png) | No | 120 pt | Appending at the end leaves the caret and final text visible while the viewport stays capped. |
+| [Soft-wrap overflow, earlier text](685968d3-screenshots-round3/b2-soft-wrap-scrolled-earlier.png) | No | 120 pt | A downward swipe exposes earlier paragraph text, distinct from the caret-end view. |
+| [Mixed wrapping and newlines](685968d3-screenshots-round3/c-mixed-newlines-and-wrap.png) | Yes — two | 120 pt | The wrapped middle text and final explicit line share the cap; the final line and caret remain visible. |
+| [Delete back down](685968d3-screenshots-round3/d-delete-back-down.png) | No | 40 pt | Replacing the long draft with `Short again.` returns the viewport to one line. |
+| [Send reset](685968d3-screenshots-round3/e-send-reset.png) | No — empty | 40 pt | Send clears the draft and restores the baseline `Reply…` state. |
+| [Eight lines, caret end](685968d3-screenshots-round3/f-eight-lines-caret-end.png) | Yes — seven | 120 pt | Lines C–H are visible and the caret is visible after `caret end`. |
+| [Eight lines, earlier text](685968d3-screenshots-round3/g-eight-lines-scrolled-earlier.png) | Yes — seven | 120 pt | A downward swipe exposes lines A–F, proving manual access to earlier text. |
+| [Keyboard dismissed](685968d3-screenshots-round3/h-keyboard-dismissed-collapsed.png) | Yes — seven | 40 pt | The keyboard is gone, the eight-line draft remains, and the viewport collapses to baseline with earlier text still visible. |
+| [Immediate refocus](685968d3-screenshots-round3/i-refocus-regrown-caret-end.png) | Yes — seven | 120 pt | One tap immediately restores the capped height; the insertion caret and final line are visible for continued typing. |
+| [Refocus, earlier text](685968d3-screenshots-round3/j-refocus-scrolled-earlier.png) | Yes — seven | 120 pt | A downward swipe after refocus exposes lines A–F, proving restored scrolling remains usable. |
+
+All eleven fresh screenshots were inspected at full size. The 80 → 120 → 40 → 120 point sequence directly covers soft-wrap growth, cap, delete/send shrink, keyboard-dismiss collapse, and immediate refocus regrowth against the final refocus implementation. The caret-end and earlier-text pairs are visibly different for both the zero-newline overflow and the eight-line/refocus states.
+
+Final checks after reverting every verification-only source change:
+
+```text
+pnpm --dir apps/mobile test -- src/screens/taskComposerInput.test.ts src/screens/TaskScreen.test.tsx src/screens/TaskScreen.attachment.test.tsx src/screens/TaskScreen.composerIsolation.test.tsx src/screens/TaskScreen.agentComposerIsolation.test.tsx
+5 files passed; 107 tests passed
+
+pnpm --dir apps/mobile run typecheck
+passed
+
+pnpm --dir apps/mobile test
+131 files passed, 2 skipped; 1,741 tests passed, 2 skipped
+
+./kd test all
+passed; Turbo 17/17 lanes, canonical Rust tests, and canonical local verification all passed. The previously reported tools/kd temporary-directory ENOTEMPTY did not recur; tools/kd/tests/cli.test.ts passed all 30 tests.
+```
