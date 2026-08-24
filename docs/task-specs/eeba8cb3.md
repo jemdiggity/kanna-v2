@@ -23,4 +23,20 @@ The protocol cannot overlap, gap, reorder, or begin replay at an unsafe byte bou
 - The server ring accepts resume positions only at recorded `term_output` frame boundaries. Hostile offsets inside ESC, UTF-8, or synchronized-update bytes fall back to the bounded snapshot plus complete-frame replay.
 - A within-grace foreground return no longer assumes native-to-WKWebView injection was consumed while iOS was backgrounded. Mobile performs one authoritative local xterm rehydrate from the retained contiguous buffer.
 - If the mobile live-output cap compacted that buffer and left a snapshot-to-tail gap, foreground reconciliation drops the attachment/resume cursor and obtains a fresh bounded snapshot instead.
-- The KSP fidelity test drives three reconnects at hostile offsets and compares the entire final visible screen from a reconstructed client emulator with the uninterrupted reference emulator.
+- The KSP test owns the server boundary invariant that a cursor inside an output frame falls back and replays the complete frame without overlap or gap; the cross-boundary mobile fidelity assertion lives in the LAN E2E below.
+
+## Revision 1 verification contract (reviewer, 2026-08-24)
+
+- Replace the isolated raw-WebSocket/emulator proof with coverage that drives the shipped `StreamClient` through `createLanTransport`, `createKannaClient`, `createMobileController`, and `createSessionStore` against the real daemon/server harness.
+- Perform sequential transport disconnects after frames ending inside `ESC [`, a split UTF-8 `漢`, and `ESC [?2026`; prove each reconnect is resumed replay (no output-epoch replacement), then hold a reconnect through more than the 512 KiB ring and prove bounded-snapshot fallback replaces the epoch.
+- Render both the mobile store's final retained bytes and an uninterrupted reference subscription through the real bundled mobile xterm fidelity harness, comparing every visible cell including text, width, colors, and flags.
+- Visually exercise the real iOS app with a long-running terminal and a foreground return after output received during a genuine 20-second background interval, inspecting the sticky-header boundary.
+
+## Delivered verification
+
+- Focused LAN E2E: `tests/remote-e2e/src/lan-layer.e2e.test.ts` now performs all three hostile sequential reconnects, resumed replay, stale-ring snapshot fallback, and complete visible-grid equality through the real mobile client/store and bundled xterm.
+- Lower-level KSP coverage is deliberately limited to its server-owned invariant: an arbitrary cursor inside one output frame falls back without slicing that frame. Cross-boundary fidelity is owned by the LAN E2E above.
+- Visual build/state: iPhone 17 Pro simulator (`C48044E2-D11B-4A50-993D-D571CA8462E7`), iOS 26.5, installed `build.kanna.app.dev`, current Metro bundle from this worktree, worktree desktop/server build identity `d26fc4027`, LAN port `48150`. The stack was launched with `./kd dev up --mobile`; this revision's `kd mobile run` command supports physical `--device` only, so the already-installed simulator dev build was launched against the kd-managed Metro and driven with XCUITest/Appium.
+- [Long-running baseline](eeba8cb3-screenshots/before-long-terminal.png): real 12,000-line terminal before the background-return exercise, with the sticky task header visible for boundary inspection.
+- [Fixed background return](eeba8cb3-screenshots/after-true-background-return.png): the same terminal after a real 20-second iOS background interval while another 1,800 lines arrived; `TRUE_BACKGROUND_READY` is intact, the grid has no fused/duplicated/foreign-character fragments, and the sticky header remains legible and correctly layered.
+- No animation was exercised, so no Reduce Motion variant was required. No mobile runtime version was changed.

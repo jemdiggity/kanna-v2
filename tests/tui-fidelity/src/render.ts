@@ -361,8 +361,12 @@ export async function verifyMobileAltScreenScrollInput(browser: Browser): Promis
   let page: Page | null = null;
   try {
     page = await context.newPage();
-    await page.setContent(await buildInstrumentedMobileDocument(), { waitUntil: "load" });
-    await page.waitForFunction(() => typeof window.__replaceTerminalState === "function");
+    await page.setContent(await buildInstrumentedMobileDocument(), {
+      waitUntil: "load"
+    });
+    await page.waitForFunction(
+      () => typeof window.__replaceTerminalState === "function"
+    );
     await page.evaluate((dims) => window.__setTerminalDims(dims), {
       cols: MOBILE_SCROLL_COLS,
       rows: MOBILE_SCROLL_ROWS
@@ -931,6 +935,43 @@ export async function renderSessionStorePathGrid(
   } finally {
     await page.screenshot({
       path: path.join(ARTIFACT_DIR, `${path.basename(emitted.fixture, ".ansi")}.path.png`),
+      fullPage: true
+    });
+    await page.close();
+  }
+}
+
+/** Render the exact retained output owned by the real mobile session store.
+ * Remote E2E uses this after transport reconnects so the assertion runs
+ * through the same bundled xterm document and byte-oriented write hooks as
+ * the shipped WebView. */
+export async function renderRetainedMobileGrid(
+  browser: Browser,
+  name: string,
+  output: HarnessTerminalOutput,
+  cols: number,
+  rows: number
+): Promise<GridSnapshot> {
+  const page = await browser.newPage({ viewport: VIEWPORT });
+  try {
+    await page.setContent(await buildInstrumentedMobileDocument(), { waitUntil: "load" });
+    await installSerializeAddon(page);
+    await page.waitForFunction(() => typeof window.__replaceTerminalState === "function");
+    await setTerminalDims(page, {
+      type: "term_snapshot",
+      task_id: "retained-mobile",
+      cols,
+      rows,
+      data_b64: ""
+    });
+    await callHook(page, "__replaceTerminalState", {
+      chunksB64: terminalChunksFromOutput(output)
+    });
+    await waitForWrites(page);
+    return await extractGrid(page);
+  } finally {
+    await page.screenshot({
+      path: path.join(ARTIFACT_DIR, `${name}.retained-mobile.png`),
       fullPage: true
     });
     await page.close();
