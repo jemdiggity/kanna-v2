@@ -1298,6 +1298,7 @@ async fn handle_mcp_tool_call(
     name: &str,
     mut args: Value,
 ) -> Result<Value, String> {
+    validate_task_listing_scope(name, &args)?;
     if name == "kanna_complete_stage" && args.get("machine_id").is_some() {
         return Err(
             "kanna_complete_stage cannot target another machine; an agent can only complete its own local stage"
@@ -1392,6 +1393,25 @@ async fn bind_request_to_spawned_run(
         "completionAttemptKey".to_string(),
         Value::String(attempt_key.clone()),
     );
+    Ok(())
+}
+
+fn validate_task_listing_scope(name: &str, args: &Value) -> Result<(), String> {
+    if !matches!(name, "kanna_list_recent_tasks" | "kanna_search_tasks") {
+        return Ok(());
+    }
+    let has_repo_id = args.get("repo_id").is_some() || args.get("repoId").is_some();
+    let all_machines = args
+        .get("all_machines")
+        .or_else(|| args.get("allMachines"))
+        .and_then(Value::as_bool)
+        == Some(true);
+    if has_repo_id && all_machines {
+        return Err(
+            "repo_id and all_machines cannot be used together; repository IDs are machine-local, so omit repo_id for an account-wide all_machines listing"
+                .to_string(),
+        );
+    }
     Ok(())
 }
 
@@ -2113,6 +2133,45 @@ mod tests {
             &json!({ "all_machines": true })
         ));
         assert!(!listing_requests_cross_repo_scope(&json!({})));
+    }
+
+    #[test]
+    fn task_listing_scope_rejects_repo_id_with_all_machines_before_request_resolution() {
+        for tool in ["kanna_list_recent_tasks", "kanna_search_tasks"] {
+            for args in [
+                json!({ "repo_id": "repo-local", "all_machines": true }),
+                json!({ "repoId": "repo-local", "allMachines": true }),
+            ] {
+                let error = validate_task_listing_scope(tool, &args)
+                    .expect_err("machine-local repo id must not be aggregated across machines");
+                assert!(error.contains("repo_id and all_machines"), "{error}");
+                assert!(
+                    error.contains("repository IDs are machine-local"),
+                    "{error}"
+                );
+            }
+        }
+
+        let catalog = kanna_tool_catalog::bundled_catalog();
+        let recent_args = json!({ "all_machines": true });
+        validate_task_listing_scope("kanna_list_recent_tasks", &recent_args)
+            .expect("account-wide recent listing remains valid");
+        assert_eq!(
+            resolve_request(&catalog, "kanna_list_recent_tasks", &recent_args)
+                .expect("resolve account-wide recent listing")
+                .path,
+            "/v1/tasks/recent?allMachines=true"
+        );
+
+        let search_args = json!({ "query": "review", "repo_id": "repo-local" });
+        validate_task_listing_scope("kanna_search_tasks", &search_args)
+            .expect("single-machine repository search remains valid");
+        assert_eq!(
+            resolve_request(&catalog, "kanna_search_tasks", &search_args)
+                .expect("resolve repository search")
+                .path,
+            "/v1/tasks/search?query=review&repoId=repo-local"
+        );
     }
 
     #[test]

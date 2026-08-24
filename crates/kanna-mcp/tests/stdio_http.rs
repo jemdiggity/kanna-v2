@@ -1810,6 +1810,68 @@ fn serve_reports_tool_argument_errors_as_tool_error_results() {
     );
 }
 
+#[test]
+fn listing_tools_reject_repo_id_with_all_machines_without_issuing_http_requests() {
+    let (base_url_tx, base_url_rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture server");
+        base_url_tx
+            .send(format!(
+                "http://{}",
+                listener.local_addr().expect("local addr")
+            ))
+            .expect("send base url");
+        listener
+            .set_nonblocking(true)
+            .expect("set nonblocking listener");
+        thread::sleep(Duration::from_millis(200));
+        assert!(
+            listener.accept().is_err(),
+            "invalid listing scopes should be rejected before HTTP routing"
+        );
+    });
+    let base_url = base_url_rx.recv().expect("base url");
+
+    let responses = run_kanna_mcp(
+        &base_url,
+        &[
+            json!({
+                "jsonrpc": "2.0",
+                "id": 41,
+                "method": "tools/call",
+                "params": {
+                    "name": "kanna_list_recent_tasks",
+                    "arguments": { "repo_id": "repo-local", "all_machines": true }
+                }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 42,
+                "method": "tools/call",
+                "params": {
+                    "name": "kanna_search_tasks",
+                    "arguments": {
+                        "query": "review",
+                        "repo_id": "repo-local",
+                        "all_machines": true
+                    }
+                }
+            }),
+        ],
+    );
+
+    server.join().expect("fixture server");
+    assert_eq!(responses.len(), 2);
+    for response in responses {
+        let message = tool_error_text(&response);
+        assert!(message.contains("repo_id and all_machines"), "{message}");
+        assert!(
+            message.contains("repository IDs are machine-local"),
+            "{message}"
+        );
+    }
+}
+
 /// A task summary as the three list routes return it. `activity` is written
 /// from the daemon's per-frame verdict, so a listing can carry the same
 /// mid-redraw misread a detail read can.

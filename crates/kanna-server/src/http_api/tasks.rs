@@ -29,7 +29,11 @@ pub(super) async fn list_recent_tasks(
         state.publish_state_changed(StateChangeScope::Tasks);
     }
     let api = MobileApi::new(state.config.clone(), db);
-    let repo_id = task_listing_repo_filter(query.repo_id.as_deref(), query.all_repos)?;
+    let repo_id = task_listing_repo_filter(
+        query.repo_id.as_deref(),
+        query.all_repos,
+        query.all_machines,
+    )?;
     let limit = query
         .limit
         .unwrap_or(DEFAULT_RECENT_TASK_LIMIT)
@@ -393,7 +397,11 @@ pub(super) async fn search_tasks(
         state.publish_state_changed(StateChangeScope::Tasks);
     }
     let api = MobileApi::new(state.config.clone(), db);
-    let repo_id = task_listing_repo_filter(query.repo_id.as_deref(), query.all_repos)?;
+    let repo_id = task_listing_repo_filter(
+        query.repo_id.as_deref(),
+        query.all_repos,
+        query.all_machines,
+    )?;
     let tasks = api
         .search_tasks_including_closed(&query.query, query.include_closed, repo_id)
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -420,7 +428,15 @@ pub(super) async fn search_tasks(
 fn task_listing_repo_filter(
     repo_id: Option<&str>,
     all_repos: bool,
+    all_machines: bool,
 ) -> Result<Option<&str>, (axum::http::StatusCode, String)> {
+    if all_machines && repo_id.is_some() {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "repoId and allMachines cannot be used together; repository IDs are machine-local"
+                .to_string(),
+        ));
+    }
     if all_repos && repo_id.is_some() {
         return Err((
             axum::http::StatusCode::BAD_REQUEST,

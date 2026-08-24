@@ -3236,6 +3236,35 @@ async fn list_recent_tasks_route_filters_by_repo_and_applies_the_requested_limit
 }
 
 #[tokio::test]
+async fn task_listing_routes_reject_repo_id_with_all_machines() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+    });
+
+    for path in [
+        "/v1/tasks/recent?repoId=repo-1&allMachines=true",
+        "/v1/tasks/search?query=review&repoId=repo-1&allMachines=true",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let message = String::from_utf8(body.to_vec()).unwrap();
+        assert!(message.contains("repoId and allMachines"), "{message}");
+        assert!(
+            message.contains("repository IDs are machine-local"),
+            "{message}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn get_task_route_returns_full_task_detail_by_id() {
     let full_prompt = format!("{}PROMPT_END_SENTINEL", "p".repeat(520));
     let seed_prompt = full_prompt.clone();
