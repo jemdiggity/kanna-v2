@@ -193,16 +193,16 @@ function runMcpExchange(
     let initialize: Record<string, unknown> | undefined;
     let toolsList: Record<string, unknown> | undefined;
     let settled = false;
+    let shutdownError: Error | undefined;
 
-    const fail = (error: Error) => {
+    const rejectAfterExit = (error: Error) => {
       if (settled) return;
-      settled = true;
+      shutdownError = error;
       clearTimeout(timer);
       child.kill("SIGKILL");
-      reject(error);
     };
     const timer = setTimeout(() => {
-      fail(
+      rejectAfterExit(
         new Error(
           `kd-mcp exchange timed out\nstdout:\n${stdoutBuffer}\nstderr:\n${stderr}`
         )
@@ -211,7 +211,12 @@ function runMcpExchange(
       // a box running several suites is simply slow. Keep it finite, not tight.
     }, 120_000);
 
-    child.once("error", fail);
+    child.once("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(error);
+    });
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string) => {
       stderr += chunk;
@@ -229,7 +234,7 @@ function runMcpExchange(
         try {
           message = JSON.parse(line) as Record<string, unknown>;
         } catch {
-          fail(new Error(`kd-mcp emitted non-JSON stdout: ${line}`));
+          rejectAfterExit(new Error(`kd-mcp emitted non-JSON stdout: ${line}`));
           return;
         }
 
@@ -252,18 +257,35 @@ function runMcpExchange(
           );
         } else if (message.id === 2) {
           toolsList = message;
+          // EOF owns the stdio server lifecycle. Wait for it to observe the
+          // closed transport and exit instead of racing teardown with a
+          // signal-interrupted shutdown.
           child.stdin.end();
-          child.kill("SIGTERM");
         }
       }
     });
-    child.once("close", () => {
+    child.once("close", (exitCode, signal) => {
       if (settled) return;
       clearTimeout(timer);
+      if (shutdownError) {
+        settled = true;
+        reject(shutdownError);
+        return;
+      }
       if (!initialize || !toolsList) {
-        fail(
+        settled = true;
+        reject(
           new Error(
             `kd-mcp exited before completing the exchange\nstdout:\n${stdoutBuffer}\nstderr:\n${stderr}`
+          )
+        );
+        return;
+      }
+      if (exitCode !== 0 || signal !== null) {
+        settled = true;
+        reject(
+          new Error(
+            `kd-mcp did not shut down cleanly (exit ${String(exitCode)}, signal ${String(signal)})\nstdout:\n${stdoutBuffer}\nstderr:\n${stderr}`
           )
         );
         return;
