@@ -1748,6 +1748,89 @@ describe("Relay integration", () => {
     await testFirestore.recursiveDelete(pairings);
   });
 
+  it("refuses a stale watermark registration before enforcing the desktop binding cap", async () => {
+    const pairings = testFirestore.collection("anonymousPushPairings");
+    await testFirestore.recursiveDelete(pairings);
+    const identity = createAnonymousPushIdentity();
+    const staleCert = createAnonymousPushCertificate(
+      identity,
+      "desktop-cap-watermark",
+      Date.now() - 2_000,
+    );
+    const currentCert = createAnonymousPushCertificate(
+      identity,
+      staleCert.deviceId,
+      staleCert.issuedAt + 1_000,
+    );
+    const registerWatermark = await fetch(relayHttpUrl("/push/pairings"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(anonymousPairingBody(
+        identity,
+        currentCert,
+        "desktop-cap-watermark-token",
+      )),
+    });
+    expect(registerWatermark.status).toBe(200);
+    const revokeWatermark = await fetch(relayHttpUrl("/push/pairings"), {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        desktopPubKey: identity.publicKey,
+        deviceId: currentCert.deviceId,
+        cert: currentCert,
+      }),
+    });
+    expect(revokeWatermark.status).toBe(200);
+    for (let index = 0; index < 10; index += 1) {
+      const cert = createAnonymousPushCertificate(identity, `desktop-cap-active-${index}`);
+      await registerAnonymousPushPairing(
+        anonymousPairingBody(identity, cert, `desktop-cap-active-token-${index}`),
+        Date.now(),
+        testFirestore,
+      );
+    }
+    const before = (await pairings
+      .where("desktopKeyHash", "==", anonymousDesktopId(identity.publicKey))
+      .get()).docs.map((doc) => ({ id: doc.id, data: doc.data() }))
+      .sort((left, right) => left.id.localeCompare(right.id));
+    expect(before).toHaveLength(11);
+    expect(before.filter((binding) => binding.data.fcmToken === null)).toHaveLength(1);
+    expect(before.filter((binding) => typeof binding.data.fcmToken === "string")).toHaveLength(10);
+
+    const rateIdentity = createAnonymousPushIdentity();
+    const rateCert = createAnonymousPushCertificate(rateIdentity, "ordering-before-rate-limit");
+    for (let index = 0; index < 30; index += 1) {
+      const admitted = await fetch(relayHttpUrl("/push/pairings"), {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-forwarded-for": "198.51.100.28",
+        },
+        body: JSON.stringify(anonymousPairingBody(rateIdentity, rateCert, "ordering-rate-token")),
+      });
+      expect(admitted.status).toBe(200);
+    }
+
+    const response = await fetch(relayHttpUrl("/push/pairings"), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-forwarded-for": "198.51.100.28",
+      },
+      body: JSON.stringify(anonymousPairingBody(identity, staleCert, "stale-watermark-token")),
+    });
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({ code: "stale_certificate" });
+    const after = (await pairings
+      .where("desktopKeyHash", "==", anonymousDesktopId(identity.publicKey))
+      .get()).docs.map((doc) => ({ id: doc.id, data: doc.data() }))
+      .sort((left, right) => left.id.localeCompare(right.id));
+    expect(after).toEqual(before);
+    await testFirestore.recursiveDelete(pairings);
+  });
+
   it("collects only stale undelivered anonymous bindings", async () => {
     const pairings = testFirestore.collection("anonymousPushPairings");
     await testFirestore.recursiveDelete(pairings);

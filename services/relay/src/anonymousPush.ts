@@ -2,8 +2,10 @@ import { createHash, createPublicKey, verify } from "node:crypto";
 import type {
   DocumentData,
   DocumentReference,
+  DocumentSnapshot,
   Firestore,
   QueryDocumentSnapshot,
+  Transaction,
 } from "firebase-admin/firestore";
 import { getFirebaseServices } from "./firebase.js";
 import {
@@ -69,6 +71,15 @@ interface WindowCounter {
   day: number[];
 }
 
+interface OrderedPairingMutationContext {
+  transaction: Transaction;
+  current: DocumentSnapshot;
+  currentBinding: DocumentData | undefined;
+  certificate: CertificateOrdering | null;
+}
+
+type PairingMutationAdmission = () => void;
+
 const desktopPublishCounters = new Map<string, WindowCounter>();
 const tokenPublishCounters = new Map<string, WindowCounter>();
 const registrationCounters = new Map<string, number[]>();
@@ -130,6 +141,23 @@ export function consumePairingRequestLimit(
   retained.push(nowMs);
   registrationCounters.set(counterKey, retained);
   return true;
+}
+
+export function createPairingRequestAdmission(
+  address: string,
+  method: "POST" | "DELETE",
+  nowMs = Date.now(),
+): PairingMutationAdmission {
+  const admitted = consumePairingRequestLimit(address, method, nowMs);
+  return () => {
+    if (!admitted) {
+      throw new AnonymousPushRefusal(
+        429,
+        "pairing_rate_limit",
+        "Anonymous push pairing rate limit exceeded",
+      );
+    }
+  };
 }
 
 export function verifyAnonymousSignature(
@@ -208,6 +236,7 @@ export async function registerAnonymousPushPairing(
   request: AnonymousPushPairingRequest,
   nowMs = Date.now(),
   db = getFirebaseServices().db,
+  admit: PairingMutationAdmission = () => undefined,
 ): Promise<void> {
   await garbageCollectAnonymousPushPairings(db, nowMs);
   const desktopKeyHash = anonymousDesktopId(request.desktopPubKey);
@@ -215,9 +244,11 @@ export async function registerAnonymousPushPairing(
   const tokenHash = sha256(request.fcmToken);
   const ref = db.collection(ANONYMOUS_PUSH_PAIRINGS_COLLECTION)
     .doc(`${desktopKeyHash}.${deviceIdHash}`);
-  await db.runTransaction(async (transaction) => {
-    const [existing, desktopBindings, tokenBindings] = await Promise.all([
-      transaction.get(ref),
+  await mutateOrderedAnonymousPushPairing(ref, request.cert, db, admit, async ({
+    transaction,
+    currentBinding,
+  }) => {
+    const [desktopBindings, tokenBindings] = await Promise.all([
       transaction.get(db.collection(ANONYMOUS_PUSH_PAIRINGS_COLLECTION)
         .where("desktopKeyHash", "==", desktopKeyHash)),
       transaction.get(db.collection(ANONYMOUS_PUSH_PAIRINGS_COLLECTION)
@@ -227,13 +258,11 @@ export async function registerAnonymousPushPairing(
     const activeDesktopBindingCount = desktopBindings.docs.filter((binding) =>
       typeof binding.data().fcmToken === "string" && binding.data().fcmToken.length > 0
     ).length;
-    const currentBinding = existing.data();
     const existingIsActive = typeof currentBinding?.fcmToken === "string"
       && currentBinding.fcmToken.length > 0;
     if (!existingIsActive && activeDesktopBindingCount >= MAX_DEVICES_PER_DESKTOP) {
       throw new AnonymousPushRefusal(409, "desktop_binding_cap", "Desktop push pairing limit reached");
     }
-    assertCurrentOrNewerCertificate(request.cert, currentBinding);
     const sameTokenBinding = currentBinding?.tokenHash === tokenHash;
     if (!sameTokenBinding && tokenBindings.size >= MAX_DESKTOPS_PER_TOKEN) {
       throw new AnonymousPushRefusal(409, "token_binding_cap", "Push token pairing limit reached");
@@ -259,10 +288,11 @@ export async function registerAnonymousPushPairing(
 export async function revokeAnonymousPushPairing(
   request: AnonymousPushPairingRevocation,
   db = getFirebaseServices().db,
+  admit: PairingMutationAdmission = () => undefined,
 ): Promise<void> {
   const ref = db.collection(ANONYMOUS_PUSH_PAIRINGS_COLLECTION)
     .doc(`${anonymousDesktopId(request.desktopPubKey)}.${sha256(request.deviceId)}`);
-  await retireAnonymousPushPairing(ref, request.cert, Date.now(), db);
+  await retireAnonymousPushPairing(ref, request.cert, Date.now(), db, undefined, admit);
 }
 
 export async function revokeAnonymousPushDevice(
@@ -406,14 +436,17 @@ async function retireAnonymousPushPairing(
   nowMs: number,
   db: Firestore,
   staleBeforeMs?: number,
+  admit: PairingMutationAdmission = () => undefined,
 ): Promise<boolean> {
-  return db.runTransaction(async (transaction) => {
-    const current = await transaction.get(ref);
+  return mutateOrderedAnonymousPushPairing(ref, candidate, db, admit, ({
+    transaction,
+    current,
+    currentBinding,
+    certificate,
+  }) => {
     if (!current.exists) return false;
-    const currentBinding = current.data();
     if (!currentBinding) throw new Error("Anonymous push pairing has no data");
-    const certificate = candidate ?? storedCertificate(currentBinding);
-    assertCurrentOrNewerCertificate(certificate, currentBinding);
+    if (!certificate) throw new Error("Anonymous push pairing has no certificate ordering metadata");
     if (staleBeforeMs !== undefined) {
       const updatedAtMs = currentBinding.updatedAtMs;
       const lastDeliveredAtMs = currentBinding.lastDeliveredAtMs;
@@ -428,6 +461,23 @@ async function retireAnonymousPushPairing(
     if (certificate.issuedAt + MAX_CERTIFICATE_LIFETIME_MS <= nowMs) transaction.delete(ref);
     else transaction.set(ref, revokedPairingRecord(currentBinding, certificate, nowMs));
     return true;
+  });
+}
+
+async function mutateOrderedAnonymousPushPairing<T>(
+  ref: DocumentReference,
+  candidate: CertificateOrdering | null,
+  db: Firestore,
+  admit: PairingMutationAdmission,
+  mutate: (context: OrderedPairingMutationContext) => T | Promise<T>,
+): Promise<T> {
+  return db.runTransaction(async (transaction) => {
+    const current = await transaction.get(ref);
+    const currentBinding = current.data();
+    const certificate = candidate ?? (currentBinding ? storedCertificate(currentBinding) : null);
+    if (certificate) assertCurrentOrNewerCertificate(certificate, currentBinding);
+    admit();
+    return mutate({ transaction, current, currentBinding, certificate });
   });
 }
 
@@ -476,7 +526,6 @@ function revokedPairingRecord(
   certificate: CertificateOrdering,
   nowMs: number,
 ): AnonymousPushPairingRecord {
-  assertCurrentOrNewerCertificate(certificate, currentBinding);
   return {
     desktopKeyHash: currentBinding.desktopKeyHash as string,
     deviceIdHash: currentBinding.deviceIdHash as string,
