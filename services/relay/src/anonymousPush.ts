@@ -287,9 +287,10 @@ export async function publishAnonymousPush(input: {
   }
   const snapshot = await db.collection(ANONYMOUS_PUSH_PAIRINGS_COLLECTION)
     .where("desktopKeyHash", "==", desktopKeyHash)
-    .limit(MAX_DEVICES_PER_DESKTOP)
     .get();
-  const bindings = snapshot.docs.filter((doc) => isActiveBinding(doc, nowMs));
+  const bindings = snapshot.docs
+    .filter((doc) => isActiveBinding(doc, nowMs))
+    .slice(0, MAX_DEVICES_PER_DESKTOP);
   if (bindings.length === 0) {
     throw new AnonymousPushRefusal(409, "no_bindings", "No anonymous push pairings are registered");
   }

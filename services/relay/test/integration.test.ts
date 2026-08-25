@@ -1579,6 +1579,52 @@ describe("Relay integration", () => {
     await closeAndWait(ws);
   });
 
+  it("ignores tokenless watermarks when selecting anonymous push bindings", async () => {
+    const identity = createAnonymousPushIdentity();
+    const cert = createAnonymousPushCertificate(identity, "anonymous-phone-after-watermarks");
+    const desktopKeyHash = anonymousDesktopId(identity.publicKey);
+    const pairings = testFirestore.collection("anonymousPushPairings");
+    const watermarkWrites = Array.from({ length: 10 }, (_, index) =>
+      pairings.doc(`${desktopKeyHash}.watermark-${index}`).set({
+        desktopKeyHash,
+        deviceIdHash: sha256Hex(`watermark-device-${index}`),
+        tokenHash: null,
+        desktopPubKey: identity.publicKey,
+        fcmToken: null,
+        updatedAtMs: Date.now(),
+        lastDeliveredAtMs: null,
+        certIssuedAt: cert.issuedAt,
+        certExpiresAt: cert.expiresAt,
+        certSignature: cert.signature,
+      }));
+    await Promise.all(watermarkWrites);
+    const register = await fetch(relayHttpUrl("/push/pairings"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(anonymousPairingBody(identity, cert, "token-after-watermarks")),
+    });
+    expect(register.status).toBe(200);
+
+    const { ws } = await connectAndAuthAnonymous(identity);
+    const ack = waitForMessage(ws, (message) =>
+      message.type === "mobile_notification_ack" && message.id === "watermark-selection");
+    ws.send(JSON.stringify({
+      type: "mobile_notification_publish",
+      id: "watermark-selection",
+      notification: { title: "Watermark selection", body: "The live binding remains selectable." },
+    }));
+    await expect(ack).resolves.toMatchObject({
+      ok: true,
+      delivery: { acceptedCount: 1, failedCount: 0 },
+    });
+    const captures = await testFirestore.collection(ANONYMOUS_PUSH_CAPTURE_COLLECTION)
+      .where("notification.title", "==", "Watermark selection")
+      .get();
+    expect(captures.size).toBe(1);
+    expect(captures.docs[0]?.data().tokenHash).toBe(sha256Hex("token-after-watermarks"));
+    await closeAndWait(ws);
+  });
+
   it("refuses invoke, tunnel, and snapshot operations from an anonymous desktop", async () => {
     const identity = createAnonymousPushIdentity();
     const { ws } = await connectAndAuthAnonymous(identity);
