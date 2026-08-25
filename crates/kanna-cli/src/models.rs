@@ -142,6 +142,10 @@ pub(crate) struct TaskDetail {
     pub(crate) revision_rounds: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) revision_limit: Option<i64>,
+    /// Latest caller-declared human authorization for a revision. Preserve it
+    /// so typed `task get` is as auditable as the shared catalog surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) latest_revision_authorization: Option<Value>,
     /// Direct children returned by a current server, including closed tasks.
     /// Keep this optional so a CLI talking to an older server does not turn an
     /// unavailable downward view into a misleading empty child set.
@@ -180,6 +184,8 @@ struct TaskDetailDef {
     revision_rounds: Option<i64>,
     #[serde(default)]
     revision_limit: Option<i64>,
+    #[serde(default)]
+    latest_revision_authorization: Option<Value>,
     #[serde(default)]
     child_task_ids: Option<Vec<String>>,
     #[serde(default)]
@@ -349,6 +355,8 @@ pub(crate) struct RequestRevisionRequest {
     pub(crate) prompt: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) metadata: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) human_authorization: Option<Value>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]

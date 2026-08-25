@@ -51,7 +51,13 @@ semantics, and the MCP task-management rule — stay in the repo-root
   recorded, the task parks `unread` at its current stage, and the response
   carries `revisionBudget.exhausted: true`. A *human* revision bypasses the
   budget and **resets** the count — but only the budget: it is still subject
-  to feedback resolution and every other preparation precondition.
+  to feedback resolution and every other preparation precondition. The
+  desktop sends its existing `origin: "human"`; a manager can relay the same
+  capability through `kanna_request_revision.human_authorization`, naming who
+  authorized it, when, and the exact action. That caller-declared attribution
+  is recorded on the closed run, repeated in `task.revision_requested`, and
+  exposed as task detail's `latestRevisionAuthorization`. It is an audit trail,
+  not proof that the named human spoke.
 - *The task's terms live in its committed spec* —
   `docs/task-specs/<task-id>.md`, written by the implement agent, updated in
   the same commits as the work, and judged by later review stages

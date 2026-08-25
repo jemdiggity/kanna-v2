@@ -396,6 +396,11 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         metadata: Option<String>,
 
+        /// JSON attribution for a relayed human decision: authorizedBy,
+        /// authorizedAt, and authorizedAction. Caller-declared and audited.
+        #[arg(long)]
+        human_authorization: Option<String>,
+
         /// Override the local Kanna server base URL
         #[arg(long)]
         server_url: Option<String>,

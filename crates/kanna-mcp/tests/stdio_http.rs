@@ -1817,7 +1817,12 @@ fn serve_reports_server_error_bodies_for_failed_actions() {
         body: Some(json!({
             "targetStage": "in progress",
             "summary": "QA failed",
-            "prompt": "Add the missing coverage."
+            "prompt": "Add the missing coverage.",
+            "humanAuthorization": {
+                "authorizedBy": "Repository owner",
+                "authorizedAt": "2026-08-25T09:30:00+09:00",
+                "authorizedAction": "One revision for the missing coverage"
+            }
         })),
         response_status: "500 Internal Server Error",
         response_body: json!("failed to create worktree: No space left on device"),
@@ -1835,7 +1840,12 @@ fn serve_reports_server_error_bodies_for_failed_actions() {
                     "task_id": "task-1",
                     "target_stage": "in progress",
                     "summary": "QA failed",
-                    "prompt": "Add the missing coverage."
+                    "prompt": "Add the missing coverage.",
+                    "human_authorization": {
+                        "authorizedBy": "Repository owner",
+                        "authorizedAt": "2026-08-25T09:30:00+09:00",
+                        "authorizedAction": "One revision for the missing coverage"
+                    }
                 }
             }
         })],

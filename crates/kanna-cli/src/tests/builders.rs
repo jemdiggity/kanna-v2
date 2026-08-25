@@ -68,6 +68,7 @@ fn builds_request_revision_payload() {
         "missing e2e coverage".to_string(),
         "Add e2e coverage for task creation.".to_string(),
         None,
+        None,
     );
 
     assert_eq!(
@@ -76,6 +77,32 @@ fn builds_request_revision_payload() {
             "targetStage": "in progress",
             "summary": "missing e2e coverage",
             "prompt": "Add e2e coverage for task creation.",
+        })
+    );
+}
+
+#[test]
+fn builds_attributed_human_revision_payload() {
+    let authorization = json!({
+        "authorizedBy": "Repository owner",
+        "authorizedAt": "2026-08-25T09:30:00+09:00",
+        "authorizedAction": "One deployment-only revision"
+    });
+    let request = build_request_revision_request(
+        "in progress".to_string(),
+        "Owner approved deployment verification".to_string(),
+        "Deploy to staging and verify the acceptance criterion.".to_string(),
+        None,
+        Some(authorization.clone()),
+    );
+
+    assert_eq!(
+        serde_json::to_value(request).unwrap(),
+        json!({
+            "targetStage": "in progress",
+            "summary": "Owner approved deployment verification",
+            "prompt": "Deploy to staging and verify the acceptance criterion.",
+            "humanAuthorization": authorization,
         })
     );
 }

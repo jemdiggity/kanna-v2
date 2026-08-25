@@ -48,12 +48,14 @@ pub(crate) fn build_request_revision_request(
     summary: String,
     prompt: String,
     metadata: Option<Value>,
+    human_authorization: Option<Value>,
 ) -> RequestRevisionRequest {
     RequestRevisionRequest {
         target_stage,
         summary,
         prompt,
         metadata,
+        human_authorization,
     }
 }
 
@@ -427,15 +429,26 @@ pub(crate) async fn run(command: TaskCommands) {
             summary,
             prompt,
             metadata,
+            human_authorization,
             server_url,
         } => {
             let metadata_value = parse_metadata_json(&metadata).unwrap_or_else(|e| {
                 eprintln!("Error: {e}");
                 process::exit(1);
             });
+            let human_authorization_value = parse_metadata_json(&human_authorization)
+                .unwrap_or_else(|e| {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                });
             let base_url = resolve_server_base_url_from_env(server_url.as_deref());
-            let request =
-                build_request_revision_request(target_stage, summary, prompt, metadata_value);
+            let request = build_request_revision_request(
+                target_stage,
+                summary,
+                prompt,
+                metadata_value,
+                human_authorization_value,
+            );
             let created = request_revision_via_api(&base_url, &task_id, &request)
                 .await
                 .unwrap_or_else(|e| {

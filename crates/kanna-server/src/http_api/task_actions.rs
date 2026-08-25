@@ -1713,7 +1713,26 @@ pub(super) async fn request_revision(
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e));
     }
 
-    let origin = payload.origin.unwrap_or_default();
+    if let Some(authorization) = payload.human_authorization.as_ref() {
+        let missing = [
+            ("authorizedBy", authorization.authorized_by.trim()),
+            ("authorizedAt", authorization.authorized_at.trim()),
+            ("authorizedAction", authorization.authorized_action.trim()),
+        ]
+        .into_iter()
+        .filter_map(|(name, value)| value.is_empty().then_some(name))
+        .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                format!(
+                    "humanAuthorization is an attributed audit record; these fields must not be empty: {}",
+                    missing.join(", ")
+                ),
+            ));
+        }
+    }
+    let human_authorized = payload.is_human_authorized();
     // The reviewer's findings live in `prompt`; `summary` is only the headline
     // shown to the user. An agent that sends an empty `prompt` starts an agent
     // with nothing to act on and burns a budgeted round proving it, so the
@@ -1721,7 +1740,7 @@ pub(super) async fn request_revision(
     // review run is closed — leaving the reviewer able to retry with the
     // findings. A human request is never refused: the compose path falls back
     // to the terminating run's verdict for it.
-    if origin.is_agent() && payload.prompt.trim().is_empty() {
+    if !human_authorized && payload.prompt.trim().is_empty() {
         return Err((
             axum::http::StatusCode::BAD_REQUEST,
             "revision request carried no reviewer feedback: `prompt` must contain the findings \
@@ -1753,13 +1772,13 @@ pub(super) async fn request_revision(
                 Err(error) => return Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, error)),
             };
 
-            if origin.is_agent() && budget.limit > 0 && budget.rounds >= budget.limit {
+            if !human_authorized && budget.limit > 0 && budget.rounds >= budget.limit {
                 return park_exhausted_revision(&db, source_task_id, &payload, budget);
             }
 
             // Only a capped agent round is announced to the revising agent as
             // a round; a human-requested revision is the human's own call.
-            let round = (origin.is_agent() && budget.limit > 0).then_some(
+            let round = (!human_authorized && budget.limit > 0).then_some(
                 crate::task_creator::RevisionRound {
                     number: budget.rounds + 1,
                     limit: budget.limit,
@@ -1783,15 +1802,19 @@ pub(super) async fn request_revision(
                 round,
             )
             .map_err(|error| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))?;
-            let stage_result = revision_stage_result(&payload.summary, &payload.metadata)?;
+            let stage_result = revision_stage_result(
+                &payload.summary,
+                &payload.metadata,
+                payload.human_authorization.as_ref(),
+            )?;
             let revision_event_payload = revision_requested_event_payload(
                 &payload,
-                budget.rounds + i64::from(origin.is_agent()),
+                budget.rounds + i64::from(!human_authorized),
                 budget.limit,
                 false,
             );
             let finalized = db.with_immediate_transaction(|db| -> rusqlite::Result<i64> {
-                let rounds = if origin.is_agent() {
+                let rounds = if !human_authorized {
                     db.claim_agent_revision_round_in_transaction(&source_task_id, budget.limit)?
                         .ok_or(rusqlite::Error::QueryReturnedNoRows)?
                 } else {
@@ -1875,7 +1898,7 @@ pub(super) async fn request_revision(
             );
             state.publish_state_changed(StateChangeScope::Tasks);
 
-            let message = if budget.limit > 0 && origin.is_agent() {
+            let message = if budget.limit > 0 && !human_authorized {
                 format!(
                     "Revision round {rounds} of {limit} started.",
                     rounds = budget.rounds,
@@ -1933,7 +1956,7 @@ fn park_exhausted_revision(
         limit = budget.limit,
         summary = payload.summary,
     );
-    let parked_result = revision_stage_result(&parked_summary, &payload.metadata)?;
+    let parked_result = revision_stage_result(&parked_summary, &payload.metadata, None)?;
     // The requested changes stay on the run as feedback so nothing the
     // reviewer found is lost when the loop stops.
     let _ = db
@@ -1995,7 +2018,8 @@ fn revision_requested_event_payload(
     serde_json::json!({
         "targetStage": payload.target_stage,
         "summary": payload.summary,
-        "origin": if payload.origin.unwrap_or_default().is_agent() { "agent" } else { "human" },
+        "origin": if payload.is_human_authorized() { "human" } else { "agent" },
+        "humanAuthorization": payload.human_authorization,
         "rounds": rounds,
         "limit": limit,
         "exhausted": exhausted,
@@ -2007,11 +2031,13 @@ fn revision_requested_event_payload(
 fn revision_stage_result(
     summary: &str,
     metadata: &Option<serde_json::Value>,
+    human_authorization: Option<&crate::mobile_api::HumanAuthorization>,
 ) -> Result<String, (axum::http::StatusCode, String)> {
     serde_json::to_string(&serde_json::json!({
         "status": "failure",
         "summary": summary,
         "metadata": metadata,
+        "humanAuthorization": human_authorization,
     }))
     .map_err(|e| {
         (

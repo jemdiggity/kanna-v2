@@ -397,7 +397,7 @@
     },
     {
       "name": "kanna_request_revision",
-      "description": "Request and schedule a revision on a Kanna task: preparation errors are returned before the review run is closed, while a successful non-exhausted response means the serialized revision transition was accepted and later run/stage events report its durable outcome. Kanna resumes the target stage's previous provider conversation in its worktree when supported, otherwise starts fresh and records why resume was unavailable. Kanna delivers the original task prompt alongside the revision prompt, so focus on required changes. Agent-requested revisions are budgeted per task: revisionBudget reports rounds/limit, and once spent the request starts nothing and parks for its human (revisionBudget.exhausted) — report findings and stop instead of retrying.",
+      "description": "Request and schedule a revision on a Kanna task: preparation errors are returned before the review run is closed, while a successful non-exhausted response means the serialized revision transition was accepted and later run/stage events report its durable outcome. Kanna resumes the target stage's previous provider conversation in its worktree when supported, otherwise starts fresh and records why resume was unavailable. Kanna delivers the original task prompt alongside the revision prompt, so focus on required changes. Agent-requested revisions are budgeted per task: revisionBudget reports rounds/limit, and once spent the request starts nothing and parks for its human (revisionBudget.exhausted) — report findings and stop instead of retrying. A manager relaying a human decision may provide human_authorization with specific attribution; Kanna records the caller-declared claim for audit, treats the request like the desktop human action, and resets the automatic revision count.",
       "method": "POST",
       "path": "/v1/tasks/{task_id}/actions/request-revision",
       "response": "json",
@@ -407,7 +407,8 @@
         { "name": "target_stage", "description": "Workflow stage whose agent should make the changes.", "type": "string", "required": false, "location": "body", "key": "targetStage", "default": "in progress" },
         { "name": "summary", "description": "Short summary of why the revision is needed, shown to the user.", "type": "string", "required": true, "location": "body" },
         { "name": "prompt", "description": "Instructions for the revising agent. Kanna delivers the original task prompt alongside this, so describe only the required changes.", "type": "string", "required": true, "location": "body" },
-        { "name": "metadata", "description": "Optional structured data (e.g. review findings) stored on the revision request.", "type": "object", "required": false, "location": "body" }
+        { "name": "metadata", "description": "Optional structured data (e.g. review findings) stored on the revision request.", "type": "object", "required": false, "location": "body" },
+        { "name": "human_authorization", "description": "Caller-declared attribution when relaying a human-authorized revision. Must be an object with non-empty authorizedBy (the human), authorizedAt (when they authorized it, preferably RFC 3339), and authorizedAction (the exact revision scope they authorized). This is a durable audit trail, not proof; omit it for the manager or review agent's own request.", "type": "object", "required": false, "location": "body", "key": "humanAuthorization" }
       ]
     }
   ]

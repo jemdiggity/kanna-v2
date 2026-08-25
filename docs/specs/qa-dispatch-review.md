@@ -195,12 +195,17 @@ Without both, two admitted requests also raced on the *same* forked branch name
 — the regression test in `http_api::tests::revision_status` reproduces exactly
 that when either guard is removed.
 
-Origin is what separates a bounded agent loop from human judgment.
-`RequestRevisionRequest.origin` (`agent`, the default, or `human`) is
-deliberately **not** exposed in the tool catalog — an agent cannot claim human
-origin. The desktop's revision action (⇧⌘S in the diff modal) sends
-`origin: "human"`: it is never refused, and it resets `revision_rounds` to 0,
-handing the agents a fresh budget to satisfy what the human asked for.
+Authorization is what separates a bounded agent loop from human judgment.
+`RequestRevisionRequest.origin` (`agent`, the default, or `human`) remains
+absent from the tool catalog, and the desktop's revision action (⇧⌘S in the
+diff modal) continues to send `origin: "human"`. A manager relaying a human
+decision instead sends `human_authorization` with `authorizedBy`,
+`authorizedAt`, and `authorizedAction`. Both human paths are never refused by
+the revision budget and reset `revision_rounds` to 0, handing the agents a
+fresh budget to satisfy what the human asked for. The relayed claim is
+caller-declared and unverified: Kanna records it on the closed run and revision
+event and exposes the latest one in task detail. This is an audit trail a later
+reviewer can challenge, not proof that the named human spoke.
 
 Every revision run also tells the revising agent where it stands: the composed
 revision prompt (and the resume message, since a resumed session never re-reads

@@ -9,6 +9,34 @@ pub struct FinishedStageRun {
 }
 
 impl Db {
+    /// Latest caller-declared human authorization persisted on a revision
+    /// verdict. Stage runs are the durable source; task events repeat the same
+    /// record for cursored orchestration history but may age out of retention.
+    pub fn latest_revision_authorization(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<serde_json::Value>, rusqlite::Error> {
+        let mut statement = self.conn.prepare(
+            "SELECT result
+             FROM stage_run
+             WHERE task_id = ? AND result IS NOT NULL
+             ORDER BY rowid DESC",
+        )?;
+        let rows = statement.query_map([task_id], |row| row.get::<_, String>(0))?;
+        for row in rows {
+            let result = row?;
+            let Some(authorization) = serde_json::from_str::<serde_json::Value>(&result)
+                .ok()
+                .and_then(|result| result.get("humanAuthorization").cloned())
+                .filter(|authorization| !authorization.is_null())
+            else {
+                continue;
+            };
+            return Ok(Some(authorization));
+        }
+        Ok(None)
+    }
+
     pub fn has_durable_running_task_session(&self, task_id: &str) -> Result<bool, rusqlite::Error> {
         self.conn.query_row(
             "SELECT EXISTS(

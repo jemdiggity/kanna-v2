@@ -739,7 +739,12 @@ fn resolves_expected_requests_for_every_bundled_tool() {
             json!({
                 "task_id": "task-1",
                 "summary": "needs work",
-                "prompt": "fix it"
+                "prompt": "fix it",
+                "human_authorization": {
+                    "authorizedBy": "Repository owner",
+                    "authorizedAt": "2026-08-25T09:30:00+09:00",
+                    "authorizedAction": "Revise the staging deployment only"
+                }
             }),
             Method::Post,
             ResponseKind::Json,
@@ -747,7 +752,12 @@ fn resolves_expected_requests_for_every_bundled_tool() {
             json!({
                 "targetStage": "in progress",
                 "summary": "needs work",
-                "prompt": "fix it"
+                "prompt": "fix it",
+                "humanAuthorization": {
+                    "authorizedBy": "Repository owner",
+                    "authorizedAt": "2026-08-25T09:30:00+09:00",
+                    "authorizedAction": "Revise the staging deployment only"
+                }
             }),
         ),
     ];

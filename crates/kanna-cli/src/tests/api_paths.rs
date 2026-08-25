@@ -174,6 +174,11 @@ fn parses_task_detail_response_shape() {
         "commitsAhead": 2,
         "commitsBehind": 1,
         "dirty": true,
+        "latestRevisionAuthorization": {
+            "authorizedBy": "Repository owner",
+            "authorizedAt": "2026-08-25T09:30:00+09:00",
+            "authorizedAction": "One deployment-only revision"
+        },
         "latestRun": {
             "id": "run-1",
             "stage": "in progress",
@@ -188,6 +193,12 @@ fn parses_task_detail_response_shape() {
     .unwrap();
 
     assert_eq!(task.id, "task-1");
+    assert_eq!(
+        task.latest_revision_authorization
+            .as_ref()
+            .and_then(|authorization| authorization["authorizedBy"].as_str()),
+        Some("Repository owner")
+    );
     assert_eq!(task.activity.as_deref(), Some("working"));
     assert_eq!(task.workflow_name.as_deref(), Some("default"));
     assert_eq!(task.stage_transition.as_deref(), Some("manual"));

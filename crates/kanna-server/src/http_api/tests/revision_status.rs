@@ -1168,6 +1168,11 @@ async fn agent_revision_request_parks_the_task_once_the_round_budget_is_spent() 
         "the agent must be told why nothing started: {}",
         budget.message
     );
+    assert!(
+        budget.message.contains("Do not retry"),
+        "the exhausted agent request must retain its stop guidance: {}",
+        budget.message
+    );
 
     let db = Db::open(&fixture.config.db_path).unwrap();
     let task = db.get_task_stage_source("budget-1").unwrap().unwrap();
@@ -1207,7 +1212,7 @@ async fn agent_revision_request_parks_the_task_once_the_round_budget_is_spent() 
 }
 
 #[tokio::test]
-async fn human_revision_request_ignores_the_budget_and_hands_it_back() {
+async fn relayed_human_revision_ignores_budget_and_is_durably_readable() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
     use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
@@ -1260,6 +1265,7 @@ async fn human_revision_request_ignores_the_budget_and_hands_it_back() {
 
     let app = super::router(Arc::new(super::AppState::new(fixture.config.clone())));
     let response = app
+        .clone()
         .oneshot(
             Request::post("/v1/tasks/budget-1/actions/request-revision")
                 .header("content-type", "application/json")
@@ -1267,8 +1273,13 @@ async fn human_revision_request_ignores_the_budget_and_hands_it_back() {
                     serde_json::json!({
                         "targetStage": "in progress",
                         "summary": "needs one more pass",
-                        "prompt": "Fix the failing typecheck.",
-                        "origin": "human"
+                        "prompt": "Deploy the branch head to staging and verify it.",
+                        "metadata": { "finding": "staging is behind branch head" },
+                        "humanAuthorization": {
+                            "authorizedBy": "Repository owner",
+                            "authorizedAt": "2026-08-25T09:30:00+09:00",
+                            "authorizedAction": "One deployment-only revision to satisfy staging acceptance"
+                        }
                     })
                     .to_string(),
                 ))
@@ -1302,6 +1313,50 @@ async fn human_revision_request_ignores_the_budget_and_hands_it_back() {
     let task = super::actions::wait_for_running_task_stage(&db, "budget-1", "in progress").await;
     assert_eq!(task.stage.as_deref(), Some("in progress"));
     assert_eq!(db.task_revision_rounds("budget-1").unwrap(), 0);
+
+    let runs = db.list_stage_runs_for_task("budget-1").unwrap();
+    let closed_review = runs
+        .iter()
+        .find(|run| run.stage == "review")
+        .expect("closed review run");
+    let result: serde_json::Value =
+        serde_json::from_str(closed_review.result.as_deref().expect("review result")).unwrap();
+    assert_eq!(
+        result["metadata"]["finding"],
+        "staging is behind branch head"
+    );
+    assert_eq!(
+        result["humanAuthorization"],
+        serde_json::json!({
+            "authorizedBy": "Repository owner",
+            "authorizedAt": "2026-08-25T09:30:00+09:00",
+            "authorizedAction": "One deployment-only revision to satisfy staging acceptance"
+        }),
+        "attribution must be stored alongside the existing verdict metadata"
+    );
+
+    let detail_response = app
+        .oneshot(
+            Request::get("/v1/tasks/budget-1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(detail_response.status(), StatusCode::OK);
+    let detail_body = axum::body::to_bytes(detail_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let detail: crate::mobile_api::TaskDetail = from_slice(&detail_body).unwrap();
+    let authorization = detail
+        .latest_revision_authorization
+        .expect("relayed authorization visible in task detail");
+    assert_eq!(authorization.authorized_by, "Repository owner");
+    assert_eq!(authorization.authorized_at, "2026-08-25T09:30:00+09:00");
+    assert_eq!(
+        authorization.authorized_action,
+        "One deployment-only revision to satisfy staging acceptance"
+    );
 
     daemon_server.await.unwrap();
     drop(db);

@@ -231,6 +231,10 @@ pub struct TaskDetail {
     /// Rounds the task's workflow allows before the engine parks the task for
     /// its human instead of revising again; `0` means unlimited.
     pub revision_limit: i64,
+    /// Most recent attributed human revision authorization, if one has been
+    /// relayed. Caller-declared and durable: an audit trail, not proof.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_revision_authorization: Option<HumanAuthorization>,
     /// How many messages have been delivered into this task's agent session
     /// from outside it — operator/manager `POST /v1/tasks/{id}/input` calls and
     /// the server's own completion notifications. The count is here so that a
@@ -484,13 +488,34 @@ pub struct RequestRevisionRequest {
     pub summary: String,
     pub prompt: String,
     pub metadata: Option<serde_json::Value>,
+    /// Caller-declared attribution for a human-authorized revision relayed by
+    /// a manager. This is an audit record, not proof that the human spoke.
+    #[serde(default)]
+    pub human_authorization: Option<HumanAuthorization>,
     /// Who asked for this revision. Agent-requested revisions spend the
     /// task's revision-round budget and are refused once it is gone; a
     /// human-requested revision is never refused and hands the budget back.
-    /// Deliberately absent from the agent tool catalog: an agent must not be
-    /// able to claim human origin.
+    /// Deliberately absent from the agent tool catalog. Catalog callers use
+    /// `human_authorization`, whose specific attribution is durably recorded,
+    /// instead of an unattributed bypass value.
     #[serde(default)]
     pub origin: Option<RevisionOrigin>,
+}
+
+impl RequestRevisionRequest {
+    pub fn is_human_authorized(&self) -> bool {
+        matches!(self.origin, Some(RevisionOrigin::Human)) || self.human_authorization.is_some()
+    }
+}
+
+/// A caller-declared record of the human decision a manager is relaying.
+/// Kanna stores this for auditability but cannot verify the claim.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HumanAuthorization {
+    pub authorized_by: String,
+    pub authorized_at: String,
+    pub authorized_action: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -499,12 +524,6 @@ pub enum RevisionOrigin {
     #[default]
     Agent,
     Human,
-}
-
-impl RevisionOrigin {
-    pub fn is_agent(self) -> bool {
-        matches!(self, Self::Agent)
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -789,6 +808,11 @@ impl MobileApi {
             ._db
             .count_task_inputs(&item.id)
             .map_err(|e| format!("db error: {}", e))?;
+        let latest_revision_authorization = self
+            ._db
+            .latest_revision_authorization(&item.id)
+            .map_err(|e| format!("db error: {}", e))?
+            .and_then(|value| serde_json::from_value(value).ok());
         Ok(Some(map_task_detail(
             item,
             repo.as_ref(),
@@ -800,6 +824,7 @@ impl MobileApi {
                 child_task_ids,
                 blocked_by_task_ids,
                 delivered_input_count,
+                latest_revision_authorization,
             },
         )))
     }
@@ -1028,6 +1053,7 @@ struct TaskDetailRelations {
     child_task_ids: Vec<String>,
     blocked_by_task_ids: Vec<String>,
     delivered_input_count: i64,
+    latest_revision_authorization: Option<HumanAuthorization>,
 }
 
 fn map_task_detail(
@@ -1043,6 +1069,7 @@ fn map_task_detail(
         child_task_ids,
         blocked_by_task_ids,
         delivered_input_count,
+        latest_revision_authorization,
     } = relations;
     let prompt = item.prompt.clone();
     let title = item
@@ -1139,6 +1166,7 @@ fn map_task_detail(
         latest_run: latest_run.map(map_task_latest_run),
         revision_rounds: item.revision_rounds,
         revision_limit,
+        latest_revision_authorization,
         delivered_input_count,
         parent_task_id: item.parent_task_id,
         child_task_ids,

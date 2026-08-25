@@ -343,6 +343,7 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
                     ("summary", "summary"),
                     ("prompt", "prompt"),
                     ("metadata", "metadata"),
+                    ("human_authorization", "human_authorization"),
                 ],
             },
         ),
