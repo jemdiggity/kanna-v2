@@ -161,6 +161,20 @@ describe("QA workflow assets", () => {
     );
     expect(agent.prompt).toContain("task.runtime_settled");
     expect(agent.prompt).toContain("task.awaiting_advance");
+    expect(agent.prompt).toContain("Notify Human Blockers");
+    expect(agent.prompt).toContain(
+      "Call `kanna_notify_mobile` whenever coordination transitions into a blocker only a human can clear"
+    );
+    expect(agent.prompt).toContain("`task_id` so tapping the notification opens that task");
+    expect(agent.prompt).toContain("one notification per distinct blocking condition");
+    expect(agent.prompt).toContain(
+      "identify the task by short human-readable name and id, state what is blocked and why"
+    );
+    expect(agent.prompt).toContain(
+      "Never claim the human was notified when the response says otherwise"
+    );
+    expect(agent.prompt).toContain("an absent or zero `lanDeliveredCount` is expected");
+    expect(agent.prompt).toContain("the event loop is idle by design while awaiting human action");
     expect(agent.prompt).toContain("kanna_set_task_notify");
     expect(agent.prompt).toContain(
       "Product work, bug fixes, investigations, releases, and other durable repository tasks"
