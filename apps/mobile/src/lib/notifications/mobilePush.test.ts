@@ -151,6 +151,7 @@ describe("mobile push notifications", () => {
       anonymousPairings: [pairing],
       fetchImpl,
       sdk: {
+        setNotificationHandler: vi.fn(),
         requestPermission: vi.fn(async () => 1),
         getToken: vi.fn(async () => "anonymous-token-1"),
         onTokenRefresh: vi.fn((listener: (token: string) => void) => {
@@ -165,7 +166,8 @@ describe("mobile push notifications", () => {
             taskId: "task-1"
           }
         })),
-        onNotificationOpened: vi.fn(() => () => undefined)
+        onNotificationOpened: vi.fn(() => () => undefined),
+        onNotificationResponse: vi.fn(() => () => undefined)
       }
     });
 
@@ -359,11 +361,13 @@ describe("mobile push notifications", () => {
       anonymousBindingCoordinator: coordinator,
       fetchImpl,
       sdk: {
+        setNotificationHandler: vi.fn(),
         requestPermission: vi.fn(async () => 1),
         getToken,
         onTokenRefresh: vi.fn(() => () => undefined),
         getInitialNotification: vi.fn(async () => null),
-        onNotificationOpened: vi.fn(() => () => undefined)
+        onNotificationOpened: vi.fn(() => () => undefined),
+        onNotificationResponse: vi.fn(() => () => undefined)
       }
     });
     const obsolete = start(() => new Promise((resolve) => {
