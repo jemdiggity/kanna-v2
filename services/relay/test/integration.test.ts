@@ -554,6 +554,50 @@ function connectAndAuthAnonymous(
   });
 }
 
+function connectAndAuthDualIdentity(
+  identity: AnonymousPushTestIdentity,
+): Promise<{ ws: WebSocket; userId: string; capabilities: Record<string, unknown> }> {
+  return new Promise((resolveConnection, reject) => {
+    const ws = new WebSocket(relayUrl());
+    const timeout = setTimeout(() => {
+      ws.close();
+      reject(new Error("Dual-identity auth timed out"));
+    }, 5_000);
+    ws.on("open", () => {
+      ws.send(JSON.stringify({
+        type: "auth",
+        desktop_id: SECRET_DESKTOP_ID,
+        desktop_secret: SECRET_DESKTOP_SECRET,
+        anon_pub_key: identity.publicKey,
+      }));
+    });
+    ws.on("message", (raw: Buffer) => {
+      const message = JSON.parse(raw.toString()) as Record<string, unknown>;
+      if (message.type === "auth_challenge" && typeof message.nonce === "string") {
+        const payload = Buffer.concat([
+          Buffer.from("kanna.relay-auth.v1\0", "utf8"),
+          Buffer.from(message.nonce, "base64url"),
+        ]);
+        ws.send(JSON.stringify({
+          type: "auth_proof",
+          signature: sign(null, payload, identity.privateKey).toString("base64url"),
+        }));
+      } else if (message.type === "auth_ok") {
+        clearTimeout(timeout);
+        resolveConnection({
+          ws,
+          userId: String(message.userId),
+          capabilities: message.capabilities as Record<string, unknown>,
+        });
+      }
+    });
+    ws.on("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+  });
+}
+
 /**
  * Open a socket and stop at the upgrade: no auth frame is ever sent, so the
  * connection holds its pre-auth admission slot until it closes or times out.
@@ -1576,6 +1620,106 @@ describe("Relay integration", () => {
     expect(captures.size).toBe(1);
     expect(captures.docs[0]?.data().tokenHash).toBe(sha256Hex("anonymous-delivery-token"));
     expect(captures.docs[0]?.data().desktopRoutingId).toBe(identity.publicKey);
+    await closeAndWait(ws);
+  });
+
+  it("delivers an account desktop notification to a phone that is still anonymous", async () => {
+    const identity = createAnonymousPushIdentity();
+    const cert = createAnonymousPushCertificate(identity, "mixed-anonymous-phone");
+    await fetch(relayHttpUrl("/push/pairings"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(anonymousPairingBody(identity, cert, "mixed-anonymous-token")),
+    });
+
+    const { ws, userId, capabilities } = await connectAndAuthDualIdentity(identity);
+    expect(userId).toBe(TEST_USER_ID);
+    expect(capabilities.mobileNotifications).toEqual({ version: 1 });
+    const ack = waitForMessage(ws, (message) =>
+      message.type === "mobile_notification_ack" && message.id === "mixed-anonymous-only");
+    ws.send(JSON.stringify({
+      type: "mobile_notification_publish",
+      id: "mixed-anonymous-only",
+      notification: { title: "Mixed anonymous phone", body: "Upgrade stays live." },
+    }));
+    await expect(ack).resolves.toMatchObject({
+      ok: true,
+      delivery: { acceptedCount: 1, failedCount: 0 },
+    });
+    const captures = await testFirestore.collection(ANONYMOUS_PUSH_CAPTURE_COLLECTION)
+      .where("notification.title", "==", "Mixed anonymous phone")
+      .get();
+    expect(captures.size).toBe(1);
+    expect(captures.docs[0]?.data()).toMatchObject({
+      tokenHash: sha256Hex("mixed-anonymous-token"),
+      desktopRoutingId: SECRET_DESKTOP_ID,
+    });
+    await closeAndWait(ws);
+  });
+
+  it("deduplicates a token held by both account and anonymous tables", async () => {
+    const identity = createAnonymousPushIdentity();
+    const token = "mixed-shared-token";
+    const cert = createAnonymousPushCertificate(identity, "mixed-shared-phone");
+    const accountDevice = testFirestore.doc(
+      `users/${TEST_USER_ID}/pushDevices/${sha256Hex("mixed-shared-device")}`,
+    );
+    await accountDevice.set({
+      deviceId: "mixed-shared-device",
+      token,
+      updatedAt: new Date().toISOString(),
+    });
+    await fetch(relayHttpUrl("/push/pairings"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(anonymousPairingBody(identity, cert, token)),
+    });
+
+    const { ws } = await connectAndAuthDualIdentity(identity);
+    const ack = waitForMessage(ws, (message) =>
+      message.type === "mobile_notification_ack" && message.id === "mixed-deduplicated");
+    ws.send(JSON.stringify({
+      type: "mobile_notification_publish",
+      id: "mixed-deduplicated",
+      notification: { title: "Mixed deduplicated", body: "Exactly once." },
+    }));
+    await expect(ack).resolves.toMatchObject({
+      ok: true,
+      delivery: { acceptedCount: 1, failedCount: 0 },
+    });
+    const captures = await testFirestore.collection(ANONYMOUS_PUSH_CAPTURE_COLLECTION)
+      .where("notification.title", "==", "Mixed deduplicated")
+      .get();
+    expect(captures.size).toBe(1);
+    expect(captures.docs[0]?.data().tokenHash).toBe(sha256Hex(token));
+    await closeAndWait(ws);
+    await accountDevice.delete();
+  });
+
+  it("falls back to the residual anonymous binding after desktop sign-out", async () => {
+    const identity = createAnonymousPushIdentity();
+    const cert = createAnonymousPushCertificate(identity, "mixed-signout-phone");
+    await fetch(relayHttpUrl("/push/pairings"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(anonymousPairingBody(identity, cert, "mixed-signout-token")),
+    });
+    const account = await connectAndAuthDualIdentity(identity);
+    expect(account.userId).toBe(TEST_USER_ID);
+    await closeAndWait(account.ws);
+
+    const { ws } = await connectAndAuthAnonymous(identity);
+    const ack = waitForMessage(ws, (message) =>
+      message.type === "mobile_notification_ack" && message.id === "mixed-signout");
+    ws.send(JSON.stringify({
+      type: "mobile_notification_publish",
+      id: "mixed-signout",
+      notification: { title: "Mixed sign-out", body: "Anonymous fallback remains." },
+    }));
+    await expect(ack).resolves.toMatchObject({
+      ok: true,
+      delivery: { acceptedCount: 1, failedCount: 0 },
+    });
     await closeAndWait(ws);
   });
 

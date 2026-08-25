@@ -134,9 +134,10 @@ function readBody(req: IncomingMessage, maxBytes = 64 * 1024): Promise<string> {
  * Two frame types qualify, and between them they are every unit of remote value
  * a phone can ask the relay for: `tunnel_request` opens a tunnel
  * (`cloud_relay`), and `invoke` drives the desktop from the phone
- * (`remote_task_control`) — the owner's 2026-08-21 ruling that everything
- * crossing the relay is paid. Anything else a phone sends is a response or an
- * event on a conversation one of these already started.
+ * (`remote_task_control`). The owner's 2026-08-24 notification carve-out does
+ * not add a phone-originated request: push publication comes from a proven
+ * desktop. Anything else a phone sends is a response or an event on a
+ * conversation one of these already started.
  *
  * The router parses the same frame again on its way through, which is one
  * wasted parse per gated request in exchange for the entitlement check not
@@ -573,10 +574,15 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
           clearTimeout(authTimer);
           return;
         }
-        desktopId = anonymousDesktopId(anonymousPubKey);
-        userId = `anonymous:${desktopId}`;
-        role = "server";
-        principalKind = "anonymousDesktop";
+        // A desktop-credential session may prove its pair-scoped identity on
+        // the same nonce. Preserve the account principal in that case; the
+        // anonymous key is an additional, same-session-proven delivery scope.
+        if (!serverAuthProof) {
+          desktopId = anonymousDesktopId(anonymousPubKey);
+          userId = `anonymous:${desktopId}`;
+          role = "server";
+          principalKind = "anonymousDesktop";
+        }
         pendingAnonymousNonce = null;
       } else if (msg.type !== "auth") {
         ws.close(4003, "First message must be auth");
@@ -587,6 +593,31 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
           ws.close(4004, "Anonymous desktops cannot open tunnels");
           clearTimeout(authTimer);
           return;
+        }
+        if (msg.desktop_id || msg.desktop_secret) {
+          if (!msg.desktop_id || !msg.desktop_secret) {
+            ws.close(4004, "Desktop credentials are incomplete");
+            clearTimeout(authTimer);
+            return;
+          }
+          const principal = await verifyDesktopCredentials(
+            msg.desktop_id,
+            msg.desktop_secret,
+          );
+          if (!principal) {
+            ws.close(4005, "Authentication failed");
+            clearTimeout(authTimer);
+            return;
+          }
+          userId = principal.userId;
+          desktopId = principal.desktopId;
+          serverAuthProof = {
+            kind: "desktop",
+            desktopId: msg.desktop_id,
+            desktopSecret: msg.desktop_secret,
+          };
+          role = "server";
+          principalKind = "account";
         }
         anonymousPubKey = msg.anon_pub_key;
         pendingAnonymousNonce = randomBytes(32).toString("base64url");
@@ -635,7 +666,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         return;
       }
 
-      if (!userId) {
+      if (!userId || !role || !principalKind) {
         ws.close(4005, "Authentication failed");
         clearTimeout(authTimer);
         return;
@@ -734,11 +765,9 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
                 authModes: ["desktop-secret"],
               },
             } : {}),
-            ...(sessionEntitlement?.grants("cloud_relay") ? {
-              mobileNotifications: {
-                version: 1,
-              },
-            } : {}),
+            mobileNotifications: {
+              version: 1,
+            },
             ...(sessionEntitlement?.grants("remote_task_control") ? {
               desktopRouting: {
                 version: 1,
@@ -872,17 +901,6 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
           ws.close(4005, "Authentication revoked");
           return;
         }
-        // Push is part of cloud access, so it stops when the entitlement does.
-        // Re-resolved per notification rather than reused from the handshake,
-        // which is what bounds revocation by the cache TTL instead of by the
-        // desktop's next reconnect.
-        if (
-          principalKind !== "anonymousDesktop"
-          && !await sessionHasCapability(entitlementSubject!, "cloud_relay")
-        ) {
-          sendAck(false, undefined, ENTITLEMENT_REQUIRED_ERROR, ENTITLEMENT_REQUIRED_CODE);
-          return;
-        }
         let notification;
         try {
           notification = parseMobileNotification(publication.notification);
@@ -907,6 +925,23 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
             } else {
               console.warn(`[push] Anonymous notification delivery failed for ${desktopId}`);
               sendAck(false, undefined, "anonymous notification delivery failed; retry later");
+            }
+          }
+        } else if (anonymousPubKey) {
+          try {
+            const delivery = await publishAnonymousPush({
+              desktopPubKey: anonymousPubKey,
+              userId: userId!,
+              desktopId,
+              notification,
+            });
+            sendAck(true, delivery);
+          } catch (error) {
+            if (error instanceof AnonymousPushRefusal) {
+              sendAck(false, undefined, error.message, error.status);
+            } else {
+              console.warn(`[push] Dual-identity notification delivery failed for ${desktopId}`);
+              sendAck(false, undefined, "mobile notification delivery failed; retry later");
             }
           }
         } else {
