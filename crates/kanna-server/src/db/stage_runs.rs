@@ -37,6 +37,57 @@ impl Db {
         Ok(None)
     }
 
+    /// Add caller-declared human attribution to the task's latest durable
+    /// revision result without replacing the verdict it already records.
+    ///
+    /// An exhausted agent request finishes and parks the review run. A later
+    /// human relay therefore has no running run for
+    /// `finish_latest_running_stage_run` to close, but its authorization must
+    /// still live beside that parked verdict rather than only in an event.
+    pub fn attach_human_authorization_to_latest_revision_result(
+        &self,
+        task_id: &str,
+        authorization: &serde_json::Value,
+    ) -> Result<bool, rusqlite::Error> {
+        let latest = self
+            .conn
+            .query_row(
+                "SELECT id, result
+                 FROM stage_run
+                 WHERE task_id = ? AND result IS NOT NULL
+                 ORDER BY rowid DESC
+                 LIMIT 1",
+                [task_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        let Some((run_id, result)) = latest else {
+            return Ok(false);
+        };
+        let mut result = serde_json::from_str::<serde_json::Value>(&result).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                1,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
+        let Some(result) = result.as_object_mut() else {
+            return Err(rusqlite::Error::InvalidColumnType(
+                1,
+                "result".to_string(),
+                rusqlite::types::Type::Text,
+            ));
+        };
+        result.insert("humanAuthorization".to_string(), authorization.clone());
+        let result = serde_json::to_string(result)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        let rows_affected = self.conn.execute(
+            "UPDATE stage_run SET result = ? WHERE id = ?",
+            (&result, &run_id),
+        )?;
+        Ok(rows_affected == 1)
+    }
+
     pub fn has_durable_running_task_session(&self, task_id: &str) -> Result<bool, rusqlite::Error> {
         self.conn.query_row(
             "SELECT EXISTS(

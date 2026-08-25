@@ -12,9 +12,12 @@ This change therefore covers the boundary with narrower executable tests:
 - shared catalog request resolution verifies the CLI-shaped argument becomes
   the attributed server body;
 - the MCP stdio/HTTP fixture verifies the same mapping through MCP;
-- the server router test drives an exhausted task through a daemon-backed
-  relayed revision, then reads the reset count, closed stage-run verdict, and
-  public task-detail attribution;
+- the server router test sends two serialized HTTP actions: an exhausted agent
+  request that finishes and parks the review run, followed by a daemon-backed
+  attributed human relay. After the revision lands it reopens SQLite and
+  verifies the preserved parked verdict/metadata/feedback, both revision
+  events, the added stage-run attribution, the reset count, and public
+  task-detail attribution;
 - the exhausted agent-origin router test proves the budget refusal and
   no-retry guidance remain intact.
 

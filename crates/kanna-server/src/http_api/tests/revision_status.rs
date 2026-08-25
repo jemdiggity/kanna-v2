@@ -1218,6 +1218,64 @@ async fn relayed_human_revision_ignores_budget_and_is_durably_readable() {
     use tokio::net::UnixListener;
 
     let fixture = setup_revision_budget_fixture("human", 1);
+    let app = super::router(Arc::new(super::AppState::new(fixture.config.clone())));
+
+    // Reproduce the real parked lifecycle first: the exhausted agent request
+    // closes the review run and records its verdict before the owner's relay
+    // arrives as a second serialized HTTP action.
+    let exhausted_response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks/budget-1/actions/request-revision")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "targetStage": "in progress",
+                        "summary": "Staging relay is behind the branch head",
+                        "prompt": "Deploy the branch head to staging and verify it.",
+                        "metadata": { "finding": "staging is behind branch head" }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(exhausted_response.status(), StatusCode::OK);
+    let exhausted_body = axum::body::to_bytes(exhausted_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let exhausted_action: TaskActionResponse = from_slice(&exhausted_body).unwrap();
+    let exhausted_budget = exhausted_action
+        .revision_budget
+        .expect("revision budget reported");
+    assert!(exhausted_budget.exhausted);
+    assert!(exhausted_budget.message.contains("Do not retry"));
+
+    let parked_db = Db::open(&fixture.config.db_path).unwrap();
+    let parked_runs = parked_db.list_stage_runs_for_task("budget-1").unwrap();
+    assert_eq!(parked_runs.len(), 1);
+    assert_eq!(parked_runs[0].status, "failed");
+    assert_eq!(
+        parked_runs[0].feedback.as_deref(),
+        Some("Deploy the branch head to staging and verify it.")
+    );
+    let parked_result: serde_json::Value = serde_json::from_str(
+        parked_runs[0]
+            .result
+            .as_deref()
+            .expect("parked review result"),
+    )
+    .unwrap();
+    assert!(parked_result["summary"]
+        .as_str()
+        .unwrap()
+        .contains("Parked for human review"));
+    assert_eq!(
+        parked_result["metadata"]["finding"],
+        "staging is behind branch head"
+    );
+    drop(parked_db);
 
     // Fake daemon: the human-requested revision must reach a real spawn even
     // though the agent budget is spent.
@@ -1263,7 +1321,6 @@ async fn relayed_human_revision_ignores_budget_and_is_durably_readable() {
         }
     });
 
-    let app = super::router(Arc::new(super::AppState::new(fixture.config.clone())));
     let response = app
         .clone()
         .oneshot(
@@ -1309,9 +1366,16 @@ async fn relayed_human_revision_ignores_budget_and_is_durably_readable() {
     assert_eq!(budget.rounds, 0, "the budget is handed back to the agents");
     assert_eq!(budget.limit, 1);
 
-    let db = Db::open(&fixture.config.db_path).unwrap();
-    let task = super::actions::wait_for_running_task_stage(&db, "budget-1", "in progress").await;
+    let transition_db = Db::open(&fixture.config.db_path).unwrap();
+    let task =
+        super::actions::wait_for_running_task_stage(&transition_db, "budget-1", "in progress")
+            .await;
     assert_eq!(task.stage.as_deref(), Some("in progress"));
+    drop(transition_db);
+
+    // Reopen the database after the detached transition lands: the
+    // attribution must survive as persisted state, not router memory.
+    let db = Db::open(&fixture.config.db_path).unwrap();
     assert_eq!(db.task_revision_rounds("budget-1").unwrap(), 0);
 
     let runs = db.list_stage_runs_for_task("budget-1").unwrap();
@@ -1321,6 +1385,10 @@ async fn relayed_human_revision_ignores_budget_and_is_durably_readable() {
         .expect("closed review run");
     let result: serde_json::Value =
         serde_json::from_str(closed_review.result.as_deref().expect("review result")).unwrap();
+    assert!(result["summary"]
+        .as_str()
+        .unwrap()
+        .contains("Parked for human review"));
     assert_eq!(
         result["metadata"]["finding"],
         "staging is behind branch head"
@@ -1333,6 +1401,28 @@ async fn relayed_human_revision_ignores_budget_and_is_durably_readable() {
             "authorizedAction": "One deployment-only revision to satisfy staging acceptance"
         }),
         "attribution must be stored alongside the existing verdict metadata"
+    );
+
+    let event_head = db.latest_task_event_seq().unwrap();
+    let revision_events = db
+        .list_task_events(
+            &crate::db::TaskEventScope::Tasks(vec!["budget-1".to_string()]),
+            0,
+            event_head,
+            100,
+        )
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.event_type == "task.revision_requested")
+        .collect::<Vec<_>>();
+    assert_eq!(revision_events.len(), 2);
+    assert_eq!(revision_events[0].payload["exhausted"], true);
+    assert_eq!(revision_events[0].payload["origin"], "agent");
+    assert_eq!(revision_events[1].payload["exhausted"], false);
+    assert_eq!(revision_events[1].payload["origin"], "human");
+    assert_eq!(
+        revision_events[1].payload["humanAuthorization"]["authorizedBy"],
+        "Repository owner"
     );
 
     let detail_response = app

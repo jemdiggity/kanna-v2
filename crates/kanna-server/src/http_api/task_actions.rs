@@ -1821,12 +1821,26 @@ pub(super) async fn request_revision(
                     db.reset_task_revision_rounds(&source_task_id)?;
                     0
                 };
-                let _ = db.finish_latest_running_stage_run(
+                let finished = db.finish_latest_running_stage_run(
                     &source_task_id,
                     "failed",
                     Some(&stage_result),
                     Some(&payload.summary),
                 )?;
+                if finished.is_none() {
+                    if let Some(authorization) = payload.human_authorization.as_ref() {
+                        let authorization =
+                            serde_json::to_value(authorization).map_err(|error| {
+                                rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+                            })?;
+                        if !db.attach_human_authorization_to_latest_revision_result(
+                            &source_task_id,
+                            &authorization,
+                        )? {
+                            return Err(rusqlite::Error::QueryReturnedNoRows);
+                        }
+                    }
+                }
                 db.append_task_event(
                     &source_task_id,
                     crate::db::TaskEventKind::RevisionRequested,
