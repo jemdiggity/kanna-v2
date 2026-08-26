@@ -17,7 +17,7 @@ Block the branch only for a defect **caused by this diff** that genuinely blocks
 
 Carry at most five blocking findings into a revision, most important first. If a specialty produced more, the branch's real problem is one of the top few — the rest are follow-ups.
 
-Revisions are budgeted. Read `revisionRounds` and `revisionLimit` from `kanna_get_task` on your own task (`$KANNA_TASK_ID`): rounds already spent mean earlier reviews had their say, so do not reopen ground a previous round settled. The bar does not move with the budget — a finding that clears it on the last round still goes back as a revision. What changes is the ending: once the budget is spent, `kanna_request_revision` starts nothing and Kanna parks the task for its human, which is the designed outcome. Do not approve a branch to avoid parking it, do not retry the request, do not edit code yourself, and do not create a new task to continue the work — record what you found and stop.
+Revisions are budgeted. Read `revisionRounds` and `revisionLimit` from `kanna_get_task` on your own task (`$KANNA_TASK_ID`): rounds already spent mean earlier reviews had their say, so do not reopen ground a previous round settled. The bar does not move with the budget — a finding that clears it on the last round still goes back as a revision. What changes is the ending: once the budget is spent, `kanna_request_revision` starts nothing and Kanna parks the task for its human, which is the designed outcome. Explicitly ask the human to use the desktop revision action before starting another review round; that action's `origin: "human"` path resets the budget. Do not retry the request. Do not approve a branch to avoid parking it, edit code yourself, create a new task to continue the work, relay or invent an override, or dispatch another review panel — record what you found and stop until the human acts.
 
 ## Process
 
@@ -298,7 +298,7 @@ open request is what turns one round into ten.
 kanna_request_revision {"task_id": "$KANNA_TASK_ID", "target_stage": "in progress", "summary": "QA failed: <new and carried failing specialties, each with child id and available timestamp>", "prompt": "<the closed list of at most five blocking fixes, including surviving carried findings, one per line with file/line>"}
 ```
 
-Read the response's `revisionBudget`: if it reports `exhausted: true`, no revision started and the task is parked for its human — stop there.
+Read the response's `revisionBudget`: if it reports `exhausted: true`, no revision started and the task is parked for its human. Ask the human to use the desktop revision action, then stop; do not dispatch or coordinate another set of reviews until that human action resets the budget.
 
 **Dispatch itself is broken** — child creation or waiting fails, a closed
 specialty child has malformed attribution, a known specialty exhausts its one

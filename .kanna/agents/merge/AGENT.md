@@ -53,9 +53,8 @@ Then, for each branch in safe order:
 3. Push rebased or conflict-resolution commits back to the branch with `--force-with-lease` when required.
 4. If a PR URL exists, merge through GitHub with a merge commit: `gh pr merge <PR> --merge`. Do not push directly to the target branch. If no PR URL exists, ask before directly updating the target branch.
 5. After each merge, fetch/reset to the updated target and recheck any risk areas involving already-merged branches.
-6. For stacked PRs, retarget direct children onto the next live parent or target with `gh pr edit --base` when a PR URL exists. Do not delete a parent branch while an unmerged child still uses it.
-7. Before deleting any merged remote branch, call `kanna_is_dependent_tasks_exist` with the merged task id. If it returns `exists: true`, do not delete the remote branch; report the dependent tasks instead. If MCP is unavailable, use `kanna-cli task dependent-tasks-exist --task-id "<task_id>"`. A blocker that has reached `pr` can already have dependent tasks stacked on its branch before the dependent has its own PR. If a manual merge request did not include a task id, leave the remote branch in place and report that cleanup needs a Kanna task id.
-8. After the full detected stack has merged, delete the stack branches that are no longer needed.
+6. For stacked PRs, retarget direct children onto the next live parent or target with `gh pr edit --base` when a PR URL exists.
+7. Leave every merged branch in place, including after the full detected stack has merged. Never delete a local or remote branch as merge cleanup, and never pass a branch-deletion flag such as `--delete-branch` to `gh pr merge` or another merge command.
 
 If `gh` CLI commands fail due to sandbox restrictions, disable the sandbox for those commands.
 
