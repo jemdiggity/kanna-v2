@@ -799,19 +799,19 @@ the full message text, `delivered_at`, the `stage` the task was on, the
 `stage_run` that was running at the time (null when none was), and a `source`.
 The row is the record; `task.input_delivered` is only its announcement.
 
-- **Sources.** `notify` is the only label the server assigns from its own
-  knowledge — it generated that message. `operator` and `manager` are
-  **declared by the caller and not verified**: the endpoint cannot tell a human
-  typing on mobile from an orchestrating agent's MCP call, and a distinction it
-  cannot observe is better admitted than invented. A caller may declare
-  `operator` or `manager`; declaring `notify` is a 400. Omitting the field
-  records `unspecified`, which is what desktop, mobile, and CLI deliveries do.
-  What every record proves regardless of label is that text entered the session
-  from outside it, at a recorded time, with the recorded content.
-- **Completion notifications are recorded**, labelled `notify`, against the task
-  that received them. Their delivery semantics are unchanged: the record is
-  written after the daemon accepted the message and cannot fail the
-  notification.
+- **Sources.** `operator` and `manager` are **declared by the caller and not
+  verified**: the endpoint cannot tell a human typing on mobile from an
+  orchestrating agent's MCP call, and a distinction it cannot observe is better
+  admitted than invented. A caller may declare `operator` or `manager`;
+  declaring `notify` is a 400. Omitting the field records `unspecified`, which
+  is what desktop, mobile, and CLI deliveries do. Historical rows may carry the
+  retired server-assigned `notify` source, but no new delivery uses it. What
+  every record proves regardless of label is that text entered the session from
+  outside it, at a recorded time, with the recorded content.
+- **Completion is not task input.** The server does not inject completion
+  messages into another task's PTY or append completion rows to `task_input`.
+  Managers observe completion through `kanna_wait_events` for fan-out or
+  `kanna_wait_task` for a single task, backed by durable run and task events.
 - **Held deliveries are not recorded.** An `input_held_by_draft` response means
   the message is queued at the daemon and has not reached the agent, so no row
   asserts it did. If the producer later declares a boundary, the daemon writes

@@ -377,5 +377,5 @@ Worth internalizing — most architectural mistakes violate one of these:
 - **Built-in agent/workflow definitions** → `.kanna/` files bundled as Tauri
   resources, never TypeScript string constants.
 - **Packaged app version** → the root `VERSION` file.
-- **Completion notification** → server/daemon boundary, never the desktop
-  frontend event bridge.
+- **Task completion observation** → durable server run/task events and the MCP
+  wait surfaces, never another task's PTY or the desktop frontend event bridge.
