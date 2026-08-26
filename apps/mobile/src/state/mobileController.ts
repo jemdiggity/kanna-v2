@@ -44,7 +44,10 @@ import type {
   TaskCreationAttempt
 } from "./sessionStore";
 import { MAX_TERMINAL_SCROLLBACK_CHARS } from "./terminalOutputBuffer";
-import type { PersistedSessionContext } from "./sessionPersistence";
+import type {
+  PersistedSessionContext,
+  TrustedDesktopRecord
+} from "./sessionPersistence";
 import { isTaskBlocked } from "../lib/api/taskIdentity";
 import { resolveAgentProviderForDesktop } from "../lib/api/agentProviders";
 import { buildMachineInventory } from "./machineInventory";
@@ -178,6 +181,7 @@ export interface MobileControllerOptions {
   persistSessionContext?: (context?: PersistedSessionContext) => Promise<void>;
   pairingService?: MachinePairingService;
   replaceClientForTrustChange?: () => void;
+  revokeAnonymousPushPairing?: (desktop: TrustedDesktopRecord) => Promise<void>;
   subscribeTaskRouteChanges?: (listener: () => void) => () => void;
   /** Phone-local pin/dismiss record. Defaults to AsyncStorage. */
   taskListPreferencesStore?: TaskListPreferencesStore;
@@ -2333,10 +2337,18 @@ export function createMobileController(
     },
 
     async removeManualMachine(desktopId) {
-      const nextTrustedDesktops = store
-        .getState()
-        .trustedDesktops
+      const currentTrustedDesktops = store.getState().trustedDesktops;
+      const removedDesktop = currentTrustedDesktops.find(
+        (desktop) => desktop.desktopId === desktopId
+      );
+      const nextTrustedDesktops = currentTrustedDesktops
         .filter((desktop) => desktop.desktopId !== desktopId);
+      if (
+        removedDesktop?.desktopPushIdentity
+        && removedDesktop.pushPairingCert
+      ) {
+        await options.revokeAnonymousPushPairing?.(removedDesktop);
+      }
       await options.persistSessionContext?.({
         ...store.getPersistedContext(),
         trustedDesktops: nextTrustedDesktops

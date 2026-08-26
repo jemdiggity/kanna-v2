@@ -14,6 +14,7 @@ pub const MAX_FAILED_CLAIMS: u8 = 5;
 pub const PUSH_PAIRING_CERT_TTL_MS: u64 = 730 * 24 * 60 * 60 * 1_000;
 const ANONYMOUS_PUSH_IDENTITY_VERSION: u8 = 1;
 const PUSH_PAIRING_CERT_DOMAIN: &[u8] = b"kanna.push-pairing-cert.v1\0";
+const ANONYMOUS_PUSH_AUTH_DOMAIN: &[u8] = b"kanna.relay-auth.v1\0";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TrustedDevice {
@@ -32,9 +33,18 @@ pub struct TrustedDevice {
     pub push_identity_public_key: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingAnonymousPushRevocation {
+    pub desktop_public_key: String,
+    pub device_id: String,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct PairingStore {
     pub trusted_devices: HashMap<String, Vec<TrustedDevice>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_anonymous_push_revocations: Vec<PendingAnonymousPushRevocation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -265,6 +275,45 @@ impl PairingStore {
             .get(desktop_id)
             .map(|devices| devices.iter().any(|device| device.device_id == device_id))
             .unwrap_or(false)
+    }
+
+    pub fn remove_trusted_device(&mut self, desktop_id: &str, device_id: &str) -> bool {
+        let Some(devices) = self.trusted_devices.get_mut(desktop_id) else {
+            return false;
+        };
+        let Some(index) = devices
+            .iter()
+            .position(|device| device.device_id == device_id)
+        else {
+            return false;
+        };
+        let removed = devices.remove(index);
+        if devices.is_empty() {
+            self.trusted_devices.remove(desktop_id);
+        }
+        if let Some(desktop_public_key) = removed.push_identity_public_key {
+            let revocation = PendingAnonymousPushRevocation {
+                desktop_public_key,
+                device_id: removed.device_id,
+            };
+            if !self
+                .pending_anonymous_push_revocations
+                .contains(&revocation)
+            {
+                self.pending_anonymous_push_revocations.push(revocation);
+            }
+        }
+        true
+    }
+
+    pub fn acknowledge_anonymous_push_revocation(
+        &mut self,
+        revocation: &PendingAnonymousPushRevocation,
+    ) -> bool {
+        let before = self.pending_anonymous_push_revocations.len();
+        self.pending_anonymous_push_revocations
+            .retain(|pending| pending != revocation);
+        self.pending_anonymous_push_revocations.len() != before
     }
 
     fn trusted_device_mut(
@@ -576,6 +625,46 @@ fn load_or_create_anonymous_push_identity(config: &Config) -> Result<SigningKey,
         }
         Err(error) => Err(format!("failed to create {}: {error}", path.display())),
     }
+}
+
+/// Sign a relay-issued one-time challenge with the existing anonymous push
+/// identity. Authentication never creates or rotates pairing identity state.
+pub(crate) fn sign_anonymous_push_auth_challenge(
+    config: &Config,
+    nonce: &str,
+) -> Result<(String, String), String> {
+    let path = anonymous_push_identity_path(config)?;
+    let identity = read_anonymous_push_identity(&path).map_err(|error| {
+        format!(
+            "failed to read anonymous push identity {}: {error}",
+            path.display()
+        )
+    })?;
+    let nonce = URL_SAFE_NO_PAD
+        .decode(nonce)
+        .map_err(|error| format!("relay challenge is not valid base64url: {error}"))?;
+    if nonce.len() != 32 {
+        return Err("relay challenge must contain 32 bytes".to_string());
+    }
+    let mut payload = ANONYMOUS_PUSH_AUTH_DOMAIN.to_vec();
+    payload.extend(nonce);
+    let signature = identity.sign(&payload);
+    Ok((
+        encode_public_key(&identity),
+        URL_SAFE_NO_PAD.encode(signature.to_bytes()),
+    ))
+}
+
+pub(crate) fn anonymous_push_public_key(config: &Config) -> Result<String, String> {
+    let path = anonymous_push_identity_path(config)?;
+    read_anonymous_push_identity(&path)
+        .map(|identity| encode_public_key(&identity))
+        .map_err(|error| {
+            format!(
+                "failed to read anonymous push identity {}: {error}",
+                path.display()
+            )
+        })
 }
 
 fn read_anonymous_push_identity(path: &Path) -> Result<SigningKey, std::io::Error> {

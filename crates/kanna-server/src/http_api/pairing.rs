@@ -10,6 +10,31 @@ use axum::{Extension, Json};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+pub(super) async fn remove_trusted_device(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    tunneled: Option<Extension<TunneledHttpInvoke>>,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(device_id): axum::extract::Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    if !peer.ip().is_loopback() || tunneled.is_some() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "trusted devices can only be removed from the desktop app".to_string(),
+        ));
+    }
+    if device_id.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "device id is required".to_string()));
+    }
+    match state.remove_trusted_device(&device_id).await {
+        Ok(true) => Ok(StatusCode::NO_CONTENT),
+        Ok(false) => Err((
+            StatusCode::NOT_FOUND,
+            "trusted device not found".to_string(),
+        )),
+        Err(error) => Err((StatusCode::INTERNAL_SERVER_ERROR, error)),
+    }
+}
+
 pub(super) async fn create_pairing_session(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     tunneled: Option<Extension<TunneledHttpInvoke>>,

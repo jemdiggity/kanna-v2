@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { pathToFileURL } from "node:url";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
@@ -78,6 +79,18 @@ import {
   type RelayStatsAudience,
 } from "./relayStatus.js";
 import { RELAY_STATUS_DASHBOARD_HTML } from "./statusDashboardPage.js";
+import {
+  AnonymousPushRefusal,
+  anonymousAuthPayload,
+  anonymousDesktopId,
+  createPairingRequestAdmission,
+  publishAnonymousPush,
+  registerAnonymousPushPairing,
+  revokeAnonymousPushDevice,
+  revokeAnonymousPushPairing,
+  validateAnonymousPushPairing,
+  verifyAnonymousSignature,
+} from "./anonymousPush.js";
 
 const PORT = parseInt(process.env.PORT || "8080", 10);
 const BUILD_COMMIT = resolveBuildCommit(process.env);
@@ -96,10 +109,19 @@ const cloudTaskPublicationStore = createFirestoreCloudTaskPublicationStore();
 /**
  * Read the full request body as a string.
  */
-function readBody(req: IncomingMessage): Promise<string> {
+function readBody(req: IncomingMessage, maxBytes = 64 * 1024): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    let byteLength = 0;
+    req.on("data", (chunk: Buffer) => {
+      byteLength += chunk.length;
+      if (byteLength > maxBytes) {
+        reject(new AnonymousPushRefusal(413, "payload_too_large", "Request body is oversized"));
+        req.resume();
+        return;
+      }
+      chunks.push(chunk);
+    });
     req.on("end", () => resolve(Buffer.concat(chunks).toString()));
     req.on("error", reject);
   });
@@ -358,9 +380,37 @@ export const server = createServer(async (req, res) => {
       return;
     }
 
+    if (
+      (req.method === "POST" || req.method === "DELETE")
+      && req.url === "/push/pairings"
+    ) {
+      const admit = createPairingRequestAdmission(clientAddressForRequest(req), req.method);
+      const body = await readBody(req, 8_192);
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(body);
+      } catch {
+        jsonResponse(res, 400, { error: "Invalid JSON" });
+        return;
+      }
+      if (req.method === "POST") {
+        const pairing = validateAnonymousPushPairing(parsed);
+        await registerAnonymousPushPairing(pairing, Date.now(), undefined, admit);
+      } else {
+        const pairing = validateAnonymousPushPairing(parsed, Date.now(), false);
+        await revokeAnonymousPushPairing(pairing, undefined, admit);
+      }
+      jsonResponse(res, 200, { ok: true });
+      return;
+    }
+
     // 404 for everything else
     jsonResponse(res, 404, { error: "Not found" });
   } catch (err) {
+    if (err instanceof AnonymousPushRefusal) {
+      jsonResponse(res, err.status, { error: err.message, code: err.code });
+      return;
+    }
     if (err instanceof AccountDeletionInProgressError) {
       jsonResponse(res, 409, { error: err.message });
       return;
@@ -429,6 +479,9 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
   let role: "phone" | "server" | null = null;
   let desktopId: string | null = null;
   let serverAuthProof: ServerAuthProof | null = null;
+  let principalKind: "account" | "anonymousDesktop" | null = null;
+  let anonymousPubKey: string | null = null;
+  let pendingAnonymousNonce: string | null = null;
   // Null until the handshake resolves an identity. Every entitlement check the
   // session makes afterwards goes through it, so a phone token's
   // `email_verified` claim keeps applying to later requests, not just to auth.
@@ -493,6 +546,8 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         desktop_id?: string;
         desktop_secret?: string;
         tunnel_id?: string;
+        anon_pub_key?: string;
+        signature?: string;
       };
 
       try {
@@ -503,18 +558,52 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         return;
       }
 
-      if (msg.type !== "auth") {
+      if (pendingAnonymousNonce) {
+        if (
+          msg.type !== "auth_proof"
+          || !anonymousPubKey
+          || typeof msg.signature !== "string"
+          || !verifyAnonymousSignature(
+            anonymousPubKey,
+            anonymousAuthPayload(pendingAnonymousNonce),
+            msg.signature,
+          )
+        ) {
+          ws.close(4005, "Anonymous authentication failed");
+          clearTimeout(authTimer);
+          return;
+        }
+        desktopId = anonymousDesktopId(anonymousPubKey);
+        userId = `anonymous:${desktopId}`;
+        role = "server";
+        principalKind = "anonymousDesktop";
+        pendingAnonymousNonce = null;
+      } else if (msg.type !== "auth") {
         ws.close(4003, "First message must be auth");
         clearTimeout(authTimer);
         return;
-      }
-
-      if (msg.id_token) {
+      } else if (msg.anon_pub_key) {
+        if (msg.tunnel_id || msg.anon_pub_key.length > 128) {
+          ws.close(4004, "Anonymous desktops cannot open tunnels");
+          clearTimeout(authTimer);
+          return;
+        }
+        anonymousPubKey = msg.anon_pub_key;
+        pendingAnonymousNonce = randomBytes(32).toString("base64url");
+        const challenge = JSON.stringify({
+          type: "auth_challenge",
+          nonce: pendingAnonymousNonce,
+        });
+        ws.send(challenge);
+        recordBytesSent(ws, "control", Buffer.byteLength(challenge));
+        return;
+      } else if (msg.id_token) {
         // Phone client auth
         const principal = await verifyPhoneIdentity(msg.id_token);
         userId = principal?.userId ?? null;
         phoneEmailVerified = principal?.emailVerified ?? null;
         role = "phone";
+        principalKind = "account";
       } else if (msg.desktop_id && msg.desktop_secret) {
         const principal = await verifyDesktopCredentials(
           msg.desktop_id,
@@ -528,6 +617,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
           desktopSecret: msg.desktop_secret,
         } : null;
         role = "server";
+        principalKind = "account";
       } else if (msg.device_token) {
         // Server (kanna-server) auth
         userId = await verifyDeviceToken(msg.device_token);
@@ -538,6 +628,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
           deviceToken: msg.device_token,
         };
         role = "server";
+        principalKind = "account";
       } else {
         ws.close(4004, "Missing id_token, device_token, or desktop credentials");
         clearTimeout(authTimer);
@@ -554,14 +645,17 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
       // (`docs/specs/accounts-and-billing.md`, Decision 5). Both session kinds
       // resolve to a uid, so both are enforced. With the flag off this resolves
       // to an unrestricted session without reading anything.
-      entitlementSubject = { userId, emailVerified: phoneEmailVerified };
-      const sessionEntitlement = await resolveSessionEntitlement(entitlementSubject);
+      const sessionEntitlement = principalKind === "anonymousDesktop"
+        ? null
+        : await resolveSessionEntitlement(
+          entitlementSubject = { userId, emailVerified: phoneEmailVerified },
+        );
 
       if (role === "server" && desktopId && msg.tunnel_id) {
         // A tunnel socket carries the payload the phone's `tunnel_request`
         // already had to be entitled to ask for. Refusing it here as well is
         // what makes the tunnel closed rather than merely unadvertised.
-        if (!sessionEntitlement.grants("cloud_relay")) {
+        if (!sessionEntitlement?.grants("cloud_relay")) {
           clearTimeout(authTimer);
           ws.close(ENTITLEMENT_REQUIRED_CODE, ENTITLEMENT_REQUIRED_ERROR);
           return;
@@ -607,7 +701,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
       // Register the connection with the router
       if (role === "phone") {
         setPhoneConnection(userId, ws);
-      } else {
+      } else if (principalKind === "account") {
         setServerConnection(userId, desktopId ?? "default", ws, serverAuthProof);
       }
       identifyByteAccount(ws, {
@@ -627,29 +721,32 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         type: "auth_ok",
         userId,
         capabilities: {
-          tunnelServices: sessionEntitlement.grants("cloud_relay")
+          tunnelServices: sessionEntitlement?.grants("cloud_relay")
             ? ["ksp", "task-transfer"]
             : [],
+          ...(principalKind === "anonymousDesktop" ? {
+            mobileNotifications: { version: 1 },
+          } : {}),
           ...(serverAuthProof?.kind === "desktop" ? {
-            ...(sessionEntitlement.grants("cloud_task_index") ? {
+            ...(sessionEntitlement?.grants("cloud_task_index") ? {
               taskSnapshotPublication: {
                 version: 2,
                 authModes: ["desktop-secret"],
               },
             } : {}),
-            ...(sessionEntitlement.grants("cloud_relay") ? {
+            ...(sessionEntitlement?.grants("cloud_relay") ? {
               mobileNotifications: {
                 version: 1,
               },
             } : {}),
-            ...(sessionEntitlement.grants("remote_task_control") ? {
+            ...(sessionEntitlement?.grants("remote_task_control") ? {
               desktopRouting: {
                 version: 1,
               },
             } : {}),
           } : {}),
         },
-        ...(sessionEntitlement.snapshot
+        ...(sessionEntitlement?.snapshot
           ? { entitlement: sessionEntitlement.snapshot }
           : {}),
       });
@@ -669,6 +766,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         id?: unknown;
         snapshot?: unknown;
         notification?: unknown;
+        deviceId?: unknown;
       } | null = null;
       try {
         publication = JSON.parse(data) as {
@@ -676,6 +774,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
           id?: unknown;
           snapshot?: unknown;
           notification?: unknown;
+          deviceId?: unknown;
         };
       } catch {
         // Non-publication messages retain the router's existing behavior.
@@ -683,6 +782,29 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
       // That parse already identified the message, so the odometer classifies
       // it without a second one.
       recordBytesReceived(ws, routedMessageByteClass(userId!, publication), receivedByteLength);
+      if (principalKind === "anonymousDesktop" && publication?.type === "invoke") {
+        sendErrorResponse(ws, publication.id, "anonymous desktop principal cannot invoke");
+        return;
+      }
+      if (principalKind === "anonymousDesktop" && publication?.type === "tunnel_request") {
+        sendErrorResponse(ws, publication.id, "anonymous desktop principal cannot open tunnels");
+        return;
+      }
+      if (principalKind === "anonymousDesktop" && publication?.type === "anonymous_push_revoke") {
+        if (!anonymousPubKey || typeof publication.deviceId !== "string") {
+          sendErrorResponse(ws, publication.id, "anonymous push revocation is malformed");
+          return;
+        }
+        await revokeAnonymousPushDevice(anonymousPubKey, publication.deviceId);
+        const response = JSON.stringify({
+          type: "response",
+          id: publication.id ?? null,
+          data: null,
+        });
+        ws.send(response);
+        recordBytesSent(ws, "control", Buffer.byteLength(response));
+        return;
+      }
       if (
         publication?.type === "invoke"
         && serverAuthProof?.kind === "desktop"
@@ -731,7 +853,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
             ...(code === undefined ? {} : { code }),
           });
         };
-        if (serverAuthProof?.kind !== "desktop") {
+        if (principalKind !== "anonymousDesktop" && serverAuthProof?.kind !== "desktop") {
           sendAck(false, undefined, "desktop-secret authentication is required");
           return;
         }
@@ -739,7 +861,13 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
           sendAck(false, undefined, "mobile notification is malformed or oversized");
           return;
         }
-        if (!await revalidateServerAuth(serverAuthProof, userId!, desktopId)) {
+        if (
+          principalKind !== "anonymousDesktop"
+          && (
+            !serverAuthProof
+            || !await revalidateServerAuth(serverAuthProof, userId!, desktopId)
+          )
+        ) {
           sendAck(false, undefined, "desktop credential is no longer authorized");
           ws.close(4005, "Authentication revoked");
           return;
@@ -748,7 +876,10 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         // Re-resolved per notification rather than reused from the handshake,
         // which is what bounds revocation by the cache TTL instead of by the
         // desktop's next reconnect.
-        if (!await sessionHasCapability(entitlementSubject!, "cloud_relay")) {
+        if (
+          principalKind !== "anonymousDesktop"
+          && !await sessionHasCapability(entitlementSubject!, "cloud_relay")
+        ) {
           sendAck(false, undefined, ENTITLEMENT_REQUIRED_ERROR, ENTITLEMENT_REQUIRED_CODE);
           return;
         }
@@ -759,12 +890,33 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
           sendAck(false, undefined, "mobile notification is malformed or oversized");
           return;
         }
-        await publishMobileNotification({
-          userId: userId!,
-          desktopId,
-          notification,
-          sendAck: ({ ok, delivery, error }) => sendAck(ok, delivery, error),
-        });
+        if (principalKind === "anonymousDesktop") {
+          if (!anonymousPubKey) {
+            sendAck(false, undefined, "anonymous desktop identity is unavailable");
+            return;
+          }
+          try {
+            const delivery = await publishAnonymousPush({
+              desktopPubKey: anonymousPubKey,
+              notification,
+            });
+            sendAck(true, delivery);
+          } catch (error) {
+            if (error instanceof AnonymousPushRefusal) {
+              sendAck(false, undefined, error.message, error.status);
+            } else {
+              console.warn(`[push] Anonymous notification delivery failed for ${desktopId}`);
+              sendAck(false, undefined, "anonymous notification delivery failed; retry later");
+            }
+          }
+        } else {
+          await publishMobileNotification({
+            userId: userId!,
+            desktopId,
+            notification,
+            sendAck: ({ ok, delivery, error }) => sendAck(ok, delivery, error),
+          });
+        }
         return;
       }
       if (publication?.type === "task_snapshot_publish") {
@@ -826,6 +978,10 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
           console.warn(`[cloud] Task snapshot publication rejected for ${userId}/${desktopId}: ${message}`);
           sendAck(false, message);
         }
+        return;
+      }
+      if (principalKind === "anonymousDesktop") {
+        sendErrorResponse(ws, publication?.id, "anonymous desktop principal is notification-only");
         return;
       }
     } else {

@@ -283,6 +283,31 @@ it.
 The two per-IP bounds, for the case where a shared NAT trips one of them. Same
 parsing rules, and the deploy sets neither.
 
+## Anonymous mobile push
+
+LAN-paired phones register their own FCM token at `POST /push/pairings` with
+the desktop-signed pairing certificate; token refresh repeats the same request,
+and `DELETE /push/pairings` revokes it. The Admin-only
+`anonymousPushPairings` collection stores one binding per hashed desktop key
+and hashed device id. Opportunistic GC removes bindings that have neither been
+refreshed nor delivered successfully for 180 days.
+
+Signed-out desktops prove the corresponding Ed25519 key through a fresh
+WebSocket challenge and receive only the `mobileNotifications` capability.
+They are never entered into the tunnel/router maps, and invoke, tunnel, and
+snapshot messages are refused before entitlement handling. The default abuse
+bounds are 10 devices per desktop key, 20 desktop keys per token, 30 publishes
+per desktop/minute and 500/day, 60 publishes per token/minute and 1,000/day,
+plus 30 pairing registrations per IP/minute. These publish limits are
+in-memory and intentionally reset with the relay process.
+
+The rate defaults can be lowered during an incident or controlled load test
+with `KANNA_ANON_PUSH_DESKTOP_PER_MINUTE`,
+`KANNA_ANON_PUSH_DESKTOP_PER_DAY`, `KANNA_ANON_PUSH_TOKEN_PER_MINUTE`,
+`KANNA_ANON_PUSH_TOKEN_PER_DAY`, and
+`KANNA_ANON_PUSH_REGISTRATIONS_PER_IP_MINUTE`. Invalid or non-positive values
+fall back to the defaults. The deploy sets none of them.
+
 ## Entitlement enforcement
 
 ### `KANNA_RELAY_ENTITLEMENT_ENFORCEMENT`

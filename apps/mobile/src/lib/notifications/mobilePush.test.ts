@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { TaskSummary } from "../api/types";
 import {
+  createAnonymousPushBindingCoordinator,
   parseNotificationTaskTarget,
   pushRegistrationUrl,
   pushUnregistrationUrl,
@@ -15,6 +16,7 @@ describe("mobile push notifications", () => {
     const stopOpened = vi.fn();
     const stopResponse = vi.fn();
     const fetchImpl = vi.fn(async () => new Response(null, { status: 200 }));
+    const onTaskOpen = vi.fn();
     const sdk = {
       setNotificationHandler: vi.fn(),
       requestPermission: vi.fn(async () => 1),
@@ -31,7 +33,7 @@ describe("mobile push notifications", () => {
     const stop = await startMobilePushNotifications({
       deviceId: "mobile-device-1",
       getIdToken: async () => "firebase-id-token",
-      onTaskOpen: vi.fn(),
+      onTaskOpen,
       relayUrl: "wss://relay-staging.kanna.build",
       fetchImpl,
       sdk
@@ -121,6 +123,269 @@ describe("mobile push notifications", () => {
         deviceToken: "fcm-after-reinstall"
       })
     ]);
+  });
+
+  it("registers, rotates, and revokes a signed-out phone's paired FCM token", async () => {
+    let refreshToken: ((token: string) => void) | null = null;
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 200 }));
+    const onTaskOpen = vi.fn();
+    const pairing = {
+      desktopId: "desktop-1",
+      desktopPushIdentity: {
+        publicKey: "desktop-public-key",
+        relayUrl: "wss://relay-staging.kanna.build",
+        environment: "staging"
+      },
+      pushPairingCert: {
+        deviceId: "mobile-device-1",
+        issuedAt: 1_000,
+        expiresAt: 2_000,
+        signature: "desktop-signature"
+      }
+    };
+    const stop = await startMobilePushNotifications({
+      deviceId: "mobile-device-1",
+      getIdToken: async () => null,
+      onTaskOpen,
+      relayUrl: "wss://relay-staging.kanna.build",
+      anonymousPairings: [pairing],
+      fetchImpl,
+      sdk: {
+        setNotificationHandler: vi.fn(),
+        requestPermission: vi.fn(async () => 1),
+        getToken: vi.fn(async () => "anonymous-token-1"),
+        onTokenRefresh: vi.fn((listener: (token: string) => void) => {
+          refreshToken = listener;
+          return () => undefined;
+        }),
+        getInitialNotification: vi.fn(async () => ({
+          data: {
+            kannaNotificationVersion: "1",
+            kind: "task",
+            desktopId: "desktop-public-key",
+            taskId: "task-1"
+          }
+        })),
+        onNotificationOpened: vi.fn(() => () => undefined),
+        onNotificationResponse: vi.fn(() => () => undefined)
+      }
+    });
+
+    expect(onTaskOpen).toHaveBeenCalledWith({
+      desktopId: "desktop-1",
+      taskId: "task-1"
+    });
+
+    expect(fetchImpl.mock.calls[0]).toEqual([
+      "https://relay-staging.kanna.build/push/pairings",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          desktopPubKey: "desktop-public-key",
+          deviceId: "mobile-device-1",
+          fcmToken: "anonymous-token-1",
+          cert: pairing.pushPairingCert
+        })
+      })
+    ]);
+    refreshToken?.("anonymous-token-2");
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(2));
+    expect(fetchImpl.mock.calls[1]?.[1]).toEqual(expect.objectContaining({
+      method: "POST",
+      body: expect.stringContaining("anonymous-token-2")
+    }));
+
+    stop();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+
+    const coordinator = createAnonymousPushBindingCoordinator(fetchImpl);
+    coordinator.begin([pairing]);
+    await coordinator.revoke(pairing);
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    expect(fetchImpl.mock.calls[2]?.[1]).toEqual(expect.objectContaining({
+      method: "DELETE",
+      body: JSON.stringify({
+        desktopPubKey: "desktop-public-key",
+        deviceId: "mobile-device-1",
+        cert: pairing.pushPairingCert
+      })
+    }));
+  });
+
+  it("revokes a pairing before FCM token initialization", async () => {
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 200 }));
+    const pairing = {
+      desktopId: "desktop-1",
+      desktopPushIdentity: {
+        publicKey: "desktop-public-key",
+        relayUrl: "wss://relay-staging.kanna.build",
+        environment: "staging"
+      },
+      pushPairingCert: {
+        deviceId: "mobile-device-1",
+        issuedAt: 1_000,
+        expiresAt: 2_000,
+        signature: "desktop-signature"
+      }
+    };
+    const coordinator = createAnonymousPushBindingCoordinator(fetchImpl);
+    coordinator.begin([pairing]);
+
+    await coordinator.revoke(pairing);
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "https://relay-staging.kanna.build/push/pairings",
+      expect.objectContaining({
+        method: "DELETE",
+        body: JSON.stringify({
+          desktopPubKey: "desktop-public-key",
+          deviceId: "mobile-device-1",
+          cert: pairing.pushPairingCert
+        })
+      })
+    );
+  });
+
+  it("rejects a refused revocation so pairing trust remains retriable", async () => {
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 409 }));
+    const pairing = {
+      desktopId: "desktop-1",
+      desktopPushIdentity: {
+        publicKey: "desktop-public-key",
+        relayUrl: "wss://relay-staging.kanna.build",
+        environment: "staging"
+      },
+      pushPairingCert: {
+        deviceId: "mobile-device-1",
+        issuedAt: 1_000,
+        expiresAt: 2_000,
+        signature: "stale-certificate"
+      }
+    };
+    const coordinator = createAnonymousPushBindingCoordinator(fetchImpl);
+    coordinator.begin([pairing]);
+
+    await expect(coordinator.revoke(pairing))
+      .rejects.toThrow("Anonymous push pairing revocation failed (409).");
+  });
+
+  it("serializes removal before certificate replacement so stale cleanup cannot win", async () => {
+    let resolveDelete: (() => void) | null = null;
+    const bindings = new Map<string, string>();
+    const requests: string[] = [];
+    const fetchImpl = vi.fn(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as {
+        desktopPubKey: string;
+        deviceId: string;
+        cert: { signature: string };
+      };
+      const key = `${body.desktopPubKey}:${body.deviceId}`;
+      requests.push(`${init.method}:${body.cert.signature}`);
+      if (init.method === "DELETE") {
+        await new Promise<void>((resolve) => {
+          resolveDelete = resolve;
+        });
+        bindings.delete(key);
+      } else {
+        bindings.set(key, body.cert.signature);
+      }
+      return new Response(null, { status: 200 });
+    });
+    const oldPairing = {
+      desktopId: "desktop-1",
+      desktopPushIdentity: {
+        publicKey: "desktop-public-key",
+        relayUrl: "wss://relay-staging.kanna.build",
+        environment: "staging"
+      },
+      pushPairingCert: {
+        deviceId: "mobile-device-1",
+        issuedAt: 1_000,
+        expiresAt: 2_000,
+        signature: "old-certificate"
+      }
+    };
+    const replacement = {
+      ...oldPairing,
+      pushPairingCert: {
+        ...oldPairing.pushPairingCert,
+        expiresAt: 3_000,
+        signature: "new-certificate"
+      }
+    };
+    const coordinator = createAnonymousPushBindingCoordinator(fetchImpl);
+    const firstGeneration = coordinator.begin([oldPairing]);
+    await coordinator.register(firstGeneration, "fcm-current");
+
+    const removal = coordinator.revoke(oldPairing);
+    await vi.waitFor(() => expect(resolveDelete).not.toBeNull());
+    const replacementGeneration = coordinator.begin([replacement]);
+    const refresh = coordinator.register(replacementGeneration, "fcm-current");
+    resolveDelete?.();
+    await Promise.all([removal, refresh]);
+
+    expect(requests).toEqual([
+      "POST:old-certificate",
+      "DELETE:old-certificate",
+      "POST:new-certificate"
+    ]);
+    expect(bindings.get("desktop-public-key:mobile-device-1"))
+      .toBe("new-certificate");
+  });
+
+  it("ignores an obsolete effect registration and never revokes on effect cleanup", async () => {
+    let resolveOldToken: ((token: string) => void) | null = null;
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 200 }));
+    const coordinator = createAnonymousPushBindingCoordinator(fetchImpl);
+    const pairing = {
+      desktopId: "desktop-1",
+      desktopPushIdentity: {
+        publicKey: "desktop-public-key",
+        relayUrl: "wss://relay-staging.kanna.build",
+        environment: "staging"
+      },
+      pushPairingCert: {
+        deviceId: "mobile-device-1",
+        issuedAt: 1_000,
+        expiresAt: 2_000,
+        signature: "current-certificate"
+      }
+    };
+    const start = (getToken: () => Promise<string>) => startMobilePushNotifications({
+      deviceId: "mobile-device-1",
+      getIdToken: async () => null,
+      onTaskOpen: vi.fn(),
+      relayUrl: "wss://relay-staging.kanna.build",
+      anonymousPairings: [pairing],
+      anonymousBindingCoordinator: coordinator,
+      fetchImpl,
+      sdk: {
+        setNotificationHandler: vi.fn(),
+        requestPermission: vi.fn(async () => 1),
+        getToken,
+        onTokenRefresh: vi.fn(() => () => undefined),
+        getInitialNotification: vi.fn(async () => null),
+        onNotificationOpened: vi.fn(() => () => undefined),
+        onNotificationResponse: vi.fn(() => () => undefined)
+      }
+    });
+    const obsolete = start(() => new Promise((resolve) => {
+      resolveOldToken = resolve;
+    }));
+    await vi.waitFor(() => expect(resolveOldToken).not.toBeNull());
+    const currentStop = await start(async () => "current-token");
+    resolveOldToken?.("obsolete-token");
+    const obsoleteStop = await obsolete;
+    obsoleteStop();
+    currentStop();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl.mock.calls[0]?.[1]).toEqual(expect.objectContaining({
+      method: "POST",
+      body: expect.stringContaining("current-token")
+    }));
   });
 
   it("accepts only the versioned task hint and ignores unknown payloads", () => {

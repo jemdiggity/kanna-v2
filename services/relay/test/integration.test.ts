@@ -1,5 +1,11 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
+import {
+  createHash,
+  generateKeyPairSync,
+  randomBytes,
+  sign,
+  type KeyObject,
+} from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -19,6 +25,13 @@ import {
   createFirestoreCloudTaskPublicationStore,
   handleCloudTaskPublication,
 } from "../src/cloudTaskPublication.js";
+import {
+  anonymousDesktopId,
+  garbageCollectAnonymousPushPairings,
+  reconcileInvalidAnonymousPushToken,
+  registerAnonymousPushPairing,
+  type AnonymousPushPairingRequest,
+} from "../src/anonymousPush.js";
 
 const TEST_EMAIL = "upvote.sieve.7t@icloud.com";
 const TEST_PASSWORD = "password123";
@@ -31,6 +44,7 @@ const SECRET_DESKTOP_SECRET = "desktop-secret-for-relay";
 const ROUTING_TARGET_DESKTOP_ID = "desktop-secret-routing-target";
 const ROUTING_TARGET_DESKTOP_SECRET = "desktop-secret-routing-target-secret";
 const E2E_SHUTDOWN_TOKEN = "relay-integration-shutdown-capability";
+const ANONYMOUS_PUSH_CAPTURE_COLLECTION = "e2eAnonymousPushDeliveries";
 /**
  * The relay caches a successful desktop-credential validation for this long,
  * so a revocation lands on an already-open socket only once it expires.
@@ -450,6 +464,96 @@ function connectAndAuth(
   });
 }
 
+interface AnonymousPushTestIdentity {
+  publicKey: string;
+  privateKey: KeyObject;
+}
+
+interface AnonymousPushTestCertificate {
+  deviceId: string;
+  issuedAt: number;
+  expiresAt: number;
+  signature: string;
+}
+
+function createAnonymousPushIdentity(): AnonymousPushTestIdentity {
+  const pair = generateKeyPairSync("ed25519");
+  const spki = pair.publicKey.export({ format: "der", type: "spki" });
+  return {
+    publicKey: Buffer.from(spki).subarray(-32).toString("base64url"),
+    privateKey: pair.privateKey,
+  };
+}
+
+function createAnonymousPushCertificate(
+  identity: AnonymousPushTestIdentity,
+  deviceId: string,
+  issuedAt = Date.now() - 1_000,
+): AnonymousPushTestCertificate {
+  const expiresAt = issuedAt + 730 * 24 * 60 * 60_000;
+  const payload = Buffer.concat([
+    Buffer.from("kanna.push-pairing-cert.v1\0", "utf8"),
+    Buffer.from(JSON.stringify({ deviceId, issuedAt, expiresAt }), "utf8"),
+  ]);
+  return {
+    deviceId,
+    issuedAt,
+    expiresAt,
+    signature: sign(null, payload, identity.privateKey).toString("base64url"),
+  };
+}
+
+function anonymousPairingBody(
+  identity: AnonymousPushTestIdentity,
+  cert: AnonymousPushTestCertificate,
+  fcmToken: string,
+): AnonymousPushPairingRequest {
+  return {
+    desktopPubKey: identity.publicKey,
+    deviceId: cert.deviceId,
+    fcmToken,
+    cert,
+  };
+}
+
+function connectAndAuthAnonymous(
+  identity: AnonymousPushTestIdentity,
+): Promise<{ ws: WebSocket; capabilities: Record<string, unknown> }> {
+  return new Promise((resolveConnection, reject) => {
+    const ws = new WebSocket(relayUrl());
+    const timeout = setTimeout(() => {
+      ws.close();
+      reject(new Error("Anonymous auth timed out"));
+    }, 5_000);
+    ws.on("open", () => {
+      ws.send(JSON.stringify({ type: "auth", anon_pub_key: identity.publicKey }));
+    });
+    ws.on("message", (raw: Buffer) => {
+      const message = JSON.parse(raw.toString()) as Record<string, unknown>;
+      if (message.type === "auth_challenge" && typeof message.nonce === "string") {
+        const payload = Buffer.concat([
+          Buffer.from("kanna.relay-auth.v1\0", "utf8"),
+          Buffer.from(message.nonce, "base64url"),
+        ]);
+        ws.send(JSON.stringify({
+          type: "auth_proof",
+          signature: sign(null, payload, identity.privateKey).toString("base64url"),
+        }));
+      } else if (message.type === "auth_ok") {
+        clearTimeout(timeout);
+        resolveConnection({
+          ws,
+          capabilities: message.capabilities as Record<string, unknown>,
+        });
+      }
+    });
+    ws.on("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+  });
+}
+
 /**
  * Open a socket and stop at the upgrade: no auth frame is ever sent, so the
  * connection holds its pre-auth admission slot until it closes or times out.
@@ -708,6 +812,7 @@ describe("Relay integration", () => {
   let firebaseConfigDir: string | null = null;
   let authPort = 0;
   let firestorePort = 0;
+  let firestoreWebsocketPort = 0;
   let firebaseHubPort = 0;
   let firebaseLoggingPort = 0;
   let idToken = "";
@@ -720,6 +825,7 @@ describe("Relay integration", () => {
     relayPort = await findFreePort();
     authPort = await findFreePort();
     firestorePort = await findFreePort();
+    firestoreWebsocketPort = await findFreePort();
     firebaseHubPort = await findFreePort();
     firebaseLoggingPort = await findFreePort();
     firebaseConfigDir = await mkdtemp(join(tmpdir(), "kanna-relay-firebase-"));
@@ -730,7 +836,11 @@ describe("Relay integration", () => {
         firestore: { rules: resolve(fileURLToPath(new URL("../../../firestore.rules", import.meta.url))) },
         emulators: {
           auth: { host: "127.0.0.1", port: authPort },
-          firestore: { host: "127.0.0.1", port: firestorePort },
+          firestore: {
+            host: "127.0.0.1",
+            port: firestorePort,
+            websocketPort: firestoreWebsocketPort,
+          },
           hub: { host: "127.0.0.1", port: firebaseHubPort },
           logging: { host: "127.0.0.1", port: firebaseLoggingPort },
           ui: { enabled: false },
@@ -758,8 +868,20 @@ describe("Relay integration", () => {
     });
     // Firebase is intentionally quiet on success, but its inherited stdout pipe
     // still needs a reader or a busy full-suite run can back-pressure startup.
-    firebaseProcess.stdout?.resume();
-    idToken = await waitForAuthEmulator(authPort);
+    let firebaseStdout = "";
+    firebaseProcess.stdout?.on("data", (chunk: Buffer) => {
+      firebaseStdout += chunk.toString();
+    });
+    idToken = await Promise.race([
+      waitForAuthEmulator(authPort),
+      new Promise<never>((_resolve, reject) => {
+        firebaseProcess?.once("exit", (code) => {
+          reject(new Error(
+            `Firebase emulator exited during startup (${code}): ${firebaseStdout}`,
+          ));
+        });
+      }),
+    ]);
     otherIdToken = await signInToAuthEmulator(authPort, OTHER_TEST_EMAIL, OTHER_TEST_PASSWORD) ?? "";
     if (!otherIdToken) throw new Error("Second seeded auth user is unavailable");
     await seedRelayDesktopCredentials(firestorePort);
@@ -791,6 +913,9 @@ describe("Relay integration", () => {
         KANNA_RELAY_MAX_UNAUTHENTICATED_CONNECTIONS_PER_IP: String(
           MAX_UNAUTHENTICATED_CONNECTIONS_PER_IP,
         ),
+        KANNA_E2E_ANON_PUSH_CAPTURE_COLLECTION: ANONYMOUS_PUSH_CAPTURE_COLLECTION,
+        KANNA_ANON_PUSH_DESKTOP_PER_MINUTE: "2",
+        KANNA_ANON_PUSH_TOKEN_PER_MINUTE: "2",
       },
       detached: true,
       stdio: "pipe",
@@ -1155,6 +1280,735 @@ describe("Relay integration", () => {
       error: expect.stringContaining("desktop-secret"),
     });
     await closeAndWait(legacyServer);
+  });
+
+  it("registers, rotates, and revokes anonymous push bindings", async () => {
+    const identity = createAnonymousPushIdentity();
+    const cert = createAnonymousPushCertificate(identity, "anonymous-phone-lifecycle");
+    const refreshedCert = createAnonymousPushCertificate(
+      identity,
+      cert.deviceId,
+      cert.issuedAt + 1_000,
+    );
+    const pairings = testFirestore.collection("anonymousPushPairings");
+
+    const register = await fetch(relayHttpUrl("/push/pairings"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(anonymousPairingBody(identity, cert, "fcm-token-one")),
+    });
+    expect(register.status).toBe(200);
+    const first = await pairings.where("desktopPubKey", "==", identity.publicKey).get();
+    expect(first.size).toBe(1);
+    expect(first.docs[0]?.data().fcmToken).toBe("fcm-token-one");
+
+    const rotate = await fetch(relayHttpUrl("/push/pairings"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(anonymousPairingBody(identity, cert, "fcm-token-two")),
+    });
+    expect(rotate.status).toBe(200);
+    const rotated = await pairings.where("desktopPubKey", "==", identity.publicKey).get();
+    expect(rotated.size).toBe(1);
+    expect(rotated.docs[0]?.data().fcmToken).toBe("fcm-token-two");
+
+    const refresh = await fetch(relayHttpUrl("/push/pairings"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(anonymousPairingBody(identity, refreshedCert, "fcm-token-three")),
+    });
+    expect(refresh.status).toBe(200);
+    const refreshed = await pairings.where("desktopPubKey", "==", identity.publicKey).get();
+    expect(refreshed.size).toBe(1);
+    expect(refreshed.docs[0]?.data()).toMatchObject({
+      certIssuedAt: refreshedCert.issuedAt,
+      certSignature: refreshedCert.signature,
+      fcmToken: "fcm-token-three",
+    });
+
+    const revoke = await fetch(relayHttpUrl("/push/pairings"), {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        desktopPubKey: identity.publicKey,
+        deviceId: cert.deviceId,
+        cert: refreshedCert,
+      }),
+    });
+    expect(revoke.status).toBe(200);
+    const revoked = await pairings.where("desktopPubKey", "==", identity.publicKey).get();
+    expect(revoked.size).toBe(1);
+    expect(revoked.docs[0]?.data()).toMatchObject({ fcmToken: null, tokenHash: null });
+  });
+
+  it("revokes an older binding with a newer certificate after its refresh registration was missed", async () => {
+    const identity = createAnonymousPushIdentity();
+    const oldIssuedAt = Date.now() - 2_000;
+    const oldCert = createAnonymousPushCertificate(identity, "missed-refresh-phone", oldIssuedAt);
+    const newerCert = createAnonymousPushCertificate(identity, "missed-refresh-phone", oldIssuedAt + 1_000);
+    const pairings = testFirestore.collection("anonymousPushPairings");
+
+    const register = await fetch(relayHttpUrl("/push/pairings"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(anonymousPairingBody(identity, oldCert, "missed-refresh-token")),
+    });
+    expect(register.status).toBe(200);
+
+    const revoke = await fetch(relayHttpUrl("/push/pairings"), {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        desktopPubKey: identity.publicKey,
+        deviceId: newerCert.deviceId,
+        cert: newerCert,
+      }),
+    });
+
+    expect(revoke.status).toBe(200);
+    const revoked = await pairings.where("desktopPubKey", "==", identity.publicKey).get();
+    expect(revoked.size).toBe(1);
+    expect(revoked.docs[0]?.data()).toMatchObject({
+      certIssuedAt: newerCert.issuedAt,
+      certSignature: newerCert.signature,
+      fcmToken: null,
+    });
+  });
+
+  it("refuses a stale certificate without replacing or revoking a newer binding", async () => {
+    const identity = createAnonymousPushIdentity();
+    const oldIssuedAt = Date.now() - 2_000;
+    const staleCert = createAnonymousPushCertificate(identity, "stale-delete-phone", oldIssuedAt);
+    const currentCert = createAnonymousPushCertificate(identity, "stale-delete-phone", oldIssuedAt + 1_000);
+    const pairings = testFirestore.collection("anonymousPushPairings");
+
+    const register = await fetch(relayHttpUrl("/push/pairings"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(anonymousPairingBody(identity, currentCert, "current-binding-token")),
+    });
+    expect(register.status).toBe(200);
+
+    const staleRegister = await fetch(relayHttpUrl("/push/pairings"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(anonymousPairingBody(identity, staleCert, "stale-binding-token")),
+    });
+    expect(staleRegister.status).toBe(409);
+    await expect(staleRegister.json()).resolves.toMatchObject({ code: "stale_certificate" });
+    const retainedAfterRegister = await pairings.where("desktopPubKey", "==", identity.publicKey).get();
+    expect(retainedAfterRegister.size).toBe(1);
+    expect(retainedAfterRegister.docs[0]?.data()).toMatchObject({
+      certIssuedAt: currentCert.issuedAt,
+      certSignature: currentCert.signature,
+      fcmToken: "current-binding-token",
+    });
+
+    const revoke = await fetch(relayHttpUrl("/push/pairings"), {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        desktopPubKey: identity.publicKey,
+        deviceId: staleCert.deviceId,
+        cert: staleCert,
+      }),
+    });
+
+    expect(revoke.status).toBe(409);
+    await expect(revoke.json()).resolves.toMatchObject({ code: "stale_certificate" });
+    const retained = await pairings.where("desktopPubKey", "==", identity.publicKey).get();
+    expect(retained.size).toBe(1);
+    expect(retained.docs[0]?.data()).toMatchObject({
+      certIssuedAt: currentCert.issuedAt,
+      certSignature: currentCert.signature,
+      fcmToken: "current-binding-token",
+    });
+
+    const currentRevoke = await fetch(relayHttpUrl("/push/pairings"), {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        desktopPubKey: identity.publicKey,
+        deviceId: currentCert.deviceId,
+        cert: currentCert,
+      }),
+    });
+    expect(currentRevoke.status).toBe(200);
+
+    const staleResurrection = await fetch(relayHttpUrl("/push/pairings"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(anonymousPairingBody(identity, staleCert, "resurrected-token")),
+    });
+    expect(staleResurrection.status).toBe(409);
+    await expect(staleResurrection.json()).resolves.toMatchObject({ code: "stale_certificate" });
+    const tombstone = await pairings.where("desktopPubKey", "==", identity.publicKey).get();
+    expect(tombstone.size).toBe(1);
+    expect(tombstone.docs[0]?.data()).toMatchObject({
+      certIssuedAt: currentCert.issuedAt,
+      certSignature: currentCert.signature,
+      fcmToken: null,
+      tokenHash: null,
+    });
+  });
+
+  it("revokes only the certificate-selected pairing without an FCM token", async () => {
+    const identity = createAnonymousPushIdentity();
+    const selectedCert = createAnonymousPushCertificate(identity, "certificate-only-selected");
+    const retainedCert = createAnonymousPushCertificate(identity, "certificate-only-retained");
+    const pairings = testFirestore.collection("anonymousPushPairings");
+    for (const [cert, token] of [
+      [selectedCert, "certificate-only-selected-token"],
+      [retainedCert, "certificate-only-retained-token"],
+    ] as const) {
+      const response = await fetch(relayHttpUrl("/push/pairings"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(anonymousPairingBody(identity, cert, token)),
+      });
+      expect(response.status).toBe(200);
+    }
+
+    const revoke = await fetch(relayHttpUrl("/push/pairings"), {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        desktopPubKey: identity.publicKey,
+        deviceId: selectedCert.deviceId,
+        cert: selectedCert,
+      }),
+    });
+
+    expect(revoke.status).toBe(200);
+    const remaining = await pairings.where("desktopPubKey", "==", identity.publicKey).get();
+    expect(remaining.docs.filter((doc) => doc.data().fcmToken).map((doc) => doc.data().deviceIdHash)).toEqual([
+      sha256Hex(retainedCert.deviceId),
+    ]);
+  });
+
+  it("accepts a signed desktop revocation over its anonymous session", async () => {
+    const identity = createAnonymousPushIdentity();
+    const staleCert = createAnonymousPushCertificate(
+      identity,
+      "desktop-revoked-phone",
+      Date.now() - 2_000,
+    );
+    const cert = createAnonymousPushCertificate(
+      identity,
+      "desktop-revoked-phone",
+      staleCert.issuedAt + 1_000,
+    );
+    const pairings = testFirestore.collection("anonymousPushPairings");
+    await fetch(relayHttpUrl("/push/pairings"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(anonymousPairingBody(identity, cert, "desktop-revoked-token")),
+    });
+    expect((await pairings.where("desktopPubKey", "==", identity.publicKey).get()).size).toBe(1);
+
+    const { ws } = await connectAndAuthAnonymous(identity);
+    const ack = waitForMessage(ws, (message) =>
+      message.type === "response" && message.id === "desktop-revoke");
+    ws.send(JSON.stringify({
+      type: "anonymous_push_revoke",
+      id: "desktop-revoke",
+      deviceId: cert.deviceId,
+    }));
+    await expect(ack).resolves.toMatchObject({ data: null });
+    const staleResurrection = await fetch(relayHttpUrl("/push/pairings"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(anonymousPairingBody(identity, staleCert, "desktop-resurrected-token")),
+    });
+    expect(staleResurrection.status).toBe(409);
+    await expect(staleResurrection.json()).resolves.toMatchObject({ code: "stale_certificate" });
+    const revoked = await pairings.where("desktopPubKey", "==", identity.publicKey).get();
+    expect(revoked.size).toBe(1);
+    expect(revoked.docs[0]?.data()).toMatchObject({
+      certIssuedAt: cert.issuedAt,
+      fcmToken: null,
+    });
+    await closeAndWait(ws);
+  });
+
+  it("refuses anonymous push registration without a valid desktop pairing certificate", async () => {
+    const identity = createAnonymousPushIdentity();
+    const cert = createAnonymousPushCertificate(identity, "unpaired-phone");
+    const response = await fetch(relayHttpUrl("/push/pairings"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ...anonymousPairingBody(identity, cert, "unpaired-token"),
+        cert: { ...cert, signature: randomBytes(64).toString("base64url") },
+      }),
+    });
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toMatchObject({ code: "invalid_certificate" });
+  });
+
+  it("authenticates an anonymous desktop and delivers only to its paired token", async () => {
+    const identity = createAnonymousPushIdentity();
+    const cert = createAnonymousPushCertificate(identity, "anonymous-phone-delivery");
+    await fetch(relayHttpUrl("/push/pairings"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(anonymousPairingBody(identity, cert, "anonymous-delivery-token")),
+    });
+    const { ws, capabilities } = await connectAndAuthAnonymous(identity);
+    expect(capabilities).toEqual({
+      tunnelServices: [],
+      mobileNotifications: { version: 1 },
+    });
+    const ack = waitForMessage(ws, (message) =>
+      message.type === "mobile_notification_ack" && message.id === "anonymous-delivery");
+    ws.send(JSON.stringify({
+      type: "mobile_notification_publish",
+      id: "anonymous-delivery",
+      notification: { title: "Done", body: "Anonymous delivery works." },
+    }));
+    await expect(ack).resolves.toMatchObject({
+      ok: true,
+      delivery: { acceptedCount: 1, failedCount: 0 },
+    });
+    const captures = await testFirestore.collection(ANONYMOUS_PUSH_CAPTURE_COLLECTION)
+      .where("notification.title", "==", "Done")
+      .get();
+    expect(captures.size).toBe(1);
+    expect(captures.docs[0]?.data().tokenHash).toBe(sha256Hex("anonymous-delivery-token"));
+    expect(captures.docs[0]?.data().desktopRoutingId).toBe(identity.publicKey);
+    await closeAndWait(ws);
+  });
+
+  it("ignores tokenless watermarks when selecting anonymous push bindings", async () => {
+    const identity = createAnonymousPushIdentity();
+    const cert = createAnonymousPushCertificate(identity, "anonymous-phone-after-watermarks");
+    const desktopKeyHash = anonymousDesktopId(identity.publicKey);
+    const pairings = testFirestore.collection("anonymousPushPairings");
+    const watermarkWrites = Array.from({ length: 10 }, (_, index) =>
+      pairings.doc(`${desktopKeyHash}.watermark-${index}`).set({
+        desktopKeyHash,
+        deviceIdHash: sha256Hex(`watermark-device-${index}`),
+        tokenHash: null,
+        desktopPubKey: identity.publicKey,
+        fcmToken: null,
+        updatedAtMs: Date.now(),
+        lastDeliveredAtMs: null,
+        certIssuedAt: cert.issuedAt,
+        certExpiresAt: cert.expiresAt,
+        certSignature: cert.signature,
+      }));
+    await Promise.all(watermarkWrites);
+    const register = await fetch(relayHttpUrl("/push/pairings"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(anonymousPairingBody(identity, cert, "token-after-watermarks")),
+    });
+    expect(register.status).toBe(200);
+
+    const { ws } = await connectAndAuthAnonymous(identity);
+    const ack = waitForMessage(ws, (message) =>
+      message.type === "mobile_notification_ack" && message.id === "watermark-selection");
+    ws.send(JSON.stringify({
+      type: "mobile_notification_publish",
+      id: "watermark-selection",
+      notification: { title: "Watermark selection", body: "The live binding remains selectable." },
+    }));
+    await expect(ack).resolves.toMatchObject({
+      ok: true,
+      delivery: { acceptedCount: 1, failedCount: 0 },
+    });
+    const captures = await testFirestore.collection(ANONYMOUS_PUSH_CAPTURE_COLLECTION)
+      .where("notification.title", "==", "Watermark selection")
+      .get();
+    expect(captures.size).toBe(1);
+    expect(captures.docs[0]?.data().tokenHash).toBe(sha256Hex("token-after-watermarks"));
+    await closeAndWait(ws);
+  });
+
+  it("refuses invoke, tunnel, and snapshot operations from an anonymous desktop", async () => {
+    const identity = createAnonymousPushIdentity();
+    const { ws } = await connectAndAuthAnonymous(identity);
+    const invoke = waitForMessage(ws, (message) =>
+      message.type === "response" && message.id === "anonymous-invoke");
+    ws.send(JSON.stringify({ type: "invoke", id: "anonymous-invoke", command: "list_active_desktops" }));
+    await expect(invoke).resolves.toMatchObject({ error: expect.stringContaining("cannot invoke") });
+
+    const tunnel = waitForMessage(ws, (message) =>
+      message.type === "response" && message.id === "anonymous-tunnel");
+    ws.send(JSON.stringify({ type: "tunnel_request", id: "anonymous-tunnel" }));
+    await expect(tunnel).resolves.toMatchObject({ error: expect.stringContaining("cannot open tunnels") });
+
+    const snapshot = waitForMessage(ws, (message) =>
+      message.type === "task_snapshot_ack" && message.id === "anonymous-snapshot");
+    ws.send(JSON.stringify({ type: "task_snapshot_publish", id: "anonymous-snapshot", snapshot: {} }));
+    await expect(snapshot).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining("desktop-secret"),
+    });
+    await closeAndWait(ws);
+  });
+
+  it("rate-limits anonymous desktop notification publication", async () => {
+    const identity = createAnonymousPushIdentity();
+    const cert = createAnonymousPushCertificate(identity, "anonymous-phone-rate-limit");
+    await fetch(relayHttpUrl("/push/pairings"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(anonymousPairingBody(identity, cert, "anonymous-rate-token")),
+    });
+    const { ws } = await connectAndAuthAnonymous(identity);
+    for (let index = 0; index < 2; index += 1) {
+      const id = `anonymous-rate-${index}`;
+      const ack = waitForMessage(ws, (message) =>
+        message.type === "mobile_notification_ack" && message.id === id);
+      ws.send(JSON.stringify({
+        type: "mobile_notification_publish",
+        id,
+        notification: { title: "Rate", body: "Allowed" },
+      }));
+      await expect(ack).resolves.toMatchObject({ ok: true });
+    }
+    const refused = waitForMessage(ws, (message) =>
+      message.type === "mobile_notification_ack" && message.id === "anonymous-rate-refused");
+    ws.send(JSON.stringify({
+      type: "mobile_notification_publish",
+      id: "anonymous-rate-refused",
+      notification: { title: "Rate", body: "Refused" },
+    }));
+    await expect(refused).resolves.toMatchObject({ ok: false, code: 429 });
+    await closeAndWait(ws);
+  });
+
+  it("rate-limits anonymous publication attempts before a no-binding query can repeat", async () => {
+    const identity = createAnonymousPushIdentity();
+    const { ws } = await connectAndAuthAnonymous(identity);
+    for (let index = 0; index < 3; index += 1) {
+      const id = `anonymous-no-binding-rate-${index}`;
+      const ack = waitForMessage(ws, (message) =>
+        message.type === "mobile_notification_ack" && message.id === id);
+      ws.send(JSON.stringify({
+        type: "mobile_notification_publish",
+        id,
+        notification: { title: "No binding", body: "Still bounded" },
+      }));
+      if (index < 2) {
+        await expect(ack).resolves.toMatchObject({ ok: false, code: 409 });
+      } else {
+        await expect(ack).resolves.toMatchObject({ ok: false, code: 429 });
+      }
+    }
+    await closeAndWait(ws);
+  });
+
+  it("enforces binding caps without charging refresh or rotation an extra slot", async () => {
+    const pairings = testFirestore.collection("anonymousPushPairings");
+    await testFirestore.recursiveDelete(pairings);
+    const desktopIdentity = createAnonymousPushIdentity();
+    const desktopRequests = Array.from({ length: 10 }, (_, index) => {
+      const cert = createAnonymousPushCertificate(desktopIdentity, `desktop-cap-phone-${index}`);
+      return anonymousPairingBody(desktopIdentity, cert, `desktop-cap-token-${index}`);
+    });
+    for (const request of desktopRequests) {
+      await registerAnonymousPushPairing(request, Date.now(), testFirestore);
+    }
+    const refreshed = desktopRequests[0]!;
+    await registerAnonymousPushPairing(
+      { ...refreshed, fcmToken: "desktop-cap-token-rotated" },
+      Date.now(),
+      testFirestore,
+    );
+    expect((await pairings.where("desktopKeyHash", "==", anonymousDesktopId(desktopIdentity.publicKey)).get()).size)
+      .toBe(10);
+    const overflowCert = createAnonymousPushCertificate(desktopIdentity, "desktop-cap-overflow");
+    await expect(registerAnonymousPushPairing(
+      anonymousPairingBody(desktopIdentity, overflowCert, "desktop-cap-overflow-token"),
+      Date.now(),
+      testFirestore,
+    )).rejects.toMatchObject({ status: 409, code: "desktop_binding_cap" });
+
+    await testFirestore.recursiveDelete(pairings);
+    const sharedToken = "token-cap-shared";
+    const tokenRequests = Array.from({ length: 20 }, (_, index) => {
+      const identity = createAnonymousPushIdentity();
+      const cert = createAnonymousPushCertificate(identity, `token-cap-phone-${index}`);
+      return anonymousPairingBody(identity, cert, sharedToken);
+    });
+    for (const request of tokenRequests) {
+      await registerAnonymousPushPairing(request, Date.now(), testFirestore);
+    }
+    await registerAnonymousPushPairing(tokenRequests[0]!, Date.now() + 1, testFirestore);
+    expect((await pairings.where("tokenHash", "==", sha256Hex(sharedToken)).get()).size).toBe(20);
+    const overflowIdentity = createAnonymousPushIdentity();
+    const tokenOverflowCert = createAnonymousPushCertificate(overflowIdentity, "token-cap-overflow");
+    await expect(registerAnonymousPushPairing(
+      anonymousPairingBody(overflowIdentity, tokenOverflowCert, sharedToken),
+      Date.now(),
+      testFirestore,
+    )).rejects.toMatchObject({ status: 409, code: "token_binding_cap" });
+    await testFirestore.recursiveDelete(pairings);
+  });
+
+  it("refuses a stale watermark registration before enforcing the desktop binding cap", async () => {
+    const pairings = testFirestore.collection("anonymousPushPairings");
+    await testFirestore.recursiveDelete(pairings);
+    const identity = createAnonymousPushIdentity();
+    const staleCert = createAnonymousPushCertificate(
+      identity,
+      "desktop-cap-watermark",
+      Date.now() - 2_000,
+    );
+    const currentCert = createAnonymousPushCertificate(
+      identity,
+      staleCert.deviceId,
+      staleCert.issuedAt + 1_000,
+    );
+    const registerWatermark = await fetch(relayHttpUrl("/push/pairings"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(anonymousPairingBody(
+        identity,
+        currentCert,
+        "desktop-cap-watermark-token",
+      )),
+    });
+    expect(registerWatermark.status).toBe(200);
+    const revokeWatermark = await fetch(relayHttpUrl("/push/pairings"), {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        desktopPubKey: identity.publicKey,
+        deviceId: currentCert.deviceId,
+        cert: currentCert,
+      }),
+    });
+    expect(revokeWatermark.status).toBe(200);
+    for (let index = 0; index < 10; index += 1) {
+      const cert = createAnonymousPushCertificate(identity, `desktop-cap-active-${index}`);
+      await registerAnonymousPushPairing(
+        anonymousPairingBody(identity, cert, `desktop-cap-active-token-${index}`),
+        Date.now(),
+        testFirestore,
+      );
+    }
+    const before = (await pairings
+      .where("desktopKeyHash", "==", anonymousDesktopId(identity.publicKey))
+      .get()).docs.map((doc) => ({ id: doc.id, data: doc.data() }))
+      .sort((left, right) => left.id.localeCompare(right.id));
+    expect(before).toHaveLength(11);
+    expect(before.filter((binding) => binding.data.fcmToken === null)).toHaveLength(1);
+    expect(before.filter((binding) => typeof binding.data.fcmToken === "string")).toHaveLength(10);
+
+    const rateIdentity = createAnonymousPushIdentity();
+    const rateCert = createAnonymousPushCertificate(rateIdentity, "ordering-before-rate-limit");
+    for (let index = 0; index < 30; index += 1) {
+      const admitted = await fetch(relayHttpUrl("/push/pairings"), {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-forwarded-for": "198.51.100.28",
+        },
+        body: JSON.stringify(anonymousPairingBody(rateIdentity, rateCert, "ordering-rate-token")),
+      });
+      expect(admitted.status).toBe(200);
+    }
+
+    const response = await fetch(relayHttpUrl("/push/pairings"), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-forwarded-for": "198.51.100.28",
+      },
+      body: JSON.stringify(anonymousPairingBody(identity, staleCert, "stale-watermark-token")),
+    });
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({ code: "stale_certificate" });
+    const after = (await pairings
+      .where("desktopKeyHash", "==", anonymousDesktopId(identity.publicKey))
+      .get()).docs.map((doc) => ({ id: doc.id, data: doc.data() }))
+      .sort((left, right) => left.id.localeCompare(right.id));
+    expect(after).toEqual(before);
+    await testFirestore.recursiveDelete(pairings);
+  });
+
+  it("collects only stale undelivered anonymous bindings", async () => {
+    const pairings = testFirestore.collection("anonymousPushPairings");
+    await testFirestore.recursiveDelete(pairings);
+    const nowMs = Date.now();
+    const staleMs = nowMs - 181 * 24 * 60 * 60 * 1_000;
+    const recentMs = nowMs - 24 * 60 * 60 * 1_000;
+    const base = {
+      desktopKeyHash: "gc-desktop",
+      deviceIdHash: "gc-device",
+      tokenHash: "gc-token",
+      desktopPubKey: "gc-public-key",
+      fcmToken: "gc-fcm-token",
+      certIssuedAt: nowMs - 732 * 24 * 60 * 60 * 1_000,
+      certExpiresAt: nowMs - 1,
+      certSignature: "gc-signature",
+    };
+    await Promise.all([
+      pairings.doc("stale-undelivered").set({ ...base, updatedAtMs: staleMs, lastDeliveredAtMs: null }),
+      pairings.doc("recently-refreshed").set({ ...base, updatedAtMs: recentMs, lastDeliveredAtMs: null }),
+      pairings.doc("recently-delivered").set({ ...base, updatedAtMs: staleMs, lastDeliveredAtMs: recentMs }),
+    ]);
+
+    expect(await garbageCollectAnonymousPushPairings(testFirestore, nowMs)).toBe(1);
+    expect((await pairings.get()).docs.map((doc) => doc.id).sort()).toEqual([
+      "recently-delivered",
+      "recently-refreshed",
+    ]);
+    await testFirestore.recursiveDelete(pairings);
+  });
+
+  it("keeps a certificate watermark when stale-binding GC retires an unexpired binding", async () => {
+    const pairings = testFirestore.collection("anonymousPushPairings");
+    await testFirestore.recursiveDelete(pairings);
+    const identity = createAnonymousPushIdentity();
+    const staleCert = createAnonymousPushCertificate(identity, "gc-ordering-phone", Date.now() - 2_000);
+    const currentCert = createAnonymousPushCertificate(identity, "gc-ordering-phone", staleCert.issuedAt + 1_000);
+    const currentBody = anonymousPairingBody(identity, currentCert, "gc-current-token");
+    await registerAnonymousPushPairing(currentBody, Date.now(), testFirestore);
+    const binding = await pairings.where("desktopPubKey", "==", identity.publicKey).get();
+    expect(binding.size).toBe(1);
+    const bindingDoc = binding.docs[0];
+    if (!bindingDoc) throw new Error("expected anonymous push binding");
+    const nowMs = Date.now();
+    await bindingDoc.ref.update({
+      updatedAtMs: nowMs - 181 * 24 * 60 * 60 * 1_000,
+      lastDeliveredAtMs: null,
+    });
+
+    expect(await garbageCollectAnonymousPushPairings(testFirestore, nowMs)).toBe(1);
+    const retired = await pairings.where("desktopPubKey", "==", identity.publicKey).get();
+    expect(retired.size).toBe(1);
+    expect(retired.docs[0]?.data()).toMatchObject({
+      certIssuedAt: currentCert.issuedAt,
+      certSignature: currentCert.signature,
+      fcmToken: null,
+      tokenHash: null,
+    });
+
+    const staleResurrection = await fetch(relayHttpUrl("/push/pairings"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(anonymousPairingBody(identity, staleCert, "gc-resurrected-token")),
+    });
+    expect(staleResurrection.status).toBe(409);
+    await expect(staleResurrection.json()).resolves.toMatchObject({ code: "stale_certificate" });
+    await testFirestore.recursiveDelete(pairings);
+  });
+
+  it("does not let stale invalid-token reconciliation retire a refreshed binding", async () => {
+    const pairings = testFirestore.collection("anonymousPushPairings");
+    await testFirestore.recursiveDelete(pairings);
+    const identity = createAnonymousPushIdentity();
+    const staleCert = createAnonymousPushCertificate(
+      identity,
+      "invalid-token-ordering-phone",
+      Date.now() - 2_000,
+    );
+    const currentCert = createAnonymousPushCertificate(
+      identity,
+      staleCert.deviceId,
+      staleCert.issuedAt + 1_000,
+    );
+    await registerAnonymousPushPairing(
+      anonymousPairingBody(identity, staleCert, "invalid-stale-token"),
+      Date.now(),
+      testFirestore,
+    );
+    const staleSnapshot = await pairings.where("desktopPubKey", "==", identity.publicKey).get();
+    const staleBinding = staleSnapshot.docs[0];
+    if (!staleBinding) throw new Error("expected stale anonymous push binding snapshot");
+    await registerAnonymousPushPairing(
+      anonymousPairingBody(identity, currentCert, "invalid-current-token"),
+      Date.now(),
+      testFirestore,
+    );
+
+    await expect(reconcileInvalidAnonymousPushToken(
+      staleBinding,
+      Date.now(),
+      testFirestore,
+    )).rejects.toMatchObject({ status: 409, code: "stale_certificate" });
+    const retained = await pairings.where("desktopPubKey", "==", identity.publicKey).get();
+    expect(retained.size).toBe(1);
+    expect(retained.docs[0]?.data()).toMatchObject({
+      certIssuedAt: currentCert.issuedAt,
+      certSignature: currentCert.signature,
+      fcmToken: "invalid-current-token",
+    });
+    await testFirestore.recursiveDelete(pairings);
+  });
+
+  it("rate-limits certificate-only pairing deletion at the configured IP bound", async () => {
+    const identity = createAnonymousPushIdentity();
+    const cert = createAnonymousPushCertificate(identity, "delete-rate-limit-phone");
+    const body = JSON.stringify({
+      desktopPubKey: identity.publicKey,
+      deviceId: cert.deviceId,
+      cert,
+    });
+    for (let index = 0; index < 30; index += 1) {
+      const response = await fetch(relayHttpUrl("/push/pairings"), {
+        method: "DELETE",
+        headers: {
+          "content-type": "application/json",
+          "x-forwarded-for": "198.51.100.27",
+        },
+        body,
+      });
+      expect(response.status).toBe(200);
+    }
+    const refused = await fetch(relayHttpUrl("/push/pairings"), {
+      method: "DELETE",
+      headers: {
+        "content-type": "application/json",
+        "x-forwarded-for": "198.51.100.27",
+      },
+      body,
+    });
+    expect(refused.status).toBe(429);
+    await expect(refused.json()).resolves.toMatchObject({
+      error: "Anonymous push pairing rate limit exceeded",
+    });
+  });
+
+  it("rate-limits one anonymous push token across desktop identities", async () => {
+    const sharedToken = "anonymous-shared-rate-token";
+    const identities = Array.from({ length: 3 }, () => createAnonymousPushIdentity());
+    for (const [index, identity] of identities.entries()) {
+      const cert = createAnonymousPushCertificate(identity, `anonymous-shared-phone-${index}`);
+      const registration = await fetch(relayHttpUrl("/push/pairings"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(anonymousPairingBody(identity, cert, sharedToken)),
+      });
+      expect(registration.status).toBe(200);
+    }
+
+    for (const [index, identity] of identities.entries()) {
+      const { ws } = await connectAndAuthAnonymous(identity);
+      const id = `anonymous-shared-rate-${index}`;
+      const ack = waitForMessage(ws, (message) =>
+        message.type === "mobile_notification_ack" && message.id === id);
+      ws.send(JSON.stringify({
+        type: "mobile_notification_publish",
+        id,
+        notification: { title: "Shared rate", body: "Across desktops" },
+      }));
+      if (index < 2) {
+        await expect(ack).resolves.toMatchObject({ ok: true });
+      } else {
+        await expect(ack).resolves.toMatchObject({
+          ok: false,
+          code: 429,
+          error: expect.stringContaining("token rate limit"),
+        });
+      }
+      await closeAndWait(ws);
+    }
   });
 
   it("authenticates a desktop and clears its transfer capability when the session disconnects", async () => {

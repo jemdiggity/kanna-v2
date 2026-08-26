@@ -24,6 +24,18 @@ fn pairing_reissue_request(device_id: &str, device_secret: &str) -> Request<Body
         .unwrap()
 }
 
+fn pairing_remove_request(device_id: &str, peer: [u8; 4]) -> Request<Body> {
+    let mut request = Request::delete(format!("/v1/pairing/trusted-devices/{device_id}"))
+        .body(Body::empty())
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            peer, 49152,
+        ))));
+    request
+}
+
 fn direct_lan_request(method: axum::http::Method, path: &str) -> Request<Body> {
     let mut request = Request::builder()
         .method(method)
@@ -5103,6 +5115,43 @@ async fn create_pairing_session_route_rejects_authenticated_relay_dispatch() {
         .error
         .as_deref()
         .is_some_and(|message| message.contains("desktop app")));
+}
+
+#[tokio::test]
+async fn desktop_trusted_device_removal_is_persisted_with_push_revocation() {
+    let state = super::test_state_with_seed("desktop-remove-pairing", "Remove Mac", |_| {});
+    let pairing_path = std::path::PathBuf::from(&state.config().pairing_store_path);
+    let mut store = crate::pairing::PairingStore::default();
+    store.add_trusted_device(
+        "desktop-remove-pairing",
+        "phone-1",
+        "Phone",
+        &crate::pairing::hash_device_secret("secret"),
+    );
+    store
+        .trusted_devices
+        .get_mut("desktop-remove-pairing")
+        .and_then(|devices| devices.first_mut())
+        .expect("trusted phone")
+        .push_identity_public_key = Some("desktop-public-key".to_string());
+    store.save(&pairing_path).unwrap();
+
+    let response = crate::http_api::router(Arc::clone(&state))
+        .oneshot(pairing_remove_request("phone-1", [127, 0, 0, 1]))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let persisted = crate::pairing::PairingStore::load(&pairing_path).unwrap();
+    assert!(!persisted.is_trusted("desktop-remove-pairing", "phone-1"));
+    assert_eq!(
+        persisted.pending_anonymous_push_revocations,
+        vec![crate::pairing::PendingAnonymousPushRevocation {
+            desktop_public_key: "desktop-public-key".to_string(),
+            device_id: "phone-1".to_string(),
+        }]
+    );
+    let _ = std::fs::remove_file(pairing_path);
 }
 
 #[tokio::test]
