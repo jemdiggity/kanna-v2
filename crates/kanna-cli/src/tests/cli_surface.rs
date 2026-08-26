@@ -789,6 +789,68 @@ fn parses_wait_events_and_set_notify_commands() {
     }
 }
 
+#[test]
+fn parses_long_lived_task_watch_contract() {
+    let cli = crate::Cli::try_parse_from([
+        "kanna-cli",
+        "task",
+        "watch",
+        "--task-id",
+        "child-a,child-b",
+        "--task-id",
+        "child-c",
+        "--repo-id",
+        "repo-1",
+        "--cursor",
+        "cursor-7",
+        "--all",
+        "--budget-secs",
+        "900",
+        "--follow",
+    ])
+    .unwrap();
+    match cli.command {
+        crate::Commands::Task {
+            command:
+                crate::TaskCommands::Watch {
+                    task_id,
+                    repo_id,
+                    cursor,
+                    all_events,
+                    budget_secs,
+                    follow,
+                    ..
+                },
+        } => {
+            assert_eq!(task_id, vec!["child-a", "child-b", "child-c"]);
+            assert_eq!(repo_id.as_deref(), Some("repo-1"));
+            assert_eq!(cursor.as_deref(), Some("cursor-7"));
+            assert!(all_events);
+            assert_eq!(budget_secs, Some(900));
+            assert!(follow);
+        }
+        _ => panic!("expected task watch command"),
+    }
+
+    let error = match crate::Cli::try_parse_from(["kanna-cli", "task", "watch"]) {
+        Ok(_) => panic!("watch needs an explicit task or repository scope"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("--task-id"));
+
+    let mut command = crate::Cli::command();
+    let watch = command
+        .find_subcommand_mut("task")
+        .and_then(|task| task.find_subcommand_mut("watch"))
+        .expect("task watch help");
+    let mut help = Vec::new();
+    watch.write_long_help(&mut help).unwrap();
+    let help = String::from_utf8(help).unwrap();
+    assert!(help.contains("push-equivalent"));
+    assert!(help.contains("240-second per-call clamp"));
+    assert!(help.contains("abort calls around 300 seconds"));
+}
+
 /// The typed CLI and the catalog tool must hit the same endpoint with the same
 /// arguments, or an agent without MCP support silently watches something else.
 #[test]

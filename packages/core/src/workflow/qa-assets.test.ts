@@ -149,16 +149,17 @@ describe("QA workflow assets", () => {
     expect(agent.name).toBe("task-manager");
     expect(agent.agent_provider?.[0]).toBe("codex");
     expect(agent.prompt).toContain("kanna_wait_events");
-    expect(agent.prompt).toContain("include_current_activity: true");
     expect(agent.prompt).toContain("Scope the watch to the whole repository");
-    expect(agent.prompt).toContain("the task session supplies its repository by default");
-    expect(agent.prompt).toContain('from: "now"');
+    expect(agent.prompt).toContain("kanna-cli task watch --repo-id <repo-id>");
+    expect(agent.prompt).toContain("starts at the live tail without replaying history");
     expect(agent.prompt).toContain(
-      "confirm the repository watch covers every open task, including blocked tasks with no session yet"
+      "reconcile every open task's current state, including blocked tasks with no session yet"
     );
     expect(agent.prompt).toContain(
-      "The last tool call of every turn is `kanna_wait_events`"
+      "Do not hand-roll shell/Python wrappers around `kanna_wait_events`"
     );
+    expect(agent.prompt).toContain("A wake means “drain the feed,”");
+    expect(agent.prompt).toContain("immediately re-arm the command with `--cursor");
     expect(agent.prompt).toContain("task.runtime_settled");
     expect(agent.prompt).toContain("task.awaiting_advance");
     expect(agent.prompt).toContain("Notify Human Blockers");

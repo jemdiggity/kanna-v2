@@ -1,4 +1,6 @@
+use std::io::Write;
 use std::process;
+use std::time::Duration;
 
 use serde_json::Value;
 
@@ -22,6 +24,142 @@ use crate::models::{
 };
 use crate::TaskCommands;
 use kanna_tool_catalog::{wait_resolved_result, wait_timeout_result};
+
+const WATCH_CURSOR_RECORD_TYPE: &str = "watch.cursor";
+
+#[derive(Debug, Clone)]
+pub(crate) struct TaskWatchOptions {
+    pub(crate) task_ids: Vec<String>,
+    pub(crate) repo_id: Option<String>,
+    pub(crate) cursor: Option<String>,
+    pub(crate) all_events: bool,
+    pub(crate) budget_secs: Option<u64>,
+    pub(crate) follow: bool,
+}
+
+fn run_finished_has_running_successor(event: &Value) -> bool {
+    let payload = &event["payload"];
+    let finished_run_id = payload.get("runId").and_then(Value::as_str);
+    let latest_run = &payload["currentTask"]["latestRun"];
+    latest_run.get("status").and_then(Value::as_str) == Some("running")
+        && match (
+            finished_run_id,
+            latest_run.get("id").and_then(Value::as_str),
+        ) {
+            (Some(finished), Some(latest)) => finished != latest,
+            // A running latest run is necessarily a successor even when an
+            // older server omitted one of the ids from its enrichment.
+            _ => true,
+        }
+}
+
+pub(crate) fn is_actionable_task_event(event: &Value) -> bool {
+    match event.get("type").and_then(Value::as_str) {
+        Some("run.started" | "stage.changed" | "task.created" | "task.input_delivered") => false,
+        Some("run.finished") => !run_finished_has_running_successor(event),
+        _ => true,
+    }
+}
+
+fn write_ndjson<W: Write>(writer: &mut W, value: &Value) -> Result<(), String> {
+    serde_json::to_writer(&mut *writer, value)
+        .map_err(|error| format!("failed to render watch output: {error}"))?;
+    writer
+        .write_all(b"\n")
+        .and_then(|()| writer.flush())
+        .map_err(|error| format!("failed to write watch output: {error}"))
+}
+
+fn write_watch_cursor<W: Write>(
+    writer: &mut W,
+    cursor: &str,
+    watch_outcome: &str,
+) -> Result<(), String> {
+    write_ndjson(
+        writer,
+        &serde_json::json!({
+            "type": WATCH_CURSOR_RECORD_TYPE,
+            "watchOutcome": watch_outcome,
+            "cursor": cursor,
+        }),
+    )
+}
+
+/// Own the long-running cursor loop while each individual HTTP request keeps
+/// the shared client-safe clamp. The cursor is advanced before filtering so a
+/// restart never replays suppressed engine mechanics.
+pub(crate) async fn watch_task_events<W: Write>(
+    base_url: &str,
+    options: TaskWatchOptions,
+    writer: &mut W,
+) -> Result<(), String> {
+    let mut cursor = options.cursor;
+    let mut first_call = true;
+    let mut quiet_since = tokio::time::Instant::now();
+
+    loop {
+        let remaining_budget = options.budget_secs.map(|budget_secs| {
+            Duration::from_secs(budget_secs).saturating_sub(quiet_since.elapsed())
+        });
+        if !first_call && remaining_budget.is_some_and(|remaining| remaining.is_zero()) {
+            let cursor = cursor
+                .as_deref()
+                .ok_or_else(|| "task watch ended without receiving a cursor".to_string())?;
+            return write_watch_cursor(writer, cursor, "budget_expired");
+        }
+
+        let timeout_secs = remaining_budget
+            .map(|remaining| {
+                remaining
+                    .as_secs()
+                    .saturating_add(u64::from(remaining.subsec_nanos() != 0))
+                    .min(kanna_tool_catalog::MAX_WAIT_TIMEOUT_SECS)
+            })
+            .unwrap_or(kanna_tool_catalog::MAX_WAIT_TIMEOUT_SECS);
+        let params = crate::api::TaskEventsParams {
+            task_ids: &options.task_ids,
+            parent_task_id: None,
+            repo_id: options.repo_id.as_deref(),
+            repo_remote_url_hash: None,
+            local_only: false,
+            include_current_activity: false,
+            short_cursor: true,
+            from: (first_call && cursor.is_none()).then_some("now"),
+            cursor: cursor.as_deref(),
+            timeout_secs,
+            limit: None,
+        };
+        let batch = wait_task_events_via_api(base_url, &params).await?;
+        first_call = false;
+        let next_cursor = batch
+            .get("cursor")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "task event response did not include a cursor".to_string())?
+            .to_string();
+        cursor = Some(next_cursor.clone());
+        let events = batch
+            .get("events")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "task event response did not include an events array".to_string())?;
+        let actionable = events
+            .iter()
+            .filter(|event| options.all_events || is_actionable_task_event(event))
+            .collect::<Vec<_>>();
+
+        if !actionable.is_empty() {
+            for event in actionable {
+                write_ndjson(writer, event)?;
+            }
+            if !options.follow {
+                return write_watch_cursor(writer, &next_cursor, "actionable");
+            }
+            // Follow mode emits a checkpoint after each batch so an
+            // interactive caller can resume after interruption.
+            write_watch_cursor(writer, &next_cursor, "following")?;
+            quiet_since = tokio::time::Instant::now();
+        }
+    }
+}
 
 pub(crate) fn build_create_task_request(options: TaskCreateOptions) -> CreateTaskRequest {
     CreateTaskRequest {
@@ -724,6 +862,30 @@ pub(crate) async fn run(command: TaskCommands) {
                 });
             if let Err(e) = print_json(&events) {
                 eprintln!("Error: {e}");
+                process::exit(1);
+            }
+        }
+        TaskCommands::Watch {
+            task_id,
+            repo_id,
+            cursor,
+            all_events,
+            budget_secs,
+            follow,
+            server_url,
+        } => {
+            let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+            let options = TaskWatchOptions {
+                task_ids: task_id,
+                repo_id,
+                cursor,
+                all_events,
+                budget_secs,
+                follow,
+            };
+            if let Err(error) = watch_task_events(&base_url, options, &mut std::io::stdout()).await
+            {
+                eprintln!("Error: {error}");
                 process::exit(1);
             }
         }
