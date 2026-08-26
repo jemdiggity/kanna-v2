@@ -3125,17 +3125,17 @@ fn read_agent_definition_loads_builtin_task_manager_agent_with_codex_first() {
         .contains("Scope the watch to the whole repository"));
     assert!(definition
         .prompt
-        .contains("Use the same MCP long-poll loop on every provider"));
+        .contains("kanna-cli task watch --repo-id <repo-id>"));
     assert!(definition
         .prompt
-        .contains("`include_current_activity: true`"));
-    assert!(definition.prompt.contains("`from: \"now\"`"));
+        .contains("starts at the live tail without replaying history"));
     assert!(definition
         .prompt
-        .contains("The last tool call of every turn is `kanna_wait_events`"));
+        .contains("Do not hand-roll shell/Python wrappers around `kanna_wait_events`"));
+    assert!(definition.prompt.contains("A wake means “drain the feed,”"));
     assert!(definition
         .prompt
-        .contains("fixed 10-second server debounce"));
+        .contains("manager-facing settled activity is server-debounced for 10 seconds"));
     assert!(definition
         .prompt
         .contains("including blocked tasks with no session yet"));

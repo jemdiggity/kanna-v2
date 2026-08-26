@@ -19,7 +19,8 @@ use crate::commands::stage_complete::{
 use crate::commands::task::{
     build_block_task_request, build_create_task_request, build_merge_handoff_request,
     build_request_revision_request, build_send_task_input_request, find_task_status_row,
-    format_task_list, format_task_status, render_wait_outcome, task_not_found_error,
+    format_task_list, format_task_status, is_actionable_task_event, render_wait_outcome,
+    task_not_found_error, watch_task_events, TaskWatchOptions,
 };
 use crate::commands::tool::build_tool_call_args;
 use crate::config::resolve_server_base_url;

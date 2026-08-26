@@ -65,7 +65,8 @@ fn guide_markdown_includes_live_context_and_all_catalog_tools() {
     assert!(guide.contains("`task.activity_changed` is the provider-neutral fallback"));
     assert!(guide.contains("a task's state has two dimensions"));
     assert!(guide.contains("prompt-only changes while a task remains stopped are visible only"));
-    assert!(guide.contains("kanna-cli tool call kanna_wait_events"));
+    assert!(guide.contains("kanna-cli task watch --repo-id <repo-id>"));
+    assert!(guide.contains("MCP clients commonly abort around 300 seconds"));
     assert!(guide.contains("no_live_agent_session"));
     assert!(guide.contains("delivery_uncertain"));
     assert!(guide.contains("## Machine-Local Repository Config"));

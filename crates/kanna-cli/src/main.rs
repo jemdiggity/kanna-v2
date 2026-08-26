@@ -637,6 +637,53 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         server_url: Option<String>,
     },
+    /// Hold the task-event long poll open until actionable work arrives
+    ///
+    /// This process is the push-equivalent for agent harnesses: run it in the
+    /// background, let process exit wake the agent, drain the printed events,
+    /// then re-arm it with the printed cursor. Unlike MCP tool calls, the
+    /// process can safely loop beyond the 240-second per-call clamp. MCP
+    /// clients commonly abort calls around 300 seconds and lose the result,
+    /// so arbitrarily long watches belong here rather than in
+    /// `kanna_wait_events`.
+    Watch {
+        /// Task IDs (or branch names) to watch; repeat or comma-separate
+        #[arg(
+            long = "task-id",
+            value_delimiter = ',',
+            required_unless_present = "repo_id"
+        )]
+        task_id: Vec<String>,
+
+        /// Watch every task in this repository. Task IDs take precedence when
+        /// both scopes are supplied, matching the event feed contract.
+        #[arg(long)]
+        repo_id: Option<String>,
+
+        /// Resume from the final cursor printed by an earlier watch. Without
+        /// this option the watch starts at the live tail and replays no history.
+        #[arg(long)]
+        cursor: Option<String>,
+
+        /// Wake for every event, including engine mechanics normally filtered
+        /// from manager notifications.
+        #[arg(long = "all")]
+        all_events: bool,
+
+        /// Exit successfully after this many quiet seconds and print a
+        /// `budget_expired` cursor record. Omit for an unlimited watch.
+        #[arg(long)]
+        budget_secs: Option<u64>,
+
+        /// Stream actionable batches instead of exiting after the first one.
+        /// With a budget, each actionable batch restarts the quiet window.
+        #[arg(long)]
+        follow: bool,
+
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]

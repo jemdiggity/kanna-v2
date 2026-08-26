@@ -862,6 +862,12 @@ fn wait_events_is_scoped_cursored_and_bounded_by_the_client_budget() {
             && description.contains("without cursor growth"),
         "the parent scope must document its bounded reparenting semantics: {description}"
     );
+    assert!(
+        description.contains("kanna-cli task watch")
+            && description.contains("clamped to 240 seconds")
+            && description.contains("abort tools/call around 300 seconds"),
+        "the MCP wait must route arbitrarily long watches to the CLI process: {description}"
+    );
 }
 
 #[test]

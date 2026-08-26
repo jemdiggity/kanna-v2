@@ -62,6 +62,182 @@ async fn typed_cli_round_trips_the_server_ks1_aggregate_cursor() {
     )), "{}", requests[1]);
 }
 
+#[test]
+fn task_watch_filter_suppresses_only_engine_mechanics() {
+    for event_type in [
+        "run.started",
+        "stage.changed",
+        "task.created",
+        "task.input_delivered",
+    ] {
+        assert!(!is_actionable_task_event(&serde_json::json!({
+            "type": event_type,
+            "payload": {}
+        })));
+    }
+    assert!(!is_actionable_task_event(&serde_json::json!({
+        "type": "run.finished",
+        "payload": {
+            "runId": "run-old",
+            "currentTask": { "latestRun": { "id": "run-next", "status": "running" } }
+        }
+    })));
+    for event_type in [
+        "run.finished",
+        "task.revision_requested",
+        "task.awaiting_input",
+        "task.pr_created",
+        "task.closed",
+    ] {
+        assert!(is_actionable_task_event(&serde_json::json!({
+            "type": event_type,
+            "payload": {
+                "runId": "run-terminal",
+                "currentTask": { "latestRun": { "id": "run-terminal", "status": "failed" } }
+            }
+        })));
+    }
+}
+
+#[tokio::test]
+async fn task_watch_starts_at_tail_advances_suppressed_cursor_and_exits_on_actionable_batch() {
+    let responses = vec![
+        http_json_response(
+            "200 OK",
+            &serde_json::json!({
+                "waitOutcome": "events",
+                "cursor": "cursor-1",
+                "events": [{ "seq": 1, "taskId": "task-a", "type": "run.started", "payload": {} }],
+                "hasMore": false
+            })
+            .to_string(),
+        ),
+        http_json_response(
+            "200 OK",
+            &serde_json::json!({
+                "waitOutcome": "events",
+                "cursor": "cursor-2",
+                "events": [{ "seq": 2, "taskId": "task-a", "type": "task.awaiting_input", "payload": { "stage": "review" } }],
+                "hasMore": false
+            })
+            .to_string(),
+        ),
+    ];
+    let (base_url, server) = serve_http_responses(responses).await;
+    let mut output = Vec::new();
+    watch_task_events(
+        &base_url,
+        TaskWatchOptions {
+            task_ids: vec!["task-a".to_string()],
+            repo_id: None,
+            cursor: None,
+            all_events: false,
+            budget_secs: None,
+            follow: false,
+        },
+        &mut output,
+    )
+    .await
+    .expect("watch actionable event");
+
+    let requests = server.await.expect("fixture server");
+    assert!(requests[0].contains("taskIds=task-a"));
+    assert!(requests[0].contains("from=now"));
+    assert!(requests[0].contains("timeoutSecs=240"));
+    assert!(!requests[0].contains("cursor="));
+    assert!(requests[1].contains("cursor=cursor-1"));
+    assert!(!requests[1].contains("from=now"));
+
+    let lines = String::from_utf8(output).unwrap();
+    let rows = lines
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["type"], "task.awaiting_input");
+    assert_eq!(rows[0]["payload"]["stage"], "review");
+    assert_eq!(rows[1]["type"], "watch.cursor");
+    assert_eq!(rows[1]["watchOutcome"], "actionable");
+    assert_eq!(rows[1]["cursor"], "cursor-2");
+}
+
+#[tokio::test]
+async fn task_watch_budget_expiry_is_a_distinct_successful_outcome() {
+    let response = http_json_response(
+        "200 OK",
+        &serde_json::json!({
+            "waitOutcome": "timeout",
+            "cursor": "tail-cursor",
+            "events": [],
+            "hasMore": false
+        })
+        .to_string(),
+    );
+    let (base_url, server) = serve_single_http_response(response).await;
+    let mut output = Vec::new();
+    watch_task_events(
+        &base_url,
+        TaskWatchOptions {
+            task_ids: Vec::new(),
+            repo_id: Some("repo-1".to_string()),
+            cursor: None,
+            all_events: false,
+            budget_secs: Some(0),
+            follow: false,
+        },
+        &mut output,
+    )
+    .await
+    .expect("quiet expiry is success");
+    let request = server.await.expect("fixture server");
+    assert!(request.contains("repoId=repo-1"));
+    assert!(request.contains("from=now"));
+    assert!(request.contains("timeoutSecs=0"));
+    let row: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(row["watchOutcome"], "budget_expired");
+    assert_eq!(row["cursor"], "tail-cursor");
+}
+
+#[tokio::test]
+async fn task_watch_all_and_follow_stream_before_quiet_exit() {
+    let response = http_json_response(
+        "200 OK",
+        &serde_json::json!({
+            "waitOutcome": "events",
+            "cursor": "cursor-follow",
+            "events": [{ "seq": 1, "taskId": "task-a", "type": "stage.changed", "payload": {} }],
+            "hasMore": false
+        })
+        .to_string(),
+    );
+    let (base_url, server) = serve_single_http_response(response).await;
+    let mut output = Vec::new();
+    watch_task_events(
+        &base_url,
+        TaskWatchOptions {
+            task_ids: vec!["task-a".to_string()],
+            repo_id: None,
+            cursor: None,
+            all_events: true,
+            budget_secs: Some(0),
+            follow: true,
+        },
+        &mut output,
+    )
+    .await
+    .expect("follow quiet expiry");
+    server.await.expect("fixture server");
+    let rows = String::from_utf8(output)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(rows[0]["type"], "stage.changed");
+    assert_eq!(rows[1]["watchOutcome"], "following");
+    assert_eq!(rows[2]["watchOutcome"], "budget_expired");
+    assert_eq!(rows[2]["cursor"], "cursor-follow");
+}
+
 #[tokio::test]
 async fn catalog_cli_defaults_listing_search_and_watch_to_the_task_repository() {
     let catalog = kanna_tool_catalog::bundled_catalog();
