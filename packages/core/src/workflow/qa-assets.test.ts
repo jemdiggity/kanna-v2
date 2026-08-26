@@ -179,13 +179,13 @@ describe("QA workflow assets", () => {
     expect(agent.prompt).toContain('origin: "human"');
     expect(agent.prompt).toContain("coordinate another set of reviews");
     expect(agent.prompt).toContain("the event loop is idle by design while awaiting human action");
-    expect(agent.prompt).toContain("kanna_set_task_notify");
+    expect(agent.prompt).toContain("Observe completion only through the MCP wait surfaces");
     expect(agent.prompt).toContain(
       "Product work, bug fixes, investigations, releases, and other durable repository tasks"
     );
-    expect(agent.prompt).toContain('"notify_task_id": "$KANNA_TASK_ID"');
+    expect(agent.prompt).not.toContain('"notify_task_id"');
     expect(agent.prompt).toContain("Do not set `parent_task_id`");
-    expect(agent.prompt).toContain("the long-running manager is never a parent/owner bucket");
+    expect(agent.prompt).toContain("The long-running manager is never a parent/owner bucket");
     expect(agent.prompt).toContain('"parent_task_id": "<durable-work-item-id>"');
     expect(agent.prompt).toContain("purpose-built child workflows");
     expect(agent.prompt).toContain("latestRun");
@@ -222,7 +222,7 @@ describe("QA workflow assets", () => {
     const dispatcher = parseAgentDefinition(readRepoFile(".kanna/agents/qa-dispatcher/AGENT.md"));
 
     expect(dispatcher.prompt).toContain('"parent_task_id": "$KANNA_TASK_ID"');
-    expect(dispatcher.prompt).toContain('"notify_task_id": "$KANNA_TASK_ID"');
+    expect(dispatcher.prompt).not.toContain('"notify_task_id"');
     expect(dispatcher.prompt).toContain("Create all children before waiting");
   });
 

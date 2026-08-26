@@ -2136,7 +2136,9 @@ pub(crate) fn create_dormant_task_for_api_with_error(
             port_env_json: None,
             agent_spawn_options_json: Some(&spawn_options_json),
             base_ref: None,
-            notify_task_id: request.notify_task_id.as_deref(),
+            // Retired completion-routing column: keep legacy schema readable,
+            // but never register a new target.
+            notify_task_id: None,
             parent_task_id: parent_task_id.as_deref(),
         })
         .map_err(|error| classify_pipeline_item_insert_error(error, has_requested_task_id))?;
@@ -2533,7 +2535,6 @@ struct ResolvedTaskSpawn {
     transfer_import: Option<crate::mobile_api::TransferImportSummary>,
     base_ref: Option<String>,
     stored_base_ref: Option<String>,
-    notify_task_id: Option<String>,
     parent_task_id: Option<String>,
 }
 
@@ -2889,6 +2890,9 @@ fn resolve_task_spawn(
     request: TaskCreationRequest,
     definitions: &RepoDefinitions,
 ) -> Result<ResolvedTaskSpawn, PrepareTaskError> {
+    // Kept on the internal request shape while older callers are compiled in;
+    // task creation deliberately does not persist the retired registration.
+    let _retired_notify_task_id = request.notify_task_id.as_deref();
     let repo_config = definitions.config();
     let original_prompt = request.task_prompt.clone();
     let display_name = request.display_name.clone();
@@ -3046,7 +3050,6 @@ fn resolve_task_spawn(
         transfer_import: request.transfer_import,
         base_ref: request.base_ref,
         stored_base_ref,
-        notify_task_id: request.notify_task_id,
         parent_task_id: request.parent_task_id,
     })
 }
@@ -3078,7 +3081,7 @@ fn insert_new_task_record(
         port_env_json: None,
         agent_spawn_options_json: Some(&agent_spawn_options_json),
         base_ref: resolved.stored_base_ref.as_deref(),
-        notify_task_id: resolved.notify_task_id.as_deref(),
+        notify_task_id: None,
         parent_task_id: resolved.parent_task_id.as_deref(),
     });
     match result {

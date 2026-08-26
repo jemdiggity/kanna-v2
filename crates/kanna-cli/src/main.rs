@@ -364,11 +364,6 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         blocker_task_id: Vec<String>,
 
-        /// Task to notify when this task reaches a terminal state. This routes
-        /// completion independently and does not make the new task a child.
-        #[arg(long)]
-        notify_task: Option<String>,
-
         /// Durable work item this is genuinely a semantic subtask of. Omit for
         /// ordinary top-level work and creator/orchestrator ownership.
         #[arg(long)]
@@ -533,20 +528,6 @@ pub(crate) enum TaskCommands {
         /// Parent task ID. Omit to detach the task from its current parent.
         #[arg(long)]
         parent_task: Option<String>,
-
-        /// Override the local Kanna server base URL
-        #[arg(long)]
-        server_url: Option<String>,
-    },
-    /// Set or clear the task notified when a task finishes
-    SetNotify {
-        /// The task ID whose completion should be announced
-        #[arg(long)]
-        task_id: String,
-
-        /// Task ID that receives the completion message. Omit to clear it.
-        #[arg(long)]
-        notify_task: Option<String>,
 
         /// Override the local Kanna server base URL
         #[arg(long)]

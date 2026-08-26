@@ -290,71 +290,6 @@ pub(super) async fn update_task(
     }))
 }
 
-#[derive(Debug, Default, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct SetTaskNotifyRequest {
-    notify_task_id: Option<String>,
-}
-
-/// Attach or clear a task's completion-notification target after creation.
-/// `notifyTaskId` was creation-time only, so an orchestrator that adopted an
-/// already-running task had no way to be told when it finished.
-///
-/// Retargeting is pure workflow-item state: it needs neither a workspace nor
-/// an agent session, so it works on a task that has not started its first
-/// stage yet. The one thing it cannot do is retarget a task that already
-/// closed — that task will never fire a completion notification again — and
-/// that case gets its own message rather than the bare `not found` the
-/// zero-row update used to produce.
-pub(super) async fn set_task_notify(
-    State(state): State<Arc<AppState>>,
-    axum::extract::Path(task_id): axum::extract::Path<String>,
-    payload: Option<Json<SetTaskNotifyRequest>>,
-) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
-    let payload = payload.map(|Json(payload)| payload).unwrap_or_default();
-    let db = Db::open(&state.config.db_path).map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("db error: {}", e),
-        )
-    })?;
-    let task_id = super::task_blockers::resolve_existing_task_id(&db, &task_id)?;
-    let notify_task_id = match payload
-        .notify_task_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        // Resolve the target too: a notification addressed to a branch name or
-        // a task that no longer exists would fail silently at delivery time.
-        Some(notify_task_id) => Some(super::task_blockers::resolve_existing_task_id(
-            &db,
-            notify_task_id,
-        )?),
-        None => None,
-    };
-    if notify_task_id.as_deref() == Some(task_id.as_str()) {
-        return Err((
-            axum::http::StatusCode::BAD_REQUEST,
-            "notifyTaskId must be a different task: a task cannot notify itself".to_string(),
-        ));
-    }
-    db.update_pipeline_item_notify_task(&task_id, notify_task_id.as_deref())
-        .map_err(|error| match error {
-            rusqlite::Error::QueryReturnedNoRows => (
-                axum::http::StatusCode::CONFLICT,
-                format!("task is closed: {task_id}"),
-            ),
-            error => db_write_error("db error", error),
-        })?;
-    state.publish_state_changed(StateChangeScope::Tasks);
-    Ok(Json(crate::mobile_api::TaskActionResponse {
-        task_id,
-        follow_task: None,
-        revision_budget: None,
-    }))
-}
-
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct SearchTasksQuery {
@@ -586,6 +521,13 @@ pub(super) async fn create_task_with_requested_id(
 ) -> Result<Json<crate::mobile_api::CreateTaskResponse>, (axum::http::StatusCode, String)> {
     if let Some(task_id) = requested_task_id.as_deref() {
         validate_requested_task_id(task_id)?;
+    }
+    if payload.notify_task_id.is_some() {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "notifyTaskId has been removed; observe completion with /v1/task-events or the task wait surface"
+                .to_string(),
+        ));
     }
     if let Some(snapshot) = payload.recovery_snapshot.as_ref() {
         snapshot

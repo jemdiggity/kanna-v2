@@ -7,8 +7,7 @@ import { makeRealTempDir, removeDir } from "../../helpers/background";
 import { startPtySession, type PtySession } from "../../helpers/pty";
 
 // WHAT BREAKS IN KANNA IF THIS PIN FAILS: transfer finalization sequencing,
-// and every other injected-input path (task send-input, stage posts, the
-// server-side completion notification).
+// task send-input, and stage posts.
 //
 // Decision 3 of the transfer plan replaces finalization's SIGINT with injected
 // input: write a wrap-up message, wait for Idle, then inject the provider's quit

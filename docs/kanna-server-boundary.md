@@ -181,7 +181,6 @@ the client falls back to a bounded snapshot.
 - `POST /v1/tasks/{task_id}/actions/signal-merge-handoff`
 - `POST /v1/tasks/{task_id}/actions/rerun-stage`
 - `POST /v1/tasks/{task_id}/actions/run-merge-agent`
-- `POST /v1/tasks/{task_id}/actions/set-notify`
 - `POST /v1/mobile/notifications`
 - `POST /v1/pairing/sessions`
 - `POST /v1/pairing/sessions/claim`
@@ -614,9 +613,10 @@ omitted from the listing, but still resolve when the
 The matching `architect-consultation` workflow is internal for the same
 reason: it is a finite manual-stage child contract named explicitly by the
 task manager, not a product-work workflow choice. The workflow binds
-`architect`; task creation supplies the assessed work item as `parentTaskId`,
-the manager independently as `notifyTaskId`, and the assessed committed branch
-as `baseRef`. No singleton or new event loop is involved. See
+`architect`; task creation supplies the assessed work item as `parentTaskId`
+and the assessed committed branch as `baseRef`. The manager observes its
+completion through the MCP wait surface. No singleton or new event loop is
+involved. See
 [Architect Consultations](specs/architect-consultations.md).
 
 Task creation uses that same resolution path for any agent role, not only
@@ -733,9 +733,9 @@ cursor-based, not snapshot-diffed:
   aggregated `ks1.` feed adds `machineId` in the usual way.
 - `task.input_delivered` announces a message delivered into a task's agent
   session from outside it. `payload.source` is the caller-declared author
-  (`operator`, `manager`, `unspecified`) or `notify` for the server's own
-  completion notification; `payload.runId` and `payload.stage` are what was live
-  at delivery; `payload.preview` is a bounded prefix with `payload.truncated`
+  (`operator`, `manager`, `unspecified`); historical retained events may carry
+  the retired `notify` source. `payload.runId` and `payload.stage` are what was
+  live at delivery; `payload.preview` is a bounded prefix with `payload.truncated`
   saying whether it was cut. The event is only the announcement — the record is
   the `task_input` row, read through `GET /v1/tasks/{task_id}/inputs`. See
   [Delivered Task Inputs](#delivered-task-inputs).
@@ -836,8 +836,8 @@ The row is the record; `task.input_delivered` is only its announcement.
   [Image attachments](#image-attachments). There is no separate attachment
   field to read, and no record is written for an attachment whose message never
   reached the session.
-- **Scope.** This covers `POST /v1/tasks/{task_id}/input` and the server's
-  completion notifications. Stage prompts, post prompts, and revision feedback
+- **Scope.** This covers `POST /v1/tasks/{task_id}/input`. Stage prompts, post
+  prompts, and revision feedback
   are already durable on `stage_run` and are not duplicated here; blocker
   resolution instructions and transfer wrap-up messages are server-generated
   session control and are likewise not recorded. An empty list therefore means
@@ -882,9 +882,8 @@ decision about that screen, and it is surfaced rather than discovered:
   recorded as delivered, and retrying changes nothing.
 - Every server-side delivery that meets the refusal records it on the *target*
   and marks that task `unread`, so a wedged singleton stops reading as idle in
-  the sidebar. This includes the two deliveries nobody would otherwise see: the
-  completion notification (whose claim is one-shot, so the message is gone) and
-  the pre-close merge-handoff backstop, which additionally refuses the close so
+  the sidebar. This includes the pre-close merge-handoff backstop, which
+  additionally refuses the close so
   the finishing task parks at its final stage instead of disappearing with an
   un-handed-off PR.
 
@@ -1024,7 +1023,7 @@ Which dimension each consumer reads:
 
 `runtimeState` is stored on `pipeline_item.runtime_status`. `exited` is written
 when a task's daemon session exits without a replacement — the same signal that
-finalizes the run and delivers the completion notification, so it never fires
+finalizes the run, so it never fires
 for the orchestrated kills behind a stage swap, rerun, or close. Starting a new
 running `stage_run` clears a stale `exited` back to absent, so a fresh session
 is never reported as already gone.
@@ -1125,18 +1124,16 @@ choice and is intentionally not changed by dynamic re-pipelining:
 - **Child tasks are excluded** (`parent_task_id IS NULL`). A specialty review a
   review stage dispatched is not a workflow the operator picked.
 
-## Task Completion Notification
+## Task Completion Observation
 
-A task with `notify_task_id` set delivers exactly one message into that task's
-terminal when it ends:
+Task completion is observed through the existing MCP wait surfaces:
+`kanna_wait_events` for fan-out and `kanna_wait_task` for one task. The durable
+facts are the terminating `stage_run`, its `run.finished` event, `task.closed`
+when applicable, and task detail. Kanna does not inject completion text into a
+manager task's PTY; that input channel is reserved for actual operator and
+manager speech.
 
-```
-TASK <child-id> DONE [success|failure|closed]: <title>
-```
-
-The status vocabulary is closed — three words, matched exactly. The receiving
-agent is expected to act on the payload without re-reading task state, which is
-the entire point of `notify_task_id`, so the word has to carry the real outcome:
+The structured status vocabulary remains closed — three words, matched exactly:
 
 - `success` — the task ended cleanly: it advanced past its final workflow stage,
   or its session ended with no failing verdict recorded against it.
@@ -1147,27 +1144,20 @@ the entire point of `notify_task_id`, so the word has to carry the real outcome:
   `POST /v1/tasks/{task_id}/actions/close`). No verdict was ever reached; this is
   not a failure and must not be diagnosed as one.
 
-The status is derived server-side from the *trigger* plus the task's terminating
-run, never from the daemon `Exit` alone: the agent erroring, the task advancing
-past its final stage, and a human closing the task all end the same PTY the same
-way. Deriving it from the exit code alone is what made every clean completion —
-and every direct close — report `DONE [failure]`.
+Daemon `Exit` finalizes activity/runtime state and any running `stage_run` in
+the same server-side path regardless of whether a desktop event bridge is
+open. An interrupted run's structured result keeps `success` or `failure` as
+appropriate; a direct close is `closed`, while a normal workflow finish keeps
+the successful terminating run. The account-wide event feed preserves these
+facts across machines.
 
-Delivery is claimed once via `pipeline_item.notified_at` and goes through the
-same logical-input helper as `POST /v1/tasks/{task_id}/input`. All of it is
-server/daemon-side; it must not depend on the desktop event bridge being open.
-
-Completion notification remains machine-local in this version. Both
-creation-time `notify_task_id` and `kanna_set_task_notify` resolve the target in
-the child's SQLite database, and `notified_at` is claimed before direct daemon
-delivery. Routing it cross-machine would require persisting a target machine
-identity and a durable remote-delivery outbox/acknowledgement; opportunistically
-probing active peers after the one-shot claim would lose messages on disconnect
-and violate the guarantee above. The account-wide event feed is therefore the
-reliable cross-machine wake-up: task managers must watch `run.finished`,
-`task.closed`, and related events, while `TASK ... DONE` remains an additional
-same-machine fast path. The staged durability work is recorded in
-[2026-08-16 cross-machine event waiting gaps](2026-08-16-cross-machine-event-waiting-e2e-gap.md).
+The legacy SQLite columns `pipeline_item.notify_task_id` and `notified_at`
+remain readable for database/snapshot compatibility but are inert. The
+creation field is deprecated and rejected when non-null, the set-notify route
+and `kanna_set_task_notify` tool have been removed, and existing values are
+never claimed. Historical `task_input` rows and `task.input_delivered` events
+whose source is `notify` remain part of the audit record; no new ones are
+written.
 
 ## Merge Handoff
 

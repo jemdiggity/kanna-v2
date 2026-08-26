@@ -34,6 +34,8 @@ pub(super) struct TaskCreationRequest {
     /// Display-only import notice for a task arriving by cross-machine
     /// transfer; printed once into the destination PTY before the agent runs.
     pub(super) transfer_import: Option<crate::mobile_api::TransferImportSummary>,
+    /// Retired request compatibility field. Resolution reads and discards it;
+    /// the public HTTP boundary rejects non-null values.
     pub(super) notify_task_id: Option<String>,
     pub(super) parent_task_id: Option<String>,
 }

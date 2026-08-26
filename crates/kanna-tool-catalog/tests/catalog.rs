@@ -30,7 +30,6 @@ fn bundled_catalog_parses_and_declares_all_tools() {
             "kanna_wait_task",
             "kanna_wait_events",
             "kanna_notify_mobile",
-            "kanna_set_task_notify",
             "kanna_set_task_workflow",
             "kanna_task_logs",
             "kanna_task_inputs",
@@ -508,23 +507,6 @@ fn resolves_expected_requests_for_every_bundled_tool() {
             "kanna_create_task",
             json!({
                 "repo_id": "repo-1",
-                "prompt": "Investigate flaky release",
-                "notify_task_id": "task-manager"
-            }),
-            Method::Post,
-            ResponseKind::Json,
-            "/v1/tasks",
-            json!({
-                "repoId": "repo-1",
-                "prompt": "Investigate flaky release",
-                "agentType": "pty",
-                "notifyTaskId": "task-manager"
-            }),
-        ),
-        (
-            "kanna_create_task",
-            json!({
-                "repo_id": "repo-1",
                 "prompt": "Subtask",
                 "parent_task_id": "task-parent"
             }),
@@ -684,22 +666,6 @@ fn resolves_expected_requests_for_every_bundled_tool() {
                 "body": "The staging build is ready.",
                 "taskId": "task-1"
             }),
-        ),
-        (
-            "kanna_set_task_notify",
-            json!({ "task_id": "task-child", "notify_task_id": "task-parent" }),
-            Method::Post,
-            ResponseKind::Json,
-            "/v1/tasks/task-child/actions/set-notify",
-            json!({ "notifyTaskId": "task-parent" }),
-        ),
-        (
-            "kanna_set_task_notify",
-            json!({ "task_id": "task-child" }),
-            Method::Post,
-            ResponseKind::Json,
-            "/v1/tasks/task-child/actions/set-notify",
-            json!({}),
         ),
         (
             "kanna_set_task_workflow",
@@ -1151,7 +1117,7 @@ fn wait_results_carry_the_task_detail_and_an_outcome_discriminator() {
 }
 
 #[test]
-fn create_task_preserves_parent_and_notify_for_genuine_dispatch_fan_out() {
+fn create_task_preserves_parent_for_genuine_dispatch_fan_out() {
     let catalog = bundled_catalog();
     let request = resolve_request(
         &catalog,
@@ -1162,8 +1128,7 @@ fn create_task_preserves_parent_and_notify_for_genuine_dispatch_fan_out() {
             "workflow_name": "specialty-review",
             "agent": "review-security",
             "base_ref": "task-parent-1-2",
-            "parent_task_id": "parent-1",
-            "notify_task_id": "parent-1"
+            "parent_task_id": "parent-1"
         }),
     )
     .expect("dispatcher-style create-task call resolves");
@@ -1179,8 +1144,7 @@ fn create_task_preserves_parent_and_notify_for_genuine_dispatch_fan_out() {
             "agent": "review-security",
             "baseRef": "task-parent-1-2",
             "agentType": "pty",
-            "parentTaskId": "parent-1",
-            "notifyTaskId": "parent-1"
+            "parentTaskId": "parent-1"
         })
     );
 }
@@ -1444,7 +1408,7 @@ fn display_name_documents_the_prompt_fallback_rather_than_a_derivation() {
 }
 
 #[test]
-fn task_creation_guidance_keeps_completion_routing_independent_from_hierarchy() {
+fn task_creation_guidance_uses_wait_surfaces_and_semantic_hierarchy() {
     let catalog = bundled_catalog();
     let create = catalog
         .tools
@@ -1458,24 +1422,16 @@ fn task_creation_guidance_keeps_completion_routing_independent_from_hierarchy() 
         .find(|param| param.name == "parent_task_id")
         .and_then(|param| param.description.as_deref())
         .expect("parent_task_id description");
-    let notify = create
-        .params
-        .iter()
-        .find(|param| param.name == "notify_task_id")
-        .and_then(|param| param.description.as_deref())
-        .expect("notify_task_id description");
-
     assert!(description.contains("Ordinary durable repository work is top-level by default"));
-    assert!(description.contains("use notify_task_id to route completion without parent_task_id"));
+    assert!(description.contains("Observe completion through kanna_wait_events"));
     assert!(parent.contains("genuine semantic subtask"));
     assert!(parent.contains("Omit for ordinary top-level work"));
-    assert!(notify.contains("independent of parent_task_id"));
-    assert!(notify.contains("does not make the new task its child"));
+    assert!(create
+        .params
+        .iter()
+        .all(|param| param.name != "notify_task_id"));
 
-    // The ordinary orchestration example routes completion but remains
-    // top-level; the genuine fan-out contract test above deliberately maps
-    // both fields for the QA dispatcher's semantic child.
-    let top_level = resolve_request(
+    let error = resolve_request(
         &catalog,
         "kanna_create_task",
         &json!({
@@ -1484,9 +1440,11 @@ fn task_creation_guidance_keeps_completion_routing_independent_from_hierarchy() 
             "notify_task_id": "task-manager-1"
         }),
     )
-    .expect("top-level orchestrated task resolves");
-    assert_eq!(top_level.body["notifyTaskId"], json!("task-manager-1"));
-    assert!(top_level.body.get("parentTaskId").is_none());
+    .expect_err("retired notify_task_id must not resolve");
+    assert!(
+        error.contains("unknown argument: notify_task_id"),
+        "{error}"
+    );
 }
 
 /// The catalog, not the shape of the text, decides a command-line argument's

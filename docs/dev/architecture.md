@@ -92,8 +92,8 @@ The desktop-side service boundary for every non-desktop consumer (mobile app,
 `kanna-server` **owns SQLite**: all schema definitions and migrations live in
 `crates/kanna-server/src/db/mod.rs`, and server startup completes legacy
 file relocation before opening the DB. The desktop frontend's `stores/db.ts` is
-only a compatibility facade. It also subscribes to daemon events server-side —
-task completion notification is a server/daemon concern, never a frontend one.
+only a compatibility facade. It also subscribes to daemon events server-side,
+so task completion state and events do not depend on the frontend being open.
 
 Boundary and route surface: [`docs/kanna-server-boundary.md`](../kanna-server-boundary.md).
 
@@ -322,12 +322,13 @@ The contracts below are specified in
   the returned cursor. The mobile app does **not** use
   this feed — its cross-machine view is the Firestore task index plus KSP
   task-summary streams.
-- **Task input pipeline.** `POST /v1/tasks/{id}/input` (and the server's own
-  completion notifications) write into the live PTY through the daemon. A
+- **Task input pipeline.** `POST /v1/tasks/{id}/input` writes into the live PTY
+  through the daemon. A
   success now means *submitted* — the daemon acknowledges only after the
   message bytes and the delayed Enter both landed. Deliveries the daemon
   accepts are appended to the durable `task_input` ledger with source
-  (`operator`/`manager`/`notify`/`unspecified`), stage, and run. Whether a
+  (`operator`/`manager`/`unspecified`), stage, and run. Historical rows may use
+  the retired `notify` source. Whether a
   composer draft holds delivery follows the daemon's **composer attestation**
   ledger, a three-way evidence state
   (`crates/daemon/SPEC.md`, protected-input and composer-attestation):
@@ -345,11 +346,11 @@ The contracts below are specified in
   `composer: { text, attestation }`, the task-logs tail labels the composer
   line, and text whose attestation is not `typed` must never be read as an
   instruction.
-- **Completion notify.** `kanna-server` subscribes to daemon terminal-state
-  events directly (never through the desktop frontend) and delivers
-  `TASK <child-id> DONE [success|failure|closed]: <title>` to the notify
-  target — a closed three-word vocabulary derived from the completion trigger
-  plus the terminating `stage_run`, never from the daemon `Exit` alone.
+- **Completion observation.** `kanna-server` subscribes to daemon
+  terminal-state events directly (never through the desktop frontend) and
+  records the terminating run/runtime state and durable events. Managers use
+  `kanna_wait_events` for fan-out or `kanna_wait_task` for one task; completion
+  is not delivered as input to another task.
 - **Cloud task publication.** `kanna-server` polls its own task snapshot
   every 500 ms, fingerprints the envelope, and publishes changes through the
   relay to Firestore (`users/{uid}/desktops/{id}/tasks`) under a

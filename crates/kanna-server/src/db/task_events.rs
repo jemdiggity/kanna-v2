@@ -80,8 +80,8 @@ pub enum TaskEventKind {
     /// this as a failed approval, not a completed workflow.
     MergeHandoffMissing,
     /// A message was delivered into the task's agent session from outside it
-    /// — an operator or manager call to `POST /v1/tasks/{id}/input`, or the
-    /// server's own completion notification. `payload.source` says who
+    /// — an operator or manager call to `POST /v1/tasks/{id}/input`.
+    /// Historical events may have source `notify`. `payload.source` says who
     /// declared authorship, `payload.preview` carries a bounded prefix and
     /// `payload.truncated` says whether it was cut; the full text is the
     /// durable `task_input` row this event announces, readable through
@@ -92,8 +92,8 @@ pub enum TaskEventKind {
     /// while it is blocked (`inherited-draft-unknown`) and is null when it
     /// clears. A blocked session is not a failed one and not a busy one: it is
     /// running normally and silently dropping nothing — every delivery into it
-    /// is refused, including Kanna's own completion notifications and the
-    /// pre-close merge handoff, until the composer it inherited is resolved.
+    /// is refused, including the pre-close merge handoff, until the composer it
+    /// inherited is resolved.
     InputBlocked,
     /// A detached workspace teardown failed to start or exceeded its deadline.
     TeardownFailed,
@@ -491,34 +491,6 @@ impl Db {
             }
         }
         Ok(events)
-    }
-
-    /// Attach (or clear) the task that receives this task's completion
-    /// notification. `notify_task_id` was creation-time only; an orchestrator
-    /// that adopts an already-running task needs to set it afterwards.
-    ///
-    /// Setting a *new* target clears `notified_at`, so a task that already
-    /// notified a previous parent still notifies the new one.
-    pub fn update_pipeline_item_notify_task(
-        &self,
-        task_id: &str,
-        notify_task_id: Option<&str>,
-    ) -> Result<(), rusqlite::Error> {
-        let rows_affected = self.conn.execute(
-            "UPDATE pipeline_item
-             SET notify_task_id = ?1,
-                 notified_at = CASE
-                     WHEN ?1 IS NOT NULL AND COALESCE(notify_task_id, '') != ?1 THEN NULL
-                     ELSE notified_at
-                 END,
-                 updated_at = datetime('now')
-             WHERE id = ?2 AND closed_at IS NULL",
-            rusqlite::params![notify_task_id, task_id],
-        )?;
-        if rows_affected == 0 {
-            return Err(rusqlite::Error::QueryReturnedNoRows);
-        }
-        Ok(())
     }
 
     /// Record the runtime dimension of a task: what its agent session is

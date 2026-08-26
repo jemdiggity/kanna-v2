@@ -293,7 +293,6 @@ export interface CreateDesktopTaskRequest {
   recoverySnapshot?: SessionRecoveryState | null;
   transferImport?: TransferImportSummary | null;
   blockerTaskIds?: string[];
-  notifyTaskId?: string;
   parentTaskId?: string;
 }
 

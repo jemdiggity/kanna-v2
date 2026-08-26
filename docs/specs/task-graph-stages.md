@@ -54,12 +54,11 @@ The current stage implementation fights both workflows:
    commit the work and advance without a human round-trip.
 5. **Vestigial and dueling state.** `tags` survives only to mark `blocked`;
    `stage = 'done'` and `closed_at` are dueling sources of truth for
-   visibility; `notify_task_id` is missing from the TS `PipelineItem`
-   interface — the triple-maintained schema is already drifting.
+   visibility; the triple-maintained schema is already drifting.
 
 Meanwhile the codebase has been growing the correct model organically:
-`parent_task_id`, `task_blocker` (with DFS cycle detection), `notify_task_id`/
-`notified_at`, `kanna_wait_task`, sidebar subtree nesting. That is a task
+`parent_task_id`, `task_blocker` (with DFS cycle detection),
+`kanna_wait_task`, sidebar subtree nesting. That is a task
 graph. The redesign promotes it to the core model and re-expresses stages on
 top of it.
 
@@ -217,7 +216,7 @@ is slow and waiting is unnecessary). Consequences the engine owns:
 ### Fan-out and join
 
 Parallel work is child tasks, created by agents (`kanna_create_task` with
-`base_ref` = the parent's branch, `parent_task_id`, `notify_task_id`) or by
+`base_ref` = the parent's branch and `parent_task_id`) or by
 humans. Each child is a full task: own branch forked from the parent's, own
 worktree, own stage lifecycle — a child can run all the way to its own PR.
 
@@ -229,11 +228,10 @@ Join is deliberately not engine-enforced. Two sanctioned patterns:
 2. **Human integrates:** children proceed to PR; the human merges the PRs and
    informs the parent (via task input or by advancing it).
 
-The engine's contribution is structured results: a child's terminal
+The engine's contribution is structured results and events: a child's terminal
 `stage_run.result` is durable and queryable (`kanna_wait_task`,
-`kanna_get_task`), and the existing notify boundary (`notify_task_id` →
-`TASK <id> DONE` typed into the parent's session) keeps working, now backed by
-run results instead of a one-shot column.
+`kanna_get_task`), while `kanna_wait_events` is the fan-out wake-up surface.
+Completion is not typed into another task's session.
 
 **Who drives:** the engine executes structure known in advance (the linear
 stage rail, declared transitions); agents create structure discovered at
@@ -455,8 +453,8 @@ consequences the first implementation missed are now owned explicitly:
   Exit watcher only treats a daemon `Exit` as agent completion when the task
   still has a running `stage_run` for that session; an in-process
   replacement guard covers the kill→spawn window. Previously an advance's
-  kill could be misread as the agent finishing, prematurely claiming the
-  once-only `notify_task_id` delivery.
+  kill could be misread as the agent finishing and prematurely finalizing its
+  runtime/run state.
 
 Per-run daemon session ids (`{task_id}-r{n}`) remain the eventual model if
 TerminalTabs grows per-run history (the `stage_run.session_id` column and

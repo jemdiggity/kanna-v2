@@ -5,7 +5,7 @@
 //! rollout uuid off the TUI footer and reports it on the `Exit` it broadcasts.
 //! An implementation -> review transition kills that session on purpose, so
 //! the `Exit` is a replaced/killed one — the shape the watcher must skip for
-//! completion notification and terminal-state finalization, but must not skip
+//! terminal-state finalization, but must not skip
 //! for the id itself. Losing it there is invisible until a revision, which
 //! then forks a fresh conversation instead of resuming. Observed historically
 //! on closed tasks cf1b5371 and 6a6eb58b, each of which burned four distinct

@@ -488,8 +488,8 @@ pub(crate) async fn terminal_state_watcher_once(
                 let replacement = replacements.consume(&session_id);
                 if replacement.replaced || killed {
                     // Orchestrated kill (stage swap, rerun, close) — not the
-                    // agent finishing, so no completion notification and no
-                    // terminal-state finalization. The provider resume id the
+                    // agent finishing, so there is no terminal-state
+                    // finalization. The provider resume id the
                     // daemon discovered on the way out still belongs to the
                     // killed run, and is its only record of the conversation
                     // a revision would reopen.
@@ -684,29 +684,6 @@ mod tests {
         }
     }
 
-    async fn expect_completion_notification(listener: &UnixListener) -> Vec<Vec<u8>> {
-        let (stream, _) = timeout(Duration::from_secs(2), listener.accept())
-            .await
-            .expect("notification connection was not opened")
-            .unwrap();
-        let (read_half, mut write_half) = stream.into_split();
-        let mut reader = BufReader::new(read_half);
-        let mut inputs = Vec::new();
-        for _ in 0..1 {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            match serde_json::from_str::<DaemonCommand>(line.trim()).unwrap() {
-                DaemonCommand::SubmitInput { session_id, data } => {
-                    assert_eq!(session_id, "task-parent");
-                    inputs.push(data);
-                }
-                other => panic!("expected SubmitInput command, got {other:?}"),
-            }
-            write_event(&mut write_half, &DaemonEvent::Ok).await;
-        }
-        inputs
-    }
-
     fn assert_task_not_completed(config: &Config) {
         let db = Db::open(&config.db_path).unwrap();
         let task = db.get_pipeline_item("task-child").unwrap().unwrap();
@@ -714,11 +691,12 @@ mod tests {
         assert!(task.notified_at.is_none());
     }
 
-    fn assert_task_completed(config: &Config) {
+    fn assert_task_completed_without_notification(config: &Config) {
         let db = Db::open(&config.db_path).unwrap();
         let task = db.get_pipeline_item("task-child").unwrap().unwrap();
         assert_eq!(task.activity.as_deref(), Some("unread"));
-        assert!(task.notified_at.is_some());
+        assert!(task.notified_at.is_none());
+        assert!(db.list_task_inputs("task-parent", 10).unwrap().is_empty());
     }
 
     fn assert_task_agent_session_id(config: &Config, expected: &str) {
@@ -950,8 +928,7 @@ mod tests {
 
         let db = Db::open(&config.db_path).unwrap();
         // An intentional kill is not the agent finishing: no finalization of
-        // the live replacement run, and no completion notification (asserted
-        // by the server task above).
+        // the live replacement run (asserted by the server task above).
         assert_eq!(
             db.stage_run("run-review").unwrap().unwrap().status,
             "running"
@@ -1128,9 +1105,8 @@ mod tests {
                 },
             )
             .await;
-            let inputs = expect_completion_notification(&listener).await;
+            expect_no_notification_connection(&listener).await;
             write_event(&mut subscriber, &DaemonEvent::ShuttingDown).await;
-            inputs
         });
 
         timeout(
@@ -1140,13 +1116,9 @@ mod tests {
         .await
         .expect("watcher did not finish")
         .unwrap();
-        let inputs = server.await.unwrap();
+        server.await.unwrap();
 
-        assert_eq!(
-            inputs,
-            vec![b"TASK task-child DONE [success]: Child Display".to_vec()]
-        );
-        assert_task_completed(&config);
+        assert_task_completed_without_notification(&config);
         assert!(
             !replacements.consume("task-child").replaced,
             "replacement entry should have been consumed by the killed exit"
@@ -1498,17 +1470,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(daemon_dir);
     }
 
-    /// Adopting a running task: the notification target is attached after the
-    /// task started, and the same server-side completion path must honour it.
+    /// Legacy registrations remain inert when a task exits.
     #[tokio::test]
-    async fn watcher_notifies_a_target_attached_after_task_creation() {
+    async fn watcher_does_not_notify_a_legacy_target() {
         let unique = unique_name("terminal-watcher-retrofit-notify");
         let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
         let config = test_config(&unique, &daemon_dir);
         seed_plain_task(&config);
         Db::open(&config.db_path)
             .unwrap()
-            .update_pipeline_item_notify_task("task-child", Some("task-parent"))
+            .update_test_pipeline_item_notify_task("task-child", "task-parent")
             .unwrap();
         let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
 
@@ -1524,9 +1495,8 @@ mod tests {
                 },
             )
             .await;
-            let inputs = expect_completion_notification(&listener).await;
+            expect_no_notification_connection(&listener).await;
             write_event(&mut subscriber, &DaemonEvent::ShuttingDown).await;
-            inputs
         });
 
         timeout(
@@ -1539,12 +1509,8 @@ mod tests {
         .await
         .expect("watcher did not finish")
         .unwrap();
-        let inputs = server.await.unwrap();
-
-        assert_eq!(
-            inputs,
-            vec![b"TASK task-child DONE [success]: Child Display".to_vec()]
-        );
+        server.await.unwrap();
+        assert_task_completed_without_notification(&config);
         let _ = std::fs::remove_file(socket_path);
         let _ = std::fs::remove_dir_all(daemon_dir);
     }

@@ -17,9 +17,9 @@ stage-engine semantics were added.
 ### No engine changes
 
 Workflows stay linear. Parallelism lives in child-task fan-out
-(`kanna_create_task` with `base_ref` = the dispatcher's branch,
-`parent_task_id`/`notify_task_id` = the dispatcher's task), and join is the
-dispatcher's job (`kanna_wait_task`, then reading the child's recorded
+(`kanna_create_task` with `base_ref` = the dispatcher's branch and
+`parent_task_id` = the dispatcher's task), and join is the dispatcher's job
+(`kanna_wait_task`, then reading the child's recorded
 verdict). This follows the task-graph spec's fan-out/join section: join
 semantics are deliberately not engine-enforced.
 
@@ -413,11 +413,11 @@ findings.
 parent review stage (qa-dispatcher, auto)
   ├─ kanna_list_task_children(parent) → closed + open children, oldest first
   │    └─ select workflowName=specialty-review, then reduce latest terminal latestRun per review-* agent
-  ├─ kanna_create_task {workflow_name: specialty-review, agent: review-ui,   base_ref: $BRANCH, parent/notify: self,
+  ├─ kanna_create_task {workflow_name: specialty-review, agent: review-ui,   base_ref: $BRANCH, parent: self,
   │                     display_name: "UI review: <subject> (round n)"}
-  ├─ kanna_create_task {workflow_name: specialty-review, agent: review-sec…, base_ref: $BRANCH, parent/notify: self,
+  ├─ kanna_create_task {workflow_name: specialty-review, agent: review-sec…, base_ref: $BRANCH, parent: self,
   │                     display_name: "Security review: <subject> (round n)"}
-  ├─ kanna_wait_task until finished (per child; waitOutcome timeout → call again; notify "TASK <id> DONE" doubles as a wake-up)
+  ├─ kanna_wait_events for the child set (cursor loop; run.finished/task.closed are the wake-up)
   ├─ kanna_get_task → latestRun.status/summary   (succeeded=PASS / failed=FAIL)
   ├─ kanna_close_task (every child, after collecting its verdict)
   ├─ filter new and carried findings against the scope bar (caused by this diff AND blocking)

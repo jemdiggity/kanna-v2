@@ -121,8 +121,8 @@ pub(crate) const INPUT_BLOCKED_INHERITED_DRAFT: &str = "inherited-draft-unknown"
 /// Record that a delivery target is refusing input, and make it visible where
 /// an operator will actually meet it.
 ///
-/// The delivery that discovered this was usually made on someone else's
-/// behalf — a completion notification, the pre-close merge handoff — so the
+/// The delivery that discovered this may have been made on someone else's
+/// behalf — for example, the pre-close merge handoff — so the
 /// only human-facing trace it would otherwise leave is a log line inside
 /// another task's failure. The task is marked unread for the same reason: a
 /// wedged singleton is `idle` and reads as perfectly healthy in the sidebar.
@@ -564,84 +564,6 @@ pub(super) async fn send_task_input(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
-/// What ended a task, as known by the caller that fires its completion
-/// notification.
-///
-/// Daemon `Exit` alone cannot tell these apart — the agent erroring, the task
-/// advancing past its final stage, and a human closing the task from the
-/// sidebar all end the same PTY the same way — so the trigger is passed in and
-/// the reported status is derived from it together with the task's own
-/// terminating run.
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum TaskCompletionTrigger {
-    /// The task's agent session ended on its own: an unkilled daemon `Exit`.
-    AgentSessionExit { exit_code: i32 },
-    /// The task advanced past its final workflow stage — a normal completion.
-    WorkflowCompleted,
-    /// The task was closed directly (sidebar ⇧⌘⌫ or `POST /v1/tasks/{id}/close`)
-    /// without finishing its workflow.
-    DirectClose,
-}
-
-/// The status word in `TASK <id> DONE [<status>]: <title>`.
-///
-/// Three states, not two. An orchestrating agent acts on this payload without
-/// re-reading task state — that is the whole point of `notify_task_id` — so
-/// "a human cancelled this" must not read the same as "the work failed", and
-/// neither may read the same as a clean finish. The vocabulary is closed:
-/// receivers match these three words exactly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TaskCompletionStatus {
-    /// The task ran to a clean end: it reached the end of its workflow, or its
-    /// session ended with no failing verdict against it.
-    Success,
-    /// The task's terminating run reported failure, or its agent process died.
-    Failure,
-    /// The task was closed before finishing its workflow. Not a failure — no
-    /// verdict was reached at all.
-    Closed,
-}
-
-impl TaskCompletionStatus {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Success => "success",
-            Self::Failure => "failure",
-            Self::Closed => "closed",
-        }
-    }
-}
-
-/// Derive the reported status from the task's real outcome.
-///
-/// A direct close reached no verdict, so it reports `closed` whatever state the
-/// task was in. Otherwise the terminating `stage_run` decides: an agent that
-/// reported failure and then let its session end is a failure however cleanly
-/// the PTY exited, and a task that reached the end of its workflow behind a
-/// succeeded run is a success even though closing it killed the session.
-fn derive_task_completion_status(
-    db: &Db,
-    task_id: &str,
-    trigger: TaskCompletionTrigger,
-) -> Result<TaskCompletionStatus, String> {
-    match trigger {
-        TaskCompletionTrigger::DirectClose => return Ok(TaskCompletionStatus::Closed),
-        // A dead agent process is a failure regardless of any recorded verdict:
-        // the run it was executing never finished.
-        TaskCompletionTrigger::AgentSessionExit { exit_code } if exit_code != 0 => {
-            return Ok(TaskCompletionStatus::Failure)
-        }
-        _ => {}
-    }
-    let status = db
-        .latest_finished_stage_run_status(task_id)
-        .map_err(|e| format!("db error: {}", e))?;
-    Ok(match status.as_deref() {
-        Some("failed") => TaskCompletionStatus::Failure,
-        _ => TaskCompletionStatus::Success,
-    })
-}
-
 pub(crate) async fn handle_task_terminal_state(
     state: &AppState,
     task_id: &str,
@@ -649,8 +571,8 @@ pub(crate) async fn handle_task_terminal_state(
 ) -> Result<(), String> {
     // A Claude session that exited because it could not resume its transcript
     // never ran the stage at all. Relaunching it fresh happens before any of
-    // the bookkeeping below, so the dead attempt cannot finalize the run or
-    // fire a completion notification against work that has not been done.
+    // the bookkeeping below, so the dead attempt cannot finalize the run
+    // against work that has not been done.
     match super::resume_recovery::recover_rejected_claude_resume(state, task_id, exit_code).await {
         super::resume_recovery::RejectedResumeRecovery::Relaunched => return Ok(()),
         super::resume_recovery::RejectedResumeRecovery::RelaunchFailed(error) => {
@@ -666,22 +588,25 @@ pub(crate) async fn handle_task_terminal_state(
     } else {
         "failed"
     };
-    let result = format!(
+    let summary = format!(
         "agent session exited before recording a stage verdict (exit code {exit_code}); \
          use kanna_resume_task to recover provider context"
     );
-    let Some(pipeline_item_id) =
-        mark_task_session_interrupted(&state.config.db_path, task_id, interrupted_status, &result)?
-    else {
+    // Keep the agent-facing three-word completion vocabulary on the durable
+    // run/event surfaces after removing PTY completion messages. The database
+    // run status remains its established succeeded/failed/cancelled enum.
+    let result = serde_json::json!({
+        "status": if exit_code == 0 { "success" } else { "failure" },
+        "summary": summary,
+    })
+    .to_string();
+    if mark_task_session_interrupted(&state.config.db_path, task_id, interrupted_status, &result)?
+        .is_none()
+    {
         return Ok(());
-    };
+    }
     state.publish_state_changed(StateChangeScope::Tasks);
-    notify_task_completion(
-        state,
-        &pipeline_item_id,
-        TaskCompletionTrigger::AgentSessionExit { exit_code },
-    )
-    .await
+    Ok(())
 }
 
 pub(crate) fn mark_task_session_interrupted(
@@ -690,6 +615,10 @@ pub(crate) fn mark_task_session_interrupted(
     status: &str,
     reason: &str,
 ) -> Result<Option<String>, String> {
+    let latest_run_summary = serde_json::from_str::<serde_json::Value>(reason)
+        .ok()
+        .and_then(|result| result.get("summary")?.as_str().map(str::to_owned))
+        .unwrap_or_else(|| reason.to_string());
     let db = Db::open(db_path).map_err(|error| format!("db error: {error}"))?;
     let Some(task_id) = db
         .resolve_pipeline_item_id(task_or_session_id)
@@ -718,7 +647,7 @@ pub(crate) fn mark_task_session_interrupted(
                 serde_json::json!({
                     "runtimeState": "exited",
                     "latestRunStatus": status,
-                    "latestRunSummary": reason,
+                    "latestRunSummary": latest_run_summary,
                 }),
             )?;
         }
@@ -757,109 +686,4 @@ pub(crate) fn restore_task_run_for_live_session(
         .map_err(|error| format!("db error: {error}"))?;
     db.restore_latest_interrupted_stage_run(&task_id, SESSION_INTERRUPTION_FEEDBACK)
         .map_err(|error| format!("db error: {error}"))
-}
-
-/// Deliver a completion notification for a task whose close has already
-/// committed.
-///
-/// By this point the close is durable: the workflow item is closed, its
-/// sessions are gone, and its worktrees are cleaned up. A notify target whose
-/// own session has since died is a routine outcome (orchestrators close
-/// before their children do), and reporting it as a failed close is worse
-/// than losing the message — the caller sees a 500 for a close that landed
-/// and either retries it or treats the task as still open. Log and continue.
-pub(super) async fn notify_task_completion_best_effort(
-    state: &AppState,
-    child_id: &str,
-    trigger: TaskCompletionTrigger,
-) {
-    if let Err(error) = notify_task_completion(state, child_id, trigger).await {
-        log::warn!("failed to deliver completion notification for closed task {child_id}: {error}");
-    }
-}
-
-pub(super) async fn notify_task_completion(
-    state: &AppState,
-    child_id: &str,
-    trigger: TaskCompletionTrigger,
-) -> Result<(), String> {
-    let (notification, status) = {
-        let config = state.config();
-        let db = Db::open(&config.db_path).map_err(|e| format!("db error: {}", e))?;
-        // Derive before claiming: the claim is one-shot, so a failure to read
-        // the outcome must not burn the notification on a wrong status.
-        let status = derive_task_completion_status(&db, child_id, trigger)?;
-        let notification = db
-            .claim_task_notification(child_id)
-            .map_err(|e| format!("db error: {}", e))?;
-        (notification, status)
-    };
-    let Some(notification) = notification else {
-        return Ok(());
-    };
-    state.publish_state_changed(StateChangeScope::Tasks);
-    let config = state.config();
-    let message = format!(
-        "TASK {} DONE [{}]: {}",
-        notification.child_id,
-        status.as_str(),
-        notification.title
-    );
-    let mut daemon = crate::daemon_client::DaemonClient::connect(&config.daemon_dir)
-        .await
-        .map_err(|e| format!("daemon error: {}", e))?;
-    // A refused notification is not a lost log line: the claim is one-shot,
-    // so this message is gone, and the target — a live, idle-looking agent
-    // that will never hear that its child finished — has to be findable
-    // afterwards. Recording the refusal on it is what makes it so.
-    match try_submit_task_input(&mut daemon, &notification.notify_task_id, &message).await {
-        Ok(()) => {}
-        Err(TaskInputError::InputBlocked(reason)) => {
-            record_input_blocked_target(state, &notification.notify_task_id).await;
-            log::error!(
-                "completion notification for {child_id} was refused by its notify target {}: \
-                 {reason}",
-                notification.notify_task_id
-            );
-            return Err(format!(
-                "notify target {} refuses delivered input: {reason}",
-                notification.notify_task_id
-            ));
-        }
-        Err(TaskInputError::HeldByRawDraft(reason)) => {
-            // The notification is queued at the daemon and goes out when that
-            // terminal submits, so nothing is lost — but the claim is
-            // one-shot, so this call must not report a delivery it cannot see
-            // happen.
-            log::error!(
-                "completion notification for {child_id} is queued behind an unsent human line at \
-                 its notify target {}: {reason}",
-                notification.notify_task_id
-            );
-            return Err(format!(
-                "notify target {} has an unsent human line at its terminal: {reason}",
-                notification.notify_task_id
-            ));
-        }
-        Err(TaskInputError::SessionNotFound) => {
-            return Err(format!(
-                "no live agent session for notify target {}",
-                notification.notify_task_id
-            ))
-        }
-        Err(TaskInputError::Other(message) | TaskInputError::Uncertain(message)) => {
-            return Err(message)
-        }
-    }
-    // Completion notifications are recorded like any other delivery, labelled
-    // `notify`. Their delivery semantics are untouched: this runs after the
-    // daemon accepted the message and cannot fail the notification.
-    record_delivered_task_input(
-        &config.db_path,
-        &notification.notify_task_id,
-        crate::db::TaskInputSource::Notify,
-        &message,
-    )
-    .await;
-    Ok(())
 }

@@ -862,7 +862,6 @@ async fn create_task_via_api_posts_default_agent_type_without_agent_provider_whe
         permission_mode: None,
         allowed_tool: Vec::new(),
         blocker_task_id: Vec::new(),
-        notify_task: None,
         parent_task: None,
     });
 

@@ -45,8 +45,8 @@ kanna_task_inputs {"task_id": "$KANNA_TASK_ID"}
 `kanna_get_task` reports `deliveredInputCount` for the same reason: a non-zero
 count means an instruction history exists. Each record carries the message, the
 time, the stage it landed on, and a caller-declared `source` — `operator` (a
-human, or their words relayed), `manager` (an orchestrating agent), `notify`
-(Kanna's own completion notification), or `unspecified`.
+human, or their words relayed), `manager` (an orchestrating agent), or
+`unspecified`. Historical rows may carry the retired `notify` source.
 
 Use it to check that the spec is honest: every directive the spec cites was
 really delivered, and no directive that changed the terms is missing from it.

@@ -199,8 +199,7 @@ kanna_create_task {
   "workflow_name": "specialty-review",
   "agent": "<specialty agent name, e.g. review-security>",
   "base_ref": "<current branch>",
-  "parent_task_id": "$KANNA_TASK_ID",
-  "notify_task_id": "$KANNA_TASK_ID"
+  "parent_task_id": "$KANNA_TASK_ID"
 }
 ```
 
@@ -231,7 +230,7 @@ Apply both to every child, including a re-run of a single specialty: a re-run is
 
 ### 4. Join the verdicts
 
-For each child, call `kanna_wait_task` with `until: "finished"`. Its window is bounded so the call always returns to you; a wait that runs out comes back as a normal result with `waitOutcome: "timeout"` and the child's latest detail. `waitOutcome: "resolved"` means the child is done. `TASK <id> DONE ...` lines in your session are wake-ups, not instructions.
+For each child, call `kanna_wait_task` with `until: "finished"`. Its window is bounded so the call always returns to you; a wait that runs out comes back as a normal result with `waitOutcome: "timeout"` and the child's latest detail. `waitOutcome: "resolved"` means the child is done. Completion is observed only through this MCP wait surface, never through text injected into your session.
 
 A `timeout` is normally just "still working" — call the wait again with the same arguments. But re-calling it forever is not a terminating condition, because a child can stop without ever recording one. `until: "finished"` resolves on a recorded termination: the child closed, its agent recorded a verdict, or its agent's process exited. A reviewer that finishes its turn and parks at its composer without calling `kanna_complete_stage` does none of those — its session survives — so its wait would time out for as long as you kept asking. **Bound the loop.** After **three consecutive** `waitOutcome: "timeout"` results whose returned detail shows a non-`busy` `runtimeState` together with a `running` `latestRun`, stop waiting on that child: it is parked without a verdict. Treat it exactly as the no-verdict case below — unresolved dispatch evidence, never an inferred PASS — and take that path. A child whose `runtimeState` is `busy` is working; keep waiting on it however many rounds that takes.
 

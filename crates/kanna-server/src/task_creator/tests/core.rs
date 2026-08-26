@@ -3157,7 +3157,7 @@ fn read_agent_definition_loads_builtin_task_manager_agent_with_codex_first() {
         .contains("Do not set `parent_task_id` merely because you created"));
     assert!(definition
         .prompt
-        .contains("the long-running manager is never a parent/owner bucket"));
+        .contains("The long-running manager is never a parent/owner bucket"));
     assert!(definition
         .prompt
         .contains("\"parent_task_id\": \"<durable-work-item-id>\""));
@@ -4623,7 +4623,7 @@ fn prepare_task_binds_bounded_architect_consultation_to_assessed_work_item() {
         .unwrap();
     assert_eq!(stored.pipeline.as_deref(), Some("architect-consultation"));
     assert_eq!(stored.parent_task_id.as_deref(), Some("work-item-1"));
-    assert_eq!(stored.notify_task_id.as_deref(), Some("manager-1"));
+    assert!(stored.notify_task_id.is_none());
     match prepared.session {
         PreparedSessionSpawn::Pty { args, .. } => {
             let command = args.join(" ");
