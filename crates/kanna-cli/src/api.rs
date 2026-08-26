@@ -10,10 +10,9 @@ use crate::models::{
     AddRepoRequest, BlockTaskRequest, CompleteStageRequest, CreateTaskRequest, CreateTaskResponse,
     DependentTasksExistResponse, MergeHandoffRequest, MobileNotificationRequest,
     MobileNotificationResponse, RepoDetail, RepoSummary, RequestRevisionRequest,
-    ResolvedAgentDefinition, SetTaskNotifyRequest, SetTaskParentRequest, SetTaskWorkflowRequest,
-    SetTaskWorkflowResponse, SignalAgentRequest, SignalAgentResponse, TaskActionResponse,
-    TaskChild, TaskDetail, TaskInputRequest, TaskInputResponse, TaskInputs, TaskRenameRequest,
-    TaskSummary, WaitUntil,
+    ResolvedAgentDefinition, SetTaskParentRequest, SetTaskWorkflowRequest, SetTaskWorkflowResponse,
+    SignalAgentRequest, SignalAgentResponse, TaskActionResponse, TaskChild, TaskDetail,
+    TaskInputRequest, TaskInputResponse, TaskInputs, TaskRenameRequest, TaskSummary, WaitUntil,
 };
 
 pub(crate) fn join_server_url(base_url: &str, path: &str) -> String {
@@ -636,19 +635,6 @@ pub(crate) async fn wait_task_events_via_api(
     params: &TaskEventsParams<'_>,
 ) -> Result<Value, String> {
     get_json(base_url, &task_events_path(params)).await
-}
-
-pub(crate) async fn set_task_notify_via_api(
-    base_url: &str,
-    task_id: &str,
-    request: &SetTaskNotifyRequest,
-) -> Result<TaskActionResponse, String> {
-    post_json(
-        base_url,
-        &format!("/v1/tasks/{task_id}/actions/set-notify"),
-        request,
-    )
-    .await
 }
 
 pub(crate) async fn notify_mobile_via_api(

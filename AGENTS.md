@@ -285,26 +285,15 @@ truth, pick one and make everything use it. Clean up resources where the
 lifecycle owns them. Prefer the most correct architecture over the shortest
 patch; treat tactical safety fallbacks as temporary and label them as such.
 
-**Server-side completion notify boundary.** `kanna-server` subscribes directly
-to daemon terminal-state events and treats daemon `Exit` for a task session as
-one completion signal — updating activity to `unread`, claiming
-`pipeline_item.notify_task_id` via `notified_at`, and delivering
-`TASK <child-id> DONE [success|failure|closed]: <title>` through the same
-two-step input helper as `/v1/tasks/{task_id}/input`. Keep this
-server/daemon-side; it must not depend on the desktop frontend event bridge
-being open. `kanna_set_task_notify` retargets that notification on an
-already-running task.
-
-The status word is a **closed three-word vocabulary** derived from the
-`TaskCompletionTrigger` plus the task's terminating `stage_run` — never from the
-daemon `Exit` alone, which cannot tell an agent erroring from a task advancing
-past its final stage from a human closing the task, because all three end the
-same PTY. `success` = ended cleanly (workflow finished, or session ended with no
-failing verdict); `failure` = the terminating run reported failure, or the agent
-process died non-zero; `closed` = closed before finishing its workflow, which is
-not a failure. Receiving agents match these words exactly and act without
-re-reading task state, so any new ending must map onto one of the three rather
-than widen the payload. See `docs/kanna-server-boundary.md`.
+**Server-side completion observation boundary.** `kanna-server` subscribes
+directly to daemon terminal-state events and treats daemon `Exit` for a task
+session as one completion signal — updating activity/runtime state and the
+terminating `stage_run`, which appends the durable `run.finished` event.
+Managers observe completion through `kanna_wait_events` for fan-out or
+`kanna_wait_task` for one task. Completion is never injected into another
+task's PTY; manager input remains reserved for actual operator/manager speech.
+The structured completion vocabulary remains exactly `success`, `failure`, or
+`closed` on stage-run results, task detail, and events.
 
 **Task event feed.** `GET /v1/task-events` (`kanna_wait_events`) is how an agent
 watches *several* tasks — `kanna_wait_task` blocks on one id and resolves only
@@ -328,16 +317,16 @@ the separate positive question-detection signal. See
 `docs/2026-07-29-awaiting-input-detection-e2e-gap.md`.
 
 **Delivered task inputs are durable.** `POST /v1/tasks/{task_id}/input`
-(`kanna_send_task_input`, and the server's own completion notifications) writes
+(`kanna_send_task_input`) writes
 to a PTY, and terminal bytes are not a record: a later stage forks a fresh
 worktree and session, so without a row it can read the whole durable record and
 honestly conclude an owner directive was never issued — which is exactly how a
 review agent once ordered an owner's mid-task design decision reverted. Every
 delivery the daemon *accepts* is therefore appended to `task_input` with its
-full text, the stage and `stage_run` live at delivery, and a `source`: `notify`
-for the server's own completion notification (the only label the server knows
-first-hand), or the caller's declared, unverified `operator` / `manager`, or
-`unspecified`. Read it with `kanna_task_inputs`
+full text, the stage and `stage_run` live at delivery, and the caller's
+declared, unverified `operator` / `manager` source, or `unspecified`.
+Historical rows may carry the retired `notify` source; no new rows use it.
+Read it with `kanna_task_inputs`
 (`GET /v1/tasks/{task_id}/inputs`); `kanna_get_task` reports
 `deliveredInputCount` so detail alone cannot read as "nothing was sent". An
 uncertain delivery is deliberately not recorded, and recording never fails a

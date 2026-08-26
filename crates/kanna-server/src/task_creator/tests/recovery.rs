@@ -219,77 +219,7 @@ async fn spawn_rejected_resume_fake_daemon(
             if !spawned {
                 continue;
             }
-            if accept_spawn {
-                return commands;
-            }
-            // A relaunch that could not start falls back to the ordinary
-            // completion path, which opens its own connection to deliver one
-            // semantic notification message.
-            drop(write_half);
-            let (notify_stream, _) = listener.accept().await.unwrap();
-            let (notify_read, mut notify_write) = notify_stream.into_split();
-            let mut notify_reader = BufReader::new(notify_read);
-            loop {
-                let command = read_fake_daemon_command(&mut notify_reader, &mut notify_write).await;
-                let submitted = matches!(
-                    &command,
-                    kanna_daemon::protocol::Command::SubmitInput { .. }
-                );
-                commands.push(command);
-                notify_write
-                    .write_all(
-                        format!(
-                            "{}\n",
-                            serde_json::to_string(&kanna_daemon::protocol::Event::Ok).unwrap()
-                        )
-                        .as_bytes(),
-                    )
-                    .await
-                    .unwrap();
-                if submitted {
-                    return commands;
-                }
-            }
-        }
-    })
-}
-
-/// Fake daemon for the exit that follows a fresh relaunch: it serves the
-/// completion notification and fails the test if anything tries to spawn a
-/// second replacement.
-async fn spawn_notification_only_fake_daemon(
-    daemon_dir: String,
-) -> tokio::task::JoinHandle<Vec<Vec<u8>>> {
-    let socket_path = test_daemon_socket_path(&daemon_dir);
-    let _ = std::fs::remove_file(&socket_path);
-    let listener = UnixListener::bind(&socket_path).unwrap();
-    tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let (read_half, mut write_half) = stream.into_split();
-        let mut reader = BufReader::new(read_half);
-        let mut inputs = Vec::new();
-        loop {
-            let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
-            let submitted = match &command {
-                kanna_daemon::protocol::Command::SubmitInput { data, .. } => {
-                    inputs.push(data.clone());
-                    true
-                }
-                other => panic!("the rejected resume retried more than once: {other:?}"),
-            };
-            write_half
-                .write_all(
-                    format!(
-                        "{}\n",
-                        serde_json::to_string(&kanna_daemon::protocol::Event::Ok).unwrap()
-                    )
-                    .as_bytes(),
-                )
-                .await
-                .unwrap();
-            if submitted {
-                return inputs;
-            }
+            return commands;
         }
     })
 }
@@ -669,7 +599,7 @@ async fn rejected_claude_resume_relaunches_the_stage_with_a_fresh_conversation()
     record_resume_attempt(&db, &worktree, Some(REVIEW_FEEDBACK));
     // A notification target proves the dead attempt reports nothing: this
     // stage has not failed, it has not run.
-    db.update_pipeline_item_notify_task("recovery-task", Some("task-parent"))
+    db.update_test_pipeline_item_notify_task("recovery-task", "task-parent")
         .unwrap();
     write_fresh_claude_probe(&worktree);
 
@@ -739,13 +669,12 @@ async fn rejected_claude_resume_relaunches_the_stage_with_a_fresh_conversation()
     assert_eq!(item.activity.as_deref(), Some("working"));
     assert!(
         item.notified_at.is_none(),
-        "a rejected resume must not fire a completion notification"
+        "a rejected resume must not claim a legacy notification target"
     );
 
     // Exactly once: the replacement is a fresh run, so an exit that prints the
     // same rejection is reported as the failure it is instead of starting yet
     // another session.
-    let fake_daemon = spawn_notification_only_fake_daemon(config.daemon_dir.clone()).await;
     crate::http_api::handle_task_terminal_state(
         &crate::http_api::AppState::new(config.clone()),
         "recovery-task",
@@ -753,13 +682,7 @@ async fn rejected_claude_resume_relaunches_the_stage_with_a_fresh_conversation()
     )
     .await
     .unwrap();
-    let inputs = fake_daemon.await.unwrap();
-    assert_eq!(
-        inputs
-            .first()
-            .map(|data| String::from_utf8_lossy(data).to_string()),
-        Some("TASK recovery-task DONE [failure]: Recovery".to_string())
-    );
+    assert!(db.list_task_inputs("task-parent", 10).unwrap().is_empty());
     assert_eq!(
         db.latest_stage_run("recovery-task").unwrap().unwrap().id,
         replacement.id,
@@ -776,7 +699,7 @@ async fn failed_fresh_relaunch_reports_the_original_agent_failure() {
     let (repo_root, config, db) = init_recovery_fixture("task-recovery-rejected-fail");
     let worktree = repo_root.join(".kanna-worktrees/task-recovery");
     record_resume_attempt(&db, &worktree, None);
-    db.update_pipeline_item_notify_task("recovery-task", Some("task-parent"))
+    db.update_test_pipeline_item_notify_task("recovery-task", "task-parent")
         .unwrap();
     write_fresh_claude_probe(&worktree);
 
@@ -802,11 +725,9 @@ async fn failed_fresh_relaunch_reports_the_original_agent_failure() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(
-        inputs
-            .first()
-            .map(|data| String::from_utf8_lossy(data).to_string()),
-        Some("TASK recovery-task DONE [failure]: Recovery".to_string())
+    assert!(
+        inputs.is_empty(),
+        "completion must not be submitted as task input"
     );
     assert!(
         !worktree.join("fresh-proof.txt").exists(),

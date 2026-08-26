@@ -177,8 +177,6 @@ fn parses_new_repo_and_task_subcommands() {
         "Investigate flaky release",
         "--display-name",
         "Release investigation",
-        "--notify-task",
-        "task-manager",
     ])
     .unwrap();
     match cli.command {
@@ -188,7 +186,6 @@ fn parses_new_repo_and_task_subcommands() {
                     repo_id,
                     prompt,
                     display_name,
-                    notify_task,
                     parent_task,
                     ..
                 },
@@ -196,7 +193,6 @@ fn parses_new_repo_and_task_subcommands() {
             assert_eq!(repo_id, "repo-1");
             assert_eq!(prompt, "Investigate flaky release");
             assert_eq!(display_name.as_deref(), Some("Release investigation"));
-            assert_eq!(notify_task.as_deref(), Some("task-manager"));
             assert_eq!(parent_task, None);
         }
         _ => panic!("expected task create command"),
@@ -595,7 +591,6 @@ fn typed_create_body_matches_catalog_create_task_body() {
         permission_mode: Some("acceptEdits".to_string()),
         allowed_tool: vec!["Read".to_string(), "Write".to_string()],
         blocker_task_id: vec!["blocker-1".to_string()],
-        notify_task: Some("parent-1".to_string()),
         parent_task: Some("root-1".to_string()),
     });
     let typed_body = serde_json::to_value(request).unwrap();
@@ -617,7 +612,6 @@ fn typed_create_body_matches_catalog_create_task_body() {
             "permission_mode": "acceptEdits",
             "allowed_tools": ["Read", "Write"],
             "blocker_task_ids": ["blocker-1"],
-            "notify_task_id": "parent-1",
             "parent_task_id": "root-1"
         }),
     )
@@ -715,7 +709,7 @@ fn parses_repo_agent_signal_provider_and_effort_overrides() {
 }
 
 #[test]
-fn parses_wait_events_and_set_notify_commands() {
+fn parses_wait_events_and_rejects_removed_set_notify_command() {
     let cli = crate::Cli::try_parse_from([
         "kanna-cli",
         "task",
@@ -763,7 +757,7 @@ fn parses_wait_events_and_set_notify_commands() {
         _ => panic!("expected task wait-events command"),
     }
 
-    let cli = crate::Cli::try_parse_from([
+    assert!(crate::Cli::try_parse_from([
         "kanna-cli",
         "task",
         "set-notify",
@@ -772,21 +766,7 @@ fn parses_wait_events_and_set_notify_commands() {
         "--notify-task",
         "parent-1",
     ])
-    .unwrap();
-    match cli.command {
-        crate::Commands::Task {
-            command:
-                crate::TaskCommands::SetNotify {
-                    task_id,
-                    notify_task,
-                    ..
-                },
-        } => {
-            assert_eq!(task_id, "child-a");
-            assert_eq!(notify_task.as_deref(), Some("parent-1"));
-        }
-        _ => panic!("expected task set-notify command"),
-    }
+    .is_err());
 }
 
 #[test]
@@ -923,20 +903,14 @@ fn typed_wait_events_path_matches_the_catalog_tool_path() {
 }
 
 #[test]
-fn typed_set_notify_body_matches_catalog_set_notify_body() {
-    let typed_body = serde_json::to_value(crate::models::SetTaskNotifyRequest {
-        notify_task_id: Some("parent-1".to_string()),
-    })
-    .unwrap();
+fn removed_set_notify_tool_is_not_in_the_catalog() {
     let catalog = kanna_tool_catalog::bundled_catalog();
-    let resolved = kanna_tool_catalog::resolve_request(
+    assert!(kanna_tool_catalog::resolve_request(
         &catalog,
         "kanna_set_task_notify",
         &json!({ "task_id": "child-a", "notify_task_id": "parent-1" }),
     )
-    .unwrap();
-
-    assert_eq!(typed_body, resolved.body);
+    .is_err());
 }
 
 #[test]

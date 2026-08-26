@@ -80,9 +80,10 @@ first. Otherwise:
 6. Selects the next task in the sidebar
 7. Tasks with `closed_at` are hidden from the sidebar. The sidebar shows tasks whose `closed_at` is null.
 
-Close also delivers blocker-close instructions to dependent tasks' sessions,
-fires the `TASK … DONE [closed]` completion notification when a notify target
-is set, and starts dependents the close unblocked.
+Close also delivers blocker-close instructions to dependent tasks' sessions
+and starts dependents the close unblocked. Managers observe the durable
+`task.closed` event through `kanna_wait_events`; close does not inject input
+into another task's terminal.
 
 On server startup, Kanna reconciles leftovers across all repos, including hidden repos: closed-task worktrees are snapshotted and removed, stale registrations are pruned, and young orphan `task-*` directories without a task row are spared. This bounds registered worktrees by construction to roughly the number of open tasks. The bound matters because each registered git worktree expands sandboxed agent shell spawn profiles; unbounded worktrees can overflow macOS `ARG_MAX` and cause sandboxed shell launches to fail with `E2BIG`.
 

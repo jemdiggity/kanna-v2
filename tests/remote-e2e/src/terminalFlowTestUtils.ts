@@ -95,7 +95,6 @@ export async function createScriptedTask(
   harness: RemoteHarness,
   options: {
     displayName: string;
-    notifyTaskId?: string;
     prompt?: string;
     repoName?: string;
     redactInput?: boolean;
@@ -140,8 +139,7 @@ export async function createScriptedTask(
       prompt: taskPrompt,
       displayName: options.displayName,
       agentProvider: "codex",
-      agentType: "pty",
-      notifyTaskId: options.notifyTaskId
+      agentType: "pty"
     }
   }));
 
@@ -269,6 +267,39 @@ export async function readPipelineItem(
     activity: typeof rows[0].activity === "string" ? rows[0].activity : null,
     notified_at: typeof rows[0].notified_at === "string" ? rows[0].notified_at : null
   };
+}
+
+export async function registerLegacyNotifyTarget(
+  harness: RemoteHarness,
+  childTaskId: string,
+  targetTaskId: string
+): Promise<void> {
+  const sql = [
+    "PRAGMA busy_timeout=5000;",
+    "UPDATE pipeline_item",
+    `SET notify_task_id = ${sqliteString(targetTaskId)}, notified_at = NULL`,
+    `WHERE id = ${sqliteString(childTaskId)};`
+  ].join(" ");
+  await execFileAsync("sqlite3", [harness.paths.dbPath, sql], {
+    cwd: harness.repoRoot,
+    env: process.env
+  });
+}
+
+export async function taskInputCount(
+  harness: RemoteHarness,
+  taskId: string
+): Promise<number> {
+  const sql = `SELECT COUNT(*) AS count FROM task_input WHERE task_id = ${sqliteString(taskId)};`;
+  const { stdout } = await execFileAsync("sqlite3", ["-json", harness.paths.dbPath, sql], {
+    cwd: harness.repoRoot,
+    env: process.env
+  });
+  const rows = JSON.parse(stdout.trim() || "[]") as unknown;
+  if (!Array.isArray(rows) || rows.length !== 1 || !isRecord(rows[0])) {
+    throw new Error(`task_input count unavailable for ${taskId}: ${stdout}`);
+  }
+  return typeof rows[0].count === "number" ? rows[0].count : Number(rows[0].count);
 }
 
 class RawRelayClientImpl implements RawRelayClient {

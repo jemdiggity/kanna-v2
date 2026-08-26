@@ -20,7 +20,6 @@ use std::time::Duration;
 mod analytics;
 mod blockers;
 mod create_intents;
-mod notifications;
 mod operator_events;
 mod pipeline_items;
 mod ports;
@@ -438,12 +437,6 @@ pub struct NewStageRun<'a> {
     pub provider_session_id: Option<&'a str>,
     pub cwd: Option<&'a str>,
     pub resumed_from_run_id: Option<&'a str>,
-}
-
-pub struct ClaimedTaskNotification {
-    pub child_id: String,
-    pub notify_task_id: String,
-    pub title: String,
 }
 
 pub struct OpenAgentTask {

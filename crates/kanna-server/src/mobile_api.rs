@@ -232,10 +232,11 @@ pub struct TaskDetail {
     /// its human instead of revising again; `0` means unlimited.
     pub revision_limit: i64,
     /// How many messages have been delivered into this task's agent session
-    /// from outside it — operator/manager `POST /v1/tasks/{id}/input` calls and
-    /// the server's own completion notifications. The count is here so that a
-    /// consumer reading only task detail cannot conclude nothing was ever sent:
-    /// a non-zero value means there is an instruction history, and
+    /// from outside it — operator/manager `POST /v1/tasks/{id}/input` calls.
+    /// Historical counts may include retired completion notifications. The
+    /// count is here so that a consumer reading only task detail cannot
+    /// conclude nothing was ever sent: a non-zero value means there is an
+    /// instruction history, and
     /// `GET /v1/tasks/{id}/inputs` has its text. Optional only so a payload
     /// from a peer that predates the record still deserializes.
     #[serde(default)]
@@ -436,6 +437,8 @@ pub struct CreateTaskRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transfer_import: Option<TransferImportSummary>,
     pub blocker_task_ids: Option<Vec<String>>,
+    /// Retired compatibility input. The HTTP boundary rejects a non-null
+    /// value and task creation never persists it.
     pub notify_task_id: Option<String>,
     pub parent_task_id: Option<String>,
 }

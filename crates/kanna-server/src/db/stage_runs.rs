@@ -514,34 +514,6 @@ impl Db {
         self.latest_finished_stage_run_result_of_kind(task_id, Some("main"))
     }
 
-    /// The status of the task's most recently finished run — its terminating
-    /// verdict. This is what a completion notification reports: a PTY that
-    /// exited says nothing about whether the work succeeded, and `cancelled`
-    /// runs are deliberately excluded because closing a task cancels whatever
-    /// was still running, which would otherwise erase the real verdict.
-    pub fn latest_finished_stage_run_status(
-        &self,
-        task_id: &str,
-    ) -> Result<Option<String>, rusqlite::Error> {
-        let status = self
-            .conn
-            .query_row(
-                "SELECT status
-                 FROM stage_run
-                 WHERE task_id = ? AND status IN ('succeeded', 'failed')
-                 ORDER BY rowid DESC
-                 LIMIT 1",
-                [task_id],
-                |row| row.get(0),
-            )
-            .optional();
-        match status {
-            Ok(status) => Ok(status),
-            Err(err) if is_missing_stage_run_table(&err) => Ok(None),
-            Err(err) => Err(err),
-        }
-    }
-
     fn latest_finished_stage_run_result_of_kind(
         &self,
         task_id: &str,

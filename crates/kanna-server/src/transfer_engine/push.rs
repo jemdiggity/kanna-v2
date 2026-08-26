@@ -783,7 +783,7 @@ async fn run_finalization(
 /// The destination has imported the task; close the source copy.
 ///
 /// The close goes through the server's own close action — WIP snapshotting,
-/// session teardown, the `closed` completion notification — rather than a
+/// session teardown and durable close event — rather than a
 /// second implementation of it.
 pub async fn outgoing_committed(
     state: &Arc<AppState>,

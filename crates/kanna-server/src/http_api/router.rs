@@ -44,7 +44,7 @@ use super::task_logs::task_logs;
 use super::task_ports::{claim_task_ports, release_task_ports};
 use super::tasks::{
     create_task, get_task, get_task_children, get_task_inputs, list_closed_task_identities,
-    list_recent_tasks, put_task, search_tasks, set_task_notify, update_task,
+    list_recent_tasks, put_task, search_tasks, update_task,
 };
 use super::transfer_sidecar::{
     clear_cloud_transfer_proxies, ensure_cloud_transfer_proxy, remove_cloud_transfer_proxy,
@@ -230,10 +230,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/tasks/{task_id}/actions/set-parent",
             post(set_task_parent),
-        )
-        .route(
-            "/v1/tasks/{task_id}/actions/set-notify",
-            post(set_task_notify),
         )
         .route(
             "/v1/tasks/{task_id}/actions/set-workflow",

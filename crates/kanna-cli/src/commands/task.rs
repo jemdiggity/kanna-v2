@@ -10,17 +10,17 @@ use crate::api::{
     list_repo_tasks_via_api, list_task_children_via_api, list_tasks_via_api,
     list_tasks_with_options_via_api, notify_mobile_via_api, parse_wait_until, rename_task_via_api,
     request_revision_via_api, rerun_stage_via_api, resume_task_via_api, search_tasks_via_api,
-    search_tasks_with_options_via_api, send_task_input_via_api, set_task_notify_via_api,
-    set_task_parent_via_api, set_task_workflow_via_api, signal_merge_handoff_via_api,
-    task_inputs_via_api, task_logs_with_agent_view_via_api, unblock_task_via_api,
-    wait_task_events_via_api, wait_task_via_api, WaitTaskOutcome,
+    search_tasks_with_options_via_api, send_task_input_via_api, set_task_parent_via_api,
+    set_task_workflow_via_api, signal_merge_handoff_via_api, task_inputs_via_api,
+    task_logs_with_agent_view_via_api, unblock_task_via_api, wait_task_events_via_api,
+    wait_task_via_api, WaitTaskOutcome,
 };
 use crate::commands::{parse_metadata_json, print_json};
 use crate::config::resolve_server_base_url_from_env;
 use crate::models::{
     BlockTaskRequest, CreateTaskRequest, MergeHandoffRequest, MobileNotificationRequest,
-    RequestRevisionRequest, SetTaskNotifyRequest, SetTaskParentRequest, SetTaskWorkflowRequest,
-    TaskCreateOptions, TaskDetail, TaskInputRequest, TaskRenameRequest, TaskStatusRow, TaskSummary,
+    RequestRevisionRequest, SetTaskParentRequest, SetTaskWorkflowRequest, TaskCreateOptions,
+    TaskDetail, TaskInputRequest, TaskRenameRequest, TaskStatusRow, TaskSummary,
 };
 use crate::TaskCommands;
 use kanna_tool_catalog::{wait_resolved_result, wait_timeout_result};
@@ -176,7 +176,6 @@ pub(crate) fn build_create_task_request(options: TaskCreateOptions) -> CreateTas
         permission_mode: options.permission_mode,
         allowed_tools: (!options.allowed_tool.is_empty()).then_some(options.allowed_tool),
         blocker_task_ids: (!options.blocker_task_id.is_empty()).then_some(options.blocker_task_id),
-        notify_task_id: options.notify_task,
         parent_task_id: options.parent_task,
     }
 }
@@ -527,7 +526,6 @@ pub(crate) async fn run(command: TaskCommands) {
             permission_mode,
             allowed_tool,
             blocker_task_id,
-            notify_task,
             parent_task,
         } => {
             let base_url = resolve_server_base_url_from_env(server_url.as_deref());
@@ -545,7 +543,6 @@ pub(crate) async fn run(command: TaskCommands) {
                 permission_mode,
                 allowed_tool,
                 blocker_task_id,
-                notify_task,
                 parent_task,
             });
             let created = create_task_via_api(&base_url, &request)
@@ -755,26 +752,6 @@ pub(crate) async fn run(command: TaskCommands) {
                 parent_task_id: parent_task,
             };
             let updated = set_task_parent_via_api(&base_url, &task_id, &request)
-                .await
-                .unwrap_or_else(|e| {
-                    eprintln!("Error: {e}");
-                    process::exit(1);
-                });
-            if let Err(e) = print_json(&updated) {
-                eprintln!("Error: {e}");
-                process::exit(1);
-            }
-        }
-        TaskCommands::SetNotify {
-            task_id,
-            notify_task,
-            server_url,
-        } => {
-            let base_url = resolve_server_base_url_from_env(server_url.as_deref());
-            let request = SetTaskNotifyRequest {
-                notify_task_id: notify_task,
-            };
-            let updated = set_task_notify_via_api(&base_url, &task_id, &request)
                 .await
                 .unwrap_or_else(|e| {
                     eprintln!("Error: {e}");

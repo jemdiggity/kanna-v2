@@ -2595,11 +2595,9 @@ fn dependent_scenario_config(label: &str, unique: &str, daemon_dir: &Path) -> Co
     }
 }
 
-/// Fake daemon for the dependent-start scenarios: acknowledges kills, refuses
-/// every `Input` as a dead session (the notify target's session is gone), and
-/// answers the dependent's spawn. Serves connections until dropped — a close
-/// opens one connection for its kills and completion notification opens
-/// another — and reports each spawned session id on the returned channel.
+/// Fake daemon for the dependent-start scenarios: acknowledges kills and
+/// answers the dependent's spawn. It reports each spawned session id on the
+/// returned channel.
 fn spawn_dependent_start_daemon(
     listener: tokio::net::UnixListener,
     expected_task_id: String,
@@ -2677,16 +2675,10 @@ async fn expect_one_spawn(
     session_id
 }
 
-/// Closing a blocker starts its dormant dependent even when the blocker's own
-/// completion notification cannot be delivered.
-///
-/// Notify delivery used to propagate: a notify target whose agent session had
-/// already died turned the close into a 500 *after* `closed_at` was written,
-/// and — because the error short-circuited the handler — the unblock sweep
-/// that follows it never ran. The task was closed, the caller was told it had
-/// failed, and every dependent stayed dormant with no run at all.
+/// A legacy notify registration has no effect on closing a blocker and
+/// starting its dormant dependent.
 #[tokio::test]
-async fn close_with_a_dead_notify_target_still_starts_dependents() {
+async fn close_with_a_legacy_notify_target_still_starts_dependents() {
     let unique = unique_test_suffix();
     let repo_root = std::env::temp_dir().join(format!("kanna-http-close-notify-dead-{unique}"));
     init_test_git_repo(&repo_root);
@@ -2713,9 +2705,7 @@ async fn close_with_a_dead_notify_target_still_starts_dependents() {
     }
     db.update_test_pipeline_item_stage_context("task-a", "task-a-stage", "default", None, "claude")
         .unwrap();
-    // The orchestrator that asked to be told when task-a finishes is itself
-    // gone: the fake daemon refuses input for every session.
-    db.update_pipeline_item_notify_task("task-a", Some("watcher"))
+    db.update_test_pipeline_item_notify_task("task-a", "watcher")
         .unwrap();
     drop(db);
     commit_branch_change(&repo_root, "task-a-stage", "blocker-output.txt", "blocker");
@@ -2762,7 +2752,7 @@ async fn close_with_a_dead_notify_target_still_starts_dependents() {
     assert_eq!(
         close_response.status(),
         StatusCode::NO_CONTENT,
-        "an undeliverable notification must not fail a close that landed"
+        "a legacy notify registration must not affect a close"
     );
     expect_one_spawn(&mut spawned, "close with a dead notify target").await;
     daemon_server.abort();

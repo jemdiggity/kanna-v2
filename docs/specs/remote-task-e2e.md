@@ -41,8 +41,9 @@ that crosses component or system boundaries must have E2E coverage.
 - **Smoke** — real emulator auth as Buffy + relay `GET /v1/status` round-trip.
   No `SKIP_AUTH`.
 - **Flows 7–10** (`terminal-flow.e2e.test.ts`) — observe_session
-  snapshot→output→exit + unobserve; remote input to the PTY; completion-notify
-  once-only guard; invoke + observation recovery across relay reconnect.
+  snapshot→output→exit + unobserve; remote input to the PTY; completion through
+  the event feed with no manager-PTY injection; invoke + observation recovery
+  across relay reconnect.
 - **Layer A** (`services/relay/test/integration.test.ts`) — real
   emulator-backed auth (device_token, desktop_id+desktop_secret, id_token,
   reject-bad-creds), multi-desktop and multi-user routing isolation, tunnel

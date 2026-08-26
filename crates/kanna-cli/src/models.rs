@@ -310,8 +310,6 @@ pub(crate) struct CreateTaskRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) blocker_task_ids: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) notify_task_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) parent_task_id: Option<String>,
 }
 
@@ -395,13 +393,6 @@ pub(crate) struct TaskRenameRequest {
 pub(crate) struct SetTaskParentRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) parent_task_id: Option<String>,
-}
-
-#[derive(Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct SetTaskNotifyRequest {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) notify_task_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -498,7 +489,6 @@ pub(crate) struct TaskCreateOptions {
     pub(crate) permission_mode: Option<String>,
     pub(crate) allowed_tool: Vec<String>,
     pub(crate) blocker_task_id: Vec<String>,
-    pub(crate) notify_task: Option<String>,
     pub(crate) parent_task: Option<String>,
 }
 

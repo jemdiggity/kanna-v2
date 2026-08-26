@@ -3389,8 +3389,8 @@ fn recorded_task_inputs_carry_their_text_source_and_live_run() {
 }
 
 /// Deliveries read back oldest first, so the list reads as the instruction
-/// history it is, and every source label round-trips — including `notify`,
-/// which the server assigns to its own completion notifications.
+/// history it is. Historical `notify` rows remain readable even though the
+/// server no longer writes them.
 #[test]
 fn task_inputs_read_back_in_delivery_order_with_every_source() {
     let path = temp_db_path();
@@ -3410,15 +3410,22 @@ fn task_inputs_read_back_in_delivery_order_with_every_source() {
         (super::TaskInputSource::Operator, "first"),
         (super::TaskInputSource::Manager, "second"),
         (super::TaskInputSource::Unspecified, "third"),
-        (
-            super::TaskInputSource::Notify,
-            "TASK child-1 DONE [success]: Child",
-        ),
     ] {
         db.record_task_input("task-1", source, message)
             .expect("record")
             .expect("task exists");
     }
+    db.conn
+        .execute(
+            "INSERT INTO task_input (task_id, run_id, stage, source, message)\
+             VALUES (?, NULL, ?, 'notify', ?)",
+            (
+                "task-1",
+                "in progress",
+                "TASK child-1 DONE [success]: Child",
+            ),
+        )
+        .expect("insert historical notify row");
 
     let inputs = db.list_task_inputs("task-1", 50).expect("list");
     assert_eq!(
@@ -3508,15 +3515,14 @@ fn recording_a_task_input_appends_a_previewed_event() {
     let _ = std::fs::remove_file(path);
 }
 
-/// A notification aimed at a task that no longer exists is a log line, not an
-/// error: nothing to record, and nothing broken by there being nothing.
+/// Input aimed at a task that no longer exists has nothing to record.
 #[test]
 fn recording_an_input_for_an_unknown_task_reports_no_record() {
     let path = temp_db_path();
     let db = Db::open_migrated(path.to_str().expect("utf8 path")).expect("open migrated db");
 
     assert_eq!(
-        db.record_task_input("missing-task", super::TaskInputSource::Notify, "hello")
+        db.record_task_input("missing-task", super::TaskInputSource::Unspecified, "hello",)
             .expect("record"),
         None
     );

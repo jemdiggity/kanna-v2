@@ -30,28 +30,13 @@ new cross-account authority should enter `kanna-server`. Once available, the
 server can seed `ks1.machineIds` from that durable inventory and report every
 offline desktop on the first call.
 
-## Completion notification gap
+## Completion observation
 
-`notify_task_id` stores only a task id in the child's local SQLite database.
-Setting it validates the target locally, and completion atomically claims
-`notified_at` before sending terminal input through the local daemon. A remote
-fallback added after that claim would be lossy: disconnecting between claim
-and delivery would permanently burn the one-shot message. Probing every live
-desktop would also make duplicate task ids ambiguous and still would not cover
-an offline target.
-
-Cross-machine `TASK <id> DONE [...]` delivery therefore remains deliberately
-out of scope for this change. A correct follow-up needs:
-
-- persisted target desktop identity alongside `notify_task_id`;
-- a durable source outbox whose acknowledgement advances the one-shot claim;
-- idempotent target inbox/delivery state; and
-- relay routing that retries after reconnect without widening the existing
-  same-account authentication model.
-
-Until then, the aggregated durable task-event feed is the cross-machine
-completion wake-up. Same-machine notification remains the low-latency
-additional path.
+2026-08-26 — The same-machine completion-input mechanism described by the
+original note was retired. Managers observe local and remote child completion
+through the aggregated durable task-event feed; Kanna no longer injects
+`TASK <id> DONE [...]` text into a manager's PTY. The legacy
+`notify_task_id`/`notified_at` columns remain inert for database compatibility.
 
 ## Coverage added and full-system remainder
 

@@ -3885,26 +3885,10 @@ async fn every_provider_emits_debounced_activity_transitions_in_both_directions(
     }
 }
 
-/// `notifyTaskId` used to be creation-time only, so an orchestrator could not
-/// subscribe to a task it had adopted rather than created.
-///
-/// Retargeting is pure `pipeline_item` state: the seeded tasks have no
-/// workspace, no terminal session, and no stage run, so this also pins that a
-/// task which has not started its first stage can still be retargeted.
 #[tokio::test]
-async fn notify_target_can_be_attached_and_cleared_after_creation() {
-    let (router, db_path) = events_router();
-    {
-        let db = Db::open(&db_path).expect("open db");
-        assert!(db
-            .get_task_worktree_path("child-a")
-            .expect("worktree")
-            .is_none());
-        assert!(db.latest_stage_run("child-a").expect("stage run").is_none());
-    }
-
+async fn removed_set_notify_route_is_not_available() {
+    let (router, _db_path) = events_router();
     let response = router
-        .clone()
         .oneshot(
             Request::post("/v1/tasks/child-a/actions/set-notify")
                 .header("content-type", "application/json")
@@ -3913,103 +3897,26 @@ async fn notify_target_can_be_attached_and_cleared_after_creation() {
         )
         .await
         .expect("request");
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let db = Db::open(&db_path).expect("open db");
-    assert_eq!(
-        db.get_pipeline_item("child-a")
-            .expect("get task")
-            .expect("task exists")
-            .notify_task_id
-            .as_deref(),
-        Some("child-b")
-    );
-
-    let cleared = router
-        .clone()
-        .oneshot(
-            Request::post("/v1/tasks/child-a/actions/set-notify")
-                .header("content-type", "application/json")
-                .body(Body::from("{}"))
-                .unwrap(),
-        )
-        .await
-        .expect("request");
-    assert_eq!(cleared.status(), StatusCode::OK);
-    assert!(db
-        .get_pipeline_item("child-a")
-        .expect("get task")
-        .expect("task exists")
-        .notify_task_id
-        .is_none());
-
-    let self_notify = router
-        .clone()
-        .oneshot(
-            Request::post("/v1/tasks/child-a/actions/set-notify")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"notifyTaskId":"child-a"}"#))
-                .unwrap(),
-        )
-        .await
-        .expect("request");
-    assert_eq!(self_notify.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
-/// A closed task will never fire another completion notification, so
-/// retargeting it is refused — but with a message that names the reason. The
-/// zero-row update behind this route used to surface as `db error: not
-/// found`, which reads as "no such task" and sent callers hunting for the
-/// wrong problem.
 #[tokio::test]
-async fn retargeting_a_closed_task_reports_that_it_is_closed() {
-    let (router, db_path) = events_router();
-    Db::open(&db_path)
-        .expect("open db")
-        .close_pipeline_item("child-a")
-        .expect("close task");
-
+async fn create_rejects_the_retired_notify_target_parameter() {
+    let (router, _db_path) = events_router();
     let response = router
         .oneshot(
-            Request::post("/v1/tasks/child-a/actions/set-notify")
+            Request::post("/v1/tasks")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"notifyTaskId":"child-b"}"#))
+                .body(Body::from(
+                    r#"{"repoId":"repo-1","prompt":"child","notifyTaskId":"child-b"}"#,
+                ))
                 .unwrap(),
         )
         .await
         .expect("request");
-    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("body");
-    assert_eq!(
-        String::from_utf8_lossy(&body).as_ref(),
-        "task is closed: child-a"
-    );
-}
-
-/// A task that already notified one parent must notify a newly attached one:
-/// otherwise adopting a finished-once task silently subscribes to nothing.
-#[tokio::test]
-async fn attaching_a_new_notify_target_rearms_the_notification() {
-    let (_router, db_path) = events_router();
-    let db = Db::open(&db_path).expect("open db");
-
-    db.update_pipeline_item_notify_task("child-a", Some("child-b"))
-        .expect("set notify");
-    db.claim_task_notification("child-a")
-        .expect("claim")
-        .expect("notification claimed");
-    assert!(db
-        .claim_task_notification("child-a")
-        .expect("claim again")
-        .is_none());
-
-    db.update_pipeline_item_notify_task("child-a", Some("child-c"))
-        .expect("retarget notify");
-    let claimed = db
-        .claim_task_notification("child-a")
-        .expect("claim")
-        .expect("notification claimed for the new target");
-    assert_eq!(claimed.notify_task_id, "child-c");
+    assert!(String::from_utf8_lossy(&body).contains("notifyTaskId has been removed"));
 }

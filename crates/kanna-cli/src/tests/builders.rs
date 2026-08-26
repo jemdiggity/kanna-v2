@@ -242,7 +242,6 @@ fn builds_camel_case_task_request_payload() {
         permission_mode: Some("dontAsk".to_string()),
         allowed_tool: vec!["Bash".to_string(), "Edit".to_string()],
         blocker_task_id: vec!["blocker-1".to_string(), "blocker-2".to_string()],
-        notify_task: Some("orchestrator-1".to_string()),
         parent_task: None,
     });
 
@@ -262,7 +261,6 @@ fn builds_camel_case_task_request_payload() {
             "permissionMode": "dontAsk",
             "allowedTools": ["Bash", "Edit"],
             "blockerTaskIds": ["blocker-1", "blocker-2"],
-            "notifyTaskId": "orchestrator-1",
         })
     );
 }
@@ -295,7 +293,6 @@ fn builds_task_request_defaults_to_pty_agent_type_when_flag_absent() {
         permission_mode: None,
         allowed_tool: Vec::new(),
         blocker_task_id: Vec::new(),
-        notify_task: None,
         parent_task: None,
     });
 

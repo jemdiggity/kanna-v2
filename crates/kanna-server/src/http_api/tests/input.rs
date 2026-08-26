@@ -2312,55 +2312,25 @@ async fn submit_task_input_sends_one_semantic_daemon_message() {
 }
 
 #[tokio::test]
-async fn terminal_state_notification_sends_once_to_notify_target() {
-    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncWriteExt, BufReader};
-    use tokio::net::UnixListener;
-
+async fn terminal_exit_with_legacy_notify_registration_uses_events_not_task_input() {
     let unique = format!(
-        "kanna-notify-{}-{}",
+        "kanna-completion-event-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos()
     );
-    let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
-    std::fs::create_dir_all(&daemon_dir).unwrap();
-    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
-    let _ = std::fs::remove_file(&socket_path);
-    let listener = UnixListener::bind(&socket_path).unwrap();
-    let server = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let (read_half, mut write_half) = stream.into_split();
-        let mut reader = BufReader::new(read_half);
-        let mut inputs = Vec::new();
-        for _ in 0..1 {
-            let command = read_test_daemon_command(&mut reader, &mut write_half).await;
-            match command {
-                DaemonCommand::SubmitInput { session_id, data } => {
-                    assert_eq!(session_id, "task-parent");
-                    inputs.push(data);
-                }
-                other => panic!("expected SubmitInput command, got {other:?}"),
-            }
-            write_half
-                .write_all(
-                    format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap()).as_bytes(),
-                )
-                .await
-                .unwrap();
-        }
-        inputs
-    });
-
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
         firebase_project_id: "kanna-local".to_string(),
-        firebase_auth_emulator_url: Some("http://127.0.0.1:9099".to_string()),
-        firebase_firestore_emulator_host: Some("127.0.0.1:8080".to_string()),
-        daemon_dir: daemon_dir.to_string_lossy().to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: std::env::temp_dir()
+            .join(format!("{unique}-no-daemon"))
+            .to_string_lossy()
+            .to_string(),
         db_path: Db::test_db_path(&unique),
         kanna_cli_path: None,
         desktop_id: "desktop-1".to_string(),
@@ -2376,67 +2346,81 @@ async fn terminal_state_notification_sends_once_to_notify_target() {
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
     db.insert_test_repo("repo-1", "Repo One").unwrap();
-    db.insert_test_pipeline_item(
-        "task-child",
-        "repo-1",
-        "Child prompt first line\nsecond line",
-        Some("Child Display"),
-        "in progress",
-        "2026-04-18 10:00:00",
-    )
-    .unwrap();
-    db.insert_test_pipeline_item(
-        "task-parent",
-        "repo-1",
-        "Parent prompt",
-        Some("Parent Display"),
-        "in progress",
-        "2026-04-18 10:00:00",
-    )
-    .unwrap();
+    for (id, title) in [("task-child", "Child"), ("task-parent", "Parent")] {
+        db.insert_test_pipeline_item(
+            id,
+            "repo-1",
+            title,
+            Some(title),
+            "in progress",
+            "2026-08-26 10:00:00",
+        )
+        .unwrap();
+    }
     db.update_test_pipeline_item_notify_task("task-child", "task-parent")
         .unwrap();
+    db.insert_stage_run(crate::db::NewStageRun {
+        id: "run-child",
+        task_id: "task-child",
+        stage: "in progress",
+        kind: "main",
+        agent: Some("implement"),
+        agent_provider: Some("codex"),
+        model: None,
+        effort: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("task-child"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
+    })
+    .unwrap();
     drop(db);
 
-    let state = Arc::new(super::AppState::new(config.clone()));
-    let mut state_changes = state.subscribe_state_changes();
-
-    super::handle_task_terminal_state(state.as_ref(), "task-child", 0)
+    let state = Arc::new(AppState::new(config.clone()));
+    handle_task_terminal_state(state.as_ref(), "task-child", 17)
         .await
         .unwrap();
-    expect_task_state_changed(&mut state_changes).await;
-    expect_task_state_changed(&mut state_changes).await;
-    let inputs = server.await.unwrap();
-    assert_eq!(
-        inputs,
-        vec![b"TASK task-child DONE [success]: Child Display".to_vec()]
-    );
 
-    super::handle_task_terminal_state(state.as_ref(), "task-child", 0)
-        .await
-        .unwrap();
-    expect_task_state_changed(&mut state_changes).await;
     let db = Db::open(&config.db_path).unwrap();
-    let task = db.get_pipeline_item("task-child").unwrap().unwrap();
-    assert_eq!(task.activity.as_deref(), Some("unread"));
-    // The runtime dimension's terminal value. `unread` is read state and a
-    // busy agent carries it too, so this — not that — is what a wait for the
-    // task to finish resolves on when no verdict was recorded.
-    assert_eq!(task.runtime_status.as_deref(), Some("exited"));
-    assert!(task.notified_at.is_some());
-    // Completion notifications are deliveries like any other and are recorded
-    // against the task that received them, labelled `notify` — the parent's
-    // record says where its wake-up came from without changing how it arrived.
-    let notified = db.list_task_inputs("task-parent", 10).unwrap();
-    assert_eq!(notified.len(), 1);
-    assert_eq!(notified[0].source, "notify");
-    assert_eq!(
-        notified[0].message,
-        "TASK task-child DONE [success]: Child Display"
+    let child = db.get_pipeline_item("task-child").unwrap().unwrap();
+    assert_eq!(child.activity.as_deref(), Some("unread"));
+    assert_eq!(child.runtime_status.as_deref(), Some("exited"));
+    assert!(
+        child.notified_at.is_none(),
+        "legacy notification was claimed"
     );
+    assert!(
+        db.list_task_inputs("task-parent", 10).unwrap().is_empty(),
+        "completion wrote into the target's durable input ledger"
+    );
+    drop(db);
 
-    let _ = std::fs::remove_file(socket_path);
-    let _ = std::fs::remove_dir_all(daemon_dir);
+    let response = router(state)
+        .oneshot(
+            Request::get("/v1/task-events?taskIds=task-child&timeoutSecs=0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let finished = body["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["type"] == "run.finished")
+        .expect("run.finished remains observable through the wait surface");
+    assert_eq!(finished["payload"]["status"], "failed");
+    let result: serde_json::Value =
+        serde_json::from_str(finished["payload"]["result"].as_str().unwrap()).unwrap();
+    assert_eq!(result["status"], "failure");
 }
 
 /// Closing a task past the final stage of a workflow that declares the
@@ -2946,344 +2930,6 @@ mod merge_handoff_on_close {
         assert_eq!(task.activity.as_deref(), Some("unread"));
         assert!(harness.merge_messages().is_empty());
         drop(db);
-        harness.cleanup();
-    }
-}
-
-/// The three ways a task can end, as one contract.
-///
-/// `TASK <id> DONE [<status>]` is acted on without re-reading task state, so
-/// each ending has to be distinguishable from the payload alone: a clean
-/// workflow finish is `success`, a task closed before it finished its workflow
-/// is `closed`, and only a real failing verdict is `failure`. Daemon `Exit`
-/// cannot tell them apart on its own — all three end the same PTY — so these
-/// drive the real routes and the real daemon socket rather than the derivation
-/// in isolation.
-mod completion_notification {
-    use super::*;
-    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tokio::net::UnixListener;
-
-    struct NotificationHarness {
-        config: Config,
-        daemon_dir: PathBuf,
-        socket_path: PathBuf,
-    }
-
-    impl NotificationHarness {
-        fn new(label: &str) -> (Self, UnixListener) {
-            let unique = format!("{label}-{}", unique_test_suffix());
-            let daemon_dir = std::env::temp_dir().join(format!("kanna-notify-{unique}-daemon"));
-            std::fs::create_dir_all(&daemon_dir).unwrap();
-            let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
-            let _ = std::fs::remove_file(&socket_path);
-            let listener = UnixListener::bind(&socket_path).unwrap();
-            let config = Config {
-                relay_url: "wss://relay.example".to_string(),
-                device_token: "device-token".to_string(),
-                firebase_project_id: "kanna-local".to_string(),
-                firebase_auth_emulator_url: None,
-                firebase_firestore_emulator_host: None,
-                daemon_dir: daemon_dir.to_string_lossy().to_string(),
-                db_path: Db::test_db_path(&format!("notify-{unique}")),
-                kanna_cli_path: None,
-                desktop_id: "desktop-1".to_string(),
-                desktop_secret: Some("desktop-secret".to_string()),
-                desktop_name: "Studio Mac".to_string(),
-                version: "test-version".to_string(),
-                environment: "development".to_string(),
-                lan_host: "127.0.0.1".to_string(),
-                lan_port: 48120,
-                transfer_port: 4455,
-                activity_event_debounce_seconds: 300,
-                pairing_store_path: format!("/tmp/kanna-pairings-{unique}.json"),
-            };
-            (
-                Self {
-                    config,
-                    daemon_dir,
-                    socket_path,
-                },
-                listener,
-            )
-        }
-
-        fn cleanup(self) {
-            let _ = std::fs::remove_file(&self.socket_path);
-            let _ = std::fs::remove_dir_all(&self.daemon_dir);
-        }
-    }
-
-    /// Ack every command on the close connection (kills, teardown spawn), then
-    /// read the notification the server delivers on its own fresh connection.
-    fn serve_close_then_notification(
-        listener: UnixListener,
-    ) -> tokio::task::JoinHandle<Vec<Vec<u8>>> {
-        tokio::spawn(async move {
-            let (stream, _) =
-                tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept())
-                    .await
-                    .expect("close never reached the daemon")
-                    .unwrap();
-            let (read_half, mut write_half) = stream.into_split();
-            let mut reader = BufReader::new(read_half);
-            // The close connection is drained until it ends; the notification
-            // arrives on a second connection because the notify path opens its
-            // own client.
-            let drain = tokio::spawn(async move {
-                loop {
-                    let Some(command) =
-                        read_test_daemon_command_optional(&mut reader, &mut write_half).await
-                    else {
-                        return;
-                    };
-                    let event = match command {
-                        DaemonCommand::Spawn { session_id, .. } => {
-                            DaemonEvent::SessionCreated { session_id }
-                        }
-                        _ => DaemonEvent::Ok,
-                    };
-                    if write_half
-                        .write_all(
-                            format!("{}\n", serde_json::to_string(&event).unwrap()).as_bytes(),
-                        )
-                        .await
-                        .is_err()
-                    {
-                        return;
-                    }
-                }
-            });
-            let inputs = read_notification(&listener).await;
-            drain.abort();
-            inputs
-        })
-    }
-
-    async fn read_notification(listener: &UnixListener) -> Vec<Vec<u8>> {
-        let (stream, _) =
-            tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept())
-                .await
-                .expect("completion notification was never delivered")
-                .unwrap();
-        let (read_half, mut write_half) = stream.into_split();
-        let mut reader = BufReader::new(read_half);
-        let mut inputs = Vec::new();
-        for _ in 0..1 {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            match serde_json::from_str::<DaemonCommand>(line.trim()).unwrap() {
-                DaemonCommand::SubmitInput { session_id, data } => {
-                    assert_eq!(session_id, "task-parent");
-                    inputs.push(data);
-                }
-                other => panic!("expected SubmitInput command, got {other:?}"),
-            }
-            write_half
-                .write_all(
-                    format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap()).as_bytes(),
-                )
-                .await
-                .unwrap();
-        }
-        inputs
-    }
-
-    fn assert_notified(inputs: Vec<Vec<u8>>, expected: &str) {
-        assert_eq!(
-            inputs,
-            vec![expected.as_bytes().to_vec()],
-            "notification payload mismatch; expected {expected}"
-        );
-    }
-
-    fn seed_notifying_child(db: &Db, run_status: &str) {
-        db.insert_test_pipeline_item(
-            "task-child",
-            "repo-1",
-            "Task event feed for orchestrating agents",
-            Some("Task event feed for orchestrating agents"),
-            "in progress",
-            "2026-07-28 10:00:00",
-        )
-        .unwrap();
-        db.update_test_pipeline_item_notify_task("task-child", "task-parent")
-            .unwrap();
-        db.insert_stage_run(crate::db::NewStageRun {
-            id: "run-1",
-            task_id: "task-child",
-            stage: "in progress",
-            kind: "main",
-            agent: Some("implement"),
-            agent_provider: Some("claude"),
-            model: None,
-            effort: None,
-            status: "running",
-            result: None,
-            feedback: None,
-            session_id: Some("task-child"),
-            provider_session_id: None,
-            cwd: None,
-            resumed_from_run_id: None,
-        })
-        .unwrap();
-        if run_status != "running" {
-            db.finish_stage_run("run-1", run_status, Some("{}"), Some("done"))
-                .unwrap();
-        }
-    }
-
-    /// The regression: a task whose final run succeeded, closed by advancing
-    /// past the last workflow stage, used to report `[failure]` because the
-    /// close path hardcoded it and daemon `Exit` was the only other signal.
-    #[tokio::test]
-    async fn advancing_past_the_final_stage_reports_success() {
-        let (harness, listener) = NotificationHarness::new("final-stage");
-        let repo_root =
-            std::env::temp_dir().join(format!("kanna-notify-repo-{}", unique_test_suffix()));
-        init_test_git_repo(&repo_root);
-
-        let db = Db::open_for_tests(&harness.config.db_path).unwrap();
-        db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
-            .unwrap();
-        seed_notifying_child(&db, "succeeded");
-        db.update_test_pipeline_item_stage_context(
-            "task-child",
-            "task-child",
-            TEST_PROVIDER_NEUTRAL_WORKFLOW,
-            None,
-            "claude",
-        )
-        .unwrap();
-        drop(db);
-
-        let daemon_server = serve_close_then_notification(listener);
-        let app = router(Arc::new(AppState::new(harness.config.clone())));
-        let response = app
-            .oneshot(
-                Request::post("/v1/tasks/task-child/actions/advance-stage")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-
-        assert_notified(
-            daemon_server.await.unwrap(),
-            "TASK task-child DONE [success]: Task event feed for orchestrating agents",
-        );
-        let db = Db::open(&harness.config.db_path).unwrap();
-        assert!(db
-            .get_pipeline_item("task-child")
-            .unwrap()
-            .unwrap()
-            .closed_at
-            .is_some());
-        let _ = std::fs::remove_dir_all(&repo_root);
-        harness.cleanup();
-    }
-
-    /// A direct close reaches no verdict. It used to report `[failure]`, which
-    /// sent receiving agents diagnosing a failure that never happened.
-    #[tokio::test]
-    async fn closing_a_task_directly_reports_closed() {
-        let (harness, listener) = NotificationHarness::new("direct-close");
-        let db = Db::open_for_tests(&harness.config.db_path).unwrap();
-        db.insert_test_repo("repo-1", "Repo One").unwrap();
-        // A succeeded run is on record: `closed` must come from *how* the task
-        // ended, not from the last verdict it happened to leave behind.
-        seed_notifying_child(&db, "succeeded");
-        drop(db);
-
-        let daemon_server = serve_close_then_notification(listener);
-        let app = router(Arc::new(AppState::new(harness.config.clone())));
-        let response = app
-            .oneshot(
-                Request::post("/v1/tasks/task-child/actions/close")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
-
-        assert_notified(
-            daemon_server.await.unwrap(),
-            "TASK task-child DONE [closed]: Task event feed for orchestrating agents",
-        );
-        harness.cleanup();
-    }
-
-    /// A real failure: the agent reported `failure` through `complete-stage`
-    /// and then let its session end cleanly. The PTY exit code says 0; the
-    /// terminating run says failed, and the run is what the payload reports.
-    #[tokio::test]
-    async fn a_failing_verdict_reports_failure_even_on_a_clean_session_exit() {
-        let (harness, listener) = NotificationHarness::new("failed-verdict");
-        let repo_root =
-            std::env::temp_dir().join(format!("kanna-notify-repo-{}", unique_test_suffix()));
-        init_test_git_repo(&repo_root);
-
-        let db = Db::open_for_tests(&harness.config.db_path).unwrap();
-        db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
-            .unwrap();
-        seed_notifying_child(&db, "running");
-        drop(db);
-
-        let state = Arc::new(AppState::new(harness.config.clone()));
-        let complete = router(Arc::clone(&state))
-            .oneshot(
-                Request::post("/v1/tasks/task-child/actions/complete-stage")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "runId": "run-1",
-                            "status": "failure",
-                            "summary": "could not build the feed"
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(complete.status(), StatusCode::OK);
-
-        let daemon_server = tokio::spawn(async move { read_notification(&listener).await });
-        handle_task_terminal_state(state.as_ref(), "task-child", 0)
-            .await
-            .unwrap();
-
-        assert_notified(
-            daemon_server.await.unwrap(),
-            "TASK task-child DONE [failure]: Task event feed for orchestrating agents",
-        );
-        let _ = std::fs::remove_dir_all(&repo_root);
-        harness.cleanup();
-    }
-
-    /// An agent process that dies is a failure whatever verdicts precede it:
-    /// the run it was executing never finished.
-    #[tokio::test]
-    async fn a_dead_agent_process_reports_failure() {
-        let (harness, listener) = NotificationHarness::new("dead-agent");
-        let db = Db::open_for_tests(&harness.config.db_path).unwrap();
-        db.insert_test_repo("repo-1", "Repo One").unwrap();
-        seed_notifying_child(&db, "succeeded");
-        drop(db);
-
-        let state = Arc::new(AppState::new(harness.config.clone()));
-        let daemon_server = tokio::spawn(async move { read_notification(&listener).await });
-        handle_task_terminal_state(state.as_ref(), "task-child", 1)
-            .await
-            .unwrap();
-
-        assert_notified(
-            daemon_server.await.unwrap(),
-            "TASK task-child DONE [failure]: Task event feed for orchestrating agents",
-        );
         harness.cleanup();
     }
 }

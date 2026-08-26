@@ -152,13 +152,6 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
             },
         ),
         (
-            "kanna_set_task_notify",
-            TypedToolSurface {
-                command_path: &["task", "set-notify"],
-                param_args: &[("task_id", "task_id"), ("notify_task_id", "notify_task")],
-            },
-        ),
-        (
             "kanna_set_task_workflow",
             TypedToolSurface {
                 command_path: &["task", "set-workflow"],
@@ -226,7 +219,6 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
                     ("model", "model"),
                     ("effort", "effort"),
                     ("permission_mode", "permission_mode"),
-                    ("notify_task_id", "notify_task"),
                     ("parent_task_id", "parent_task"),
                     ("allowed_tools", "allowed_tool"),
                     ("blocker_task_ids", "blocker_task_id"),

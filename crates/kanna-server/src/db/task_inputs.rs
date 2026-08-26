@@ -17,8 +17,8 @@
 //! announcement.
 //!
 //! Scope, stated so a reader knows what an empty list does and does not mean:
-//! this covers deliveries through `POST /v1/tasks/{task_id}/input` and the
-//! server's own completion notifications. Stage prompts, post prompts, and
+//! this covers deliveries through `POST /v1/tasks/{task_id}/input`. Historical
+//! rows may have the retired `notify` source. Stage prompts, post prompts, and
 //! revision feedback are already durable on `stage_run` and are not duplicated
 //! here.
 
@@ -34,9 +34,8 @@ const TASK_INPUT_EVENT_PREVIEW_CHARS: usize = 200;
 
 /// Who delivered a task input.
 ///
-/// `Notify` is the only variant the server assigns from its own knowledge — it
-/// generated the message. The rest are **declared by the caller** and are not
-/// verified: `POST /v1/tasks/{task_id}/input` cannot tell a human typing on
+/// These labels are **declared by the caller** and are not verified:
+/// `POST /v1/tasks/{task_id}/input` cannot tell a human typing on
 /// mobile from an orchestrating agent's MCP call, and inventing a distinction
 /// it cannot observe would be worse than admitting `Unspecified`. What every
 /// record proves regardless of its label is that text entered the session from
@@ -49,9 +48,6 @@ pub enum TaskInputSource {
     /// An orchestrating agent (a task manager, a dispatcher) declared itself
     /// the author.
     Manager,
-    /// The server's own `TASK <id> DONE [status]: <title>` completion
-    /// notification. Never accepted from a caller.
-    Notify,
     /// The caller declared nothing. Ordinary for desktop, mobile, and CLI
     /// deliveries, which have no reason to claim authorship.
     Unspecified,
@@ -62,14 +58,13 @@ impl TaskInputSource {
         match self {
             Self::Operator => "operator",
             Self::Manager => "manager",
-            Self::Notify => "notify",
             Self::Unspecified => "unspecified",
         }
     }
 
-    /// Accept a source label from an API caller. `notify` is rejected because
-    /// it means "the server generated this itself", which a caller cannot make
-    /// true, and `unspecified` is what an omitted field already means.
+    /// Accept a source label from an API caller. `notify` is a retired
+    /// server-owned historical label, so callers cannot claim it;
+    /// `unspecified` is already what an omitted field means.
     pub fn from_caller_declared(value: &str) -> Result<Self, String> {
         match value {
             "operator" => Ok(Self::Operator),
