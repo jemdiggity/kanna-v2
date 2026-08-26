@@ -677,7 +677,10 @@ cursor-based, not snapshot-diffed:
   that same global watermark to the parent id; they are constant-size and do
   not contain child ids or membership history. Callers pass back the cursor
   they were given unchanged; events that fire between two calls arrive on the
-  next one.
+  next one. The `ks1` server aggregate and `km1` MCP aggregate both wrap every
+  embedded native checkpoint in the same `ke1` per-machine envelope. Deployed
+  aggregate cursors with bare numeric, `p3`, `kc1`, or short-handle values stay
+  accepted and are canonicalized when resumed.
 - Omitting the cursor returns the scope's retained history (14 days), so a
   watcher that starts after its children does not lose their early events.
 - Events are appended by the same DB writes that change the state they describe
@@ -748,14 +751,15 @@ cursor-based, not snapshot-diffed:
   `quit-sent`, `exited`, `already-exited`, `degraded`). See
   [Source finalization](#source-finalization).
 
-Every delivered event is enriched with the task's current title, stage,
-`currentActivity`, stage transition, and machine id. The `activity` field is
-also current except on `task.activity_changed`, where it retains the historical
-edge value for compatibility. Finished and awaiting events also carry the
-latest run status and a bounded summary snippet. This current context is
-resolved at delivery time rather than frozen into the append row, which is
-intentional: a manager draining retained history needs to know what it can do
-now. `machineId` is present in the payload and at the aggregate row level.
+Every delivered event keeps event-time fields in the payload. In particular,
+`payload.stage` is the stage in effect when the event was appended (older rows
+that did not stamp it are reconstructed from preceding immutable task/run/stage
+events), and run events keep their own `runId`, status, and result. Delivery-time
+state is structurally separate under `payload.currentTask`: current title,
+stage, activity, stage transition, and, for finished/awaiting events, latest-run
+id/status plus a bounded summary snippet. A manager draining retained history
+can therefore distinguish what happened from what it can do now. `machineId`
+is present in the payload and at the aggregate row level.
 
 Four scopes, in precedence order: `taskIds`, then `parentTaskId`, then
 `repoId`, then `repoRemoteUrlHash`. `parentTaskId` exists because the other two do not cover a fan-out

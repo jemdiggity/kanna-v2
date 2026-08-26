@@ -11,6 +11,7 @@ use crate::db::NewStageRun;
 use axum::Router;
 use base64::Engine;
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -490,7 +491,7 @@ async fn level_triggered_activity_wait_returns_an_already_idle_task_immediately(
     assert_eq!(event["synthetic"], true);
     assert_eq!(event["payload"]["currentState"], true);
     assert_eq!(event["payload"]["runtimeState"], "idle");
-    assert_eq!(event["payload"]["title"], "child-a");
+    assert_eq!(event["payload"]["currentTask"]["title"], "child-a");
     assert_eq!(event["payload"]["machineId"], "desktop-task-events");
 }
 
@@ -788,6 +789,180 @@ async fn aggregate_current_activity_pages_drain_every_machine_without_starvation
     assert_eq!(drained["hasMore"], false);
     assert!(drained["events"].as_array().expect("events").is_empty());
     relay.abort();
+}
+
+#[tokio::test]
+async fn aggregate_mid_settled_cursor_resumes_without_replaying_durable_sequences() {
+    let local_ids = ["local-settled-a", "local-settled-b"];
+    let peer_ids = ["peer-settled-a"];
+    let all_ids = local_ids
+        .iter()
+        .chain(peer_ids.iter())
+        .copied()
+        .collect::<Vec<_>>();
+    let source = test_state_with_seed("desktop-mid-source", "Mid Source", |db| {
+        db.insert_test_repo("repo-mid-source", "Mid Source Repo")
+            .expect("insert source repo");
+        for task_id in local_ids {
+            db.insert_test_pipeline_item(
+                task_id,
+                "repo-mid-source",
+                "local settled task",
+                Some(task_id),
+                "in progress",
+                "2026-08-26 00:00:00",
+            )
+            .expect("insert local task");
+        }
+        settle_runtime_tasks(db, &local_ids);
+        for index in 0..125 {
+            db.append_task_event(
+                "local-settled-a",
+                crate::db::TaskEventKind::RunFinished,
+                serde_json::json!({
+                    "runId": format!("historical-{index}"),
+                    "stage": "in progress",
+                    "status": "succeeded",
+                }),
+            )
+            .expect("append retained event");
+        }
+    });
+    let peer = test_state_with_seed("desktop-mid-peer", "Mid Peer", |db| {
+        db.insert_test_repo("repo-mid-peer", "Mid Peer Repo")
+            .expect("insert peer repo");
+        for task_id in peer_ids {
+            db.insert_test_pipeline_item(
+                task_id,
+                "repo-mid-peer",
+                "peer settled task",
+                Some(task_id),
+                "in progress",
+                "2026-08-26 00:00:00",
+            )
+            .expect("insert peer task");
+        }
+        settle_runtime_tasks(db, &peer_ids);
+    });
+    let source_router = router(Arc::clone(&source));
+    let peer_tail = Db::open(&peer.config().db_path)
+        .expect("open peer db")
+        .latest_task_event_seq()
+        .expect("peer tail")
+        .to_string();
+    let local_mid_settled = format!(
+        "kc1.{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&serde_json::json!({
+                "durableCursor": "0",
+                "settledComplete": false,
+            }))
+            .expect("encode current-activity payload")
+        )
+    );
+    let mut cursor = aggregate_tasks_cursor(
+        "desktop-mid-source",
+        "desktop-mid-peer",
+        &all_ids,
+        &local_mid_settled,
+        &peer_tail,
+    );
+    let connected = Arc::new(AtomicBool::new(true));
+    let relay = connect_test_relay_peer(&source, Arc::clone(&peer), connected);
+    let task_ids = all_ids.join(",");
+    let mut delivered_sequences = HashSet::new();
+    let mut drained = false;
+
+    for _ in 0..8 {
+        let page = get_account_json_body(
+            &source_router,
+            &source,
+            &format!(
+                "/v1/task-events?taskIds={task_ids}&includeCurrentActivity=true&limit=100&cursor={cursor}&timeoutSecs=2"
+            ),
+        )
+        .await;
+        let next_cursor = cursor_of(&page);
+        let aggregate_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(next_cursor.strip_prefix("ks1.").expect("ks1 cursor"))
+            .expect("decode aggregate cursor");
+        let aggregate: Value =
+            serde_json::from_slice(&aggregate_bytes).expect("parse aggregate cursor");
+        assert!(aggregate["cursorsByMachine"]
+            .as_object()
+            .expect("machine cursor map")
+            .values()
+            .all(|machine_cursor| machine_cursor
+                .as_str()
+                .is_some_and(|cursor| cursor.starts_with("ke1."))));
+        for event in page["events"].as_array().expect("events") {
+            let Some(seq) = event["seq"].as_i64() else {
+                continue;
+            };
+            let key = (
+                event["machineId"].as_str().expect("machine id").to_string(),
+                seq,
+            );
+            assert!(
+                delivered_sequences.insert(key),
+                "a resumed cursor must not return a durable sequence twice: {page}"
+            );
+        }
+        cursor = next_cursor;
+        if page["hasMore"] == false {
+            drained = true;
+            break;
+        }
+    }
+
+    assert!(drained, "the mid-settled scan must terminate");
+    assert!(delivered_sequences.len() >= 125);
+    relay.abort();
+}
+
+#[tokio::test]
+async fn replayed_run_event_keeps_event_time_stage_after_task_advances() {
+    let (app, db_path) = events_router();
+    let db = Db::open(&db_path).expect("open db");
+    start_run(&db, "run-in-progress", "child-a", "in progress");
+    db.finish_stage_run(
+        "run-in-progress",
+        "failed",
+        Some("historical failure"),
+        None,
+    )
+    .expect("finish historical run");
+    db.update_pipeline_item_stage("child-a", "review")
+        .expect("advance to review");
+    start_run(&db, "run-review", "child-a", "review");
+    db.finish_stage_run("run-review", "succeeded", Some("current success"), None)
+        .expect("finish current run");
+    db.update_pipeline_item_stage("child-a", "pr")
+        .expect("advance to pr");
+
+    let replay = get_json_body(
+        &app,
+        "/v1/task-events?taskIds=child-a&localOnly=true&limit=500&timeoutSecs=0",
+    )
+    .await;
+    let historical = replay["events"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .find(|event| {
+            event["type"] == "run.finished" && event["payload"]["runId"] == "run-in-progress"
+        })
+        .expect("historical run event");
+
+    assert_eq!(historical["payload"]["stage"], "in progress");
+    assert_eq!(historical["payload"]["runId"], "run-in-progress");
+    assert_eq!(historical["payload"]["status"], "failed");
+    assert_eq!(historical["payload"]["currentTask"]["stage"], "pr");
+    assert_eq!(
+        historical["payload"]["currentTask"]["latestRun"]["status"],
+        "succeeded"
+    );
+    assert!(historical["payload"].get("latestRun").is_none());
 }
 
 #[test]
@@ -1445,15 +1620,23 @@ async fn manual_stage_agent_exit_emits_enriched_awaiting_advance_event() {
         .find(|event| event["type"] == "task.awaiting_advance")
         .expect("awaiting advance event");
     assert_eq!(event["machineId"], "desktop-awaiting-advance");
-    assert_eq!(event["payload"]["title"], "Manual task title");
+    assert_eq!(
+        event["payload"]["currentTask"]["title"],
+        "Manual task title"
+    );
     assert_eq!(event["payload"]["stage"], "in progress");
-    assert_eq!(event["payload"]["activity"], "unread");
-    assert_eq!(event["payload"]["stageTransition"], "manual");
+    assert_eq!(event["payload"]["currentTask"]["activity"], "unread");
+    assert_eq!(event["payload"]["currentTask"]["stageTransition"], "manual");
     assert_eq!(event["payload"]["machineId"], "desktop-awaiting-advance");
-    assert_eq!(event["payload"]["latestRun"]["status"], "cancelled");
-    assert!(event["payload"]["latestRun"]["summarySnippet"]
-        .as_str()
-        .is_some_and(|summary| summary.contains("exit code 0")));
+    assert_eq!(
+        event["payload"]["currentTask"]["latestRun"]["status"],
+        "cancelled"
+    );
+    assert!(
+        event["payload"]["currentTask"]["latestRun"]["summarySnippet"]
+            .as_str()
+            .is_some_and(|summary| summary.contains("exit code 0"))
+    );
 
     let _ = std::fs::remove_file(socket_path);
     let _ = std::fs::remove_dir_all(daemon_dir);
@@ -1643,13 +1826,17 @@ async fn stage_start_emits_one_settled_working_edge_and_suppresses_a_resume_flic
         json!({
             "previousActivity": "idle",
             "activity": "working",
-            "currentActivity": "working",
             "runtimeState": "busy",
             "latestRunFinishedWithoutCompletion": false,
-            "title": "settled-start",
             "stage": "in progress",
-            "stageTransition": null,
             "machineId": "desktop-start-peer",
+            "currentTask": {
+                "title": "settled-start",
+                "stage": "in progress",
+                "activity": "working",
+                "stageTransition": null,
+                "latestRun": null,
+            },
         })
     );
 
@@ -1827,6 +2014,16 @@ async fn truncated_peer_legacy_parent_batch_preserves_acknowledged_watermarks() 
     let peer_continuation = aggregate_continuation["cursorsByMachine"]["desktop-legacy-peer"]
         .as_str()
         .expect("peer continuation");
+    let peer_continuation = String::from_utf8(
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(
+                peer_continuation
+                    .strip_prefix("ke1.")
+                    .expect("canonical per-machine continuation"),
+            )
+            .expect("decode canonical per-machine continuation"),
+    )
+    .expect("utf8 per-machine continuation");
     let peer_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(
             peer_continuation

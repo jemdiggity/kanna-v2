@@ -22,6 +22,7 @@ const DEFAULT_SERVER_BASE_URL: &str = "http://127.0.0.1:48120";
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const MULTI_MACHINE_CURSOR_PREFIX: &str = "km1.";
 const SHORT_MULTI_MACHINE_CURSOR_PREFIX: &str = "kmh1.";
+const MACHINE_CURSOR_PREFIX: &str = "ke1.";
 const MAX_MULTI_MACHINE_CURSOR_LEN: usize = 64 * 1024;
 const MULTI_MACHINE_WAIT_SESSION_TTL: Duration = Duration::from_secs(10 * 60);
 const MAX_MULTI_MACHINE_WAIT_SESSIONS: usize = 256;
@@ -649,6 +650,32 @@ fn encode_multi_machine_cursor(cursor: &MultiMachineCursor) -> Result<String, St
     Ok(encoded)
 }
 
+fn decode_machine_cursor(cursor: &str) -> Result<String, String> {
+    let Some(encoded) = cursor.strip_prefix(MACHINE_CURSOR_PREFIX) else {
+        return Ok(cursor.to_string());
+    };
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|_| "cursor contains an invalid per-machine checkpoint".to_string())?;
+    let decoded = String::from_utf8(bytes)
+        .map_err(|_| "cursor contains an invalid per-machine checkpoint".to_string())?;
+    if decoded.is_empty() || decoded.starts_with(MACHINE_CURSOR_PREFIX) {
+        return Err("cursor contains an invalid per-machine checkpoint".to_string());
+    }
+    Ok(decoded)
+}
+
+fn encode_machine_cursor(cursor: &str) -> Result<String, String> {
+    let native = decode_machine_cursor(cursor)?;
+    if native.is_empty() {
+        return Err("cursor contains an empty per-machine checkpoint".to_string());
+    }
+    Ok(format!(
+        "{MACHINE_CURSOR_PREFIX}{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(native.as_bytes())
+    ))
+}
+
 fn new_short_multi_machine_cursor(registry: &MultiMachineWaitRegistry) -> String {
     loop {
         let nonce = SHORT_CURSOR_NONCE.fetch_add(1, Ordering::Relaxed);
@@ -694,7 +721,7 @@ fn decode_multi_machine_cursor(value: &str) -> Result<Option<MultiMachineCursor>
         .map_err(|_| {
             "cursor is not a valid multi-machine event cursor; restart without a cursor to safely replay retained history".to_string()
         })?;
-    let cursor: MultiMachineCursor = serde_json::from_slice(&bytes)
+    let mut cursor: MultiMachineCursor = serde_json::from_slice(&bytes)
         .map_err(|_| {
             "cursor is not a valid multi-machine event cursor; restart without a cursor to safely replay retained history".to_string()
         })?;
@@ -719,6 +746,9 @@ fn decode_multi_machine_cursor(value: &str) -> Result<Option<MultiMachineCursor>
             "cursor is not a valid multi-machine event cursor; restart without a cursor to safely replay retained history"
                 .to_string(),
         );
+    }
+    for machine_cursor in cursor.cursors_by_machine.values_mut() {
+        *machine_cursor = encode_machine_cursor(machine_cursor)?;
     }
     Ok(Some(cursor))
 }
@@ -959,7 +989,10 @@ fn spawn_machine_event_wait(
     machine_args.insert("local_only".to_string(), Value::Bool(true));
     match session.cursor.cursors_by_machine.get(machine_id) {
         Some(cursor) => {
-            machine_args.insert("cursor".to_string(), Value::String(cursor.clone()));
+            machine_args.insert(
+                "cursor".to_string(),
+                Value::String(decode_machine_cursor(cursor)?),
+            );
         }
         None => {
             machine_args.remove("cursor");
@@ -1022,10 +1055,10 @@ fn apply_machine_wait_completion(
                 completion.machine_id
             )
         })?;
-    session
-        .cursor
-        .cursors_by_machine
-        .insert(completion.machine_id.clone(), cursor.to_string());
+    session.cursor.cursors_by_machine.insert(
+        completion.machine_id.clone(),
+        encode_machine_cursor(cursor)?,
+    );
     *has_more |= response
         .get("hasMore")
         .and_then(Value::as_bool)
@@ -1120,9 +1153,10 @@ async fn wait_events_across_machines(
             .task_ids_by_machine
             .contains_key(&cursor.local_machine_id)
         {
-            cursor
-                .cursors_by_machine
-                .insert(cursor.local_machine_id.clone(), native_cursor.to_string());
+            cursor.cursors_by_machine.insert(
+                cursor.local_machine_id.clone(),
+                encode_machine_cursor(native_cursor)?,
+            );
         }
     }
     let input_cursor_key = encode_multi_machine_cursor(&cursor)?;
@@ -1743,7 +1777,7 @@ mod tests {
 
     #[test]
     fn multi_machine_cursor_round_trips_ownership_and_native_cursors() {
-        let cursor = MultiMachineCursor {
+        let legacy_cursor = MultiMachineCursor {
             local_machine_id: "desktop-local".to_string(),
             task_ids_by_machine: BTreeMap::from([
                 ("desktop-local".to_string(), vec!["task-a".to_string()]),
@@ -1755,11 +1789,30 @@ mod tests {
             ]),
         };
 
-        let encoded = encode_multi_machine_cursor(&cursor).expect("encode cursor");
+        let encoded = encode_multi_machine_cursor(&legacy_cursor).expect("encode cursor");
         assert!(encoded.starts_with(MULTI_MACHINE_CURSOR_PREFIX));
+        let decoded = decode_multi_machine_cursor(&encoded)
+            .expect("decode cursor")
+            .expect("km1 cursor");
+        assert_eq!(decoded.local_machine_id, legacy_cursor.local_machine_id);
         assert_eq!(
-            decode_multi_machine_cursor(&encoded).expect("decode cursor"),
-            Some(cursor)
+            decoded.task_ids_by_machine,
+            legacy_cursor.task_ids_by_machine
+        );
+        assert!(decoded
+            .cursors_by_machine
+            .values()
+            .all(|cursor| cursor.starts_with(MACHINE_CURSOR_PREFIX)));
+        assert_eq!(
+            decoded
+                .cursors_by_machine
+                .iter()
+                .map(|(machine_id, cursor)| {
+                    Ok((machine_id.clone(), decode_machine_cursor(cursor)?))
+                })
+                .collect::<Result<BTreeMap<_, _>, String>>()
+                .expect("decode canonical machine cursors"),
+            legacy_cursor.cursors_by_machine
         );
     }
 

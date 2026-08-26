@@ -396,6 +396,38 @@ impl Db {
         rows.collect()
     }
 
+    /// Resolve the stage in effect when an already-retained event was written.
+    ///
+    /// New and historical run rows carry `stage`; task creation does too, and
+    /// a stage transition carries `toStage`. Looking backward through those
+    /// immutable facts lets the HTTP replay repair older event kinds that did
+    /// not stamp a stage of their own without substituting today's task stage.
+    pub fn task_event_stage_at(
+        &self,
+        task_id: &str,
+        event_seq: i64,
+    ) -> Result<Option<String>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT COALESCE(
+                     json_extract(payload, '$.stage'),
+                     json_extract(payload, '$.toStage')
+                 )
+                 FROM task_event
+                 WHERE task_id = ?1
+                   AND seq <= ?2
+                   AND COALESCE(
+                       json_extract(payload, '$.stage'),
+                       json_extract(payload, '$.toStage')
+                   ) IS NOT NULL
+                 ORDER BY seq DESC
+                 LIMIT 1",
+                rusqlite::params![task_id, event_seq],
+                |row| row.get(0),
+            )
+            .optional()
+    }
+
     /// Globally ordered events for a known parent-membership snapshot, with
     /// candidate work bounded by `task_ids.len() + limit` index hits.
     ///
