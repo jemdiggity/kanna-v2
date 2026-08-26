@@ -56,6 +56,7 @@ const LEGACY_CURSOR_SCAN_LIMIT: i64 = 500;
 const WAIT_RECHECK_SECS: u64 = 5;
 const AGGREGATE_CURSOR_PREFIX: &str = "ks1.";
 const CURRENT_ACTIVITY_CURSOR_PREFIX: &str = "kc1.";
+const MACHINE_CURSOR_PREFIX: &str = "ke1.";
 const SHORT_CURSOR_PREFIX: &str = "kh1.";
 const AGGREGATE_WAIT_SESSION_TTL: Duration = Duration::from_secs(10 * 60);
 const ZERO_TIMEOUT_DRAIN_BUDGET: Duration = Duration::from_millis(100);
@@ -954,18 +955,17 @@ fn summary_snippet(summary: &str) -> String {
     }
 }
 
-/// Add the current decision context a manager needs to every durable event.
-///
-/// The append-only row remains the lifecycle fact and cursor authority. These
-/// fields are deliberately resolved at delivery time because the contract asks
-/// for the task's *current* state: a retained event may be read after the task
-/// advanced, closed, or acquired a newer run.
+/// Preserve the lifecycle fact and add delivery-time context under a distinct
+/// key. Event-time fields must never be overwritten by today's task state: a
+/// retained `run.finished` from `in progress` is still that run after the task
+/// reaches `pr`.
 fn enrich_event_batch(
     config: &crate::config::Config,
     batch: &mut EventBatch,
 ) -> Result<(), String> {
-    let db = Db::open(&config.db_path).map_err(|error| format!("db error: {error}"))?;
-    let api = crate::mobile_api::MobileApi::new(config.clone(), db);
+    let event_db = Db::open(&config.db_path).map_err(|error| format!("db error: {error}"))?;
+    let current_db = Db::open(&config.db_path).map_err(|error| format!("db error: {error}"))?;
+    let api = crate::mobile_api::MobileApi::new(config.clone(), current_db);
     for event in &mut batch.events {
         let Some(event_object) = event.as_object_mut() else {
             continue;
@@ -974,12 +974,17 @@ fn enrich_event_batch(
             "machineId".to_string(),
             Value::String(config.desktop_id.clone()),
         );
-        let Some(task_id) = event_object.get("taskId").and_then(Value::as_str) else {
+        let Some(task_id) = event_object
+            .get("taskId")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        else {
             continue;
         };
-        let Some(task) = api.get_task(task_id)? else {
+        let Some(task) = api.get_task(&task_id)? else {
             continue;
         };
+        let event_seq = event_object.get("seq").and_then(Value::as_i64);
         let include_latest_run = matches!(
             event_object.get("type").and_then(Value::as_str),
             Some("run.finished" | "task.awaiting_input" | "task.awaiting_advance")
@@ -988,31 +993,41 @@ fn enrich_event_batch(
         let Some(payload) = payload.as_object_mut() else {
             continue;
         };
-        payload.insert("title".to_string(), Value::String(task.title));
-        payload.insert("stage".to_string(), json!(task.stage));
-        // `task.activity_changed` already owns `activity` as the value at the
-        // recorded edge. Preserve that historical meaning while still
-        // exposing the task's delivery-time value explicitly.
-        payload
-            .entry("activity".to_string())
-            .or_insert_with(|| json!(task.activity));
-        payload.insert("currentActivity".to_string(), json!(task.activity));
-        payload.insert("stageTransition".to_string(), json!(task.stage_transition));
+        if !payload.contains_key("stage") {
+            let event_stage = event_seq
+                .map(|seq| event_db.task_event_stage_at(&task_id, seq))
+                .transpose()
+                .map_err(|error| format!("db error: {error}"))?
+                .flatten();
+            if let Some(event_stage) = event_stage {
+                payload.insert("stage".to_string(), Value::String(event_stage));
+            }
+        }
         payload.insert(
             "machineId".to_string(),
             Value::String(config.desktop_id.clone()),
         );
-        if include_latest_run {
-            payload.insert(
-                "latestRun".to_string(),
-                task.latest_run.map_or(Value::Null, |run| {
-                    json!({
-                        "status": run.status,
-                        "summarySnippet": run.summary.as_deref().map(summary_snippet),
-                    })
-                }),
-            );
-        }
+        let latest_run = if include_latest_run {
+            task.latest_run.map_or(Value::Null, |run| {
+                json!({
+                    "id": run.id,
+                    "status": run.status,
+                    "summarySnippet": run.summary.as_deref().map(summary_snippet),
+                })
+            })
+        } else {
+            Value::Null
+        };
+        payload.insert(
+            "currentTask".to_string(),
+            json!({
+                "title": task.title,
+                "stage": task.stage,
+                "activity": task.activity,
+                "stageTransition": task.stage_transition,
+                "latestRun": latest_run,
+            }),
+        );
     }
     Ok(())
 }
@@ -1191,6 +1206,35 @@ fn invalid_aggregate_cursor() -> (axum::http::StatusCode, String) {
     )
 }
 
+/// `ks1` used to embed native cursors directly, so deployed values may contain
+/// either a numeric/p3 cursor or a `kc1` current-state continuation. Accept
+/// both, but serialize every per-machine checkpoint through one `ke1` envelope
+/// so a caller never has to infer meaning from mixed map values.
+fn decode_machine_cursor(cursor: &str) -> Result<String, (axum::http::StatusCode, String)> {
+    let Some(encoded) = cursor.strip_prefix(MACHINE_CURSOR_PREFIX) else {
+        return Ok(cursor.to_string());
+    };
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|_| invalid_aggregate_cursor())?;
+    let decoded = String::from_utf8(bytes).map_err(|_| invalid_aggregate_cursor())?;
+    if decoded.is_empty() || decoded.starts_with(MACHINE_CURSOR_PREFIX) {
+        return Err(invalid_aggregate_cursor());
+    }
+    Ok(decoded)
+}
+
+fn encode_machine_cursor(cursor: &str) -> Result<String, (axum::http::StatusCode, String)> {
+    let native = decode_machine_cursor(cursor)?;
+    if native.is_empty() {
+        return Err(invalid_aggregate_cursor());
+    }
+    Ok(format!(
+        "{MACHINE_CURSOR_PREFIX}{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(native.as_bytes())
+    ))
+}
+
 fn decode_aggregate_cursor(
     cursor: &str,
 ) -> Result<AggregateCursor, (axum::http::StatusCode, String)> {
@@ -1224,6 +1268,9 @@ fn decode_aggregate_cursor(
     }
     cursor.machine_ids.sort();
     cursor.machine_ids.dedup();
+    for machine_cursor in cursor.cursors_by_machine.values_mut() {
+        *machine_cursor = encode_machine_cursor(machine_cursor)?;
+    }
     Ok(cursor)
 }
 
@@ -1405,10 +1452,15 @@ fn spawn_aggregate_wait(
     machine_id: String,
     timeout_secs: u64,
     limit: i64,
-) {
+) -> Result<(), (axum::http::StatusCode, String)> {
     let query = local_query_for_aggregate(
         &session.cursor.scope,
-        session.cursor.cursors_by_machine.get(&machine_id).cloned(),
+        session
+            .cursor
+            .cursors_by_machine
+            .get(&machine_id)
+            .map(|cursor| decode_machine_cursor(cursor))
+            .transpose()?,
         timeout_secs,
         limit,
         session.include_current_activity,
@@ -1453,6 +1505,7 @@ fn spawn_aggregate_wait(
         }
     });
     session.pending_machines.insert(machine_id);
+    Ok(())
 }
 
 fn apply_aggregate_completion(
@@ -1588,15 +1641,19 @@ fn apply_aggregate_completion(
             .cursor
             .cursors_by_machine
             .get(&completion.machine_id);
-        let previous_current = previous_wire_cursor
-            .map(|cursor| decode_current_activity_cursor(cursor))
+        let previous_native_cursor = previous_wire_cursor
+            .map(|cursor| decode_machine_cursor(cursor))
+            .transpose()?;
+        let previous_current = previous_native_cursor
+            .as_deref()
+            .map(decode_current_activity_cursor)
             .transpose()?
             .flatten();
         let durable_cursor = match &session.cursor.scope {
             AggregateScope::Children { parent_task_id } => cursor_after_truncated_parent_batch(
                 parent_task_id,
-                previous_wire_cursor
-                    .map(String::as_str)
+                previous_native_cursor
+                    .as_deref()
                     .map(durable_cursor_from_wire)
                     .transpose()?
                     .as_deref(),
@@ -1619,10 +1676,10 @@ fn apply_aggregate_completion(
         }
     };
     if let Some(next_cursor) = next_cursor {
-        session
-            .cursor
-            .cursors_by_machine
-            .insert(completion.machine_id.clone(), next_cursor);
+        session.cursor.cursors_by_machine.insert(
+            completion.machine_id.clone(),
+            encode_machine_cursor(&next_cursor)?,
+        );
     }
     *has_more |= !session.cursor.machines_with_more.is_empty();
     Ok(!returned_events.is_empty())
@@ -1672,7 +1729,10 @@ async fn wait_aggregate_task_events(
         None => {
             let mut cursors_by_machine = BTreeMap::new();
             if let Some(native_cursor) = supplied_cursor {
-                cursors_by_machine.insert(local_machine_id.clone(), native_cursor.to_string());
+                cursors_by_machine.insert(
+                    local_machine_id.clone(),
+                    encode_machine_cursor(native_cursor)?,
+                );
             }
             AggregateCursor {
                 local_machine_id: local_machine_id.clone(),
@@ -1782,7 +1842,7 @@ async fn wait_aggregate_task_events(
                 machine_id,
                 remaining_secs,
                 limit,
-            );
+            )?;
         }
 
         let joined = if timeout_secs == 0 {

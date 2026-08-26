@@ -1,10 +1,66 @@
 use super::*;
-use crate::api::notify_mobile_via_api;
+use crate::api::{notify_mobile_via_api, wait_task_events_via_api, TaskEventsParams};
 use crate::commands::tool::call_catalog_tool_with_task_id;
 use crate::models::MobileNotificationRequest;
 
 #[path = "../../../test-support/old_relay_mobile_notification.rs"]
 mod old_relay_mobile_notification;
+
+#[tokio::test]
+async fn typed_cli_round_trips_the_server_ks1_aggregate_cursor() {
+    let aggregate_cursor = "ks1.fixture-with-ke1-machine-cursors";
+    let responses = vec![
+        http_json_response(
+            "200 OK",
+            &serde_json::json!({
+                "waitOutcome": "events",
+                "cursor": aggregate_cursor,
+                "events": [{ "seq": 7, "taskId": "task-a", "type": "run.started", "payload": {} }],
+                "hasMore": true,
+            })
+            .to_string(),
+        ),
+        http_json_response(
+            "200 OK",
+            &serde_json::json!({
+                "waitOutcome": "timeout",
+                "cursor": aggregate_cursor,
+                "events": [],
+                "hasMore": false,
+            })
+            .to_string(),
+        ),
+    ];
+    let (base_url, server) = serve_http_responses(responses).await;
+    let task_ids = vec!["task-a".to_string()];
+    let params = |cursor| TaskEventsParams {
+        task_ids: &task_ids,
+        parent_task_id: None,
+        repo_id: None,
+        repo_remote_url_hash: None,
+        local_only: false,
+        include_current_activity: true,
+        short_cursor: false,
+        from: None,
+        cursor,
+        timeout_secs: 0,
+        limit: Some(100),
+    };
+
+    let first = wait_task_events_via_api(&base_url, &params(None))
+        .await
+        .expect("first CLI wait");
+    assert_eq!(first["cursor"], aggregate_cursor);
+    let second = wait_task_events_via_api(&base_url, &params(Some(aggregate_cursor)))
+        .await
+        .expect("resumed CLI wait");
+    assert_eq!(second["cursor"], aggregate_cursor);
+
+    let requests = server.await.expect("fixture server");
+    assert!(requests[1].starts_with(&format!(
+        "GET /v1/task-events?timeoutSecs=0&taskIds=task-a&includeCurrentActivity=true&shortCursor=false&cursor={aggregate_cursor}&limit=100 HTTP/1.1"
+    )), "{}", requests[1]);
+}
 
 #[tokio::test]
 async fn catalog_cli_defaults_listing_search_and_watch_to_the_task_repository() {

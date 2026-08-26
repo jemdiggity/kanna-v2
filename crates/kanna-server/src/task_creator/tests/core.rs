@@ -3142,7 +3142,8 @@ fn read_agent_definition_loads_builtin_task_manager_agent_with_codex_first() {
     assert!(definition.prompt.contains("`include_closed: true`"));
     assert!(definition.prompt.contains("`task.runtime_settled`"));
     assert!(definition.prompt.contains("`task.awaiting_advance`"));
-    assert!(definition.prompt.contains("`currentActivity`"));
+    assert!(definition.prompt.contains("`payload.currentTask`"));
+    assert!(definition.prompt.contains("event-time stage"));
     assert!(definition.prompt.contains("task.awaiting_input"));
     assert!(definition.prompt.contains("task.activity_changed"));
     assert!(definition.prompt.contains("no_live_agent_session"));
