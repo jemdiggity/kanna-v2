@@ -174,6 +174,9 @@ describe("QA workflow assets", () => {
       "Never claim the human was notified when the response says otherwise"
     );
     expect(agent.prompt).toContain("an absent or zero `lanDeliveredCount` is expected");
+    expect(agent.prompt).toContain("ask the human to use the desktop revision action");
+    expect(agent.prompt).toContain('origin: "human"');
+    expect(agent.prompt).toContain("coordinate another set of reviews");
     expect(agent.prompt).toContain("the event loop is idle by design while awaiting human action");
     expect(agent.prompt).toContain("kanna_set_task_notify");
     expect(agent.prompt).toContain(
@@ -377,6 +380,9 @@ describe("QA workflow assets", () => {
       expect(agent, name).toContain("revisionLimit");
       expect(agent, name).toContain("parks the task for its human");
       expect(agent, name).toMatch(/do not retry the request/i);
+      expect(agent, name).toContain("ask the human to use the desktop revision action");
+      expect(agent, name).toContain('origin: "human"');
+      expect(agent, name).toContain("stop until the human acts");
 
       // The blocking bar must not move with the budget. Relaxing it on the
       // last round would approve a branch that still has blocking findings —
@@ -740,7 +746,7 @@ describe("QA workflow assets", () => {
 
     expect(mergeAgent).toContain("PR metadata can explain intent, but topology decides ordering.");
     expect(mergeAgent).toContain("Do not infer stack relationships from PR titles or descriptions");
-    expect(mergeAgent).toContain("Do not delete a parent branch while an unmerged child still uses it");
+    expect(mergeAgent).toContain("retarget direct children onto the next live parent or target");
     // Merge approval is delegated to this checked-in policy, not to a
     // privileged server-built envelope: approve sends an ordinary request and
     // the merge master decides. The compact request line is the shape both
@@ -750,15 +756,21 @@ describe("QA workflow assets", () => {
     expect(approveAgent).not.toContain("KANNA_MERGE_HANDOFF");
     expect(mergeAgent).toContain("MERGE <head> -> <base> [TASK <task-id>] [PR <url>]: <summary>");
     expect(mergeAgent).not.toContain("KANNA_MERGE_HANDOFF");
-    expect(mergeAgent).toContain("Before deleting any merged remote branch, call `kanna_is_dependent_tasks_exist` with the merged task id");
-    expect(mergeAgent).toContain("If it returns `exists: true`, do not delete the remote branch");
-    expect(mergeAgent).toContain('If MCP is unavailable, use `kanna-cli task dependent-tasks-exist --task-id "<task_id>"`.');
-    expect(mergeAgent).not.toContain("If MCP is unavailable, use `curl ");
-    expect(mergeAgent).toContain("A blocker that has reached `pr` can already have dependent tasks stacked on its branch");
-    expect(mergeAgent).toContain("After the full detected stack has merged, delete the stack branches that are no longer needed");
+    expect(mergeAgent).toContain("Leave every merged branch in place");
+    expect(mergeAgent).toContain("Never delete a local or remote branch as merge cleanup");
+    expect(mergeAgent).not.toContain("kanna_is_dependent_tasks_exist");
     expect(mergeAgent).toContain("gh pr merge <PR> --merge");
     expect(mergeAgent).toContain("Do not push directly to the target branch.");
-    expect(mergeAgent).not.toContain("--delete-branch");
+    expect(mergeAgent).toContain("never pass a branch-deletion flag such as `--delete-branch`");
+
+    const mergeContract = readRepoFile(".kanna/agents/merge/CONTRACT.md");
+    const gitFlavor = readRepoFile(".kanna/agents/merge/flavors/git/AGENT.md");
+    const githubFlavor = readRepoFile(".kanna/agents/merge/flavors/github/AGENT.md");
+    for (const definition of [mergeContract, gitFlavor, githubFlavor]) {
+      expect(definition).toMatch(/leave every merged|leave merged local and remote branches/i);
+      expect(definition).not.toContain("kanna_is_dependent_tasks_exist");
+    }
+    expect(githubFlavor).toContain("never pass `--delete-branch`");
   });
 
   // Every flavor that opens a PR carries its own copy of the steps, so the

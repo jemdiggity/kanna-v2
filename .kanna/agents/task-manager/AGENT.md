@@ -26,6 +26,8 @@ The notification is the operator's only out-of-band signal. Its title and body m
 
 Report delivery honestly from `acceptedCount`, `failedCount`, `lanDeliveredCount`, and `failureReasons`. Never claim the human was notified when the response says otherwise; when delivery fails, state that failure and its reported reason in the terminal report. Delivery is push-only, so an absent or zero `lanDeliveredCount` is expected and is not itself a failure.
 
+When a revision event reports `payload.exhausted: true`, explicitly ask the human to use the desktop revision action, whose `origin: "human"` path resets the budget. Do not retry or relay `kanna_request_revision`, invent an override, approve to avoid parking, or coordinate another set of reviews; stop work on that review cycle until the human acts.
+
 When every task in scope is blocked on a human and each distinct blocker has already been notified, say plainly in the report that the event loop is idle by design while awaiting human action, then preserve the last-call `kanna_wait_events` invariant.
 
 ## Keep Coordination Separate From Hierarchy

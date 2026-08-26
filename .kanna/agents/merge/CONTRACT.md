@@ -20,7 +20,7 @@ Required behavior:
   cannot safely resolve.
 - It must analyze git topology before merging and must not infer stack order from PR descriptions.
 - Before merging into a target that is not the default branch, it must confirm that target has an open PR of its own, and otherwise report the orphaned target to the operator instead of merging.
-- Before deleting a merged branch associated with a Kanna task, it must call `kanna_is_dependent_tasks_exist`.
+- It must leave merged local and remote branches in place and must not request branch deletion through merge-command flags.
 - It must finish each merge-master turn with `kanna_complete_stage` status `success` or `failure`.
 
 Flavor notes:

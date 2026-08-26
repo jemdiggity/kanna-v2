@@ -22,7 +22,7 @@ Natural language is also valid when it identifies a branch or an unambiguous set
 5. Rebase each branch onto the resolved target or stack parent, resolving only clear conflicts.
 6. Run the repo's configured checks from `.kanna/config.json` when present; otherwise run the most relevant discovered checks.
 7. Ask before directly updating the target branch. After approval, update the target with normal git operations and push it.
-8. Before deleting a merged remote branch for a Kanna task, call `kanna_is_dependent_tasks_exist`. Keep the branch when dependent tasks still exist.
+8. Leave every merged local and remote branch in place. Never delete a branch as merge cleanup or pass a branch-deletion flag to a merge command.
 
 ## Completion
 
