@@ -346,26 +346,29 @@ fresh-worktree runs only create a directory and symlink.
 Do not eject the volume during a build. An ejection makes the symlink dangling
 immediately and the next build fails visibly at `.build`; rerun the local hook
 afterward. When setup finds its own dangling link while the volume is absent, it
-replaces only the link with an empty local `.build` directory and preserves the
-external artifacts. After remounting, setup relinks an empty fallback; if new
-local artifacts were produced meanwhile, it leaves them in place for an
-explicit manual choice.
+first persists the exact external target in the gitignored
+`.kanna-external-build-target` record, then replaces only the link with an empty
+local `.build` directory and preserves the external artifacts. The target record
+survives this fallback. After remounting, setup relinks an empty fallback; if
+new local artifacts were produced meanwhile, it leaves them in place for an
+explicit manual choice while retaining the record for teardown.
 
 Cargo's `.cargo/config.toml` resolves `.build` and `.build/cargo-build` relative
 to the worktree, and kd's sidecar staging reads final binaries through that same
 worktree-private path, so the symlink preserves both Cargo isolation and the
-private sidecar provenance boundary. The symlink is also `kd clean`'s source of
-truth for external storage: cleanup reads its target before unlinking it and
-removes the target only when its final path component exactly matches the
-current worktree directory. A mismatched or chained external target fails
-visibly instead of risking another workspace. A dangling link is removed
-only after its recorded external target has been removed. If that target cannot
-be resolved (for example, because its volume is unavailable), cleanup fails
-visibly and preserves the link as the authoritative pointer for a later retry.
-It does not report the external cleanup as successful or guess another path.
-Consequently, the repository's normal `./kd clean --all` teardown removes the
-exact per-workspace external directory as well as the local link when storage
-is available.
+private sidecar provenance boundary. The durable target record is `kd clean`'s
+source of truth for external storage; setup computes it from its machine-local
+configuration and cleanup reads it rather than duplicating that computation.
+Legacy workspaces without a record still use their `.build` symlink. Cleanup
+removes a target only when its final path component exactly matches the current
+worktree directory. A mismatched record, a record/link disagreement, or a
+chained external target fails visibly instead of risking another workspace. If
+the recorded target cannot be resolved (for example, because its volume is
+unavailable), cleanup fails visibly and preserves the record and local layout
+for a later retry; it never reports success or guesses another path. Once the
+target is available, the repository's normal `./kd clean --all` teardown
+removes the exact per-workspace external directory, local `.build` path, and
+target record.
 
 The setup list comes from `origin/main` but runs against the forked branch. This
 hook invocation does not depend on a tracked script in that branch: branches

@@ -12,9 +12,11 @@ Narrower coverage in
 `tools/kd/tests/external-build-clean.integration.test.ts` runs the committed
 machine-local setup template for two real Git repositories, invokes the same
 `cleanWorkspace` runtime used by `./kd clean --all` for the departed workspace,
-and proves its external target disappears while the live sibling target and link
-remain. `tools/kd/tests/clean-pages-release.test.ts` separately pins exact-name
-refusal and dangling-link behavior.
+exercises the unavailable-volume local fallback, proves cleanup fails without
+losing its durable target record, remounts the fixture volume, and proves the
+departed external target disappears while the live sibling target, record, and
+link remain. `tools/kd/tests/clean-pages-release.test.ts` separately pins
+exact-name refusal and legacy dangling-link behavior.
 
 Full E2E becomes practical when the server test harness can inject a
 primary-checkout-local setup path (or an equivalent disposable workspace-build

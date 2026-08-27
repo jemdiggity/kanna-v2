@@ -3,6 +3,7 @@ import { homedir, userInfo } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import {
+  EXTERNAL_WORKSPACE_BUILD_RECORD,
   resolveExternalWorkspaceBuild,
   WORKSPACE_BUILD_DIRECTORY
 } from "./workspace-build";
@@ -53,6 +54,7 @@ export function cleanWorkspace(input: CleanInput): CleanResult {
   const candidates: Array<{ path: string; requirePresent?: boolean }> = [
     ...(externalWorkspaceBuild ? [{ path: externalWorkspaceBuild, requirePresent: true }] : []),
     { path: join(input.repoRoot, WORKSPACE_BUILD_DIRECTORY) },
+    { path: join(input.repoRoot, EXTERNAL_WORKSPACE_BUILD_RECORD) },
     { path: join(input.repoRoot, "apps", "desktop", "src-tauri", "target") },
     { path: bazelOutputBase(input.repoRoot, homeDir, input.userName ?? userInfo().username) }
   ];
