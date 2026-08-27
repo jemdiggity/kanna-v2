@@ -942,16 +942,24 @@ function createClientForMode({
       onValidatedRoutesChanged: onTaskRoutesChanged,
       onPushPairingMaterial
     });
-    const sourceTrackingClient: KannaClient = {
-      ...trustedLanClient.client,
-      async listDesktops() {
-        const local = await trustedLanClient.client.listDesktops();
-        onMachineSourcesChanged({ account: [], local });
-        return local;
+    const composedClient = createCloudLanClient(
+      createDisconnectedClient(),
+      trustedLanClient.client,
+      {
+        isLanEnabled: () => true,
+        isCloudEnabled: () => false,
+        lanClientForDesktop: trustedLanClient.clientForDesktop,
+        initialDesktopSources: getMachineSourceDesktops(),
+        onDesktopSourceWarnings: onMachineSourceWarnings,
+        onDesktopSourcesChanged: onMachineSourcesChanged,
+        onLanReadUnavailable:
+          trustedLanClient.invalidatePendingValidatedRoutes
       }
-    };
+    );
     return {
-      client: sourceTrackingClient,
+      client: composedClient,
+      listRecentTasksWithSupplement: (onSupplement) =>
+        composedClient.listRecentTasksWithSupplement(onSupplement),
       dispose() {},
       setForeground() {}
     };

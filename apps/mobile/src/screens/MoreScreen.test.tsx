@@ -171,6 +171,29 @@ describe("MoreScreen", () => {
     expect(input.onRetry).toHaveBeenCalledOnce();
   });
 
+  it("renders an actionable canonical repository routing error", async () => {
+    if (!MoreScreen) throw new Error("MoreScreen was not loaded");
+    const input = {
+      ...props(),
+      status: "error" as const,
+      errorMessage:
+        'Repository "git:missing-hash" is not registered on a reachable paired desktop.'
+    };
+
+    await act(async () => {
+      rendered = create(React.createElement(MoreScreen!, input));
+    });
+
+    const copy = rendered.root
+      .findAll((node) => node.type === "Text")
+      .flatMap((node) => node.children)
+      .join(" ");
+    expect(copy).toContain("Commands unavailable");
+    expect(copy).toContain(
+      'Repository "git:missing-hash" is not registered on a reachable paired desktop.'
+    );
+  });
+
   it("places compact build information after repository commands", async () => {
     if (!MoreScreen) throw new Error("MoreScreen was not loaded");
 

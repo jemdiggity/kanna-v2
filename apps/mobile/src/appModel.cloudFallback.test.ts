@@ -519,6 +519,81 @@ describe("createAppModel cloud routing", () => {
     app.controller.dispose();
   });
 
+  it.each([
+    ["signed in", signedInState()],
+    ["signed out", { status: "signedOut" } as const]
+  ])("routes canonical repository commands to a local LAN id while %s", async (
+    _authLabel,
+    initialAuthState
+  ) => {
+    const fixture = createLanFixture(async () => []);
+    const requests: string[] = [];
+    const fetchImpl = vi.fn<FetchLike>(async (input, init) => {
+      const url = typeof input === "string" ? input : input.toString();
+      requests.push(url);
+      if (url.endsWith("/v1/repos")) {
+        return response([
+          {
+            id: "repo-lan",
+            name: "Kanna",
+            remoteUrlHash: "b3bc33fe2f13"
+          }
+        ]);
+      }
+      if (url.endsWith("/v1/repos/repo-lan/commands")) {
+        return response({
+          repoId: "repo-lan",
+          revision: "catalog-v1",
+          commands: []
+        });
+      }
+      return fixture.fetchImpl(input, init);
+    });
+    const { authSession } = createMutableAuthSession(initialAuthState);
+    const taskIndex: CloudTaskIndex = {
+      listDesktops: vi.fn().mockResolvedValue([]),
+      listRecentTasks: vi.fn().mockResolvedValue([]),
+      subscribeRecentTasks: vi.fn((_uid, onUpdate) => {
+        onUpdate([]);
+        return vi.fn();
+      })
+    };
+    const app = createAppModel({
+      authSession,
+      fetchImpl,
+      persistence: createTrustedPersistence(),
+      options: {
+        forceCloud: false,
+        relayUrl: "wss://relay.test",
+        taskIndex,
+        bonjourBrowser: fixture.bonjourBrowser,
+        createRelayClient: () => createRelayClientMock()
+      }
+    });
+
+    await app.initialize();
+    await expect(app.client.listRepos()).resolves.toContainEqual(
+      expect.objectContaining({
+        id: "git:b3bc33fe2f13",
+        remoteUrlHash: "b3bc33fe2f13"
+      })
+    );
+    await expect(
+      app.client.listRepoCommands("git:b3bc33fe2f13")
+    ).resolves.toMatchObject({
+      repoId: "git:b3bc33fe2f13",
+      revision: "catalog-v1"
+    });
+
+    expect(requests).toContain(
+      "http://desktop.lan:48120/v1/repos/repo-lan/commands"
+    );
+    expect(requests).not.toContain(
+      "http://desktop.lan:48120/v1/repos/git%3Ab3bc33fe2f13/commands"
+    );
+    app.controller.dispose();
+  });
+
   it("uses account-known machines over LAN without a manual trust record", async () => {
     const { authSession } = createMutableAuthSession(signedInState());
     let pushCloudTasks: ((tasks: CloudTaskSummary[]) => void) | null = null;

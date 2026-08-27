@@ -213,6 +213,12 @@ export async function assertRepositoryCommandJourney(
 
   const repoOption = await ui.getRepoOption();
   await repoOption.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  const repoOptionName = await repoOption.getAttribute("name");
+  if (!repoOptionName?.startsWith("mobile.more.repo.git:")) {
+    throw new Error(
+      `Expected signed-out More to exercise a canonical git repository id, got ${repoOptionName ?? "<missing>"}`
+    );
+  }
   await repoOption.click();
   await (await ui.getConfigureCommandGroup()).waitForDisplayed({
     timeout: SCREEN_TIMEOUT_MS

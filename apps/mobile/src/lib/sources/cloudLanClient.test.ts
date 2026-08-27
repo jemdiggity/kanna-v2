@@ -431,6 +431,81 @@ describe("mergeCloudAndLanTasks", () => {
 });
 
 describe("createCloudLanClient", () => {
+  it("explains an unresolved canonical repository while cloud routing is disabled", async () => {
+    const cloud = createClientMock();
+    const lan = createClientMock({
+      getStatus: vi.fn().mockResolvedValue(runningStatus("desktop-lan")),
+      listRepos: vi.fn().mockResolvedValue([])
+    });
+    const client = createCloudLanClient(cloud, lan, {
+      isLanEnabled: () => true,
+      isCloudEnabled: () => false
+    });
+
+    await client.listRepos();
+
+    await expect(client.listRepoCommands("git:missing-hash")).rejects.toThrow(
+      'Repository "git:missing-hash" is not registered on a reachable paired desktop.'
+    );
+    expect(cloud.listRepoCommands).not.toHaveBeenCalled();
+    expect(lan.listRepoCommands).not.toHaveBeenCalled();
+  });
+
+  it("does not send a cloud task identity to signed-out LAN detail, logs, or files", async () => {
+    const cloud = createClientMock({
+      listTaskDirectory: vi.fn<KannaClient["listTaskDirectory"]>(),
+      readTaskFileRange: vi.fn<KannaClient["readTaskFileRange"]>()
+    });
+    const lan = createClientMock({
+      listTaskDirectory: vi.fn<KannaClient["listTaskDirectory"]>(),
+      readTaskFileRange: vi.fn<KannaClient["readTaskFileRange"]>()
+    });
+    const client = createCloudLanClient(cloud, lan, {
+      isLanEnabled: () => true,
+      isCloudEnabled: () => false
+    });
+    const taskId = "cloud:desktop-owner:repo-local:task-local";
+    const message =
+      `Task "${taskId}" belongs to a cloud account and is unavailable while signed out.`;
+
+    await expect(client.getTask(taskId)).rejects.toThrow(message);
+    await expect(client.readTaskFile(taskId, "README.md")).rejects.toThrow(
+      message
+    );
+    await expect(client.listTaskDirectory(taskId, "src")).rejects.toThrow(
+      message
+    );
+    await expect(
+      client.readTaskFileRange(taskId, "README.md", 1, 20)
+    ).rejects.toThrow(message);
+    await expect(
+      client.resolveTaskFileMentions(taskId, [{ path: "README.md" }])
+    ).rejects.toThrow(message);
+    await expect(client.readTaskDiff(taskId)).rejects.toThrow(message);
+    const terminalListener = vi.fn();
+    client.observeTaskTerminal(taskId, terminalListener);
+
+    expect(terminalListener).toHaveBeenCalledWith({
+      type: "error",
+      taskId,
+      message
+    });
+    expect(cloud.getTask).not.toHaveBeenCalled();
+    expect(lan.getTask).not.toHaveBeenCalled();
+    expect(cloud.readTaskFile).not.toHaveBeenCalled();
+    expect(lan.readTaskFile).not.toHaveBeenCalled();
+    expect(cloud.listTaskDirectory).not.toHaveBeenCalled();
+    expect(lan.listTaskDirectory).not.toHaveBeenCalled();
+    expect(cloud.readTaskFileRange).not.toHaveBeenCalled();
+    expect(lan.readTaskFileRange).not.toHaveBeenCalled();
+    expect(cloud.resolveTaskFileMentions).not.toHaveBeenCalled();
+    expect(lan.resolveTaskFileMentions).not.toHaveBeenCalled();
+    expect(cloud.readTaskDiff).not.toHaveBeenCalled();
+    expect(lan.readTaskDiff).not.toHaveBeenCalled();
+    expect(cloud.observeTaskTerminal).not.toHaveBeenCalled();
+    expect(lan.observeTaskTerminal).not.toHaveBeenCalled();
+  });
+
   it("routes a repo command to the current LAN owner instead of a stale cloud-task owner", async () => {
     const cloud = createClientMock({
       listRepos: vi.fn().mockResolvedValue([]),
