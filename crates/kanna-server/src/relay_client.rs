@@ -10,6 +10,11 @@ use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 pub type WsSink = SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
 pub type WsStream = SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>;
 
+pub struct RelayAuthentication {
+    pub user_id: String,
+    pub capabilities: RelayCapabilities,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccountAuthProbe {
     Authorized,
@@ -222,8 +227,12 @@ fn build_auth_message(config: &Config, tunnel_id: Option<String>) -> RelayMessag
             device_token: None,
             desktop_id: Some(config.desktop_id.clone()),
             desktop_secret: Some(desktop_secret.clone()),
+            anon_pub_key: if tunnel_id.is_none() {
+                crate::pairing::anonymous_push_public_key(config).ok()
+            } else {
+                None
+            },
             tunnel_id,
-            anon_pub_key: None,
         },
         None => match crate::pairing::anonymous_push_public_key(config) {
             Ok(public_key) => RelayMessage::Auth {
@@ -246,7 +255,8 @@ fn build_auth_message(config: &Config, tunnel_id: Option<String>) -> RelayMessag
 
 pub async fn connect_to_relay(
     config: &Config,
-) -> Result<(WsSink, WsStream), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(WsSink, WsStream, Option<RelayAuthentication>), Box<dyn std::error::Error + Send + Sync>>
+{
     let (ws_stream, _response) = connect_async(&config.relay_url).await?;
     let (mut sink, mut stream) = ws_stream.split();
 
@@ -262,7 +272,7 @@ pub async fn connect_to_relay(
     let auth_json = serde_json::to_string(&auth)?;
     sink.send(Message::Text(auth_json.into())).await?;
 
-    if anonymous_auth {
+    let authentication = if anonymous_auth {
         let challenge = stream
             .next()
             .await
@@ -281,17 +291,23 @@ pub async fn connect_to_relay(
             .next()
             .await
             .ok_or("relay closed before anonymous auth completed")??;
-        if !matches!(
-            serde_json::from_str::<RelayMessage>(auth_ok.to_text()?)?,
-            RelayMessage::AuthOk { .. }
-        ) {
-            return Err("relay refused anonymous push authentication".into());
+        match serde_json::from_str::<RelayMessage>(auth_ok.to_text()?)? {
+            RelayMessage::AuthOk {
+                user_id,
+                capabilities,
+            } => Some(RelayAuthentication {
+                user_id,
+                capabilities,
+            }),
+            _ => return Err("relay refused anonymous push authentication".into()),
         }
-    }
+    } else {
+        None
+    };
 
     log::info!("Authenticated with relay");
 
-    Ok((sink, stream))
+    Ok((sink, stream, authentication))
 }
 
 pub async fn connect_anonymous_push_to_relay(
@@ -355,15 +371,26 @@ pub async fn probe_account_auth(config: &Config) -> AccountAuthProbe {
             .await?;
         while let Some(frame) = socket.next().await {
             match frame? {
-                Message::Text(text) => {
-                    if matches!(
-                        serde_json::from_str::<RelayMessage>(&text),
-                        Ok(RelayMessage::AuthOk { .. })
-                    ) {
+                Message::Text(text) => match serde_json::from_str::<RelayMessage>(&text) {
+                    Ok(RelayMessage::AuthChallenge { nonce }) => {
+                        let Ok((_, signature)) =
+                            crate::pairing::sign_anonymous_push_auth_challenge(config, &nonce)
+                        else {
+                            return Ok(AccountAuthProbe::Unavailable);
+                        };
+                        socket
+                            .send(Message::Text(
+                                serde_json::to_string(&RelayMessage::AuthProof { signature })?
+                                    .into(),
+                            ))
+                            .await?;
+                    }
+                    Ok(RelayMessage::AuthOk { .. }) => {
                         let _ = socket.close(None).await;
                         return Ok(AccountAuthProbe::Authorized);
                     }
-                }
+                    _ => {}
+                },
                 Message::Close(frame) => {
                     return Ok(
                         if frame
@@ -460,6 +487,35 @@ mod tests {
                 "desktop_id": "desktop-1",
                 "desktop_secret": "desktop-secret"
             })
+        );
+    }
+
+    #[test]
+    fn build_auth_message_adds_the_pair_scoped_identity_to_account_auth() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config();
+        config.desktop_secret = Some("desktop-secret".to_string());
+        config.pairing_store_path = temp.path().join("pairings.json").display().to_string();
+        let mut active = Some(crate::pairing::create_active_pairing_session(&config).unwrap());
+        let code = active.as_ref().unwrap().session.code.clone();
+        let claimed = crate::pairing::claim_pairing_session(
+            &config,
+            &mut active,
+            crate::pairing::PairingClaimRequest {
+                code,
+                device_id: "phone-dual-auth".to_string(),
+                device_name: "Kanna Mobile".to_string(),
+            },
+        )
+        .unwrap();
+
+        let payload = serde_json::to_value(super::build_auth_message(&config, None)).unwrap();
+
+        assert_eq!(payload["desktop_id"], "desktop-1");
+        assert_eq!(payload["desktop_secret"], "desktop-secret");
+        assert_eq!(
+            payload["anon_pub_key"],
+            claimed.desktop_push_identity.public_key
         );
     }
 

@@ -213,6 +213,74 @@ describe("mobile push notifications", () => {
     }));
   });
 
+  it("keeps the anonymous binding through sign-in and sign-out transitions", async () => {
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 200 }));
+    const coordinator = createAnonymousPushBindingCoordinator(fetchImpl);
+    const pairing = {
+      desktopId: "desktop-1",
+      desktopPushIdentity: {
+        publicKey: "desktop-public-key",
+        relayUrl: "wss://relay-staging.kanna.build",
+        environment: "staging"
+      },
+      pushPairingCert: {
+        deviceId: "mobile-device-1",
+        issuedAt: 1_000,
+        expiresAt: 2_000,
+        signature: "desktop-signature"
+      }
+    };
+    const sdk = {
+      setNotificationHandler: vi.fn(),
+      requestPermission: vi.fn(async () => 1),
+      getToken: vi.fn(async () => "transition-token"),
+      onTokenRefresh: vi.fn(() => () => undefined),
+      getInitialNotification: vi.fn(async () => null),
+      onNotificationOpened: vi.fn(() => () => undefined),
+      onNotificationResponse: vi.fn(() => () => undefined)
+    };
+    const start = (idToken: string | null) => startMobilePushNotifications({
+      deviceId: "mobile-device-1",
+      getIdToken: async () => idToken,
+      onTaskOpen: vi.fn(),
+      relayUrl: "wss://relay-staging.kanna.build",
+      anonymousPairings: [pairing],
+      anonymousBindingCoordinator: coordinator,
+      fetchImpl,
+      sdk
+    });
+
+    const stopSignedOut = await start(null);
+    expect(fetchImpl.mock.calls.map((call) => [call[0], call[1]?.method])).toEqual([
+      ["https://relay-staging.kanna.build/push/pairings", "POST"]
+    ]);
+    stopSignedOut();
+
+    const stopSignedIn = await start("firebase-id-token");
+    expect(fetchImpl.mock.calls.slice(1, 3).map((call) => [call[0], call[1]?.method])).toEqual([
+      ["https://relay-staging.kanna.build/push/register", "POST"],
+      ["https://relay-staging.kanna.build/push/pairings", "POST"]
+    ]);
+    stopSignedIn();
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(4));
+    expect(fetchImpl.mock.calls[3]).toEqual([
+      "https://relay-staging.kanna.build/push/unregister",
+      expect.objectContaining({ method: "POST" })
+    ]);
+
+    const stopSignedOutAgain = await start(null);
+    expect(fetchImpl.mock.calls[4]).toEqual([
+      "https://relay-staging.kanna.build/push/pairings",
+      expect.objectContaining({
+        method: "POST",
+        body: expect.stringContaining("transition-token")
+      })
+    ]);
+    stopSignedOutAgain();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fetchImpl).toHaveBeenCalledTimes(5);
+  });
+
   it("revokes a pairing before FCM token initialization", async () => {
     const fetchImpl = vi.fn(async () => new Response(null, { status: 200 }));
     const pairing = {

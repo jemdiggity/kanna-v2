@@ -513,7 +513,7 @@ describe("Relay entitlement enforcement", () => {
     await closeAndWait(auth.ws);
   });
 
-  it("authenticates an unentitled desktop but advertises and serves nothing paid", async () => {
+  it("keeps notifications free for an unentitled desktop while paid publication stays gated", async () => {
     const { ack, auth } = await publishAs(enforcingPort, accounts.unentitled, "unentitled-publish");
 
     // Decision 5: the session still completes auth. Closing it would be exactly
@@ -521,7 +521,7 @@ describe("Relay entitlement enforcement", () => {
     expect(auth.userId).toBe(accounts.unentitled.uid);
     expect(auth.capabilities.tunnelServices).toEqual([]);
     expect(auth.capabilities.taskSnapshotPublication).toBeUndefined();
-    expect(auth.capabilities.mobileNotifications).toBeUndefined();
+    expect(auth.capabilities.mobileNotifications).toEqual({ version: 1 });
     // Desktop-to-desktop routing crosses the relay, so the 2026-08-21 owner
     // ruling makes it paid too — it is no longer advertised either.
     expect(auth.capabilities.desktopRouting).toBeUndefined();
@@ -546,8 +546,11 @@ describe("Relay entitlement enforcement", () => {
       },
     }));
     await expect(pushAck).resolves.toMatchObject({
-      ok: false,
-      code: ENTITLEMENT_REQUIRED_CODE,
+      ok: true,
+      delivery: {
+        acceptedCount: 0,
+        failedCount: 0,
+      },
     });
     await closeAndWait(auth.ws);
   });

@@ -21,6 +21,7 @@ const STALE_BINDING_MS = 180 * 24 * 60 * 60 * 1_000;
 const MAX_CERTIFICATE_LIFETIME_MS = 731 * 24 * 60 * 60_000;
 const MAX_DEVICES_PER_DESKTOP = 10;
 const MAX_DESKTOPS_PER_TOKEN = 20;
+const MAX_ACCOUNT_PUSH_DEVICES = 500;
 const INVALID_TOKEN_CODES = new Set([
   "messaging/invalid-argument",
   "messaging/invalid-registration-token",
@@ -76,6 +77,13 @@ interface OrderedPairingMutationContext {
   current: DocumentSnapshot;
   currentBinding: DocumentData | undefined;
   certificate: CertificateOrdering | null;
+}
+
+interface PushDeliveryTarget {
+  token: string;
+  tokenHash: string;
+  accountDevices: QueryDocumentSnapshot[];
+  anonymousBindings: QueryDocumentSnapshot[];
 }
 
 type PairingMutationAdmission = () => void;
@@ -308,45 +316,99 @@ export async function revokeAnonymousPushDevice(
 
 export async function publishAnonymousPush(input: {
   desktopPubKey: string;
+  userId?: string;
+  desktopId?: string;
   notification: MobileNotification;
 }, db = getFirebaseServices().db): Promise<MobileNotificationDelivery> {
   const nowMs = Date.now();
   const desktopKeyHash = anonymousDesktopId(input.desktopPubKey);
-  if (!consumeCounter(desktopPublishCounters, desktopKeyHash, nowMs, DESKTOP_PER_MINUTE, DESKTOP_PER_DAY)) {
+  const dualIdentity = Boolean(input.userId && input.desktopId);
+  const anonymousAdmitted = consumeCounter(
+    desktopPublishCounters,
+    desktopKeyHash,
+    nowMs,
+    DESKTOP_PER_MINUTE,
+    DESKTOP_PER_DAY,
+  );
+  if (!anonymousAdmitted && !dualIdentity) {
     throw new AnonymousPushRefusal(429, "desktop_rate_limit", "Anonymous desktop push rate limit exceeded");
   }
-  const snapshot = await db.collection(ANONYMOUS_PUSH_PAIRINGS_COLLECTION)
-    .where("desktopKeyHash", "==", desktopKeyHash)
-    .get();
-  const bindings = snapshot.docs
+  const [anonymousSnapshot, accountSnapshot] = await Promise.all([
+    anonymousAdmitted
+      ? db.collection(ANONYMOUS_PUSH_PAIRINGS_COLLECTION)
+        .where("desktopKeyHash", "==", desktopKeyHash)
+        .get()
+      : Promise.resolve(null),
+    input.userId
+      ? db.collection("users").doc(input.userId).collection("pushDevices")
+        .limit(MAX_ACCOUNT_PUSH_DEVICES).get()
+      : Promise.resolve(null),
+  ]);
+  const bindings = (anonymousSnapshot?.docs ?? [])
     .filter((doc) => isActiveBinding(doc, nowMs))
     .slice(0, MAX_DEVICES_PER_DESKTOP);
-  if (bindings.length === 0) {
+  if (bindings.length === 0 && !dualIdentity) {
     throw new AnonymousPushRefusal(409, "no_bindings", "No anonymous push pairings are registered");
   }
-  const uniqueBindings = new Map<string, QueryDocumentSnapshot>();
+
+  const targets = new Map<string, PushDeliveryTarget>();
+  for (const device of accountSnapshot?.docs ?? []) {
+    const token = device.data().token;
+    if (typeof token !== "string" || !token.trim()) continue;
+    const normalized = token.trim();
+    const target = targets.get(normalized) ?? {
+      token: normalized,
+      tokenHash: sha256(normalized),
+      accountDevices: [],
+      anonymousBindings: [],
+    };
+    target.accountDevices.push(device);
+    targets.set(normalized, target);
+  }
   for (const binding of bindings) {
+    const token = binding.data().fcmToken;
     const tokenHash = binding.data().tokenHash;
-    if (typeof tokenHash !== "string" || uniqueBindings.has(tokenHash)) continue;
-    if (!consumeCounter(tokenPublishCounters, tokenHash, nowMs, TOKEN_PER_MINUTE, TOKEN_PER_DAY)) {
-      throw new AnonymousPushRefusal(429, "token_rate_limit", "Anonymous push token rate limit exceeded");
+    if (typeof token !== "string" || !token.trim() || typeof tokenHash !== "string") continue;
+    const normalized = token.trim();
+    const existing = targets.get(normalized);
+    if (existing?.anonymousBindings.length) {
+      existing.anonymousBindings.push(binding);
+      continue;
     }
-    uniqueBindings.set(tokenHash, binding);
+    if (!consumeCounter(tokenPublishCounters, tokenHash, nowMs, TOKEN_PER_MINUTE, TOKEN_PER_DAY)) {
+      if (!dualIdentity) {
+        throw new AnonymousPushRefusal(429, "token_rate_limit", "Anonymous push token rate limit exceeded");
+      }
+      continue;
+    }
+    const target = existing ?? {
+      token: normalized,
+      tokenHash,
+      accountDevices: [],
+      anonymousBindings: [],
+    };
+    target.anonymousBindings.push(binding);
+    targets.set(normalized, target);
   }
   const { messaging } = getFirebaseServices();
-  const selected = [...uniqueBindings.values()];
+  const selected = [...targets.values()];
+  if (selected.length === 0) {
+    return { acceptedCount: 0, failedCount: 0, failureReasons: [] };
+  }
   const captureCollection = process.env.KANNA_E2E_ANON_PUSH_CAPTURE_COLLECTION?.trim();
   if (captureCollection) {
     const batch = db.batch();
-    for (const doc of selected) {
+    for (const target of selected) {
       batch.set(db.collection(captureCollection).doc(), {
         desktopKeyHash,
-        desktopRoutingId: input.desktopPubKey,
-        tokenHash: doc.data().tokenHash,
+        desktopRoutingId: input.desktopId ?? input.desktopPubKey,
+        tokenHash: target.tokenHash,
         notification: input.notification,
         capturedAtMs: nowMs,
       });
-      batch.update(doc.ref, { lastDeliveredAtMs: nowMs });
+      for (const binding of target.anonymousBindings) {
+        batch.update(binding.ref, { lastDeliveredAtMs: nowMs });
+      }
     }
     await batch.commit();
     return {
@@ -356,26 +418,34 @@ export async function publishAnonymousPush(input: {
     };
   }
   const response = await messaging.sendEachForMulticast({
-    tokens: selected.map((doc) => doc.data().fcmToken as string),
+    tokens: selected.map((target) => target.token),
     notification: { title: input.notification.title, body: input.notification.body },
     data: {
       kannaNotificationVersion: "1",
       kind: input.notification.taskId ? "task" : "general",
-      // Anonymous sessions have no account-authoritative desktop id. The
-      // public identity is stable and lets the receiving phone map the hint
-      // back to its locally paired desktop without trusting a claimed id.
-      desktopId: input.desktopPubKey,
+      // Dual-identity sessions retain the account-authoritative desktop id.
+      // Anonymous-only sessions use the proven public key, which the phone
+      // maps back to its locally paired desktop.
+      desktopId: input.desktopId ?? input.desktopPubKey,
       ...(input.notification.taskId ? { taskId: input.notification.taskId } : {}),
     },
     apns: { payload: { aps: { sound: "default" } } },
   });
   await Promise.allSettled(response.responses.map(async (result, index) => {
-    const doc = selected[index];
-    if (!doc) return;
+    const target = selected[index];
+    if (!target) return;
     if (result.success) {
-      await doc.ref.update({ lastDeliveredAtMs: nowMs });
+      await Promise.all(target.anonymousBindings.map((binding) =>
+        binding.ref.update({ lastDeliveredAtMs: nowMs })));
     } else if (result.error?.code && INVALID_TOKEN_CODES.has(result.error.code)) {
-      await reconcileInvalidAnonymousPushToken(doc, nowMs, db);
+      await Promise.all([
+        ...target.anonymousBindings.map((binding) =>
+          reconcileInvalidAnonymousPushToken(binding, nowMs, db)),
+        ...target.accountDevices.map((device) => db.runTransaction(async (transaction) => {
+          const current = await transaction.get(device.ref);
+          if (current.data()?.token === target.token) transaction.delete(device.ref);
+        })),
+      ]);
     }
   }));
   return {

@@ -237,34 +237,51 @@ export async function startMobilePushNotifications(
   };
   const registerToken = async (deviceToken: string) => {
     const idToken = await input.getIdToken();
+    const pairings = input.anonymousPairings ?? [];
+    const failures: unknown[] = [];
+    let accountRegistered = false;
+    let anonymousRegistered = false;
     if (idToken) {
-      if (!registrationUrl) {
-        throw new Error("Mobile notification relay URL is invalid.");
+      try {
+        if (!registrationUrl) {
+          throw new Error("Mobile notification relay URL is invalid.");
+        }
+        const response = await (input.fetchImpl ?? fetch)(registrationUrl, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            idToken,
+            deviceId: input.deviceId,
+            deviceToken
+          })
+        });
+        if (!response.ok) {
+          throw new Error(
+            `Mobile notification registration failed (${response.status}).`
+          );
+        }
+        accountRegistered = true;
+      } catch (error: unknown) {
+        console.error("Account push registration failed:", error);
+        failures.push(error);
       }
-      const response = await (input.fetchImpl ?? fetch)(registrationUrl, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          idToken,
-          deviceId: input.deviceId,
-          deviceToken
-        })
-      });
-      if (!response.ok) {
-        throw new Error(
-          `Mobile notification registration failed (${response.status}).`
-        );
+    }
+    if (pairings.length > 0) {
+      try {
+        await anonymousBindingCoordinator.register(anonymousGeneration, deviceToken);
+        anonymousRegistered = true;
+      } catch (error: unknown) {
+        console.error("Anonymous push registration failed:", error);
+        failures.push(error);
       }
-    } else {
-      const pairings = input.anonymousPairings ?? [];
-      if (pairings.length === 0) {
-        throw new Error("Cannot register mobile notifications without an account or pairing.");
-      }
-      await anonymousBindingCoordinator.register(anonymousGeneration, deviceToken);
+    }
+    if (!accountRegistered && !anonymousRegistered) {
+      if (failures[0] instanceof Error) throw failures[0];
+      throw new Error("Cannot register mobile notifications without an account or pairing.");
     }
     if (stopped) {
-      if (idToken) await unregisterDevice({ idToken, deviceToken });
-    } else if (idToken) {
+      if (idToken && accountRegistered) await unregisterDevice({ idToken, deviceToken });
+    } else if (idToken && accountRegistered) {
       registration = { idToken, deviceToken };
     }
   };

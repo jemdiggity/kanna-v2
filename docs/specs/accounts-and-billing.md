@@ -33,12 +33,13 @@ recorded verbatim:
 > "¥500 JPY, $5 USD, $5 CAD, $5 AUD, €5, £5 per month" — "possibly revised
 > pending our new opex estimation."
 
-The first settles the enforcement boundary: **everything that crosses the relay
-is entitlement-gated**, phone→desktop `invoke` (remote task control) included —
-the question Slice 1 left open (Decision 5, and `docs/task-specs/03389bf0.md`).
-LAN stays free, permanently, including remote control of a machine the user
-paired by QR on the same network. The second sets the launch price
-(Decision 4, "Pricing").
+The first originally settled the enforcement boundary as everything crossing
+the relay. The owner's 2026-08-24 anonymous-push amendment narrows that ruling:
+**push notifications are free for account and pair-scoped anonymous identities**;
+phone→desktop `invoke`, tunnels, snapshots, and remote terminal access remain
+entitlement-gated (Decision 5). LAN stays free, permanently, including remote
+control of a machine the user paired by QR on the same network. The second sets
+the launch price (Decision 4, "Pricing").
 
 Apple App Store analysis in this spec reflects knowledge current to
 January 2026. Every item under "Human verification required" must be checked
@@ -662,13 +663,13 @@ default.
 ## Decision 5 — Entitlement enforcement
 
 - **The relay is the enforcement point.** It already terminates every unit of
-  remote value — tunnels, snapshot publication, push, remote task control —
+  paid remote value — tunnels, snapshot publication, remote task control —
   and already re-reads Firestore for credential revalidation. After identity
   verification (`services/relay/src/auth.ts`), resolve uid → read
   `users/{uid}/entitlements/cloud_access` (in-memory TTL cache ~60s, same
   pattern as credential revalidation). Unentitled sessions still get
-  `auth_ok` but with no advertised `tunnelServices`, publication and
-  notification requests refused with a distinct close/error code (e.g. 4402
+  `auth_ok` but with no advertised `tunnelServices`; publication and remote
+  control requests are refused with a distinct close/error code (e.g. 4402
   "entitlement required") so clients render the neutral inactive state
   instead of a generic connection error. Enforcement applies to both phone
   ID-token sessions and desktop `desktopCredentials` sessions (both resolve
@@ -688,28 +689,34 @@ default.
   entitlement doc) and render active/grace/inactive. Mobile's inactive state
   now routes to the subscribe screen (Decision 4) instead of being a dead
   end.
-- **The enforced set is everything that crosses the relay** (owner ruling,
-  2026-08-21, quoted at the top of this spec — no longer an open decision).
+- **The enforced set is every paid remote-control/data path that crosses the
+  relay. Push notification delivery is the explicit carve-out** (owner
+  amendment, 2026-08-24): notifications are free for account and anonymous
+  pair-scoped identities. The relay still authenticates the sender and enforces
+  the anonymous principal's notification-only boundary; this amendment removes
+  only the `cloud_relay` entitlement check from notification publication.
   Enumerated, so a reader knows what flag day turns off for an unentitled
-  account:
+  account and what remains available:
   - `tunnel_request` and the tunnel socket itself — `cloud_relay`;
   - `task_snapshot_publish` — `cloud_task_index`;
-  - `mobile_notification_publish` — `cloud_relay`;
+  - `mobile_notification_publish` — free after authenticated account or
+    pair-scoped anonymous identity proof; no cloud entitlement required;
   - **`invoke` — `remote_task_control`**: phone→desktop remote task control,
     and desktop→desktop routing (`desktopRouting`), which crosses the same
     relay and is therefore paid on the same terms. An unentitled session is
     advertised neither `tunnelServices` nor `desktopRouting`, and each refused
     request answers 4402 rather than closing the session.
 - **Expired subscription**: relay tunnel refused, publication refused (index
-  frozen), push stops, `invoke` refused. Nothing is deleted — data returns on
-  renewal.
+  frozen), `invoke` refused; push notifications continue. Nothing is deleted —
+  paid remote data and control return on renewal.
 - **What stays free — stated explicitly**: LAN is free, permanently. The
   desktop app is fully functional with no account; LAN QR pairing and the
   mobile LAN companion need no account and no subscription — **including
   remote task control of a QR-paired machine over the LAN**, which reaches no
   relay code and is gated by nothing (owner ruling, 2026-08-21). The funnel is:
-  free local product → paid remote access (`cloud_access` = relay + cloud
-  task index + push + remote task control). This spec endorses that shape.
+  free local product and notifications → paid remote access (`cloud_access` =
+  tunnels + cloud task index + remote task control). This spec endorses that
+  shape.
 - **Grandfathering / flag day** (owner default): seed existing
   manually-provisioned accounts as `source: grandfathered, status: active`
   (the legacy cohort is small); enforcement turns on for everyone else on
@@ -940,8 +947,9 @@ carry StoreKit.
   expired / absent / unverified-email / sandbox-stamped) for both phone and
   desktop auth paths, including the 4402 refusal semantics and TTL-cache
   revalidation on revocation, and covering every path in the enforced set of
-  Decision 5 — tunnels, publication, push, and `invoke` (phone→desktop and
-  desktop→desktop) — with the flag off proving each one unchanged.
+  Decision 5 — tunnels, publication, and `invoke` (phone→desktop and
+  desktop→desktop) — plus the enforcement-on notification carve-out proving
+  an unentitled account still publishes push.
 - **Mobile/local**: a checked-in **StoreKit configuration file** in
   `apps/mobile` drives simulator purchase, restore, renewal, and refund
   flows without App Store Connect; sandbox Apple IDs cover

@@ -3,8 +3,8 @@
  * Decision 5).
  *
  * The relay is the enforcement point because it terminates every unit of remote
- * value — tunnels, cloud task snapshot publication, push, remote task
- * control — and already re-reads
+ * value — tunnels, cloud task snapshot publication, and remote task control —
+ * and already re-reads
  * Firestore per connection for credential revalidation. After identity
  * verification the session's uid is resolved to
  * `users/{uid}/entitlements/cloud_access`, the single record the reducer in
@@ -40,13 +40,12 @@ export const ENTITLEMENT_REQUIRED_ERROR = "entitlement required";
 /**
  * Capability names on the entitlement record (the reducer's own vocabulary).
  *
- * What each gates at the relay: `cloud_relay` covers tunnels and push,
+ * What each gates at the relay: `cloud_relay` covers tunnels,
  * `cloud_task_index` covers task snapshot publication, and
  * `remote_task_control` covers `invoke` routing — phone-to-desktop and
- * desktop-to-desktop alike. The owner's 2026-08-21 ruling ("cloud access is
- * paid; connecting to machines the user manually adds with the QR method is
- * free") makes every relay-crossing path paid, which settled the question
- * `docs/task-specs/03389bf0.md` left open; LAN paths reach none of this code.
+ * desktop-to-desktop alike. Notifications deliberately sit outside this
+ * capability set: the owner's 2026-08-24 amendment makes account and anonymous
+ * push free while tunnels, snapshots, and remote task control stay paid.
  *
  * The reducer writes all three or none, so these distinctions do not change any
  * behaviour today; they exist so a future partial capability set means what it
