@@ -359,9 +359,13 @@ truth for external storage: cleanup reads its target before unlinking it and
 removes the target only when its final path component exactly matches the
 current worktree directory. A mismatched or chained external target fails
 visibly instead of risking another workspace. A dangling link is removed
-without guessing or deleting an external path. Consequently, the repository's
-normal `./kd clean --all` teardown removes the exact per-workspace external
-directory as well as the local link.
+only after its recorded external target has been removed. If that target cannot
+be resolved (for example, because its volume is unavailable), cleanup fails
+visibly and preserves the link as the authoritative pointer for a later retry.
+It does not report the external cleanup as successful or guess another path.
+Consequently, the repository's normal `./kd clean --all` teardown removes the
+exact per-workspace external directory as well as the local link when storage
+is available.
 
 The setup list comes from `origin/main` but runs against the forked branch. This
 hook invocation does not depend on a tracked script in that branch: branches

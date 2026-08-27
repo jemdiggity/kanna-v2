@@ -100,11 +100,30 @@ describe("clean runtime", () => {
     await rm(root, { recursive: true, force: true });
   });
 
-  it("removes a dangling external build link without guessing another path", async () => {
+  it("reports an unavailable recorded external build and preserves its authoritative link", async () => {
     const root = await mkdtemp(join(tmpdir(), "kd-clean-dangling-"));
     const repo = join(root, "task-dangling");
     mkdirSync(repo, { recursive: true });
     symlinkSync(join(root, "external", "task-dangling"), join(repo, ".build"));
+
+    expect(() =>
+      cleanWorkspace({
+        repoRoot: repo,
+        homeDir: join(root, "home"),
+        userName: "tester",
+        all: false,
+        dry: false,
+        sharedRustBuild: false
+      })
+    ).toThrow(/Cannot clean external \.build target.*recorded target is unavailable.*preserving/);
+    expect(lstatSync(join(repo, ".build")).isSymbolicLink()).toBe(true);
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("remains idempotent when no workspace build path is recorded", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-clean-absent-"));
+    const repo = join(root, "task-absent");
+    mkdirSync(repo, { recursive: true });
 
     const result = cleanWorkspace({
       repoRoot: repo,
@@ -115,8 +134,7 @@ describe("clean runtime", () => {
       sharedRustBuild: false
     });
 
-    expect(result.removals.map((removal) => removal.path)).toEqual([join(repo, ".build")]);
-    expect(existsSync(join(repo, ".build"))).toBe(false);
+    expect(result.removals).toEqual([]);
     await rm(root, { recursive: true, force: true });
   });
 });

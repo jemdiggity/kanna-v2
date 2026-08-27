@@ -44,7 +44,11 @@ export function resolveExternalWorkspaceBuild(repoRoot: string): string | undefi
   }
 
   const targetStats = tryLstat(target);
-  if (!targetStats) return target;
+  if (!targetStats) {
+    throw new Error(
+      `[kd] Cannot clean external .build target ${target}: the recorded target is unavailable; preserving ${localBuild}`
+    );
+  }
   if (targetStats.isSymbolicLink() || !targetStats.isDirectory()) {
     throw new Error(
       `[kd] Refusing to clean external .build target ${target}: target must be a real directory`
