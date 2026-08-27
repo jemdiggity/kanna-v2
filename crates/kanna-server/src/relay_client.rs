@@ -10,6 +10,11 @@ use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 pub type WsSink = SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
 pub type WsStream = SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>;
 
+pub struct RelayAuthentication {
+    pub user_id: String,
+    pub capabilities: RelayCapabilities,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccountAuthProbe {
     Authorized,
@@ -250,7 +255,8 @@ fn build_auth_message(config: &Config, tunnel_id: Option<String>) -> RelayMessag
 
 pub async fn connect_to_relay(
     config: &Config,
-) -> Result<(WsSink, WsStream), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(WsSink, WsStream, Option<RelayAuthentication>), Box<dyn std::error::Error + Send + Sync>>
+{
     let (ws_stream, _response) = connect_async(&config.relay_url).await?;
     let (mut sink, mut stream) = ws_stream.split();
 
@@ -266,7 +272,7 @@ pub async fn connect_to_relay(
     let auth_json = serde_json::to_string(&auth)?;
     sink.send(Message::Text(auth_json.into())).await?;
 
-    if anonymous_auth {
+    let authentication = if anonymous_auth {
         let challenge = stream
             .next()
             .await
@@ -285,17 +291,23 @@ pub async fn connect_to_relay(
             .next()
             .await
             .ok_or("relay closed before anonymous auth completed")??;
-        if !matches!(
-            serde_json::from_str::<RelayMessage>(auth_ok.to_text()?)?,
-            RelayMessage::AuthOk { .. }
-        ) {
-            return Err("relay refused anonymous push authentication".into());
+        match serde_json::from_str::<RelayMessage>(auth_ok.to_text()?)? {
+            RelayMessage::AuthOk {
+                user_id,
+                capabilities,
+            } => Some(RelayAuthentication {
+                user_id,
+                capabilities,
+            }),
+            _ => return Err("relay refused anonymous push authentication".into()),
         }
-    }
+    } else {
+        None
+    };
 
     log::info!("Authenticated with relay");
 
-    Ok((sink, stream))
+    Ok((sink, stream, authentication))
 }
 
 pub async fn connect_anonymous_push_to_relay(

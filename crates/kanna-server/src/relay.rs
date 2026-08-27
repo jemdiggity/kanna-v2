@@ -48,6 +48,40 @@ fn cloud_task_publication_enabled(desktop_secret: Option<&str>) -> bool {
     desktop_secret.is_some_and(|secret| !secret.is_empty())
 }
 
+fn apply_relay_authentication(
+    authentication: relay_client::RelayAuthentication,
+    http_state: &http_api::AppState,
+    publisher: &mut PublisherState,
+    authenticated_user_id: &mut Option<String>,
+    routing_generation: &mut u64,
+) {
+    let relay_client::RelayAuthentication {
+        user_id,
+        capabilities,
+    } = authentication;
+    log::info!("Relay authenticated as user {user_id}");
+    *authenticated_user_id = Some(user_id);
+    if capabilities
+        .desktop_routing
+        .as_ref()
+        .is_some_and(|capability| capability.version >= 1)
+    {
+        *routing_generation = http_state.set_desktop_routing_available(true);
+    } else {
+        http_state.set_desktop_routing_available(false);
+    }
+    publisher.on_authenticated(
+        capabilities
+            .task_snapshot_publication
+            .map(|capability| capability.version),
+    );
+    http_state.set_mobile_notifications_available(
+        capabilities
+            .mobile_notifications
+            .is_some_and(|capability| capability.version >= 1),
+    );
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RelayKeepaliveAction {
     SendPing,
@@ -124,15 +158,16 @@ pub(crate) async fn run_relay_loop(
         http_state.set_mobile_notifications_available(false);
         log::info!("Connecting to relay at {}...", config.relay_url);
 
-        let (sink, mut stream) = match relay_client::connect_to_relay(&config).await {
-            Ok(pair) => pair,
-            Err(e) => {
-                log::error!("Failed to connect to relay: {}", e);
-                log::info!("Retrying in 5 seconds...");
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                continue;
-            }
-        };
+        let (sink, mut stream, initial_authentication) =
+            match relay_client::connect_to_relay(&config).await {
+                Ok(pair) => pair,
+                Err(e) => {
+                    log::error!("Failed to connect to relay: {}", e);
+                    log::info!("Retrying in 5 seconds...");
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    continue;
+                }
+            };
 
         log::info!("Connected to relay");
 
@@ -158,6 +193,15 @@ pub(crate) async fn run_relay_loop(
         let publication_enabled = cloud_task_publication_enabled(config.desktop_secret.as_deref());
         let mut authenticated_user_id: Option<String> = None;
         let mut routing_generation = 0;
+        if let Some(authentication) = initial_authentication {
+            apply_relay_authentication(
+                authentication,
+                &http_state,
+                &mut publisher,
+                &mut authenticated_user_id,
+                &mut routing_generation,
+            );
+        }
 
         // Message processing loop
         loop {
@@ -561,26 +605,15 @@ pub(crate) async fn run_relay_loop(
                             user_id,
                             capabilities,
                         } => {
-                            log::info!("Relay authenticated as user {}", user_id);
-                            authenticated_user_id = Some(user_id.clone());
-                            if capabilities
-                                .desktop_routing
-                                .as_ref()
-                                .is_some_and(|capability| capability.version >= 1)
-                            {
-                                routing_generation = http_state.set_desktop_routing_available(true);
-                            } else {
-                                http_state.set_desktop_routing_available(false);
-                            }
-                            publisher.on_authenticated(
-                                capabilities
-                                    .task_snapshot_publication
-                                    .map(|capability| capability.version),
-                            );
-                            http_state.set_mobile_notifications_available(
-                                capabilities
-                                    .mobile_notifications
-                                    .is_some_and(|capability| capability.version >= 1),
+                            apply_relay_authentication(
+                                relay_client::RelayAuthentication {
+                                    user_id,
+                                    capabilities,
+                                },
+                                &http_state,
+                                &mut publisher,
+                                &mut authenticated_user_id,
+                                &mut routing_generation,
                             );
                         }
                         RelayMessage::TaskSnapshotAck { id, ok, error } => {
@@ -1937,6 +1970,263 @@ mod tests {
                 .and_then(|name| name.to_str())
                 .expect("pairing store file name")
         ));
+        let _ = std::fs::remove_file(pairing_store_path);
+        let _ = std::fs::remove_file(identity_path);
+    }
+
+    #[tokio::test]
+    async fn dual_identity_auth_initializes_capabilities_and_publishes_notification() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+        use tokio::time::timeout;
+        use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
+
+        async fn authenticate_dual_identity(
+            socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+            expected_public_key: &str,
+            nonce_byte: u8,
+        ) {
+            let auth = socket
+                .next()
+                .await
+                .expect("account auth message")
+                .expect("account auth frame");
+            let TungsteniteMessage::Text(auth) = auth else {
+                panic!("account auth must be text");
+            };
+            let auth: serde_json::Value = serde_json::from_str(&auth).expect("parse account auth");
+            assert_eq!(auth["desktop_id"], "desktop-dual-identity");
+            assert_eq!(auth["desktop_secret"], "account-secret");
+            assert_eq!(auth["anon_pub_key"], expected_public_key);
+
+            let nonce_bytes = [nonce_byte; 32];
+            socket
+                .send(TungsteniteMessage::Text(
+                    serde_json::json!({
+                        "type": "auth_challenge",
+                        "nonce": URL_SAFE_NO_PAD.encode(nonce_bytes)
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .expect("send auth challenge");
+            let proof = socket
+                .next()
+                .await
+                .expect("auth proof")
+                .expect("auth proof frame");
+            let TungsteniteMessage::Text(proof) = proof else {
+                panic!("auth proof must be text");
+            };
+            let proof: serde_json::Value = serde_json::from_str(&proof).expect("parse auth proof");
+            let public_key: [u8; 32] = URL_SAFE_NO_PAD
+                .decode(expected_public_key)
+                .expect("decode public key")
+                .try_into()
+                .expect("public key length");
+            let signature = Signature::from_slice(
+                &URL_SAFE_NO_PAD
+                    .decode(proof["signature"].as_str().expect("signature"))
+                    .expect("decode signature"),
+            )
+            .expect("signature length");
+            let mut signed = b"kanna.relay-auth.v1\0".to_vec();
+            signed.extend(nonce_bytes);
+            VerifyingKey::from_bytes(&public_key)
+                .expect("valid public key")
+                .verify(&signed, &signature)
+                .expect("desktop proves its anonymous identity");
+
+            socket
+                .send(TungsteniteMessage::Text(
+                    serde_json::json!({
+                        "type": "auth_ok",
+                        "userId": "account-user",
+                        "capabilities": {
+                            "desktopRouting": { "version": 1 },
+                            "taskSnapshotPublication": { "version": 2 },
+                            "mobileNotifications": { "version": 1 }
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .expect("send auth success");
+        }
+
+        let relay_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind relay stand-in");
+        let relay_address = relay_listener.local_addr().expect("relay address");
+        let unique = format!(
+            "relay-dual-identity-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        );
+        let database_path = crate::db::Db::test_db_path(&unique);
+        let pairing_store_path = std::env::temp_dir().join(format!("{unique}-pairings.json"));
+        let config = Config {
+            relay_url: format!("ws://{relay_address}"),
+            device_token: "legacy-device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
+            daemon_dir: std::env::temp_dir()
+                .join(format!("{unique}-daemon"))
+                .to_string_lossy()
+                .into_owned(),
+            db_path: database_path.clone(),
+            kanna_cli_path: None,
+            desktop_id: "desktop-dual-identity".to_string(),
+            desktop_secret: Some("account-secret".to_string()),
+            desktop_name: "Dual Identity Mac".to_string(),
+            version: "test-version".to_string(),
+            environment: "development".to_string(),
+            lan_host: "127.0.0.1".to_string(),
+            lan_port: 48120,
+            transfer_port: 4455,
+            activity_event_debounce_seconds: 300,
+            pairing_store_path: pairing_store_path.to_string_lossy().into_owned(),
+        };
+        let mut active = Some(
+            crate::pairing::create_active_pairing_session(&config).expect("create pairing session"),
+        );
+        let code = active
+            .as_ref()
+            .expect("active pairing")
+            .session
+            .code
+            .clone();
+        let pairing = crate::pairing::claim_pairing_session(
+            &config,
+            &mut active,
+            crate::pairing::PairingClaimRequest {
+                code,
+                device_id: "phone-dual-identity".to_string(),
+                device_name: "Test Phone".to_string(),
+            },
+        )
+        .expect("claim pairing");
+        let expected_public_key = pairing.desktop_push_identity.public_key;
+        let database = crate::db::Db::open_for_tests(&database_path).expect("open test db");
+        let state = Arc::new(http_api::AppState::new(config.clone()));
+
+        let relay_server = tokio::spawn(async move {
+            let (probe_stream, _) = relay_listener.accept().await.expect("accept account probe");
+            let mut probe = tokio_tungstenite::accept_async(probe_stream)
+                .await
+                .expect("accept account probe websocket");
+            authenticate_dual_identity(&mut probe, &expected_public_key, 5).await;
+            let _ = probe.next().await;
+
+            let (relay_stream, _) = relay_listener.accept().await.expect("accept relay");
+            let mut relay = tokio_tungstenite::accept_async(relay_stream)
+                .await
+                .expect("accept relay websocket");
+            authenticate_dual_identity(&mut relay, &expected_public_key, 9).await;
+
+            let mut saw_snapshot = false;
+            let mut saw_notification = false;
+            while !saw_snapshot || !saw_notification {
+                let message = relay
+                    .next()
+                    .await
+                    .expect("relay message")
+                    .expect("relay frame");
+                let TungsteniteMessage::Text(text) = message else {
+                    continue;
+                };
+                let message: serde_json::Value =
+                    serde_json::from_str(&text).expect("parse relay message");
+                match message["type"].as_str() {
+                    Some("task_snapshot_publish") => {
+                        assert_eq!(message["snapshot"]["schemaVersion"], 2);
+                        saw_snapshot = true;
+                        relay
+                            .send(TungsteniteMessage::Text(
+                                serde_json::json!({
+                                    "type": "task_snapshot_ack",
+                                    "id": message["id"],
+                                    "ok": true
+                                })
+                                .to_string()
+                                .into(),
+                            ))
+                            .await
+                            .expect("ack task snapshot");
+                    }
+                    Some("mobile_notification_publish") => {
+                        assert_eq!(message["notification"]["title"], "Dual identity push");
+                        saw_notification = true;
+                        relay
+                            .send(TungsteniteMessage::Text(
+                                serde_json::json!({
+                                    "type": "mobile_notification_ack",
+                                    "id": message["id"],
+                                    "ok": true,
+                                    "delivery": {
+                                        "acceptedCount": 1,
+                                        "failedCount": 0,
+                                        "failureReasons": []
+                                    }
+                                })
+                                .to_string()
+                                .into(),
+                            ))
+                            .await
+                            .expect("ack notification");
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let relay_loop = run_relay_loop(config, database, Arc::clone(&state));
+        tokio::pin!(relay_loop);
+        let verification = timeout(Duration::from_secs(5), async {
+            while !state.mobile_notifications_available() || !state.desktop_routing_available() {
+                tokio::task::yield_now().await;
+            }
+            let response = http_api::dispatch_authenticated_http_invoke(
+                Arc::clone(&state),
+                "POST",
+                "/v1/mobile/notifications",
+                serde_json::json!({
+                    "title": "Dual identity push",
+                    "body": "Account and anonymous recipients remain reachable."
+                }),
+            )
+            .await;
+            assert_eq!(response.status, 200, "{response:?}");
+            assert_eq!(
+                response
+                    .body
+                    .as_ref()
+                    .and_then(|body| body["acceptedCount"].as_u64()),
+                Some(1)
+            );
+            relay_server.await.expect("relay server");
+        });
+        tokio::pin!(verification);
+        tokio::select! {
+            result = &mut verification => result.expect("dual-identity relay verification timed out"),
+            result = &mut relay_loop => panic!("relay loop exited early: {result:?}"),
+        }
+
+        let identity_path = pairing_store_path.with_file_name(format!(
+            "{}.anonymous-push-identity.json",
+            pairing_store_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("pairing store file name")
+        ));
+        let _ = std::fs::remove_file(database_path);
         let _ = std::fs::remove_file(pairing_store_path);
         let _ = std::fs::remove_file(identity_path);
     }
