@@ -7,6 +7,24 @@ import {
 } from "./lanTransport";
 
 describe("createLanTransport", () => {
+  it("returns durable held-input status without inviting a retry", async () => {
+    const queued = {
+      status: "queued",
+      reason: "input_held_by_draft",
+      message: "A human has an unsent line at that terminal.",
+      queuedInputCount: 2
+    };
+    const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
+      ok: true,
+      status: 202,
+      json: async () => queued
+    });
+    const transport = createLanTransport("http://127.0.0.1:48120", fetchImpl);
+
+    await expect(transport.sendTaskInput("task-1", "please rebase")).resolves.toEqual(queued);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
   it("carries the desktop's reported agent provider inventory", async () => {
     const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
       ok: true,
@@ -556,7 +574,9 @@ describe("createLanTransport", () => {
       taskId: "task-3"
     });
     await expect(transport.closeTask("task-1")).resolves.toBeUndefined();
-    await expect(transport.sendTaskInput("task-1", "continue")).resolves.toBeUndefined();
+    await expect(transport.sendTaskInput("task-1", "continue")).resolves.toEqual({
+      status: "delivered"
+    });
 
     expect(fetchImpl).toHaveBeenNthCalledWith(
       1,
@@ -1219,10 +1239,10 @@ describe("createLanTransport", () => {
         mediaType: "image/jpeg",
         dataBase64: "AQID"
       })
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ status: "delivered" });
     await expect(
       transport.sendTaskInput("task-1", "continue")
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ status: "delivered" });
 
     expect(fetchImpl).toHaveBeenNthCalledWith(
       1,

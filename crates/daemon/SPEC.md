@@ -271,6 +271,7 @@ Line-delimited JSON over Unix domain socket. Each message is one JSON object + `
 | `Exit` | session_id, code | Process exited |
 | `SessionCreated` | session_id | New session ready |
 | `InputBlockedChanged` | session_id, logical_input_blocked | Session started or stopped refusing logical input |
+| `LogicalInputReleased` | session_id | One draft-held logical message has had its text and Enter written; consumers advance one FIFO delivery record |
 | `SessionList` | sessions | Response to List |
 | `HandoffReady` | sessions | Session metadata (followed by SCM_RIGHTS) |
 | `ShuttingDown` | — | Daemon shutting down (handoff) |
@@ -346,7 +347,12 @@ released by a producer's boundary, and one released by composer attestation all
 acknowledge through the same channel. A message the daemon parks behind a
 declared raw draft has not been submitted, and is answered
 `logical_input_held_by_draft` rather than `Ok`: the message stays queued for
-the boundary, but no caller is told a delivery happened that did not. A writer
+the boundary, but no caller is told a delivery happened that did not. Once
+released, the writer pauses after each synthesized Enter before beginning the
+next message and emits `LogicalInputReleased` only after that Enter is written;
+this preserves both provider-composer and durable-record boundaries. `List`
+reports `pending_logical_input_count` so a server reconnect can reconcile a
+release edge it missed. A writer
 that ends between the two writes answers `write_failed`, because the text may
 already be sitting unsent at the composer and a blind retry would duplicate it. A new server paired with a
 previous daemon generation therefore waits for the supporting successor before

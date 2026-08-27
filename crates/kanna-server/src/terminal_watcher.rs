@@ -209,6 +209,50 @@ fn apply_watcher_input_blocked(
     Ok(changed)
 }
 
+fn record_released_task_input(
+    state: &http_api::AppState,
+    session_id: &str,
+) -> Result<bool, String> {
+    let db = crate::db::Db::open(&state.config().db_path)
+        .map_err(|error| format!("db error: {error}"))?;
+    let Some(task_id) = db
+        .resolve_pipeline_item_id(session_id)
+        .map_err(|error| format!("db error: {error}"))?
+    else {
+        return Ok(false);
+    };
+    db.deliver_next_held_task_input(&task_id)
+        .map(|record| record.is_some())
+        .map_err(|error| format!("db error: {error}"))
+}
+
+fn reconcile_released_task_inputs(
+    state: &http_api::AppState,
+    session_id: &str,
+    daemon_pending_count: usize,
+) -> Result<bool, String> {
+    let db = crate::db::Db::open(&state.config().db_path)
+        .map_err(|error| format!("db error: {error}"))?;
+    let Some(task_id) = db
+        .resolve_pipeline_item_id(session_id)
+        .map_err(|error| format!("db error: {error}"))?
+    else {
+        return Ok(false);
+    };
+    let durable_pending = db
+        .count_held_task_inputs(&task_id)
+        .map_err(|error| format!("db error: {error}"))?;
+    let released = durable_pending.saturating_sub(daemon_pending_count as i64);
+    let mut changed = false;
+    for _ in 0..released {
+        changed |= db
+            .deliver_next_held_task_input(&task_id)
+            .map_err(|error| format!("db error: {error}"))?
+            .is_some();
+    }
+    Ok(changed)
+}
+
 async fn reconcile_detached_terminal_status(
     state: &http_api::AppState,
     session_id: &str,
@@ -371,6 +415,17 @@ pub(crate) async fn terminal_state_watcher_once(
                         error
                     ),
                 }
+                if let Some(pending_count) = session.pending_logical_input_count {
+                    match reconcile_released_task_inputs(state, &session.session_id, pending_count)
+                    {
+                        Ok(queue_changed) => changed |= queue_changed,
+                        Err(error) => log::warn!(
+                            "failed to reconcile queued input for {}: {}",
+                            session.session_id,
+                            error
+                        ),
+                    }
+                }
                 // Same reason as the field above: an adopted session's
                 // composer is whatever the provider left on screen, and this
                 // List is the first thing that runs against the daemon that
@@ -476,6 +531,19 @@ pub(crate) async fn terminal_state_watcher_once(
                     error
                 ),
             },
+            DaemonEvent::LogicalInputReleased { session_id } => {
+                match record_released_task_input(state, &session_id) {
+                    Ok(true) => {
+                        state.publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks)
+                    }
+                    Ok(false) => log::warn!(
+                        "daemon released queued logical input for {session_id}, but no durable queue row matched"
+                    ),
+                    Err(error) => log::warn!(
+                        "failed to record released task input for {session_id}: {error}"
+                    ),
+                }
+            }
             DaemonEvent::Exit {
                 session_id,
                 code,
@@ -623,6 +691,43 @@ mod tests {
             "2026-04-18 10:00:00",
         )
         .unwrap();
+    }
+
+    #[test]
+    fn logical_release_edges_advance_one_durable_input_each() {
+        let unique = unique_name("terminal-watcher-logical-input-release");
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        let config = test_config(&unique, &daemon_dir);
+        seed_plain_task(&config);
+        let db = Db::open(&config.db_path).unwrap();
+        for message in ["first queued message", "second queued message"] {
+            let id = db
+                .prepare_queued_task_input(
+                    "task-child",
+                    crate::db::TaskInputSource::Operator,
+                    message,
+                )
+                .unwrap()
+                .unwrap();
+            assert!(db.mark_queued_task_input_held(id, "typed draft").unwrap());
+        }
+        drop(db);
+
+        let state = http_api::AppState::new(config.clone());
+        assert!(record_released_task_input(&state, "task-child").unwrap());
+        assert!(record_released_task_input(&state, "task-child").unwrap());
+
+        let db = Db::open(&config.db_path).unwrap();
+        let delivered = db.list_task_inputs("task-child", 10).unwrap();
+        assert_eq!(
+            delivered
+                .iter()
+                .map(|record| record.message.as_str())
+                .collect::<Vec<_>>(),
+            ["first queued message", "second queued message"]
+        );
+        assert!(!record_released_task_input(&state, "task-child").unwrap());
+        let _ = std::fs::remove_file(config.db_path);
     }
 
     fn bind_daemon_listener(daemon_dir: &Path) -> (UnixListener, PathBuf) {
@@ -1159,6 +1264,7 @@ mod tests {
                 status: kanna_daemon::protocol::SessionStatus::Idle,
                 kind: Default::default(),
                 logical_input_blocked: true,
+                pending_logical_input_count: None,
                 composer_text: None,
                 composer_attestation: Default::default(),
             }],
@@ -1272,6 +1378,7 @@ mod tests {
                 status: kanna_daemon::protocol::SessionStatus::Idle,
                 kind: Default::default(),
                 logical_input_blocked: false,
+                pending_logical_input_count: None,
                 composer_text: Some("check again in a minute".to_string()),
                 composer_attestation: ComposerAttestation::NotTyped,
             }],
@@ -1977,6 +2084,7 @@ mod tests {
                         status: kanna_daemon::protocol::SessionStatus::Idle,
                         kind: Default::default(),
                         logical_input_blocked: false,
+                        pending_logical_input_count: None,
                         composer_text: None,
                         composer_attestation: Default::default(),
                     }],
@@ -2070,6 +2178,7 @@ mod tests {
                     status: kanna_daemon::protocol::SessionStatus::Busy,
                     kind: Default::default(),
                     logical_input_blocked: false,
+                    pending_logical_input_count: None,
                     composer_text: None,
                     composer_attestation: Default::default(),
                 }],
@@ -2150,6 +2259,7 @@ mod tests {
                         status: kanna_daemon::protocol::SessionStatus::Busy,
                         kind: Default::default(),
                         logical_input_blocked: false,
+                        pending_logical_input_count: None,
                         composer_text: None,
                         composer_attestation: Default::default(),
                     }],

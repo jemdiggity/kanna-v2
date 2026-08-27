@@ -354,7 +354,19 @@ export interface TaskSummary {
   pinned?: boolean;
   /** Owner-side ordering position among pinned tasks in the same repo. */
   pinOrder?: number | null;
+  /** Messages accepted by the desktop but not yet confirmed at the agent. */
+  queuedInputCount?: number;
+  queuedInputReason?: "input_held_by_draft" | "delivery_uncertain" | "sending" | null;
 }
+
+export type TaskInputResult =
+  | { status: "delivered" }
+  | {
+      status: "queued";
+      reason: "input_held_by_draft";
+      message: string;
+      queuedInputCount: number;
+    };
 
 export interface TaskLatestRun {
   id: string;

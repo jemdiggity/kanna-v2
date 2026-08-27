@@ -1006,6 +1006,7 @@ async fn send_task_input_rejects_a_finished_task_without_a_live_daemon_session()
                         status: SessionStatus::Idle,
                         kind: Default::default(),
                         logical_input_blocked: false,
+                        pending_logical_input_count: None,
                         composer_text: None,
                         composer_attestation: Default::default(),
                     }],
@@ -1133,6 +1134,7 @@ async fn send_task_input_delivers_to_a_live_session_after_a_finished_run() {
                         status: SessionStatus::Idle,
                         kind: Default::default(),
                         logical_input_blocked: false,
+                        pending_logical_input_count: None,
                         composer_text: None,
                         composer_attestation: Default::default(),
                     }],
@@ -1405,6 +1407,7 @@ fn spawn_live_session_daemon(
                         // This helper's sessions accept delivered input; the
                         // refusal path has its own tests on main.
                         logical_input_blocked: false,
+                        pending_logical_input_count: None,
                         composer_text: None,
                         composer_attestation: Default::default(),
                     }],
@@ -1566,6 +1569,7 @@ fn spawn_refusing_session_daemon(
                         kind: Default::default(),
                         logical_input_blocked: code
                             == kanna_daemon::protocol::ErrorCode::InheritedDraftStateUnknown,
+                        pending_logical_input_count: None,
                         composer_text: None,
                         composer_attestation: Default::default(),
                     }],
@@ -1854,6 +1858,7 @@ async fn send_task_input_reports_daemon_write_failure_as_delivery_uncertain() {
                         status: SessionStatus::Idle,
                         kind: Default::default(),
                         logical_input_blocked: false,
+                        pending_logical_input_count: None,
                         composer_text: None,
                         composer_attestation: Default::default(),
                     }],
@@ -1985,6 +1990,7 @@ async fn refused_input_reports_the_unblock_story_and_marks_the_target() {
                         status: SessionStatus::Idle,
                         kind: Default::default(),
                         logical_input_blocked: true,
+                        pending_logical_input_count: None,
                         composer_text: None,
                         composer_attestation: Default::default(),
                     }],
@@ -2118,12 +2124,11 @@ async fn refused_input_reports_the_unblock_story_and_marks_the_target() {
 /// at the agent's prompt until someone pressed Enter at that terminal, and the
 /// phone had been told it was delivered.
 ///
-/// A message the daemon parks behind a human's unsent line has not been
-/// submitted, so the delivery answers with its own reason rather than 204 —
-/// and nothing is written to the durable input record, which exists to say
-/// what the agent was actually told.
+/// Messages parked behind a human's unsent line are accepted into a visible,
+/// durable FIFO. They become distinct delivered rows only as the daemon emits
+/// one release edge for each message.
 #[tokio::test]
-async fn input_held_behind_an_unsent_human_line_is_not_reported_as_delivered() {
+async fn held_inputs_are_visible_and_flush_to_distinct_delivery_rows() {
     use kanna_daemon::protocol::{
         Command as DaemonCommand, ErrorCode, Event as DaemonEvent, SessionInfo, SessionState,
         SessionStatus,
@@ -2137,40 +2142,46 @@ async fn input_held_behind_an_unsent_human_line_is_not_reported_as_delivered() {
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let listener = UnixListener::bind(&socket_path).unwrap();
     let daemon_server = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let (read_half, mut write_half) = stream.into_split();
-        let mut reader = BufReader::new(read_half);
         let mut commands = Vec::new();
-        while commands.len() < 2 {
-            let command = read_test_daemon_command(&mut reader, &mut write_half).await;
-            let response = match &command {
-                DaemonCommand::List => DaemonEvent::SessionList {
-                    sessions: vec![SessionInfo {
-                        session_id: "task-held".to_string(),
-                        pid: 42,
-                        cwd: "/tmp".to_string(),
-                        state: SessionState::Active,
-                        idle_seconds: 0,
-                        status: SessionStatus::Idle,
-                        kind: Default::default(),
-                        logical_input_blocked: false,
-                        composer_text: None,
-                        composer_attestation: Default::default(),
-                    }],
-                },
-                DaemonCommand::SubmitInputIfSession { .. } => DaemonEvent::Error {
-                    code: Some(ErrorCode::LogicalInputHeldByDraft),
-                    message: "logical input for session task-held was not submitted: a human has \
-                              an unsent line at that terminal"
-                        .to_string(),
-                },
-                other => panic!("unexpected daemon command: {other:?}"),
-            };
-            commands.push(command);
-            write_half
-                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
-                .await
-                .unwrap();
+        for _ in 0..2 {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            for _ in 0..2 {
+                let command = read_test_daemon_command(&mut reader, &mut write_half).await;
+                let response = match &command {
+                    DaemonCommand::List => DaemonEvent::SessionList {
+                        sessions: vec![SessionInfo {
+                            session_id: "task-held".to_string(),
+                            pid: 42,
+                            cwd: "/tmp".to_string(),
+                            state: SessionState::Active,
+                            idle_seconds: 0,
+                            status: SessionStatus::Idle,
+                            kind: Default::default(),
+                            logical_input_blocked: false,
+                            pending_logical_input_count: None,
+                            composer_text: None,
+                            composer_attestation: Default::default(),
+                        }],
+                    },
+                    DaemonCommand::SubmitInputIfSession { .. } => DaemonEvent::Error {
+                        code: Some(ErrorCode::LogicalInputHeldByDraft),
+                        message:
+                            "logical input for session task-held was not submitted: a human has \
+                                  an unsent line at that terminal"
+                                .to_string(),
+                    },
+                    other => panic!("unexpected daemon command: {other:?}"),
+                };
+                commands.push(command);
+                write_half
+                    .write_all(
+                        format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
         }
         commands
     });
@@ -2208,35 +2219,45 @@ async fn input_held_behind_an_unsent_human_line_is_not_reported_as_delivered() {
     drop(db);
 
     let router = super::router(Arc::new(super::AppState::new(config.clone())));
-    let response = router
-        .clone()
-        .oneshot(
-            Request::post("/v1/tasks/task-held/input")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::json!({ "input": "please also update the docs" }).to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let failure: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(failure["reason"], "input_held_by_draft");
-    assert!(
-        failure["message"]
+    for (index, input) in ["please also update the docs", "then run the tests"]
+        .into_iter()
+        .enumerate()
+    {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/v1/tasks/task-held/input")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "input": input }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let queued: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            status,
+            StatusCode::ACCEPTED,
+            "unexpected response: {queued}"
+        );
+        assert_eq!(queued["status"], "queued");
+        assert_eq!(queued["reason"], "input_held_by_draft");
+        assert_eq!(queued["queuedInputCount"], index + 1);
+        assert!(queued["message"]
             .as_str()
             .unwrap()
-            .contains("unsent line at that terminal"),
-        "the answer must carry the daemon's own explanation: {failure}"
-    );
+            .contains("unsent line at that terminal"));
+    }
     assert!(matches!(
         daemon_server.await.unwrap().as_slice(),
         [
+            DaemonCommand::List,
+            DaemonCommand::SubmitInputIfSession { .. },
             DaemonCommand::List,
             DaemonCommand::SubmitInputIfSession { .. }
         ]
@@ -2247,6 +2268,31 @@ async fn input_held_behind_an_unsent_human_line_is_not_reported_as_delivered() {
         db.list_task_inputs("task-held", 10).unwrap().is_empty(),
         "a message that was never written must not be recorded as delivered"
     );
+    assert_eq!(db.count_queued_task_inputs("task-held").unwrap(), 2);
+    let snapshot = db.ui_snapshot().unwrap();
+    let held_task = snapshot.entries[0]
+        .items
+        .iter()
+        .find(|item| item.id == "task-held")
+        .unwrap();
+    assert_eq!(held_task.queued_input_count, 2);
+    assert_eq!(
+        held_task.queued_input_reason.as_deref(),
+        Some("input_held_by_draft")
+    );
+
+    db.deliver_next_held_task_input("task-held").unwrap();
+    db.deliver_next_held_task_input("task-held").unwrap();
+    let delivered = db.list_task_inputs("task-held", 10).unwrap();
+    assert_eq!(
+        delivered
+            .iter()
+            .map(|record| record.message.as_str())
+            .collect::<Vec<_>>(),
+        ["please also update the docs", "then run the tests"]
+    );
+    assert_ne!(delivered[0].id, delivered[1].id);
+    assert_eq!(db.count_queued_task_inputs("task-held").unwrap(), 0);
     drop(db);
 
     let _ = std::fs::remove_file(socket_path);

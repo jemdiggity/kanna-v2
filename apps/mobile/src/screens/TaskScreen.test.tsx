@@ -233,6 +233,8 @@ interface RenderTaskScreenOptions {
   ownerLocalTaskId?: string;
   title?: string;
   prompt?: string;
+  queuedInputCount?: number;
+  queuedInputReason?: "input_held_by_draft" | "delivery_uncertain" | "sending";
   quickReplies?: readonly TaskQuickReply[];
   quickRepliesHydrated?: boolean;
   companionStatus?: "idle" | "connecting" | "reconnecting" | "available" | "unavailable" | "error";
@@ -294,6 +296,8 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     ownerLocalTaskId,
     title = "Task",
     prompt,
+    queuedInputCount,
+    queuedInputReason,
     quickReplies = DEFAULT_TASK_QUICK_REPLIES,
     quickRepliesHydrated = true,
     companionStatus = "idle",
@@ -321,7 +325,9 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
       stage: "in progress",
       agentType,
       activity,
-      blockedByTaskIds
+      blockedByTaskIds,
+      queuedInputCount,
+      queuedInputReason
     },
     blockerTasks,
     terminalOutput,
@@ -373,6 +379,21 @@ function unmountTaskScreen(): void {
     cleanup?.();
   }
 }
+
+it("shows why held task messages are queued and clears the status at zero", () => {
+  let tree = renderTaskScreen({
+    queuedInputCount: 2,
+    queuedInputReason: "input_held_by_draft"
+  });
+  const status = findByTestId(tree, MOBILE_E2E_IDS.taskQueuedInputStatus);
+  expect(status).not.toBeNull();
+  expect(JSON.stringify(status?.props?.children)).toContain(
+    "queued behind an unsent desktop terminal draft"
+  );
+
+  tree = renderTaskScreen({ queuedInputCount: 0 });
+  expect(findByTestId(tree, MOBILE_E2E_IDS.taskQueuedInputStatus)).toBeNull();
+});
 
 function invokeLayout(
   node: ElementNode | null,

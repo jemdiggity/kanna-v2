@@ -246,6 +246,18 @@ impl Db {
             );
             CREATE INDEX idx_task_input_task_id ON task_input(task_id, id);
 
+            CREATE TABLE queued_task_input (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL,
+                source TEXT NOT NULL,
+                message TEXT NOT NULL,
+                state TEXT NOT NULL CHECK (state IN ('preparing', 'held', 'uncertain')),
+                reason TEXT,
+                queued_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX idx_queued_task_input_task_id
+                ON queued_task_input(task_id, id);
+
             CREATE TABLE task_transfer (
                 id TEXT PRIMARY KEY,
                 direction TEXT NOT NULL,

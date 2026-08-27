@@ -105,6 +105,69 @@ fn preview_of(message: &str) -> (String, bool) {
 }
 
 impl Db {
+    fn insert_delivered_task_input(
+        &self,
+        task_id: &str,
+        source: &str,
+        message: &str,
+    ) -> Result<Option<TaskInputRecord>, rusqlite::Error> {
+        let stage: Option<Option<String>> = self
+            .conn
+            .query_row(
+                "SELECT stage FROM pipeline_item WHERE id = ?",
+                [task_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(stage) = stage else {
+            return Ok(None);
+        };
+        let run_id: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM stage_run
+                 WHERE task_id = ? AND status = 'running'
+                 ORDER BY rowid DESC
+                 LIMIT 1",
+                [task_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        self.conn.execute(
+            "INSERT INTO task_input (task_id, run_id, stage, source, message)
+             VALUES (?, ?, ?, ?, ?)",
+            params![task_id, run_id, stage, source, message],
+        )?;
+        let id = self.conn.last_insert_rowid();
+        let delivered_at: String = self.conn.query_row(
+            "SELECT delivered_at FROM task_input WHERE id = ?",
+            [id],
+            |row| row.get(0),
+        )?;
+        let (preview, truncated) = preview_of(message);
+        self.append_task_event(
+            task_id,
+            TaskEventKind::InputDelivered,
+            json!({
+                "inputId": id,
+                "source": source,
+                "runId": run_id,
+                "stage": stage,
+                "preview": preview,
+                "truncated": truncated,
+            }),
+        )?;
+        Ok(Some(TaskInputRecord {
+            id,
+            task_id: task_id.to_string(),
+            run_id,
+            stage,
+            source: source.to_string(),
+            message: message.to_string(),
+            delivered_at,
+        }))
+    }
+
     /// Append one delivered input and announce it.
     ///
     /// Call this only after the daemon has accepted the message. A delivery
@@ -123,62 +186,129 @@ impl Db {
         message: &str,
     ) -> Result<Option<TaskInputRecord>, rusqlite::Error> {
         self.with_immediate_transaction(|db| {
-            let stage: Option<Option<String>> = db
+            db.insert_delivered_task_input(task_id, source.as_str(), message)
+        })
+    }
+
+    pub fn prepare_queued_task_input(
+        &self,
+        task_id: &str,
+        source: TaskInputSource,
+        message: &str,
+    ) -> Result<Option<i64>, rusqlite::Error> {
+        let inserted = self.conn.execute(
+            "INSERT INTO queued_task_input (task_id, source, message, state)
+             SELECT id, ?, ?, 'preparing' FROM pipeline_item WHERE id = ?",
+            params![source.as_str(), message, task_id],
+        )?;
+        Ok((inserted == 1).then(|| self.conn.last_insert_rowid()))
+    }
+
+    pub fn mark_queued_task_input_held(
+        &self,
+        id: i64,
+        reason: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        let changed = self.conn.execute(
+            "UPDATE queued_task_input SET state = 'held', reason = ? WHERE id = ?",
+            params![reason, id],
+        )?;
+        Ok(changed == 1)
+    }
+
+    pub fn mark_queued_task_input_uncertain(
+        &self,
+        id: i64,
+        reason: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE queued_task_input SET state = 'uncertain', reason = ? WHERE id = ?",
+            params![reason, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn discard_queued_task_input(&self, id: i64) -> Result<(), rusqlite::Error> {
+        self.conn
+            .execute("DELETE FROM queued_task_input WHERE id = ?", [id])?;
+        Ok(())
+    }
+
+    pub fn deliver_queued_task_input(
+        &self,
+        id: i64,
+    ) -> Result<Option<TaskInputRecord>, rusqlite::Error> {
+        self.with_immediate_transaction(|db| {
+            let queued: Option<(String, String, String)> = db
                 .conn
                 .query_row(
-                    "SELECT stage FROM pipeline_item WHERE id = ?",
-                    [task_id],
-                    |row| row.get(0),
+                    "SELECT task_id, source, message FROM queued_task_input WHERE id = ?",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .optional()?;
-            let Some(stage) = stage else {
+            let Some((task_id, source, message)) = queued else {
                 return Ok(None);
             };
-            let run_id: Option<String> = db
-                .conn
-                .query_row(
-                    "SELECT id FROM stage_run
-                     WHERE task_id = ? AND status = 'running'
-                     ORDER BY rowid DESC
-                     LIMIT 1",
-                    [task_id],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            db.conn.execute(
-                "INSERT INTO task_input (task_id, run_id, stage, source, message)
-                 VALUES (?, ?, ?, ?, ?)",
-                params![task_id, run_id, stage, source.as_str(), message],
-            )?;
-            let id = db.conn.last_insert_rowid();
-            let delivered_at: String = db.conn.query_row(
-                "SELECT delivered_at FROM task_input WHERE id = ?",
-                [id],
-                |row| row.get(0),
-            )?;
-            let (preview, truncated) = preview_of(message);
-            db.append_task_event(
-                task_id,
-                TaskEventKind::InputDelivered,
-                json!({
-                    "inputId": id,
-                    "source": source.as_str(),
-                    "runId": run_id,
-                    "stage": stage,
-                    "preview": preview,
-                    "truncated": truncated,
-                }),
-            )?;
-            Ok(Some(TaskInputRecord {
-                id,
-                task_id: task_id.to_string(),
-                run_id,
-                stage,
-                source: source.as_str().to_string(),
-                message: message.to_string(),
-                delivered_at,
-            }))
+            let delivered = db.insert_delivered_task_input(&task_id, &source, &message)?;
+            db.conn
+                .execute("DELETE FROM queued_task_input WHERE id = ?", [id])?;
+            Ok(delivered)
         })
+    }
+
+    pub fn deliver_next_held_task_input(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<TaskInputRecord>, rusqlite::Error> {
+        let id: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT id FROM queued_task_input
+                 WHERE task_id = ? AND state IN ('preparing', 'held') ORDER BY id LIMIT 1",
+                [task_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match id {
+            Some(id) => self.deliver_queued_task_input(id),
+            None => Ok(None),
+        }
+    }
+
+    pub fn count_queued_task_inputs(&self, task_id: &str) -> Result<i64, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT COUNT(*) FROM queued_task_input WHERE task_id = ?",
+            [task_id],
+            |row| row.get(0),
+        )
+    }
+
+    pub fn count_held_task_inputs(&self, task_id: &str) -> Result<i64, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT COUNT(*) FROM queued_task_input
+             WHERE task_id = ? AND state = 'held'",
+            [task_id],
+            |row| row.get(0),
+        )
+    }
+
+    pub fn queued_task_input_reason(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<String>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT CASE state
+                    WHEN 'held' THEN 'input_held_by_draft'
+                    WHEN 'uncertain' THEN 'delivery_uncertain'
+                    ELSE 'sending'
+                 END
+                 FROM queued_task_input WHERE task_id = ? ORDER BY id LIMIT 1",
+                [task_id],
+                |row| row.get(0),
+            )
+            .optional()
     }
 
     /// The task's most recent `limit` delivered inputs, returned oldest first

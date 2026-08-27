@@ -701,7 +701,9 @@ describe("remote transport", () => {
       taskId: "task-pr"
     });
     await expect(transport.closeTask("task-1")).resolves.toBeUndefined();
-    await expect(transport.sendTaskInput("task-1", "continue")).resolves.toBeUndefined();
+    await expect(transport.sendTaskInput("task-1", "continue")).resolves.toEqual({
+      status: "delivered"
+    });
 
     expect(invokeDesktop).toHaveBeenNthCalledWith(1, {
       desktopId: "desktop-1",
@@ -1870,7 +1872,9 @@ describe("remote transport", () => {
     await transport.listRecentTasks();
     invokeDesktop.mockClear();
     expect(transport.observeTaskTerminal("cloud-task-1", listener)).toBe(subscription);
-    await expect(transport.sendTaskInput("cloud-task-1", "continue")).resolves.toBeUndefined();
+    await expect(transport.sendTaskInput("cloud-task-1", "continue")).resolves.toEqual({
+      status: "delivered"
+    });
     await expect(transport.closeTask("cloud-task-1")).resolves.toBeUndefined();
     await expect(transport.runMergeAgent("cloud-task-1")).resolves.toEqual({
       taskId: "cloud-task-1",
@@ -2104,7 +2108,9 @@ describe("remote transport", () => {
 
     await transport.listRecentTasks();
     invokeDesktop.mockClear();
-    await expect(transport.sendTaskInput("cloud-task-1", "1")).resolves.toBeUndefined();
+    await expect(transport.sendTaskInput("cloud-task-1", "1")).resolves.toEqual({
+      status: "delivered"
+    });
 
     expect(invokeDesktop).toHaveBeenCalledWith({
       desktopId: "desktop-owner",
@@ -2247,7 +2253,7 @@ describe("remote transport", () => {
         mediaType: "image/jpeg",
         dataBase64: "AQID"
       })
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ status: "delivered" });
 
     // The relay tunnels a desktop invocation as JSON, so the image travels
     // base64-in-body — the same shape the LAN transport posts.

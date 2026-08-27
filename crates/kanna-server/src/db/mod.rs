@@ -119,6 +119,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "054_pipeline_item_composer",
     "055_activity_event_debounce",
     "056_runtime_settled_debounce",
+    "057_queued_task_input",
 ];
 
 #[derive(Debug, Serialize)]
@@ -271,6 +272,8 @@ pub struct SnapshotPipelineItem {
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
     pub has_running_post: i64,
+    pub queued_input_count: i64,
+    pub queued_input_reason: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1805,6 +1808,29 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
             [],
         )?;
         Ok(())
+    })?;
+
+    run_migration(conn, "057_queued_task_input", |conn| {
+        // The daemon can accept a logical message while a typed terminal
+        // draft prevents submission. Keep the server-side attribution until
+        // the daemon announces that exact FIFO slot was written; otherwise a
+        // restart loses both sender-visible queue state and the later durable
+        // delivery record.
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS queued_task_input (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+                source TEXT NOT NULL,
+                message TEXT NOT NULL,
+                state TEXT NOT NULL CHECK (state IN ('preparing', 'held', 'uncertain')),
+                reason TEXT,
+                queued_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_queued_task_input_task_id
+                ON queued_task_input(task_id, id);
+            "#,
+        )
     })?;
 
     Ok(())

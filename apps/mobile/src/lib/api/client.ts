@@ -33,6 +33,7 @@ import type {
   TaskFileMentionInput,
   TaskFileMentionResolution,
   TaskInputAttachment,
+  TaskInputResult,
   TaskDetail,
   TaskSummary
 } from "./types";
@@ -201,7 +202,7 @@ export interface KannaTransport {
     taskId: string,
     input: string,
     attachment?: TaskInputAttachment
-  ): Promise<void>;
+  ): Promise<TaskInputResult>;
   /**
    * Whether the desktop that owns this task advertises the image-attachment
    * contract on its own `/v1/status`.
@@ -276,7 +277,7 @@ export interface KannaClient {
     taskId: string,
     input: string,
     attachment?: TaskInputAttachment
-  ): Promise<void>;
+  ): Promise<TaskInputResult>;
   /**
    * Whether the desktop that owns this task advertises the image-attachment
    * contract on its own `/v1/status`.

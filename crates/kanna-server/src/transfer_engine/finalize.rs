@@ -899,6 +899,7 @@ mod tests {
                             status,
                             kind: SessionKind::default(),
                             logical_input_blocked: false,
+                            pending_logical_input_count: None,
                             composer_text: None,
                             composer_attestation: Default::default(),
                         })

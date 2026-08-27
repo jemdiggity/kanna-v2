@@ -30,6 +30,7 @@ import type {
   TaskFileMentionInput,
   TaskFileMentionResolution,
   TaskInputAttachment,
+  TaskInputResult,
   TaskDetail,
   TaskSummary,
   WritePathHealth,
@@ -895,12 +896,13 @@ export function createRemoteTransport({
       input: string,
       attachment?: TaskInputAttachment
     ) => {
-      await requestTask<void>(
+      const result = await requestTask<TaskInputResult | undefined>(
         taskId,
         "POST",
         (localTaskId) => `/v1/tasks/${encodeURIComponent(localTaskId)}/input`,
         attachment ? { input, attachment } : { input }
       );
+      return result?.status === "queued" ? result : { status: "delivered" };
     },
     supportsTaskInputAttachments: async (taskId: string) => {
       // Deliberately NOT `getStatus()`: with cloud tasks wired that returns a
