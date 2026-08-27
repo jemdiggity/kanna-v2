@@ -354,12 +354,14 @@ explicit manual choice.
 Cargo's `.cargo/config.toml` resolves `.build` and `.build/cargo-build` relative
 to the worktree, and kd's sidecar staging reads final binaries through that same
 worktree-private path, so the symlink preserves both Cargo isolation and the
-private sidecar provenance boundary. `./kd clean`, however, removes a live
-symlink itself rather than following it, so the external directory and its
-artifacts remain. Its `existsSync` guard skips an already-dangling symlink; the
-local hook repairs that case on its next run. Remove the exact worktree
-directory on the external volume explicitly when the artifacts are no longer
-wanted; the next setup otherwise relinks it.
+private sidecar provenance boundary. The symlink is also `kd clean`'s source of
+truth for external storage: cleanup reads its target before unlinking it and
+removes the target only when its final path component exactly matches the
+current worktree directory. A mismatched or chained external target fails
+visibly instead of risking another workspace. A dangling link is removed
+without guessing or deleting an external path. Consequently, the repository's
+normal `./kd clean --all` teardown removes the exact per-workspace external
+directory as well as the local link.
 
 The setup list comes from `origin/main` but runs against the forked branch. This
 hook invocation does not depend on a tracked script in that branch: branches

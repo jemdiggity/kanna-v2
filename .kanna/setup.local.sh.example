@@ -15,6 +15,10 @@ workspace_name=$(basename "$workspace_root")
 local_build="$workspace_root/.build"
 external_workspace_build="$external_build_root/$workspace_name"
 
+# This exact symlink is the source of truth shared with `kd env sync` and
+# `kd clean`: Cargo follows it for builds, and cleanup reads and validates it
+# instead of independently reconstructing this machine-local path.
+
 # A previously configured link becomes dangling if the volume is ejected.
 # Replace only this hook's dangling link with an empty local directory; the
 # external artifacts remain untouched and can be relinked after remounting.

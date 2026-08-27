@@ -1,11 +1,15 @@
 import { copyFileSync, existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { repositoryDirectory } from "./rust-cache";
+import { WORKSPACE_BUILD_DIRECTORY } from "./workspace-build";
 
 export function writeCargoConfig(repoRoot: string): string {
   const path = join(repoRoot, ".cargo", "config.toml");
   mkdirSync(join(repoRoot, ".cargo"), { recursive: true });
-  writeFileSync(path, `[build]\ntarget-dir = ".build"\nbuild-dir = ".build/cargo-build"\n`);
+  writeFileSync(
+    path,
+    `[build]\ntarget-dir = "${WORKSPACE_BUILD_DIRECTORY}"\nbuild-dir = "${WORKSPACE_BUILD_DIRECTORY}/cargo-build"\n`
+  );
   return path;
 }
 

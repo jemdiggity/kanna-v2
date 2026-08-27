@@ -1,7 +1,11 @@
-import { existsSync, rmSync, statSync } from "node:fs";
+import { lstatSync, rmSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
+import {
+  resolveExternalWorkspaceBuild,
+  WORKSPACE_BUILD_DIRECTORY
+} from "./workspace-build";
 
 export interface CleanInput {
   repoRoot: string;
@@ -28,21 +32,24 @@ export function bazelOutputBase(repoRoot: string, homeDir = homedir(), userName 
 }
 
 function removePath(path: string, dry: boolean): CleanRemoval | null {
-  if (!existsSync(path)) {
+  try {
+    lstatSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     return null;
   }
   if (!dry) {
     rmSync(path, { recursive: true, force: true });
-  } else {
-    statSync(path);
   }
   return { path, removed: !dry, dryRun: dry };
 }
 
 export function cleanWorkspace(input: CleanInput): CleanResult {
   const homeDir = input.homeDir ?? homedir();
+  const externalWorkspaceBuild = resolveExternalWorkspaceBuild(input.repoRoot);
   const candidates = [
-    join(input.repoRoot, ".build"),
+    ...(externalWorkspaceBuild ? [externalWorkspaceBuild] : []),
+    join(input.repoRoot, WORKSPACE_BUILD_DIRECTORY),
     join(input.repoRoot, "apps", "desktop", "src-tauri", "target"),
     bazelOutputBase(input.repoRoot, homeDir, input.userName ?? userInfo().username)
   ];

@@ -1,4 +1,12 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  symlinkSync,
+  writeFileSync
+} from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -38,6 +46,77 @@ describe("clean runtime", () => {
     expect(result.removals.map((removal) => removal.path)).toContain(bazelOutputBase(repo, home, "tester"));
     expect(existsSync(join(repo, ".build"))).toBe(false);
     expect(existsSync(sharedRust)).toBe(true);
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("removes the exact external build target recorded by the workspace link", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-clean-external-"));
+    const repo = join(root, "task-abcd1234-2");
+    const externalBuild = join(root, "external", "task-abcd1234-2");
+    mkdirSync(repo, { recursive: true });
+    mkdirSync(externalBuild, { recursive: true });
+    writeFileSync(join(externalBuild, "artifact.txt"), "x");
+    symlinkSync(externalBuild, join(repo, ".build"));
+
+    const result = cleanWorkspace({
+      repoRoot: repo,
+      homeDir: join(root, "home"),
+      userName: "tester",
+      all: false,
+      dry: false,
+      sharedRustBuild: false
+    });
+
+    expect(result.removals.map((removal) => removal.path)).toEqual([
+      join(realpathSync(join(root, "external")), "task-abcd1234-2"),
+      join(repo, ".build")
+    ]);
+    expect(existsSync(externalBuild)).toBe(false);
+    expect(existsSync(join(repo, ".build"))).toBe(false);
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("refuses an external build target belonging to a sibling workspace", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-clean-mismatch-"));
+    const repo = join(root, "task-current");
+    const siblingBuild = join(root, "external", "task-sibling");
+    mkdirSync(repo, { recursive: true });
+    mkdirSync(siblingBuild, { recursive: true });
+    writeFileSync(join(siblingBuild, "artifact.txt"), "keep");
+    symlinkSync(siblingBuild, join(repo, ".build"));
+
+    expect(() =>
+      cleanWorkspace({
+        repoRoot: repo,
+        homeDir: join(root, "home"),
+        userName: "tester",
+        all: true,
+        dry: false,
+        sharedRustBuild: false
+      })
+    ).toThrow(/Refusing to clean external \.build target.*expected an exact workspace target/);
+    expect(readFileSync(join(siblingBuild, "artifact.txt"), "utf8")).toBe("keep");
+    expect(lstatSync(join(repo, ".build")).isSymbolicLink()).toBe(true);
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("removes a dangling external build link without guessing another path", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-clean-dangling-"));
+    const repo = join(root, "task-dangling");
+    mkdirSync(repo, { recursive: true });
+    symlinkSync(join(root, "external", "task-dangling"), join(repo, ".build"));
+
+    const result = cleanWorkspace({
+      repoRoot: repo,
+      homeDir: join(root, "home"),
+      userName: "tester",
+      all: false,
+      dry: false,
+      sharedRustBuild: false
+    });
+
+    expect(result.removals.map((removal) => removal.path)).toEqual([join(repo, ".build")]);
+    expect(existsSync(join(repo, ".build"))).toBe(false);
     await rm(root, { recursive: true, force: true });
   });
 });
