@@ -457,7 +457,16 @@ describe("Repository command journey", () => {
         ...element(),
         waitForDisplayed: vi.fn(async () => events.push("More displayed"))
       })),
-      getRepoOption: vi.fn(async () => element("click repository")),
+      getRepoOption: vi.fn(async () => ({
+        ...element("click repository"),
+        getAttribute: vi.fn(async (name: string) => {
+          if (name === "name") {
+            events.push("read repository identity");
+            return "mobile.more.repo.git:remote-hash";
+          }
+          return null;
+        })
+      })),
       getConfigureCommandGroup: vi.fn(async () => ({
         ...element(),
         waitForDisplayed: vi.fn(async () => events.push("Configure displayed"))
@@ -491,6 +500,7 @@ describe("Repository command journey", () => {
     expect(events).toEqual([
       "click More",
       "More displayed",
+      "read repository identity",
       "click repository",
       "Configure displayed",
       "scroll command",

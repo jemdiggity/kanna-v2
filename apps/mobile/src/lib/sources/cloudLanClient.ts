@@ -25,7 +25,11 @@ import {
   buildCloudTaskId,
   canonicalizeTaskActionId
 } from "../api/taskIdentity";
-import { canonicalRepoId, mergeRepoSummaries } from "../api/repoIdentity";
+import {
+  canonicalRepoId,
+  isRemoteRepoId,
+  mergeRepoSummaries
+} from "../api/repoIdentity";
 
 export type DisplayTaskRoute =
   | { source: "cloud"; taskId: string }
@@ -44,6 +48,8 @@ export type DisplayTaskRoute =
 
 export interface CloudLanClientOptions {
   isLanEnabled(): boolean;
+  /** False when canonical cloud identities must never fall through to a LAN route. */
+  isCloudEnabled?(): boolean;
   canUseLanTaskStreams?(desktopId: string): boolean;
   lanClientForDesktop?(desktopId: string): KannaClient | null;
   optionalLanWaitMs?: number;
@@ -871,6 +877,25 @@ export function createCloudLanClient(
     const route =
       provisionalTaskRoutes.get(taskId) ?? snapshotTaskRoutes.get(taskId);
     if (!route) {
+      if (
+        taskId.startsWith("cloud:") &&
+        options.isCloudEnabled?.() === false
+      ) {
+        return {
+          source: "unavailable",
+          taskId,
+          desktopId: "unknown",
+          message: `Task "${taskId}" belongs to a cloud account and is unavailable while signed out.`
+        };
+      }
+      if (options.isCloudEnabled?.() === false) {
+        return {
+          source: "lan",
+          taskId,
+          desktopId: "unknown",
+          client: lan
+        };
+      }
       return { source: "cloud", taskId, client: cloud };
     }
     if (route.source === "cloud") {
@@ -952,6 +977,25 @@ export function createCloudLanClient(
       (candidate) => candidate.repoId === repoId
     );
     if (!sourceTask) {
+      if (
+        isRemoteRepoId(repoId) &&
+        options.isCloudEnabled?.() === false
+      ) {
+        return {
+          source: "unavailable" as const,
+          taskId: repoId,
+          desktopId: "unknown",
+          message: `Repository "${repoId}" is not registered on a reachable paired desktop.`
+        };
+      }
+      if (options.isCloudEnabled?.() === false) {
+        return {
+          source: "lan" as const,
+          client: lan,
+          repoId,
+          desktopId: "unknown"
+        };
+      }
       return { source: "cloud" as const, client: cloud, repoId };
     }
     const taskRoute = routeForTask(sourceTask.id);
@@ -1348,7 +1392,10 @@ export function createCloudLanClient(
         route.taskId
       ]);
     },
-    getStatus: () => cloud.getStatus(),
+    getStatus: () =>
+      options.isCloudEnabled?.() === false
+        ? lan.getStatus()
+        : cloud.getStatus(),
     listDesktops,
     listRepos,
     startRepoCheckout: async (input) => {
