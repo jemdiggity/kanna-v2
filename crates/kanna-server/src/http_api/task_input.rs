@@ -297,44 +297,6 @@ pub(crate) async fn submit_task_input(
         })
 }
 
-/// Append the durable record of an input the daemon accepted.
-///
-/// This never fails the delivery it describes. By the time it runs the bytes
-/// are already queued in the PTY, so answering the caller with an error would
-/// invite a retry that duplicates terminal input — the one outcome the input
-/// path is built to avoid. A record that cannot be written is therefore loud
-/// in the log and nowhere else.
-pub(crate) async fn record_delivered_task_input(
-    db_path: &str,
-    task_id: &str,
-    source: TaskInputSource,
-    input: &str,
-) {
-    let db_path = db_path.to_string();
-    let task_id = task_id.to_string();
-    let logged_task_id = task_id.clone();
-    let message = task_input_message(input).to_string();
-    let recorded = tokio::task::spawn_blocking(move || {
-        let db = Db::open(&db_path)?;
-        db.record_task_input(&task_id, source, &message)
-    })
-    .await;
-    match recorded {
-        Ok(Ok(Some(_))) => {}
-        Ok(Ok(None)) => log::warn!(
-            "delivered {} input to {logged_task_id}, which has no task row to record it on",
-            source.as_str()
-        ),
-        Ok(Err(error)) => log::error!(
-            "failed to record a delivered {} input for task {logged_task_id}: {error}",
-            source.as_str()
-        ),
-        Err(error) => {
-            log::error!("task input record worker failed for task {logged_task_id}: {error}")
-        }
-    }
-}
-
 pub(super) async fn send_task_input(
     _access: PrivilegedTaskAccess,
     State(state): State<Arc<AppState>>,

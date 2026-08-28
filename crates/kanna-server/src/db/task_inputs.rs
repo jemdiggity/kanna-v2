@@ -179,6 +179,7 @@ impl Db {
     /// `Ok(None)` means the task id does not exist, which is how a
     /// notification aimed at a deleted task stays a log line instead of an
     /// error.
+    #[cfg(test)]
     pub fn record_task_input(
         &self,
         task_id: &str,
