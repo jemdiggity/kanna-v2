@@ -4176,6 +4176,16 @@ const TERMINAL_TAP_IDLE_POLL: Duration = Duration::from_secs(5);
 /// Live output events a lagging subscriber may fall behind before it is resynced
 /// from the tap's current state instead of the stream.
 const TERMINAL_TAP_BROADCAST_CAPACITY: usize = 512;
+/// Maximum raw delta sent immediately behind a snapshot to a consumer that
+/// has no valid resume cursor. Larger gaps trigger a new daemon snapshot.
+///
+/// The decision is made across the complete delta from the snapshot base: the
+/// consumer receives either every byte in order or a replacement snapshot,
+/// never a suffix cut at an arbitrary UTF-8 or VT boundary. It is separate
+/// from the larger resume ring: an existing viewer already has the parser state
+/// needed to consume a large missed delta, while a fresh mobile attach must not
+/// turn that ring into rapidly streamed scrollback.
+const TERMINAL_FRESH_ATTACH_REPLAY_MAX_BYTES: usize = 16 * 1024;
 /// Taps kept for sessions nobody is watching. Active taps are bounded by actual
 /// viewers; this only bounds the idle ones still holding their grace window.
 const MAX_IDLE_TERMINAL_TAPS: usize = 16;
@@ -4467,6 +4477,15 @@ impl TerminalTap {
             // still holds is unreachable from that base.
             return (events, TapAttach::NeedsRestart);
         };
+        if replay.iter().map(|chunk| chunk.len()).sum::<usize>()
+            > TERMINAL_FRESH_ATTACH_REPLAY_MAX_BYTES
+        {
+            // A fresh consumer has none of this tap's state. Re-anchor it from
+            // the daemon's rendered headless terminal instead of replaying a
+            // large raw delta behind an old snapshot. Resume consumers keep
+            // using the full ring above: their xterm already holds that base.
+            return (events, TapAttach::NeedsRestart);
+        }
         (
             events,
             TapAttach::Fresh {
@@ -12866,7 +12885,7 @@ mod tests {
             window.len(),
             vt.len()
         );
-        assert_eq!(scrollback_lines, 2_000 - (24 + 400));
+        assert_eq!(scrollback_lines, 2_000 - (24 * 3));
         assert!(window.ends_with("row-1999"));
 
         // Walking the history downward reproduces exactly what was withheld.
@@ -13065,7 +13084,7 @@ mod tests {
         let expected: Vec<u8> = outputs.concat()[consumed..].to_vec();
         assert_eq!(replayed, expected);
         assert!(
-            replayed.len() * 4 < window_bytes,
+            replayed.len() < window_bytes,
             "reconnect transferred {} bytes against a {window_bytes} byte snapshot",
             replayed.len()
         );
@@ -13185,7 +13204,7 @@ mod tests {
                     window.len() * 4 < vt.len(),
                     "the fallback must still be a bounded tail, not the whole buffer"
                 );
-                assert_eq!(scrollback_lines, Some(2_000 - (24 + 400)));
+                assert_eq!(scrollback_lines, Some(2_000 - (24 * 3)));
             }
             other => panic!("an unreplayable resume must fall back to a snapshot: {other:?}"),
         }
@@ -13320,6 +13339,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_fresh_viewer_does_not_receive_a_large_replay_burst() {
+        let vt = scrollback_vt(2_000);
+        // This still fits comfortably in the resume ring. Before the fresh
+        // attach ceiling, a new viewer received every chunk rapidly behind an
+        // old snapshot even though it had no buffer to resume.
+        let chunk = format!(
+            "\x1b[?2026h\x1b[38;2;1;2;3m{}\x1b[0m\x1b[?2026l",
+            "x".repeat(1_024)
+        );
+        let outputs: Vec<Vec<u8>> = (0..32).map(|_| chunk.clone().into_bytes()).collect();
+        let total_output = outputs.concat().len();
+        assert!(total_output > TERMINAL_FRESH_ATTACH_REPLAY_MAX_BYTES);
+        assert!(total_output < TERMINAL_RING_MAX_BYTES);
+        let fixture = WindowedTerminalFixture::new("fresh-replay-cap", vt.clone(), outputs).await;
+
+        let mut first = ws_connect(&fixture.url).await;
+        send_frame(&mut first, &windowed_client_auth_frame()).await;
+        assert_eq!(recv_frame(&mut first).await, auth_ok_frame_for(false));
+        send_frame(&mut first, &attach_terminal_frame(None)).await;
+        assert!(matches!(
+            recv_frame(&mut first).await,
+            ServerFrame::TermSnapshot { .. }
+        ));
+        let mut consumed = 0usize;
+        while consumed < total_output {
+            match recv_frame(&mut first).await {
+                ServerFrame::TermOutput { data_b64, .. } => {
+                    consumed += decode_frame_bytes(&data_b64).len();
+                }
+                other => panic!("expected live output after attach, got {other:?}"),
+            }
+        }
+        drop(first);
+
+        let mut fresh = ws_connect(&fixture.url).await;
+        send_frame(&mut fresh, &windowed_client_auth_frame()).await;
+        assert_eq!(recv_frame(&mut fresh).await, auth_ok_frame_for(false));
+        send_frame(&mut fresh, &attach_terminal_frame(None)).await;
+
+        match recv_frame(&mut fresh).await {
+            ServerFrame::TermSnapshot { data_b64, .. } => {
+                let snapshot = decode_frame_bytes(&data_b64);
+                assert!(snapshot.len() <= crate::terminal_window::TERMINAL_WINDOW_MAX_BYTES);
+                assert!(String::from_utf8(snapshot)
+                    .expect("utf8 snapshot")
+                    .ends_with("row-1999"));
+            }
+            other => panic!("expected a fresh bounded snapshot, got {other:?}"),
+        }
+        assert!(
+            recv_frame_with_timeout(&mut fresh, Duration::from_millis(300))
+                .await
+                .is_none(),
+            "a fresh viewer must not receive the old tap's ANSI replay burst"
+        );
+
+        drop(fresh);
+    }
+
+    #[tokio::test]
     async fn a_new_viewer_gets_a_fresh_snapshot_when_the_ring_outran_the_old_one() {
         let vt = scrollback_vt(100);
         // Past TERMINAL_RING_MAX_BYTES, so the recorded stream can no longer be
@@ -13355,11 +13434,16 @@ mod tests {
 
         match recv_frame(&mut second).await {
             ServerFrame::TermSnapshot { data_b64, .. } => {
-                assert_eq!(
-                    String::from_utf8(decode_frame_bytes(&data_b64)).expect("utf8 window"),
-                    vt,
-                    "the re-attached daemon snapshot is what hydrates the new viewer"
-                );
+                let snapshot =
+                    String::from_utf8(decode_frame_bytes(&data_b64)).expect("utf8 window");
+                let rows: Vec<&str> = snapshot
+                    .strip_prefix("\x1b[0m")
+                    .expect("a truncated snapshot resets inherited ANSI style")
+                    .split("\r\n")
+                    .collect();
+                assert_eq!(rows.len(), 72, "the snapshot keeps only three screenfuls");
+                assert_eq!(rows.first(), Some(&"row-28"));
+                assert_eq!(rows.last(), Some(&"row-99"));
             }
             other => panic!("expected a fresh bounded snapshot, got {other:?}"),
         }

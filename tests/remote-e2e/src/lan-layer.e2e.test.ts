@@ -311,8 +311,10 @@ describe("LAN task loop E2E", () => {
       const snapshotText = events.outputText();
       expect(snapshotText).toContain("MOBILE_PTY_HISTORY_10050");
       expect(snapshotText).not.toContain("MOBILE_PTY_HISTORY_05000");
-      // The full history is ~800 KB; the window is a small tail of it.
-      expect(Buffer.byteLength(snapshotText, "utf8")).toBeLessThan(300_000);
+      // The full history is ~800 KB. The attach is the 24-row screen plus two
+      // pagefuls of recent scrollback, not the old fixed 400-row tail or the
+      // tap's accumulated replay ring.
+      expect(Buffer.byteLength(snapshotText, "utf8")).toBeLessThan(40_000);
 
       events.requestScrollback({
         historyId: window.historyId ?? 0,
@@ -633,7 +635,7 @@ describe("LAN task loop E2E", () => {
     }
   }, 45_000);
 
-  it("retains authoritative no-echo input and a live PTY burst across a mobile terminal remount", async () => {
+  it("retains authoritative no-echo input and a bounded recent PTY tail across a mobile remount", async () => {
     const task = await createScriptedTask(harness, {
       displayName: "Mobile retained terminal input task",
       redactInput: true
@@ -683,7 +685,8 @@ describe("LAN task loop E2E", () => {
       );
       expect(remountedOutput).not.toContain(submittedInput);
       expect(remountedOutput).not.toContain("composed password");
-      expect(remountedOutput).toContain("SCRIPT_BURST_0001_");
+      expect(remountedOutput).not.toContain("SCRIPT_BURST_0001_");
+      expect(remountedOutput).toContain("SCRIPT_BURST_1950_");
       expect(remountedOutput).toContain("SCRIPT_BURST_2000_");
       expect(
         store.taskTerminalOutputSource.getSnapshot().outputEpoch

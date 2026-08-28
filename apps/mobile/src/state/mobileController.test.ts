@@ -8184,6 +8184,10 @@ describe("createMobileController", () => {
       window: { streamId: 4, historyId: 11, scrollbackLines: 900 }
     });
 
+    // A bounded snapshot advertises older history; receiving it alone must not
+    // eagerly turn that history back into an attach-time burst.
+    expect(requestScrollback).not.toHaveBeenCalled();
+
     controller.requestTaskTerminalScrollback("task-1");
     expect(requestScrollback).toHaveBeenCalledTimes(1);
     expect(requestScrollback).toHaveBeenLastCalledWith({
