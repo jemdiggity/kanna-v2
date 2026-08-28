@@ -7,14 +7,14 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  symlinkSync,
   writeFileSync
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanWorkspace } from "../src/runtime/clean";
-
-const root = resolve(import.meta.dirname, "../../..");
+import { migrateLegacyExternalWorkspaceBuild } from "../src/runtime/env-sync";
 
 describe("external build workspace teardown", () => {
   const fixtures: string[] = [];
@@ -25,7 +25,7 @@ describe("external build workspace teardown", () => {
     }
   });
 
-  it("retains an unavailable target record, then removes only the departed workspace after remount", () => {
+  it("migrates an installed legacy hook before fallback, then cleans only the departed workspace", () => {
     const fixture = mkdtempSync(join(tmpdir(), "kd-external-teardown-"));
     fixtures.push(fixture);
     const volume = join(fixture, "external-volume");
@@ -33,7 +33,7 @@ describe("external build workspace teardown", () => {
     const externalRoot = join(volume, "kanna-builds", "kanna");
     const departed = join(fixture, "task-departed-2");
     const liveSibling = join(fixture, "task-live-3");
-    const hook = join(fixture, "setup.local.sh");
+    const legacyHook = join(fixture, "setup.local.sh");
     mkdirSync(volume);
     mkdirSync(departed);
     mkdirSync(liveSibling);
@@ -44,31 +44,43 @@ describe("external build workspace teardown", () => {
       });
     }
 
-    const template = readFileSync(join(root, ".kanna", "setup.local.sh.example"), "utf8");
+    // This is the behavior of the already-installed pre-upgrade hook: when the
+    // external volume is unavailable, it replaces its dangling .build link
+    // without first writing the durable target record introduced later.
     writeFileSync(
-      hook,
-      template
-        .replace('external_volume="/path/to/external-volume"', `external_volume="${volume}"`)
-        .replace(
-          'external_build_root="$external_volume/kanna-builds/kanna"',
-          `external_build_root="${externalRoot}"`
-        )
+      legacyHook,
+      [
+        "#!/bin/sh",
+        'if [ -L "$PWD/.build" ] && [ ! -e "$PWD/.build" ]; then',
+        '  rm "$PWD/.build" && mkdir "$PWD/.build"',
+        "fi",
+        ""
+      ].join("\n")
     );
-    execFileSync("/bin/sh", [hook], { cwd: departed, stdio: "pipe" });
-    execFileSync("/bin/sh", [hook], { cwd: liveSibling, stdio: "pipe" });
 
     const departedBuild = join(externalRoot, "task-departed-2");
     const siblingBuild = join(externalRoot, "task-live-3");
     const departedRecord = join(departed, ".kanna-external-build-target");
     const siblingRecord = join(liveSibling, ".kanna-external-build-target");
+    mkdirSync(departedBuild, { recursive: true });
+    mkdirSync(siblingBuild, { recursive: true });
+    symlinkSync(departedBuild, join(departed, ".build"));
+    symlinkSync(siblingBuild, join(liveSibling, ".build"));
     writeFileSync(join(departedBuild, "artifact.txt"), "remove");
     writeFileSync(join(siblingBuild, "artifact.txt"), "keep");
 
-    expect(readFileSync(departedRecord, "utf8")).toBe(`${departedBuild}\n`);
-    expect(readFileSync(siblingRecord, "utf8")).toBe(`${siblingBuild}\n`);
+    expect(existsSync(departedRecord)).toBe(false);
+    expect(existsSync(siblingRecord)).toBe(false);
 
     renameSync(volume, unmountedVolume);
-    execFileSync("/bin/sh", [hook], { cwd: departed, stdio: "pipe" });
+    // This is the tracked setup ordering: kd env sync migrates cleanup
+    // knowledge before Kanna invokes the optional ignored local hook.
+    expect(migrateLegacyExternalWorkspaceBuild(departed)).toEqual({
+      status: "migrated",
+      record: departedRecord,
+      target: departedBuild
+    });
+    execFileSync("/bin/sh", [legacyHook], { cwd: departed, stdio: "pipe" });
     expect(lstatSync(join(departed, ".build")).isDirectory()).toBe(true);
     expect(readFileSync(departedRecord, "utf8")).toBe(`${departedBuild}\n`);
     expect(() =>
@@ -100,6 +112,23 @@ describe("external build workspace teardown", () => {
     expect(existsSync(departedRecord)).toBe(false);
     expect(readFileSync(join(siblingBuild, "artifact.txt"), "utf8")).toBe("keep");
     expect(existsSync(join(liveSibling, ".build"))).toBe(true);
-    expect(readFileSync(siblingRecord, "utf8")).toBe(`${siblingBuild}\n`);
+    expect(existsSync(siblingRecord)).toBe(false);
+  });
+
+  it("visibly refuses to migrate a legacy link belonging to a sibling workspace", () => {
+    const fixture = mkdtempSync(join(tmpdir(), "kd-external-migration-refusal-"));
+    fixtures.push(fixture);
+    const workspace = join(fixture, "task-current");
+    const siblingBuild = join(fixture, "external", "task-sibling");
+    mkdirSync(workspace);
+    mkdirSync(siblingBuild, { recursive: true });
+    symlinkSync(siblingBuild, join(workspace, ".build"));
+
+    expect(() => migrateLegacyExternalWorkspaceBuild(workspace)).toThrow(
+      /Refusing external \.build target.*expected an exact workspace target ending in task-current/
+    );
+    expect(lstatSync(join(workspace, ".build")).isSymbolicLink()).toBe(true);
+    expect(existsSync(join(workspace, ".kanna-external-build-target"))).toBe(false);
+    expect(existsSync(siblingBuild)).toBe(true);
   });
 });

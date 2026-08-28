@@ -311,11 +311,19 @@ copy of something an operator wrote deliberately.
 
 ### Machine-local workspace setup
 
-The final `setup` command optionally runs `.kanna/setup.local.sh` from the
+The `setup` list optionally runs `.kanna/setup.local.sh` from the
 repository's **primary checkout**. The primary checkout is deliberate: ignored
 files are not copied by `git worktree add`, so one local hook there is shared by
 every current and future task worktree. A missing, non-executable, or failing
 hook is ignored and cannot block task creation or a stage transition.
+
+Tracked `kd env sync` steps bracket that optional hook. Before the hook, env
+sync atomically migrates any identity-safe legacy external `.build` symlink
+into the durable target record, including a dangling link whose volume is
+currently unavailable. After the hook, env sync captures a first-time link
+created by an older installed hook. A link whose final component does not
+exactly match the worktree fails setup visibly; env sync derives the target
+from the link and never reconstructs the hook's machine-local external root.
 
 Start from the committed template, from either the primary checkout or a task
 worktree:

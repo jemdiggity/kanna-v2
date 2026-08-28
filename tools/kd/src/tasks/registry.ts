@@ -29,7 +29,11 @@ import {
 import { assertNotProductionDb, resetSqliteDb, seedSqliteDb, type DevDbTarget } from "../runtime/db";
 import { killWorkspaceDaemons } from "../runtime/daemon";
 import { checkRequiredCommands } from "../runtime/doctor";
-import { syncMachineLocalConfig, writeCargoConfig } from "../runtime/env-sync";
+import {
+  migrateLegacyExternalWorkspaceBuild,
+  syncMachineLocalConfig,
+  writeCargoConfig
+} from "../runtime/env-sync";
 import { buildFirebaseCommandEnv, buildFirebaseEmulatorArgs, formatMissingFirebaseEmulators, resolveFirebaseEnvFromReference, writeFirebaseEmulatorConfig, type FirebasePortInput } from "../runtime/firebase";
 import { resolveMobileServerUrl } from "../runtime/mobile";
 import { buildDesktopRealE2eCommand } from "../runtime/desktop-e2e";
@@ -2290,7 +2294,11 @@ export const taskDefinitions = [
       const context = await resolveDefaultContext(process.env);
       const cargoConfig = writeCargoConfig(context.repoRoot);
       const machineLocalConfig = syncMachineLocalConfig(context.repoRoot);
+      const legacyExternalBuild = migrateLegacyExternalWorkspaceBuild(context.repoRoot);
       const lines = ["Synced Kanna dev environment files."];
+      if (legacyExternalBuild.status === "migrated") {
+        lines.push(`  preserved legacy external build target ${legacyExternalBuild.target}`);
+      }
       if (machineLocalConfig.status === "copied") {
         lines.push(`  machine-local repo config from ${machineLocalConfig.source}`);
       } else if (machineLocalConfig.status === "kept-local") {
@@ -2299,7 +2307,7 @@ export const taskDefinitions = [
       return {
         ok: true,
         message: lines.join("\n"),
-        data: { cargoConfig, machineLocalConfig }
+        data: { cargoConfig, machineLocalConfig, legacyExternalBuild }
       };
     }
   },

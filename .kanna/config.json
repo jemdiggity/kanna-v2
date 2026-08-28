@@ -6,7 +6,8 @@
     "pnpm install",
     "./kd env sync",
     "./kd rust-cache warm",
-    "local_setup=\"$(git rev-parse --git-common-dir 2>/dev/null)/../.kanna/setup.local.sh\"; [ ! -x \"$local_setup\" ] || \"$local_setup\" || true"
+    "local_setup=\"$(git rev-parse --git-common-dir 2>/dev/null)/../.kanna/setup.local.sh\"; [ ! -x \"$local_setup\" ] || \"$local_setup\" || true",
+    "./kd env sync"
   ],
   "teardown": ["./kd dev down --kill-daemon", "./kd clean --all"],
   "test": ["pnpm test"],

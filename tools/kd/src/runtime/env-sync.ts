@@ -1,7 +1,12 @@
 import { copyFileSync, existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { repositoryDirectory } from "./rust-cache";
-import { WORKSPACE_BUILD_DIRECTORY } from "./workspace-build";
+import {
+  migrateLegacyExternalWorkspaceBuild,
+  WORKSPACE_BUILD_DIRECTORY
+} from "./workspace-build";
+
+export { migrateLegacyExternalWorkspaceBuild } from "./workspace-build";
 
 export function writeCargoConfig(repoRoot: string): string {
   const path = join(repoRoot, ".cargo", "config.toml");

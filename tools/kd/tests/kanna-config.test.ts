@@ -74,6 +74,7 @@ describe("Kanna repository cache defaults", () => {
     expect(positions, "setup keeps the cache install after environment sync").toEqual(
       [...positions].sort((a, b) => a - b)
     );
+    expect(setup.slice(setup.indexOf(localSetupCommand) + 1)).toContain("./kd env sync");
   });
 
   it("runs one shared machine-local hook without letting it block setup", () => {
