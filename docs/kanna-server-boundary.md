@@ -23,10 +23,11 @@ transactional daemon handoff, and is never redirected to a later run or stage.
 **A `204` means submitted, not queued.** The message and its Enter are one
 delivery in two PTY writes, and the daemon acknowledges only after the second,
 so a success answer cannot be given for text still sitting unsent at the
-composer. A message retained behind a draft answers `409` with
-`reason: "input_held_by_draft"` instead: it stays queued for the producer's
-boundary, but it has not been delivered, so it is not recorded as delivered
-either. Reported by the product owner on 2026-08-20, when replies sent from
+composer. A message retained behind a draft answers `202` with
+`status: "queued"`, `reason: "input_held_by_draft"`, and the task's
+`queuedInputCount`: it stays queued for the producer's boundary and every task
+summary exposes that backlog and reason. It is first stored in
+`queued_task_input`, not falsely recorded as delivered. Reported by the product owner on 2026-08-20, when replies sent from
 mobile sat at the agent's prompt until someone pressed Enter at that terminal
 while the phone had been told they were delivered. A declared draft that leaves
 nothing at the prompt — a navigation key, an Escape, a Ctrl-key press — no
@@ -812,14 +813,26 @@ The row is the record; `task.input_delivered` is only its announcement.
   messages into another task's PTY or append completion rows to `task_input`.
   Managers observe completion through `kanna_wait_events` for fan-out or
   `kanna_wait_task` for a single task, backed by durable run and task events.
-- **Held deliveries are not recorded.** An `input_held_by_draft` response means
-  the message is queued at the daemon and has not reached the agent, so no row
-  asserts it did. If the producer later declares a boundary, the daemon writes
-  that message without telling the server, and it is delivered but unrecorded —
-  a known hole in this record, and the reason the refusal tells its caller the
-  message is still queued rather than inviting a resend that would queue a
-  second copy. Closing it needs a daemon-to-server signal for a released
-  message, which does not exist yet.
+- **Held deliveries move through a durable FIFO.** The server reserves a
+  `queued_task_input` row before daemon submission, bound to the exact child
+  PID used by `SubmitInputIfSession` as the daemon-session incarnation fence.
+  A held response keeps that row visible; each incarnation-bearing
+  `LogicalInputReleased` daemon event transactionally moves exactly the oldest
+  matching row into `task_input`, preserving boundaries, source, and order.
+  `SessionList.pending_logical_input_count` reconciles missed release events
+  only against held rows owned by that same incarnation. A row owned by a
+  replaced or exited session becomes `delivery_uncertain`; it is not promoted
+  from the replacement's pending count.
+- **Interrupted preparation is ambiguous, not delivery evidence.** A server
+  restart converts any leftover `preparing` reservation to
+  `delivery_uncertain`: the server cannot prove whether the daemon accepted and
+  perhaps flushed it before the interruption. A live, exact-incarnation
+  `LogicalInputReleased` edge may consume a `preparing` row when it races the
+  HTTP held-state update, because that edge itself proves acceptance. Reconnect
+  never makes that inference. An uncertain row remains a FIFO barrier for its
+  incarnation: later release evidence cannot be attributed past it, because
+  the event may describe the ambiguous slot itself. Uncertain rows remain
+  sender-visible rather than being expired or discarded silently.
 - **Uncertain deliveries are not recorded.** A `delivery_uncertain` response
   means the bytes may or may not have reached the PTY; a row asserting the agent
   was told something it may never have heard is a worse record than a missing

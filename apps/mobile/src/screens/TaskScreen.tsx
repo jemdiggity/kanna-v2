@@ -1086,6 +1086,24 @@ export function TaskScreen({
             {attachmentErrorMessage}
           </Text>
         ) : null}
+        {(task.queuedInputCount ?? 0) > 0 ? (
+          <View
+            accessibilityLiveRegion="polite"
+            accessibilityLabel="Queued task input status"
+            style={styles.queuedInputStatus}
+            testID={MOBILE_E2E_IDS.taskQueuedInputStatus}
+          >
+            <Ionicons color="#F7C66A" name="time-outline" size={16} />
+            <Text style={styles.queuedInputStatusText}>
+              {task.queuedInputCount} {task.queuedInputCount === 1 ? "message" : "messages"}{" "}
+              {task.queuedInputReason === "delivery_uncertain"
+                ? "awaiting delivery confirmation. Check the desktop terminal before retrying."
+                : task.queuedInputReason === "sending"
+                  ? "being handed to the desktop terminal. Keep this screen open for confirmation."
+                : "queued behind an unsent desktop terminal draft. It will send after that draft is submitted."}
+            </Text>
+          </View>
+        ) : null}
 
         <View style={styles.inputComposer}>
           {canAttachPhoto ? (
@@ -1535,6 +1553,24 @@ const styles = StyleSheet.create({
   },
   attachButtonDisabled: {
     opacity: 0.45
+  },
+  queuedInputStatus: {
+    alignItems: "center",
+    backgroundColor: "rgba(92, 64, 18, 0.7)",
+    borderColor: "rgba(247, 198, 106, 0.45)",
+    borderRadius: 12,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 8,
+    marginBottom: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 9
+  },
+  queuedInputStatusText: {
+    color: "#F9D994",
+    flex: 1,
+    fontSize: 12,
+    lineHeight: 17
   },
   inputComposer: {
     alignItems: "flex-end",

@@ -19,6 +19,8 @@ function task(overrides: Record<string, unknown> = {}): Record<string, unknown> 
     stage: "in progress",
     activity: "idle",
     activityRevision: 4,
+    queuedInputCount: 2,
+    queuedInputReason: "input_held_by_draft",
     blockerRevision: 6,
     transitionRevision: "run-4",
     status: "active",
@@ -85,6 +87,8 @@ describe("cloud task publication validation", () => {
       cloudTaskId: "cloud-stable",
       activity: "idle",
       activityRevision: 4,
+      queuedInputCount: 2,
+      queuedInputReason: "input_held_by_draft",
       blockerRevision: 6,
       transitionRevision: "run-4",
       waitingPromptSnippet: "Ready for review",
@@ -93,6 +97,31 @@ describe("cloud task publication validation", () => {
       agent: { provider: "codex", type: "pty" },
       repo: { remoteUrlHash: "remote-hash" },
     });
+  });
+
+  it("preserves queued input status and defaults older publishers to no queue", () => {
+    const queued = validateCloudTaskPublication(publication(), "desktop-1");
+    expect(queued.tasks[0]).toMatchObject({
+      queuedInputCount: 2,
+      queuedInputReason: "input_held_by_draft",
+    });
+
+    const legacyTask = task();
+    delete legacyTask.queuedInputCount;
+    delete legacyTask.queuedInputReason;
+    const legacy = validateCloudTaskPublication(
+      publication([legacyTask]),
+      "desktop-1",
+    );
+    expect(legacy.tasks[0]).toMatchObject({
+      queuedInputCount: 0,
+      queuedInputReason: null,
+    });
+
+    expect(() => validateCloudTaskPublication(
+      publication([task({ queuedInputReason: "lost" })]),
+      "desktop-1",
+    )).toThrow(/queuedInputReason/);
   });
 
   it("preserves canonical pin metadata and defaults older publishers to unpinned", () => {

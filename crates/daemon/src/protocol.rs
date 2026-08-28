@@ -464,6 +464,15 @@ pub enum Event {
         composer_text: Option<String>,
         composer_attestation: ComposerAttestation,
     },
+    /// A logical message retained behind a typed terminal draft has now had
+    /// both its text and terminating Enter written to the PTY.
+    LogicalInputReleased {
+        session_id: String,
+        /// Child pid of the exact session incarnation that released it.
+        /// Session ids are reused across stage and recovery replacements.
+        #[serde(default)]
+        session_pid: u32,
+    },
     SessionList {
         sessions: Vec<SessionInfo>,
     },
@@ -519,6 +528,10 @@ pub struct SessionInfo {
     /// Absent on a daemon that predates the field, which reports `false`.
     #[serde(default)]
     pub logical_input_blocked: bool,
+    /// Logical messages accepted but not yet fully submitted. Absent on an
+    /// older daemon, which reports zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_logical_input_count: Option<usize>,
     /// The text rendered on this session's composer line, when its frame draws
     /// a readable one. Reported as its own field — never folded into a status
     /// snippet — so a reader cannot mistake it for something the session said.
@@ -1094,6 +1107,7 @@ mod tests {
             status: SessionStatus::Idle,
             kind: SessionKind::Pty,
             logical_input_blocked: false,
+            pending_logical_input_count: None,
             composer_text: None,
             composer_attestation: ComposerAttestation::NotTyped,
         };
@@ -1125,6 +1139,7 @@ mod tests {
                 status: SessionStatus::Idle,
                 kind: SessionKind::Pty,
                 logical_input_blocked: true,
+                pending_logical_input_count: None,
                 composer_text: Some("half typed".to_string()),
                 composer_attestation: ComposerAttestation::Typed,
             }],

@@ -282,6 +282,7 @@ mod tests {
             status: kanna_daemon::protocol::SessionStatus::Idle,
             kind,
             logical_input_blocked: false,
+            pending_logical_input_count: None,
             composer_text: None,
             composer_attestation: Default::default(),
         }

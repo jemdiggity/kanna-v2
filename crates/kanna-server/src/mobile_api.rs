@@ -150,6 +150,12 @@ pub struct TaskSummary {
     pub pin_order: Option<i64>,
     #[serde(default)]
     pub blocked_by_task_ids: Vec<String>,
+    /// Inputs retained behind a typed terminal draft (or whose delivery is
+    /// explicitly uncertain). Zero means there is no sender-visible backlog.
+    #[serde(default)]
+    pub queued_input_count: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queued_input_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -241,6 +247,10 @@ pub struct TaskDetail {
     /// from a peer that predates the record still deserializes.
     #[serde(default)]
     pub delivered_input_count: i64,
+    #[serde(default)]
+    pub queued_input_count: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queued_input_reason: Option<String>,
     pub parent_task_id: Option<String>,
     /// Direct children of this task, oldest first — the downward view of
     /// `parent_task_id`. **Closed children are included**: parentage is
@@ -727,12 +737,22 @@ impl MobileApi {
                     .latest_stage_run(&item.id)
                     .map_err(|e| format!("db error: {}", e))?
                     .and_then(|run| run.agent);
+                let queued_input_count = self
+                    ._db
+                    .count_queued_task_inputs(&item.id)
+                    .map_err(|e| format!("db error: {}", e))?;
+                let queued_input_reason = self
+                    ._db
+                    .queued_task_input_reason(&item.id)
+                    .map_err(|e| format!("db error: {}", e))?;
                 Ok(map_task_summary(
                     item,
                     repo_name,
                     blocked_by_task_ids,
                     &self.config.desktop_id,
                     agent,
+                    queued_input_count,
+                    queued_input_reason,
                 ))
             })
             .collect()
@@ -797,6 +817,14 @@ impl MobileApi {
             ._db
             .count_task_inputs(&item.id)
             .map_err(|e| format!("db error: {}", e))?;
+        let queued_input_count = self
+            ._db
+            .count_queued_task_inputs(&item.id)
+            .map_err(|e| format!("db error: {}", e))?;
+        let queued_input_reason = self
+            ._db
+            .queued_task_input_reason(&item.id)
+            .map_err(|e| format!("db error: {}", e))?;
         Ok(Some(map_task_detail(
             item,
             repo.as_ref(),
@@ -808,6 +836,8 @@ impl MobileApi {
                 child_task_ids,
                 blocked_by_task_ids,
                 delivered_input_count,
+                queued_input_count,
+                queued_input_reason,
             },
         )))
     }
@@ -992,6 +1022,8 @@ fn map_task_summary(
     blocked_by_task_ids: Vec<String>,
     machine_id: &str,
     agent: Option<String>,
+    queued_input_count: i64,
+    queued_input_reason: Option<String>,
 ) -> TaskSummary {
     let full_prompt = item.prompt.clone();
     let prompt = full_prompt.as_deref().map(bound_task_listing_prompt);
@@ -1023,6 +1055,8 @@ fn map_task_summary(
         pinned: item.pinned.unwrap_or(0) != 0,
         pin_order: item.pin_order,
         blocked_by_task_ids,
+        queued_input_count,
+        queued_input_reason,
     }
 }
 
@@ -1036,6 +1070,8 @@ struct TaskDetailRelations {
     child_task_ids: Vec<String>,
     blocked_by_task_ids: Vec<String>,
     delivered_input_count: i64,
+    queued_input_count: i64,
+    queued_input_reason: Option<String>,
 }
 
 fn map_task_detail(
@@ -1051,6 +1087,8 @@ fn map_task_detail(
         child_task_ids,
         blocked_by_task_ids,
         delivered_input_count,
+        queued_input_count,
+        queued_input_reason,
     } = relations;
     let prompt = item.prompt.clone();
     let title = item
@@ -1148,6 +1186,8 @@ fn map_task_detail(
         revision_rounds: item.revision_rounds,
         revision_limit,
         delivered_input_count,
+        queued_input_count,
+        queued_input_reason,
         parent_task_id: item.parent_task_id,
         child_task_ids,
         blocked_by_task_ids,

@@ -127,6 +127,7 @@ pub(crate) async fn stream_output(
     daemon_lifecycle: DaemonLifecycle,
     session: Arc<SessionHandle>,
 ) {
+    let session_pid = session.pty.lock().await.pid();
     let async_fd = match AsyncFd::new(io_fd) {
         Ok(fd) => fd,
         Err(error) => {
@@ -258,9 +259,14 @@ pub(crate) async fn stream_output(
                                     .pop_front()
                                     .expect("pending input disappeared before completion");
                                 let logical_after_write = completed.take_logical_after_write();
-                                for (data, written) in logical_after_write.into_iter().rev() {
-                                    pending_input
-                                        .push_front(PendingInput::acknowledged_logical(data, written));
+                                for (data, written, released_from_draft) in
+                                    logical_after_write.into_iter().rev()
+                                {
+                                    pending_input.push_front(PendingInput::acknowledged_logical(
+                                        data,
+                                        written,
+                                        released_from_draft,
+                                    ));
                                 }
                                 if completed.kind == PendingInputKind::LogicalEnter
                                     && session.complete_logical_input().is_err()
@@ -270,6 +276,26 @@ pub(crate) async fn stream_output(
                                         session_id
                                     );
                                     break;
+                                }
+                                if completed.kind == PendingInputKind::LogicalEnter {
+                                    // The CLI needs a processing turn after
+                                    // Enter before another queued message can
+                                    // safely own its composer. The existing
+                                    // text -> Enter fence did not protect the
+                                    // Enter -> next-message boundary.
+                                    logical_submit_at = Some(
+                                        Instant::now()
+                                            + Duration::from_millis(LOGICAL_INPUT_SUBMIT_DELAY_MS),
+                                    );
+                                    if completed.logical_released_from_draft() {
+                                        let event = Event::LogicalInputReleased {
+                                            session_id: session_id.clone(),
+                                            session_pid,
+                                        };
+                                        if let Ok(json) = serde_json::to_string(&event) {
+                                            let _ = broadcast_tx.send(json);
+                                        }
+                                    }
                                 }
                                 // A declared draft has now actually reached
                                 // the terminal, so frames rendered after it

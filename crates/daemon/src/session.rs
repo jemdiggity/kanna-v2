@@ -173,7 +173,8 @@ pub struct PendingInput {
     declared_draft: bool,
     written: Option<oneshot::Sender<()>>,
     #[cfg_attr(not(test), allow(dead_code))]
-    logical_after_write: Vec<(Vec<u8>, Option<oneshot::Sender<()>>)>,
+    logical_after_write: Vec<(Vec<u8>, Option<oneshot::Sender<()>>, bool)>,
+    logical_released_from_draft: bool,
 }
 
 impl PendingInput {
@@ -184,6 +185,7 @@ impl PendingInput {
             declared_draft: false,
             written,
             logical_after_write: Vec::new(),
+            logical_released_from_draft: false,
         }
     }
 
@@ -194,13 +196,14 @@ impl PendingInput {
             declared_draft: true,
             written,
             logical_after_write: Vec::new(),
+            logical_released_from_draft: false,
         }
     }
 
     fn raw_submission(
         data: Vec<u8>,
         written: Option<oneshot::Sender<()>>,
-        logical_after_write: Vec<(Vec<u8>, Option<oneshot::Sender<()>>)>,
+        logical_after_write: Vec<(Vec<u8>, Option<oneshot::Sender<()>>, bool)>,
     ) -> Self {
         Self {
             data,
@@ -208,6 +211,7 @@ impl PendingInput {
             declared_draft: false,
             written,
             logical_after_write,
+            logical_released_from_draft: false,
         }
     }
 
@@ -219,6 +223,7 @@ impl PendingInput {
     pub(crate) fn acknowledged_logical(
         data: Vec<u8>,
         written: Option<oneshot::Sender<()>>,
+        released_from_draft: bool,
     ) -> Self {
         if data.is_empty() {
             Self {
@@ -227,6 +232,7 @@ impl PendingInput {
                 declared_draft: false,
                 written,
                 logical_after_write: Vec::new(),
+                logical_released_from_draft: released_from_draft,
             }
         } else {
             Self {
@@ -235,6 +241,7 @@ impl PendingInput {
                 declared_draft: false,
                 written,
                 logical_after_write: Vec::new(),
+                logical_released_from_draft: released_from_draft,
             }
         }
     }
@@ -260,10 +267,14 @@ impl PendingInput {
         }
     }
 
+    pub fn logical_released_from_draft(&self) -> bool {
+        self.logical_released_from_draft
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn take_logical_after_write(
         &mut self,
-    ) -> Vec<(Vec<u8>, Option<oneshot::Sender<()>>)> {
+    ) -> Vec<(Vec<u8>, Option<oneshot::Sender<()>>, bool)> {
         std::mem::take(&mut self.logical_after_write)
     }
 }
@@ -324,6 +335,7 @@ struct InputCoordinationState {
 struct QueuedLogicalInput {
     data: Vec<u8>,
     dispatched: bool,
+    released_from_draft: bool,
     /// Fires when this message's terminating Enter is written. It travels with
     /// the message rather than with the call that queued it, so a message
     /// released by a later boundary or by composer attestation acknowledges
@@ -348,6 +360,7 @@ impl InputCoordinationState {
                 .map(|data| QueuedLogicalInput {
                     data,
                     dispatched: false,
+                    released_from_draft: true,
                     written: None,
                 })
                 .collect(),
@@ -466,6 +479,7 @@ fn dispatch_accepted_logical_inputs(
             .send(PendingInput::acknowledged_logical(
                 logical_input.data.clone(),
                 logical_input.written.take(),
+                logical_input.released_from_draft,
             ))
             .map_err(|_| InputQueueError::Closed)?;
         logical_input.dispatched = true;
@@ -557,8 +571,11 @@ impl SessionHandle {
                 let mut logical_after_write = Vec::new();
                 for logical_input in &mut state.logical_inputs {
                     if !logical_input.dispatched {
-                        logical_after_write
-                            .push((logical_input.data.clone(), logical_input.written.take()));
+                        logical_after_write.push((
+                            logical_input.data.clone(),
+                            logical_input.written.take(),
+                            true,
+                        ));
                         logical_input.dispatched = true;
                     }
                 }
@@ -617,9 +634,11 @@ impl SessionHandle {
             return Err(InputQueueError::InheritedDraftStateUnknown);
         }
         let (written_tx, written) = oneshot::channel();
+        let released_from_draft = state.draft_holds_input();
         state.logical_inputs.push_back(QueuedLogicalInput {
             data: data.clone(),
             dispatched: false,
+            released_from_draft,
             written: Some(written_tx),
         });
         if state.draft_holds_input() {
@@ -634,7 +653,7 @@ impl SessionHandle {
             .and_then(|logical_input| logical_input.written.take());
         if self
             .input_tx
-            .send(PendingInput::acknowledged_logical(data, queued_ack))
+            .send(PendingInput::acknowledged_logical(data, queued_ack, false))
             .is_err()
         {
             state.logical_inputs.pop_back();
@@ -660,6 +679,13 @@ impl SessionHandle {
             .lock()
             .map(|state| !state.raw_input_draft_state_known)
             .unwrap_or(true)
+    }
+
+    pub fn pending_logical_input_count(&self) -> usize {
+        self.input_coordination
+            .lock()
+            .map(|state| state.logical_inputs.len())
+            .unwrap_or(0)
     }
 
     /// Whether a logical message would be withheld from the PTY right now:
@@ -1094,6 +1120,7 @@ impl SessionHandle {
             status,
             kind: crate::protocol::SessionKind::Pty,
             logical_input_blocked: self.logical_input_blocked(),
+            pending_logical_input_count: Some(self.pending_logical_input_count()),
             composer_text: self.composer_line().await,
             composer_attestation: self.composer_attestation(),
         }
@@ -1791,7 +1818,10 @@ mod tests {
         boundary
             .take_logical_after_write()
             .into_iter()
-            .map(|(data, _written)| data)
+            .map(|(data, _written, released_from_draft)| {
+                assert!(released_from_draft);
+                data
+            })
             .collect()
     }
 
@@ -1826,10 +1856,10 @@ mod tests {
         assert_eq!(boundary.data, b"\r");
         assert!(input_rx.try_recv().is_err());
         let mut released = boundary.take_logical_after_write().into_iter();
-        let (first_data, _) = released.next().expect("first released message");
-        let (second_data, _) = released.next().expect("second released message");
-        let first = super::PendingInput::acknowledged_logical(first_data, None);
-        let second = super::PendingInput::acknowledged_logical(second_data, None);
+        let (first_data, _, first_released) = released.next().expect("first released message");
+        let (second_data, _, second_released) = released.next().expect("second released message");
+        let first = super::PendingInput::acknowledged_logical(first_data, None, first_released);
+        let second = super::PendingInput::acknowledged_logical(second_data, None, second_released);
         assert_eq!(first.kind, super::PendingInputKind::LogicalMessage);
         assert_eq!(first.data, b"manager one");
         assert_eq!(second.kind, super::PendingInputKind::LogicalMessage);

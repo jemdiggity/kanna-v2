@@ -27,6 +27,7 @@ import type {
   TaskFileMentionInput,
   TaskFileMentionResolution,
   TaskInputAttachment,
+  TaskInputResult,
   TaskDetail,
   TaskSummary
 } from "../api/types";
@@ -240,11 +241,16 @@ export function createLanTransport(
       input: string,
       attachment?: TaskInputAttachment
     ) =>
-      request<void>(`/v1/tasks/${encodeURIComponent(taskId)}/input`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(attachment ? { input, attachment } : { input })
-      }),
+      request<TaskInputResult | undefined>(
+        `/v1/tasks/${encodeURIComponent(taskId)}/input`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(attachment ? { input, attachment } : { input })
+        }
+      ).then((result) =>
+        result?.status === "queued" ? result : { status: "delivered" }
+      ),
     // A LAN connection is pinned to one desktop, so that desktop's own status
     // is the answer. Read fresh rather than reusing the cached
     // `kspStreamVersion` probe: the desktop can be upgraded under a live app.
