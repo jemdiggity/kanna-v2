@@ -29,14 +29,13 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-/// Rows of scrollback kept above the visible screen in the initial snapshot.
+/// Pagefuls of scrollback kept above the visible screen in the initial
+/// snapshot. Everything older is one scroll gesture away.
 ///
-/// Sized to render instantly on a poor link rather than to be complete: 400
-/// plain lines is tens of KiB, an order of magnitude below the ~225 KB–977 KB
-/// full snapshots observed on real sessions
-/// (`docs/2026-08-15-long-lived-codex-terminal-fidelity-diagnosis.md`).
-/// Everything older is one scroll gesture away.
-pub(crate) const TERMINAL_WINDOW_SCROLLBACK_LINES: usize = 400;
+/// This is deliberately relative to the rendered grid. The old fixed 400-row
+/// tail was bounded in bytes, but it was still sixteen pagefuls at the daemon's
+/// common 24-row attach geometry and visibly poured history into a phone.
+pub(crate) const TERMINAL_WINDOW_SCROLLBACK_PAGES: usize = 2;
 
 /// Hard ceiling on the window, whatever its line count.
 ///
@@ -90,10 +89,13 @@ pub(crate) struct TerminalWindow {
 /// Split a serialized terminal into the window to send and the scrollback to
 /// retain. `rows` is the terminal's visible height, which is never trimmed.
 pub(crate) fn window_snapshot(vt: &str, rows: u16) -> TerminalWindow {
+    let scrollback_lines = usize::from(rows)
+        .max(1)
+        .saturating_mul(TERMINAL_WINDOW_SCROLLBACK_PAGES);
     window_snapshot_with_limits(
         vt,
         rows,
-        TERMINAL_WINDOW_SCROLLBACK_LINES,
+        scrollback_lines,
         TERMINAL_WINDOW_MAX_BYTES,
         TERMINAL_HISTORY_RETENTION_BYTES,
     )
@@ -471,6 +473,22 @@ mod tests {
         assert_eq!(windowed.window, vt);
         assert!(windowed.history.is_empty());
         assert!(!windowed.truncated);
+    }
+
+    #[test]
+    fn default_window_is_two_scrollback_pages_plus_the_screen() {
+        let vt = lines(5_000, "row-");
+        let windowed = window_snapshot(&vt, 24);
+        let kept: Vec<&str> = windowed
+            .window
+            .trim_start_matches(FRAGMENT_STYLE_RESET)
+            .split("\r\n")
+            .collect();
+
+        assert_eq!(kept.len(), 24 * (TERMINAL_WINDOW_SCROLLBACK_PAGES + 1));
+        assert_eq!(kept.first(), Some(&"row-4928"));
+        assert_eq!(kept.last(), Some(&"row-4999"));
+        assert_eq!(windowed.history.len(), 4_928);
     }
 
     #[test]
