@@ -141,6 +141,10 @@ enum Evt {
         session_id: String,
         status: SessionStatus,
     },
+    LogicalInputReleased {
+        session_id: String,
+        session_pid: u32,
+    },
     Ok,
     Error {
         code: Option<ErrorCode>,
@@ -231,7 +235,7 @@ fn input_if_session_rejects_a_different_observed_pid() {
 }
 
 #[test]
-fn logical_input_waits_for_partial_raw_input_and_submits_separately() {
+fn queued_logical_inputs_release_as_separate_real_pty_submissions() {
     let daemon = DaemonHandle::start();
     let mut conn = daemon.connect();
     let session_id = "draft-isolation";
@@ -241,18 +245,34 @@ fn logical_input_waits_for_partial_raw_input_and_submits_separately() {
         "stty -echo; while IFS= read -r line; do printf 'LINE:<%s>\\n' \"$line\"; done",
     );
 
+    conn.send(&Cmd::List);
+    let session_pid = match conn.recv() {
+        Evt::SessionList { sessions } => sessions
+            .iter()
+            .find(|session| session["session_id"] == session_id)
+            .and_then(|session| session["pid"].as_u64())
+            .and_then(|pid| u32::try_from(pid).ok())
+            .expect("spawned session should have a pid"),
+        other => panic!("expected SessionList, got: {other:?}"),
+    };
+
     conn.send(&Cmd::InputNoReply {
         session_id: session_id.to_string(),
         data: b"human draft".to_vec(),
     });
-    conn.send(&Cmd::SubmitInput {
-        session_id: session_id.to_string(),
-        data: b"manager message".to_vec(),
-    });
-    // Accepted into the queue, but not submitted — and the daemon says which.
-    match conn.recv() {
-        Evt::Error { code, .. } => assert_eq!(code, Some(ErrorCode::LogicalInputHeldByDraft)),
-        other => panic!("a message held behind a draft must not answer Ok, got: {other:?}"),
+    for message in [
+        b"first manager message".as_slice(),
+        b"second manager message",
+    ] {
+        conn.send(&Cmd::SubmitInput {
+            session_id: session_id.to_string(),
+            data: message.to_vec(),
+        });
+        // Accepted into the queue, but not submitted — and the daemon says which.
+        match conn.recv() {
+            Evt::Error { code, .. } => assert_eq!(code, Some(ErrorCode::LogicalInputHeldByDraft)),
+            other => panic!("a message held behind a draft must not answer Ok, got: {other:?}"),
+        }
     }
 
     thread::sleep(Duration::from_millis(300));
@@ -267,6 +287,10 @@ fn logical_input_waits_for_partial_raw_input_and_submits_separately() {
         ),
     }
 
+    let mut subscriber = daemon.connect();
+    subscriber.send(&Cmd::Subscribe);
+    assert!(matches!(subscriber.recv(), Evt::Ok));
+
     conn.send(&Cmd::InputBoundary {
         session_id: session_id.to_string(),
         data: b"\r".to_vec(),
@@ -280,13 +304,16 @@ fn logical_input_waits_for_partial_raw_input_and_submits_separately() {
         });
         let snapshot = recv_snapshot(&mut conn, session_id);
         let human = snapshot.vt.find("LINE:<human draft>");
-        let manager = snapshot.vt.find("LINE:<manager message>");
-        if let (Some(human), Some(manager)) = (human, manager) {
+        let first = snapshot.vt.find("LINE:<first manager message>");
+        let second = snapshot.vt.find("LINE:<second manager message>");
+        if let (Some(human), Some(first), Some(second)) = (human, first, second) {
             assert!(
-                human < manager,
-                "raw draft must submit before the queued message"
+                human < first && first < second,
+                "the draft and queued messages must be submitted in FIFO order"
             );
-            assert!(!snapshot.vt.contains("human draftmanager message"));
+            assert!(!snapshot
+                .vt
+                .contains("first manager messagesecond manager message"));
             break;
         }
         assert!(
@@ -295,6 +322,38 @@ fn logical_input_waits_for_partial_raw_input_and_submits_separately() {
             snapshot.vt
         );
         thread::sleep(Duration::from_millis(20));
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut released = 0;
+    while released < 2 {
+        match subscriber.recv_with_timeout(Duration::from_millis(100)) {
+            Ok(Evt::LogicalInputReleased {
+                session_id: released_session,
+                session_pid: released_pid,
+            }) => {
+                assert_eq!(released_session, session_id);
+                assert_eq!(released_pid, session_pid);
+                released += 1;
+            }
+            Ok(_) | Err(_) if Instant::now() < deadline => {}
+            Ok(other) => panic!("timed out after unexpected subscriber event: {other:?}"),
+            Err(error) => panic!("timed out waiting for logical release events: {error}"),
+        }
+    }
+
+    let no_extra_release_deadline = Instant::now() + Duration::from_millis(200);
+    while Instant::now() < no_extra_release_deadline {
+        if let Ok(Evt::LogicalInputReleased {
+            session_id: released_session,
+            ..
+        }) = subscriber.recv_with_timeout(Duration::from_millis(25))
+        {
+            assert_ne!(
+                released_session, session_id,
+                "each queued message must emit exactly one release event"
+            );
+        }
     }
 }
 
@@ -2816,7 +2875,7 @@ fn same_id_reuse_waits_for_old_reader_exit_and_recovery_teardown() {
             }
             Ok(Evt::Exit { .. }) => panic!("old Exit escaped after replacement SessionCreated"),
             Ok(Evt::SessionCreated { .. } | Evt::Snapshot { .. } | Evt::Ok | Evt::Unknown) => {}
-            Ok(Evt::SessionList { .. } | Evt::Error { .. }) => {}
+            Ok(Evt::SessionList { .. } | Evt::LogicalInputReleased { .. } | Evt::Error { .. }) => {}
             Err(_) => {}
         }
     }
