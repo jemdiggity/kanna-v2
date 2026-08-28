@@ -74,6 +74,7 @@ describe("Kanna repository cache defaults", () => {
     expect(positions, "setup keeps the cache install after environment sync").toEqual(
       [...positions].sort((a, b) => a - b)
     );
+    expect(setup.slice(setup.indexOf(localSetupCommand) + 1)).toContain("./kd env sync");
   });
 
   it("runs one shared machine-local hook without letting it block setup", () => {
@@ -126,6 +127,7 @@ describe("Kanna repository cache defaults", () => {
     const unmountedVolume = resolve(fixture, "external-volume-unmounted");
     const localHook = resolve(fixture, "setup.local.sh");
     const localBuild = resolve(repo, ".build");
+    const targetRecord = resolve(repo, ".kanna-external-build-target");
     const externalBuild = resolve(volume, "kanna-builds", "kanna", "repo");
 
     try {
@@ -147,12 +149,14 @@ describe("Kanna repository cache defaults", () => {
       execFileSync("/bin/sh", [localHook], { cwd: repo, stdio: "ignore" });
       expect(lstatSync(localBuild).isSymbolicLink()).toBe(true);
       expect(readlinkSync(localBuild)).toBe(externalBuild);
+      expect(readFileSync(targetRecord, "utf8")).toBe(`${externalBuild}\n`);
       expect(readFileSync(resolve(externalBuild, "artifact.txt"), "utf8")).toBe("keep me\n");
 
       renameSync(volume, unmountedVolume);
       execFileSync("/bin/sh", [localHook], { cwd: repo, stdio: "ignore" });
       expect(lstatSync(localBuild).isDirectory()).toBe(true);
       expect(lstatSync(localBuild).isSymbolicLink()).toBe(false);
+      expect(readFileSync(targetRecord, "utf8")).toBe(`${externalBuild}\n`);
       expect(
         readFileSync(
           resolve(unmountedVolume, "kanna-builds", "kanna", "repo", "artifact.txt"),
@@ -164,6 +168,7 @@ describe("Kanna repository cache defaults", () => {
       execFileSync("/bin/sh", [localHook], { cwd: repo, stdio: "ignore" });
       expect(lstatSync(localBuild).isSymbolicLink()).toBe(true);
       expect(readlinkSync(localBuild)).toBe(externalBuild);
+      expect(readFileSync(targetRecord, "utf8")).toBe(`${externalBuild}\n`);
     } finally {
       rmSync(fixture, { recursive: true, force: true });
     }

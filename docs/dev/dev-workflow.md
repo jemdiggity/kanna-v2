@@ -311,11 +311,19 @@ copy of something an operator wrote deliberately.
 
 ### Machine-local workspace setup
 
-The final `setup` command optionally runs `.kanna/setup.local.sh` from the
+The `setup` list optionally runs `.kanna/setup.local.sh` from the
 repository's **primary checkout**. The primary checkout is deliberate: ignored
 files are not copied by `git worktree add`, so one local hook there is shared by
 every current and future task worktree. A missing, non-executable, or failing
 hook is ignored and cannot block task creation or a stage transition.
+
+Tracked `kd env sync` steps bracket that optional hook. Before the hook, env
+sync atomically migrates any identity-safe legacy external `.build` symlink
+into the durable target record, including a dangling link whose volume is
+currently unavailable. After the hook, env sync captures a first-time link
+created by an older installed hook. A link whose final component does not
+exactly match the worktree fails setup visibly; env sync derives the target
+from the link and never reconstructs the hook's machine-local external root.
 
 Start from the committed template, from either the primary checkout or a task
 worktree:
@@ -346,20 +354,29 @@ fresh-worktree runs only create a directory and symlink.
 Do not eject the volume during a build. An ejection makes the symlink dangling
 immediately and the next build fails visibly at `.build`; rerun the local hook
 afterward. When setup finds its own dangling link while the volume is absent, it
-replaces only the link with an empty local `.build` directory and preserves the
-external artifacts. After remounting, setup relinks an empty fallback; if new
-local artifacts were produced meanwhile, it leaves them in place for an
-explicit manual choice.
+first persists the exact external target in the gitignored
+`.kanna-external-build-target` record, then replaces only the link with an empty
+local `.build` directory and preserves the external artifacts. The target record
+survives this fallback. After remounting, setup relinks an empty fallback; if
+new local artifacts were produced meanwhile, it leaves them in place for an
+explicit manual choice while retaining the record for teardown.
 
 Cargo's `.cargo/config.toml` resolves `.build` and `.build/cargo-build` relative
 to the worktree, and kd's sidecar staging reads final binaries through that same
 worktree-private path, so the symlink preserves both Cargo isolation and the
-private sidecar provenance boundary. `./kd clean`, however, removes a live
-symlink itself rather than following it, so the external directory and its
-artifacts remain. Its `existsSync` guard skips an already-dangling symlink; the
-local hook repairs that case on its next run. Remove the exact worktree
-directory on the external volume explicitly when the artifacts are no longer
-wanted; the next setup otherwise relinks it.
+private sidecar provenance boundary. The durable target record is `kd clean`'s
+source of truth for external storage; setup computes it from its machine-local
+configuration and cleanup reads it rather than duplicating that computation.
+Legacy workspaces without a record still use their `.build` symlink. Cleanup
+removes a target only when its final path component exactly matches the current
+worktree directory. A mismatched record, a record/link disagreement, or a
+chained external target fails visibly instead of risking another workspace. If
+the recorded target cannot be resolved (for example, because its volume is
+unavailable), cleanup fails visibly and preserves the record and local layout
+for a later retry; it never reports success or guesses another path. Once the
+target is available, the repository's normal `./kd clean --all` teardown
+removes the exact per-workspace external directory, local `.build` path, and
+target record.
 
 The setup list comes from `origin/main` but runs against the forked branch. This
 hook invocation does not depend on a tracked script in that branch: branches

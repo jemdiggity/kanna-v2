@@ -3,6 +3,7 @@ node_modules/
 dist/
 target/
 .build/
+/.kanna-external-build-target
 .kanna-daemon/
 .kanna-daemon-*/
 .kanna-daemon-e2e/

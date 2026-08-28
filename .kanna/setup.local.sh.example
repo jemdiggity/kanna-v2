@@ -14,19 +14,51 @@ workspace_root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
 workspace_name=$(basename "$workspace_root")
 local_build="$workspace_root/.build"
 external_workspace_build="$external_build_root/$workspace_name"
+external_target_record="$workspace_root/.kanna-external-build-target"
+
+# This record is the durable source of truth shared with `kd clean`; Cargo uses
+# the matching `.build` symlink whenever the volume is available. Keeping the
+# record outside `.build` lets cleanup retain the target while `.build` is a
+# local fallback. Cleanup reads it instead of reconstructing this local path.
+if [ -e "$external_target_record" ] || [ -L "$external_target_record" ]; then
+  if [ ! -f "$external_target_record" ] || [ -L "$external_target_record" ]; then
+    warn "$external_target_record is not a regular file; leaving the current .build layout unchanged"
+    exit 0
+  fi
+  recorded_external_build=$(cat "$external_target_record" 2>/dev/null || true)
+  if [ "$recorded_external_build" != "$external_workspace_build" ]; then
+    warn "$external_target_record names another target; leaving the current .build layout unchanged"
+    exit 0
+  fi
+fi
+
+record_external_target() {
+  if [ -f "$external_target_record" ] && [ ! -L "$external_target_record" ]; then
+    return 0
+  fi
+  record_tmp="$external_target_record.$$"
+  if (umask 077 && printf '%s\n' "$external_workspace_build" > "$record_tmp") &&
+    mv "$record_tmp" "$external_target_record"; then
+    return 0
+  fi
+  rm -f "$record_tmp" 2>/dev/null || true
+  warn "could not record external build target $external_workspace_build"
+  return 1
+}
 
 # A previously configured link becomes dangling if the volume is ejected.
 # Replace only this hook's dangling link with an empty local directory; the
-# external artifacts remain untouched and can be relinked after remounting.
+# external artifacts and durable target record remain untouched for cleanup or
+# relinking after remounting.
 if [ ! -d "$external_volume" ] || [ ! -w "$external_volume" ]; then
   if [ -L "$local_build" ] && [ ! -e "$local_build" ]; then
     link_target=$(readlink "$local_build" 2>/dev/null || true)
     case "$link_target" in
       "$external_build_root"/*)
-        if rm "$local_build" && mkdir "$local_build"; then
+        if record_external_target && rm "$local_build" && mkdir "$local_build"; then
           warn "external build volume unavailable; replaced dangling .build link with a local directory"
         else
-          warn "external build volume unavailable and dangling .build link could not be repaired"
+          warn "external build volume unavailable and dangling .build link could not be safely repaired"
         fi
         ;;
     esac
@@ -42,7 +74,9 @@ fi
 if [ -L "$local_build" ]; then
   link_target=$(readlink "$local_build" 2>/dev/null || true)
   if [ "$link_target" = "$external_workspace_build" ]; then
-    if ! mkdir -p "$external_workspace_build"; then
+    if ! record_external_target; then
+      warn "could not persist the external target record; preserving the .build link"
+    elif ! mkdir -p "$external_workspace_build"; then
       warn "could not create $external_workspace_build"
     fi
   else
@@ -54,7 +88,11 @@ fi
 if [ -d "$local_build" ]; then
   if [ ! -e "$external_workspace_build" ]; then
     if mv "$local_build" "$external_workspace_build"; then
-      if ! ln -s "$external_workspace_build" "$local_build"; then
+      if ! record_external_target; then
+        if ! mv "$external_workspace_build" "$local_build"; then
+          warn "could not record $external_workspace_build or restore its artifacts to $local_build"
+        fi
+      elif ! ln -s "$external_workspace_build" "$local_build"; then
         warn "migrated artifacts to $external_workspace_build but could not create the .build link"
       fi
     else
@@ -66,7 +104,7 @@ if [ -d "$local_build" ]; then
   # An empty local fallback created while the volume was absent is safe to
   # replace. Never merge or delete a non-empty local build tree implicitly.
   if [ -z "$(ls -A "$local_build" 2>/dev/null)" ]; then
-    if rmdir "$local_build" && ln -s "$external_workspace_build" "$local_build"; then
+    if record_external_target && rmdir "$local_build" && ln -s "$external_workspace_build" "$local_build"; then
       exit 0
     fi
     mkdir -p "$local_build" 2>/dev/null || true
@@ -87,7 +125,9 @@ if ! mkdir -p "$external_workspace_build"; then
   exit 0
 fi
 
-if ! ln -s "$external_workspace_build" "$local_build"; then
+if ! record_external_target; then
+  warn "could not persist the external target record; leaving .build unconfigured"
+elif ! ln -s "$external_workspace_build" "$local_build"; then
   warn "could not link .build to $external_workspace_build"
 fi
 
