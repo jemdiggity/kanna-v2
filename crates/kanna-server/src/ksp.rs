@@ -13434,11 +13434,16 @@ mod tests {
 
         match recv_frame(&mut second).await {
             ServerFrame::TermSnapshot { data_b64, .. } => {
-                assert_eq!(
-                    String::from_utf8(decode_frame_bytes(&data_b64)).expect("utf8 window"),
-                    vt,
-                    "the re-attached daemon snapshot is what hydrates the new viewer"
-                );
+                let snapshot =
+                    String::from_utf8(decode_frame_bytes(&data_b64)).expect("utf8 window");
+                let rows: Vec<&str> = snapshot
+                    .strip_prefix("\x1b[0m")
+                    .expect("a truncated snapshot resets inherited ANSI style")
+                    .split("\r\n")
+                    .collect();
+                assert_eq!(rows.len(), 72, "the snapshot keeps only three screenfuls");
+                assert_eq!(rows.first(), Some(&"row-28"));
+                assert_eq!(rows.last(), Some(&"row-99"));
             }
             other => panic!("expected a fresh bounded snapshot, got {other:?}"),
         }
