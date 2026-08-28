@@ -187,6 +187,7 @@ pub(crate) fn build_request_revision_request(
     metadata: Option<Value>,
 ) -> RequestRevisionRequest {
     RequestRevisionRequest {
+        run_id: None,
         target_stage,
         summary,
         prompt,
@@ -569,8 +570,12 @@ pub(crate) async fn run(command: TaskCommands) {
                 process::exit(1);
             });
             let base_url = resolve_server_base_url_from_env(server_url.as_deref());
-            let request =
+            let mut request =
                 build_request_revision_request(target_stage, summary, prompt, metadata_value);
+            bind_revision_request(&mut request).unwrap_or_else(|error| {
+                eprintln!("Error: {error}");
+                process::exit(1);
+            });
             let created = request_revision_via_api(&base_url, &task_id, &request)
                 .await
                 .unwrap_or_else(|e| {
@@ -867,4 +872,16 @@ pub(crate) async fn run(command: TaskCommands) {
             }
         }
     }
+}
+
+fn bind_revision_request(request: &mut RequestRevisionRequest) -> Result<(), String> {
+    if let Some(path) = std::env::var_os(kanna_tool_catalog::KANNA_COMPLETION_CONTEXT_ENV) {
+        let context = kanna_tool_catalog::read_completion_context(std::path::Path::new(&path))?;
+        request.run_id = Some(context.run_id);
+    } else if let Ok(run_id) = std::env::var(kanna_tool_catalog::KANNA_STAGE_RUN_ID_ENV) {
+        if !run_id.trim().is_empty() {
+            request.run_id = Some(run_id);
+        }
+    }
+    Ok(())
 }

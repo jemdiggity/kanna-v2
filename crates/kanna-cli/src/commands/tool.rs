@@ -201,6 +201,8 @@ pub(crate) async fn call_catalog_tool_with_task_id(
     request.machine_id = None;
     if name == "kanna_complete_stage" {
         bind_request_to_spawned_run(base_url, &mut request).await?;
+    } else if name == "kanna_request_revision" {
+        bind_revision_request_to_spawned_run(&mut request)?;
     }
     let kind = request.kind;
     // The tools this client advertises — including any override catalog — are
@@ -334,6 +336,24 @@ async fn wait_catalog_task_routed(
         }
         tokio::time::sleep(poll_interval.min(deadline - now)).await;
     }
+}
+
+fn bind_revision_request_to_spawned_run(request: &mut ResolvedRequest) -> Result<(), String> {
+    let run_id = match env::var_os(kanna_tool_catalog::KANNA_COMPLETION_CONTEXT_ENV) {
+        Some(path) => {
+            Some(kanna_tool_catalog::read_completion_context(std::path::Path::new(&path))?.run_id)
+        }
+        None => env::var(kanna_tool_catalog::KANNA_STAGE_RUN_ID_ENV).ok(),
+    };
+    let Some(run_id) = run_id.filter(|value| !value.trim().is_empty()) else {
+        return Ok(());
+    };
+    let body = request
+        .body
+        .as_object_mut()
+        .ok_or_else(|| "request-revision request body must be an object".to_string())?;
+    body.insert("runId".to_string(), Value::String(run_id));
+    Ok(())
 }
 
 async fn bind_request_to_spawned_run(

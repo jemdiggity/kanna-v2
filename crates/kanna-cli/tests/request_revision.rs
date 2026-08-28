@@ -14,9 +14,17 @@ fn request_revision_does_not_warn_when_workflow_socket_is_unavailable() {
         let bytes_read = stream.read(&mut buffer).unwrap();
         let request = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
         assert!(request.starts_with("POST /v1/tasks/task-1/actions/request-revision HTTP/1.1"));
-        assert!(request.contains(
-            r#"{"targetStage":"in progress","summary":"needs revision","prompt":"Please revise."}"#
-        ));
+        let body = request.split("\r\n\r\n").nth(1).unwrap();
+        let body: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "targetStage": "in progress",
+                "summary": "needs revision",
+                "prompt": "Please revise.",
+                "runId": "run-review-1",
+            })
+        );
 
         let body = r#"{"taskId":"task-2"}"#;
         stream
@@ -57,6 +65,8 @@ fn request_revision_does_not_warn_when_workflow_socket_is_unavailable() {
             "--server-url",
             &format!("http://{address}"),
         ])
+        .env_remove(kanna_tool_catalog::KANNA_COMPLETION_CONTEXT_ENV)
+        .env(kanna_tool_catalog::KANNA_STAGE_RUN_ID_ENV, "run-review-1")
         .env("KANNA_SOCKET_PATH", &socket_path)
         .output()
         .unwrap();

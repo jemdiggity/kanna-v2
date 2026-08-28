@@ -1123,10 +1123,147 @@ async fn wait_for_revision_run(db: &Db, task_id: &str, stage: &str) -> crate::db
     panic!("no {stage} revision run landed for task {task_id}");
 }
 
+fn seed_bound_review_run(db: &Db, task_id: &str, run_id: &str) {
+    db.insert_stage_run_with_completion_binding(
+        crate::db::NewStageRun {
+            id: run_id,
+            task_id,
+            stage: "review",
+            kind: "main",
+            agent: Some("review"),
+            agent_provider: Some("claude"),
+            model: None,
+            effort: None,
+            status: "running",
+            result: None,
+            feedback: None,
+            session_id: Some(task_id),
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: None,
+        },
+        Some("auto"),
+        true,
+    )
+    .unwrap();
+}
+
 fn cleanup_revision_budget_fixture(fixture: &RevisionBudgetFixture) {
     let _ = std::fs::remove_file(&fixture.socket_path);
     let _ = std::fs::remove_dir_all(&fixture.daemon_dir);
     let _ = std::fs::remove_dir_all(&fixture.repo_root);
+}
+
+/// A review verdict carries two identities: the task route and the immutable
+/// review run from the caller's spawn context. This drives two concurrent
+/// tasks through the real router and preparation path, proving a crossed pair
+/// is refused without spending a round while each legitimate pair remains
+/// independent and concludes its own review.
+#[tokio::test]
+async fn review_run_binding_refuses_cross_task_pair_and_allows_concurrent_verdicts() {
+    let fixture = setup_revision_budget_fixture_with_spent_rounds("run-binding", 5, 0);
+    assert!(Command::new("git")
+        .args(["branch", "task-budget-2"])
+        .current_dir(&fixture.repo_root)
+        .status()
+        .unwrap()
+        .success());
+    {
+        let db = Db::open(&fixture.config.db_path).unwrap();
+        seed_bound_review_run(&db, "budget-1", "review-run-1");
+        db.insert_test_pipeline_item(
+            "budget-2",
+            "repo-1",
+            "Add the other focused fix",
+            Some("Add the other focused fix"),
+            "review",
+            "2026-07-26 10:01:00",
+        )
+        .unwrap();
+        db.update_test_pipeline_item_stage_context(
+            "budget-2",
+            "task-budget-2",
+            "budget",
+            None,
+            "claude",
+        )
+        .unwrap();
+        seed_bound_review_run(&db, "budget-2", "review-run-2");
+    }
+
+    let daemon = spawn_fixture_daemon(fixture.socket_path.clone(), None, None);
+    let app = super::router(Arc::new(super::AppState::new(fixture.config.clone())));
+    let request = |task_id: &'static str, run_id: &'static str, finding: &'static str| {
+        Request::post(format!("/v1/tasks/{task_id}/actions/request-revision"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "runId": run_id,
+                    "targetStage": "in progress",
+                    "summary": finding,
+                    "prompt": format!("Fix {finding}.")
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    };
+
+    let crossed = app
+        .clone()
+        .oneshot(request("budget-1", "review-run-2", "crossed finding"))
+        .await
+        .unwrap();
+    let crossed_status = crossed.status();
+    let crossed_body = axum::body::to_bytes(crossed.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(crossed_status, StatusCode::CONFLICT);
+    let crossed_message = String::from_utf8_lossy(&crossed_body);
+    assert!(
+        crossed_message.contains("belongs to budget-2"),
+        "{crossed_message}"
+    );
+    assert!(
+        crossed_message.contains("No revision was started"),
+        "{crossed_message}"
+    );
+    {
+        let db = Db::open(&fixture.config.db_path).unwrap();
+        assert_eq!(db.task_revision_rounds("budget-1").unwrap(), 0);
+        assert_eq!(
+            db.stage_run("review-run-1").unwrap().unwrap().status,
+            "running"
+        );
+        assert_eq!(
+            db.stage_run("review-run-2").unwrap().unwrap().status,
+            "running"
+        );
+    }
+
+    let (first, second) = tokio::join!(
+        app.clone()
+            .oneshot(request("budget-1", "review-run-1", "first finding")),
+        app.clone()
+            .oneshot(request("budget-2", "review-run-2", "second finding"))
+    );
+    assert_eq!(first.unwrap().status(), StatusCode::OK);
+    assert_eq!(second.unwrap().status(), StatusCode::OK);
+
+    let db = Db::open(&fixture.config.db_path).unwrap();
+    wait_for_revision_run(&db, "budget-1", "in progress").await;
+    wait_for_revision_run(&db, "budget-2", "in progress").await;
+    assert_eq!(db.task_revision_rounds("budget-1").unwrap(), 1);
+    assert_eq!(db.task_revision_rounds("budget-2").unwrap(), 1);
+    let first_review = db.stage_run("review-run-1").unwrap().unwrap();
+    let second_review = db.stage_run("review-run-2").unwrap().unwrap();
+    assert_eq!(first_review.status, "failed");
+    assert_eq!(first_review.feedback.as_deref(), Some("first finding"));
+    assert_eq!(second_review.status, "failed");
+    assert_eq!(second_review.feedback.as_deref(), Some("second finding"));
+
+    daemon.abort();
+    drop(db);
+    cleanup_revision_budget_fixture(&fixture);
 }
 
 #[tokio::test]
@@ -2034,21 +2171,22 @@ async fn a_second_revision_is_refused_until_the_detached_transition_lands() {
     );
 
     let app = super::router(Arc::new(super::AppState::new(fixture.config.clone())));
-    let request = || {
+    let request = |run_id: Option<&str>| {
+        let mut body = serde_json::json!({
+            "targetStage": "in progress",
+            "summary": "QA failed: review-ui",
+            "prompt": "Fix the finding."
+        });
+        if let Some(run_id) = run_id {
+            body["runId"] = serde_json::Value::String(run_id.to_string());
+        }
         Request::post("/v1/tasks/budget-1/actions/request-revision")
             .header("content-type", "application/json")
-            .body(Body::from(
-                serde_json::json!({
-                    "targetStage": "in progress",
-                    "summary": "QA failed: review-ui",
-                    "prompt": "Fix the finding."
-                })
-                .to_string(),
-            ))
+            .body(Body::from(body.to_string()))
             .unwrap()
     };
 
-    let first = app.clone().oneshot(request()).await.unwrap();
+    let first = app.clone().oneshot(request(None)).await.unwrap();
     assert_eq!(first.status(), StatusCode::OK);
     let body = axum::body::to_bytes(first.into_body(), usize::MAX)
         .await
@@ -2065,7 +2203,7 @@ async fn a_second_revision_is_refused_until_the_detached_transition_lands() {
         .expect("the detached transition never reached the daemon")
         .expect("daemon gate dropped");
 
-    let second = app.clone().oneshot(request()).await.unwrap();
+    let second = app.clone().oneshot(request(None)).await.unwrap();
     let second_status = second.status();
     let second_body = axum::body::to_bytes(second.into_body(), usize::MAX)
         .await
@@ -2098,7 +2236,7 @@ async fn a_second_revision_is_refused_until_the_detached_transition_lands() {
     let _ = release_tx.send(());
 
     let db = Db::open(&fixture.config.db_path).unwrap();
-    wait_for_revision_run(&db, "budget-1", "in progress").await;
+    let revision_run = wait_for_revision_run(&db, "budget-1", "in progress").await;
     let revision_runs = db
         .list_stage_runs_for_task("budget-1")
         .unwrap()
@@ -2121,7 +2259,11 @@ async fn a_second_revision_is_refused_until_the_detached_transition_lands() {
     let mut third_status = StatusCode::CONFLICT;
     let mut third_body = Vec::new();
     for _ in 0..250 {
-        let third = app.clone().oneshot(request()).await.unwrap();
+        let third = app
+            .clone()
+            .oneshot(request(Some(&revision_run.id)))
+            .await
+            .unwrap();
         third_status = third.status();
         third_body = axum::body::to_bytes(third.into_body(), usize::MAX)
             .await

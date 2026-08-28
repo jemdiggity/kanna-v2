@@ -483,6 +483,11 @@ pub struct MergeHandoffRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestRevisionRequest {
+    /// Exact review run whose verdict this request concludes. Agent adapters
+    /// inject this from the immutable spawn context; it is intentionally not
+    /// exposed as an agent-authored tool argument.
+    #[serde(default)]
+    pub run_id: Option<String>,
     pub target_stage: String,
     pub summary: String,
     pub prompt: String,
