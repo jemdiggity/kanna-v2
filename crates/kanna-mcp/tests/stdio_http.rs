@@ -1817,13 +1817,14 @@ fn serve_reports_server_error_bodies_for_failed_actions() {
         body: Some(json!({
             "targetStage": "in progress",
             "summary": "QA failed",
-            "prompt": "Add the missing coverage."
+            "prompt": "Add the missing coverage.",
+            "runId": "run-review-1"
         })),
         response_status: "500 Internal Server Error",
         response_body: json!("failed to create worktree: No space left on device"),
     }]);
 
-    let responses = run_kanna_mcp(
+    let responses = run_kanna_mcp_with_env(
         &base_url,
         &[json!({
             "jsonrpc": "2.0",
@@ -1839,6 +1840,7 @@ fn serve_reports_server_error_bodies_for_failed_actions() {
                 }
             }
         })],
+        &[("KANNA_STAGE_RUN_ID", "run-review-1")],
     );
 
     server.join().expect("fixture server");

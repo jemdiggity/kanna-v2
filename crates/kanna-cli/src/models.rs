@@ -342,6 +342,8 @@ pub(crate) struct CompleteStageRequest {
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RequestRevisionRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) run_id: Option<String>,
     pub(crate) target_stage: String,
     pub(crate) summary: String,
     pub(crate) prompt: String,

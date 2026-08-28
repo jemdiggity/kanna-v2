@@ -1725,6 +1725,7 @@ pub(super) async fn request_revision(
                     format!("db error: {}", e),
                 )
             })?;
+            validate_revision_run_binding(&db, &source_task_id, payload.run_id.as_deref(), origin)?;
             let budget = match crate::task_creator::resolve_revision_budget(&db, &source_task_id) {
                 Ok(budget) => budget,
                 Err(error) => return Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, error)),
@@ -1996,4 +1997,89 @@ fn revision_stage_result(
             format!("invalid revision result: {}", e),
         )
     })
+}
+
+/// Fence an agent verdict to the review run that authored it.
+///
+/// The task id remains the routing key, but it is not sufficient proof of
+/// ownership: a stale environment or copied id can name another live task.
+/// Newly spawned runs are completion-bound, so their adapters must supply the
+/// immutable run id from the spawn context. Legacy runs keep the same
+/// compatibility exception as complete-stage. Human revisions deliberately
+/// remain usable after a review run has parked or exited.
+fn validate_revision_run_binding(
+    db: &Db,
+    task_id: &str,
+    requested_run_id: Option<&str>,
+    origin: crate::mobile_api::RevisionOrigin,
+) -> Result<(), (axum::http::StatusCode, String)> {
+    let current_run = db
+        .latest_stage_run(task_id)
+        .map_err(|error| db_write_error("db error", error))?;
+    let requested_run_id = match requested_run_id {
+        Some(run_id) if !run_id.trim().is_empty() => Some(run_id),
+        Some(_) => {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                "runId must be non-empty when provided".to_string(),
+            ))
+        }
+        None => None,
+    };
+
+    if let Some(requested_run_id) = requested_run_id {
+        let Some(current_run) = current_run else {
+            return Err((
+                axum::http::StatusCode::CONFLICT,
+                format!(
+                    "review run {requested_run_id} cannot conclude task {task_id}: the task has no stage run"
+                ),
+            ));
+        };
+        if current_run.id != requested_run_id || current_run.task_id != task_id {
+            let owner = db
+                .stage_run(requested_run_id)
+                .map_err(|error| db_write_error("db error", error))?
+                .map(|run| run.task_id)
+                .unwrap_or_else(|| "no task".to_string());
+            return Err((
+                axum::http::StatusCode::CONFLICT,
+                format!(
+                    "review run {requested_run_id} belongs to {owner} and cannot conclude task \
+                     {task_id}; that task's current run is {}. No revision was started and no \
+                     revision round was spent.",
+                    current_run.id
+                ),
+            ));
+        }
+        if origin.is_agent() && (current_run.kind != "main" || current_run.status != "running") {
+            return Err((
+                axum::http::StatusCode::CONFLICT,
+                format!(
+                    "review run {requested_run_id} is {} {} and cannot issue a new revision. No \
+                     revision was started and no revision round was spent.",
+                    current_run.status, current_run.kind
+                ),
+            ));
+        }
+        return Ok(());
+    }
+
+    if origin.is_agent() {
+        if let Some(current_run) = current_run {
+            if db
+                .stage_run_completion_bound(&current_run.id)
+                .map_err(|error| db_write_error("db error", error))?
+            {
+                return Err((
+                    axum::http::StatusCode::CONFLICT,
+                    "runId is required for this spawned review run; restart the \
+                     request-revision adapter if it predates the run. No revision was started \
+                     and no revision round was spent."
+                        .to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
