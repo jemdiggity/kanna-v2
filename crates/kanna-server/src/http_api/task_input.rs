@@ -516,7 +516,7 @@ pub(super) async fn send_task_input(
     let queue_message = task_input_message(&delivered_input).to_string();
     let queue_result = tokio::task::spawn_blocking(move || {
         let db = Db::open(&queue_db_path)?;
-        db.prepare_queued_task_input(&queue_task_id, source, &queue_message)
+        db.prepare_queued_task_input(&queue_task_id, live_session_pid, source, &queue_message)
     })
     .await;
     let queue_id = match queue_result {
@@ -585,29 +585,45 @@ pub(super) async fn send_task_input(
     if let Err(TaskInputError::HeldByRawDraft(message)) = delivered {
         let db_path = state.config.db_path.clone();
         let held_message = message.clone();
+        let held_task_id = task_id.clone();
         let persisted = tokio::task::spawn_blocking(move || {
             let db = Db::open(&db_path)?;
-            let still_queued = db.mark_queued_task_input_held(queue_id, &held_message)?;
-            let queued_input_count = db.count_queued_task_inputs(&task_id)?;
-            Ok::<_, rusqlite::Error>((still_queued, queued_input_count))
+            let still_queued =
+                db.mark_queued_task_input_held(queue_id, live_session_pid, &held_message)?;
+            let queued_input_count = db.count_queued_task_inputs(&held_task_id)?;
+            let queue_reason = (!still_queued)
+                .then(|| db.queued_task_input_reason_for_id(queue_id))
+                .transpose()?
+                .flatten();
+            Ok::<_, rusqlite::Error>((still_queued, queued_input_count, queue_reason))
         })
         .await;
-        let (still_queued, queued_input_count) = match persisted {
+        let (still_queued, queued_input_count, queue_reason) = match persisted {
             Ok(Ok(result)) => result,
             Ok(Err(error)) => {
                 // The daemon already accepted this logical message. Returning
                 // an error would invite a retry and duplicate it; the prepared
                 // row remains durable and visible while the DB error is logged.
                 log::error!("could not mark held task input {queue_id}: {error}");
-                (true, 1)
+                (true, 1, None)
             }
             Err(error) => {
                 log::error!("held task input queue worker failed for {queue_id}: {error}");
-                (true, 1)
+                (true, 1, None)
             }
         };
         state.publish_state_changed(StateChangeScope::Tasks);
         if !still_queued {
+            if queue_reason.as_deref() == Some("delivery_uncertain") {
+                return Err(task_input_http_error(
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    "delivery_uncertain",
+                    format!(
+                        "terminal input delivery is uncertain: the owning session for task {task_id} exited or was replaced before delivery was proven"
+                    ),
+                    None,
+                ));
+            }
             return Ok(axum::http::StatusCode::NO_CONTENT.into_response());
         }
         return Ok((

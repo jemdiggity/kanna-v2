@@ -468,6 +468,10 @@ pub enum Event {
     /// both its text and terminating Enter written to the PTY.
     LogicalInputReleased {
         session_id: String,
+        /// Child pid of the exact session incarnation that released it.
+        /// Session ids are reused across stage and recovery replacements.
+        #[serde(default)]
+        session_pid: u32,
     },
     SessionList {
         sessions: Vec<SessionInfo>,

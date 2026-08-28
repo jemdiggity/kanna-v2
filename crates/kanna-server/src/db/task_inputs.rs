@@ -193,13 +193,14 @@ impl Db {
     pub fn prepare_queued_task_input(
         &self,
         task_id: &str,
+        session_pid: u32,
         source: TaskInputSource,
         message: &str,
     ) -> Result<Option<i64>, rusqlite::Error> {
         let inserted = self.conn.execute(
-            "INSERT INTO queued_task_input (task_id, source, message, state)
-             SELECT id, ?, ?, 'preparing' FROM pipeline_item WHERE id = ?",
-            params![source.as_str(), message, task_id],
+            "INSERT INTO queued_task_input (task_id, session_pid, source, message, state)
+             SELECT id, ?, ?, ?, 'preparing' FROM pipeline_item WHERE id = ?",
+            params![session_pid, source.as_str(), message, task_id],
         )?;
         Ok((inserted == 1).then(|| self.conn.last_insert_rowid()))
     }
@@ -207,11 +208,13 @@ impl Db {
     pub fn mark_queued_task_input_held(
         &self,
         id: i64,
+        session_pid: u32,
         reason: &str,
     ) -> Result<bool, rusqlite::Error> {
         let changed = self.conn.execute(
-            "UPDATE queued_task_input SET state = 'held', reason = ? WHERE id = ?",
-            params![reason, id],
+            "UPDATE queued_task_input SET state = 'held', reason = ?
+             WHERE id = ? AND session_pid = ? AND state = 'preparing'",
+            params![reason, id, session_pid],
         )?;
         Ok(changed == 1)
     }
@@ -257,22 +260,29 @@ impl Db {
         })
     }
 
-    pub fn deliver_next_held_task_input(
+    pub fn deliver_next_released_task_input(
         &self,
         task_id: &str,
+        session_pid: u32,
+        include_preparing: bool,
     ) -> Result<Option<TaskInputRecord>, rusqlite::Error> {
-        let id: Option<i64> = self
+        let queued: Option<(i64, String)> = self
             .conn
             .query_row(
-                "SELECT id FROM queued_task_input
-                 WHERE task_id = ? AND state IN ('preparing', 'held') ORDER BY id LIMIT 1",
-                [task_id],
-                |row| row.get(0),
+                "SELECT id, state FROM queued_task_input
+                 WHERE task_id = ? AND session_pid = ? ORDER BY id LIMIT 1",
+                params![task_id, session_pid],
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        match id {
-            Some(id) => self.deliver_queued_task_input(id),
-            None => Ok(None),
+        match queued {
+            Some((id, state)) if state == "held" || (include_preparing && state == "preparing") => {
+                self.deliver_queued_task_input(id)
+            }
+            // An uncertain earlier slot may still be the daemon release this
+            // evidence describes. It is a FIFO barrier: skipping it would
+            // falsely attribute that release to a later message.
+            Some(_) | None => Ok(None),
         }
     }
 
@@ -284,13 +294,86 @@ impl Db {
         )
     }
 
-    pub fn count_held_task_inputs(&self, task_id: &str) -> Result<i64, rusqlite::Error> {
+    pub fn count_held_task_inputs(
+        &self,
+        task_id: &str,
+        session_pid: u32,
+    ) -> Result<i64, rusqlite::Error> {
         self.conn.query_row(
             "SELECT COUNT(*) FROM queued_task_input
-             WHERE task_id = ? AND state = 'held'",
-            [task_id],
+             WHERE task_id = ? AND session_pid = ? AND state = 'held'",
+            params![task_id, session_pid],
             |row| row.get(0),
         )
+    }
+
+    pub fn has_uncertain_task_inputs(
+        &self,
+        task_id: &str,
+        session_pid: u32,
+    ) -> Result<bool, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT EXISTS(
+                    SELECT 1 FROM queued_task_input
+                    WHERE task_id = ? AND session_pid = ? AND state = 'uncertain'
+                 )",
+            params![task_id, session_pid],
+            |row| row.get(0),
+        )
+    }
+
+    /// A server restart cannot know whether a `preparing` reservation reached
+    /// the daemon before the process stopped. Keep the message visible, but do
+    /// not let reconnect invent either acceptance or delivery.
+    pub fn mark_preparing_task_inputs_uncertain(&self) -> Result<usize, rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE queued_task_input
+             SET state = 'uncertain', reason = 'server interrupted while daemon acceptance was pending'
+             WHERE state = 'preparing'",
+            [],
+        )
+    }
+
+    pub fn pending_task_input_incarnations(&self) -> Result<Vec<(String, u32)>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT task_id, session_pid FROM queued_task_input
+             WHERE state IN ('preparing', 'held') AND session_pid IS NOT NULL",
+        )?;
+        let owners = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect();
+        owners
+    }
+
+    pub fn mark_pending_task_inputs_uncertain_for_incarnation(
+        &self,
+        task_id: &str,
+        session_pid: u32,
+    ) -> Result<usize, rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE queued_task_input
+             SET state = 'uncertain', reason = 'owning daemon session was replaced or exited before delivery was proven'
+             WHERE task_id = ? AND session_pid = ? AND state IN ('preparing', 'held')",
+            params![task_id, session_pid],
+        )
+    }
+
+    pub fn queued_task_input_reason_for_id(
+        &self,
+        id: i64,
+    ) -> Result<Option<String>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT CASE state
+                    WHEN 'held' THEN 'input_held_by_draft'
+                    WHEN 'uncertain' THEN 'delivery_uncertain'
+                    ELSE 'sending'
+                 END
+                 FROM queued_task_input WHERE id = ?",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()
     }
 
     pub fn queued_task_input_reason(

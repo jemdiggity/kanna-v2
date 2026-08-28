@@ -814,12 +814,25 @@ The row is the record; `task.input_delivered` is only its announcement.
   Managers observe completion through `kanna_wait_events` for fan-out or
   `kanna_wait_task` for a single task, backed by durable run and task events.
 - **Held deliveries move through a durable FIFO.** The server reserves a
-  `queued_task_input` row before daemon submission. A held response keeps that
-  row visible; each `LogicalInputReleased` daemon event transactionally moves
-  exactly the oldest row into `task_input`, preserving boundaries, source, and
-  order. `SessionList.pending_logical_input_count` reconciles release events
-  missed while the server was down. A `preparing` or `uncertain` row stays
-  visible instead of being expired or discarded silently.
+  `queued_task_input` row before daemon submission, bound to the exact child
+  PID used by `SubmitInputIfSession` as the daemon-session incarnation fence.
+  A held response keeps that row visible; each incarnation-bearing
+  `LogicalInputReleased` daemon event transactionally moves exactly the oldest
+  matching row into `task_input`, preserving boundaries, source, and order.
+  `SessionList.pending_logical_input_count` reconciles missed release events
+  only against held rows owned by that same incarnation. A row owned by a
+  replaced or exited session becomes `delivery_uncertain`; it is not promoted
+  from the replacement's pending count.
+- **Interrupted preparation is ambiguous, not delivery evidence.** A server
+  restart converts any leftover `preparing` reservation to
+  `delivery_uncertain`: the server cannot prove whether the daemon accepted and
+  perhaps flushed it before the interruption. A live, exact-incarnation
+  `LogicalInputReleased` edge may consume a `preparing` row when it races the
+  HTTP held-state update, because that edge itself proves acceptance. Reconnect
+  never makes that inference. An uncertain row remains a FIFO barrier for its
+  incarnation: later release evidence cannot be attributed past it, because
+  the event may describe the ambiguous slot itself. Uncertain rows remain
+  sender-visible rather than being expired or discarded silently.
 - **Uncertain deliveries are not recorded.** A `delivery_uncertain` response
   means the bytes may or may not have reached the PTY; a row asserting the agent
   was told something it may never have heard is a worse record than a missing

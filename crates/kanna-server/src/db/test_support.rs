@@ -253,6 +253,7 @@ impl Db {
                 message TEXT NOT NULL,
                 state TEXT NOT NULL CHECK (state IN ('preparing', 'held', 'uncertain')),
                 reason TEXT,
+                session_pid INTEGER,
                 queued_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
             CREATE INDEX idx_queued_task_input_task_id

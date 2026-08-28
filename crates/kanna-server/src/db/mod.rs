@@ -120,6 +120,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "055_activity_event_debounce",
     "056_runtime_settled_debounce",
     "057_queued_task_input",
+    "058_queued_task_input_session_incarnation",
 ];
 
 #[derive(Debug, Serialize)]
@@ -1831,6 +1832,27 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
                 ON queued_task_input(task_id, id);
             "#,
         )
+    })?;
+
+    run_migration(conn, "058_queued_task_input_session_incarnation", |conn| {
+        // A task id survives stage and recovery session replacement. Queue
+        // recovery must therefore be fenced by the same child pid that
+        // SubmitInputIfSession uses to identify the exact daemon session
+        // incarnation. Rows created before that identity existed cannot be
+        // reconciled safely.
+        add_column(conn, "queued_task_input", "session_pid", "INTEGER")?;
+        conn.execute(
+            "UPDATE queued_task_input
+             SET state = 'uncertain', reason = 'delivery outcome predates session-incarnation tracking'
+             WHERE session_pid IS NULL",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_queued_task_input_session
+             ON queued_task_input(task_id, session_pid, id)",
+            [],
+        )?;
+        Ok(())
     })?;
 
     Ok(())

@@ -127,6 +127,7 @@ pub(crate) async fn stream_output(
     daemon_lifecycle: DaemonLifecycle,
     session: Arc<SessionHandle>,
 ) {
+    let session_pid = session.pty.lock().await.pid();
     let async_fd = match AsyncFd::new(io_fd) {
         Ok(fd) => fd,
         Err(error) => {
@@ -289,6 +290,7 @@ pub(crate) async fn stream_output(
                                     if completed.logical_released_from_draft() {
                                         let event = Event::LogicalInputReleased {
                                             session_id: session_id.clone(),
+                                            session_pid,
                                         };
                                         if let Ok(json) = serde_json::to_string(&event) {
                                             let _ = broadcast_tx.send(json);

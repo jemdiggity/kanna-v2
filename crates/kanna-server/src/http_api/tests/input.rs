@@ -1684,9 +1684,9 @@ async fn an_attachment_refused_by_a_blocked_session_is_not_left_on_disk() {
 /// photo it names has to still be there when the agent finally reads the path.
 ///
 /// This is the opposite half of the reconciliation above, and the one a naive
-/// "any error means clean up" rule gets wrong: the caller is told 409
-/// `input_held_by_draft` and nothing is recorded as delivered, yet the file
-/// must survive.
+/// "any non-immediate delivery means clean up" rule gets wrong: the caller is
+/// told the input is queued behind a draft and nothing is recorded as
+/// delivered, yet the file must survive.
 #[tokio::test]
 async fn an_attachment_held_behind_a_human_draft_stays_on_disk_for_the_queued_message() {
     use base64::Engine;
@@ -1730,12 +1730,13 @@ async fn an_attachment_held_behind_a_human_draft_stays_on_disk_for_the_queued_me
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
-    let failure: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(failure["reason"], "input_held_by_draft");
+    let queued: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(queued["status"], "queued");
+    assert_eq!(queued["reason"], "input_held_by_draft");
 
     // The queued message still names this path, so the file has to be here
     // when that terminal submits and the agent goes to read it.
@@ -2281,8 +2282,18 @@ async fn held_inputs_are_visible_and_flush_to_distinct_delivery_rows() {
         Some("input_held_by_draft")
     );
 
-    db.deliver_next_held_task_input("task-held").unwrap();
-    db.deliver_next_held_task_input("task-held").unwrap();
+    assert!(db
+        .deliver_next_released_task_input("task-held", 99, true)
+        .unwrap()
+        .is_none());
+    assert!(
+        db.list_task_inputs("task-held", 10).unwrap().is_empty(),
+        "release evidence from a replacement incarnation must not record delivery"
+    );
+    db.deliver_next_released_task_input("task-held", 42, false)
+        .unwrap();
+    db.deliver_next_released_task_input("task-held", 42, false)
+        .unwrap();
     let delivered = db.list_task_inputs("task-held", 10).unwrap();
     assert_eq!(
         delivered
