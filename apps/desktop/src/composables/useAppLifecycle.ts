@@ -70,6 +70,7 @@ interface UseAppLifecycleOptions {
   preferences: AppPreferences;
   remoteTaskDiagnostics: Ref<unknown>;
   restoreSidebarWidth: () => Promise<void>;
+  restoreTransferredModal: () => void;
   shortcutsStartFull: Ref<boolean>;
   showShortcutsModal: Ref<boolean>;
   startSystemThemeListener: () => void;
@@ -107,6 +108,7 @@ export function useAppLifecycle({
   preferences,
   remoteTaskDiagnostics,
   restoreSidebarWidth,
+  restoreTransferredModal,
   shortcutsStartFull,
   showShortcutsModal,
   startSystemThemeListener,
@@ -313,6 +315,7 @@ export function useAppLifecycle({
 
     await restoreSidebarWidth();
     await store.init(db);
+    restoreTransferredModal();
     preferences.appTheme = normalizeAppThemePreference(store.appTheme);
     preferences.codeTheme = normalizeCodeThemePreference(store.codeTheme);
     startSystemThemeListener();
@@ -475,7 +478,9 @@ export function useAppLifecycle({
     preferences.recentAgentChoices = parseRecentAgentChoices(await getDesktopSetting("recentAgentChoices"));
 
     startPeriodicBackup(dbName, ref(db) as Ref<DbHandle | null>);
-    if (!store.hideShortcutsOnStartup) {
+    // A transferred surface is already the intentional startup overlay for a
+    // tear-off window. Do not cover it with the automatic shortcuts prompt.
+    if (!store.hideShortcutsOnStartup && !windowWorkspace.bootstrap.tearOffContext) {
       shortcutsStartFull.value = true;
       showShortcutsModal.value = true;
     }

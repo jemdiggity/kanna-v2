@@ -159,7 +159,7 @@ function setPreferencesRef(component: Element | ComponentPublicInstance | null) 
     @branch-include-change="(branchInclude: BranchInclude) => m.updateCurrentDiffViewState({ branchInclude })"
     @review-head-change="(reviewHeadCommit: string) => m.updateCurrentDiffViewState({ reviewHeadCommit })"
     @review-comments-change="(reviewComments: PendingReviewComment[]) => m.updateCurrentDiffViewState({ reviewComments })"
-    @close="m.showDiffModal.value = false; m.maximizedModal.value = null"
+    @close="m.closeDiffModal"
   />
   <CommitGraphModal
     :ref="setCommitGraphModalRef"

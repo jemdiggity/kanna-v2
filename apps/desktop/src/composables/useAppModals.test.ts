@@ -4,6 +4,7 @@ import { defineComponent, h, nextTick, reactive } from "vue";
 import { mount } from "@vue/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import type { MarkdownPreviewMode } from "../stores/markdownPreviewMode";
+import type { ModalTearOffContext } from "../modalTearOff";
 import { useAppModals } from "./useAppModals";
 
 function deferred() {
@@ -17,6 +18,7 @@ function deferred() {
 function mountMarkdownModalHarness(options: {
   markdownPreviewMode?: MarkdownPreviewMode;
   savePreference?: (key: string, value: string) => Promise<void>;
+  tearOffContext?: ModalTearOffContext;
 } = {}) {
   const savePreference = vi.fn(
     options.savePreference ?? (async () => {}),
@@ -28,15 +30,24 @@ function mountMarkdownModalHarness(options: {
     markdownPreviewMode: options.markdownPreviewMode ?? "rendered",
     savePreference,
   });
+  const clearTearOffContext = vi.fn(async () => {});
   const TestHarness = defineComponent({
     setup() {
       const modals = useAppModals({
         isMobile: false,
         store: store as unknown as Parameters<typeof useAppModals>[0]["store"],
         windowWorkspace: {
-          bootstrap: { windowId: "main" },
+          bootstrap: {
+            windowId: "main",
+            selectedRepoId: "repo-1",
+            selectedItemId: "task-a",
+            ...(options.tearOffContext
+              ? { tearOffContext: options.tearOffContext }
+              : {}),
+          },
           loadSnapshot: vi.fn(),
           persistSidebarWidth: vi.fn(),
+          clearTearOffContext,
         } as unknown as Parameters<typeof useAppModals>[0]["windowWorkspace"],
       });
       return { modals };
@@ -46,10 +57,58 @@ function mountMarkdownModalHarness(options: {
     },
   });
   const wrapper = mount(TestHarness);
-  return { modals: wrapper.vm.modals, savePreference, store, wrapper };
+  return { clearTearOffContext, modals: wrapper.vm.modals, savePreference, store, wrapper };
 }
 
 describe("useAppModals", () => {
+  it("restores a transferred tree as a normal maximized modal and clears only its transfer state", async () => {
+    const harness = mountMarkdownModalHarness({
+      tearOffContext: {
+        surface: "tree",
+        worktreePath: "/repo/.kanna-worktrees/task-a",
+        repoRoot: "/repo",
+      },
+    });
+
+    harness.modals.restoreTransferredModal();
+    expect(harness.modals.showTreeExplorer.value).toBe(true);
+    expect(harness.modals.maximizedModal.value).toBe("tree");
+    expect(harness.modals.treeExplorerRoot.value).toBe("/repo/.kanna-worktrees/task-a");
+
+    harness.modals.closeTreeExplorer();
+    expect(harness.modals.showTreeExplorer.value).toBe(false);
+    expect(harness.modals.maximizedModal.value).toBe(null);
+    expect(harness.clearTearOffContext).toHaveBeenCalledOnce();
+    await nextTick();
+    harness.wrapper.unmount();
+  });
+
+  it("restores transferred diff view state in the ordinary maximized modal", () => {
+    const harness = mountMarkdownModalHarness({
+      tearOffContext: {
+        surface: "diff",
+        repoPath: "/repo",
+        viewKey: "item:task-a",
+        initialScope: "working",
+        initialScrollPositions: { working: 240 },
+        initialBranchInclude: "all",
+      },
+    });
+
+    harness.modals.restoreTransferredModal();
+    expect(harness.modals.showDiffModal.value).toBe(true);
+    expect(harness.modals.maximizedModal.value).toBe("diff");
+    expect(harness.modals.currentDiffViewState.value).toMatchObject({
+      scope: "working",
+      scrollPositions: { working: 240 },
+      branchInclude: "all",
+    });
+
+    harness.modals.closeDiffModal();
+    expect(harness.clearTearOffContext).toHaveBeenCalledOnce();
+    harness.wrapper.unmount();
+  });
+
   it("rechecks agent CLIs when the setup shell closes", () => {
     const { modals, wrapper } = mountMarkdownModalHarness();
     const recheckClis = vi.fn(async () => {});

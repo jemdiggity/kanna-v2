@@ -3,7 +3,9 @@ import { computed, ref, onMounted, nextTick } from "vue";
 import DiffView from "./DiffView.vue";
 import { useShortcutContext } from "../composables/useShortcutContext";
 import { useModalZIndex } from "../composables/useModalZIndex";
+import { useModalTearOff } from "../composables/useModalTearOff";
 import { useKannaStore } from "../stores/kanna";
+import type { RequestRevisionOptions } from "../stores/workflow";
 import {
   buildRevisionPrompt,
   formatReviewAnchor,
@@ -35,6 +37,9 @@ const props = defineProps<{
   reviewHeadCommit?: string;
   approveSignalsMerge?: boolean;
   hasRunningPost?: boolean;
+  standalone?: boolean;
+  requestRevisionAction?: (taskId: string, options: RequestRevisionOptions) => Promise<boolean>;
+  advanceStageAction?: (taskId: string) => Promise<unknown>;
 }>();
 
 const emit = defineEmits<{
@@ -62,6 +67,28 @@ const approveMergesTask = computed(() => props.approveSignalsMerge === true);
 const approveDisabled = computed(() => approving.value || props.hasRunningPost === true);
 const currentHeadCommit = computed(() => props.reviewHeadCommit ?? "HEAD");
 const baseRefLabel = computed(() => props.baseRef ?? "main");
+const tearOff = useModalTearOff({
+  enabled: computed(() => !props.standalone),
+  modalRef,
+  handleSelector: ".diff-toolbar, .verdict-bar",
+  getContext: () => ({
+    surface: "diff",
+    repoPath: props.repoPath,
+    ...(props.worktreePath ? { worktreePath: props.worktreePath } : {}),
+    ...(props.initialScope ? { initialScope: props.initialScope } : {}),
+    ...(props.initialScrollPositions ? { initialScrollPositions: props.initialScrollPositions } : {}),
+    ...(props.initialBranchInclude ? { initialBranchInclude: props.initialBranchInclude } : {}),
+    ...(props.baseRef ? { baseRef: props.baseRef } : {}),
+    ...(props.viewKey ? { viewKey: props.viewKey } : {}),
+    ...(props.taskId ? { taskId: props.taskId } : {}),
+    ...(props.reviewStage ? { reviewStage: props.reviewStage } : {}),
+    ...(props.reviewComments ? { reviewComments: props.reviewComments } : {}),
+    ...(props.reviewHeadCommit ? { reviewHeadCommit: props.reviewHeadCommit } : {}),
+    ...(props.approveSignalsMerge !== undefined ? { approveSignalsMerge: props.approveSignalsMerge } : {}),
+    ...(props.hasRunningPost !== undefined ? { hasRunningPost: props.hasRunningPost } : {}),
+  }),
+  onTornOff: () => emit("close"),
+});
 
 function openRequestChangesComposer() {
   if (!reviewEnabled.value || comments.value.length === 0) return;
@@ -83,7 +110,8 @@ async function submitRequestChanges() {
     summary: summaryDraft.value,
   });
   try {
-    const requestDelivered = await store.requestRevision(props.taskId, {
+    const requestRevision = props.requestRevisionAction ?? store.requestRevision;
+    const requestDelivered = await requestRevision(props.taskId, {
       targetStage: "in progress",
       summary,
       prompt,
@@ -106,7 +134,8 @@ async function approveReview() {
   if (!props.taskId || approveDisabled.value) return;
   approving.value = true;
   try {
-    await store.advanceStage(props.taskId);
+    const advanceStage = props.advanceStageAction ?? store.advanceStage;
+    await advanceStage(props.taskId);
   } finally {
     approving.value = false;
   }
@@ -134,8 +163,16 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="modal-overlay" :class="{ maximized }" :style="{ zIndex }" @click.self="emit('close')">
-    <div ref="modalRef" class="diff-modal" tabindex="-1">
+  <div class="modal-overlay" :class="{ maximized, standalone }" :style="{ zIndex }" @click.self="emit('close')">
+    <div
+      ref="modalRef"
+      class="diff-modal"
+      tabindex="-1"
+      @pointerdown="tearOff.onPointerDown"
+      @pointermove="tearOff.onPointerMove"
+      @pointerup="tearOff.onPointerUp"
+      @pointercancel="tearOff.onPointerCancel"
+    >
       <div v-if="reviewEnabled" class="verdict-bar">
         <span>{{ $t('diffView.pendingCommentCount', { count: comments.length }) }}</span>
         <button type="button" :disabled="comments.length === 0" @click="openRequestChangesComposer">
@@ -212,6 +249,28 @@ onMounted(() => {
   overflow: hidden;
   outline: none;
   position: relative;
+}
+
+.modal-overlay.standalone {
+  background: none;
+}
+
+.standalone .diff-modal {
+  width: 100%;
+  height: 100%;
+  border: none;
+  border-radius: 0;
+}
+
+.diff-modal :deep(.diff-toolbar),
+.verdict-bar {
+  cursor: default;
+  user-select: none;
+}
+
+.diff-modal :deep(.diff-toolbar button),
+.verdict-bar button {
+  cursor: pointer;
 }
 
 .verdict-bar {

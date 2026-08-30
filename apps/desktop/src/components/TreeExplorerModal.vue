@@ -3,6 +3,7 @@ import { ref, computed, onMounted, onUnmounted, nextTick, watch, toRef } from "v
 import { useTreeExplorer, type TreeNode } from "../composables/useTreeExplorer";
 import { useShortcutContext, registerContextShortcuts } from "../composables/useShortcutContext";
 import { useModalZIndex } from "../composables/useModalZIndex";
+import { useModalTearOff } from "../composables/useModalTearOff";
 
 useShortcutContext("tree");
 registerContextShortcuts("tree", [
@@ -36,6 +37,7 @@ const props = defineProps<{
   homePath?: string;
   maximized?: boolean;
   suspended?: boolean;
+  standalone?: boolean;
 }>();
 
 const rootLabel = computed(() => {
@@ -51,6 +53,19 @@ const emit = defineEmits<{
 
 const modalRef = ref<HTMLElement | null>(null);
 const currentColRef = ref<HTMLElement | null>(null);
+
+const tearOff = useModalTearOff({
+  enabled: computed(() => !props.standalone),
+  modalRef,
+  handleSelector: ".breadcrumb-bar",
+  getContext: () => ({
+    surface: "tree",
+    worktreePath: props.worktreePath,
+    repoRoot: props.repoRoot,
+    ...(props.homePath ? { homePath: props.homePath } : {}),
+  }),
+  onTornOff: () => emit("close"),
+});
 
 const {
   state,
@@ -192,7 +207,7 @@ function isDimmed(entry: TreeNode): boolean {
   <div
     v-show="!suspended"
     class="modal-overlay"
-    :class="{ maximized }"
+    :class="{ maximized, standalone }"
     :style="{ zIndex }"
     @click.self="emit('close')"
   >
@@ -201,17 +216,23 @@ function isDimmed(entry: TreeNode): boolean {
       class="tree-modal"
       tabindex="-1"
       @keydown="onKeydown"
+      @pointerdown="tearOff.onPointerDown"
+      @pointermove="tearOff.onPointerMove"
+      @pointerup="tearOff.onPointerUp"
+      @pointercancel="tearOff.onPointerCancel"
     >
       <!-- Breadcrumb bar -->
       <div class="breadcrumb-bar">
         <span
           class="breadcrumb-segment breadcrumb-root"
+          data-no-tear-off
           @click="jumpToBreadcrumb(0)"
         >{{ rootLabel }}</span>
         <template v-for="(seg, i) in state.breadcrumb" :key="i">
           <span class="breadcrumb-sep">/</span>
           <span
             class="breadcrumb-segment"
+            data-no-tear-off
             @click="jumpToBreadcrumb(i + 1)"
           >{{ seg }}</span>
         </template>
@@ -352,6 +373,20 @@ function isDimmed(entry: TreeNode): boolean {
   box-shadow: none;
 }
 
+.modal-overlay.standalone {
+  background: none;
+  align-items: stretch;
+  padding: 0;
+}
+
+.standalone .tree-modal {
+  width: 100%;
+  height: 100%;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+}
+
 /* Breadcrumb */
 .breadcrumb-bar {
   padding: 10px 14px;
@@ -362,6 +397,8 @@ function isDimmed(entry: TreeNode): boolean {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  cursor: default;
+  user-select: none;
 }
 
 .breadcrumb-segment {

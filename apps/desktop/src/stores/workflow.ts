@@ -1,15 +1,12 @@
 import type { AgentDefinition, WorkflowDefinition } from "../../../../packages/core/src/workflow/workflow-types";
-import { invoke } from "../invoke";
 import {
   fetchDesktopRepoAgentDefinition,
   fetchDesktopRepoWorkflowDefinition,
 } from "../services/desktopServerClient";
-import { resolveCurrentKannaServerBaseUrl } from "../services/kannaServerBaseUrl";
+import { postDesktopTaskAction } from "../services/desktopTaskActions";
 import { requireService, type AdvanceStageOptions, type KannaSnapshot, type StoreContext } from "./state";
 import { debugLog } from "../utils/debugLog";
 
-const LOCAL_SERVER_ACTION_TIMEOUT_MS = 30_000;
-const LOCAL_SERVER_ACTION_RETRY_DELAY_MS = 250;
 const STAGE_ADVANCE_RECONCILE_TIMEOUT_MS = 15_000;
 const STAGE_ADVANCE_RECONCILE_RETRY_MS = 100;
 
@@ -22,6 +19,10 @@ export interface WorkflowApi {
 }
 
 export type AdvanceStageResult = "advanced" | "ignored" | "failed";
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 export interface RequestRevisionOptions {
   targetStage: string;
@@ -41,59 +42,6 @@ export function createWorkflowApi(context: StoreContext): WorkflowApi {
     nextStageName: string | null;
     pendingPostName: string | null;
     closesOnSuccess: boolean;
-  }
-
-  function sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-
-  async function resolveLocalServerBaseUrl(): Promise<string> {
-    const deadline = Date.now() + LOCAL_SERVER_ACTION_TIMEOUT_MS;
-    let lastError: unknown = null;
-    while (Date.now() < deadline) {
-      try {
-        await invoke("ensure_mobile_server");
-        return await resolveCurrentKannaServerBaseUrl("resolving local task action server");
-      } catch (error) {
-        lastError = error;
-        const message = error instanceof Error ? error.message : String(error);
-        if (!message.includes("another kanna-server is already starting")) {
-          throw error;
-        }
-        await sleep(LOCAL_SERVER_ACTION_RETRY_DELAY_MS);
-      }
-    }
-    throw lastError instanceof Error ? lastError : new Error(String(lastError ?? "kanna-server did not become ready"));
-  }
-
-  async function postTaskAction(
-    taskId: string,
-    action: "advance-stage" | "rerun-stage" | "request-revision",
-    body?: unknown,
-  ): Promise<Response> {
-    const serverBaseUrl = await resolveLocalServerBaseUrl();
-    const url = `${serverBaseUrl}/v1/tasks/${encodeURIComponent(taskId)}/actions/${action}`;
-    const deadline = Date.now() + LOCAL_SERVER_ACTION_TIMEOUT_MS;
-    let lastError: unknown = null;
-
-    while (Date.now() < deadline) {
-      try {
-        return await fetch(url, {
-          method: "POST",
-          ...(body == null
-            ? {}
-            : {
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(body),
-              }),
-        });
-      } catch (error) {
-        lastError = error;
-        await sleep(LOCAL_SERVER_ACTION_RETRY_DELAY_MS);
-      }
-    }
-
-    throw lastError instanceof Error ? lastError : new Error(String(lastError ?? `failed to call ${action}`));
   }
 
   // Selection during stage advance is only adjusted when the task being advanced
@@ -298,7 +246,7 @@ export function createWorkflowApi(context: StoreContext): WorkflowApi {
 
     try {
       return await withOptimisticStageAdvance(taskId, nextStageName, pendingPostName, async () => {
-        const response = await postTaskAction(taskId, "advance-stage");
+        const response = await postDesktopTaskAction(taskId, "advance-stage");
         if (!response.ok) {
           const message = await response.text();
           if (response.status === 409) {
@@ -334,7 +282,7 @@ export function createWorkflowApi(context: StoreContext): WorkflowApi {
     if (item.closed_at != null) return;
 
     try {
-      const response = await postTaskAction(taskId, "rerun-stage");
+      const response = await postDesktopTaskAction(taskId, "rerun-stage");
       if (!response.ok) {
         throw new Error(await response.text());
       }
@@ -356,7 +304,7 @@ export function createWorkflowApi(context: StoreContext): WorkflowApi {
 
     revisionRequestsInFlight.add(taskId);
     try {
-      const response = await postTaskAction(taskId, "request-revision", {
+      const response = await postDesktopTaskAction(taskId, "request-revision", {
         targetStage: options.targetStage,
         summary: options.summary,
         prompt: options.prompt,

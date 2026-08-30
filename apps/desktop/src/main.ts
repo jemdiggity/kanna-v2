@@ -13,6 +13,7 @@ import {
 } from "./perf/taskSwitchPerf";
 import App from "./App.vue";
 import { createWindowWorkspace, parseWindowBootstrap, resolveWindowBootstrap } from "./windowWorkspace";
+import { parseModalTearOffContext } from "./modalTearOff";
 import { e2eAppMetrics, e2eTerminalOutputPerf } from "./e2eAppMetrics";
 import { e2eInvokeHistory } from "./e2eInvokeHistory";
 import { e2eEventHistory } from "./e2eEventHistory";
@@ -200,10 +201,11 @@ if (isTauri) {
 
 try {
   const { db, dbName } = await loadDatabase();
-  const windowBootstrap = await resolveWindowBootstrap(
-    db,
-    parseWindowBootstrap(window.location.search),
-  );
+  const parsedWindowBootstrap = parseWindowBootstrap(window.location.search);
+  const windowBootstrap = await resolveWindowBootstrap(db, parsedWindowBootstrap);
+  const tearOffContext = parseModalTearOffContext(window.location.search)
+    ?? windowBootstrap.tearOffContext
+    ?? null;
   const windowWorkspace = createWindowWorkspace({ db, bootstrap: windowBootstrap });
   try {
     await windowWorkspace.restoreCurrentWindowGeometry();
@@ -286,9 +288,11 @@ try {
   }
 
   app.mount("#app");
-  void windowWorkspace.restoreAdditionalWindows().catch((error) => {
-    console.error("[windowWorkspace] failed to restore additional windows:", error);
-  });
+  if (!tearOffContext) {
+    void windowWorkspace.restoreAdditionalWindows().catch((error) => {
+      console.error("[windowWorkspace] failed to restore additional windows:", error);
+    });
+  }
 } catch (e) {
   console.error("[init] fatal:", e);
   const el = document.getElementById("app");

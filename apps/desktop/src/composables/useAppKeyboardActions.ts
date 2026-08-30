@@ -73,6 +73,7 @@ interface UseAppKeyboardActionsOptions {
     fromTree?: boolean,
   ) => void;
   closeTreeExplorer: () => void;
+  closeDiffModal: () => void;
   advanceSelectedRemoteWorkspaceTask: (workspaceTask: WorkspaceTask) => Promise<void>;
   closeSelectedWorkspaceTask: () => Promise<boolean>;
   navigateItems: (direction: -1 | 1) => Promise<void>;
@@ -137,6 +138,7 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
     getCurrentPreviewRecall,
     openFilePreview,
     closeTreeExplorer,
+    closeDiffModal,
     advanceSelectedRemoteWorkspaceTask,
     closeSelectedWorkspaceTask,
     navigateItems,
@@ -294,8 +296,7 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
       if (showDiffModal.value) {
         const shouldCloseDiff = diffModalRef.value?.dismiss() ?? true;
         if (shouldCloseDiff) {
-          showDiffModal.value = false;
-          maximizedModal.value = null;
+          closeDiffModal();
         }
         return true;
       }
@@ -354,8 +355,7 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
       if (showDiffModal.value) {
         const z = diffModalRef.value?.zIndex ?? 0;
         if (isTopModal(z)) {
-          showDiffModal.value = false;
-          maximizedModal.value = null;
+          closeDiffModal();
         } else {
           diffModalRef.value?.bringToFront();
         }

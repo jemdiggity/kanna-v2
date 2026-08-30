@@ -25,6 +25,7 @@ import {
   type MarkdownPreviewMode,
 } from "../stores/markdownPreviewMode";
 import type { PendingReviewComment } from "../utils/reviewComments";
+import type { ModalTearOffContext } from "../modalTearOff";
 
 export type DiffScope = "branch" | "working";
 export type BranchInclude = "none" | "staged" | "all";
@@ -60,6 +61,9 @@ interface UseAppModalsOptions {
 }
 
 export function useAppModals({ isMobile, store, windowWorkspace }: UseAppModalsOptions) {
+  const transferredModalContext = ref<ModalTearOffContext | null>(
+    windowWorkspace.bootstrap.tearOffContext ?? null,
+  );
   const showNewTaskModal = ref(false);
   const availableWorkflows = ref<string[]>([]);
   const defaultWorkflowName = ref<string | undefined>(undefined);
@@ -93,6 +97,9 @@ export function useAppModals({ isMobile, store, windowWorkspace }: UseAppModalsO
   );
   const homePath = ref("");
   const treeExplorerRoot = computed(() => {
+    if (transferredModalContext.value?.surface === "tree") {
+      return transferredModalContext.value.worktreePath;
+    }
     if (currentWorktreePath.value) return currentWorktreePath.value;
     if (store.selectedRepo?.path) return store.selectedRepo.path;
     return homePath.value;
@@ -155,6 +162,43 @@ export function useAppModals({ isMobile, store, windowWorkspace }: UseAppModalsO
     if (!key) return;
     const current = diffViewStates[key] ?? {};
     diffViewStates[key] = { ...current, ...partial };
+  }
+
+  function restoreTransferredModal() {
+    const context = transferredModalContext.value;
+    if (!context) return;
+    if (context.surface === "tree") {
+      showTreeExplorer.value = true;
+      maximizedModal.value = "tree";
+      return;
+    }
+
+    const key = context.viewKey ?? currentDiffViewKey.value;
+    if (key) {
+      diffViewStates[key] = {
+        ...(context.initialScope ? { scope: context.initialScope } : {}),
+        ...(context.initialScrollPositions
+          ? { scrollPositions: context.initialScrollPositions }
+          : {}),
+        ...(context.initialBranchInclude
+          ? { branchInclude: context.initialBranchInclude }
+          : {}),
+        ...(context.reviewComments ? { reviewComments: context.reviewComments } : {}),
+        ...(context.reviewHeadCommit
+          ? { reviewHeadCommit: context.reviewHeadCommit }
+          : {}),
+      };
+    }
+    showDiffModal.value = true;
+    maximizedModal.value = "diff";
+  }
+
+  function finishTransferredModal(surface: ModalTearOffContext["surface"]): void {
+    if (transferredModalContext.value?.surface !== surface) return;
+    transferredModalContext.value = null;
+    void windowWorkspace.clearTearOffContext().catch((error: unknown) => {
+      console.error("[App] failed to finish transferred modal state:", error);
+    });
   }
 
   function buildCurrentFileFlowKey(): string | undefined {
@@ -311,6 +355,13 @@ export function useAppModals({ isMobile, store, windowWorkspace }: UseAppModalsO
   function closeTreeExplorer() {
     showTreeExplorer.value = false;
     maximizedModal.value = maximizedModal.value === "tree" ? null : maximizedModal.value;
+    finishTransferredModal("tree");
+  }
+
+  function closeDiffModal() {
+    showDiffModal.value = false;
+    maximizedModal.value = maximizedModal.value === "diff" ? null : maximizedModal.value;
+    finishTransferredModal("diff");
   }
 
   function closeFileFlow() {
@@ -425,6 +476,7 @@ export function useAppModals({ isMobile, store, windowWorkspace }: UseAppModalsO
     previewImageUrl,
     showDiffModal,
     showTreeExplorer,
+    transferredModalContext,
     currentWorktreePath,
     activeWorktreePath,
     homePath,
@@ -458,6 +510,7 @@ export function useAppModals({ isMobile, store, windowWorkspace }: UseAppModalsO
     currentDiffViewKey,
     currentDiffViewState,
     updateCurrentDiffViewState,
+    restoreTransferredModal,
     currentPreviewMarkdownMode,
     updateCurrentPreviewMarkdownMode,
     stopSidebarResize,
@@ -466,6 +519,7 @@ export function useAppModals({ isMobile, store, windowWorkspace }: UseAppModalsO
     currentShortcutContext,
     onShellClose,
     closeTreeExplorer,
+    closeDiffModal,
     closeFileFlow,
     closeFilePicker,
     showFilePickerOnTop,
