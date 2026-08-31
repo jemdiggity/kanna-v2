@@ -4,6 +4,7 @@ import { computed, defineComponent, h, nextTick, reactive, ref } from "vue";
 import { mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { KeyboardActions } from "./composables/useKeyboardShortcuts";
+import type { ModalTearOffContext } from "./modalTearOff";
 import type { PipelineItem } from "./types/kanna";
 import type { TaskUiSlot } from "./types/taskUi";
 import {
@@ -239,6 +240,7 @@ const mockWindowWorkspace = {
     windowId: "main",
     selectedRepoId: null,
     selectedItemId: null,
+    tearOffContext: undefined as ModalTearOffContext | undefined,
   },
   initialize: vi.fn(async () => {}),
   loadSnapshot: vi.fn(async () => ({ windows: [] })),
@@ -1091,6 +1093,7 @@ describe("App", () => {
     store.appTheme = "dark";
     store.codeTheme = "match";
     store.markdownPreviewMode = "rendered";
+    store.hideShortcutsOnStartup = true;
     store.savePreference.mockClear();
     nativeSetThemeMock.mockClear();
     listenHandlers.clear();
@@ -1121,6 +1124,7 @@ describe("App", () => {
     mockWindowWorkspace.invalidateSharedData.mockClear();
     mockWindowWorkspace.restoreAdditionalWindows.mockClear();
     mockWindowWorkspace.bootstrap.windowId = "main";
+    mockWindowWorkspace.bootstrap.tearOffContext = undefined;
     dbSelectMock.mockReset();
     dbSelectMock.mockResolvedValue([]);
     dbMock.execute.mockReset();
@@ -1241,6 +1245,33 @@ describe("App", () => {
     const wrapper = await mountApp(SidebarWithRepoStub);
 
     expect(scheduleStartupBackupMock).not.toHaveBeenCalled();
+
+    wrapper.unmount();
+  });
+
+  it("does not cover a transferred modal with the startup shortcuts prompt", async () => {
+    store.hideShortcutsOnStartup = false;
+    mockWindowWorkspace.bootstrap.windowId = "window-2";
+    mockWindowWorkspace.bootstrap.tearOffContext = {
+      surface: "tree",
+      worktreePath: "/tmp/repo/.kanna-worktrees/task-a",
+      repoRoot: "/tmp/repo",
+    };
+
+    const wrapper = await mountApp(SidebarWithRepoStub);
+
+    expect(wrapper.find("tree-explorer-modal-stub").exists()).toBe(true);
+    expect(wrapper.find("keyboard-shortcuts-modal-stub").exists()).toBe(false);
+
+    wrapper.unmount();
+  });
+
+  it("still shows the startup shortcuts prompt in an ordinary window", async () => {
+    store.hideShortcutsOnStartup = false;
+
+    const wrapper = await mountApp(SidebarWithRepoStub);
+
+    expect(wrapper.find("keyboard-shortcuts-modal-stub").exists()).toBe(true);
 
     wrapper.unmount();
   });

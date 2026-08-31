@@ -36,6 +36,7 @@ const props = withDefaults(
     maximized?: boolean;
     initialLine?: number;
     initialMarkdownMode?: MarkdownPreviewMode;
+    standalone?: boolean;
   }>(),
   {
     remoteContent: null,
@@ -387,7 +388,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="modal-overlay" :class="{ maximized }" :style="{ zIndex }" @click.self="emit('close')">
+  <div class="modal-overlay" :class="{ maximized, standalone }" :style="{ zIndex }" @click.self="emit('close')">
     <div ref="modalRef" class="preview-modal" tabindex="-1">
       <div class="preview-header">
         <span class="file-path">{{ filePath }}</span>
@@ -458,6 +459,17 @@ onMounted(() => {
   overflow: hidden;
   outline: none;
   position: relative;
+}
+
+.modal-overlay.standalone {
+  background: none;
+}
+
+.standalone .preview-modal {
+  width: 100%;
+  height: 100%;
+  border: none;
+  border-radius: 0;
 }
 
 .preview-header {

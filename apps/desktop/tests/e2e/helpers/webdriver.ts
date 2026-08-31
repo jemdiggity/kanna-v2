@@ -248,6 +248,59 @@ export class WebDriverClient {
     await this.post(`/session/${this.sid}/window/rect`, rect);
   }
 
+  async getWindowHandles(): Promise<string[]> {
+    const res = await this.get(`/session/${this.sid}/window/handles`);
+    return res.value as string[];
+  }
+
+  async switchToWindow(handle: string): Promise<void> {
+    await this.post(`/session/${this.sid}/window`, { handle });
+  }
+
+  async pointerDragBy(
+    elementId: string,
+    delta: { x: number; y: number },
+    startRatio: { x: number; y: number } = { x: 0.8, y: 0.5 },
+  ): Promise<void> {
+    const rect = await this.getElementRect(elementId);
+    const start = {
+      x: Math.round(rect.x + rect.width * startRatio.x),
+      y: Math.round(rect.y + rect.height * startRatio.y),
+    };
+    const dragged = await this.executeAsync<boolean>(
+      `const cb = arguments[arguments.length - 1];
+       const source = document.elementFromPoint(${start.x}, ${start.y});
+       const modal = source?.closest(".tree-modal, .diff-modal");
+       if (!(source instanceof Element) || !(modal instanceof HTMLElement)) {
+         cb(false);
+         return;
+       }
+       const pointerId = 41;
+       const fire = (target, type, x, y, buttons) => target.dispatchEvent(new PointerEvent(type, {
+         pointerId,
+         pointerType: "mouse",
+         bubbles: true,
+         cancelable: true,
+         button: 0,
+         buttons,
+         clientX: x,
+         clientY: y,
+         screenX: window.screenX + x,
+         screenY: window.screenY + y,
+       }));
+       fire(source, "pointerdown", ${start.x}, ${start.y}, 1);
+       setTimeout(() => {
+         fire(modal, "pointermove", ${start.x + delta.x}, ${start.y + delta.y}, 1);
+         setTimeout(() => {
+           fire(modal, "pointerup", ${start.x + delta.x}, ${start.y + delta.y}, 0);
+           cb(true);
+         }, 80);
+       }, 80);`,
+    );
+    if (!dragged) throw new Error("pointer drag source is not inside a supported modal");
+    await pauseForSlowMode("webdriver pointer drag");
+  }
+
   async dragElementToElement(sourceElementId: string, targetElementId: string): Promise<void> {
     const source = await this.getElementRect(sourceElementId);
     const target = await this.getElementRect(targetElementId);

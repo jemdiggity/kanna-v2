@@ -4,6 +4,7 @@ import {
   applyWindowWorkspaceMutation,
   createWindowWorkspace,
   normalizeWindowGeometry,
+  normalizeTearOffWindowGeometry,
   removeWindowFromWorkspaceSnapshot,
   parseWindowBootstrap,
   reconcileWorkspaceSnapshot,
@@ -78,6 +79,69 @@ describe("windowWorkspace", () => {
     expect(normalizeWindowGeometry({ x: Number.NaN, y: 90, width: 980, height: 720 })).toBeNull();
     expect(normalizeWindowGeometry({ x: 120, y: 90, width: 799, height: 720 })).toBeNull();
     expect(normalizeWindowGeometry({ x: 120, y: 90, width: 980, height: 599 })).toBeNull();
+  });
+
+  it("keeps modal-sized geometry only for a tear-off workspace row", () => {
+    const geometry = { x: 120, y: 90, width: 780, height: 480 };
+    expect(normalizeWindowGeometry(geometry)).toBeNull();
+    expect(normalizeTearOffWindowGeometry(geometry)).toEqual(geometry);
+    expect(normalizeTearOffWindowGeometry({ ...geometry, width: 419 })).toBeNull();
+    expect(normalizeTearOffWindowGeometry({ ...geometry, height: 279 })).toBeNull();
+  });
+
+  it("clears transferred-modal state while keeping the normal selected workspace", () => {
+    const context = {
+      surface: "tree" as const,
+      worktreePath: "/repo/worktree",
+      repoRoot: "/repo",
+    };
+    const snapshot: WorkspaceSnapshot = {
+      windows: [{
+        windowId: "tear-off-1",
+        selectedRepoId: "repo-old",
+        selectedItemId: "task-old",
+        sidebarHidden: false,
+        sidebarWidth: 260,
+        order: 0,
+        geometry: { x: 120, y: 90, width: 780, height: 480 },
+        tearOffContext: context,
+      }],
+    };
+
+    expect(applyWindowWorkspaceMutation(snapshot, {
+      operation: "clearTearOff",
+      windowId: "tear-off-1",
+      selectedRepoId: "repo-1",
+      selectedItemId: "task-1",
+    })).toEqual({
+      windows: [{
+        windowId: "tear-off-1",
+        selectedRepoId: "repo-1",
+        selectedItemId: "task-1",
+        sidebarHidden: false,
+        sidebarWidth: 260,
+        order: 0,
+        geometry: null,
+      }],
+    });
+  });
+
+  it("parses a persisted tear-off bootstrap from the window URL", () => {
+    const context = {
+      surface: "tree" as const,
+      worktreePath: "/repo/worktree",
+      repoRoot: "/repo",
+    };
+    const params = new URLSearchParams({
+      windowId: "tear-off-1",
+      tearOff: JSON.stringify(context),
+    });
+    expect(parseWindowBootstrap(`?${params.toString()}`)).toEqual({
+      windowId: "tear-off-1",
+      selectedRepoId: null,
+      selectedItemId: null,
+      tearOffContext: context,
+    });
   });
 
   it("loads legacy workspace rows without geometry as a defaultable null value", async () => {

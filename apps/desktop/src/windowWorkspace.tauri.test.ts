@@ -1,8 +1,9 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   applyWindowWorkspaceMutation,
   createWindowWorkspace,
+  resolveWindowBootstrap,
   WINDOW_WORKSPACE_SETTINGS_KEY,
   type WorkspaceSnapshot,
 } from "./windowWorkspace";
@@ -24,6 +25,8 @@ const currentWindowHarness = vi.hoisted(() => ({
   setSize: vi.fn(async () => {}),
   outerPosition: vi.fn(async () => ({ x: 200, y: 120 })),
   outerSize: vi.fn(async () => ({ width: 1000, height: 740 })),
+  innerSize: vi.fn(async () => ({ width: 1000, height: 708 })),
+  scaleFactor: vi.fn(async () => 1),
   movedHandler: null as null | (() => void),
   resizedHandler: null as null | (() => void),
   unlistenMoved: vi.fn(),
@@ -50,6 +53,8 @@ vi.mock("@tauri-apps/api/window", () => ({
     setSize: currentWindowHarness.setSize,
     outerPosition: currentWindowHarness.outerPosition,
     outerSize: currentWindowHarness.outerSize,
+    innerSize: currentWindowHarness.innerSize,
+    scaleFactor: currentWindowHarness.scaleFactor,
     onMoved: vi.fn(async (handler: () => void) => {
       currentWindowHarness.movedHandler = handler;
       return currentWindowHarness.unlistenMoved;
@@ -100,6 +105,9 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
     setSize = vi.fn(async () => {});
     show = vi.fn(async () => {});
     setFocus = vi.fn(async () => {});
+    startDragging = vi.fn(async () => {});
+    innerSize = vi.fn(async () => ({ width: 780, height: 448 }));
+    outerSize = vi.fn(async () => ({ width: 780, height: 480 }));
 
     constructor(label: string, options: Record<string, unknown> = {}) {
       this.label = label;
@@ -130,6 +138,10 @@ vi.mock("@kanna/" + "db", () => ({
 }));
 
 describe("windowWorkspace in Tauri", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   beforeEach(() => {
     settingStore.clear();
     updateDesktopServerClientHandlersForTests({
@@ -168,6 +180,8 @@ describe("windowWorkspace in Tauri", () => {
     currentWindowHarness.setSize.mockClear();
     currentWindowHarness.outerPosition.mockClear();
     currentWindowHarness.outerSize.mockClear();
+    currentWindowHarness.innerSize.mockClear();
+    currentWindowHarness.scaleFactor.mockClear();
     currentWindowHarness.movedHandler = null;
     currentWindowHarness.resizedHandler = null;
     currentWindowHarness.unlistenMoved.mockClear();
@@ -248,6 +262,166 @@ describe("windowWorkspace in Tauri", () => {
     expect(restored?.setPosition.mock.invocationCallOrder[0]).toBeLessThan(
       restored?.show.mock.invocationCallOrder[0] ?? 0,
     );
+  });
+
+  it("restores a persisted tear-off through the shared window lifecycle", async () => {
+    const context = {
+      surface: "diff" as const,
+      repoPath: "/repo",
+      worktreePath: "/repo/.kanna-worktrees/task-1",
+    };
+    settingStore.set(
+      WINDOW_WORKSPACE_SETTINGS_KEY,
+      JSON.stringify({
+        windows: [
+          {
+            windowId: "main",
+            selectedRepoId: null,
+            selectedItemId: null,
+            order: 0,
+            sidebarHidden: false,
+            sidebarWidth: 260,
+          },
+          {
+            windowId: "tear-off-1",
+            selectedRepoId: null,
+            selectedItemId: null,
+            order: 1,
+            sidebarHidden: false,
+            sidebarWidth: 260,
+            geometry: { x: 240, y: 180, width: 1080, height: 614 },
+            tearOffContext: context,
+          },
+        ],
+      } satisfies WorkspaceSnapshot),
+    );
+    const workspace = createWindowWorkspace({
+      db: {} as never,
+      bootstrap: { windowId: "main", selectedRepoId: null, selectedItemId: null },
+    });
+
+    await workspace.restoreAdditionalWindows();
+
+    const restored = createdWindows[0];
+    expect(restored?.options).toMatchObject({
+      title: "Diff — Kanna",
+      minWidth: 420,
+      minHeight: 280,
+      visible: false,
+    });
+    expect(String(restored?.options.url)).toContain("windowMode=tearOff");
+    expect(restored?.show).toHaveBeenCalledTimes(1);
+  });
+
+  it("fits a tear-off native frame to its persisted content size", async () => {
+    const innerWidthSpy = vi.spyOn(window, "innerWidth", "get").mockReturnValue(780);
+    const innerHeightSpy = vi.spyOn(window, "innerHeight", "get").mockReturnValue(448);
+    currentWindowHarness.outerSize.mockResolvedValueOnce({ width: 1560, height: 896 });
+    currentWindowHarness.scaleFactor.mockResolvedValueOnce(2);
+    const context = {
+      surface: "tree" as const,
+      worktreePath: "/repo/.kanna-worktrees/task-1",
+      repoRoot: "/repo",
+    };
+    settingStore.set(
+      WINDOW_WORKSPACE_SETTINGS_KEY,
+      JSON.stringify({
+        windows: [{
+          windowId: "tear-off-1",
+          selectedRepoId: null,
+          selectedItemId: null,
+          order: 0,
+          sidebarHidden: false,
+          sidebarWidth: 260,
+          geometry: { x: 480, y: 360, width: 1560, height: 960 },
+          tearOffContext: context,
+        }],
+      } satisfies WorkspaceSnapshot),
+    );
+    const workspace = createWindowWorkspace({
+      db: {} as never,
+      bootstrap: {
+        windowId: "tear-off-1",
+        selectedRepoId: null,
+        selectedItemId: null,
+        tearOffContext: context,
+      },
+    });
+
+    await workspace.restoreCurrentWindowGeometry();
+    innerWidthSpy.mockRestore();
+    innerHeightSpy.mockRestore();
+
+    expect(currentWindowHarness.setSize).toHaveBeenCalledWith(
+      expect.objectContaining({ width: 1560, height: 960 }),
+    );
+    expect(currentWindowHarness.setPosition).toHaveBeenCalledWith(
+      expect.objectContaining({ x: 480, y: 360 }),
+    );
+  });
+
+  it("persists the live selection with a tear-off after navigation", async () => {
+    const workspace = createWindowWorkspace({
+      db: {} as never,
+      bootstrap: {
+        windowId: "main",
+        selectedRepoId: "repo-at-startup",
+        selectedItemId: "task-at-startup",
+      },
+    });
+    const context = {
+      surface: "tree" as const,
+      worktreePath: "/repo/.kanna-worktrees/task-1",
+      repoRoot: "/repo",
+    };
+
+    await workspace.persistSelection({
+      selectedRepoId: "repo-1",
+      selectedItemId: "task-1",
+    });
+    await workspace.openTearOffWindow(context, {
+      x: 240,
+      y: 180,
+      width: 780,
+      height: 480,
+    });
+
+    const created = createdWindows[0];
+    expect(created?.label).toMatch(/^window-/);
+    expect(created?.options).toMatchObject({
+      title: "task-1 — Kanna",
+      width: 780,
+      height: 480,
+      minWidth: 420,
+      minHeight: 280,
+      visible: false,
+    });
+    expect(String(created?.options.url)).toContain("windowMode=tearOff");
+    expect(created?.startDragging).toHaveBeenCalledTimes(1);
+    const stored = JSON.parse(
+      settingStore.get(WINDOW_WORKSPACE_SETTINGS_KEY) ?? '{"windows":[]}',
+    ) as WorkspaceSnapshot;
+    expect(stored.windows).toHaveLength(1);
+    expect(stored.windows[0]).toMatchObject({
+      selectedRepoId: "repo-1",
+      selectedItemId: "task-1",
+      geometry: { x: 240, y: 180, width: 780, height: 480 },
+      tearOffContext: context,
+    });
+    await expect(resolveWindowBootstrap(
+      {} as never,
+      {
+        windowId: stored.windows[0]?.windowId ?? "missing",
+        selectedRepoId: null,
+        selectedItemId: null,
+      },
+      stored,
+    )).resolves.toMatchObject({
+      selectedRepoId: "repo-1",
+      selectedItemId: "task-1",
+      tearOffContext: context,
+    });
+    expect(ensuredWindowWasLive).toEqual([false]);
   });
 
   it("reveals a secondary window when applying its saved geometry fails", async () => {

@@ -11,6 +11,8 @@ describe("window workspace native capability", () => {
   it("allows the geometry APIs used to validate and restore saved bounds", () => {
     expect(capability).toContain('"core:window:allow-set-position"');
     expect(capability).toContain('"core:window:allow-set-size"');
+    expect(capability).toContain('"core:window:allow-set-min-size"');
+    expect(capability).toContain('"core:window:allow-start-dragging"');
     expect(capability).toContain('"core:window:allow-available-monitors"');
     expect(capability).toContain('"core:window:allow-primary-monitor"');
     expect(capability).toContain('"core:window:allow-outer-position"');

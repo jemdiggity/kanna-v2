@@ -502,6 +502,7 @@ export interface DesktopWorkspaceWindowState {
   sidebarWidth: number;
   order: number;
   geometry?: DesktopWorkspaceWindowGeometry | null;
+  tearOffContext?: import("../modalTearOff").ModalTearOffContext | null;
 }
 
 export interface DesktopWorkspaceWindowGeometry {
@@ -526,6 +527,12 @@ export type DesktopWindowWorkspaceMutation =
     }
   | { operation: "updateSidebarHidden"; windowId: string; sidebarHidden: boolean }
   | { operation: "updateSidebarWidth"; windowId: string; sidebarWidth: number }
+  | {
+      operation: "clearTearOff";
+      windowId: string;
+      selectedRepoId: string | null;
+      selectedItemId: string | null;
+    }
   | {
       operation: "updateGeometry";
       windowId: string;

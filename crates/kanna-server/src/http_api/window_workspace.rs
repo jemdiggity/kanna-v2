@@ -14,6 +14,8 @@ const MIN_SIDEBAR_WIDTH: i64 = 220;
 const MAX_SIDEBAR_WIDTH: i64 = 420;
 const MIN_WINDOW_WIDTH: u32 = 800;
 const MIN_WINDOW_HEIGHT: u32 = 600;
+const MIN_TEAR_OFF_WINDOW_WIDTH: u32 = 420;
+const MIN_TEAR_OFF_WINDOW_HEIGHT: u32 = 280;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -25,8 +27,13 @@ struct WorkspaceWindowGeometry {
 }
 
 impl WorkspaceWindowGeometry {
-    fn is_usable(&self) -> bool {
-        self.width >= MIN_WINDOW_WIDTH && self.height >= MIN_WINDOW_HEIGHT
+    fn is_usable(&self, tear_off: bool) -> bool {
+        let (minimum_width, minimum_height) = if tear_off {
+            (MIN_TEAR_OFF_WINDOW_WIDTH, MIN_TEAR_OFF_WINDOW_HEIGHT)
+        } else {
+            (MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
+        };
+        self.width >= minimum_width && self.height >= minimum_height
     }
 }
 
@@ -46,6 +53,8 @@ struct WorkspaceWindowState {
     order: i64,
     #[serde(default)]
     geometry: Option<WorkspaceWindowGeometry>,
+    #[serde(default)]
+    tear_off_context: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
@@ -126,6 +135,7 @@ fn validate_mutation(payload: &WorkspaceMutationRequest) -> Result<(), String> {
         "updateSidebarWidth" if payload.window_id.is_some() && payload.sidebar_width.is_some() => {
             Ok(())
         }
+        "clearTearOff" if payload.window_id.is_some() => Ok(()),
         "updateGeometry" if payload.window_id.is_some() && payload.geometry.is_some() => Ok(()),
         "remove" if payload.window_id.is_some() => Ok(()),
         operation => Err(format!("invalid window workspace mutation: {operation}")),
@@ -182,6 +192,14 @@ fn apply_mutation(
                 window.sidebar_width = payload.sidebar_width.expect("validated width");
             }
         }
+        "clearTearOff" => {
+            if let Some(window) = find_window_mut(&mut snapshot, payload.window_id.as_deref()) {
+                window.selected_repo_id = payload.selected_repo_id;
+                window.selected_item_id = payload.selected_item_id;
+                window.tear_off_context = None;
+                window.geometry = None;
+            }
+        }
         "updateGeometry" => {
             if let Some(window) = find_window_mut(&mut snapshot, payload.window_id.as_deref()) {
                 window.geometry = payload.geometry;
@@ -232,7 +250,7 @@ fn normalize_snapshot(mut snapshot: WorkspaceSnapshot) -> WorkspaceSnapshot {
         if window
             .geometry
             .as_ref()
-            .is_some_and(|geometry| !geometry.is_usable())
+            .is_some_and(|geometry| !geometry.is_usable(window.tear_off_context.is_some()))
         {
             window.geometry = None;
         }
@@ -262,6 +280,7 @@ mod tests {
                 sidebar_width: DEFAULT_SIDEBAR_WIDTH,
                 order: 0,
                 geometry: None,
+                tear_off_context: None,
             }],
         };
         let geometry = WorkspaceWindowGeometry {
@@ -322,6 +341,7 @@ mod tests {
                 sidebar_width: DEFAULT_SIDEBAR_WIDTH,
                 order: 0,
                 geometry: None,
+                tear_off_context: None,
             }],
         };
 
@@ -356,6 +376,7 @@ mod tests {
                 sidebar_width: DEFAULT_SIDEBAR_WIDTH,
                 order: 0,
                 geometry: None,
+                tear_off_context: None,
             }],
         };
 
@@ -370,6 +391,7 @@ mod tests {
                 sidebar_width: 347,
                 order: 0,
                 geometry: None,
+                tear_off_context: None,
             }),
             selected_repo_id: None,
             selected_item_id: None,
@@ -410,6 +432,7 @@ mod tests {
                     sidebar_width: DEFAULT_SIDEBAR_WIDTH,
                     order: 0,
                     geometry: None,
+                    tear_off_context: None,
                 }),
                 selected_repo_id: None,
                 selected_item_id: None,
@@ -436,6 +459,7 @@ mod tests {
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             order,
             geometry: None,
+            tear_off_context: None,
         };
         let snapshot = WorkspaceSnapshot {
             windows: vec![
@@ -468,5 +492,80 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["window-2", "window-new"]
         );
+    }
+
+    #[test]
+    fn tear_off_windows_keep_modal_sized_geometry() {
+        let geometry = WorkspaceWindowGeometry {
+            x: 240,
+            y: 180,
+            width: 780,
+            height: 480,
+        };
+        let snapshot = normalize_snapshot(WorkspaceSnapshot {
+            windows: vec![WorkspaceWindowState {
+                window_id: "tear-off".to_string(),
+                selected_repo_id: None,
+                selected_item_id: None,
+                sidebar_hidden: false,
+                sidebar_width: DEFAULT_SIDEBAR_WIDTH,
+                order: 0,
+                geometry: Some(geometry.clone()),
+                tear_off_context: Some(serde_json::json!({
+                    "surface": "tree",
+                    "worktreePath": "/repo",
+                    "repoRoot": "/repo"
+                })),
+            }],
+        });
+
+        assert_eq!(snapshot.windows[0].geometry.as_ref(), Some(&geometry));
+    }
+
+    #[test]
+    fn clearing_a_tear_off_keeps_the_window_and_clears_modal_state() {
+        let snapshot = WorkspaceSnapshot {
+            windows: vec![WorkspaceWindowState {
+                window_id: "tear-off".to_string(),
+                selected_repo_id: None,
+                selected_item_id: None,
+                sidebar_hidden: false,
+                sidebar_width: DEFAULT_SIDEBAR_WIDTH,
+                order: 0,
+                geometry: Some(WorkspaceWindowGeometry {
+                    x: 240,
+                    y: 180,
+                    width: 780,
+                    height: 480,
+                }),
+                tear_off_context: Some(serde_json::json!({
+                    "surface": "tree",
+                    "worktreePath": "/repo",
+                    "repoRoot": "/repo"
+                })),
+            }],
+        };
+
+        let next = apply_mutation(
+            snapshot,
+            WorkspaceMutationRequest {
+                operation: "clearTearOff".to_string(),
+                window_id: Some("tear-off".to_string()),
+                window: None,
+                selected_repo_id: Some("repo-1".to_string()),
+                selected_item_id: Some("task-1".to_string()),
+                sidebar_hidden: None,
+                sidebar_width: None,
+                geometry: None,
+                observed_window_ids: None,
+                live_window_ids: None,
+            },
+        );
+
+        assert_eq!(next.windows.len(), 1);
+        assert_eq!(next.windows[0].selected_repo_id.as_deref(), Some("repo-1"));
+        assert_eq!(next.windows[0].selected_item_id.as_deref(), Some("task-1"));
+        assert!(next.windows[0].tear_off_context.is_none());
+        assert!(next.windows[0].geometry.is_none());
     }
 }

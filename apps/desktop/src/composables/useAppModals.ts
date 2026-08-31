@@ -25,6 +25,11 @@ import {
   type MarkdownPreviewMode,
 } from "../stores/markdownPreviewMode";
 import type { PendingReviewComment } from "../utils/reviewComments";
+import type {
+  DiffTearOffContext,
+  ModalTearOffContext,
+  TreeExplorerTearOffContext,
+} from "../modalTearOff";
 
 export type DiffScope = "branch" | "working";
 export type BranchInclude = "none" | "staged" | "all";
@@ -60,6 +65,9 @@ interface UseAppModalsOptions {
 }
 
 export function useAppModals({ isMobile, store, windowWorkspace }: UseAppModalsOptions) {
+  const transferredModalContext = ref<ModalTearOffContext | null>(
+    windowWorkspace.bootstrap.tearOffContext ?? null,
+  );
   const showNewTaskModal = ref(false);
   const availableWorkflows = ref<string[]>([]);
   const defaultWorkflowName = ref<string | undefined>(undefined);
@@ -84,15 +92,41 @@ export function useAppModals({ isMobile, store, windowWorkspace }: UseAppModalsO
   const previewImageUrl = ref("");
   const showDiffModal = ref(false);
   const showTreeExplorer = ref(false);
+  const transferredTreeContext = computed<TreeExplorerTearOffContext | null>(() =>
+    transferredModalContext.value?.surface === "tree"
+      ? transferredModalContext.value
+      : null
+  );
+  const transferredDiffContext = computed<DiffTearOffContext | null>(() =>
+    transferredModalContext.value?.surface === "diff"
+      ? transferredModalContext.value
+      : null
+  );
   const currentWorktreePath = computed(() => {
     if (!store.selectedRepo?.path || !store.currentItem?.branch) return undefined;
     return `${store.selectedRepo.path}/.kanna-worktrees/${store.currentItem.branch}`;
   });
+  const activeRepoPath = computed(() =>
+    transferredTreeContext.value?.repoRoot
+      ?? transferredDiffContext.value?.repoPath
+      ?? store.selectedRepo?.path
+      ?? ""
+  );
   const activeWorktreePath = computed(() =>
-    currentWorktreePath.value ?? store.selectedRepo?.path ?? ""
+    transferredTreeContext.value?.worktreePath
+      ?? transferredDiffContext.value?.worktreePath
+      ?? currentWorktreePath.value
+      ?? activeRepoPath.value
+  );
+  const activeDiffWorktreePath = computed(() =>
+    transferredDiffContext.value?.worktreePath
+      ?? (store.currentItem?.branch ? currentWorktreePath.value : undefined)
   );
   const homePath = ref("");
   const treeExplorerRoot = computed(() => {
+    if (transferredTreeContext.value) {
+      return transferredTreeContext.value.worktreePath;
+    }
     if (currentWorktreePath.value) return currentWorktreePath.value;
     if (store.selectedRepo?.path) return store.selectedRepo.path;
     return homePath.value;
@@ -141,6 +175,7 @@ export function useAppModals({ isMobile, store, windowWorkspace }: UseAppModalsO
   const diffViewStates = reactive<Record<string, DiffViewState>>({});
   const filePreviewRecallStates = reactive<Record<string, FilePreviewRecallState>>({});
   const currentDiffViewKey = computed(() => {
+    if (transferredDiffContext.value?.viewKey) return transferredDiffContext.value.viewKey;
     if (store.currentItem) return `item:${store.currentItem.id}`;
     if (store.selectedRepo) return `repo:${store.selectedRepo.id}`;
     return undefined;
@@ -155,6 +190,43 @@ export function useAppModals({ isMobile, store, windowWorkspace }: UseAppModalsO
     if (!key) return;
     const current = diffViewStates[key] ?? {};
     diffViewStates[key] = { ...current, ...partial };
+  }
+
+  function restoreTransferredModal() {
+    const context = transferredModalContext.value;
+    if (!context) return;
+    if (context.surface === "tree") {
+      showTreeExplorer.value = true;
+      maximizedModal.value = "tree";
+      return;
+    }
+
+    const key = context.viewKey ?? currentDiffViewKey.value;
+    if (key) {
+      diffViewStates[key] = {
+        ...(context.initialScope ? { scope: context.initialScope } : {}),
+        ...(context.initialScrollPositions
+          ? { scrollPositions: context.initialScrollPositions }
+          : {}),
+        ...(context.initialBranchInclude
+          ? { branchInclude: context.initialBranchInclude }
+          : {}),
+        ...(context.reviewComments ? { reviewComments: context.reviewComments } : {}),
+        ...(context.reviewHeadCommit
+          ? { reviewHeadCommit: context.reviewHeadCommit }
+          : {}),
+      };
+    }
+    showDiffModal.value = true;
+    maximizedModal.value = "diff";
+  }
+
+  function finishTransferredModal(surface: ModalTearOffContext["surface"]): void {
+    if (transferredModalContext.value?.surface !== surface) return;
+    transferredModalContext.value = null;
+    void windowWorkspace.clearTearOffContext().catch((error: unknown) => {
+      console.error("[App] failed to finish transferred modal state:", error);
+    });
   }
 
   function buildCurrentFileFlowKey(): string | undefined {
@@ -311,6 +383,13 @@ export function useAppModals({ isMobile, store, windowWorkspace }: UseAppModalsO
   function closeTreeExplorer() {
     showTreeExplorer.value = false;
     maximizedModal.value = maximizedModal.value === "tree" ? null : maximizedModal.value;
+    finishTransferredModal("tree");
+  }
+
+  function closeDiffModal() {
+    showDiffModal.value = false;
+    maximizedModal.value = maximizedModal.value === "diff" ? null : maximizedModal.value;
+    finishTransferredModal("diff");
   }
 
   function closeFileFlow() {
@@ -425,8 +504,13 @@ export function useAppModals({ isMobile, store, windowWorkspace }: UseAppModalsO
     previewImageUrl,
     showDiffModal,
     showTreeExplorer,
+    transferredModalContext,
+    transferredTreeContext,
+    transferredDiffContext,
     currentWorktreePath,
+    activeRepoPath,
     activeWorktreePath,
+    activeDiffWorktreePath,
     homePath,
     treeExplorerRoot,
     showShellModal,
@@ -458,6 +542,7 @@ export function useAppModals({ isMobile, store, windowWorkspace }: UseAppModalsO
     currentDiffViewKey,
     currentDiffViewState,
     updateCurrentDiffViewState,
+    restoreTransferredModal,
     currentPreviewMarkdownMode,
     updateCurrentPreviewMarkdownMode,
     stopSidebarResize,
@@ -466,6 +551,7 @@ export function useAppModals({ isMobile, store, windowWorkspace }: UseAppModalsO
     currentShortcutContext,
     onShellClose,
     closeTreeExplorer,
+    closeDiffModal,
     closeFileFlow,
     closeFilePicker,
     showFilePickerOnTop,
