@@ -17,8 +17,20 @@ use tokio_tungstenite::tungstenite::Message;
 
 const RELAY_PING_INTERVAL: Duration = Duration::from_secs(30);
 const RELAY_PONG_TIMEOUT: Duration = Duration::from_secs(75);
+const RELAY_RECONNECT_DELAY: Duration = Duration::from_secs(5);
 const TASK_SNAPSHOT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const MOBILE_NOTIFICATION_REJECTION_CATEGORY: &str = "relayRejection";
+
+#[derive(Clone, Copy)]
+struct RelayConnectionTiming {
+    connect_timeout: Duration,
+    reconnect_delay: Duration,
+}
+
+const RELAY_CONNECTION_TIMING: RelayConnectionTiming = RelayConnectionTiming {
+    connect_timeout: relay_client::RELAY_CONNECT_TIMEOUT,
+    reconnect_delay: RELAY_RECONNECT_DELAY,
+};
 
 enum PendingDesktopRequest {
     ListActive {
@@ -68,7 +80,9 @@ fn apply_relay_authentication(
     {
         *routing_generation = http_state.set_desktop_routing_available(true);
     } else {
-        http_state.set_desktop_routing_available(false);
+        http_state.set_desktop_routing_unavailable(
+            "relay authenticated without desktop-routing capability",
+        );
     }
     publisher.on_authenticated(
         capabilities
@@ -121,6 +135,15 @@ pub(crate) async fn run_relay_loop(
     db: db::Db,
     http_state: Arc<http_api::AppState>,
 ) -> Result<(), String> {
+    run_relay_loop_with_timing(config, db, http_state, RELAY_CONNECTION_TIMING).await
+}
+
+async fn run_relay_loop_with_timing(
+    config: Config,
+    db: db::Db,
+    http_state: Arc<http_api::AppState>,
+    timing: RelayConnectionTiming,
+) -> Result<(), String> {
     let revocation_config = config.clone();
     let revocation_state = Arc::clone(&http_state);
     tokio::spawn(async move {
@@ -141,10 +164,23 @@ pub(crate) async fn run_relay_loop(
     loop {
         let anonymous_identity_available =
             crate::pairing::anonymous_push_public_key(&config).is_ok();
+        let account_auth = if anonymous_identity_available && config.desktop_secret.is_some() {
+            tokio::select! {
+                probe = relay_client::probe_account_auth(&config) => probe,
+                _ = http_state.wait_for_cloud_relay_reconnect() => {
+                    let reason = "desktop relay connect cancelled by local reconnect request";
+                    log::info!("Cloud relay account probe cancelled by the local reconnect request");
+                    http_state.set_desktop_routing_unavailable(reason);
+                    tokio::time::sleep(timing.reconnect_delay).await;
+                    continue;
+                }
+            }
+        } else {
+            relay_client::AccountAuthProbe::Unavailable
+        };
         let use_anonymous_push = anonymous_identity_available
             && (config.desktop_secret.is_none()
-                || relay_client::probe_account_auth(&config).await
-                    == relay_client::AccountAuthProbe::Rejected);
+                || account_auth == relay_client::AccountAuthProbe::Rejected);
         if use_anonymous_push {
             run_anonymous_push_loop(
                 &config,
@@ -154,20 +190,39 @@ pub(crate) async fn run_relay_loop(
             .await?;
             continue;
         }
-        http_state.set_desktop_routing_available(false);
+        http_state.set_desktop_routing_unavailable("connecting to desktop relay");
         http_state.set_mobile_notifications_available(false);
         log::info!("Connecting to relay at {}...", config.relay_url);
 
-        let (sink, mut stream, initial_authentication) =
-            match relay_client::connect_to_relay(&config).await {
-                Ok(pair) => pair,
-                Err(e) => {
-                    log::error!("Failed to connect to relay: {}", e);
-                    log::info!("Retrying in 5 seconds...");
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    continue;
-                }
-            };
+        let connection = tokio::select! {
+            connection = relay_client::connect_to_relay(&config, timing.connect_timeout) => connection,
+            _ = http_state.wait_for_cloud_relay_reconnect() => {
+                let reason = "desktop relay connect cancelled by local reconnect request";
+                log::info!("Cloud relay connect cancelled by the local reconnect request");
+                http_state.set_desktop_routing_unavailable(reason);
+                log::info!("Retrying in 5 seconds...");
+                tokio::time::sleep(timing.reconnect_delay).await;
+                continue;
+            }
+        };
+        let (sink, mut stream, initial_authentication) = match connection {
+            Ok(pair) => pair,
+            Err(error) => {
+                log::error!("Failed to connect to relay: {error}");
+                let reason = match error {
+                    relay_client::RelayConnectError::TimedOut { .. } => {
+                        "desktop relay connect timed out".to_string()
+                    }
+                    relay_client::RelayConnectError::Failed(error) => {
+                        format!("desktop relay connection failed: {error}")
+                    }
+                };
+                http_state.set_desktop_routing_unavailable(reason);
+                log::info!("Retrying in 5 seconds...");
+                tokio::time::sleep(timing.reconnect_delay).await;
+                continue;
+            }
+        };
 
         log::info!("Connected to relay");
 
@@ -202,6 +257,7 @@ pub(crate) async fn run_relay_loop(
                 &mut routing_generation,
             );
         }
+        let mut disconnect_reason = "desktop relay connection ended".to_string();
 
         // Message processing loop
         loop {
@@ -234,6 +290,8 @@ pub(crate) async fn run_relay_loop(
                         }
                         PublisherStep::Reconnect => {
                             log::warn!("Cloud task snapshot retries exhausted; reconnecting relay");
+                            disconnect_reason =
+                                "cloud task publication acknowledgements timed out".to_string();
                             break;
                         }
                         PublisherStep::Wait => {}
@@ -331,6 +389,8 @@ pub(crate) async fn run_relay_loop(
                             fail_pending_desktop_request(request, error.clone());
                         }
                         log::error!("Failed to send desktop relay request: {error}");
+                        disconnect_reason =
+                            format!("failed to send desktop relay request: {error}");
                         break;
                     }
                     continue;
@@ -340,11 +400,13 @@ pub(crate) async fn run_relay_loop(
                         RelayKeepaliveAction::SendPing => {
                             if let Err(e) = sink.lock().await.send(Message::Ping(Vec::new().into())).await {
                                 log::error!("Failed to send relay ping: {}", e);
+                                disconnect_reason = format!("failed to send relay ping: {e}");
                                 break;
                             }
                         }
                         RelayKeepaliveAction::Reconnect => {
                             log::warn!("Relay keepalive timed out; reconnecting");
+                            disconnect_reason = "desktop relay keepalive timed out".to_string();
                             break;
                         }
                     }
@@ -353,12 +415,14 @@ pub(crate) async fn run_relay_loop(
                 msg_result = stream.next() => {
                     let Some(msg_result) = msg_result else {
                         log::info!("Relay WebSocket stream ended");
+                        disconnect_reason = "desktop relay WebSocket stream ended".to_string();
                         break;
                     };
                     match msg_result {
                         Ok(m) => m,
                         Err(e) => {
                             log::error!("WebSocket error: {}", e);
+                            disconnect_reason = format!("desktop relay WebSocket error: {e}");
                             break;
                         }
                     }
@@ -756,12 +820,24 @@ pub(crate) async fn run_relay_loop(
                 Message::Ping(data) => {
                     if let Err(e) = sink.lock().await.send(Message::Pong(data)).await {
                         log::error!("Failed to send pong: {}", e);
+                        disconnect_reason = format!("failed to send desktop relay pong: {e}");
                         break;
                     }
                 }
                 Message::Pong(_) => {}
-                Message::Close(_) => {
-                    log::info!("Relay closed connection");
+                Message::Close(frame) => {
+                    disconnect_reason = frame.map_or_else(
+                        || "desktop relay closed without a reason".to_string(),
+                        |frame| {
+                            let reason = frame.reason.trim();
+                            if reason.is_empty() {
+                                format!("desktop relay closed with code {}", frame.code)
+                            } else {
+                                format!("desktop relay closed with code {}: {reason}", frame.code)
+                            }
+                        },
+                    );
+                    log::info!("Relay closed connection: {disconnect_reason}");
                     break;
                 }
                 _ => {}
@@ -769,7 +845,7 @@ pub(crate) async fn run_relay_loop(
         }
 
         // Clean up all observer tasks on disconnect
-        http_state.set_desktop_routing_available(false);
+        http_state.set_desktop_routing_unavailable(disconnect_reason.clone());
         http_state.set_mobile_notifications_available(false);
         publisher.on_disconnected();
         for (_, pending) in pending_mobile_notifications.drain() {
@@ -789,7 +865,7 @@ pub(crate) async fn run_relay_loop(
         }
 
         log::info!("Disconnected from relay. Reconnecting in 5 seconds...");
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        tokio::time::sleep(timing.reconnect_delay).await;
     }
 }
 
@@ -1374,6 +1450,7 @@ mod tests {
     use kanna_daemon::protocol::TerminalSnapshot;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Mutex as StdMutex, Once};
+    use tokio::io::AsyncReadExt;
 
     static TEST_LOGGER: RelayTestLogger = RelayTestLogger;
     static TEST_LOGGER_INIT: Once = Once::new();
@@ -1381,6 +1458,81 @@ mod tests {
     static TEST_LOG_MESSAGES: StdMutex<Vec<String>> = StdMutex::new(Vec::new());
 
     struct RelayTestLogger;
+
+    fn relay_connection_test_config(name: &str, relay_address: std::net::SocketAddr) -> Config {
+        let unique = format!(
+            "relay-connect-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        );
+        Config {
+            relay_url: format!("ws://{relay_address}"),
+            device_token: "device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
+            daemon_dir: std::env::temp_dir()
+                .join(format!("{unique}-daemon"))
+                .to_string_lossy()
+                .into_owned(),
+            db_path: db::Db::test_db_path(&unique),
+            kanna_cli_path: None,
+            desktop_id: format!("desktop-{name}"),
+            desktop_secret: Some("desktop-secret".to_string()),
+            desktop_name: "Connect Test Mac".to_string(),
+            version: "test-version".to_string(),
+            environment: "development".to_string(),
+            lan_host: "127.0.0.1".to_string(),
+            lan_port: 48_120,
+            transfer_port: 4455,
+            activity_event_debounce_seconds: 300,
+            pairing_store_path: std::env::temp_dir()
+                .join(format!("{unique}-pairings.json"))
+                .to_string_lossy()
+                .into_owned(),
+        }
+    }
+
+    async fn stalled_relay_listener() -> (
+        std::net::SocketAddr,
+        tokio::sync::mpsc::UnboundedReceiver<(usize, std::time::Instant)>,
+        tokio::sync::mpsc::UnboundedReceiver<usize>,
+        JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind stalled relay");
+        let address = listener.local_addr().expect("stalled relay address");
+        let (accepted_tx, accepted_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (closed_tx, closed_rx) = tokio::sync::mpsc::unbounded_channel();
+        let server = tokio::spawn(async move {
+            let mut attempt = 0_usize;
+            loop {
+                let (mut stream, _) = listener.accept().await.expect("accept stalled relay TCP");
+                attempt += 1;
+                accepted_tx
+                    .send((attempt, std::time::Instant::now()))
+                    .expect("report accepted relay TCP");
+                let closed_tx = closed_tx.clone();
+                tokio::spawn(async move {
+                    let mut bytes = [0_u8; 1024];
+                    loop {
+                        match stream.read(&mut bytes).await {
+                            Ok(0) | Err(_) => {
+                                let _ = closed_tx.send(attempt);
+                                break;
+                            }
+                            Ok(_) => {}
+                        }
+                    }
+                });
+            }
+        });
+        (address, accepted_rx, closed_rx, server)
+    }
 
     impl log::Log for RelayTestLogger {
         fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
@@ -1418,6 +1570,204 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
         )
+    }
+
+    #[tokio::test]
+    async fn stalled_relay_handshake_times_out_and_retries_after_backoff() {
+        let (address, mut accepted, mut closed, relay_server) = stalled_relay_listener().await;
+        let config = relay_connection_test_config("timeout", address);
+        let database_path = config.db_path.clone();
+        let database = db::Db::open_for_tests(&database_path).expect("open test database");
+        let state = Arc::new(http_api::AppState::new(config.clone()));
+        let relay_loop = run_relay_loop_with_timing(
+            config,
+            database,
+            Arc::clone(&state),
+            RelayConnectionTiming {
+                connect_timeout: Duration::from_millis(100),
+                reconnect_delay: Duration::from_millis(200),
+            },
+        );
+        tokio::pin!(relay_loop);
+        let verification = async {
+            let (first_attempt, first_accepted_at) =
+                tokio::time::timeout(Duration::from_secs(1), accepted.recv())
+                    .await
+                    .expect("first connection attempt was not made")
+                    .expect("stalled relay stopped");
+            assert_eq!(first_attempt, 1);
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(1), closed.recv())
+                    .await
+                    .expect("timed-out socket stayed open"),
+                Some(1)
+            );
+            tokio::time::timeout(Duration::from_millis(100), async {
+                while state.desktop_routing_unavailable_reason()
+                    != "desktop relay connect timed out"
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("timeout reason was not exposed");
+
+            let (second_attempt, second_accepted_at) =
+                tokio::time::timeout(Duration::from_secs(1), accepted.recv())
+                    .await
+                    .expect("relay did not retry after timeout")
+                    .expect("stalled relay stopped");
+            assert_eq!(second_attempt, 2);
+            assert!(
+                second_accepted_at.duration_since(first_accepted_at) >= Duration::from_millis(250),
+                "retry skipped the timeout or reconnect backoff"
+            );
+        };
+        tokio::pin!(verification);
+        tokio::select! {
+            () = &mut verification => {}
+            result = &mut relay_loop => panic!("relay loop exited early: {result:?}"),
+        }
+
+        relay_server.abort();
+        let _ = std::fs::remove_file(database_path);
+    }
+
+    #[tokio::test]
+    async fn reconnect_request_cancels_a_stalled_relay_handshake_immediately() {
+        let (address, mut accepted, mut closed, relay_server) = stalled_relay_listener().await;
+        let config = relay_connection_test_config("cancel", address);
+        let database_path = config.db_path.clone();
+        let database = db::Db::open_for_tests(&database_path).expect("open test database");
+        let state = Arc::new(http_api::AppState::new(config.clone()));
+        let relay_loop = run_relay_loop_with_timing(
+            config,
+            database,
+            Arc::clone(&state),
+            RelayConnectionTiming {
+                connect_timeout: Duration::from_secs(5),
+                reconnect_delay: Duration::from_secs(1),
+            },
+        );
+        tokio::pin!(relay_loop);
+        let verification = async {
+            let (attempt, _) = tokio::time::timeout(Duration::from_secs(1), accepted.recv())
+                .await
+                .expect("connection attempt was not made")
+                .expect("stalled relay stopped");
+            assert_eq!(attempt, 1);
+            let requested_at = std::time::Instant::now();
+            state.request_cloud_relay_reconnect();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_millis(500), closed.recv())
+                    .await
+                    .expect("reconnect did not cancel the socket promptly"),
+                Some(1)
+            );
+            assert!(requested_at.elapsed() < Duration::from_millis(500));
+            tokio::time::timeout(Duration::from_millis(100), async {
+                while state.desktop_routing_unavailable_reason()
+                    != "desktop relay connect cancelled by local reconnect request"
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("cancellation reason was not exposed");
+        };
+        tokio::pin!(verification);
+        tokio::select! {
+            () = &mut verification => {}
+            result = &mut relay_loop => panic!("relay loop exited early: {result:?}"),
+        }
+
+        relay_server.abort();
+        let _ = std::fs::remove_file(database_path);
+    }
+
+    #[tokio::test]
+    async fn connect_timeout_does_not_apply_after_a_relay_session_is_established() {
+        use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind established relay");
+        let address = listener.local_addr().expect("established relay address");
+        let (pong_received_tx, pong_received_rx) = tokio::sync::oneshot::channel();
+        let (release_relay_tx, release_relay_rx) = tokio::sync::oneshot::channel();
+        let relay_server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept relay TCP");
+            let mut socket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("accept relay WebSocket");
+            let auth = socket
+                .next()
+                .await
+                .expect("auth message")
+                .expect("valid auth frame");
+            assert!(matches!(auth, TungsteniteMessage::Text(_)));
+            socket
+                .send(TungsteniteMessage::Text(
+                    serde_json::json!({
+                        "type": "auth_ok",
+                        "userId": "user-1",
+                        "capabilities": { "desktopRouting": { "version": 1 } }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .expect("send auth acknowledgement");
+
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            socket
+                .send(TungsteniteMessage::Ping(vec![1, 2, 3].into()))
+                .await
+                .expect("send ping after connect timeout budget");
+            loop {
+                let frame = socket
+                    .next()
+                    .await
+                    .expect("relay session closed after connect budget")
+                    .expect("valid relay response");
+                if matches!(frame, TungsteniteMessage::Pong(payload) if payload.as_ref() == [1, 2, 3])
+                {
+                    break;
+                }
+            }
+            let _ = pong_received_tx.send(());
+            let _ = release_relay_rx.await;
+        });
+        let config = relay_connection_test_config("established", address);
+        let database_path = config.db_path.clone();
+        let database = db::Db::open_for_tests(&database_path).expect("open test database");
+        let state = Arc::new(http_api::AppState::new(config.clone()));
+        let relay_loop = run_relay_loop_with_timing(
+            config,
+            database,
+            Arc::clone(&state),
+            RelayConnectionTiming {
+                connect_timeout: Duration::from_millis(200),
+                reconnect_delay: Duration::from_millis(50),
+            },
+        );
+        tokio::pin!(relay_loop);
+        let verification = async {
+            tokio::time::timeout(Duration::from_secs(2), pong_received_rx)
+                .await
+                .expect("established relay did not remain usable")
+                .expect("established relay closed before pong");
+            assert!(state.desktop_routing_available());
+            let _ = release_relay_tx.send(());
+            relay_server.await.expect("established relay task failed");
+        };
+        tokio::pin!(verification);
+        tokio::select! {
+            () = &mut verification => {}
+            result = &mut relay_loop => panic!("relay loop exited early: {result:?}"),
+        }
+
+        let _ = std::fs::remove_file(database_path);
     }
 
     #[test]
@@ -3161,6 +3511,18 @@ mod tests {
                 .expect("primary auth frame")
                 .expect("valid primary auth");
             assert!(matches!(auth, TungsteniteMessage::Text(_)));
+            primary
+                .send(TungsteniteMessage::Text(
+                    serde_json::json!({
+                        "type": "auth_ok",
+                        "userId": "user-1",
+                        "capabilities": { "desktopRouting": { "version": 1 } }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .expect("authenticate primary websocket");
 
             primary
                 .send(TungsteniteMessage::Text(

@@ -47,10 +47,7 @@ pub(super) async fn list_cloud_desktops(
             Err(error) => (false, Some(error)),
         }
     } else {
-        (
-            false,
-            Some("desktop relay routing is unavailable".to_string()),
-        )
+        (false, Some(state.desktop_routing_unavailable_reason()))
     };
     ids.sort();
     ids.dedup();

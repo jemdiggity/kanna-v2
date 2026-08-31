@@ -41,6 +41,7 @@ pub struct AppState {
     relay_reconnect: Arc<Notify>,
     anonymous_push_revocations_changed: Arc<Notify>,
     relay_desktop_routing_available: Arc<AtomicBool>,
+    relay_desktop_routing_unavailable_reason: Arc<StdMutex<Option<String>>>,
     relay_desktop_routing_generation: Arc<AtomicU64>,
     desktop_relay_tx: mpsc::Sender<DesktopRelayRequest>,
     desktop_relay_rx: Arc<StdMutex<Option<mpsc::Receiver<DesktopRelayRequest>>>>,
@@ -322,6 +323,9 @@ impl AppState {
             relay_reconnect: Arc::new(Notify::new()),
             anonymous_push_revocations_changed: Arc::new(Notify::new()),
             relay_desktop_routing_available: Arc::new(AtomicBool::new(false)),
+            relay_desktop_routing_unavailable_reason: Arc::new(StdMutex::new(Some(
+                "desktop relay has not connected".to_string(),
+            ))),
             relay_desktop_routing_generation: Arc::new(AtomicU64::new(0)),
             desktop_relay_tx,
             desktop_relay_rx: Arc::new(StdMutex::new(Some(desktop_relay_rx))),
@@ -422,7 +426,30 @@ impl AppState {
         };
         self.relay_desktop_routing_available
             .store(available, Ordering::Release);
+        if available {
+            *self
+                .relay_desktop_routing_unavailable_reason
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        }
         generation
+    }
+
+    pub(crate) fn set_desktop_routing_unavailable(&self, reason: impl Into<String>) {
+        *self
+            .relay_desktop_routing_unavailable_reason
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(reason.into());
+        self.relay_desktop_routing_available
+            .store(false, Ordering::Release);
+    }
+
+    pub(crate) fn desktop_routing_unavailable_reason(&self) -> String {
+        self.relay_desktop_routing_unavailable_reason
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .unwrap_or_else(|| "desktop relay routing is unavailable".to_string())
     }
 
     pub(crate) fn desktop_routing_available(&self) -> bool {
@@ -441,12 +468,12 @@ impl AppState {
 
     async fn send_desktop_relay_request(&self, request: DesktopRelayRequest) -> Result<(), String> {
         if !self.desktop_routing_available() {
-            return Err("desktop relay routing is unavailable".to_string());
+            return Err(self.desktop_routing_unavailable_reason());
         }
         self.desktop_relay_tx
             .send(request)
             .await
-            .map_err(|_| "desktop relay routing is unavailable".to_string())
+            .map_err(|_| self.desktop_routing_unavailable_reason())
     }
 
     pub(crate) async fn list_active_relay_desktops(&self) -> Result<Vec<String>, String> {
