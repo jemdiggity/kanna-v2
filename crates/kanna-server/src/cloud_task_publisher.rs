@@ -535,7 +535,7 @@ impl PublisherState {
         id: &str,
         ok: bool,
         _error: Option<String>,
-        now: Instant,
+        _now: Instant,
     ) -> Result<(), String> {
         let Some(in_flight) = self.in_flight.take() else {
             return Err(format!("unexpected task snapshot acknowledgement {id}"));
@@ -548,7 +548,13 @@ impl PublisherState {
             self.last_acked_fingerprint = Some(in_flight.request.snapshot.fingerprint());
             return Ok(());
         }
-        self.schedule_failure(in_flight.attempt, now);
+        // A negative acknowledgement is a complete protocol response. Retrying
+        // the identical invalid snapshot cannot repair it, and reconnecting the
+        // shared control socket takes healthy machine discovery and routing
+        // down with an unrelated publication. Suppress this fingerprint until
+        // local state changes; timeouts still retry and reconnect because their
+        // delivery outcome is unknown.
+        self.last_acked_fingerprint = Some(in_flight.request.snapshot.fingerprint());
         Ok(())
     }
 
@@ -1086,7 +1092,7 @@ mod tests {
     }
 
     #[test]
-    fn publisher_retries_with_backoff_then_requests_reconnect() {
+    fn publisher_does_not_disconnect_routing_for_a_rejected_snapshot() {
         let now = Instant::now();
         let mut state = PublisherState::new();
         state.on_authenticated(Some(2));
@@ -1097,19 +1103,15 @@ mod tests {
             ui_snapshot("idle"),
         ));
 
-        for attempt in 1..=3 {
-            let PublisherStep::Publish(request) =
-                state.next_step(now + Duration::from_secs(attempt * 10))
-            else {
-                panic!("expected publish attempt {attempt}");
-            };
-            state
-                .on_ack(&request.id, false, Some("write failed".into()), now)
-                .unwrap();
-        }
+        let PublisherStep::Publish(request) = state.next_step(now) else {
+            panic!("expected publication");
+        };
+        state
+            .on_ack(&request.id, false, Some("invalid snapshot".into()), now)
+            .unwrap();
         assert!(matches!(
             state.next_step(now + Duration::from_secs(60)),
-            PublisherStep::Reconnect
+            PublisherStep::Wait
         ));
     }
 

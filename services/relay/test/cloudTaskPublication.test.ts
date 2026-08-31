@@ -445,6 +445,20 @@ describe("cloud task publication validation", () => {
       Array.from({ length: 251 }, (_, index) => task({ ownerLocalTaskId: `task-${index}` })),
     ), "desktop-1")).toThrow(/at most 250/);
   });
+
+  it("measures prompt snippets in Unicode characters like kanna-server", () => {
+    const promptSnippet = `${"😀".repeat(250)}${"界".repeat(250)}`;
+    const parsed = validateCloudTaskPublication(
+      publication([task({ promptSnippet })]),
+      "desktop-1",
+    );
+    expect(parsed.tasks[0]?.promptSnippet).toBe(promptSnippet);
+
+    expect(() => validateCloudTaskPublication(
+      publication([task({ promptSnippet: `${promptSnippet}x` })]),
+      "desktop-1",
+    )).toThrow(/promptSnippet/);
+  });
 });
 
 describe("cloud task publication reconciliation", () => {
