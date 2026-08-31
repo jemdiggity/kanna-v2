@@ -171,7 +171,11 @@ so a reused PID can never be killed; an entry whose exit could not be
 confirmed is retained rather than dropped. Inventory mutations are serialized
 by an atomically published lock directory with owner metadata, and abandoned
 locks (dead owner) are recovered — the same protocol is implemented in both the
-kd TypeScript and the desktop Rust spawn path. The counterpart contract for
+kd TypeScript and the Rust desktop/daemon spawn paths. A worktree daemon also
+records each `kanna-terminal-recovery` child in this inventory and removes the
+record after reaping it. Cleanup deliberately terminates the daemon before its
+recovery child so closing the child's control pipe can produce a clean exit
+instead of leaving a daemon-owned zombie. The counterpart contract for
 agents is one line in the shared task-environment prompt
 (`packages/core/src/workflow/kanna-task-environment.md`): stop every background
 process you start before recording stage completion. Detached repository

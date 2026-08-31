@@ -124,7 +124,10 @@ export async function cleanupProcessInventory(
   const cleaned: InventoryResource[] = [];
   const failed: InventoryResource[] = [];
   if (resources.length === 0) return { cleaned, failed };
-  for (const resource of [...resources].reverse()) {
+  const cleanupOrder = [...resources].reverse().sort((left, right) =>
+    Number(isRecoverySidecar(left)) - Number(isRecoverySidecar(right))
+  );
+  for (const resource of cleanupOrder) {
     if (resource.kind === "process") {
       const outcome = await terminateInventoryProcess(resource, normalized);
       (outcome === "failed" ? failed : cleaned).push(resource);
@@ -148,6 +151,10 @@ export async function cleanupProcessInventory(
     );
   });
   return { cleaned, failed };
+}
+
+function isRecoverySidecar(resource: InventoryResource): boolean {
+  return resource.kind === "process" && resource.label === "kanna-terminal-recovery";
 }
 
 async function waitForIdentityToDisappear(

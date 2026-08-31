@@ -1,10 +1,41 @@
 use kanna_terminal_recovery::protocol::{RecoveryCommand, RecoveryResponse};
 use kanna_terminal_recovery::service::RecoveryService;
 use kanna_terminal_recovery::snapshot_store::SnapshotStore;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::thread;
 use std::time::Duration;
+
+struct PermanentlyFailedControlChannel {
+    reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Read for PermanentlyFailedControlChannel {
+    fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "daemon control channel is gone",
+        ))
+    }
+}
+
+#[test]
+fn failed_control_channel_is_read_once_before_service_exits() {
+    let tempdir = tempfile::tempdir().expect("tempdir should exist");
+    let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let input = PermanentlyFailedControlChannel {
+        reads: reads.clone(),
+    };
+    let mut service = RecoveryService::new(SnapshotStore::new(tempdir.path()));
+
+    let error = service
+        .run(input, Vec::<u8>::new())
+        .expect_err("a failed daemon channel should stop the helper");
+
+    assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(error.to_string().contains("daemon control channel is gone"));
+}
 
 #[test]
 fn write_output_keeps_live_snapshot_in_memory_until_flush() {

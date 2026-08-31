@@ -45,9 +45,22 @@ impl RecoveryService {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            let reader = BufReader::new(input);
-            for line in reader.lines() {
-                let _ = tx.send(line);
+            let mut reader = BufReader::new(input);
+            loop {
+                let mut line = String::new();
+                let result = match reader.read_line(&mut line) {
+                    Ok(0) => break,
+                    Ok(_) => Ok(line),
+                    Err(error) => Err(error),
+                };
+                let failed = result.is_err();
+                if tx.send(result).is_err() || failed {
+                    // A failed control-channel read is terminal. Re-entering
+                    // read_line on a permanently failed descriptor can return
+                    // immediately forever and burn a full CPU core after the
+                    // daemon is gone.
+                    break;
+                }
             }
         });
 

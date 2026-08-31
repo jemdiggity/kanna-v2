@@ -268,6 +268,15 @@ fn spawn_daemon_process() -> Result<(std::process::Child, std::path::PathBuf), S
     let mut explicit_env = Vec::new();
     if is_worktree {
         explicit_env.push(("KANNA_WORKTREE".to_string(), "1".to_string()));
+        if let Some(worktree) = inferred_worktree.as_ref() {
+            explicit_env.push((
+                "KANNA_PROCESS_INVENTORY_PATH".to_string(),
+                worktree
+                    .join(".kanna/kd-state/process-inventory.json")
+                    .to_string_lossy()
+                    .into_owned(),
+            ));
+        }
     }
     explicit_env.push((
         "KANNA_DAEMON_DIR".to_string(),

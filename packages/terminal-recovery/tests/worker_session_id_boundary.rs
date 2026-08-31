@@ -1,10 +1,39 @@
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use kanna_terminal_recovery::protocol::{RecoveryCommand, RecoveryResponse};
 
 const CANARY_STEM: &str = "kanna-worker-session-id-canary";
 const CANARY_CONTENTS: &[u8] = b"worker boundary secret";
+
+#[test]
+fn worker_exits_promptly_when_daemon_control_channel_reaches_eof() {
+    let temp = tempfile::tempdir().expect("temporary test directory");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_kanna-terminal-recovery"))
+        .env("KANNA_TERMINAL_RECOVERY_DIR", temp.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .expect("spawn recovery worker");
+
+    drop(child.stdin.take());
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Some(status) = child.try_wait().expect("poll recovery worker") {
+            assert!(
+                status.success(),
+                "EOF should stop the recovery worker cleanly"
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "recovery worker stayed alive after its daemon channel closed"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
 
 #[test]
 fn worker_rejects_hostile_session_ids_at_the_ndjson_boundary() {
