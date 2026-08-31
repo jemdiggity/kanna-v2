@@ -25,7 +25,11 @@ import {
   type MarkdownPreviewMode,
 } from "../stores/markdownPreviewMode";
 import type { PendingReviewComment } from "../utils/reviewComments";
-import type { ModalTearOffContext } from "../modalTearOff";
+import type {
+  DiffTearOffContext,
+  ModalTearOffContext,
+  TreeExplorerTearOffContext,
+} from "../modalTearOff";
 
 export type DiffScope = "branch" | "working";
 export type BranchInclude = "none" | "staged" | "all";
@@ -88,17 +92,40 @@ export function useAppModals({ isMobile, store, windowWorkspace }: UseAppModalsO
   const previewImageUrl = ref("");
   const showDiffModal = ref(false);
   const showTreeExplorer = ref(false);
+  const transferredTreeContext = computed<TreeExplorerTearOffContext | null>(() =>
+    transferredModalContext.value?.surface === "tree"
+      ? transferredModalContext.value
+      : null
+  );
+  const transferredDiffContext = computed<DiffTearOffContext | null>(() =>
+    transferredModalContext.value?.surface === "diff"
+      ? transferredModalContext.value
+      : null
+  );
   const currentWorktreePath = computed(() => {
     if (!store.selectedRepo?.path || !store.currentItem?.branch) return undefined;
     return `${store.selectedRepo.path}/.kanna-worktrees/${store.currentItem.branch}`;
   });
+  const activeRepoPath = computed(() =>
+    transferredTreeContext.value?.repoRoot
+      ?? transferredDiffContext.value?.repoPath
+      ?? store.selectedRepo?.path
+      ?? ""
+  );
   const activeWorktreePath = computed(() =>
-    currentWorktreePath.value ?? store.selectedRepo?.path ?? ""
+    transferredTreeContext.value?.worktreePath
+      ?? transferredDiffContext.value?.worktreePath
+      ?? currentWorktreePath.value
+      ?? activeRepoPath.value
+  );
+  const activeDiffWorktreePath = computed(() =>
+    transferredDiffContext.value?.worktreePath
+      ?? (store.currentItem?.branch ? currentWorktreePath.value : undefined)
   );
   const homePath = ref("");
   const treeExplorerRoot = computed(() => {
-    if (transferredModalContext.value?.surface === "tree") {
-      return transferredModalContext.value.worktreePath;
+    if (transferredTreeContext.value) {
+      return transferredTreeContext.value.worktreePath;
     }
     if (currentWorktreePath.value) return currentWorktreePath.value;
     if (store.selectedRepo?.path) return store.selectedRepo.path;
@@ -148,6 +175,7 @@ export function useAppModals({ isMobile, store, windowWorkspace }: UseAppModalsO
   const diffViewStates = reactive<Record<string, DiffViewState>>({});
   const filePreviewRecallStates = reactive<Record<string, FilePreviewRecallState>>({});
   const currentDiffViewKey = computed(() => {
+    if (transferredDiffContext.value?.viewKey) return transferredDiffContext.value.viewKey;
     if (store.currentItem) return `item:${store.currentItem.id}`;
     if (store.selectedRepo) return `repo:${store.selectedRepo.id}`;
     return undefined;
@@ -477,8 +505,12 @@ export function useAppModals({ isMobile, store, windowWorkspace }: UseAppModalsO
     showDiffModal,
     showTreeExplorer,
     transferredModalContext,
+    transferredTreeContext,
+    transferredDiffContext,
     currentWorktreePath,
+    activeRepoPath,
     activeWorktreePath,
+    activeDiffWorktreePath,
     homePath,
     treeExplorerRoot,
     showShellModal,

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   applyWindowWorkspaceMutation,
   createWindowWorkspace,
+  resolveWindowBootstrap,
   WINDOW_WORKSPACE_SETTINGS_KEY,
   type WorkspaceSnapshot,
 } from "./windowWorkspace";
@@ -359,10 +360,14 @@ describe("windowWorkspace in Tauri", () => {
     );
   });
 
-  it("persists a tear-off context and exact modal geometry before opening it", async () => {
+  it("persists the live selection with a tear-off after navigation", async () => {
     const workspace = createWindowWorkspace({
       db: {} as never,
-      bootstrap: { windowId: "main", selectedRepoId: null, selectedItemId: null },
+      bootstrap: {
+        windowId: "main",
+        selectedRepoId: "repo-at-startup",
+        selectedItemId: "task-at-startup",
+      },
     });
     const context = {
       surface: "tree" as const,
@@ -370,6 +375,10 @@ describe("windowWorkspace in Tauri", () => {
       repoRoot: "/repo",
     };
 
+    await workspace.persistSelection({
+      selectedRepoId: "repo-1",
+      selectedItemId: "task-1",
+    });
     await workspace.openTearOffWindow(context, {
       x: 240,
       y: 180,
@@ -394,7 +403,22 @@ describe("windowWorkspace in Tauri", () => {
     ) as WorkspaceSnapshot;
     expect(stored.windows).toHaveLength(1);
     expect(stored.windows[0]).toMatchObject({
+      selectedRepoId: "repo-1",
+      selectedItemId: "task-1",
       geometry: { x: 240, y: 180, width: 780, height: 480 },
+      tearOffContext: context,
+    });
+    await expect(resolveWindowBootstrap(
+      {} as never,
+      {
+        windowId: stored.windows[0]?.windowId ?? "missing",
+        selectedRepoId: null,
+        selectedItemId: null,
+      },
+      stored,
+    )).resolves.toMatchObject({
+      selectedRepoId: "repo-1",
+      selectedItemId: "task-1",
       tearOffContext: context,
     });
     expect(ensuredWindowWasLive).toEqual([false]);

@@ -19,14 +19,16 @@ function mountMarkdownModalHarness(options: {
   markdownPreviewMode?: MarkdownPreviewMode;
   savePreference?: (key: string, value: string) => Promise<void>;
   tearOffContext?: ModalTearOffContext;
+  selectedRepo?: { id: string; path: string };
+  currentItem?: { id: string; branch: string };
 } = {}) {
   const savePreference = vi.fn(
     options.savePreference ?? (async () => {}),
   );
   const store = reactive({
     repos: [],
-    selectedRepo: { id: "repo-1", path: "/repo" },
-    currentItem: { id: "task-a", branch: "task-a" },
+    selectedRepo: options.selectedRepo ?? { id: "repo-1", path: "/repo" },
+    currentItem: options.currentItem ?? { id: "task-a", branch: "task-a" },
     markdownPreviewMode: options.markdownPreviewMode ?? "rendered",
     savePreference,
   });
@@ -63,17 +65,25 @@ function mountMarkdownModalHarness(options: {
 describe("useAppModals", () => {
   it("restores a transferred tree as a normal maximized modal and clears only its transfer state", async () => {
     const harness = mountMarkdownModalHarness({
+      selectedRepo: { id: "repo-current", path: "/current-repo" },
+      currentItem: { id: "task-current", branch: "task-current" },
       tearOffContext: {
         surface: "tree",
-        worktreePath: "/repo/.kanna-worktrees/task-a",
-        repoRoot: "/repo",
+        worktreePath: "/current-repo/.kanna-worktrees/task-current",
+        repoRoot: "/current-repo",
       },
     });
 
     harness.modals.restoreTransferredModal();
     expect(harness.modals.showTreeExplorer.value).toBe(true);
     expect(harness.modals.maximizedModal.value).toBe("tree");
-    expect(harness.modals.treeExplorerRoot.value).toBe("/repo/.kanna-worktrees/task-a");
+    expect(harness.modals.treeExplorerRoot.value).toBe(
+      "/current-repo/.kanna-worktrees/task-current",
+    );
+    expect(harness.modals.activeRepoPath.value).toBe("/current-repo");
+    expect(harness.modals.activeWorktreePath.value).toBe(
+      "/current-repo/.kanna-worktrees/task-current",
+    );
 
     harness.modals.closeTreeExplorer();
     expect(harness.modals.showTreeExplorer.value).toBe(false);
@@ -85,10 +95,14 @@ describe("useAppModals", () => {
 
   it("restores transferred diff view state in the ordinary maximized modal", () => {
     const harness = mountMarkdownModalHarness({
+      selectedRepo: { id: "repo-current", path: "/current-repo" },
+      currentItem: { id: "task-current", branch: "task-current" },
       tearOffContext: {
         surface: "diff",
-        repoPath: "/repo",
-        viewKey: "item:task-a",
+        repoPath: "/current-repo",
+        worktreePath: "/current-repo/.kanna-worktrees/task-current",
+        viewKey: "item:task-current",
+        taskId: "task-current",
         initialScope: "working",
         initialScrollPositions: { working: 240 },
         initialBranchInclude: "all",
@@ -98,6 +112,11 @@ describe("useAppModals", () => {
     harness.modals.restoreTransferredModal();
     expect(harness.modals.showDiffModal.value).toBe(true);
     expect(harness.modals.maximizedModal.value).toBe("diff");
+    expect(harness.modals.currentDiffViewKey.value).toBe("item:task-current");
+    expect(harness.modals.activeRepoPath.value).toBe("/current-repo");
+    expect(harness.modals.activeDiffWorktreePath.value).toBe(
+      "/current-repo/.kanna-worktrees/task-current",
+    );
     expect(harness.modals.currentDiffViewState.value).toMatchObject({
       scope: "working",
       scrollPositions: { working: 240 },

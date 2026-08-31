@@ -41,10 +41,16 @@ const preferences = c.appPreferences.preferences;
 // only a pinned current stage with the merge-signaling approve post may
 // present approval as a merge.
 const diffApproveSignalsMerge = computed(() => {
+  if (m.transferredDiffContext.value?.approveSignalsMerge !== undefined) {
+    return m.transferredDiffContext.value.approveSignalsMerge;
+  }
   const item = c.store.currentItem;
   return item ? pinnedApproveMergePost(item) : false;
 });
-const diffHasRunningPost = computed(() => Boolean(c.store.currentItem?.has_running_post));
+const diffHasRunningPost = computed(() =>
+  m.transferredDiffContext.value?.hasRunningPost
+    ?? Boolean(c.store.currentItem?.has_running_post)
+);
 
 function setShellModalRef(component: Element | ComponentPublicInstance | null) {
   m.shellModalRef.value = component as InstanceType<typeof ShellModal> | null;
@@ -139,17 +145,17 @@ function setPreferencesRef(component: Element | ComponentPublicInstance | null) 
   </KeepAlive>
   <DiffModal
     :ref="setDiffModalRef"
-    v-if="m.showDiffModal.value && !c.isMobile && c.store.selectedRepo?.path"
-    :repo-path="c.store.selectedRepo.path"
-    :worktree-path="c.store.currentItem?.branch ? m.activeWorktreePath.value : undefined"
+    v-if="m.showDiffModal.value && !c.isMobile && m.activeRepoPath.value"
+    :repo-path="m.activeRepoPath.value"
+    :worktree-path="m.activeDiffWorktreePath.value"
     :initial-scope="m.currentDiffViewState.value?.scope"
     :initial-scroll-positions="m.currentDiffViewState.value?.scrollPositions"
     :initial-branch-include="m.currentDiffViewState.value?.branchInclude"
-    :base-ref="c.store.currentItem?.base_ref ?? undefined"
+    :base-ref="m.transferredDiffContext.value?.baseRef ?? c.store.currentItem?.base_ref ?? undefined"
     :view-key="m.currentDiffViewKey.value"
     :maximized="m.maximizedModal.value === 'diff'"
-    :task-id="c.store.currentItem?.id"
-    :review-stage="c.store.currentItem?.stage ?? undefined"
+    :task-id="m.transferredDiffContext.value?.taskId ?? c.store.currentItem?.id"
+    :review-stage="m.transferredDiffContext.value?.reviewStage ?? c.store.currentItem?.stage ?? undefined"
     :review-comments="m.currentDiffViewState.value?.reviewComments"
     :review-head-commit="m.currentDiffViewState.value?.reviewHeadCommit"
     :approve-signals-merge="diffApproveSignalsMerge"
@@ -185,7 +191,7 @@ function setPreferencesRef(component: Element | ComponentPublicInstance | null) 
     :ref="setTreeExplorerRef"
     v-if="m.showTreeExplorer.value && m.treeExplorerRoot.value"
     :worktree-path="m.treeExplorerRoot.value"
-    :repo-root="c.store.selectedRepo?.path ?? m.treeExplorerRoot.value"
+    :repo-root="m.activeRepoPath.value || m.treeExplorerRoot.value"
     :home-path="m.homePath.value"
     :maximized="m.maximizedModal.value === 'tree'"
     :suspended="m.showFilePreviewModal.value && m.previewFromTree.value"
@@ -194,7 +200,7 @@ function setPreferencesRef(component: Element | ComponentPublicInstance | null) 
   />
   <FilePreviewModal
     :ref="setFilePreviewRef"
-    v-if="(m.showFilePreviewModal.value || m.previewHidden.value) && !c.isMobile && (c.store.selectedRepo?.path || m.previewRemoteContent.value !== null)"
+    v-if="(m.showFilePreviewModal.value || m.previewHidden.value) && !c.isMobile && (m.activeRepoPath.value || m.previewRemoteContent.value !== null)"
     v-show="m.showFilePreviewModal.value"
     :key="`${m.activeWorktreePath.value}:${m.previewFilePath.value}`"
     :file-path="m.previewFilePath.value"

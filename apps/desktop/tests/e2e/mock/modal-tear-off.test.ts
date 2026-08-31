@@ -5,8 +5,72 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { WebDriverClient } from "../helpers/webdriver";
 import { cleanupFixtureRepos, createSeedFixtureRepo } from "../helpers/fixture-repo";
 import { cleanupWorktrees, importTestRepoDirect, resetDatabase } from "../helpers/reset";
+import { callVueMethod, execDb } from "../helpers/vue";
 
 const REPO_NAME = "modal-tear-off";
+const STARTUP_REPO_NAME = "modal-tear-off-startup";
+const CURRENT_FILE = "selected-context.txt";
+const CURRENT_FILE_CONTENT = "current selection preview\n";
+const CURRENT_DIFF_FILE = "current-selection-diff.txt";
+const STARTUP_TASK_ID = "modal-tear-off-startup-task";
+const CURRENT_TASK_ID = "modal-tear-off-current-task";
+
+interface VisibleSelection {
+  repoId: string | null;
+  repoName: string | null;
+  repoPath: string | null;
+  taskId: string | null;
+}
+
+async function visibleSelection(client: WebDriverClient): Promise<VisibleSelection> {
+  return await client.executeSync<VisibleSelection>(
+    `const ctx = window.__KANNA_E2E__.setupState;
+     const selectedRepo = ctx.store?.selectedRepo?.value ?? ctx.store?.selectedRepo ?? null;
+     const currentItem = ctx.store?.currentItem?.value ?? ctx.store?.currentItem ?? null;
+     return {
+       repoId: selectedRepo?.id ?? null,
+       repoName: selectedRepo?.name ?? null,
+       repoPath: selectedRepo?.path ?? null,
+       taskId: currentItem?.id ?? null,
+     };`,
+  );
+}
+
+async function clickTreeFile(client: WebDriverClient, fileName: string): Promise<void> {
+  const clicked = await client.executeSync<boolean>(
+    `const item = Array.from(document.querySelectorAll(".col-current .tree-item"))
+       .find((entry) => entry.querySelector(".entry-name")?.textContent?.trim() === ${JSON.stringify(fileName)});
+     if (!item) return false;
+     item.click();
+     return true;`,
+  );
+  expect(clicked).toBe(true);
+}
+
+async function createAndSelectTask(
+  client: WebDriverClient,
+  repoId: string,
+  taskId: string,
+): Promise<void> {
+  await execDb(
+    client,
+    `INSERT INTO pipeline_item
+       (id, repo_id, prompt, stage, branch, agent_type, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      taskId,
+      repoId,
+      `Fixture task ${taskId}`,
+      "in progress",
+      null,
+      "agent",
+      "2026-08-30T00:00:00.000Z",
+      "2026-08-30T00:00:00.000Z",
+    ],
+  );
+  await callVueMethod(client, "refreshAllItems");
+  await callVueMethod(client, "store.selectItem", taskId);
+}
 
 async function waitForWindowCount(
   client: WebDriverClient,
@@ -111,6 +175,19 @@ async function persistedTearOffCount(client: WebDriverClient): Promise<number> {
   );
 }
 
+async function waitForPersistedTearOffCount(
+  client: WebDriverClient,
+  expected: number,
+  timeoutMs = 5_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await persistedTearOffCount(client) === expected) return;
+    await sleep(100);
+  }
+  throw new Error(`timed out waiting for ${expected} persisted tear-off windows`);
+}
+
 async function persistedTearOffGeometry(client: WebDriverClient): Promise<{
   x: number;
   y: number;
@@ -127,16 +204,42 @@ async function persistedTearOffGeometry(client: WebDriverClient): Promise<{
 
 describe("modal tear-off", () => {
   const client = new WebDriverClient();
+  let startupRepoPath = "";
   let fixtureRepoPath = "";
   let sourceHandle = "";
+  let startupSelection: VisibleSelection = {
+    repoId: null,
+    repoName: null,
+    repoPath: null,
+    taskId: null,
+  };
+  let selectedAtDrag: VisibleSelection = {
+    repoId: null,
+    repoName: null,
+    repoPath: null,
+    taskId: null,
+  };
 
   beforeAll(async () => {
+    startupRepoPath = await createSeedFixtureRepo("task-switch-minimal");
     fixtureRepoPath = await createSeedFixtureRepo("task-switch-minimal");
-    await writeFile(join(fixtureRepoPath, "tear-off-change.txt"), "untracked diff\n", "utf8");
+    await writeFile(join(fixtureRepoPath, CURRENT_FILE), CURRENT_FILE_CONTENT, "utf8");
+    await writeFile(join(fixtureRepoPath, CURRENT_DIFF_FILE), "current selection diff\n", "utf8");
     await client.createSession();
     await resetDatabase(client);
-    await importTestRepoDirect(client, fixtureRepoPath, REPO_NAME);
+    const startupRepoId = await importTestRepoDirect(client, startupRepoPath, STARTUP_REPO_NAME);
+    await createAndSelectTask(client, startupRepoId, STARTUP_TASK_ID);
+    await client.waitForText(".repo-header", STARTUP_REPO_NAME, 10_000);
+    await client.reload();
+    startupSelection = await visibleSelection(client);
+    const currentRepoId = await importTestRepoDirect(client, fixtureRepoPath, REPO_NAME);
+    await createAndSelectTask(client, currentRepoId, CURRENT_TASK_ID);
     await client.waitForText(".repo-header", REPO_NAME, 10_000);
+    selectedAtDrag = await visibleSelection(client);
+    expect(selectedAtDrag.repoName).toBe(REPO_NAME);
+    expect(selectedAtDrag.repoId).not.toBe(startupSelection.repoId);
+    expect(selectedAtDrag.taskId).not.toBe(startupSelection.taskId);
+    expect(selectedAtDrag.taskId).not.toBeNull();
     [sourceHandle] = await client.getWindowHandles();
   });
 
@@ -170,7 +273,8 @@ describe("modal tear-off", () => {
       console.warn("[modal-tear-off.e2e] explicit tear-off cleanup failed:", error);
     }
     if (fixtureRepoPath) await cleanupWorktrees(client, fixtureRepoPath);
-    await cleanupFixtureRepos(fixtureRepoPath ? [fixtureRepoPath] : []);
+    if (startupRepoPath) await cleanupWorktrees(client, startupRepoPath);
+    await cleanupFixtureRepos([startupRepoPath, fixtureRepoPath].filter(Boolean));
     await client.deleteSession();
   });
 
@@ -200,7 +304,15 @@ describe("modal tear-off", () => {
     await client.waitForElement(".app", 5_000);
     await client.waitForElement(".modal-overlay.maximized .tree-modal", 5_000);
     await client.waitForText(".tree-modal", "README.md", 5_000);
+    await client.waitForText(".tree-modal", CURRENT_FILE, 5_000);
+    expect(await visibleSelection(client)).toEqual(selectedAtDrag);
     await assertFullWindowModal(client, ".tree-modal", modalRect);
+
+    await clickTreeFile(client, CURRENT_FILE);
+    await client.waitForText(".preview-modal .file-path", CURRENT_FILE, 5_000);
+    await client.waitForText(".preview-modal", CURRENT_FILE_CONTENT.trim(), 5_000);
+    await client.pressShortcut(["Escape"]);
+    await client.waitForElement(".tree-modal", 5_000);
 
     await client.switchToWindow(sourceHandle);
     await client.waitForNoElement(".tree-modal", 5_000);
@@ -224,7 +336,7 @@ describe("modal tear-off", () => {
       `return window.__KannaTearOffAppIdentity ?? "reloaded";`,
     )).toBe("tree-window");
     expect(await client.getWindowHandles()).toHaveLength(2);
-    expect(await persistedTearOffCount(client)).toBe(0);
+    await waitForPersistedTearOffCount(client, 0);
     await closeSecondaryWindow(client, sourceHandle);
   });
 
@@ -238,7 +350,7 @@ describe("modal tear-off", () => {
       y: number;
       scale: number;
     }>("return { x: window.screenX, y: window.screenY, scale: window.devicePixelRatio };");
-    await client.waitForText(".diff-view", "tear-off-change.txt", 10_000);
+    await client.waitForText(".diff-view", CURRENT_DIFF_FILE, 10_000);
 
     await client.pointerDragBy(toolbar, { x: 100, y: 50 }, { x: 0.95, y: 0.5 });
     const handles = await waitForWindowCount(client, 2);
@@ -250,7 +362,8 @@ describe("modal tear-off", () => {
     await dismissStartupShortcuts(client);
     await client.waitForElement(".app", 5_000);
     await client.waitForElement(".modal-overlay.maximized .diff-modal", 5_000);
-    await client.waitForText(".diff-view", "tear-off-change.txt", 10_000);
+    await client.waitForText(".diff-view", CURRENT_DIFF_FILE, 10_000);
+    expect(await visibleSelection(client)).toEqual(selectedAtDrag);
     await assertFullWindowModal(client, ".diff-modal", modalRect);
 
     await client.switchToWindow(sourceHandle);
@@ -271,7 +384,7 @@ describe("modal tear-off", () => {
       `return window.__KannaTearOffAppIdentity ?? "reloaded";`,
     )).toBe("diff-window");
     expect(await client.getWindowHandles()).toHaveLength(2);
-    expect(await persistedTearOffCount(client)).toBe(0);
+    await waitForPersistedTearOffCount(client, 0);
     await closeSecondaryWindow(client, sourceHandle);
   });
 });

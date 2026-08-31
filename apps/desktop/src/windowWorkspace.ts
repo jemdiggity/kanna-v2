@@ -513,6 +513,10 @@ export function createWindowWorkspace(input: {
 }): WindowWorkspaceController {
   const { db, bootstrap } = input;
   let currentTearOffContext = bootstrap.tearOffContext ?? null;
+  let currentSelection = {
+    selectedRepoId: bootstrap.selectedRepoId,
+    selectedItemId: bootstrap.selectedItemId,
+  };
   let currentWindowUpdateQueue = Promise.resolve();
 
   async function resolveNativeGeometry(
@@ -822,8 +826,8 @@ export function createWindowWorkspace(input: {
       const nativeGeometry = await physicalTearOffGeometry(geometry);
       const nextWindow: WorkspaceWindowState = {
         windowId,
-        selectedRepoId: bootstrap.selectedRepoId,
-        selectedItemId: bootstrap.selectedItemId,
+        selectedRepoId: currentSelection.selectedRepoId,
+        selectedItemId: currentSelection.selectedItemId,
         sidebarHidden: false,
         sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
         order: snapshot.windows.length,
@@ -904,6 +908,7 @@ export function createWindowWorkspace(input: {
       }
     },
     persistSelection: async (selection) => {
+      currentSelection = { ...selection };
       await queueCurrentWindowMutation({
         operation: "updateSelection",
         windowId: bootstrap.windowId,
