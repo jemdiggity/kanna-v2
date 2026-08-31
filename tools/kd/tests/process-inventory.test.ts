@@ -166,6 +166,61 @@ describe("kd process inventory", () => {
     ]);
   });
 
+  it("reaps only this instance's recovery helper after its daemon", async () => {
+    const firstRoot = mkdtempSync(join(tmpdir(), "kanna-recovery-first-"));
+    const secondRoot = mkdtempSync(join(tmpdir(), "kanna-recovery-second-"));
+    const firstInventory = join(firstRoot, ".kanna/kd-state/process-inventory.json");
+    const secondInventory = join(secondRoot, ".kanna/kd-state/process-inventory.json");
+    const identities = new Map<number, string>([
+      [801, "first-daemon"],
+      [802, "first-recovery"],
+      [901, "second-daemon"],
+      [902, "second-recovery"]
+    ]);
+    recordInventoryResource(firstInventory, {
+      kind: "process", pid: 801, label: "kanna-daemon", identity: "first-daemon"
+    });
+    recordInventoryResource(firstInventory, {
+      kind: "process", pid: 802, label: "kanna-terminal-recovery", identity: "first-recovery"
+    });
+    recordInventoryResource(secondInventory, {
+      kind: "process", pid: 901, label: "kanna-daemon", identity: "second-daemon"
+    });
+    recordInventoryResource(secondInventory, {
+      kind: "process", pid: 902, label: "kanna-terminal-recovery", identity: "second-recovery"
+    });
+    const signals: number[] = [];
+
+    const result = await executeDevDownWithContext({ killDaemon: false }, {
+      runner,
+      context: {
+        repoRoot: firstRoot,
+        tmux: { server: "first", session: "first" },
+        ports: {},
+        env: {}
+      }
+    }, {
+      cleanupOperations: {
+        identity: (pid) => identities.get(pid),
+        signal: (pid) => {
+          signals.push(pid);
+          identities.delete(pid);
+        },
+        graceMs: 1,
+        pollMs: 1
+      }
+    });
+
+    expect(result.data).toMatchObject({
+      inventoryCleanup: { failed: [] }
+    });
+    expect(signals).toEqual([801, 802]);
+    expect(readProcessInventory(firstInventory)).toEqual([]);
+    expect(readProcessInventory(secondInventory)).toHaveLength(2);
+    expect(identities.get(901)).toBe("second-daemon");
+    expect(identities.get(902)).toBe("second-recovery");
+  });
+
   it.runIf(tmuxAvailable)("dev down removes the exact tmux server and detached pane while preserving an unrelated process", async () => {
     const repoRoot = mkdtempSync(join(tmpdir(), "kanna-dev-down-"));
     const socket = `kanna-kd-test-${process.pid}-${Date.now()}`;

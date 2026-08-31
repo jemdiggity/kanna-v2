@@ -5,6 +5,7 @@ pub mod bench;
 pub mod fd;
 pub mod headless_terminal;
 pub mod proc_info;
+mod process_inventory;
 pub mod protocol;
 pub mod pty;
 pub mod reaper;

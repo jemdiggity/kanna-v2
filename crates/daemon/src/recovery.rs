@@ -58,6 +58,7 @@ pub struct SeededRecoverySnapshot {
 pub struct RecoveryManager {
     launcher: Option<RecoveryLauncher>,
     snapshot_dir: PathBuf,
+    process_inventory_path: Option<PathBuf>,
     seeded_for_next_start: Arc<StdMutex<HashSet<String>>>,
     sequences: Arc<StdMutex<HashMap<String, u64>>>,
     state: Arc<Mutex<RecoveryState>>,
@@ -255,7 +256,9 @@ impl RecoveryManager {
     pub async fn start() -> Self {
         let snapshot_dir = default_snapshot_dir();
         let launcher = detect_launcher();
-        let manager = Self::new(snapshot_dir, launcher);
+        let mut manager = Self::new(snapshot_dir, launcher);
+        manager.process_inventory_path =
+            std::env::var_os("KANNA_PROCESS_INVENTORY_PATH").map(PathBuf::from);
         let _ = manager.ensure_sender().await;
         manager
     }
@@ -615,6 +618,7 @@ impl RecoveryManager {
         Self {
             launcher,
             snapshot_dir,
+            process_inventory_path: None,
             seeded_for_next_start: Arc::new(StdMutex::new(HashSet::new())),
             sequences: Arc::new(StdMutex::new(HashMap::new())),
             state: Arc::new(Mutex::new(RecoveryState {
@@ -757,7 +761,13 @@ impl RecoveryManager {
         }
 
         let launcher = self.launcher.as_ref()?.clone();
-        let worker = match spawn_worker(launcher, self.snapshot_dir.clone()).await {
+        let worker = match spawn_worker(
+            launcher,
+            self.snapshot_dir.clone(),
+            self.process_inventory_path.as_deref(),
+        )
+        .await
+        {
             Ok(worker) => worker,
             Err(message) => {
                 log::warn!("failed to start recovery sidecar: {}", message);
@@ -893,6 +903,7 @@ async fn replay_session(worker: &RecoveryWorker, command: RecoveryCommand) -> Re
 async fn spawn_worker(
     launcher: RecoveryLauncher,
     snapshot_dir: PathBuf,
+    process_inventory_path: Option<&Path>,
 ) -> Result<Arc<RecoveryWorker>, String> {
     std::fs::create_dir_all(&snapshot_dir).map_err(|error| {
         format!(
@@ -929,6 +940,26 @@ async fn spawn_worker(
         )
     })?;
 
+    let inventory_record = match process_inventory_path {
+        Some(path) => match child
+            .id()
+            .ok_or_else(|| "spawned recovery sidecar did not expose a process id".to_string())
+            .and_then(|pid| {
+                crate::process_inventory::record_process(path, pid, "kanna-terminal-recovery")
+            }) {
+            Ok(record) => Some(record),
+            Err(error) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Err(format!(
+                    "failed to inventory recovery sidecar {:?}: {error}",
+                    launcher.program
+                ));
+            }
+        },
+        None => None,
+    };
+
     let child_stdin = child
         .stdin
         .take()
@@ -957,6 +988,7 @@ async fn spawn_worker(
         rx,
         cancel_rx,
         stopped_tx,
+        inventory_record,
     ));
     Ok(worker)
 }
@@ -974,6 +1006,7 @@ async fn recovery_worker(
     mut rx: mpsc::Receiver<WorkerMessage>,
     mut cancel: watch::Receiver<bool>,
     stopped: watch::Sender<bool>,
+    inventory_record: Option<crate::process_inventory::ProcessInventoryRecord>,
 ) {
     let mut lines = BufReader::new(stdout).lines();
     let exit = loop {
@@ -1052,6 +1085,9 @@ async fn recovery_worker(
             drop(stdin);
             kill_and_reap_child(&mut child).await;
         }
+    }
+    if let Some(record) = inventory_record.as_ref() {
+        crate::process_inventory::remove_process(record);
     }
     let _ = stopped.send(true);
 }
@@ -1265,6 +1301,36 @@ fn unique_test_snapshot_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn spawned_worker_is_inventoried_until_it_is_reaped() {
+        let root = unique_test_snapshot_dir();
+        let snapshot_dir = root.join("snapshots");
+        let inventory_path = root.join("process-inventory.json");
+        let worker = spawn_worker(
+            RecoveryLauncher {
+                program: PathBuf::from("/bin/sh"),
+                args: vec![
+                    "-c".to_string(),
+                    "while IFS= read -r line; do :; done".to_string(),
+                ],
+            },
+            snapshot_dir,
+            Some(&inventory_path),
+        )
+        .await
+        .expect("worker should start");
+
+        let inventory = std::fs::read_to_string(&inventory_path).expect("inventory should exist");
+        assert!(inventory.contains("kanna-terminal-recovery"));
+
+        worker.cancel_and_wait().await;
+        assert!(
+            !inventory_path.exists(),
+            "reaped worker should remove its inventory record"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[tokio::test]
     async fn unsafe_session_ids_never_reach_the_worker_or_tracked_state() {

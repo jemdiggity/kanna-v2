@@ -79,7 +79,11 @@ import { getPortStatuses } from "../runtime/port-status";
 import { executeRemoteE2e } from "../runtime/remote-e2e";
 import { executeStagingSmoke } from "../runtime/staging-smoke";
 import { nodeCommandRunner, type CommandResult, type CommandRunner } from "../runtime/process";
-import { cleanupProcessInventory, processInventoryPath } from "../runtime/process-inventory";
+import {
+  cleanupProcessInventory,
+  processInventoryPath,
+  type ProcessCleanupOperations
+} from "../runtime/process-inventory";
 import { readDevDesktopAuth, readStagingDesktopAuth } from "../runtime/developer-config";
 import {
   listStagingRelayActiveDesktopIds,
@@ -439,6 +443,7 @@ export interface ExecutorInput {
 
 export interface DevDownExecutionOptions {
   killProcess?: (pid: number) => void;
+  cleanupOperations?: ProcessCleanupOperations;
 }
 
 export interface MobileDeviceRunExecutionOptions {
@@ -1866,14 +1871,15 @@ export async function executeDevDownWithContext(
   const inventoryCleanup = await cleanupProcessInventory(
     processInventoryPath(executor.context.repoRoot),
     executor.runner,
-    options.killProcess
+    options.killProcess ?? options.cleanupOperations
   );
   const daemonCleanup = input.killDaemon
     ? await killWorkspaceDaemons({
         repoRoot: executor.context.repoRoot,
         daemonDir: executor.context.env.KANNA_DAEMON_DIR ?? "",
         runner: executor.runner,
-        killProcess: options.killProcess
+        killProcess: options.killProcess,
+        cleanupOperations: options.cleanupOperations
       })
     : undefined;
   return {
