@@ -3,12 +3,43 @@ use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 pub type WsSink = SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
 pub type WsStream = SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>;
+
+pub(crate) const RELAY_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+
+#[derive(Debug)]
+pub enum RelayConnectError {
+    TimedOut { timeout: Duration },
+    Failed(Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl fmt::Display for RelayConnectError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TimedOut { timeout } => write!(
+                formatter,
+                "connect timed out after {} seconds",
+                timeout.as_secs_f64()
+            ),
+            Self::Failed(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for RelayConnectError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::TimedOut { .. } => None,
+            Self::Failed(error) => Some(error.as_ref()),
+        }
+    }
+}
 
 pub struct RelayAuthentication {
     pub user_id: String,
@@ -255,6 +286,16 @@ fn build_auth_message(config: &Config, tunnel_id: Option<String>) -> RelayMessag
 
 pub async fn connect_to_relay(
     config: &Config,
+    timeout: Duration,
+) -> Result<(WsSink, WsStream, Option<RelayAuthentication>), RelayConnectError> {
+    match tokio::time::timeout(timeout, connect_to_relay_inner(config)).await {
+        Ok(result) => result.map_err(RelayConnectError::Failed),
+        Err(_) => Err(RelayConnectError::TimedOut { timeout }),
+    }
+}
+
+async fn connect_to_relay_inner(
+    config: &Config,
 ) -> Result<(WsSink, WsStream, Option<RelayAuthentication>), Box<dyn std::error::Error + Send + Sync>>
 {
     let (ws_stream, _response) = connect_async(&config.relay_url).await?;
@@ -291,23 +332,37 @@ pub async fn connect_to_relay(
             .next()
             .await
             .ok_or("relay closed before anonymous auth completed")??;
-        match serde_json::from_str::<RelayMessage>(auth_ok.to_text()?)? {
-            RelayMessage::AuthOk {
-                user_id,
-                capabilities,
-            } => Some(RelayAuthentication {
-                user_id,
-                capabilities,
-            }),
-            _ => return Err("relay refused anonymous push authentication".into()),
-        }
+        parse_authentication(auth_ok, "anonymous push")?
     } else {
-        None
+        let auth_ok = stream
+            .next()
+            .await
+            .ok_or("relay closed before authentication completed")??;
+        parse_authentication(auth_ok, "desktop")?
     };
 
     log::info!("Authenticated with relay");
 
-    Ok((sink, stream, authentication))
+    Ok((sink, stream, Some(authentication)))
+}
+
+fn parse_authentication(
+    message: Message,
+    credential_kind: &str,
+) -> Result<RelayAuthentication, Box<dyn std::error::Error + Send + Sync>> {
+    match serde_json::from_str::<RelayMessage>(message.to_text()?)? {
+        RelayMessage::AuthOk {
+            user_id,
+            capabilities,
+        } => Ok(RelayAuthentication {
+            user_id,
+            capabilities,
+        }),
+        RelayMessage::Error { message } => {
+            Err(format!("relay refused {credential_kind} authentication: {message}").into())
+        }
+        _ => Err(format!("relay refused {credential_kind} authentication").into()),
+    }
 }
 
 pub async fn connect_anonymous_push_to_relay(
@@ -432,7 +487,9 @@ pub async fn connect_tunnel_to_relay(
 
 #[cfg(test)]
 mod tests {
+    use super::{Duration, Message};
     use crate::config::Config;
+    use futures_util::StreamExt;
 
     fn test_config() -> Config {
         Config {
@@ -455,6 +512,40 @@ mod tests {
             activity_event_debounce_seconds: 300,
             pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
         }
+    }
+
+    #[tokio::test]
+    async fn authentication_acknowledgement_is_inside_the_connect_timeout() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind auth-stalling relay");
+        let address = listener.local_addr().expect("auth-stalling relay address");
+        let relay = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept relay TCP");
+            let mut socket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("accept relay WebSocket");
+            let auth = socket
+                .next()
+                .await
+                .expect("auth request")
+                .expect("valid auth request");
+            assert!(matches!(auth, Message::Text(_)));
+            socket.next().await
+        });
+        let mut config = test_config();
+        config.relay_url = format!("ws://{address}");
+
+        let error = match super::connect_to_relay(&config, Duration::from_millis(100)).await {
+            Ok(_) => panic!("relay connected without an auth acknowledgement"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, super::RelayConnectError::TimedOut { .. }));
+        let close = tokio::time::timeout(Duration::from_secs(1), relay)
+            .await
+            .expect("timed-out auth socket stayed open")
+            .expect("auth-stalling relay task failed");
+        assert!(!matches!(close, Some(Ok(_))));
     }
 
     #[test]

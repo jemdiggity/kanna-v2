@@ -284,6 +284,16 @@ of being replayed after reconnect. Task waits retain the normal 240-second MCP
 window, with the server-side relay handoff bounded below the MCP client's
 300-second tool-call deadline.
 
+Desktop relay establishment — TCP, TLS, WebSocket upgrade, and authentication —
+has one 15-second budget. A timeout abandons the socket and enters the normal
+five-second reconnect backoff. The local reconnect action races both the
+account-auth probe and primary establishment, so it can cancel a connection
+that has not reached the established-session loop. While routing is
+unavailable, machine discovery preserves the concrete connection reason;
+establishment timeout and local cancellation are reported distinctly as
+`desktop relay connect timed out` and
+`desktop relay connect cancelled by local reconnect request`.
+
 The local `GET /v1/task-events` surface is the account-wide event boundary for
 a caller presenting the server's local task-event bearer credential or a
 paired device credential. The server creates `task-events.token` beside its

@@ -463,7 +463,11 @@ async fn list_desktops_route_returns_configured_desktop() {
 
 #[tokio::test]
 async fn cloud_desktop_listing_keeps_local_machine_when_relay_is_unavailable() {
-    let app = super::test_router("desktop-local-only", "Local Mac");
+    let state = super::test_state_with_seed("desktop-local-only", "Local Mac", |_| {});
+    state.set_desktop_routing_unavailable(
+        "desktop relay closed with code 1013: connection capacity exceeded",
+    );
+    let app = crate::http_api::router(state);
     let mut request = Request::get("/v1/cloud/desktops")
         .body(Body::empty())
         .unwrap();
@@ -482,6 +486,10 @@ async fn cloud_desktop_listing_keeps_local_machine_when_relay_is_unavailable() {
     let listing: serde_json::Value = from_slice(&body).unwrap();
     assert_eq!(listing["currentMachineId"], "desktop-local-only");
     assert_eq!(listing["relayAvailable"], false);
+    assert_eq!(
+        listing["error"],
+        "desktop relay closed with code 1013: connection capacity exceeded"
+    );
     assert_eq!(listing["machines"][0]["id"], "desktop-local-only");
     assert_eq!(listing["machines"][0]["isLocal"], true);
 }
