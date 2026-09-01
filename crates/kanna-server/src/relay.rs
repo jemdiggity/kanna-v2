@@ -15,6 +15,12 @@ use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant, MissedTickBehavior};
 use tokio_tungstenite::tungstenite::Message;
 
+pub(crate) fn desktop_relay_connection_failure_reason(
+    error: &(dyn std::error::Error + Send + Sync),
+) -> String {
+    format!("desktop relay connection failed: {error}")
+}
+
 const RELAY_PING_INTERVAL: Duration = Duration::from_secs(30);
 const RELAY_PONG_TIMEOUT: Duration = Duration::from_secs(75);
 const RELAY_RECONNECT_DELAY: Duration = Duration::from_secs(5);
@@ -214,7 +220,7 @@ async fn run_relay_loop_with_timing(
                         "desktop relay connect timed out".to_string()
                     }
                     relay_client::RelayConnectError::Failed(error) => {
-                        format!("desktop relay connection failed: {error}")
+                        desktop_relay_connection_failure_reason(error.as_ref())
                     }
                 };
                 http_state.set_desktop_routing_unavailable(reason);
@@ -1447,10 +1453,13 @@ async fn observer_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
     use kanna_daemon::protocol::TerminalSnapshot;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Mutex as StdMutex, Once};
     use tokio::io::AsyncReadExt;
+    use tower::ServiceExt;
 
     static TEST_LOGGER: RelayTestLogger = RelayTestLogger;
     static TEST_LOGGER_INIT: Once = Once::new();
@@ -1768,6 +1777,113 @@ mod tests {
         }
 
         let _ = std::fs::remove_file(database_path);
+    }
+
+    #[tokio::test]
+    async fn admission_refusal_reason_reaches_machine_list_unavailable_state() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind refusing relay");
+        let relay_address = listener.local_addr().expect("refusing relay address");
+        let relay_server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept relay client");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut chunk).await.expect("read upgrade request");
+                assert!(
+                    read > 0,
+                    "relay client closed before sending upgrade headers"
+                );
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let body = b"relay capacity exhausted; retry shortly\n";
+            let headers = format!(
+                "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            );
+            stream
+                .write_all(headers.as_bytes())
+                .await
+                .expect("write refusal headers");
+            stream.write_all(body).await.expect("write refusal body");
+            stream.shutdown().await.expect("finish refusal response");
+        });
+
+        let unique = format!(
+            "relay-admission-refusal-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        );
+        let config = Config {
+            relay_url: format!("ws://{relay_address}"),
+            device_token: "device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
+            daemon_dir: std::env::temp_dir()
+                .join(&unique)
+                .to_string_lossy()
+                .to_string(),
+            db_path: db::Db::test_db_path(&unique),
+            kanna_cli_path: None,
+            desktop_id: "desktop-capacity-client".to_string(),
+            desktop_secret: Some("desktop-secret".to_string()),
+            desktop_name: "Capacity Client".to_string(),
+            version: "test-version".to_string(),
+            environment: "development".to_string(),
+            lan_host: "127.0.0.1".to_string(),
+            lan_port: 48_120,
+            transfer_port: 4_455,
+            activity_event_debounce_seconds: 300,
+            pairing_store_path: std::env::temp_dir()
+                .join(format!("{unique}-pairings.json"))
+                .to_string_lossy()
+                .to_string(),
+        };
+        let state = Arc::new(http_api::AppState::new(config));
+        let error = match relay_client::connect_to_relay(
+            state.config(),
+            relay_client::RELAY_CONNECT_TIMEOUT,
+        )
+        .await
+        {
+            Ok(_) => panic!("HTTP refusal unexpectedly upgraded to WebSocket"),
+            Err(error) => error,
+        };
+        relay_server.await.expect("refusing relay task");
+        state.set_desktop_routing_unavailable(desktop_relay_connection_failure_reason(
+            error.as_ref(),
+        ));
+
+        let mut request = Request::get("/v1/cloud/desktops")
+            .body(Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                49_152,
+            ))));
+        let response = http_api::router(Arc::clone(&state))
+            .oneshot(request)
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let listing: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(listing["relayAvailable"], false);
+        assert_eq!(
+            listing["error"],
+            "desktop relay connection failed: HTTP error: 503 Service Unavailable: relay capacity exhausted; retry shortly"
+        );
     }
 
     #[test]
