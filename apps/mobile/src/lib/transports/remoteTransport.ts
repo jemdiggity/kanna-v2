@@ -39,6 +39,7 @@ import {
   buildCloudTaskId,
   canonicalizeTaskActionId,
 } from "../api/taskIdentity";
+import { taskMatchesSearchQuery } from "../api/taskSearch";
 import {
   canonicalRepoId,
   isRemoteRepoId,
@@ -777,11 +778,8 @@ export function createRemoteTransport({
     },
     searchTasks: async (query) => {
       if (listCloudTasks) {
-        const normalizedQuery = query.toLowerCase();
-        return (await listFreshCloudTasks()).filter(
-          (task) =>
-            task.title.toLowerCase().includes(normalizedQuery) ||
-            task.waitingPromptSnippet?.toLowerCase().includes(normalizedQuery) === true
+        return (await listFreshCloudTasks()).filter((task) =>
+          taskMatchesSearchQuery(task, query)
         );
       }
       return request<TaskSummary[]>(

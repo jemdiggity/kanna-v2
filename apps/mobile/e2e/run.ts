@@ -77,17 +77,24 @@ export function resolveSmokeModeAppEnv(
   mode: string,
   configuredAppEnv: string | undefined
 ): string | undefined {
-  return mode === "hybrid" ? "dev" : configuredAppEnv;
+  return mode === "hybrid" || mode === "search-focus"
+    ? "dev"
+    : configuredAppEnv;
 }
 
 export function requiresExactExpoEnvironment(mode: string): boolean {
-  return mode === "relay" || mode === "hybrid" || mode === "profile-disconnected";
+  return (
+    mode === "relay" ||
+    mode === "hybrid" ||
+    mode === "profile-disconnected" ||
+    mode === "search-focus"
+  );
 }
 
 export function resolveSimulatorAlertHandling(
   mode: string
 ): SimulatorAlertHandling {
-  if (mode === "hybrid") {
+  if (mode === "hybrid" || mode === "search-focus") {
     return "accept";
   }
   if (mode === "relay" || mode === "profile-disconnected") {
@@ -255,13 +262,17 @@ async function main(): Promise<void> {
 
     if (
       mode === "smoke" ||
-      mode === "search-focus" ||
       mode === "tab-reselection" ||
       mode === "shell-visual"
     ) {
       await assertDesktopServerReachable(resolvedDesktopServerUrl);
     }
-    if (mode === "relay" || mode === "hybrid" || mode === "profile-disconnected") {
+    if (
+      mode === "relay" ||
+      mode === "hybrid" ||
+      mode === "profile-disconnected" ||
+      mode === "search-focus"
+    ) {
       relayHarness = await startMobileRelayHarness({
         mode: mode === "relay" ? "relay" : "hybrid"
       });
@@ -269,7 +280,10 @@ async function main(): Promise<void> {
 
     expoServer = await ensureExpoServer({
       env:
-        (mode === "hybrid" || mode === "profile-disconnected") && relayHarness
+        (mode === "hybrid" ||
+          mode === "profile-disconnected" ||
+          mode === "search-focus") &&
+        relayHarness
           ? relayHarness.hybridEnv
           : mode === "relay" && relayHarness
           ? relayHarness.env
@@ -374,6 +388,18 @@ async function main(): Promise<void> {
         publishCloudRefresh: () => relayHarness!.publishHybridCloudRefresh(),
         stopRelay: () => relayHarness!.harness.stopRelay()
       });
+    } else if (mode === "search-focus" && relayHarness) {
+      await seedPairedTrustedDesktopThroughDeepLink({
+        bundleId: env.bundleId,
+        createPairingSession: relayHarness.createPairingSession,
+        driver,
+        desktop: relayHarness.hybridFixture.desktop
+      });
+      await runSearchFocusSmoke(driver, {
+        screenshotPath: process.env.KANNA_E2E_SEARCH_SCREENSHOT_PATH?.trim(),
+        stopAfterTaskIdSearch: true,
+        taskId: relayHarness.hybridFixture.duplicate.localTaskId
+      });
     } else if (mode === "cloud") {
       await runCloudTaskFlow(driver, {
         email: env.cloudEmail,
@@ -389,15 +415,16 @@ async function main(): Promise<void> {
           displayName: desktopIdentity.desktopName
         }
       });
-      if (mode === "search-focus") {
-        await runSearchFocusSmoke(driver);
-      } else if (mode === "tab-reselection") {
+      if (mode === "tab-reselection") {
         await runTabReselectionSmoke(driver);
       } else {
         await runListDetailBackSmoke(driver, {
           desktopServerUrl: resolvedDesktopServerUrl
         });
-        await runSearchFocusSmoke(driver);
+        await runSearchFocusSmoke(driver, {
+          screenshotPath: process.env.KANNA_E2E_SEARCH_SCREENSHOT_PATH?.trim(),
+          taskId: process.env.KANNA_E2E_PTY_TASK_ID?.trim()
+        });
         await runTabReselectionSmoke(driver);
         if (env.target === "simulator") {
           await runShellVisualSmoke(driver);

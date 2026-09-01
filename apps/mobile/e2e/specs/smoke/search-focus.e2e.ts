@@ -6,15 +6,19 @@ const POLL_INTERVAL_MS = 250;
 
 interface SearchFocusElement {
   click(): Promise<unknown>;
+  getAttribute?(name: string): Promise<string | null>;
   isExisting(): Promise<boolean>;
+  setValue?(value: string): Promise<unknown>;
   waitForDisplayed(options: { timeout: number }): Promise<unknown>;
 }
 
 export interface SearchFocusUi {
+  captureTaskIdSearch?(): Promise<void>;
   getSearchInput(): Promise<SearchFocusElement>;
   getSearchKeyboardDismissTarget(): Promise<SearchFocusElement>;
   getSearchScreen(): Promise<SearchFocusElement>;
   getSearchToolbarButton(): Promise<SearchFocusElement>;
+  getTaskResult(taskId: string): Promise<SearchFocusElement>;
   getTasksScreen(): Promise<SearchFocusElement>;
   getTasksTab(): Promise<SearchFocusElement>;
   isKeyboardShown(): Promise<boolean>;
@@ -30,7 +34,9 @@ export interface SearchFocusUi {
 }
 
 export async function runSearchFocusJourney(
-  ui: SearchFocusUi
+  ui: SearchFocusUi,
+  taskId?: string,
+  stopAfterTaskIdSearch = false
 ): Promise<void> {
   const searchButton = await ui.getSearchToolbarButton();
   await searchButton.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
@@ -45,6 +51,12 @@ export async function runSearchFocusJourney(
     timeoutMsg:
       "Expected Search tasks input to have native focus and show keyboard after toolbar Search tap"
   });
+
+  if (taskId) {
+    await verifyTaskIdSearch(ui, taskId);
+    await ui.captureTaskIdSearch?.();
+    if (stopAfterTaskIdSearch) return;
+  }
 
   await dismissSearchKeyboard(ui);
 
@@ -69,6 +81,24 @@ export async function runSearchFocusJourney(
   await tasksTab.click();
   const tasksScreen = await ui.getTasksScreen();
   await tasksScreen.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+}
+
+async function verifyTaskIdSearch(
+  ui: SearchFocusUi,
+  taskId: string
+): Promise<void> {
+  const searchInput = await ui.getSearchInput();
+  if (!searchInput.setValue) {
+    throw new Error("Search input does not support setting a task ID query");
+  }
+  await searchInput.setValue(taskId.slice(0, 5));
+
+  const result = await ui.getTaskResult(taskId);
+  await result.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  const label = await result.getAttribute?.("label");
+  if (!label?.includes(`Task ID ${taskId}`)) {
+    throw new Error(`Expected task ID search result to render ${JSON.stringify(taskId)}`);
+  }
 }
 
 async function dismissSearchKeyboard(ui: SearchFocusUi): Promise<void> {
@@ -103,8 +133,14 @@ async function waitForSearchFocus(
   );
 }
 
-function createSearchFocusUi(driver: Browser): SearchFocusUi {
+function createSearchFocusUi(
+  driver: Browser,
+  screenshotPath?: string
+): SearchFocusUi {
   return {
+    async captureTaskIdSearch() {
+      if (screenshotPath) await driver.saveScreenshot(screenshotPath);
+    },
     async getSearchInput() {
       return driver.$(selectors.searchInput);
     },
@@ -116,6 +152,9 @@ function createSearchFocusUi(driver: Browser): SearchFocusUi {
     },
     async getSearchToolbarButton() {
       return driver.$(selectors.searchToolbarButton);
+    },
+    async getTaskResult(taskId) {
+      return driver.$(selectors.taskResult(taskId));
     },
     async getTasksScreen() {
       return driver.$(selectors.tasksScreen);
@@ -146,8 +185,19 @@ function elementReferenceId(reference: unknown): string | null {
   return null;
 }
 
-export async function runSearchFocusSmoke(driver: Browser): Promise<void> {
+export async function runSearchFocusSmoke(
+  driver: Browser,
+  options: {
+    screenshotPath?: string;
+    stopAfterTaskIdSearch?: boolean;
+    taskId?: string;
+  } = {}
+): Promise<void> {
   const appShell = await driver.$(selectors.appShell);
   await appShell.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
-  await runSearchFocusJourney(createSearchFocusUi(driver));
+  await runSearchFocusJourney(
+    createSearchFocusUi(driver, options.screenshotPath),
+    options.taskId,
+    options.stopAfterTaskIdSearch
+  );
 }

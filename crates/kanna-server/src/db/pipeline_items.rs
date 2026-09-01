@@ -201,7 +201,9 @@ impl Db {
              WHERE (?1 OR closed_at IS NULL)
                AND (?2 IS NULL OR repo_id = ?2)
                AND (
-                 lower(coalesce(display_name, '')) LIKE ?3
+                 lower(id) LIKE ?3
+                 OR lower(coalesce(branch, '')) LIKE ?3
+                 OR lower(coalesce(display_name, '')) LIKE ?3
                  OR lower(coalesce(prompt, '')) LIKE ?3
                )
              ORDER BY updated_at DESC, created_at DESC",

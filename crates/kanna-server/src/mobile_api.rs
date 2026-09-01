@@ -2118,7 +2118,7 @@ mod tests {
     }
 
     #[test]
-    fn search_tasks_matches_display_name_or_prompt_and_excludes_closed_tasks() {
+    fn search_tasks_matches_text_id_or_branch_and_excludes_closed_tasks() {
         let config = Config {
             relay_url: "wss://relay.example".to_string(),
             device_token: "device-token".to_string(),
@@ -2152,7 +2152,7 @@ mod tests {
         )
         .unwrap();
         db.insert_test_pipeline_item(
-            "task-other",
+            "eef65d54",
             "repo-1",
             "write release notes",
             Some("Docs"),
@@ -2177,6 +2177,14 @@ mod tests {
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].id, "task-merge");
         assert_eq!(tasks[0].title, "Merge Cleanup");
+
+        let tasks = api.search_tasks("EEF65").unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, "eef65d54");
+
+        let tasks = api.search_tasks("branch-eef65").unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, "eef65d54");
     }
 
     #[test]

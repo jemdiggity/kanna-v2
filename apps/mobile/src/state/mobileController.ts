@@ -49,6 +49,7 @@ import type {
   TrustedDesktopRecord
 } from "./sessionPersistence";
 import { isTaskBlocked } from "../lib/api/taskIdentity";
+import { taskMatchesSearchQuery } from "../lib/api/taskSearch";
 import { resolveAgentProviderForDesktop } from "../lib/api/agentProviders";
 import { buildMachineInventory } from "./machineInventory";
 import {
@@ -3459,14 +3460,9 @@ function filterTasksForQuery(
   tasks: readonly TaskSummary[],
   query: string
 ): TaskSummary[] {
-  const normalizedQuery = query.trim().toLowerCase();
-  if (!normalizedQuery) {
+  if (!query.trim()) {
     return [];
   }
 
-  return tasks.filter(
-    (task) =>
-      task.title.toLowerCase().includes(normalizedQuery) ||
-      task.waitingPromptSnippet?.toLowerCase().includes(normalizedQuery) === true
-  );
+  return tasks.filter((task) => taskMatchesSearchQuery(task, query));
 }
