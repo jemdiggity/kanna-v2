@@ -123,15 +123,21 @@ async function connect(url: string, options?: ClientOptions): Promise<WebSocket>
   return client;
 }
 
-function connectExpectingRefusal(url: string): Promise<{ status: number }> {
+function connectExpectingRefusal(url: string): Promise<{ status: number; reason: string }> {
   return new Promise((resolve, reject) => {
     const client = new WebSocket(url);
     sockets.push(client);
     // `ws` surfaces a non-101 upgrade response as `unexpected-response`.
     client.once("unexpected-response", (_req, res) => {
-      res.resume();
-      client.terminate();
-      resolve({ status: res.statusCode ?? 0 });
+      const chunks: Buffer[] = [];
+      res.on("data", (chunk: Buffer) => chunks.push(chunk));
+      res.on("end", () => {
+        client.terminate();
+        resolve({
+          status: res.statusCode ?? 0,
+          reason: Buffer.concat(chunks).toString().trim(),
+        });
+      });
     });
     client.once("open", () => reject(new Error("upgrade was admitted")));
     client.once("error", (error) => reject(error));
@@ -366,6 +372,7 @@ describe("per-IP upgrade admission over a real upgrade", () => {
 
     const refused = await connectExpectingRefusal(harness.url);
     expect(refused.status).toBe(429);
+    expect(refused.reason).toContain("too many unauthenticated connections");
     expect(harness.refusals[0]).toContain("too many unauthenticated connections");
     for (const client of silent) expect(client.readyState).toBe(WebSocket.OPEN);
 

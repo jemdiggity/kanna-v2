@@ -47,6 +47,7 @@ import {
 import { resolveBuildCommit } from "./buildInfo.js";
 import {
   beginCloudTaskPublicationSession,
+  CloudTaskPublicationRefusal,
   createFirestoreCloudTaskPublicationStore,
   endCloudTaskPublicationSession,
   handleCloudTaskPublication,
@@ -962,17 +963,28 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
               session: publicationSessionGeneration,
               sequence: nextPublicationSequence++,
             };
-        const sendAck = (ok: boolean, error?: string, code?: number) => {
+        const sendAck = (
+          ok: boolean,
+          error?: string,
+          code?: number,
+          retryable?: boolean,
+        ) => {
           messageLifecycle.sendTaskSnapshotAck({
             type: "task_snapshot_ack",
             id,
             ok,
             ...(error ? { error } : {}),
             ...(code === undefined ? {} : { code }),
+            ...(retryable === undefined ? {} : { retryable }),
           });
         };
         if (serverAuthProof?.kind !== "desktop") {
-          sendAck(false, "desktop-secret authentication is required for task snapshot publication");
+          sendAck(
+            false,
+            "desktop-secret authentication is required for task snapshot publication",
+            undefined,
+            false,
+          );
           return;
         }
         if (
@@ -980,7 +992,12 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
           || !generation
           || Buffer.byteLength(data) > MAX_TASK_SNAPSHOT_BYTES + 16_384
         ) {
-          sendAck(false, "task snapshot publication is malformed or oversized");
+          sendAck(
+            false,
+            "task snapshot publication is malformed or oversized",
+            undefined,
+            false,
+          );
           return;
         }
         if (!desktopId || !await revalidateServerAuth(
@@ -988,7 +1005,12 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
           userId!,
           desktopId,
         )) {
-          sendAck(false, "desktop credential is no longer authorized");
+          sendAck(
+            false,
+            "desktop credential is no longer authorized",
+            undefined,
+            false,
+          );
           ws.close(4005, "Authentication revoked");
           return;
         }
@@ -996,7 +1018,12 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         // the index goes stale, but nothing already published is deleted, so it
         // comes back on renewal (Decision 5).
         if (!await sessionHasCapability(entitlementSubject!, "cloud_task_index")) {
-          sendAck(false, ENTITLEMENT_REQUIRED_ERROR, ENTITLEMENT_REQUIRED_CODE);
+          sendAck(
+            false,
+            ENTITLEMENT_REQUIRED_ERROR,
+            ENTITLEMENT_REQUIRED_CODE,
+            true,
+          );
           return;
         }
         try {
@@ -1011,7 +1038,12 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           console.warn(`[cloud] Task snapshot publication rejected for ${userId}/${desktopId}: ${message}`);
-          sendAck(false, message);
+          sendAck(
+            false,
+            message,
+            undefined,
+            !(error instanceof CloudTaskPublicationRefusal),
+          );
         }
         return;
       }

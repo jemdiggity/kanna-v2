@@ -85,6 +85,14 @@ interface PublicationSessionState {
   reconciliationTail: Promise<void>;
 }
 
+/** A snapshot whose contents can never reconcile successfully unchanged. */
+export class CloudTaskPublicationRefusal extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CloudTaskPublicationRefusal";
+  }
+}
+
 export function validateCloudTaskPublication(
   value: unknown,
   authenticatedDesktopId: string,
@@ -263,7 +271,11 @@ function validateTask(
     ownerDesktopId,
     ownerLocalTaskId,
     title: requiredString(task.title, `${path}.title`, 512),
-    promptSnippet: nullableString(task.promptSnippet, `${path}.promptSnippet`, 500),
+    // kanna-server truncates by Rust `char` (Unicode scalar values). JavaScript
+    // `String.length` counts UTF-16 code units, so a valid 500-character prompt
+    // containing astral characters used to be rejected and made the desktop
+    // reconnect its otherwise healthy relay control socket indefinitely.
+    promptSnippet: nullableUnicodeString(task.promptSnippet, `${path}.promptSnippet`, 500),
     waitingPromptSnippet: optionalNullableUnicodeString(
       task.waitingPromptSnippet,
       `${path}.waitingPromptSnippet`,
@@ -366,7 +378,13 @@ export async function handleCloudTaskPublication(input: {
   store?: CloudTaskPublicationStore;
 }): Promise<void> {
   validatePublicationGeneration(input.generation);
-  const publication = validateCloudTaskPublication(input.snapshot, input.desktopId);
+  let publication: ValidatedCloudTaskPublication;
+  try {
+    publication = validateCloudTaskPublication(input.snapshot, input.desktopId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new CloudTaskPublicationRefusal(message);
+  }
   const store = input.store ?? createFirestoreCloudTaskPublicationStore();
   await store.reconcile({
     userId: input.userId,
@@ -729,6 +747,18 @@ function nullableString(value: unknown, field: string, maxLength: number): strin
   return value;
 }
 
+function nullableUnicodeString(
+  value: unknown,
+  field: string,
+  maxLength: number,
+): string | null {
+  if (value === null) return null;
+  if (typeof value !== "string" || Array.from(value).length > maxLength) {
+    throw new Error(`${field} must be null or a string of at most ${maxLength} characters`);
+  }
+  return value;
+}
+
 // Missing on snapshots from older desktop publishers; treated as "no parent".
 function optionalNullableString(
   value: unknown,
@@ -744,11 +774,8 @@ function optionalNullableUnicodeString(
   field: string,
   maxLength: number,
 ): string | null {
-  if (value === undefined || value === null) return null;
-  if (typeof value !== "string" || Array.from(value).length > maxLength) {
-    throw new Error(`${field} must be null or a string of at most ${maxLength} characters`);
-  }
-  return value;
+  if (value === undefined) return null;
+  return nullableUnicodeString(value, field, maxLength);
 }
 
 // Missing on snapshots from older desktop publishers; treated as "no running post".

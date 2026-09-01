@@ -1174,6 +1174,90 @@ describe("Relay integration", () => {
     }
   });
 
+  it("keeps two credentialed desktops on one account connected and routes between them", async () => {
+    const targetCredentialRef = testFirestore.doc(
+      `desktopCredentials/${ROUTING_TARGET_DESKTOP_ID}`,
+    );
+    const targetDesktopRef = testFirestore.doc(
+      `users/${TEST_USER_ID}/desktops/${ROUTING_TARGET_DESKTOP_ID}`,
+    );
+    await targetCredentialRef.set({
+      desktopId: ROUTING_TARGET_DESKTOP_ID,
+      desktopSecretHash: sha256Hex(ROUTING_TARGET_DESKTOP_SECRET),
+      displayName: "Routing Target",
+      revokedAt: null,
+      uid: TEST_USER_ID,
+      updatedAt: new Date().toISOString(),
+    });
+
+    const { ws: requester } = await connectAndAuth({
+      desktop_id: SECRET_DESKTOP_ID,
+      desktop_secret: SECRET_DESKTOP_SECRET,
+    });
+    const { ws: target } = await connectAndAuth({
+      desktop_id: ROUTING_TARGET_DESKTOP_ID,
+      desktop_secret: ROUTING_TARGET_DESKTOP_SECRET,
+    });
+
+    try {
+      requester.send(JSON.stringify({
+        type: "invoke",
+        id: "same-account-presence",
+        command: "list_active_desktops",
+        args: {},
+      }));
+      const presence = await waitForMessage(
+        requester,
+        (message) => message.type === "response" && message.id === "same-account-presence",
+      );
+      expect(presence.data).toEqual({
+        desktopIds: expect.arrayContaining([
+          SECRET_DESKTOP_ID,
+          ROUTING_TARGET_DESKTOP_ID,
+        ]),
+      });
+
+      const delivered = waitForMessage(
+        target,
+        (message) => message.type === "invoke" && message.id === "same-account-route",
+      );
+      requester.send(JSON.stringify({
+        type: "invoke",
+        id: "same-account-route",
+        desktopId: ROUTING_TARGET_DESKTOP_ID,
+        method: "GET",
+        path: "/v1/tasks/recent",
+        body: null,
+      }));
+      await expect(delivered).resolves.toMatchObject({
+        desktopId: ROUTING_TARGET_DESKTOP_ID,
+        path: "/v1/tasks/recent",
+      });
+
+      const returned = waitForMessage(
+        requester,
+        (message) => message.type === "response" && message.id === "same-account-route",
+      );
+      target.send(JSON.stringify({
+        type: "response",
+        id: "same-account-route",
+        status: 200,
+        body: [{ id: "target-task" }],
+      }));
+      await expect(returned).resolves.toMatchObject({
+        status: 200,
+        body: [{ id: "target-task" }],
+      });
+      expect(requester.readyState).toBe(WebSocket.OPEN);
+      expect(target.readyState).toBe(WebSocket.OPEN);
+    } finally {
+      await closeAndWait(requester);
+      await closeAndWait(target);
+      await targetCredentialRef.delete();
+      await testFirestore.recursiveDelete(targetDesktopRef);
+    }
+  });
+
   it("stops routing sibling invokes after the requester desktop secret is revoked", async () => {
     const requesterCredentialRef = testFirestore.doc(
       `desktopCredentials/${SECRET_DESKTOP_ID}`,

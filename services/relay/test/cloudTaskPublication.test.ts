@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  CloudTaskPublicationRefusal,
   handleCloudTaskPublication,
   planTaskReconciliation,
   validateCloudTaskPublication,
@@ -445,9 +446,36 @@ describe("cloud task publication validation", () => {
       Array.from({ length: 251 }, (_, index) => task({ ownerLocalTaskId: `task-${index}` })),
     ), "desktop-1")).toThrow(/at most 250/);
   });
+
+  it("measures prompt snippets in Unicode characters like kanna-server", () => {
+    const promptSnippet = `${"😀".repeat(250)}${"界".repeat(250)}`;
+    const parsed = validateCloudTaskPublication(
+      publication([task({ promptSnippet })]),
+      "desktop-1",
+    );
+    expect(parsed.tasks[0]?.promptSnippet).toBe(promptSnippet);
+
+    expect(() => validateCloudTaskPublication(
+      publication([task({ promptSnippet: `${promptSnippet}x` })]),
+      "desktop-1",
+    )).toThrow(/promptSnippet/);
+  });
 });
 
 describe("cloud task publication reconciliation", () => {
+  it("classifies invalid snapshots as permanent publication refusals", async () => {
+    const reconcile = vi.fn(async () => undefined);
+
+    await expect(handleCloudTaskPublication({
+      userId: "user-owner",
+      desktopId: "desktop-1",
+      generation: { session: 4, sequence: 2 },
+      snapshot: null,
+      store: { reconcile },
+    })).rejects.toBeInstanceOf(CloudTaskPublicationRefusal);
+    expect(reconcile).not.toHaveBeenCalled();
+  });
+
   it("sets current tasks, carries activity-only changes, and deletes stale and duplicate docs", () => {
     const plan = planTaskReconciliation(
       [

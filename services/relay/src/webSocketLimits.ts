@@ -391,10 +391,15 @@ export function attachUpgradeAdmission(options: {
       const status = decision.status === 503
         ? "503 Service Unavailable"
         : "429 Too Many Requests";
-      socket.write(
-        `HTTP/1.1 ${status}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`
+      const body = `${decision.reason}\n`;
+      // Admission runs before the WebSocket upgrade so an HTTP refusal is the
+      // protocol-level equivalent of a close frame. Finish the response with
+      // the reason before closing; write()+destroy() can discard buffered
+      // bytes and surface to clients as an unexplained TCP reset.
+      socket.end(
+        `HTTP/1.1 ${status}\r\nConnection: close\r\nContent-Type: text/plain; charset=utf-8\r\n`
+        + `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`
       );
-      socket.destroy();
       return;
     }
 

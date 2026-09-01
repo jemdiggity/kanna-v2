@@ -118,6 +118,30 @@ describe("websocket message lifecycle", () => {
     expect(renderedLogCalls([[new Error(canary)]])).toContain(canary);
   });
 
+  it("marks an unhandled snapshot failure retryable without closing routing", async () => {
+    const socket = new FaultInjectingSocket();
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    attachWebSocketMessageHandler(
+      socket as unknown as WebSocket,
+      "test-peer",
+      async () => {
+        throw new Error("temporary reconciliation failure");
+      },
+    );
+
+    socket.emitJson({ type: "task_snapshot_publish", id: "snapshot-1", snapshot: {} });
+    await flushEventLoop();
+
+    expect(decodedMessages(socket)).toEqual([{
+      type: "task_snapshot_ack",
+      id: "snapshot-1",
+      ok: false,
+      error: "relay could not process request",
+      retryable: true,
+    }]);
+    expect(socket.terminated).toBe(false);
+  });
+
   it("contains acknowledgement send failure without a duplicate attempt and disconnects", async () => {
     const canary = "websocket-send-secret-DO-NOT-LEAK";
     const socket = new FaultInjectingSocket();
@@ -148,6 +172,92 @@ describe("websocket message lifecycle", () => {
     expect(renderedLogCalls(errors.mock.calls)).not.toContain(canary);
   });
 
+  it("acknowledges transient publication failure for retry on the same relay socket", async () => {
+    const logs = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const warnings = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    class TestCloudTaskPublicationRefusal extends Error {}
+    const handleCloudTaskPublication = vi.fn()
+      .mockRejectedValueOnce(new Error("firestore temporarily unavailable"))
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new TestCloudTaskPublicationRefusal("invalid snapshot"));
+    vi.doMock("./auth.js", () => ({
+      verifyPhoneToken: vi.fn(),
+      verifyDeviceToken: vi.fn(),
+      verifyDesktopCredentials: vi.fn().mockResolvedValue({
+        userId: "operator-1",
+        desktopId: "desktop-1",
+      }),
+      revalidateServerAuth: vi.fn().mockResolvedValue(true),
+      registerDevice: vi.fn(),
+      registerPushDevice: vi.fn(),
+      unregisterPushDevice: vi.fn(),
+    }));
+    vi.doMock("./cloudTaskPublication.js", () => ({
+      CloudTaskPublicationRefusal: TestCloudTaskPublicationRefusal,
+      createFirestoreCloudTaskPublicationStore: vi.fn().mockReturnValue({}),
+      beginCloudTaskPublicationSession: vi.fn().mockResolvedValue(1),
+      endCloudTaskPublicationSession: vi.fn().mockResolvedValue(undefined),
+      handleCloudTaskPublication,
+      MAX_TASK_SNAPSHOT_BYTES: 4 * 1024 * 1024,
+    }));
+
+    const port = await findFreePort();
+    const relay = await import("./index.js");
+    relay.startRelay(port, "127.0.0.1");
+    await waitForListening(relay.server);
+    const client = new WebSocket(`ws://127.0.0.1:${port}`);
+
+    try {
+      await waitForOpen(client);
+      client.send(JSON.stringify({
+        type: "auth",
+        desktop_id: "desktop-1",
+        desktop_secret: "desktop-secret",
+      }));
+      expect(await receiveJson(client)).toMatchObject({ type: "auth_ok" });
+
+      client.send(JSON.stringify(taskSnapshotRequest("snapshot-first")));
+      expect(await receiveJson(client)).toEqual({
+        type: "task_snapshot_ack",
+        id: "snapshot-first",
+        ok: false,
+        error: "firestore temporarily unavailable",
+        retryable: true,
+      });
+      expect(client.readyState).toBe(WebSocket.OPEN);
+
+      client.send(JSON.stringify(taskSnapshotRequest("snapshot-retry")));
+      expect(await receiveJson(client)).toEqual({
+        type: "task_snapshot_ack",
+        id: "snapshot-retry",
+        ok: true,
+      });
+      expect(handleCloudTaskPublication).toHaveBeenCalledTimes(2);
+      expect(client.readyState).toBe(WebSocket.OPEN);
+
+      client.send(JSON.stringify(taskSnapshotRequest("snapshot-invalid")));
+      expect(await receiveJson(client)).toEqual({
+        type: "task_snapshot_ack",
+        id: "snapshot-invalid",
+        ok: false,
+        error: "invalid snapshot",
+        retryable: false,
+      });
+      expect(handleCloudTaskPublication).toHaveBeenCalledTimes(3);
+      expect(client.readyState).toBe(WebSocket.OPEN);
+    } finally {
+      client.close();
+      await waitForClose(client);
+      await closeWebSocketServer(relay.wss);
+      await closeServer(relay.server);
+      logs.mockRestore();
+      warnings.mockRestore();
+      vi.doUnmock("./auth.js");
+      vi.doUnmock("./cloudTaskPublication.js");
+      vi.resetModules();
+    }
+  });
+
   it("contains auth revalidation rejection through the production websocket listener", async () => {
     const canary = "desktop-auth-secret-DO-NOT-LEAK";
     const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -169,6 +279,7 @@ describe("websocket message lifecycle", () => {
       unregisterPushDevice: vi.fn(),
     }));
     vi.doMock("./cloudTaskPublication.js", () => ({
+      CloudTaskPublicationRefusal: class CloudTaskPublicationRefusal extends Error {},
       createFirestoreCloudTaskPublicationStore: vi.fn().mockReturnValue({}),
       beginCloudTaskPublicationSession: vi.fn().mockResolvedValue(1),
       endCloudTaskPublicationSession: vi.fn().mockResolvedValue(undefined),
@@ -222,6 +333,14 @@ function mobileNotificationRequest(id: string): Record<string, unknown> {
     type: "mobile_notification_publish",
     id,
     notification: { title: "Ready", body: "Staging is ready." },
+  };
+}
+
+function taskSnapshotRequest(id: string): Record<string, unknown> {
+  return {
+    type: "task_snapshot_publish",
+    id,
+    snapshot: {},
   };
 }
 

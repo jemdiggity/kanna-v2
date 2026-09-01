@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::time::Duration;
 use tokio::net::TcpStream;
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{Error as TungsteniteError, Message};
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 pub type WsSink = SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
@@ -38,6 +38,79 @@ impl std::error::Error for RelayConnectError {
             Self::TimedOut { .. } => None,
             Self::Failed(error) => Some(error.as_ref()),
         }
+    }
+}
+
+const MAX_RELAY_HTTP_ERROR_REASON_BYTES: usize = 512;
+
+#[derive(Debug)]
+struct RelayHttpUpgradeError {
+    status: String,
+    reason: Option<String>,
+}
+
+impl fmt::Display for RelayHttpUpgradeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "HTTP error: {}", self.status)?;
+        if let Some(reason) = &self.reason {
+            write!(f, ": {reason}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for RelayHttpUpgradeError {}
+
+fn normalize_relay_http_error_reason(body: &[u8]) -> Option<String> {
+    let body = std::str::from_utf8(body).ok()?;
+    let mut normalized = String::new();
+    let mut pending_space = false;
+    let mut truncated = false;
+
+    for character in body.chars() {
+        if character.is_whitespace() {
+            pending_space = !normalized.is_empty();
+            continue;
+        }
+        if character.is_control() {
+            return None;
+        }
+
+        let space_bytes = usize::from(pending_space);
+        if normalized.len() + space_bytes + character.len_utf8() > MAX_RELAY_HTTP_ERROR_REASON_BYTES
+        {
+            truncated = true;
+            break;
+        }
+        if pending_space {
+            normalized.push(' ');
+            pending_space = false;
+        }
+        normalized.push(character);
+    }
+
+    if normalized.is_empty() {
+        return None;
+    }
+    if truncated {
+        while normalized.len() + '…'.len_utf8() > MAX_RELAY_HTTP_ERROR_REASON_BYTES {
+            normalized.pop();
+        }
+        normalized.push('…');
+    }
+    Some(normalized)
+}
+
+fn relay_connect_error(error: TungsteniteError) -> Box<dyn std::error::Error + Send + Sync> {
+    match error {
+        TungsteniteError::Http(response) => Box::new(RelayHttpUpgradeError {
+            status: response.status().to_string(),
+            reason: response
+                .body()
+                .as_deref()
+                .and_then(normalize_relay_http_error_reason),
+        }),
+        error => Box::new(error),
     }
 }
 
@@ -197,6 +270,8 @@ pub enum RelayMessage {
         ok: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        #[serde(default)]
+        retryable: bool,
     },
     #[serde(rename = "mobile_notification_publish")]
     MobileNotificationPublish {
@@ -298,7 +373,9 @@ async fn connect_to_relay_inner(
     config: &Config,
 ) -> Result<(WsSink, WsStream, Option<RelayAuthentication>), Box<dyn std::error::Error + Send + Sync>>
 {
-    let (ws_stream, _response) = connect_async(&config.relay_url).await?;
+    let (ws_stream, _response) = connect_async(&config.relay_url)
+        .await
+        .map_err(relay_connect_error)?;
     let (mut sink, mut stream) = ws_stream.split();
 
     // Send auth message immediately after connecting
@@ -491,6 +568,39 @@ mod tests {
     use crate::config::Config;
     use futures_util::StreamExt;
 
+    async fn start_refusing_relay(body: Vec<u8>) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind refusing relay");
+        let address = listener.local_addr().expect("refusing relay address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept relay client");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut chunk).await.expect("read upgrade request");
+                assert!(
+                    read > 0,
+                    "relay client closed before sending upgrade headers"
+                );
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let headers = format!(
+                "HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            );
+            stream
+                .write_all(headers.as_bytes())
+                .await
+                .expect("write refusal headers");
+            stream.write_all(&body).await.expect("write refusal body");
+            stream.shutdown().await.expect("finish refusal response");
+        });
+        (format!("ws://{address}"), server)
+    }
+
     fn test_config() -> Config {
         Config {
             relay_url: "ws://127.0.0.1:9080".to_string(),
@@ -546,6 +656,47 @@ mod tests {
             .expect("timed-out auth socket stayed open")
             .expect("auth-stalling relay task failed");
         assert!(!matches!(close, Some(Ok(_))));
+    }
+
+    #[tokio::test]
+    async fn connection_error_includes_normalized_real_http_refusal_reason() {
+        let (relay_url, server) = start_refusing_relay(
+            b"  too many unauthenticated\r\nconnections from this address\t\n".to_vec(),
+        )
+        .await;
+        let mut config = test_config();
+        config.relay_url = relay_url;
+
+        let error = match super::connect_to_relay(&config, Duration::from_secs(1)).await {
+            Ok(_) => panic!("HTTP refusal unexpectedly upgraded to WebSocket"),
+            Err(error) => error,
+        };
+        server.await.expect("refusing relay task");
+
+        assert_eq!(
+            error.to_string(),
+            "HTTP error: 429 Too Many Requests: too many unauthenticated connections from this address"
+        );
+    }
+
+    #[test]
+    fn invalid_http_refusal_body_keeps_status_only_fallback() {
+        let response = tokio_tungstenite::tungstenite::http::Response::builder()
+            .status(503)
+            .body(Some(vec![0xff, 0xfe]))
+            .unwrap();
+        let error =
+            super::relay_connect_error(tokio_tungstenite::tungstenite::Error::Http(response));
+
+        assert_eq!(error.to_string(), "HTTP error: 503 Service Unavailable");
+    }
+
+    #[test]
+    fn http_refusal_reason_is_bounded_in_utf8_bytes() {
+        let reason = super::normalize_relay_http_error_reason("é".repeat(400).as_bytes()).unwrap();
+
+        assert!(reason.len() <= super::MAX_RELAY_HTTP_ERROR_REASON_BYTES);
+        assert!(reason.ends_with('…'));
     }
 
     #[test]
@@ -639,12 +790,35 @@ mod tests {
         }))
         .expect("task snapshot ack should deserialize");
 
-        let super::RelayMessage::TaskSnapshotAck { id, ok, error } = message else {
+        let super::RelayMessage::TaskSnapshotAck {
+            id,
+            ok,
+            error,
+            retryable,
+        } = message
+        else {
             panic!("expected task snapshot ack");
         };
         assert_eq!(id, "task-snapshot-9");
         assert!(!ok);
+        assert!(!retryable);
         assert_eq!(error.as_deref(), Some("credential revoked"));
+
+        let retryable: super::RelayMessage = serde_json::from_value(serde_json::json!({
+            "type": "task_snapshot_ack",
+            "id": "task-snapshot-10",
+            "ok": false,
+            "error": "firestore unavailable",
+            "retryable": true
+        }))
+        .expect("retryable task snapshot ack should deserialize");
+        assert!(matches!(
+            retryable,
+            super::RelayMessage::TaskSnapshotAck {
+                retryable: true,
+                ..
+            }
+        ));
     }
 
     #[test]
