@@ -270,6 +270,8 @@ pub enum RelayMessage {
         ok: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        #[serde(default)]
+        retryable: bool,
     },
     #[serde(rename = "mobile_notification_publish")]
     MobileNotificationPublish {
@@ -788,12 +790,35 @@ mod tests {
         }))
         .expect("task snapshot ack should deserialize");
 
-        let super::RelayMessage::TaskSnapshotAck { id, ok, error } = message else {
+        let super::RelayMessage::TaskSnapshotAck {
+            id,
+            ok,
+            error,
+            retryable,
+        } = message
+        else {
             panic!("expected task snapshot ack");
         };
         assert_eq!(id, "task-snapshot-9");
         assert!(!ok);
+        assert!(!retryable);
         assert_eq!(error.as_deref(), Some("credential revoked"));
+
+        let retryable: super::RelayMessage = serde_json::from_value(serde_json::json!({
+            "type": "task_snapshot_ack",
+            "id": "task-snapshot-10",
+            "ok": false,
+            "error": "firestore unavailable",
+            "retryable": true
+        }))
+        .expect("retryable task snapshot ack should deserialize");
+        assert!(matches!(
+            retryable,
+            super::RelayMessage::TaskSnapshotAck {
+                retryable: true,
+                ..
+            }
+        ));
     }
 
     #[test]

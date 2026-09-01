@@ -85,6 +85,14 @@ interface PublicationSessionState {
   reconciliationTail: Promise<void>;
 }
 
+/** A snapshot whose contents can never reconcile successfully unchanged. */
+export class CloudTaskPublicationRefusal extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CloudTaskPublicationRefusal";
+  }
+}
+
 export function validateCloudTaskPublication(
   value: unknown,
   authenticatedDesktopId: string,
@@ -370,7 +378,13 @@ export async function handleCloudTaskPublication(input: {
   store?: CloudTaskPublicationStore;
 }): Promise<void> {
   validatePublicationGeneration(input.generation);
-  const publication = validateCloudTaskPublication(input.snapshot, input.desktopId);
+  let publication: ValidatedCloudTaskPublication;
+  try {
+    publication = validateCloudTaskPublication(input.snapshot, input.desktopId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new CloudTaskPublicationRefusal(message);
+  }
   const store = input.store ?? createFirestoreCloudTaskPublicationStore();
   await store.reconcile({
     userId: input.userId,

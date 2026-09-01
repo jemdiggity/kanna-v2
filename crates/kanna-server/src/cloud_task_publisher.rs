@@ -534,8 +534,9 @@ impl PublisherState {
         &mut self,
         id: &str,
         ok: bool,
+        retryable: bool,
         _error: Option<String>,
-        _now: Instant,
+        now: Instant,
     ) -> Result<(), String> {
         let Some(in_flight) = self.in_flight.take() else {
             return Err(format!("unexpected task snapshot acknowledgement {id}"));
@@ -548,14 +549,24 @@ impl PublisherState {
             self.last_acked_fingerprint = Some(in_flight.request.snapshot.fingerprint());
             return Ok(());
         }
-        // A negative acknowledgement is a complete protocol response. Retrying
-        // the identical invalid snapshot cannot repair it, and reconnecting the
-        // shared control socket takes healthy machine discovery and routing
-        // down with an unrelated publication. Suppress this fingerprint until
-        // local state changes; timeouts still retry and reconnect because their
-        // delivery outcome is unknown.
+        if retryable {
+            self.schedule_retryable_failure(in_flight.attempt, now);
+            return Ok(());
+        }
+        // A permanent negative acknowledgement is a complete protocol response.
+        // Retrying the identical invalid snapshot cannot repair it, and
+        // reconnecting the shared control socket takes healthy machine discovery
+        // and routing down with an unrelated publication. Suppress this
+        // fingerprint until local state changes; timeouts still retry and
+        // reconnect because their delivery outcome is unknown.
         self.last_acked_fingerprint = Some(in_flight.request.snapshot.fingerprint());
         Ok(())
+    }
+
+    fn schedule_retryable_failure(&mut self, attempt: u8, now: Instant) {
+        let bounded_attempt = attempt.min(MAX_PUBLISH_ATTEMPTS);
+        let delay = Duration::from_secs(1 << (bounded_attempt - 1));
+        self.retry_at = Some((now + delay, (attempt + 1).min(MAX_PUBLISH_ATTEMPTS)));
     }
 
     fn schedule_failure(&mut self, attempt: u8, now: Instant) {
@@ -734,7 +745,7 @@ mod tests {
             panic!("expected initial publication");
         };
         publisher
-            .on_ack(&first_request.id, true, None, now)
+            .on_ack(&first_request.id, true, false, None, now)
             .unwrap();
         for index in 0..10 {
             let mut continuous = ui_snapshot("working");
@@ -1044,7 +1055,7 @@ mod tests {
         };
         state.observe(working.clone());
         assert!(matches!(state.next_step(now), PublisherStep::Wait));
-        state.on_ack(&first.id, true, None, now).unwrap();
+        state.on_ack(&first.id, true, false, None, now).unwrap();
         let PublisherStep::Publish(second) = state.next_step(now) else {
             panic!("expected coalesced publish")
         };
@@ -1107,7 +1118,55 @@ mod tests {
             panic!("expected publication");
         };
         state
-            .on_ack(&request.id, false, Some("invalid snapshot".into()), now)
+            .on_ack(
+                &request.id,
+                false,
+                false,
+                Some("invalid snapshot".into()),
+                now,
+            )
+            .unwrap();
+        assert!(matches!(
+            state.next_step(now + Duration::from_secs(60)),
+            PublisherStep::Wait
+        ));
+    }
+
+    #[test]
+    fn publisher_retries_transient_reconciliation_failure_without_reconnecting() {
+        let now = Instant::now();
+        let mut state = PublisherState::new();
+        state.on_authenticated(Some(2));
+        state.observe(map_ui_snapshot(
+            "desktop-1",
+            "Studio Mac",
+            test_agent_providers(),
+            ui_snapshot("idle"),
+        ));
+
+        let PublisherStep::Publish(first) = state.next_step(now) else {
+            panic!("expected publication");
+        };
+        state
+            .on_ack(
+                &first.id,
+                false,
+                true,
+                Some("firestore temporarily unavailable".into()),
+                now,
+            )
+            .unwrap();
+        assert!(matches!(
+            state.next_step(now + Duration::from_millis(999)),
+            PublisherStep::Wait
+        ));
+
+        let PublisherStep::Publish(retry) = state.next_step(now + Duration::from_secs(1)) else {
+            panic!("expected retry on the existing relay session");
+        };
+        assert_eq!(retry.snapshot.fingerprint(), first.snapshot.fingerprint());
+        state
+            .on_ack(&retry.id, true, false, None, now + Duration::from_secs(1))
             .unwrap();
         assert!(matches!(
             state.next_step(now + Duration::from_secs(60)),
@@ -1130,7 +1189,7 @@ mod tests {
         let PublisherStep::Publish(first) = state.next_step(now) else {
             panic!("expected first")
         };
-        state.on_ack(&first.id, true, None, now).unwrap();
+        state.on_ack(&first.id, true, false, None, now).unwrap();
         assert!(matches!(state.next_step(now), PublisherStep::Wait));
 
         state.on_disconnected();

@@ -103,6 +103,7 @@ function correlatedFailure(raw: RawData): CorrelatedFailure | null {
         id: message.id,
         ok: false,
         error: MESSAGE_FAILURE,
+        retryable: true,
       },
     };
   }

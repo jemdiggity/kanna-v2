@@ -686,9 +686,14 @@ async fn run_relay_loop_with_timing(
                                 &mut routing_generation,
                             );
                         }
-                        RelayMessage::TaskSnapshotAck { id, ok, error } => {
+                        RelayMessage::TaskSnapshotAck {
+                            id,
+                            ok,
+                            error,
+                            retryable,
+                        } => {
                             if let Err(message) =
-                                publisher.on_ack(&id, ok, error.clone(), Instant::now())
+                                publisher.on_ack(&id, ok, retryable, error.clone(), Instant::now())
                             {
                                 log::warn!("{message}");
                             } else if !ok {
