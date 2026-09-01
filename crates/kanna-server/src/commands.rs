@@ -188,7 +188,8 @@ pub async fn handle_invoke(
                         *prepared,
                     )
                     .await?;
-                    serde_json::to_value(dispatched).map_err(|e| format!("serialize error: {}", e))
+                    serde_json::to_value(dispatched.response)
+                        .map_err(|e| format!("serialize error: {}", e))
                 }
                 task_creator::PreparedStageTransition::Close {
                     task_id,

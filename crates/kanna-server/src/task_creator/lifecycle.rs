@@ -873,7 +873,7 @@ pub(crate) async fn dispatch_prepared_post_for_api(
     daemon: &mut DaemonClient,
     replacements: &SessionReplacements,
     prepared: PreparedPostDispatch,
-) -> Result<crate::mobile_api::TaskActionResponse, String> {
+) -> Result<PostDispatchOutcome, String> {
     let task_id = prepared.task_id.clone();
     let inherited_run_id = Db::open(db_path)
         .map_err(|e| format!("db error: {e}"))?
@@ -889,85 +889,114 @@ pub(crate) async fn dispatch_prepared_post_for_api(
         // continue that process into a post: replace it with a newly spawned
         // post whose private run-scoped context is server-owned.
         return spawn_prepared_stage_run_for_api(db_path, daemon, replacements, prepared.fallback)
-            .await;
+            .await
+            .map(|response| PostDispatchOutcome {
+                response,
+                held_by_raw_draft: false,
+            });
     }
-    match try_submit_task_input(daemon, &prepared.session_id, &prepared.message).await {
-        Ok(()) => {
-            let db = Db::open(db_path).map_err(|e| format!("db error: {}", e))?;
-            // The live session keeps whatever agent is already running;
-            // attribute the post run to it rather than to the post's
-            // fallback agent binding.
-            let inherited = db
-                .latest_stage_run(&task_id)
-                .map_err(|e| format!("db error: {}", e))?;
-            let inherited_run_id = inherited.as_ref().map(|run| run.id.clone());
-            db.finish_latest_running_stage_run(&task_id, "succeeded", None, None)
-                .map_err(|e| format!("db error: {}", e))?;
-            // The post continues the inherited run's live agent session, so
-            // its provider session id and cwd carry over too.
-            let (agent, agent_provider, model, effort, provider_session_id, cwd) = match inherited {
-                Some(run) => (
-                    run.agent,
-                    run.agent_provider,
-                    run.model,
-                    run.effort,
-                    run.provider_session_id,
-                    run.cwd,
-                ),
-                None => (
-                    prepared.fallback.stage_agent.clone(),
-                    Some(prepared.fallback.agent_provider.clone()),
-                    prepared.fallback.model.clone(),
-                    prepared.fallback.effort.clone(),
-                    None,
-                    Some(prepared.fallback.cwd.clone()),
-                ),
-            };
-            let run_id = generate_stage_run_id(&task_id);
-            db.insert_stage_run_with_completion_binding(
-                NewStageRun {
-                    id: &run_id,
-                    task_id: &task_id,
-                    stage: &prepared.run_stage,
-                    kind: "post",
-                    agent: agent.as_deref(),
-                    agent_provider: agent_provider.as_deref(),
-                    model: model.as_deref(),
-                    effort: effort.as_deref(),
-                    status: "running",
-                    result: None,
-                    feedback: None,
-                    session_id: Some(&prepared.session_id),
-                    provider_session_id: provider_session_id.as_deref(),
-                    cwd: cwd.as_deref(),
-                    resumed_from_run_id: None,
-                },
-                Some(prepared.fallback.completion_transition.as_str()),
-                true,
-            )
-            .map_err(|e| format!("db error: {}", e))?;
-            if let Some(inherited_run_id) = inherited_run_id.as_deref() {
-                advance_server_completion_context(daemon.daemon_dir(), inherited_run_id, &run_id);
+    let held_by_raw_draft =
+        match try_submit_task_input(daemon, &prepared.session_id, &prepared.message).await {
+            Ok(()) => false,
+            // The daemon accepted this semantic message and owns its automatic
+            // release after the human submits the draft. Record the post run now
+            // just as for an immediate write: otherwise the queued post would be
+            // invisible and its eventual completion would still be bound to the
+            // preceding main run.
+            Err(TaskInputError::HeldByRawDraft(_)) => true,
+            Err(TaskInputError::SessionNotFound) => {
+                return spawn_prepared_stage_run_for_api(
+                    db_path,
+                    daemon,
+                    replacements,
+                    prepared.fallback,
+                )
+                .await
+                .map(|response| PostDispatchOutcome {
+                    response,
+                    held_by_raw_draft: false,
+                });
             }
-            Ok(crate::mobile_api::TaskActionResponse {
+            // A blocked session is alive and refusing, so falling back to a fresh
+            // spawn would run the post twice against one live agent. Report the
+            // refusal — its message carries what unblocks it.
+            Err(
+                TaskInputError::Other(message)
+                | TaskInputError::Uncertain(message)
+                | TaskInputError::InputBlocked(message),
+            ) => return Err(message),
+        };
+    {
+        let db = Db::open(db_path).map_err(|e| format!("db error: {}", e))?;
+        // The live session keeps whatever agent is already running;
+        // attribute the post run to it rather than to the post's
+        // fallback agent binding.
+        let inherited = db
+            .latest_stage_run(&task_id)
+            .map_err(|e| format!("db error: {}", e))?;
+        let inherited_run_id = inherited.as_ref().map(|run| run.id.clone());
+        db.finish_latest_running_stage_run(&task_id, "succeeded", None, None)
+            .map_err(|e| format!("db error: {}", e))?;
+        // The post continues the inherited run's live agent session, so
+        // its provider session id and cwd carry over too.
+        let (agent, agent_provider, model, effort, provider_session_id, cwd) = match inherited {
+            Some(run) => (
+                run.agent,
+                run.agent_provider,
+                run.model,
+                run.effort,
+                run.provider_session_id,
+                run.cwd,
+            ),
+            None => (
+                prepared.fallback.stage_agent.clone(),
+                Some(prepared.fallback.agent_provider.clone()),
+                prepared.fallback.model.clone(),
+                prepared.fallback.effort.clone(),
+                None,
+                Some(prepared.fallback.cwd.clone()),
+            ),
+        };
+        let run_id = generate_stage_run_id(&task_id);
+        db.insert_stage_run_with_completion_binding(
+            NewStageRun {
+                id: &run_id,
+                task_id: &task_id,
+                stage: &prepared.run_stage,
+                kind: "post",
+                agent: agent.as_deref(),
+                agent_provider: agent_provider.as_deref(),
+                model: model.as_deref(),
+                effort: effort.as_deref(),
+                status: "running",
+                result: None,
+                feedback: None,
+                session_id: Some(&prepared.session_id),
+                provider_session_id: provider_session_id.as_deref(),
+                cwd: cwd.as_deref(),
+                resumed_from_run_id: None,
+            },
+            Some(prepared.fallback.completion_transition.as_str()),
+            true,
+        )
+        .map_err(|e| format!("db error: {}", e))?;
+        if let Some(inherited_run_id) = inherited_run_id.as_deref() {
+            advance_server_completion_context(daemon.daemon_dir(), inherited_run_id, &run_id);
+        }
+        Ok(PostDispatchOutcome {
+            response: crate::mobile_api::TaskActionResponse {
                 task_id,
                 follow_task: None,
                 revision_budget: None,
-            })
-        }
-        Err(TaskInputError::SessionNotFound) => {
-            spawn_prepared_stage_run_for_api(db_path, daemon, replacements, prepared.fallback).await
-        }
-        // A blocked session is alive and refusing, so falling back to a fresh
-        // spawn would run the post twice against one live agent. Report the
-        // refusal — its message carries what unblocks it.
-        Err(
-            TaskInputError::Other(message)
-            | TaskInputError::Uncertain(message)
-            | TaskInputError::InputBlocked(message)
-            | TaskInputError::HeldByRawDraft(message),
-        ) => Err(message),
+            },
+            held_by_raw_draft,
+        })
     }
+}
+
+pub(crate) struct PostDispatchOutcome {
+    pub(crate) response: crate::mobile_api::TaskActionResponse,
+    pub(crate) held_by_raw_draft: bool,
 }
 
 pub(crate) async fn rerun_prepared_stage_for_api(
