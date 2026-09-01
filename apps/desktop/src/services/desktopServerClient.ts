@@ -261,6 +261,10 @@ export interface DesktopTaskDetail {
    * set, so nothing else on screen says anything is wrong.
    */
   inputBlocked?: string | null;
+  composer?: {
+    text: string | null;
+    attestation: "typed" | "not-typed" | "unknown";
+  } | null;
 }
 
 export async function fetchDesktopTaskDetail(taskId: string): Promise<DesktopTaskDetail> {

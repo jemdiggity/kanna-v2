@@ -3028,7 +3028,8 @@ async fn dispatch_post_injects_message_into_live_session_and_records_post_run() 
     .unwrap();
     let commands = fake_daemon.await.unwrap();
 
-    assert_eq!(response.task_id, "task-1");
+    assert_eq!(response.response.task_id, "task-1");
+    assert!(!response.held_by_raw_draft);
     match &commands[0] {
         kanna_daemon::protocol::Command::SubmitInput { session_id, data } => {
             assert_eq!(session_id, "task-1");
@@ -3059,6 +3060,99 @@ async fn dispatch_post_injects_message_into_live_session_and_records_post_run() 
             .run_id,
         runs[1].id,
         "live post dispatch must rebind through the inherited process context, not the fallback env"
+    );
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[tokio::test]
+async fn dispatch_post_records_a_running_post_when_the_daemon_holds_it_behind_a_draft() {
+    let repo_root = init_git_repo("dispatch-post-held-draft");
+    write_post_workflow_fixtures(&repo_root);
+
+    let config = test_config("dispatch-post-held-draft");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    seed_post_workflow_task(&config, &db, &repo_root);
+    db.insert_stage_run(NewStageRun {
+        id: "run-main",
+        task_id: "task-1",
+        stage: "in progress",
+        kind: "main",
+        agent: Some("implement"),
+        agent_provider: Some("claude"),
+        model: Some("sonnet"),
+        effort: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    let completion_path =
+        std::path::Path::new(&config.daemon_dir).join("runtime/completion/run-main.json");
+    kanna_tool_catalog::write_completion_context(
+        &completion_path,
+        &kanna_tool_catalog::CompletionContext::new("run-main"),
+    )
+    .unwrap();
+    let post = match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
+        PreparedStageTransition::Post(post) => post,
+        _ => panic!("expected post dispatch"),
+    };
+
+    let socket_path = test_daemon_socket_path(&config.daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let fake_daemon = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        loop {
+            let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
+            if super::answer_terminal_carryover_probe(&command, &mut write_half).await {
+                continue;
+            }
+            assert!(matches!(
+                command,
+                kanna_daemon::protocol::Command::SubmitInput { .. }
+            ));
+            let response = kanna_daemon::protocol::Event::Error {
+                code: Some(kanna_daemon::protocol::ErrorCode::LogicalInputHeldByDraft),
+                message: "queued behind typed draft".to_string(),
+            };
+            write_half
+                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+                .await
+                .unwrap();
+            break;
+        }
+    });
+    let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    let outcome = crate::task_creator::dispatch_prepared_post_for_api(
+        &config.db_path,
+        &mut daemon,
+        &crate::session_replacements::SessionReplacements::default(),
+        *post,
+    )
+    .await
+    .unwrap();
+    fake_daemon.await.unwrap();
+
+    assert!(outcome.held_by_raw_draft);
+    assert_eq!(outcome.response.task_id, "task-1");
+    let runs = db.list_stage_runs_for_task("task-1").unwrap();
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0].status, "succeeded");
+    assert_eq!(runs[1].kind, "post");
+    assert_eq!(runs[1].status, "running");
+    assert_eq!(
+        kanna_tool_catalog::read_completion_context(&completion_path)
+            .unwrap()
+            .run_id,
+        runs[1].id,
     );
 
     let _ = std::fs::remove_dir_all(&repo_root);
@@ -3132,7 +3226,7 @@ async fn dispatch_post_falls_back_to_fresh_session_when_session_is_dead() {
     .unwrap();
     let commands = fake_daemon.await.unwrap();
 
-    assert_eq!(response.task_id, "task-1");
+    assert_eq!(response.response.task_id, "task-1");
     let spawn = commands
         .iter()
         .find(|command| matches!(command, kanna_daemon::protocol::Command::Spawn { .. }))

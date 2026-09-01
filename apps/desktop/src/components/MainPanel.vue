@@ -121,6 +121,14 @@ const inputBlocked = computed(() => {
   return typeof detail.inputBlocked === "string" && detail.inputBlocked.length > 0;
 });
 
+const postHeldByDraft = computed(() => {
+  const task = item.value;
+  const detail = taskDetail.value;
+  if (!task || !detail || detail.id !== task.id || !task.has_running_post) return false;
+  if (task.closed_at != null || detail.closedAt != null) return false;
+  return detail.composer?.attestation === "typed";
+});
+
 let taskDetailRequest = 0;
 async function loadTaskDetail(taskId: string): Promise<void> {
   const request = ++taskDetailRequest;
@@ -139,6 +147,8 @@ watch(
     item.value?.id ?? null,
     item.value?.activity_revision ?? 0,
     item.value?.stage ?? null,
+    item.value?.updated_at ?? null,
+    item.value?.has_running_post ?? 0,
   ] as const,
   ([taskId], previous) => {
     if (taskId !== previous?.[0]) {
@@ -360,6 +370,10 @@ function dismissCommandHint() {
         <p class="input-blocked-title">{{ $t('mainPanel.inputBlockedTitle') }}</p>
         <p class="input-blocked-hint">{{ $t('mainPanel.inputBlockedHint') }}</p>
       </section>
+      <section v-if="postHeldByDraft" class="post-held" data-testid="post-held-by-draft">
+        <p class="post-held-title">{{ $t('mainPanel.advanceHeldTitle') }}</p>
+        <p class="post-held-hint">{{ $t('mainPanel.advanceHeldHint') }}</p>
+      </section>
       <section v-if="parkedRevisionAvailable" class="revision-recovery" data-testid="revision-recovery">
         <div>
           <p class="revision-recovery-title">{{ $t('mainPanel.revisionExhaustedTitle') }}</p>
@@ -551,6 +565,25 @@ function dismissCommandHint() {
   padding: 10px 16px;
   border-bottom: 1px solid var(--kn-warning);
   background: var(--kn-warning-bg);
+}
+
+.post-held {
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--kn-warning);
+  background: var(--kn-warning-bg);
+}
+
+.post-held-title {
+  margin: 0;
+  color: var(--kn-text-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.post-held-hint {
+  margin: 2px 0 0;
+  color: var(--kn-text-muted);
+  font-size: 11px;
 }
 
 .input-blocked-title {

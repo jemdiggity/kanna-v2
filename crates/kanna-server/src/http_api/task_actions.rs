@@ -6,6 +6,7 @@ use super::task_blockers::{
 use super::task_input::submit_task_input;
 use crate::db::Db;
 use axum::extract::State;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use kanna_agent_protocol::StateChangeScope;
 use serde::Deserialize;
@@ -840,7 +841,7 @@ pub(super) async fn advance_stage(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(task_id): axum::extract::Path<String>,
     payload: Option<Json<AdvanceStageRequest>>,
-) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+) -> Result<Response, (axum::http::StatusCode, String)> {
     let task_id = resolve_task_id_for_mutation(&state, &task_id).await?;
     let response = crate::mobile_api::TaskActionResponse {
         task_id: task_id.clone(),
@@ -848,7 +849,7 @@ pub(super) async fn advance_stage(
         revision_budget: None,
     };
     let Some(stage_advance) = state.begin_requested_stage_advance(&task_id).await else {
-        return Ok(Json(response));
+        return Ok(Json(response).into_response());
     };
 
     if let Some(expected_transition_revision) =
@@ -889,7 +890,7 @@ pub(super) async fn advance_stage(
     #[cfg(test)]
     if let Some(stage_advancer) = state.stage_advancer.clone() {
         return stage_advancer(task_id)
-            .map(Json)
+            .map(|response| Json(response).into_response())
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e));
     }
 
@@ -922,8 +923,58 @@ pub(super) async fn advance_stage(
         .await?
     };
     let Some(transition) = transition else {
-        return Ok(Json(response));
+        return Ok(Json(response).into_response());
     };
+    if let crate::task_creator::PreparedStageTransition::Post(prepared) = transition {
+        // Unlike a stage swap, a live-session post cannot kill the HTTP
+        // caller. Await it so the desktop action receives the daemon's exact
+        // held-draft result instead of an unconditional 200 from before the
+        // detached worker even attempts delivery.
+        let post_state = Arc::clone(&state);
+        let handle = tokio::runtime::Handle::current();
+        let outcome = tokio::task::spawn_blocking(move || {
+            handle.block_on(async move {
+                let mut daemon =
+                    crate::daemon_client::DaemonClient::connect(&post_state.config.daemon_dir)
+                        .await
+                        .map_err(|error| format!("daemon error: {error}"))?;
+                crate::task_creator::dispatch_prepared_post_for_api(
+                    &post_state.config.db_path,
+                    &mut daemon,
+                    &post_state.session_replacements,
+                    *prepared,
+                )
+                .await
+            })
+        })
+        .await
+        .map_err(|error| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("stage post worker failed: {error}"),
+            )
+        })?
+        .map_err(|error| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))?;
+        state.publish_state_changed(StateChangeScope::Tasks);
+        let status = if outcome.held_by_raw_draft {
+            axum::http::StatusCode::ACCEPTED
+        } else {
+            axum::http::StatusCode::OK
+        };
+        let mut response = serde_json::to_value(outcome.response).map_err(|error| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("could not serialize stage post response: {error}"),
+            )
+        })?;
+        if outcome.held_by_raw_draft {
+            response["inputDelivery"] = serde_json::json!({
+                "status": "queued",
+                "reason": "input_held_by_draft",
+            });
+        }
+        return Ok((status, Json(response)).into_response());
+    }
     execute_stage_transition_detached_holding(
         Arc::clone(&state),
         task_id,
@@ -934,7 +985,7 @@ pub(super) async fn advance_stage(
         },
     );
     state.publish_state_changed(StateChangeScope::Tasks);
-    Ok(Json(response))
+    Ok(Json(response).into_response())
 }
 
 /// Execute a prepared transition: swap to the next stage's run, dispatch a
@@ -970,7 +1021,7 @@ async fn execute_stage_transition(
             .await
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
             state.publish_state_changed(StateChangeScope::Tasks);
-            Ok(Json(dispatched))
+            Ok(Json(dispatched.response))
         }
         crate::task_creator::PreparedStageTransition::Close {
             task_id,

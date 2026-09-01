@@ -37,6 +37,7 @@ const { toasts, dismiss } = useToast()
   display: flex;
   align-items: center;
   gap: 8px;
+  width: min(360px, calc(100vw - 24px));
   max-width: 360px;
   padding: 8px 12px;
   border-radius: 4px;
@@ -66,7 +67,7 @@ const { toasts, dismiss } = useToast()
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .toast-dismiss {
