@@ -1859,7 +1859,10 @@ mod tests {
         .await
         {
             Ok(_) => panic!("HTTP refusal unexpectedly upgraded to WebSocket"),
-            Err(error) => error,
+            Err(relay_client::RelayConnectError::Failed(error)) => error,
+            Err(relay_client::RelayConnectError::TimedOut { .. }) => {
+                panic!("HTTP refusal unexpectedly timed out")
+            }
         };
         relay_server.await.expect("refusing relay task");
         state.set_desktop_routing_unavailable(desktop_relay_connection_failure_reason(
