@@ -45,6 +45,15 @@ function createSearchFocusUi({
       attributeName === "focused" ? String(inputFocused) : null
     ),
     isExisting: vi.fn(async () => searchVisible),
+    setValue: vi.fn(async () => undefined),
+    waitForDisplayed: vi.fn(async () => undefined)
+  };
+  const taskResult: FakeElement = {
+    click: vi.fn(async () => undefined),
+    getAttribute: vi.fn(async (name: string) =>
+      name === "label" ? "Unrelated title. Task ID eef65d54. in progress" : null
+    ),
+    isExisting: vi.fn(async () => searchVisible),
     waitForDisplayed: vi.fn(async () => undefined)
   };
   const searchKeyboardDismissTarget: FakeElement = {
@@ -73,12 +82,14 @@ function createSearchFocusUi({
   };
 
   const ui = {
+    captureTaskIdSearch: vi.fn(async () => undefined),
     getSearchInput: vi.fn(async () => searchInput),
     getSearchKeyboardDismissTarget: vi.fn(
       async () => searchKeyboardDismissTarget
     ),
     getSearchScreen: vi.fn(async () => searchScreen),
     getSearchToolbarButton: vi.fn(async () => searchButton),
+    getTaskResult: vi.fn(async () => taskResult),
     getTasksScreen: vi.fn(async () => tasksScreen),
     getTasksTab: vi.fn(async () => tasksTab),
     isKeyboardShown: vi.fn(async () => keyboardShown),
@@ -101,6 +112,7 @@ function createSearchFocusUi({
     searchScreen,
     tasksScreen,
     tasksTab,
+    taskResult,
     ui
   };
 }
@@ -133,5 +145,19 @@ describe("runSearchFocusJourney", () => {
     );
 
     expect(harness.searchButton.click).toHaveBeenCalledOnce();
+  });
+
+  it("searches by a task ID prefix and verifies the full ID in the result row", async () => {
+    const harness = createSearchFocusUi();
+
+    await runSearchFocusJourney(harness.ui, "eef65d54");
+
+    expect(harness.searchInput.setValue).toHaveBeenCalledWith("eef65");
+    expect(harness.ui.getTaskResult).toHaveBeenCalledWith("eef65d54");
+    expect(harness.taskResult.waitForDisplayed).toHaveBeenCalledWith({
+      timeout: 30_000
+    });
+    expect(harness.taskResult.getAttribute).toHaveBeenCalledWith("label");
+    expect(harness.ui.captureTaskIdSearch).toHaveBeenCalledOnce();
   });
 });

@@ -108,6 +108,32 @@ describe("taskSearchMatch", () => {
     expect(taskSearchMatch("sst", item)).toBeNull();
   });
 
+  it("matches a durable task id exactly or by a literal partial id", () => {
+    const item = makeItem({
+      id: "eef65d54",
+      branch: null,
+      display_name: "Unrelated title",
+      prompt: "Unrelated prompt",
+    });
+
+    expect(taskSearchMatch("eef65d54", item)?.score).toBeGreaterThan(0);
+    expect(taskSearchMatch("EEF65", item)?.score).toBeGreaterThan(0);
+    expect(taskSearchMatch("65d5", item)?.score).toBeGreaterThan(0);
+    expect(taskSearchMatch("ef54", item)).toBeNull();
+  });
+
+  it("matches the durable id exposed by a sidebar task slot", () => {
+    const item = {
+      task_id: "eef65d54",
+      display_name: "Unrelated title",
+      issue_title: null,
+      branch: null,
+      prompt: null,
+    };
+
+    expect(taskSearchMatch("eef65", item)?.score).toBeGreaterThan(0);
+  });
+
   it("requires every query term to match somewhere meaningful", () => {
     const item = makeItem();
 

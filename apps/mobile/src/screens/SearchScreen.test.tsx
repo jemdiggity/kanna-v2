@@ -45,6 +45,37 @@ afterEach(async () => {
 });
 
 describe("SearchScreen", () => {
+  it("names task IDs as searchable and keeps result IDs visible through TaskList", async () => {
+    const result = {
+      id: "eef65d54",
+      repoId: "repo-1",
+      title: "Unrelated title",
+      stage: "in progress"
+    };
+
+    await act(async () => {
+      mounted = create(
+        <SearchScreen
+          focusRequestKey={0}
+          query="eef65"
+          results={[result]}
+          onChangeQuery={vi.fn()}
+          onOpenTask={vi.fn()}
+        />
+      );
+    });
+
+    const text = mounted.root
+      .findAllByType("Text")
+      .map((node) => node.children.join(""))
+      .join(" ");
+    expect(text).toContain("task ID");
+    expect(mounted.root.findByType("TaskList").props.taskSlots[0]).toMatchObject({
+      state: "ready",
+      taskId: "eef65d54"
+    });
+  });
+
   it("does not focus the query input without a focus request", async () => {
     await act(async () => {
       mounted = create(

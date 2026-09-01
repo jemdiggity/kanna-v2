@@ -53,7 +53,7 @@ export function SearchScreen({
           Search
         </Text>
         <Text style={styles.subheading}>
-          Search tasks by title or prompt content across the paired desktop.
+          Search tasks by title, prompt content, or task ID across the paired desktop.
         </Text>
         <TextInput
           ref={inputRef}

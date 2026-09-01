@@ -3,6 +3,8 @@ export interface TaskSearchResult {
 }
 
 export interface TaskSearchable {
+  id?: string | null;
+  task_id?: string | null;
   display_name: string | null;
   issue_title: string | null;
   branch: string | null;
@@ -16,6 +18,7 @@ interface SearchField {
 
 const TOKEN_SPLIT_RE = /[^\p{L}\p{N}]+/u;
 const ASCII_ALNUM_RE = /^[a-z0-9]+$/i;
+const DURABLE_TASK_ID_RE = /^[0-9a-f]{8}$/i;
 
 function normalizeText(text: string): string {
   return text.trim().toLowerCase();
@@ -65,7 +68,9 @@ function scoreTermAgainstField(term: string, field: SearchField): number {
 }
 
 function searchableFields(item: TaskSearchable): SearchField[] {
+  const taskId = item.task_id ?? item.id ?? "";
   return [
+    { text: DURABLE_TASK_ID_RE.test(taskId) ? taskId : "", weight: 1.5 },
     { text: item.display_name ?? "", weight: 1.35 },
     { text: item.issue_title ?? "", weight: 1.2 },
     { text: item.branch ?? "", weight: 1.1 },

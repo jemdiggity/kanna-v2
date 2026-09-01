@@ -25,6 +25,7 @@ import {
   buildCloudTaskId,
   canonicalizeTaskActionId
 } from "../api/taskIdentity";
+import { taskMatchesSearchQuery } from "../api/taskSearch";
 import {
   canonicalRepoId,
   isRemoteRepoId,
@@ -1492,11 +1493,8 @@ export function createCloudLanClient(
       };
     },
     searchTasks: async (query) => {
-      const normalizedQuery = query.toLowerCase();
-      return (await listRecentTasks()).filter(
-        (task) =>
-          task.title.toLowerCase().includes(normalizedQuery) ||
-          task.waitingPromptSnippet?.toLowerCase().includes(normalizedQuery) === true
+      return (await listRecentTasks()).filter((task) =>
+        taskMatchesSearchQuery(task, query)
       );
     },
     createTask,
