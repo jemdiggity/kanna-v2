@@ -368,8 +368,9 @@ still records `0.0.68` in `VERSION`, `release/0.1` exists on origin, and its RC
 diverged from main badly enough that the right answer is to abandon it and
 stabilize 0.2 from the *current* `origin/main` instead.
 
-Bump inference cannot express that. `origin/main:VERSION` only advances when a
-production release commits the bump, so with trunk at `0.0.68`,
+Bump inference uses the greater of `origin/main:VERSION` and the greatest
+production release, matching a bare main RC. It still cannot skip an
+unreleased series: when both floors remain in the `0.0` series,
 `kd release cut --minor` computes `0.1.0` and aims straight back at the series
 being abandoned; `--major` jumps to `1.0`. The old escapes were all bad: promote
 `0.1.0` purely to advance `VERSION`, delete or force-reuse `release/0.1`, or

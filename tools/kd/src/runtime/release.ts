@@ -368,7 +368,7 @@ function parseGreatestProductionVersion(raw: string): string | null {
   return greatest;
 }
 
-async function readGreatestProductionVersion(input: ReleaseShipInput): Promise<string | null> {
+async function readGreatestProductionVersion(input: ReleaseCommandContext): Promise<string | null> {
   const remoteUrl = await mustRun(input.runner, "git", ["remote", "get-url", "origin"], input.repoRoot, input.env);
   const repoSlug = releaseRepoSlug(remoteUrl);
   const raw = await mustRun(
@@ -1630,8 +1630,8 @@ export interface ReleaseCutInput {
   bump: ReleaseBump;
   /**
    * Explicit target series version `X.Y.0`. Overrides bump inference, which
-   * cannot express "skip the series we are abandoning" — the only way to reach
-   * 0.2 from a trunk still recording 0.0.68 without first releasing 0.1.
+   * cannot express skipping beyond the next series derived from the greater of
+   * trunk's recorded version and the production-version floor.
    */
   version?: string;
   /** Series (`X.Y`) this cut deliberately skips over. Never inferred. */
@@ -1785,14 +1785,12 @@ export async function readAbandonedSeries(
 /**
  * Cuts the next stabilization branch.
  *
- * Bump inference reads `origin/main:VERSION`, which only advances when a
- * production release commits it. That is correct while releases land in order,
- * but it cannot express a series transition that skips an abandoned series: with
- * trunk at 0.0.68 and `release/0.1` already cut, `--minor` can only aim back at
- * the series being abandoned. `--version X.Y.0` names the intended series
- * directly, and every series it steps over must be named and reasoned for — so
- * skipping a version is always a decision someone wrote down, never a side
- * effect of a flag.
+ * Bump inference uses the same production floor as a main staging ship, so a
+ * stale `origin/main:VERSION` cannot make the recommended guard-4 remedy cut an
+ * older series than the RC that a bare main ship would derive. `--version X.Y.0`
+ * still names a farther intended series directly, and every series it steps over
+ * must be named and reasoned for — so skipping a version is always a decision
+ * someone wrote down, never a side effect of a flag.
  */
 export async function cutReleaseBranch(input: ReleaseCutInput): Promise<ReleaseCutResult> {
   await mustRun(input.runner, "git", ["fetch", "origin", "main"], input.repoRoot, input.env);
@@ -1819,7 +1817,11 @@ export async function cutReleaseBranch(input: ReleaseCutInput): Promise<ReleaseC
     }
     targetVersion = normalized;
   } else {
-    targetVersion = bumpVersion(trunkVersion, input.bump);
+    targetVersion = deriveMainStagingBaseVersion(
+      trunkVersion,
+      await readGreatestProductionVersion(input),
+      input.bump
+    ).baseVersion;
   }
 
   const targetSeries = releaseSeriesFromVersion(targetVersion);

@@ -2054,6 +2054,15 @@ describe("release cut", () => {
         if (key === "git remote get-url origin") {
           return { exitCode: 0, stdout: "git@github.com:jemdiggity/kanna.git\n", stderr: "" };
         }
+        if (isProductionReleaseListQuery(command, args)) {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify(
+              (fixture.productionTags ?? []).map((version) => ({ tagName: `v${version}`, isPrerelease: false }))
+            ),
+            stderr: ""
+          };
+        }
         if (key === "git ls-remote --heads origin refs/heads/release/*") {
           return {
             exitCode: 0,
@@ -2158,6 +2167,42 @@ describe("release cut", () => {
       expect(result.branch).toBe("release/1.5");
       expect(result.version).toBe("1.5.0");
       expect(calls.some((call) => call.command === "git" && call.args.join(" ") === `push origin ${MAIN_SHA}:refs/heads/release/1.5`)).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("cuts the guard-4 remedy in the same production-floored series as a bare main RC", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot } = createReleaseRepo(root);
+      const calls: CommandCall[] = [];
+      const decision = decidePromotionBase({
+        rcLabel: "v0.3.0-staging.8",
+        seriesBranch: "release/0.3",
+        branchSha: null,
+        sourceBranch: "main",
+        commit: RELEASE_01_SHA,
+        originMain: MAIN_SHA
+      });
+
+      expect(decision.reason).toMatch(/kd release cut --minor.*ship a fresh staging RC/s);
+
+      const result = await cutReleaseBranch({
+        repoRoot,
+        bump: "minor",
+        env: {},
+        runner: cutRunner({ trunkVersion: "0.0.68", productionTags: ["0.2.0"] }, calls)
+      });
+
+      expect(result.branch).toBe("release/0.3");
+      expect(result.version).toBe("0.3.0");
+      expect(
+        calls.some(
+          (call) =>
+            call.command === "git" && call.args.join(" ") === `push origin ${MAIN_SHA}:refs/heads/release/0.3`
+        )
+      ).toBe(true);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
