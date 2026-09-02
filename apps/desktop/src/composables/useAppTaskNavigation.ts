@@ -548,7 +548,9 @@ export function useAppTaskNavigation({
   }
 
   const paletteExtraCommands = computed<PaletteExtraCommand[]>(() => {
-    const cmds: PaletteExtraCommand[] = [];
+    const cmds: PaletteExtraCommand[] = [
+      { action: "undoClose", label: t('tasks.undoClose'), group: t('shortcuts.groupTasks'), shortcut: "" },
+    ];
     const item = store.currentItem;
     if (item && item.closed_at == null && !isBlocked(item.id)) {
       cmds.push({ action: "blockTask", label: t('tasks.blockTask'), group: t('shortcuts.groupTasks'), shortcut: "" });

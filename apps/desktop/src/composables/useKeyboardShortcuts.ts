@@ -92,7 +92,6 @@ export const shortcuts: ShortcutDef[] = [
   { action: "advanceStage", labelKey: "shortcuts.advanceStage", groupKey: "shortcuts.groupCreateOrganize", key: "s",                            meta: true, display: "⌘S",                       context: ["main", "diff"] },
   { action: "requestChanges", labelKey: "shortcuts.requestChanges", groupKey: "shortcuts.groupCreateOrganize", key: "s", meta: true, shift: true, display: "⇧⌘S", context: ["diff"] },
   { action: "closeTask",  labelKey: "shortcuts.closeReject",   groupKey: "shortcuts.groupCreateOrganize", key: ["Backspace", "Delete"],        meta: true, shift: true,  display: "⇧⌘⌫",     context: ["main"] },
-  { action: "undoClose",  labelKey: "shortcuts.undoClose",     groupKey: "shortcuts.groupCreateOrganize", key: ["Z", "z"],                     meta: true,               display: "⌘Z",       context: ["main"] },
   // Navigation — move between tasks, repos, and history
   { action: "navigateUp",     labelKey: "shortcuts.previousTask",   groupKey: "shortcuts.groupMoveAround", key: "ArrowUp",                   meta: true, alt: true,    display: "⌥⌘↑",     context: ["main"] },
   { action: "navigateDown",   labelKey: "shortcuts.nextTask",       groupKey: "shortcuts.groupMoveAround", key: "ArrowDown",                 meta: true, alt: true,    display: "⌥⌘↓",     context: ["main"] },

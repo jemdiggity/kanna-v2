@@ -1,6 +1,6 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { buildGlobalKeydownScript } from "../helpers/keyboard";
+import { buildGlobalKeydownScript, buildHandledGlobalKeydownScript } from "../helpers/keyboard";
 import { WebDriverClient } from "../helpers/webdriver";
 import { resetDatabase, importTestRepo } from "../helpers/reset";
 import { execDb, getVueState } from "../helpers/vue";
@@ -1254,6 +1254,38 @@ describe("keyboard shortcuts", () => {
     );
     await client.waitForNoElement(".shortcuts-modal", 2000);
     await client.waitForNoElement(".picker-modal", 2000);
+  });
+
+  it("does not reserve Command+Z while keeping Undo Close in the command palette", async () => {
+    await client.executeSync(
+      `${CTX_SCRIPT}.showCommandPalette = false;
+       ${CTX_SCRIPT}.showShortcutsModal = false;`,
+    );
+
+    const handled = await client.executeSync<boolean>(
+      buildHandledGlobalKeydownScript({ key: "z", meta: true }),
+    );
+    expect(handled).toBe(false);
+
+    await pressKey("/", { meta: true });
+    const shortcutsModal = await client.waitForElement(".shortcuts-modal", 2000);
+    const shortcutsText = await client.getText(shortcutsModal);
+    expect(shortcutsText).not.toContain("Undo Close");
+    expect(shortcutsText).not.toContain("⌘Z");
+
+    await client.executeSync(`${CTX_SCRIPT}.showShortcutsModal = false;`);
+    await client.waitForNoElement(".shortcuts-modal", 2000);
+
+    await pressKey("P", { meta: true, shift: true });
+    await client.waitForElement(".palette-modal", 2000);
+    const input = await client.findElement(".palette-modal .palette-input");
+    await client.sendKeys(input, "Undo Close");
+    const undoCommand = await client.waitForText(".palette-modal .command-item", "Undo Close", 2000);
+    expect(await client.getText(undoCommand)).toBe("Undo Close");
+    expect(await client.findElements(".palette-modal .command-item .command-keys")).toHaveLength(0);
+
+    await client.executeSync(`${CTX_SCRIPT}.showCommandPalette = false;`);
+    await client.waitForNoElement(".palette-modal", 2000);
   });
 
   it("Shift+Cmd+Enter maximizes the tree explorer", async () => {

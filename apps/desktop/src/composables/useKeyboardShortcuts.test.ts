@@ -65,7 +65,6 @@ describe("getShortcutGroups", () => {
       "shortcuts.advanceStage",
       "shortcuts.requestChanges",
       "shortcuts.closeReject",
-      "shortcuts.undoClose",
     ]);
 
     expect(groupMap["shortcuts.groupMoveAround"]).toEqual([
@@ -173,6 +172,13 @@ describe("isAppShortcut", () => {
       key: "l",
       metaKey: true,
     }))).toBe(true);
+  });
+
+  it("does not reserve Command+Z", () => {
+    expect(isAppShortcut(new KeyboardEvent("keydown", {
+      key: "z",
+      metaKey: true,
+    }))).toBe(false);
   });
 });
 
@@ -290,6 +296,21 @@ describe("useKeyboardShortcuts", () => {
     expect(actions.openFile).toHaveBeenCalledTimes(1);
     expect(actions.newTask).not.toHaveBeenCalled();
 
+    wrapper.unmount();
+  });
+
+  it("does not dispatch undo close for Command+Z", () => {
+    const actions = buildActions();
+    const wrapper = mountShortcutHarness(actions, () => "main");
+
+    window.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "z",
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    }));
+
+    expect(actions.undoClose).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 
