@@ -55,7 +55,14 @@ async function publishFixture(options: FixtureOptions = {}): Promise<PublishFixt
   await writeFile(join(repoRoot, "apps/mobile/VERSION"), "1.0.0\n");
   await writeFile(
     join(repoRoot, "apps/mobile/src/mobileEnvironments.json"),
-    JSON.stringify({ prod: { name: "prod", displayName: "Kanna", iosBundleId: BUNDLE_ID } })
+    JSON.stringify({
+      prod: {
+        name: "prod",
+        displayName: "Kanna",
+        iosBundleId: BUNDLE_ID,
+        runtimeVersion: "2.2.2"
+      }
+    })
   );
   const outDir = join(repoRoot, ".build/mobile/ios-production");
   await mkdir(join(outDir, "export"), { recursive: true });

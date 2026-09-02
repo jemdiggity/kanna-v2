@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parseCliArgs } from "../cli";
 import {
+  archiveTagName,
   buildMobileIosArchivePlan,
   executeMobileIosArchiveWithContext,
   isUploaderUnavailable,
@@ -124,6 +125,7 @@ describe("kd mobile archive", () => {
       teamId: "EA4J68749Z",
       version: "1.2.3",
       buildNumber: "45",
+      runtimeVersion: "1.0.0",
       archivePath: join(repoRoot, ".build/mobile-release/Kanna.xcarchive"),
       exportPath: join(repoRoot, ".build/mobile-release/export"),
       ipaPath: join(repoRoot, ".build/mobile-release/export/Kanna.ipa")
@@ -216,6 +218,8 @@ describe("kd mobile archive", () => {
     expect(result.ok).toBe(true);
     expect(result.message).toContain("Dry run: mobile production archive 1.0.0 (45)");
     expect(result.message).toContain(`Source: release/0.2 (${SHORT_COMMIT})`);
+    expect(result.message).toContain("Runtime version: 1.0.0");
+    expect(result.message).toContain("would push git tag mobile-archive-v1.0.0-45");
     const plan = result.data as MobileIosArchivePlan;
     expect(plan.source).toEqual({ ref: "release/0.2", commit: HEAD_COMMIT, shortCommit: SHORT_COMMIT });
     expect(plan.version).toBe("1.0.0");
@@ -229,6 +233,70 @@ describe("kd mobile archive", () => {
       "git rev-parse --verify --quiet release/0.2^{commit}",
       "xcodebuild -version"
     ]);
+  });
+
+  it("pushes an annotated archive provenance tag before an optional upload", async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-mobile-archive-ledger-"));
+    await writeMinimalRepo(repoRoot);
+    const calls: string[] = [];
+    let tagRecord: unknown;
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push(`${command} ${args.join(" ")}`);
+        if (command === "git" && args[0] === "status") {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (command === "git" && args[0] === "rev-parse") {
+          if (args[3]?.startsWith("refs/tags/")) {
+            return { exitCode: 1, stdout: "", stderr: "" };
+          }
+          return { exitCode: 0, stdout: `${HEAD_COMMIT}\n`, stderr: "" };
+        }
+        if (command === "git" && args[0] === "tag") {
+          tagRecord = JSON.parse(args[5] ?? "null") as unknown;
+        }
+        if (command === "xcodebuild" && args[0] === "-version") {
+          return { exitCode: 0, stdout: "Xcode 26.0\nBuild version 17A123\n", stderr: "" };
+        }
+        if (command === "xcrun" && args[0] === "--find") {
+          return { exitCode: 0, stdout: "/Applications/Xcode.app/altool\n", stderr: "" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+
+    const result = await executeMobileIosArchiveWithContext(
+      { production: true, ref: "release/0.2", buildNumber: "45", upload: true },
+      {
+        repoRoot,
+        env: {
+          APP_STORE_CONNECT_API_KEY_ID: "KEY",
+          APP_STORE_CONNECT_API_ISSUER_ID: "ISSUER"
+        },
+        runner,
+        now: () => new Date("2026-09-03T01:02:03.000Z")
+      }
+    );
+
+    expect(result.ok).toBe(true);
+    expect(archiveTagName("1.0.0", "45")).toBe("mobile-archive-v1.0.0-45");
+    expect(tagRecord).toEqual({
+      kind: "kanna-mobile-ios-archive",
+      version: "1.0.0",
+      buildNumber: "45",
+      runtimeVersion: "1.0.0",
+      bundleId: "build.kanna.app",
+      ref: "release/0.2",
+      commit: HEAD_COMMIT,
+      shortCommit: SHORT_COMMIT,
+      archivedAt: "2026-09-03T01:02:03.000Z"
+    });
+    const tagIndex = calls.findIndex((call) => call.startsWith("git tag -a mobile-archive-v1.0.0-45"));
+    const pushIndex = calls.indexOf("git push origin refs/tags/mobile-archive-v1.0.0-45");
+    const uploadIndex = calls.findIndex((call) => call.startsWith("xcrun altool --upload-app"));
+    expect(tagIndex).toBeGreaterThan(-1);
+    expect(pushIndex).toBeGreaterThan(tagIndex);
+    expect(uploadIndex).toBeGreaterThan(pushIndex);
   });
 
   it("falls back to the repository VERSION when apps/mobile/VERSION is absent", async () => {
@@ -494,6 +562,11 @@ describe("kd mobile archive", () => {
         JSON.stringify({
           ApplicationProperties: { CFBundleShortVersionString: "1.2.3", CFBundleVersion: "9" }
         })
+      )
+    ).toEqual({ version: "1.2.3", buildNumber: "9" });
+    expect(
+      parseArchiveIdentity(
+        JSON.stringify({ CFBundleShortVersionString: "1.2.3", CFBundleVersion: "9" })
       )
     ).toEqual({ version: "1.2.3", buildNumber: "9" });
     expect(parseArchiveIdentity("not json")).toBeNull();
