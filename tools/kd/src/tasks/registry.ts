@@ -2430,7 +2430,7 @@ export const taskDefinitions = [
   },
   {
     id: "release.ship",
-    description: "Build, sign, notarize, and optionally publish a Kanna release, flooring main staging above the greatest production semantic version.",
+    description: "Build, sign, notarize, and optionally publish a Kanna release; bare main staging starts the next minor series from the production floor unless it continues an active RC.",
     inputSchema: releaseShipInputSchema,
     execute: async (_context, input) => {
       const parsed = releaseShipInputSchema.parse(input);

@@ -409,7 +409,11 @@ async function resolveStagingContext(input: ReleaseShipInput): Promise<StagingCo
 
   if (branchName === "main") {
     const sourceVersion = readCurrentVersion(input.repoRoot);
-    const derivation = deriveMainStagingBaseVersion(sourceVersion, await readGreatestProductionVersion(input), input.bump);
+    // Main starts the next feature series by default. Patch releases in the
+    // production series come from its release branch; an explicit bump still
+    // lets an operator override derivation when the release plan requires it.
+    const bump = input.bumpExplicit ? input.bump : "minor";
+    const derivation = deriveMainStagingBaseVersion(sourceVersion, await readGreatestProductionVersion(input), bump);
     return { ...derivation, sourceBranch: "main", commit: head };
   }
 
@@ -1149,12 +1153,17 @@ export function decidePromotionBase(args: {
     };
   }
   if (args.originMain !== args.commit) {
+    const remedy = args.branchSha
+      ? `${args.seriesBranch} already exists at ${args.branchSha} and does not match this RC; do not move it backward. ` +
+        `Ship a fresh staging RC from the existing ${args.seriesBranch} tip, soak it, then promote that build.`
+      : `Run kd release cut --minor from current origin/main, then ship a fresh staging RC from the new ${args.seriesBranch}, ` +
+        `soak it, and promote that build. As a last resort, if preserving this exact RC is necessary, cut ${args.seriesBranch} ` +
+        `at the RC commit with raw git (git push origin ${args.commit}:refs/heads/${args.seriesBranch}); kd never moves an existing branch.`;
     return {
       pushBranch: null,
       reason:
         `origin/main (${args.originMain ?? "unknown"}) has advanced past ${args.rcLabel} (${args.commit}). ` +
-        `Cut a release branch at the RC commit (git push origin ${args.commit}:refs/heads/${args.seriesBranch}) to keep promoting it, ` +
-        "or ship a fresh staging RC from main, soak it, and promote that build."
+        remedy
     };
   }
   return { pushBranch: "main", reason: null };

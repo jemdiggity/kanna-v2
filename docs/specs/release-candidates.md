@@ -72,7 +72,11 @@ authorize a version rollback.
 
 A bare ship continues an unpromoted active candidate from the same source branch:
 `X.Y.Z-staging.N` becomes the next unused `X.Y.Z-staging.*` version, with `N + 1`
-as its floor. It does not re-derive that series from trunk's `VERSION`. Explicit
+as its floor. It does not re-derive that series from trunk's `VERSION`. After
+promotion, a bare **main** ship starts the next minor series from the greater of
+trunk's `VERSION` and the greatest production semantic version. Patch RCs in an
+already-produced `X.Y` series belong on `release/X.Y`, whose series versioning
+selects the next patch. Explicit
 `--minor`, `--major`, or `--patch` selects a new derivation instead; the forward
 version gate still applies, so an explicit flag cannot roll the channel back.
 
@@ -210,7 +214,10 @@ This is the only automatic divergent move.
 3. `HEAD` equals the prerelease's recorded `targetCommitish` (you release what
    you validated, from a checkout of it).
 4. **Mechanical base.** The RC's promotion base still equals that commit. The
-   base is resolved from the RC's recorded provenance:
+   main arm of this guard is bookkeeping for where the promotion bump and
+   release-notes base land; it is not the soak-safety boundary. Guards 1 and 3
+   establish the immutable candidate identity and ensure the exact validated
+   commit is released. The base is resolved from the RC's recorded provenance:
    - If `release/X.Y` exists on origin with its tip exactly at the RC commit,
      the RC promotes to the branch and the version bump is pushed there. This
      covers active branch stabilization and the cut-at-RC-commit escape below.
@@ -239,9 +246,14 @@ call the same decision functions (`evaluateStagingPublishGate`,
 `tools/kd/src/runtime/release-lineage.ts`), and both paths run the same immutable
 candidate identity checks, so they cannot disagree.
 
-When main has advanced past a main RC, the error offers the standard escape:
-cut `release/X.Y` at the RC commit and promote again — the branch, not main,
-then has to match. Do not weaken guard 3; promoting a commit nobody soaked
+When main has advanced past a main RC, the standard in-tool remedy is to run
+`kd release cut --minor` at current `origin/main`, ship a fresh RC from the new
+branch, soak it, and promote that branch RC. If the series branch already
+exists at another commit, use its existing tip for the fresh RC; never move it
+backward. Cutting `release/X.Y` at the old RC commit with a raw-git push remains
+a last-resort escape only when the branch does not exist and preserving that
+exact RC is necessary. `kd` deliberately provides no force/move operation for
+an existing branch. Do not weaken guard 3; promoting a commit nobody soaked
 recreates the original problem.
 
 ### Soak policy
@@ -331,14 +343,19 @@ bugfixes.
   Each backport batch ends with a fresh RC.
 - **Promote from the branch.** Guard 4 pins the branch tip instead of main, so
   main can run arbitrarily far ahead during the soak. The version bump commit
-  lands on the branch; after promoting, merge `release/X.Y` back into main so
-  `VERSION` and the tag history reach main. Until that merge lands, a main RC
-  uses the greatest valid production semantic version reported by GitHub as its
-  version floor and reports
-  `versionFloor` in the ship result when that floor overrides stale `VERSION`.
+  lands on the branch. Main does not need that bump commit merged back: the
+  verified post-promotion hand-back authorizes the channel's return to forward
+  main, and a main RC uses the greatest valid production semantic version
+  reported by GitHub as its version floor. A bare main ship then starts the next
+  minor series, while patch backports continue on the dormant release branch.
+  The ship result reports `versionFloor` when that floor overrides stale
+  `VERSION`.
 - **The branch goes dormant after release.** Reuse it for `X.Y.1` hotfix RCs
   (the series versioning picks the next patch automatically); cut `release/X.(Y+1)`
   for the next feature release.
+
+Until the bare-main default described above is available in a shipped `kd`, the
+next main staging ship after a promotion must pass `--minor` explicitly.
 
 A roadmap makes the cut decision explicit: define the v1 scope (a GitHub
 milestone works), and cut `release/1.0` when the last v1 feature merges.
@@ -417,14 +434,16 @@ owner: `origin/main:VERSION` (`0.0.68`) is what trunk last released;
 `release/0.2` is what is being stabilized, and its RCs version themselves
 `0.2.Z-staging.N` from the branch series rather than from `VERSION`; production
 is whatever `vX.Y.Z` was last tagged. Promotion pushes the `0.2.0` version-file
-bump to `release/0.2`, and merging the branch back to main is what finally moves
-trunk's `VERSION` to `0.2.0`. Before promotion, the freeze rule refuses main RCs.
-After promotion, a main ship compares `VERSION` with the greatest valid semantic
-version across all non-prerelease GitHub releases, takes the greater version,
-and applies the requested bump. Thus
+bump to `release/0.2`; trunk's `VERSION` may remain stale because the production
+tag and release metadata are the authoritative floor. Before promotion, the
+freeze rule refuses main RCs. After promotion, a main ship compares `VERSION`
+with the greatest valid semantic version across all non-prerelease GitHub
+releases, takes the greater version, and applies an implicit minor bump (or the
+explicitly requested bump). Thus
 stale `VERSION` at `0.0.68` with production at `v0.2.0` derives
-`v0.2.1-staging.N`, never `v0.0.69-staging.N`; the returned `versionFloor`
-record calls out the lag until the branch merge synchronizes the file.
+`v0.3.0-staging.N` by default, never `v0.0.69-staging.N`; the returned
+`versionFloor` record calls out the lag. Patch backports derive `v0.2.1` from
+`release/0.2` instead.
 
 ### Branch hygiene: enforced vs. documented
 
@@ -438,7 +457,8 @@ Two different claims are easy to conflate, so they are kept apart:
   and reports every branch commit with no patch-equivalent on main as
   `releaseBranch.unmergedCommits`. Those are fixes that landed *only* on the
   branch — the regression the "fix on main first, then backport" rule exists to
-  prevent — and they are visible before the branch is merged back. Ordinary
+  prevent — and they remain visible while the branch stabilizes and after it
+  goes dormant. Ordinary
   cherry-picks from main do not appear, because patch-id equivalence recognizes
   them, and merge commits are excluded because a merge carries no patch of its
   own. One caveat worth knowing before reading the number as a defect count: a
@@ -539,7 +559,7 @@ five-minute decision about a build that already proved itself, not a project.
 The shipping agent (`.kanna/agents/ship/AGENT.md`) owns the process end to end;
 the command-palette task is only an interactive wrapper around that definition:
 cutting branches, shipping RCs, applying release-candidate backports
-(cherry-pick from main, test, push, re-RC), promoting, and merging back.
+(cherry-pick from main, test, push, re-RC), and promoting.
 Promoting production remains a human decision: agents may cut branches, ship
 staging RCs, and push backports only after explicit authorization; an
 unauthorized programmatic launch is limited to status plus a staging dry-run.
