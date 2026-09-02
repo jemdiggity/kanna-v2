@@ -63,11 +63,14 @@ itself is built on, plus pure unit tests for the decision functions:
   distinct from an unreachable one, a manifest that fails to download, and one
   that does not parse; branch-tip-exact RC provenance;
   soak timing, the explicit override, and dry-run parity with the real
-  promotion; the reset operation's provenance record and validation; and the
-  full series-transition recovery case (explicit `0.2.0` cut with trunk at
-  `0.0.68`, asserting the abandonment tag lands before the branch push, no
-  production tag is created, no branch is deleted, and `ship`/`promote`/`status`
-  then refuse the abandoned series).
+  promotion; a cut from advancing main followed by an exact-tip branch RC and
+  branch-arm promotion while main keeps moving; the post-promotion bare-main
+  next-minor default; state-aware dormant-branch remedies that never suggest a
+  non-fast-forward push; the reset operation's provenance record and validation;
+  and the full series-transition recovery case (explicit `0.2.0` cut with trunk
+  at `0.0.68`, asserting the abandonment tag lands before the branch push, no
+  production tag is created, no branch is deleted, and
+  `ship`/`promote`/`status` then refuse the abandoned series).
 - `tools/kd/tests/cli.test.ts`, `tools/kd/tests/mcp-tools.test.ts`,
   `tools/kd/tests/release-tasks.test.ts` — the CLI and MCP surfaces, including
   that the reset tool's three fields are all required and that the soak override

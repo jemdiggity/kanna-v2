@@ -27,6 +27,7 @@ import {
   compareVersions,
   createUpdaterBundle,
   cutReleaseBranch,
+  decidePromotionBase,
   deriveMainStagingBaseVersion,
   nextSeriesPatchVersion,
   parsePromotionVersions,
@@ -381,7 +382,7 @@ describe("release shipping", () => {
           if (command === "git" && args.join(" ") === "rev-parse HEAD") {
             return { exitCode: 0, stdout: "1234567890abcdef\n", stderr: "" };
           }
-          if (command === "git" && args.join(" ") === "ls-remote --tags origin v1.2.4-staging.*") {
+          if (command === "git" && args.join(" ") === "ls-remote --tags origin v1.3.0-staging.*") {
             return { exitCode: 0, stdout: "", stderr: "" };
           }
           if (command === "bazel" && args[0] === "build") {
@@ -389,9 +390,9 @@ describe("release shipping", () => {
             expect(args).toContain("//:kanna_updater_bundle_staging_arm64");
             expect(args).not.toContain("//:kanna_signed_dmg_release_arm64");
             expect(readVersionFiles(repoRoot)).toEqual([
-              "1.2.4-staging.1\n",
-              '{\n  "version": "1.2.4-staging.1"\n}\n',
-              '[package]\nname = "kanna"\nversion = "1.2.4-staging.1"\n'
+              "1.3.0-staging.1\n",
+              '{\n  "version": "1.3.0-staging.1"\n}\n',
+              '[package]\nname = "kanna"\nversion = "1.3.0-staging.1"\n'
             ]);
             return { exitCode: 0, stdout: "", stderr: "" };
           }
@@ -407,7 +408,7 @@ describe("release shipping", () => {
           if (command === "sh" && args[0] === "-c") {
             expect(args[1]).toContain("hdiutil attach");
             expect(args[1]).toContain("sips -g pixelWidth -g pixelHeight");
-            expect(args.at(-1)).toBe(join(repoRoot, ".build", "release", "staging", "Kanna_Staging_1.2.4-staging.1_arm64.dmg"));
+            expect(args.at(-1)).toBe(join(repoRoot, ".build", "release", "staging", "Kanna_Staging_1.3.0-staging.1_arm64.dmg"));
             return { exitCode: 0, stdout: "", stderr: "" };
           }
           if (command === "pnpm") {
@@ -434,10 +435,10 @@ describe("release shipping", () => {
       expect(releaseAssetName("1.2.4-staging.1", "arm64", "staging")).toBe("Kanna_Staging_1.2.4-staging.1_arm64.dmg");
       expect(updaterAssetName("1.2.4-staging.1", "arm64", "staging")).toBe("Kanna_Staging_1.2.4-staging.1_arm64.app.tar.gz");
       expect(updaterSignatureName("1.2.4-staging.1", "arm64", "staging")).toBe("Kanna_Staging_1.2.4-staging.1_arm64.app.tar.gz.sig");
-      expect(result.dmgPaths).toEqual([join(repoRoot, ".build", "release", "staging", "Kanna_Staging_1.2.4-staging.1_arm64.dmg")]);
+      expect(result.dmgPaths).toEqual([join(repoRoot, ".build", "release", "staging", "Kanna_Staging_1.3.0-staging.1_arm64.dmg")]);
       expect(result.updaterPaths).toEqual([
-        join(repoRoot, ".build", "release", "staging", "Kanna_Staging_1.2.4-staging.1_arm64.app.tar.gz"),
-        join(repoRoot, ".build", "release", "staging", "Kanna_Staging_1.2.4-staging.1_arm64.app.tar.gz.sig")
+        join(repoRoot, ".build", "release", "staging", "Kanna_Staging_1.3.0-staging.1_arm64.app.tar.gz"),
+        join(repoRoot, ".build", "release", "staging", "Kanna_Staging_1.3.0-staging.1_arm64.app.tar.gz.sig")
       ]);
       expect(result.latestJson).toBe(join(repoRoot, ".build", "release", "staging", "latest-staging.json"));
       const validationCall = calls.find((call) => call.command === "sh" && call.args[0] === "-c");
@@ -1703,16 +1704,26 @@ describe("release promotion", () => {
     }
   });
 
-  it("promotes from a release branch and pushes the version bump there", async () => {
+  it("promotes a soaked branch RC while origin/main keeps moving", async () => {
     const root = await mkdtemp(join(tmpdir(), "kd-release-"));
     try {
       const { repoRoot, privateKeyPath } = createReleaseRepo(root);
       const outputs = writeReleaseBuildOutputs(repoRoot, ["arm64", "x86_64"]);
       const calls: CommandCall[] = [];
       const runner = promoteRunner({
+        "gh release view v1.2.4-staging.3": {
+          exitCode: 0,
+          stdout: `{"tagName":"v1.2.4-staging.3","targetCommitish":"${STAGING_COMMIT}","publishedAt":"${RC_PUBLISHED_AT}","body":"Staging updater manifest for v1.2.4-staging.3\\n\\nSource-Branch: release/1.2","isPrerelease":true}\n`,
+          stderr: ""
+        },
         "git ls-remote origin refs/heads/release/1.2": {
           exitCode: 0,
           stdout: `${STAGING_COMMIT}\trefs/heads/release/1.2\n`,
+          stderr: ""
+        },
+        "git rev-parse origin/main": {
+          exitCode: 0,
+          stdout: "ffffffffffffffffffffffffffffffffffffffff\n",
           stderr: ""
         }
       }, repoRoot, outputs, calls);
@@ -1722,6 +1733,7 @@ describe("release promotion", () => {
       expect(result.version).toBe("1.2.4");
       expect(calls.some((call) => call.command === "git" && call.args.join(" ") === "push origin HEAD:release/1.2 v1.2.4")).toBe(true);
       expect(calls.some((call) => call.command === "git" && call.args.join(" ") === "fetch origin main")).toBe(false);
+      expect(calls.some((call) => call.command === "git" && call.args.join(" ") === "rev-parse origin/main")).toBe(false);
       const notesCall = calls.find((call) => call.command === "gh" && call.args[0] === "api");
       expect(notesCall?.args).toContain("target_commitish=release/1.2");
     } finally {
@@ -1971,6 +1983,36 @@ describe("release series", () => {
       versionFloor: null
     });
   });
+
+  it("offers an in-kd branch RC remedy before the raw-git last resort", () => {
+    const decision = decidePromotionBase({
+      rcLabel: "v1.3.0-staging.8",
+      seriesBranch: "release/1.3",
+      branchSha: null,
+      sourceBranch: "main",
+      commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      originMain: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    });
+
+    expect(decision.pushBranch).toBeNull();
+    expect(decision.reason).toMatch(/kd release cut --minor.*ship a fresh staging RC.*As a last resort.*raw git/s);
+  });
+
+  it("never recommends moving a dormant series branch backward", () => {
+    const decision = decidePromotionBase({
+      rcLabel: "v1.3.1-staging.1",
+      seriesBranch: "release/1.3",
+      branchSha: "cccccccccccccccccccccccccccccccccccccccc",
+      sourceBranch: "main",
+      commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      originMain: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    });
+
+    expect(decision.pushBranch).toBeNull();
+    expect(decision.reason).toMatch(/already exists.*does not match this RC.*do not move it backward/s);
+    expect(decision.reason).toMatch(/fresh staging RC from the existing release\/1\.3 tip/);
+    expect(decision.reason).not.toContain("git push");
+  });
 });
 
 describe("release cut", () => {
@@ -2011,6 +2053,15 @@ describe("release cut", () => {
         }
         if (key === "git remote get-url origin") {
           return { exitCode: 0, stdout: "git@github.com:jemdiggity/kanna.git\n", stderr: "" };
+        }
+        if (isProductionReleaseListQuery(command, args)) {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify(
+              (fixture.productionTags ?? []).map((version) => ({ tagName: `v${version}`, isPrerelease: false }))
+            ),
+            stderr: ""
+          };
         }
         if (key === "git ls-remote --heads origin refs/heads/release/*") {
           return {
@@ -2116,6 +2167,42 @@ describe("release cut", () => {
       expect(result.branch).toBe("release/1.5");
       expect(result.version).toBe("1.5.0");
       expect(calls.some((call) => call.command === "git" && call.args.join(" ") === `push origin ${MAIN_SHA}:refs/heads/release/1.5`)).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("cuts the guard-4 remedy in the same production-floored series as a bare main RC", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot } = createReleaseRepo(root);
+      const calls: CommandCall[] = [];
+      const decision = decidePromotionBase({
+        rcLabel: "v0.3.0-staging.8",
+        seriesBranch: "release/0.3",
+        branchSha: null,
+        sourceBranch: "main",
+        commit: RELEASE_01_SHA,
+        originMain: MAIN_SHA
+      });
+
+      expect(decision.reason).toMatch(/kd release cut --minor.*ship a fresh staging RC/s);
+
+      const result = await cutReleaseBranch({
+        repoRoot,
+        bump: "minor",
+        env: {},
+        runner: cutRunner({ trunkVersion: "0.0.68", productionTags: ["0.2.0"] }, calls)
+      });
+
+      expect(result.branch).toBe("release/0.3");
+      expect(result.version).toBe("0.3.0");
+      expect(
+        calls.some(
+          (call) =>
+            call.command === "git" && call.args.join(" ") === `push origin ${MAIN_SHA}:refs/heads/release/0.3`
+        )
+      ).toBe(true);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -3445,15 +3532,15 @@ describe("staging publish lineage gates", () => {
 
       const result = await shipRelease(shipGateInput(repoRoot, privateKeyPath, runner));
 
-      expect(result.version).toBe("1.3.1-staging.1");
+      expect(result.version).toBe("1.4.0-staging.1");
       expect(result.version).not.toBe("1.2.6-staging.1");
       expect(result.versionFloor).toEqual({
         versionFile: "1.2.3",
         greatestProductionVersion: "1.3.0",
-        baseVersion: "1.3.1",
+        baseVersion: "1.4.0",
         detail:
           "VERSION 1.2.3 lags greatest production semantic version v1.3.0; " +
-          "derived main staging version 1.3.1 from the production floor."
+          "derived main staging version 1.4.0 from the production floor."
       });
       const query = calls.find((call) => isProductionReleaseListQuery(call.command, call.args));
       const limitIndex = query?.args.indexOf("--limit") ?? -1;
@@ -3618,14 +3705,14 @@ describe("staging publish lineage gates", () => {
 
       const result = await shipRelease(shipGateInput(repoRoot, privateKeyPath, runner, undefined, true));
 
-      expect(result.version).toBe("1.3.1-staging.1");
+      expect(result.version).toBe("1.4.0-staging.1");
       expect(result.versionFloor).toEqual({
         versionFile: "1.2.3",
         greatestProductionVersion: "1.3.0",
-        baseVersion: "1.3.1",
+        baseVersion: "1.4.0",
         detail:
           "VERSION 1.2.3 lags greatest production semantic version v1.3.0; " +
-          "derived main staging version 1.3.1 from the production floor."
+          "derived main staging version 1.4.0 from the production floor."
       });
       const edit = calls.find(
         (call) => call.command === "gh" && call.args[0] === "release" && call.args[1] === "edit"
@@ -3734,7 +3821,7 @@ describe("staging publish lineage gates", () => {
 
       const result = await shipRelease(shipGateInput(repoRoot, privateKeyPath, runner));
 
-      expect(result.version).toBe("1.2.4-staging.1");
+      expect(result.version).toBe("1.3.0-staging.1");
       // Positive evidence of emptiness: the channel release itself 404s.
       const channelRead = calls.find(
         (call) => call.command === "gh" && call.args[1] === "view" && call.args[2] === "desktop-staging"

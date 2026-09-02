@@ -36,7 +36,7 @@ After `./kd release status`, select only the authorized operation:
 - **Abandon a release series:** `./kd release cut --version X.Y.0 --abandon-series <X.Y> --reason "<why>"`, after releasing the channel with `reset-staging` if it still serves that series.
 - **Rehearse:** use `--dry-run` instead of `--release`; a dry-run builds and signs but does not notarize or publish, and it runs the same lineage, freeze, and soak gates as the real operation.
 
-For plain ships, choose `--major`, `--minor`, or `--patch` (default `--patch`). Release-branch RCs derive their version from `release/X.Y`, ignore bump flags, and require `--branch release/X.Y` from a Kanna `task-*` worktree whose `HEAD` is exactly the branch's remote tip.
+For plain ships, choose `--major`, `--minor`, or `--patch` when an explicit override is required. A bare main staging ship continues an active unpromoted main RC; otherwise it starts the next minor series from the production floor. Release-branch RCs derive their version from `release/X.Y`, ignore bump flags, and require `--branch release/X.Y` from a Kanna `task-*` worktree whose `HEAD` is exactly the branch's remote tip. Production-series patch RCs belong on that release branch.
 
 ## Preflight
 
@@ -58,7 +58,7 @@ Each staging publish increments `N` from remote tags, creates an immutable `vX.Y
 
 `./kd release status` separates *mechanical* promotability (the RC still matches its promotion branch tip) from whether promotion is allowed. Never describe a candidate as promotable or ready on the mechanical field alone — report `promotion.allowed` and, when it is false, every entry in `promotion.blockers`, including lineage validity, the soak window (`promotion.soak`), an abandoned series, and any active freeze.
 
-Promotion is production: it must rebuild the exact soaked commit with production identity and refuses unless HEAD and the recorded promotion base still match, the candidate's lineage is valid, its series is not abandoned, the policy soak window has elapsed, the tree is clean, and `vX.Y.Z` does not exist. After branch promotion, report that `release/X.Y` must be merged back to main through the normal PR flow. See `docs/specs/release-candidates.md`.
+Promotion is production: it must rebuild the exact soaked commit with production identity and refuses unless HEAD and the recorded promotion base still match, the candidate's lineage is valid, its series is not abandoned, the policy soak window has elapsed, the tree is clean, and `vX.Y.Z` does not exist. After branch promotion, report that the branch goes dormant for future patch backports; do not merge its version-bump commit into main. The verified post-promotion hand-back and production-version floor let forward main start the next minor RC while trunk's `VERSION` is stale. See `docs/specs/release-candidates.md`.
 
 ## Report And Complete
 

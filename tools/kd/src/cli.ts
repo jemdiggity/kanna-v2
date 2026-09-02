@@ -1390,7 +1390,8 @@ const helpTopics: Record<string, string[]> = {
     "",
     "Build, sign, notarize, and optionally publish a Kanna release.",
     "A staging publish must be a descendant of the candidate the channel already serves, except for a verified and recorded forward-main resumption after promotion; a release/X.Y RC must build that branch's remote tip exactly.",
-    "Main staging versions bump the greater of VERSION and the greatest production semantic version; the result reports versionFloor when stale VERSION was raised.",
+    "A bare main staging ship continues an active unpromoted main RC; otherwise it starts the next minor series from the greater of VERSION and the greatest production semantic version. Pass a bump flag to override it.",
+    "Patch RCs in a production series are shipped from release/X.Y; the result reports versionFloor when stale VERSION was raised.",
     "While an unpromoted release/X.Y candidate is soaking, main staging publishes are refused; a genuine matching promotion resumes forward main automatically, while abandonment requires kd release reset-staging.",
     "Use --staging --rollback-to <version> to repoint the staging channel manifest without building."
   ],
@@ -1399,7 +1400,7 @@ const helpTopics: Record<string, string[]> = {
     "",
     "Promote a soaked staging prerelease (e.g. 1.2.4-staging.3) into the production release of the same commit.",
     "Rebuilds that exact commit with production identity, then tags, publishes, and repoints the updater manifest.",
-    "Requires the checkout and origin/main to still be at the staging build's commit, a valid staging lineage, and the",
+    "Requires the checkout and the RC's resolved mechanical base (its exact release-branch tip, or main for a main RC) to still be at the staging build's commit, a valid staging lineage, and the",
     "release-policy.json soak window (default 24h) to have elapsed. --dry-run rehearses without publishing and runs the same gates.",
     "--override-soak <reason> is the explicit human override for the soak window only; it never waives lineage or base checks."
   ],
