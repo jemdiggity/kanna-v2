@@ -6,7 +6,10 @@ Kanna distinguishes an explicit stage restart from recovery:
   current worktree.
 - `kanna_resume_task` is for a latest `cancelled` or `failed` run whose daemon
   session is dead. It starts the same stage in the same worktree and prefers
-  the previous provider conversation.
+  the previous provider conversation. The same action accepts a latest
+  `running` run only when daemon `List` proves its recorded session is absent;
+  this is how desktop attach recovery closes a run whose daemon died before an
+  `Exit` could reach the server.
 
 If the task is not in that resumable state, the action returns an explanatory
 conflict rather than treating the task as missing. Provider-context failures
@@ -82,3 +85,22 @@ require the replacement process to read a value that exists only in the prior
 Claude transcript. Separate tests remove the transcript and assert the durable
 fallback reason, and prove that a daemon-listed live session restores the
 interrupted run without spawning a replacement.
+
+The desktop follows the same boundary. An attach failure with recoverable
+scrollback calls `POST /v1/tasks/{task_id}/actions/resume`; it never rebuilds a
+provider command or replays the initial prompt itself. For a still-`running`
+run, the server proves the recorded daemon session is absent, finishes that
+dead run without emitting a transient `task.awaiting_advance`, and passes the
+run to the shared provider-aware preparation. The desktop waits until daemon
+`List` exposes the detached replacement before reconnecting its terminal.
+Consequently, a fresh provider conversation can appear only with
+`resumeFallbackReason`, and a genuine provider resume carries
+`resumedFromRunId`.
+
+The restart-recovery integration coverage begins with a `running` run and an
+absent daemon session. It proves Claude uses its assigned session id, Codex
+discovers a cwd-matching rollout when no id was captured, and a missing Codex
+rollout produces the exact durable fallback reason. Desktop store coverage
+proves attach recovery invokes the server action and cannot invoke its former
+local spawn path. The remaining full-process daemon-kill harness gap is tracked
+in `docs/2026-09-03-provider-resume-after-daemon-death-e2e-gap.md`.

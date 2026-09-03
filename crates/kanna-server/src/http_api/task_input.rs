@@ -718,6 +718,29 @@ pub(crate) fn mark_task_session_interrupted(
     status: &str,
     reason: &str,
 ) -> Result<Option<String>, String> {
+    mark_task_session_interrupted_inner(db_path, task_or_session_id, status, reason, true)
+}
+
+/// Finish a run whose daemon session was proven absent immediately before a
+/// provider-aware replacement is prepared. This keeps the durable
+/// `run.finished` boundary without briefly advertising the task as awaiting a
+/// manual stage advance between the dead run and its recovery run.
+pub(crate) fn mark_task_session_interrupted_for_recovery(
+    db_path: &str,
+    task_or_session_id: &str,
+    status: &str,
+    reason: &str,
+) -> Result<Option<String>, String> {
+    mark_task_session_interrupted_inner(db_path, task_or_session_id, status, reason, false)
+}
+
+fn mark_task_session_interrupted_inner(
+    db_path: &str,
+    task_or_session_id: &str,
+    status: &str,
+    reason: &str,
+    emit_awaiting_advance: bool,
+) -> Result<Option<String>, String> {
     let latest_run_summary = serde_json::from_str::<serde_json::Value>(reason)
         .ok()
         .and_then(|result| result.get("summary")?.as_str().map(str::to_owned))
@@ -741,9 +764,11 @@ pub(crate) fn mark_task_session_interrupted(
             Some(reason),
             Some(SESSION_INTERRUPTION_FEEDBACK),
         )?;
-        if finished.as_ref().is_some_and(|run| {
-            run.kind == "main" && run.completion_transition.as_deref() == Some("manual")
-        }) {
+        if emit_awaiting_advance
+            && finished.as_ref().is_some_and(|run| {
+                run.kind == "main" && run.completion_transition.as_deref() == Some("manual")
+            })
+        {
             db.append_task_event(
                 &task_id,
                 crate::db::TaskEventKind::AwaitingAdvance,

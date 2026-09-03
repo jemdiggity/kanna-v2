@@ -1127,28 +1127,54 @@ pub(super) async fn resume_task(
 ) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
     let task_id = resolve_task_id_for_mutation(&state, &task_id).await?;
     let task_mutation = state.begin_requested_task_mutation(&task_id).await;
-    let prepared = {
+    let (latest_run_status, daemon_session_id) = {
         let state = Arc::clone(&state);
         let task_id = task_id.clone();
-        super::blocking::run_handler_blocking("task resume prepare", move || {
+        super::blocking::run_handler_blocking("task resume inspect", move || {
             let db = Db::open(&state.config.db_path).map_err(|error| {
                 (
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                     format!("db error: {error}"),
                 )
             })?;
-            crate::task_creator::prepare_resume_task_for_api(&db, &state.config, &task_id)
-                .map_err(|error| (resume_action_error_status(&error), error))
+            let run = db
+                .latest_stage_run(&task_id)
+                .map_err(|error| {
+                    (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("db error: {error}"),
+                    )
+                })?
+                .ok_or_else(|| {
+                    (
+                        axum::http::StatusCode::CONFLICT,
+                        format!("task has no stage run to resume: {task_id}"),
+                    )
+                })?;
+            if !matches!(run.status.as_str(), "running" | "cancelled" | "failed") {
+                return Err((
+                    axum::http::StatusCode::CONFLICT,
+                    format!(
+                        "latest run is {}, not running, cancelled or failed: {}",
+                        run.status, task_id
+                    ),
+                ));
+            }
+            let daemon_session_id = run.session_id.unwrap_or_else(|| task_id.clone());
+            Ok((run.status, daemon_session_id))
         })
         .await?
     };
-    match crate::task_creator::daemon_session_presence(
-        &state.config.daemon_dir,
-        prepared.session_id(),
-    )
-    .await
+    match crate::task_creator::daemon_session_presence(&state.config.daemon_dir, &daemon_session_id)
+        .await
     {
         crate::task_creator::DaemonSessionPresence::Present => {
+            if latest_run_status == "running" {
+                return Err((
+                    axum::http::StatusCode::CONFLICT,
+                    format!("task session is still alive: {task_id}"),
+                ));
+            }
             let db_path = state.config.db_path.clone();
             let restore_task_id = task_id.clone();
             let restored = super::blocking::run_handler_blocking(
@@ -1183,6 +1209,49 @@ pub(super) async fn resume_task(
         }
         crate::task_creator::DaemonSessionPresence::Absent => {}
     }
+    if latest_run_status == "running" {
+        let db_path = state.config.db_path.clone();
+        let interrupted_task_id = task_id.clone();
+        super::blocking::run_handler_blocking("task resume mark missing session", move || {
+            let summary = "task session was missing when restart recovery began; use kanna_resume_task to recover provider context";
+            let result = serde_json::json!({
+                "status": "failure",
+                "summary": summary,
+            })
+            .to_string();
+            crate::http_api::mark_task_session_interrupted_for_recovery(
+                &db_path,
+                &interrupted_task_id,
+                "failed",
+                &result,
+            )
+            .map_err(|error| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))?
+            .ok_or_else(|| {
+                (
+                    axum::http::StatusCode::NOT_FOUND,
+                    format!("task not found: {interrupted_task_id}"),
+                )
+            })?;
+            Ok(())
+        })
+        .await?;
+        state.publish_state_changed(StateChangeScope::Tasks);
+    }
+    let prepared = {
+        let state = Arc::clone(&state);
+        let task_id = task_id.clone();
+        super::blocking::run_handler_blocking("task resume prepare", move || {
+            let db = Db::open(&state.config.db_path).map_err(|error| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("db error: {error}"),
+                )
+            })?;
+            crate::task_creator::prepare_resume_task_for_api(&db, &state.config, &task_id)
+                .map_err(|error| (resume_action_error_status(&error), error))
+        })
+        .await?
+    };
     execute_stage_transition_detached_holding(
         Arc::clone(&state),
         task_id.clone(),
