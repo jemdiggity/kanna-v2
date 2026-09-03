@@ -438,7 +438,7 @@ function buildCapabilities(input: {
     canCreateSiblingTask: true,
     canPushToMachine: input.isLocal,
     canPullFromMachine: input.canPullFromMachine,
-    canOpenDiff: input.isLocal,
+    canOpenDiff: input.isReachable,
     canOpenInIde: input.isLocal,
     canOpenShell: input.isLocal,
     canAdvanceStage: input.isReachable,

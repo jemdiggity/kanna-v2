@@ -16,6 +16,10 @@ import { formatReviewAnchor, type PendingReviewComment } from "../utils/reviewCo
 import DiffContentPane from "./DiffContentPane.vue";
 import DiffToolbar from "./DiffToolbar.vue";
 import DiffSearchBar from "./DiffSearchBar.vue";
+import type {
+  RemoteTaskDiffContent,
+  RemoteTaskDiffRequest,
+} from "../services/desktopRemoteTaskClient";
 
 const { t } = useI18n();
 const { effectiveCodeTheme } = useThemeRuntime();
@@ -77,6 +81,7 @@ const props = defineProps<{
   reviewEnabled?: boolean;
   reviewComments?: PendingReviewComment[];
   reviewHeadCommit?: string;
+  remoteDiffLoader?: (request: RemoteTaskDiffRequest) => Promise<RemoteTaskDiffContent>;
 }>();
 const baseRef = computed(() => props.baseRef);
 const reviewEnabled = computed(() => Boolean(props.reviewEnabled) && scope.value === "branch");
@@ -530,7 +535,13 @@ async function loadDiff(options: LoadDiffOptions = {}) {
   try {
     let patch = "";
 
-    if (scope.value === "working") {
+    if (props.remoteDiffLoader) {
+      const request: RemoteTaskDiffRequest = scope.value === "working"
+        ? { scope: "working", mode: workingFilter.value }
+        : { scope: "branch", mode: branchInclude.value };
+      const remoteDiff = await props.remoteDiffLoader(request);
+      patch = remoteDiff.patch;
+    } else if (scope.value === "working") {
       const diffStartedAt = performance.now();
       const args: { repoPath: string; mode: WorkingFilter; contextLines?: number } = {
         repoPath: path,
@@ -620,7 +631,8 @@ async function loadDiff(options: LoadDiffOptions = {}) {
     if (!isActiveDiffLoad(loadId)) {
       return;
     }
-    error.value = e instanceof Error ? e.message : String(e);
+    const message = e instanceof Error ? e.message : String(e);
+    error.value = `Task diff unavailable: ${message}`;
     scrollRestorePendingLoadId = 0;
     clearScrollAnchorForLoad(loadId);
     logDiffPerf(loadId, "error", {

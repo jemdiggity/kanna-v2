@@ -1,10 +1,11 @@
 // @vitest-environment happy-dom
 
-import { defineComponent, h, nextTick, reactive } from "vue";
+import { computed, defineComponent, h, nextTick, reactive } from "vue";
 import { mount } from "@vue/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import type { MarkdownPreviewMode } from "../stores/markdownPreviewMode";
 import type { ModalTearOffContext } from "../modalTearOff";
+import type { WorkspaceTask } from "../workspace/types";
 import { useAppModals } from "./useAppModals";
 
 function deferred() {
@@ -21,6 +22,7 @@ function mountMarkdownModalHarness(options: {
   tearOffContext?: ModalTearOffContext;
   selectedRepo?: { id: string; path: string };
   currentItem?: { id: string; branch: string };
+  selectedWorkspaceTask?: WorkspaceTask;
 } = {}) {
   const savePreference = vi.fn(
     options.savePreference ?? (async () => {}),
@@ -51,6 +53,7 @@ function mountMarkdownModalHarness(options: {
           persistSidebarWidth: vi.fn(),
           clearTearOffContext,
         } as unknown as Parameters<typeof useAppModals>[0]["windowWorkspace"],
+        selectedWorkspaceTask: computed(() => options.selectedWorkspaceTask ?? null),
       });
       return { modals };
     },
@@ -63,6 +66,63 @@ function mountMarkdownModalHarness(options: {
 }
 
 describe("useAppModals", () => {
+  it("routes remote-owned task views without constructing a local worktree path", () => {
+    const remoteItem = {
+      id: "cloud-task",
+      branch: "task-owner-branch",
+    };
+    const harness = mountMarkdownModalHarness({
+      selectedRepo: { id: "local-repo", path: "/local/repo" },
+      currentItem: { id: "local-shadow", branch: "task-local-shadow" },
+      selectedWorkspaceTask: {
+        item: remoteItem,
+        owner: { kind: "remote", id: "desktop-owner" },
+        terminal: {
+          kind: "cloud",
+          remoteRef: {
+            ownerDesktopId: "desktop-owner",
+            ownerLocalTaskId: "owner-task",
+          },
+        },
+      } as WorkspaceTask,
+    });
+
+    expect(harness.modals.currentWorktreePath.value).toBeUndefined();
+    expect(harness.modals.activeRepoPath.value).toBe("");
+    expect(harness.modals.activeTaskViewIsRemote.value).toBe(true);
+    expect(harness.modals.activeRemoteTaskRoute.value).toEqual({
+      desktopId: "desktop-owner",
+      taskId: "owner-task",
+    });
+    expect(harness.modals.treeExplorerRoot.value).toBe("task-owner-branch");
+
+    harness.wrapper.unmount();
+  });
+
+  it("keeps an unreachable remote-owned task off local filesystem paths", async () => {
+    const harness = mountMarkdownModalHarness({
+      selectedRepo: { id: "local-repo", path: "/local/repo" },
+      currentItem: { id: "local-shadow", branch: "task-local-shadow" },
+      selectedWorkspaceTask: {
+        item: { id: "cloud-offline", branch: "task-owner-offline" },
+        owner: { kind: "remote", id: "unknown" },
+        sources: [],
+        terminal: { kind: "none" },
+      } as WorkspaceTask,
+    });
+
+    expect(harness.modals.currentWorktreePath.value).toBeUndefined();
+    expect(harness.modals.activeRepoPath.value).toBe("");
+    expect(harness.modals.activeTaskViewIsRemote.value).toBe(true);
+    expect(harness.modals.activeRemoteTaskRoute.value).toBeNull();
+    expect(harness.modals.treeExplorerRoot.value).toBe("task-owner-offline");
+    await expect(harness.modals.listRemoteTaskDirectory("", false)).rejects.toThrow(
+      "Remote task route is unavailable.",
+    );
+
+    harness.wrapper.unmount();
+  });
+
   it("restores a transferred tree as a normal maximized modal and clears only its transfer state", async () => {
     const harness = mountMarkdownModalHarness({
       selectedRepo: { id: "repo-current", path: "/current-repo" },

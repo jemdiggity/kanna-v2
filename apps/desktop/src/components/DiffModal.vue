@@ -6,6 +6,10 @@ import { useModalZIndex } from "../composables/useModalZIndex";
 import { useModalTearOff } from "../composables/useModalTearOff";
 import { useKannaStore } from "../stores/kanna";
 import type { RequestRevisionOptions } from "../stores/workflow";
+import type {
+  RemoteTaskDiffContent,
+  RemoteTaskDiffRequest,
+} from "../services/desktopRemoteTaskClient";
 import {
   buildRevisionPrompt,
   formatReviewAnchor,
@@ -40,6 +44,9 @@ const props = defineProps<{
   standalone?: boolean;
   requestRevisionAction?: (taskId: string, options: RequestRevisionOptions) => Promise<boolean>;
   advanceStageAction?: (taskId: string) => Promise<unknown>;
+  remoteDiffLoader?: (request: RemoteTaskDiffRequest) => Promise<RemoteTaskDiffContent>;
+  remoteDesktopId?: string;
+  remoteTaskId?: string;
 }>();
 
 const emit = defineEmits<{
@@ -86,6 +93,8 @@ const tearOff = useModalTearOff({
     ...(props.reviewHeadCommit ? { reviewHeadCommit: props.reviewHeadCommit } : {}),
     ...(props.approveSignalsMerge !== undefined ? { approveSignalsMerge: props.approveSignalsMerge } : {}),
     ...(props.hasRunningPost !== undefined ? { hasRunningPost: props.hasRunningPost } : {}),
+    ...(props.remoteDesktopId ? { remoteDesktopId: props.remoteDesktopId } : {}),
+    ...(props.remoteTaskId ? { remoteTaskId: props.remoteTaskId } : {}),
   }),
   onTornOff: () => emit("close"),
 });
@@ -194,6 +203,7 @@ onMounted(() => {
         :review-enabled="reviewEnabled"
         :review-comments="comments"
         :review-head-commit="reviewHeadCommit"
+        :remote-diff-loader="remoteDiffLoader"
         @scope-change="emit('scope-change', $event)"
         @scroll-state-change="emit('scroll-state-change', $event)"
         @branch-include-change="emit('branch-include-change', $event)"

@@ -152,7 +152,7 @@ defineExpose({
   refreshLanTasks,
 });
 
-const appModals = useAppModals({ isMobile, store, windowWorkspace });
+const appModals = useAppModals({ isMobile, store, windowWorkspace, selectedWorkspaceTask });
 const {
   showNewTaskModal,
   availableWorkflows,

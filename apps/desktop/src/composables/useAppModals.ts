@@ -1,4 +1,4 @@
-import { computed, nextTick, reactive, ref, watch } from "vue";
+import { computed, nextTick, onUnmounted, reactive, ref, watch, type ComputedRef } from "vue";
 
 import Sidebar from "../components/Sidebar.vue";
 import MainPanel from "../components/MainPanel.vue";
@@ -30,6 +30,12 @@ import type {
   ModalTearOffContext,
   TreeExplorerTearOffContext,
 } from "../modalTearOff";
+import type { WorkspaceTask } from "../workspace/types";
+import { createConfiguredDesktopRemoteTaskViewClient } from "../services/desktopRelayTerminal";
+import type {
+  DesktopRemoteTaskViewClient,
+  RemoteTaskDiffRequest,
+} from "../services/desktopRemoteTaskClient";
 
 export type DiffScope = "branch" | "working";
 export type BranchInclude = "none" | "staged" | "all";
@@ -62,9 +68,15 @@ interface UseAppModalsOptions {
   isMobile: boolean;
   store: ReturnType<typeof useKannaStore>;
   windowWorkspace: WindowWorkspaceController;
+  selectedWorkspaceTask?: ComputedRef<WorkspaceTask | null>;
 }
 
-export function useAppModals({ isMobile, store, windowWorkspace }: UseAppModalsOptions) {
+export function useAppModals({
+  isMobile,
+  store,
+  windowWorkspace,
+  selectedWorkspaceTask,
+}: UseAppModalsOptions) {
   const transferredModalContext = ref<ModalTearOffContext | null>(
     windowWorkspace.bootstrap.tearOffContext ?? null,
   );
@@ -102,14 +114,45 @@ export function useAppModals({ isMobile, store, windowWorkspace }: UseAppModalsO
       ? transferredModalContext.value
       : null
   );
+  const selectedTaskIsRemote = computed(() =>
+    selectedWorkspaceTask?.value?.owner.kind === "remote"
+  );
+  const selectedRemoteTaskRoute = computed(() => {
+    const task = selectedWorkspaceTask?.value;
+    const route = task?.owner.kind === "remote"
+      ? task.terminal.remoteRef
+        ?? task.sources.find((source) => source.terminalRef)?.terminalRef
+      : undefined;
+    return route
+      ? { desktopId: route.ownerDesktopId, taskId: route.ownerLocalTaskId }
+      : null;
+  });
+  const activeRemoteTaskRoute = computed(() => {
+    const transferred = transferredTreeContext.value ?? transferredDiffContext.value;
+    if (transferred?.remoteDesktopId && transferred.remoteTaskId) {
+      return { desktopId: transferred.remoteDesktopId, taskId: transferred.remoteTaskId };
+    }
+    return selectedRemoteTaskRoute.value;
+  });
+  const activeTaskViewIsRemote = computed(() => {
+    const transferred = transferredTreeContext.value ?? transferredDiffContext.value;
+    return Boolean(transferred?.remoteDesktopId && transferred.remoteTaskId)
+      || selectedTaskIsRemote.value;
+  });
+  const activeTask = computed(() =>
+    selectedTaskIsRemote.value
+      ? selectedWorkspaceTask?.value?.item ?? null
+      : store.currentItem
+  );
   const currentWorktreePath = computed(() => {
-    if (!store.selectedRepo?.path || !store.currentItem?.branch) return undefined;
-    return `${store.selectedRepo.path}/.kanna-worktrees/${store.currentItem.branch}`;
+    if (selectedTaskIsRemote.value) return undefined;
+    if (!store.selectedRepo?.path || !activeTask.value?.branch) return undefined;
+    return `${store.selectedRepo.path}/.kanna-worktrees/${activeTask.value.branch}`;
   });
   const activeRepoPath = computed(() =>
     transferredTreeContext.value?.repoRoot
       ?? transferredDiffContext.value?.repoPath
-      ?? store.selectedRepo?.path
+      ?? (activeTaskViewIsRemote.value ? undefined : store.selectedRepo?.path)
       ?? ""
   );
   const activeWorktreePath = computed(() =>
@@ -120,12 +163,15 @@ export function useAppModals({ isMobile, store, windowWorkspace }: UseAppModalsO
   );
   const activeDiffWorktreePath = computed(() =>
     transferredDiffContext.value?.worktreePath
-      ?? (store.currentItem?.branch ? currentWorktreePath.value : undefined)
+      ?? (activeTaskViewIsRemote.value ? undefined : currentWorktreePath.value)
   );
   const homePath = ref("");
   const treeExplorerRoot = computed(() => {
     if (transferredTreeContext.value) {
       return transferredTreeContext.value.worktreePath;
+    }
+    if (activeTaskViewIsRemote.value) {
+      return activeTask.value?.branch ?? activeRemoteTaskRoute.value?.taskId ?? "Remote task";
     }
     if (currentWorktreePath.value) return currentWorktreePath.value;
     if (store.selectedRepo?.path) return store.selectedRepo.path;
@@ -176,6 +222,9 @@ export function useAppModals({ isMobile, store, windowWorkspace }: UseAppModalsO
   const filePreviewRecallStates = reactive<Record<string, FilePreviewRecallState>>({});
   const currentDiffViewKey = computed(() => {
     if (transferredDiffContext.value?.viewKey) return transferredDiffContext.value.viewKey;
+    if (selectedTaskIsRemote.value && selectedWorkspaceTask?.value?.item) {
+      return `item:${selectedWorkspaceTask.value.item.id}`;
+    }
     if (store.currentItem) return `item:${store.currentItem.id}`;
     if (store.selectedRepo) return `repo:${store.selectedRepo.id}`;
     return undefined;
@@ -230,12 +279,51 @@ export function useAppModals({ isMobile, store, windowWorkspace }: UseAppModalsO
   }
 
   function buildCurrentFileFlowKey(): string | undefined {
+    if (selectedTaskIsRemote.value && selectedWorkspaceTask?.value?.item) {
+      return `item:${selectedWorkspaceTask.value.item.id}`;
+    }
     if (store.currentItem) return `item:${store.currentItem.id}`;
     if (store.selectedRepo) return `repo:${store.selectedRepo.id}`;
     return undefined;
   }
 
   const currentFileFlowKey = computed(() => buildCurrentFileFlowKey());
+
+  let remoteTaskViewClientPromise: Promise<DesktopRemoteTaskViewClient | null> | null = null;
+
+  async function getRemoteTaskViewClient(): Promise<DesktopRemoteTaskViewClient> {
+    remoteTaskViewClientPromise ??= createConfiguredDesktopRemoteTaskViewClient();
+    const client = await remoteTaskViewClientPromise;
+    if (!client) {
+      throw new Error("Remote task files are unavailable because the relay is not configured.");
+    }
+    return client;
+  }
+
+  async function listRemoteTaskDirectory(path: string, showAllFiles: boolean) {
+    const route = activeRemoteTaskRoute.value;
+    if (!route) throw new Error("Remote task route is unavailable.");
+    const client = await getRemoteTaskViewClient();
+    return client.listTaskDirectory({ ...route, path, showAllFiles });
+  }
+
+  async function readRemoteTaskFile(path: string): Promise<string> {
+    const route = activeRemoteTaskRoute.value;
+    if (!route) throw new Error("Remote task route is unavailable.");
+    const client = await getRemoteTaskViewClient();
+    return (await client.readTaskFile({ ...route, path })).content;
+  }
+
+  async function readRemoteTaskDiff(request: RemoteTaskDiffRequest) {
+    const route = activeRemoteTaskRoute.value;
+    if (!route) throw new Error("Remote task route is unavailable.");
+    const client = await getRemoteTaskViewClient();
+    return client.readTaskDiff({ ...route, request });
+  }
+
+  onUnmounted(() => {
+    void remoteTaskViewClientPromise?.then((client) => client?.close());
+  });
 
   function rememberCurrentPreview(filePath: string, initialLine: number | undefined) {
     const key = buildCurrentFileFlowKey();
@@ -507,6 +595,12 @@ export function useAppModals({ isMobile, store, windowWorkspace }: UseAppModalsO
     transferredModalContext,
     transferredTreeContext,
     transferredDiffContext,
+    activeTask,
+    activeTaskViewIsRemote,
+    activeRemoteTaskRoute,
+    listRemoteTaskDirectory,
+    readRemoteTaskFile,
+    readRemoteTaskDiff,
     currentWorktreePath,
     activeRepoPath,
     activeWorktreePath,

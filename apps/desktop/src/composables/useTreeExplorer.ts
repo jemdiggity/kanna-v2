@@ -1,7 +1,6 @@
 import { ref, shallowRef, watch, type Ref, computed } from "vue";
 import { computedAsync, refDebounced } from "@vueuse/core";
 import { invoke } from "../invoke";
-import { useToast } from "./useToast";
 
 export interface TreeNode {
   name: string;
@@ -12,7 +11,19 @@ export interface TreeNode {
 interface DirEntryResponse {
   name: string;
   is_dir: boolean;
+  path?: string;
 }
+
+export interface RemoteDirectoryEntry {
+  name: string;
+  path: string;
+  isDir: boolean;
+}
+
+export type RemoteDirectoryLoader = (
+  path: string,
+  showAllFiles: boolean,
+) => Promise<{ entries: RemoteDirectoryEntry[] }>;
 
 export interface MillerState {
   columns: TreeNode[][];
@@ -21,10 +32,13 @@ export interface MillerState {
   breadcrumb: string[];
 }
 
-export function useTreeExplorer(rootPath: Ref<string>, repoRoot: Ref<string>) {
+export function useTreeExplorer(
+  rootPath: Ref<string>,
+  repoRoot: Ref<string>,
+  remoteDirectoryLoader: Ref<RemoteDirectoryLoader | undefined>,
+) {
   const cache = new Map<string, TreeNode[]>();
-  const fallbackRoot = ref<string | null>(null);
-  const effectiveRoot = computed(() => fallbackRoot.value ?? rootPath.value);
+  const effectiveRoot = computed(() => rootPath.value);
 
   // ── User-driven state ──────────────────────────────────────────
   const breadcrumb = ref<string[]>([]);
@@ -43,6 +57,7 @@ export function useTreeExplorer(rootPath: Ref<string>, repoRoot: Ref<string>) {
   const currentDirAbs = computed(() => {
     const root = effectiveRoot.value;
     const bc = breadcrumb.value;
+    if (remoteDirectoryLoader.value) return bc.join("/");
     return bc.length === 0 ? root : `${root}/${bc.join("/")}`;
   });
 
@@ -51,6 +66,7 @@ export function useTreeExplorer(rootPath: Ref<string>, repoRoot: Ref<string>) {
     if (bc.length === 0) return null;
     const root = effectiveRoot.value;
     const parentBc = bc.slice(0, -1);
+    if (remoteDirectoryLoader.value) return parentBc.join("/");
     return parentBc.length === 0 ? root : `${root}/${parentBc.join("/")}`;
   });
 
@@ -59,17 +75,26 @@ export function useTreeExplorer(rootPath: Ref<string>, repoRoot: Ref<string>) {
     const cacheKey = `${showAll ? "all" : "visible"}:${dirPath}`;
     if (cache.has(cacheKey)) return cache.get(cacheKey)!;
 
-    const entries = await invoke<DirEntryResponse[]>("read_dir_entries", {
-      path: dirPath,
-      repoRoot: repoRoot.value,
-      showAllFiles: showAll,
-    });
+    const loader = remoteDirectoryLoader.value;
+    const entries: DirEntryResponse[] = loader
+      ? (await loader(dirPath, showAll)).entries.map((entry) => ({
+        name: entry.name,
+        path: entry.path,
+        is_dir: entry.isDir,
+      }))
+      : await invoke<DirEntryResponse[]>("read_dir_entries", {
+        path: dirPath,
+        repoRoot: repoRoot.value,
+        showAllFiles: showAll,
+      });
 
     const root = effectiveRoot.value;
     const nodes: TreeNode[] = entries.map((e) => {
-      const rel = dirPath === root
-        ? e.name
-        : dirPath.slice(root.length + 1) + "/" + e.name;
+      const rel = loader && e.path
+        ? e.path
+        : dirPath === root
+          ? e.name
+          : dirPath.slice(root.length + 1) + "/" + e.name;
       return { name: e.name, isDir: e.is_dir, path: rel };
     });
 
@@ -78,6 +103,7 @@ export function useTreeExplorer(rootPath: Ref<string>, repoRoot: Ref<string>) {
   }
 
   function absolutePath(relativePath: string): string {
+    if (remoteDirectoryLoader.value) return relativePath;
     return relativePath ? `${effectiveRoot.value}/${relativePath}` : effectiveRoot.value;
   }
 
@@ -87,20 +113,15 @@ export function useTreeExplorer(rootPath: Ref<string>, repoRoot: Ref<string>) {
   const currentEntries = computedAsync(
     async () => {
       const dir = currentDirAbs.value;
-      if (!dir) return [];
+      if (!dir && !remoteDirectoryLoader.value) return [];
       try {
         const includeIgnored = showAllFiles.value;
-        return await fetchDir(dir, includeIgnored);
+        const entries = await fetchDir(dir, includeIgnored);
+        error.value = null;
+        return entries;
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        const rr = repoRoot.value;
-        if (!fallbackRoot.value && effectiveRoot.value !== rr && rr) {
-          console.warn("[tree-explorer] rootPath unavailable, falling back to repo root");
-          useToast().warning("Worktree missing — showing repo root");
-          fallbackRoot.value = rr;
-          return [];
-        }
-        error.value = msg;
+        error.value = `Task files unavailable: ${msg}`;
         console.error("[tree-explorer] fetch failed:", msg);
         return [];
       }
@@ -117,7 +138,8 @@ export function useTreeExplorer(rootPath: Ref<string>, repoRoot: Ref<string>) {
         const includeIgnored = showAllFiles.value;
         return await fetchDir(dir, includeIgnored);
       } catch (error) {
-        console.debug("[tree-explorer] failed to load parent entries:", error);
+        const message = error instanceof Error ? error.message : String(error);
+        console.error("[tree-explorer] failed to load parent entries:", message);
         return [];
       }
     },
@@ -148,8 +170,10 @@ export function useTreeExplorer(rootPath: Ref<string>, repoRoot: Ref<string>) {
       try {
         const includeIgnored = showAllFiles.value;
         return await fetchDir(absolutePath(entry.path), includeIgnored);
-      } catch (error) {
-        console.debug("[tree-explorer] failed to load preview entries:", error);
+      } catch (caught) {
+        const message = caught instanceof Error ? caught.message : String(caught);
+        error.value = `Task files unavailable: ${message}`;
+        console.error("[tree-explorer] failed to load preview entries:", message);
         return [];
       }
     },
@@ -173,7 +197,7 @@ export function useTreeExplorer(rootPath: Ref<string>, repoRoot: Ref<string>) {
   }));
 
   // ── Reset on root change ───────────────────────────────────────
-  watch(rootPath, () => {
+  watch([rootPath, remoteDirectoryLoader], () => {
     breadcrumb.value = [];
     showAllFiles.value = false;
     requestedCursor.value = 0;
@@ -181,7 +205,6 @@ export function useTreeExplorer(rootPath: Ref<string>, repoRoot: Ref<string>) {
     filtering.value = false;
     error.value = null;
     cache.clear();
-    fallbackRoot.value = null;
   });
 
   // ── Navigation ─────────────────────────────────────────────────
@@ -439,7 +462,6 @@ export function useTreeExplorer(rootPath: Ref<string>, repoRoot: Ref<string>) {
     filterText.value = "";
     filtering.value = false;
     cache.clear();
-    fallbackRoot.value = null;
     slideDirection.value = null;
     pendingG.value = false;
     error.value = null;

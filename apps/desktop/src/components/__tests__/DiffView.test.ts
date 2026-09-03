@@ -1772,4 +1772,51 @@ describe("DiffView", () => {
 
     wrapper.unmount();
   });
+
+  it("loads remote diffs without invoking local git commands", async () => {
+    const remoteDiffLoader = vi.fn(async () => ({
+      taskId: "owner-task",
+      baseRef: "main",
+      mergeBase: "base-sha",
+      patch: "diff --git a/remote.ts b/remote.ts",
+      truncated: false,
+    }));
+    const wrapper = mount(DiffView, {
+      props: {
+        repoPath: "",
+        initialScope: "working",
+        remoteDiffLoader,
+      },
+      global: { mocks: { $t: (key: string) => key } },
+    });
+
+    await flushPromises();
+    await flushPromises();
+
+    expect(remoteDiffLoader).toHaveBeenCalledWith({ scope: "working", mode: "all" });
+    expect(invokeMock).not.toHaveBeenCalled();
+    expect(wrapper.find(".diff-file").exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("renders an explicit unavailable state when a remote diff cannot be read", async () => {
+    const wrapper = mount(DiffView, {
+      props: {
+        repoPath: "",
+        remoteDiffLoader: vi.fn(async () => {
+          throw new Error("owner machine is offline");
+        }),
+      },
+      global: { mocks: { $t: (key: string) => key } },
+    });
+
+    await flushPromises();
+    await flushPromises();
+
+    expect(wrapper.get('[data-testid="diff-unavailable"]').text()).toContain(
+      "Task diff unavailable: owner machine is offline",
+    );
+    expect(wrapper.text()).not.toContain("No changes");
+    wrapper.unmount();
+  });
 });

@@ -17,6 +17,8 @@ describe("modal tear-off context", () => {
       initialBranchInclude: "staged",
       baseRef: "origin/main",
       taskId: "task-1",
+      remoteDesktopId: "desktop-owner",
+      remoteTaskId: "owner-task-1",
       reviewComments: [{
         id: "comment-1",
         filePath: "src/日本語.ts",
@@ -34,6 +36,12 @@ describe("modal tear-off context", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     expect(parseModalTearOffContext("?tearOff=%7Bbad")).toBeNull();
     expect(parseModalTearOffContext("?tearOff=%7B%22surface%22%3A%22shell%22%7D")).toBeNull();
+    expect(parseModalTearOffContext(buildModalTearOffUrl({
+      surface: "tree",
+      worktreePath: "remote-task",
+      repoRoot: "",
+      remoteDesktopId: "desktop-owner",
+    }).slice(1))).toBeNull();
     warn.mockRestore();
   });
 });

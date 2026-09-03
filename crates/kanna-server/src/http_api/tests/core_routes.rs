@@ -4220,6 +4220,20 @@ impl TaskFileRouteFixture {
         )
         .await
     }
+
+    async fn browse_through_authenticated_relay(
+        &self,
+        task_id: &str,
+        encoded_path: &str,
+    ) -> crate::http_api::HttpInvokeResponse {
+        crate::http_api::dispatch_authenticated_http_invoke(
+            Arc::clone(&self.state),
+            "GET",
+            &format!("/v1/tasks/{task_id}/browse?path={encoded_path}&limit=100"),
+            serde_json::Value::Null,
+        )
+        .await
+    }
     async fn post_resolve(
         &self,
         task_id: &str,
@@ -4358,6 +4372,23 @@ async fn task_file_resolver_route_returns_unique_and_ambiguous_matches() {
             .collect::<Vec<_>>(),
         vec!["a/Shared.ts", "b/Shared.ts"]
     );
+}
+
+#[tokio::test]
+async fn task_directory_route_supports_authenticated_relay_dispatch() {
+    let fixture = TaskFileRouteFixture::new();
+    fixture.write("src/remote.ts", b"export const remote = true;\n");
+
+    let response = fixture
+        .browse_through_authenticated_relay("task-file", "src")
+        .await;
+
+    assert_eq!(response.status, StatusCode::OK.as_u16());
+    assert_eq!(response.error, None);
+    let body = response.body.expect("authenticated browse response body");
+    assert_eq!(body["path"], "src");
+    assert_eq!(body["entries"][0]["path"], "src/remote.ts");
+    assert_eq!(body["entries"][0]["isDir"], false);
 }
 
 #[tokio::test]
