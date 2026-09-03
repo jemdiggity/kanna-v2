@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-REPO="jemdiggity/kanna"
+REPO="tampopogk/kanna"
 APP_NAME="Kanna"
 INSTALL_DIR="/Applications"
 
