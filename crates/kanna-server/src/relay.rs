@@ -42,6 +42,11 @@ enum PendingDesktopRequest {
     ListActive {
         response: tokio::sync::oneshot::Sender<Result<Vec<String>, String>>,
     },
+    ListRepoSingletons {
+        response: tokio::sync::oneshot::Sender<
+            Result<Vec<crate::http_api::RemoteSingletonOwner>, String>,
+        >,
+    },
     Invoke {
         response: tokio::sync::oneshot::Sender<Result<crate::http_api::HttpInvokeResponse, String>>,
     },
@@ -363,6 +368,26 @@ async fn run_relay_loop_with_timing(
                                 },
                             },
                             PendingDesktopRequest::ListActive { response },
+                        ),
+                        http_api::DesktopRelayRequest::ListRepoSingletons {
+                            generation,
+                            remote_url_hash,
+                            agent,
+                            response,
+                        } => (
+                            generation,
+                            RelayMessage::Invoke {
+                                id: RelayId::String(id.clone()),
+                                desktop_id: None,
+                                request: RelayInvoke::Command {
+                                    command: "list_repo_singletons".to_string(),
+                                    args: serde_json::json!({
+                                        "remoteUrlHash": remote_url_hash,
+                                        "agent": agent,
+                                    }),
+                                },
+                            },
+                            PendingDesktopRequest::ListRepoSingletons { response },
                         ),
                         http_api::DesktopRelayRequest::Invoke {
                             generation,
@@ -1147,6 +1172,9 @@ fn fail_pending_desktop_request(request: PendingDesktopRequest, error: String) {
         PendingDesktopRequest::ListActive { response } => {
             let _ = response.send(Err(error));
         }
+        PendingDesktopRequest::ListRepoSingletons { response } => {
+            let _ = response.send(Err(error));
+        }
         PendingDesktopRequest::Invoke { response } => {
             let _ = response.send(Err(error));
         }
@@ -1170,6 +1198,22 @@ fn resolve_pending_desktop_request(
                     .and_then(|value| {
                         serde_json::from_value::<Vec<String>>(value)
                             .map_err(|error| format!("relay returned invalid desktop ids: {error}"))
+                    }),
+            };
+            let _ = response.send(result);
+        }
+        PendingDesktopRequest::ListRepoSingletons { response } => {
+            let result = match error {
+                Some(error) => Err(error),
+                None => data
+                    .and_then(|value| value.get("owners").cloned())
+                    .ok_or_else(|| {
+                        "relay returned an invalid repository singleton response".to_string()
+                    })
+                    .and_then(|value| {
+                        serde_json::from_value(value).map_err(|error| {
+                            format!("relay returned invalid singleton owners: {error}")
+                        })
                     }),
             };
             let _ = response.send(result);

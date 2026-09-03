@@ -172,7 +172,7 @@ function sendSuccessResponse(client: WebSocket | undefined, id: unknown): void {
   );
 }
 
-function sendDataResponse(
+export function sendDataResponse(
   client: WebSocket | undefined,
   id: unknown,
   data: unknown

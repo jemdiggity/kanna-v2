@@ -586,6 +586,46 @@ impl Db {
             .optional()
     }
 
+    /// Every open singleton candidate for one machine-independent repository.
+    ///
+    /// Repository ids are installation-local, so cross-desktop singleton
+    /// discovery must enter through the canonical remote URL hash. Returning
+    /// all matches is intentional: older builds could create one singleton per
+    /// local registration, and resolution must report that corruption instead
+    /// of silently selecting the newest row.
+    pub fn find_open_agent_tasks_by_remote_url_hash(
+        &self,
+        remote_url_hash: &str,
+        agent: &str,
+    ) -> Result<Vec<OpenAgentTask>, rusqlite::Error> {
+        let mut statement = self.conn.prepare(
+            "SELECT DISTINCT p.id, COALESCE(NULLIF(latest.session_id, ''), p.id)
+             FROM pipeline_item p
+             JOIN repo r ON r.id = p.repo_id
+             JOIN stage_run matching ON matching.task_id = p.id AND matching.agent = ?
+             LEFT JOIN stage_run latest ON latest.rowid = (
+                 SELECT candidate.rowid
+                 FROM stage_run candidate
+                 WHERE candidate.task_id = p.id
+                   AND candidate.agent = ?
+                 ORDER BY candidate.rowid DESC
+                 LIMIT 1
+             )
+             WHERE r.remote_url_hash = ?
+               AND p.closed_at IS NULL
+             ORDER BY p.rowid DESC",
+        )?;
+        let tasks = statement
+            .query_map((agent, agent, remote_url_hash), |row| {
+                Ok(OpenAgentTask {
+                    task_id: row.get(0)?,
+                    session_id: row.get(1)?,
+                })
+            })?
+            .collect();
+        tasks
+    }
+
     pub fn get_task_stage_source(
         &self,
         id: &str,

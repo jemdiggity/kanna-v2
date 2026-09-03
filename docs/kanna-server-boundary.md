@@ -428,6 +428,36 @@ checks reachable siblings and, when the id exists elsewhere, returns an error
 that names the owning machine and tells MCP callers to repeat
 `kanna_get_task` with that `machine_id`, rather than returning a bare 404.
 
+Repository singleton signals use that authenticated desktop-routing boundary
+before local creation. A repository row with `remote_url_hash` is identified
+account-wide by that hash plus the singleton agent name; local repository ids
+never cross machines. Cloud task snapshots persist the synthetic
+`singletonAgent` beside each open singleton, so the relay-backed directory can
+name owners whose desktops are already offline. Current publishers also stamp
+`singletonDirectoryVersion: 1`; a registered desktop without that stamp makes
+directory resolution fail closed until it publishes a current snapshot. The receiving server combines
+that directory with its local database and every active sibling's native
+lookup; a successful live lookup replaces stale directory state for that
+machine. It only creates on the requesting machine after all three sources
+prove absence. One remote match receives the message through the existing
+task-input route. Two or more open matches are an existing-world duplicate:
+resolution logs and returns every `machineId:taskId` owner instead of choosing
+one.
+
+Resolution fails closed. A signed-in server that cannot list siblings, cannot
+complete any native lookup, or loses the discovered owner before input
+delivery returns an error and never creates a replacement. The durable
+directory plus successfully observed live owner sets ensure a later signal
+still names and refuses an owner that has gone offline; only a successful live
+lookup proving that task closed overrides its stale directory row. There is no
+implicit takeover. A future takeover surface must be explicitly named and
+must durably supersede or close the stranded task when its machine reconnects.
+Repositories without `remote_url_hash` have no cross-machine identity and
+deliberately keep the original per-machine behavior. A desktop without an
+account credential likewise has no sibling namespace; when account routing
+exists but is temporarily unavailable, uncertainty is an error rather than
+permission to duplicate.
+
 ## Task Transfer Transport
 
 `kanna-server` owns the `kanna-task-transfer` sidecar: it spawns the process,

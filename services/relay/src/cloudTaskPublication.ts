@@ -20,6 +20,7 @@ export interface CloudTransferIdentity {
 }
 
 export interface ValidatedCloudTaskPublication {
+  singletonDirectoryVersion: 0 | 1;
   displayName: string;
   /** Agent provider CLIs installed on the publishing desktop, or null from a
    * desktop build that predates the field. Stored verbatim (shape-validated,
@@ -43,6 +44,7 @@ export interface CloudTaskPublicationStore {
     displayName: string;
     agentProviders: string[] | null;
     transfer: CloudTransferIdentity | null;
+    singletonDirectoryVersion: 0 | 1;
     tasks: CloudTaskDocument[];
   }): Promise<void>;
 }
@@ -106,6 +108,12 @@ export function validateCloudTaskPublication(
     throw new Error("task snapshot schemaVersion must be 1 or 2");
   }
   const schemaVersion = root.schemaVersion;
+  const singletonDirectoryVersion = root.singletonDirectoryVersion === undefined
+    ? 0
+    : root.singletonDirectoryVersion;
+  if (singletonDirectoryVersion !== 0 && singletonDirectoryVersion !== 1) {
+    throw new Error("task snapshot singletonDirectoryVersion must be 1 when present");
+  }
   const desktop = requiredRecord(root.desktop, "task snapshot desktop");
   const displayName = requiredString(desktop.displayName, "desktop.displayName", 256);
   const agentProviders = validateAgentProviders(desktop.agentProviders);
@@ -129,7 +137,7 @@ export function validateCloudTaskPublication(
     identities.add(key);
     return task;
   });
-  return { displayName, agentProviders, transfer, tasks };
+  return { singletonDirectoryVersion, displayName, agentProviders, transfer, tasks };
 }
 
 const MAX_AGENT_PROVIDERS = 32;
@@ -178,6 +186,14 @@ function validateTask(
   }
   const localRepoId = requiredString(task.localRepoId, `${path}.localRepoId`, 128);
   const ownerLocalTaskId = requiredString(task.ownerLocalTaskId, `${path}.ownerLocalTaskId`, 128);
+  const singletonAgent = optionalNullableString(
+    task.singletonAgent,
+    `${path}.singletonAgent`,
+    64,
+  );
+  if (singletonAgent !== null && singletonAgent.trim().length === 0) {
+    throw new Error(`${path}.singletonAgent must be null or a nonblank string`);
+  }
   const repo = requiredRecord(task.repo, `${path}.repo`);
   const agent = requiredRecord(task.agent, `${path}.agent`);
   const transfer = requiredRecord(task.transfer, `${path}.transfer`);
@@ -270,6 +286,7 @@ function validateTask(
     localRepoId,
     ownerDesktopId,
     ownerLocalTaskId,
+    ...(singletonAgent === null ? {} : { singletonAgent }),
     title: requiredString(task.title, `${path}.title`, 512),
     // kanna-server truncates by Rust `char` (Unicode scalar values). JavaScript
     // `String.length` counts UTF-16 code units, so a valid 500-character prompt
@@ -339,6 +356,68 @@ function validateEmptyTransfer(
   };
 }
 
+export interface RepoSingletonOwner {
+  machineId: string;
+  taskId: string;
+}
+
+/** Read the durable cloud task index as the account-wide singleton directory. */
+export async function listRepoSingletonOwners(input: {
+  userId: string;
+  remoteUrlHash: string;
+  agent: string;
+  db?: Firestore;
+}): Promise<RepoSingletonOwner[]> {
+  const db = input.db ?? getFirebaseServices().db;
+  const desktops = await db.collection(`users/${input.userId}/desktops`).get();
+  // Ignore renderer-era duplicate desktop documents. Server publication owns
+  // the deterministic id and reconciles those old subtrees separately.
+  const canonicalDesktops = desktops.docs.filter((desktop) => {
+    const machineId = desktop.data().desktopId;
+    return typeof machineId === "string" && desktop.id === cloudDesktopDocumentId(machineId);
+  });
+  for (const desktop of canonicalDesktops) {
+    if (desktop.data().singletonDirectoryVersion !== 1) {
+      const machineId = desktop.data().desktopId;
+      throw new Error(
+        `repository singleton directory is incomplete for machine ${
+          typeof machineId === "string" ? machineId : desktop.id
+        }`,
+      );
+    }
+  }
+  const taskSnapshots = await Promise.all(
+    canonicalDesktops.map(async (desktop) => await desktop.ref.collection("tasks").get()),
+  );
+  const owners: RepoSingletonOwner[] = [];
+  for (const snapshot of taskSnapshots) {
+    for (const document of snapshot.docs) {
+      const task = document.data();
+      if (
+        task.singletonAgent !== input.agent
+        || task.closedAt !== null
+        || !isRecord(task.repo)
+        || task.repo.remoteUrlHash !== input.remoteUrlHash
+        || typeof task.ownerDesktopId !== "string"
+        || typeof task.ownerLocalTaskId !== "string"
+      ) {
+        continue;
+      }
+      owners.push({
+        machineId: task.ownerDesktopId,
+        taskId: task.ownerLocalTaskId,
+      });
+    }
+  }
+  owners.sort((left, right) =>
+    left.machineId.localeCompare(right.machineId)
+      || left.taskId.localeCompare(right.taskId));
+  return owners.filter((owner, index) =>
+    index === 0
+    || owner.machineId !== owners[index - 1]?.machineId
+    || owner.taskId !== owners[index - 1]?.taskId);
+}
+
 export function planTaskReconciliation(
   existing: ExistingTaskDocument[],
   tasks: CloudTaskDocument[],
@@ -393,6 +472,7 @@ export async function handleCloudTaskPublication(input: {
     displayName: publication.displayName,
     agentProviders: publication.agentProviders,
     transfer: publication.transfer,
+    singletonDirectoryVersion: publication.singletonDirectoryVersion,
     tasks: publication.tasks,
   });
 }
@@ -494,6 +574,7 @@ export function createFirestoreCloudTaskPublicationStore(
       displayName,
       agentProviders,
       transfer,
+      singletonDirectoryVersion,
       tasks,
     }) {
       validatePublicationGeneration(generation);
@@ -537,6 +618,7 @@ export function createFirestoreCloudTaskPublicationStore(
             displayName,
             agentProviders: agentProviders ?? FieldValue.delete(),
             transfer: transfer ?? FieldValue.delete(),
+            singletonDirectoryVersion,
             publicationSequence: generation.sequence,
             updatedAt: FieldValue.serverTimestamp(),
           }, { merge: true });

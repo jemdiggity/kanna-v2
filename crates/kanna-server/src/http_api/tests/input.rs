@@ -176,6 +176,261 @@ async fn generic_merge_signal_delivers_natural_language_to_existing_singleton() 
     assert_signal_agent_reuses_open_task_with_run_status("running", "merge").await;
 }
 
+#[tokio::test]
+async fn signal_agent_keeps_repo_without_remote_hash_machine_local() {
+    // The helper's repo has no remote metadata and its AppState has no active
+    // relay loop. Delivery succeeding proves resolution did not enter the
+    // account-wide path merely because this desktop has an account credential.
+    assert_signal_agent_reuses_open_task_with_run_status("running", "task-manager").await;
+}
+
+#[test]
+fn singleton_directory_snapshot_clears_a_closed_offline_owner() {
+    let state = test_state_with_seed("desktop-cache", "Cache Mac", |_| {});
+    state.observe_singleton_owners(
+        "shared-remote-hash",
+        "task-manager",
+        "desktop-former-owner",
+        vec!["task-former-owner".to_string()],
+    );
+
+    state.replace_singleton_owners("shared-remote-hash", "task-manager", Vec::new());
+
+    assert!(state
+        .known_singleton_owners("shared-remote-hash", "task-manager")
+        .is_empty());
+}
+
+fn seed_remote_repo(db: &Db, repo_id: &str) {
+    db.insert_test_repo(repo_id, "Shared Repo").unwrap();
+    db.patch_repo(
+        repo_id,
+        None,
+        Some(Some("https://example.com/acme/shared.git")),
+        Some(Some("shared-remote-hash")),
+        None,
+    )
+    .unwrap();
+}
+
+fn seed_remote_singleton(db: &Db, repo_id: &str, task_id: &str, agent: &str) {
+    seed_remote_repo(db, repo_id);
+    db.insert_test_pipeline_item(
+        task_id,
+        repo_id,
+        "Resident singleton",
+        Some("Resident Singleton"),
+        "in progress",
+        "2026-09-03T00:00:00Z",
+    )
+    .unwrap();
+    db.insert_stage_run(crate::db::NewStageRun {
+        id: &format!("run-{task_id}"),
+        task_id,
+        stage: "in progress",
+        kind: "main",
+        agent: Some(agent),
+        agent_provider: Some("claude"),
+        model: None,
+        effort: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some(task_id),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+}
+
+fn connect_singleton_relay_peer(
+    source: &Arc<AppState>,
+    peer: Arc<AppState>,
+    fail_input_delivery: bool,
+) -> tokio::task::JoinHandle<()> {
+    let mut requests = source
+        .take_desktop_relay_requests()
+        .expect("take source relay queue");
+    source.set_desktop_routing_available(true);
+    tokio::spawn(async move {
+        while let Some(request) = requests.recv().await {
+            match request {
+                crate::http_api::DesktopRelayRequest::ListActive { response, .. } => {
+                    let machine_ids = if fail_input_delivery {
+                        Vec::new()
+                    } else {
+                        vec![peer.config().desktop_id.clone()]
+                    };
+                    let _ = response.send(Ok(machine_ids));
+                }
+                crate::http_api::DesktopRelayRequest::ListRepoSingletons {
+                    remote_url_hash,
+                    agent,
+                    response,
+                    ..
+                } => {
+                    let result = Db::open(&peer.config().db_path)
+                        .and_then(|db| {
+                            db.find_open_agent_tasks_by_remote_url_hash(&remote_url_hash, &agent)
+                        })
+                        .map(|tasks| {
+                            tasks
+                                .into_iter()
+                                .map(|task| crate::http_api::RemoteSingletonOwner {
+                                    machine_id: peer.config().desktop_id.clone(),
+                                    task_id: task.task_id,
+                                })
+                                .collect()
+                        })
+                        .map_err(|error| error.to_string());
+                    let _ = response.send(result);
+                }
+                crate::http_api::DesktopRelayRequest::Invoke {
+                    method,
+                    path,
+                    body,
+                    response,
+                    ..
+                } => {
+                    if fail_input_delivery && path.ends_with("/input") {
+                        let _ = response.send(Err("peer disconnected".to_string()));
+                        continue;
+                    }
+                    let result = crate::http_api::dispatch_authenticated_http_invoke(
+                        Arc::clone(&peer),
+                        &method,
+                        &path,
+                        body,
+                    )
+                    .await;
+                    let _ = response.send(Ok(result));
+                }
+            }
+        }
+    })
+}
+
+#[tokio::test]
+async fn signal_agent_discovers_and_routes_to_sibling_repo_singleton() {
+    let source = test_state_with_seed("desktop-source", "Source Mac", |db| {
+        seed_remote_repo(db, "repo-source")
+    });
+    let delivered = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let delivered_for_sender = Arc::clone(&delivered);
+    let peer = test_state_with_seed_and_task_input_sender(
+        "desktop-owner",
+        "Owner Mac",
+        |db| seed_remote_singleton(db, "repo-owner", "task-manager-owner", "task-manager"),
+        Arc::new(move |task_id, input| {
+            delivered_for_sender.lock().unwrap().push((task_id, input));
+            Ok(())
+        }),
+    );
+    let relay = connect_singleton_relay_peer(&source, peer, false);
+    let app = super::router(Arc::clone(&source));
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/repos/repo-source/agents/task-manager/signal")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"message":"coordinate this repo"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(body["taskId"], "task-manager-owner");
+    assert_eq!(body["created"], false);
+    assert_eq!(
+        *delivered.lock().unwrap(),
+        vec![(
+            "task-manager-owner".to_string(),
+            "coordinate this repo".to_string()
+        )]
+    );
+    relay.abort();
+}
+
+#[tokio::test]
+async fn signal_agent_refuses_persisted_owner_that_is_already_unreachable() {
+    let source = test_state_with_seed("desktop-source-offline", "Source Mac", |db| {
+        seed_remote_repo(db, "repo-source")
+    });
+    let peer = test_state_with_seed_and_task_input_sender(
+        "desktop-sleeping",
+        "Sleeping Mac",
+        |db| seed_remote_singleton(db, "repo-owner", "task-merge-owner", "merge"),
+        Arc::new(|_, _| panic!("unreachable owner must not receive input")),
+    );
+    let relay = connect_singleton_relay_peer(&source, peer, true);
+    let app = super::router(Arc::clone(&source));
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/repos/repo-source/agents/merge/signal")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"message":"merge this"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let message = String::from_utf8(body.to_vec()).unwrap();
+    assert!(message.contains("task-merge-owner"), "{message}");
+    assert!(message.contains("desktop-sleeping"), "{message}");
+    assert!(message.contains("no replacement was created"), "{message}");
+    relay.abort();
+}
+
+#[tokio::test]
+async fn signal_agent_reports_duplicate_repo_singletons_across_machines() {
+    let source = test_state_with_seed("desktop-duplicate-a", "First Mac", |db| {
+        seed_remote_singleton(db, "repo-source", "task-manager-a", "task-manager")
+    });
+    let peer = test_state_with_seed_and_task_input_sender(
+        "desktop-duplicate-b",
+        "Second Mac",
+        |db| seed_remote_singleton(db, "repo-owner", "task-manager-b", "task-manager"),
+        Arc::new(|_, _| panic!("duplicate resolution must not deliver input")),
+    );
+    let relay = connect_singleton_relay_peer(&source, peer, false);
+    let app = super::router(Arc::clone(&source));
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/repos/repo-source/agents/task-manager/signal")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"message":"coordinate"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let message = String::from_utf8(body.to_vec()).unwrap();
+    for expected in [
+        "duplicate open task-manager singletons",
+        "desktop-duplicate-a:task-manager-a",
+        "desktop-duplicate-b:task-manager-b",
+    ] {
+        assert!(message.contains(expected), "{message}");
+    }
+    relay.abort();
+}
+
 fn seed_approvable_source(db: &Db, task_id: &str, run_id: &str, pr_number: i64) {
     db.insert_test_pipeline_item(
         task_id,

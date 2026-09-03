@@ -8,6 +8,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Notify};
 
+type SingletonOwnerObservations = HashMap<(String, String), HashMap<String, Vec<String>>>;
+
 #[derive(Clone, Copy)]
 pub(super) struct TunneledHttpInvoke;
 
@@ -38,6 +40,7 @@ pub struct AppState {
     requested_task_operations: Arc<RequestedTaskOperations>,
     pub(super) repo_checkouts: Arc<StdMutex<HashMap<String, RepoCheckoutOperation>>>,
     pub(super) repo_checkout_root: std::path::PathBuf,
+    known_singleton_owners: Arc<StdMutex<SingletonOwnerObservations>>,
     relay_reconnect: Arc<Notify>,
     anonymous_push_revocations_changed: Arc<Notify>,
     relay_desktop_routing_available: Arc<AtomicBool>,
@@ -95,6 +98,12 @@ pub(crate) enum DesktopRelayRequest {
         generation: u64,
         response: oneshot::Sender<Result<Vec<String>, String>>,
     },
+    ListRepoSingletons {
+        generation: u64,
+        remote_url_hash: String,
+        agent: String,
+        response: oneshot::Sender<Result<Vec<RemoteSingletonOwner>, String>>,
+    },
     Invoke {
         generation: u64,
         desktop_id: String,
@@ -103,6 +112,13 @@ pub(crate) enum DesktopRelayRequest {
         body: serde_json::Value,
         response: oneshot::Sender<Result<HttpInvokeResponse, String>>,
     },
+}
+
+#[derive(Debug, Clone, serde::Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RemoteSingletonOwner {
+    pub machine_id: String,
+    pub task_id: String,
 }
 
 #[derive(Default)]
@@ -320,6 +336,7 @@ impl AppState {
             requested_task_operations: Arc::new(RequestedTaskOperations::default()),
             repo_checkouts: Arc::new(StdMutex::new(HashMap::new())),
             repo_checkout_root,
+            known_singleton_owners: Arc::new(StdMutex::new(HashMap::new())),
             relay_reconnect: Arc::new(Notify::new()),
             anonymous_push_revocations_changed: Arc::new(Notify::new()),
             relay_desktop_routing_available: Arc::new(AtomicBool::new(false)),
@@ -492,6 +509,28 @@ impl AppState {
             .map_err(|_| "desktop relay disconnected".to_string())?
     }
 
+    pub(crate) async fn list_relay_repo_singletons(
+        &self,
+        remote_url_hash: String,
+        agent: String,
+    ) -> Result<Vec<RemoteSingletonOwner>, String> {
+        let (response, result) = oneshot::channel();
+        let generation = self
+            .relay_desktop_routing_generation
+            .load(Ordering::Acquire);
+        self.send_desktop_relay_request(DesktopRelayRequest::ListRepoSingletons {
+            generation,
+            remote_url_hash,
+            agent,
+            response,
+        })
+        .await?;
+        tokio::time::timeout(std::time::Duration::from_secs(10), result)
+            .await
+            .map_err(|_| "repository singleton directory lookup timed out".to_string())?
+            .map_err(|_| "desktop relay disconnected".to_string())?
+    }
+
     pub(crate) async fn invoke_relay_desktop(
         &self,
         desktop_id: String,
@@ -520,6 +559,72 @@ impl AppState {
             .await
             .map_err(|_| "desktop relay invocation timed out".to_string())?
             .map_err(|_| "desktop relay disconnected".to_string())?
+    }
+
+    /// Retain the last proven owner set for a sibling. An absent desktop in a
+    /// later active-desktop listing is not evidence that its open singleton
+    /// disappeared; keeping this observation is what turns sleep/offline into
+    /// an explicit refusal instead of permission to create a rival. A
+    /// successful lookup replaces the observation, including with an empty
+    /// set after the old singleton was closed.
+    pub(crate) fn observe_singleton_owners(
+        &self,
+        remote_url_hash: &str,
+        agent: &str,
+        machine_id: &str,
+        task_ids: Vec<String>,
+    ) {
+        let mut observations = self
+            .known_singleton_owners
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        observations
+            .entry((remote_url_hash.to_string(), agent.to_string()))
+            .or_default()
+            .insert(machine_id.to_string(), task_ids);
+    }
+
+    /// Replace the complete relay-backed owner snapshot for this repository
+    /// and agent. Unlike an active-desktop lookup, the durable directory can
+    /// prove that a formerly observed offline owner has closed, so absence
+    /// from a successful directory response must clear stale observations.
+    pub(crate) fn replace_singleton_owners(
+        &self,
+        remote_url_hash: &str,
+        agent: &str,
+        owners: Vec<RemoteSingletonOwner>,
+    ) {
+        let mut by_machine = HashMap::<String, Vec<String>>::new();
+        for owner in owners {
+            by_machine
+                .entry(owner.machine_id)
+                .or_default()
+                .push(owner.task_id);
+        }
+        let mut observations = self
+            .known_singleton_owners
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        observations.insert((remote_url_hash.to_string(), agent.to_string()), by_machine);
+    }
+
+    pub(crate) fn known_singleton_owners(
+        &self,
+        remote_url_hash: &str,
+        agent: &str,
+    ) -> Vec<(String, String)> {
+        self.known_singleton_owners
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&(remote_url_hash.to_string(), agent.to_string()))
+            .into_iter()
+            .flat_map(|owners| owners.iter())
+            .flat_map(|(machine_id, task_ids)| {
+                task_ids
+                    .iter()
+                    .map(move |task_id| (machine_id.clone(), task_id.clone()))
+            })
+            .collect()
     }
 
     pub(crate) fn set_mobile_notifications_available(&self, available: bool) {

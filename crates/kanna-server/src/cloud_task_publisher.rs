@@ -56,6 +56,7 @@ impl RestingSnippetCache {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CloudTaskSnapshotEnvelope {
     schema_version: u8,
+    singleton_directory_version: u8,
     desktop: CloudDesktopSnapshot,
     tasks: Vec<CloudTaskSnapshot>,
 }
@@ -109,6 +110,8 @@ struct CloudTaskSnapshot {
     local_repo_id: String,
     owner_desktop_id: String,
     owner_local_task_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    singleton_agent: Option<String>,
     title: String,
     prompt_snippet: Option<String>,
     waiting_prompt_snippet: Option<String>,
@@ -261,6 +264,7 @@ fn map_ui_snapshot_with_snippets(
 
     CloudTaskSnapshotEnvelope {
         schema_version: CLOUD_TASK_SCHEMA_V2,
+        singleton_directory_version: 1,
         desktop: CloudDesktopSnapshot {
             display_name: truncate(desktop_name, 256),
             agent_providers: Some(agent_providers),
@@ -319,12 +323,18 @@ fn map_task(
         .created_at
         .clone()
         .unwrap_or_else(|| updated_at.clone());
+    let singleton_agent = item
+        .pipeline
+        .strip_prefix("singleton-")
+        .filter(|agent| !agent.is_empty())
+        .map(|agent| truncate(agent, 64));
 
     CloudTaskSnapshot {
         cloud_task_id: item.cloud_task_id,
         local_repo_id: repo.id.clone(),
         owner_desktop_id: desktop_id.to_string(),
         owner_local_task_id: item.id,
+        singleton_agent,
         title: truncate(&title, 512),
         prompt_snippet: (!prompt.is_empty()).then(|| prompt.chars().take(500).collect()),
         waiting_prompt_snippet: resting_snippet
@@ -685,6 +695,7 @@ mod tests {
         let json = serde_json::to_value(snapshot).unwrap();
 
         assert_eq!(json["schemaVersion"], 2);
+        assert_eq!(json["singletonDirectoryVersion"], 1);
         assert_eq!(json["desktop"]["displayName"], "Studio Mac");
         assert_eq!(
             json["desktop"]["agentProviders"],
@@ -727,6 +738,16 @@ mod tests {
         assert_eq!(json["tasks"][0]["parentTaskId"], serde_json::Value::Null);
         assert_eq!(json["tasks"][0]["pinned"], false);
         assert_eq!(json["tasks"][0]["pinOrder"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn snapshot_mapping_publishes_repo_singleton_identity() {
+        let mut source = ui_snapshot("idle");
+        source.entries[0].items[0].pipeline = "singleton-task-manager".into();
+        let snapshot = map_ui_snapshot("desktop-1", "Studio Mac", test_agent_providers(), source);
+        let json = serde_json::to_value(snapshot).unwrap();
+
+        assert_eq!(json["tasks"][0]["singletonAgent"], "task-manager");
     }
 
     #[test]

@@ -25,7 +25,7 @@ use super::repos::{
     start_repo_checkout,
 };
 use super::settings::{delete_setting, get_setting, put_cloud_transfer_identity, put_setting};
-use super::signal_agent::{signal_agent, signal_merge_handoff};
+use super::signal_agent::{find_local_singletons, signal_agent, signal_merge_handoff};
 use super::snapshot::get_snapshot;
 use super::state::{AppState, AuthenticatedHttpInvoke, HttpInvokeResponse, TunneledHttpInvoke};
 use super::status::status;
@@ -156,6 +156,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/repos/{repo_id}/agents/{agent}/signal",
             post(signal_agent),
+        )
+        .route(
+            "/v1/repo-singletons/{remote_url_hash}/{agent}",
+            get(find_local_singletons),
         )
         .route("/v1/task-events", get(wait_task_events))
         .route("/v1/tasks/recent", get(list_recent_tasks))
