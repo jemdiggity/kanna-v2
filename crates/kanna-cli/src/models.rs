@@ -440,6 +440,21 @@ pub(crate) struct MobileNotificationResponse {
     pub(crate) failed_count: u64,
     #[serde(default)]
     pub(crate) failure_reasons: Vec<MobileNotificationFailureReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) no_devices_reason: Option<MobileNotificationNoDevicesReason>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MobileNotificationNoDevicesReason {
+    pub(crate) code: String,
+    pub(crate) message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) retired_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) provider_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) retired_by_desktop_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
