@@ -57,6 +57,67 @@ describe("MobileAccessPanel", () => {
       .toBe("ABC123");
   });
 
+  it("warns when the signed-in account has no registered push device and explains why", async () => {
+    const wrapper = mount(MobileAccessPanel, {
+      props: {
+        desktopName: "Studio Mac",
+        serverStatus: "running",
+        pairingCode: null,
+        pairingPayload: null,
+        accountSignedIn: true,
+        pushRegistration: {
+          status: "noRegisteredDevices",
+          registeredDeviceCount: 0,
+          noDevicesReason: {
+            code: "unregistered",
+            message: "The mobile app unregistered the last push device at 2026-09-03T08:11:31.000Z.",
+            retiredAt: "2026-09-03T08:11:31.000Z",
+          },
+        },
+      },
+    });
+
+    const row = wrapper.get('[data-testid="mobile-access-push-registration"]');
+    expect(row.attributes("data-status")).toBe("noRegisteredDevices");
+    expect(row.text()).toContain("No phone is registered for push notifications");
+    expect(wrapper.get('[data-testid="mobile-access-push-reason"]').text())
+      .toContain("unregistered the last push device at 2026-09-03T08:11:31.000Z");
+    expect(wrapper.get('[data-testid="mobile-access-push-instruction"]').text())
+      .toMatch(/open kanna on your phone/i);
+
+    await wrapper.get('[data-testid="mobile-access-push-refresh"]').trigger("click");
+    expect(wrapper.emitted("refresh-push-registration")).toHaveLength(1);
+  });
+
+  it("reports a registered phone and hides push status while signed out", () => {
+    const registered = mount(MobileAccessPanel, {
+      props: {
+        desktopName: "Studio Mac",
+        serverStatus: "running",
+        pairingCode: null,
+        pairingPayload: null,
+        accountSignedIn: true,
+        pushRegistration: { status: "registered", registeredDeviceCount: 1 },
+      },
+    });
+    const row = registered.get('[data-testid="mobile-access-push-registration"]');
+    expect(row.attributes("data-status")).toBe("registered");
+    expect(row.text()).toContain("reach 1 registered phone");
+    expect(registered.find('[data-testid="mobile-access-push-instruction"]').exists()).toBe(false);
+
+    const signedOut = mount(MobileAccessPanel, {
+      props: {
+        desktopName: "Studio Mac",
+        serverStatus: "running",
+        pairingCode: null,
+        pairingPayload: null,
+        accountSignedIn: false,
+        pushRegistration: { status: "noRegisteredDevices", registeredDeviceCount: 0 },
+      },
+    });
+    expect(signedOut.find('[data-testid="mobile-access-push-registration"]').exists()).toBe(false);
+  });
+
   it("stops displaying pairing credentials when the session expires", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-17T00:00:00Z"));

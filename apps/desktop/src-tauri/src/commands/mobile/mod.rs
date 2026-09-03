@@ -61,6 +61,22 @@ pub struct WritePathHealth {
     pub oldest_workspace_command_seconds: Option<u64>,
 }
 
+/// Whether the account this desktop is signed into currently has a mobile
+/// push device registered, as `kanna-server` learned from the relay's own
+/// target resolution (`GET /v1/mobile/notifications/registration`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MobilePushRegistrationStatus {
+    /// `registered`, `noRegisteredDevices`, or `unavailable`.
+    pub status: String,
+    #[serde(default)]
+    pub registered_device_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_devices_reason: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct MobilePairingSession {
@@ -384,6 +400,32 @@ impl MobileServerManager {
         Ok(pairing)
     }
 
+    pub async fn push_registration_status(&self) -> Result<MobilePushRegistrationStatus, String> {
+        let api_base_url = {
+            let state = self.inner.lock().await;
+            if !state.started {
+                return Err("kanna-server is not running".to_string());
+            }
+            state.api_base_url.clone()
+        };
+        let response = self
+            .client
+            .get(format!(
+                "{}/v1/mobile/notifications/registration",
+                api_base_url
+            ))
+            .send()
+            .await
+            .map_err(|e| format!("failed to fetch mobile push registration status: {}", e))?;
+        let response = response
+            .error_for_status()
+            .map_err(|e| format!("mobile push registration status request failed: {}", e))?;
+        response
+            .json::<MobilePushRegistrationStatus>()
+            .await
+            .map_err(|e| format!("failed to decode mobile push registration status: {}", e))
+    }
+
     async fn wait_for_status(
         &self,
         api_base_url: &str,
@@ -472,6 +514,14 @@ pub(crate) async fn wait_for_server_started(app: &tauri::AppHandle) {
 pub async fn mobile_server_status(app: tauri::AppHandle) -> Result<MobileServerStatus, String> {
     let manager = app.state::<MobileServerManager>();
     manager.snapshot().await
+}
+
+#[tauri::command]
+pub async fn mobile_push_registration_status(
+    app: tauri::AppHandle,
+) -> Result<MobilePushRegistrationStatus, String> {
+    let manager = app.state::<MobileServerManager>();
+    manager.push_registration_status().await
 }
 
 #[tauri::command]

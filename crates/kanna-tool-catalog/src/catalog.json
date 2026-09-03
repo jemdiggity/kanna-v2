@@ -139,7 +139,7 @@
     },
     {
       "name": "kanna_notify_mobile",
-      "description": "Send an operator-facing push notification to Kanna Mobile through the relay. Delivery to registered devices reports acceptedCount, failedCount, and token-free provider failure reasons. Use this for meaningful long-running-task milestones or when the operator needs to act. When task_id is present, tapping opens that task.",
+      "description": "Send an operator-facing push notification to Kanna Mobile through the relay. Delivery to registered devices reports status (accepted, deliveryFailed, or noRegisteredDevices), acceptedCount, failedCount, and token-free provider failure reasons. A noRegisteredDevices result is live, never cached, and carries noDevicesReason: code neverRegistered (no phone ever registered for this account), unregistered (the mobile app retired the registration at retiredAt), tokenRejected (the push provider rejected the token as providerCode during a delivery from retiredByDesktopId at retiredAt), or unknown, plus an operator-facing message. Treat noRegisteredDevices as the operator being unreachable by push right now: do not retry the same message, report the reason to the operator through the task and your summary, and tell them to open Kanna on the phone while signed in so it re-registers. Use this for meaningful long-running-task milestones or when the operator needs to act. When task_id is present, tapping opens that task.",
       "method": "POST",
       "path": "/v1/mobile/notifications",
       "response": "json",

@@ -191,6 +191,7 @@ the client falls back to a bounded snapshot.
 - `POST /v1/tasks/{task_id}/actions/rerun-stage`
 - `POST /v1/tasks/{task_id}/actions/run-merge-agent`
 - `POST /v1/mobile/notifications`
+- `GET /v1/mobile/notifications/registration`
 - `POST /v1/pairing/sessions`
 - `POST /v1/pairing/sessions/claim`
 - `POST /v1/pairing/push-certificate` (paired-device authentication required)
@@ -1406,12 +1407,81 @@ per-device as `messaging/invalid-argument`, invalid, or unregistered, and
 acknowledges the request over the same WebSocket. A payload-wide invalid
 argument rejects the multicast call itself rather than appearing as one
 device's result.
-The server response includes `acceptedCount`, `failedCount`, and aggregated
+The server response includes `status` (`accepted`, `deliveryFailed`, or
+`noRegisteredDevices`), `acceptedCount`, `failedCount`, and aggregated
 `failureReasons`. Each reason has a safe provider code, category, count, and
 actionable message; it never identifies a device or includes its token, the
 Firebase provider's uncontrolled raw message, credentials, or notification
 contents. Older relay acknowledgements without `failureReasons` deserialize as
 an empty list during rolling upgrades.
+
+### Zero-device results explain themselves
+
+`noRegisteredDevices` is never a cached value: every call makes the relay
+resolve the account's live `pushDevices` registrations (unioned with the
+desktop's active anonymous bindings on a dual-identity session). When that
+resolves to zero devices, the response carries `noDevicesReason`, read from the
+account's registration records:
+
+| `code` | Meaning | Extra fields |
+|---|---|---|
+| `neverRegistered` | No push device has ever registered for this account. | — |
+| `unregistered` | The mobile app retired the last registration (sign-out, or an effect cleanup). | `retiredAt` |
+| `tokenRejected` | The push provider rejected the last token as invalid, so the relay retired it. | `retiredAt`, `providerCode`, `retiredByDesktopId` (the desktop whose delivery met the rejection — often a *different* desktop on the same account) |
+| `unknown` | The registration was retired before the relay recorded why. | `retiredAt` when known |
+
+Every reason carries a `message` that tells the operator what to do (open Kanna
+on the phone while signed in; the app re-registers on launch). The field is
+absent when a relay predating it answers, and absent whenever a device was
+targeted. Token values never appear in any response or log.
+
+The relay makes this possible by retiring registrations instead of deleting
+them: `POST /push/unregister` and the invalid-token reconciliation after a
+multicast both keep the `pushDevices` document with `token: null` plus
+`retiredAt`, `retiredReason`, and (for rejections) the provider code and the
+delivering desktop id. A registration replaces the whole document, so a retired
+record disappears the moment the phone registers again. The relay logs each
+registration, each unregister outcome (`retired`, `stale`, `alreadyRetired`,
+`absent`) with the guard it applied, each provider-rejection retirement, and
+each zero-target delivery, always without the token.
+
+### Registration ids make unregister safe
+
+Every mobile registration carries a client-minted `registrationId`, and the
+phone's unregister names the id it is retiring. The relay retires only that
+registration; a newer registration of the same device — even with the same FCM
+token — is left alone (`outcome: "stale"`). Token matching remains the guard
+for phones that predate the id, and an unregister with neither retires the
+registration unconditionally, as before.
+
+This closes the drop found on 2026-09-03 (task 34047a85): the mobile push
+effect re-ran three times in 700 ms as its dependencies settled, each cleanup
+fired an unregister for the previous registration carrying the same token the
+new run had just re-registered, and the last unregister to land deleted the
+live row. On the phone, account registration is now a serialized desired-state
+reconciler per device: a cleanup and the next run's registration apply in
+order, a failed registration is retried with backoff instead of being
+remembered as registered, and a `401` forces a fresh id token on the retry.
+
+### Registration status probe
+
+`GET /v1/mobile/notifications/registration` answers whether the signed-in
+account currently has a registered push device, for the desktop's Mobile
+Access panel. It is a `dryRun` publish: the relay resolves exactly the targets
+a real `kanna_notify_mobile` would reach and explains a zero-target result,
+without sending, touching delivery watermarks, or spending anonymous rate-limit
+budget. The response is `status` (`registered`, `noRegisteredDevices`, or
+`unavailable`), `registeredDeviceCount`, and the same `noDevicesReason` on a
+zero result (`error` on `unavailable`). The relay advertises the dry run as
+`mobileNotifications.version` 2 in `auth_ok`; against a version-1 relay the
+server refuses the probe as `unavailable` rather than risk delivering it as a
+real push, and a signed-out desktop's lazily connected anonymous session also
+refuses it, because the probe is about the account.
+
+`kanna-server` logs every notification outcome — `accepted` with counts,
+`deliveryFailed` with the aggregate reasons, `noRegisteredDevices` with the
+reason code and its fields, and a relay failure — so a result that changes
+between two calls leaves a trace on the desktop that sent it.
 
 Push delivery presents through the operating system while the mobile app is
 foregrounded or backgrounded and can reach a suspended or terminated app. It

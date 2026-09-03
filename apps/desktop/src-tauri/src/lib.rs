@@ -349,6 +349,7 @@ pub fn run() {
             // Mobile commands
             commands::mobile::ensure_mobile_server,
             commands::mobile::mobile_server_status,
+            commands::mobile::mobile_push_registration_status,
             commands::mobile::create_mobile_pairing_session,
             commands::mobile::desktop_cloud_credential,
             // Shell commands

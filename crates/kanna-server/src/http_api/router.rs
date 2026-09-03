@@ -9,7 +9,7 @@ use super::e2e_mobile_controls::{gate_direct_lan_http, update_e2e_mobile_machine
 use super::e2e_sql::{execute_e2e_server_work, execute_e2e_sql};
 use super::ksp::{ksp_stream, legacy_ksp_stream};
 use super::lan_trust::{attach_trusted_lan_device, require_privileged_task_access};
-use super::mobile_notifications::notify_mobile;
+use super::mobile_notifications::{mobile_push_registration, notify_mobile};
 use super::operator_events::post_operator_events;
 use super::pairing::{
     claim_pairing_session, create_pairing_session, reissue_push_pairing_certificate,
@@ -100,6 +100,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/v1/operator-events", post(post_operator_events))
         .route("/v1/mobile/notifications", post(notify_mobile))
+        .route(
+            "/v1/mobile/notifications/registration",
+            get(mobile_push_registration),
+        )
         .route("/v1/analytics/repos/{repo_id}", get(get_repo_analytics))
         .route("/v1/stream", get(legacy_ksp_stream))
         .route("/v2/stream", get(ksp_stream))

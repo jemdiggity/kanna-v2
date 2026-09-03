@@ -62,6 +62,16 @@ import {
   publishMobileNotification,
   type MobileNotificationDelivery,
 } from "./mobileNotifications.js";
+import { MAX_REGISTRATION_ID_LENGTH } from "./pushDevices.js";
+
+/**
+ * Version 1: publish + ack. Version 2: publishes carry `dryRun`, which
+ * resolves targets and explains a zero-target result without sending, and
+ * deliveries report `targetedDeviceCount` / `noDevicesReason`. kanna-server
+ * refuses to send a dry run to a relay below 2, because an older relay would
+ * deliver the probe as a real push.
+ */
+const MOBILE_NOTIFICATIONS_CAPABILITY_VERSION = 2;
 import {
   attachWebSocketMessageHandler,
 } from "./webSocketMessageLifecycle.js";
@@ -198,6 +208,18 @@ function noStore(res: ServerResponse): void {
 /**
  * Send a JSON response.
  */
+/**
+ * `undefined` when absent, the trimmed id when well-formed, `false` when the
+ * caller sent something that is not a bounded opaque string.
+ */
+function parsePushRegistrationId(value: unknown): string | undefined | false {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") return false;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > MAX_REGISTRATION_ID_LENGTH) return false;
+  return trimmed;
+}
+
 function jsonResponse(
   res: ServerResponse,
   status: number,
@@ -321,7 +343,12 @@ export const server = createServer(async (req, res) => {
 
     if (req.method === "POST" && req.url === "/push/register") {
       const body = await readBody(req);
-      let parsed: { idToken?: string; deviceId?: string; deviceToken?: string };
+      let parsed: {
+        idToken?: string;
+        deviceId?: string;
+        deviceToken?: string;
+        registrationId?: unknown;
+      };
 
       try {
         parsed = JSON.parse(body);
@@ -340,6 +367,11 @@ export const server = createServer(async (req, res) => {
         jsonResponse(res, 400, { error: "Push registration is oversized" });
         return;
       }
+      const registrationId = parsePushRegistrationId(parsed.registrationId);
+      if (registrationId === false) {
+        jsonResponse(res, 400, { error: "Push registrationId is malformed" });
+        return;
+      }
 
       const userId = await verifyPhoneToken(parsed.idToken);
       if (!userId) {
@@ -347,14 +379,19 @@ export const server = createServer(async (req, res) => {
         return;
       }
 
-      await registerPushDevice(userId, parsed.deviceId, parsed.deviceToken);
+      await registerPushDevice(userId, parsed.deviceId, parsed.deviceToken, registrationId);
       jsonResponse(res, 200, { ok: true });
       return;
     }
 
     if (req.method === "POST" && req.url === "/push/unregister") {
       const body = await readBody(req);
-      let parsed: { idToken?: string; deviceId?: string; deviceToken?: string };
+      let parsed: {
+        idToken?: string;
+        deviceId?: string;
+        deviceToken?: string;
+        registrationId?: unknown;
+      };
 
       try {
         parsed = JSON.parse(body);
@@ -374,6 +411,11 @@ export const server = createServer(async (req, res) => {
         jsonResponse(res, 400, { error: "Push unregistration is oversized" });
         return;
       }
+      const registrationId = parsePushRegistrationId(parsed.registrationId);
+      if (registrationId === false) {
+        jsonResponse(res, 400, { error: "Push registrationId is malformed" });
+        return;
+      }
 
       const userId = await verifyPhoneToken(parsed.idToken);
       if (!userId) {
@@ -381,8 +423,11 @@ export const server = createServer(async (req, res) => {
         return;
       }
 
-      await unregisterPushDevice(userId, parsed.deviceId, parsed.deviceToken);
-      jsonResponse(res, 200, { ok: true });
+      const outcome = await unregisterPushDevice(userId, parsed.deviceId, {
+        ...(parsed.deviceToken !== undefined ? { deviceToken: parsed.deviceToken } : {}),
+        ...(registrationId !== undefined ? { registrationId } : {}),
+      });
+      jsonResponse(res, 200, { ok: true, outcome });
       return;
     }
 
@@ -761,7 +806,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
             ? ["ksp", "task-transfer"]
             : [],
           ...(principalKind === "anonymousDesktop" ? {
-            mobileNotifications: { version: 1 },
+            mobileNotifications: { version: MOBILE_NOTIFICATIONS_CAPABILITY_VERSION },
           } : {}),
           ...(serverAuthProof?.kind === "desktop" ? {
             ...(sessionEntitlement?.grants("cloud_task_index") ? {
@@ -771,7 +816,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
               },
             } : {}),
             mobileNotifications: {
-              version: 1,
+              version: MOBILE_NOTIFICATIONS_CAPABILITY_VERSION,
             },
             ...(sessionEntitlement?.grants("remote_task_control") ? {
               desktopRouting: {
@@ -803,6 +848,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         deviceId?: unknown;
         command?: unknown;
         args?: unknown;
+        dryRun?: unknown;
       } | null = null;
       try {
         publication = JSON.parse(data) as {
@@ -813,6 +859,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
           deviceId?: unknown;
           command?: unknown;
           args?: unknown;
+          dryRun?: unknown;
         };
       } catch {
         // Non-publication messages retain the router's existing behavior.
@@ -1004,6 +1051,11 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
           sendAck(false, undefined, "mobile notification is malformed or oversized");
           return;
         }
+        // A dry run resolves the same targets a real delivery would and
+        // explains a zero-target result, without sending or spending
+        // rate-limit budget. It is how a desktop asks "is anything registered
+        // for this account right now?" through the one path that decides it.
+        const dryRun = publication.dryRun === true;
         if (principalKind === "anonymousDesktop") {
           if (!anonymousPubKey) {
             sendAck(false, undefined, "anonymous desktop identity is unavailable");
@@ -1013,6 +1065,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
             const delivery = await publishAnonymousPush({
               desktopPubKey: anonymousPubKey,
               notification,
+              dryRun,
             });
             sendAck(true, delivery);
           } catch (error) {
@@ -1030,6 +1083,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
               userId: userId!,
               desktopId,
               notification,
+              dryRun,
             });
             sendAck(true, delivery);
           } catch (error) {
@@ -1045,6 +1099,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
             userId: userId!,
             desktopId,
             notification,
+            dryRun,
             sendAck: ({ ok, delivery, error }) => sendAck(ok, delivery, error),
           });
         }

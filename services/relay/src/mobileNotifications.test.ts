@@ -17,7 +17,8 @@ describe("relay mobile notification delivery", () => {
       [invalidArgumentRef, "fcm-disabled-apns"],
       [permissionRef, "fcm-current-with-missing-iam"]
     ]);
-    const deletedRefs: { id: string }[] = [];
+    const retiredRefs: { id: string }[] = [];
+    const retiredRecords: Record<string, unknown>[] = [];
     const sendEachForMulticast = vi.fn(async () => ({
       successCount: 1,
       failureCount: 3,
@@ -91,14 +92,16 @@ describe("relay mobile notification delivery", () => {
           return token ? { token } : undefined;
         }
       })),
-      delete: vi.fn((ref: { id: string }) => {
-        deletedRefs.push(ref);
+      set: vi.fn((ref: { id: string }, record: Record<string, unknown>) => {
+        retiredRefs.push(ref);
+        retiredRecords.push(record);
         storedTokens.delete(ref);
       })
     };
     const runTransaction = vi.fn(async (
-      callback: (value: typeof transaction) => Promise<void>
+      callback: (value: typeof transaction) => Promise<boolean>
     ) => callback(transaction));
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
     vi.doMock("./firebase.js", () => ({
       getFirebaseServices: () => ({
         db: { collection, runTransaction },
@@ -118,6 +121,7 @@ describe("relay mobile notification delivery", () => {
     })).resolves.toEqual({
       acceptedCount: 1,
       failedCount: 3,
+      targetedDeviceCount: 4,
       failureReasons: [
         {
           providerCode: "messaging/invalid-argument",
@@ -167,7 +171,137 @@ describe("relay mobile notification delivery", () => {
       }
     });
     expect(runTransaction).toHaveBeenCalledTimes(2);
-    expect(deletedRefs).toEqual([unregisteredRef, invalidArgumentRef]);
+    expect(retiredRefs).toEqual([unregisteredRef, invalidArgumentRef]);
+    // Retirement keeps an attributable record instead of deleting the row, so a
+    // later zero-target delivery can say which provider code retired it and
+    // from which desktop's delivery. The token itself is gone.
+    expect(retiredRecords).toEqual([
+      {
+        deviceId: null,
+        token: null,
+        registrationId: null,
+        updatedAt: expect.any(String),
+        retiredAt: expect.any(String),
+        retiredReason: "tokenRejected",
+        retiredProviderCode: "messaging/registration-token-not-registered",
+        retiredByDesktopId: "desktop-1"
+      },
+      {
+        deviceId: null,
+        token: null,
+        registrationId: null,
+        updatedAt: expect.any(String),
+        retiredAt: expect.any(String),
+        retiredReason: "tokenRejected",
+        retiredProviderCode: "messaging/invalid-argument",
+        retiredByDesktopId: "desktop-1"
+      }
+    ]);
+    expect(JSON.stringify(retiredRecords)).not.toContain("fcm-");
+  });
+
+  it("explains a zero-target delivery from the retirement records without sending", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const sendEachForMulticast = vi.fn();
+    let docs: { data: () => Record<string, unknown>; ref: { id: string } }[] = [];
+    const get = vi.fn(async () => ({ docs }));
+    vi.doMock("./firebase.js", () => ({
+      getFirebaseServices: () => ({
+        db: {
+          collection: () => ({
+            doc: () => ({ collection: () => ({ limit: () => ({ get }) }) })
+          }),
+          runTransaction: vi.fn()
+        },
+        messaging: { sendEachForMulticast }
+      })
+    }));
+    const { sendMobileNotification } = await import("./mobileNotifications.js");
+    const notification = { title: "Blocked", body: "Needs a decision." };
+
+    await expect(sendMobileNotification({
+      userId: "operator-1",
+      desktopId: "desktop-1",
+      notification
+    })).resolves.toEqual({
+      acceptedCount: 0,
+      failedCount: 0,
+      failureReasons: [],
+      targetedDeviceCount: 0,
+      noDevicesReason: {
+        code: "neverRegistered",
+        message: expect.stringContaining("has ever registered")
+      }
+    });
+
+    docs = [
+      {
+        ref: { id: "older" },
+        data: () => ({
+          deviceId: "phone-old",
+          token: null,
+          registrationId: null,
+          updatedAt: "2026-09-01T00:00:00.000Z",
+          retiredAt: "2026-09-01T00:00:00.000Z",
+          retiredReason: "unregistered"
+        })
+      },
+      {
+        ref: { id: "newer" },
+        data: () => ({
+          deviceId: "phone-new",
+          token: null,
+          registrationId: null,
+          updatedAt: "2026-09-03T08:11:31.000Z",
+          retiredAt: "2026-09-03T08:11:31.000Z",
+          retiredReason: "tokenRejected",
+          retiredProviderCode: "messaging/registration-token-not-registered",
+          retiredByDesktopId: "desktop-2"
+        })
+      }
+    ];
+    await expect(sendMobileNotification({
+      userId: "operator-1",
+      desktopId: "desktop-1",
+      notification
+    })).resolves.toMatchObject({
+      targetedDeviceCount: 0,
+      noDevicesReason: {
+        code: "tokenRejected",
+        retiredAt: "2026-09-03T08:11:31.000Z",
+        providerCode: "messaging/registration-token-not-registered",
+        retiredByDesktopId: "desktop-2"
+      }
+    });
+
+    docs = [docs[0]!];
+    await expect(sendMobileNotification({
+      userId: "operator-1",
+      desktopId: "desktop-1",
+      notification
+    })).resolves.toMatchObject({
+      noDevicesReason: { code: "unregistered", retiredAt: "2026-09-01T00:00:00.000Z" }
+    });
+
+    docs = [{ ref: { id: "live" }, data: () => ({ deviceId: "phone", token: "fcm-live" }) }];
+    await expect(sendMobileNotification({
+      userId: "operator-1",
+      desktopId: "desktop-1",
+      notification,
+      dryRun: true
+    })).resolves.toEqual({
+      acceptedCount: 0,
+      failedCount: 0,
+      failureReasons: [],
+      targetedDeviceCount: 1
+    });
+
+    expect(sendEachForMulticast).not.toHaveBeenCalled();
+    expect(warn.mock.calls.map((call) => call[0])).toEqual([
+      "[push] No mobile push device targeted for desktop desktop-1 (neverRegistered)",
+      "[push] No mobile push device targeted for desktop desktop-1 (tokenRejected)",
+      "[push] No mobile push device targeted for desktop desktop-1 (unregistered)"
+    ]);
   });
 
   it("does not evict a replacement registered while Firebase rejects the old token", async () => {
@@ -184,12 +318,12 @@ describe("relay mobile notification delivery", () => {
       get: vi.fn(async () => ({
         data: () => ({ token: storedToken })
       })),
-      delete: vi.fn(() => {
+      set: vi.fn(() => {
         storedToken = "";
       })
     };
     const runTransaction = vi.fn(async (
-      callback: (value: typeof transaction) => Promise<void>
+      callback: (value: typeof transaction) => Promise<boolean>
     ) => callback(transaction));
     const sendEachForMulticast = vi.fn(async () => {
       storedToken = "fcm-replacement";
@@ -233,7 +367,7 @@ describe("relay mobile notification delivery", () => {
     });
 
     expect(transaction.get).toHaveBeenCalledWith(deviceRef);
-    expect(transaction.delete).not.toHaveBeenCalled();
+    expect(transaction.set).not.toHaveBeenCalled();
     expect(storedToken).toBe("fcm-replacement");
   });
 

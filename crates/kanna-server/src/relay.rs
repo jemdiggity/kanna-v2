@@ -107,10 +107,10 @@ fn apply_relay_authentication(
             .task_snapshot_publication
             .map(|capability| capability.version),
     );
-    http_state.set_mobile_notifications_available(
+    http_state.set_mobile_notifications_version(
         capabilities
             .mobile_notifications
-            .is_some_and(|capability| capability.version >= 1),
+            .map_or(0, |capability| capability.version),
     );
 }
 
@@ -336,6 +336,16 @@ async fn run_relay_loop_with_timing(
                         ));
                         continue;
                     }
+                    if request.notification.dry_run
+                        && !http_state.mobile_notification_dry_run_supported()
+                    {
+                        // An older relay would send the probe as a real push.
+                        let _ = request.response.send(Err(
+                            "relay does not support push registration probes; upgrade the relay"
+                                .to_string(),
+                        ));
+                        continue;
+                    }
 
                     let correlation = next_mobile_notification_id;
                     let id = format!(
@@ -353,6 +363,7 @@ async fn run_relay_loop_with_timing(
                     );
                     let message = RelayMessage::MobileNotificationPublish {
                         id: id.clone(),
+                        dry_run: request.notification.dry_run,
                         notification: request.notification,
                     };
                     if let Err(error) = send_relay_response_message(&sink, message).await {
@@ -1134,6 +1145,14 @@ async fn run_anonymous_push_loop(
                     _ = http_state.wait_for_cloud_relay_reconnect() => return Ok(()),
                 },
             };
+            if request.notification.dry_run {
+                // The registration probe asks about the signed-in account; a
+                // signed-out desktop has no account registration to report.
+                let _ = request.response.send(Err(
+                    "push registration probe requires a signed-in desktop".to_string(),
+                ));
+                continue;
+            }
             let id = format!(
                 "anonymous-mobile-notification:{}:{next_id}",
                 config.desktop_id
@@ -1141,6 +1160,7 @@ async fn run_anonymous_push_loop(
             next_id = next_id.wrapping_add(1).max(1);
             let message = RelayMessage::MobileNotificationPublish {
                 id: id.clone(),
+                dry_run: false,
                 notification: request.notification,
             };
             if let Err(error) = sink
@@ -1610,6 +1630,9 @@ mod tests {
     static TEST_LOGGER_INIT: Once = Once::new();
     static TEST_LOG_CAPTURE_ACTIVE: AtomicBool = AtomicBool::new(false);
     static TEST_LOG_MESSAGES: StdMutex<Vec<String>> = StdMutex::new(Vec::new());
+    /// The log capture is process-global, so tests that read it hold this for
+    /// their whole body; otherwise one test's `finish` clears another's lines.
+    static TEST_LOG_CAPTURE_GUARD: StdMutex<()> = StdMutex::new(());
 
     struct RelayTestLogger;
 
@@ -2075,6 +2098,359 @@ mod tests {
         }
     }
 
+    /// Relay stand-in for the push-registration probe tests: authenticates
+    /// with the given `mobileNotifications` capability version, then answers
+    /// each publish from `acks` in order. A publish that arrives once `acks`
+    /// is exhausted fails the test, which is how the version-1 case proves the
+    /// probe was never sent.
+    fn spawn_probe_relay_stand_in(
+        relay_listener: tokio::net::TcpListener,
+        capability_version: u64,
+        mut acks: Vec<serde_json::Value>,
+    ) -> tokio::task::JoinHandle<Vec<serde_json::Value>> {
+        use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
+        tokio::spawn(async move {
+            let (stream, _) = relay_listener.accept().await.expect("accept relay");
+            let mut socket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("accept websocket");
+            let auth = socket
+                .next()
+                .await
+                .expect("auth message")
+                .expect("auth frame");
+            assert!(matches!(auth, TungsteniteMessage::Text(_)));
+            socket
+                .send(TungsteniteMessage::Text(
+                    serde_json::json!({
+                        "type": "auth_ok",
+                        "userId": "operator-1",
+                        "capabilities": {
+                            "mobileNotifications": { "version": capability_version }
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .expect("send auth ack");
+            let mut received = Vec::new();
+            while let Some(message) = socket.next().await {
+                let TungsteniteMessage::Text(text) = message.expect("relay frame") else {
+                    continue;
+                };
+                let value: serde_json::Value =
+                    serde_json::from_str(&text).expect("parse relay message");
+                if value["type"] != "mobile_notification_publish" {
+                    continue;
+                }
+                let mut ack = acks.remove(0);
+                ack["id"] = value["id"].clone();
+                received.push(value);
+                socket
+                    .send(TungsteniteMessage::Text(ack.to_string().into()))
+                    .await
+                    .expect("send ack");
+                if acks.is_empty() {
+                    return received;
+                }
+            }
+            received
+        })
+    }
+
+    fn probe_test_config(relay_address: std::net::SocketAddr, unique: &str) -> Config {
+        Config {
+            relay_url: format!("ws://{relay_address}"),
+            device_token: "device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
+            daemon_dir: format!("/tmp/{unique}-daemon"),
+            db_path: crate::db::Db::test_db_path(unique),
+            kanna_cli_path: None,
+            desktop_id: "desktop-probe".to_string(),
+            desktop_secret: Some("desktop-secret".to_string()),
+            desktop_name: "Probe Test Mac".to_string(),
+            version: "test-version".to_string(),
+            environment: "development".to_string(),
+            lan_host: "127.0.0.1".to_string(),
+            lan_port: 48120,
+            transfer_port: 4455,
+            activity_event_debounce_seconds: 300,
+            pairing_store_path: format!("/tmp/{unique}-pairings.json"),
+        }
+    }
+
+    fn probe_test_unique(label: &str) -> String {
+        format!(
+            "relay-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        )
+    }
+
+    #[tokio::test]
+    async fn mobile_push_registration_probe_reads_dry_run_acks_and_notify_reports_reason() {
+        use tokio::time::timeout;
+
+        let _capture_guard = TEST_LOG_CAPTURE_GUARD
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        start_test_log_capture();
+        let relay_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind relay stand-in");
+        let relay_address = relay_listener.local_addr().expect("relay address");
+        let unique = probe_test_unique("push-registration-probe");
+        let config = probe_test_config(relay_address, &unique);
+        let database = crate::db::Db::open_for_tests(&config.db_path).expect("open test db");
+        let state = Arc::new(http_api::AppState::new(config.clone()));
+        let relay_server = spawn_probe_relay_stand_in(
+            relay_listener,
+            2,
+            vec![
+                serde_json::json!({
+                    "type": "mobile_notification_ack",
+                    "ok": true,
+                    "delivery": {
+                        "acceptedCount": 0,
+                        "failedCount": 0,
+                        "failureReasons": [],
+                        "targetedDeviceCount": 0,
+                        "noDevicesReason": {
+                            "code": "unregistered",
+                            "message": "The mobile app unregistered the last push device at 2026-09-03T08:11:31.000Z.",
+                            "retiredAt": "2026-09-03T08:11:31.000Z"
+                        }
+                    }
+                }),
+                serde_json::json!({
+                    "type": "mobile_notification_ack",
+                    "ok": true,
+                    "delivery": {
+                        "acceptedCount": 0,
+                        "failedCount": 0,
+                        "failureReasons": [],
+                        "targetedDeviceCount": 1
+                    }
+                }),
+                serde_json::json!({
+                    "type": "mobile_notification_ack",
+                    "ok": true,
+                    "delivery": {
+                        "acceptedCount": 0,
+                        "failedCount": 0,
+                        "failureReasons": [],
+                        "targetedDeviceCount": 0,
+                        "noDevicesReason": {
+                            "code": "tokenRejected",
+                            "message": "The push provider rejected the last device token.",
+                            "retiredAt": "2026-09-03T08:39:00.000Z",
+                            "providerCode": "messaging/registration-token-not-registered",
+                            "retiredByDesktopId": "desktop-21b320e8"
+                        }
+                    }
+                }),
+            ],
+        );
+
+        let relay_loop = run_relay_loop(config, database, Arc::clone(&state));
+        tokio::pin!(relay_loop);
+        let requests = async {
+            timeout(Duration::from_secs(2), async {
+                while !state.mobile_notification_dry_run_supported() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("relay dry-run capability was not advertised");
+            let missing = http_api::dispatch_authenticated_http_invoke(
+                Arc::clone(&state),
+                "GET",
+                "/v1/mobile/notifications/registration",
+                serde_json::Value::Null,
+            )
+            .await;
+            let registered = http_api::dispatch_authenticated_http_invoke(
+                Arc::clone(&state),
+                "GET",
+                "/v1/mobile/notifications/registration",
+                serde_json::Value::Null,
+            )
+            .await;
+            let notified = http_api::dispatch_authenticated_http_invoke(
+                Arc::clone(&state),
+                "POST",
+                "/v1/mobile/notifications",
+                serde_json::json!({
+                    "title": "Blocked",
+                    "body": "Needs a decision.",
+                    "taskId": "7fce7adf"
+                }),
+            )
+            .await;
+            (missing, registered, notified)
+        };
+        tokio::pin!(requests);
+        let (missing, registered, notified) = tokio::select! {
+            responses = &mut requests => responses,
+            result = &mut relay_loop => panic!("relay loop exited early: {result:?}"),
+        };
+        let published = relay_server.await.expect("relay stand-in");
+
+        assert_eq!(published.len(), 3);
+        assert_eq!(published[0]["dryRun"], true, "{:?}", published[0]);
+        assert_eq!(published[1]["dryRun"], true, "{:?}", published[1]);
+        assert!(
+            published[2].get("dryRun").is_none(),
+            "a real notification must not carry dryRun: {:?}",
+            published[2]
+        );
+        assert_eq!(published[2]["notification"]["taskId"], "7fce7adf");
+
+        assert_eq!(missing.status, 200, "{missing:?}");
+        assert_eq!(
+            missing.body,
+            Some(serde_json::json!({
+                "status": "noRegisteredDevices",
+                "registeredDeviceCount": 0,
+                "noDevicesReason": {
+                    "code": "unregistered",
+                    "message": "The mobile app unregistered the last push device at 2026-09-03T08:11:31.000Z.",
+                    "retiredAt": "2026-09-03T08:11:31.000Z"
+                }
+            }))
+        );
+        assert_eq!(
+            registered.body,
+            Some(serde_json::json!({
+                "status": "registered",
+                "registeredDeviceCount": 1
+            }))
+        );
+        assert_eq!(notified.status, 200, "{notified:?}");
+        assert_eq!(
+            notified.body,
+            Some(serde_json::json!({
+                "status": "noRegisteredDevices",
+                "acceptedCount": 0,
+                "failedCount": 0,
+                "failureReasons": [],
+                "noDevicesReason": {
+                    "code": "tokenRejected",
+                    "message": "The push provider rejected the last device token.",
+                    "retiredAt": "2026-09-03T08:39:00.000Z",
+                    "providerCode": "messaging/registration-token-not-registered",
+                    "retiredByDesktopId": "desktop-21b320e8"
+                }
+            }))
+        );
+
+        let logs = finish_test_log_capture();
+        assert!(
+            logs.iter().any(|line| {
+                line.contains("Mobile notification noRegisteredDevices: task=7fce7adf")
+                    && line.contains("reason=tokenRejected")
+                    && line.contains("retiredAt=2026-09-03T08:39:00.000Z")
+                    && line.contains("providerCode=messaging/registration-token-not-registered")
+                    && line.contains("retiredByDesktopId=desktop-21b320e8")
+            }),
+            "notify outcome was not logged: {logs:?}"
+        );
+        assert!(
+            logs.iter().any(|line| {
+                line.contains("Mobile push registration probe found no registered device")
+                    && line.contains("reason=unregistered")
+            }),
+            "probe outcome was not logged: {logs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mobile_push_registration_probe_is_refused_against_a_version_one_relay() {
+        use tokio::time::timeout;
+
+        let relay_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind relay stand-in");
+        let relay_address = relay_listener.local_addr().expect("relay address");
+        let unique = probe_test_unique("push-registration-probe-v1");
+        let config = probe_test_config(relay_address, &unique);
+        let database = crate::db::Db::open_for_tests(&config.db_path).expect("open test db");
+        let state = Arc::new(http_api::AppState::new(config.clone()));
+        // The only ack is for the real notification that follows the probe;
+        // an older relay would have delivered the probe itself as a push, so
+        // the stand-in fails the test if a second publish ever arrives.
+        let relay_server = spawn_probe_relay_stand_in(
+            relay_listener,
+            1,
+            vec![serde_json::json!({
+                "type": "mobile_notification_ack",
+                "ok": true,
+                "delivery": { "acceptedCount": 1, "failedCount": 0, "failureReasons": [] }
+            })],
+        );
+
+        let relay_loop = run_relay_loop(config, database, Arc::clone(&state));
+        tokio::pin!(relay_loop);
+        let requests = async {
+            timeout(Duration::from_secs(2), async {
+                while !state.mobile_notifications_available() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("relay capability was not advertised");
+            assert!(!state.mobile_notification_dry_run_supported());
+            let probe = http_api::dispatch_authenticated_http_invoke(
+                Arc::clone(&state),
+                "GET",
+                "/v1/mobile/notifications/registration",
+                serde_json::Value::Null,
+            )
+            .await;
+            let notified = http_api::dispatch_authenticated_http_invoke(
+                Arc::clone(&state),
+                "POST",
+                "/v1/mobile/notifications",
+                serde_json::json!({ "title": "Blocked", "body": "Needs a decision." }),
+            )
+            .await;
+            (probe, notified)
+        };
+        tokio::pin!(requests);
+        let (probe, notified) = tokio::select! {
+            responses = &mut requests => responses,
+            result = &mut relay_loop => panic!("relay loop exited early: {result:?}"),
+        };
+        let published = relay_server.await.expect("relay stand-in");
+
+        assert_eq!(published.len(), 1, "{published:?}");
+        assert_eq!(published[0]["notification"]["title"], "Blocked");
+        assert_eq!(probe.status, 200, "{probe:?}");
+        assert_eq!(
+            probe.body,
+            Some(serde_json::json!({
+                "status": "unavailable",
+                "registeredDeviceCount": 0,
+                "error": "relay does not support push registration probes; upgrade the relay"
+            }))
+        );
+        assert_eq!(
+            notified.body,
+            Some(serde_json::json!({
+                "status": "accepted",
+                "acceptedCount": 1,
+                "failedCount": 0,
+                "failureReasons": []
+            }))
+        );
+    }
+
     #[tokio::test]
     async fn mobile_notification_endpoint_queues_push_with_active_lan_stream_and_sanitizes_rejection(
     ) {
@@ -2085,6 +2461,9 @@ mod tests {
         const OLD_RELAY_PROJECT: &str = "kanna-secret-project";
         const OLD_RELAY_TOKEN_DIAGNOSTIC: &str = "raw-device-token-diagnostic";
 
+        let _capture_guard = TEST_LOG_CAPTURE_GUARD
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         start_test_log_capture();
 
         let relay_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
