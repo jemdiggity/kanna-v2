@@ -125,6 +125,14 @@ const mainPanelUiSlot = computed<TaskUiSlot | null>(() => {
   };
 });
 
+async function reorderSidebarRepos(orderedIds: string[]): Promise<void> {
+  const reposById = new Map(sidebarRepos.value.map((repo) => [repo.id, repo]));
+  await store.reorderRepos(orderedIds.map((id) => ({
+    id,
+    remoteUrlHash: reposById.get(id)?.remote_url_hash ?? null,
+  })));
+}
+
 const selectedSidebarSlotId = computed(() => {
   const selectedId = selectedCloudItemId.value ?? store.selectedItemId;
   if (!selectedId) return null;
@@ -495,7 +503,7 @@ const modalLayerController = {
         @rename-done="focusAgentTerminal"
         @hide-repo="store.hideRepo"
         @rename-repo="store.renameRepo"
-        @reorder-repos="store.reorderRepos"
+        @reorder-repos="reorderSidebarRepos"
       />
       <div
         v-if="canResizeSidebar"

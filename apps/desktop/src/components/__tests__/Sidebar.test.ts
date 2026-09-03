@@ -1246,9 +1246,10 @@ describe("Sidebar", () => {
       },
       {
         ...repo,
-        id: "repo-3",
-        path: "/repo-3",
-        name: "third",
+        id: "cloud:repo-3",
+        path: "cloud",
+        name: "remote third",
+        remote_url_hash: "remote-third-hash",
         created_at: "2026-01-03T00:00:00.000Z",
       },
     ];
@@ -1259,7 +1260,7 @@ describe("Sidebar", () => {
 
     vm.emitRepoReorder(repos[2]!.id, repos[0]!.id);
 
-    expect(wrapper.emitted("reorder-repos")).toEqual([[["repo-3", "repo-1", "repo-2"]]]);
+    expect(wrapper.emitted("reorder-repos")).toEqual([[["cloud:repo-3", "repo-1", "repo-2"]]]);
   });
 
   it("does not reorder repositories while search is active", async () => {

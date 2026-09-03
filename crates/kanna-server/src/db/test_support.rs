@@ -82,6 +82,11 @@ impl Db {
                 last_opened_at TEXT
             );
 
+            CREATE TABLE repo_sidebar_order (
+                remote_url_hash TEXT PRIMARY KEY,
+                sort_order INTEGER NOT NULL
+            );
+
             CREATE TABLE pipeline_item (
                 id TEXT PRIMARY KEY,
                 cloud_task_id TEXT,

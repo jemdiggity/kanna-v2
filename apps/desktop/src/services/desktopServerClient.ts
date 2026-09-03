@@ -13,6 +13,7 @@ export interface DesktopSnapshotEntry {
 
 export interface DesktopSnapshot {
   entries: DesktopSnapshotEntry[];
+  repoSidebarOrder?: Record<string, number>;
   taskBlockers: TaskBlocker[];
   blockerTaskStates?: BlockerTaskStates;
   worktreePaths: Record<string, string>;
@@ -70,7 +71,7 @@ export interface DesktopServerClientHandlersForTests {
     catalogRevision: string,
   ) => MaybePromise<RunDesktopRepoCommandResponse>;
   findRepoByPath?: (path: string) => MaybePromise<DesktopRepoResponse | null>;
-  reorderRepos?: (orderedIds: string[]) => MaybePromise<void>;
+  reorderRepos?: (orderedRepos: DesktopRepoOrderInput[]) => MaybePromise<void>;
   fetchClosedTaskIdentities?: () => MaybePromise<ClosedTaskIdentity[]>;
   fetchTaskDetail?: (taskId: string) => MaybePromise<DesktopTaskDetail>;
   patchTask?: (taskId: string, input: PatchDesktopTaskInput) => MaybePromise<void>;
@@ -875,15 +876,43 @@ export async function addDesktopRepo(input: AddDesktopRepoInput): Promise<Deskto
   });
 }
 
-export async function reorderDesktopRepos(orderedIds: string[]): Promise<void> {
+export interface DesktopRepoOrderInput {
+  id: string;
+  remoteUrlHash: string | null;
+}
+
+export interface DesktopRepoOrderResponse {
+  updated: number;
+  updatedIds: string[];
+  notPersistedIds: string[];
+}
+
+export async function reorderDesktopRepos(
+  orderedRepos: DesktopRepoOrderInput[],
+): Promise<DesktopRepoOrderResponse> {
   if (clientHandlersForTests?.reorderRepos) {
-    await clientHandlersForTests.reorderRepos(orderedIds);
-    return;
+    await clientHandlersForTests.reorderRepos(orderedRepos);
+    return {
+      updated: orderedRepos.length,
+      updatedIds: orderedRepos.map((repo) => repo.id),
+      notPersistedIds: [],
+    };
   }
-  await requestJson<{ updated: number }>("/v1/repos/actions/reorder", {
+  const response = await requestJson<{
+    updated: number;
+    updatedIds?: string[];
+    notPersistedIds?: string[];
+  }>("/v1/repos/actions/reorder", {
     method: "POST",
-    body: { orderedIds },
+    // orderedIds keeps the request compatible with a server from before
+    // remote-only persistence; current servers prefer the richer descriptors.
+    body: { orderedIds: orderedRepos.map((repo) => repo.id), orderedRepos },
   });
+  return {
+    updated: response.updated,
+    updatedIds: response.updatedIds ?? [],
+    notPersistedIds: response.notPersistedIds ?? [],
+  };
 }
 
 export interface PatchDesktopTaskInput {

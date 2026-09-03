@@ -1,4 +1,17 @@
 use super::{Db, NewRepo, Repo, SnapshotRepo};
+use rusqlite::OptionalExtension;
+
+#[derive(Debug)]
+pub(crate) struct RepoOrderInput<'a> {
+    pub id: &'a str,
+    pub remote_url_hash: Option<&'a str>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ReorderReposResult {
+    pub updated_ids: Vec<String>,
+    pub not_persisted_ids: Vec<String>,
+}
 
 impl Db {
     pub fn list_repo_remote_urls(
@@ -164,13 +177,65 @@ impl Db {
         Ok(())
     }
 
-    pub fn reorder_repos(&self, ordered_ids: &[String]) -> Result<(), rusqlite::Error> {
-        for (index, id) in ordered_ids.iter().enumerate() {
-            self.conn.execute(
-                "UPDATE repo SET sort_order = ? WHERE id = ?",
-                (index as i64, id),
-            )?;
+    pub(crate) fn reorder_repos(
+        &self,
+        ordered_repos: &[RepoOrderInput<'_>],
+    ) -> Result<ReorderReposResult, rusqlite::Error> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let mut result = ReorderReposResult {
+            updated_ids: Vec::new(),
+            not_persisted_ids: Vec::new(),
+        };
+
+        for (index, repo) in ordered_repos.iter().enumerate() {
+            let sort_order = index as i64;
+            let local_remote_url_hash = transaction
+                .query_row(
+                    "SELECT remote_url_hash FROM repo WHERE id = ?1",
+                    [repo.id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()?;
+
+            if let Some(local_remote_url_hash) = local_remote_url_hash {
+                transaction.execute(
+                    "UPDATE repo SET sort_order = ?1 WHERE id = ?2",
+                    (sort_order, repo.id),
+                )?;
+                if let Some(remote_url_hash) = local_remote_url_hash
+                    .as_deref()
+                    .filter(|hash| !hash.is_empty())
+                    .or_else(|| repo.remote_url_hash.filter(|hash| !hash.is_empty()))
+                {
+                    upsert_repo_sidebar_order(&transaction, remote_url_hash, sort_order)?;
+                }
+                result.updated_ids.push(repo.id.to_string());
+                continue;
+            }
+
+            if let Some(remote_url_hash) = repo.remote_url_hash.filter(|hash| !hash.is_empty()) {
+                upsert_repo_sidebar_order(&transaction, remote_url_hash, sort_order)?;
+                result.updated_ids.push(repo.id.to_string());
+            } else {
+                result.not_persisted_ids.push(repo.id.to_string());
+            }
         }
-        Ok(())
+
+        transaction.commit()?;
+        Ok(result)
     }
+}
+
+fn upsert_repo_sidebar_order(
+    transaction: &rusqlite::Transaction<'_>,
+    remote_url_hash: &str,
+    sort_order: i64,
+) -> Result<(), rusqlite::Error> {
+    transaction.execute(
+        "INSERT INTO repo_sidebar_order (remote_url_hash, sort_order)
+         VALUES (?1, ?2)
+         ON CONFLICT(remote_url_hash) DO UPDATE SET sort_order = excluded.sort_order",
+        (remote_url_hash, sort_order),
+    )?;
+    Ok(())
 }

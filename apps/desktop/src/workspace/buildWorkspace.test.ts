@@ -64,6 +64,67 @@ function emptySnapshot() {
 }
 
 describe("buildWorkspace", () => {
+  it("interleaves remote-only repos by durable hash order and preserves it after local import", () => {
+    const remoteRepo = repo({
+      id: "cloud:repo-remote",
+      path: "cloud",
+      name: "remote",
+      remote_url_hash: "hash-remote",
+      sort_order: 7,
+    });
+    const snapshots = {
+      cloudSnapshot: {
+        repos: [remoteRepo],
+        items: [],
+        terminalRefs: {},
+        blockedByTaskIds: {},
+        transferMachines: [],
+      },
+      lanSnapshot: {
+        repos: [],
+        items: [],
+        terminalRefs: {},
+        blockedByTaskIds: {},
+        transferMachines: [],
+      },
+    };
+
+    const remoteOnly = buildWorkspace({
+      localRepos: [
+        { repo: repo({ id: "repo-first", sort_order: 0 }), remoteUrlHash: null },
+        { repo: repo({ id: "repo-last", sort_order: 2 }), remoteUrlHash: null },
+      ],
+      localItems: [],
+      ...snapshots,
+      repoSidebarOrder: new Map([["hash-remote", 1]]),
+    });
+    expect(remoteOnly.repos.map((entry) => [entry.key, entry.sortOrder])).toEqual([
+      ["repo-first", 0],
+      ["cloud:repo-remote", 1],
+      ["repo-last", 2],
+    ]);
+
+    const imported = buildWorkspace({
+      localRepos: [
+        { repo: repo({ id: "repo-first", sort_order: 0 }), remoteUrlHash: null },
+        {
+          repo: repo({ id: "repo-imported", sort_order: 1, remote_url_hash: "hash-remote" }),
+          remoteUrlHash: "hash-remote",
+        },
+        { repo: repo({ id: "repo-last", sort_order: 2 }), remoteUrlHash: null },
+      ],
+      localItems: [],
+      ...snapshots,
+      repoSidebarOrder: new Map([["hash-remote", 1]]),
+    });
+    expect(imported.repos.map((entry) => [entry.key, entry.sortOrder])).toEqual([
+      ["repo-first", 0],
+      ["repo-imported", 1],
+      ["repo-last", 2],
+    ]);
+    expect(imported.repos[1]?.source).toBe("mixed");
+  });
+
   it("deduplicates equally fresh remote blocker ids across cloud and LAN sources", () => {
     const cloudItem = item({
       id: "cloud:repo-remote:blocked-owner",

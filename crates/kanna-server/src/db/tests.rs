@@ -237,10 +237,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(
-        latest_migration,
-        "058_queued_task_input_session_incarnation"
-    );
+    assert_eq!(latest_migration, "059_repo_sidebar_order");
     assert_eq!(
         index_columns(&db.conn, "idx_pipeline_item_parent_created_id"),
         vec!["parent_task_id", "created_at", "id"],
@@ -333,6 +330,44 @@ fn test_schema_keeps_parentage_index_in_parity_with_migrations() {
         vec!["parent_task_id", "created_at", "id"],
         "router and DB tests must exercise the indexed production query shape"
     );
+
+    drop(db);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn imported_repo_inherits_remote_only_sidebar_order() {
+    let path = Db::test_db_path("remote-sidebar-order-import");
+    let db = Db::open_for_tests(&path).expect("open test db");
+
+    let result = db
+        .reorder_repos(&[super::RepoOrderInput {
+            id: "cloud:remote-repo",
+            remote_url_hash: Some("remote-repo-hash"),
+        }])
+        .expect("persist remote-only position");
+    assert_eq!(result.updated_ids, vec!["cloud:remote-repo"]);
+
+    db.insert_repo(NewRepo {
+        id: "repo-imported",
+        path: "/tmp/repo-imported",
+        name: "imported",
+        default_branch: Some("main"),
+    })
+    .expect("insert imported repo");
+    db.patch_repo(
+        "repo-imported",
+        None,
+        None,
+        Some(Some("remote-repo-hash")),
+        None,
+    )
+    .expect("attach imported repo identity");
+
+    let snapshot = db.ui_snapshot().expect("load snapshot");
+    assert_eq!(snapshot.entries[0].repo.id, "repo-imported");
+    assert_eq!(snapshot.entries[0].repo.sort_order, 0);
+    assert_eq!(snapshot.repo_sidebar_order["remote-repo-hash"], 0);
 
     drop(db);
     let _ = std::fs::remove_file(path);

@@ -16,6 +16,7 @@ impl Db {
 
         let snapshot = UiSnapshot {
             entries,
+            repo_sidebar_order: self.list_repo_sidebar_order()?,
             task_blockers: self.list_snapshot_task_blockers()?,
             blocker_task_states: self.list_snapshot_blocker_task_states()?,
             worktree_paths: self.list_snapshot_worktree_paths()?,
@@ -27,11 +28,15 @@ impl Db {
 
     fn list_snapshot_repos(&self) -> Result<Vec<SnapshotRepo>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, path, name, default_branch, remote_url, remote_url_hash,
-                    hidden, sort_order, created_at, last_opened_at
+            "SELECT repo.id, repo.path, repo.name, repo.default_branch, repo.remote_url,
+                    repo.remote_url_hash, repo.hidden,
+                    COALESCE(repo_sidebar_order.sort_order, repo.sort_order) AS sidebar_sort_order,
+                    repo.created_at, repo.last_opened_at
              FROM repo
-             WHERE hidden = 0
-             ORDER BY sort_order ASC, created_at ASC",
+             LEFT JOIN repo_sidebar_order
+               ON repo_sidebar_order.remote_url_hash = repo.remote_url_hash
+             WHERE repo.hidden = 0
+             ORDER BY sidebar_sort_order ASC, repo.created_at ASC",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(SnapshotRepo {
@@ -47,6 +52,14 @@ impl Db {
                 last_opened_at: row.get(9)?,
             })
         })?;
+        rows.collect()
+    }
+
+    fn list_repo_sidebar_order(&self) -> Result<HashMap<String, i64>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT remote_url_hash, sort_order FROM repo_sidebar_order ORDER BY sort_order ASC",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
         rows.collect()
     }
 

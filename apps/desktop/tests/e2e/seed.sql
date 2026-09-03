@@ -19,6 +19,11 @@ CREATE TABLE IF NOT EXISTS repo (
   last_opened_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS repo_sidebar_order (
+  remote_url_hash TEXT PRIMARY KEY,
+  sort_order INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS pipeline_item (
   id TEXT PRIMARY KEY, repo_id TEXT NOT NULL REFERENCES repo(id) ON DELETE CASCADE,
   issue_number INTEGER, issue_title TEXT, prompt TEXT,
@@ -103,6 +108,7 @@ DELETE FROM terminal_session;
 DELETE FROM worktree;
 DELETE FROM agent_run;
 DELETE FROM pipeline_item;
+DELETE FROM repo_sidebar_order;
 DELETE FROM repo;
 DELETE FROM settings;
 
