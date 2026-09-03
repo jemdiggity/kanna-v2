@@ -205,10 +205,11 @@ fn seed_remote_repo(db: &Db, repo_id: &str) {
     db.insert_test_repo(repo_id, "Shared Repo").unwrap();
     db.patch_repo(
         repo_id,
-        None,
-        Some(Some("https://example.com/acme/shared.git")),
-        Some(Some("shared-remote-hash")),
-        None,
+        crate::db::RepoPatch {
+            remote_url: Some(Some("https://example.com/acme/shared.git")),
+            remote_url_hash: Some(Some("shared-remote-hash")),
+            ..Default::default()
+        },
     )
     .unwrap();
 }
@@ -491,10 +492,11 @@ async fn signal_agent_concurrent_first_signal_creates_one_account_wide_task() {
                 .unwrap();
                 db.patch_repo(
                     "repo-shared",
-                    None,
-                    Some(Some("https://example.com/acme/shared.git")),
-                    Some(Some("shared-race-hash")),
-                    None,
+                    crate::db::RepoPatch {
+                        remote_url: Some(Some("https://example.com/acme/shared.git")),
+                        remote_url_hash: Some(Some("shared-race-hash")),
+                        ..Default::default()
+                    },
                 )
                 .unwrap();
             });
