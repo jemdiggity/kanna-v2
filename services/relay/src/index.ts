@@ -848,7 +848,6 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         deviceId?: unknown;
         command?: unknown;
         args?: unknown;
-        dryRun?: unknown;
       } | null = null;
       try {
         publication = JSON.parse(data) as {
@@ -859,7 +858,6 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
           deviceId?: unknown;
           command?: unknown;
           args?: unknown;
-          dryRun?: unknown;
         };
       } catch {
         // Non-publication messages retain the router's existing behavior.
