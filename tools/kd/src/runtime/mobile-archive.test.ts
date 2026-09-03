@@ -506,6 +506,31 @@ describe("kd mobile archive", () => {
           ]);
         },
         expected: "bundleId"
+      },
+      {
+        createTag: async (fixture) => {
+          const tree = await runGit(fixture.repoRoot, ["rev-parse", `${fixture.commit}^{tree}`]);
+          const differentCommit = await runGit(fixture.repoRoot, [
+            "commit-tree",
+            tree,
+            "-p",
+            fixture.commit,
+            "-m",
+            "different tag target"
+          ]);
+          await runGit(fixture.repoRoot, [
+            "tag",
+            "-a",
+            tag,
+            differentCommit,
+            "-m",
+            existingProvenanceRecord({
+              commit: fixture.commit,
+              shortCommit: fixture.commit.slice(0, 12)
+            })
+          ]);
+        },
+        expected: "points to commit"
       }
     ];
 

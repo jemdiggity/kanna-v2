@@ -87,9 +87,11 @@ Its JSON message records the requested ref, full and short commit, marketing
 version, build number, runtime version, bundle id, and archive timestamp. This
 git tag is the durable archive-time ledger; `.build/` output is disposable.
 Inspect it with `git show mobile-archive-v<version>-<build>`. Reusing the same
-version/build at another commit is refused. `kd mobile publish` later adds its
-separate `mobile-v<version>-<build>` tag with upload, verification, and App
-Store Connect identifiers.
+version/build at another commit is refused: both the annotated tag's peeled
+Git target and the commit in its JSON message must equal the requested archive
+commit. `kd mobile publish` later adds its separate
+`mobile-v<version>-<build>` tag with upload, verification, and App Store
+Connect identifiers.
 
 ## GCS Layout
 

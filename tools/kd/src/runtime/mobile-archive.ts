@@ -110,6 +110,28 @@ async function recordArchiveProvenance(input: {
           "Use a new build number; provenance tags are immutable."
       };
     }
+    const existingTarget = await input.runner.run(
+      "git",
+      ["rev-parse", "--verify", "--quiet", `refs/tags/${tag}^{commit}`],
+      { cwd: input.repoRoot, env: input.env }
+    );
+    if (existingTarget.exitCode !== 0) {
+      return {
+        ok: false,
+        message:
+          `Archive provenance tag ${tag} exists but its target commit could not be read. ` +
+          "Use a new build number; provenance tags are immutable."
+      };
+    }
+    if (existingTarget.stdout.trim() !== input.record.commit) {
+      return {
+        ok: false,
+        message:
+          `Archive provenance tag ${tag} points to commit ${JSON.stringify(existingTarget.stdout.trim())}, ` +
+          `expected ${JSON.stringify(input.record.commit)}. ` +
+          "Use a new build number; provenance tags are immutable."
+      };
+    }
     const existingContents = await input.runner.run(
       "git",
       ["for-each-ref", "--format=%(contents)", `refs/tags/${tag}`],
