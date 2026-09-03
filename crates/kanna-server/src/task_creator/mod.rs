@@ -599,11 +599,11 @@ pub(crate) fn prepare_rerun_stage_for_api(
         .unwrap_or_default();
     let agent_type = resolve_agent_type(source_task.agent_type.as_deref(), provider)?;
     if !std::path::Path::new(&worktree_path).is_dir() {
-        let start_point = source_task
-            .base_ref
-            .clone()
-            .or_else(|| fetch_start_point(&repo.path, repo.default_branch.as_deref()));
-        create_worktree(&repo.path, branch, &worktree_path, start_point.as_deref())?;
+        let start_point = match source_task.base_ref.clone() {
+            Some(base_ref) => base_ref,
+            None => fetch_start_point(&repo.path, repo.default_branch.as_deref())?,
+        };
+        create_worktree(&repo.path, branch, &worktree_path, Some(&start_point))?;
         db.upsert_worktree(&format!("wt-{task_id}"), task_id, &worktree_path, branch)
             .map_err(|e| format!("db error: {}", e))?;
         db.upsert_terminal_session(
@@ -2265,8 +2265,14 @@ pub(crate) fn prepare_start_dormant_task_for_api(
     let base_ref = blocker_branches
         .first()
         .cloned()
-        .or_else(|| item.base_ref.clone())
-        .or_else(|| fetch_start_point(&repo.path, repo.default_branch.as_deref()));
+        .or_else(|| item.base_ref.clone());
+    let base_ref = match base_ref {
+        Some(base_ref) => Some(base_ref),
+        None => Some(fetch_start_point(
+            &repo.path,
+            repo.default_branch.as_deref(),
+        )?),
+    };
 
     let final_prompt = build_stage_prompt(
         agent
@@ -3237,10 +3243,11 @@ fn create_new_task_worktree(
     worktree_path: &str,
     base_ref: Option<&str>,
 ) -> Result<(), String> {
-    let start_point = base_ref
-        .map(str::to_string)
-        .or_else(|| fetch_start_point(&repo.path, repo.default_branch.as_deref()));
-    create_worktree(&repo.path, branch, worktree_path, start_point.as_deref())?;
+    let start_point = match base_ref {
+        Some(base_ref) => base_ref.to_string(),
+        None => fetch_start_point(&repo.path, repo.default_branch.as_deref())?,
+    };
+    create_worktree(&repo.path, branch, worktree_path, Some(&start_point))?;
     db.upsert_worktree(&format!("wt-{task_id}"), task_id, worktree_path, branch)
         .map_err(|e| format!("db error: {}", e))?;
     db.upsert_terminal_session(
