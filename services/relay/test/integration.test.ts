@@ -1165,7 +1165,7 @@ describe("Relay integration", () => {
     }
   });
 
-  it("explains a zero-target notification and resolves targets on a dry run without sending", async () => {
+  it("explains a zero-target notification and resolves targets on a probe without sending", async () => {
     const pushDevicesRef = testFirestore.collection(
       `users/${TEST_USER_ID}/pushDevices`,
     );
@@ -1176,14 +1176,13 @@ describe("Relay integration", () => {
       desktop_id: SECRET_DESKTOP_ID,
       desktop_secret: SECRET_DESKTOP_SECRET,
     });
-    const publish = async (id: string, dryRun = false) => {
+    const publish = async (id: string, probe = false) => {
       const ack = waitForMessage(ws, (message) =>
         message.type === "mobile_notification_ack" && message.id === id);
       ws.send(JSON.stringify({
-        type: "mobile_notification_publish",
+        type: probe ? "mobile_notification_probe" : "mobile_notification_publish",
         id,
-        notification: { title: "Blocked", body: "Needs a decision." },
-        ...(dryRun ? { dryRun: true } : {}),
+        ...(!probe ? { notification: { title: "Blocked", body: "Needs a decision." } } : {}),
       }));
       return ack;
     };
@@ -1204,15 +1203,15 @@ describe("Relay integration", () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ idToken, deviceId, deviceToken, registrationId: "reg-1" }),
       })).status).toBe(200);
-      // The dry run resolves the registered device without sending; the
+      // The probe resolves the registered device without sending; the
       // emulator environment has no FCM credentials, so a real send here
       // would have failed the whole call instead of reporting a target.
-      const dryRun = await publish("explain-dry-run", true);
-      expect(dryRun).toMatchObject({
+      const probe = await publish("explain-probe", true);
+      expect(probe).toMatchObject({
         ok: true,
         delivery: { acceptedCount: 0, failedCount: 0, targetedDeviceCount: 1 },
       });
-      expect((dryRun.delivery as Record<string, unknown>).noDevicesReason).toBeUndefined();
+      expect((probe.delivery as Record<string, unknown>).noDevicesReason).toBeUndefined();
 
       expect((await fetch(relayHttpUrl("/push/unregister"), {
         method: "POST",

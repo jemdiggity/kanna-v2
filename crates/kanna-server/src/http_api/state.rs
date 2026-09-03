@@ -51,8 +51,8 @@ pub struct AppState {
     pub(super) aggregate_task_event_waits:
         Arc<StdMutex<crate::http_api::task_events::AggregateWaitRegistry>>,
     /// Version of the relay's `mobileNotifications` capability on the live
-    /// session; `0` while no session offers it. Version 2 adds dry-run target
-    /// resolution (the push-registration probe).
+    /// session; `0` while no session offers it. Version 2 adds the distinct
+    /// push-registration probe message.
     relay_mobile_notifications_version: Arc<AtomicU64>,
     mobile_notification_tx: mpsc::Sender<MobileNotificationRequest>,
     mobile_notification_rx: Arc<StdMutex<Option<mpsc::Receiver<MobileNotificationRequest>>>>,
@@ -719,10 +719,9 @@ impl AppState {
             >= 1
     }
 
-    /// Whether the live relay session resolves targets on a `dryRun` publish
-    /// instead of sending it. A relay that predates the flag would deliver the
-    /// probe as a real notification, so the probe is refused without this.
-    pub(crate) fn mobile_notification_dry_run_supported(&self) -> bool {
+    /// Whether the live relay session supports the distinct registration
+    /// probe message. The request is refused without this advertised contract.
+    pub(crate) fn mobile_notification_probe_supported(&self) -> bool {
         self.relay_mobile_notifications_version
             .load(Ordering::Acquire)
             >= 2

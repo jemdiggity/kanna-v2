@@ -203,8 +203,8 @@ pub struct MobileNotificationPayload {
     /// result without sending anything or spending rate-limit budget. This is
     /// how the desktop learns whether the signed-in account currently has a
     /// registered push device, through the one code path that decides it.
-    /// Carried on the publish message itself (`dryRun`), not inside the
-    /// notification, so it is never serialized here.
+    /// Encoded as the distinct `mobile_notification_probe` wire message, so it
+    /// is never serialized as part of this notification payload.
     #[serde(skip)]
     pub dry_run: bool,
 }
@@ -311,11 +311,12 @@ pub enum RelayMessage {
     MobileNotificationPublish {
         id: String,
         notification: MobileNotificationPayload,
-        /// Resolve targets without sending; requires relay capability
-        /// `mobileNotifications.version >= 2`.
-        #[serde(rename = "dryRun", default, skip_serializing_if = "std::ops::Not::not")]
-        dry_run: bool,
     },
+    /// Resolve notification targets without sending. Requires relay
+    /// capability `mobileNotifications.version >= 2`; its distinct type keeps
+    /// the operation safe even if a probe reaches an older relay.
+    #[serde(rename = "mobile_notification_probe")]
+    MobileNotificationProbe { id: String },
     #[serde(rename = "mobile_notification_ack")]
     MobileNotificationAck {
         id: String,

@@ -12,8 +12,8 @@ const MAX_TITLE_CHARS: usize = 200;
 const MAX_BODY_CHARS: usize = 2_000;
 const MAX_TASK_ID_CHARS: usize = 256;
 
-/// Placeholder content for a dry-run publish. The relay validates the shape of
-/// every publish and ignores the content on a dry run; nothing is sent.
+/// Internal placeholder content for the queue payload. Probe requests are
+/// serialized as `mobile_notification_probe`, without this notification.
 const REGISTRATION_PROBE_TITLE: &str = "Kanna";
 const REGISTRATION_PROBE_BODY: &str = "push registration probe";
 

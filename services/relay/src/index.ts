@@ -65,11 +65,11 @@ import {
 import { MAX_REGISTRATION_ID_LENGTH } from "./pushDevices.js";
 
 /**
- * Version 1: publish + ack. Version 2: publishes carry `dryRun`, which
- * resolves targets and explains a zero-target result without sending, and
- * deliveries report `targetedDeviceCount` / `noDevicesReason`. kanna-server
- * refuses to send a dry run to a relay below 2, because an older relay would
- * deliver the probe as a real push.
+ * Version 1: publish + ack. Version 2: the distinct
+ * `mobile_notification_probe` message resolves targets and explains a
+ * zero-target result without sending, and deliveries report
+ * `targetedDeviceCount` / `noDevicesReason`. Keeping the probe out of the
+ * publish message means an older relay can never mistake it for a real send.
  */
 const MOBILE_NOTIFICATIONS_CAPABILITY_VERSION = 2;
 import {
@@ -1008,7 +1008,10 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         }
         return;
       }
-      if (publication?.type === "mobile_notification_publish") {
+      if (
+        publication?.type === "mobile_notification_publish"
+        || publication?.type === "mobile_notification_probe"
+      ) {
         const id = typeof publication.id === "string" ? publication.id : "";
         const sendAck = (
           ok: boolean,
@@ -1044,18 +1047,20 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
           ws.close(4005, "Authentication revoked");
           return;
         }
-        let notification;
-        try {
-          notification = parseMobileNotification(publication.notification);
-        } catch {
-          sendAck(false, undefined, "mobile notification is malformed or oversized");
-          return;
+        // A probe resolves the same targets a real delivery would and explains
+        // a zero-target result, without sending or spending rate-limit budget.
+        // It has its own wire type so an older relay cannot interpret it as a
+        // real notification even if capability negotiation regresses.
+        const dryRun = publication.type === "mobile_notification_probe";
+        let notification = { title: "Kanna", body: "push registration probe" };
+        if (!dryRun) {
+          try {
+            notification = parseMobileNotification(publication.notification);
+          } catch {
+            sendAck(false, undefined, "mobile notification is malformed or oversized");
+            return;
+          }
         }
-        // A dry run resolves the same targets a real delivery would and
-        // explains a zero-target result, without sending or spending
-        // rate-limit budget. It is how a desktop asks "is anything registered
-        // for this account right now?" through the one path that decides it.
-        const dryRun = publication.dryRun === true;
         if (principalKind === "anonymousDesktop") {
           if (!anonymousPubKey) {
             sendAck(false, undefined, "anonymous desktop identity is unavailable");

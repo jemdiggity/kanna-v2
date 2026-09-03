@@ -32,7 +32,7 @@ export interface MobileNotificationDelivery {
   /**
    * Distinct device tokens the delivery resolved. Reported for every
    * delivery so a caller can tell "sent to zero" from "sent to some"; it is
-   * the whole answer of a `dryRun` publish, which resolves targets without
+   * the whole answer of a registration probe, which resolves targets without
    * sending.
    */
   targetedDeviceCount: number;
@@ -108,7 +108,7 @@ export async function sendMobileNotification(input: {
     const noDevicesReason = describeNoPushDevices(snapshot.docs.map((doc) => doc.data()));
     console.warn(
       `[push] No mobile push device targeted for desktop ${input.desktopId}`
-      + ` (${noDevicesReason.code}${input.dryRun ? ", dry run" : ""})`,
+      + ` (${noDevicesReason.code}${input.dryRun ? ", probe" : ""})`,
     );
     return {
       acceptedCount: 0,

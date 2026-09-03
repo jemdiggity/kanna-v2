@@ -337,9 +337,8 @@ async fn run_relay_loop_with_timing(
                         continue;
                     }
                     if request.notification.dry_run
-                        && !http_state.mobile_notification_dry_run_supported()
+                        && !http_state.mobile_notification_probe_supported()
                     {
-                        // An older relay would send the probe as a real push.
                         let _ = request.response.send(Err(
                             "relay does not support push registration probes; upgrade the relay"
                                 .to_string(),
@@ -361,10 +360,13 @@ async fn run_relay_loop_with_timing(
                             response: request.response,
                         },
                     );
-                    let message = RelayMessage::MobileNotificationPublish {
-                        id: id.clone(),
-                        dry_run: request.notification.dry_run,
-                        notification: request.notification,
+                    let message = if request.notification.dry_run {
+                        RelayMessage::MobileNotificationProbe { id: id.clone() }
+                    } else {
+                        RelayMessage::MobileNotificationPublish {
+                            id: id.clone(),
+                            notification: request.notification,
+                        }
                     };
                     if let Err(error) = send_relay_response_message(&sink, message).await {
                         if let Some(pending) = pending_mobile_notifications.remove(&id) {
@@ -1160,7 +1162,6 @@ async fn run_anonymous_push_loop(
             next_id = next_id.wrapping_add(1).max(1);
             let message = RelayMessage::MobileNotificationPublish {
                 id: id.clone(),
-                dry_run: false,
                 notification: request.notification,
             };
             if let Err(error) = sink
@@ -2100,9 +2101,9 @@ mod tests {
 
     /// Relay stand-in for the push-registration probe tests: authenticates
     /// with the given `mobileNotifications` capability version, then answers
-    /// each publish from `acks` in order. A publish that arrives once `acks`
-    /// is exhausted fails the test, which is how the version-1 case proves the
-    /// probe was never sent.
+    /// each notification publish or probe from `acks` in order. A message that
+    /// arrives once `acks` is exhausted fails the test, which is how the
+    /// version-1 case proves the probe was never sent.
     fn spawn_probe_relay_stand_in(
         relay_listener: tokio::net::TcpListener,
         capability_version: u64,
@@ -2141,7 +2142,9 @@ mod tests {
                 };
                 let value: serde_json::Value =
                     serde_json::from_str(&text).expect("parse relay message");
-                if value["type"] != "mobile_notification_publish" {
+                if value["type"] != "mobile_notification_publish"
+                    && value["type"] != "mobile_notification_probe"
+                {
                     continue;
                 }
                 let mut ack = acks.remove(0);
@@ -2194,7 +2197,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mobile_push_registration_probe_reads_dry_run_acks_and_notify_reports_reason() {
+    async fn mobile_push_registration_probe_reads_acks_and_notify_reports_reason() {
         use tokio::time::timeout;
 
         let _capture_guard = TEST_LOG_CAPTURE_GUARD
@@ -2262,7 +2265,7 @@ mod tests {
         tokio::pin!(relay_loop);
         let requests = async {
             timeout(Duration::from_secs(2), async {
-                while !state.mobile_notification_dry_run_supported() {
+                while !state.mobile_notification_probe_supported() {
                     tokio::task::yield_now().await;
                 }
             })
@@ -2303,13 +2306,9 @@ mod tests {
         let published = relay_server.await.expect("relay stand-in");
 
         assert_eq!(published.len(), 3);
-        assert_eq!(published[0]["dryRun"], true, "{:?}", published[0]);
-        assert_eq!(published[1]["dryRun"], true, "{:?}", published[1]);
-        assert!(
-            published[2].get("dryRun").is_none(),
-            "a real notification must not carry dryRun: {:?}",
-            published[2]
-        );
+        assert_eq!(published[0]["type"], "mobile_notification_probe");
+        assert_eq!(published[1]["type"], "mobile_notification_probe");
+        assert_eq!(published[2]["type"], "mobile_notification_publish");
         assert_eq!(published[2]["notification"]["taskId"], "7fce7adf");
 
         assert_eq!(missing.status, 200, "{missing:?}");
@@ -2405,7 +2404,7 @@ mod tests {
             })
             .await
             .expect("relay capability was not advertised");
-            assert!(!state.mobile_notification_dry_run_supported());
+            assert!(!state.mobile_notification_probe_supported());
             let probe = http_api::dispatch_authenticated_http_invoke(
                 Arc::clone(&state),
                 "GET",

@@ -413,7 +413,7 @@ export async function publishAnonymousPush(input: {
     );
     console.warn(
       `[push] No mobile push device targeted for desktop ${input.desktopId ?? desktopKeyHash}`
-      + ` (${noDevicesReason.code}${dryRun ? ", dry run" : ""})`,
+      + ` (${noDevicesReason.code}${dryRun ? ", probe" : ""})`,
     );
     return {
       acceptedCount: 0,

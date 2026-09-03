@@ -1467,16 +1467,18 @@ remembered as registered, and a `401` forces a fresh id token on the retry.
 
 `GET /v1/mobile/notifications/registration` answers whether the signed-in
 account currently has a registered push device, for the desktop's Mobile
-Access panel. It is a `dryRun` publish: the relay resolves exactly the targets
+Access panel. It uses the distinct `mobile_notification_probe` relay message:
+the relay resolves exactly the targets
 a real `kanna_notify_mobile` would reach and explains a zero-target result,
 without sending, touching delivery watermarks, or spending anonymous rate-limit
 budget. The response is `status` (`registered`, `noRegisteredDevices`, or
 `unavailable`), `registeredDeviceCount`, and the same `noDevicesReason` on a
 zero result (`error` on `unavailable`). The relay advertises the dry run as
 `mobileNotifications.version` 2 in `auth_ok`; against a version-1 relay the
-server refuses the probe as `unavailable` rather than risk delivering it as a
-real push, and a signed-out desktop's lazily connected anonymous session also
-refuses it, because the probe is about the account.
+server refuses the probe as `unavailable`. The separate wire type also ensures
+an older relay cannot mistake a probe for a real push if capability negotiation
+regresses. A signed-out desktop's lazily connected anonymous session refuses
+it, because the probe is about the account.
 
 `kanna-server` logs every notification outcome — `accepted` with counts,
 `deliveryFailed` with the aggregate reasons, `noRegisteredDevices` with the

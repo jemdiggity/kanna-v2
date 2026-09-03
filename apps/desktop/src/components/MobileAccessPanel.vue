@@ -54,6 +54,13 @@ const pushRegistrationReason = computed(() => {
   return reason.message;
 });
 
+const pushRegistrationInstruction = computed(() => {
+  if (pushRegistrationTone.value !== "noRegisteredDevices") return "";
+  return pushRegistrationReason.value.toLocaleLowerCase().includes("open kanna on")
+    ? ""
+    : PUSH_REREGISTER_INSTRUCTION;
+});
+
 const statusLabel = computed(() => {
   if (props.serverStatus === "running") return "Online";
   if (props.serverStatus === "stopped") return "Offline";
@@ -149,10 +156,10 @@ onBeforeUnmount(() => {
           data-testid="mobile-access-push-reason"
         >{{ pushRegistrationReason }}</p>
         <p
-          v-if="pushRegistrationTone === 'noRegisteredDevices'"
+          v-if="pushRegistrationInstruction"
           class="push-instruction"
           data-testid="mobile-access-push-instruction"
-        >{{ PUSH_REREGISTER_INSTRUCTION }}</p>
+        >{{ pushRegistrationInstruction }}</p>
       </div>
       <button
         type="button"

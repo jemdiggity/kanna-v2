@@ -70,7 +70,7 @@ describe("MobileAccessPanel", () => {
           registeredDeviceCount: 0,
           noDevicesReason: {
             code: "unregistered",
-            message: "The mobile app unregistered the last push device at 2026-09-03T08:11:31.000Z.",
+            message: "The mobile app unregistered the last push device at 2026-09-03T08:11:31.000Z. Open Kanna on the phone while signed in to register again.",
             retiredAt: "2026-09-03T08:11:31.000Z",
           },
         },
@@ -82,8 +82,8 @@ describe("MobileAccessPanel", () => {
     expect(row.text()).toContain("No phone is registered for push notifications");
     expect(wrapper.get('[data-testid="mobile-access-push-reason"]').text())
       .toContain("unregistered the last push device at 2026-09-03T08:11:31.000Z");
-    expect(wrapper.get('[data-testid="mobile-access-push-instruction"]').text())
-      .toMatch(/open kanna on your phone/i);
+    expect(row.text().match(/Open Kanna/g)).toHaveLength(1);
+    expect(wrapper.find('[data-testid="mobile-access-push-instruction"]').exists()).toBe(false);
 
     await wrapper.get('[data-testid="mobile-access-push-refresh"]').trigger("click");
     expect(wrapper.emitted("refresh-push-registration")).toHaveLength(1);
