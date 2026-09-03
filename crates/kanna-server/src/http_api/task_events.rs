@@ -19,6 +19,11 @@
 //!   rewinds the global sequence: events at or below an acknowledged checkpoint
 //!   do not become eligible later, while events after it are included whenever
 //!   the child is in the parent scope at the next read.
+//! - `excludeTaskIds` is a filter over whichever scope was chosen, never a
+//!   scope: it drops those tasks' durable and synthetic rows but is not part
+//!   of any cursor, so a watcher may change it between calls. It exists so a
+//!   repo-scoped manager running inside a task session can keep its own
+//!   runtime edges out of the feed that wakes it.
 
 use super::lan_trust::AccountWideTaskEventAccess;
 use super::state::{AppState, TunneledHttpInvoke};
@@ -82,6 +87,11 @@ pub(super) struct TaskEventsQuery {
     /// for callers that already have the hash; aggregate repo-id waits resolve
     /// their local row to this value before contacting peers.
     repo_remote_url_hash: Option<String>,
+    /// Comma-separated task ids or branch names whose events are dropped from
+    /// the chosen scope. A watcher inside a task session passes its own id so
+    /// a repo-wide watch does not wake it with its own settled-runtime edges.
+    /// Unknown ids exclude nothing; they are never an error.
+    exclude_task_ids: Option<String>,
     timeout_secs: Option<u64>,
     limit: Option<i64>,
     /// Used by kanna-mcp's existing km1 fan-in so its native local sub-wait
@@ -129,6 +139,10 @@ enum AggregateMachineWaitError {
 }
 
 struct AggregateWaitSession {
+    /// Forwarded verbatim to every machine leg; each leg resolves the ids
+    /// against its own database. Not part of the cursor, so a resumed session
+    /// whose exclusions changed simply restarts its pending legs.
+    exclude_task_ids: Vec<String>,
     cursor: AggregateCursor,
     pending: tokio::task::JoinSet<AggregateWaitCompletion>,
     pending_machines: HashSet<String>,
@@ -610,6 +624,27 @@ fn resolve_scope(
     ))
 }
 
+/// Resolve `excludeTaskIds` to task ids. Branch names are accepted like every
+/// other task reference; a value that resolves to nothing is kept verbatim so
+/// excluding a task that no longer exists is a harmless no-op rather than a
+/// failed watch.
+fn resolve_exclusions(
+    db: &Db,
+    query: &TaskEventsQuery,
+) -> Result<Vec<String>, (axum::http::StatusCode, String)> {
+    let mut resolved = Vec::new();
+    for raw in normalized_values(query.exclude_task_ids.as_deref()) {
+        let task_id = db
+            .resolve_pipeline_item_id(&raw)
+            .map_err(db_error)?
+            .unwrap_or(raw);
+        if !resolved.contains(&task_id) {
+            resolved.push(task_id);
+        }
+    }
+    Ok(resolved)
+}
+
 struct EventBatch {
     events: Vec<Value>,
     cursor: String,
@@ -685,6 +720,7 @@ fn durable_cursor_from_wire(cursor: &str) -> Result<String, (axum::http::StatusC
 fn read_legacy_parent_batch_with_hook(
     db: &Db,
     parent_task_id: &str,
+    exclude_task_ids: &[String],
     legacy: &ParentTaskEventsCursorV1,
     limit: i64,
     after_membership_read: impl FnOnce(),
@@ -711,7 +747,8 @@ fn read_legacy_parent_batch_with_hook(
             {
                 return Ok((head_seq, Vec::new(), Vec::new(), false));
             }
-            let members = db.list_child_task_ids(parent_task_id)?;
+            let mut members = db.list_child_task_ids(parent_task_id)?;
+            members.retain(|member| !exclude_task_ids.contains(member));
             after_membership_read();
             let after_seq = legacy.event_seq.unwrap_or_else(|| {
                 members
@@ -814,10 +851,11 @@ fn read_legacy_parent_batch_with_hook(
 fn read_legacy_parent_batch(
     db: &Db,
     parent_task_id: &str,
+    exclude_task_ids: &[String],
     legacy: &ParentTaskEventsCursorV1,
     limit: i64,
 ) -> Result<EventBatch, (axum::http::StatusCode, String)> {
-    read_legacy_parent_batch_with_hook(db, parent_task_id, legacy, limit, || {})
+    read_legacy_parent_batch_with_hook(db, parent_task_id, exclude_task_ids, legacy, limit, || {})
 }
 
 #[cfg(test)]
@@ -836,6 +874,7 @@ pub(super) fn read_legacy_parent_batch_for_test(
     let batch = read_legacy_parent_batch_with_hook(
         db,
         parent_task_id,
+        &[],
         &legacy,
         limit,
         after_membership_read,
@@ -851,6 +890,7 @@ pub(super) fn read_legacy_parent_batch_for_test(
 fn read_sequence_batch(
     db: &Db,
     scope: &TaskEventScope,
+    exclude_task_ids: &[String],
     after_seq: i64,
     limit: i64,
     parent_task_id: Option<&str>,
@@ -860,7 +900,13 @@ fn read_sequence_batch(
     let (head_seq, mut events) = db
         .with_read_transaction(|db| {
             let head_seq = db.latest_task_event_seq()?;
-            let events = db.list_task_events(scope, after_seq, head_seq, limit + 1)?;
+            let events = db.list_task_events_excluding(
+                scope,
+                exclude_task_ids,
+                after_seq,
+                head_seq,
+                limit + 1,
+            )?;
             Ok((head_seq, events))
         })
         .map_err(db_error)?;
@@ -894,6 +940,7 @@ fn read_sequence_batch(
 fn read_batch(
     db_path: &str,
     scope: &TaskEventScope,
+    exclude_task_ids: &[String],
     cursor: Option<&TaskEventsCursor>,
     limit: i64,
 ) -> Result<EventBatch, (axum::http::StatusCode, String)> {
@@ -901,7 +948,7 @@ fn read_batch(
     if let TaskEventScope::Children(parent_task_id) = scope {
         return match cursor {
             Some(TaskEventsCursor::ParentV1(legacy)) => {
-                read_legacy_parent_batch(&db, parent_task_id, legacy, limit)
+                read_legacy_parent_batch(&db, parent_task_id, exclude_task_ids, legacy, limit)
             }
             Some(TaskEventsCursor::ParentV3(parent_cursor)) => {
                 if parent_cursor.parent_task_id != *parent_task_id {
@@ -913,6 +960,7 @@ fn read_batch(
                 read_sequence_batch(
                     &db,
                     scope,
+                    exclude_task_ids,
                     parent_cursor.event_seq,
                     limit,
                     Some(parent_task_id),
@@ -920,10 +968,17 @@ fn read_batch(
             }
             // Numeric parent cursors were returned by the first deployed
             // implementation. Their global watermark maps exactly to p3.
-            Some(TaskEventsCursor::Sequence(seq)) => {
-                read_sequence_batch(&db, scope, *seq, limit, Some(parent_task_id))
+            Some(TaskEventsCursor::Sequence(seq)) => read_sequence_batch(
+                &db,
+                scope,
+                exclude_task_ids,
+                *seq,
+                limit,
+                Some(parent_task_id),
+            ),
+            None => {
+                read_sequence_batch(&db, scope, exclude_task_ids, 0, limit, Some(parent_task_id))
             }
-            None => read_sequence_batch(&db, scope, 0, limit, Some(parent_task_id)),
         };
     }
 
@@ -937,7 +992,7 @@ fn read_batch(
         }
         None => 0,
     };
-    read_sequence_batch(&db, scope, after_seq, limit, None)
+    read_sequence_batch(&db, scope, exclude_task_ids, after_seq, limit, None)
 }
 
 const EVENT_SUMMARY_SNIPPET_CHARS: usize = 280;
@@ -1035,6 +1090,7 @@ fn enrich_event_batch(
 fn append_current_activity_snapshots(
     db_path: &str,
     scope: &TaskEventScope,
+    exclude_task_ids: &[String],
     batch: &mut EventBatch,
     limit: i64,
     progress: &mut CurrentActivityProgress,
@@ -1046,6 +1102,7 @@ fn append_current_activity_snapshots(
     let db = Db::open(db_path)?;
     let mut rows = db.list_non_busy_task_runtime_states(
         scope,
+        exclude_task_ids,
         progress.settled_after_task_id.as_deref(),
         remaining.saturating_add(1) as i64,
     )?;
@@ -1108,14 +1165,17 @@ async fn wait_local_task_events(
     );
 
     let db_path = state.config().db_path.clone();
-    let scope = {
+    let (scope, exclude_task_ids) = {
         let db = Db::open(&db_path).map_err(|e| {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 format!("db error: {e}"),
             )
         })?;
-        resolve_scope(&db, &query, tolerate_missing_tasks)?
+        (
+            resolve_scope(&db, &query, tolerate_missing_tasks)?,
+            resolve_exclusions(&db, &query)?,
+        )
     };
     let from_now = starts_at_current_tail(&query)?;
     if cursor.is_none() && from_now {
@@ -1141,11 +1201,12 @@ async fn wait_local_task_events(
         // wake this call, not wait for the next re-check.
         let mut appended = Box::pin(crate::db::task_event_appended());
         appended.as_mut().enable();
-        let mut batch = read_batch(&db_path, &scope, cursor.as_ref(), limit)?;
+        let mut batch = read_batch(&db_path, &scope, &exclude_task_ids, cursor.as_ref(), limit)?;
         if query.include_current_activity {
             append_current_activity_snapshots(
                 &db_path,
                 &scope,
+                &exclude_task_ids,
                 &mut batch,
                 limit,
                 &mut current_progress,
@@ -1371,6 +1432,7 @@ fn resolve_aggregate_scope(
 
 fn local_query_for_aggregate(
     scope: &AggregateScope,
+    exclude_task_ids: &[String],
     cursor: Option<String>,
     timeout_secs: u64,
     limit: i64,
@@ -1384,6 +1446,7 @@ fn local_query_for_aggregate(
         local_only: true,
         include_current_activity,
         from: from_now.then(|| "now".to_string()),
+        exclude_task_ids: (!exclude_task_ids.is_empty()).then(|| exclude_task_ids.join(",")),
         ..TaskEventsQuery::default()
     };
     match scope {
@@ -1425,6 +1488,12 @@ fn aggregate_query_path(query: &TaskEventsQuery) -> String {
             encode_path_segment(remote_url_hash)
         ));
     }
+    if let Some(exclude_task_ids) = query.exclude_task_ids.as_deref() {
+        params.push(format!(
+            "excludeTaskIds={}",
+            encode_path_segment(exclude_task_ids)
+        ));
+    }
     if let Some(cursor) = query.cursor.as_deref() {
         params.push(format!("cursor={}", encode_path_segment(cursor)));
     }
@@ -1455,6 +1524,7 @@ fn spawn_aggregate_wait(
 ) -> Result<(), (axum::http::StatusCode, String)> {
     let query = local_query_for_aggregate(
         &session.cursor.scope,
+        &session.exclude_task_ids,
         session
             .cursor
             .cursors_by_machine
@@ -1701,6 +1771,7 @@ async fn wait_aggregate_task_events(
         .clamp(1, MAX_EVENT_LIMIT);
     let db = Db::open(&state.config().db_path).map_err(db_error)?;
     let requested_scope = resolve_aggregate_scope(&db, &query)?;
+    let exclude_task_ids = normalized_values(query.exclude_task_ids.as_deref());
     let supplied_cursor = query.cursor.as_deref();
     let decoded = supplied_cursor
         .filter(|cursor| cursor.starts_with(AGGREGATE_CURSOR_PREFIX))
@@ -1760,6 +1831,7 @@ async fn wait_aggregate_task_events(
             .as_ref()
             .and_then(|key| registry.sessions.remove(key))
             .unwrap_or_else(|| AggregateWaitSession {
+                exclude_task_ids: exclude_task_ids.clone(),
                 cursor,
                 pending: tokio::task::JoinSet::new(),
                 pending_machines: HashSet::new(),
@@ -1768,10 +1840,16 @@ async fn wait_aggregate_task_events(
                 from_now,
             })
     };
-    if session.include_current_activity != query.include_current_activity {
-        session.pending.abort_all();
+    if session.include_current_activity != query.include_current_activity
+        || session.exclude_task_ids != exclude_task_ids
+    {
+        // Inherited legs were started under the old filter. A fresh JoinSet
+        // aborts them on drop; joining them here would surface their
+        // cancellation as a failed wait.
+        session.pending = tokio::task::JoinSet::new();
         session.pending_machines.clear();
         session.include_current_activity = query.include_current_activity;
+        session.exclude_task_ids = exclude_task_ids;
     }
     let mut machine_errors = Vec::new();
     let mut active_machines = HashSet::from([local_machine_id.clone()]);
@@ -2014,6 +2092,7 @@ mod aggregate_wait_registry_tests {
         });
         tokio::task::yield_now().await;
         AggregateWaitSession {
+            exclude_task_ids: Vec::new(),
             cursor: AggregateCursor {
                 local_machine_id: machine_id.clone(),
                 scope: AggregateScope::Tasks {

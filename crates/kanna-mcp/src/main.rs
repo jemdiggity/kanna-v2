@@ -1,10 +1,10 @@
 use base64::Engine;
 use clap::{Parser, Subcommand};
 use kanna_tool_catalog::{
-    args_with_repo_context, clamp_wait_timeout_secs, encode_path_segment, load_catalog,
-    repo_context_task_id, resolve_request, runtime_info_snapshot, task_value_matches_wait_until,
-    wait_resolved_result, wait_timeout_result, Catalog, Method, ResolvedRequest, ResponseKind,
-    RuntimeAdapterIdentity, WaitUntil, DEFAULT_WAIT_TIMEOUT_SECS,
+    args_with_repo_context, args_with_self_exclusion, clamp_wait_timeout_secs, encode_path_segment,
+    load_catalog, repo_context_task_id, resolve_request, runtime_info_snapshot,
+    task_value_matches_wait_until, wait_resolved_result, wait_timeout_result, Catalog, Method,
+    ResolvedRequest, ResponseKind, RuntimeAdapterIdentity, WaitUntil, DEFAULT_WAIT_TIMEOUT_SECS,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
@@ -1360,6 +1360,7 @@ async fn handle_mcp_tool_call(
         None => None,
     };
     args = args_with_repo_context(&args, current_task.as_ref())?;
+    args = args_with_self_exclusion(name, &args, task_id.as_deref())?;
     if prepare_wait_events_routing(
         name,
         &mut args,

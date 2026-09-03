@@ -349,6 +349,10 @@ pub enum ParamLoc {
     Query,
     Body,
     Routing,
+    /// Consumed by the calling adapter's policy layer (see
+    /// [`args_with_self_exclusion`]) and never serialized into the request.
+    /// Declared in the catalog so every client advertises and validates it.
+    Client,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -943,6 +947,7 @@ pub fn resolve_request(
                 let key = param.key.as_deref().unwrap_or(&param.name);
                 body.insert(key.to_string(), value);
             }
+            ParamLoc::Client => {}
             ParamLoc::Routing => {
                 if param.name != "machine_id" {
                     return Err(format!(
@@ -1062,6 +1067,83 @@ pub fn repo_context_task_id(
     }
 
     Ok(Some(task_id.to_string()))
+}
+
+/// The task whose events a repository-scoped wait drops so it does not wake
+/// itself, or `None` when no exclusion applies.
+///
+/// Self-exclusion is tool policy shared by every catalog client, so it lives
+/// here beside repository defaulting. It applies only when the wait is
+/// repository-scoped — an explicit `repo_id` / `repo_remote_url_hash`, or the
+/// task-session repository default — because an explicit `task_ids` list is
+/// already literal and a `parent_task_id` scope excludes the parent
+/// structurally. `include_self` turns the default off; explicit
+/// `exclude_task_ids` entries are never touched by either.
+pub fn task_event_self_exclusion(
+    explicit_task_scope: bool,
+    include_self: bool,
+    current_task_id: Option<&str>,
+) -> Option<String> {
+    if explicit_task_scope || include_self {
+        return None;
+    }
+    current_task_id
+        .map(str::trim)
+        .filter(|task_id| !task_id.is_empty())
+        .map(str::to_string)
+}
+
+/// Apply [`task_event_self_exclusion`] to `kanna_wait_events` arguments,
+/// appending the caller task to `exclude_task_ids` and consuming the
+/// client-only `include_self` flag. Every other tool passes through unchanged.
+pub fn args_with_self_exclusion(
+    tool_name: &str,
+    args: &Value,
+    current_task_id: Option<&str>,
+) -> Result<Value, String> {
+    if tool_name != "kanna_wait_events" {
+        return Ok(args.clone());
+    }
+    let mut resolved_args = args
+        .as_object()
+        .cloned()
+        .ok_or_else(|| "tool arguments must be a JSON object".to_string())?;
+    let include_self = match resolved_args.remove("include_self") {
+        Some(Value::Bool(include_self)) => include_self,
+        Some(Value::Null) | None => false,
+        Some(_) => return Err("include_self must be a boolean".to_string()),
+    };
+    // Match the server's scope resolution: empty task-id arrays and blank
+    // parent ids fall through to repository scope, so they must not disable
+    // the repository watch's default self-exclusion.
+    let explicit_task_ids = match resolved_args.get("task_ids") {
+        Some(Value::Null) | None => false,
+        Some(value) => string_array_value(value, "task_ids")?
+            .iter()
+            .any(|task_id| !task_id.trim().is_empty()),
+    };
+    let explicit_parent_scope = resolved_args
+        .get("parent_task_id")
+        .and_then(Value::as_str)
+        .is_some_and(|parent_task_id| !parent_task_id.trim().is_empty());
+    let explicit_task_scope = explicit_task_ids || explicit_parent_scope;
+    let Some(self_task_id) =
+        task_event_self_exclusion(explicit_task_scope, include_self, current_task_id)
+    else {
+        return Ok(Value::Object(resolved_args));
+    };
+    let mut exclude_task_ids = match resolved_args.get("exclude_task_ids") {
+        Some(Value::Null) | None => Vec::new(),
+        Some(value) => string_array_value(value, "exclude_task_ids")?,
+    };
+    if !exclude_task_ids.contains(&self_task_id) {
+        exclude_task_ids.push(self_task_id);
+    }
+    resolved_args.insert(
+        "exclude_task_ids".to_string(),
+        Value::Array(exclude_task_ids.into_iter().map(Value::String).collect()),
+    );
+    Ok(Value::Object(resolved_args))
 }
 
 /// Resolve a request after applying the caller task's repository context.

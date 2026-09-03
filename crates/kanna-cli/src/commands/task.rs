@@ -23,7 +23,7 @@ use crate::models::{
     TaskDetail, TaskInputRequest, TaskRenameRequest, TaskStatusRow, TaskSummary,
 };
 use crate::TaskCommands;
-use kanna_tool_catalog::{wait_resolved_result, wait_timeout_result};
+use kanna_tool_catalog::{task_event_self_exclusion, wait_resolved_result, wait_timeout_result};
 
 const WATCH_CURSOR_RECORD_TYPE: &str = "watch.cursor";
 
@@ -31,10 +31,48 @@ const WATCH_CURSOR_RECORD_TYPE: &str = "watch.cursor";
 pub(crate) struct TaskWatchOptions {
     pub(crate) task_ids: Vec<String>,
     pub(crate) repo_id: Option<String>,
+    /// Effective exclusions — see [`resolve_task_event_exclusions`].
+    pub(crate) exclude_task_ids: Vec<String>,
     pub(crate) cursor: Option<String>,
     pub(crate) all_events: bool,
     pub(crate) budget_secs: Option<u64>,
     pub(crate) follow: bool,
+}
+
+/// The typed CLI's application of the shared self-exclusion policy
+/// (`kanna_tool_catalog::task_event_self_exclusion`): explicit
+/// `--exclude-task-id` values always apply, and a repository-scoped wait from
+/// inside a task session (`KANNA_TASK_ID`) also drops the caller's own task
+/// unless `--include-self` was passed. The same rule the catalog applies to
+/// `kanna_wait_events`, so an agent on the CLI fallback is not woken by
+/// events the MCP tool would have filtered.
+pub(crate) fn resolve_task_event_exclusions(
+    explicit_exclusions: Vec<String>,
+    explicit_task_scope: bool,
+    include_self: bool,
+    current_task_id: Option<&str>,
+) -> Vec<String> {
+    let mut exclusions: Vec<String> = Vec::new();
+    for value in explicit_exclusions {
+        let value = value.trim().to_string();
+        if !value.is_empty() && !exclusions.contains(&value) {
+            exclusions.push(value);
+        }
+    }
+    if let Some(self_task_id) =
+        task_event_self_exclusion(explicit_task_scope, include_self, current_task_id)
+    {
+        if !exclusions.contains(&self_task_id) {
+            exclusions.push(self_task_id);
+        }
+    }
+    exclusions
+}
+
+fn current_task_id_from_env() -> Option<String> {
+    std::env::var("KANNA_TASK_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
 }
 
 fn run_finished_has_running_successor(event: &Value) -> bool {
@@ -121,6 +159,7 @@ pub(crate) async fn watch_task_events<W: Write>(
             parent_task_id: None,
             repo_id: options.repo_id.as_deref(),
             repo_remote_url_hash: None,
+            exclude_task_ids: &options.exclude_task_ids,
             local_only: false,
             include_current_activity: false,
             short_cursor: true,
@@ -813,6 +852,8 @@ pub(crate) async fn run(command: TaskCommands) {
             parent_task_id,
             repo_id,
             repo_remote_url_hash,
+            exclude_task_id,
+            include_self,
             local_only,
             include_current_activity,
             short_cursor,
@@ -823,11 +864,18 @@ pub(crate) async fn run(command: TaskCommands) {
             server_url,
         } => {
             let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+            let exclude_task_ids = resolve_task_event_exclusions(
+                exclude_task_id,
+                !task_id.is_empty() || parent_task_id.is_some(),
+                include_self,
+                current_task_id_from_env().as_deref(),
+            );
             let params = crate::api::TaskEventsParams {
                 task_ids: &task_id,
                 parent_task_id: parent_task_id.as_deref(),
                 repo_id: repo_id.as_deref(),
                 repo_remote_url_hash: repo_remote_url_hash.as_deref(),
+                exclude_task_ids: &exclude_task_ids,
                 local_only,
                 include_current_activity,
                 short_cursor,
@@ -850,6 +898,8 @@ pub(crate) async fn run(command: TaskCommands) {
         TaskCommands::Watch {
             task_id,
             repo_id,
+            exclude_task_id,
+            include_self,
             cursor,
             all_events,
             budget_secs,
@@ -857,9 +907,16 @@ pub(crate) async fn run(command: TaskCommands) {
             server_url,
         } => {
             let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+            let exclude_task_ids = resolve_task_event_exclusions(
+                exclude_task_id,
+                !task_id.is_empty(),
+                include_self,
+                current_task_id_from_env().as_deref(),
+            );
             let options = TaskWatchOptions {
                 task_ids: task_id,
                 repo_id,
+                exclude_task_ids,
                 cursor,
                 all_events,
                 budget_secs,

@@ -507,6 +507,7 @@ async fn level_triggered_activity_wait_returns_an_already_idle_task_immediately(
     assert_eq!(
         db.list_non_busy_task_runtime_states(
             &crate::db::TaskEventScope::Tasks(vec!["child-a".to_string(),]),
+            &[],
             None,
             10
         )
@@ -3980,4 +3981,248 @@ async fn create_rejects_the_retired_notify_target_parameter() {
         .await
         .expect("body");
     assert!(String::from_utf8_lossy(&body).contains("notifyTaskId has been removed"));
+}
+
+fn task_ids_of(body: &Value) -> Vec<String> {
+    body["events"]
+        .as_array()
+        .expect("events array")
+        .iter()
+        .map(|event| event["taskId"].as_str().expect("taskId").to_string())
+        .collect()
+}
+
+/// `excludeTaskIds` is how a repo-scoped manager keeps its own settled-runtime
+/// edges out of the feed that wakes it. It is a filter over the scope, not a
+/// scope: durable rows and synthetic settled rows are both dropped, branch
+/// names resolve like everywhere else, an unknown id excludes nothing, and a
+/// cursor issued under one exclusion list resumes under another.
+#[tokio::test]
+async fn repo_scope_exclusion_drops_named_tasks_without_becoming_a_scope() {
+    let (router, db_path) = events_router();
+    {
+        let db = Db::open(&db_path).expect("open db");
+        db.update_pipeline_item_stage("child-a", "review")
+            .expect("advance child-a");
+        db.update_pipeline_item_stage("child-b", "review")
+            .expect("advance child-b");
+        settle_runtime_tasks(&db, &["child-a", "child-b", "child-c"]);
+    }
+
+    let excluded = get_json_body(
+        &router,
+        "/v1/task-events?repoId=repo-events&localOnly=true&excludeTaskIds=child-a&includeCurrentActivity=true&timeoutSecs=0",
+    )
+    .await;
+    assert_eq!(excluded["waitOutcome"], "events");
+    assert!(
+        !task_ids_of(&excluded)
+            .iter()
+            .any(|task_id| task_id == "child-a"),
+        "{excluded:#?}"
+    );
+    assert!(event_pairs(&excluded).contains(&("child-b".to_string(), "stage.changed".to_string())));
+    let synthetic_task_ids = excluded["events"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .filter(|event| event["synthetic"] == true)
+        .map(|event| event["taskId"].as_str().expect("taskId").to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(synthetic_task_ids, vec!["child-b", "child-c"]);
+
+    let by_branch = get_json_body(
+        &router,
+        "/v1/task-events?repoId=repo-events&localOnly=true&excludeTaskIds=branch-child-a,%20branch-child-b&includeCurrentActivity=true&timeoutSecs=0",
+    )
+    .await;
+    let remaining = task_ids_of(&by_branch).into_iter().collect::<HashSet<_>>();
+    assert_eq!(remaining, HashSet::from(["child-c".to_string()]));
+
+    let unknown = get_json_body(
+        &router,
+        "/v1/task-events?repoId=repo-events&localOnly=true&excludeTaskIds=no-such-task&timeoutSecs=0",
+    )
+    .await;
+    assert!(event_pairs(&unknown).contains(&("child-a".to_string(), "stage.changed".to_string())));
+
+    // A cursor issued under an exclusion resumes without it, and vice versa.
+    // Excluded rows are consumed by the checkpoint, never deferred.
+    {
+        let db = Db::open(&db_path).expect("open db");
+        db.update_pipeline_item_stage("child-a", "pr")
+            .expect("advance child-a again");
+        db.update_pipeline_item_stage("child-b", "pr")
+            .expect("advance child-b again");
+    }
+    let resumed_without = get_json_body(
+        &router,
+        &format!(
+            "/v1/task-events?repoId=repo-events&localOnly=true&cursor={}&timeoutSecs=0",
+            cursor_of(&unknown)
+        ),
+    )
+    .await;
+    assert_eq!(
+        event_pairs(&resumed_without),
+        vec![
+            ("child-a".to_string(), "stage.changed".to_string()),
+            ("child-b".to_string(), "stage.changed".to_string()),
+        ]
+    );
+    let resumed_with = get_json_body(
+        &router,
+        &format!(
+            "/v1/task-events?repoId=repo-events&localOnly=true&excludeTaskIds=child-a&cursor={}&timeoutSecs=0",
+            cursor_of(&unknown)
+        ),
+    )
+    .await;
+    assert_eq!(
+        event_pairs(&resumed_with),
+        vec![("child-b".to_string(), "stage.changed".to_string())]
+    );
+    let drained = get_json_body(
+        &router,
+        &format!(
+            "/v1/task-events?repoId=repo-events&localOnly=true&cursor={}&timeoutSecs=0",
+            cursor_of(&resumed_with)
+        ),
+    )
+    .await;
+    assert_eq!(drained["waitOutcome"], "timeout");
+    assert_eq!(event_pairs(&drained), Vec::new());
+}
+
+/// The account-wide aggregate forwards the exclusion to every machine leg and
+/// treats a changed exclusion as a filter change on the same cursor, never as
+/// the scope switch that would reject it.
+#[tokio::test]
+async fn aggregate_repo_wait_forwards_exclusions_to_every_machine_leg() {
+    const REMOTE_HASH: &str = "sha256:excluded-on-two-machines";
+    let source = test_state_with_seed("desktop-source-excluded", "Source Mac", |db| {
+        db.insert_test_repo("repo-source-id", "Kanna Source")
+            .expect("insert source repo");
+        db.patch_repo(
+            "repo-source-id",
+            crate::db::RepoPatch {
+                remote_url_hash: Some(Some(REMOTE_HASH)),
+                ..crate::db::RepoPatch::default()
+            },
+        )
+        .expect("set source remote hash");
+    });
+    let peer = test_state_with_seed("desktop-peer-excluded", "Peer Mac", |db| {
+        db.insert_test_repo("repo-peer-different-id", "Kanna Peer")
+            .expect("insert peer repo");
+        db.patch_repo(
+            "repo-peer-different-id",
+            crate::db::RepoPatch {
+                remote_url_hash: Some(Some(REMOTE_HASH)),
+                ..crate::db::RepoPatch::default()
+            },
+        )
+        .expect("set peer remote hash");
+        db.insert_test_pipeline_item(
+            "remote-child",
+            "repo-peer-different-id",
+            "remote child",
+            Some("Remote Child"),
+            "in progress",
+            "2026-09-03 00:00:00",
+        )
+        .expect("insert peer task");
+        db.update_pipeline_item_stage("remote-child", "review")
+            .expect("append peer event");
+    });
+    let connected = Arc::new(AtomicBool::new(true));
+    let relay = connect_test_relay_peer(&source, Arc::clone(&peer), Arc::clone(&connected));
+    let source_router = router(Arc::clone(&source));
+
+    let unfiltered = get_account_json_body(
+        &source_router,
+        &source,
+        "/v1/task-events?repoId=repo-source-id&timeoutSecs=1",
+    )
+    .await;
+    assert_eq!(
+        event_pairs(&unfiltered),
+        vec![("remote-child".to_string(), "stage.changed".to_string())]
+    );
+
+    let filtered = get_account_json_body(
+        &source_router,
+        &source,
+        "/v1/task-events?repoId=repo-source-id&excludeTaskIds=remote-child&timeoutSecs=0",
+    )
+    .await;
+    assert_eq!(filtered["waitOutcome"], "timeout", "{filtered:#?}");
+    assert_eq!(event_pairs(&filtered), Vec::new());
+    assert_eq!(filtered["machineErrors"], json!([]));
+    assert!(cursor_of(&filtered).starts_with("ks1."));
+
+    // Dropping the exclusion on the same cursor is a filter change, not a
+    // scope switch: the excluded row was consumed, only the new one arrives.
+    Db::open(&peer.config().db_path)
+        .expect("open peer db")
+        .update_pipeline_item_stage("remote-child", "pr")
+        .expect("append a later peer event");
+    let resumed = get_account_json_body(
+        &source_router,
+        &source,
+        &format!(
+            "/v1/task-events?repoId=repo-source-id&cursor={}&timeoutSecs=1",
+            cursor_of(&filtered)
+        ),
+    )
+    .await;
+    assert_eq!(
+        event_pairs(&resumed),
+        vec![("remote-child".to_string(), "stage.changed".to_string())]
+    );
+    assert_eq!(resumed["events"][0]["payload"]["stage"], "pr");
+
+    // Legs inherited from a quiet long poll were armed under the previous
+    // filter; a resume with a different one restarts them instead of
+    // reporting their cancellation as a failed wait.
+    let quiet = get_account_json_body(
+        &source_router,
+        &source,
+        &format!(
+            "/v1/task-events?repoId=repo-source-id&excludeTaskIds=remote-child&cursor={}&timeoutSecs=1",
+            cursor_of(&resumed)
+        ),
+    )
+    .await;
+    assert_eq!(quiet["waitOutcome"], "timeout", "{quiet:#?}");
+    let restarted = get_account_json_body(
+        &source_router,
+        &source,
+        &format!(
+            "/v1/task-events?repoId=repo-source-id&cursor={}&timeoutSecs=0",
+            cursor_of(&quiet)
+        ),
+    )
+    .await;
+    assert_eq!(restarted["waitOutcome"], "timeout", "{restarted:#?}");
+    assert_eq!(event_pairs(&restarted), Vec::new());
+    Db::open(&peer.config().db_path)
+        .expect("open peer db")
+        .close_pipeline_item("remote-child")
+        .expect("close the peer task");
+    let after_restart = get_account_json_body(
+        &source_router,
+        &source,
+        &format!(
+            "/v1/task-events?repoId=repo-source-id&cursor={}&timeoutSecs=1",
+            cursor_of(&restarted)
+        ),
+    )
+    .await;
+    assert_eq!(
+        event_pairs(&after_restart),
+        vec![("remote-child".to_string(), "task.closed".to_string())]
+    );
+
+    relay.abort();
 }

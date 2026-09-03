@@ -2,10 +2,10 @@ use std::env;
 use std::process;
 
 use kanna_tool_catalog::{
-    clamp_wait_timeout_secs, encode_path_segment, load_catalog, repo_context_task_id,
-    resolve_request, resolve_request_with_repo_context, runtime_info_snapshot,
-    wait_resolved_result, wait_timeout_result, Catalog, Method as CatalogMethod, ResolvedRequest,
-    ResponseKind, RuntimeAdapterIdentity,
+    args_with_self_exclusion, clamp_wait_timeout_secs, encode_path_segment, load_catalog,
+    repo_context_task_id, resolve_request, resolve_request_with_repo_context,
+    runtime_info_snapshot, wait_resolved_result, wait_timeout_result, Catalog,
+    Method as CatalogMethod, ResolvedRequest, ResponseKind, RuntimeAdapterIdentity,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -199,8 +199,9 @@ pub(crate) async fn call_catalog_tool_with_task_id(
         }
         None => None,
     };
+    let args = args_with_self_exclusion(name, args, task_id)?;
     let mut request =
-        resolve_request_with_repo_context(catalog, name, args, current_task.as_ref())?;
+        resolve_request_with_repo_context(catalog, name, &args, current_task.as_ref())?;
     request.machine_id = None;
     if name == "kanna_complete_stage" {
         bind_request_to_spawned_run(base_url, &mut request).await?;

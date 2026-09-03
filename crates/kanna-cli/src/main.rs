@@ -601,6 +601,19 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         repo_remote_url_hash: Option<String>,
 
+        /// Drop these tasks' events (ids or branch names) from the chosen
+        /// scope; repeat or comma-separate. A filter, not a scope, so it
+        /// never invalidates a cursor. Inside a task session a repository
+        /// scope adds the calling task automatically.
+        #[arg(long = "exclude-task-id", value_delimiter = ',')]
+        exclude_task_id: Vec<String>,
+
+        /// Keep the calling task's own events in a repository-scoped wait
+        /// issued from a task session (disables the automatic self-exclusion
+        /// only; explicit --exclude-task-id values still apply)
+        #[arg(long)]
+        include_self: bool,
+
         /// Restrict the wait to the connected server instead of aggregating peers
         #[arg(long)]
         local_only: bool,
@@ -654,9 +667,24 @@ pub(crate) enum TaskCommands {
         task_id: Vec<String>,
 
         /// Watch every task in this repository. Task IDs take precedence when
-        /// both scopes are supplied, matching the event feed contract.
+        /// both scopes are supplied, matching the event feed contract. When
+        /// run from inside a task session (KANNA_TASK_ID set), the calling
+        /// task's own events are excluded so the watch never wakes its owner
+        /// with its own settled-runtime edges; see --include-self.
         #[arg(long)]
         repo_id: Option<String>,
+
+        /// Drop these tasks' events (ids or branch names) from the watch;
+        /// repeat or comma-separate. A filter, not a scope, so a cursor
+        /// printed before adding one still resumes.
+        #[arg(long = "exclude-task-id", value_delimiter = ',')]
+        exclude_task_id: Vec<String>,
+
+        /// Keep the calling task's own events in a repository-scoped watch
+        /// run from a task session, e.g. to observe your own run.finished.
+        /// Disables the automatic self-exclusion only.
+        #[arg(long)]
+        include_self: bool,
 
         /// Resume from the final cursor printed by an earlier watch. Without
         /// this option the watch starts at the live tail and replays no history.

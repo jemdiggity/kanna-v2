@@ -1,7 +1,8 @@
 use kanna_tool_catalog::{
-    bundled_catalog, clamp_wait_timeout_secs, repo_context_task_id, resolve_request,
-    resolve_request_with_repo_context, runtime_info_snapshot, task_value_matches_wait_until,
-    wait_resolved_result, wait_timeout_result, Catalog, Method, ParamLoc, ParamType, ResponseKind,
+    args_with_self_exclusion, bundled_catalog, clamp_wait_timeout_secs, repo_context_task_id,
+    resolve_request, resolve_request_with_repo_context, runtime_info_snapshot,
+    task_event_self_exclusion, task_value_matches_wait_until, wait_resolved_result,
+    wait_timeout_result, Catalog, Method, ParamLoc, ParamType, ResponseKind,
     RuntimeAdapterIdentity, WaitUntil, CLIENT_TOOL_CALL_BUDGET_SECS, DEFAULT_WAIT_TIMEOUT_SECS,
     MAX_WAIT_TIMEOUT_SECS,
 };
@@ -1874,4 +1875,164 @@ fn kanna_info_reports_tools_the_connected_server_cannot_serve() {
         &client_tools,
     );
     assert_eq!(unreachable["agentApi"]["status"], "unknown");
+}
+
+/// Self-exclusion is catalog policy so `kanna-mcp` and `kanna-cli tool call`
+/// cannot drift: a repository-scoped wait from inside a task session drops the
+/// caller's own task, explicit task/parent scopes are taken literally, and
+/// `include_self` is the documented way to opt out.
+#[test]
+fn wait_events_self_exclusion_is_shared_catalog_policy() {
+    let catalog = bundled_catalog();
+
+    let defaulted = args_with_self_exclusion(
+        "kanna_wait_events",
+        &json!({ "from": "now" }),
+        Some("manager-1"),
+    )
+    .expect("apply policy");
+    assert_eq!(defaulted["exclude_task_ids"], json!(["manager-1"]));
+    let resolved = resolve_request_with_repo_context(
+        &catalog,
+        "kanna_wait_events",
+        &defaulted,
+        Some(&json!({ "repoId": "repo-current" })),
+    )
+    .expect("resolve defaulted wait");
+    assert_eq!(
+        resolved.path,
+        "/v1/task-events?repoId=repo-current&excludeTaskIds=manager-1&shortCursor=true&from=now&timeoutSecs=240"
+    );
+
+    let explicit_repo = args_with_self_exclusion(
+        "kanna_wait_events",
+        &json!({ "repo_id": "repo-explicit", "exclude_task_ids": ["other", "manager-1"] }),
+        Some("manager-1"),
+    )
+    .expect("apply policy");
+    assert_eq!(
+        explicit_repo["exclude_task_ids"],
+        json!(["other", "manager-1"])
+    );
+
+    let remote_hash = args_with_self_exclusion(
+        "kanna_wait_events",
+        &json!({ "repo_remote_url_hash": "hash", "exclude_task_ids": ["other"] }),
+        Some("manager-1"),
+    )
+    .expect("apply policy");
+    assert_eq!(
+        remote_hash["exclude_task_ids"],
+        json!(["other", "manager-1"])
+    );
+
+    for repository_scope_with_empty_literal in [
+        json!({ "repo_id": "repo-explicit", "task_ids": [] }),
+        json!({ "repo_id": "repo-explicit", "task_ids": [" "] }),
+        json!({ "repo_id": "repo-explicit", "parent_task_id": "" }),
+        json!({ "repo_id": "repo-explicit", "parent_task_id": null }),
+    ] {
+        let filtered = args_with_self_exclusion(
+            "kanna_wait_events",
+            &repository_scope_with_empty_literal,
+            Some("manager-1"),
+        )
+        .expect("apply policy");
+        assert_eq!(
+            filtered["exclude_task_ids"],
+            json!(["manager-1"]),
+            "empty literal scopes fall through to repository scope"
+        );
+    }
+
+    for literal in [
+        json!({ "task_ids": ["manager-1", "child-a"] }),
+        json!({ "parent_task_id": "manager-1" }),
+    ] {
+        let unchanged = args_with_self_exclusion("kanna_wait_events", &literal, Some("manager-1"))
+            .expect("apply policy");
+        assert_eq!(unchanged, literal, "explicit scopes are taken literally");
+    }
+
+    let included = args_with_self_exclusion(
+        "kanna_wait_events",
+        &json!({ "repo_id": "repo-explicit", "include_self": true, "exclude_task_ids": ["other"] }),
+        Some("manager-1"),
+    )
+    .expect("apply policy");
+    assert_eq!(
+        included,
+        json!({ "repo_id": "repo-explicit", "exclude_task_ids": ["other"] })
+    );
+
+    let outside_session =
+        args_with_self_exclusion("kanna_wait_events", &json!({ "repo_id": "repo-1" }), None)
+            .expect("apply policy");
+    assert_eq!(outside_session, json!({ "repo_id": "repo-1" }));
+
+    let other_tool = args_with_self_exclusion(
+        "kanna_list_recent_tasks",
+        &json!({ "limit": 5 }),
+        Some("manager-1"),
+    )
+    .expect("apply policy");
+    assert_eq!(other_tool, json!({ "limit": 5 }));
+
+    let error = args_with_self_exclusion(
+        "kanna_wait_events",
+        &json!({ "include_self": "yes" }),
+        Some("manager-1"),
+    )
+    .expect_err("include_self must be boolean");
+    assert!(error.contains("include_self must be a boolean"), "{error}");
+
+    assert_eq!(
+        task_event_self_exclusion(false, false, Some("  ")),
+        None,
+        "a blank task id is not a session"
+    );
+}
+
+/// `include_self` is advertised and validated like every other argument but
+/// never reaches the wire: the server has no notion of "self".
+#[test]
+fn include_self_is_a_client_only_parameter() {
+    let catalog = bundled_catalog();
+    let include_self = catalog
+        .find_param("kanna_wait_events", "include_self")
+        .expect("include_self declared");
+    assert_eq!(include_self.location, ParamLoc::Client);
+    assert_eq!(include_self.param_type, ParamType::Boolean);
+    let exclude = catalog
+        .find_param("kanna_wait_events", "exclude_task_ids")
+        .expect("exclude_task_ids declared");
+    assert_eq!(exclude.location, ParamLoc::Query);
+    assert_eq!(exclude.param_type, ParamType::StringArray);
+    assert_eq!(exclude.key.as_deref(), Some("excludeTaskIds"));
+
+    let resolved = resolve_request(
+        &catalog,
+        "kanna_wait_events",
+        &json!({ "repo_id": "repo-1", "include_self": true, "exclude_task_ids": ["a", "b"], "timeout_secs": 0 }),
+    )
+    .expect("resolve");
+    assert_eq!(
+        resolved.path,
+        "/v1/task-events?repoId=repo-1&excludeTaskIds=a%2Cb&shortCursor=true&timeoutSecs=0"
+    );
+
+    let schema = bundled_catalog().tools_list_value();
+    let wait_events = schema
+        .as_array()
+        .expect("tools")
+        .iter()
+        .find(|tool| tool["name"] == "kanna_wait_events")
+        .expect("wait events tool");
+    let properties = &wait_events["inputSchema"]["properties"];
+    assert!(properties.get("include_self").is_some());
+    assert!(properties.get("exclude_task_ids").is_some());
+    assert!(wait_events["description"]
+        .as_str()
+        .expect("description")
+        .contains("excludes the calling task's own events by default"));
 }

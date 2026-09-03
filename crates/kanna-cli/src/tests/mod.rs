@@ -22,7 +22,7 @@ use crate::commands::task::{
     build_block_task_request, build_create_task_request, build_merge_handoff_request,
     build_request_revision_request, build_send_task_input_request, find_task_status_row,
     format_task_list, format_task_status, is_actionable_task_event, render_wait_outcome,
-    task_not_found_error, watch_task_events, TaskWatchOptions,
+    resolve_task_event_exclusions, task_not_found_error, watch_task_events, TaskWatchOptions,
 };
 use crate::commands::tool::build_tool_call_args;
 use crate::config::resolve_server_base_url;
@@ -151,6 +151,8 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
                     ("parent_task_id", "parent_task_id"),
                     ("repo_id", "repo_id"),
                     ("repo_remote_url_hash", "repo_remote_url_hash"),
+                    ("exclude_task_ids", "exclude_task_id"),
+                    ("include_self", "include_self"),
                     ("local_only", "local_only"),
                     ("include_current_activity", "include_current_activity"),
                     ("short_cursor", "short_cursor"),
