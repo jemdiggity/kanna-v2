@@ -130,8 +130,12 @@ pub(crate) struct TaskDetail {
     pub(crate) pr_url: Option<String>,
     pub(crate) closed_at: Option<String>,
     pub(crate) worktree_path: Option<String>,
-    pub(crate) commits_ahead: i64,
-    pub(crate) commits_behind: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) commits_ahead: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) commits_behind: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) base_ref_unresolved: Option<bool>,
     pub(crate) dirty: bool,
     /// Agent-requested revision rounds spent, and the cap the task's workflow
     /// allows (`0` = unlimited). Optional so a desktop server predating the
@@ -173,8 +177,12 @@ struct TaskDetailDef {
     pr_url: Option<String>,
     closed_at: Option<String>,
     worktree_path: Option<String>,
-    commits_ahead: i64,
-    commits_behind: i64,
+    #[serde(default)]
+    commits_ahead: Option<i64>,
+    #[serde(default)]
+    commits_behind: Option<i64>,
+    #[serde(default)]
+    base_ref_unresolved: Option<bool>,
     dirty: bool,
     #[serde(default)]
     revision_rounds: Option<i64>,

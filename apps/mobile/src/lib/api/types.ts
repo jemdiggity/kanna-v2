@@ -393,6 +393,8 @@ export interface TaskDetail extends TaskSummary {
   worktreePath?: string | null;
   commitsAhead?: number;
   commitsBehind?: number;
+  /** The task's recorded base and current repo default both failed to resolve. */
+  baseRefUnresolved?: boolean;
   dirty?: boolean;
   latestRun?: TaskLatestRun | null;
   /** Agent-requested revision rounds spent since the last human-requested one. */

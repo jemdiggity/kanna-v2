@@ -194,13 +194,42 @@ fn parses_task_detail_response_shape() {
     assert_eq!(task.agent_provider.as_deref(), Some("claude"));
     assert_eq!(task.branch.as_deref(), Some("task-task-1"));
     assert_eq!(task.worktree_path.as_deref(), Some("/tmp/worktree"));
-    assert_eq!(task.commits_ahead, 2);
-    assert_eq!(task.commits_behind, 1);
+    assert_eq!(task.commits_ahead, Some(2));
+    assert_eq!(task.commits_behind, Some(1));
+    assert_eq!(task.base_ref_unresolved, None);
     assert!(task.dirty);
     let latest_run = task.latest_run.expect("latest run");
     assert_eq!(latest_run.id.as_deref(), Some("run-1"));
     assert_eq!(latest_run.status.as_deref(), Some("succeeded"));
     assert_eq!(latest_run.summary.as_deref(), Some("done"));
+}
+
+#[test]
+fn task_detail_preserves_unresolved_base_without_inventing_commit_counts() {
+    let task: TaskDetail = serde_json::from_value(json!({
+        "id": "task-1",
+        "repoId": "repo-1",
+        "title": "Unresolved base",
+        "stage": "in progress",
+        "activity": "idle",
+        "agentType": "pty",
+        "agentProvider": "codex",
+        "branch": "task-task-1",
+        "prUrl": null,
+        "closedAt": null,
+        "worktreePath": "/tmp/worktree",
+        "baseRefUnresolved": true,
+        "dirty": false
+    }))
+    .expect("deserialize unresolved task detail");
+
+    assert_eq!(task.commits_ahead, None);
+    assert_eq!(task.commits_behind, None);
+    assert_eq!(task.base_ref_unresolved, Some(true));
+    let serialized = serde_json::to_value(task).expect("serialize unresolved task detail");
+    assert!(serialized.get("commitsAhead").is_none());
+    assert!(serialized.get("commitsBehind").is_none());
+    assert_eq!(serialized["baseRefUnresolved"], true);
 }
 
 #[test]
