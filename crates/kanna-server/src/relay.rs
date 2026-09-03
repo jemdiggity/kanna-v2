@@ -1633,7 +1633,7 @@ mod tests {
     static TEST_LOG_MESSAGES: StdMutex<Vec<String>> = StdMutex::new(Vec::new());
     /// The log capture is process-global, so tests that read it hold this for
     /// their whole body; otherwise one test's `finish` clears another's lines.
-    static TEST_LOG_CAPTURE_GUARD: StdMutex<()> = StdMutex::new(());
+    static TEST_LOG_CAPTURE_GUARD: Mutex<()> = Mutex::const_new(());
 
     struct RelayTestLogger;
 
@@ -2200,9 +2200,7 @@ mod tests {
     async fn mobile_push_registration_probe_reads_acks_and_notify_reports_reason() {
         use tokio::time::timeout;
 
-        let _capture_guard = TEST_LOG_CAPTURE_GUARD
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _capture_guard = TEST_LOG_CAPTURE_GUARD.lock().await;
         start_test_log_capture();
         let relay_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -2460,9 +2458,7 @@ mod tests {
         const OLD_RELAY_PROJECT: &str = "kanna-secret-project";
         const OLD_RELAY_TOKEN_DIAGNOSTIC: &str = "raw-device-token-diagnostic";
 
-        let _capture_guard = TEST_LOG_CAPTURE_GUARD
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _capture_guard = TEST_LOG_CAPTURE_GUARD.lock().await;
         start_test_log_capture();
 
         let relay_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
