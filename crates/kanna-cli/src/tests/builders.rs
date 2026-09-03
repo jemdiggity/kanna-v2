@@ -156,6 +156,14 @@ fn builds_add_repo_payload() {
 }
 
 #[test]
+fn builds_reconcile_repo_metadata_payload() {
+    assert_eq!(
+        serde_json::to_value(build_reconcile_repo_metadata_request(false)).unwrap(),
+        json!({ "apply": false })
+    );
+}
+
+#[test]
 fn send_task_input_payload_passes_message_through_unchanged() {
     // The server owns submission; the CLI sends the message verbatim.
     let request = build_send_task_input_request("continue\n".to_string(), None);

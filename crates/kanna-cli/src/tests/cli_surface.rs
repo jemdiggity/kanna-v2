@@ -148,6 +148,49 @@ fn parses_new_repo_and_task_subcommands() {
 
     let cli = crate::Cli::try_parse_from([
         "kanna-cli",
+        "repo",
+        "reconcile-metadata",
+        "--repo-id",
+        "repo-1",
+        "--server-url",
+        "http://127.0.0.1:48120",
+    ])
+    .unwrap();
+    match cli.command {
+        crate::Commands::Repo {
+            command:
+                crate::RepoCommands::ReconcileMetadata {
+                    repo_id,
+                    apply,
+                    server_url,
+                },
+        } => {
+            assert_eq!(repo_id, "repo-1");
+            assert!(apply, "reconciliation applies by default");
+            assert_eq!(server_url.as_deref(), Some("http://127.0.0.1:48120"));
+        }
+        _ => panic!("expected repo reconcile-metadata command"),
+    }
+
+    let cli = crate::Cli::try_parse_from([
+        "kanna-cli",
+        "repo",
+        "reconcile-metadata",
+        "--repo-id",
+        "repo-1",
+        "--apply",
+        "false",
+    ])
+    .unwrap();
+    match cli.command {
+        crate::Commands::Repo {
+            command: crate::RepoCommands::ReconcileMetadata { apply, .. },
+        } => assert!(!apply),
+        _ => panic!("expected repo reconcile-metadata command"),
+    }
+
+    let cli = crate::Cli::try_parse_from([
+        "kanna-cli",
         "task",
         "wait",
         "--task-id",

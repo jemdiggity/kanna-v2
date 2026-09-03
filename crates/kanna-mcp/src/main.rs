@@ -1751,6 +1751,7 @@ mod tests {
                 "kanna_guide",
                 "kanna_list_repos",
                 "kanna_add_repo",
+                "kanna_reconcile_repo_metadata",
                 "kanna_list_recent_tasks",
                 "kanna_get_task",
                 "kanna_list_task_children",

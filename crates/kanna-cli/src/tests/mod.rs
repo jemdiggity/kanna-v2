@@ -1,19 +1,20 @@
 use crate::api::{
     advance_stage_via_api, block_task_via_api, close_task_via_api, create_task_via_api,
     dependent_tasks_exist_path, dependent_tasks_exist_via_api, get_task_via_api,
-    list_task_children_via_api, parse_wait_until, rename_task_via_api, repo_agent_list_path,
-    repo_task_list_path, request_revision_via_api, rerun_stage_via_api, resume_task_via_api,
-    send_task_input_via_api, set_task_parent_via_api, set_task_workflow_via_api, signal_agent_path,
-    signal_agent_via_api, signal_merge_handoff_via_api, task_children_path, task_get_path,
-    task_list_path, task_logs_path, task_matches_wait_until, task_search_path,
-    unblock_task_via_api, wait_task_via_api, WaitTaskOutcome,
+    list_task_children_via_api, parse_wait_until, reconcile_repo_metadata_via_api,
+    rename_task_via_api, repo_agent_list_path, repo_task_list_path, request_revision_via_api,
+    rerun_stage_via_api, resume_task_via_api, send_task_input_via_api, set_task_parent_via_api,
+    set_task_workflow_via_api, signal_agent_path, signal_agent_via_api,
+    signal_merge_handoff_via_api, task_children_path, task_get_path, task_list_path,
+    task_logs_path, task_matches_wait_until, task_search_path, unblock_task_via_api,
+    wait_task_via_api, WaitTaskOutcome,
 };
 use crate::commands::guide::{
     build_guide_context, render_guide_json, render_guide_markdown, run_guide_command,
     run_topic_guide_command, GuideContext,
 };
-use crate::commands::repo::build_add_repo_request;
 use crate::commands::repo::build_signal_agent_request;
+use crate::commands::repo::{build_add_repo_request, build_reconcile_repo_metadata_request};
 use crate::commands::stage_complete::{
     build_complete_stage_request, render_stage_complete_confirmation,
 };
@@ -26,8 +27,9 @@ use crate::commands::task::{
 use crate::commands::tool::build_tool_call_args;
 use crate::config::resolve_server_base_url;
 use crate::models::{
-    SetTaskParentRequest, SetTaskWorkflowRequest, SignalAgentRequest, TaskCreateOptions,
-    TaskDetail, TaskInputResponse, TaskLatestRun, TaskRenameRequest, TaskSummary, WaitUntil,
+    ReconcileRepoMetadataResponse, SetTaskParentRequest, SetTaskWorkflowRequest,
+    SignalAgentRequest, TaskCreateOptions, TaskDetail, TaskInputResponse, TaskLatestRun,
+    TaskRenameRequest, TaskSummary, WaitUntil,
 };
 use clap::{Command, CommandFactory, Parser};
 use kanna_tool_catalog::{ParamLoc, CLIENT_TOOL_CALL_BUDGET_SECS, MAX_WAIT_TIMEOUT_SECS};
@@ -78,6 +80,13 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
             TypedToolSurface {
                 command_path: &["repo", "add"],
                 param_args: &[("path", "path"), ("name", "name")],
+            },
+        ),
+        (
+            "kanna_reconcile_repo_metadata",
+            TypedToolSurface {
+                command_path: &["repo", "reconcile-metadata"],
+                param_args: &[("repo_id", "repo_id"), ("apply", "apply")],
             },
         ),
         (

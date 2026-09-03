@@ -30,6 +30,24 @@ pub(crate) struct AddRepoRequest {
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct ReconcileRepoMetadataRequest {
+    pub(crate) apply: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReconcileRepoMetadataResponse {
+    pub(crate) repo_id: String,
+    pub(crate) recorded_default_branch: Option<String>,
+    pub(crate) recorded_default_branch_source: Option<String>,
+    pub(crate) detected_default_branch: String,
+    pub(crate) detected_default_branch_source: String,
+    pub(crate) drift: bool,
+    pub(crate) updated: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct SignalAgentRequest {
     pub(crate) message: String,
     /// Only honored when the signal creates the singleton agent task; a
