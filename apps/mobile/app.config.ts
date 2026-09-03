@@ -107,6 +107,12 @@ interface ExpoConfig {
   version: string;
   scheme: string;
   icon: string;
+  android: {
+    adaptiveIcon: {
+      foregroundImage: string;
+      backgroundImage: string;
+    };
+  };
   plugins: Array<string | [string, Record<string, unknown>]>;
   platforms: string[];
   ios: {
@@ -257,6 +263,12 @@ export function createExpoConfig(
     version,
     scheme: appEnvironment.scheme,
     icon: "./assets/icon.png",
+    android: {
+      adaptiveIcon: {
+        foregroundImage: "./assets/adaptive-icon-foreground.png",
+        backgroundImage: "./assets/adaptive-icon-background.png"
+      }
+    },
     plugins: [
       // React Native Firebase native packages autolink in every environment,
       // so their Swift pods always require static frameworks. This Podfile

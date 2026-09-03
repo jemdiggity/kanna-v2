@@ -32,9 +32,14 @@ describe("mobile app config", () => {
         channel: "production",
         manifestUrl: "https://relay.kanna.build/ota/manifest"
       },
-      runtimeVersion: "2.2.2"
+      runtimeVersion: "2.2.3"
     });
-    expect(config.runtimeVersion).toBe("2.2.2");
+    expect(config.runtimeVersion).toBe("2.2.3");
+    expect(config.icon).toBe("./assets/icon.png");
+    expect(config.android.adaptiveIcon).toEqual({
+      foregroundImage: "./assets/adaptive-icon-foreground.png",
+      backgroundImage: "./assets/adaptive-icon-background.png"
+    });
     expect(config.updates).toMatchObject({
       url: "https://relay.kanna.build/ota/manifest",
       requestHeaders: { "expo-channel-name": "production" },
@@ -90,9 +95,9 @@ describe("mobile app config", () => {
         channel: null,
         manifestUrl: null
       },
-      runtimeVersion: "2.2.2"
+      runtimeVersion: "2.2.3"
     });
-    expect(config.runtimeVersion).toBe("2.2.2");
+    expect(config.runtimeVersion).toBe("2.2.3");
     expect(config.updates).toBeUndefined();
   });
 
@@ -171,9 +176,9 @@ describe("mobile app config", () => {
         channel: "staging",
         manifestUrl: "https://relay-staging.kanna.build/ota/manifest"
       },
-      runtimeVersion: "2.2.2"
+      runtimeVersion: "2.2.3"
     });
-    expect(config.runtimeVersion).toBe("2.2.2");
+    expect(config.runtimeVersion).toBe("2.2.3");
     expect(config.updates).toMatchObject({
       url: "https://relay-staging.kanna.build/ota/manifest",
       requestHeaders: { "expo-channel-name": "staging" }
@@ -331,7 +336,7 @@ describe("mobile app config", () => {
         recordAudioAndroid: false
       }
     ]);
-    expect(config.runtimeVersion).toBe("2.2.2");
+    expect(config.runtimeVersion).toBe("2.2.3");
   });
 
   it("declares the composer attachment permissions and captures no audio", () => {
