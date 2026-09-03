@@ -50,7 +50,10 @@ pub struct AppState {
     desktop_relay_rx: Arc<StdMutex<Option<mpsc::Receiver<DesktopRelayRequest>>>>,
     pub(super) aggregate_task_event_waits:
         Arc<StdMutex<crate::http_api::task_events::AggregateWaitRegistry>>,
-    relay_mobile_notifications_available: Arc<AtomicBool>,
+    /// Version of the relay's `mobileNotifications` capability on the live
+    /// session; `0` while no session offers it. Version 2 adds the distinct
+    /// push-registration probe message.
+    relay_mobile_notifications_version: Arc<AtomicU64>,
     mobile_notification_tx: mpsc::Sender<MobileNotificationRequest>,
     mobile_notification_rx: Arc<StdMutex<Option<mpsc::Receiver<MobileNotificationRequest>>>>,
     requested_task_mutations: Arc<RequestedTaskMutations>,
@@ -371,7 +374,7 @@ impl AppState {
             desktop_relay_tx,
             desktop_relay_rx: Arc::new(StdMutex::new(Some(desktop_relay_rx))),
             aggregate_task_event_waits: Arc::new(StdMutex::new(Default::default())),
-            relay_mobile_notifications_available: Arc::new(AtomicBool::new(false)),
+            relay_mobile_notifications_version: Arc::new(AtomicU64::new(0)),
             mobile_notification_tx,
             mobile_notification_rx: Arc::new(StdMutex::new(Some(mobile_notification_rx))),
             requested_task_mutations: Arc::new(RequestedTaskMutations::default()),
@@ -700,13 +703,28 @@ impl AppState {
     }
 
     pub(crate) fn set_mobile_notifications_available(&self, available: bool) {
-        self.relay_mobile_notifications_available
-            .store(available, Ordering::Release);
+        self.set_mobile_notifications_version(u64::from(available));
+    }
+
+    /// Record the relay's advertised `mobileNotifications.version` (`0` when
+    /// the capability is absent or the session is gone).
+    pub(crate) fn set_mobile_notifications_version(&self, version: u64) {
+        self.relay_mobile_notifications_version
+            .store(version, Ordering::Release);
     }
 
     pub(crate) fn mobile_notifications_available(&self) -> bool {
-        self.relay_mobile_notifications_available
+        self.relay_mobile_notifications_version
             .load(Ordering::Acquire)
+            >= 1
+    }
+
+    /// Whether the live relay session supports the distinct registration
+    /// probe message. The request is refused without this advertised contract.
+    pub(crate) fn mobile_notification_probe_supported(&self) -> bool {
+        self.relay_mobile_notifications_version
+            .load(Ordering::Acquire)
+            >= 2
     }
 
     pub(crate) fn take_mobile_notification_requests(

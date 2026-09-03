@@ -62,6 +62,16 @@ import {
   publishMobileNotification,
   type MobileNotificationDelivery,
 } from "./mobileNotifications.js";
+import { MAX_REGISTRATION_ID_LENGTH } from "./pushDevices.js";
+
+/**
+ * Version 1: publish + ack. Version 2: the distinct
+ * `mobile_notification_probe` message resolves targets and explains a
+ * zero-target result without sending, and deliveries report
+ * `targetedDeviceCount` / `noDevicesReason`. Keeping the probe out of the
+ * publish message means an older relay can never mistake it for a real send.
+ */
+const MOBILE_NOTIFICATIONS_CAPABILITY_VERSION = 2;
 import {
   attachWebSocketMessageHandler,
 } from "./webSocketMessageLifecycle.js";
@@ -198,6 +208,18 @@ function noStore(res: ServerResponse): void {
 /**
  * Send a JSON response.
  */
+/**
+ * `undefined` when absent, the trimmed id when well-formed, `false` when the
+ * caller sent something that is not a bounded opaque string.
+ */
+function parsePushRegistrationId(value: unknown): string | undefined | false {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") return false;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > MAX_REGISTRATION_ID_LENGTH) return false;
+  return trimmed;
+}
+
 function jsonResponse(
   res: ServerResponse,
   status: number,
@@ -321,7 +343,12 @@ export const server = createServer(async (req, res) => {
 
     if (req.method === "POST" && req.url === "/push/register") {
       const body = await readBody(req);
-      let parsed: { idToken?: string; deviceId?: string; deviceToken?: string };
+      let parsed: {
+        idToken?: string;
+        deviceId?: string;
+        deviceToken?: string;
+        registrationId?: unknown;
+      };
 
       try {
         parsed = JSON.parse(body);
@@ -340,6 +367,11 @@ export const server = createServer(async (req, res) => {
         jsonResponse(res, 400, { error: "Push registration is oversized" });
         return;
       }
+      const registrationId = parsePushRegistrationId(parsed.registrationId);
+      if (registrationId === false) {
+        jsonResponse(res, 400, { error: "Push registrationId is malformed" });
+        return;
+      }
 
       const userId = await verifyPhoneToken(parsed.idToken);
       if (!userId) {
@@ -347,14 +379,19 @@ export const server = createServer(async (req, res) => {
         return;
       }
 
-      await registerPushDevice(userId, parsed.deviceId, parsed.deviceToken);
+      await registerPushDevice(userId, parsed.deviceId, parsed.deviceToken, registrationId);
       jsonResponse(res, 200, { ok: true });
       return;
     }
 
     if (req.method === "POST" && req.url === "/push/unregister") {
       const body = await readBody(req);
-      let parsed: { idToken?: string; deviceId?: string; deviceToken?: string };
+      let parsed: {
+        idToken?: string;
+        deviceId?: string;
+        deviceToken?: string;
+        registrationId?: unknown;
+      };
 
       try {
         parsed = JSON.parse(body);
@@ -374,6 +411,11 @@ export const server = createServer(async (req, res) => {
         jsonResponse(res, 400, { error: "Push unregistration is oversized" });
         return;
       }
+      const registrationId = parsePushRegistrationId(parsed.registrationId);
+      if (registrationId === false) {
+        jsonResponse(res, 400, { error: "Push registrationId is malformed" });
+        return;
+      }
 
       const userId = await verifyPhoneToken(parsed.idToken);
       if (!userId) {
@@ -381,8 +423,11 @@ export const server = createServer(async (req, res) => {
         return;
       }
 
-      await unregisterPushDevice(userId, parsed.deviceId, parsed.deviceToken);
-      jsonResponse(res, 200, { ok: true });
+      const outcome = await unregisterPushDevice(userId, parsed.deviceId, {
+        ...(parsed.deviceToken !== undefined ? { deviceToken: parsed.deviceToken } : {}),
+        ...(registrationId !== undefined ? { registrationId } : {}),
+      });
+      jsonResponse(res, 200, { ok: true, outcome });
       return;
     }
 
@@ -761,7 +806,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
             ? ["ksp", "task-transfer"]
             : [],
           ...(principalKind === "anonymousDesktop" ? {
-            mobileNotifications: { version: 1 },
+            mobileNotifications: { version: MOBILE_NOTIFICATIONS_CAPABILITY_VERSION },
           } : {}),
           ...(serverAuthProof?.kind === "desktop" ? {
             ...(sessionEntitlement?.grants("cloud_task_index") ? {
@@ -771,7 +816,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
               },
             } : {}),
             mobileNotifications: {
-              version: 1,
+              version: MOBILE_NOTIFICATIONS_CAPABILITY_VERSION,
             },
             ...(sessionEntitlement?.grants("remote_task_control") ? {
               desktopRouting: {
@@ -961,7 +1006,10 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         }
         return;
       }
-      if (publication?.type === "mobile_notification_publish") {
+      if (
+        publication?.type === "mobile_notification_publish"
+        || publication?.type === "mobile_notification_probe"
+      ) {
         const id = typeof publication.id === "string" ? publication.id : "";
         const sendAck = (
           ok: boolean,
@@ -997,12 +1045,19 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
           ws.close(4005, "Authentication revoked");
           return;
         }
-        let notification;
-        try {
-          notification = parseMobileNotification(publication.notification);
-        } catch {
-          sendAck(false, undefined, "mobile notification is malformed or oversized");
-          return;
+        // A probe resolves the same targets a real delivery would and explains
+        // a zero-target result, without sending or spending rate-limit budget.
+        // It has its own wire type so an older relay cannot interpret it as a
+        // real notification even if capability negotiation regresses.
+        const dryRun = publication.type === "mobile_notification_probe";
+        let notification = { title: "Kanna", body: "push registration probe" };
+        if (!dryRun) {
+          try {
+            notification = parseMobileNotification(publication.notification);
+          } catch {
+            sendAck(false, undefined, "mobile notification is malformed or oversized");
+            return;
+          }
         }
         if (principalKind === "anonymousDesktop") {
           if (!anonymousPubKey) {
@@ -1013,6 +1068,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
             const delivery = await publishAnonymousPush({
               desktopPubKey: anonymousPubKey,
               notification,
+              dryRun,
             });
             sendAck(true, delivery);
           } catch (error) {
@@ -1030,6 +1086,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
               userId: userId!,
               desktopId,
               notification,
+              dryRun,
             });
             sendAck(true, delivery);
           } catch (error) {
@@ -1045,6 +1102,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
             userId: userId!,
             desktopId,
             notification,
+            dryRun,
             sendAck: ({ ok, delivery, error }) => sendAck(ok, delivery, error),
           });
         }

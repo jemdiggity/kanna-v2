@@ -54,7 +54,350 @@ interface StartMobilePushInput {
   sdk?: MobilePushSdk;
   anonymousPairings?: readonly AnonymousPushPairing[];
   anonymousBindingCoordinator?: AnonymousPushBindingCoordinator;
+  accountRegistrationCoordinator?: AccountPushRegistrationCoordinator;
 }
+
+/**
+ * The account registration this device should hold on the relay.
+ * `getIdToken` is kept so a retry, or an unregister long after the token the
+ * registration used has expired, can mint a fresh one.
+ */
+export interface AccountPushRegistrationDesire {
+  relayUrl: string;
+  deviceId: string;
+  deviceToken: string;
+  getIdToken(forceRefresh?: boolean): Promise<string | null>;
+}
+
+export interface AccountPushRegistrationSnapshot {
+  deviceToken: string;
+  registrationId: string;
+}
+
+export interface AccountPushRegistrationLease {
+  relayUrl: string;
+  deviceId: string;
+  generation: number;
+}
+
+export interface AccountPushRegistrationAttempt {
+  lease: AccountPushRegistrationLease;
+  settled: Promise<void>;
+}
+
+/**
+ * Serializes account push registration per device and reconciles the relay
+ * toward the latest declared state.
+ *
+ * Before this existed, every re-run of the push effect fired a fire-and-forget
+ * unregister for the previous registration while the new run registered the
+ * same FCM token. On 2026-09-03 three such runs landed within 700 ms on
+ * staging and the last cleanup deleted the live row (task 34047a85). Here the
+ * desired state is owned by the latest lifecycle lease, one worker per device
+ * applies it in order, a registration failure is retried instead of being
+ * remembered as registered, and every registration carries an id the relay
+ * compares on unregister.
+ */
+export interface AccountPushRegistrationCoordinator {
+  /**
+   * Declare the registration this device should hold. Resolves once the
+   * first attempt has settled: applied, superseded, or failed with a retry
+   * scheduled. Retries continue in the background until applied or replaced.
+   */
+  register(desire: AccountPushRegistrationDesire): AccountPushRegistrationAttempt;
+  /**
+   * Release a lifecycle's registration desire. A stale lease is ignored so
+   * an older effect cleanup cannot retire the current lifecycle's registration.
+   */
+  unregister(lease: AccountPushRegistrationLease): Promise<void>;
+  /** What the relay is believed to hold right now; `null` when nothing. */
+  applied(relayUrl: string, deviceId: string): AccountPushRegistrationSnapshot | null;
+}
+
+interface AccountPushRegistrationCoordinatorOptions {
+  fetchImpl?: typeof fetch;
+  /** Delay before retry number `attempt` (1-based). Tests shorten it. */
+  retryDelayMs?: (attempt: number) => number;
+  /** How many times an unregister is retried before the local record is dropped. */
+  maxUnregisterAttempts?: number;
+  createRegistrationId?: () => string;
+}
+
+interface AppliedAccountRegistration extends AccountPushRegistrationSnapshot {
+  idToken: string;
+  getIdToken(forceRefresh?: boolean): Promise<string | null>;
+}
+
+interface AccountRegistrationState {
+  desired: AccountPushRegistrationDesire | null;
+  activeLease: AccountPushRegistrationLease | null;
+  applied: AppliedAccountRegistration | null;
+  worker: Promise<void> | null;
+  /** Resolves the current retry sleep early when the desire changes. */
+  wake: (() => void) | null;
+  /** Resolvers waiting for the current or next attempt to settle. */
+  settled: (() => void)[];
+  forceRefresh: boolean;
+}
+
+const DEFAULT_MAX_UNREGISTER_ATTEMPTS = 5;
+
+function defaultRetryDelayMs(attempt: number): number {
+  return Math.min(60_000, 1_000 * 2 ** Math.max(0, attempt - 1));
+}
+
+function defaultRegistrationId(): string {
+  return `reg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
+function accountRegistrationKey(relayUrl: string, deviceId: string): string {
+  return `${relayUrl}\0${deviceId}`;
+}
+
+export function createAccountPushRegistrationCoordinator(
+  options: AccountPushRegistrationCoordinatorOptions = {}
+): AccountPushRegistrationCoordinator {
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const retryDelayMs = options.retryDelayMs ?? defaultRetryDelayMs;
+  const maxUnregisterAttempts =
+    options.maxUnregisterAttempts ?? DEFAULT_MAX_UNREGISTER_ATTEMPTS;
+  const createRegistrationId = options.createRegistrationId ?? defaultRegistrationId;
+  const states = new Map<string, AccountRegistrationState>();
+  let nextLeaseGeneration = 0;
+
+  const stateFor = (relayUrl: string, deviceId: string): AccountRegistrationState => {
+    const key = accountRegistrationKey(relayUrl, deviceId);
+    const existing = states.get(key);
+    if (existing) return existing;
+    const created: AccountRegistrationState = {
+      desired: null,
+      activeLease: null,
+      applied: null,
+      worker: null,
+      wake: null,
+      settled: [],
+      forceRefresh: false
+    };
+    states.set(key, created);
+    return created;
+  };
+
+  const settle = (state: AccountRegistrationState) => {
+    const waiters = state.settled;
+    state.settled = [];
+    for (const resolve of waiters) resolve();
+  };
+
+  const sleep = (state: AccountRegistrationState, ms: number) =>
+    new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        state.wake = null;
+        resolve();
+      }, ms);
+      state.wake = () => {
+        clearTimeout(timer);
+        state.wake = null;
+        resolve();
+      };
+    });
+
+  const postJson = async (url: string, body: Record<string, string>) => {
+    const response = await fetchImpl(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    return response.status;
+  };
+
+  const isReconciled = (state: AccountRegistrationState): boolean =>
+    state.desired
+      ? state.applied?.deviceToken === state.desired.deviceToken
+      : state.applied === null;
+
+  const runWorker = async (
+    relayUrl: string,
+    deviceId: string,
+    state: AccountRegistrationState
+  ): Promise<void> => {
+    let registerAttempts = 0;
+    let unregisterAttempts = 0;
+    while (!isReconciled(state)) {
+      const desired = state.desired;
+      if (desired) {
+        const registrationUrl = pushRegistrationUrl(desired.relayUrl);
+        if (!registrationUrl) {
+          console.error("Account push registration skipped: relay URL is invalid.");
+          state.desired = null;
+          settle(state);
+          continue;
+        }
+        let failure: string | null = null;
+        let idToken: string | null = null;
+        try {
+          idToken = await desired.getIdToken(state.forceRefresh);
+        } catch (error: unknown) {
+          failure = `id token unavailable (${String(error)})`;
+        }
+        if (!failure && !idToken) failure = "id token unavailable";
+        const registrationId = createRegistrationId();
+        if (!failure && idToken) {
+          try {
+            const status = await postJson(registrationUrl, {
+              idToken,
+              deviceId: desired.deviceId,
+              deviceToken: desired.deviceToken,
+              registrationId
+            });
+            if (status >= 200 && status < 300) {
+              if (state.desired === desired) {
+                state.applied = {
+                  deviceToken: desired.deviceToken,
+                  registrationId,
+                  idToken,
+                  getIdToken: desired.getIdToken
+                };
+              } else {
+                // Superseded while in flight: the relay now holds this
+                // registration, so record it and let the loop reconcile
+                // toward the newer desire.
+                state.applied = {
+                  deviceToken: desired.deviceToken,
+                  registrationId,
+                  idToken,
+                  getIdToken: desired.getIdToken
+                };
+              }
+              state.forceRefresh = false;
+              registerAttempts = 0;
+              settle(state);
+              continue;
+            }
+            failure = `relay answered ${status}`;
+            if (status === 401) state.forceRefresh = true;
+          } catch (error: unknown) {
+            failure = String(error);
+          }
+        }
+        registerAttempts += 1;
+        console.error(
+          `Account push registration failed (attempt ${registerAttempts}): ${failure}; retrying`
+        );
+        settle(state);
+        if (state.desired !== desired) continue;
+        await sleep(state, retryDelayMs(registerAttempts));
+        continue;
+      }
+
+      const applied = state.applied;
+      if (!applied) continue;
+      const unregistrationUrl = pushUnregistrationUrl(relayUrl);
+      if (!unregistrationUrl) {
+        state.applied = null;
+        settle(state);
+        continue;
+      }
+      let failure: string | null = null;
+      try {
+        let idToken: string | null = applied.idToken;
+        if (unregisterAttempts > 0) {
+          idToken = (await applied.getIdToken(true)) ?? applied.idToken;
+        }
+        const status = await postJson(unregistrationUrl, {
+          idToken,
+          deviceId,
+          deviceToken: applied.deviceToken,
+          registrationId: applied.registrationId
+        });
+        if (status >= 200 && status < 300) {
+          state.applied = null;
+          unregisterAttempts = 0;
+          settle(state);
+          continue;
+        }
+        failure = `relay answered ${status}`;
+      } catch (error: unknown) {
+        failure = String(error);
+      }
+      unregisterAttempts += 1;
+      if (unregisterAttempts >= maxUnregisterAttempts) {
+        // The relay keeps the row until the next registration replaces it or
+        // the push provider retires it; the local record is dropped so the
+        // worker does not spin forever on a relay that is down.
+        console.error(
+          `Mobile notification unregistration gave up after ${unregisterAttempts} attempts: ${failure}`
+        );
+        state.applied = null;
+        settle(state);
+        continue;
+      }
+      console.error(
+        `Mobile notification unregistration failed (attempt ${unregisterAttempts}): ${failure}; retrying`
+      );
+      settle(state);
+      if (state.desired !== null) continue;
+      await sleep(state, retryDelayMs(unregisterAttempts));
+    }
+    settle(state);
+  };
+
+  const kick = (
+    relayUrl: string,
+    deviceId: string,
+    state: AccountRegistrationState
+  ): Promise<void> => {
+    const settled = new Promise<void>((resolve) => state.settled.push(resolve));
+    if (state.worker) {
+      state.wake?.();
+    } else {
+      state.worker = runWorker(relayUrl, deviceId, state)
+        .catch((error: unknown) => {
+          console.error("Account push registration worker failed:", error);
+        })
+        .finally(() => {
+          state.worker = null;
+          settle(state);
+          if (!isReconciled(state)) void kick(relayUrl, deviceId, state);
+        });
+    }
+    return settled;
+  };
+
+  return {
+    register(desire) {
+      const state = stateFor(desire.relayUrl, desire.deviceId);
+      const lease = {
+        relayUrl: desire.relayUrl,
+        deviceId: desire.deviceId,
+        generation: ++nextLeaseGeneration
+      };
+      state.activeLease = lease;
+      state.desired = desire;
+      return {
+        lease,
+        settled: isReconciled(state)
+          ? Promise.resolve()
+          : kick(desire.relayUrl, desire.deviceId, state)
+      };
+    },
+    unregister(lease) {
+      const state = stateFor(lease.relayUrl, lease.deviceId);
+      if (state.activeLease !== lease) return Promise.resolve();
+      state.activeLease = null;
+      state.desired = null;
+      if (isReconciled(state) && !state.worker) return Promise.resolve();
+      return kick(lease.relayUrl, lease.deviceId, state);
+    },
+    applied(relayUrl, deviceId) {
+      const applied = stateFor(relayUrl, deviceId).applied;
+      return applied
+        ? { deviceToken: applied.deviceToken, registrationId: applied.registrationId }
+        : null;
+    }
+  };
+}
+
+const defaultAccountRegistrationCoordinator = createAccountPushRegistrationCoordinator();
 
 type AnonymousPushFetch = (
   input: string,
@@ -161,6 +504,10 @@ export async function startMobilePushNotifications(
     ?? (input.fetchImpl
       ? createAnonymousPushBindingCoordinator(input.fetchImpl)
       : defaultAnonymousBindingCoordinator);
+  const accountRegistrationCoordinator = input.accountRegistrationCoordinator
+    ?? (input.fetchImpl
+      ? createAccountPushRegistrationCoordinator({ fetchImpl: input.fetchImpl })
+      : defaultAccountRegistrationCoordinator);
   const anonymousGeneration = anonymousBindingCoordinator.begin(
     input.anonymousPairings ?? []
   );
@@ -213,58 +560,25 @@ export async function startMobilePushNotifications(
     };
   }
 
-  let registration: { idToken: string; deviceToken: string } | null = null;
   let stopped = false;
-  const unregisterDevice = async (registered: {
-    idToken: string;
-    deviceToken: string;
-  }) => {
-    if (!unregistrationUrl) return;
-    const response = await (input.fetchImpl ?? fetch)(unregistrationUrl, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        idToken: registered.idToken,
-        deviceId: input.deviceId,
-        deviceToken: registered.deviceToken
-      })
-    });
-    if (!response.ok) {
-      throw new Error(
-        `Mobile notification unregistration failed (${response.status}).`
-      );
-    }
-  };
+  let accountLease: AccountPushRegistrationLease | null = null;
   const registerToken = async (deviceToken: string) => {
     const idToken = await input.getIdToken();
     const pairings = input.anonymousPairings ?? [];
-    const failures: unknown[] = [];
-    let accountRegistered = false;
     let anonymousRegistered = false;
-    if (idToken) {
-      try {
-        if (!registrationUrl) {
-          throw new Error("Mobile notification relay URL is invalid.");
-        }
-        const response = await (input.fetchImpl ?? fetch)(registrationUrl, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            idToken,
-            deviceId: input.deviceId,
-            deviceToken
-          })
-        });
-        if (!response.ok) {
-          throw new Error(
-            `Mobile notification registration failed (${response.status}).`
-          );
-        }
-        accountRegistered = true;
-      } catch (error: unknown) {
-        console.error("Account push registration failed:", error);
-        failures.push(error);
-      }
+    if (idToken && registrationUrl && unregistrationUrl && !stopped) {
+      // The coordinator owns the account registration from here: it retries a
+      // failed attempt with backoff and remembers only what the relay
+      // acknowledged, so a failed re-registration is never "registered" in
+      // memory. The first attempt is awaited so a rejection is logged now.
+      const registration = accountRegistrationCoordinator.register({
+        relayUrl: input.relayUrl,
+        deviceId: input.deviceId,
+        deviceToken,
+        getIdToken: input.getIdToken
+      });
+      accountLease = registration.lease;
+      await registration.settled;
     }
     if (pairings.length > 0) {
       try {
@@ -272,17 +586,11 @@ export async function startMobilePushNotifications(
         anonymousRegistered = true;
       } catch (error: unknown) {
         console.error("Anonymous push registration failed:", error);
-        failures.push(error);
+        if (!accountLease) throw error;
       }
     }
-    if (!accountRegistered && !anonymousRegistered) {
-      if (failures[0] instanceof Error) throw failures[0];
+    if (!accountLease && !anonymousRegistered) {
       throw new Error("Cannot register mobile notifications without an account or pairing.");
-    }
-    if (stopped) {
-      if (idToken && accountRegistered) await unregisterDevice({ idToken, deviceToken });
-    } else if (idToken && accountRegistered) {
-      registration = { idToken, deviceToken };
     }
   };
 
@@ -298,10 +606,14 @@ export async function startMobilePushNotifications(
     tokenUnsubscribe();
     openedUnsubscribe();
     responseUnsubscribe();
-    if (registration) {
-      void unregisterDevice(registration).catch((error: unknown) => {
-        console.error("Mobile notification unregistration failed:", error);
-      });
+    if (accountLease) {
+      // Release only this lifecycle's lease. If a newer effect run has already
+      // registered the same device, the coordinator ignores this stale cleanup.
+      void accountRegistrationCoordinator
+        .unregister(accountLease)
+        .catch((error: unknown) => {
+          console.error("Mobile notification unregistration failed:", error);
+        });
     }
   };
 }

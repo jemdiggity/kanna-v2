@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { renderPairingQr } from "../utils/pairingQr";
+import type { MobilePushRegistrationStatus } from "../types/mobilePushRegistration";
 
 type ServerStatus = "running" | "stopped" | "error";
 
@@ -10,11 +11,55 @@ const props = defineProps<{
   pairingCode: string | null;
   pairingPayload: string | null;
   expiresAtUnixMs?: number | null;
+  /** Whether the desktop is signed into a Kanna account; push status applies only then. */
+  accountSignedIn?: boolean;
+  /** Latest push-registration probe; `null` while none has completed. */
+  pushRegistration?: MobilePushRegistrationStatus | null;
+  pushRegistrationLoading?: boolean;
 }>();
 
 const emit = defineEmits<{
   (e: "start-pairing"): void;
+  (e: "refresh-push-registration"): void;
 }>();
+
+const PUSH_REREGISTER_INSTRUCTION =
+  "Open Kanna on your phone while signed in to this account and allow notifications; "
+  + "the app registers the phone again on launch.";
+
+const pushRegistrationTone = computed(() => {
+  if (!props.accountSignedIn || !props.pushRegistration) return null;
+  return props.pushRegistration.status;
+});
+
+const pushRegistrationSummary = computed(() => {
+  const registration = props.pushRegistration;
+  if (!registration) return "";
+  if (registration.status === "registered") {
+    return registration.registeredDeviceCount === 1
+      ? "Push notifications reach 1 registered phone."
+      : `Push notifications reach ${registration.registeredDeviceCount} registered phones.`;
+  }
+  if (registration.status === "noRegisteredDevices") {
+    return "No phone is registered for push notifications on this account, so "
+      + "kanna_notify_mobile cannot reach you.";
+  }
+  return "Push registration status is unavailable"
+    + (registration.error ? `: ${registration.error}` : ".");
+});
+
+const pushRegistrationReason = computed(() => {
+  const reason = props.pushRegistration?.noDevicesReason;
+  if (!reason || props.pushRegistration?.status !== "noRegisteredDevices") return "";
+  return reason.message;
+});
+
+const pushRegistrationInstruction = computed(() => {
+  if (pushRegistrationTone.value !== "noRegisteredDevices") return "";
+  return pushRegistrationReason.value.toLocaleLowerCase().includes("open kanna on")
+    ? ""
+    : PUSH_REREGISTER_INSTRUCTION;
+});
 
 const statusLabel = computed(() => {
   if (props.serverStatus === "running") return "Online";
@@ -94,6 +139,38 @@ onBeforeUnmount(() => {
     <p class="description">
       Pair a phone or tablet to browse tasks and recent activity on this desktop.
     </p>
+
+    <div
+      v-if="pushRegistrationTone"
+      class="push-registration"
+      :class="`push-${pushRegistrationTone}`"
+      data-testid="mobile-access-push-registration"
+      :data-status="pushRegistrationTone"
+    >
+      <div class="push-registration-text">
+        <span class="label">Push notifications</span>
+        <p class="push-summary">{{ pushRegistrationSummary }}</p>
+        <p
+          v-if="pushRegistrationReason"
+          class="push-reason"
+          data-testid="mobile-access-push-reason"
+        >{{ pushRegistrationReason }}</p>
+        <p
+          v-if="pushRegistrationInstruction"
+          class="push-instruction"
+          data-testid="mobile-access-push-instruction"
+        >{{ pushRegistrationInstruction }}</p>
+      </div>
+      <button
+        type="button"
+        class="secondary-action"
+        data-testid="mobile-access-push-refresh"
+        :disabled="pushRegistrationLoading"
+        @click="emit('refresh-push-registration')"
+      >
+        {{ pushRegistrationLoading ? "Checking…" : "Check again" }}
+      </button>
+    </div>
 
     <div class="pairing-area">
       <div v-if="pairingCode && !pairingExpired" class="pairing-session">
@@ -195,6 +272,71 @@ onBeforeUnmount(() => {
   font-size: 12px;
   line-height: 1.5;
   color: var(--kn-text-secondary);
+}
+
+.push-registration {
+  margin-top: 12px;
+  padding: 10px 12px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--kn-border-default);
+  border-radius: 8px;
+  background: var(--kn-bg-panel);
+}
+
+.push-noRegisteredDevices {
+  border-color: var(--kn-danger);
+  background: var(--kn-danger-bg);
+}
+
+.push-registration-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.push-summary {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--kn-text-primary);
+}
+
+.push-noRegisteredDevices .push-summary {
+  color: var(--kn-danger);
+  font-weight: 600;
+}
+
+.push-reason,
+.push-instruction {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--kn-text-secondary);
+}
+
+.secondary-action {
+  flex: none;
+  padding: 6px 10px;
+  border: 1px solid var(--kn-border-strong);
+  border-radius: 7px;
+  background: var(--kn-bg-input);
+  color: var(--kn-text-primary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.secondary-action:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.secondary-action:focus-visible {
+  outline: 2px solid var(--kn-accent);
+  outline-offset: 2px;
 }
 
 .pairing-area {

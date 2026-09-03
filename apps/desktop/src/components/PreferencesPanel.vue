@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import {
@@ -19,6 +19,7 @@ import {
   getConfiguredDesktopPortalBaseUrl,
 } from '../services/desktopAuthSdk'
 import type { DesktopAuthSession, DesktopAuthState } from '../services/desktopAuth'
+import type { MobilePushRegistrationStatus } from '../types/mobilePushRegistration'
 import type { AppThemePreference, CodeThemePreference } from '../theme/theme'
 import type { AgentMessageAppearance } from '../stores/state'
 
@@ -74,6 +75,8 @@ const mobileServerStatus = ref<MobileServerStatus>("stopped")
 const pairingCode = ref<string | null>(null)
 const pairingPayload = ref<string | null>(null)
 const pairingExpiresAtUnixMs = ref<number | null>(null)
+const pushRegistration = ref<MobilePushRegistrationStatus | null>(null)
+const pushRegistrationLoading = ref(false)
 const authSession = ref<DesktopAuthSession | null>(null)
 const authState = ref<DesktopAuthState>({ status: "signedOut" })
 const accountEmail = ref("")
@@ -137,6 +140,43 @@ async function refreshMobileAccess() {
     mobileServerStatus.value = "error"
   }
 }
+
+/**
+ * Ask kanna-server whether the signed-in account has a registered push
+ * device. The relay decides this through the same target resolution a real
+ * `kanna_notify_mobile` would use, without sending anything.
+ */
+async function refreshPushRegistration() {
+  if (authState.value.status !== "signedIn") {
+    pushRegistration.value = null
+    return
+  }
+  pushRegistrationLoading.value = true
+  try {
+    pushRegistration.value = await invoke<MobilePushRegistrationStatus>(
+      "mobile_push_registration_status"
+    )
+  } catch (error) {
+    console.error("[PreferencesPanel] failed to load push registration status:", error)
+    pushRegistration.value = {
+      status: "unavailable",
+      registeredDeviceCount: 0,
+      error: error instanceof Error ? error.message : String(error)
+    }
+  } finally {
+    pushRegistrationLoading.value = false
+  }
+}
+
+const isSignedIn = computed(() => authState.value.status === "signedIn")
+watch(
+  () => [activeTab.value, isSignedIn.value] as const,
+  ([tab, signedIn]) => {
+    if (tab === "mobile" && signedIn) void refreshPushRegistration()
+    else if (!signedIn) pushRegistration.value = null
+  },
+  { immediate: true }
+)
 
 async function startPairing() {
   try {
@@ -457,7 +497,11 @@ defineExpose({ cycleTab })
           :pairing-code="pairingCode"
           :pairing-payload="pairingPayload"
           :expires-at-unix-ms="pairingExpiresAtUnixMs"
+          :account-signed-in="isSignedIn"
+          :push-registration="pushRegistration"
+          :push-registration-loading="pushRegistrationLoading"
           @start-pairing="startPairing"
+          @refresh-push-registration="refreshPushRegistration"
         />
       </div>
 

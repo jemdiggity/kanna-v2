@@ -1,5 +1,12 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { getFirebaseServices } from "./firebase.js";
+import {
+  ACCOUNT_DELETIONS_COLLECTION,
+  AccountDeletionInProgressError,
+} from "./accountDeletion.js";
+
+export { AccountDeletionInProgressError } from "./accountDeletion.js";
+export { registerPushDevice, unregisterPushDevice } from "./pushDevices.js";
 
 /**
  * Upper bound on desktops docs fetched per credential check. A desktopId is a
@@ -8,14 +15,6 @@ import { getFirebaseServices } from "./firebase.js";
  * secret-hash comparison below still selects the correct owner.
  */
 const DESKTOP_LOOKUP_LIMIT = 10;
-const ACCOUNT_DELETIONS_COLLECTION = "accountDeletions";
-
-export class AccountDeletionInProgressError extends Error {
-  constructor() {
-    super("account deletion is in progress");
-    this.name = "AccountDeletionInProgressError";
-  }
-}
 
 /**
  * How long a successful `desktopCredentials` validation stays usable for
@@ -398,73 +397,4 @@ export async function registerDevice(
     console.error("[auth] Failed to register device:", err);
     throw err;
   }
-}
-
-export async function registerPushDevice(
-  userId: string,
-  deviceId: string,
-  deviceToken: string
-): Promise<void> {
-  try {
-    const { db } = getFirebaseServices();
-    await db.runTransaction(async (transaction) => {
-      const deletion = await transaction.get(
-        db.collection(ACCOUNT_DELETIONS_COLLECTION).doc(userId),
-      );
-      if (deletion.exists) throw new AccountDeletionInProgressError();
-      transaction.set(
-        db
-          .collection("users")
-          .doc(userId)
-          .collection("pushDevices")
-          .doc(hashPushDeviceId(deviceId)),
-        {
-          deviceId,
-          token: deviceToken,
-          updatedAt: new Date().toISOString(),
-        },
-      );
-    });
-    console.log(
-      `[auth] Registered mobile push device ${deviceId} for user ${userId}`
-    );
-  } catch (err) {
-    if (err instanceof AccountDeletionInProgressError) throw err;
-    console.error("[auth] Failed to register mobile push device:", err);
-    throw err;
-  }
-}
-
-export async function unregisterPushDevice(
-  userId: string,
-  deviceId: string,
-  deviceToken?: string,
-): Promise<void> {
-  try {
-    const { db } = getFirebaseServices();
-    const deviceRef = db
-      .collection("users")
-      .doc(userId)
-      .collection("pushDevices")
-      .doc(hashPushDeviceId(deviceId));
-    if (deviceToken === undefined) {
-      // Compatibility for mobile versions released before unregister requests
-      // identified the registration they were retiring.
-      await deviceRef.delete();
-      return;
-    }
-    await db.runTransaction(async (transaction) => {
-      const registration = await transaction.get(deviceRef);
-      if (registration.data()?.token === deviceToken) {
-        transaction.delete(deviceRef);
-      }
-    });
-  } catch (err) {
-    console.error("[auth] Failed to unregister mobile push device:", err);
-    throw err;
-  }
-}
-
-function hashPushDeviceId(deviceId: string): string {
-  return createHash("sha256").update(deviceId, "utf8").digest("hex");
 }

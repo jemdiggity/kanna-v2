@@ -13,6 +13,12 @@ import {
   type MobileNotification,
   type MobileNotificationDelivery,
 } from "./mobileNotifications.js";
+import {
+  MAX_ACCOUNT_PUSH_DEVICES,
+  describeNoPushDevices,
+  livePushToken,
+  retirePushDeviceAfterProviderRejection,
+} from "./pushDevices.js";
 
 export const ANONYMOUS_PUSH_PAIRINGS_COLLECTION = "anonymousPushPairings";
 export const ANONYMOUS_AUTH_DOMAIN = Buffer.from("kanna.relay-auth.v1\0", "utf8");
@@ -21,7 +27,6 @@ const STALE_BINDING_MS = 180 * 24 * 60 * 60 * 1_000;
 const MAX_CERTIFICATE_LIFETIME_MS = 731 * 24 * 60 * 60_000;
 const MAX_DEVICES_PER_DESKTOP = 10;
 const MAX_DESKTOPS_PER_TOKEN = 20;
-const MAX_ACCOUNT_PUSH_DEVICES = 500;
 const INVALID_TOKEN_CODES = new Set([
   "messaging/invalid-argument",
   "messaging/invalid-registration-token",
@@ -319,11 +324,17 @@ export async function publishAnonymousPush(input: {
   userId?: string;
   desktopId?: string;
   notification: MobileNotification;
+  /**
+   * Resolve targets and explain a zero-target result without sending,
+   * touching delivery watermarks, or spending rate-limit budget.
+   */
+  dryRun?: boolean;
 }, db = getFirebaseServices().db): Promise<MobileNotificationDelivery> {
   const nowMs = Date.now();
   const desktopKeyHash = anonymousDesktopId(input.desktopPubKey);
   const dualIdentity = Boolean(input.userId && input.desktopId);
-  const anonymousAdmitted = consumeCounter(
+  const dryRun = input.dryRun === true;
+  const anonymousAdmitted = dryRun || consumeCounter(
     desktopPublishCounters,
     desktopKeyHash,
     nowMs,
@@ -353,9 +364,8 @@ export async function publishAnonymousPush(input: {
 
   const targets = new Map<string, PushDeliveryTarget>();
   for (const device of accountSnapshot?.docs ?? []) {
-    const token = device.data().token;
-    if (typeof token !== "string" || !token.trim()) continue;
-    const normalized = token.trim();
+    const normalized = livePushToken(device.data());
+    if (!normalized) continue;
     const target = targets.get(normalized) ?? {
       token: normalized,
       tokenHash: sha256(normalized),
@@ -375,7 +385,10 @@ export async function publishAnonymousPush(input: {
       existing.anonymousBindings.push(binding);
       continue;
     }
-    if (!consumeCounter(tokenPublishCounters, tokenHash, nowMs, TOKEN_PER_MINUTE, TOKEN_PER_DAY)) {
+    if (
+      !dryRun
+      && !consumeCounter(tokenPublishCounters, tokenHash, nowMs, TOKEN_PER_MINUTE, TOKEN_PER_DAY)
+    ) {
       if (!dualIdentity) {
         throw new AnonymousPushRefusal(429, "token_rate_limit", "Anonymous push token rate limit exceeded");
       }
@@ -390,11 +403,35 @@ export async function publishAnonymousPush(input: {
     target.anonymousBindings.push(binding);
     targets.set(normalized, target);
   }
-  const { messaging } = getFirebaseServices();
   const selected = [...targets.values()];
   if (selected.length === 0) {
-    return { acceptedCount: 0, failedCount: 0, failureReasons: [] };
+    // Only a dual-identity session reaches here with zero targets (an
+    // anonymous-only session was refused above), so the account records are
+    // the registration history to explain.
+    const noDevicesReason = describeNoPushDevices(
+      (accountSnapshot?.docs ?? []).map((doc) => doc.data()),
+    );
+    console.warn(
+      `[push] No mobile push device targeted for desktop ${input.desktopId ?? desktopKeyHash}`
+      + ` (${noDevicesReason.code}${dryRun ? ", probe" : ""})`,
+    );
+    return {
+      acceptedCount: 0,
+      failedCount: 0,
+      failureReasons: [],
+      targetedDeviceCount: 0,
+      noDevicesReason,
+    };
   }
+  if (dryRun) {
+    return {
+      acceptedCount: 0,
+      failedCount: 0,
+      failureReasons: [],
+      targetedDeviceCount: selected.length,
+    };
+  }
+  const { messaging } = getFirebaseServices();
   const captureCollection = process.env.KANNA_E2E_ANON_PUSH_CAPTURE_COLLECTION?.trim();
   if (captureCollection) {
     const batch = db.batch();
@@ -415,6 +452,7 @@ export async function publishAnonymousPush(input: {
       acceptedCount: selected.length,
       failedCount: 0,
       failureReasons: [],
+      targetedDeviceCount: selected.length,
     };
   }
   const response = await messaging.sendEachForMulticast({
@@ -441,10 +479,13 @@ export async function publishAnonymousPush(input: {
       await Promise.all([
         ...target.anonymousBindings.map((binding) =>
           reconcileInvalidAnonymousPushToken(binding, nowMs, db)),
-        ...target.accountDevices.map((device) => db.runTransaction(async (transaction) => {
-          const current = await transaction.get(device.ref);
-          if (current.data()?.token === target.token) transaction.delete(device.ref);
-        })),
+        ...target.accountDevices.map((device) =>
+          retirePushDeviceAfterProviderRejection(db, {
+            ref: device.ref,
+            expectedToken: target.token,
+            providerCode: result.error?.code ?? "messaging/unknown-error",
+            desktopId: input.desktopId ?? desktopKeyHash,
+          })),
       ]);
     }
   }));
@@ -454,6 +495,7 @@ export async function publishAnonymousPush(input: {
     failureReasons: summarizeFailures(
       response.responses.flatMap((result) => result.error ? [result.error] : []),
     ),
+    targetedDeviceCount: selected.length,
   };
 }
 

@@ -1,4 +1,5 @@
 import { setTimeout as sleep } from "node:timers/promises";
+import { createHash } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { tauriInvoke } from "../helpers/vue";
 import { WebDriverClient } from "../helpers/webdriver";
@@ -22,6 +23,9 @@ interface RelayMessage extends Record<string, unknown> {
 }
 
 const client = new WebDriverClient();
+let authSession: AuthSession | null = null;
+let desktopCredentialPath: string | null = null;
+let pushDevicePath: string | null = null;
 
 function requireEnv(name: string): string {
   const value = process.env[name]?.trim();
@@ -130,6 +134,45 @@ function relayUrl(): string {
     return configured;
   }
   return `ws://127.0.0.1:${requireEnv("KANNA_RELAY_PORT")}`;
+}
+
+function relayHttpUrl(path: string): string {
+  const url = relayUrl().replace(/^ws:/, "http:").replace(/^wss:/, "https:");
+  return `${url.replace(/\/+$/, "")}${path}`;
+}
+
+async function updatePushRegistration(
+  action: "register" | "unregister",
+  auth: AuthSession,
+  input: { deviceId: string; deviceToken: string; registrationId: string }
+): Promise<void> {
+  const response = await fetch(relayHttpUrl(`/push/${action}`), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      idToken: auth.idToken,
+      ...input
+    })
+  });
+  if (!response.ok) {
+    throw new Error(`push ${action} failed: ${response.status} ${await response.text()}`);
+  }
+}
+
+async function signInDesktopRenderer(): Promise<void> {
+  await client.click(await client.waitForElement('[data-testid="preferences-account-tab"]'));
+  await client.sendKeys(
+    await client.waitForElement('[data-testid="account-email"]'),
+    "upvote.sieve.7t@icloud.com"
+  );
+  await client.sendKeys(
+    await client.waitForElement('[data-testid="account-password"]'),
+    "password123"
+  );
+  await client.click(
+    await client.waitForElement('[data-testid="account-sign-in"] .primary-button')
+  );
+  await client.waitForText(".prefs-panel", "upvote.sieve.7t@icloud.com", 15_000);
 }
 
 async function connectPhoneRelay(): Promise<WebSocket> {
@@ -268,7 +311,17 @@ describe("mobile pairing UI", () => {
   });
 
   afterAll(async () => {
-    await client.deleteSession();
+    try {
+      if (authSession && pushDevicePath) {
+        await deleteFirestoreDocument(authSession.idToken, pushDevicePath).catch(() => undefined);
+      }
+      if (authSession && desktopCredentialPath) {
+        await deleteFirestoreDocument(authSession.idToken, desktopCredentialPath)
+          .catch(() => undefined);
+      }
+    } finally {
+      await client.deleteSession();
+    }
   });
 
   it("starts pairing and registers this desktop online with the relay", async () => {
@@ -295,12 +348,40 @@ describe("mobile pairing UI", () => {
     expect(status.desktopId).toEqual(expect.any(String));
 
     const auth = await signInForAuthSession();
+    authSession = auth;
     const credential = await tauriInvoke(client, "desktop_cloud_credential") as DesktopCloudCredential;
-    const desktopPath = await createDesktopCredentialDoc(auth, status, credential);
-    try {
-      await waitForActiveDesktop(status.desktopId!);
-    } finally {
-      await deleteFirestoreDocument(auth.idToken, desktopPath).catch(() => undefined);
-    }
+    desktopCredentialPath = await createDesktopCredentialDoc(auth, status, credential);
+    await waitForActiveDesktop(status.desktopId!);
+  }, 45_000);
+
+  it("shows the signed-in operator when push is unreachable and tracks registration changes", async () => {
+    if (!authSession) throw new Error("pairing test did not create an auth session");
+    await signInDesktopRenderer();
+    await client.click(await client.waitForElement('[data-testid="preferences-mobile-tab"]'));
+
+    const rowSelector = '[data-testid="mobile-access-push-registration"]';
+    await client.waitForText(rowSelector, "No phone is registered for push notifications", 15_000);
+    await client.waitForText(rowSelector, "has ever registered", 15_000);
+    await client.waitForText(rowSelector, "Open Kanna on the phone", 15_000);
+
+    const device = {
+      deviceId: "desktop-mobile-access-e2e-phone",
+      deviceToken: "desktop-mobile-access-e2e-token",
+      registrationId: "desktop-mobile-access-e2e-registration"
+    };
+    pushDevicePath = `users/${authSession.localId}/pushDevices/${
+      createHash("sha256").update(device.deviceId, "utf8").digest("hex")
+    }`;
+    await updatePushRegistration("register", authSession, device);
+    await client.click(await client.waitForElement('[data-testid="mobile-access-push-refresh"]'));
+    await client.waitForText(rowSelector, "reach 1 registered phone", 15_000);
+
+    await updatePushRegistration("unregister", authSession, device);
+    await client.click(await client.waitForElement('[data-testid="mobile-access-push-refresh"]'));
+    await client.waitForText(rowSelector, "unregistered the last push device", 15_000);
+    await client.waitForText(rowSelector, "Open Kanna on the phone", 15_000);
+
+    const screenshotPath = process.env.KANNA_MOBILE_ACCESS_SCREENSHOT_PATH?.trim();
+    if (screenshotPath) await client.screenshot(screenshotPath);
   }, 45_000);
 });

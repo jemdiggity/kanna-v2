@@ -199,6 +199,14 @@ pub struct MobileNotificationPayload {
     pub body: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
+    /// Ask the relay to resolve the delivery targets and explain a zero-target
+    /// result without sending anything or spending rate-limit budget. This is
+    /// how the desktop learns whether the signed-in account currently has a
+    /// registered push device, through the one code path that decides it.
+    /// Encoded as the distinct `mobile_notification_probe` wire message, so it
+    /// is never serialized as part of this notification payload.
+    #[serde(skip)]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -208,6 +216,32 @@ pub struct MobileNotificationDelivery {
     pub failed_count: u64,
     #[serde(default)]
     pub failure_reasons: Vec<MobileNotificationFailureReason>,
+    /// Distinct device tokens the relay resolved. Absent from acknowledgements
+    /// of a relay that predates the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub targeted_device_count: Option<u64>,
+    /// Why nothing was targeted; present exactly when the relay resolved zero
+    /// devices. Never carries a token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_devices_reason: Option<MobileNotificationNoDevicesReason>,
+}
+
+/// The relay's explanation for a zero-target delivery, read from the account's
+/// push-registration records: `neverRegistered`, `unregistered` (the mobile app
+/// retired it, `retiredAt`), `tokenRejected` (the push provider rejected the
+/// token as `providerCode` during a delivery for `retiredByDesktopId` at
+/// `retiredAt`), or `unknown` (retired before the relay recorded why).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileNotificationNoDevicesReason {
+    pub code: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retired_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retired_by_desktop_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -278,6 +312,11 @@ pub enum RelayMessage {
         id: String,
         notification: MobileNotificationPayload,
     },
+    /// Resolve notification targets without sending. Requires relay
+    /// capability `mobileNotifications.version >= 2`; its distinct type keeps
+    /// the operation safe even if a probe reaches an older relay.
+    #[serde(rename = "mobile_notification_probe")]
+    MobileNotificationProbe { id: String },
     #[serde(rename = "mobile_notification_ack")]
     MobileNotificationAck {
         id: String,

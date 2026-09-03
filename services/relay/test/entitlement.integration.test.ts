@@ -521,7 +521,7 @@ describe("Relay entitlement enforcement", () => {
     expect(auth.userId).toBe(accounts.unentitled.uid);
     expect(auth.capabilities.tunnelServices).toEqual([]);
     expect(auth.capabilities.taskSnapshotPublication).toBeUndefined();
-    expect(auth.capabilities.mobileNotifications).toEqual({ version: 1 });
+    expect(auth.capabilities.mobileNotifications).toEqual({ version: 2 });
     // Desktop-to-desktop routing crosses the relay, so the 2026-08-21 owner
     // ruling makes it paid too — it is no longer advertised either.
     expect(auth.capabilities.desktopRouting).toBeUndefined();

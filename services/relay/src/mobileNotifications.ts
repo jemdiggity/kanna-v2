@@ -1,8 +1,15 @@
 import { randomUUID } from "node:crypto";
 import type { DocumentReference } from "firebase-admin/firestore";
 import { getFirebaseServices } from "./firebase.js";
+import {
+  MAX_ACCOUNT_PUSH_DEVICES,
+  describeNoPushDevices,
+  livePushToken,
+  retirePushDeviceAfterProviderRejection,
+  type NoPushDevicesReason,
+} from "./pushDevices.js";
 
-const MAX_PUSH_DEVICES = 500;
+const MAX_PUSH_DEVICES = MAX_ACCOUNT_PUSH_DEVICES;
 const INVALID_TOKEN_CODES = new Set([
   // Per-device invalid-argument responses are token failures. Invalid message
   // payloads reject the whole multicast call instead of producing one result
@@ -22,6 +29,15 @@ export interface MobileNotificationDelivery {
   acceptedCount: number;
   failedCount: number;
   failureReasons: MobileNotificationFailureReason[];
+  /**
+   * Distinct device tokens the delivery resolved. Reported for every
+   * delivery so a caller can tell "sent to zero" from "sent to some"; it is
+   * the whole answer of a registration probe, which resolves targets without
+   * sending.
+   */
+  targetedDeviceCount: number;
+  /** Present exactly when `targetedDeviceCount` is zero. Never carries a token. */
+  noDevicesReason?: NoPushDevicesReason;
 }
 
 export interface MobileNotificationFailureReason {
@@ -74,6 +90,8 @@ export async function sendMobileNotification(input: {
   userId: string;
   desktopId: string;
   notification: MobileNotification;
+  /** Resolve targets and explain a zero-target result without sending. */
+  dryRun?: boolean;
 }): Promise<MobileNotificationDelivery> {
   const { db, messaging } = getFirebaseServices();
   const snapshot = await db
@@ -83,13 +101,30 @@ export async function sendMobileNotification(input: {
     .limit(MAX_PUSH_DEVICES)
     .get();
   const devices = snapshot.docs.flatMap((doc): RegisteredPushDevice[] => {
-    const token = doc.data().token;
-    return typeof token === "string" && token.trim()
-      ? [{ ref: doc.ref, token: token.trim() }]
-      : [];
+    const token = livePushToken(doc.data());
+    return token ? [{ ref: doc.ref, token }] : [];
   });
   if (devices.length === 0) {
-    return { acceptedCount: 0, failedCount: 0, failureReasons: [] };
+    const noDevicesReason = describeNoPushDevices(snapshot.docs.map((doc) => doc.data()));
+    console.warn(
+      `[push] No mobile push device targeted for desktop ${input.desktopId}`
+      + ` (${noDevicesReason.code}${input.dryRun ? ", probe" : ""})`,
+    );
+    return {
+      acceptedCount: 0,
+      failedCount: 0,
+      failureReasons: [],
+      targetedDeviceCount: 0,
+      noDevicesReason,
+    };
+  }
+  if (input.dryRun) {
+    return {
+      acceptedCount: 0,
+      failedCount: 0,
+      failureReasons: [],
+      targetedDeviceCount: devices.length,
+    };
   }
 
   const response = await messaging.sendEachForMulticast({
@@ -113,21 +148,21 @@ export async function sendMobileNotification(input: {
     },
   });
 
-  const staleDeviceDeletes = response.responses.flatMap((result, index) => {
+  const staleDeviceRetirements = response.responses.flatMap((result, index) => {
     const code = result.error?.code;
     const device = devices[index];
     if (!code || !INVALID_TOKEN_CODES.has(code) || !device) {
       return [];
     }
-    return [db.runTransaction(async (transaction) => {
-      const current = await transaction.get(device.ref);
-      if (current.data()?.token === device.token) {
-        transaction.delete(device.ref);
-      }
+    return [retirePushDeviceAfterProviderRejection(db, {
+      ref: device.ref,
+      expectedToken: device.token,
+      providerCode: code,
+      desktopId: input.desktopId,
     })];
   });
-  if (staleDeviceDeletes.length > 0) {
-    await Promise.allSettled(staleDeviceDeletes);
+  if (staleDeviceRetirements.length > 0) {
+    await Promise.allSettled(staleDeviceRetirements);
   }
 
   return {
@@ -136,6 +171,7 @@ export async function sendMobileNotification(input: {
     failureReasons: summarizeMessagingFailures(
       response.responses.flatMap((result) => result.error ? [result.error] : [])
     ),
+    targetedDeviceCount: devices.length,
   };
 }
 
@@ -143,6 +179,7 @@ export async function publishMobileNotification(input: {
   userId: string;
   desktopId: string;
   notification: MobileNotification;
+  dryRun?: boolean;
   sendAck: (ack: MobileNotificationPublicationAck) => void;
 }, dependencies: MobileNotificationPublicationDependencies = {}): Promise<void> {
   const send = dependencies.send ?? sendMobileNotification;
@@ -153,6 +190,7 @@ export async function publishMobileNotification(input: {
       userId: input.userId,
       desktopId: input.desktopId,
       notification: input.notification,
+      ...(input.dryRun ? { dryRun: true } : {}),
     });
   } catch {
     const incidentId = (dependencies.createIncidentId ?? randomUUID)();

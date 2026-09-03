@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { TaskSummary } from "../api/types";
 import {
+  createAccountPushRegistrationCoordinator,
   createAnonymousPushBindingCoordinator,
   parseNotificationTaskTarget,
   pushRegistrationUrl,
@@ -8,6 +9,11 @@ import {
   resolveNotificationTaskId,
   startMobilePushNotifications
 } from "./mobilePush";
+
+function requestBody(call: readonly unknown[] | undefined): Record<string, string> {
+  const init = call?.[1] as { body?: unknown } | undefined;
+  return JSON.parse(String(init?.body)) as Record<string, string>;
+}
 
 describe("mobile push notifications", () => {
   it("registers the FCM token with the authenticated relay and follows refreshes", async () => {
@@ -50,24 +56,26 @@ describe("mobile push notifications", () => {
 
     expect(fetchImpl).toHaveBeenCalledWith(
       "https://relay-staging.kanna.build/push/register",
-      expect.objectContaining({
-        method: "POST",
-        body: JSON.stringify({
-          idToken: "firebase-id-token",
-          deviceId: "mobile-device-1",
-          deviceToken: "fcm-token-1"
-        })
-      })
+      expect.objectContaining({ method: "POST" })
     );
+    expect(requestBody(fetchImpl.mock.calls[0])).toEqual({
+      idToken: "firebase-id-token",
+      deviceId: "mobile-device-1",
+      deviceToken: "fcm-token-1",
+      registrationId: expect.any(String)
+    });
 
     refreshToken?.("fcm-token-2");
     await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(2));
-    expect(fetchImpl.mock.calls[1]?.[1]?.body).toBe(
-      JSON.stringify({
-        idToken: "firebase-id-token",
-        deviceId: "mobile-device-1",
-        deviceToken: "fcm-token-2"
-      })
+    const refreshed = requestBody(fetchImpl.mock.calls[1]);
+    expect(refreshed).toEqual({
+      idToken: "firebase-id-token",
+      deviceId: "mobile-device-1",
+      deviceToken: "fcm-token-2",
+      registrationId: expect.any(String)
+    });
+    expect(refreshed.registrationId).not.toBe(
+      requestBody(fetchImpl.mock.calls[0]).registrationId
     );
 
     stop();
@@ -75,17 +83,195 @@ describe("mobile push notifications", () => {
     expect(stopOpened).toHaveBeenCalledOnce();
     expect(stopResponse).toHaveBeenCalledOnce();
     await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(3));
-    expect(fetchImpl.mock.calls[2]).toEqual([
-      "https://relay-staging.kanna.build/push/unregister",
-      expect.objectContaining({
-        method: "POST",
-        body: JSON.stringify({
-          idToken: "firebase-id-token",
-          deviceId: "mobile-device-1",
-          deviceToken: "fcm-token-2"
-        })
-      })
+    expect(fetchImpl.mock.calls[2]?.[0]).toBe(
+      "https://relay-staging.kanna.build/push/unregister"
+    );
+    // The unregister names the registration it retires, so the relay can
+    // ignore it if a newer registration of this device has landed since.
+    expect(requestBody(fetchImpl.mock.calls[2])).toEqual({
+      idToken: "firebase-id-token",
+      deviceId: "mobile-device-1",
+      deviceToken: "fcm-token-2",
+      registrationId: refreshed.registrationId
+    });
+  });
+
+  it("keeps the newer same-token lifecycle registered when the older deferred cleanup runs", async () => {
+    // The 2026-09-03 staging loss: the push effect re-ran with the same FCM
+    // token while the previous run's register was still in flight. App.tsx
+    // defers that run's cleanup until start resolves; its stale lease must not
+    // clear the newer run's desire when both starts coalesce onto one request.
+    const relayRegistrations = new Map<string, string>();
+    let resolveFirstRegister: (() => void) | null = null;
+    const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, string>;
+      if (url.endsWith("/push/register")) {
+        await new Promise<void>((resolve) => {
+          resolveFirstRegister = resolve;
+        });
+        relayRegistrations.set(body.registrationId, body.deviceToken);
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      relayRegistrations.delete(body.registrationId);
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+    const coordinator = createAccountPushRegistrationCoordinator({
+      fetchImpl: fetchImpl as unknown as typeof fetch
+    });
+    const sdk = {
+      setNotificationHandler: vi.fn(),
+      requestPermission: vi.fn(async () => 1),
+      getToken: vi.fn(async () => "fcm-same-token"),
+      onTokenRefresh: vi.fn(() => () => undefined),
+      getInitialNotification: vi.fn(async () => null),
+      onNotificationOpened: vi.fn(() => () => undefined),
+      onNotificationResponse: vi.fn(() => () => undefined)
+    };
+    const start = () => startMobilePushNotifications({
+      deviceId: "mobile-device-1",
+      getIdToken: async () => "firebase-id-token",
+      onTaskOpen: vi.fn(),
+      relayUrl: "wss://relay-staging.kanna.build",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      accountRegistrationCoordinator: coordinator,
+      sdk
+    });
+    const beginEffectRun = () => {
+      let disposed = false;
+      let stop = () => undefined;
+      const started = start().then((cleanup) => {
+        if (disposed) cleanup();
+        else stop = cleanup;
+      });
+      return {
+        dispose() {
+          disposed = true;
+          stop();
+        },
+        started
+      };
+    };
+
+    const firstRun = beginEffectRun();
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(1));
+    firstRun.dispose();
+    const secondRun = beginEffectRun();
+    await vi.waitFor(() => expect(sdk.getToken).toHaveBeenCalledTimes(2));
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+    resolveFirstRegister?.();
+    await Promise.all([firstRun.started, secondRun.started]);
+
+    const liveRegistration = requestBody(fetchImpl.mock.calls[0]);
+    expect(fetchImpl.mock.calls.map((call) => call[0])).toEqual([
+      "https://relay-staging.kanna.build/push/register"
     ]);
+    expect([...relayRegistrations.entries()]).toEqual([
+      [liveRegistration.registrationId, "fcm-same-token"]
+    ]);
+    expect(coordinator.applied("wss://relay-staging.kanna.build", "mobile-device-1")).toEqual({
+      deviceToken: "fcm-same-token",
+      registrationId: liveRegistration.registrationId
+    });
+
+    secondRun.dispose();
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(2));
+    expect(requestBody(fetchImpl.mock.calls[1]).registrationId).toBe(
+      liveRegistration.registrationId
+    );
+    expect(relayRegistrations.size).toBe(0);
+  });
+
+  it("retries a failed re-registration instead of remembering the device as registered", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const statuses = [503, 401, 200];
+    const fetchImpl = vi.fn(async () =>
+      new Response(null, { status: statuses.shift() ?? 200 }));
+    const getIdToken = vi.fn(async (forceRefresh?: boolean) =>
+      forceRefresh ? "firebase-id-token-fresh" : "firebase-id-token");
+    const coordinator = createAccountPushRegistrationCoordinator({
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      retryDelayMs: () => 0
+    });
+
+    await startMobilePushNotifications({
+      deviceId: "mobile-device-1",
+      getIdToken,
+      onTaskOpen: vi.fn(),
+      relayUrl: "wss://relay-staging.kanna.build",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      accountRegistrationCoordinator: coordinator,
+      sdk: {
+        setNotificationHandler: vi.fn(),
+        requestPermission: vi.fn(async () => 1),
+        getToken: vi.fn(async () => "fcm-token-1"),
+        onTokenRefresh: vi.fn(() => () => undefined),
+        getInitialNotification: vi.fn(async () => null),
+        onNotificationOpened: vi.fn(() => () => undefined),
+        onNotificationResponse: vi.fn(() => () => undefined)
+      }
+    });
+
+    // The first attempt was refused, so nothing is believed registered yet.
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(coordinator.applied("wss://relay-staging.kanna.build", "mobile-device-1")).toBeNull();
+
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(3));
+    await vi.waitFor(() =>
+      expect(coordinator.applied("wss://relay-staging.kanna.build", "mobile-device-1")).toEqual({
+        deviceToken: "fcm-token-1",
+        registrationId: requestBody(fetchImpl.mock.calls[2]).registrationId
+      }));
+    // A 401 forces a fresh id token on the next attempt.
+    expect(getIdToken.mock.calls.at(-1)).toEqual([true]);
+    expect(requestBody(fetchImpl.mock.calls[2]).idToken).toBe("firebase-id-token-fresh");
+  });
+
+  it("retries an unregister with a fresh id token and gives up after the configured attempts", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const unregisterStatuses = [500, 200];
+    const fetchImpl = vi.fn(async (url: string) =>
+      new Response(null, {
+        status: url.endsWith("/push/unregister") ? unregisterStatuses.shift() ?? 500 : 200
+      }));
+    const getIdToken = vi.fn(async (forceRefresh?: boolean) =>
+      forceRefresh ? "firebase-id-token-fresh" : "firebase-id-token");
+    const coordinator = createAccountPushRegistrationCoordinator({
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      retryDelayMs: () => 0,
+      maxUnregisterAttempts: 2
+    });
+    const relayUrl = "wss://relay-staging.kanna.build";
+
+    const firstRegistration = coordinator.register({
+      relayUrl,
+      deviceId: "mobile-device-1",
+      deviceToken: "fcm-token-1",
+      getIdToken
+    });
+    await firstRegistration.settled;
+    await coordinator.unregister(firstRegistration.lease);
+    await vi.waitFor(() => expect(coordinator.applied(relayUrl, "mobile-device-1")).toBeNull());
+    expect(fetchImpl.mock.calls.map((call) => call[0])).toEqual([
+      `https://relay-staging.kanna.build/push/register`,
+      `https://relay-staging.kanna.build/push/unregister`,
+      `https://relay-staging.kanna.build/push/unregister`
+    ]);
+    expect(requestBody(fetchImpl.mock.calls[1]).idToken).toBe("firebase-id-token");
+    expect(requestBody(fetchImpl.mock.calls[2]).idToken).toBe("firebase-id-token-fresh");
+
+    // A relay that stays down: the local record is dropped after the bound so
+    // the worker does not spin, and the next registration replaces the row.
+    const secondRegistration = coordinator.register({
+      relayUrl,
+      deviceId: "mobile-device-1",
+      deviceToken: "fcm-token-2",
+      getIdToken
+    });
+    await secondRegistration.settled;
+    await coordinator.unregister(secondRegistration.lease);
+    await vi.waitFor(() => expect(coordinator.applied(relayUrl, "mobile-device-1")).toBeNull());
+    expect(fetchImpl.mock.calls.filter((call) => call[0].endsWith("/push/unregister"))).toHaveLength(4);
   });
 
   it("re-registers the current FCM token on every app launch", async () => {
@@ -111,17 +297,19 @@ describe("mobile push notifications", () => {
       });
     }
 
-    expect(fetchImpl.mock.calls.map((call) => call[1]?.body)).toEqual([
-      JSON.stringify({
+    expect(fetchImpl.mock.calls.map((call) => requestBody(call))).toEqual([
+      {
         idToken: "firebase-id-token",
         deviceId: "mobile-device-1",
-        deviceToken: "fcm-before-reinstall"
-      }),
-      JSON.stringify({
+        deviceToken: "fcm-before-reinstall",
+        registrationId: expect.any(String)
+      },
+      {
         idToken: "firebase-id-token",
         deviceId: "mobile-device-1",
-        deviceToken: "fcm-after-reinstall"
-      })
+        deviceToken: "fcm-after-reinstall",
+        registrationId: expect.any(String)
+      }
     ]);
   });
 

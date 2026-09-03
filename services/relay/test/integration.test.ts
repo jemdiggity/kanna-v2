@@ -1097,10 +1097,145 @@ describe("Relay integration", () => {
         }),
       });
       expect(unregister.status).toBe(200);
-      expect(await unregister.json()).toEqual({ ok: true });
-      expect((await pushDeviceRef.get()).exists).toBe(false);
+      expect(await unregister.json()).toEqual({ ok: true, outcome: "retired" });
+      // Retirement keeps an attributable record rather than deleting the row.
+      expect((await pushDeviceRef.get()).data()).toEqual({
+        deviceId,
+        token: null,
+        registrationId: null,
+        updatedAt: expect.any(String),
+        retiredAt: expect.any(String),
+        retiredReason: "unregistered",
+      });
     } finally {
       await pushDeviceRef.delete();
+    }
+  });
+
+  it("ignores a late unregister of an older registration that reused the same token", async () => {
+    // The 2026-09-03 staging loss: the mobile effect re-ran three times in
+    // 700 ms with one FCM token, and the last cleanup to land deleted the
+    // freshly written row because the guard compared tokens only.
+    const deviceId = "relay-integration-reordered-device";
+    const deviceToken = "relay-integration-same-fcm-token";
+    const pushDeviceRef = testFirestore.doc(
+      `users/${TEST_USER_ID}/pushDevices/${sha256Hex(deviceId)}`,
+    );
+    await pushDeviceRef.delete();
+    const register = (registrationId: string) => fetch(relayHttpUrl("/push/register"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ idToken, deviceId, deviceToken, registrationId }),
+    });
+    const unregister = (registrationId: string) => fetch(relayHttpUrl("/push/unregister"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ idToken, deviceId, deviceToken, registrationId }),
+    });
+
+    try {
+      expect((await register("reg-1")).status).toBe(200);
+      expect((await register("reg-2")).status).toBe(200);
+      expect((await register("reg-3")).status).toBe(200);
+      const late1 = await unregister("reg-1");
+      const late2 = await unregister("reg-2");
+      expect(await late1.json()).toEqual({ ok: true, outcome: "stale" });
+      expect(await late2.json()).toEqual({ ok: true, outcome: "stale" });
+      expect((await pushDeviceRef.get()).data()).toEqual({
+        deviceId,
+        token: deviceToken,
+        registrationId: "reg-3",
+        updatedAt: expect.any(String),
+      });
+
+      const malformed = await fetch(relayHttpUrl("/push/unregister"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ idToken, deviceId, registrationId: 42 }),
+      });
+      expect(malformed.status).toBe(400);
+
+      const current = await unregister("reg-3");
+      expect(await current.json()).toEqual({ ok: true, outcome: "retired" });
+      expect((await pushDeviceRef.get()).data()?.token).toBeNull();
+      const repeat = await unregister("reg-3");
+      expect(await repeat.json()).toEqual({ ok: true, outcome: "alreadyRetired" });
+    } finally {
+      await pushDeviceRef.delete();
+    }
+  });
+
+  it("explains a zero-target notification and resolves targets on a probe without sending", async () => {
+    const pushDevicesRef = testFirestore.collection(
+      `users/${TEST_USER_ID}/pushDevices`,
+    );
+    await testFirestore.recursiveDelete(pushDevicesRef);
+    const deviceId = "relay-integration-explained-device";
+    const deviceToken = "relay-integration-explained-fcm-token";
+    const { ws } = await connectAndAuth({
+      desktop_id: SECRET_DESKTOP_ID,
+      desktop_secret: SECRET_DESKTOP_SECRET,
+    });
+    const publish = async (id: string, probe = false) => {
+      const ack = waitForMessage(ws, (message) =>
+        message.type === "mobile_notification_ack" && message.id === id);
+      ws.send(JSON.stringify({
+        type: probe ? "mobile_notification_probe" : "mobile_notification_publish",
+        id,
+        ...(!probe ? { notification: { title: "Blocked", body: "Needs a decision." } } : {}),
+      }));
+      return ack;
+    };
+
+    try {
+      await expect(publish("explain-never")).resolves.toMatchObject({
+        ok: true,
+        delivery: {
+          acceptedCount: 0,
+          failedCount: 0,
+          targetedDeviceCount: 0,
+          noDevicesReason: { code: "neverRegistered" },
+        },
+      });
+
+      expect((await fetch(relayHttpUrl("/push/register"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ idToken, deviceId, deviceToken, registrationId: "reg-1" }),
+      })).status).toBe(200);
+      // The probe resolves the registered device without sending; the
+      // emulator environment has no FCM credentials, so a real send here
+      // would have failed the whole call instead of reporting a target.
+      const probe = await publish("explain-probe", true);
+      expect(probe).toMatchObject({
+        ok: true,
+        delivery: { acceptedCount: 0, failedCount: 0, targetedDeviceCount: 1 },
+      });
+      expect((probe.delivery as Record<string, unknown>).noDevicesReason).toBeUndefined();
+
+      expect((await fetch(relayHttpUrl("/push/unregister"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ idToken, deviceId, deviceToken, registrationId: "reg-1" }),
+      })).status).toBe(200);
+      const explained = await publish("explain-unregistered");
+      expect(explained).toMatchObject({
+        ok: true,
+        delivery: {
+          acceptedCount: 0,
+          failedCount: 0,
+          targetedDeviceCount: 0,
+          noDevicesReason: {
+            code: "unregistered",
+            retiredAt: expect.any(String),
+            message: expect.stringContaining("unregistered the last push device"),
+          },
+        },
+      });
+      expect(JSON.stringify(explained)).not.toContain(deviceToken);
+    } finally {
+      await closeAndWait(ws);
+      await testFirestore.recursiveDelete(pushDevicesRef);
     }
   });
 
@@ -1687,7 +1822,7 @@ describe("Relay integration", () => {
     const { ws, capabilities } = await connectAndAuthAnonymous(identity);
     expect(capabilities).toEqual({
       tunnelServices: [],
-      mobileNotifications: { version: 1 },
+      mobileNotifications: { version: 2 },
     });
     const ack = waitForMessage(ws, (message) =>
       message.type === "mobile_notification_ack" && message.id === "anonymous-delivery");
@@ -1720,7 +1855,7 @@ describe("Relay integration", () => {
 
     const { ws, userId, capabilities } = await connectAndAuthDualIdentity(identity);
     expect(userId).toBe(TEST_USER_ID);
-    expect(capabilities.mobileNotifications).toEqual({ version: 1 });
+    expect(capabilities.mobileNotifications).toEqual({ version: 2 });
     const ack = waitForMessage(ws, (message) =>
       message.type === "mobile_notification_ack" && message.id === "mixed-anonymous-only");
     ws.send(JSON.stringify({

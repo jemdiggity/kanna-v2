@@ -327,6 +327,51 @@ async fn notify_mobile_surfaces_only_the_fixed_server_rejection_error() {
 }
 
 #[tokio::test]
+async fn notify_mobile_preserves_the_server_no_devices_reason() {
+    let response = http_json_response(
+        "200 OK",
+        &serde_json::json!({
+            "status": "noRegisteredDevices",
+            "acceptedCount": 0,
+            "failedCount": 0,
+            "failureReasons": [],
+            "noDevicesReason": {
+                "code": "tokenRejected",
+                "message": "The push provider rejected the registered device.",
+                "retiredAt": "2026-09-03T08:39:00.000Z",
+                "providerCode": "messaging/registration-token-not-registered",
+                "retiredByDesktopId": "desktop-aa43ab36"
+            }
+        })
+        .to_string(),
+    );
+    let (base_url, server) = serve_single_http_response(response).await;
+
+    let delivery = notify_mobile_via_api(
+        &base_url,
+        &MobileNotificationRequest {
+            title: "Registration check".to_string(),
+            body: "Confirm the reason survives the typed CLI.".to_string(),
+            task_id: None,
+        },
+    )
+    .await
+    .expect("notification response");
+    server.await.expect("fixture server");
+
+    assert_eq!(
+        serde_json::to_value(delivery).expect("serialized CLI response")["noDevicesReason"],
+        serde_json::json!({
+            "code": "tokenRejected",
+            "message": "The push provider rejected the registered device.",
+            "retiredAt": "2026-09-03T08:39:00.000Z",
+            "providerCode": "messaging/registration-token-not-registered",
+            "retiredByDesktopId": "desktop-aa43ab36"
+        })
+    );
+}
+
+#[tokio::test]
 async fn advance_stage_posts_to_task_action_path_with_empty_json_body() {
     let response = http_json_response("200 OK", "{\"taskId\":\"next-task-1\"}");
     let (base_url, handle) = serve_single_http_response(response).await;
