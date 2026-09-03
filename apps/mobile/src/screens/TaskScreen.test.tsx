@@ -777,6 +777,25 @@ describe("TaskScreen", () => {
     ).toBeNull();
   });
 
+  it("closes the server preview when the preview modal closes", async () => {
+    const onCloseTaskPreview = vi.fn().mockResolvedValue(undefined);
+    let tree = renderTaskScreen({
+      ports: [{ name: "DEV_PORT", port: 8471 }],
+      onCloseTaskPreview
+    });
+    pressByTestId(tree, MOBILE_E2E_IDS.taskPreviewButton);
+    tree = renderTaskScreen({
+      ports: [{ name: "DEV_PORT", port: 8471 }],
+      onCloseTaskPreview
+    });
+
+    const previewModal = findByType(tree, "TaskPreviewModal");
+    (previewModal?.props?.onClose as () => void)();
+    await Promise.resolve();
+
+    expect(onCloseTaskPreview).toHaveBeenCalledOnce();
+  });
+
   it.each([
     ["advance-stage", componentMocks.onAdvanceTaskStage],
     ["close-task", componentMocks.onCloseTask]

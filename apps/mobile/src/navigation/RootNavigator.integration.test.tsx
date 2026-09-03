@@ -1418,6 +1418,36 @@ describe("RootNavigator task action integration", () => {
     vi.mocked(showTaskActionMenu).mockClear();
   });
 
+  it.each([
+    [false, { mentionedFilesLabel: "Mentioned Files (0)" }],
+    [
+      true,
+      { mentionedFilesLabel: "Mentioned Files (0)", previewAvailable: true }
+    ]
+  ] as const)(
+    "gates the task Preview action on controller capability (%s)",
+    async (canOpenPreview, expectedMenuOptions) => {
+      const previewTask: TaskSummary = {
+        ...task,
+        ports: [{ name: "DEV_PORT", port: 8471 }]
+      };
+      const client = createClientMock();
+      const canOpenTaskPreview = vi.fn(() => canOpenPreview);
+      Object.assign(client, { canOpenTaskPreview });
+      vi.mocked(client.listRecentTasks).mockResolvedValue([previewTask]);
+      vi.mocked(client.listRepoTasks).mockResolvedValue([previewTask]);
+      const store = createSessionStore();
+
+      await openTaskDetailAndCaptureMenu(client, store);
+
+      expect(canOpenTaskPreview).toHaveBeenCalledWith(task.id);
+      expect(showTaskActionMenu).toHaveBeenCalledWith(
+        expectedMenuOptions,
+        expect.any(Function)
+      );
+    }
+  );
+
   it("aborts an uncertain creation through its slot with the reserved id and frozen desktop", async () => {
     const attempt = {
       slotId: "create:slot-abort",

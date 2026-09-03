@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::collections::HashMap;
 use std::io::Read as _;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::{TcpListener, TcpStream};
@@ -34,6 +34,7 @@ const HARD_TTL: Duration = Duration::from_secs(12 * 60 * 60);
 const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 const MAX_REQUEST_BODY_BYTES: usize = 8 * 1024 * 1024;
 const MAX_CONNECTIONS: usize = 16;
+const MAX_PENDING_ENTER_SECRETS: usize = 8;
 
 type PreviewKey = (String, String);
 
@@ -45,16 +46,36 @@ pub(super) struct PreviewSessions {
 struct PreviewHandle {
     generation: String,
     cancel: oneshot::Sender<()>,
+    listener_port: u16,
+    session: Arc<PreviewSession>,
 }
 
 impl PreviewSessions {
-    async fn replace(&self, key: PreviewKey, generation: String, cancel: oneshot::Sender<()>) {
-        if let Some(previous) = self
-            .sessions
+    async fn current(&self, key: &PreviewKey) -> Option<(u16, Arc<PreviewSession>)> {
+        self.sessions
             .lock()
             .await
-            .insert(key, PreviewHandle { generation, cancel })
-        {
+            .get(key)
+            .map(|handle| (handle.listener_port, Arc::clone(&handle.session)))
+    }
+
+    async fn replace(
+        &self,
+        key: PreviewKey,
+        generation: String,
+        cancel: oneshot::Sender<()>,
+        listener_port: u16,
+        session: Arc<PreviewSession>,
+    ) {
+        if let Some(previous) = self.sessions.lock().await.insert(
+            key,
+            PreviewHandle {
+                generation,
+                cancel,
+                listener_port,
+                session,
+            },
+        ) {
             let _ = previous.cancel.send(());
         }
     }
@@ -131,8 +152,7 @@ struct PreviewSession {
     worktree_path: String,
     port_name: String,
     upstream_port: u16,
-    enter_secret: String,
-    enter_consumed: AtomicBool,
+    enter_secrets: Mutex<Vec<String>>,
     cookie_value: String,
     hard_expires_at: u64,
     last_activity: AtomicU64,
@@ -177,6 +197,33 @@ pub(super) async fn open_task_preview(
             .into_response();
     }
 
+    let preview_key = (selection.task_id.clone(), selection.port_name.clone());
+    if let Some((listener_port, session)) = state.preview_sessions.current(&preview_key).await {
+        if session_is_current(&session).await {
+            let enter_secret = match random_hex_128() {
+                Ok(secret) => secret,
+                Err(error) => return (StatusCode::INTERNAL_SERVER_ERROR, error).into_response(),
+            };
+            let mut enter_secrets = session.enter_secrets.lock().await;
+            if enter_secrets.len() >= MAX_PENDING_ENTER_SECRETS {
+                enter_secrets.remove(0);
+            }
+            enter_secrets.push(enter_secret.clone());
+            drop(enter_secrets);
+            session
+                .last_activity
+                .store(unix_seconds(), Ordering::Release);
+            return Json(OpenPreviewResponse {
+                port: listener_port,
+                port_name: selection.port_name,
+                enter_path: format!("{ENTER_PATH}?t={enter_secret}"),
+                expires_at: session.hard_expires_at.saturating_mul(1000),
+                ports,
+            })
+            .into_response();
+        }
+    }
+
     let listener = match TcpListener::bind((state.config.lan_host.as_str(), 0)).await {
         Ok(listener) => listener,
         Err(error) => {
@@ -213,8 +260,7 @@ pub(super) async fn open_task_preview(
         worktree_path: selection.worktree_path,
         port_name: selection.port_name.clone(),
         upstream_port: selection.port,
-        enter_secret: enter_secret.clone(),
-        enter_consumed: AtomicBool::new(false),
+        enter_secrets: Mutex::new(vec![enter_secret.clone()]),
         cookie_value,
         hard_expires_at,
         last_activity: AtomicU64::new(now),
@@ -225,10 +271,15 @@ pub(super) async fn open_task_preview(
         connections: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
     });
     let (cancel_tx, cancel_rx) = oneshot::channel();
-    let preview_key = (selection.task_id.clone(), selection.port_name.clone());
     state
         .preview_sessions
-        .replace(preview_key.clone(), enter_secret.clone(), cancel_tx)
+        .replace(
+            preview_key.clone(),
+            enter_secret.clone(),
+            cancel_tx,
+            listener_port,
+            Arc::clone(&session),
+        )
         .await;
 
     let listener_session = Arc::clone(&session);
@@ -401,7 +452,7 @@ async fn proxy_preview_request(
 ) -> Response {
     let path = request.uri().path();
     if path == ENTER_PATH {
-        if request.method() != Method::GET || !consume_enter_secret(&session, request.uri()) {
+        if request.method() != Method::GET || !consume_enter_secret(&session, request.uri()).await {
             return StatusCode::NOT_FOUND.into_response();
         }
         if !session_is_current(&session).await {
@@ -603,15 +654,22 @@ fn is_websocket_upgrade(headers: &HeaderMap) -> bool {
             })
 }
 
-fn consume_enter_secret(session: &PreviewSession, uri: &Uri) -> bool {
+async fn consume_enter_secret(session: &PreviewSession, uri: &Uri) -> bool {
     let presented = uri
         .query()
         .and_then(|query| query.split('&').find_map(|pair| pair.strip_prefix("t=")));
-    presented.is_some_and(|secret| secret_matches(secret, &session.enter_secret))
-        && session
-            .enter_consumed
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
+    let Some(presented) = presented else {
+        return false;
+    };
+    let mut secrets = session.enter_secrets.lock().await;
+    let Some(index) = secrets
+        .iter()
+        .position(|expected| secret_matches(presented, expected))
+    else {
+        return false;
+    };
+    secrets.remove(index);
+    true
 }
 
 fn cookie_matches(session: &PreviewSession, headers: &HeaderMap) -> bool {
@@ -721,6 +779,41 @@ mod tests {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
     use tower::ServiceExt as _;
 
+    fn authenticated_preview_request(
+        method: Method,
+        path: &str,
+        body: &'static str,
+    ) -> Request<Body> {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("content-type", "application/json")
+            .header("x-kanna-device-id", "preview-phone")
+            .header("x-kanna-device-secret", "preview-secret")
+            .body(Body::from(body))
+            .expect("preview request");
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [192, 168, 1, 30],
+                49152,
+            ))));
+        request
+    }
+
+    fn trust_preview_phone(state: &Arc<AppState>) -> std::path::PathBuf {
+        let pairing_path = std::path::PathBuf::from(&state.config().pairing_store_path);
+        let mut pairing_store = crate::pairing::PairingStore::default();
+        pairing_store.add_trusted_device(
+            &state.config().desktop_id,
+            "preview-phone",
+            "Preview Phone",
+            &crate::pairing::hash_device_secret("preview-secret"),
+        );
+        pairing_store.save(&pairing_path).expect("save pairing");
+        pairing_path
+    }
+
     #[test]
     fn request_rewrite_targets_only_loopback_and_removes_forwarding_headers() {
         let mut request = Request::builder()
@@ -752,34 +845,39 @@ mod tests {
         assert_eq!(headers[LOCATION], "/project.html");
     }
 
-    #[test]
-    fn enter_and_cookie_credentials_are_independent() {
+    #[tokio::test]
+    async fn enter_and_cookie_credentials_are_independent() {
         let session = PreviewSession {
             db_path: String::new(),
             task_id: "task".into(),
             worktree_path: "workspace".into(),
             port_name: "PORT".into(),
             upstream_port: 8471,
-            enter_secret: "enter-secret".into(),
-            enter_consumed: AtomicBool::new(false),
+            enter_secrets: Mutex::new(vec!["enter-secret".into()]),
             cookie_value: "cookie-secret".into(),
             hard_expires_at: u64::MAX,
             last_activity: AtomicU64::new(0),
             last_validated: AtomicU64::new(0),
             connections: Arc::new(Semaphore::new(1)),
         };
-        assert!(consume_enter_secret(
-            &session,
-            &"/__kanna_preview__/enter?t=enter-secret"
-                .parse()
-                .expect("uri")
-        ));
-        assert!(!consume_enter_secret(
-            &session,
-            &"/__kanna_preview__/enter?t=enter-secret"
-                .parse()
-                .expect("uri")
-        ));
+        assert!(
+            consume_enter_secret(
+                &session,
+                &"/__kanna_preview__/enter?t=enter-secret"
+                    .parse()
+                    .expect("uri")
+            )
+            .await
+        );
+        assert!(
+            !consume_enter_secret(
+                &session,
+                &"/__kanna_preview__/enter?t=enter-secret"
+                    .parse()
+                    .expect("uri")
+            )
+            .await
+        );
         let mut headers = HeaderMap::new();
         headers.insert(
             COOKIE,
@@ -791,6 +889,81 @@ mod tests {
             HeaderValue::from_static("kanna_preview=enter-secret"),
         );
         assert!(!cookie_matches(&session, &headers));
+    }
+
+    #[tokio::test]
+    async fn paired_api_refuses_unknown_port_and_closed_task() {
+        let state = crate::http_api::test_state_with_seed(
+            "desktop-preview-refusals",
+            "Preview Refusal Mac",
+            |db| {
+                db.insert_test_repo("repo-preview", "Preview Repo")
+                    .expect("insert repo");
+                for (task_id, title) in [
+                    ("task-open", "Open Preview Task"),
+                    ("task-closed", "Closed Preview Task"),
+                ] {
+                    db.insert_test_pipeline_item(
+                        task_id,
+                        "repo-preview",
+                        "build a site",
+                        Some(title),
+                        "in progress",
+                        "2026-09-03 00:00:00",
+                    )
+                    .expect("insert task");
+                    db.upsert_worktree(
+                        &format!("worktree-{task_id}"),
+                        task_id,
+                        &format!("/tmp/{task_id}"),
+                        task_id,
+                    )
+                    .expect("insert worktree");
+                }
+                assert!(db
+                    .claim_task_port("task-open", "DEV_PORT", 8471)
+                    .expect("claim port"));
+                db.set_test_pipeline_item_closed_at("task-closed", "2026-09-03 00:01:00")
+                    .expect("close task");
+            },
+        );
+        let pairing_path = trust_preview_phone(&state);
+        let api = crate::http_api::router(Arc::clone(&state));
+
+        let unknown = api
+            .clone()
+            .oneshot(authenticated_preview_request(
+                Method::POST,
+                "/v1/tasks/task-open/preview",
+                r#"{"portName":"OTHER_PORT"}"#,
+            ))
+            .await
+            .expect("unknown-port response");
+        assert_eq!(unknown.status(), StatusCode::BAD_REQUEST);
+        let unknown_body = axum::body::to_bytes(unknown.into_body(), usize::MAX)
+            .await
+            .expect("unknown-port body");
+        let unknown_json: serde_json::Value =
+            serde_json::from_slice(&unknown_body).expect("unknown-port json");
+        assert_eq!(unknown_json["reason"], "unknown_port");
+
+        let closed = api
+            .oneshot(authenticated_preview_request(
+                Method::POST,
+                "/v1/tasks/task-closed/preview",
+                "{}",
+            ))
+            .await
+            .expect("closed-task response");
+        assert_eq!(closed.status(), StatusCode::CONFLICT);
+        let closed_body = axum::body::to_bytes(closed.into_body(), usize::MAX)
+            .await
+            .expect("closed-task body");
+        let closed_json: serde_json::Value =
+            serde_json::from_slice(&closed_body).expect("closed-task json");
+        assert_eq!(closed_json["reason"], "task_closed");
+
+        let _ = std::fs::remove_file(pairing_path);
     }
 
     #[tokio::test]
@@ -966,6 +1139,43 @@ mod tests {
         assert_eq!(proxied.status(), StatusCode::OK);
         assert_eq!(proxied.text().await.expect("proxied body"), "proxied");
 
+        let reissued = api
+            .clone()
+            .oneshot(authenticated_preview_request(
+                Method::POST,
+                "/v1/tasks/task-preview/preview",
+                r#"{"portName":"DEV_PORT"}"#,
+            ))
+            .await
+            .expect("reissued response");
+        assert_eq!(reissued.status(), StatusCode::OK);
+        let reissued_body = axum::body::to_bytes(reissued.into_body(), usize::MAX)
+            .await
+            .expect("reissued body");
+        let reissued_json: serde_json::Value =
+            serde_json::from_slice(&reissued_body).expect("reissued json");
+        assert_eq!(reissued_json["port"], listener_port);
+        let reissued_enter_path = reissued_json["enterPath"]
+            .as_str()
+            .expect("reissued enter path");
+        assert_ne!(reissued_enter_path, enter_path);
+        let browser_enter = client
+            .get(format!("{base}{reissued_enter_path}"))
+            .send()
+            .await
+            .expect("browser enter request");
+        assert_eq!(browser_enter.status(), StatusCode::FOUND);
+        assert_eq!(
+            client
+                .get(format!("{base}/project.html"))
+                .header(COOKIE, cookie.clone())
+                .send()
+                .await
+                .expect("original WebView session after browser handoff")
+                .status(),
+            StatusCode::OK
+        );
+
         let mut websocket_request = format!("ws://127.0.0.1:{listener_port}/ws")
             .into_client_request()
             .expect("websocket request");
@@ -990,17 +1200,27 @@ mod tests {
         );
         websocket.close(None).await.expect("close websocket");
 
-        let mut close_request = Request::delete("/v1/tasks/task-preview/preview")
-            .header("x-kanna-device-id", "preview-phone")
-            .header("x-kanna-device-secret", "preview-secret")
-            .body(Body::empty())
-            .expect("close request");
-        close_request
-            .extensions_mut()
-            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
-                [192, 168, 1, 30],
-                49152,
-            ))));
+        Db::open(&state.config().db_path)
+            .expect("open preview db")
+            .release_task_ports("task-preview")
+            .expect("release preview port");
+        let release_second = unix_seconds();
+        while unix_seconds() == release_second {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            client
+                .get(format!("{base}/project.html"))
+                .header(COOKIE, cookie)
+                .send()
+                .await
+                .expect("request after port release")
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+
+        let close_request =
+            authenticated_preview_request(Method::DELETE, "/v1/tasks/task-preview/preview", "");
         let closed = api.oneshot(close_request).await.expect("close response");
         assert_eq!(closed.status(), StatusCode::NO_CONTENT);
         tokio::time::sleep(Duration::from_millis(20)).await;

@@ -113,17 +113,22 @@ beforeEach(() => {
   harness.openUrl.mockReset().mockResolvedValue(undefined);
 });
 
-function render(onOpen: () => Promise<{
-  url: string;
-  portName: string;
-  port: number;
-  expiresAt: number;
-  ports: Array<{ name: string; port: number; listening: boolean }>;
-}>): ElementNode {
+function render(
+  onOpen: (portName?: string) => Promise<{
+    url: string;
+    portName: string;
+    port: number;
+    expiresAt: number;
+    ports: Array<{ name: string; port: number; listening: boolean }>;
+  }>,
+  ports: Array<{ name: string; port: number }> = [
+    { name: "DEV_PORT", port: 8471 }
+  ]
+): ElementNode {
   harness.hookIndex = 0;
   return TaskPreviewModal({
     taskTitle: "Portfolio",
-    ports: [{ name: "DEV_PORT", port: 8471 }],
+    ports,
     onOpen,
     onClose: vi.fn()
   }) as ElementNode;
@@ -186,13 +191,22 @@ describe("TaskPreviewModal", () => {
   });
 
   it("loads only the minted preview origin in a bridge-free WebView", async () => {
-    const onOpen = vi.fn().mockResolvedValue({
-      url: "http://192.168.1.20:55321/__kanna_preview__/enter?t=secret",
-      portName: "DEV_PORT",
-      port: 55321,
-      expiresAt: 123,
-      ports: [{ name: "DEV_PORT", port: 8471, listening: true }]
-    });
+    const onOpen = vi
+      .fn()
+      .mockResolvedValueOnce({
+        url: "http://192.168.1.20:55321/__kanna_preview__/enter?t=webview",
+        portName: "DEV_PORT",
+        port: 55321,
+        expiresAt: 123,
+        ports: [{ name: "DEV_PORT", port: 8471, listening: true }]
+      })
+      .mockResolvedValueOnce({
+        url: "http://192.168.1.20:55321/__kanna_preview__/enter?t=browser",
+        portName: "DEV_PORT",
+        port: 55321,
+        expiresAt: 123,
+        ports: [{ name: "DEV_PORT", port: 8471, listening: true }]
+      });
     render(onOpen);
     await runEffects();
     const webView = find(render(onOpen), "mobile.task-preview.webview");
@@ -206,7 +220,7 @@ describe("TaskPreviewModal", () => {
       thirdPartyCookiesEnabled: false,
       originWhitelist: ["http://192.168.1.20:55321"],
       source: {
-        uri: "http://192.168.1.20:55321/__kanna_preview__/enter?t=secret"
+        uri: "http://192.168.1.20:55321/__kanna_preview__/enter?t=webview"
       }
     });
     expect(webView?.props?.onMessage).toBeUndefined();
@@ -238,9 +252,73 @@ describe("TaskPreviewModal", () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(onOpen).toHaveBeenCalledTimes(2);
+    expect(onOpen).toHaveBeenNthCalledWith(2, "DEV_PORT");
     expect(harness.openUrl).toHaveBeenCalledWith(
-      "http://192.168.1.20:55321/__kanna_preview__/enter?t=secret"
+      "http://192.168.1.20:55321/__kanna_preview__/enter?t=browser"
     );
+    expect(
+      find(render(onOpen), "mobile.task-preview.webview")?.props?.source
+    ).toEqual({
+      uri: "http://192.168.1.20:55321/__kanna_preview__/enter?t=webview"
+    });
+  });
+
+  it("re-mints the preview for a newly selected port", async () => {
+    const onOpen = vi.fn().mockResolvedValue({
+      url: "http://192.168.1.20:55321/__kanna_preview__/enter?t=secret",
+      portName: "DEV_PORT",
+      port: 55321,
+      expiresAt: 123,
+      ports: [
+        { name: "DEV_PORT", port: 8471, listening: true },
+        { name: "STORYBOOK_PORT", port: 8472, listening: true }
+      ]
+    });
+    const ports = [
+      { name: "DEV_PORT", port: 8471 },
+      { name: "STORYBOOK_PORT", port: 8472 }
+    ];
+
+    render(onOpen, ports);
+    await runEffects();
+    const storybook = find(
+      render(onOpen, ports),
+      "mobile.task-preview.port.STORYBOOK_PORT"
+    );
+    (storybook?.props?.onPress as () => void)();
+    render(onOpen, ports);
+    await runEffects();
+
+    expect(onOpen).toHaveBeenNthCalledWith(1, "DEV_PORT");
+    expect(onOpen).toHaveBeenNthCalledWith(2, "STORYBOOK_PORT");
+  });
+
+  it("shows a WebView load error and Retry re-mints the preview", async () => {
+    const onOpen = vi.fn().mockResolvedValue({
+      url: "http://192.168.1.20:55321/__kanna_preview__/enter?t=secret",
+      portName: "DEV_PORT",
+      port: 55321,
+      expiresAt: 123,
+      ports: [{ name: "DEV_PORT", port: 8471, listening: true }]
+    });
+
+    render(onOpen);
+    await runEffects();
+    const webView = find(render(onOpen), "mobile.task-preview.webview");
+    (webView?.props?.onError as (event: {
+      nativeEvent: { description: string };
+    }) => void)({ nativeEvent: { description: "Proxy connection failed" } });
+    const errorTree = render(onOpen);
+    expect(find(errorTree, "mobile.task-preview.error")?.props?.children).toBe(
+      "Proxy connection failed"
+    );
+    const retry = find(errorTree, "mobile.task-preview.retry");
+    (retry?.props?.onPress as () => void)();
+    render(onOpen);
+    await runEffects();
+
+    expect(onOpen).toHaveBeenCalledTimes(2);
+    expect(onOpen).toHaveBeenNthCalledWith(2, "DEV_PORT");
   });
 
   it("shows a retry action when the declared server is not listening", async () => {
