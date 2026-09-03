@@ -131,6 +131,8 @@ export interface PendingTaskAction {
 
 export interface SessionState {
   mobileDeviceId: string | null;
+  /** Phone-local override for the build environment's relay endpoint. */
+  customRelayUrl: string | null;
   connectionMode: DesktopMode | null;
   connectionState: ConnectionState;
   desktopId: string | null;
@@ -288,6 +290,7 @@ export interface SessionStore {
   getPersistedContext(): PersistedSessionContext;
   hydrateContext(context: PersistedSessionContext): void;
   ensureMobileDeviceId(generate: () => string): string;
+  setCustomRelayUrl(relayUrl: string | null): void;
   setConnectionMode(mode: DesktopMode | null): void;
   setConnectionState(state: ConnectionState): void;
   setDesktopStatus(status: string | null, desktopName: string | null, pairingCode: string | null, desktopId?: string | null): void;
@@ -448,6 +451,7 @@ export interface SessionStore {
 export function createSessionStore(): SessionStore {
   let state: SessionState = {
     mobileDeviceId: null,
+    customRelayUrl: null,
     connectionMode: null,
     connectionState: "idle",
     desktopId: null,
@@ -682,6 +686,7 @@ export function createSessionStore(): SessionStore {
       );
       return {
         mobileDeviceId: state.mobileDeviceId,
+        customRelayUrl: state.customRelayUrl,
         selectedDesktopId: state.selectedDesktopId,
         selectedRepoId: state.selectedRepoId,
         selectedTaskId:
@@ -723,6 +728,7 @@ export function createSessionStore(): SessionStore {
       state = {
         ...state,
         mobileDeviceId: context.mobileDeviceId,
+        customRelayUrl: context.customRelayUrl ?? null,
         selectedDesktopId: context.selectedDesktopId,
         selectedRepoId: context.selectedRepoId,
         selectedTaskId,
@@ -765,6 +771,11 @@ export function createSessionStore(): SessionStore {
       state = { ...state, mobileDeviceId };
       publish();
       return mobileDeviceId;
+    },
+    setCustomRelayUrl(relayUrl) {
+      if (state.customRelayUrl === relayUrl) return;
+      state = { ...state, customRelayUrl: relayUrl };
+      publish();
     },
     setConnectionMode(mode) {
       state = { ...state, connectionMode: mode };

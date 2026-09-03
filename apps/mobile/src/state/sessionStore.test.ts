@@ -17,6 +17,23 @@ describe("createSessionStore", () => {
     agentProvider: "codex" as const
   };
 
+  it("hydrates and persists the device relay override", () => {
+    const store = createSessionStore();
+    store.hydrateContext({
+      mobileDeviceId: null,
+      customRelayUrl: "wss://relay.home.example",
+      selectedDesktopId: null,
+      selectedRepoId: null,
+      selectedTaskId: null,
+      activeView: "tasks"
+    });
+
+    expect(store.getState().customRelayUrl).toBe("wss://relay.home.example");
+    store.setCustomRelayUrl("wss://relay.changed.example");
+    expect(store.getPersistedContext().customRelayUrl)
+      .toBe("wss://relay.changed.example");
+  });
+
   it("tracks task creation attempts independently by slot", () => {
     const store = createSessionStore();
     const secondAttempt = {
