@@ -5018,14 +5018,14 @@ async fn assert_trusted_peer_advance_stage_posts_expected_body(
 async fn trusted_peer_advance_stage_posts_to_owner_kanna_server() {
     assert_trusted_peer_advance_stage_posts_expected_body(
         Some("run-1"),
-        r#"{"expectedTransitionRevision":"run-1"}"#,
+        r#"{"expectedTransitionRevision":"run-1","source":"operator"}"#,
     )
     .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn trusted_peer_legacy_advance_without_revision_posts_no_cas_body() {
-    assert_trusted_peer_advance_stage_posts_expected_body(None, "{}").await;
+async fn trusted_peer_advance_without_revision_still_declares_operator() {
+    assert_trusted_peer_advance_stage_posts_expected_body(None, r#"{"source":"operator"}"#).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

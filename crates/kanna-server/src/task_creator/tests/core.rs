@@ -3233,6 +3233,8 @@ fn read_agent_definition_loads_builtin_task_manager_agent_with_codex_first() {
     let definition = resolve_test_agent_definition(&repo_root, "task-manager").unwrap();
 
     assert_eq!(definition.name, "task-manager");
+    assert!(definition.prompt.contains("source: \"manager\""));
+    assert!(definition.prompt.contains("--source manager"));
     assert_eq!(
         definition.agent_providers.first().map(String::as_str),
         Some("codex")
@@ -3480,6 +3482,7 @@ fn read_agent_definition_substitutes_repo_config_vars_in_agent_body() {
             branch: None,
             base_ref: Some("origin/main"),
             source_worktree: None,
+            stage_trigger: "unspecified",
             vars: Some(&vars),
         },
     );
@@ -3513,6 +3516,7 @@ fn build_stage_prompt_does_not_reexpand_reserved_tokens_in_var_values() {
             branch: None,
             base_ref: None,
             source_worktree: None,
+            stage_trigger: "unspecified",
             vars: Some(&vars),
         },
     );
@@ -3537,6 +3541,7 @@ fn build_stage_prompt_leaves_unknown_vars_literal() {
             branch: None,
             base_ref: None,
             source_worktree: None,
+            stage_trigger: "unspecified",
             vars: None,
         },
     );
@@ -3545,6 +3550,26 @@ fn build_stage_prompt_leaves_unknown_vars_literal() {
         prompt,
         "## Agent Instructions\n\nPing $UNKNOWN_NAME and ${ALSO_UNKNOWN}."
     );
+}
+
+#[test]
+fn build_stage_prompt_resolves_stage_trigger() {
+    let prompt = build_stage_prompt(
+        "Entered by $STAGE_TRIGGER.",
+        None,
+        &PromptContext {
+            task_prompt: None,
+            prev_result: None,
+            prev_main_result: None,
+            branch: None,
+            base_ref: None,
+            source_worktree: None,
+            stage_trigger: "manager",
+            vars: None,
+        },
+    );
+
+    assert_eq!(prompt, "## Agent Instructions\n\nEntered by manager.");
 }
 
 #[test]
@@ -3559,6 +3584,7 @@ fn build_stage_prompt_labels_agent_instructions_and_the_actual_task() {
             branch: None,
             base_ref: None,
             source_worktree: None,
+            stage_trigger: "unspecified",
             vars: None,
         },
     );
@@ -3574,6 +3600,7 @@ fn build_stage_prompt_omits_empty_prompt_sections() {
         branch: None,
         base_ref: None,
         source_worktree: None,
+        stage_trigger: "unspecified",
         vars: None,
     };
     assert_eq!(
@@ -3612,6 +3639,7 @@ fn build_stage_prompt_replaces_base_ref() {
             branch: Some("task-source"),
             base_ref: Some("origin/main"),
             source_worktree: Some("/tmp/repo/.kanna-worktrees/task-source"),
+            stage_trigger: "unspecified",
             vars: None,
         },
     );
@@ -3651,6 +3679,7 @@ fn build_target_stage_prompt_sections_a_carried_task_without_rescanning_it() {
         None,
         None,
         None,
+        "operator",
     )
     .unwrap();
 
@@ -3781,6 +3810,7 @@ fn build_agent_command_adds_claude_kanna_preamble_as_system_prompt() {
         "review",
         "qa",
         Some("auto"),
+        "operator",
         Some("/tmp/kanna-mcp.json"),
     );
 
@@ -3806,6 +3836,7 @@ fn build_agent_command_adds_claude_kanna_preamble_as_system_prompt() {
     assert!(command.contains(
         "This session was launched by Kanna as task `task-123`, stage `review` of workflow `qa` (transition: `auto`)."
     ));
+    assert!(command.contains("This stage was entered by: operator"));
     assert!(!command.contains("{{TASK_CONTEXT}}"));
     assert!(!command.contains("{{MCP_STATUS}}"));
     assert!(command.contains("Claude is launched with this config via `--mcp-config`"));
@@ -3843,6 +3874,7 @@ fn build_kanna_preamble_renders_transition_specific_completion_guidance() {
         "review",
         "qa",
         Some("auto"),
+        "auto",
         None,
     );
     assert!(auto.contains("This stage's transition is `auto`"));
@@ -3856,6 +3888,7 @@ fn build_kanna_preamble_renders_transition_specific_completion_guidance() {
         "in progress",
         "default",
         Some("manual"),
+        "operator",
         None,
     );
     assert!(manual.contains("This stage's transition is `manual`"));
@@ -3872,6 +3905,7 @@ fn build_kanna_preamble_renders_transition_specific_completion_guidance() {
         "in progress",
         "default",
         None,
+        "unspecified",
         None,
     );
     assert!(default.contains("This stage's transition is `manual`"));
@@ -3885,6 +3919,7 @@ fn build_agent_command_launches_antigravity_with_prepended_kanna_context() {
         "implement",
         "default",
         Some("manual"),
+        "operator",
         None,
     );
 
@@ -4199,6 +4234,7 @@ fn build_kanna_preamble_names_automatic_and_fallback_mcp_providers() {
         "implement",
         "default",
         None,
+        "unspecified",
         Some("/tmp/kanna-mcp.json"),
     );
     assert!(codex.contains("Codex is launched with Kanna MCP registration"));
@@ -4210,6 +4246,7 @@ fn build_kanna_preamble_names_automatic_and_fallback_mcp_providers() {
         "implement",
         "default",
         None,
+        "unspecified",
         Some("/tmp/kanna-mcp.json"),
     );
     assert!(antigravity.contains("Antigravity CLI MCP registration is not wired"));

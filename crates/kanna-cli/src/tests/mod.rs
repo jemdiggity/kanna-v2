@@ -293,7 +293,7 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
             "kanna_advance_stage",
             TypedToolSurface {
                 command_path: &["task", "advance-stage"],
-                param_args: &[("task_id", "task_id")],
+                param_args: &[("task_id", "task_id"), ("source", "source")],
             },
         ),
         (

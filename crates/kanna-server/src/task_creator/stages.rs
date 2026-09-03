@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::db::{Db, TaskStageSource};
+use crate::db::{Db, StageTrigger, TaskStageSource};
 
 use super::definitions::{
     parse_stored_workflow_definition, post_as_stage, resolve_stage_position, RepoDefinitions,
@@ -106,10 +106,25 @@ fn load_stage_transition_source(
     })
 }
 
+#[cfg(test)]
 pub(crate) fn prepare_advance_stage_for_api(
     db: &Db,
     config: &Config,
     source_task_id: &str,
+) -> Result<PreparedStageTransition, String> {
+    prepare_advance_stage_for_api_with_trigger(
+        db,
+        config,
+        source_task_id,
+        StageTrigger::Unspecified,
+    )
+}
+
+pub(crate) fn prepare_advance_stage_for_api_with_trigger(
+    db: &Db,
+    config: &Config,
+    source_task_id: &str,
+    trigger: StageTrigger,
 ) -> Result<PreparedStageTransition, String> {
     let identity = load_stage_identity(db, source_task_id)?;
     if identity.source_task.closed_at.is_some() {
@@ -136,7 +151,9 @@ pub(crate) fn prepare_advance_stage_for_api(
     match position {
         // Legacy in-flight task parked at a folded post name (e.g. `commit`):
         // the post is the current context, so advancing swaps past its owner.
-        StagePosition::Post { owner } => prepare_swap_to_index(db, config, &context, owner + 1),
+        StagePosition::Post { owner } => {
+            prepare_swap_to_index(db, config, &context, owner + 1, trigger)
+        }
         StagePosition::Stage(index) => {
             let stage = &loaded.workflow.stages[index];
             if let Some(post) = &stage.post {
@@ -160,10 +177,10 @@ pub(crate) fn prepare_advance_stage_for_api(
                     _ => true,
                 };
                 if post_pending {
-                    return prepare_post_dispatch(db, config, &context, index);
+                    return prepare_post_dispatch(db, config, &context, index, trigger);
                 }
             }
-            prepare_swap_to_index(db, config, &context, index + 1)
+            prepare_swap_to_index(db, config, &context, index + 1, trigger)
         }
     }
 }
@@ -175,12 +192,31 @@ pub(crate) fn prepare_advance_stage_for_api(
 /// dispatched); a `main` completion follows the stage's policy — `auto`
 /// dispatches the stage's post (or swaps when there is none), `manual`
 /// parks the task.
+#[cfg(test)]
 pub(crate) fn prepare_stage_completion_for_api(
     db: &Db,
     config: &Config,
     source_task_id: &str,
     finished_run_kind: Option<&str>,
     completion_transition: Option<&str>,
+) -> Result<Option<PreparedStageTransition>, String> {
+    prepare_stage_completion_for_api_with_trigger(
+        db,
+        config,
+        source_task_id,
+        finished_run_kind,
+        completion_transition,
+        None,
+    )
+}
+
+pub(crate) fn prepare_stage_completion_for_api_with_trigger(
+    db: &Db,
+    config: &Config,
+    source_task_id: &str,
+    finished_run_kind: Option<&str>,
+    completion_transition: Option<&str>,
+    finished_run_trigger: Option<&str>,
 ) -> Result<Option<PreparedStageTransition>, String> {
     let identity = load_stage_identity(db, source_task_id)?;
     if identity.source_task.closed_at.is_some() {
@@ -201,13 +237,25 @@ pub(crate) fn prepare_stage_completion_for_api(
     match position {
         // Legacy in-flight task parked at a folded post name: success means
         // the post finished, which always advances past its owner.
-        StagePosition::Post { owner } => {
-            prepare_swap_to_index(db, config, &context, owner + 1).map(Some)
-        }
+        StagePosition::Post { owner } => prepare_swap_to_index(
+            db,
+            config,
+            &context,
+            owner + 1,
+            stage_trigger_from_stored(finished_run_trigger),
+        )
+        .map(Some),
         StagePosition::Stage(index) => {
             let stage = &loaded.workflow.stages[index];
             if finished_run_kind == Some("post") {
-                return prepare_swap_to_index(db, config, &context, index + 1).map(Some);
+                return prepare_swap_to_index(
+                    db,
+                    config,
+                    &context,
+                    index + 1,
+                    stage_trigger_from_stored(finished_run_trigger),
+                )
+                .map(Some);
             }
             let transition = match completion_transition {
                 Some("manual") => WorkflowStageTransition::Manual,
@@ -221,7 +269,8 @@ pub(crate) fn prepare_stage_completion_for_api(
                 return Ok(None);
             }
             if stage.post.is_some() {
-                return prepare_post_dispatch(db, config, &context, index).map(Some);
+                return prepare_post_dispatch(db, config, &context, index, StageTrigger::Auto)
+                    .map(Some);
             }
             if loaded.workflow.stages.get(index + 1).is_none() {
                 // An auto main-run completion never closes the task; only an
@@ -229,7 +278,7 @@ pub(crate) fn prepare_stage_completion_for_api(
                 // final stage.
                 return Ok(None);
             }
-            prepare_swap_to_index(db, config, &context, index + 1).map(Some)
+            prepare_swap_to_index(db, config, &context, index + 1, StageTrigger::Auto).map(Some)
         }
     }
 }
@@ -239,6 +288,7 @@ fn prepare_swap_to_index(
     config: &Config,
     context: &StageTransitionContext<'_>,
     next_index: usize,
+    trigger: StageTrigger,
 ) -> Result<PreparedStageTransition, String> {
     let Some(next_stage) = context.workflow.stages.get(next_index) else {
         let workspace_teardown = context
@@ -289,6 +339,7 @@ fn prepare_swap_to_index(
         None,
         None,
         prompt_suffix,
+        trigger,
     )?;
     run.terminal_prelude = Some(super::terminal_marker::format_stage_transition_marker(
         from_stage,
@@ -302,6 +353,7 @@ fn prepare_post_dispatch(
     config: &Config,
     context: &StageTransitionContext<'_>,
     owner_index: usize,
+    trigger: StageTrigger,
 ) -> Result<PreparedStageTransition, String> {
     let owner = &context.workflow.stages[owner_index];
     let post_stage =
@@ -329,6 +381,7 @@ fn prepare_post_dispatch(
         SpawnAgentOverrides::default(),
         Some(&completion_instruction),
         None,
+        trigger,
     )?;
 
     Ok(PreparedStageTransition::Post(Box::new(
@@ -353,6 +406,7 @@ fn prepare_stage_run_for_target(
     prompt_override: Option<&str>,
     feedback: Option<String>,
     prompt_suffix: Option<&str>,
+    trigger: StageTrigger,
 ) -> Result<PreparedStageRunSpawn, String> {
     prepare_stage_run_for_target_with_provider(
         db,
@@ -366,6 +420,7 @@ fn prepare_stage_run_for_target(
         feedback,
         SpawnAgentOverrides::default(),
         prompt_suffix,
+        trigger,
     )
 }
 
@@ -382,6 +437,7 @@ fn prepare_stage_run_for_target_with_provider(
     feedback: Option<String>,
     agent_overrides: SpawnAgentOverrides,
     prompt_suffix: Option<&str>,
+    trigger: StageTrigger,
 ) -> Result<PreparedStageRunSpawn, String> {
     prepare_stage_run_for_target_returning_prompt(
         db,
@@ -396,6 +452,7 @@ fn prepare_stage_run_for_target_with_provider(
         agent_overrides,
         None,
         prompt_suffix,
+        trigger,
     )
     .map(|(run, _)| run)
 }
@@ -414,6 +471,7 @@ fn prepare_stage_run_for_target_returning_prompt(
     agent_overrides: SpawnAgentOverrides,
     additional_agent_instructions: Option<&str>,
     prompt_suffix: Option<&str>,
+    trigger: StageTrigger,
 ) -> Result<(PreparedStageRunSpawn, String), String> {
     let source_task = context.source_task;
     let source_branch =
@@ -449,6 +507,7 @@ fn prepare_stage_run_for_target_returning_prompt(
         prompt_branch.as_deref(),
         source_task.base_ref.as_deref(),
         source_task.branch.as_deref(),
+        trigger.as_str(),
     )?;
     if let Some(suffix) = prompt_suffix {
         final_prompt.push_str("\n\n");
@@ -465,6 +524,7 @@ fn prepare_stage_run_for_target_returning_prompt(
             prompt_branch.as_deref(),
             source_task.base_ref.as_deref(),
             source_task.branch.as_deref(),
+            trigger.as_str(),
             Some(instructions),
         )?,
         None => final_prompt.clone(),
@@ -497,6 +557,7 @@ fn prepare_stage_run_for_target_returning_prompt(
         source_task.agent_type.as_deref(),
         agent_overrides,
         source_task.agent_provider.as_deref(),
+        trigger,
     )?;
     if matches!(run.workspace, PreparedRunWorkspace::Forked(_)) {
         let departed_stage = source_task
@@ -515,6 +576,15 @@ fn prepare_stage_run_for_target_returning_prompt(
         );
     }
     Ok((run, returned_prompt))
+}
+
+fn stage_trigger_from_stored(trigger: Option<&str>) -> StageTrigger {
+    match trigger {
+        Some("auto") => StageTrigger::Auto,
+        Some("operator") => StageTrigger::Operator,
+        Some("manager") => StageTrigger::Manager,
+        _ => StageTrigger::Unspecified,
+    }
 }
 
 pub(crate) fn previous_stage_result(
@@ -678,6 +748,10 @@ pub(crate) fn prepare_revision_task_for_api(
         model: last_run.as_ref().and_then(|run| run.model.clone()),
         effort: last_run.as_ref().and_then(|run| run.effort.clone()),
     };
+    let trigger = last_run
+        .as_ref()
+        .map(|run| stage_trigger_from_stored(Some(&run.trigger)))
+        .unwrap_or(StageTrigger::Unspecified);
     let mut prepared = prepare_stage_run_for_target_with_provider(
         db,
         config,
@@ -690,6 +764,7 @@ pub(crate) fn prepare_revision_task_for_api(
         Some(revision_prompt.to_string()),
         agent_overrides,
         None,
+        trigger,
     )?;
     prepared.resume_fallback_reason = resume_fallback_reason;
     Ok(prepared)
@@ -893,6 +968,7 @@ fn prepare_stage_restart(
                 Some(branch),
                 source_task.base_ref.as_deref(),
                 source_task.branch.as_deref(),
+                &run.trigger,
             )?;
             (RunWorkspaceSpec::Current, prompt, Some(reason))
         }
@@ -921,6 +997,7 @@ fn prepare_stage_restart(
         // to today.
         SpawnAgentOverrides::from_stage_run(&run),
         source_task.agent_provider.as_deref(),
+        stage_trigger_from_stored(Some(&run.trigger)),
     )?;
     prepared.resume_fallback_reason = resume_fallback_reason;
     Ok(prepared)
@@ -1009,6 +1086,7 @@ fn prepare_revision_resume(
         source_task.agent_type.as_deref(),
         agent_overrides,
         source_task.agent_provider.as_deref(),
+        stage_trigger_from_stored(Some(&run.trigger)),
     )?;
     // A definition that changed provider or session type since the source run
     // cannot continue that conversation.

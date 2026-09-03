@@ -300,7 +300,11 @@ describe("createLanTransport", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(fetchImpl).toHaveBeenCalledWith(
       "http://127.0.0.1:48120/v1/tasks/task-1/actions/advance-stage",
-      { method: "POST" }
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source: "operator" })
+      }
     );
   });
 
@@ -670,15 +674,15 @@ describe("createLanTransport", () => {
     expect(fetchImpl).toHaveBeenNthCalledWith(
       5,
       "http://127.0.0.1:48120/v1/tasks/task-1/actions/run-merge-agent",
-      {
-        method: "POST"
-      }
+      { method: "POST" }
     );
     expect(fetchImpl).toHaveBeenNthCalledWith(
       6,
       "http://127.0.0.1:48120/v1/tasks/task-1/actions/advance-stage",
       {
-        method: "POST"
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source: "operator" })
       }
     );
     expect(fetchImpl).toHaveBeenNthCalledWith(

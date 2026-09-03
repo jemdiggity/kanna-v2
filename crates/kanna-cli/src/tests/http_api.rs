@@ -376,13 +376,28 @@ async fn advance_stage_posts_to_task_action_path_with_empty_json_body() {
     let response = http_json_response("200 OK", "{\"taskId\":\"next-task-1\"}");
     let (base_url, handle) = serve_single_http_response(response).await;
 
-    let action = advance_stage_via_api(&base_url, "task-123").await.unwrap();
+    let action = advance_stage_via_api(&base_url, "task-123", None)
+        .await
+        .unwrap();
     let request = handle.await.unwrap();
 
     assert_eq!(action.task_id, "next-task-1");
     assert!(request.starts_with("POST /v1/tasks/task-123/actions/advance-stage HTTP/1.1"));
     assert!(request.contains("content-type: application/json"));
     assert!(request.ends_with("{}"));
+}
+
+#[tokio::test]
+async fn advance_stage_posts_declared_manager_source() {
+    let response = http_json_response("200 OK", "{\"taskId\":\"task-123\"}");
+    let (base_url, handle) = serve_single_http_response(response).await;
+
+    advance_stage_via_api(&base_url, "task-123", Some("manager"))
+        .await
+        .unwrap();
+    let request = handle.await.unwrap();
+
+    assert!(request.ends_with(r#"{"source":"manager"}"#));
 }
 
 #[tokio::test]
@@ -839,7 +854,7 @@ async fn advance_stage_surfaces_http_errors() {
     let response = http_json_response("409 Conflict", "{\"error\":\"task not accepted yet\"}");
     let (base_url, handle) = serve_single_http_response(response).await;
 
-    let error = advance_stage_via_api(&base_url, "task-123")
+    let error = advance_stage_via_api(&base_url, "task-123", None)
         .await
         .unwrap_err();
     let request = handle.await.unwrap();

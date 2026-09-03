@@ -698,11 +698,14 @@ pub(crate) async fn set_task_workflow_via_api(
 pub(crate) async fn advance_stage_via_api(
     base_url: &str,
     task_id: &str,
+    source: Option<&str>,
 ) -> Result<TaskActionResponse, String> {
     post_json(
         base_url,
         &format!("/v1/tasks/{task_id}/actions/advance-stage"),
-        &serde_json::json!({}),
+        &source
+            .map(|source| serde_json::json!({ "source": source }))
+            .unwrap_or_else(|| serde_json::json!({})),
     )
     .await
 }

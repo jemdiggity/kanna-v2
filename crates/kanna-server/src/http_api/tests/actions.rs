@@ -4068,6 +4068,27 @@ async fn advance_stage_route_uses_stage_advancer() {
 }
 
 #[tokio::test]
+async fn advance_stage_route_rejects_server_owned_trigger_as_a_declared_source() {
+    let app = super::test_router_with_stage_advancer(
+        "desktop-1",
+        "Studio Mac",
+        Arc::new(|_| panic!("invalid source must be rejected before advancing")),
+    );
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/advance-stage")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"source":"auto"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn stale_advance_transition_revision_is_rejected_after_owner_transition() {
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let seeded = super::test_state_with_seed("desktop-advance-cas", "Studio Mac", |db| {
@@ -4706,7 +4727,8 @@ async fn advance_stage_route_records_stage_run_for_spawned_next_task() {
     let response_task = tokio::spawn(async move {
         app.oneshot(
             Request::post("/v1/tasks/source-1/actions/advance-stage")
-                .body(Body::empty())
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"source":"operator"}"#))
                 .unwrap(),
         )
         .await
@@ -4768,6 +4790,20 @@ async fn advance_stage_route_records_stage_run_for_spawned_next_task() {
     assert_eq!(runs[0].agent_provider.as_deref(), Some("claude"));
     assert_eq!(runs[0].status, "running");
     assert_eq!(runs[0].session_id.as_deref(), Some("source-1"));
+    assert_eq!(runs[0].trigger, "operator");
+    let events = db
+        .list_task_events(
+            &crate::db::TaskEventScope::Tasks(vec!["source-1".to_string()]),
+            0,
+            i64::MAX,
+            20,
+        )
+        .unwrap();
+    let stage_changed = events
+        .iter()
+        .find(|event| event.event_type == "stage.changed")
+        .expect("stage.changed event");
+    assert_eq!(stage_changed.payload["trigger"], "operator");
 
     daemon_server.await.unwrap();
     if created_sidecar {

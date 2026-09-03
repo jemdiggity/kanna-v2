@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PipelineItem } from "@kanna/db";
 import { createWorkflowApi } from "./workflow";
 import type { StoreContext } from "./state";
+import { postDesktopTaskAction } from "../services/desktopTaskActions";
 
 vi.mock("../services/desktopTaskActions", () => ({
   postDesktopTaskAction: vi.fn(async () => new Response(
@@ -71,6 +72,9 @@ describe("advanceStage held-draft feedback", () => {
     } as unknown as StoreContext;
 
     await expect(createWorkflowApi(context).advanceStage("task-1")).resolves.toBe("advanced");
+    expect(postDesktopTaskAction).toHaveBeenCalledWith("task-1", "advance-stage", {
+      source: "operator",
+    });
     expect(warning).toHaveBeenCalledWith("toasts.advanceHeldByDraft");
   });
 });

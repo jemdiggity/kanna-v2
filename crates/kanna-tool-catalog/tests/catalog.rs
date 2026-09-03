@@ -419,10 +419,12 @@ fn removed_approval_override_is_not_an_agent_tool() {
         .iter()
         .find(|tool| tool.name == "kanna_advance_stage")
         .expect("advance tool");
-    assert_eq!(advance.params.len(), 2);
+    assert_eq!(advance.params.len(), 3);
     assert_eq!(advance.params[0].name, "machine_id");
     assert_eq!(advance.params[0].location, ParamLoc::Routing);
     assert_eq!(advance.params[1].name, "task_id");
+    assert_eq!(advance.params[2].name, "source");
+    assert_eq!(advance.params[2].location, ParamLoc::Body);
 }
 
 #[test]
@@ -666,11 +668,11 @@ fn resolves_expected_requests_for_every_bundled_tool() {
         ),
         (
             "kanna_advance_stage",
-            json!({ "task_id": "task-1" }),
+            json!({ "task_id": "task-1", "source": "manager" }),
             Method::Post,
             ResponseKind::Json,
             "/v1/tasks/task-1/actions/advance-stage",
-            json!({}),
+            json!({ "source": "manager" }),
         ),
         (
             "kanna_rerun_stage",

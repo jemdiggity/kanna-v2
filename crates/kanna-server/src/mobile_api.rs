@@ -304,6 +304,9 @@ pub struct TaskLatestRun {
     pub id: String,
     pub stage: String,
     pub kind: String,
+    /// How this run's stage was entered. Legacy rows are `unspecified`.
+    #[serde(default = "default_stage_trigger")]
+    pub trigger: String,
     #[serde(default)]
     pub agent: Option<String>,
     pub status: String,
@@ -311,6 +314,10 @@ pub struct TaskLatestRun {
     pub resumed_from_run_id: Option<String>,
     pub resume_fallback_reason: Option<String>,
     pub finished_at: Option<String>,
+}
+
+fn default_stage_trigger() -> String {
+    "unspecified".to_string()
 }
 
 /// A task's durable instruction history: every message delivered into its
@@ -1267,6 +1274,7 @@ fn map_task_latest_run(run: crate::db::StageRun) -> TaskLatestRun {
         id: run.id,
         stage: run.stage,
         kind: run.kind,
+        trigger: run.trigger,
         agent: run.agent,
         status: run.status,
         summary,
@@ -2254,6 +2262,7 @@ mod tests {
         let latest_run = detail.latest_run.expect("latest run");
         assert_eq!(latest_run.stage, "review");
         assert_eq!(latest_run.kind, "main");
+        assert_eq!(latest_run.trigger, "unspecified");
         assert_eq!(latest_run.agent.as_deref(), Some("review-security"));
         assert_eq!(latest_run.status, "failed");
         assert_eq!(

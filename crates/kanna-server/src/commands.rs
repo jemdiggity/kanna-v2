@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::daemon_client::DaemonClient;
-use crate::db::Db;
+use crate::db::{Db, StageTrigger};
 use crate::mobile_api::MobileApi;
 use crate::session_replacements::SessionReplacements;
 use crate::task_creator;
@@ -165,9 +165,15 @@ pub async fn handle_invoke(
                 .get("task_id")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "missing required arg: task_id".to_string())?;
+            let trigger = match args.get("source").and_then(|value| value.as_str()) {
+                Some(source) => StageTrigger::from_caller_declared(source)?,
+                None => StageTrigger::Unspecified,
+            };
             let transition = {
                 let db = Db::open(&config.db_path).map_err(|e| format!("db error: {}", e))?;
-                task_creator::prepare_advance_stage_for_api(&db, config, task_id)?
+                task_creator::prepare_advance_stage_for_api_with_trigger(
+                    &db, config, task_id, trigger,
+                )?
             };
             match transition {
                 task_creator::PreparedStageTransition::Run(prepared) => {

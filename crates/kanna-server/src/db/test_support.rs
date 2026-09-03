@@ -186,6 +186,7 @@ impl Db {
                 resumed_from_run_id TEXT,
                 resume_fallback_reason TEXT,
                 completion_transition TEXT CHECK (completion_transition IN ('manual', 'auto')),
+                trigger TEXT CHECK (trigger IN ('auto', 'operator', 'manager', 'unspecified')),
                 completion_bound INTEGER NOT NULL DEFAULT 0,
                 started_at TEXT NOT NULL DEFAULT (datetime('now')),
                 finished_at TEXT

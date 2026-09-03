@@ -6,6 +6,38 @@ use serde_json::json;
 pub struct FinishedStageRun {
     pub kind: String,
     pub completion_transition: Option<String>,
+    pub trigger: String,
+}
+
+/// How a stage run was entered. Caller-declared labels are recorded without
+/// authentication; only `Auto` is server-owned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StageTrigger {
+    Auto,
+    Operator,
+    Manager,
+    Unspecified,
+}
+
+impl StageTrigger {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Operator => "operator",
+            Self::Manager => "manager",
+            Self::Unspecified => "unspecified",
+        }
+    }
+
+    pub fn from_caller_declared(value: &str) -> Result<Self, String> {
+        match value {
+            "operator" => Ok(Self::Operator),
+            "manager" => Ok(Self::Manager),
+            other => Err(format!(
+                "unknown stage advance source: {other}; use \"operator\" or \"manager\", or omit it"
+            )),
+        }
+    }
 }
 
 impl Db {
@@ -49,12 +81,27 @@ impl Db {
         completion_transition: Option<&str>,
         completion_bound: bool,
     ) -> Result<(), rusqlite::Error> {
+        self.insert_stage_run_with_completion_binding_and_trigger(
+            run,
+            completion_transition,
+            completion_bound,
+            None,
+        )
+    }
+
+    pub fn insert_stage_run_with_completion_binding_and_trigger(
+        &self,
+        run: NewStageRun<'_>,
+        completion_transition: Option<&str>,
+        completion_bound: bool,
+        trigger: Option<StageTrigger>,
+    ) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "INSERT INTO stage_run
              (id, task_id, stage, kind, agent, agent_provider, model, effort, status, result, feedback,
               session_id, provider_session_id, cwd, resumed_from_run_id, completion_transition,
-              completion_bound)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              completion_bound, trigger)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 run.id,
                 run.task_id,
@@ -73,6 +120,7 @@ impl Db {
                 run.resumed_from_run_id,
                 completion_transition,
                 completion_bound,
+                trigger.map(StageTrigger::as_str),
             ],
         )?;
         // A pending run has not started anything yet; the watcher wants the
@@ -108,7 +156,8 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, task_id, stage, kind, agent, agent_provider, model, effort, status, result, feedback,
                     session_id, provider_session_id, cwd, resumed_from_run_id,
-                    resume_fallback_reason, completion_transition, started_at, finished_at
+                    resume_fallback_reason, completion_transition,
+                    COALESCE(trigger, 'unspecified'), started_at, finished_at
              FROM stage_run
              WHERE task_id = ?
              ORDER BY rowid ASC",
@@ -144,7 +193,8 @@ impl Db {
             .query_row(
                 "SELECT id, task_id, stage, kind, agent, agent_provider, model, effort, status, result,
                         feedback, session_id, provider_session_id, cwd, resumed_from_run_id,
-                        resume_fallback_reason, completion_transition, started_at, finished_at
+                        resume_fallback_reason, completion_transition,
+                        COALESCE(trigger, 'unspecified'), started_at, finished_at
                  FROM stage_run
                  WHERE task_id = ?
                  ORDER BY rowid DESC
@@ -174,7 +224,8 @@ impl Db {
             .query_row(
                 "SELECT id, task_id, stage, kind, agent, agent_provider, model, effort, status, result,
                         feedback, session_id, provider_session_id, cwd, resumed_from_run_id,
-                        resume_fallback_reason, completion_transition, started_at, finished_at
+                        resume_fallback_reason, completion_transition,
+                        COALESCE(trigger, 'unspecified'), started_at, finished_at
                  FROM stage_run
                  WHERE task_id = ? AND stage = ? AND kind = ?
                  ORDER BY rowid DESC
@@ -195,7 +246,8 @@ impl Db {
             .query_row(
                 "SELECT id, task_id, stage, kind, agent, agent_provider, model, effort, status, result,
                         feedback, session_id, provider_session_id, cwd, resumed_from_run_id,
-                        resume_fallback_reason, completion_transition, started_at, finished_at
+                        resume_fallback_reason, completion_transition,
+                        COALESCE(trigger, 'unspecified'), started_at, finished_at
                  FROM stage_run WHERE id = ?",
                 [run_id],
                 stage_run_from_row,
@@ -217,7 +269,8 @@ impl Db {
             .query_row(
                 "SELECT id, task_id, stage, kind, agent, agent_provider, model, effort, status, result,
                         feedback, session_id, provider_session_id, cwd, resumed_from_run_id,
-                        resume_fallback_reason, completion_transition, started_at, finished_at
+                        resume_fallback_reason, completion_transition,
+                        COALESCE(trigger, 'unspecified'), started_at, finished_at
                  FROM stage_run
                  WHERE task_id = ? AND stage = ? AND kind = 'main'
                    AND provider_session_id IS NOT NULL AND cwd IS NOT NULL
@@ -447,7 +500,7 @@ impl Db {
         let run_result = self
             .conn
             .query_row(
-                "SELECT id, kind, completion_transition
+                "SELECT id, kind, completion_transition, COALESCE(trigger, 'unspecified')
                  FROM stage_run
                  WHERE task_id = ? AND status = 'running'
                  ORDER BY rowid DESC
@@ -458,6 +511,7 @@ impl Db {
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(3)?,
                     ))
                 },
             )
@@ -467,13 +521,14 @@ impl Db {
             Err(err) if is_missing_stage_run_table(&err) => return Ok(None),
             Err(err) => return Err(err),
         };
-        let Some((run_id, kind, completion_transition)) = run else {
+        let Some((run_id, kind, completion_transition, trigger)) = run else {
             return Ok(None);
         };
         self.finish_stage_run(&run_id, status, result, feedback)?;
         Ok(Some(FinishedStageRun {
             kind,
             completion_transition,
+            trigger,
         }))
     }
 
@@ -565,7 +620,8 @@ fn stage_run_from_row(row: &rusqlite::Row<'_>) -> Result<StageRun, rusqlite::Err
         resumed_from_run_id: row.get(14)?,
         resume_fallback_reason: row.get(15)?,
         completion_transition: row.get(16)?,
-        started_at: row.get(17)?,
-        finished_at: row.get(18)?,
+        trigger: row.get(17)?,
+        started_at: row.get(18)?,
+        finished_at: row.get(19)?,
     })
 }

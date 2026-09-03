@@ -46,7 +46,7 @@ pub use operator_events::NewOperatorEvent;
 pub use pipeline_items::MergeSignalSource;
 pub(crate) use repos::RepoOrderInput;
 #[allow(unused_imports)]
-pub use stage_runs::FinishedStageRun;
+pub use stage_runs::{FinishedStageRun, StageTrigger};
 #[allow(unused_imports)]
 pub use task_events::{appended as task_event_appended, TaskEvent, TaskEventKind, TaskEventScope};
 #[allow(unused_imports)]
@@ -123,6 +123,8 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "057_queued_task_input",
     "058_queued_task_input_session_incarnation",
     "059_repo_sidebar_order",
+    "060_repo_default_branch_source",
+    "061_stage_run_trigger",
 ];
 
 #[derive(Debug, Serialize)]
@@ -447,6 +449,9 @@ pub struct StageRun {
     /// Effective completion policy chosen when this run was prepared.
     /// Legacy rows leave this null and fall back to the pinned stage policy.
     pub completion_transition: Option<String>,
+    /// How this run's stage was entered. Legacy NULL rows surface as
+    /// `unspecified` rather than pretending provenance can be reconstructed.
+    pub trigger: String,
     pub started_at: String,
     pub finished_at: Option<String>,
 }
@@ -805,6 +810,7 @@ fn create_base_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
           resumed_from_run_id TEXT,
           resume_fallback_reason TEXT,
           completion_transition TEXT CHECK (completion_transition IN ('manual', 'auto')),
+          trigger TEXT CHECK (trigger IN ('auto', 'operator', 'manager', 'unspecified')),
           completion_bound INTEGER NOT NULL DEFAULT 0,
           started_at TEXT NOT NULL DEFAULT (datetime('now')),
           finished_at TEXT
@@ -1903,6 +1909,15 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     run_migration(conn, "060_repo_default_branch_source", |conn| {
         add_column(conn, "repo", "default_branch_source", "TEXT")
+    })?;
+
+    run_migration(conn, "061_stage_run_trigger", |conn| {
+        add_column(
+            conn,
+            "stage_run",
+            "trigger",
+            "TEXT CHECK (trigger IN ('auto', 'operator', 'manager', 'unspecified'))",
+        )
     })?;
 
     Ok(())

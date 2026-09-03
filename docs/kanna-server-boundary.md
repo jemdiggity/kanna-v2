@@ -231,6 +231,11 @@ the client falls back to a bounded snapshot.
 - `POST /v1/tasks/{task_id}/actions/request-revision`
 - `POST /v1/tasks/{task_id}/actions/close`
 - `POST /v1/tasks/{task_id}/actions/advance-stage`
+  accepts optional `source: "operator" | "manager"`. The server records this
+  caller declaration without authentication; omission means `unspecified`.
+  Engine policy transitions use `auto`. The trigger is stored on the spawned
+  main `stage_run`, carried through any pending post run, emitted on
+  `stage.changed`, and returned as `latestRun.trigger`.
 - `POST /v1/tasks/{task_id}/actions/signal-merge-handoff`
 - `POST /v1/tasks/{task_id}/actions/rerun-stage`
 - `POST /v1/tasks/{task_id}/actions/run-merge-agent`
@@ -1140,7 +1145,9 @@ finished". This is deliberately unlike `GET /v1/tasks/search` and
 parentage edge. It returns direct children only, includes closed children, and
 orders them oldest first. Each item contains `id`, optional `workflowName`,
 optional `agent`, `createdAt`, optional `closedAt`, and optional `latestRun`
-(`stage`, `kind`, `status`, `summary`, and `finishedAt`). The workflow
+(`stage`, `kind`, `trigger`, `status`, `summary`, and `finishedAt`). `trigger`
+is `auto`, `operator`, `manager`, or `unspecified` and answers how the run's
+stage was entered; existing pre-migration rows are `unspecified`. The workflow
 identity and latest run let a fan-out owner reconstruct durable child verdicts
 after notifications, context compaction, or a fresh agent session; a closed
 child remains part of that history because closure is lifecycle cleanup, not
@@ -1582,7 +1589,7 @@ The CLI remains the shell/script interface; MCP is the structured agent-tool int
 ## CLI Task Actions
 
 - `kanna-cli task send-input --task-id <TASK_ID> --message <MESSAGE> [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/input`. Input is accepted only for an active daemon PTY session, fenced to the PTY process ID observed before acceptance while the server holds the task lifecycle lease. The daemon may retain it behind an active human draft, but never for a later run or stage. A successful acknowledgement prints `{ "ok": true }`; an absent or concurrently replaced session returns HTTP 409 with `reason: "no_live_agent_session"`, the latest run status/finish time when available, and explicit `kanna_resume_task` / `kanna_rerun_stage` recovery guidance. If the acknowledgement is lost after acceptance, the server reports uncertain delivery so callers do not retry blindly.
-- `kanna-cli task advance-stage --task-id <TASK_ID> [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/actions/advance-stage` and prints the action response as JSON.
+- `kanna-cli task advance-stage --task-id <TASK_ID> [--source operator|manager] [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/actions/advance-stage` and prints the action response as JSON. Omitted source is recorded as `unspecified`; automatic policy transitions are `auto`.
 - `kanna-cli task signal-merge --task-id <TASK_ID> --branch <HEAD> --target <BASE> --summary <SUMMARY> [--pr-url <URL>] [--server-url <URL>]` sends an ordinary request to the repository's merge agent.
 - `kanna-cli task resume --task-id <TASK_ID> [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/actions/resume`. It accepts a latest `cancelled` or `failed` run whose daemon session is dead. It also accepts a latest `running` run only after a daemon `List` proves the run's recorded session is absent; the desktop uses that form when an attach after restart discovers a session lost with the old daemon. It resumes the provider conversation when its durable transcript and original worktree pass the shared revision-resume checks; unsupported or missing provider context starts fresh and records `resumeFallbackReason`, while task-state precondition failures return an explanatory conflict. A present session returns a conflict for a running run and restores a false interruption for a previously interrupted run, so the route never creates a duplicate provider process. An empty route-level 404 identifies an older server that does not provide the action. Callers may use `rerun-stage` when recovery is unavailable or a deliberately fresh conversation is acceptable.
 - `kanna-cli task rerun-stage --task-id <TASK_ID> [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/actions/rerun-stage`. This is always an explicit fresh provider conversation, not recovery.

@@ -505,18 +505,19 @@ export function createRemoteTransport({
 
   const requestTaskAction = async (
     taskId: string,
-    buildPath: (localTaskId: string) => string
+    buildPath: (localTaskId: string) => string,
+    body: unknown | null = null
   ): Promise<TaskActionResponse> => {
     const route = await resolveCloudTaskRoute(taskId);
     if (!route) {
-      return request<TaskActionResponse>("POST", buildPath(taskId), null);
+      return request<TaskActionResponse>("POST", buildPath(taskId), body);
     }
 
     const response = await requestDesktop<TaskActionResponse>(
       route.desktopId,
       "POST",
       buildPath(route.taskId),
-      null
+      body
     );
     const responseTaskId = (
       response as TaskActionResponse | null | undefined
@@ -857,7 +858,8 @@ export function createRemoteTransport({
       requestTaskAction(
         taskId,
         (localTaskId) =>
-          `/v1/tasks/${encodeURIComponent(localTaskId)}/actions/advance-stage`
+          `/v1/tasks/${encodeURIComponent(localTaskId)}/actions/advance-stage`,
+        { source: "operator" }
       ),
     resumeTask: (taskId: string) =>
       requestTaskAction(

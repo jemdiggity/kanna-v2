@@ -221,7 +221,9 @@ export function createLanTransport(
       }),
     advanceTaskStage: (taskId: string) =>
       request<TaskActionResponse>(`/v1/tasks/${encodeURIComponent(taskId)}/actions/advance-stage`, {
-        method: "POST"
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source: "operator" })
       }),
     resumeTask: (taskId: string) =>
       request<TaskActionResponse>(`/v1/tasks/${encodeURIComponent(taskId)}/actions/resume`, {
