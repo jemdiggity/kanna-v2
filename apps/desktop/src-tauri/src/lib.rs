@@ -304,6 +304,7 @@ pub fn run() {
             commands::git::log::git_log,
             commands::git::log::git_graph,
             commands::git::remote::git_default_branch,
+            commands::git::remote::git_repository_has_commits,
             commands::git::remote::git_repository_state,
             commands::git::remote::git_current_branch,
             commands::git::remote::git_list_base_branches,

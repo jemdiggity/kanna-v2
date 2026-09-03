@@ -9,10 +9,11 @@ use std::env;
 use crate::models::{
     AddRepoRequest, BlockTaskRequest, CompleteStageRequest, CreateTaskRequest, CreateTaskResponse,
     DependentTasksExistResponse, MergeHandoffRequest, MobileNotificationRequest,
-    MobileNotificationResponse, RepoDetail, RepoSummary, RequestRevisionRequest,
-    ResolvedAgentDefinition, SetTaskParentRequest, SetTaskWorkflowRequest, SetTaskWorkflowResponse,
-    SignalAgentRequest, SignalAgentResponse, TaskActionResponse, TaskChild, TaskDetail,
-    TaskInputRequest, TaskInputResponse, TaskInputs, TaskRenameRequest, TaskSummary, WaitUntil,
+    MobileNotificationResponse, ReconcileRepoMetadataRequest, ReconcileRepoMetadataResponse,
+    RepoDetail, RepoSummary, RequestRevisionRequest, ResolvedAgentDefinition, SetTaskParentRequest,
+    SetTaskWorkflowRequest, SetTaskWorkflowResponse, SignalAgentRequest, SignalAgentResponse,
+    TaskActionResponse, TaskChild, TaskDetail, TaskInputRequest, TaskInputResponse, TaskInputs,
+    TaskRenameRequest, TaskSummary, WaitUntil,
 };
 
 pub(crate) fn join_server_url(base_url: &str, path: &str) -> String {
@@ -58,6 +59,13 @@ pub(crate) fn repo_task_list_path(repo_id: &str) -> String {
 
 pub(crate) fn repo_agent_list_path(repo_id: &str) -> String {
     format!("/v1/repos/{}/agents", encode_path_segment(repo_id))
+}
+
+pub(crate) fn reconcile_repo_metadata_path(repo_id: &str) -> String {
+    format!(
+        "/v1/repos/{}/reconcile-metadata",
+        encode_path_segment(repo_id)
+    )
 }
 
 pub(crate) fn signal_agent_path(repo_id: &str, agent: &str) -> String {
@@ -363,6 +371,14 @@ pub(crate) async fn add_repo_via_api(
     request: &AddRepoRequest,
 ) -> Result<RepoDetail, String> {
     post_json(base_url, "/v1/repos", request).await
+}
+
+pub(crate) async fn reconcile_repo_metadata_via_api(
+    base_url: &str,
+    repo_id: &str,
+    request: &ReconcileRepoMetadataRequest,
+) -> Result<ReconcileRepoMetadataResponse, String> {
+    post_json(base_url, &reconcile_repo_metadata_path(repo_id), request).await
 }
 
 pub(crate) async fn signal_agent_via_api(

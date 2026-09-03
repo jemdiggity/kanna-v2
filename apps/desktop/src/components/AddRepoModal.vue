@@ -11,6 +11,7 @@ import { macOsTextInputAttrs } from "../utils/textInput";
 
 interface GitRepositoryState {
   defaultBranch: string;
+  defaultBranchSource: string;
   hasCommits: boolean;
 }
 

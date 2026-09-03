@@ -6,6 +6,7 @@ export interface Repo {
   path: string;
   name: string;
   default_branch: string;
+  default_branch_source?: string | null;
   remote_url: string | null;
   remote_url_hash: string | null;
   hidden: number;

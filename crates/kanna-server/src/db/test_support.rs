@@ -74,6 +74,7 @@ impl Db {
                 path TEXT NOT NULL,
                 name TEXT NOT NULL,
                 default_branch TEXT,
+                default_branch_source TEXT,
                 remote_url TEXT,
                 remote_url_hash TEXT,
                 hidden INTEGER,

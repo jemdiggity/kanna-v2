@@ -101,6 +101,20 @@ pub(crate) enum RepoCommands {
         #[arg(long)]
         server_url: Option<String>,
     },
+    /// Detect repository metadata drift and update the existing record by default
+    ReconcileMetadata {
+        /// Existing repository ID
+        #[arg(long)]
+        repo_id: String,
+
+        /// Apply detected metadata to the existing record; set false for a drift check
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        apply: bool,
+
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
     /// Find or create singleton agent tasks for a repo
     Agent {
         #[command(subcommand)]

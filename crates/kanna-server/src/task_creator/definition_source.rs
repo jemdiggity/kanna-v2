@@ -148,6 +148,11 @@ impl RepoDefinitionSnapshot {
                 ));
             }
             Some(revision.to_string())
+        } else if has_any_remote(&repo_path)? {
+            return Err(format!(
+                "recorded default-branch snapshot `{ref_name}` (`{full_ref_name}`) does not exist in repository `{}`; reconcile the repository metadata before resolving definitions",
+                repo_path.display()
+            ));
         } else {
             None
         };
@@ -228,6 +233,30 @@ impl RepoDefinitionSnapshot {
             .map(str::to_string)
             .collect())
     }
+}
+
+fn has_any_remote(repo_path: &Path) -> Result<bool, String> {
+    let output = Command::new("git")
+        .arg("remote")
+        .current_dir(repo_path)
+        .output()
+        .map_err(|error| {
+            format!(
+                "failed to list Git remotes in `{}`: {error}",
+                repo_path.display()
+            )
+        })?;
+    if !output.status.success() {
+        return Err(format!(
+            "failed to list Git remotes in `{}` (status {}): {}",
+            repo_path.display(),
+            output.status,
+            command_stderr(&output)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .any(|remote| !remote.trim().is_empty()))
 }
 
 /// Update the remote-tracking refs definitions resolve against. A failure is
@@ -665,23 +694,19 @@ mod tests {
     }
 
     #[test]
-    fn resolve_treats_default_branch_as_an_exact_remote_ref() {
+    fn resolve_rejects_a_recorded_branch_without_an_exact_remote_ref() {
         let fixture = GitFixture::new();
         fixture.publish_config("remote-v2");
 
-        let snapshot = RepoDefinitionSnapshot::resolve(
+        let error = RepoDefinitionSnapshot::resolve(
             &fixture.consumer,
             Some("main~1"),
             OriginFreshness::Fetch,
         )
-        .unwrap();
+        .unwrap_err();
 
-        assert_eq!(snapshot.ref_name(), "origin/main~1");
-        assert_eq!(snapshot.revision(), None);
-        assert_eq!(
-            snapshot.read_optional_utf8(".kanna/config.json").unwrap(),
-            None
-        );
+        assert!(error.contains("origin/main~1"), "{error}");
+        assert!(error.contains("reconcile"), "{error}");
     }
 
     #[test]

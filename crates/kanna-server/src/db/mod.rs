@@ -207,6 +207,7 @@ pub struct Repo {
     pub path: String,
     pub name: String,
     pub default_branch: Option<String>,
+    pub default_branch_source: Option<String>,
     pub remote_url_hash: Option<String>,
     pub hidden: Option<i64>,
     pub sort_order: Option<i64>,
@@ -220,6 +221,7 @@ pub struct SnapshotRepo {
     pub path: String,
     pub name: String,
     pub default_branch: Option<String>,
+    pub default_branch_source: Option<String>,
     pub remote_url: Option<String>,
     pub remote_url_hash: Option<String>,
     pub hidden: i64,
@@ -354,6 +356,16 @@ pub struct NewRepo<'a> {
     pub path: &'a str,
     pub name: &'a str,
     pub default_branch: Option<&'a str>,
+}
+
+#[derive(Default)]
+pub struct RepoPatch<'a> {
+    pub name: Option<&'a str>,
+    pub remote_url: Option<Option<&'a str>>,
+    pub remote_url_hash: Option<Option<&'a str>>,
+    pub hidden: Option<bool>,
+    pub default_branch: Option<&'a str>,
+    pub default_branch_source: Option<&'a str>,
 }
 
 pub struct TaskStageSource {
@@ -719,6 +731,7 @@ fn create_base_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
         CREATE TABLE IF NOT EXISTS repo (
           id TEXT PRIMARY KEY, path TEXT NOT NULL, name TEXT NOT NULL,
           default_branch TEXT NOT NULL DEFAULT 'main',
+          default_branch_source TEXT,
           remote_url TEXT,
           remote_url_hash TEXT,
           sort_order INTEGER NOT NULL DEFAULT 0,
@@ -1875,6 +1888,10 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
             WHERE remote_url_hash IS NOT NULL AND remote_url_hash != '';
             "#,
         )
+    })?;
+
+    run_migration(conn, "060_repo_default_branch_source", |conn| {
+        add_column(conn, "repo", "default_branch_source", "TEXT")
     })?;
 
     Ok(())

@@ -337,6 +337,83 @@ async fn advance_stage_posts_to_task_action_path_with_empty_json_body() {
 }
 
 #[tokio::test]
+async fn reconcile_repo_metadata_posts_exact_route_and_default_apply_body() {
+    let response = http_json_response(
+        "200 OK",
+        r#"{
+            "repoId":"repo-1",
+            "recordedDefaultBranch":"master",
+            "recordedDefaultBranchSource":"local_current_branch",
+            "detectedDefaultBranch":"main",
+            "detectedDefaultBranchSource":"remote_origin_head",
+            "drift":true,
+            "updated":true
+        }"#,
+    );
+    let (base_url, handle) = serve_single_http_response(response).await;
+
+    let reconciled = reconcile_repo_metadata_via_api(
+        &base_url,
+        "repo-1",
+        &build_reconcile_repo_metadata_request(true),
+    )
+    .await
+    .unwrap();
+    let request = handle.await.unwrap();
+
+    assert_eq!(
+        reconciled,
+        ReconcileRepoMetadataResponse {
+            repo_id: "repo-1".to_string(),
+            recorded_default_branch: Some("master".to_string()),
+            recorded_default_branch_source: Some("local_current_branch".to_string()),
+            detected_default_branch: "main".to_string(),
+            detected_default_branch_source: "remote_origin_head".to_string(),
+            drift: true,
+            updated: true,
+        }
+    );
+    assert!(request.starts_with("POST /v1/repos/repo-1/reconcile-metadata HTTP/1.1"));
+    assert!(request.contains("content-type: application/json"));
+    assert!(request.ends_with(r#"{"apply":true}"#));
+    assert_eq!(
+        serde_json::to_value(reconciled).unwrap()["detectedDefaultBranchSource"],
+        "remote_origin_head",
+        "typed response output must retain the server's camelCase contract"
+    );
+}
+
+#[tokio::test]
+async fn reconcile_repo_metadata_posts_apply_false_for_doctor_check() {
+    let response = http_json_response(
+        "200 OK",
+        r#"{
+            "repoId":"repo-1",
+            "recordedDefaultBranch":"master",
+            "recordedDefaultBranchSource":null,
+            "detectedDefaultBranch":"main",
+            "detectedDefaultBranchSource":"remote_origin_head",
+            "drift":true,
+            "updated":false
+        }"#,
+    );
+    let (base_url, handle) = serve_single_http_response(response).await;
+
+    let reconciled = reconcile_repo_metadata_via_api(
+        &base_url,
+        "repo-1",
+        &build_reconcile_repo_metadata_request(false),
+    )
+    .await
+    .unwrap();
+    let request = handle.await.unwrap();
+
+    assert!(!reconciled.updated);
+    assert!(request.starts_with("POST /v1/repos/repo-1/reconcile-metadata HTTP/1.1"));
+    assert!(request.ends_with(r#"{"apply":false}"#));
+}
+
+#[tokio::test]
 async fn signal_merge_handoff_posts_the_resolved_policy_request_details() {
     let response = http_json_response(
         "200 OK",

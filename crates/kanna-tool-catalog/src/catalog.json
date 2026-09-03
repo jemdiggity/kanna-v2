@@ -51,6 +51,18 @@
       ]
     },
     {
+      "name": "kanna_reconcile_repo_metadata",
+      "description": "Detect a repository's authoritative default branch from origin HEAD, compare it with the recorded metadata, and update the existing repo record by default. This preserves the repo id and its tasks. Set apply=false for a doctor-style drift check without changing metadata. The response includes recorded and detected branch values, provenance for each, drift, and whether an update was made.",
+      "method": "POST",
+      "path": "/v1/repos/{repo_id}/reconcile-metadata",
+      "response": "json",
+      "params": [
+        { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.", "type": "string", "required": false, "location": "routing" },
+        { "name": "repo_id", "description": "Existing repository id from kanna_list_repos. Reconciliation updates this record in place and does not re-register the repository.", "type": "string", "required": true, "location": "path" },
+        { "name": "apply", "description": "Apply detected metadata to the existing record. Defaults to true; set false to report drift only.", "type": "boolean", "required": false, "location": "body", "default": true }
+      ]
+    },
+    {
       "name": "kanna_list_recent_tasks",
       "description": "List recent Kanna tasks, newest first by update time. Inside a task session this defaults to that task's repository; pass all_repos for the rare cross-repository view. Set all_machines to discover tasks on every currently reachable account machine; that preserves the account-wide aggregation and returns tasks plus explicit machineErrors. Rows carry a prompt bounded to 500 characters, the latest durable agent name in agent, and the session transport in agentType.",
       "method": "GET",

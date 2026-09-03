@@ -28,7 +28,8 @@ impl Db {
 
     fn list_snapshot_repos(&self) -> Result<Vec<SnapshotRepo>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT repo.id, repo.path, repo.name, repo.default_branch, repo.remote_url,
+            "SELECT repo.id, repo.path, repo.name, repo.default_branch,
+                    repo.default_branch_source, repo.remote_url,
                     repo.remote_url_hash, repo.hidden,
                     COALESCE(repo_sidebar_order.sort_order, repo.sort_order) AS sidebar_sort_order,
                     repo.created_at, repo.last_opened_at
@@ -44,12 +45,13 @@ impl Db {
                 path: row.get(1)?,
                 name: row.get(2)?,
                 default_branch: row.get(3)?,
-                remote_url: row.get(4)?,
-                remote_url_hash: row.get(5)?,
-                hidden: row.get(6)?,
-                sort_order: row.get(7)?,
-                created_at: row.get(8)?,
-                last_opened_at: row.get(9)?,
+                default_branch_source: row.get(4)?,
+                remote_url: row.get(5)?,
+                remote_url_hash: row.get(6)?,
+                hidden: row.get(7)?,
+                sort_order: row.get(8)?,
+                created_at: row.get(9)?,
+                last_opened_at: row.get(10)?,
             })
         })?;
         rows.collect()

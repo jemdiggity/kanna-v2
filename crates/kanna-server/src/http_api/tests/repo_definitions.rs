@@ -358,6 +358,52 @@ fn manifest_router(seed: &str, repo: &Path) -> axum::Router {
 }
 
 #[tokio::test]
+async fn definition_manifest_surfaces_a_missing_recorded_remote_branch() {
+    let (_temp, repo) = published_definitions_repo(
+        "missing-recorded-branch",
+        &[(
+            ".kanna/config.json",
+            json!({ "workflow": "single-reviewer" }).to_string(),
+        )],
+    );
+    let repo_path = repo.to_string_lossy().to_string();
+    let app = super::test_router_with_seed(
+        "definitions-missing-recorded-branch",
+        "Studio Mac",
+        move |db| {
+            db.insert_repo_with_branch_source(
+                NewRepo {
+                    id: "repo-1",
+                    path: &repo_path,
+                    name: "Manifest Repo",
+                    default_branch: Some("master"),
+                },
+                Some("legacy_unknown"),
+            )
+            .unwrap();
+        },
+    );
+
+    let response = app
+        .oneshot(
+            Request::get("/v1/repos/repo-1/kanna-definitions")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let error = String::from_utf8(body.to_vec()).unwrap();
+    assert!(error.contains("repo-1"), "{error}");
+    assert!(error.contains("master"), "{error}");
+    assert!(error.contains("legacy_unknown"), "{error}");
+    assert!(error.contains("reconcile"), "{error}");
+}
+
+#[tokio::test]
 async fn repo_definition_manifest_reports_retired_workflow_names_as_their_current_name() {
     // The desktop's new-task picker preselects `defaultWorkflow` only when it
     // is a member of `workflows`, and otherwise silently falls back to the

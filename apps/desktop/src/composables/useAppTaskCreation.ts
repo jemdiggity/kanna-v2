@@ -27,11 +27,6 @@ interface SidebarRepoProjection {
   id: string;
 }
 
-interface GitRepositoryState {
-  defaultBranch: string;
-  hasCommits: boolean;
-}
-
 interface UseAppTaskCreationOptions {
   store: ReturnType<typeof useKannaStore>;
   toast: ReturnType<typeof useToast>;
@@ -396,16 +391,16 @@ export function useAppTaskCreation({
     repoPath: string,
   ) {
     if (!repoId) return;
-    let repositoryState: GitRepositoryState;
+    let hasCommits: boolean;
     try {
-      repositoryState = await invoke<GitRepositoryState>("git_repository_state", { repoPath });
+      hasCommits = await invoke<boolean>("git_repository_has_commits", { repoPath });
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       console.error("[App] setup eligibility check failed:", error);
       toast.error(`${t('toasts.taskCreationFailed')}: ${msg}`);
       return;
     }
-    if (!repositoryState.hasCommits) {
+    if (!hasCommits) {
       toast.warning(t("toasts.emptyRepoNeedsInitialCommit"));
       return;
     }

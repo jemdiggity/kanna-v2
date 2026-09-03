@@ -485,6 +485,7 @@ impl RepoDefinitions {
             repo.default_branch.as_deref(),
             OriginFreshness::Fetch,
         )
+        .map_err(|error| repo_definition_resolution_error(repo, error))
     }
 
     /// Resolve against the remote-tracking refs already on disk. Reads that
@@ -496,6 +497,7 @@ impl RepoDefinitions {
             repo.default_branch.as_deref(),
             OriginFreshness::Local,
         )
+        .map_err(|error| repo_definition_resolution_error(repo, error))
     }
 
     fn resolve_path(
@@ -736,6 +738,20 @@ impl RepoDefinitions {
         }
         Ok(resolved)
     }
+}
+
+fn repo_definition_resolution_error(repo: &Repo, error: String) -> String {
+    let branch = repo.default_branch.as_deref().unwrap_or("main");
+    let source = repo
+        .default_branch_source
+        .as_deref()
+        .unwrap_or("legacy_unknown");
+    let message = format!(
+        "failed to resolve repository definitions for repo `{}` from recorded default branch `{branch}` (source: {source}): {error}",
+        repo.id
+    );
+    log::error!("{message}");
+    message
 }
 
 /// The committed config as a raw JSON object, so the machine-local layer can
