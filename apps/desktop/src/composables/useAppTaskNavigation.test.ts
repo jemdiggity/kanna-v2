@@ -126,6 +126,13 @@ describe("useAppTaskNavigation", () => {
     if (!navigation) throw new Error("navigation composable did not initialize");
 
     try {
+      expect(navigation.paletteExtraCommands.value).toContainEqual({
+        action: "undoClose",
+        label: "tasks.undoClose",
+        group: "shortcuts.groupTasks",
+        shortcut: "",
+      });
+
       const localPush = navigation.paletteDynamicCommands.value.find((command) =>
         command.id === "push-to-machine");
       expect(localPush?.label).toBe("taskTransfer.pushToMachine");

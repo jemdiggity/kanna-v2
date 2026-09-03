@@ -42,4 +42,26 @@ describe("CommandPaletteModal", () => {
     }
     expect(labels).toContain("shortcuts.allShortcuts");
   });
+
+  it("lists undo close as a command without assigning it a shortcut", async () => {
+    const wrapper = mount(CommandPaletteModal, {
+      attachTo: document.body,
+      props: {
+        extraCommands: [{
+          action: "undoClose",
+          label: "tasks.undoClose",
+          group: "shortcuts.groupTasks",
+          shortcut: "",
+        }],
+      },
+    });
+    const command = wrapper.findAll(".command-item")
+      .find((item) => item.find(".command-label").text() === "tasks.undoClose");
+
+    expect(command).toBeDefined();
+    expect(command?.find(".command-keys").exists()).toBe(false);
+    await command?.trigger("click");
+    expect(wrapper.emitted("execute")).toContainEqual(["undoClose"]);
+    wrapper.unmount();
+  });
 });

@@ -145,7 +145,6 @@ Tasks can be pinned to the top of their repo's task list by dragging above the p
 | ⌘L | Open latest file link |
 | ⌘S | Advance stage / approve (runs the stage's post first; blocked while a post is running) |
 | ⇧⌘⌫ | Close task |
-| ⌘Z | Undo close |
 | ⌥⌘↑/↓ | Navigate tasks |
 | ⇧⌘↑/↓ | Navigate repos |
 | ⌘U / ⇧⌘U | Oldest unread task (repo / all repos) |
