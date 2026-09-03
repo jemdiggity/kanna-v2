@@ -15,7 +15,7 @@ import {
 
 describe("staging remote E2E configuration", () => {
   it("skips cleanly when the staging device token or Buffy password is absent", () => {
-    expect(buffyStagingCredentialsFromEnv({})).toEqual({
+    expect(buffyStagingCredentialsFromEnv({ NODE_ENV: "test" })).toEqual({
       ok: false,
       missing: ["KANNA_E2E_DEVICE_TOKEN", "KANNA_STAGING_TEST_PASSWORD"]
     });
@@ -26,6 +26,7 @@ describe("staging remote E2E configuration", () => {
 
   it("uses staging cloud settings and a disposable desktop identity", () => {
     const env = stagingServerEnvironment({
+      NODE_ENV: "test",
       KANNA_E2E_DEVICE_TOKEN: "staging-buffy-device-token",
       KANNA_STAGING_TEST_PASSWORD: "secret"
     });

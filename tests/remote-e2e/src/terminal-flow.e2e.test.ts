@@ -384,16 +384,20 @@ describe("remote task terminal flow E2E", () => {
       events.sendInput(Buffer.from(humanDraft).toString("base64"));
       await waitForTerminalOutput(events, `SCRIPT_PARTIAL:${humanDraft}`);
 
-      // Parked behind the human's unsent line, so it has not been submitted
-      // and the delivery says so rather than answering success.
-      await expect(
-        harness.client.invokeDesktop({
-          desktopId: harness.desktopId,
-          method: "POST",
-          path: `/v1/tasks/${task.taskId}/input`,
-          body: { input: managerMessage }
-        })
-      ).rejects.toThrow(/unsent line at that terminal/);
+      // Parked behind the human's unsent line, so it has not been submitted.
+      // The accepted queue entry is a successful 202 response, not a refusal.
+      const queued = await harness.client.invokeDesktop({
+        desktopId: harness.desktopId,
+        method: "POST",
+        path: `/v1/tasks/${task.taskId}/input`,
+        body: { input: managerMessage }
+      });
+      expect(queued).toMatchObject({
+        status: "queued",
+        reason: "input_held_by_draft",
+        message: expect.stringMatching(/unsent line at that terminal/),
+        queuedInputCount: 1
+      });
 
       await new Promise((resolve) => setTimeout(resolve, 300));
       expect(events.outputText()).not.toContain(`SCRIPT_INPUT:${humanDraft}`);
@@ -478,14 +482,18 @@ describe("remote task terminal flow E2E", () => {
       events.sendInput(Buffer.from(firstDraft).toString("base64"));
       await waitForTerminalOutput(events, `SCRIPT_PARTIAL:${firstDraft}`);
 
-      await expect(
-        harness.client.invokeDesktop({
-          desktopId: harness.desktopId,
-          method: "POST",
-          path: `/v1/tasks/${task.taskId}/input`,
-          body: { input: managerMessage }
-        })
-      ).rejects.toThrow(/unsent line at that terminal/);
+      const queued = await harness.client.invokeDesktop({
+        desktopId: harness.desktopId,
+        method: "POST",
+        path: `/v1/tasks/${task.taskId}/input`,
+        body: { input: managerMessage }
+      });
+      expect(queued).toMatchObject({
+        status: "queued",
+        reason: "input_held_by_draft",
+        message: expect.stringMatching(/unsent line at that terminal/),
+        queuedInputCount: 1
+      });
 
       const bracketedPaste = `\u001b[200~${pasteContinuation}\u001b[201~`;
       events.sendInput(Buffer.from(bracketedPaste).toString("base64"));

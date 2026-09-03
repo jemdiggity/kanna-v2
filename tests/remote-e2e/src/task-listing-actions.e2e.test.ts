@@ -247,7 +247,7 @@ describe("remote task listing, creation, and actions E2E", () => {
     expect(typedEventTaskIds).toEqual(expect.arrayContaining([openChildId, closedChildId]));
     expect(typedEventTaskIds).not.toContain(parent.taskId);
     const typedCursor = getString(asRecord(typedEvents), "cursor");
-    expect(typedCursor.startsWith("p3.")).toBe(true);
+    expect(typedCursor).toMatch(/^kh1\.[0-9a-f]{8}$/);
     expect(typedCursor.length).toBeLessThan(128);
 
     await appendTaskEvent(harness, openChildId, "task.awaiting_input");
@@ -291,7 +291,7 @@ describe("remote task listing, creation, and actions E2E", () => {
       expect.arrayContaining([openChildId, closedChildId])
     );
     const catalogCursor = getString(asRecord(catalogEvents), "cursor");
-    expect(catalogCursor.startsWith("p3.")).toBe(true);
+    expect(catalogCursor).toMatch(/^kh1\.[0-9a-f]{8}$/);
     expect(catalogCursor.length).toBeLessThan(128);
 
     await appendTaskEvent(harness, openChildId, "task.revision_requested");
@@ -354,6 +354,7 @@ describe("remote task listing, creation, and actions E2E", () => {
       "--verify",
       `refs/heads/task-${advanceTask.taskId}-2`
     ])).toContain(`task-${advanceTask.taskId}-2`);
+    const advanceReviewRun = await latestRunRow(harness, advanceTask.taskId);
 
     const successTask = await createScriptedTask(harness, {
       displayName: "Remote complete success task"
@@ -420,6 +421,7 @@ describe("remote task listing, creation, and actions E2E", () => {
       "POST",
       `/v1/tasks/${advanceTask.taskId}/actions/request-revision`,
       {
+        runId: getString(advanceReviewRun, "id"),
         targetStage: "in progress",
         summary: "review failed over relay",
         prompt: "Address the remote action assertion gaps.",
