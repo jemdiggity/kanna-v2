@@ -141,7 +141,8 @@ pub fn read_task_diff(
                 .or_else(|| repo.and_then(|repo| repo.default_branch.clone()));
             let merge_base = base_ref
                 .as_deref()
-                .and_then(|base_ref| resolve_merge_base(root, base_ref));
+                .and_then(|base_ref| crate::git_refs::resolve_base_ref(root, base_ref))
+                .and_then(|resolved| resolved.merge_base);
             (base_ref, merge_base)
         }
         TaskDiffRequest::Working(_) => (None, None),
@@ -211,27 +212,6 @@ fn run_git(root: &Path, args: &[&str]) -> Result<std::process::Output, TaskDiffE
         .args(args)
         .output()
         .map_err(|error| TaskDiffError::Internal(format!("failed to run git: {error}")))
-}
-
-/// Prefers the remote-tracking base over the local branch so the diff base
-/// stays correct when the local base branch is stale or missing.
-fn resolve_merge_base(root: &Path, base_ref: &str) -> Option<String> {
-    let candidates: Vec<String> = if base_ref.contains('/') {
-        vec![base_ref.to_string()]
-    } else {
-        vec![format!("origin/{base_ref}"), base_ref.to_string()]
-    };
-    for candidate in candidates {
-        if let Ok(output) = run_git(root, &["merge-base", &candidate, "HEAD"]) {
-            if output.status.success() {
-                let merge_base = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !merge_base.is_empty() {
-                    return Some(merge_base);
-                }
-            }
-        }
-    }
-    None
 }
 
 /// Runs `git diff <selector...> --`. `tolerate_failure` covers selectors

@@ -224,6 +224,14 @@ filter. The MCP adapter supplies the calling task's repository by default and
 leaves the account-wide `all_machines` behavior unchanged; `all_repos` is the
 explicit local cross-repository escape hatch.
 
+Task-detail git history is computed against the same resolved base as the task
+diff: an unqualified base prefers `origin/<base>` over local `<base>`, including
+when the local branch exists but is stale. If a task's persisted base no longer
+resolves, stats retry the repo's current default branch. When neither resolves,
+`commitsAhead` and `commitsBehind` are omitted and `baseRefUnresolved: true` is
+reported; this must not be interpreted as zero work. `dirty` remains an
+independent working-tree result.
+
 ### Remote repository checkout
 
 Authenticated repo inventory includes an optional, credential-free `remoteUrl`

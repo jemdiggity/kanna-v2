@@ -223,8 +223,14 @@ pub struct TaskDetail {
     pub pr_url: Option<String>,
     pub closed_at: Option<String>,
     pub worktree_path: Option<String>,
-    pub commits_ahead: i64,
-    pub commits_behind: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commits_ahead: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commits_behind: Option<i64>,
+    /// True when neither the task's recorded base nor the repo's current
+    /// default branch resolves in the task worktree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_ref_unresolved: Option<bool>,
     pub dirty: bool,
     /// The task's most recent stage run, when one exists. Fan-out
     /// orchestrators (e.g. the QA dispatcher) read a finished child's
@@ -1096,12 +1102,23 @@ fn map_task_detail(
         .clone()
         .or(prompt.clone())
         .unwrap_or_else(|| item.id.clone());
+    let recorded_base_ref = item
+        .base_ref
+        .clone()
+        .filter(|value| !value.trim().is_empty());
+    let repo_default_branch = repo
+        .and_then(|repo| repo.default_branch.clone())
+        .filter(|value| !value.trim().is_empty());
     let git_state = worktree_path
         .as_deref()
         .and_then(|path| {
-            Path::new(path)
-                .exists()
-                .then(|| task_git_state(path, task_base_ref(&item, repo).as_deref()))
+            Path::new(path).exists().then(|| {
+                task_git_state(
+                    path,
+                    recorded_base_ref.as_deref(),
+                    repo_default_branch.as_deref(),
+                )
+            })
         })
         .and_then(Result::ok)
         .unwrap_or_default();
@@ -1181,6 +1198,7 @@ fn map_task_detail(
         worktree_path: existing_worktree_path,
         commits_ahead: git_state.commits_ahead,
         commits_behind: git_state.commits_behind,
+        base_ref_unresolved: git_state.base_ref_unresolved.then_some(true),
         dirty: git_state.dirty,
         latest_run: latest_run.map(map_task_latest_run),
         revision_rounds: item.revision_rounds,
@@ -1274,8 +1292,9 @@ fn map_repo_detail(repo: crate::db::Repo) -> RepoDetail {
 
 #[derive(Default)]
 struct TaskGitState {
-    commits_ahead: i64,
-    commits_behind: i64,
+    commits_ahead: Option<i64>,
+    commits_behind: Option<i64>,
+    base_ref_unresolved: bool,
     dirty: bool,
 }
 
@@ -1340,22 +1359,32 @@ fn git_default_branch(repo_path: &Path) -> Result<String, String> {
     Err("could not determine default branch".to_string())
 }
 
-fn task_base_ref(item: &crate::db::PipelineItem, repo: Option<&crate::db::Repo>) -> Option<String> {
-    item.base_ref
-        .clone()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| repo.and_then(|repo| repo.default_branch.clone()))
-}
-
-fn task_git_state(worktree_path: &str, base_ref: Option<&str>) -> Result<TaskGitState, String> {
+fn task_git_state(
+    worktree_path: &str,
+    recorded_base_ref: Option<&str>,
+    repo_default_branch: Option<&str>,
+) -> Result<TaskGitState, String> {
     let dirty = git_status_dirty(worktree_path)?;
-    let (commits_ahead, commits_behind) = match base_ref {
-        Some(base_ref) => git_ahead_behind(worktree_path, base_ref).unwrap_or((0, 0)),
-        None => (0, 0),
-    };
+    let root = Path::new(worktree_path);
+    let resolved_base = recorded_base_ref
+        .and_then(|base_ref| crate::git_refs::resolve_base_ref(root, base_ref))
+        .or_else(|| {
+            repo_default_branch
+                .filter(|default_branch| Some(*default_branch) != recorded_base_ref)
+                .and_then(|base_ref| crate::git_refs::resolve_base_ref(root, base_ref))
+        });
+    let ahead_behind = resolved_base
+        .as_ref()
+        .map(|resolved| git_ahead_behind(worktree_path, &resolved.reference))
+        .transpose()?;
+    let (commits_ahead, commits_behind) = ahead_behind
+        .map(|(ahead, behind)| (Some(ahead), Some(behind)))
+        .unwrap_or((None, None));
     Ok(TaskGitState {
         commits_ahead,
         commits_behind,
+        base_ref_unresolved: resolved_base.is_none()
+            && (recorded_base_ref.is_some() || repo_default_branch.is_some()),
         dirty,
     })
 }

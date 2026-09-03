@@ -6,6 +6,7 @@ mod commands;
 mod config;
 mod daemon_client;
 mod db;
+mod git_refs;
 mod http_api;
 mod human_control;
 mod internal_ports;

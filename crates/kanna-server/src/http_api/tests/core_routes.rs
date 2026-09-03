@@ -3361,8 +3361,8 @@ async fn get_task_route_returns_full_task_detail_by_id() {
     assert_eq!(task.pr_url, None);
     assert_eq!(task.closed_at, None);
     assert_eq!(task.worktree_path, None);
-    assert_eq!(task.commits_ahead, 0);
-    assert_eq!(task.commits_behind, 0);
+    assert_eq!(task.commits_ahead, None);
+    assert_eq!(task.commits_behind, None);
     assert!(!task.dirty);
 }
 
@@ -3854,8 +3854,8 @@ async fn get_task_route_returns_worktree_git_state() {
     );
     assert_eq!(task.workflow_name.as_deref(), Some("default"));
     assert_eq!(task.stage_transition.as_deref(), Some("manual"));
-    assert_eq!(task.commits_ahead, 1);
-    assert_eq!(task.commits_behind, 0);
+    assert_eq!(task.commits_ahead, Some(1));
+    assert_eq!(task.commits_behind, Some(0));
     assert!(task.dirty);
 
     let _ = Command::new("git")
@@ -3864,6 +3864,173 @@ async fn get_task_route_returns_worktree_git_state() {
         .status();
     let _ = std::fs::remove_dir_all(repo_root);
     let _ = std::fs::remove_dir_all(worktree);
+}
+
+fn run_task_stats_git(repo: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .expect("run task stats git command");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn task_stats_fixture(label: &str) -> (PathBuf, PathBuf) {
+    let unique = format!(
+        "{}-{}-{label}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos()
+    );
+    let repo_root = std::env::temp_dir().join(format!("kanna-task-stats-repo-{unique}"));
+    let worktree = std::env::temp_dir().join(format!("kanna-task-stats-worktree-{unique}"));
+    init_test_git_repo(&repo_root);
+    run_task_stats_git(
+        &repo_root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "task-stats",
+            worktree.to_str().expect("utf-8 worktree path"),
+        ],
+    );
+    std::fs::write(worktree.join("feature.txt"), "feature").expect("write feature");
+    run_task_stats_git(&worktree, &["add", "feature.txt"]);
+    run_task_stats_git(&worktree, &["commit", "-m", "feature"]);
+    (repo_root, worktree)
+}
+
+async fn request_task_stats(
+    repo_root: &Path,
+    worktree: &Path,
+    base_ref: &str,
+) -> (serde_json::Value, crate::mobile_api::TaskDetail) {
+    let repo_path = repo_root.to_string_lossy().to_string();
+    let worktree_path = worktree.to_string_lossy().to_string();
+    let base_ref = base_ref.to_string();
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", move |db| {
+        db.insert_test_repo_with_path("repo-1", &repo_path, "Repo One")
+            .expect("insert repo");
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "Task git stats",
+            Some("Task git stats"),
+            "in progress",
+            "2026-09-03 10:00:00",
+        )
+        .expect("insert task");
+        db.update_test_pipeline_item_base_ref("task-1", &base_ref)
+            .expect("set task base ref");
+        db.upsert_worktree("wt-task-1", "task-1", &worktree_path, "task-stats")
+            .expect("insert worktree");
+    });
+    let response = app
+        .oneshot(
+            Request::get("/v1/tasks/task-1")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("request task detail");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read response body");
+    let value: serde_json::Value = from_slice(&body).expect("parse task detail JSON");
+    let detail = serde_json::from_value(value.clone()).expect("parse typed task detail");
+    (value, detail)
+}
+
+fn remove_task_stats_fixture(repo_root: &Path, worktree: &Path) {
+    let _ = Command::new("git")
+        .args([
+            "worktree",
+            "remove",
+            "--force",
+            worktree.to_str().unwrap_or_default(),
+        ])
+        .current_dir(repo_root)
+        .status();
+    let _ = std::fs::remove_dir_all(repo_root);
+    let _ = std::fs::remove_dir_all(worktree);
+}
+
+#[tokio::test]
+async fn get_task_git_stats_resolve_origin_when_local_base_is_missing() {
+    let (repo_root, worktree) = task_stats_fixture("remote-only");
+    run_task_stats_git(&repo_root, &["checkout", "--detach"]);
+    run_task_stats_git(&repo_root, &["branch", "-D", "main"]);
+
+    let (json, detail) = request_task_stats(&repo_root, &worktree, "main").await;
+    assert_eq!(detail.commits_ahead, Some(1));
+    assert_eq!(detail.commits_behind, Some(0));
+    assert_eq!(detail.base_ref_unresolved, None);
+    assert_eq!(json["commitsAhead"], 1);
+    assert!(json.get("baseRefUnresolved").is_none());
+
+    remove_task_stats_fixture(&repo_root, &worktree);
+}
+
+#[tokio::test]
+async fn get_task_git_stats_prefer_origin_when_local_base_is_stale() {
+    let (repo_root, worktree) = task_stats_fixture("stale-local");
+    run_task_stats_git(&repo_root, &["checkout", "-b", "remote-main"]);
+    std::fs::write(repo_root.join("remote.txt"), "remote").expect("write remote change");
+    run_task_stats_git(&repo_root, &["add", "remote.txt"]);
+    run_task_stats_git(&repo_root, &["commit", "-m", "remote change"]);
+    run_task_stats_git(
+        &repo_root,
+        &["update-ref", "refs/remotes/origin/main", "remote-main"],
+    );
+    run_task_stats_git(&repo_root, &["checkout", "main"]);
+
+    let (_, detail) = request_task_stats(&repo_root, &worktree, "main").await;
+    assert_eq!(detail.commits_ahead, Some(1));
+    assert_eq!(detail.commits_behind, Some(1));
+    assert_eq!(detail.base_ref_unresolved, None);
+
+    remove_task_stats_fixture(&repo_root, &worktree);
+}
+
+#[tokio::test]
+async fn get_task_git_stats_fall_back_from_stale_recorded_base_to_repo_default() {
+    let (repo_root, worktree) = task_stats_fixture("stale-recorded-base");
+
+    let (_, detail) = request_task_stats(&repo_root, &worktree, "retired-default").await;
+    assert_eq!(detail.commits_ahead, Some(1));
+    assert_eq!(detail.commits_behind, Some(0));
+    assert_eq!(detail.base_ref_unresolved, None);
+
+    remove_task_stats_fixture(&repo_root, &worktree);
+}
+
+#[tokio::test]
+async fn get_task_git_stats_omit_counts_and_mark_an_unresolved_base() {
+    let (repo_root, worktree) = task_stats_fixture("unresolved");
+    run_task_stats_git(
+        &repo_root,
+        &["update-ref", "-d", "refs/remotes/origin/main"],
+    );
+    run_task_stats_git(&repo_root, &["checkout", "--detach"]);
+    run_task_stats_git(&repo_root, &["branch", "-D", "main"]);
+
+    let (json, detail) = request_task_stats(&repo_root, &worktree, "main").await;
+    assert_eq!(detail.commits_ahead, None);
+    assert_eq!(detail.commits_behind, None);
+    assert_eq!(detail.base_ref_unresolved, Some(true));
+    assert!(json.get("commitsAhead").is_none());
+    assert!(json.get("commitsBehind").is_none());
+    assert_eq!(json["baseRefUnresolved"], true);
+
+    remove_task_stats_fixture(&repo_root, &worktree);
 }
 
 #[tokio::test]
