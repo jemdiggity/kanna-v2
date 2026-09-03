@@ -178,19 +178,30 @@ export async function checkProvisioningProfile(input: {
   if (decoded.exitCode !== 0) {
     return fail(name, decoded.stderr.trim() || `security cms -D failed on ${profilePath}.`);
   }
-  const converted = await input.runner.run("plutil", ["-convert", "json", "-o", "-", "-"], {
+  const nameResult = await input.runner.run("plutil", ["-extract", "Name", "raw", "-o", "-", "-"], {
     stdin: decoded.stdout
   });
-  if (converted.exitCode !== 0) {
-    return fail(name, converted.stderr.trim() || "could not convert the provisioning profile to JSON.");
+  const appIdentifierResult = await input.runner.run(
+    "plutil",
+    ["-extract", "Entitlements.application-identifier", "raw", "-o", "-", "-"],
+    { stdin: decoded.stdout }
+  );
+  if (appIdentifierResult.exitCode !== 0) {
+    return fail(
+      name,
+      appIdentifierResult.stderr.trim() || "the provisioning profile has no application-identifier entitlement."
+    );
   }
-  let plist: Record<string, unknown>;
-  try {
-    plist = JSON.parse(converted.stdout) as Record<string, unknown>;
-  } catch {
-    return fail(name, "the decoded provisioning profile is not valid JSON.");
-  }
-  const profile = parseProvisioningProfile(plist);
+  const provisionedDevicesResult = await input.runner.run(
+    "plutil",
+    ["-extract", "ProvisionedDevices", "json", "-o", "-", "-"],
+    { stdin: decoded.stdout }
+  );
+  const profile: ProvisioningProfile = {
+    name: nameResult.exitCode === 0 ? nameResult.stdout.trim() : undefined,
+    hasProvisionedDevices: provisionedDevicesResult.exitCode === 0,
+    applicationIdentifier: appIdentifierResult.stdout.trim()
+  };
   if (profile.hasProvisionedDevices) {
     return fail(
       name,
@@ -279,10 +290,41 @@ export async function checkMarketingIcon(input: {
     (candidate) => existsSync(candidate)
   );
   if (!iconPath) {
-    return fail(
-      name,
-      `no marketing icon in ${input.appPath}; looked for ${MARKETING_ICON_CANDIDATES.join(", ")}.`
-    );
+    const assetCatalogPath = join(input.appPath, "Assets.car");
+    if (!existsSync(assetCatalogPath)) {
+      return fail(
+        name,
+        `no marketing icon in ${input.appPath}; looked for ${MARKETING_ICON_CANDIDATES.join(", ")} and Assets.car.`
+      );
+    }
+    const catalog = await input.runner.run("xcrun", ["assetutil", "--info", assetCatalogPath]);
+    if (catalog.exitCode !== 0) {
+      return fail(name, catalog.stderr.trim() || `assetutil failed on ${assetCatalogPath}.`);
+    }
+    let renditions: unknown;
+    try {
+      renditions = JSON.parse(catalog.stdout) as unknown;
+    } catch {
+      return fail(name, `${assetCatalogPath} metadata is not valid JSON.`);
+    }
+    if (!Array.isArray(renditions)) {
+      return fail(name, `${assetCatalogPath} metadata is not an array.`);
+    }
+    const marketingIcon = renditions.find((entry) => {
+      if (!entry || typeof entry !== "object") return false;
+      const rendition = entry as Record<string, unknown>;
+      return rendition.PixelWidth === 1024 && rendition.PixelHeight === 1024 && rendition.Name === "AppIcon";
+    }) as Record<string, unknown> | undefined;
+    if (!marketingIcon) {
+      return fail(name, `${assetCatalogPath} has no 1024x1024 AppIcon rendition.`);
+    }
+    if (marketingIcon.Opaque !== true) {
+      return fail(name, `${assetCatalogPath} 1024x1024 AppIcon is not marked opaque.`);
+    }
+    const renditionName = typeof marketingIcon.RenditionName === "string"
+      ? marketingIcon.RenditionName
+      : "AppIcon";
+    return pass(name, `${assetCatalogPath} (${renditionName}) — 1024x1024, opaque`);
   }
   const result = await input.runner.run("sips", [
     "-g",

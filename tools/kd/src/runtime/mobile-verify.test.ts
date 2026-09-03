@@ -27,6 +27,7 @@ interface AppFixtureOptions {
   appConfig?: unknown;
   omitAppConfig?: boolean;
   omitIcon?: boolean;
+  compiledIcon?: boolean;
   omitProfile?: boolean;
   hasAlpha?: string;
   iconSize?: string;
@@ -51,6 +52,9 @@ async function appFixture(options: AppFixtureOptions = {}): Promise<{
   }
   if (!options.omitIcon) {
     await writeFile(join(appPath, "AppIcon~ios-marketing.png"), "png");
+  }
+  if (options.compiledIcon) {
+    await writeFile(join(appPath, "Assets.car"), "compiled-assets");
   }
   if (!options.omitAppConfig) {
     await writeFile(
@@ -107,6 +111,23 @@ async function appFixture(options: AppFixtureOptions = {}): Promise<{
         return { exitCode: 0, stdout: "<plist/>", stderr: "" };
       }
       if (command === "plutil") {
+        if (args[0] === "-extract") {
+          if (args[1] === "Name") {
+            return { exitCode: 0, stdout: `${profile.Name}\n`, stderr: "" };
+          }
+          if (args[1] === "Entitlements.application-identifier") {
+            return {
+              exitCode: 0,
+              stdout: `${(profile.Entitlements as Record<string, unknown>)["application-identifier"]}\n`,
+              stderr: ""
+            };
+          }
+          if (args[1] === "ProvisionedDevices") {
+            return options.provisionedDevices
+              ? { exitCode: 0, stdout: JSON.stringify(profile.ProvisionedDevices), stderr: "" }
+              : { exitCode: 1, stdout: "", stderr: "missing" };
+          }
+        }
         // stdin form is the provisioning profile; the file form is Info.plist.
         const isStdin = args.includes("-");
         const target = isStdin && args[args.length - 1] === "-" ? profile : infoPlist;
@@ -121,6 +142,21 @@ async function appFixture(options: AppFixtureOptions = {}): Promise<{
             `  pixelWidth: ${options.iconSize ?? "1024"}`,
             `  pixelHeight: ${options.iconSize ?? "1024"}`
           ].join("\n"),
+          stderr: ""
+        };
+      }
+      if (command === "xcrun" && args[0] === "assetutil") {
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify([
+            {
+              Name: "AppIcon",
+              RenditionName: "App-Icon-1024x1024@1x.png",
+              PixelWidth: Number(options.iconSize ?? "1024"),
+              PixelHeight: Number(options.iconSize ?? "1024"),
+              Opaque: options.hasAlpha !== "yes"
+            }
+          ]),
           stderr: ""
         };
       }
@@ -338,6 +374,24 @@ describe("kd mobile verify", () => {
       expect(result.detail).toContain("no marketing icon");
     } finally {
       await missing.cleanup();
+    }
+  });
+
+  it("accepts an opaque 1024 marketing icon compiled into Assets.car", async () => {
+    const fixture = await appFixture({ omitIcon: true, compiledIcon: true });
+    try {
+      const result = check(
+        await verifyExtractedApp({
+          appPath: fixture.appPath,
+          expected: EXPECTED,
+          runner: fixture.runner
+        }),
+        "1024 marketing icon"
+      );
+      expect(result.status).toBe("PASS");
+      expect(result.detail).toContain("App-Icon-1024x1024@1x.png");
+    } finally {
+      await fixture.cleanup();
     }
   });
 

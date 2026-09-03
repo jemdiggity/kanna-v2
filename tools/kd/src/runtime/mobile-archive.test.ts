@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parseCliArgs } from "../cli";
 import {
+  archiveTagName,
   buildMobileIosArchivePlan,
   executeMobileIosArchiveWithContext,
   isUploaderUnavailable,
@@ -11,7 +12,7 @@ import {
   parseXcodeMajorVersion,
   type MobileIosArchivePlan
 } from "./mobile-archive";
-import type { CommandRunner } from "./process";
+import { nodeCommandRunner, type CommandRunner } from "./process";
 
 const HEAD_COMMIT = "9c8b7a6d5e4f30210123456789abcdef01234567";
 const SHORT_COMMIT = HEAD_COMMIT.slice(0, 12);
@@ -124,6 +125,7 @@ describe("kd mobile archive", () => {
       teamId: "EA4J68749Z",
       version: "1.2.3",
       buildNumber: "45",
+      runtimeVersion: "1.0.0",
       archivePath: join(repoRoot, ".build/mobile-release/Kanna.xcarchive"),
       exportPath: join(repoRoot, ".build/mobile-release/export"),
       ipaPath: join(repoRoot, ".build/mobile-release/export/Kanna.ipa")
@@ -216,6 +218,8 @@ describe("kd mobile archive", () => {
     expect(result.ok).toBe(true);
     expect(result.message).toContain("Dry run: mobile production archive 1.0.0 (45)");
     expect(result.message).toContain(`Source: release/0.2 (${SHORT_COMMIT})`);
+    expect(result.message).toContain("Runtime version: 1.0.0");
+    expect(result.message).toContain("would push git tag mobile-archive-v1.0.0-45");
     const plan = result.data as MobileIosArchivePlan;
     expect(plan.source).toEqual({ ref: "release/0.2", commit: HEAD_COMMIT, shortCommit: SHORT_COMMIT });
     expect(plan.version).toBe("1.0.0");
@@ -229,6 +233,327 @@ describe("kd mobile archive", () => {
       "git rev-parse --verify --quiet release/0.2^{commit}",
       "xcodebuild -version"
     ]);
+  });
+
+  it("pushes an annotated archive provenance tag before an optional upload", async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-mobile-archive-ledger-"));
+    await writeMinimalRepo(repoRoot);
+    const calls: string[] = [];
+    let tagRecord: unknown;
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push(`${command} ${args.join(" ")}`);
+        if (command === "git" && args[0] === "status") {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (command === "git" && args[0] === "cat-file") {
+          return { exitCode: 1, stdout: "", stderr: "" };
+        }
+        if (command === "git" && args[0] === "rev-parse") {
+          return { exitCode: 0, stdout: `${HEAD_COMMIT}\n`, stderr: "" };
+        }
+        if (command === "git" && args[0] === "tag") {
+          tagRecord = JSON.parse(args[5] ?? "null") as unknown;
+        }
+        if (command === "xcodebuild" && args[0] === "-version") {
+          return { exitCode: 0, stdout: "Xcode 26.0\nBuild version 17A123\n", stderr: "" };
+        }
+        if (command === "xcrun" && args[0] === "--find") {
+          return { exitCode: 0, stdout: "/Applications/Xcode.app/altool\n", stderr: "" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+
+    const result = await executeMobileIosArchiveWithContext(
+      { production: true, ref: "release/0.2", buildNumber: "45", upload: true },
+      {
+        repoRoot,
+        env: {
+          APP_STORE_CONNECT_API_KEY_ID: "KEY",
+          APP_STORE_CONNECT_API_ISSUER_ID: "ISSUER"
+        },
+        runner,
+        now: () => new Date("2026-09-03T01:02:03.000Z")
+      }
+    );
+
+    expect(result.ok).toBe(true);
+    expect(archiveTagName("1.0.0", "45")).toBe("mobile-archive-v1.0.0-45");
+    expect(tagRecord).toEqual({
+      kind: "kanna-mobile-ios-archive",
+      version: "1.0.0",
+      buildNumber: "45",
+      runtimeVersion: "1.0.0",
+      bundleId: "build.kanna.app",
+      ref: "release/0.2",
+      commit: HEAD_COMMIT,
+      shortCommit: SHORT_COMMIT,
+      archivedAt: "2026-09-03T01:02:03.000Z"
+    });
+    const tagIndex = calls.findIndex((call) => call.startsWith("git tag -a mobile-archive-v1.0.0-45"));
+    const pushIndex = calls.indexOf("git push origin refs/tags/mobile-archive-v1.0.0-45");
+    const uploadIndex = calls.findIndex((call) => call.startsWith("xcrun altool --upload-app"));
+    expect(tagIndex).toBeGreaterThan(-1);
+    expect(pushIndex).toBeGreaterThan(tagIndex);
+    expect(uploadIndex).toBeGreaterThan(pushIndex);
+  });
+
+  function existingArchiveTagRunner(input: {
+    calls: string[];
+    tagType: "tag" | "commit";
+    contents?: string;
+  }): CommandRunner {
+    return {
+      async run(command, args) {
+        input.calls.push(`${command} ${args.join(" ")}`);
+        if (command === "git" && args[0] === "status") {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (command === "git" && args[0] === "rev-parse") {
+          return { exitCode: 0, stdout: `${HEAD_COMMIT}\n`, stderr: "" };
+        }
+        if (command === "git" && args[0] === "cat-file") {
+          return { exitCode: 0, stdout: `${input.tagType}\n`, stderr: "" };
+        }
+        if (command === "git" && args[0] === "for-each-ref") {
+          return { exitCode: 0, stdout: input.contents ?? "", stderr: "" };
+        }
+        if (command === "xcodebuild" && args[0] === "-version") {
+          return { exitCode: 0, stdout: "Xcode 26.0\nBuild version 17A123\n", stderr: "" };
+        }
+        if (command === "xcrun" && args[0] === "--find") {
+          return { exitCode: 0, stdout: "/Applications/Xcode.app/altool\n", stderr: "" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+  }
+
+  function existingProvenanceRecord(overrides: Record<string, unknown> = {}): string {
+    return JSON.stringify({
+      kind: "kanna-mobile-ios-archive",
+      version: "1.0.0",
+      buildNumber: "45",
+      runtimeVersion: "1.0.0",
+      bundleId: "build.kanna.app",
+      ref: "release/0.2",
+      commit: HEAD_COMMIT,
+      shortCommit: SHORT_COMMIT,
+      archivedAt: "2026-09-03T01:02:03.000Z",
+      ...overrides
+    });
+  }
+
+  it("reuses a valid existing annotated provenance tag without rewriting it", async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-mobile-archive-existing-valid-"));
+    await writeMinimalRepo(repoRoot);
+    const calls: string[] = [];
+    const result = await executeMobileIosArchiveWithContext(
+      { production: true, ref: "release/0.2", buildNumber: "45" },
+      {
+        repoRoot,
+        env: {},
+        runner: existingArchiveTagRunner({ calls, tagType: "tag", contents: existingProvenanceRecord() })
+      }
+    );
+
+    expect(result.ok).toBe(true);
+    expect(calls).toContain("git push origin refs/tags/mobile-archive-v1.0.0-45");
+    expect(calls.some((call) => call.startsWith("git tag "))).toBe(false);
+  });
+
+  it.each([
+    { name: "lightweight", tagType: "commit" as const, contents: undefined, expected: "not an annotated tag" },
+    { name: "malformed JSON", tagType: "tag" as const, contents: "not json", expected: "not readable JSON" },
+    {
+      name: "same-commit mismatched record",
+      tagType: "tag" as const,
+      contents: existingProvenanceRecord({ runtimeVersion: "0.9.0" }),
+      expected: "runtimeVersion"
+    }
+  ])("rejects a $name archive tag before push or upload", async ({ tagType, contents, expected }) => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-mobile-archive-existing-invalid-"));
+    await writeMinimalRepo(repoRoot);
+    const calls: string[] = [];
+    const result = await executeMobileIosArchiveWithContext(
+      { production: true, ref: "release/0.2", buildNumber: "45", upload: true },
+      {
+        repoRoot,
+        env: { APP_STORE_CONNECT_API_KEY_ID: "KEY", APP_STORE_CONNECT_API_ISSUER_ID: "ISSUER" },
+        runner: existingArchiveTagRunner({ calls, tagType, contents })
+      }
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain(expected);
+    expect(calls.some((call) => call.startsWith("git push "))).toBe(false);
+    expect(calls.some((call) => call.startsWith("xcrun altool "))).toBe(false);
+  });
+
+  async function runGit(cwd: string, args: string[]): Promise<string> {
+    const result = await nodeCommandRunner.run("git", args, { cwd, env: process.env });
+    expect(result.exitCode, result.stderr || result.stdout).toBe(0);
+    return result.stdout.trim();
+  }
+
+  async function createRealGitArchiveFixture(): Promise<{
+    repoRoot: string;
+    remote: string;
+    commit: string;
+    calls: string[];
+    runner: CommandRunner;
+  }> {
+    const root = await mkdtemp(join(tmpdir(), "kanna-mobile-archive-git-"));
+    const repoRoot = join(root, "repo");
+    const remote = join(root, "origin.git");
+    await mkdir(repoRoot);
+    await writeMinimalRepo(repoRoot);
+    await writeFile(join(repoRoot, ".gitignore"), ".build/\n");
+    await runGit(repoRoot, ["init"]);
+    await runGit(repoRoot, ["config", "user.name", "Kanna Test"]);
+    await runGit(repoRoot, ["config", "user.email", "kanna-test@example.invalid"]);
+    await runGit(repoRoot, ["add", "."]);
+    await runGit(repoRoot, ["commit", "-m", "fixture"]);
+    await runGit(root, ["init", "--bare", remote]);
+    await runGit(repoRoot, ["remote", "add", "origin", remote]);
+    const commit = await runGit(repoRoot, ["rev-parse", "HEAD"]);
+    await seedArtifacts(repoRoot, "1.0.0", "45", commit);
+    const calls: string[] = [];
+    const runner: CommandRunner = {
+      async run(command, args, options) {
+        calls.push(`${command} ${args.join(" ")}`);
+        if (command === "git") {
+          return nodeCommandRunner.run(command, args, {
+            ...options,
+            env: { ...process.env, ...options?.env }
+          });
+        }
+        if (command === "xcodebuild" && args[0] === "-version") {
+          return { exitCode: 0, stdout: "Xcode 26.0\nBuild version 17A123\n", stderr: "" };
+        }
+        if (command === "xcrun" && args[0] === "--find") {
+          return { exitCode: 0, stdout: "/Applications/Xcode.app/altool\n", stderr: "" };
+        }
+        if (command === "plutil") {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              ApplicationProperties: {
+                CFBundleShortVersionString: "1.0.0",
+                CFBundleVersion: "45"
+              }
+            }),
+            stderr: ""
+          };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+    return { repoRoot, remote, commit, calls, runner };
+  }
+
+  it("validates existing provenance through real annotated and lightweight git objects", async () => {
+    const valid = await createRealGitArchiveFixture();
+    const tag = archiveTagName("1.0.0", "45");
+    const validRecord = existingProvenanceRecord({
+      commit: valid.commit,
+      shortCommit: valid.commit.slice(0, 12)
+    });
+    await runGit(valid.repoRoot, ["tag", "-a", tag, valid.commit, "-m", validRecord]);
+    await runGit(valid.repoRoot, ["push", "origin", `refs/tags/${tag}`]);
+    const originalTagObject = await runGit(valid.repoRoot, ["rev-parse", `refs/tags/${tag}`]);
+
+    const validResult = await executeMobileIosArchiveWithContext(
+      { production: true, ref: "HEAD", buildNumber: "45" },
+      { repoRoot: valid.repoRoot, env: process.env, runner: valid.runner }
+    );
+
+    expect(validResult.ok).toBe(true);
+    expect(await runGit(valid.repoRoot, ["rev-parse", `refs/tags/${tag}`])).toBe(originalTagObject);
+    expect(await runGit(valid.remote, ["rev-parse", `refs/tags/${tag}`])).toBe(originalTagObject);
+    expect(valid.calls.some((call) => call.startsWith("git tag "))).toBe(false);
+
+    const invalidCases: Array<{
+      createTag: (fixture: Awaited<ReturnType<typeof createRealGitArchiveFixture>>) => Promise<void>;
+      expected: string;
+    }> = [
+      {
+        createTag: async (fixture) => {
+          await runGit(fixture.repoRoot, ["tag", tag, fixture.commit]);
+        },
+        expected: "not an annotated tag"
+      },
+      {
+        createTag: async (fixture) => {
+          await runGit(fixture.repoRoot, ["tag", "-a", tag, fixture.commit, "-m", "not json"]);
+        },
+        expected: "not readable JSON"
+      },
+      {
+        createTag: async (fixture) => {
+          await runGit(fixture.repoRoot, [
+            "tag",
+            "-a",
+            tag,
+            fixture.commit,
+            "-m",
+            existingProvenanceRecord({
+              commit: fixture.commit,
+              shortCommit: fixture.commit.slice(0, 12),
+              bundleId: "build.kanna.wrong"
+            })
+          ]);
+        },
+        expected: "bundleId"
+      },
+      {
+        createTag: async (fixture) => {
+          const tree = await runGit(fixture.repoRoot, ["rev-parse", `${fixture.commit}^{tree}`]);
+          const differentCommit = await runGit(fixture.repoRoot, [
+            "commit-tree",
+            tree,
+            "-p",
+            fixture.commit,
+            "-m",
+            "different tag target"
+          ]);
+          await runGit(fixture.repoRoot, [
+            "tag",
+            "-a",
+            tag,
+            differentCommit,
+            "-m",
+            existingProvenanceRecord({
+              commit: fixture.commit,
+              shortCommit: fixture.commit.slice(0, 12)
+            })
+          ]);
+        },
+        expected: "points to commit"
+      }
+    ];
+
+    for (const invalidCase of invalidCases) {
+      const fixture = await createRealGitArchiveFixture();
+      await invalidCase.createTag(fixture);
+      const result = await executeMobileIosArchiveWithContext(
+        { production: true, ref: "HEAD", buildNumber: "45", upload: true },
+        {
+          repoRoot: fixture.repoRoot,
+          env: {
+            ...process.env,
+            APP_STORE_CONNECT_API_KEY_ID: "KEY",
+            APP_STORE_CONNECT_API_ISSUER_ID: "ISSUER"
+          },
+          runner: fixture.runner
+        }
+      );
+      expect(result.ok).toBe(false);
+      expect(result.message).toContain(invalidCase.expected);
+      expect(fixture.calls.some((call) => call.startsWith("git push "))).toBe(false);
+      expect(fixture.calls.some((call) => call.startsWith("xcrun altool "))).toBe(false);
+    }
   });
 
   it("falls back to the repository VERSION when apps/mobile/VERSION is absent", async () => {
@@ -322,6 +647,9 @@ describe("kd mobile archive", () => {
         }
         if (command === "git" && args[0] === "rev-parse") {
           return { exitCode: 0, stdout: `${HEAD_COMMIT}\n`, stderr: "" };
+        }
+        if (command === "git" && args[0] === "cat-file") {
+          return { exitCode: 1, stdout: "", stderr: "" };
         }
         if (command === "xcrun" && args[0] === "--find") {
           return { exitCode: 0, stdout: "/Applications/Xcode.app/Contents/Developer/usr/bin/altool", stderr: "" };
@@ -494,6 +822,11 @@ describe("kd mobile archive", () => {
         JSON.stringify({
           ApplicationProperties: { CFBundleShortVersionString: "1.2.3", CFBundleVersion: "9" }
         })
+      )
+    ).toEqual({ version: "1.2.3", buildNumber: "9" });
+    expect(
+      parseArchiveIdentity(
+        JSON.stringify({ CFBundleShortVersionString: "1.2.3", CFBundleVersion: "9" })
       )
     ).toEqual({ version: "1.2.3", buildNumber: "9" });
     expect(parseArchiveIdentity("not json")).toBeNull();

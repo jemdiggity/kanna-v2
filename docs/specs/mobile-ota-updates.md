@@ -32,6 +32,67 @@ by the relay and stored in the per-environment Firebase/GCS bucket.
 - Public cert SHA-256 fingerprint: `18:5A:94:97:1B:8C:07:A4:CA:8E:22:51:85:FA:64:31:EE:6C:9B:B8:E5:AD:06:17:93:CD:AD:90:CF:D9:6B:22`.
 - Private key secret: Google Secret Manager secret `kanna-mobile-ota-private-key-pem` in each environment project.
 
+## Native Versioning and Archive Provenance
+
+### Motivation: reconstructing the App Store 1.0 binary
+
+The first App Store binary predates the durable archive ledger below. App
+Store Connect identifies it as uploaded August 17, 2026 at 21:04, with original
+file `727ee03c-3740-44ef-bc17-0d1ff8a925eb.ipa`. Repository forensics make its
+runtime knowable only circumstantially: the last `origin/main` tip before the
+upload was `64824093a` (August 17 at 19:39 +09:00), that commit used production
+runtime `2.1.4`, and `2.1.4` remained current until August 19. The binary
+therefore embeds runtime `2.1.4` regardless of which contemporaneous ref
+produced it. The owner later confirmed App Store Connect identifies the
+released binary as build 3, but no historical ledger binds that build to an
+exact source ref.
+
+Current production OTA configuration uses runtime `2.2.2`, first introduced by
+`6f303e3dd` on August 23. Those updates cannot reach the 1.0 store binary, so a
+new native binary is mandatory. This reconstruction—and the inability to name
+the exact source/build—is why archive provenance must be written and pushed at
+archive time rather than deferred until publication.
+
+### Policy
+
+The mobile App Store version series is independent of the desktop release
+series. A mobile `1.0`, `1.1`, or `1.0.1` release may accompany any desktop
+`0.3.x` release; neither number is derived from the other. The checked-in
+mobile marketing version uses Apple's three-component form in
+`apps/mobile/VERSION` (for example `1.0.0`, which the App Store may display as
+`1.0`).
+
+The three version values answer different questions:
+
+- **Marketing version (`CFBundleShortVersionString`)** identifies a customer-
+  facing App Store release. Bump it when submitting a new binary after the
+  current version has been released, or when product release semantics call
+  for a new patch/minor version. A JS-only OTA does not bump it.
+- **Build number (`CFBundleVersion`)** identifies one App Store binary. Use a
+  numeric value higher than every prior production archive/upload, including
+  across marketing versions. Any rebuilt binary from changed source takes a
+  new build number; an OTA does not.
+- **Expo `runtimeVersion`** is a native compatibility key, not a customer-
+  facing version. Increment it in every entry of
+  `apps/mobile/src/mobileEnvironments.json` whenever native code, native
+  configuration, the Expo SDK, a native dependency, the native-identity
+  plugin, or the embedded OTA signing certificate changes. JS/assets-only
+  changes keep it unchanged. An OTA is reachable only by installed binaries
+  with the same runtime.
+
+Every successful `kd mobile archive --production` records provenance before
+any optional upload by creating and pushing the immutable annotated tag
+`mobile-archive-v<marketing-version>-<build-number>` at the archived commit.
+Its JSON message records the requested ref, full and short commit, marketing
+version, build number, runtime version, bundle id, and archive timestamp. This
+git tag is the durable archive-time ledger; `.build/` output is disposable.
+Inspect it with `git show mobile-archive-v<version>-<build>`. Reusing the same
+version/build at another commit is refused: both the annotated tag's peeled
+Git target and the commit in its JSON message must equal the requested archive
+commit. `kd mobile publish` later adds its separate
+`mobile-v<version>-<build>` tag with upload, verification, and App Store
+Connect identifiers.
+
 ## GCS Layout
 
 Objects live in the environment bucket under `ota/`:

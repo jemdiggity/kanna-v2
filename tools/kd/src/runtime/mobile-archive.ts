@@ -21,6 +21,7 @@ export interface MobileIosArchiveContext {
   repoRoot: string;
   env: NodeJS.ProcessEnv;
   runner: CommandRunner;
+  now?: () => Date;
 }
 
 export type MobileIosArchiveCommandKind = "prebuild" | "archive" | "export" | "upload";
@@ -43,6 +44,7 @@ export interface MobileIosArchivePlan {
   teamId: string;
   version: string;
   buildNumber: string;
+  runtimeVersion: string;
   outDir: string;
   archivePath: string;
   exportOptionsPlistPath: string;
@@ -56,6 +58,7 @@ export interface MobileIosArchivePlan {
 interface MobileEnvironmentRecord {
   displayName?: string;
   iosBundleId?: string;
+  runtimeVersion?: string;
 }
 
 const APP_ENV = "prod";
@@ -65,21 +68,176 @@ const UPLOAD_API_KEY_PLACEHOLDER = "<APP_STORE_CONNECT_API_KEY_ID>";
 const UPLOAD_API_ISSUER_PLACEHOLDER = "<APP_STORE_CONNECT_API_ISSUER_ID>";
 const NATIVE_MARKETING_VERSION_PATTERN = /^\d+\.\d+\.\d+$/;
 
+/**
+ * The git-native archive ledger. It is deliberately separate from the later
+ * `mobile-v*` publish tag: an archive may be handed to the owner and submitted
+ * manually, so its provenance must survive before an upload happens.
+ */
+export interface MobileArchiveProvenanceRecord {
+  kind: "kanna-mobile-ios-archive";
+  version: string;
+  buildNumber: string;
+  runtimeVersion: string;
+  bundleId: string;
+  ref: string;
+  commit: string;
+  shortCommit: string;
+  archivedAt: string;
+}
+
+export function archiveTagName(version: string, buildNumber: string): string {
+  return `mobile-archive-v${version}-${buildNumber}`;
+}
+
+async function recordArchiveProvenance(input: {
+  record: MobileArchiveProvenanceRecord;
+  repoRoot: string;
+  env: NodeJS.ProcessEnv;
+  runner: CommandRunner;
+}): Promise<{ ok: true; tag: string } | { ok: false; message: string }> {
+  const tag = archiveTagName(input.record.version, input.record.buildNumber);
+  const existingType = await input.runner.run(
+    "git",
+    ["cat-file", "-t", `refs/tags/${tag}`],
+    { cwd: input.repoRoot, env: input.env }
+  );
+  if (existingType.exitCode === 0) {
+    if (existingType.stdout.trim() !== "tag") {
+      return {
+        ok: false,
+        message:
+          `Archive provenance tag ${tag} exists but is not an annotated tag. ` +
+          "Use a new build number; provenance tags are immutable."
+      };
+    }
+    const existingTarget = await input.runner.run(
+      "git",
+      ["rev-parse", "--verify", "--quiet", `refs/tags/${tag}^{commit}`],
+      { cwd: input.repoRoot, env: input.env }
+    );
+    if (existingTarget.exitCode !== 0) {
+      return {
+        ok: false,
+        message:
+          `Archive provenance tag ${tag} exists but its target commit could not be read. ` +
+          "Use a new build number; provenance tags are immutable."
+      };
+    }
+    if (existingTarget.stdout.trim() !== input.record.commit) {
+      return {
+        ok: false,
+        message:
+          `Archive provenance tag ${tag} points to commit ${JSON.stringify(existingTarget.stdout.trim())}, ` +
+          `expected ${JSON.stringify(input.record.commit)}. ` +
+          "Use a new build number; provenance tags are immutable."
+      };
+    }
+    const existingContents = await input.runner.run(
+      "git",
+      ["for-each-ref", "--format=%(contents)", `refs/tags/${tag}`],
+      { cwd: input.repoRoot, env: input.env }
+    );
+    if (existingContents.exitCode !== 0) {
+      return {
+        ok: false,
+        message:
+          `Archive provenance tag ${tag} exists but its provenance record could not be read. ` +
+          "Use a new build number; provenance tags are immutable."
+      };
+    }
+    const mismatch = describeArchiveProvenanceMismatch(existingContents.stdout, input.record);
+    if (mismatch) {
+      return {
+        ok: false,
+        message:
+          `Archive provenance tag ${tag} does not match this archive: ${mismatch}. ` +
+          "Use a new build number; provenance tags are immutable."
+      };
+    }
+  } else {
+    const created = await input.runner.run(
+      "git",
+      ["tag", "-a", tag, input.record.commit, "-m", JSON.stringify(input.record, null, 2)],
+      { cwd: input.repoRoot, env: input.env }
+    );
+    if (created.exitCode !== 0) {
+      return {
+        ok: false,
+        message:
+          `Built the archive, but recording provenance tag ${tag} failed: ` +
+          (created.stderr.trim() || created.stdout.trim() || "git tag failed.")
+      };
+    }
+  }
+  const pushed = await input.runner.run("git", ["push", "origin", `refs/tags/${tag}`], {
+    cwd: input.repoRoot,
+    env: input.env
+  });
+  if (pushed.exitCode !== 0) {
+    return {
+      ok: false,
+      message:
+        `Built the archive, but pushing provenance tag ${tag} failed: ` +
+        (pushed.stderr.trim() || pushed.stdout.trim() || "git push failed.") +
+        " Nothing was uploaded to App Store Connect."
+    };
+  }
+  return { ok: true, tag };
+}
+
+function describeArchiveProvenanceMismatch(
+  rawRecord: string,
+  expected: MobileArchiveProvenanceRecord
+): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawRecord);
+  } catch {
+    return "its annotation is not readable JSON";
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return "its annotation is not a JSON object";
+  }
+  const record = parsed as Record<string, unknown>;
+  const identityFields = [
+    "kind",
+    "version",
+    "buildNumber",
+    "runtimeVersion",
+    "bundleId",
+    "commit"
+  ] as const;
+  for (const field of identityFields) {
+    if (record[field] !== expected[field]) {
+      return `${field} is ${JSON.stringify(record[field])}, expected ${JSON.stringify(expected[field])}`;
+    }
+  }
+  return null;
+}
+
 export function parseXcodeMajorVersion(stdout: string): number | null {
   const match = stdout.match(/^Xcode\s+(\d+)(?:\.|\s|$)/m);
   return match ? Number.parseInt(match[1], 10) : null;
 }
 
-export async function readMobileProductionIdentity(repoRoot: string): Promise<{ bundleId: string; displayName: string }> {
+export async function readMobileProductionIdentity(repoRoot: string): Promise<{
+  bundleId: string;
+  displayName: string;
+  runtimeVersion: string;
+}> {
   const configPath = join(repoRoot, "apps/mobile/src/mobileEnvironments.json");
   const parsed = JSON.parse(await readFile(configPath, "utf8")) as Record<string, MobileEnvironmentRecord | undefined>;
   const prod = parsed.prod;
   if (!prod?.iosBundleId?.trim()) {
     throw new Error("Missing prod.iosBundleId in apps/mobile/src/mobileEnvironments.json.");
   }
+  if (!prod.runtimeVersion?.trim()) {
+    throw new Error("Missing prod.runtimeVersion in apps/mobile/src/mobileEnvironments.json.");
+  }
   return {
     bundleId: prod.iosBundleId.trim(),
-    displayName: prod.displayName?.trim() || "Kanna"
+    displayName: prod.displayName?.trim() || "Kanna",
+    runtimeVersion: prod.runtimeVersion.trim()
   };
 }
 
@@ -247,6 +405,7 @@ export async function buildMobileIosArchivePlan(input: {
     teamId: APPLE_TEAM_ID,
     version,
     buildNumber,
+    runtimeVersion: identity.runtimeVersion,
     outDir,
     archivePath,
     exportOptionsPlistPath,
@@ -316,9 +475,12 @@ export function parseArchiveIdentity(rawPlistJson: string): ArchiveIdentity | nu
   try {
     const parsed = JSON.parse(rawPlistJson) as {
       ApplicationProperties?: { CFBundleShortVersionString?: string; CFBundleVersion?: string };
+      CFBundleShortVersionString?: string;
+      CFBundleVersion?: string;
     };
-    const version = parsed.ApplicationProperties?.CFBundleShortVersionString?.trim();
-    const buildNumber = parsed.ApplicationProperties?.CFBundleVersion?.trim();
+    const properties = parsed.ApplicationProperties ?? parsed;
+    const version = properties.CFBundleShortVersionString?.trim();
+    const buildNumber = properties.CFBundleVersion?.trim();
     if (!version || !buildNumber) return null;
     return { version, buildNumber };
   } catch {
@@ -366,7 +528,17 @@ export async function resolveReusableArchive(input: {
   if (!existsSync(archiveInfoPlist)) {
     return { reusable: false, reason: `no archive Info.plist at ${archiveInfoPlist}` };
   }
-  const result = await runner.run("plutil", ["-convert", "json", "-o", "-", archiveInfoPlist]);
+  // A real xcarchive Info.plist contains top-level values that plutil cannot
+  // serialize to JSON. Extract only the identity subtree rather than treating
+  // an otherwise valid archive as unreadable and rebuilding it.
+  const result = await runner.run("plutil", [
+    "-extract",
+    "ApplicationProperties",
+    "json",
+    "-o",
+    "-",
+    archiveInfoPlist
+  ]);
   if (result.exitCode !== 0) {
     return { reusable: false, reason: "could not read the existing archive Info.plist" };
   }
@@ -504,6 +676,8 @@ export async function executeMobileIosArchiveWithContext(
         `Dry run: mobile production archive ${plan.version} (${plan.buildNumber})`,
         formatSourceRef(source),
         `Bundle ID: ${plan.bundleId}`,
+        `Runtime version: ${plan.runtimeVersion}`,
+        `Archive ledger: would push git tag ${archiveTagName(plan.version, plan.buildNumber)}`,
         `Archive: ${plan.archivePath}`,
         `IPA: ${plan.ipaPath}`,
         formatPlanCommands(plan)
@@ -524,16 +698,17 @@ export async function executeMobileIosArchiveWithContext(
     input.forceRebuild === true
       ? { reusable: false, reason: "--force-rebuild requested" }
       : await resolveReusableArchive({ runner: context.runner, plan });
-  const commands = reuse.reusable
-    ? plan.commands.filter((command) => command.kind === "upload")
-    : plan.commands;
+  const archiveCommands = reuse.reusable
+    ? []
+    : plan.commands.filter((command) => command.kind !== "upload");
+  const uploadCommands = plan.commands.filter((command) => command.kind === "upload");
 
   await mkdir(plan.outDir, { recursive: true });
   if (!reuse.reusable) {
     await writeFile(plan.exportOptionsPlistPath, plan.exportOptionsPlist);
   }
 
-  for (const plannedCommand of commands) {
+  for (const plannedCommand of archiveCommands) {
     const command = commandWithUploadCredentials(plannedCommand, uploadCredentials);
     const result = await context.runner.run(command.command, command.args, {
       cwd: command.cwd,
@@ -549,6 +724,44 @@ export async function executeMobileIosArchiveWithContext(
     }
   }
 
+  const archivedAt = (context.now ?? (() => new Date()))().toISOString();
+  const provenance: MobileArchiveProvenanceRecord = {
+    kind: "kanna-mobile-ios-archive",
+    version: plan.version,
+    buildNumber: plan.buildNumber,
+    runtimeVersion: plan.runtimeVersion,
+    bundleId: plan.bundleId,
+    ref: source.ref,
+    commit: source.commit,
+    shortCommit: source.shortCommit,
+    archivedAt
+  };
+  const recorded = await recordArchiveProvenance({
+    record: provenance,
+    repoRoot: context.repoRoot,
+    env: context.env,
+    runner: context.runner
+  });
+  if (!recorded.ok) {
+    return { ok: false, message: recorded.message, data: { plan, provenance } };
+  }
+
+  for (const plannedCommand of uploadCommands) {
+    const command = commandWithUploadCredentials(plannedCommand, uploadCredentials);
+    const result = await context.runner.run(command.command, command.args, {
+      cwd: command.cwd,
+      env: { ...context.env, ...command.env },
+      streamOutput: command.streamOutput
+    });
+    if (result.exitCode !== 0) {
+      return {
+        ok: false,
+        message: result.stderr || result.stdout || `${command.command} ${command.args.join(" ")} failed`,
+        data: { plan, provenance, failedCommand: `${command.command} ${plannedCommand.args.join(" ")}` }
+      };
+    }
+  }
+
   return {
     ok: true,
     message: [
@@ -557,10 +770,12 @@ export async function executeMobileIosArchiveWithContext(
         : `Built mobile production archive ${plan.version} (${plan.buildNumber}).`,
       formatSourceRef(source),
       `Bundle ID: ${plan.bundleId}`,
+      `Runtime version: ${plan.runtimeVersion}`,
       `Archive: ${plan.archivePath}`,
       `IPA: ${plan.ipaPath}`,
+      `Archive ledger: pushed git tag ${recorded.tag}`,
       input.upload ? "Uploaded to App Store Connect with altool." : "Upload skipped; rerun with --upload to submit."
     ].join("\n"),
-    data: { ...plan, reused: reuse.reusable, reuseReason: reuse.reason }
+    data: { ...plan, provenance, archiveTag: recorded.tag, reused: reuse.reusable, reuseReason: reuse.reason }
   };
 }

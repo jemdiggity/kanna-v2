@@ -64,7 +64,11 @@ Use the repo-native wrapper for App Store Connect builds:
 `--ref <branch|tag|sha>` is required: the archive is built from the working
 tree, so `kd` refuses a dirty worktree or a ref that is not the checked-out
 commit, and prints the resolved commit as `Source: <ref> (<short sha>)` so a
-submitted build traces back to its source.
+submitted build traces back to its source. After export and before any optional
+upload, it pushes an annotated
+`mobile-archive-v<marketing-version>-<build-number>` tag containing the ref,
+commit, runtime version, marketing version, build number, bundle id, and
+timestamp. That tag is the durable ledger; `.build/` is disposable.
 
 The command runs Expo CNG locally with `KANNA_APP_ENV=prod`, keeps the generated
 `apps/mobile/ios/` directory uncommitted, archives the generated Xcode workspace,
@@ -80,6 +84,13 @@ file is absent, the root desktop `VERSION` remains a compatibility fallback;
 an empty or malformed mobile file fails instead of silently falling back.
 Always pass a monotonically increasing `--build-number`; this becomes
 `CFBundleVersion`.
+
+Mobile marketing versions are independent of desktop release versions. A new
+binary after an App Store version is released needs a new mobile marketing
+version; each production archive needs a globally increasing build number;
+only native compatibility changes bump Expo `runtimeVersion`. See
+[`docs/specs/mobile-ota-updates.md`](../../docs/specs/mobile-ota-updates.md#native-versioning-and-archive-provenance)
+for the complete policy.
 
 To upload after export, configure Transporter API-key credentials locally and
 run:

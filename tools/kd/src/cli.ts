@@ -1154,6 +1154,7 @@ const helpTopics: Record<string, string[]> = {
     "Usage: kd mobile archive --production --ref <branch|tag|sha> --build-number <number> [--version <version>] [--out-dir <dir>] [--upload] [--force-rebuild] [--dry-run]",
     "",
     "Build a production iOS archive and IPA through local Expo CNG and Xcode.",
+    "After export, push an annotated archive provenance tag before any optional upload.",
     "",
     "Options:",
     "  --production              Required. Use the production Kanna mobile identity.",
