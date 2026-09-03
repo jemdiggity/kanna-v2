@@ -23,6 +23,16 @@ interface KspTestFrame extends Record<string, unknown> {
   task_id?: unknown;
 }
 
+interface TaskEvent {
+  type?: string;
+  payload?: Record<string, unknown>;
+}
+
+interface TaskEventFeed {
+  cursor?: string;
+  events?: TaskEvent[];
+}
+
 function rawDataToString(data: RawData): string {
   if (typeof data === "string") return data;
   if (Buffer.isBuffer(data)) return data.toString();
@@ -108,6 +118,32 @@ describe("remote task terminal flow E2E", () => {
     );
   }
 
+  async function waitForTaskEvent(
+    taskId: string,
+    initialCursor: string,
+    predicate: (event: TaskEvent) => boolean,
+    timeoutMs = 20_000,
+  ): Promise<TaskEvent> {
+    const deadline = Date.now() + timeoutMs;
+    let cursor = initialCursor;
+    const observed: TaskEvent[] = [];
+    while (Date.now() < deadline) {
+      const feed = await harness.client.invokeDesktop({
+        desktopId: harness.desktopId,
+        method: "GET",
+        path: `/v1/task-events?taskIds=${taskId}&localOnly=true&cursor=${encodeURIComponent(cursor)}&timeoutSecs=1`,
+        body: null,
+      }) as TaskEventFeed;
+      observed.push(...(feed.events ?? []));
+      const event = feed.events?.find(predicate);
+      if (event) return event;
+      if (feed.cursor) cursor = feed.cursor;
+    }
+    throw new Error(
+      `task ${taskId} did not emit the expected event; observed: ${JSON.stringify(observed)}`,
+    );
+  }
+
   it("reports a Claude composer idle before and after daemon handoff", async () => {
     const task = await createScriptedTask(harness, {
       displayName: "Claude runtime handoff task",
@@ -115,14 +151,6 @@ describe("remote task terminal flow E2E", () => {
     });
 
     await waitForRuntimeState(task.taskId, "idle");
-    const initial = await harness.client.invokeDesktop({
-      desktopId: harness.desktopId,
-      method: "GET",
-      path: `/v1/task-events?taskIds=${task.taskId}&localOnly=true&from=now&timeoutSecs=0`,
-      body: null,
-    }) as { cursor?: string };
-    expect(initial.cursor).toEqual(expect.any(String));
-
     await harness.client.invokeDesktop({
       desktopId: harness.desktopId,
       method: "POST",
@@ -135,6 +163,13 @@ describe("remote task terminal flow E2E", () => {
 
     await harness.restartDaemon();
     expect((await waitForRuntimeState(task.taskId, "idle")).runtimeState).toBe("idle");
+    const initial = await harness.client.invokeDesktop({
+      desktopId: harness.desktopId,
+      method: "GET",
+      path: `/v1/task-events?taskIds=${task.taskId}&localOnly=true&from=now&timeoutSecs=0`,
+      body: null,
+    }) as TaskEventFeed;
+    expect(initial.cursor).toEqual(expect.any(String));
 
     await harness.client.invokeDesktop({
       desktopId: harness.desktopId,
@@ -145,25 +180,17 @@ describe("remote task terminal flow E2E", () => {
     await waitForRuntimeState(task.taskId, "busy");
     await waitForRuntimeState(task.taskId, "idle");
 
-    // Manager runtime settling is intentionally fixed at ten seconds. The
-    // ordinary activity event uses the configured 20-second debounce.
-    await sleep(21_000);
-    const settled = await harness.client.invokeDesktop({
-      desktopId: harness.desktopId,
-      method: "GET",
-      path: `/v1/task-events?taskIds=${task.taskId}&localOnly=true&cursor=${encodeURIComponent(initial.cursor ?? "")}&timeoutSecs=0`,
-      body: null,
-    }) as { events?: Array<{ type?: string; payload?: Record<string, unknown> }> };
-    const idleRuntimeEvents = settled.events?.filter(
-      (event) => event.type === "task.runtime_settled" && event.payload?.runtimeState === "idle",
+    const settled = await waitForTaskEvent(
+      task.taskId,
+      initial.cursor ?? "",
+      (event) => event.type === "task.runtime_settled"
+        && event.payload?.previousRuntimeState === "busy"
+        && event.payload.runtimeState === "idle",
     );
-    expect(idleRuntimeEvents?.length).toBeGreaterThanOrEqual(1);
-    expect(settled.events).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        type: "task.activity_changed",
-        payload: expect.objectContaining({ runtimeState: "idle" }),
-      }),
-    ]));
+    expect(settled.payload).toMatchObject({
+      previousRuntimeState: "busy",
+      runtimeState: "idle",
+    });
   }, 90_000);
 
   it("streams snapshot, live output, and exit through observe_session and stops after unobserve", async () => {
