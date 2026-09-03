@@ -1,24 +1,90 @@
 # Kanna
 
-Keyboard-centric macOS app for running Claude CLI in worktrees.
-Upgrade from tmux.
+Kanna runs multiple coding agents across multiple machines. Give each stage of
+a workflow its own agent and choose where a person must advance the task and
+where the next stage starts automatically. A task-manager agent can create and
+advance tasks through Kanna's MCP tools or CLI, then notify your iPhone when a
+decision really needs you. Kanna Mobile puts the agents' terminal UIs on your
+phone, and task transfer lets you push or pull work between machines.
 
-## Features
+Kanna is open source and built for small teams and solo founders. It probably
+isn't the right fit for a big-corp development process.
 
-- Run multiple agent tasks in parallel, each in an isolated git worktree
-- Real-time terminal with full Claude TUI
-- Built-in diff viewer (branch, last commit, or working changes)
-- One-click PR creation and merge
-- PTY daemon survives app restarts
-- Multi-repo support
+## Bring your own model
+
+Kanna supports the installed CLIs for **Claude**, **Codex**, **Copilot**,
+**OpenCode**, and **Antigravity**. Install and authenticate at least one of
+them, then Kanna spawns that CLI for each task. Authentication stays with the
+provider's CLI; Kanna does not ask for or manage model-provider API keys.
+
+Providers can be selected per task, per workflow stage, per agent, or by
+repository defaults. That makes it practical to use one agent to manage work,
+another to implement it, and specialist agents or local models through
+OpenCode to review it.
+
+## How it works
+
+A Kanna task is a prompt, git worktree, branch, agent session, and current
+workflow stage. Each task starts isolated from the others. Advancing a stage
+forks a fresh workspace from its committed tip and starts the next stage's
+agent, so only committed work crosses a stage boundary. The standalone PTY
+daemon keeps sessions alive when the desktop app restarts or upgrades.
+
+Kanna ships three public workflows:
+
+| Workflow | Stages |
+| --- | --- |
+| `no-review` | Implementation, then pull request |
+| `single-reviewer` | Implementation → one review → pull request |
+| `specialized-reviewers` | Implementation → dispatched specialist reviews → pull request |
+
+Every stage declares a manual or automatic transition policy. The built-ins
+pause after implementation for a person to inspect the work; review stages can
+advance automatically when they pass. Repositories can define their own
+workflows too.
+
+Per-repository configuration lives in [`.kanna/config.json`](.kanna/config.json):
+setup and teardown commands, tests, reserved ports, the default workflow, and
+agent-provider selection. See the
+[published JSON Schema](https://schemas.kanna.build/config.schema.json) for the
+full surface. Repository definitions in
+`.kanna/agents/<name>/AGENT.md` override built-in agents by name, while an
+`EXTEND.md` layers repository-specific instructions onto the resolved agent.
+
+For implementation detail, start with the [developer docs](docs/dev/README.md)
+and [feature specs](docs/specs/).
+
+## Kanna Mobile
+
+On the same network, Kanna Mobile connects directly to a paired machine, so
+task and terminal traffic stays on the LAN. Off-network notifications still
+work for free. Off-network remote terminal access uses Kanna's cloud relay and
+costs **$5/month**; it is free for beta testers.
+
+The iPhone app provides a remote terminal for agent TUIs, task and activity
+views, task input with native speech-to-text, diffs, and machine pairing. From
+the desktop app, tasks can be pushed to another machine or pulled back while
+preserving their task history and agent session data.
+
+## Screenshots
+
+![Kanna desktop showing the task list, an agent terminal, and the Push to Machine command](docs/readme-assets/desktop-push-to-machine.webp)
+
+| Mobile task list and workflow stages | Task-manager terminal on Kanna Mobile | Kanna notifications on the iOS lock screen |
+| --- | --- | --- |
+| ![Kanna Mobile task list showing tasks in progress and review](docs/readme-assets/mobile-workflow-stages.webp) | ![Kanna Mobile remote terminal connected to the task-manager agent](docs/readme-assets/mobile-task-manager-terminal.webp) | ![iOS lock screen showing Kanna task-manager notifications](docs/readme-assets/ios-task-notifications.webp) |
 
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/jemdiggity/kanna/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/tampopogk/kanna/main/scripts/install.sh | sh
 ```
 
-Requires [Claude CLI](https://docs.anthropic.com/en/docs/claude-code).
+Kanna supports macOS on Apple Silicon and Intel. You need at least one
+supported agent CLI installed and authenticated.
+
+Kanna is currently looking for beta testers. Learn more at
+[kanna.build](https://kanna.build).
 
 ## Developing Kanna
 
