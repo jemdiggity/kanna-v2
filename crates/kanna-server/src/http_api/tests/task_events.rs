@@ -4103,18 +4103,24 @@ async fn aggregate_repo_wait_forwards_exclusions_to_every_machine_leg() {
     let source = test_state_with_seed("desktop-source-excluded", "Source Mac", |db| {
         db.insert_test_repo("repo-source-id", "Kanna Source")
             .expect("insert source repo");
-        db.patch_repo("repo-source-id", None, None, Some(Some(REMOTE_HASH)), None)
-            .expect("set source remote hash");
+        db.patch_repo(
+            "repo-source-id",
+            crate::db::RepoPatch {
+                remote_url_hash: Some(Some(REMOTE_HASH)),
+                ..crate::db::RepoPatch::default()
+            },
+        )
+        .expect("set source remote hash");
     });
     let peer = test_state_with_seed("desktop-peer-excluded", "Peer Mac", |db| {
         db.insert_test_repo("repo-peer-different-id", "Kanna Peer")
             .expect("insert peer repo");
         db.patch_repo(
             "repo-peer-different-id",
-            None,
-            None,
-            Some(Some(REMOTE_HASH)),
-            None,
+            crate::db::RepoPatch {
+                remote_url_hash: Some(Some(REMOTE_HASH)),
+                ..crate::db::RepoPatch::default()
+            },
         )
         .expect("set peer remote hash");
         db.insert_test_pipeline_item(
