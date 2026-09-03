@@ -445,12 +445,18 @@ signals therefore elect exactly one requesting desktop; a loser observes the
 winning machine and task and either routes to an already-published owner or
 fails closed while that task is still being prepared. Preparation failure
 releases only the matching unpublished reservation; a persisted task keeps its
-claim. The reservation records the claiming desktop's current cloud-publication
-session. If that server crashes after acquisition but before SQLite persistence,
-the claim remains fail closed while the desktop is unreachable; only a complete
-snapshot from a later fenced publication session on that same desktop may clear
-the reservation, and only when the proposed task id is absent. A same-session
-snapshot or any other desktop's snapshot is not authoritative for this purpose.
+claim. The reservation records a random creator-process fence generated once
+by the claiming `kanna-server` and included in both its claim commands and
+complete cloud snapshots. The fence survives ordinary relay disconnects and
+publication-session rollover, so an empty snapshot after reconnect cannot
+clear a claim while the original HTTP request can still persist its task. If
+that server crashes after acquisition but before SQLite persistence, its
+replacement process publishes a different fence; only a complete snapshot
+from that same desktop with the different process fence may clear the
+reservation, and only when the proposed task id is absent. A snapshot carrying
+the reservation's fence, a snapshot without a fence, or any other desktop's
+snapshot is not authoritative for this purpose. Explicit failure cleanup is
+also fenced to the creator process and the matching machine/task identity.
 Cloud snapshot reconciliation otherwise promotes the matching reservation to a
 durable owner and conditionally deletes that claim when the owning open task is
 removed, so another desktop's claim can never be overwritten or released.

@@ -177,6 +177,13 @@ async fn run_relay_loop_with_timing(
     let mut desktop_relay_requests = http_state.take_desktop_relay_requests()?;
     let mut next_mobile_notification_id = 1_u64;
     let mut next_desktop_request_id = 1_u64;
+    // Stable across relay connection/session rollover, but replaced when this
+    // server process restarts. The relay uses it to distinguish reconnect from
+    // a dead creator while a singleton reservation is not yet in SQLite.
+    let singleton_reservation_fence = (0..4)
+        .map(|_| crate::task_creator::generate_singleton_task_id())
+        .collect::<Result<Vec<_>, _>>()?
+        .join("");
 
     // Reconnection loop
     loop {
@@ -286,13 +293,16 @@ async fn run_relay_loop_with_timing(
                 }
                 _ = publication_interval.tick(), if publication_enabled => {
                     match db.ui_snapshot() {
-                        Ok(snapshot) => publisher.observe(map_ui_snapshot_for_publication(
-                            &config.desktop_id,
-                            &config.desktop_name,
-                            crate::agent_inventory::installed_agent_providers(),
-                            snapshot,
-                            &mut resting_snippets,
-                        )),
+                        Ok(snapshot) => publisher.observe(
+                            map_ui_snapshot_for_publication(
+                                &config.desktop_id,
+                                &config.desktop_name,
+                                crate::agent_inventory::installed_agent_providers(),
+                                snapshot,
+                                &mut resting_snippets,
+                            )
+                            .with_singleton_reservation_fence(&singleton_reservation_fence),
+                        ),
                         Err(error) => log::warn!("Failed to build cloud task snapshot: {error}"),
                     }
                     match publisher.next_step(Instant::now()) {
@@ -413,6 +423,7 @@ async fn run_relay_loop_with_timing(
                                         "remoteUrlHash": remote_url_hash,
                                         "agent": agent,
                                         "taskId": task_id,
+                                        "creatorFence": singleton_reservation_fence.as_str(),
                                     }),
                                 },
                             },
@@ -435,6 +446,7 @@ async fn run_relay_loop_with_timing(
                                         "remoteUrlHash": remote_url_hash,
                                         "agent": agent,
                                         "taskId": task_id,
+                                        "creatorFence": singleton_reservation_fence.as_str(),
                                     }),
                                 },
                             },
@@ -3720,6 +3732,14 @@ mod tests {
         assert_eq!(publications.1["schemaVersion"], 1);
         assert_eq!(publications.2, "task-snapshot-2");
         assert_eq!(publications.3["schemaVersion"], 1);
+        let first_fence = publications.1["singletonReservationFence"]
+            .as_str()
+            .expect("first publication process fence");
+        assert!(!first_fence.is_empty());
+        assert_eq!(
+            publications.3["singletonReservationFence"], first_fence,
+            "routine relay reconnect must retain the creator-process fence"
+        );
         let _ = std::fs::remove_file(db_path);
     }
 

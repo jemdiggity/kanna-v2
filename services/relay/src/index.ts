@@ -933,22 +933,24 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         const remoteUrlHash = record?.remoteUrlHash;
         const agent = record?.agent;
         const taskId = record?.taskId;
+        const creatorFence = record?.creatorFence;
         if (typeof remoteUrlHash !== "string" || remoteUrlHash.length === 0
           || remoteUrlHash.length > 128 || typeof agent !== "string" || agent.length === 0
           || agent.length > 64 || typeof taskId !== "string" || taskId.length === 0
-          || taskId.length > 128) {
+          || taskId.length > 128 || typeof creatorFence !== "string"
+          || creatorFence.length === 0 || creatorFence.length > 128) {
           sendErrorResponse(ws, publication.id, "repository singleton claim is malformed");
           return;
         }
         try {
           if (publication.command === "claim_repo_singleton") {
             const claim = await claimRepoSingleton({
-              userId: userId!, remoteUrlHash, agent, machineId: desktopId, taskId,
+              userId: userId!, remoteUrlHash, agent, machineId: desktopId, taskId, creatorFence,
             });
             sendDataResponse(ws, publication.id, { claim });
           } else {
             const released = await releaseRepoSingletonReservation({
-              userId: userId!, remoteUrlHash, agent, machineId: desktopId, taskId,
+              userId: userId!, remoteUrlHash, agent, machineId: desktopId, taskId, creatorFence,
             });
             sendDataResponse(ws, publication.id, { released });
           }

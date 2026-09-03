@@ -57,6 +57,8 @@ impl RestingSnippetCache {
 pub(crate) struct CloudTaskSnapshotEnvelope {
     schema_version: u8,
     singleton_directory_version: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    singleton_reservation_fence: Option<String>,
     desktop: CloudDesktopSnapshot,
     tasks: Vec<CloudTaskSnapshot>,
 }
@@ -64,6 +66,11 @@ pub(crate) struct CloudTaskSnapshotEnvelope {
 impl CloudTaskSnapshotEnvelope {
     pub(crate) fn fingerprint(&self) -> String {
         serde_json::to_string(self).expect("cloud task snapshot must serialize")
+    }
+
+    pub(crate) fn with_singleton_reservation_fence(mut self, fence: &str) -> Self {
+        self.singleton_reservation_fence = Some(fence.to_string());
+        self
     }
 
     fn for_publication_version(mut self, version: u8) -> Self {
@@ -265,6 +272,7 @@ fn map_ui_snapshot_with_snippets(
     CloudTaskSnapshotEnvelope {
         schema_version: CLOUD_TASK_SCHEMA_V2,
         singleton_directory_version: 1,
+        singleton_reservation_fence: None,
         desktop: CloudDesktopSnapshot {
             display_name: truncate(desktop_name, 256),
             agent_providers: Some(agent_providers),

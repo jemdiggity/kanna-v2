@@ -586,6 +586,7 @@ describe("cloud task publication reconciliation", () => {
         acceptingTransfers: true,
       },
       singletonDirectoryVersion: 1,
+      singletonReservationFence: null,
       tasks: expect.arrayContaining([
         expect.objectContaining({ ownerDesktopId: "desktop-1", ownerLocalTaskId: "task-1" }),
       ]),
