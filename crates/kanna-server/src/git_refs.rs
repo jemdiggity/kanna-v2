@@ -21,7 +21,7 @@ pub(crate) fn resolve_base_ref(root: &Path, base_ref: &str) -> Option<ResolvedBa
         let resolved = Command::new("git")
             .arg("-C")
             .arg(root)
-            .args(["rev-parse", "--verify", "--quiet"])
+            .args(["rev-parse", "--verify", "--quiet", "--end-of-options"])
             .arg(format!("{candidate}^{{commit}}"))
             .output();
         if !resolved.is_ok_and(|output| output.status.success()) {
@@ -30,7 +30,7 @@ pub(crate) fn resolve_base_ref(root: &Path, base_ref: &str) -> Option<ResolvedBa
         let merge_base = Command::new("git")
             .arg("-C")
             .arg(root)
-            .args(["merge-base", &candidate, "HEAD"])
+            .args(["merge-base", "--", &candidate, "HEAD"])
             .output()
             .ok()
             .filter(|output| output.status.success())
@@ -86,5 +86,26 @@ mod tests {
         let resolved = resolve_base_ref(root, "unrelated").expect("resolve unrelated ref");
         assert_eq!(resolved.reference, "origin/unrelated");
         assert_eq!(resolved.merge_base, None);
+    }
+
+    #[test]
+    fn resolves_an_option_shaped_local_branch() {
+        let temp_dir = tempfile::tempdir().expect("create git ref fixture");
+        let root = temp_dir.path();
+        git(root, &["init", "-b", "main"]);
+        git(root, &["config", "user.email", "test@example.com"]);
+        git(root, &["config", "user.name", "Test"]);
+        std::fs::write(root.join("main.txt"), "main").expect("write main file");
+        git(root, &["add", "main.txt"]);
+        git(root, &["commit", "-m", "main"]);
+        let branch = "--local-option-shaped-branch";
+        git(
+            root,
+            &["update-ref", &format!("refs/heads/{branch}"), "HEAD"],
+        );
+
+        let resolved = resolve_base_ref(root, branch).expect("resolve option-shaped branch");
+        assert_eq!(resolved.reference, branch);
+        assert!(resolved.merge_base.is_some());
     }
 }
