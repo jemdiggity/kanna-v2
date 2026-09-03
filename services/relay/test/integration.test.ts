@@ -22,8 +22,10 @@ import {
 } from "../../firebase-functions/src/accountDeletion.js";
 import {
   beginCloudTaskPublicationSession,
+  claimRepoSingleton,
   createFirestoreCloudTaskPublicationStore,
   handleCloudTaskPublication,
+  releaseRepoSingletonReservation,
 } from "../src/cloudTaskPublication.js";
 import {
   anonymousDesktopId,
@@ -2334,6 +2336,107 @@ describe("Relay integration", () => {
       `users/${TEST_USER_ID}/desktops/desktop-other`,
     ).get()).exists).toBe(false);
     await closeAndWait(ws);
+  });
+
+  it("atomically elects one owner after concurrent desktops both discover singleton absence", async () => {
+    const userId = `singleton-race-${Date.now()}`;
+    const userRef = testFirestore.doc(`users/${userId}`);
+    await Promise.all(["desktop-a", "desktop-b"].map(async (desktopId) => {
+      await userRef.collection("desktops").doc(desktopId).set({
+        desktopId,
+        singletonDirectoryVersion: 1,
+      });
+    }));
+    const bothAbsent = deferredVoid();
+    let absenceDiscoveries = 0;
+    const afterAbsenceDiscovery = async () => {
+      absenceDiscoveries += 1;
+      if (absenceDiscoveries === 2) bothAbsent.resolve();
+      await bothAbsent.promise;
+    };
+
+    try {
+      const claims = await Promise.all([
+        claimRepoSingleton({
+          userId,
+          remoteUrlHash: "shared-remote-hash",
+          agent: "task-manager",
+          machineId: "desktop-a",
+          taskId: "task-a",
+          db: testFirestore,
+          afterAbsenceDiscovery,
+        }),
+        claimRepoSingleton({
+          userId,
+          remoteUrlHash: "shared-remote-hash",
+          agent: "task-manager",
+          machineId: "desktop-b",
+          taskId: "task-b",
+          db: testFirestore,
+          afterAbsenceDiscovery,
+        }),
+      ]);
+
+      expect(absenceDiscoveries).toBe(2);
+      expect(claims.filter((claim) => claim.status === "acquired")).toHaveLength(1);
+      expect(claims.filter((claim) => claim.status === "reserved")).toHaveLength(1);
+      expect(new Set(claims.map((claim) => `${claim.machineId}:${claim.taskId}`)).size).toBe(1);
+      expect((await userRef.collection("repoSingletonClaims").get()).docs).toHaveLength(1);
+      const winner = claims.find((claim) => claim.status === "acquired");
+      if (!winner) throw new Error("concurrent claim had no winner");
+      await expect(releaseRepoSingletonReservation({
+        userId,
+        remoteUrlHash: "shared-remote-hash",
+        agent: "task-manager",
+        machineId: winner.machineId,
+        taskId: winner.taskId,
+        db: testFirestore,
+      })).resolves.toBe(true);
+      expect((await userRef.collection("repoSingletonClaims").get()).empty).toBe(true);
+    } finally {
+      await testFirestore.recursiveDelete(userRef);
+    }
+  });
+
+  it("publishes and conditionally removes durable singleton ownership", async () => {
+    const userId = `singleton-publication-${Date.now()}`;
+    const desktopId = "singleton-publication-desktop";
+    const userRef = testFirestore.doc(`users/${userId}`);
+    const store = createFirestoreCloudTaskPublicationStore(testFirestore);
+    try {
+      const session = await beginCloudTaskPublicationSession({ userId, desktopId, store });
+      await handleCloudTaskPublication({
+        userId,
+        desktopId,
+        generation: { session, sequence: 1 },
+        snapshot: publishedSnapshot("idle", [publishedTask("idle", {
+          ownerDesktopId: desktopId,
+          singletonAgent: "merge",
+        })]),
+        store,
+      });
+      let claims = await userRef.collection("repoSingletonClaims").get();
+      expect(claims.docs).toHaveLength(1);
+      expect(claims.docs[0]?.data()).toMatchObject({
+        state: "owned",
+        machineId: desktopId,
+        taskId: "task-cloud-publish",
+        remoteUrlHash: "remote-hash",
+        agent: "merge",
+      });
+
+      await handleCloudTaskPublication({
+        userId,
+        desktopId,
+        generation: { session, sequence: 2 },
+        snapshot: publishedSnapshot("idle", []),
+        store,
+      });
+      claims = await userRef.collection("repoSingletonClaims").get();
+      expect(claims.empty).toBe(true);
+    } finally {
+      await testFirestore.recursiveDelete(userRef);
+    }
   });
 
   it("fences relay registrations and cached or in-flight publication once deletion starts", async () => {

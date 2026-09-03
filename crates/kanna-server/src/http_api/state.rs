@@ -104,6 +104,20 @@ pub(crate) enum DesktopRelayRequest {
         agent: String,
         response: oneshot::Sender<Result<Vec<RemoteSingletonOwner>, String>>,
     },
+    ClaimRepoSingleton {
+        generation: u64,
+        remote_url_hash: String,
+        agent: String,
+        task_id: String,
+        response: oneshot::Sender<Result<RemoteSingletonClaim, String>>,
+    },
+    ReleaseRepoSingletonReservation {
+        generation: u64,
+        remote_url_hash: String,
+        agent: String,
+        task_id: String,
+        response: oneshot::Sender<Result<bool, String>>,
+    },
     Invoke {
         generation: u64,
         desktop_id: String,
@@ -119,6 +133,16 @@ pub(crate) enum DesktopRelayRequest {
 pub(crate) struct RemoteSingletonOwner {
     pub machine_id: String,
     pub task_id: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RemoteSingletonClaim {
+    pub status: String,
+    pub machine_id: String,
+    pub task_id: String,
+    #[serde(default)]
+    pub owners: Vec<RemoteSingletonOwner>,
 }
 
 #[derive(Default)]
@@ -528,6 +552,54 @@ impl AppState {
         tokio::time::timeout(std::time::Duration::from_secs(10), result)
             .await
             .map_err(|_| "repository singleton directory lookup timed out".to_string())?
+            .map_err(|_| "desktop relay disconnected".to_string())?
+    }
+
+    pub(crate) async fn claim_relay_repo_singleton(
+        &self,
+        remote_url_hash: String,
+        agent: String,
+        task_id: String,
+    ) -> Result<RemoteSingletonClaim, String> {
+        let (response, result) = oneshot::channel();
+        let generation = self
+            .relay_desktop_routing_generation
+            .load(Ordering::Acquire);
+        self.send_desktop_relay_request(DesktopRelayRequest::ClaimRepoSingleton {
+            generation,
+            remote_url_hash,
+            agent,
+            task_id,
+            response,
+        })
+        .await?;
+        tokio::time::timeout(std::time::Duration::from_secs(10), result)
+            .await
+            .map_err(|_| "repository singleton ownership claim timed out".to_string())?
+            .map_err(|_| "desktop relay disconnected".to_string())?
+    }
+
+    pub(crate) async fn release_relay_repo_singleton_reservation(
+        &self,
+        remote_url_hash: String,
+        agent: String,
+        task_id: String,
+    ) -> Result<bool, String> {
+        let (response, result) = oneshot::channel();
+        let generation = self
+            .relay_desktop_routing_generation
+            .load(Ordering::Acquire);
+        self.send_desktop_relay_request(DesktopRelayRequest::ReleaseRepoSingletonReservation {
+            generation,
+            remote_url_hash,
+            agent,
+            task_id,
+            response,
+        })
+        .await?;
+        tokio::time::timeout(std::time::Duration::from_secs(10), result)
+            .await
+            .map_err(|_| "repository singleton reservation release timed out".to_string())?
             .map_err(|_| "desktop relay disconnected".to_string())?
     }
 

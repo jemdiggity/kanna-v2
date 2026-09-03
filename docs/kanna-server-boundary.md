@@ -438,8 +438,17 @@ name owners whose desktops are already offline. Current publishers also stamp
 directory resolution fail closed until it publishes a current snapshot. The receiving server combines
 that directory with its local database and every active sibling's native
 lookup; a successful live lookup replaces stale directory state for that
-machine. It only creates on the requesting machine after all three sources
-prove absence. One remote match receives the message through the existing
+machine. After all three sources prove absence, the requesting server proposes
+a task id and atomically creates a relay-owned Firestore claim keyed by
+`remoteUrlHash + agent` before it writes the local task. Concurrent first
+signals therefore elect exactly one requesting desktop; a loser observes the
+winning machine and task and either routes to an already-published owner or
+fails closed while that task is still being prepared. Preparation failure
+releases only the matching unpublished reservation; a persisted task keeps its
+claim. Cloud snapshot reconciliation promotes the matching reservation to a
+durable owner and conditionally deletes that claim when the owning open task is
+removed, so another desktop's claim can never be overwritten or released.
+One remote match receives the message through the existing
 task-input route. Two or more open matches are an existing-world duplicate:
 resolution logs and returns every `machineId:taskId` owner instead of choosing
 one.

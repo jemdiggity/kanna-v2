@@ -112,6 +112,12 @@ fn connect_test_relay_peer(
                         let _ = response.send(Ok(result));
                     });
                 }
+                crate::http_api::DesktopRelayRequest::ClaimRepoSingleton { .. }
+                | crate::http_api::DesktopRelayRequest::ReleaseRepoSingletonReservation {
+                    ..
+                } => {
+                    panic!("task-event relay test does not claim singletons")
+                }
             }
         }
     })
@@ -167,6 +173,12 @@ fn connect_test_relay_peer_with_long_poll_budget(
                         let _ = response.send(Ok(result));
                     });
                 }
+                crate::http_api::DesktopRelayRequest::ClaimRepoSingleton { .. }
+                | crate::http_api::DesktopRelayRequest::ReleaseRepoSingletonReservation {
+                    ..
+                } => {
+                    panic!("task-event relay test does not claim singletons")
+                }
             }
         }
     })
@@ -212,6 +224,12 @@ fn connect_test_relay_peer_with_invoke_gate(
                         let _ = response.send(Ok(result));
                     });
                 }
+                crate::http_api::DesktopRelayRequest::ClaimRepoSingleton { .. }
+                | crate::http_api::DesktopRelayRequest::ReleaseRepoSingletonReservation {
+                    ..
+                } => {
+                    panic!("task-event relay test does not claim singletons")
+                }
             }
         }
     })
@@ -240,6 +258,12 @@ fn connect_unresponsive_listed_peer(
                         let _response = response;
                         std::future::pending::<()>().await;
                     });
+                }
+                crate::http_api::DesktopRelayRequest::ClaimRepoSingleton { .. }
+                | crate::http_api::DesktopRelayRequest::ReleaseRepoSingletonReservation {
+                    ..
+                } => {
+                    panic!("task-event relay test does not claim singletons")
                 }
             }
         }

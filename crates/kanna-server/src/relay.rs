@@ -47,6 +47,13 @@ enum PendingDesktopRequest {
             Result<Vec<crate::http_api::RemoteSingletonOwner>, String>,
         >,
     },
+    ClaimRepoSingleton {
+        response:
+            tokio::sync::oneshot::Sender<Result<crate::http_api::RemoteSingletonClaim, String>>,
+    },
+    ReleaseRepoSingletonReservation {
+        response: tokio::sync::oneshot::Sender<Result<bool, String>>,
+    },
     Invoke {
         response: tokio::sync::oneshot::Sender<Result<crate::http_api::HttpInvokeResponse, String>>,
     },
@@ -388,6 +395,50 @@ async fn run_relay_loop_with_timing(
                                 },
                             },
                             PendingDesktopRequest::ListRepoSingletons { response },
+                        ),
+                        http_api::DesktopRelayRequest::ClaimRepoSingleton {
+                            generation,
+                            remote_url_hash,
+                            agent,
+                            task_id,
+                            response,
+                        } => (
+                            generation,
+                            RelayMessage::Invoke {
+                                id: RelayId::String(id.clone()),
+                                desktop_id: None,
+                                request: RelayInvoke::Command {
+                                    command: "claim_repo_singleton".to_string(),
+                                    args: serde_json::json!({
+                                        "remoteUrlHash": remote_url_hash,
+                                        "agent": agent,
+                                        "taskId": task_id,
+                                    }),
+                                },
+                            },
+                            PendingDesktopRequest::ClaimRepoSingleton { response },
+                        ),
+                        http_api::DesktopRelayRequest::ReleaseRepoSingletonReservation {
+                            generation,
+                            remote_url_hash,
+                            agent,
+                            task_id,
+                            response,
+                        } => (
+                            generation,
+                            RelayMessage::Invoke {
+                                id: RelayId::String(id.clone()),
+                                desktop_id: None,
+                                request: RelayInvoke::Command {
+                                    command: "release_repo_singleton_reservation".to_string(),
+                                    args: serde_json::json!({
+                                        "remoteUrlHash": remote_url_hash,
+                                        "agent": agent,
+                                        "taskId": task_id,
+                                    }),
+                                },
+                            },
+                            PendingDesktopRequest::ReleaseRepoSingletonReservation { response },
                         ),
                         http_api::DesktopRelayRequest::Invoke {
                             generation,
@@ -1175,6 +1226,12 @@ fn fail_pending_desktop_request(request: PendingDesktopRequest, error: String) {
         PendingDesktopRequest::ListRepoSingletons { response } => {
             let _ = response.send(Err(error));
         }
+        PendingDesktopRequest::ClaimRepoSingleton { response } => {
+            let _ = response.send(Err(error));
+        }
+        PendingDesktopRequest::ReleaseRepoSingletonReservation { response } => {
+            let _ = response.send(Err(error));
+        }
         PendingDesktopRequest::Invoke { response } => {
             let _ = response.send(Err(error));
         }
@@ -1198,6 +1255,33 @@ fn resolve_pending_desktop_request(
                     .and_then(|value| {
                         serde_json::from_value::<Vec<String>>(value)
                             .map_err(|error| format!("relay returned invalid desktop ids: {error}"))
+                    }),
+            };
+            let _ = response.send(result);
+        }
+        PendingDesktopRequest::ClaimRepoSingleton { response } => {
+            let result = match error {
+                Some(error) => Err(error),
+                None => data
+                    .and_then(|value| value.get("claim").cloned())
+                    .ok_or_else(|| {
+                        "relay returned an invalid repository singleton claim".to_string()
+                    })
+                    .and_then(|value| {
+                        serde_json::from_value(value).map_err(|error| {
+                            format!("relay returned invalid singleton claim: {error}")
+                        })
+                    }),
+            };
+            let _ = response.send(result);
+        }
+        PendingDesktopRequest::ReleaseRepoSingletonReservation { response } => {
+            let result = match error {
+                Some(error) => Err(error),
+                None => data
+                    .and_then(|value| value.get("released").and_then(serde_json::Value::as_bool))
+                    .ok_or_else(|| {
+                        "relay returned an invalid singleton reservation release".to_string()
                     }),
             };
             let _ = response.send(result);

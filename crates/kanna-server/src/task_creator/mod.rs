@@ -1808,6 +1808,7 @@ pub(crate) fn prepare_singleton_agent_task_for_api(
     agent_name: &str,
     message: &str,
     overrides: SingletonAgentOverrides,
+    requested_task_id: Option<String>,
 ) -> Result<PreparedTaskSpawn, PrepareTaskError> {
     let repo = db
         .get_repo(repo_id)
@@ -1859,7 +1860,7 @@ pub(crate) fn prepare_singleton_agent_task_for_api(
         config,
         &repo,
         TaskCreationRequest {
-            requested_task_id: None,
+            requested_task_id,
             create_intent_json: None,
             task_prompt: message.to_string(),
             display_name,
@@ -1889,6 +1890,10 @@ pub(crate) fn prepare_singleton_agent_task_for_api(
             parent_task_id: None,
         },
     )
+}
+
+pub(crate) fn generate_singleton_task_id() -> Result<String, String> {
+    generate_task_id()
 }
 
 pub(crate) fn prepare_integration_task_for_api(

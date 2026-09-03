@@ -306,6 +306,12 @@ fn connect_singleton_relay_peer(
                     .await;
                     let _ = response.send(Ok(result));
                 }
+                crate::http_api::DesktopRelayRequest::ClaimRepoSingleton { .. }
+                | crate::http_api::DesktopRelayRequest::ReleaseRepoSingletonReservation {
+                    ..
+                } => {
+                    panic!("existing-owner test must not enter singleton creation")
+                }
             }
         }
     })
@@ -429,6 +435,194 @@ async fn signal_agent_reports_duplicate_repo_singletons_across_machines() {
         assert!(message.contains(expected), "{message}");
     }
     relay.abort();
+}
+
+#[tokio::test]
+async fn signal_agent_concurrent_first_signal_creates_one_account_wide_task() {
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::UnixListener;
+
+    let suffix = unique_test_suffix();
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let owner = Arc::new(tokio::sync::Mutex::new(None::<(String, String)>));
+    let mut states = Vec::new();
+    let mut relay_tasks = Vec::new();
+    let mut daemon_tasks = Vec::new();
+    let mut cleanup_paths = Vec::new();
+
+    for machine in ["desktop-race-a", "desktop-race-b"] {
+        let repo_root = std::env::temp_dir().join(format!("{suffix}-{machine}-repo"));
+        init_test_git_repo(&repo_root);
+        let daemon_dir = std::env::temp_dir().join(format!("{suffix}-{machine}-daemon"));
+        std::fs::create_dir_all(&daemon_dir).unwrap();
+        let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        daemon_tasks.push(tokio::spawn(async move {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = tokio::io::BufReader::new(read_half);
+            let command = read_test_daemon_command(&mut reader, &mut write_half).await;
+            let session_id = match command {
+                DaemonCommand::Spawn { session_id, .. }
+                | DaemonCommand::SpawnAgent { session_id, .. } => session_id,
+                other => panic!("expected singleton spawn, got {other:?}"),
+            };
+            write_half
+                .write_all(
+                    format!(
+                        "{}\n",
+                        serde_json::to_string(&DaemonEvent::SessionCreated { session_id }).unwrap()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        }));
+        let state =
+            test_state_with_daemon_dir(machine, machine, &daemon_dir.to_string_lossy(), |db| {
+                db.insert_test_repo_with_path(
+                    "repo-shared",
+                    &repo_root.to_string_lossy(),
+                    "Shared",
+                )
+                .unwrap();
+                db.patch_repo(
+                    "repo-shared",
+                    None,
+                    Some(Some("https://example.com/acme/shared.git")),
+                    Some(Some("shared-race-hash")),
+                    None,
+                )
+                .unwrap();
+            });
+        let mut requests = state.take_desktop_relay_requests().unwrap();
+        state.set_desktop_routing_available(true);
+        let barrier_for_relay = Arc::clone(&barrier);
+        let owner_for_relay = Arc::clone(&owner);
+        let machine_id = machine.to_string();
+        relay_tasks.push(tokio::spawn(async move {
+            while let Some(request) = requests.recv().await {
+                match request {
+                    crate::http_api::DesktopRelayRequest::ListRepoSingletons {
+                        response, ..
+                    } => {
+                        let _ = response.send(Ok(Vec::new()));
+                    }
+                    crate::http_api::DesktopRelayRequest::ListActive { response, .. } => {
+                        let _ = response.send(Ok(Vec::new()));
+                    }
+                    crate::http_api::DesktopRelayRequest::ClaimRepoSingleton {
+                        task_id,
+                        response,
+                        ..
+                    } => {
+                        barrier_for_relay.wait().await;
+                        let mut current = owner_for_relay.lock().await;
+                        let (status, claimed_machine, claimed_task) = match current.as_ref() {
+                            Some((claimed_machine, claimed_task)) => {
+                                ("reserved", claimed_machine.clone(), claimed_task.clone())
+                            }
+                            None => {
+                                *current = Some((machine_id.clone(), task_id.clone()));
+                                ("acquired", machine_id.clone(), task_id)
+                            }
+                        };
+                        let _ = response.send(Ok(crate::http_api::RemoteSingletonClaim {
+                            status: status.to_string(),
+                            machine_id: claimed_machine,
+                            task_id: claimed_task,
+                            owners: Vec::new(),
+                        }));
+                    }
+                    crate::http_api::DesktopRelayRequest::ReleaseRepoSingletonReservation {
+                        task_id,
+                        response,
+                        ..
+                    } => {
+                        let mut current = owner_for_relay.lock().await;
+                        let released =
+                            current.as_ref().is_some_and(|(owner_machine, owner_task)| {
+                                owner_machine == &machine_id && owner_task == &task_id
+                            });
+                        if released {
+                            *current = None;
+                        }
+                        let _ = response.send(Ok(released));
+                    }
+                    crate::http_api::DesktopRelayRequest::Invoke { response, .. } => {
+                        let _ = response.send(Err("unexpected invoke".to_string()));
+                    }
+                }
+            }
+        }));
+        cleanup_paths.push((
+            repo_root,
+            daemon_dir,
+            socket_path,
+            state.config().db_path.clone(),
+        ));
+        states.push(state);
+    }
+
+    let first = super::router(Arc::clone(&states[0])).oneshot(
+        Request::post("/v1/repos/repo-shared/agents/task-manager/signal")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"message":"coordinate"}"#))
+            .unwrap(),
+    );
+    let second = super::router(Arc::clone(&states[1])).oneshot(
+        Request::post("/v1/repos/repo-shared/agents/task-manager/signal")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"message":"coordinate"}"#))
+            .unwrap(),
+    );
+    let (first, second) = tokio::join!(first, second);
+    let statuses = [first.unwrap().status(), second.unwrap().status()];
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::OK)
+            .count(),
+        1
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::SERVICE_UNAVAILABLE)
+            .count(),
+        1
+    );
+    let mut open_count = 0;
+    for _ in 0..40 {
+        open_count = states
+            .iter()
+            .map(|state| {
+                Db::open(&state.config().db_path)
+                    .unwrap()
+                    .find_open_agent_tasks_by_remote_url_hash("shared-race-hash", "task-manager")
+                    .unwrap()
+                    .len()
+            })
+            .sum::<usize>();
+        if open_count == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert_eq!(open_count, 1);
+
+    for task in relay_tasks.into_iter().chain(daemon_tasks) {
+        task.abort();
+    }
+    for (repo_root, daemon_dir, socket_path, db_path) in cleanup_paths {
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+        let _ = std::fs::remove_dir_all(repo_root);
+        let _ = std::fs::remove_file(db_path);
+    }
 }
 
 fn seed_approvable_source(db: &Db, task_id: &str, run_id: &str, pr_number: i64) {
