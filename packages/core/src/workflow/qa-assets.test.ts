@@ -63,6 +63,35 @@ describe("built-in agent completion protocol", () => {
 });
 
 describe("QA workflow assets", () => {
+  it("keeps shell-running agents from matching processes by prompt substrings", () => {
+    const specialtyReviewers = readdirSync(resolve(repoRoot, ".kanna/agents"))
+      .filter((name) => name.startsWith("review-"));
+    const shellRunningAgents = [
+      "implement",
+      "review",
+      "qa-dispatcher",
+      ...specialtyReviewers,
+      "commit",
+      "pr",
+      "merge",
+      "ship",
+      "task-manager",
+    ];
+
+    for (const name of shellRunningAgents) {
+      const agent = readRepoPhrases(`.kanna/agents/${name}/AGENT.md`);
+      expect(agent, name).toContain("Never use `pkill -f` or `killall`");
+      expect(agent, name).toContain("Kanna task prompts are present in agent argv");
+      expect(agent, name).toContain("record `$!` and `kill <pid>`");
+      expect(agent, name).toContain("process group you created with `kill -- -<pgid>`");
+      expect(agent, name).toContain("unique token you put in that command line yourself");
+    }
+
+    const conventions = readRepoPhrases("AGENTS.md");
+    expect(conventions).toContain("Never use `pkill -f` or `killall`");
+    expect(conventions).toContain("Kanna task prompts are present in agent argv");
+  });
+
   it("keeps Kanna runtime identity policy repo-scoped", () => {
     const ordinaryPrompt = buildKannaRuntimeUserPrompt(
       buildStagePrompt("Implement the task.", "$TASK_PROMPT", {

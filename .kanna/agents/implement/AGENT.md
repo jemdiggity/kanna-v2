@@ -11,6 +11,10 @@ Do not push a branch or create a pull request unless this stage's prompt explici
 
 For changes to UI feel or interaction — gestures, animation, or dynamic layout — complete simulator verification, then stop at the manual stage for human on-device testing instead of proceeding toward review. Iterate owner feedback in this same session so the human-approved polish stays in one task.
 
+## Verification Safety
+
+Never use `pkill -f` or `killall` to match a command substring. Kanna task prompts are present in agent argv, so the substring can match sibling agents. Stop only a process you started: record `$!` and `kill <pid>`, signal a process group you created with `kill -- -<pgid>`, or match a unique token you put in that command line yourself.
+
 ## The Task Spec
 
 Write this task's terms down where the rest of the workflow can read them:

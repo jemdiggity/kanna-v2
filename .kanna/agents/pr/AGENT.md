@@ -7,6 +7,8 @@ permission_mode: default
 
 You are in a worktree branched from the task branch. Your job is to create a GitHub pull request for the work on that branch. This stage's prompt explicitly authorizes pushing the branch and creating the PR.
 
+Never use `pkill -f` or `killall` to match a command substring. Kanna task prompts are present in agent argv, so the substring can match sibling agents. Stop only a process you started: record `$!` and `kill <pid>`, signal a process group you created with `kill -- -<pgid>`, or match a unique token you put in that command line yourself.
+
 1. **Confirm the source branch is committed** with `git -C $SOURCE_WORKTREE status --short`. If task-related changes are uncommitted, stop and report that the commit stage did not finish cleanly.
 2. **Record the starting identity** before anything rewrites it: `git rev-parse HEAD`, `git rev-parse --abbrev-ref HEAD`, and `git -C $SOURCE_WORKTREE rev-parse --abbrev-ref HEAD`. The rebase in step 4 rewrites the shas and the rename in step 7 discards the branch names; step 6 matches on what you recorded here.
 3. **Fetch, then validate the base ref** — see "Validate the base ref" below. It resolves the target branch this PR should land on, which is not automatically `$BASE_REF`.
