@@ -2052,6 +2052,24 @@ async fn task_port_routes_claim_reuse_and_release_allocations() {
     assert_eq!(first_json["portEnv"]["KANNA_DEV_PORT"], "1423");
     assert_eq!(first_json["firstPort"], 1423);
 
+    let task_detail = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/tasks/task-1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let task_detail_body = axum::body::to_bytes(task_detail.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let task_detail_json: serde_json::Value = from_slice(&task_detail_body).unwrap();
+    assert_eq!(
+        task_detail_json["ports"],
+        serde_json::json!([{ "name": "KANNA_DEV_PORT", "port": 1423 }])
+    );
+
     let reused = app
         .clone()
         .oneshot(

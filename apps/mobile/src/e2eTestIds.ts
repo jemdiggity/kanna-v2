@@ -68,6 +68,17 @@ export const MOBILE_E2E_IDS = {
   visualCompanionClose: "mobile.visual-companion.close",
   visualCompanionStatus: "mobile.visual-companion.status",
   visualCompanionWebView: "mobile.visual-companion.webview",
+  taskPreviewButton: "mobile.task-preview.button",
+  taskPreviewModal: "mobile.task-preview.modal",
+  taskPreviewClose: "mobile.task-preview.close",
+  taskPreviewRefresh: "mobile.task-preview.refresh",
+  taskPreviewBrowser: "mobile.task-preview.browser",
+  taskPreviewRetry: "mobile.task-preview.retry",
+  taskPreviewError: "mobile.task-preview.error",
+  taskPreviewWebView: "mobile.task-preview.webview",
+  taskPreviewPort(portName: string): string {
+    return `mobile.task-preview.port.${portName}`;
+  },
   taskDiffTitle: "mobile.task-diff.title",
   taskDiffScopeOption(scope: string): string {
     return `mobile.task-diff.scope.${scope}`;

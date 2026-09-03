@@ -56,6 +56,9 @@ vi.mock("./RepoExplorer", () => ({ RepoExplorer: "RepoExplorer" }));
 vi.mock("./VisualCompanionModal", () => ({
   VisualCompanionModal: "VisualCompanionModal"
 }));
+vi.mock("./TaskPreviewModal", () => ({
+  TaskPreviewModal: "TaskPreviewModal"
+}));
 vi.mock("./QuickReplySendControl", () => ({
   QuickReplySendControl: "QuickReplySendControl"
 }));

@@ -384,6 +384,9 @@ vi.mock("../screens/RepoExplorer", () => ({ RepoExplorer: "RepoExplorer" }));
 vi.mock("../screens/VisualCompanionModal", () => ({
   VisualCompanionModal: "VisualCompanionModal"
 }));
+vi.mock("../screens/TaskPreviewModal", () => ({
+  TaskPreviewModal: "TaskPreviewModal"
+}));
 
 let RootNavigator: typeof import("./RootNavigator").default | null = null;
 let controller: MobileController | null = null;

@@ -431,6 +431,37 @@ describe("mergeCloudAndLanTasks", () => {
 });
 
 describe("createCloudLanClient", () => {
+  it("offers task preview only while that task has a live LAN route", async () => {
+    const lanPreview = vi.fn().mockResolvedValue({
+      url: "http://192.168.1.10:55000/",
+      port: 55000,
+      portName: "DEV_PORT",
+      expiresAt: 123,
+      ports: [{ name: "DEV_PORT", port: 8471, listening: true }]
+    });
+    const cloud = createClientMock({
+      listRecentTasks: vi.fn().mockResolvedValue([
+        task({ id: "cloud-only", ownerDesktopId: "desktop-cloud" })
+      ])
+    });
+    const lan = createClientMock({
+      listRecentTasks: vi.fn().mockResolvedValue([task({ id: "lan-only" })]),
+      openTaskPreview: lanPreview
+    });
+    const client = createCloudLanClient(cloud, lan, {
+      isLanEnabled: () => true
+    });
+
+    await client.listRecentTasks();
+
+    expect(client.canOpenTaskPreview?.("lan-only")).toBe(true);
+    expect(client.canOpenTaskPreview?.("cloud-only")).toBe(false);
+    await expect(client.openTaskPreview?.("lan-only", "DEV_PORT")).resolves.toMatchObject({
+      portName: "DEV_PORT"
+    });
+    expect(lanPreview).toHaveBeenCalledWith("lan-only", "DEV_PORT");
+  });
+
   it("explains an unresolved canonical repository while cloud routing is disabled", async () => {
     const cloud = createClientMock();
     const lan = createClientMock({

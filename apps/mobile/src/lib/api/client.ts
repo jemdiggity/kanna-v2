@@ -35,6 +35,7 @@ import type {
   TaskInputAttachment,
   TaskInputResult,
   TaskDetail,
+  TaskPreviewOpenResult,
   TaskSummary
 } from "./types";
 
@@ -199,6 +200,8 @@ export interface KannaTransport {
     expectedActivityRevision?: number
   ): Promise<TaskActivityResponse>;
   closeTask(taskId: string): Promise<void>;
+  openTaskPreview?(taskId: string, portName?: string): Promise<TaskPreviewOpenResult>;
+  closeTaskPreview?(taskId: string): Promise<void>;
   sendTaskInput(
     taskId: string,
     input: string,
@@ -275,6 +278,9 @@ export interface KannaClient {
     expectedActivityRevision?: number
   ): Promise<TaskActivityResponse>;
   closeTask(taskId: string): Promise<void>;
+  canOpenTaskPreview?(taskId: string): boolean;
+  openTaskPreview?(taskId: string, portName?: string): Promise<TaskPreviewOpenResult>;
+  closeTaskPreview?(taskId: string): Promise<void>;
   sendTaskInput(
     taskId: string,
     input: string,
@@ -417,6 +423,19 @@ export function createKannaClient(transport: KannaTransport): KannaClient {
     markTaskRead: (taskId, expectedActivityRevision) =>
       transport.markTaskRead(taskId, expectedActivityRevision),
     closeTask: (taskId) => transport.closeTask(taskId),
+    ...(transport.openTaskPreview
+      ? {
+          canOpenTaskPreview: () => true,
+          openTaskPreview: (taskId: string, portName?: string) =>
+            transport.openTaskPreview!(taskId, portName)
+        }
+      : {}),
+    ...(transport.closeTaskPreview
+      ? {
+          closeTaskPreview: (taskId: string) =>
+            transport.closeTaskPreview!(taskId)
+        }
+      : {}),
     sendTaskInput: (taskId, input, attachment) =>
       attachment
         ? transport.sendTaskInput(taskId, input, attachment)

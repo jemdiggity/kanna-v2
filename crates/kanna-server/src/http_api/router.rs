@@ -15,6 +15,7 @@ use super::pairing::{
     claim_pairing_session, create_pairing_session, reissue_push_pairing_certificate,
     remove_trusted_device,
 };
+use super::preview::{close_task_preview, open_task_preview};
 use super::repo_browser::{list_task_directory, read_task_file_range};
 use super::repo_commands::{list_repo_commands, run_repo_command};
 use super::repos::{
@@ -267,6 +268,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/tasks/{task_id}/ports",
             post(claim_task_ports).delete(release_task_ports),
+        )
+        .route(
+            "/v1/tasks/{task_id}/preview",
+            post(open_task_preview).delete(close_task_preview),
         )
         .route(
             "/v1/tasks/{task_id}/actions/run-merge-agent",

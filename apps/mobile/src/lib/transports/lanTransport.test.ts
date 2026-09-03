@@ -24,6 +24,49 @@ describe("createLanTransport", () => {
     );
   });
 
+  it("opens preview through the validated LAN host without exposing pairing credentials in the URL", async () => {
+    const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        port: 55321,
+        portName: "DEV_PORT",
+        enterPath: "/__kanna_preview__/enter?t=desktop-secret",
+        expiresAt: 123,
+        ports: [{ name: "DEV_PORT", port: 8471, listening: true }]
+      })
+    });
+    const transport = createLanTransport(
+      "http://192.168.1.20:48120",
+      fetchImpl,
+      undefined,
+      { deviceCredentials: { deviceId: "phone", deviceSecret: "pair-secret" } }
+    );
+
+    await expect(transport.openTaskPreview?.("task/1", "DEV_PORT")).resolves.toEqual({
+      url: "http://192.168.1.20:55321/__kanna_preview__/enter?t=desktop-secret",
+      port: 55321,
+      portName: "DEV_PORT",
+      expiresAt: 123,
+      ports: [{ name: "DEV_PORT", port: 8471, listening: true }]
+    });
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "http://192.168.1.20:48120/v1/tasks/task%2F1/preview",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Kanna-Device-Id": "phone",
+          "X-Kanna-Device-Secret": "pair-secret"
+        },
+        body: JSON.stringify({ portName: "DEV_PORT" })
+      }
+    );
+    expect(
+      (await transport.openTaskPreview?.("task/1", "DEV_PORT"))?.url
+    ).not.toContain("pair-secret");
+  });
+
   it("returns durable held-input status without inviting a retry", async () => {
     const queued = {
       status: "queued",

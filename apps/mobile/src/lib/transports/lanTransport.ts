@@ -29,6 +29,7 @@ import type {
   TaskInputAttachment,
   TaskInputResult,
   TaskDetail,
+  TaskPreviewOpenResult,
   TaskSummary
 } from "../api/types";
 import { parseAgentProviderInventory } from "../api/agentProviders";
@@ -239,6 +240,27 @@ export function createLanTransport(
     closeTask: (taskId: string) =>
       request<void>(`/v1/tasks/${encodeURIComponent(taskId)}/actions/close`, {
         method: "POST"
+      }),
+    openTaskPreview: async (taskId: string, portName?: string) => {
+      const opened = await request<
+        Omit<TaskPreviewOpenResult, "url"> & { enterPath: string }
+      >(
+        `/v1/tasks/${encodeURIComponent(taskId)}/preview`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(portName ? { portName } : {})
+        }
+      );
+      const previewOrigin = new URL(baseUrl);
+      previewOrigin.port = String(opened.port);
+      const enterUrl = new URL(opened.enterPath, previewOrigin.origin);
+      const { enterPath: _enterPath, ...result } = opened;
+      return { ...result, url: enterUrl.toString() };
+    },
+    closeTaskPreview: (taskId: string) =>
+      request<void>(`/v1/tasks/${encodeURIComponent(taskId)}/preview`, {
+        method: "DELETE"
       }),
     sendTaskInput: (
       taskId: string,

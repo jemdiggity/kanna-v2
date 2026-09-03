@@ -1,14 +1,15 @@
 # Remote Dev-Server Preview — Architecture Spec
 
-Status: architect consultation verdict (task `48b324bd`, 2026-08-21). Analysis
-and design only — implementation is sliced at the end and meant to be spawned
-as tasks. Owner feature request (verbatim): *"if the user is developing a
+Status: architect consultation verdict (task `48b324bd`, 2026-08-21). The LAN
+P0/P1 slice was implemented by task `2967f435` on 2026-09-03; the off-network
+relay P2 slice and its recorded owner/infrastructure decisions remain future
+work. Owner feature request (verbatim): *"if the user is developing a
 webapp on kanna via our mobile app, and doing it remotely, there's no easy way
 for them to view their dev server to preview their app."* Owner ruling
 (2026-08-21, carried from the billing work): everything through the relay is
 entitlement-gated — **cloud access paid, LAN free**.
 
-## Verified current state (2026-08-21)
+## Verified pre-implementation state (2026-08-21)
 
 Confirmed by source inspection in this worktree. Corrections to the
 consultation prompt are marked ⚠️.
@@ -209,9 +210,11 @@ Remote: WebView ─ https://p-<token>.relay.kanna.build/ ─► relay preview  �
   are also revoked on: task close, stage transition (workspace teardown —
   the same hook that kills the daemon session), idle/hard expiry, and
   desktop restart (in-memory). Revocation closes the LAN listener / relay
-  tunnel; in-flight responses are aborted.
+  tunnel. The LAN listener stops accepting new requests immediately; already
+  accepted HTTP responses drain through graceful shutdown, while every new
+  request revalidates the task, workspace, and claimed port.
 - `mobile_api::TaskDetail` gains `ports: [{name, port}] | null` (serialized
-  from `pipeline_item.port_env`) so the phone can show the affordance without
+  from the task's `task_port` rows) so the phone can show the affordance without
   a second request. Field absence = old desktop = hide the affordance (this
   is the version-skew gate).
 
@@ -250,9 +253,9 @@ residual).
 - `Upgrade: websocket` → forwarder performs the upstream handshake and then
   splices raw bytes (hyper upgrade), which is what makes Vite/Metro HMR work
   unmodified.
-- Per-session caps: max 64 concurrent streams, max 16 concurrent LAN TCP
-  connections (the `cloud_transfer_proxy` numbers), per-session buffered
-  bytes bounded (below).
+- The implemented LAN path admits at most 16 concurrent HTTP responses or
+  WebSocket connections per session. The future relay path retains its
+  separate 64-stream cap and bounded buffering rules below.
 
 ## Q1 — LAN path (ship first)
 

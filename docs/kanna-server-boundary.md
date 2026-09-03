@@ -190,6 +190,8 @@ the client falls back to a bounded snapshot.
 - `POST /v1/tasks/{task_id}/actions/signal-merge-handoff`
 - `POST /v1/tasks/{task_id}/actions/rerun-stage`
 - `POST /v1/tasks/{task_id}/actions/run-merge-agent`
+- `POST /v1/tasks/{task_id}/preview` (paired-LAN/loopback only; mint a short-lived preview listener for one declared task port)
+- `DELETE /v1/tasks/{task_id}/preview` (revoke all live LAN preview listeners for the task)
 - `POST /v1/mobile/notifications`
 - `GET /v1/mobile/notifications/registration`
 - `POST /v1/pairing/sessions`
@@ -223,6 +225,9 @@ a new LAN pairing ceremony, which binds the device to the new identity.
 
 Task-list rows are deliberately bounded summaries. `prompt` contains at most
 500 characters; `GET /v1/tasks/{task_id}` is the full-prompt surface.
+Task detail also returns `ports: [{name, port}] | null` from the task's current
+claimed-port rows. Mobile treats field absence as an older desktop and `null`
+as a preview-capable desktop with no declared port.
 `waitingPromptSnippet` is the canonical latest-output preview key (the server
 still accepts the deprecated `snippet` key when aggregating an older peer, but
 does not serialize both). `agent` is the name recorded on the latest durable

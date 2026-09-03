@@ -633,6 +633,7 @@ function TaskDetailRoute({
       (resolveDurableTaskId(state, routeTaskId) ?? routeTaskId)
       ? state.pendingTaskAction.action
       : null);
+  const previewTaskId = resolveDurableTaskId(state, routeTaskId);
 
   return (
     <TaskScreen
@@ -707,6 +708,23 @@ function TaskDetailRoute({
         return durableTaskId
           ? controller.readTaskDiff(durableTaskId, request)
           : Promise.reject(new Error("Task creation is still in progress."));
+      }}
+      taskPreviewRouteAvailable={
+        previewTaskId
+          ? (controller.canOpenTaskPreview?.(previewTaskId) ?? false)
+          : false
+      }
+      onOpenTaskPreview={(portName) => {
+        const durableTaskId = resolveDurableTaskId(state, routeTaskId);
+        return durableTaskId
+          ? controller.openTaskPreview(durableTaskId, portName)
+          : Promise.reject(new Error("Task creation is still in progress."));
+      }}
+      onCloseTaskPreview={() => {
+        const durableTaskId = resolveDurableTaskId(state, routeTaskId);
+        return durableTaskId
+          ? controller.closeTaskPreview(durableTaskId)
+          : Promise.resolve();
       }}
       onSendInput={(input, attachment) => {
         const durableTaskId = resolveDurableTaskId(state, routeTaskId);

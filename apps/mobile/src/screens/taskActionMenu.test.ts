@@ -66,6 +66,33 @@ describe("showTaskActionMenu", () => {
     );
   });
 
+  it("offers dev-server preview only when a declared port is available", () => {
+    showTaskActionMenu(
+      {
+        mentionedFilesLabel: "Mentioned Files (0)",
+        previewAvailable: true
+      },
+      vi.fn()
+    );
+
+    expect(nativeMocks.actionSheet).toHaveBeenCalledWith(
+      expect.objectContaining({
+        options: [
+          "Preview Dev Server",
+          "Browse Files",
+          "Mentioned Files (0)",
+          "View Diff",
+          "Advance Stage",
+          "Close Task",
+          "Cancel"
+        ],
+        cancelButtonIndex: 6,
+        destructiveButtonIndex: 5
+      }),
+      expect.any(Function)
+    );
+  });
+
   it.each([
     [0, "browse-files"],
     [1, "mentioned-files"],
