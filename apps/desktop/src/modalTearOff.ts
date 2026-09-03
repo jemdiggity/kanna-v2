@@ -1,10 +1,15 @@
 import type { PendingReviewComment } from "./utils/reviewComments";
 
+export type RemoteTaskViewTransport = "lan" | "cloud";
+
 export interface TreeExplorerTearOffContext {
   surface: "tree";
   worktreePath: string;
   repoRoot: string;
   homePath?: string;
+  remoteDesktopId?: string;
+  remoteTaskId?: string;
+  remoteTransport?: RemoteTaskViewTransport;
 }
 
 export interface DiffTearOffContext {
@@ -22,6 +27,9 @@ export interface DiffTearOffContext {
   reviewHeadCommit?: string;
   approveSignalsMerge?: boolean;
   hasRunningPost?: boolean;
+  remoteDesktopId?: string;
+  remoteTaskId?: string;
+  remoteTransport?: RemoteTaskViewTransport;
 }
 
 export type ModalTearOffContext = TreeExplorerTearOffContext | DiffTearOffContext;
@@ -52,6 +60,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 export function isModalTearOffContext(value: unknown): value is ModalTearOffContext {
   if (!isRecord(value)) return false;
+  const hasValidRemoteRoute =
+    (value.remoteDesktopId === undefined
+      && value.remoteTaskId === undefined
+      && value.remoteTransport === undefined)
+    || (typeof value.remoteDesktopId === "string"
+      && typeof value.remoteTaskId === "string"
+      && (value.remoteTransport === undefined
+        || value.remoteTransport === "lan"
+        || value.remoteTransport === "cloud"));
+  if (!hasValidRemoteRoute) return false;
   if (value.surface === "tree") {
     return typeof value.worktreePath === "string" && typeof value.repoRoot === "string";
   }

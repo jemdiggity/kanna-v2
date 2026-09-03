@@ -1,11 +1,28 @@
 // @vitest-environment happy-dom
 
-import { defineComponent, h, nextTick, reactive } from "vue";
+import { computed, defineComponent, h, nextTick, reactive } from "vue";
 import { mount } from "@vue/test-utils";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { MarkdownPreviewMode } from "../stores/markdownPreviewMode";
 import type { ModalTearOffContext } from "../modalTearOff";
+import type { WorkspaceTask } from "../workspace/types";
 import { useAppModals } from "./useAppModals";
+
+const taskViewMocks = vi.hoisted(() => ({
+  relayFactory: vi.fn(),
+  lanFactory: vi.fn(),
+  listTaskDirectory: vi.fn(),
+  readTaskFile: vi.fn(),
+  readTaskDiff: vi.fn(),
+}));
+
+vi.mock("../services/desktopRelayTerminal", () => ({
+  createConfiguredDesktopRemoteTaskViewClient: taskViewMocks.relayFactory,
+}));
+
+vi.mock("../services/desktopLanTerminal", () => ({
+  createConfiguredDesktopLanTaskViewClient: taskViewMocks.lanFactory,
+}));
 
 function deferred() {
   let resolve!: () => void;
@@ -21,6 +38,7 @@ function mountMarkdownModalHarness(options: {
   tearOffContext?: ModalTearOffContext;
   selectedRepo?: { id: string; path: string };
   currentItem?: { id: string; branch: string };
+  selectedWorkspaceTask?: WorkspaceTask;
 } = {}) {
   const savePreference = vi.fn(
     options.savePreference ?? (async () => {}),
@@ -51,6 +69,7 @@ function mountMarkdownModalHarness(options: {
           persistSidebarWidth: vi.fn(),
           clearTearOffContext,
         } as unknown as Parameters<typeof useAppModals>[0]["windowWorkspace"],
+        selectedWorkspaceTask: computed(() => options.selectedWorkspaceTask ?? null),
       });
       return { modals };
     },
@@ -63,6 +82,138 @@ function mountMarkdownModalHarness(options: {
 }
 
 describe("useAppModals", () => {
+  beforeEach(() => {
+    taskViewMocks.relayFactory.mockReset();
+    taskViewMocks.lanFactory.mockReset().mockResolvedValue({
+      close: vi.fn(),
+      listTaskDirectory: taskViewMocks.listTaskDirectory,
+      readTaskFile: taskViewMocks.readTaskFile,
+      readTaskDiff: taskViewMocks.readTaskDiff,
+    });
+    taskViewMocks.listTaskDirectory.mockReset().mockResolvedValue({
+      path: "",
+      entries: [],
+      offset: 0,
+      nextOffset: null,
+      totalEntries: 0,
+    });
+    taskViewMocks.readTaskFile.mockReset().mockResolvedValue({
+      path: "README.md",
+      content: "LAN body",
+    });
+    taskViewMocks.readTaskDiff.mockReset().mockResolvedValue({
+      taskId: "owner-task",
+      baseRef: "main",
+      mergeBase: "base",
+      patch: "diff",
+      truncated: false,
+    });
+  });
+
+  it("routes remote-owned task views without constructing a local worktree path", () => {
+    const remoteItem = {
+      id: "cloud-task",
+      branch: "task-owner-branch",
+    };
+    const harness = mountMarkdownModalHarness({
+      selectedRepo: { id: "local-repo", path: "/local/repo" },
+      currentItem: { id: "local-shadow", branch: "task-local-shadow" },
+      selectedWorkspaceTask: {
+        item: remoteItem,
+        owner: { kind: "remote", id: "desktop-owner" },
+        terminal: {
+          kind: "cloud",
+          remoteRef: {
+            ownerDesktopId: "desktop-owner",
+            ownerLocalTaskId: "owner-task",
+          },
+        },
+      } as WorkspaceTask,
+    });
+
+    expect(harness.modals.currentWorktreePath.value).toBeUndefined();
+    expect(harness.modals.activeRepoPath.value).toBe("");
+    expect(harness.modals.activeTaskViewIsRemote.value).toBe(true);
+    expect(harness.modals.activeRemoteTaskRoute.value).toEqual({
+      desktopId: "desktop-owner",
+      taskId: "owner-task",
+      transport: "cloud",
+    });
+    expect(harness.modals.treeExplorerRoot.value).toBe("task-owner-branch");
+
+    harness.wrapper.unmount();
+  });
+
+  it("routes LAN tree, file, and diff reads without constructing a relay client", async () => {
+    const harness = mountMarkdownModalHarness({
+      selectedWorkspaceTask: {
+        item: { id: "lan-task", branch: "task-owner-branch" },
+        owner: { kind: "remote", id: "peer-owner" },
+        terminal: {
+          kind: "lan",
+          remoteRef: {
+            ownerDesktopId: "peer-owner",
+            ownerLocalTaskId: "owner-task",
+          },
+        },
+      } as WorkspaceTask,
+    });
+
+    expect(harness.modals.activeRemoteTaskRoute.value).toEqual({
+      desktopId: "peer-owner",
+      taskId: "owner-task",
+      transport: "lan",
+    });
+
+    await harness.modals.listRemoteTaskDirectory("src", true);
+    await harness.modals.readRemoteTaskFile("README.md");
+    await harness.modals.readRemoteTaskDiff({ scope: "working", mode: "all" });
+
+    expect(taskViewMocks.lanFactory).toHaveBeenCalledOnce();
+    expect(taskViewMocks.relayFactory).not.toHaveBeenCalled();
+    expect(taskViewMocks.listTaskDirectory).toHaveBeenCalledWith({
+      desktopId: "peer-owner",
+      taskId: "owner-task",
+      path: "src",
+      showAllFiles: true,
+    });
+    expect(taskViewMocks.readTaskFile).toHaveBeenCalledWith({
+      desktopId: "peer-owner",
+      taskId: "owner-task",
+      path: "README.md",
+    });
+    expect(taskViewMocks.readTaskDiff).toHaveBeenCalledWith({
+      desktopId: "peer-owner",
+      taskId: "owner-task",
+      request: { scope: "working", mode: "all" },
+    });
+    harness.wrapper.unmount();
+  });
+
+  it("keeps an unreachable remote-owned task off local filesystem paths", async () => {
+    const harness = mountMarkdownModalHarness({
+      selectedRepo: { id: "local-repo", path: "/local/repo" },
+      currentItem: { id: "local-shadow", branch: "task-local-shadow" },
+      selectedWorkspaceTask: {
+        item: { id: "cloud-offline", branch: "task-owner-offline" },
+        owner: { kind: "remote", id: "unknown" },
+        sources: [],
+        terminal: { kind: "none" },
+      } as WorkspaceTask,
+    });
+
+    expect(harness.modals.currentWorktreePath.value).toBeUndefined();
+    expect(harness.modals.activeRepoPath.value).toBe("");
+    expect(harness.modals.activeTaskViewIsRemote.value).toBe(true);
+    expect(harness.modals.activeRemoteTaskRoute.value).toBeNull();
+    expect(harness.modals.treeExplorerRoot.value).toBe("task-owner-offline");
+    await expect(harness.modals.listRemoteTaskDirectory("", false)).rejects.toThrow(
+      "Remote task route is unavailable.",
+    );
+
+    harness.wrapper.unmount();
+  });
+
   it("restores a transferred tree as a normal maximized modal and clears only its transfer state", async () => {
     const harness = mountMarkdownModalHarness({
       selectedRepo: { id: "repo-current", path: "/current-repo" },
@@ -90,6 +241,27 @@ describe("useAppModals", () => {
     expect(harness.modals.maximizedModal.value).toBe(null);
     expect(harness.clearTearOffContext).toHaveBeenCalledOnce();
     await nextTick();
+    harness.wrapper.unmount();
+  });
+
+  it("restores the authoritative LAN transport from a remote tree tear-off", () => {
+    const harness = mountMarkdownModalHarness({
+      tearOffContext: {
+        surface: "tree",
+        worktreePath: "task-owner-branch",
+        repoRoot: "",
+        remoteDesktopId: "peer-owner",
+        remoteTaskId: "owner-task",
+        remoteTransport: "lan",
+      },
+    });
+
+    expect(harness.modals.activeTaskViewIsRemote.value).toBe(true);
+    expect(harness.modals.activeRemoteTaskRoute.value).toEqual({
+      desktopId: "peer-owner",
+      taskId: "owner-task",
+      transport: "lan",
+    });
     harness.wrapper.unmount();
   });
 

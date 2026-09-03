@@ -459,4 +459,50 @@ describe("FilePreviewModal", () => {
 
     wrapper.unmount();
   });
+
+  it("loads a remote task file without reading the local worktree", async () => {
+    const remoteContentLoader = vi.fn(async () => "export const owner = 'machine-b';");
+    const wrapper = mount(FilePreviewModal, {
+      props: {
+        filePath: "src/owner.ts",
+        worktreePath: "",
+        remoteContentLoader,
+      },
+      global: { mocks: { $t: (key: string) => key } },
+    });
+
+    try {
+      await vi.waitFor(() => {
+        expect(wrapper.get(".preview-content").text()).toContain("machine-b");
+      });
+      expect(remoteContentLoader).toHaveBeenCalledWith("src/owner.ts");
+      expect(invokeMock).not.toHaveBeenCalledWith("read_text_file", expect.anything());
+      expect(wrapper.find(".btn-open").exists()).toBe(false);
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it("renders an explicit unavailable state when a remote task file read fails", async () => {
+    const wrapper = mount(FilePreviewModal, {
+      props: {
+        filePath: "src/missing.ts",
+        worktreePath: "",
+        remoteContentLoader: vi.fn(async () => {
+          throw new Error("task workspace unavailable");
+        }),
+      },
+      global: { mocks: { $t: (key: string) => key } },
+    });
+
+    try {
+      await vi.waitFor(() => {
+        expect(wrapper.get('[data-testid="file-preview-unavailable"]').text()).toContain(
+          "Task file unavailable: task workspace unavailable",
+        );
+      });
+    } finally {
+      wrapper.unmount();
+    }
+  });
 });

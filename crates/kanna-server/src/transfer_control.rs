@@ -30,6 +30,8 @@ const OPERATIONS: &[&str] = &[
     "close-peer-task",
     "advance-peer-task-stage",
     "read-peer-task-file",
+    "read-peer-task-directory",
+    "read-peer-task-diff",
     "mark-peer-task-read",
     "start-pairing",
     "accept-pairing",
@@ -231,6 +233,36 @@ pub async fn dispatch(
                         "target_peer_id": required_string(&params, &["peerId"])?,
                         "task_id": required_string(&params, &["taskId"])?,
                         "path": required_string(&params, &["path"])?,
+                    }),
+                )
+                .await
+        }
+        "read-peer-task-directory" => {
+            client
+                .request(
+                    "read_peer_task_directory",
+                    json!({
+                        "target_peer_id": required_string(&params, &["peerId"] )?,
+                        "task_id": required_string(&params, &["taskId"] )?,
+                        "path": required_string(&params, &["path"] )?,
+                        "show_all_files": required_bool(&params, &["showAllFiles"] )?,
+                        "offset": number(&params, &["offset"])
+                            .ok_or("read-peer-task-directory requires offset")?,
+                        "limit": number(&params, &["limit"])
+                            .ok_or("read-peer-task-directory requires limit")?,
+                    }),
+                )
+                .await
+        }
+        "read-peer-task-diff" => {
+            client
+                .request(
+                    "read_peer_task_diff",
+                    json!({
+                        "target_peer_id": required_string(&params, &["peerId"] )?,
+                        "task_id": required_string(&params, &["taskId"] )?,
+                        "scope": required_string(&params, &["scope"] )?,
+                        "mode": required_string(&params, &["mode"] )?,
                     }),
                 )
                 .await
@@ -597,6 +629,8 @@ mod tests {
             "complete-outgoing-transfer-finalization"
         ));
         assert!(is_transfer_control_operation("abandon-outgoing-transfer"));
+        assert!(is_transfer_control_operation("read-peer-task-directory"));
+        assert!(is_transfer_control_operation("read-peer-task-diff"));
         assert!(!is_transfer_control_operation("shutdown"));
         assert!(!is_transfer_control_operation(""));
     }

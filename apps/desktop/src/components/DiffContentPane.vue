@@ -21,7 +21,7 @@ defineExpose({ getContainerElement });
 </script>
 
 <template>
-  <div v-if="error" class="diff-status diff-error">{{ error }}</div>
+  <div v-if="error" class="diff-status diff-error" role="alert" data-testid="diff-unavailable">{{ error }}</div>
   <div v-else-if="noDiff && !loading" class="diff-status">{{ $t('diffView.noChanges') }}</div>
   <div ref="containerRef" class="diff-container" @scroll="$emit('scroll')"></div>
 </template>

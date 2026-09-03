@@ -44,12 +44,12 @@ const diffApproveSignalsMerge = computed(() => {
   if (m.transferredDiffContext.value?.approveSignalsMerge !== undefined) {
     return m.transferredDiffContext.value.approveSignalsMerge;
   }
-  const item = c.store.currentItem;
+  const item = m.activeTask.value;
   return item ? pinnedApproveMergePost(item) : false;
 });
 const diffHasRunningPost = computed(() =>
   m.transferredDiffContext.value?.hasRunningPost
-    ?? Boolean(c.store.currentItem?.has_running_post)
+    ?? Boolean(m.activeTask.value?.has_running_post)
 );
 
 function setShellModalRef(component: Element | ComponentPublicInstance | null) {
@@ -145,21 +145,25 @@ function setPreferencesRef(component: Element | ComponentPublicInstance | null) 
   </KeepAlive>
   <DiffModal
     :ref="setDiffModalRef"
-    v-if="m.showDiffModal.value && !c.isMobile && m.activeRepoPath.value"
-    :repo-path="m.activeRepoPath.value"
+    v-if="m.showDiffModal.value && !c.isMobile && (m.activeRepoPath.value || m.activeTaskViewIsRemote.value)"
+    :repo-path="m.activeRepoPath.value || ''"
     :worktree-path="m.activeDiffWorktreePath.value"
     :initial-scope="m.currentDiffViewState.value?.scope"
     :initial-scroll-positions="m.currentDiffViewState.value?.scrollPositions"
     :initial-branch-include="m.currentDiffViewState.value?.branchInclude"
-    :base-ref="m.transferredDiffContext.value?.baseRef ?? c.store.currentItem?.base_ref ?? undefined"
+    :base-ref="m.transferredDiffContext.value?.baseRef ?? m.activeTask.value?.base_ref ?? undefined"
     :view-key="m.currentDiffViewKey.value"
     :maximized="m.maximizedModal.value === 'diff'"
-    :task-id="m.transferredDiffContext.value?.taskId ?? c.store.currentItem?.id"
-    :review-stage="m.transferredDiffContext.value?.reviewStage ?? c.store.currentItem?.stage ?? undefined"
+    :task-id="m.transferredDiffContext.value?.taskId ?? m.activeTask.value?.id"
+    :review-stage="m.transferredDiffContext.value?.reviewStage ?? m.activeTask.value?.stage ?? undefined"
     :review-comments="m.currentDiffViewState.value?.reviewComments"
     :review-head-commit="m.currentDiffViewState.value?.reviewHeadCommit"
     :approve-signals-merge="diffApproveSignalsMerge"
     :has-running-post="diffHasRunningPost"
+    :remote-diff-loader="m.activeTaskViewIsRemote.value ? m.readRemoteTaskDiff : undefined"
+    :remote-desktop-id="m.activeRemoteTaskRoute.value?.desktopId"
+    :remote-task-id="m.activeRemoteTaskRoute.value?.taskId"
+    :remote-transport="m.activeRemoteTaskRoute.value?.transport"
     @scope-change="(scope: DiffScope) => m.updateCurrentDiffViewState({ scope })"
     @scroll-state-change="(scrollPositions: DiffScrollPositions) => m.updateCurrentDiffViewState({ scrollPositions })"
     @branch-include-change="(branchInclude: BranchInclude) => m.updateCurrentDiffViewState({ branchInclude })"
@@ -195,17 +199,22 @@ function setPreferencesRef(component: Element | ComponentPublicInstance | null) 
     :home-path="m.homePath.value"
     :maximized="m.maximizedModal.value === 'tree'"
     :suspended="m.showFilePreviewModal.value && m.previewFromTree.value"
+    :remote-directory-loader="m.activeTaskViewIsRemote.value ? m.listRemoteTaskDirectory : undefined"
+    :remote-desktop-id="m.activeRemoteTaskRoute.value?.desktopId"
+    :remote-task-id="m.activeRemoteTaskRoute.value?.taskId"
+    :remote-transport="m.activeRemoteTaskRoute.value?.transport"
     @close="m.closeTreeExplorer"
     @open-file="(f: string) => m.openFilePreview(f, undefined, false, true)"
   />
   <FilePreviewModal
     :ref="setFilePreviewRef"
-    v-if="(m.showFilePreviewModal.value || m.previewHidden.value) && !c.isMobile && (m.activeRepoPath.value || m.previewRemoteContent.value !== null)"
+    v-if="(m.showFilePreviewModal.value || m.previewHidden.value) && !c.isMobile && (m.activeRepoPath.value || m.activeTaskViewIsRemote.value || m.previewRemoteContent.value !== null)"
     v-show="m.showFilePreviewModal.value"
     :key="`${m.activeWorktreePath.value}:${m.previewFilePath.value}`"
     :file-path="m.previewFilePath.value"
     :worktree-path="m.activeWorktreePath.value"
     :remote-content="m.previewRemoteContent.value"
+    :remote-content-loader="m.activeTaskViewIsRemote.value ? m.readRemoteTaskFile : undefined"
     :ide-command="c.store.ideCommand"
     :initial-line="m.previewInitialLine.value"
     :initial-markdown-mode="m.currentPreviewMarkdownMode.value"

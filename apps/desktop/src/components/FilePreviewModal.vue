@@ -32,6 +32,7 @@ const props = withDefaults(
      * actions (open in IDE) are hidden.
      */
     remoteContent?: string | null;
+    remoteContentLoader?: (path: string) => Promise<string>;
     ideCommand?: string;
     maximized?: boolean;
     initialLine?: number;
@@ -42,6 +43,9 @@ const props = withDefaults(
     remoteContent: null,
     initialMarkdownMode: DEFAULT_MARKDOWN_PREVIEW_MODE,
   },
+);
+const isRemoteFile = computed(() =>
+  props.remoteContent !== null || props.remoteContentLoader !== undefined
 );
 
 const emit = defineEmits<{
@@ -82,7 +86,7 @@ registerContextShortcuts("file", [
   ...(props.filePath.toLowerCase().endsWith(".md")
     ? [{ label: t('filePreview.shortcutToggleMarkdown'), display: "m", groupKey: "shortcuts.groupViews" }]
     : []),
-  ...(props.remoteContent === null
+  ...(!isRemoteFile.value
     ? [{ label: t('filePreview.shortcutOpenIDE'), display: "⌘O", groupKey: "shortcuts.groupActions" }]
     : []),
   { label: t('filePreview.shortcutClose'), display: "q", groupKey: "shortcuts.groupActions" },
@@ -183,15 +187,15 @@ watch([renderMarkdown, content, effectiveCodeTheme], async ([shouldRender, raw])
   renderedMarkdown.value = parser.render(raw);
 });
 
-const isRemoteFile = computed(() => props.remoteContent !== null);
-
 async function loadFile() {
   loading.value = true;
   error.value = null;
   try {
-    const raw = props.remoteContent !== null
-      ? props.remoteContent
-      : await invoke<string>("read_text_file", { path: `${props.worktreePath}/${props.filePath}` });
+    const raw = props.remoteContentLoader
+      ? await props.remoteContentLoader(props.filePath)
+      : props.remoteContent !== null
+        ? props.remoteContent
+        : await invoke<string>("read_text_file", { path: `${props.worktreePath}/${props.filePath}` });
 
     const hl = await getHighlighter();
     const lang = getSyntaxLanguageForPath(props.filePath);
@@ -270,6 +274,10 @@ watch(() => props.filePath, () => {
 });
 
 watch(() => props.remoteContent, () => {
+  loadFile();
+});
+
+watch(() => props.remoteContentLoader, () => {
   loadFile();
 });
 
@@ -400,7 +408,9 @@ onMounted(() => {
         </div>
       </div>
       <div v-if="loading" class="preview-status">{{ $t('common.loading') }}</div>
-      <div v-else-if="error" class="preview-status preview-error">{{ error }}</div>
+      <div v-else-if="error" class="preview-status preview-error" role="alert" data-testid="file-preview-unavailable">
+        Task file unavailable: {{ error }}
+      </div>
       <div
         v-else
         ref="contentRef"

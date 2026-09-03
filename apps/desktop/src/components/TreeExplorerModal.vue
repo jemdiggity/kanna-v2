@@ -1,9 +1,14 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, nextTick, watch, toRef } from "vue";
-import { useTreeExplorer, type TreeNode } from "../composables/useTreeExplorer";
+import {
+  useTreeExplorer,
+  type RemoteDirectoryLoader,
+  type TreeNode,
+} from "../composables/useTreeExplorer";
 import { useShortcutContext, registerContextShortcuts } from "../composables/useShortcutContext";
 import { useModalZIndex } from "../composables/useModalZIndex";
 import { useModalTearOff } from "../composables/useModalTearOff";
+import type { RemoteTaskViewTransport } from "../modalTearOff";
 
 useShortcutContext("tree");
 registerContextShortcuts("tree", [
@@ -38,6 +43,10 @@ const props = defineProps<{
   maximized?: boolean;
   suspended?: boolean;
   standalone?: boolean;
+  remoteDirectoryLoader?: RemoteDirectoryLoader;
+  remoteDesktopId?: string;
+  remoteTaskId?: string;
+  remoteTransport?: RemoteTaskViewTransport;
 }>();
 
 const rootLabel = computed(() => {
@@ -63,6 +72,9 @@ const tearOff = useModalTearOff({
     worktreePath: props.worktreePath,
     repoRoot: props.repoRoot,
     ...(props.homePath ? { homePath: props.homePath } : {}),
+    ...(props.remoteDesktopId ? { remoteDesktopId: props.remoteDesktopId } : {}),
+    ...(props.remoteTaskId ? { remoteTaskId: props.remoteTaskId } : {}),
+    ...(props.remoteTransport ? { remoteTransport: props.remoteTransport } : {}),
   }),
   onTornOff: () => emit("close"),
 });
@@ -87,7 +99,8 @@ const {
   reset,
 } = useTreeExplorer(
   toRef(props, "worktreePath"),
-  toRef(props, "repoRoot")
+  toRef(props, "repoRoot"),
+  toRef(props, "remoteDirectoryLoader"),
 );
 
 const HORIZONTAL_WHEEL_THRESHOLD = 64;
@@ -283,7 +296,7 @@ function isDimmed(entry: TreeNode): boolean {
             </div>
           </div>
           <div v-if="loading" class="col-loading">&middot;&middot;&middot;</div>
-          <div v-else-if="error" class="col-error">{{ error }}</div>
+          <div v-else-if="error" class="col-error" role="alert" data-testid="tree-explorer-unavailable">{{ error }}</div>
           <div v-else-if="state.columns[1].length === 0" class="col-empty">(empty)</div>
         </div>
 

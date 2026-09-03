@@ -6,7 +6,8 @@ use super::companion::{
 };
 use super::daemon::{
     advance_owner_task_stage, close_owner_task, mark_owner_task_read, prepare_session_observer,
-    read_owner_task_file, resize_daemon_session, send_daemon_input, stream_daemon_session,
+    read_owner_task_diff, read_owner_task_directory, read_owner_task_file, resize_daemon_session,
+    send_daemon_input, stream_daemon_session,
 };
 use super::discovery::PeerDiscovery;
 use super::events::{
@@ -1652,6 +1653,79 @@ async fn handle_connection(
                 path,
                 content,
             },
+            Err(error) => PeerResponse::Error {
+                request_id,
+                message: error.to_string(),
+            },
+        },
+        Ok(PeerRequest::ReadTaskDirectory {
+            request_id,
+            requester_peer_id,
+            task_id,
+            path,
+            show_all_files,
+            offset,
+            limit,
+            sealed_payload,
+        }) => match async {
+            let payload = authenticate_peer_request(
+                &context,
+                &requester_peer_id,
+                sealed_payload.as_deref(),
+                "read_task_directory",
+                &request_id,
+            )
+            .await?;
+            ensure_authenticated_argument(&payload, "task_id", &task_id)?;
+            ensure_authenticated_argument(&payload, "path", &path)?;
+            ensure_authenticated_argument(&payload, "show_all_files", &show_all_files)?;
+            ensure_authenticated_argument(&payload, "offset", &offset)?;
+            ensure_authenticated_argument(&payload, "limit", &limit)?;
+            read_owner_task_directory(
+                &context,
+                &task_id,
+                &path,
+                show_all_files,
+                offset,
+                limit,
+            )
+            .await
+        }
+        .await
+        {
+            Ok(listing) => PeerResponse::ReadTaskDirectory {
+                request_id,
+                listing,
+            },
+            Err(error) => PeerResponse::Error {
+                request_id,
+                message: error.to_string(),
+            },
+        },
+        Ok(PeerRequest::ReadTaskDiff {
+            request_id,
+            requester_peer_id,
+            task_id,
+            scope,
+            mode,
+            sealed_payload,
+        }) => match async {
+            let payload = authenticate_peer_request(
+                &context,
+                &requester_peer_id,
+                sealed_payload.as_deref(),
+                "read_task_diff",
+                &request_id,
+            )
+            .await?;
+            ensure_authenticated_argument(&payload, "task_id", &task_id)?;
+            ensure_authenticated_argument(&payload, "scope", &scope)?;
+            ensure_authenticated_argument(&payload, "mode", &mode)?;
+            read_owner_task_diff(&context, &task_id, &scope, &mode).await
+        }
+        .await
+        {
+            Ok(diff) => PeerResponse::ReadTaskDiff { request_id, diff },
             Err(error) => PeerResponse::Error {
                 request_id,
                 message: error.to_string(),

@@ -6,9 +6,19 @@ import { buildGlobalKeydownScript, buildSelectorKeydownScript } from "../helpers
 import { WebDriverClient } from "../helpers/webdriver";
 import { cleanupFixtureRepos, createSeedFixtureRepo } from "../helpers/fixture-repo";
 import { cleanupWorktrees, importTestRepoDirect, resetDatabase } from "../helpers/reset";
+import { callVueMethod, execDb } from "../helpers/vue";
 
 const REPO_NAME = "task-switch-minimal";
 const IGNORED_FILE = "ignored-output.log";
+
+function isVueCallError(result: unknown): result is { __error: string } {
+  return Boolean(
+    result
+    && typeof result === "object"
+    && "__error" in result
+    && typeof (result as { __error?: unknown }).__error === "string",
+  );
+}
 
 async function pressKey(
   client: WebDriverClient,
@@ -100,6 +110,7 @@ async function waitForBreadcrumb(
 describe("tree explorer", () => {
   const client = new WebDriverClient();
   let fixtureRepoPath = "";
+  let fixtureRepoId = "";
   let repoImported = false;
 
   beforeAll(async () => {
@@ -118,7 +129,7 @@ describe("tree explorer", () => {
 
   async function ensureRepoImported(): Promise<void> {
     if (repoImported) return;
-    await importTestRepoDirect(client, fixtureRepoPath, REPO_NAME);
+    fixtureRepoId = await importTestRepoDirect(client, fixtureRepoPath, REPO_NAME);
     await client.waitForText(".repo-header", REPO_NAME, 10_000);
     repoImported = true;
   }
@@ -225,5 +236,43 @@ describe("tree explorer", () => {
     await pressActiveElementKey(client, "a");
     await waitForExplorerText(client, IGNORED_FILE);
     expect(await textContent(client, ".show-all-toggle")).toContain("showing all");
+  });
+
+  it("renders a removed local task worktree as unavailable instead of an empty tree or repo fallback", async () => {
+    await ensureRepoImported();
+    const taskId = "tree-missing-worktree";
+    const branch = "task-tree-missing-worktree";
+    await execDb(
+      client,
+      `INSERT OR REPLACE INTO pipeline_item
+         (id, repo_id, prompt, display_name, stage, branch, agent_type, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        taskId,
+        fixtureRepoId,
+        "Missing worktree explorer fixture",
+        "Missing worktree explorer fixture",
+        "in progress",
+        branch,
+        "agent",
+        "2026-09-03T00:00:00.000Z",
+        "2026-09-03T00:00:00.000Z",
+      ],
+    );
+    const refreshResult = await callVueMethod(client, "refreshAllItems");
+    if (isVueCallError(refreshResult)) throw new Error(refreshResult.__error);
+    const selectResult = await callVueMethod(client, "store.selectItem", taskId);
+    if (isVueCallError(selectResult)) throw new Error(selectResult.__error);
+
+    await client.executeSync(
+      `window.__KANNA_E2E__.setupState.showTreeExplorer = false;`,
+    );
+    await pressKey(client, "E", { meta: true, shift: true });
+    await client.waitForElement('[data-testid="tree-explorer-unavailable"]', 5_000);
+
+    const explorerText = await textContent(client, ".tree-modal");
+    expect(explorerText).toContain("Task files unavailable:");
+    expect(explorerText).not.toContain("README.md");
+    expect(explorerText).not.toContain("(empty)");
   });
 });

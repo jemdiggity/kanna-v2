@@ -458,6 +458,7 @@ vi.mock("./services/desktopLanTaskIndex", () => ({
 
 vi.mock("./services/desktopRelayTerminal", () => ({
   createConfiguredDesktopRelayTerminalClient: relayTerminalClientFactoryMock,
+  createConfiguredDesktopRemoteTaskViewClient: relayTerminalClientFactoryMock,
 }));
 
 vi.mock("./services/desktopLanTerminal", () => ({

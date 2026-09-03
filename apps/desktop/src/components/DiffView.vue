@@ -16,6 +16,10 @@ import { formatReviewAnchor, type PendingReviewComment } from "../utils/reviewCo
 import DiffContentPane from "./DiffContentPane.vue";
 import DiffToolbar from "./DiffToolbar.vue";
 import DiffSearchBar from "./DiffSearchBar.vue";
+import type {
+  RemoteTaskDiffContent,
+  RemoteTaskDiffRequest,
+} from "../services/desktopRemoteTaskClient";
 
 const { t } = useI18n();
 const { effectiveCodeTheme } = useThemeRuntime();
@@ -77,6 +81,7 @@ const props = defineProps<{
   reviewEnabled?: boolean;
   reviewComments?: PendingReviewComment[];
   reviewHeadCommit?: string;
+  remoteDiffLoader?: (request: RemoteTaskDiffRequest) => Promise<RemoteTaskDiffContent>;
 }>();
 const baseRef = computed(() => props.baseRef);
 const reviewEnabled = computed(() => Boolean(props.reviewEnabled) && scope.value === "branch");
@@ -99,6 +104,7 @@ const diffContent = ref("");
 const loading = ref(false);
 const error = ref<string | null>(null);
 const noDiff = ref(false);
+const diffTruncated = ref(false);
 const workingFilter = ref<WorkingFilter>("all");
 const branchInclude = ref<BranchInclude>(normalizeBranchInclude(props.initialBranchInclude));
 const scope = ref<DiffScope>(props.initialScope === "branch" ? "branch" : "working");
@@ -517,6 +523,7 @@ async function loadDiff(options: LoadDiffOptions = {}) {
   loading.value = true;
   error.value = null;
   noDiff.value = false;
+  diffTruncated.value = false;
   scrollRestorePendingLoadId = (scrollPositions.value[scope.value] ?? 0) > 0 ? loadId : 0;
   logDiffPerf(loadId, "start", {
     scope: scope.value,
@@ -529,8 +536,16 @@ async function loadDiff(options: LoadDiffOptions = {}) {
 
   try {
     let patch = "";
+    let truncated = false;
 
-    if (scope.value === "working") {
+    if (props.remoteDiffLoader) {
+      const request: RemoteTaskDiffRequest = scope.value === "working"
+        ? { scope: "working", mode: workingFilter.value }
+        : { scope: "branch", mode: branchInclude.value };
+      const remoteDiff = await props.remoteDiffLoader(request);
+      patch = remoteDiff.patch;
+      truncated = remoteDiff.truncated;
+    } else if (scope.value === "working") {
       const diffStartedAt = performance.now();
       const args: { repoPath: string; mode: WorkingFilter; contextLines?: number } = {
         repoPath: path,
@@ -588,8 +603,9 @@ async function loadDiff(options: LoadDiffOptions = {}) {
     if (!isActiveDiffLoad(loadId)) {
       return;
     }
+    diffTruncated.value = truncated;
 
-    if (!patch?.trim()) {
+    if (!patch?.trim() && !truncated) {
       noDiff.value = true;
       diffContent.value = "";
       renderedFiles.value = [];
@@ -620,7 +636,8 @@ async function loadDiff(options: LoadDiffOptions = {}) {
     if (!isActiveDiffLoad(loadId)) {
       return;
     }
-    error.value = e instanceof Error ? e.message : String(e);
+    const message = e instanceof Error ? e.message : String(e);
+    error.value = `Task diff unavailable: ${message}`;
     scrollRestorePendingLoadId = 0;
     clearScrollAnchorForLoad(loadId);
     logDiffPerf(loadId, "error", {
@@ -820,6 +837,14 @@ defineExpose({ refresh: loadDiff, dismissReviewLayer, jumpToReviewAnchor });
       @cycle-branch-include="cycleBranchInclude()"
       @toggle-context-lines="toggleContextLines()"
     />
+    <div
+      v-if="diffTruncated"
+      class="diff-truncated-warning"
+      data-testid="diff-truncated-warning"
+      role="alert"
+    >
+      Diff truncated at 1 MiB. The patch shown below is incomplete.
+    </div>
     <DiffContentPane
       ref="contentPaneRef"
       :error="error"
@@ -889,6 +914,17 @@ defineExpose({ refresh: loadDiff, dismissReviewLayer, jumpToReviewAnchor });
   flex-direction: column;
   outline: none;
   position: relative;
+}
+
+.diff-truncated-warning {
+  flex: 0 0 auto;
+  padding: 9px 14px;
+  border-top: 1px solid color-mix(in srgb, var(--kn-warning) 55%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--kn-warning) 55%, transparent);
+  background: color-mix(in srgb, var(--kn-warning) 14%, var(--kn-code-bg));
+  color: var(--kn-warning);
+  font-weight: 650;
+  letter-spacing: 0.01em;
 }
 
 .review-composer {

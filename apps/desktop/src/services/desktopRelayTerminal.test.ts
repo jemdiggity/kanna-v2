@@ -665,6 +665,105 @@ describe("createDesktopRelayTerminalClient", () => {
     await expect(malformedPromise).rejects.toThrow("Remote task file response was malformed.");
   });
 
+  it("reads a paginated task directory and scoped diff from the owning desktop", async () => {
+    const socket = new FakeSocket();
+    const client = createDesktopRelayTerminalClient({
+      createSocket: () => socket,
+      getIdToken: vi.fn(async () => "id-token"),
+      relayUrl: "ws://relay.test",
+    });
+
+    const directoryPromise = client.listTaskDirectory({
+      desktopId: "desktop-owner",
+      taskId: "owner-task",
+      path: "src dir",
+      showAllFiles: true,
+    });
+    const diffPromise = client.readTaskDiff({
+      desktopId: "desktop-owner",
+      taskId: "owner-task",
+      request: { scope: "working", mode: "staged" },
+    });
+
+    await openRelayTunnel(socket);
+    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
+    await vi.waitFor(() => {
+      expect(socket.sent.some((entry) => entry.includes("/browse?"))).toBe(true);
+      expect(socket.sent.some((entry) => entry.includes("/diff?"))).toBe(true);
+    });
+
+    const firstRequests = socket.sent.map((entry) => JSON.parse(entry));
+    const firstDirectory = firstRequests.find(
+      (entry) => entry.path === "/v1/tasks/owner-task/browse?path=src%20dir&showAllFiles=true&offset=0&limit=100",
+    );
+    const diff = firstRequests.find(
+      (entry) => entry.path === "/v1/tasks/owner-task/diff?scope=working&mode=staged",
+    );
+    expect(firstDirectory).toMatchObject({ type: "request", method: "GET", body: null });
+    expect(diff).toMatchObject({ type: "request", method: "GET", body: null });
+
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "response",
+        id: firstDirectory.id,
+        status: 200,
+        body: {
+          path: "src dir",
+          entries: [{ name: "a.ts", path: "src dir/a.ts", isDir: false, size: 12 }],
+          offset: 0,
+          nextOffset: 1,
+          totalEntries: 2,
+        },
+      }),
+    });
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "response",
+        id: diff.id,
+        status: 200,
+        body: {
+          taskId: "owner-task",
+          baseRef: null,
+          mergeBase: null,
+          patch: "remote patch",
+          truncated: false,
+        },
+      }),
+    });
+
+    await vi.waitFor(() => {
+      expect(socket.sent.some((entry) => entry.includes("offset=1"))).toBe(true);
+    });
+    const secondDirectory = socket.sent
+      .map((entry) => JSON.parse(entry))
+      .find((entry) => entry.path?.includes("offset=1"));
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "response",
+        id: secondDirectory.id,
+        status: 200,
+        body: {
+          path: "src dir",
+          entries: [{ name: "nested", path: "src dir/nested", isDir: true, size: null }],
+          offset: 1,
+          nextOffset: null,
+          totalEntries: 2,
+        },
+      }),
+    });
+
+    await expect(directoryPromise).resolves.toMatchObject({
+      path: "src dir",
+      entries: [
+        { name: "a.ts", path: "src dir/a.ts", isDir: false, size: 12 },
+        { name: "nested", path: "src dir/nested", isDir: true, size: null },
+      ],
+      nextOffset: null,
+      totalEntries: 2,
+    });
+    await expect(diffPromise).resolves.toMatchObject({ taskId: "owner-task", patch: "remote patch" });
+  });
+
   it("rejects a blocked owner response with its message", async () => {
     const socket = new FakeSocket();
     const client = createDesktopRelayTerminalClient({

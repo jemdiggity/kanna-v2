@@ -456,6 +456,7 @@ describe("buildWorkspace", () => {
       capabilities: {
         canOpenTerminal: true,
         canSendInput: true,
+        canOpenDiff: true,
         canClose: true,
         canAdvanceStage: true,
       },
@@ -834,7 +835,7 @@ describe("buildWorkspace", () => {
       canSendInput: true,
       canResizeTerminal: true,
       canClose: true,
-      canOpenDiff: false,
+      canOpenDiff: true,
       canOpenInIde: false,
       canOpenShell: false,
       canAdvanceStage: true,

@@ -4,6 +4,9 @@ import { createRelayTunnelWebSocketFactory, StreamClient } from "@kanna/stream-c
 import { createDesktopStreamFrameDecoder } from "./desktopStreamFrameDecoder";
 import type {
   DesktopRemoteTaskClient,
+  DesktopRemoteTaskViewClient,
+  RemoteTaskDiffContent,
+  RemoteTaskDirectoryListing,
 } from "./desktopRemoteTaskClient";
 
 export type {
@@ -75,6 +78,16 @@ export async function createConfiguredDesktopRelayTerminalClient(): Promise<Desk
   });
 }
 
+export async function createConfiguredDesktopRemoteTaskViewClient(): Promise<DesktopRemoteTaskViewClient | null> {
+  const relayUrl = await resolveDesktopRelayUrl();
+  if (!relayUrl) return null;
+  const authSession = await getConfiguredDesktopAuthSession();
+  return createDesktopRelayTerminalClient({
+    relayUrl,
+    getIdToken: (forceRefresh?: boolean) => authSession.getIdToken(forceRefresh),
+  });
+}
+
 export async function listActiveDesktopIdsViaRelay(): Promise<Set<string> | null> {
   const relayUrl = await resolveDesktopRelayUrl();
   if (!relayUrl) return null;
@@ -101,7 +114,7 @@ export function createDesktopRelayTerminalClient({
   createSocket = (url) => new WebSocket(url) as unknown as RelaySocketLike,
   getIdToken,
   relayUrl,
-}: DesktopRelayTerminalClientOptions): DesktopRemoteTaskClient {
+}: DesktopRelayTerminalClientOptions): DesktopRemoteTaskViewClient {
   const clients = new Map<string, StreamClient>();
 
   const clientForDesktop = (desktopId: string): StreamClient => {
@@ -255,6 +268,47 @@ export function createDesktopRelayTerminalClient({
       }
       return { path: body.path, content: body.content };
     },
+    async listTaskDirectory(options) {
+      const client = clientForDesktop(options.desktopId);
+      const entries: RemoteTaskDirectoryListing["entries"] = [];
+      let offset = 0;
+      let responsePath = options.path;
+      let totalEntries = 0;
+      while (true) {
+        const response = await client.request(
+          "GET",
+          `/v1/tasks/${encodeURIComponent(options.taskId)}/browse?path=${encodeURIComponent(options.path)}&showAllFiles=${options.showAllFiles === true}&offset=${offset}&limit=100`,
+          null,
+        );
+        assertSuccessfulTaskAction(response, "task directory read");
+        const page = parseTaskDirectoryListing(response.body);
+        responsePath = page.path;
+        totalEntries = page.totalEntries;
+        entries.push(...page.entries);
+        if (page.nextOffset === null) break;
+        offset = page.nextOffset;
+      }
+      return {
+        path: responsePath,
+        entries,
+        offset: 0,
+        nextOffset: null,
+        totalEntries,
+      };
+    },
+    async readTaskDiff(options) {
+      const query = new URLSearchParams({
+        scope: options.request.scope,
+        mode: options.request.mode,
+      });
+      const response = await clientForDesktop(options.desktopId).request(
+        "GET",
+        `/v1/tasks/${encodeURIComponent(options.taskId)}/diff?${query.toString()}`,
+        null,
+      );
+      assertSuccessfulTaskAction(response, "task diff read");
+      return parseTaskDiffContent(response.body);
+    },
     async markTaskRead(options) {
       const response = await clientForDesktop(options.desktopId).request(
         "POST",
@@ -263,6 +317,61 @@ export function createDesktopRelayTerminalClient({
       );
       assertSuccessfulTaskAction(response, "mark read");
     },
+  };
+}
+
+export function parseTaskDirectoryListing(value: unknown): RemoteTaskDirectoryListing {
+  if (!isRecord(value) || !Array.isArray(value.entries)) {
+    throw new Error("Remote task directory response was malformed.");
+  }
+  const entries = value.entries.map((entry) => {
+    if (
+      !isRecord(entry)
+      || typeof entry.name !== "string"
+      || typeof entry.path !== "string"
+      || typeof entry.isDir !== "boolean"
+    ) {
+      throw new Error("Remote task directory response was malformed.");
+    }
+    const size = typeof entry.size === "number" || entry.size === null
+      ? entry.size
+      : undefined;
+    return { name: entry.name, path: entry.path, isDir: entry.isDir, size };
+  });
+  if (
+    typeof value.path !== "string"
+    || typeof value.offset !== "number"
+    || !(typeof value.nextOffset === "number" || value.nextOffset === null)
+    || typeof value.totalEntries !== "number"
+  ) {
+    throw new Error("Remote task directory response was malformed.");
+  }
+  return {
+    path: value.path,
+    entries,
+    offset: value.offset,
+    nextOffset: value.nextOffset,
+    totalEntries: value.totalEntries,
+  };
+}
+
+export function parseTaskDiffContent(value: unknown): RemoteTaskDiffContent {
+  if (
+    !isRecord(value)
+    || typeof value.taskId !== "string"
+    || !(typeof value.baseRef === "string" || value.baseRef === null)
+    || !(typeof value.mergeBase === "string" || value.mergeBase === null)
+    || typeof value.patch !== "string"
+    || typeof value.truncated !== "boolean"
+  ) {
+    throw new Error("Remote task diff response was malformed.");
+  }
+  return {
+    taskId: value.taskId,
+    baseRef: value.baseRef,
+    mergeBase: value.mergeBase,
+    patch: value.patch,
+    truncated: value.truncated,
   };
 }
 

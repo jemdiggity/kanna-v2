@@ -9,8 +9,11 @@ import type {
   DesktopRemoteCompanionEvent,
   DesktopRemoteCompanionSubscription,
   DesktopRemoteTaskClient,
+  DesktopRemoteTaskViewClient,
   ObserveDesktopRemoteCompanionOptions,
+  RemoteTaskDirectoryListing,
 } from "./desktopRemoteTaskClient";
+import { parseTaskDiffContent, parseTaskDirectoryListing } from "./desktopRelayTerminal";
 
 const companionGenerationProcessNonce = createCompanionGenerationProcessNonce();
 let companionGenerationCounter = 0;
@@ -19,7 +22,11 @@ export async function createConfiguredDesktopLanTerminalClient(): Promise<Deskto
   return createDesktopLanTerminalClient();
 }
 
-export function createDesktopLanTerminalClient(): DesktopRemoteTaskClient {
+export async function createConfiguredDesktopLanTaskViewClient(): Promise<DesktopRemoteTaskViewClient> {
+  return createDesktopLanTerminalClient();
+}
+
+export function createDesktopLanTerminalClient(): DesktopRemoteTaskViewClient {
   interface ObserverRecord {
     leaseId: string;
     options: ObserveDesktopRelayTerminalOptions;
@@ -433,6 +440,44 @@ export function createDesktopLanTerminalClient(): DesktopRemoteTaskClient {
         throw new Error("LAN task file response was malformed.");
       }
       return { path, content };
+    },
+    async listTaskDirectory(options) {
+      const entries: RemoteTaskDirectoryListing["entries"] = [];
+      let offset = 0;
+      let responsePath = options.path;
+      let totalEntries = 0;
+      while (true) {
+        const response = await invoke("read_transfer_peer_task_directory", {
+          peerId: options.desktopId,
+          taskId: options.taskId,
+          path: options.path,
+          showAllFiles: options.showAllFiles === true,
+          offset,
+          limit: 100,
+        });
+        const page = parseTaskDirectoryListing(response);
+        responsePath = page.path;
+        totalEntries = page.totalEntries;
+        entries.push(...page.entries);
+        if (page.nextOffset === null) break;
+        offset = page.nextOffset;
+      }
+      return {
+        path: responsePath,
+        entries,
+        offset: 0,
+        nextOffset: null,
+        totalEntries,
+      };
+    },
+    async readTaskDiff(options) {
+      const response = await invoke("read_transfer_peer_task_diff", {
+        peerId: options.desktopId,
+        taskId: options.taskId,
+        scope: options.request.scope,
+        mode: options.request.mode,
+      });
+      return parseTaskDiffContent(response);
     },
     async markTaskRead(options) {
       await invoke("mark_transfer_peer_task_read", {

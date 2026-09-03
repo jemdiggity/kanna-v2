@@ -75,6 +75,33 @@ export interface RemoteTaskFileContent {
   content: string;
 }
 
+export interface RemoteTaskDirectoryEntry {
+  name: string;
+  path: string;
+  isDir: boolean;
+  size?: number | null;
+}
+
+export interface RemoteTaskDirectoryListing {
+  path: string;
+  entries: RemoteTaskDirectoryEntry[];
+  offset: number;
+  nextOffset: number | null;
+  totalEntries: number;
+}
+
+export type RemoteTaskDiffRequest =
+  | { scope: "branch"; mode: "none" | "staged" | "all" }
+  | { scope: "working"; mode: "all" | "unstaged" | "staged" };
+
+export interface RemoteTaskDiffContent {
+  taskId: string;
+  baseRef: string | null;
+  mergeBase: string | null;
+  patch: string;
+  truncated: boolean;
+}
+
 export interface DesktopRemoteTerminalClient {
   close(): void;
   observeTerminal(
@@ -92,4 +119,13 @@ export interface DesktopRemoteTaskClient extends DesktopRemoteTerminalClient {
   observeCompanion(
     options: ObserveDesktopRemoteCompanionOptions,
   ): DesktopRemoteCompanionSubscription;
+}
+
+export interface DesktopRemoteTaskViewClient extends DesktopRemoteTaskClient {
+  listTaskDirectory(
+    options: ReadRemoteTaskFileOptions & { showAllFiles?: boolean },
+  ): Promise<RemoteTaskDirectoryListing>;
+  readTaskDiff(
+    options: RemoteTaskActionOptions & { request: RemoteTaskDiffRequest },
+  ): Promise<RemoteTaskDiffContent>;
 }

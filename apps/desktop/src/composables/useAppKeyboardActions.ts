@@ -351,7 +351,7 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
       }
     },
     showDiff: () => {
-      if (!store.selectedRepo) return;
+      if (!store.selectedRepo && !selectedWorkspaceTask.value) return;
       if (showDiffModal.value) {
         const z = diffModalRef.value?.zIndex ?? 0;
         if (isTopModal(z)) {

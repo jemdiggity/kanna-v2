@@ -531,6 +531,61 @@ fn remote_task_file_messages_use_expected_wire_names() {
 }
 
 #[test]
+fn remote_task_directory_and_diff_messages_roundtrip() {
+    assert_roundtrip(ControlRequest::ReadPeerTaskDirectory {
+        request_id: "req-directory-control".into(),
+        target_peer_id: "peer-owner".into(),
+        task_id: "task-owner".into(),
+        path: "src".into(),
+        show_all_files: true,
+        offset: 100,
+        limit: 100,
+    });
+    assert_roundtrip(ControlResponse::ReadPeerTaskDirectory {
+        request_id: "req-directory-control".into(),
+        listing: json!({ "path": "src", "entries": [] }),
+    });
+    assert_roundtrip(PeerRequest::ReadTaskDirectory {
+        request_id: "req-directory-peer".into(),
+        requester_peer_id: "peer-secondary".into(),
+        task_id: "task-owner".into(),
+        path: "src".into(),
+        show_all_files: true,
+        offset: 100,
+        limit: 100,
+        sealed_payload: Some("sealed-directory".into()),
+    });
+    assert_roundtrip(PeerResponse::ReadTaskDirectory {
+        request_id: "req-directory-peer".into(),
+        listing: json!({ "path": "src", "entries": [] }),
+    });
+
+    assert_roundtrip(ControlRequest::ReadPeerTaskDiff {
+        request_id: "req-diff-control".into(),
+        target_peer_id: "peer-owner".into(),
+        task_id: "task-owner".into(),
+        scope: "branch".into(),
+        mode: "all".into(),
+    });
+    assert_roundtrip(ControlResponse::ReadPeerTaskDiff {
+        request_id: "req-diff-control".into(),
+        diff: json!({ "patch": "diff", "truncated": true }),
+    });
+    assert_roundtrip(PeerRequest::ReadTaskDiff {
+        request_id: "req-diff-peer".into(),
+        requester_peer_id: "peer-secondary".into(),
+        task_id: "task-owner".into(),
+        scope: "branch".into(),
+        mode: "all".into(),
+        sealed_payload: Some("sealed-diff".into()),
+    });
+    assert_roundtrip(PeerResponse::ReadTaskDiff {
+        request_id: "req-diff-peer".into(),
+        diff: json!({ "patch": "diff", "truncated": true }),
+    });
+}
+
+#[test]
 fn remote_task_mark_read_messages_use_expected_wire_names() {
     let control_request = ControlRequest::MarkPeerTaskRead {
         request_id: "req-mark-read-control".into(),

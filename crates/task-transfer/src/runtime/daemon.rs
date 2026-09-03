@@ -342,6 +342,78 @@ pub(super) async fn read_owner_task_file(
     get_local_kanna_task_file(port, task_id, path).await
 }
 
+async fn get_local_kanna_task_file(
+    port: u16,
+    task_id: &str,
+    path: &str,
+) -> Result<(String, String), RuntimeError> {
+    let value = get_local_kanna_task_json(
+        port,
+        task_id,
+        &format!("files/content?path={}", percent_encode_query_value(path)),
+        "task file",
+    )
+    .await?;
+    let file_path = value
+        .get("path")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| {
+            RuntimeError::Protocol("Kanna server task file response is missing path".into())
+        })?;
+    let content = value
+        .get("content")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| {
+            RuntimeError::Protocol("Kanna server task file response is missing content".into())
+        })?;
+    Ok((file_path.to_owned(), content.to_owned()))
+}
+
+pub(super) async fn read_owner_task_directory(
+    context: &ListenerContext,
+    task_id: &str,
+    path: &str,
+    show_all_files: bool,
+    offset: usize,
+    limit: usize,
+) -> Result<serde_json::Value, RuntimeError> {
+    let port = context
+        .kanna_server_port
+        .ok_or_else(|| RuntimeError::Protocol("Kanna server port is not configured".into()))?;
+    get_local_kanna_task_json(
+        port,
+        task_id,
+        &format!(
+            "browse?path={}&showAllFiles={show_all_files}&offset={offset}&limit={limit}",
+            percent_encode_query_value(path),
+        ),
+        "task directory",
+    )
+    .await
+}
+
+pub(super) async fn read_owner_task_diff(
+    context: &ListenerContext,
+    task_id: &str,
+    scope: &str,
+    mode: &str,
+) -> Result<serde_json::Value, RuntimeError> {
+    let port = context
+        .kanna_server_port
+        .ok_or_else(|| RuntimeError::Protocol("Kanna server port is not configured".into()))?;
+    get_local_kanna_task_json(
+        port,
+        task_id,
+        &format!(
+            "diff?scope={}&mode={}",
+            percent_encode_query_value(scope),
+            percent_encode_query_value(mode),
+        ),
+        "task diff",
+    )
+    .await
+}
+
 fn percent_encode_query_value(value: &str) -> String {
     let mut encoded = String::with_capacity(value.len());
     for byte in value.bytes() {
@@ -355,16 +427,17 @@ fn percent_encode_query_value(value: &str) -> String {
     encoded
 }
 
-async fn get_local_kanna_task_file(
+async fn get_local_kanna_task_json(
     port: u16,
     task_id: &str,
-    path: &str,
-) -> Result<(String, String), RuntimeError> {
+    suffix: &str,
+    operation: &str,
+) -> Result<serde_json::Value, RuntimeError> {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).await?;
     let request_path = format!(
-        "/v1/tasks/{}/files/content?path={}",
+        "/v1/tasks/{}/{}",
         percent_encode_query_value(task_id),
-        percent_encode_query_value(path),
+        suffix,
     );
     let request = format!(
         "GET {request_path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n",
@@ -396,26 +469,15 @@ async fn get_local_kanna_task_file(
 
     if !(200..300).contains(&status) {
         return Err(RuntimeError::Protocol(format!(
-            "Kanna server task file read failed with HTTP {status}: {body}"
+            "Kanna server {operation} read failed with HTTP {status}: {body}"
         )));
     }
 
-    let parsed: serde_json::Value = serde_json::from_str(body).map_err(|error| {
-        RuntimeError::Protocol(format!("invalid Kanna server task file response: {error}"))
-    })?;
-    let file_path = parsed
-        .get("path")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| {
-            RuntimeError::Protocol("Kanna server task file response is missing path".into())
-        })?;
-    let content = parsed
-        .get("content")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| {
-            RuntimeError::Protocol("Kanna server task file response is missing content".into())
-        })?;
-    Ok((file_path.to_owned(), content.to_owned()))
+    serde_json::from_str(body).map_err(|error| {
+        RuntimeError::Protocol(format!(
+            "invalid Kanna server {operation} response: {error}"
+        ))
+    })
 }
 
 pub(super) async fn mark_owner_task_read(
