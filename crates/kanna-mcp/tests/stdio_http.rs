@@ -967,8 +967,29 @@ fn serve_defaults_listing_search_and_tail_watch_to_current_task_repo() {
             path: "/v1/tasks/task-current",
             body: None,
             response_status: "200 OK",
+            response_body: current_task.clone(),
+        },
+        ExpectedRequest {
+            method: "GET",
+            path: "/v1/task-events?repoId=repo-current&excludeTaskIds=task-current&shortCursor=true&from=now&timeoutSecs=0",
+            body: None,
+            response_status: "200 OK",
+            response_body: json!({
+                "waitOutcome": "timeout",
+                "cursor": "kh1.tail",
+                "events": [],
+                "hasMore": false
+            }),
+        },
+        ExpectedRequest {
+            method: "GET",
+            path: "/v1/tasks/task-current",
+            body: None,
+            response_status: "200 OK",
             response_body: current_task,
         },
+        // include_self is consumed by the adapter: the caller's own task is
+        // no longer excluded and nothing named includeSelf reaches the wire.
         ExpectedRequest {
             method: "GET",
             path: "/v1/task-events?repoId=repo-current&shortCursor=true&from=now&timeoutSecs=0",
@@ -998,11 +1019,15 @@ fn serve_defaults_listing_search_and_tail_watch_to_current_task_repo() {
                 "jsonrpc": "2.0", "id": 15, "method": "tools/call",
                 "params": { "name": "kanna_wait_events", "arguments": { "from": "now", "timeout_secs": 0 } }
             }),
+            json!({
+                "jsonrpc": "2.0", "id": 16, "method": "tools/call",
+                "params": { "name": "kanna_wait_events", "arguments": { "from": "now", "timeout_secs": 0, "include_self": true } }
+            }),
         ],
         &[("KANNA_TASK_ID", "task-current")],
     );
 
-    assert_eq!(server.join().expect("fixture server").len(), 6);
+    assert_eq!(server.join().expect("fixture server").len(), 8);
     assert!(
         responses
             .iter()

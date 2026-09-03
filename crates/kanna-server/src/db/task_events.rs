@@ -277,10 +277,31 @@ impl TaskEventScope {
     }
 }
 
+/// `AND <column> NOT IN (?, …)` for a non-empty exclusion list, or an empty
+/// string so the surrounding query is unchanged when nothing is excluded.
+///
+/// Exclusion is a filter layered over a scope, never a scope of its own: it
+/// does not participate in cursor identity, so a caller may add or drop an
+/// excluded task between two calls without losing its checkpoint.
+fn exclusion_clause(column: &str, exclude_task_ids: &[String]) -> String {
+    if exclude_task_ids.is_empty() {
+        return String::new();
+    }
+    let placeholders = vec!["?"; exclude_task_ids.len()].join(", ");
+    format!(" AND {column} NOT IN ({placeholders})")
+}
+
+fn exclusion_params(exclude_task_ids: &[String]) -> impl Iterator<Item = SqlValue> + '_ {
+    exclude_task_ids
+        .iter()
+        .map(|task_id| SqlValue::Text(task_id.clone()))
+}
+
 impl Db {
     pub fn list_non_busy_task_runtime_states(
         &self,
         scope: &TaskEventScope,
+        exclude_task_ids: &[String],
         after_task_id: Option<&str>,
         limit: i64,
     ) -> Result<Vec<(String, String)>, rusqlite::Error> {
@@ -290,10 +311,11 @@ impl Db {
                AND runtime_status IN ('idle', 'waiting', 'exited')
                AND runtime_event_pending_at IS NULL
                AND (? IS NULL OR id > ?)
-               AND {}
+               AND {}{}
              ORDER BY id ASC
              LIMIT ?",
-            scope.pipeline_item_where_clause()
+            scope.pipeline_item_where_clause(),
+            exclusion_clause("id", exclude_task_ids)
         );
         let mut params = vec![
             after_task_id
@@ -304,6 +326,7 @@ impl Db {
                 .unwrap_or(SqlValue::Null),
         ];
         params.extend(scope.params());
+        params.extend(exclusion_params(exclude_task_ids));
         params.push(SqlValue::Integer(limit));
         let mut statement = self.conn.prepare(&sql)?;
         let rows = statement.query_map(rusqlite::params_from_iter(params), |row| {
@@ -358,6 +381,20 @@ impl Db {
         head_seq: i64,
         limit: i64,
     ) -> Result<Vec<TaskEvent>, rusqlite::Error> {
+        self.list_task_events_excluding(scope, &[], after_seq, head_seq, limit)
+    }
+
+    /// [`Self::list_task_events`] minus every event whose task is in
+    /// `exclude_task_ids` — how a repo-scoped watcher running inside a task
+    /// session keeps its own runtime edges out of its wake-up feed.
+    pub fn list_task_events_excluding(
+        &self,
+        scope: &TaskEventScope,
+        exclude_task_ids: &[String],
+        after_seq: i64,
+        head_seq: i64,
+        limit: i64,
+    ) -> Result<Vec<TaskEvent>, rusqlite::Error> {
         // For a dynamic parent scope, SQLite otherwise prefers one
         // `idx_task_event_task_seq` probe per child. `NOT INDEXED` still permits
         // the INTEGER PRIMARY KEY range seek, and forces work to start at the
@@ -370,14 +407,16 @@ impl Db {
         let sql = format!(
             "SELECT seq, task_id, type, payload, created_at
              FROM {event_source}
-             WHERE seq > ? AND seq <= ? AND {}
+             WHERE seq > ? AND seq <= ? AND {}{}
              ORDER BY seq ASC
              LIMIT ?",
-            scope.where_clause()
+            scope.where_clause(),
+            exclusion_clause("task_id", exclude_task_ids)
         );
         let mut params: Vec<SqlValue> =
             vec![SqlValue::Integer(after_seq), SqlValue::Integer(head_seq)];
         params.extend(scope.params());
+        params.extend(exclusion_params(exclude_task_ids));
         params.push(SqlValue::Integer(limit));
 
         let mut stmt = self.conn.prepare(&sql)?;

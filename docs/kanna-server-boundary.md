@@ -180,7 +180,7 @@ the client falls back to a bounded snapshot.
 - `GET /v1/tasks/search?query=...`
 - `GET /v1/tasks/{task_id}/children` (durable direct-child fan-out history; includes closed children)
 - `GET /v1/tasks/{task_id}/inputs?tail=...` (durable instruction history: every message delivered into the task's agent session from outside it)
-- `GET /v1/task-events?taskIds=...|parentTaskId=...|repoId=...|repoRemoteUrlHash=...&cursor=...&timeoutSecs=...&limit=...` (multi-task, multi-machine event feed; blocks server-side until an event arrives or the window elapses)
+- `GET /v1/task-events?taskIds=...|parentTaskId=...|repoId=...|repoRemoteUrlHash=...&excludeTaskIds=...&cursor=...&timeoutSecs=...&limit=...` (multi-task, multi-machine event feed; blocks server-side until an event arrives or the window elapses; `excludeTaskIds` is a filter over the chosen scope, see [Task Event Feed](#task-event-feed))
 - `POST /v1/tasks`
 - `POST /v1/tasks/{task_id}/input` (optionally with one base64 image `attachment`; see [Image attachments](#image-attachments))
 - `POST /v1/tasks/{task_id}/actions/complete-stage`
@@ -867,6 +867,33 @@ It is evaluated per read against `pipeline_item.parent_task_id`, so a task
 created or adopted mid-watch is in scope at the next checkpoint. It covers
 direct children only and excludes the parent's own events, which makes it
 exactly the set `GET /v1/tasks/{task_id}` reports as `childTaskIds`.
+
+`excludeTaskIds` (comma-separated task ids or branch names) is a filter over
+whichever scope was chosen, never a scope of its own. It drops those tasks'
+durable events and their synthetic `includeCurrentActivity` rows on every
+machine leg of an aggregate wait, and it is deliberately not part of any
+cursor: a checkpoint issued under one exclusion list resumes under another,
+and changing it never trips the scope-switch rejection below. Excluded rows are
+consumed by the checkpoint, not deferred — a later call that drops the
+exclusion does not replay them. An id that matches no task excludes nothing.
+It exists because the repository scope includes the caller: a manager running
+`kanna-cli task watch --repo-id` inside its own task session was woken by its
+own `task.runtime_settled` edge at the end of every turn, forever. The server
+has no notion of "self", so the exclusion is client policy applied once in
+`kanna-tool-catalog` (`args_with_self_exclusion`) and shared by `kanna-mcp`,
+`kanna-cli tool call`, and the typed `kanna-cli task watch` / `task
+wait-events` commands: a repository-scoped wait issued with `KANNA_TASK_ID`
+set adds the caller's own id to `exclude_task_ids` unless `include_self` /
+`--include-self` is given. Explicit `taskIds` and `parentTaskId` scopes are
+taken literally — the former is already explicit and the latter excludes the
+parent structurally.
+
+A cursor is bound to its scope. Resuming a `repoId` cursor with `taskIds` or
+`parentTaskId` (or vice versa) is rejected with HTTP 400 `cursor belongs to a
+different task-event scope`; a watcher that changes scope must start at the
+live tail (`from=now`) and cannot carry its checkpoint across. With
+`excludeTaskIds` there is no reason for a manager to leave the repository
+scope to avoid itself.
 
 Reparenting uses read-checkpoint semantics. Every response advances one global
 sequence after evaluating the membership that exists for that read. Moving a

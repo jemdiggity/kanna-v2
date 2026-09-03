@@ -319,7 +319,10 @@ The contracts below are specified in
   unreachable peers as `machineErrors` with `stale: true`. `kanna-mcp` keeps
   its own older `km1.` client-side fan-in for explicit multi-machine task-id
   sets. A task manager consumes the feed by looping `kanna_wait_events` with
-  the returned cursor. The mobile app does **not** use
+  the returned cursor; a repository-scoped wait issued from inside a task
+  session excludes the caller's own task (`excludeTaskIds`, applied by the
+  shared catalog policy) so a manager is never woken by its own settled
+  runtime edge. The mobile app does **not** use
   this feed — its cross-machine view is the Firestore task index plus KSP
   task-summary streams.
 - **Task input pipeline.** `POST /v1/tasks/{id}/input` writes into the live PTY

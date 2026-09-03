@@ -781,6 +781,9 @@ fn parses_wait_events_and_rejects_removed_set_notify_command() {
         "30",
         "--limit",
         "10",
+        "--exclude-task-id",
+        "noisy-a,noisy-b",
+        "--include-self",
     ])
     .unwrap();
     match cli.command {
@@ -791,6 +794,8 @@ fn parses_wait_events_and_rejects_removed_set_notify_command() {
                     parent_task_id,
                     repo_id,
                     repo_remote_url_hash,
+                    exclude_task_id,
+                    include_self,
                     local_only,
                     short_cursor,
                     cursor,
@@ -799,6 +804,8 @@ fn parses_wait_events_and_rejects_removed_set_notify_command() {
                     ..
                 },
         } => {
+            assert_eq!(exclude_task_id, vec!["noisy-a", "noisy-b"]);
+            assert!(include_self);
             assert_eq!(task_id, vec!["child-a", "child-b", "child-c"]);
             assert_eq!(parent_task_id, None);
             assert_eq!(repo_id, None);
@@ -842,6 +849,11 @@ fn parses_long_lived_task_watch_contract() {
         "--budget-secs",
         "900",
         "--follow",
+        "--exclude-task-id",
+        "noisy-a,noisy-b",
+        "--exclude-task-id",
+        "noisy-c",
+        "--include-self",
     ])
     .unwrap();
     match cli.command {
@@ -850,6 +862,8 @@ fn parses_long_lived_task_watch_contract() {
                 crate::TaskCommands::Watch {
                     task_id,
                     repo_id,
+                    exclude_task_id,
+                    include_self,
                     cursor,
                     all_events,
                     budget_secs,
@@ -859,6 +873,8 @@ fn parses_long_lived_task_watch_contract() {
         } => {
             assert_eq!(task_id, vec!["child-a", "child-b", "child-c"]);
             assert_eq!(repo_id.as_deref(), Some("repo-1"));
+            assert_eq!(exclude_task_id, vec!["noisy-a", "noisy-b", "noisy-c"]);
+            assert!(include_self);
             assert_eq!(cursor.as_deref(), Some("cursor-7"));
             assert!(all_events);
             assert_eq!(budget_secs, Some(900));
@@ -884,6 +900,8 @@ fn parses_long_lived_task_watch_contract() {
     assert!(help.contains("push-equivalent"));
     assert!(help.contains("240-second per-call clamp"));
     assert!(help.contains("abort calls around 300 seconds"));
+    assert!(help.contains("--include-self"));
+    assert!(help.contains("--exclude-task-id"));
 }
 
 /// The typed CLI and the catalog tool must hit the same endpoint with the same
@@ -905,6 +923,7 @@ fn typed_wait_events_path_matches_the_catalog_tool_path() {
         parent_task_id: None,
         repo_id: None,
         repo_remote_url_hash: None,
+        exclude_task_ids: &[],
         local_only: false,
         include_current_activity: false,
         short_cursor: true,
@@ -930,6 +949,36 @@ fn typed_wait_events_path_matches_the_catalog_tool_path() {
     );
     assert_eq!(query_pairs(&resolved.path), query_pairs(&typed));
 
+    // Exclusions ride the same query key on both surfaces, so a manager on
+    // the CLI fallback is silenced by exactly the tasks the MCP tool drops.
+    let resolved_excluded = kanna_tool_catalog::resolve_request(
+        &catalog,
+        "kanna_wait_events",
+        &json!({ "repo_id": "repo-1", "exclude_task_ids": ["manager-1", "noisy"], "include_self": false, "timeout_secs": 30 }),
+    )
+    .unwrap();
+    let exclusions = ["manager-1".to_string(), "noisy".to_string()];
+    let typed_excluded = crate::api::task_events_path(&crate::api::TaskEventsParams {
+        task_ids: &[],
+        parent_task_id: None,
+        repo_id: Some("repo-1"),
+        repo_remote_url_hash: None,
+        exclude_task_ids: &exclusions,
+        local_only: false,
+        include_current_activity: false,
+        short_cursor: true,
+        from: None,
+        cursor: None,
+        timeout_secs: 30,
+        limit: None,
+    });
+    assert_eq!(
+        query_pairs(&resolved_excluded.path),
+        query_pairs(&typed_excluded)
+    );
+    assert!(typed_excluded.contains("excludeTaskIds=manager-1%2Cnoisy"));
+    assert!(!typed_excluded.contains("includeSelf"));
+
     // Same for the parent scope: an agent on the CLI fallback must land on the
     // same children the MCP tool would watch, not on a repo-wide feed.
     let resolved_parent = kanna_tool_catalog::resolve_request(
@@ -943,6 +992,7 @@ fn typed_wait_events_path_matches_the_catalog_tool_path() {
         parent_task_id: Some("parent-1"),
         repo_id: None,
         repo_remote_url_hash: None,
+        exclude_task_ids: &[],
         local_only: false,
         include_current_activity: false,
         short_cursor: true,

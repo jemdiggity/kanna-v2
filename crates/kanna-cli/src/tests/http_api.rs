@@ -38,6 +38,7 @@ async fn typed_cli_round_trips_the_server_ks1_aggregate_cursor() {
         parent_task_id: None,
         repo_id: None,
         repo_remote_url_hash: None,
+        exclude_task_ids: &[],
         local_only: false,
         include_current_activity: true,
         short_cursor: false,
@@ -130,6 +131,7 @@ async fn task_watch_starts_at_tail_advances_suppressed_cursor_and_exits_on_actio
         TaskWatchOptions {
             task_ids: vec!["task-a".to_string()],
             repo_id: None,
+            exclude_task_ids: Vec::new(),
             cursor: None,
             all_events: false,
             budget_secs: None,
@@ -180,6 +182,7 @@ async fn task_watch_budget_expiry_is_a_distinct_successful_outcome() {
         TaskWatchOptions {
             task_ids: Vec::new(),
             repo_id: Some("repo-1".to_string()),
+            exclude_task_ids: Vec::new(),
             cursor: None,
             all_events: false,
             budget_secs: Some(0),
@@ -217,6 +220,7 @@ async fn task_watch_all_and_follow_stream_before_quiet_exit() {
         TaskWatchOptions {
             task_ids: vec!["task-a".to_string()],
             repo_id: None,
+            exclude_task_ids: Vec::new(),
             cursor: None,
             all_events: true,
             budget_secs: Some(0),
@@ -257,7 +261,7 @@ async fn catalog_cli_defaults_listing_search_and_watch_to_the_task_repository() 
         (
             "kanna_wait_events",
             serde_json::json!({ "from": "now", "timeout_secs": 0 }),
-            "/v1/task-events?repoId=repo-current&shortCursor=true&from=now&timeoutSecs=0",
+            "/v1/task-events?repoId=repo-current&excludeTaskIds=task-current&shortCursor=true&from=now&timeoutSecs=0",
             serde_json::json!({
                 "waitOutcome": "timeout",
                 "cursor": "17",
@@ -956,4 +960,109 @@ async fn create_task_via_api_posts_default_agent_type_without_agent_provider_whe
             "agentType": "pty",
         })
     );
+}
+
+/// The typed CLI applies the catalog's self-exclusion policy: a repository
+/// watch from inside a task session drops the caller, explicit scopes and
+/// `--include-self` are taken literally, and explicit exclusions always apply.
+#[test]
+fn task_watch_self_exclusion_matches_catalog_policy() {
+    assert_eq!(
+        resolve_task_event_exclusions(Vec::new(), false, false, Some("manager-1")),
+        vec!["manager-1"]
+    );
+    assert_eq!(
+        resolve_task_event_exclusions(
+            vec![
+                "noisy".to_string(),
+                " manager-1 ".to_string(),
+                "noisy".to_string()
+            ],
+            false,
+            false,
+            Some("manager-1")
+        ),
+        vec!["noisy", "manager-1"]
+    );
+    assert_eq!(
+        resolve_task_event_exclusions(vec!["noisy".to_string()], false, true, Some("manager-1")),
+        vec!["noisy"]
+    );
+    assert_eq!(
+        resolve_task_event_exclusions(Vec::new(), true, false, Some("manager-1")),
+        Vec::<String>::new(),
+        "an explicit task or parent scope is literal"
+    );
+    assert_eq!(
+        resolve_task_event_exclusions(Vec::new(), false, false, None),
+        Vec::<String>::new(),
+        "outside a task session there is no self to exclude"
+    );
+    assert_eq!(
+        resolve_task_event_exclusions(Vec::new(), false, false, Some("   ")),
+        Vec::<String>::new()
+    );
+}
+
+/// The watch loop sends its effective exclusions on every poll, including the
+/// re-armed one, so the server — not the client — keeps the caller's own
+/// settled-runtime edges out of the batch that wakes it.
+#[tokio::test]
+async fn task_watch_sends_its_exclusions_on_every_poll() {
+    let responses = vec![
+        http_json_response(
+            "200 OK",
+            &serde_json::json!({
+                "waitOutcome": "timeout",
+                "cursor": "cursor-1",
+                "events": [],
+                "hasMore": false
+            })
+            .to_string(),
+        ),
+        http_json_response(
+            "200 OK",
+            &serde_json::json!({
+                "waitOutcome": "events",
+                "cursor": "cursor-2",
+                "events": [{ "seq": 9, "taskId": "child-a", "type": "task.runtime_settled", "payload": {} }],
+                "hasMore": false
+            })
+            .to_string(),
+        ),
+    ];
+    let (base_url, server) = serve_http_responses(responses).await;
+    let mut output = Vec::new();
+    watch_task_events(
+        &base_url,
+        TaskWatchOptions {
+            task_ids: Vec::new(),
+            repo_id: Some("repo-1".to_string()),
+            exclude_task_ids: vec!["manager-1".to_string(), "noisy".to_string()],
+            cursor: None,
+            all_events: false,
+            budget_secs: None,
+            follow: false,
+        },
+        &mut output,
+    )
+    .await
+    .expect("watch actionable event");
+
+    let requests = server.await.expect("fixture server");
+    assert_eq!(requests.len(), 2);
+    for request in &requests {
+        assert!(request.contains("repoId=repo-1"), "{request}");
+        assert!(
+            request.contains("excludeTaskIds=manager-1%2Cnoisy"),
+            "{request}"
+        );
+    }
+    let lines = String::from_utf8(output).unwrap();
+    let rows = lines
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(rows[0]["taskId"], "child-a");
+    assert_eq!(rows[1]["watchOutcome"], "actionable");
 }

@@ -125,6 +125,9 @@ pub(crate) struct TaskEventsParams<'a> {
     pub(crate) parent_task_id: Option<&'a str>,
     pub(crate) repo_id: Option<&'a str>,
     pub(crate) repo_remote_url_hash: Option<&'a str>,
+    /// Already-resolved exclusions: the caller's own task on a repo-scoped
+    /// watch from a task session, plus anything named explicitly.
+    pub(crate) exclude_task_ids: &'a [String],
     pub(crate) local_only: bool,
     pub(crate) include_current_activity: bool,
     pub(crate) short_cursor: bool,
@@ -158,6 +161,12 @@ pub(crate) fn task_events_path(params: &TaskEventsParams<'_>) -> String {
         query.push(format!(
             "repoRemoteUrlHash={}",
             encode_path_segment(repo_remote_url_hash)
+        ));
+    }
+    if !params.exclude_task_ids.is_empty() {
+        query.push(format!(
+            "excludeTaskIds={}",
+            encode_path_segment(&params.exclude_task_ids.join(","))
         ));
     }
     if params.local_only {
