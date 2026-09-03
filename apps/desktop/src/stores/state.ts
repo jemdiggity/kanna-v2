@@ -236,6 +236,7 @@ export interface StoreServices {
   applyTaskRuntimeStatus?: (item: PipelineItem, status: string) => Promise<void>;
   waitForSessionExit?: (sessionId: string) => Promise<void>;
   resolveSessionExitWaiters?: (sessionId: string) => void;
+  resolveSessionCreatedWaiters?: (sessionId: string) => void;
   persistExitedSessionResumeId?: (sessionId: string, resumeSessionId?: string | null) => Promise<void>;
   getAgentProviderAvailability?: () => Promise<import("./agent-provider").AgentProviderAvailability>;
   createItem?: (

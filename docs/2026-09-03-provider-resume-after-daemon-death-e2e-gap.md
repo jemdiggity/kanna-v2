@@ -10,8 +10,9 @@ production launcher sequence this behavior depends on.
 Narrower coverage added meanwhile:
 
 - desktop store tests prove a missing task session calls the server's `resume`
-  action, waits for the detached replacement to appear in daemon `List`, and
-  never invokes the local initial-prompt spawn path;
+  action, registers its waiter before that request can race the detached
+  replacement, completes from the daemon's `session_created` event without
+  polling `List`, and never invokes the local initial-prompt spawn path;
 - server integration tests begin with a durable `running` run and an absent
   daemon session, drive the HTTP action over the daemon protocol, and verify
   both Claude's recorded-id resume and Codex's cwd-discovered resume command;

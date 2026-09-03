@@ -517,6 +517,13 @@ printf 'retained' > resume-proof.txt
         std::fs::read_to_string(worktree.join("resume-proof.txt")).unwrap(),
         "retained"
     );
+    let interrupted = db.stage_run("run-killed-mid-turn").unwrap().unwrap();
+    let interrupted_result: serde_json::Value =
+        serde_json::from_str(interrupted.result.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        interrupted_result["summary"],
+        "task session was missing when the resume action began automatic provider-context recovery"
+    );
     let run = loop {
         let run = db.latest_stage_run("recovery-task").unwrap().unwrap();
         if run.id != "run-killed-mid-turn" {

@@ -687,6 +687,7 @@ describe("createInitApi", () => {
       selectedTaskId.value = taskId;
       state.selectedItemId.value = "create:stable-current";
     });
+    const resolveSessionCreatedWaiters = vi.fn();
     const services = {
       loadInitialData: vi.fn(async () => {}),
       reloadSnapshot: vi.fn(async () => {
@@ -699,6 +700,7 @@ describe("createInitApi", () => {
         ? state.items.value.find((item) => item.id === selectedTaskId.value) ?? null
         : state.items.value[0] ?? null),
       restoreSelection,
+      resolveSessionCreatedWaiters,
     };
     const toast = {
       toasts: ref([]),
@@ -729,6 +731,7 @@ describe("createInitApi", () => {
 
     await getSessionCreatedHandler()({ payload: { session_id: "task-external" } });
 
+    expect(resolveSessionCreatedWaiters).toHaveBeenCalledWith("task-external");
     expect(services.reloadSnapshot).toHaveBeenCalled();
     expect(state.items.value.map((item) => item.id)).toEqual(["task-external", "task-current"]);
     expect(restoreSelection).toHaveBeenCalledWith("task-current");
