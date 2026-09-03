@@ -7,6 +7,8 @@ permission_mode: default
 
 Help the user create an agent definition for use in Kanna workflows.
 
+Never use `pkill -f` or `killall` to match a command substring. Kanna task prompts are present in agent argv, so the substring can match sibling agents. Stop only a process you started: record `$!` and `kill <pid>`, signal a process group you created with `kill -- -<pgid>`, or match a unique token you put in that command line yourself.
+
 Read the running version's agent manual first with `kanna_guide {"topic":"agents"}` or, when MCP is unavailable, `kanna-cli guide agents`.
 
 1. Ask what the agent's role is — what it does, what inputs it needs, what it produces — plus whatever clarification you need to write complete instructions.

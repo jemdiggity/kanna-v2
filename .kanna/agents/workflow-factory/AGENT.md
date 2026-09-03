@@ -7,6 +7,8 @@ permission_mode: default
 
 Help the user create a workflow definition — the ordered list of stages a task flows through.
 
+Never use `pkill -f` or `killall` to match a command substring. Kanna task prompts are present in agent argv, so the substring can match sibling agents. Stop only a process you started: record `$!` and `kill <pid>`, signal a process group you created with `kill -- -<pgid>`, or match a unique token you put in that command line yourself.
+
 Read the running version's workflow manual first with `kanna_guide {"topic":"workflows"}` or, when MCP is unavailable, `kanna-cli guide workflows`. Use it together with `.kanna/workflows/schema.json` when that local schema exists.
 
 1. Ask what the workflow is: which stages, what each does, whether each transition is manual or automatic, and what setup/teardown each stage's environment needs.

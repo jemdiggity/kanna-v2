@@ -63,22 +63,16 @@ describe("built-in agent completion protocol", () => {
 });
 
 describe("QA workflow assets", () => {
-  it("keeps shell-running agents from matching processes by prompt substrings", () => {
-    const specialtyReviewers = readdirSync(resolve(repoRoot, ".kanna/agents"))
-      .filter((name) => name.startsWith("review-"));
-    const shellRunningAgents = [
-      "implement",
-      "review",
-      "qa-dispatcher",
-      ...specialtyReviewers,
-      "commit",
-      "pr",
-      "merge",
-      "ship",
-      "task-manager",
-    ];
+  it("keeps every built-in agent from matching processes by prompt substrings", () => {
+    const builtInAgents = readdirSync(resolve(repoRoot, ".kanna/agents"), {
+      withFileTypes: true,
+    })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort();
+    expect(builtInAgents.length).toBeGreaterThan(0);
 
-    for (const name of shellRunningAgents) {
+    for (const name of builtInAgents) {
       const agent = readRepoPhrases(`.kanna/agents/${name}/AGENT.md`);
       expect(agent, name).toContain("Never use `pkill -f` or `killall`");
       expect(agent, name).toContain("Kanna task prompts are present in agent argv");
