@@ -184,7 +184,8 @@
     "transferFinalizationUnclean": "転送元のエージェントセッションが正常に終了しませんでした",
     "transferReservationOrphaned": "重複した転送予約を解放できず、ディスクに残っている可能性があります",
     "remoteCompanionStarting": "ビジュアルコンパニオンを起動しています。しばらくしてからもう一度リンクを開いてください。",
-    "remoteCompanionOpenFailed": "ビジュアルコンパニオンを開けませんでした。"
+    "remoteCompanionOpenFailed": "ビジュアルコンパニオンを開けませんでした。",
+    "remoteTerminalFileDropUnavailable": "別のマシンのターミナルにはファイルをドロップできません。ファイルをそのマシンへ転送してから、パスを貼り付けてください。"
   },
   "tags": {
     "inProgress": "進行中",

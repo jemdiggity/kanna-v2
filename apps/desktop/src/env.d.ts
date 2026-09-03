@@ -23,10 +23,21 @@ interface KannaTerminalBuffersE2EApi {
   sessionIds: () => string[];
   write: (sessionId: string, data: string, callback?: () => void) => void;
   input: (sessionId: string, data: string) => void;
+  refresh: (sessionId: string) => void;
   findTextCell: (
     sessionId: string,
     text: string,
   ) => { column: number; row: number; columns: number; rows: number } | null;
+  cellAttributes: (
+    sessionId: string,
+    row: number,
+    column: number,
+  ) => {
+    bold: boolean;
+    inverse: boolean;
+    foreground: number;
+    foregroundMode: number;
+  } | null;
   selectText: (sessionId: string, text: string) => string | null;
 }
 

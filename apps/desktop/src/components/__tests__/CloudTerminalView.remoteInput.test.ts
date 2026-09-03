@@ -28,8 +28,15 @@ vi.mock("@xterm/xterm", () => ({
     }
     loadAddon() {}
     open() {}
+    refresh() {}
     reset() {}
-    write() {}
+    resize(cols: number, rows: number) {
+      this.cols = cols;
+      this.rows = rows;
+    }
+    write(_data: string | Uint8Array, callback?: () => void) {
+      callback?.();
+    }
     dispose() {}
   },
 }));
@@ -127,7 +134,13 @@ function terminalClient(sendInput = harness.sendInput) {
       listener: (event: Record<string, unknown>) => void;
     }) => {
       harness.subscriptionListener = options.listener;
-      queueMicrotask(() => options.listener({ type: "ready", taskId: options.taskId }));
+      queueMicrotask(() => options.listener({
+        type: "snapshot",
+        taskId: options.taskId,
+        cols: 80,
+        rows: 24,
+        data: new Uint8Array(),
+      }));
       return { close: vi.fn() };
     }),
     sendInput,
@@ -521,6 +534,31 @@ describe("CloudTerminalView", () => {
     wrapper.unmount();
   });
 
+  it("preserves one multiline bracketed paste over remote terminal input", async () => {
+    harness.sendInput.mockResolvedValue(undefined);
+    const { default: CloudTerminalView } = await import("../CloudTerminalView.vue");
+    const wrapper = mount(CloudTerminalView, {
+      props: {
+        ownerDesktopId: "desktop-1",
+        ownerTaskId: "task-1",
+        transport: "cloud",
+      },
+    });
+    await flushPromises();
+    const paste = "\u001b[200~first line\nsecond line\u001b[201~";
+
+    wrapper.get(".terminal-container").element.dispatchEvent(new Event("paste"));
+    harness.dataListener?.(paste);
+    await flushPromises();
+
+    expect(harness.sendInput).toHaveBeenCalledExactlyOnceWith({
+      desktopId: "desktop-1",
+      taskId: "task-1",
+      data: paste,
+    });
+    wrapper.unmount();
+  });
+
   it("keeps a failed input queue in error through later output and rebuilds it on retry", async () => {
     harness.sendInput
       .mockRejectedValueOnce(new Error("peer frame rejected"))
@@ -543,7 +581,7 @@ describe("CloudTerminalView", () => {
     harness.subscriptionListener?.({
       type: "output",
       taskId: "task-1",
-      text: "late output",
+      data: new TextEncoder().encode("late output"),
     });
     await flushPromises();
     expect(wrapper.attributes("data-status")).toBe("error");

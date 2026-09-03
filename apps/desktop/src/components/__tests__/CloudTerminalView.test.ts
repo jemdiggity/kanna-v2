@@ -4,6 +4,7 @@ import { mount } from "@vue/test-utils";
 import { nextTick } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import CloudTerminalView from "../CloudTerminalView.vue";
+import type { DesktopRemoteTerminalEvent } from "../../services/desktopRemoteTaskClient";
 
 type LinkHandler = (event: MouseEvent, uri: string) => void;
 
@@ -28,8 +29,15 @@ const testState = vi.hoisted(() => {
       this.dataHandler = handler;
     });
     open = vi.fn();
+    refresh = vi.fn();
     reset = vi.fn();
-    write = vi.fn();
+    resize = vi.fn((cols: number, rows: number) => {
+      this.cols = cols;
+      this.rows = rows;
+    });
+    write = vi.fn((_data: string | Uint8Array, callback?: () => void) => {
+      callback?.();
+    });
 
     constructor(options: Record<string, unknown>) {
       this.options = { ...options };
@@ -133,6 +141,7 @@ vi.mock("vue-i18n", async (importOriginal) => {
         ({
           "toasts.remoteCompanionStarting": "Starting visual companion…",
           "toasts.remoteCompanionOpenFailed": "Could not open visual companion.",
+          "toasts.remoteTerminalFileDropUnavailable": "Files can’t be dropped into a remote terminal.",
           "visualCompanion.open": "Open visual companion",
         })[key] ?? key,
     }),
@@ -155,6 +164,10 @@ vi.mock("../../theme/theme", () => ({
 
 vi.mock("../../e2eTerminalBuffers", () => ({
   registerE2ETerminalBuffer: vi.fn(() => testState.terminalBufferUnregister),
+}));
+
+vi.mock("../../utils/animationFrame", () => ({
+  nextFrameOrTimeout: () => Promise.resolve(),
 }));
 
 interface FakeClient {
@@ -516,7 +529,7 @@ describe("CloudTerminalView remote visual companion links", () => {
   it("uses the LAN client factory and preserves terminal input and resize behavior", async () => {
     const client = createClient();
     let terminalListener:
-      | ((event: { type: "ready"; taskId: string }) => void)
+      | ((event: DesktopRemoteTerminalEvent) => void)
       | undefined;
     client.observeTerminal.mockImplementation((options) => {
       terminalListener = options.listener;
@@ -532,7 +545,13 @@ describe("CloudTerminalView remote visual companion links", () => {
       },
     });
     await flushAsync();
-    terminalListener?.({ type: "ready", taskId: "task-2" });
+    terminalListener?.({
+      type: "snapshot",
+      taskId: "task-2",
+      cols: 80,
+      rows: 24,
+      data: new TextEncoder().encode("snapshot"),
+    });
     client.resize.mockClear();
     testState.resizeCallbacks[0]?.([], {} as ResizeObserver);
     testState.terminals[0]?.dataHandler?.("hello");
@@ -567,7 +586,7 @@ describe("CloudTerminalView remote visual companion links", () => {
   it("does not fit or resize while hidden and refits on reactivation without reconnecting", async () => {
     const client = createClient();
     let terminalListener:
-      | ((event: { type: "ready"; taskId: string }) => void)
+      | ((event: DesktopRemoteTerminalEvent) => void)
       | undefined;
     client.observeTerminal.mockImplementation((options) => {
       terminalListener = options.listener;
@@ -584,7 +603,13 @@ describe("CloudTerminalView remote visual companion links", () => {
       },
     });
     await flushAsync();
-    terminalListener?.({ type: "ready", taskId: "task-2" });
+    terminalListener?.({
+      type: "snapshot",
+      taskId: "task-2",
+      cols: 80,
+      rows: 24,
+      data: new TextEncoder().encode("snapshot"),
+    });
     await flushAsync();
 
     const terminal = testState.terminals[0];
@@ -667,7 +692,7 @@ describe("CloudTerminalView remote visual companion links", () => {
     const newClient = createClient();
     const oldSend = deferred<void>();
     let oldTerminalListener:
-      | ((event: { type: "ready"; taskId: string }) => void)
+      | ((event: DesktopRemoteTerminalEvent) => void)
       | undefined;
     oldClient.observeTerminal.mockImplementation((options) => {
       oldTerminalListener = options.listener;
@@ -685,7 +710,13 @@ describe("CloudTerminalView remote visual companion links", () => {
       },
     });
     await flushAsync();
-    oldTerminalListener?.({ type: "ready", taskId: "task-old" });
+    oldTerminalListener?.({
+      type: "snapshot",
+      taskId: "task-old",
+      cols: 80,
+      rows: 24,
+      data: new TextEncoder().encode("snapshot"),
+    });
     testState.terminals[0]?.dataHandler?.("old input");
     await wrapper.setProps({
       ownerDesktopId: "desktop-new",
@@ -706,6 +737,93 @@ describe("CloudTerminalView remote visual companion links", () => {
     expect(testState.terminals[0]?.write).not.toHaveBeenCalledWith(
       expect.stringContaining("old transport failed"),
     );
+    wrapper.unmount();
+  });
+
+  it("replays each authoritative snapshot at its source dimensions before fitting the owner PTY", async () => {
+    const client = createClient();
+    let terminalListener: ((event: DesktopRemoteTerminalEvent) => void) | undefined;
+    client.observeTerminal.mockImplementation((options) => {
+      terminalListener = options.listener;
+      return { close: client.terminalClose };
+    });
+    mocks.relayFactory.mockResolvedValue(client);
+    const wrapper = mount(CloudTerminalView, {
+      props: {
+        ownerDesktopId: "desktop-1",
+        ownerTaskId: "task-1",
+      },
+    });
+    await flushAsync();
+
+    const terminal = testState.terminals[0];
+    const fitAddon = terminal?.loadedAddons.find(
+      (addon) => addon instanceof testState.FakeFitAddon,
+    ) as InstanceType<typeof testState.FakeFitAddon> | undefined;
+    if (!terminal || !fitAddon || !terminalListener) {
+      throw new Error("remote terminal was not initialized");
+    }
+    fitAddon.fit.mockImplementation(() => {
+      terminal.cols = 117;
+      terminal.rows = 39;
+    });
+    client.resize.mockClear();
+    const snapshot = new TextEncoder().encode("\u001b[?1049h\u001b[2J\u001b[24;80Hcorner");
+
+    terminalListener({
+      type: "snapshot",
+      taskId: "task-1",
+      cols: 80,
+      rows: 24,
+      data: snapshot,
+    });
+    await flushAsync();
+
+    expect(terminal.options).toMatchObject({
+      cursorBlink: false,
+      fontFamily: '\"JetBrains Mono\", \"SF Mono\", Menlo, monospace',
+      fontSize: 13,
+      lineHeight: 1,
+      scrollback: 10000,
+    });
+    expect(terminal.options).not.toHaveProperty("convertEol");
+    expect(terminal.reset).toHaveBeenCalledTimes(2);
+    expect(terminal.resize).toHaveBeenCalledWith(80, 24);
+    expect(terminal.write).toHaveBeenCalledWith(snapshot, expect.any(Function));
+    expect(wrapper.attributes("data-status")).toBe("live");
+    expect(client.resize).toHaveBeenCalledExactlyOnceWith({
+      desktopId: "desktop-1",
+      taskId: "task-1",
+      cols: 117,
+      rows: 39,
+    });
+    expect(terminal.refresh).toHaveBeenCalledWith(0, 38);
+    wrapper.unmount();
+  });
+
+  it("refuses viewer-local file drops with a clear message instead of typing a dead path", async () => {
+    const client = createClient();
+    mocks.relayFactory.mockResolvedValue(client);
+    const wrapper = mount(CloudTerminalView, {
+      props: {
+        ownerDesktopId: "desktop-1",
+        ownerTaskId: "task-1",
+      },
+    });
+    await flushAsync();
+    const drop = new Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(drop, "dataTransfer", {
+      value: { files: [{ path: "/Users/viewer/Desktop/screenshot.png" }] },
+    });
+
+    wrapper.get(".terminal-container").element.dispatchEvent(drop);
+    await flushAsync();
+
+    expect(drop.defaultPrevented).toBe(true);
+    expect(mocks.toastError).toHaveBeenCalledWith(
+      "Files can’t be dropped into a remote terminal.",
+    );
+    expect(client.sendInput).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 });

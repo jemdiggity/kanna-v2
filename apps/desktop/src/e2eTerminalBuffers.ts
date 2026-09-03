@@ -18,6 +18,13 @@ export interface VisibleTerminalTextCell {
   rows: number;
 }
 
+export interface TerminalCellAttributes {
+  bold: boolean;
+  inverse: boolean;
+  foreground: number;
+  foregroundMode: number;
+}
+
 const terminals = new Map<string, Terminal>();
 
 export function registerE2ETerminalBuffer(sessionId: string, terminal: Terminal): () => void {
@@ -30,7 +37,9 @@ export function registerE2ETerminalBuffer(sessionId: string, terminal: Terminal)
     sessionIds: () => Array.from(terminals.keys()),
     write: writeTerminalBuffer,
     input: inputTerminalBuffer,
+    refresh: refreshTerminalBuffer,
     findTextCell: findTerminalTextCell,
+    cellAttributes: getTerminalCellAttributes,
     selectText: selectTerminalBufferText,
   };
 
@@ -40,6 +49,34 @@ export function registerE2ETerminalBuffer(sessionId: string, terminal: Terminal)
       terminals.delete(sessionId);
     }
   };
+}
+
+function refreshTerminalBuffer(sessionId: string): void {
+  const terminal = terminals.get(sessionId);
+  if (!terminal) {
+    throw new Error(`terminal buffer not registered for session ${sessionId}`);
+  }
+  terminal.refresh(0, terminal.rows - 1);
+}
+
+function getTerminalCellAttributes(
+  sessionId: string,
+  row: number,
+  column: number,
+): TerminalCellAttributes | null {
+  const terminal = terminals.get(sessionId);
+  if (!terminal) {
+    throw new Error(`terminal buffer not registered for session ${sessionId}`);
+  }
+  const cell = terminal.buffer.active.getLine(row)?.getCell(column);
+  return cell
+    ? {
+        bold: cell.isBold() !== 0,
+        inverse: cell.isInverse() !== 0,
+        foreground: cell.getFgColor(),
+        foregroundMode: cell.getFgColorMode(),
+      }
+    : null;
 }
 
 function selectTerminalBufferText(sessionId: string, text: string): string | null {

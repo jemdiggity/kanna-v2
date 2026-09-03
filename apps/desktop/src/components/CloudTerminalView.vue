@@ -2,7 +2,9 @@
 import { nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { ImageAddon } from "@xterm/addon-image";
 import { WebLinksAddon } from "@xterm/addon-web-links";
+import { WebglAddon } from "@xterm/addon-webgl";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useI18n } from "vue-i18n";
 import "@xterm/xterm/css/xterm.css";
@@ -30,6 +32,11 @@ import { registerE2ETerminalBuffer } from "../e2eTerminalBuffers";
 import { useToast } from "../composables/useToast";
 import { isShiftEnter, SHIFT_ENTER_CSI_U } from "../composables/terminalKeyboard";
 import { createTerminalInputProducerClassifier } from "../composables/terminalInputProducer";
+import { nextFrameOrTimeout } from "../utils/animationFrame";
+import {
+  createTerminalDropBridge,
+  type TerminalDropBridge,
+} from "../composables/terminalDropBridge";
 import MentionedFilesOverlay from "./MentionedFilesOverlay.vue";
 
 const props = withDefaults(defineProps<{
@@ -51,6 +58,9 @@ const companionBridge = getDesktopCompanionBridgeManager();
 let terminal: Terminal | null = null;
 let fitAddon: FitAddon | null = null;
 let resizeObserver: ResizeObserver | null = null;
+let dropBridge: TerminalDropBridge | null = null;
+let cleanupDropEvents: (() => void) | null = null;
+let cleanupNativeDropEvents: (() => void) | null = null;
 let inputEventContainer: HTMLElement | null = null;
 let relayClient: DesktopRemoteTaskClient | null = null;
 let subscription: DesktopRemoteTerminalSubscription | null = null;
@@ -257,6 +267,41 @@ function fitAndResizeRemote() {
   });
 }
 
+async function fitAndResizeRemoteAfterLayout(generation: number) {
+  await nextTick();
+  await nextFrameOrTimeout();
+  if (unmounted || generation !== lifecycleGeneration || !props.active) return;
+  fitAndResizeRemote();
+  terminal?.refresh(0, terminal.rows - 1);
+}
+
+function refuseRemoteFileDrop(paths: string[]) {
+  if (paths.length === 0) return;
+  toast.error(t("toasts.remoteTerminalFileDropUnavailable"));
+}
+
+function applyRemoteSnapshot(
+  cols: number,
+  rows: number,
+  data: Uint8Array,
+  generation: number,
+) {
+  if (!terminal) return;
+  // A daemon snapshot is a serialized terminal grid at its recorded PTY
+  // dimensions. Replaying it into the viewer's unrelated dimensions reflows
+  // full-screen TUIs before their cursor-addressed redraw can run. Restore the
+  // source geometry first, then fit and resize the owning PTY after xterm has
+  // parsed the authoritative snapshot.
+  terminal.reset();
+  terminal.resize(cols, rows);
+  terminal.write(data, () => {
+    if (!terminal || unmounted || generation !== lifecycleGeneration) return;
+    status.value = "live";
+    terminal.refresh(0, terminal.rows - 1);
+    void fitAndResizeRemoteAfterLayout(generation);
+  });
+}
+
 async function start() {
   stopSubscription();
   const generation = lifecycleGeneration;
@@ -322,10 +367,9 @@ async function start() {
           || relayClient !== client
           || event.taskId !== taskId
         ) return;
-        if (event.type === "ready") {
+        if (event.type === "snapshot") {
           if (inputQueue === queue && !queue.closed) {
-            status.value = "live";
-            fitAndResizeRemote();
+            applyRemoteSnapshot(event.cols, event.rows, event.data, generation);
           }
           return;
         }
@@ -333,7 +377,7 @@ async function start() {
           if (inputQueue === queue && !queue.closed) {
             status.value = "live";
           }
-          terminal?.write(event.text);
+          terminal?.write(event.data);
           return;
         }
         if (event.type === "exit") {
@@ -436,11 +480,12 @@ function registerTerminalBufferForE2E() {
 onMounted(() => {
   terminal = new Terminal({
     allowProposedApi: true,
-    convertEol: true,
-    cursorBlink: true,
+    cursorBlink: false,
     disableStdin: false,
-    fontFamily: 'Menlo, Monaco, "Courier New", monospace',
-    fontSize: 12,
+    fontFamily: '"JetBrains Mono", "SF Mono", Menlo, monospace',
+    fontSize: 13,
+    lineHeight: 1,
+    scrollback: 10000,
     theme: getTerminalTheme(effectiveCodeTheme.value),
   });
   terminal.attachCustomKeyEventHandler((event: KeyboardEvent) => {
@@ -479,6 +524,20 @@ onMounted(() => {
   fitAddon = new FitAddon();
   terminal.loadAddon(fitAddon);
   terminal.loadAddon(new WebLinksAddon(handleLinkActivate));
+  try {
+    const webgl = new WebglAddon();
+    webgl.onContextLoss(() => {
+      console.warn("[cloud-terminal] WebGL context lost, falling back to DOM renderer");
+      webgl.dispose();
+    });
+    terminal.loadAddon(webgl);
+  } catch (error) {
+    console.warn(
+      "[cloud-terminal] WebGL addon failed, falling back to DOM renderer:",
+      error,
+    );
+  }
+  terminal.loadAddon(new ImageAddon());
   if (containerRef.value) {
     terminal.open(containerRef.value);
     inputEventContainer = containerRef.value;
@@ -498,6 +557,19 @@ onMounted(() => {
       getContainer: () => containerRef.value,
     });
     fileLinkProvider.register();
+    dropBridge = createTerminalDropBridge({
+      sessionId: props.ownerTaskId,
+      instanceId: `remote:${props.ownerDesktopId}:${props.ownerTaskId}`,
+      options: { agentTerminal: true },
+      getContainer: () => containerRef.value,
+      isDisposed: () => unmounted,
+      sendDroppedPaths: refuseRemoteFileDrop,
+      onNativeDropCleanupReady(cleanup) {
+        cleanupNativeDropEvents?.();
+        cleanupNativeDropEvents = cleanup;
+      },
+    });
+    cleanupDropEvents = dropBridge.registerContainerDropHandlers();
     fitAndResizeRemote();
     resizeObserver = new ResizeObserver(() => fitAndResizeRemote());
     resizeObserver.observe(containerRef.value);
@@ -517,9 +589,7 @@ watch(
   () => props.active,
   async (active) => {
     if (!active) return;
-    await nextTick();
-    if (unmounted || !props.active) return;
-    fitAndResizeRemote();
+    await fitAndResizeRemoteAfterLayout(lifecycleGeneration);
   },
 );
 
@@ -536,6 +606,11 @@ onUnmounted(() => {
   unregisterE2ETerminalBuffer?.();
   unregisterE2ETerminalBuffer = null;
   resizeObserver?.disconnect();
+  cleanupDropEvents?.();
+  cleanupDropEvents = null;
+  cleanupNativeDropEvents?.();
+  cleanupNativeDropEvents = null;
+  dropBridge = null;
   if (inputEventContainer) {
     for (const eventName of controlInputEvents) {
       inputEventContainer.removeEventListener(eventName, inputProducer.declareControlInput, true);

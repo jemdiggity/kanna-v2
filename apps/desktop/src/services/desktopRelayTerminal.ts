@@ -146,12 +146,21 @@ export function createDesktopRelayTerminalClient({
     observeTerminal(options) {
       const client = clientForDesktop(options.desktopId);
       client.attachTerminal(options.taskId, {
-        onSnapshot(_cols, _rows, dataB64) {
-          options.listener({ type: "output", taskId: options.taskId, text: decodeBase64(dataB64) });
-          options.listener({ type: "ready", taskId: options.taskId });
+        onSnapshot(cols, rows, dataB64) {
+          options.listener({
+            type: "snapshot",
+            taskId: options.taskId,
+            cols,
+            rows,
+            data: decodeBase64(dataB64),
+          });
         },
         onOutput(dataB64) {
-          options.listener({ type: "output", taskId: options.taskId, text: decodeBase64(dataB64) });
+          options.listener({
+            type: "output",
+            taskId: options.taskId,
+            data: decodeBase64(dataB64),
+          });
         },
         onSessionExit(code) {
           options.listener({ type: "exit", taskId: options.taskId, code });
@@ -516,11 +525,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function decodeBase64(value: string): string {
-  if (!value) return "";
+function decodeBase64(value: string): Uint8Array {
+  if (!value) return new Uint8Array();
   const binary = globalThis.atob(value);
-  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
-  return new TextDecoder().decode(bytes);
+  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
 }
 
 function encodeBase64(value: string): string {
