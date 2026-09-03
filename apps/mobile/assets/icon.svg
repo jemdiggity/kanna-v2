@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Kanna mobile app icon">
+  <defs>
+    <linearGradient id="mobile-background" x1="256" y1="0" x2="256" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0.62" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#f3f4f6"/>
+    </linearGradient>
+    <linearGradient id="hot-gradient" x1="113" y1="99" x2="354" y2="99" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#f72b89"/>
+      <stop offset="1" stop-color="#ff8a12"/>
+    </linearGradient>
+    <linearGradient id="pink-gradient" x1="113" y1="178" x2="293" y2="178" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#df1fb7"/>
+      <stop offset="1" stop-color="#ef2d9b"/>
+    </linearGradient>
+    <linearGradient id="purple-gradient" x1="113" y1="256" x2="226" y2="256" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#9630dc"/>
+      <stop offset="1" stop-color="#9e23dd"/>
+    </linearGradient>
+    <linearGradient id="indigo-gradient" x1="113" y1="335" x2="293" y2="335" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1957c3"/>
+      <stop offset="1" stop-color="#6940a4"/>
+    </linearGradient>
+    <linearGradient id="blue-violet-gradient" x1="113" y1="414" x2="360" y2="414" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1458c5"/>
+      <stop offset="1" stop-color="#736b91"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Mobile platforms supply the outer icon mask. Keep this background full bleed. -->
+  <rect id="mobile-icon-background" width="512" height="512" fill="url(#mobile-background)"/>
+
+  <g id="task-pill-artwork">
+    <rect x="113" y="82" width="45" height="34" rx="17" fill="url(#hot-gradient)"/>
+    <rect x="180" y="82" width="174" height="34" rx="17" fill="url(#hot-gradient)"/>
+    <rect x="377" y="82" width="24" height="34" rx="12" fill="#17d34c"/>
+
+    <rect x="113" y="161" width="45" height="34" rx="17" fill="url(#pink-gradient)"/>
+    <rect x="180" y="161" width="113" height="34" rx="17" fill="url(#pink-gradient)"/>
+
+    <rect x="113" y="240" width="45" height="33" rx="16.5" fill="url(#purple-gradient)"/>
+    <rect x="180" y="240" width="46" height="33" rx="16.5" fill="url(#purple-gradient)"/>
+
+    <rect x="113" y="318" width="45" height="33" rx="16.5" fill="url(#indigo-gradient)"/>
+    <rect x="180" y="318" width="47" height="33" rx="16.5" fill="url(#indigo-gradient)"/>
+    <rect x="245" y="318" width="48" height="33" rx="16.5" fill="url(#indigo-gradient)"/>
+
+    <rect x="113" y="397" width="45" height="33" rx="16.5" fill="url(#blue-violet-gradient)"/>
+    <rect x="180" y="397" width="47" height="33" rx="16.5" fill="url(#blue-violet-gradient)"/>
+    <rect x="245" y="397" width="48" height="33" rx="16.5" fill="url(#blue-violet-gradient)"/>
+    <rect x="313" y="397" width="47" height="33" rx="16.5" fill="url(#blue-violet-gradient)"/>
+  </g>
+</svg>

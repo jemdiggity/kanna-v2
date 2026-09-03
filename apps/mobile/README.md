@@ -15,9 +15,14 @@ Bump `runtimeVersion` whenever a change touches native code, native config, the
 Expo SDK, native dependencies, or `plugins/withKannaNativeIdentity.js`. JS-only
 changes keep the same `runtimeVersion` and are OTA-deliverable.
 
-The current Expo SDK 57 native runtime uses `runtimeVersion` `2.2.1`. OTA
+The current Expo SDK 57 native runtime uses `runtimeVersion` `2.2.3`. OTA
 updates built for an earlier runtime are not compatible; install a native build
 with the matching runtime before publishing or applying an update.
+
+`2.2.3` replaces the pre-masked mobile app icon with full-bleed iOS/legacy
+artwork and separate Android adaptive-icon layers. The generated native icon
+assets therefore require a new binary even though the app's in-app UI is
+unchanged.
 
 `2.2.1` aligns Expo SDK 57 and its native modules on Expo's compatible patch
 set after `2.2.0` combined a newer image-manipulator framework with an older
