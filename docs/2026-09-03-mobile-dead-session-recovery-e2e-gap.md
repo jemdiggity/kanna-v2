@@ -20,8 +20,10 @@ selection -> replacement terminal sequence yet.
   invokes that server operation instead of locally spawning a replacement.
 - Mobile transport tests cover the resume action over both LAN and relay
   owner routing and preserve structured missing-session errors. Controller and
-  rendered-state tests cover automatic recovery, the restarting state, the
-  detached-spawn attach race, reconnection, and exact server failure text.
+  rendered-state tests cover automatic recovery and the restarting state.
+  Controller tests specifically prove refresh-independent terminal recovery
+  without a cloud subscription, the bounded timeout and re-selection retry,
+  structured-agent automatic reattachment, and exact server failure text.
 
 ## What would close the gap
 

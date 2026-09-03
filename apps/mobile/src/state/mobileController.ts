@@ -161,6 +161,10 @@ const REPO_COMMAND_TASK_LOAD_ERROR =
 const REPO_COMMAND_TASK_LOAD_ATTEMPTS = 3;
 const REPO_COMMAND_TASK_LOAD_RETRY_MS = 200;
 const DEFAULT_REPO_CHECKOUT_POLL_INTERVAL_MS = 500;
+const TASK_SESSION_RECOVERY_POLL_MS = 1_000;
+const TASK_SESSION_RECOVERY_TIMEOUT_MS = 30_000;
+const TASK_SESSION_RECOVERY_TIMEOUT_MESSAGE =
+  "Session restart timed out; select the task again to retry";
 
 export interface CloudTaskPublication {
   cloudAuthoritative: boolean;
@@ -339,7 +343,7 @@ export function createMobileController(
     string,
     Promise<string | null>
   >();
-  const recoveringTaskSessionIds = new Set<string>();
+  const recoveringTaskSessionAttempts = new Map<string, symbol>();
   const taskCreationPersistenceFlights = new Map<string, Promise<void>>();
   const recoveryStartedTaskIds = new Set<string>();
   let repoCheckoutFlight: Promise<string | null> | null = null;
@@ -971,7 +975,7 @@ export function createMobileController(
   ): void => {
     showTaskSessionRestarting(taskId, stream);
 
-    if (recoveringTaskSessionIds.has(taskId)) {
+    if (recoveringTaskSessionAttempts.has(taskId)) {
       return;
     }
 
@@ -991,32 +995,77 @@ export function createMobileController(
     }
 
     // The server acknowledges before its detached transition has spawned the
-    // replacement. Keep this recovery live until a later task-state refresh
-    // reattaches and receives a stream frame; the server publishes that
-    // refresh after the daemon accepts the replacement. An earlier refresh may
-    // still see the dead session, in which case the in-flight guard above
-    // retires that attach without starting a second recovery.
-    recoveringTaskSessionIds.add(taskId);
-    void resumeTask(taskId).catch((error: unknown) => {
-      recoveringTaskSessionIds.delete(taskId);
-      const reason = error instanceof Error ? error.message : String(error);
-      const message = `Session restart failed: ${reason}`;
-      if (stream === "terminal") {
-        store.setTaskTerminalError(taskId, message);
-      } else {
-        store.applyTaskAgentStreamEvent(taskId, {
-          type: "error",
-          message
-        });
+    // replacement. Mobile therefore owns completion of the recovery: retry
+    // the selected task's attachment until a non-error stream frame removes
+    // this attempt, or stop after the same bounded window used by desktop.
+    // This path deliberately depends on neither collection refreshes nor the
+    // cloud task subscription, so LAN and relay connections behave alike.
+    const attempt = Symbol(taskId);
+    recoveringTaskSessionAttempts.set(taskId, attempt);
+    void (async () => {
+      let failureMessage: string | null = null;
+      try {
+        await resumeTask(taskId);
+        const deadline = Date.now() + TASK_SESSION_RECOVERY_TIMEOUT_MS;
+        while (recoveringTaskSessionAttempts.get(taskId) === attempt) {
+          const remainingMs = deadline - Date.now();
+          if (remainingMs <= 0) {
+            failureMessage = TASK_SESSION_RECOVERY_TIMEOUT_MESSAGE;
+            break;
+          }
+          await new Promise<void>((resolve) => {
+            setTimeout(
+              resolve,
+              Math.min(TASK_SESSION_RECOVERY_POLL_MS, remainingMs)
+            );
+          });
+          if (
+            recoveringTaskSessionAttempts.get(taskId) !== attempt ||
+            durableTaskIdForSelection(store.getState().selectedTaskId) !==
+              taskId ||
+            !findTask(taskId)
+          ) {
+            break;
+          }
+          if (Date.now() >= deadline) {
+            failureMessage = TASK_SESSION_RECOVERY_TIMEOUT_MESSAGE;
+            break;
+          }
+          startTaskView(taskId);
+        }
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        failureMessage = `Session restart failed: ${reason}`;
+      } finally {
+        if (recoveringTaskSessionAttempts.get(taskId) !== attempt) {
+          return;
+        }
+        recoveringTaskSessionAttempts.delete(taskId);
+        if (
+          !failureMessage ||
+          durableTaskIdForSelection(store.getState().selectedTaskId) !== taskId
+        ) {
+          return;
+        }
+        if (stream === "terminal") {
+          stopTaskTerminal();
+          store.setTaskTerminalError(taskId, failureMessage);
+        } else {
+          stopTaskAgent();
+          store.applyTaskAgentStreamEvent(taskId, {
+            type: "error",
+            message: failureMessage
+          });
+        }
       }
-    });
+    })();
   };
 
   const clearTaskSessionIfMissing = (taskId: string) => {
     if (findTask(taskId)) {
       return;
     }
-    recoveringTaskSessionIds.delete(taskId);
+    recoveringTaskSessionAttempts.delete(taskId);
     stopTaskSession();
     store.clearTaskTerminal();
     store.clearTaskAgent();
@@ -1279,7 +1328,7 @@ export function createMobileController(
           return;
         }
         if (event.type !== "error") {
-          recoveringTaskSessionIds.delete(streamTaskId);
+          recoveringTaskSessionAttempts.delete(streamTaskId);
         }
         switch (event.type) {
           case "snapshot":
@@ -1376,7 +1425,7 @@ export function createMobileController(
           return;
         }
         if (event.type !== "error") {
-          recoveringTaskSessionIds.delete(streamTaskId);
+          recoveringTaskSessionAttempts.delete(streamTaskId);
         }
         if (
           event.type === "error" &&
@@ -3532,6 +3581,7 @@ export function createMobileController(
     },
 
     dispose() {
+      recoveringTaskSessionAttempts.clear();
       taskSummaryStoreUnsubscribe();
       for (const subscription of taskSummarySubscriptions.values()) subscription.close();
       taskSummarySubscriptions.clear();

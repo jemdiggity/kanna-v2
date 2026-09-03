@@ -7844,7 +7844,8 @@ describe("createMobileController", () => {
     });
   });
 
-  it("recovers a missing terminal session through the shared server action", async () => {
+  it("recovers and reattaches a missing LAN terminal session without a refresh", async () => {
+    vi.useFakeTimers();
     const store = createSessionStore();
     const client = createClientMock();
     const recovery = createDeferred<{ taskId: string }>();
@@ -7852,6 +7853,7 @@ describe("createMobileController", () => {
     const controller = createMobileController(client, store);
 
     await controller.bootstrap();
+    expect(client.observeDesktopTaskSummaries).toBeUndefined();
     controller.openTask("task-1");
     client.__terminalStream.emit({
       type: "error",
@@ -7870,30 +7872,10 @@ describe("createMobileController", () => {
     recovery.resolve({ taskId: "task-1" });
     await flushMicrotasks();
 
-    // The resume action acknowledges before the detached replacement exists.
-    // A server task-state refresh is what drives the next attach.
     expect(client.observeTaskTerminal).toHaveBeenCalledOnce();
-    expect(store.getState()).toMatchObject({
-      taskTerminalTaskId: "task-1",
-      taskTerminalStatus: "restarting",
-      taskTerminalErrorMessage: null
-    });
-
-    await controller.refresh();
+    await vi.advanceTimersByTimeAsync(1_000);
     expect(client.observeTaskTerminal).toHaveBeenCalledTimes(2);
 
-    // A refresh emitted before the replacement spawn acknowledgement may race
-    // into the same attach error. It is retired without duplicating recovery.
-    client.__terminalStream.emit({
-      type: "error",
-      taskId: "task-1",
-      code: "session_not_found",
-      message: "session not found: task-1"
-    });
-    expect(client.resumeTask).toHaveBeenCalledOnce();
-    expect(store.getState().taskTerminalStatus).toBe("restarting");
-
-    await controller.refresh();
     client.__terminalStream.emit({
       type: "snapshot",
       taskId: "task-1",
@@ -7903,6 +7885,45 @@ describe("createMobileController", () => {
     });
     expect(client.resumeTask).toHaveBeenCalledOnce();
     expect(store.getState().taskTerminalStatus).toBe("live");
+    controller.dispose();
+  });
+
+  it("times out a missing terminal recovery and retries it on re-selection", async () => {
+    vi.useFakeTimers();
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    client.__terminalStream.emit({
+      type: "error",
+      taskId: "task-1",
+      code: "session_not_found",
+      message: "session not found: task-1"
+    });
+    await flushMicrotasks();
+
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(store.getState()).toMatchObject({
+      taskTerminalStatus: "error",
+      taskTerminalErrorMessage:
+        "Session restart timed out; select the task again to retry"
+    });
+    expect(client.resumeTask).toHaveBeenCalledOnce();
+
+    controller.openTask("task-1");
+    client.__terminalStream.emit({
+      type: "error",
+      taskId: "task-1",
+      code: "session_not_found",
+      message: "session not found: task-1"
+    });
+    await flushMicrotasks();
+
+    expect(client.resumeTask).toHaveBeenCalledTimes(2);
+    controller.dispose();
   });
 
   it("shows the server reason when missing-session recovery fails", async () => {
@@ -7930,7 +7951,8 @@ describe("createMobileController", () => {
     });
   });
 
-  it("recovers a missing structured-agent session and shows restart progress", async () => {
+  it("recovers and reattaches a missing structured-agent session automatically", async () => {
+    vi.useFakeTimers();
     const agentTask = {
       id: "task-agent",
       repoId: "repo-1",
@@ -7960,6 +7982,21 @@ describe("createMobileController", () => {
       taskAgentStatus: "restarting",
       taskAgentErrorMessage: null
     });
+
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(client.observeTaskAgent).toHaveBeenCalledTimes(2);
+
+    client.__agentStream.emit({
+      type: "snapshot",
+      taskId: agentTask.id,
+      events: [],
+      nextSeq: 0
+    });
+
+    expect(client.resumeTask).toHaveBeenCalledOnce();
+    expect(store.getState().taskAgentStatus).toBe("live");
+    controller.dispose();
   });
 
   it("selects a desktop and refreshes status through the active client", async () => {
