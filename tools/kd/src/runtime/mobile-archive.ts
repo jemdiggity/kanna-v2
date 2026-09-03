@@ -96,21 +96,43 @@ async function recordArchiveProvenance(input: {
   runner: CommandRunner;
 }): Promise<{ ok: true; tag: string } | { ok: false; message: string }> {
   const tag = archiveTagName(input.record.version, input.record.buildNumber);
-  const existing = await input.runner.run(
+  const existingType = await input.runner.run(
     "git",
-    ["rev-parse", "--verify", "--quiet", `refs/tags/${tag}^{commit}`],
+    ["cat-file", "-t", `refs/tags/${tag}`],
     { cwd: input.repoRoot, env: input.env }
   );
-  const existingCommit = existing.stdout.trim();
-  if (existing.exitCode === 0 && existingCommit !== input.record.commit) {
-    return {
-      ok: false,
-      message:
-        `Archive provenance tag ${tag} already names ${existingCommit || "an unreadable commit"}, ` +
-        `not ${input.record.commit}. Use a new build number; provenance tags are immutable.`
-    };
-  }
-  if (existing.exitCode !== 0) {
+  if (existingType.exitCode === 0) {
+    if (existingType.stdout.trim() !== "tag") {
+      return {
+        ok: false,
+        message:
+          `Archive provenance tag ${tag} exists but is not an annotated tag. ` +
+          "Use a new build number; provenance tags are immutable."
+      };
+    }
+    const existingContents = await input.runner.run(
+      "git",
+      ["for-each-ref", "--format=%(contents)", `refs/tags/${tag}`],
+      { cwd: input.repoRoot, env: input.env }
+    );
+    if (existingContents.exitCode !== 0) {
+      return {
+        ok: false,
+        message:
+          `Archive provenance tag ${tag} exists but its provenance record could not be read. ` +
+          "Use a new build number; provenance tags are immutable."
+      };
+    }
+    const mismatch = describeArchiveProvenanceMismatch(existingContents.stdout, input.record);
+    if (mismatch) {
+      return {
+        ok: false,
+        message:
+          `Archive provenance tag ${tag} does not match this archive: ${mismatch}. ` +
+          "Use a new build number; provenance tags are immutable."
+      };
+    }
+  } else {
     const created = await input.runner.run(
       "git",
       ["tag", "-a", tag, input.record.commit, "-m", JSON.stringify(input.record, null, 2)],
@@ -139,6 +161,36 @@ async function recordArchiveProvenance(input: {
     };
   }
   return { ok: true, tag };
+}
+
+function describeArchiveProvenanceMismatch(
+  rawRecord: string,
+  expected: MobileArchiveProvenanceRecord
+): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawRecord);
+  } catch {
+    return "its annotation is not readable JSON";
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return "its annotation is not a JSON object";
+  }
+  const record = parsed as Record<string, unknown>;
+  const identityFields = [
+    "kind",
+    "version",
+    "buildNumber",
+    "runtimeVersion",
+    "bundleId",
+    "commit"
+  ] as const;
+  for (const field of identityFields) {
+    if (record[field] !== expected[field]) {
+      return `${field} is ${JSON.stringify(record[field])}, expected ${JSON.stringify(expected[field])}`;
+    }
+  }
+  return null;
 }
 
 export function parseXcodeMajorVersion(stdout: string): number | null {
