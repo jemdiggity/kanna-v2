@@ -449,6 +449,11 @@ For UI feel or interaction changes (animation, gesture, or dynamic layout), simu
 
 ## Common Pitfalls
 
+- Never use `pkill -f` or `killall` to match a command substring. Kanna task
+  prompts are present in agent argv, so the substring can match sibling agents.
+  Stop only a process you started: record `$!` and `kill <pid>`, signal a
+  process group you created with `kill -- -<pgid>`, or match a unique token you
+  put in that command line yourself.
 - Claude CLI permission mode flags are **camelCase** (`dontAsk` not `dont-ask`). The SDK was broken by this once already.
 - `@pierre/diffs`: use `containerWrapper` (not `fileContainer`) in `FileDiff.render()` — `fileContainer` skips the shadow DOM and loses all styling. Use `worker-portable.js` (not `worker.js`) to avoid WASM dependency. Theme/lineDiffType go in worker pool options, not FileDiff constructor (ignored when using pool).
 - `git_diff` must include untracked files (`include_untracked`, `recurse_untracked_dirs`, `show_untracked_content`) or new files created by Claude won't appear in the diff view.
