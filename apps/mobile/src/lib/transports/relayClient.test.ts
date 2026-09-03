@@ -505,6 +505,48 @@ describe("createRelayDesktopClient", () => {
     );
   });
 
+  it("preserves agent attach error codes through the KSP relay tunnel", async () => {
+    const socket = createSocket();
+    const client = createRelayDesktopClient({
+      createSocket: () => socket,
+      getIdToken: async () => "id-token-1",
+      relayUrl: "wss://relay.example"
+    });
+    const events: unknown[] = [];
+
+    client.observeTaskAgent(
+      { desktopId: "desktop-1", taskId: "task-1" },
+      (event) => events.push(event)
+    );
+
+    socket.onopen?.();
+    await flushPromises();
+    socket.onmessage?.({
+      data: JSON.stringify({ type: "auth_ok", userId: "user-1" })
+    });
+    socket.onmessage?.({ data: JSON.stringify({ type: "tunnel_ready" }) });
+    await flushPromises();
+    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
+    await flushPromises();
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "error",
+        task_id: "task-1",
+        code: "session_not_found",
+        message: "session not found: task-1"
+      })
+    });
+
+    expect(events).toEqual([
+      {
+        type: "error",
+        taskId: "task-1",
+        code: "session_not_found",
+        message: "session not found: task-1"
+      }
+    ]);
+  });
+
   it("passes split utf-8 terminal output across relay chunks without decoding", async () => {
     const socket = createSocket();
     const client = createRelayDesktopClient({

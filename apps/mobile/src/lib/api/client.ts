@@ -118,7 +118,7 @@ export type TaskAgentStreamEvent =
   | { type: "event"; taskId: string; seq: number; event: AgentEvent }
   | { type: "status"; taskId: string; status: string }
   | { type: "exit"; taskId: string; code: number }
-  | { type: "error"; taskId: string; message: string };
+  | { type: "error"; taskId: string; code?: string; message: string };
 
 export interface TaskAgentSubscription {
   close(): void;
@@ -193,6 +193,7 @@ export interface KannaTransport {
   abortTaskCreation(input: AbortTaskCreationRequest): Promise<void>;
   runMergeAgent(taskId: string): Promise<TaskActionResponse>;
   advanceTaskStage(taskId: string): Promise<TaskActionResponse>;
+  resumeTask?(taskId: string): Promise<TaskActionResponse>;
   markTaskRead(
     taskId: string,
     expectedActivityRevision?: number
@@ -268,6 +269,7 @@ export interface KannaClient {
   abortTaskCreation(input: AbortTaskCreationRequest): Promise<void>;
   runMergeAgent(taskId: string): Promise<TaskActionResponse>;
   advanceTaskStage(taskId: string): Promise<TaskActionResponse>;
+  resumeTask?(taskId: string): Promise<TaskActionResponse>;
   markTaskRead(
     taskId: string,
     expectedActivityRevision?: number
@@ -348,6 +350,7 @@ export class RepoNotRegisteredError extends TaskCreationError {
 
 export function createKannaClient(transport: KannaTransport): KannaClient {
   const reissuePushPairingCertificate = transport.reissuePushPairingCertificate;
+  const resumeTask = transport.resumeTask;
   return {
     ...(transport.observeDesktopTaskSummaries
       ? {
@@ -408,6 +411,9 @@ export function createKannaClient(transport: KannaTransport): KannaClient {
     abortTaskCreation: (input) => transport.abortTaskCreation(input),
     runMergeAgent: (taskId) => transport.runMergeAgent(taskId),
     advanceTaskStage: (taskId) => transport.advanceTaskStage(taskId),
+    ...(resumeTask
+      ? { resumeTask: (taskId: string) => resumeTask(taskId) }
+      : {}),
     markTaskRead: (taskId, expectedActivityRevision) =>
       transport.markTaskRead(taskId, expectedActivityRevision),
     closeTask: (taskId) => transport.closeTask(taskId),

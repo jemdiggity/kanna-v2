@@ -18,6 +18,36 @@ function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
 }
 
 describe("remote transport", () => {
+  it("routes missing-session recovery through the task owner over the relay", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue({
+      taskId: "local-task-1"
+    });
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => null,
+      invokeDesktop,
+      listCloudTasks: async () => [{
+        id: "cloud-task-1",
+        repoId: "cloud-repo-1",
+        title: "Recover me",
+        stage: "in progress",
+        ownerDesktopId: "desktop-owner",
+        ownerLocalRepoId: "local-repo-1",
+        ownerLocalTaskId: "local-task-1"
+      }]
+    });
+
+    await expect(transport.resumeTask?.("cloud-task-1")).resolves.toEqual({
+      taskId: "cloud-task-1"
+    });
+    expect(invokeDesktop).toHaveBeenCalledWith({
+      desktopId: "desktop-owner",
+      method: "POST",
+      path: "/v1/tasks/local-task-1/actions/resume",
+      body: null
+    });
+  });
+
   it("propagates an advance-stage conflict from the owning desktop without retrying", async () => {
     const held = new RemoteTransportError(
       "remote_invocation_failed",

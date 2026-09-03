@@ -859,6 +859,12 @@ export function createRemoteTransport({
         (localTaskId) =>
           `/v1/tasks/${encodeURIComponent(localTaskId)}/actions/advance-stage`
       ),
+    resumeTask: (taskId: string) =>
+      requestTaskAction(
+        taskId,
+        (localTaskId) =>
+          `/v1/tasks/${encodeURIComponent(localTaskId)}/actions/resume`
+      ),
     markTaskRead: (taskId: string, expectedActivityRevision?: number) =>
       requestTask<TaskActivityResponse>(
         taskId,

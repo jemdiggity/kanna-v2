@@ -1660,6 +1660,8 @@ function getStatusCopy(status: TaskTerminalStatus): string {
   switch (status) {
     case "connecting":
       return "Connecting to desktop daemon...";
+    case "restarting":
+      return "Restarting session...";
     case "error":
       return "Terminal stream failed.";
     case "closed":

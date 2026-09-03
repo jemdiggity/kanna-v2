@@ -351,6 +351,7 @@ export function TaskScreen({
     (isAgentTask
       ? taskCreationPhase !== "idle" ||
         agentStatus === "connecting" ||
+        agentStatus === "restarting" ||
         agentStatus === "error"
       : model.isComposerDisabled);
   const isAnimatedCreation =
@@ -358,7 +359,9 @@ export function TaskScreen({
   const isAnimatedTerminalConnection =
     taskCreationPhase === "idle" &&
     !isAgentTask &&
-    (terminalStatus === "idle" || terminalStatus === "connecting");
+    (terminalStatus === "idle" ||
+      terminalStatus === "connecting" ||
+      terminalStatus === "restarting");
   const terminalViewport =
     screenViewport ?? { width: windowWidth, height: windowHeight };
   const terminalGeometry = resolveMobileTerminalGeometry(terminalViewport);

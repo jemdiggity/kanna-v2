@@ -248,6 +248,9 @@ function createClientMock(): ClientMock {
     advanceTaskStage: vi.fn().mockResolvedValue({
       taskId: "task-pr"
     }),
+    resumeTask: vi.fn().mockResolvedValue({
+      taskId: "task-1"
+    }),
     markTaskRead: vi.fn().mockResolvedValue({
       taskId: "task-1",
       activity: "idle"
@@ -7839,6 +7842,161 @@ describe("createMobileController", () => {
       taskTerminalErrorMessage: "No terminal session is available for this task",
       errorMessage: null
     });
+  });
+
+  it("recovers and reattaches a missing LAN terminal session without a refresh", async () => {
+    vi.useFakeTimers();
+    const store = createSessionStore();
+    const client = createClientMock();
+    const recovery = createDeferred<{ taskId: string }>();
+    client.resumeTask.mockReturnValueOnce(recovery.promise);
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    expect(client.observeDesktopTaskSummaries).toBeUndefined();
+    controller.openTask("task-1");
+    client.__terminalStream.emit({
+      type: "error",
+      taskId: "task-1",
+      code: "session_not_found",
+      message: "session not found: task-1"
+    });
+
+    expect(client.resumeTask).toHaveBeenCalledWith("task-1");
+    expect(client.__terminalStream.subscription.close).toHaveBeenCalledOnce();
+    expect(store.getState()).toMatchObject({
+      taskTerminalStatus: "restarting",
+      taskTerminalErrorMessage: null
+    });
+
+    recovery.resolve({ taskId: "task-1" });
+    await flushMicrotasks();
+
+    expect(client.observeTaskTerminal).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(client.observeTaskTerminal).toHaveBeenCalledTimes(2);
+
+    client.__terminalStream.emit({
+      type: "snapshot",
+      taskId: "task-1",
+      cols: 80,
+      rows: 24,
+      dataB64: "recovered"
+    });
+    expect(client.resumeTask).toHaveBeenCalledOnce();
+    expect(store.getState().taskTerminalStatus).toBe("live");
+    controller.dispose();
+  });
+
+  it("times out a missing terminal recovery and retries it on re-selection", async () => {
+    vi.useFakeTimers();
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    client.__terminalStream.emit({
+      type: "error",
+      taskId: "task-1",
+      code: "session_not_found",
+      message: "session not found: task-1"
+    });
+    await flushMicrotasks();
+
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(store.getState()).toMatchObject({
+      taskTerminalStatus: "error",
+      taskTerminalErrorMessage:
+        "Session restart timed out; select the task again to retry"
+    });
+    expect(client.resumeTask).toHaveBeenCalledOnce();
+
+    controller.openTask("task-1");
+    client.__terminalStream.emit({
+      type: "error",
+      taskId: "task-1",
+      code: "session_not_found",
+      message: "session not found: task-1"
+    });
+    await flushMicrotasks();
+
+    expect(client.resumeTask).toHaveBeenCalledTimes(2);
+    controller.dispose();
+  });
+
+  it("shows the server reason when missing-session recovery fails", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    client.resumeTask.mockRejectedValueOnce(
+      new Error("could not verify that task session is dead: task-1")
+    );
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    client.__terminalStream.emit({
+      type: "error",
+      taskId: "task-1",
+      code: "session_not_found",
+      message: "session not found: task-1"
+    });
+    await flushMicrotasks();
+
+    expect(store.getState()).toMatchObject({
+      taskTerminalStatus: "error",
+      taskTerminalErrorMessage:
+        "Session restart failed: could not verify that task session is dead: task-1"
+    });
+  });
+
+  it("recovers and reattaches a missing structured-agent session automatically", async () => {
+    vi.useFakeTimers();
+    const agentTask = {
+      id: "task-agent",
+      repoId: "repo-1",
+      title: "Recover the agent stream",
+      stage: "in progress",
+      agentType: "agent" as const
+    };
+    const store = createSessionStore();
+    const client = createClientMock();
+    client.listRecentTasks.mockResolvedValueOnce([agentTask]);
+    client.listRepoTasks.mockResolvedValueOnce([agentTask]);
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.openTask(agentTask.id);
+    client.__agentStream.emit({
+      type: "error",
+      taskId: agentTask.id,
+      code: "session_not_found",
+      message: `session not found: ${agentTask.id}`
+    });
+
+    expect(client.resumeTask).toHaveBeenCalledWith(agentTask.id);
+    expect(client.__agentStream.subscription.close).toHaveBeenCalledOnce();
+    expect(store.getState()).toMatchObject({
+      taskAgentTaskId: agentTask.id,
+      taskAgentStatus: "restarting",
+      taskAgentErrorMessage: null
+    });
+
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(client.observeTaskAgent).toHaveBeenCalledTimes(2);
+
+    client.__agentStream.emit({
+      type: "snapshot",
+      taskId: agentTask.id,
+      events: [],
+      nextSeq: 0
+    });
+
+    expect(client.resumeTask).toHaveBeenCalledOnce();
+    expect(store.getState().taskAgentStatus).toBe("live");
+    controller.dispose();
   });
 
   it("selects a desktop and refreshes status through the active client", async () => {

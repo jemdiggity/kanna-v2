@@ -190,7 +190,7 @@ describe("AgentMessageView", () => {
     }
   );
 
-  it.each(["connecting", "error", "closed"] as const)(
+  it.each(["connecting", "restarting", "error", "closed"] as const)(
     "does not expose agent stream readiness for the %s state",
     (status) => {
       const tree = renderAgentView([], status);
@@ -204,6 +204,14 @@ describe("AgentMessageView", () => {
 
     expect(findByType(tree, "LoadingText")?.props.label).toBe("Connecting");
     expect(collectText(tree)).not.toContain("Connecting...");
+  });
+
+  it("shows an animated session restart state", () => {
+    const tree = renderAgentView([], "restarting");
+
+    expect(findByType(tree, "LoadingText")?.props.label).toBe(
+      "Restarting session"
+    );
   });
 
   it.each(["live", "idle", "error", "closed"] as const)(

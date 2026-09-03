@@ -7,6 +7,23 @@ import {
 } from "./lanTransport";
 
 describe("createLanTransport", () => {
+  it("posts missing-session recovery to the task resume action", async () => {
+    const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ taskId: "task/recover" })
+    });
+    const transport = createLanTransport("http://127.0.0.1:48120", fetchImpl);
+
+    await expect(transport.resumeTask?.("task/recover")).resolves.toEqual({
+      taskId: "task/recover"
+    });
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "http://127.0.0.1:48120/v1/tasks/task%2Frecover/actions/resume",
+      { method: "POST" }
+    );
+  });
+
   it("returns durable held-input status without inviting a retry", async () => {
     const queued = {
       status: "queued",
@@ -908,6 +925,14 @@ describe("createLanTransport", () => {
         status: "busy"
       } satisfies ServerFrame)
     });
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "error",
+        task_id: "task-1",
+        code: "session_not_found",
+        message: "session not found: task-1"
+      } satisfies ServerFrame)
+    });
 
     subscription.sendInput("continue");
     subscription.sendPermission("perm-1", { kind: "allow_session" });
@@ -947,7 +972,13 @@ describe("createLanTransport", () => {
         seq: 1,
         event: { type: "assistant_text", text: "hi", truncated: false }
       },
-      { type: "status", taskId: "task-1", status: "busy" }
+      { type: "status", taskId: "task-1", status: "busy" },
+      {
+        type: "error",
+        taskId: "task-1",
+        code: "session_not_found",
+        message: "session not found: task-1"
+      }
     ]);
     expect(socket.close).toHaveBeenCalledTimes(1);
   });
