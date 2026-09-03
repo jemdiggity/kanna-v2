@@ -4,7 +4,11 @@ import { resolveCurrentKannaServerBaseUrl } from "./kannaServerBaseUrl";
 const LOCAL_SERVER_ACTION_TIMEOUT_MS = 30_000;
 const LOCAL_SERVER_ACTION_RETRY_DELAY_MS = 250;
 
-export type DesktopTaskAction = "advance-stage" | "rerun-stage" | "request-revision";
+export type DesktopTaskAction =
+  | "advance-stage"
+  | "rerun-stage"
+  | "request-revision"
+  | "resume";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));

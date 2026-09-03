@@ -45,17 +45,23 @@ const mocks = vi.hoisted(() => {
   const updateAgentSessionIdMock = vi.fn(async () => {});
   const putTaskAgentSessionMock = vi.fn(async () => {});
   const applyTaskRuntimeStatusMock = vi.fn(async (taskId: string) => ({ taskId, activity: null }));
+  const postDesktopTaskActionMock = vi.fn(async () => new Response("{}", { status: 200 }));
   return {
     invokeMock,
     invokeDefault,
     updateAgentSessionIdMock,
     putTaskAgentSessionMock,
     applyTaskRuntimeStatusMock,
+    postDesktopTaskActionMock,
   };
 });
 
 vi.mock("../invoke", () => ({
   invoke: mocks.invokeMock,
+}));
+
+vi.mock("../services/desktopTaskActions", () => ({
+  postDesktopTaskAction: mocks.postDesktopTaskActionMock,
 }));
 
 vi.mock("./db", () => ({
@@ -138,6 +144,8 @@ describe("createSessionsApi", () => {
     vi.useRealTimers();
     mocks.invokeMock.mockReset();
     mocks.invokeMock.mockImplementation(mocks.invokeDefault);
+    mocks.postDesktopTaskActionMock.mockReset();
+    mocks.postDesktopTaskActionMock.mockResolvedValue(new Response("{}", { status: 200 }));
     mocks.updateAgentSessionIdMock.mockClear();
     mocks.putTaskAgentSessionMock.mockClear();
     mocks.applyTaskRuntimeStatusMock.mockClear();
@@ -420,75 +428,30 @@ describe("createSessionsApi", () => {
     });
   });
 
-  it("recovers an SDK agent task through the shared task session recovery API", async () => {
+  it("recovers a missing task through the server-owned provider resume path", async () => {
     const context = makeContext();
-    context.state.repos.value = [{
-      id: "repo-1",
-      path: "/tmp/repo",
-      name: "repo",
-      default_branch: "main",
-      hidden: 0,
-      sort_order: 0,
-      created_at: "2026-06-18T00:00:00.000Z",
-      last_opened_at: "2026-06-18T00:00:00.000Z",
-    }];
-    context.state.items.value = [{
-      id: "task-1",
-      repo_id: "repo-1",
-      issue_number: null,
-      issue_title: null,
-      prompt: "Ship it",
-      workflow: "default",
-      stage: "in progress",
-      stage_result: null,
-      active_post_action: null,
-      tags: "[]",
-      pr_number: null,
-      pr_url: null,
-      branch: "task-task-1",
-      closed_at: null,
+    const reloadSnapshot = vi.fn(async () => {});
+    context.services.reloadSnapshot = reloadSnapshot;
+    context.state.items.value = [makeItem({
       agent_type: "agent",
-      agent_provider: "claude",
-      activity: "idle",
-      activity_changed_at: "2026-06-18T00:00:00.000Z",
-      unread_at: null,
-      port_offset: null,
-      port_env: JSON.stringify({ KANNA_DEV_PORT: "1421" }),
-      agent_spawn_options: null,
-      pinned: 0,
-      pin_order: null,
-      display_name: null,
-      base_ref: null,
       agent_session_id: "claude-session-1",
-      previous_stage: null,
-      teardown_started_at: null,
-      created_at: "2026-06-18T00:00:00.000Z",
-      updated_at: "2026-06-18T00:00:00.000Z",
-    }];
+    })];
+    mocks.invokeMock.mockImplementation(async (command, args) => {
+      if (command === "list_sessions") return [{ session_id: "task-1" }];
+      return mocks.invokeDefault(command, args);
+    });
     const sessions = createSessionsApi(context);
 
     await sessions.recoverTaskSession("task-1", { cols: 100, rows: 40 });
 
-    expect(mocks.invokeMock).toHaveBeenCalledWith("spawn_agent_session", expect.objectContaining({
-      sessionId: "task-1",
-      cwd: "/tmp/repo/.kanna-worktrees/task-task-1",
-      prompt: "Ship it",
-      agentProvider: "claude",
-      model: null,
-      permissionMode: null,
-      executable: null,
-    }));
-    const spawnCall = mocks.invokeMock.mock.calls.find(([command]) => command === "spawn_agent_session");
-    expect(spawnCall?.[1]).toEqual(expect.objectContaining({
-      env: expect.objectContaining({
-        KANNA_TASK_ID: "task-1",
-        KANNA_WORKTREE: "1",
-        KANNA_DEV_PORT: "1421",
-        KANNA_MCP_PATH: "/usr/bin/kanna-mcp",
-        KANNA_MCP_CONFIG: "/tmp/kanna-daemon/runtime/mcp/task-1.json",
-      }),
-      mcpConfigPath: "/tmp/kanna-daemon/runtime/mcp/task-1.json",
-    }));
+    expect(mocks.postDesktopTaskActionMock).toHaveBeenCalledWith("task-1", "resume");
+    expect(mocks.invokeMock).toHaveBeenCalledWith("list_sessions");
+    expect(mocks.invokeMock).not.toHaveBeenCalledWith(
+      "spawn_agent_session",
+      expect.anything(),
+    );
+    expect(mocks.invokeMock).not.toHaveBeenCalledWith("spawn_session", expect.anything());
+    expect(reloadSnapshot).toHaveBeenCalledOnce();
   });
 
   it("passes task-scoped Kanna CLI env to worktree shell sessions", async () => {
@@ -633,112 +596,22 @@ describe("createSessionsApi", () => {
     );
   });
 
-  it("uses remote workspace config when recovering an SDK task", async () => {
+  it("does not spawn locally when the server rejects task recovery", async () => {
     const context = makeContext();
-    context.state.repos.value = [{
-      id: "repo-1",
-      path: "/tmp/repo",
-      name: "repo",
-      default_branch: "main",
-      hidden: 0,
-      sort_order: 0,
-      created_at: "2026-06-18T00:00:00.000Z",
-      last_opened_at: "2026-06-18T00:00:00.000Z",
-    }];
-    context.state.items.value = [makeItem({ agent_type: "agent" })];
-    const fetchRepoKannaDefinitions = vi.fn(async () => ({
-      revision: "remote-rev",
-      refName: "origin/main",
-      config: {
-        workspace: {
-          env: { REMOTE_ENV: "yes" },
-          path: { prepend: ["remote-bin"] },
-        },
-      },
-      defaultWorkflow: "default",
-      workflows: ["default"],
-    }));
-    updateDesktopServerClientHandlersForTests({ fetchRepoKannaDefinitions });
-    const sessions = createSessionsApi(context);
-
-    await sessions.recoverTaskSession("task-1");
-
-    const spawnCall = mocks.invokeMock.mock.calls.find(([command]) => command === "spawn_agent_session");
-    expect(fetchRepoKannaDefinitions).toHaveBeenCalledWith("repo-1");
-    expect(spawnCall?.[1]?.env).toEqual(expect.objectContaining({
-      REMOTE_ENV: "yes",
-    }));
-    expect(spawnCall?.[1]?.env?.PATH).toContain(
-      "/tmp/repo/.kanna-worktrees/task-task-1/remote-bin",
+    context.state.items.value = [makeItem({ agent_session_id: null })];
+    mocks.postDesktopTaskActionMock.mockResolvedValue(
+      new Response("no provider transcript", { status: 409 }),
     );
-  });
-
-  it("restores persisted SDK agent spawn options during task session recovery", async () => {
-    const context = makeContext();
-    context.state.repos.value = [{
-      id: "repo-1",
-      path: "/tmp/repo",
-      name: "repo",
-      default_branch: "main",
-      hidden: 0,
-      sort_order: 0,
-      created_at: "2026-06-18T00:00:00.000Z",
-      last_opened_at: "2026-06-18T00:00:00.000Z",
-    }];
-    context.state.items.value = [{
-      id: "task-1",
-      repo_id: "repo-1",
-      issue_number: null,
-      issue_title: null,
-      prompt: "Ship it",
-      workflow: "default",
-      stage: "in progress",
-      stage_result: null,
-      active_post_action: null,
-      tags: "[]",
-      pr_number: null,
-      pr_url: null,
-      branch: "task-task-1",
-      closed_at: null,
-      agent_type: "agent",
-      agent_provider: "claude",
-      activity: "idle",
-      activity_changed_at: "2026-06-18T00:00:00.000Z",
-      unread_at: null,
-      port_offset: null,
-      port_env: JSON.stringify({ KANNA_DEV_PORT: "1421" }),
-      agent_spawn_options: JSON.stringify({
-        model: "claude-sonnet-test",
-        effort: "high",
-        permissionMode: "dontAsk",
-        allowedTools: ["Read", "Bash"],
-        disallowedTools: ["WebFetch"],
-        maxTurns: 7,
-        maxBudgetUsd: 1.5,
-      }),
-      pinned: 0,
-      pin_order: null,
-      display_name: null,
-      base_ref: null,
-      agent_session_id: "claude-session-1",
-      previous_stage: null,
-      teardown_started_at: null,
-      created_at: "2026-06-18T00:00:00.000Z",
-      updated_at: "2026-06-18T00:00:00.000Z",
-    }];
     const sessions = createSessionsApi(context);
 
-    await sessions.recoverTaskSession("task-1");
+    await expect(sessions.recoverTaskSession("task-1")).rejects.toThrow(
+      "no provider transcript",
+    );
 
-    expect(mocks.invokeMock).toHaveBeenCalledWith("spawn_agent_session", expect.objectContaining({
-      sessionId: "task-1",
-      model: "claude-sonnet-test",
-      effort: "high",
-      permissionMode: "dontAsk",
-      allowedTools: ["Read", "Bash"],
-      disallowedTools: ["WebFetch"],
-      maxTurns: 7,
-      maxBudgetUsd: 1.5,
-    }));
+    expect(mocks.invokeMock).not.toHaveBeenCalledWith("spawn_session", expect.anything());
+    expect(mocks.invokeMock).not.toHaveBeenCalledWith(
+      "spawn_agent_session",
+      expect.anything(),
+    );
   });
 });

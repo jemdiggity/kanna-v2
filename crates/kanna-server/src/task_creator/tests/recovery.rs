@@ -448,24 +448,19 @@ async fn resume_respawns_with_the_interrupted_runs_model_and_effort() {
 }
 
 #[tokio::test]
-async fn killed_task_resume_restores_the_provider_transcript_context() {
+#[allow(clippy::await_holding_lock)] // Process-global provider store must stay fixed through prepare.
+async fn restart_recovery_restores_the_claude_transcript_context() {
     let (repo_root, config, db) = init_recovery_fixture("task-recovery-context");
     let worktree = repo_root.join(".kanna-worktrees/task-recovery");
     let config_dir = repo_root.join("claude-config");
     write_recovery_transcript(&config_dir, &worktree);
-    crate::http_api::handle_task_terminal_state(
-        &crate::http_api::AppState::new(config.clone()),
-        "recovery-task",
-        137,
-    )
-    .await
-    .unwrap();
     assert_eq!(
         db.latest_stage_run("recovery-task")
             .unwrap()
             .unwrap()
             .status,
-        "failed"
+        "running",
+        "the restart path begins before an Exit can finalize the lost session"
     );
     let fake_claude = worktree.join(".kanna/test-provider-bin/claude");
     std::fs::write(
@@ -535,6 +530,158 @@ printf 'retained' > resume-proof.txt
     );
     assert_eq!(run.resume_fallback_reason, None);
     assert_eq!(run.model.as_deref(), Some(RECOVERY_MODEL));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // Process-global provider store must stay fixed through prepare.
+async fn restart_recovery_discovers_and_resumes_codex_by_worktree_cwd() {
+    const CODEX_SESSION_ID: &str = "019d99a5-aa94-7c73-b786-644cc095c037";
+
+    let (repo_root, config, db) = init_recovery_fixture("task-recovery-codex-context");
+    let worktree = repo_root.join(".kanna-worktrees/task-recovery");
+    Connection::open(&config.db_path)
+        .unwrap()
+        .execute(
+            "UPDATE stage_run
+             SET agent_provider = 'codex', provider_session_id = NULL, model = NULL
+             WHERE id = 'run-killed-mid-turn'",
+            [],
+        )
+        .unwrap();
+    let codex_home = repo_root.join("codex-home");
+    let sessions_dir = codex_home.join("sessions/2026/09/03");
+    std::fs::create_dir_all(&sessions_dir).unwrap();
+    std::fs::write(
+        sessions_dir.join(format!(
+            "rollout-2026-09-03T07-00-00-{CODEX_SESSION_ID}.jsonl"
+        )),
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "session_meta",
+                "payload": {
+                    "id": CODEX_SESSION_ID,
+                    "cwd": worktree.to_string_lossy(),
+                },
+            })
+        ),
+    )
+    .unwrap();
+
+    let fake_daemon = spawn_recovery_fake_daemon(config.daemon_dir.clone()).await;
+    let (response, commands) = {
+        let _env_guard = super::CODEX_HOME_LOCK.lock().unwrap();
+        std::env::set_var("CODEX_HOME", &codex_home);
+        let app = crate::http_api::router(std::sync::Arc::new(crate::http_api::AppState::new(
+            config.clone(),
+        )));
+        let response = tower::ServiceExt::oneshot(
+            app,
+            axum::http::Request::post("/v1/tasks/recovery-task/actions/resume")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        let commands = fake_daemon.await.unwrap();
+        std::env::remove_var("CODEX_HOME");
+        (response, commands)
+    };
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+
+    let command_line = commands
+        .iter()
+        .find_map(|command| match command {
+            kanna_daemon::protocol::Command::Spawn { args, .. } => args.last(),
+            _ => None,
+        })
+        .expect("replacement spawn command");
+    assert!(
+        command_line.contains(&format!("resume '{CODEX_SESSION_ID}'")),
+        "the hard-death path must discover the Codex rollout by cwd: {command_line}"
+    );
+    let run = loop {
+        let run = db.latest_stage_run("recovery-task").unwrap().unwrap();
+        if run.id != "run-killed-mid-turn" {
+            break run;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    assert_eq!(
+        run.resumed_from_run_id.as_deref(),
+        Some("run-killed-mid-turn")
+    );
+    assert_eq!(run.provider_session_id.as_deref(), Some(CODEX_SESSION_ID));
+    assert_eq!(run.resume_fallback_reason, None);
+    let events = db
+        .list_task_events(
+            &crate::db::TaskEventScope::Tasks(vec!["recovery-task".to_string()]),
+            0,
+            i64::MAX,
+            100,
+        )
+        .unwrap();
+    assert!(
+        events
+            .iter()
+            .all(|event| event.event_type != "task.awaiting_advance"),
+        "automatic restart recovery must not transiently advertise a manual advance: {events:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // Process-global provider store must stay fixed through prepare.
+async fn restart_recovery_records_the_exact_codex_fallback_reason() {
+    let (repo_root, config, db) = init_recovery_fixture("task-recovery-codex-fallback");
+    Connection::open(&config.db_path)
+        .unwrap()
+        .execute(
+            "UPDATE stage_run
+             SET agent_provider = 'codex', provider_session_id = NULL, model = NULL
+             WHERE id = 'run-killed-mid-turn'",
+            [],
+        )
+        .unwrap();
+    let empty_codex_home = repo_root.join("empty-codex-home");
+    std::fs::create_dir_all(empty_codex_home.join("sessions")).unwrap();
+
+    let fake_daemon = spawn_recovery_fake_daemon(config.daemon_dir.clone()).await;
+    let response = {
+        let _env_guard = super::CODEX_HOME_LOCK.lock().unwrap();
+        std::env::set_var("CODEX_HOME", &empty_codex_home);
+        let app = crate::http_api::router(std::sync::Arc::new(crate::http_api::AppState::new(
+            config.clone(),
+        )));
+        let response = tower::ServiceExt::oneshot(
+            app,
+            axum::http::Request::post("/v1/tasks/recovery-task/actions/resume")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        fake_daemon.await.unwrap();
+        std::env::remove_var("CODEX_HOME");
+        response
+    };
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+
+    let run = loop {
+        let run = db.latest_stage_run("recovery-task").unwrap().unwrap();
+        if run.id != "run-killed-mid-turn" {
+            break run;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    assert_eq!(run.resumed_from_run_id, None);
+    assert_eq!(
+        run.resume_fallback_reason.as_deref(),
+        Some("no Codex CLI transcript for the recorded session or previous run cwd")
+    );
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }
@@ -863,6 +1010,44 @@ async fn resuming_into_a_live_session_clears_the_exited_runtime_verdict() {
         serde_json::json!("running"),
         "the restore itself must still have happened: {detail}"
     );
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[tokio::test]
+async fn restart_recovery_refuses_to_duplicate_a_live_running_session() {
+    let (repo_root, config, db) = init_recovery_fixture("task-recovery-running-live");
+    let daemon = spawn_listing_fake_daemon(config.daemon_dir.clone()).await;
+    let app = crate::http_api::router(std::sync::Arc::new(crate::http_api::AppState::new(
+        config.clone(),
+    )));
+    let response = tower::ServiceExt::oneshot(
+        app,
+        axum::http::Request::post("/v1/tasks/recovery-task/actions/resume")
+            .body(axum::body::Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&body).contains("task session is still alive"),
+        "the conflict must explain the failed hard-death precondition"
+    );
+    assert_eq!(
+        db.latest_stage_run("recovery-task")
+            .unwrap()
+            .unwrap()
+            .status,
+        "running"
+    );
+    assert!(matches!(
+        daemon.await.unwrap(),
+        kanna_daemon::protocol::Command::List
+    ));
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }

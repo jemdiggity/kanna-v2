@@ -18,11 +18,14 @@ import {
 import { shouldIgnoreRuntimeStatusDuringSetup } from "./taskRuntimeStatus";
 import { resolveTaskItemForDaemonSession } from "./taskSessionIdentity";
 import { isReadableDirectory, resolveShellSpawnCwd } from "../utils/shellCwd";
-import { fetchRepoConfig, requireService, type AgentSpawnRecoveryOptions, type PreparedPtySession, type PtySpawnOptions, type StoreContext, type TaskSessionRecoveryOptions } from "./state";
+import { fetchRepoConfig, requireService, type PreparedPtySession, type PtySpawnOptions, type StoreContext, type TaskSessionRecoveryOptions } from "./state";
 import { isTaskSelectedInAnyWindow } from "./windowSelection";
 import { applyDesktopTaskRuntimeStatus, putDesktopTaskAgentSession } from "../services/desktopServerClient";
+import { postDesktopTaskAction } from "../services/desktopTaskActions";
 
 const CODEX_SPAWN_SUBMIT_DELAY_MS = 5_000;
+const TASK_SESSION_RECOVERY_TIMEOUT_MS = 30_000;
+const TASK_SESSION_RECOVERY_POLL_MS = 100;
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -249,65 +252,6 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
     await spawnShellSession(sessionId, worktreePath, portEnv, true, fallbackCwd);
   }
 
-  async function resolveTaskWorktreePath(item: PipelineItem): Promise<string> {
-    const repo = context.state.repos.value.find((candidate) => candidate.id === item.repo_id);
-    if (!repo) {
-      throw new Error(`repo not found for task ${item.id}`);
-    }
-    return item.branch ? `${repo.path}/.kanna-worktrees/${item.branch}` : repo.path;
-  }
-
-  function parseAgentSpawnRecoveryOptions(raw: string | null | undefined): AgentSpawnRecoveryOptions {
-    if (!raw) return {};
-    try {
-      const parsed = JSON.parse(raw) as AgentSpawnRecoveryOptions;
-      return {
-        model: typeof parsed.model === "string" ? parsed.model : null,
-        effort: typeof parsed.effort === "string" ? parsed.effort : null,
-        permissionMode: typeof parsed.permissionMode === "string" ? parsed.permissionMode : null,
-        allowedTools: Array.isArray(parsed.allowedTools)
-          ? parsed.allowedTools.filter((tool): tool is string => typeof tool === "string")
-          : null,
-        disallowedTools: Array.isArray(parsed.disallowedTools)
-          ? parsed.disallowedTools.filter((tool): tool is string => typeof tool === "string")
-          : null,
-        maxTurns: typeof parsed.maxTurns === "number" ? parsed.maxTurns : null,
-        maxBudgetUsd: typeof parsed.maxBudgetUsd === "number" ? parsed.maxBudgetUsd : null,
-      };
-    } catch (error) {
-      console.debug("[store] failed to parse agent spawn recovery options:", error);
-      return {};
-    }
-  }
-
-  async function buildAgentSessionEnv(
-    sessionId: string,
-    repoId: string,
-    worktreePath: string,
-    portEnv: Record<string, string>,
-  ): Promise<{ env: Record<string, string>; mcpConfigPath?: string }> {
-    const repoConfig = await fetchRepoConfig(repoId);
-    const inheritedPath = await readEnvVarOptional("PATH");
-    const agentBaseEnv = buildWorktreeSessionEnv({
-      worktreePath,
-      repoConfig,
-      portEnv,
-      inheritedPath,
-    });
-    const env = {
-      ...agentBaseEnv,
-      ...buildTaskRuntimeEnv({
-        taskId: sessionId,
-        socketPath: await invoke<string>("get_workflow_socket_path"),
-        serverBaseUrl: await resolveCurrentKannaServerBaseUrl("recovering SDK task env"),
-        kannaCliPath: await whichBinaryOptional("kanna-cli"),
-        path: agentBaseEnv.PATH ?? inheritedPath,
-      }),
-    };
-    const { mcpConfigPath } = await prepareKannaMcpRuntime(sessionId, env);
-    return { env, mcpConfigPath };
-  }
-
   async function preparePtySession(
     sessionId: string,
     prompt: string,
@@ -463,7 +407,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
 
   async function recoverTaskSession(
     sessionId: string,
-    options: TaskSessionRecoveryOptions = {},
+    _options: TaskSessionRecoveryOptions = {},
   ): Promise<void> {
     const item = context.state.items.value.find((candidate) => candidate.id === sessionId);
     if (!item) {
@@ -473,55 +417,27 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
       throw new Error(`cannot recover closed task session: ${sessionId}`);
     }
 
-    const worktreePath = await resolveTaskWorktreePath(item);
-    const agentProvider = requireResolvedAgentProvider(item.agent_provider ?? undefined);
-    const prompt = item.prompt ?? "";
-    const cols = options.cols ?? 80;
-    const rows = options.rows ?? 24;
-    const portEnv = parsePortEnv(item.port_env);
-    const spawnOptions = parseAgentSpawnRecoveryOptions(item.agent_spawn_options);
-
-    if (item.agent_type === "agent" || item.agent_type === "sdk") {
-      const { env, mcpConfigPath } = await buildAgentSessionEnv(
-        sessionId,
-        item.repo_id,
-        worktreePath,
-        portEnv,
-      );
-      await invoke("spawn_agent_session", {
-        sessionId,
-        cwd: worktreePath,
-        prompt,
-        env,
-        agentProvider,
-        systemPrompt: buildKannaRuntimeSystemPrompt({
-          taskId: sessionId,
-          stage: item.stage,
-          workflow: item.pipeline,
-          provider: agentProvider,
-          mcpConfigured: !!mcpConfigPath,
-        }),
-        mcpConfigPath: mcpConfigPath ?? null,
-        permissionMode: spawnOptions.permissionMode ?? null,
-        model: spawnOptions.model ?? null,
-        effort: spawnOptions.effort ?? null,
-        allowedTools: spawnOptions.allowedTools ?? null,
-        disallowedTools: spawnOptions.disallowedTools ?? null,
-        maxTurns: spawnOptions.maxTurns ?? null,
-        maxBudgetUsd: spawnOptions.maxBudgetUsd ?? null,
-        executable: null,
-      });
-      return;
+    const response = await postDesktopTaskAction(sessionId, "resume");
+    if (!response.ok) {
+      throw new Error(await response.text());
     }
 
-    await spawnPtySession(sessionId, worktreePath, prompt, cols, rows, {
-      agentProvider,
-      portEnv,
-      worktreePath,
-      model: spawnOptions.model ?? undefined,
-      effort: spawnOptions.effort ?? undefined,
-      ...(item.agent_session_id ? { resumeSessionId: item.agent_session_id } : {}),
-    });
+    // The action returns before its detached transition replaces the session:
+    // an agent can invoke the same route from inside the PTY being replaced,
+    // so the server cannot bind the HTTP request lifetime to the spawn. Keep
+    // the desktop recovery operation pending until the daemon names the new
+    // incarnation, otherwise the terminal immediately reattaches, sees the
+    // same missing-session error, and strands the recovered run off-screen.
+    const deadline = Date.now() + TASK_SESSION_RECOVERY_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      const sessions = await invoke<Array<{ session_id?: string }> | null>("list_sessions");
+      if (Array.isArray(sessions) && sessions.some((session) => session.session_id === sessionId)) {
+        await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
+        return;
+      }
+      await delay(TASK_SESSION_RECOVERY_POLL_MS);
+    }
+    throw new Error(`timed out waiting for recovered task session: ${sessionId}`);
   }
 
   return {
