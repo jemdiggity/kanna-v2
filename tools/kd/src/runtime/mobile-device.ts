@@ -9,6 +9,15 @@ export interface AvailablePhysicalDevice {
   platformVersion: string;
 }
 
+export interface AvailableSimulatorDevice {
+  deviceTypeIdentifier: string;
+  lastBootedAt?: string;
+  name: string;
+  runtime: string;
+  state: string;
+  udid: string;
+}
+
 interface XcdeviceRecord {
   available?: boolean;
   ignored?: boolean;
@@ -22,6 +31,19 @@ interface XcdeviceRecord {
 interface SelectPhysicalDeviceOptions {
   requestedName?: string;
   requestedUdid?: string;
+}
+
+interface SimctlDeviceRecord {
+  deviceTypeIdentifier?: string;
+  isAvailable?: boolean;
+  lastBootedAt?: string;
+  name?: string;
+  state?: string;
+  udid?: string;
+}
+
+interface SimctlDeviceList {
+  devices?: Record<string, SimctlDeviceRecord[]>;
 }
 
 export interface MobileDeviceRunCommand {
@@ -178,6 +200,117 @@ function normalizePlatformVersion(rawVersion: string | undefined): string {
 
 function formatDeviceList(devices: readonly AvailablePhysicalDevice[]): string {
   return devices.map((device) => `${device.name} (${device.udid})`).join(", ");
+}
+
+function simulatorRuntimeParts(runtime: string): number[] {
+  const version = runtime.match(/\.SimRuntime\.iOS-(.+)$/)?.[1] ?? "0";
+  return version.split("-").map((part) => Number.parseInt(part, 10) || 0);
+}
+
+function compareSimulatorRuntime(left: string, right: string): number {
+  const leftParts = simulatorRuntimeParts(left);
+  const rightParts = simulatorRuntimeParts(right);
+  const length = Math.max(leftParts.length, rightParts.length);
+  for (let index = 0; index < length; index += 1) {
+    const difference = (rightParts[index] ?? 0) - (leftParts[index] ?? 0);
+    if (difference !== 0) return difference;
+  }
+  return 0;
+}
+
+function simulatorPreference(
+  left: AvailableSimulatorDevice,
+  right: AvailableSimulatorDevice
+): number {
+  const bootDifference = Number(right.state === "Booted") - Number(left.state === "Booted");
+  if (bootDifference !== 0) return bootDifference;
+  const runtimeDifference = compareSimulatorRuntime(left.runtime, right.runtime);
+  if (runtimeDifference !== 0) return runtimeDifference;
+  const leftModel = Number.parseInt(left.name.match(/^iPhone (\d+)/)?.[1] ?? "0", 10);
+  const rightModel = Number.parseInt(right.name.match(/^iPhone (\d+)/)?.[1] ?? "0", 10);
+  return rightModel - leftModel;
+}
+
+function formatSimulatorList(devices: readonly AvailableSimulatorDevice[]): string {
+  return devices
+    .map((device) => `${device.name} (${device.udid}, ${device.runtime.split(".").at(-1) ?? device.runtime})`)
+    .join(", ");
+}
+
+export function parseSimctlDeviceList(stdout: string): AvailableSimulatorDevice[] {
+  const parsed = JSON.parse(stdout) as SimctlDeviceList;
+  const devices: AvailableSimulatorDevice[] = [];
+  for (const [runtime, runtimeDevices] of Object.entries(parsed.devices ?? {})) {
+    for (const device of runtimeDevices) {
+      if (
+        device.isAvailable !== true ||
+        !device.deviceTypeIdentifier?.includes(".SimDeviceType.iPhone-") ||
+        !device.name ||
+        !device.state ||
+        !device.udid
+      ) {
+        continue;
+      }
+      devices.push({
+        deviceTypeIdentifier: device.deviceTypeIdentifier,
+        ...(device.lastBootedAt ? { lastBootedAt: device.lastBootedAt } : {}),
+        name: device.name,
+        runtime,
+        state: device.state,
+        udid: device.udid
+      });
+    }
+  }
+  return devices.sort(simulatorPreference);
+}
+
+export function selectSimulatorDevice(
+  devices: readonly AvailableSimulatorDevice[],
+  requested?: string
+): AvailableSimulatorDevice {
+  if (!devices.length) {
+    throw new Error(
+      "No available iPhone simulators were found. Install an iOS Simulator runtime in Xcode Settings > Components."
+    );
+  }
+  const ordered = [...devices].sort(simulatorPreference);
+  if (!requested) return ordered[0];
+  const matches = ordered.filter(
+    (device) => device.udid === requested || device.name === requested
+  );
+  if (matches.length > 0) return matches[0];
+  throw new Error(
+    `Requested iOS simulator "${requested}" was not found. Available simulators: ${formatSimulatorList(ordered)}`
+  );
+}
+
+export async function listAvailableSimulatorDevices(
+  runner: CommandRunner
+): Promise<AvailableSimulatorDevice[]> {
+  const result = await runner.run("xcrun", ["simctl", "list", "devices", "available", "--json"]);
+  if (result.exitCode !== 0) {
+    throw new Error(result.stderr || "Failed to list available iOS simulators with xcrun simctl.");
+  }
+  return parseSimctlDeviceList(result.stdout);
+}
+
+export async function resolveSimulatorDevice(
+  runner: CommandRunner,
+  requested?: string
+): Promise<AvailableSimulatorDevice> {
+  return selectSimulatorDevice(await listAvailableSimulatorDevices(runner), requested);
+}
+
+export function buildMobileSimulatorBootCommandPlan(
+  device: AvailableSimulatorDevice
+): Array<Omit<MobileDeviceRunCommand, "cwd" | "env">> {
+  return [
+    ...(device.state === "Booted"
+      ? []
+      : [{ command: "xcrun", args: ["simctl", "boot", device.udid] }]),
+    { command: "xcrun", args: ["simctl", "bootstatus", device.udid, "-b"] },
+    { command: "open", args: ["-a", "Simulator", "--args", "-CurrentDeviceUDID", device.udid] }
+  ];
 }
 
 export function parseXcdeviceList(stdout: string): AvailablePhysicalDevice[] {

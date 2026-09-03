@@ -143,7 +143,8 @@ Two contracts that are easy to break:
   distinct bundle ids and display names). Don't hand-patch `project.pbxproj`;
   Expo regenerates it.
 
-Run it through `kd` (`./kd dev up --mobile`, `./kd mobile run --device`) — bare
+Run it through `kd` (`./kd mobile run --simulator` for Simulator,
+`./kd mobile run --device` for a physical iPhone) — bare
 `expo start` does not start the desktop-side `kanna-server`. Details and device
 troubleshooting: `docs/dev/dev-workflow.md`; OTA operations:
 `docs/specs/mobile-ota-updates.md`.
@@ -405,7 +406,7 @@ added meanwhile.
 
 Any change that affects rendered UI — mobile screens or components, or desktop
 Vue components or styling — must be visually verified before its PR is opened.
-Run the real app (`./kd mobile run` with the iOS Simulator for mobile, never
+Run the real app (`./kd mobile run --simulator` with the iOS Simulator for mobile, never
 bare `expo start`; `./kd dev up` for desktop), exercise the changed states and
 relevant accessibility variants such as Reduce Motion for animation work,
 capture and inspect screenshots, and summarize that verification in the PR

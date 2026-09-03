@@ -52,6 +52,7 @@ import {
   buildMobileDeviceRelaunchCommand,
   buildMobileDeviceRunCommand,
   buildMobileDeviceUninstallAppCommand,
+  buildMobileSimulatorBootCommandPlan,
   checkPhysicalDeviceRunPreflight,
   isMobileDeviceAppInstalled,
   mobileDeviceDerivedDataPath,
@@ -59,7 +60,10 @@ import {
   resolveMobileNativeIdentity,
   resolveMobileReleaseAppPath,
   resolvePhysicalDevice,
+  resolveSimulatorDevice,
   waitForPhysicalDeviceMetroReadiness,
+  type AvailablePhysicalDevice,
+  type AvailableSimulatorDevice,
   type PhysicalDeviceMetroReadinessInput
 } from "../runtime/mobile-device";
 import {
@@ -160,6 +164,7 @@ export interface MobileUpInput {
 
 export interface MobileRunInput {
   device: boolean;
+  simulator?: boolean | string;
   production?: boolean;
   staging?: boolean;
   install?: boolean;
@@ -223,6 +228,7 @@ const mobileUpInputSchema = z.object({
 
 const mobileRunInputSchema = z.object({
   device: z.boolean().default(false),
+  simulator: z.union([z.boolean(), z.string()]).optional(),
   production: z.boolean().default(false),
   staging: z.boolean().default(false),
   install: z.boolean().default(false),
@@ -1041,9 +1047,10 @@ function formatPhysicalDeviceRunSuccess(input: {
   profile: KdEnvironmentProfile;
   ownerEndpoint: string;
   deviceEndpoint: string;
+  targetKind?: "device" | "simulator";
 }): string {
   return [
-    `Launched Kanna mobile on ${input.deviceName}.`,
+    `Launched Kanna mobile on ${input.deviceName}${input.targetKind === "simulator" ? " simulator" : ""}.`,
     `Bundle ID: ${input.bundleId}`,
     `Metro: ${input.metroUrl}`,
     `Profile: ${formatEnvironmentProfile(input.profile)}.`,
@@ -1061,14 +1068,17 @@ function formatPhysicalDeviceRunFailure(input: {
   metroUrl: string;
   appState: string;
   reason: string;
+  targetKind?: "device" | "simulator";
 }): string {
   return [
-    `Failed to launch Kanna mobile on ${input.deviceName}.`,
+    `Failed to launch Kanna mobile on ${input.deviceName}${input.targetKind === "simulator" ? " simulator" : ""}.`,
     `Bundle ID: ${input.bundleId}`,
     `Metro: ${input.metroUrl}`,
     `App: ${input.appState}`,
     input.reason,
-    "On the iPhone, allow Local Network for Kanna in Settings -> Privacy & Security -> Local Network."
+    ...(input.targetKind === "simulator"
+      ? []
+      : ["On the iPhone, allow Local Network for Kanna in Settings -> Privacy & Security -> Local Network."])
   ].join("\n");
 }
 
@@ -1115,10 +1125,53 @@ function physicalDeviceChecksWithMetroReadiness(input: {
   metroOk: boolean;
 }): Awaited<ReturnType<typeof checkPhysicalDeviceRunPreflight>>["checks"] {
   return input.checks.map((check) =>
-    check.name === "metro-lan"
-      ? { name: "metro-lan", ok: input.metroOk, message: input.metroMessage }
+    check.name.startsWith("metro-")
+      ? { name: check.name, ok: input.metroOk, message: input.metroMessage }
       : check
   );
+}
+
+type MobileRunTarget =
+  | { kind: "device"; device: AvailablePhysicalDevice }
+  | { kind: "simulator"; device: AvailableSimulatorDevice };
+
+async function resolveMobileRunTarget(
+  input: MobileRunInput,
+  executor: ExecutorInput
+): Promise<MobileRunTarget> {
+  if (input.device) {
+    return {
+      kind: "device",
+      device: await resolvePhysicalDevice(executor.runner, {
+        requestedUdid: executor.context.env.KANNA_IOS_DEVICE_UDID?.trim() || undefined,
+        requestedName: executor.context.env.KANNA_IOS_PHYSICAL_DEVICE_NAME?.trim() || undefined
+      })
+    };
+  }
+  return {
+    kind: "simulator",
+    device: await resolveSimulatorDevice(
+      executor.runner,
+      typeof input.simulator === "string" ? input.simulator : undefined
+    )
+  };
+}
+
+async function bootMobileRunSimulator(
+  target: MobileRunTarget,
+  runner: CommandRunner
+): Promise<void> {
+  if (target.kind !== "simulator") return;
+  for (const command of buildMobileSimulatorBootCommandPlan(target.device)) {
+    const result = await runner.run(command.command, command.args, { streamOutput: true });
+    if (result.exitCode !== 0) {
+      throw new Error(
+        result.stderr.trim() ||
+          result.stdout.trim() ||
+          `Failed to boot iOS simulator ${target.device.name} (${target.device.udid}).`
+      );
+    }
+  }
 }
 
 export async function executeMobileDeviceRunWithContext(
@@ -1134,8 +1187,14 @@ export async function executeMobileDeviceRunWithContext(
     staging: input.staging,
     production: input.production
   });
-  if (!input.device) {
-    throw new Error("mobile.run requires --device.");
+  const hasSimulator = input.simulator === true || typeof input.simulator === "string";
+  if (Number(input.device) + Number(hasSimulator) !== 1) {
+    throw new Error(
+      "mobile.run requires exactly one target: --simulator [<udid|name>] or --device."
+    );
+  }
+  if (hasSimulator && input.install) {
+    throw new Error("mobile.run --install is only supported with the physical-iPhone --device target.");
   }
   if (input.production && input.staging) {
     throw new Error("mobile.run accepts only one of --production or --staging.");
@@ -1158,16 +1217,18 @@ export async function executeMobileDeviceRunWithContext(
     if (ownerCheck) return ownerCheck;
   }
 
-  const device = await resolvePhysicalDevice(executor.runner, {
-    requestedUdid: executor.context.env.KANNA_IOS_DEVICE_UDID?.trim() || undefined,
-    requestedName: executor.context.env.KANNA_IOS_PHYSICAL_DEVICE_NAME?.trim() || undefined
-  });
-  const buildEnv = mobileDeviceInstallEnv(profile, executor, device.udid);
+  const target = await resolveMobileRunTarget(input, executor);
+  await bootMobileRunSimulator(target, executor.runner);
+  const device = target.device;
+  const buildEnv = mobileRunTargetEnv(profile, executor, target);
   if (input.install) {
-    return executeMobileDeviceReleaseInstall(profile, executor, device, buildEnv);
+    if (target.kind !== "device") {
+      throw new Error("mobile.run --install requires a physical iPhone target.");
+    }
+    return executeMobileDeviceReleaseInstall(profile, executor, target.device, buildEnv);
   }
 
-  const lanHost = requireMobileDeviceLanHost(options);
+  const lanHost = target.kind === "device" ? requireMobileDeviceLanHost(options) : "127.0.0.1";
   const launch = prepareMobileDeviceLaunch(input, profile, executor, lanHost, buildEnv);
   await launch.resetTmux();
   await startTmuxSession(executor.runner, executor.context.tmux, launch.plan.windows, {
@@ -1179,12 +1240,29 @@ export async function executeMobileDeviceRunWithContext(
   }
 
   const nativeIdentity = resolveMobileNativeIdentity(launch.env);
-  const preflight = await checkPhysicalDeviceRunPreflight(executor.runner, {
-    bundleId: nativeIdentity.bundleId,
-    device,
-    lanHost,
-    metroPort
-  });
+  const preflight = target.kind === "device"
+    ? await checkPhysicalDeviceRunPreflight(executor.runner, {
+        bundleId: nativeIdentity.bundleId,
+        device: target.device,
+        lanHost,
+        metroPort
+      })
+    : {
+        ok: true,
+        metroUrl: `http://${lanHost}:${metroPort}`,
+        checks: [
+          {
+            name: "simulator-boot",
+            ok: true,
+            message: `${device.name} (${device.udid}) is booted.`
+          },
+          {
+            name: "metro-local",
+            ok: false,
+            message: "Metro readiness is checked after native prebuild."
+          }
+        ]
+      };
   const prebuildCommand = buildMobileDevicePrebuildCommand({
     repoRoot: executor.context.repoRoot,
     nativeIdentity
@@ -1205,7 +1283,8 @@ export async function executeMobileDeviceRunWithContext(
           deviceName: device.name,
           metroUrl: preflight.metroUrl,
           appState: "not launched because prebuild failed.",
-          reason: `Failed to prebuild Kanna mobile for ${nativeIdentity.bundleId}.`
+          reason: `Failed to prebuild Kanna mobile for ${nativeIdentity.bundleId}.`,
+          targetKind: target.kind
         }),
       data: {
         profile,
@@ -1231,7 +1310,8 @@ export async function executeMobileDeviceRunWithContext(
         deviceName: device.name,
         metroUrl: initialMetroReadiness.metroUrl,
         appState: "not launched because Metro was not ready.",
-        reason: `FAIL metro-lan: ${initialMetroReadiness.message}`
+        reason: `FAIL metro-lan: ${initialMetroReadiness.message}`,
+        targetKind: target.kind
       }),
       data: {
         profile,
@@ -1281,7 +1361,8 @@ export async function executeMobileDeviceRunWithContext(
           checks: preflight.checks,
           metroMessage: postLaunchMetroReadiness.message,
           metroOk: true
-        })
+        }),
+        targetKind: target.kind
       }),
       data: {
         profile,
@@ -1299,6 +1380,7 @@ export async function executeMobileDeviceRunWithContext(
   }
 
   if (
+    target.kind === "device" &&
     runResult.exitCode !== 0 &&
     postLaunchMetroReadiness.ok &&
     isTransientExpoMetroFailure(runResult)
@@ -1332,7 +1414,8 @@ export async function executeMobileDeviceRunWithContext(
             checks: preflight.checks,
             metroMessage: postLaunchMetroReadiness.message,
             metroOk: true
-          })
+          }),
+          targetKind: target.kind
         }),
         data: {
           profile,
@@ -1356,7 +1439,8 @@ export async function executeMobileDeviceRunWithContext(
         deviceName: device.name,
         metroUrl: postLaunchMetroReadiness.metroUrl,
         appState: "installed, but relaunch failed.",
-        reason: relaunchResult.stderr || relaunchResult.stdout || "Failed to relaunch the installed iOS app."
+        reason: relaunchResult.stderr || relaunchResult.stdout || "Failed to relaunch the installed iOS app.",
+        targetKind: target.kind
       }),
       data: {
         bundleId: nativeIdentity.bundleId,
@@ -1383,7 +1467,8 @@ export async function executeMobileDeviceRunWithContext(
       reason:
         runResult.exitCode === 0
           ? `FAIL metro-lan: ${postLaunchMetroReadiness.message}`
-          : runResult.stderr || runResult.stdout || "The iOS install or launch command failed."
+          : runResult.stderr || runResult.stdout || "The iOS install or launch command failed.",
+      targetKind: target.kind
     }),
     data: {
       bundleId: nativeIdentity.bundleId,
@@ -1399,15 +1484,18 @@ export async function executeMobileDeviceRunWithContext(
   };
 }
 
-function mobileDeviceInstallEnv(
+function mobileRunTargetEnv(
   profile: KdEnvironmentProfile,
   executor: ExecutorInput,
-  deviceUdid: string
+  target: MobileRunTarget
 ): NodeJS.ProcessEnv {
-  return {
-    ...applyEnvironmentProfile(executor.context.env, profile),
-    KANNA_IOS_DEVICE_UDID: deviceUdid
-  };
+  const env = applyEnvironmentProfile(executor.context.env, profile);
+  if (target.kind === "device") {
+    return { ...env, KANNA_IOS_DEVICE_UDID: target.device.udid };
+  }
+  delete env.KANNA_IOS_DEVICE_UDID;
+  delete env.KANNA_IOS_PHYSICAL_DEVICE_NAME;
+  return env;
 }
 
 async function executeMobileDeviceReleaseInstall(
@@ -2054,7 +2142,7 @@ export const taskDefinitions = [
   },
   {
     id: "mobile.run",
-    description: "Build, install, and launch Kanna mobile on a physical iOS device.",
+    description: "Build, install, and launch Kanna mobile on an iOS Simulator or physical iPhone.",
     inputSchema: mobileRunInputSchema,
     execute: async (_context, input) => executeMobileDeviceRun(mobileRunInputSchema.parse(input))
   },
