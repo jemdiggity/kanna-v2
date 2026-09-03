@@ -1113,8 +1113,20 @@ pub fn args_with_self_exclusion(
         Some(Value::Null) | None => false,
         Some(_) => return Err("include_self must be a boolean".to_string()),
     };
-    let explicit_task_scope =
-        resolved_args.contains_key("task_ids") || resolved_args.contains_key("parent_task_id");
+    // Match the server's scope resolution: empty task-id arrays and blank
+    // parent ids fall through to repository scope, so they must not disable
+    // the repository watch's default self-exclusion.
+    let explicit_task_ids = match resolved_args.get("task_ids") {
+        Some(Value::Null) | None => false,
+        Some(value) => string_array_value(value, "task_ids")?
+            .iter()
+            .any(|task_id| !task_id.trim().is_empty()),
+    };
+    let explicit_parent_scope = resolved_args
+        .get("parent_task_id")
+        .and_then(Value::as_str)
+        .is_some_and(|parent_task_id| !parent_task_id.trim().is_empty());
+    let explicit_task_scope = explicit_task_ids || explicit_parent_scope;
     let Some(self_task_id) =
         task_event_self_exclusion(explicit_task_scope, include_self, current_task_id)
     else {

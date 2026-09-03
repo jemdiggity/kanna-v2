@@ -1926,6 +1926,25 @@ fn wait_events_self_exclusion_is_shared_catalog_policy() {
         json!(["other", "manager-1"])
     );
 
+    for repository_scope_with_empty_literal in [
+        json!({ "repo_id": "repo-explicit", "task_ids": [] }),
+        json!({ "repo_id": "repo-explicit", "task_ids": [" "] }),
+        json!({ "repo_id": "repo-explicit", "parent_task_id": "" }),
+        json!({ "repo_id": "repo-explicit", "parent_task_id": null }),
+    ] {
+        let filtered = args_with_self_exclusion(
+            "kanna_wait_events",
+            &repository_scope_with_empty_literal,
+            Some("manager-1"),
+        )
+        .expect("apply policy");
+        assert_eq!(
+            filtered["exclude_task_ids"],
+            json!(["manager-1"]),
+            "empty literal scopes fall through to repository scope"
+        );
+    }
+
     for literal in [
         json!({ "task_ids": ["manager-1", "child-a"] }),
         json!({ "parent_task_id": "manager-1" }),
