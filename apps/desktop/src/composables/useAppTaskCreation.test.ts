@@ -508,6 +508,97 @@ describe("useAppTaskCreation", () => {
     expect(defaultBaseBranchName.value).toBe("origin/trunk");
   });
 
+  it("falls back to the published default branch when the cloud repo remote cannot be listed", async () => {
+    const {
+      creation,
+      store,
+      availableBaseBranches,
+      defaultBaseBranchName,
+      remoteSnapshot,
+      cloudOnlyRepoIds,
+      toast,
+    } = createTaskCreationHarness();
+    const cloudRepoId = "cloud:repo-private";
+    remoteSnapshot.value = {
+      repos: [{
+        id: cloudRepoId,
+        path: "",
+        name: "repo-private",
+        default_branch: "trunk",
+        remote_url: "https://github.com/kanna/repo-private.git",
+        remote_url_hash: null,
+        hidden: 0,
+        sort_order: 0,
+        created_at: "2026-08-30T00:00:00Z",
+        last_opened_at: "2026-08-30T00:00:00Z",
+      }],
+      items: [],
+      terminalRefs: {},
+      blockedByTaskIds: {},
+      transferMachines: [],
+    };
+    cloudOnlyRepoIds.add(cloudRepoId);
+    store.selectedRepoId = cloudRepoId;
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "git_list_remote_base_branches") {
+        throw new Error("git ls-remote failed: Repository not found.");
+      }
+      return "";
+    });
+
+    await creation.openNewTaskModal(cloudRepoId);
+
+    expect(availableBaseBranches.value).toEqual(["origin/trunk"]);
+    expect(defaultBaseBranchName.value).toBe("origin/trunk");
+    expect(toast.error).toHaveBeenCalledWith(
+      "toasts.remoteBaseBranchesFailed: git ls-remote failed: Repository not found.",
+    );
+  });
+
+  it("offers the published default branch when a cloud repo has no remote URL", async () => {
+    const {
+      creation,
+      store,
+      availableBaseBranches,
+      defaultBaseBranchName,
+      remoteSnapshot,
+      cloudOnlyRepoIds,
+      toast,
+    } = createTaskCreationHarness();
+    const cloudRepoId = "cloud:repo-unlinked";
+    remoteSnapshot.value = {
+      repos: [{
+        id: cloudRepoId,
+        path: "",
+        name: "repo-unlinked",
+        default_branch: "main",
+        remote_url: null,
+        remote_url_hash: null,
+        hidden: 0,
+        sort_order: 0,
+        created_at: "2026-08-30T00:00:00Z",
+        last_opened_at: "2026-08-30T00:00:00Z",
+      }],
+      items: [],
+      terminalRefs: {},
+      blockedByTaskIds: {},
+      transferMachines: [],
+    };
+    cloudOnlyRepoIds.add(cloudRepoId);
+    store.selectedRepoId = cloudRepoId;
+    invokeMock.mockImplementation(async () => "");
+
+    await creation.openNewTaskModal(cloudRepoId);
+
+    expect(availableBaseBranches.value).toEqual(["origin/main"]);
+    expect(defaultBaseBranchName.value).toBe("origin/main");
+    expect(toast.error).not.toHaveBeenCalled();
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "git_list_remote_base_branches",
+      expect.anything(),
+    );
+  });
+
   it("discards option results from a superseded repository load", async () => {
     const definitions = {
       "repo-1": deferred<{

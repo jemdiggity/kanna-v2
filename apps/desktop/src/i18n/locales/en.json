@@ -142,6 +142,7 @@
   "toasts": {
     "taskCreationFailed": "Task creation failed",
     "repoDefinitionsFailed": "Could not load repository definitions",
+    "remoteBaseBranchesFailed": "Could not list branches from the repository remote",
     "prCreationFailed": "PR creation failed",
     "repoCreationFailed": "Failed to create repo",
     "repoImportFailed": "Failed to import repo",
