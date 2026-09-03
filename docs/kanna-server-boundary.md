@@ -43,7 +43,9 @@ for a known task directly to the existing reactive task object. An unsupported
 version, malformed state, missing/ambiguous task, scope-only frame, any
 structural task change, and every `repos`, `blockers`, or `settings` change
 falls back to the authoritative full snapshot. A reconnect also fetches the
-full snapshot because this broadcast has no replay cursor.
+full snapshot because this broadcast has no replay cursor. If a connection's
+broadcast subscriber lags, the server forwards a coarse `tasks` frame so any
+dropped scoped updates are likewise recovered from the authoritative snapshot.
 
 Compatibility is additive and self-versioned rather than handshake-gated. An
 older server omits `task_state`, so a newer desktop follows its existing full
