@@ -30,6 +30,7 @@ import {
   setServerConnection,
   routeMessage,
   routedMessageByteClass,
+  sendDataResponse,
   sendErrorResponse,
   getConnectionCount,
   getTunnelFlowStats,
@@ -49,8 +50,11 @@ import {
   beginCloudTaskPublicationSession,
   CloudTaskPublicationRefusal,
   createFirestoreCloudTaskPublicationStore,
+  claimRepoSingleton,
   endCloudTaskPublicationSession,
   handleCloudTaskPublication,
+  listRepoSingletonOwners,
+  releaseRepoSingletonReservation,
   MAX_TASK_SNAPSHOT_BYTES,
 } from "./cloudTaskPublication.js";
 import {
@@ -797,6 +801,8 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         snapshot?: unknown;
         notification?: unknown;
         deviceId?: unknown;
+        command?: unknown;
+        args?: unknown;
       } | null = null;
       try {
         publication = JSON.parse(data) as {
@@ -805,6 +811,8 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
           snapshot?: unknown;
           notification?: unknown;
           deviceId?: unknown;
+          command?: unknown;
+          args?: unknown;
         };
       } catch {
         // Non-publication messages retain the router's existing behavior.
@@ -865,6 +873,93 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
           );
           return;
         }
+      }
+      if (
+        publication?.type === "invoke"
+        && publication.command === "list_repo_singletons"
+      ) {
+        if (serverAuthProof?.kind !== "desktop") {
+          sendErrorResponse(
+            ws,
+            publication.id,
+            "desktop-secret authentication is required",
+          );
+          return;
+        }
+        const args = publication.args;
+        const record = args && typeof args === "object" && !Array.isArray(args)
+          ? args as Record<string, unknown>
+          : null;
+        const remoteUrlHash = record?.remoteUrlHash;
+        const agent = record?.agent;
+        if (
+          typeof remoteUrlHash !== "string"
+          || remoteUrlHash.length === 0
+          || remoteUrlHash.length > 128
+          || typeof agent !== "string"
+          || agent.length === 0
+          || agent.length > 64
+        ) {
+          sendErrorResponse(ws, publication.id, "repository singleton lookup is malformed");
+          return;
+        }
+        try {
+          const owners = await listRepoSingletonOwners({
+            userId: userId!,
+            remoteUrlHash,
+            agent,
+          });
+          sendDataResponse(ws, publication.id, { owners });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          console.warn(`[cloud] Repository singleton lookup failed for ${userId}: ${message}`);
+          sendErrorResponse(ws, publication.id, "repository singleton directory is unavailable");
+        }
+        return;
+      }
+      if (
+        publication?.type === "invoke"
+        && (publication.command === "claim_repo_singleton"
+          || publication.command === "release_repo_singleton_reservation")
+      ) {
+        if (serverAuthProof?.kind !== "desktop" || !desktopId) {
+          sendErrorResponse(ws, publication.id, "desktop-secret authentication is required");
+          return;
+        }
+        const args = publication.args;
+        const record = args && typeof args === "object" && !Array.isArray(args)
+          ? args as Record<string, unknown>
+          : null;
+        const remoteUrlHash = record?.remoteUrlHash;
+        const agent = record?.agent;
+        const taskId = record?.taskId;
+        const creatorFence = record?.creatorFence;
+        if (typeof remoteUrlHash !== "string" || remoteUrlHash.length === 0
+          || remoteUrlHash.length > 128 || typeof agent !== "string" || agent.length === 0
+          || agent.length > 64 || typeof taskId !== "string" || taskId.length === 0
+          || taskId.length > 128 || typeof creatorFence !== "string"
+          || creatorFence.length === 0 || creatorFence.length > 128) {
+          sendErrorResponse(ws, publication.id, "repository singleton claim is malformed");
+          return;
+        }
+        try {
+          if (publication.command === "claim_repo_singleton") {
+            const claim = await claimRepoSingleton({
+              userId: userId!, remoteUrlHash, agent, machineId: desktopId, taskId, creatorFence,
+            });
+            sendDataResponse(ws, publication.id, { claim });
+          } else {
+            const released = await releaseRepoSingletonReservation({
+              userId: userId!, remoteUrlHash, agent, machineId: desktopId, taskId, creatorFence,
+            });
+            sendDataResponse(ws, publication.id, { released });
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          console.warn(`[cloud] Repository singleton claim failed for ${userId}: ${message}`);
+          sendErrorResponse(ws, publication.id, "repository singleton ownership is unavailable");
+        }
+        return;
       }
       if (publication?.type === "mobile_notification_publish") {
         const id = typeof publication.id === "string" ? publication.id : "";

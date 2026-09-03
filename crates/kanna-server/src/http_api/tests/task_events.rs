@@ -88,6 +88,9 @@ fn connect_test_relay_peer(
                     };
                     let _ = response.send(Ok(machine_ids));
                 }
+                crate::http_api::DesktopRelayRequest::ListRepoSingletons { response, .. } => {
+                    let _ = response.send(Ok(Vec::new()));
+                }
                 crate::http_api::DesktopRelayRequest::Invoke {
                     method,
                     path,
@@ -108,6 +111,12 @@ fn connect_test_relay_peer(
                         .await;
                         let _ = response.send(Ok(result));
                     });
+                }
+                crate::http_api::DesktopRelayRequest::ClaimRepoSingleton { .. }
+                | crate::http_api::DesktopRelayRequest::ReleaseRepoSingletonReservation {
+                    ..
+                } => {
+                    panic!("task-event relay test does not claim singletons")
                 }
             }
         }
@@ -130,6 +139,9 @@ fn connect_test_relay_peer_with_long_poll_budget(
             match request {
                 crate::http_api::DesktopRelayRequest::ListActive { response, .. } => {
                     let _ = response.send(Ok(vec![peer.config().desktop_id.clone()]));
+                }
+                crate::http_api::DesktopRelayRequest::ListRepoSingletons { response, .. } => {
+                    let _ = response.send(Ok(Vec::new()));
                 }
                 crate::http_api::DesktopRelayRequest::Invoke {
                     method,
@@ -161,6 +173,12 @@ fn connect_test_relay_peer_with_long_poll_budget(
                         let _ = response.send(Ok(result));
                     });
                 }
+                crate::http_api::DesktopRelayRequest::ClaimRepoSingleton { .. }
+                | crate::http_api::DesktopRelayRequest::ReleaseRepoSingletonReservation {
+                    ..
+                } => {
+                    panic!("task-event relay test does not claim singletons")
+                }
             }
         }
     })
@@ -181,6 +199,9 @@ fn connect_test_relay_peer_with_invoke_gate(
             match request {
                 crate::http_api::DesktopRelayRequest::ListActive { response, .. } => {
                     let _ = response.send(Ok(vec![peer.config().desktop_id.clone()]));
+                }
+                crate::http_api::DesktopRelayRequest::ListRepoSingletons { response, .. } => {
+                    let _ = response.send(Ok(Vec::new()));
                 }
                 crate::http_api::DesktopRelayRequest::Invoke {
                     method,
@@ -203,6 +224,12 @@ fn connect_test_relay_peer_with_invoke_gate(
                         let _ = response.send(Ok(result));
                     });
                 }
+                crate::http_api::DesktopRelayRequest::ClaimRepoSingleton { .. }
+                | crate::http_api::DesktopRelayRequest::ReleaseRepoSingletonReservation {
+                    ..
+                } => {
+                    panic!("task-event relay test does not claim singletons")
+                }
             }
         }
     })
@@ -223,11 +250,20 @@ fn connect_unresponsive_listed_peer(
                 crate::http_api::DesktopRelayRequest::ListActive { response, .. } => {
                     let _ = response.send(Ok(vec![machine_id.clone()]));
                 }
+                crate::http_api::DesktopRelayRequest::ListRepoSingletons { response, .. } => {
+                    let _ = response.send(Ok(Vec::new()));
+                }
                 crate::http_api::DesktopRelayRequest::Invoke { response, .. } => {
                     tokio::spawn(async move {
                         let _response = response;
                         std::future::pending::<()>().await;
                     });
+                }
+                crate::http_api::DesktopRelayRequest::ClaimRepoSingleton { .. }
+                | crate::http_api::DesktopRelayRequest::ReleaseRepoSingletonReservation {
+                    ..
+                } => {
+                    panic!("task-event relay test does not claim singletons")
                 }
             }
         }

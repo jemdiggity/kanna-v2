@@ -428,6 +428,57 @@ checks reachable siblings and, when the id exists elsewhere, returns an error
 that names the owning machine and tells MCP callers to repeat
 `kanna_get_task` with that `machine_id`, rather than returning a bare 404.
 
+Repository singleton signals use that authenticated desktop-routing boundary
+before local creation. A repository row with `remote_url_hash` is identified
+account-wide by that hash plus the singleton agent name; local repository ids
+never cross machines. Cloud task snapshots persist the synthetic
+`singletonAgent` beside each open singleton, so the relay-backed directory can
+name owners whose desktops are already offline. Current publishers also stamp
+`singletonDirectoryVersion: 1`; a registered desktop without that stamp makes
+directory resolution fail closed until it publishes a current snapshot. The receiving server combines
+that directory with its local database and every active sibling's native
+lookup; a successful live lookup replaces stale directory state for that
+machine. After all three sources prove absence, the requesting server proposes
+a task id and atomically creates a relay-owned Firestore claim keyed by
+`remoteUrlHash + agent` before it writes the local task. Concurrent first
+signals therefore elect exactly one requesting desktop; a loser observes the
+winning machine and task and either routes to an already-published owner or
+fails closed while that task is still being prepared. Preparation failure
+releases only the matching unpublished reservation; a persisted task keeps its
+claim. The reservation records a random creator-process fence generated once
+by the claiming `kanna-server` and included in both its claim commands and
+complete cloud snapshots. The fence survives ordinary relay disconnects and
+publication-session rollover, so an empty snapshot after reconnect cannot
+clear a claim while the original HTTP request can still persist its task. If
+that server crashes after acquisition but before SQLite persistence, its
+replacement process publishes a different fence; only a complete snapshot
+from that same desktop with the different process fence may clear the
+reservation, and only when the proposed task id is absent. A snapshot carrying
+the reservation's fence, a snapshot without a fence, or any other desktop's
+snapshot is not authoritative for this purpose. Explicit failure cleanup is
+also fenced to the creator process and the matching machine/task identity.
+Cloud snapshot reconciliation otherwise promotes the matching reservation to a
+durable owner and conditionally deletes that claim when the owning open task is
+removed, so another desktop's claim can never be overwritten or released.
+One remote match receives the message through the existing
+task-input route. Two or more open matches are an existing-world duplicate:
+resolution logs and returns every `machineId:taskId` owner instead of choosing
+one.
+
+Resolution fails closed. A signed-in server that cannot list siblings, cannot
+complete any native lookup, or loses the discovered owner before input
+delivery returns an error and never creates a replacement. The durable
+directory plus successfully observed live owner sets ensure a later signal
+still names and refuses an owner that has gone offline; only a successful live
+lookup proving that task closed overrides its stale directory row. There is no
+implicit takeover. A future takeover surface must be explicitly named and
+must durably supersede or close the stranded task when its machine reconnects.
+Repositories without `remote_url_hash` have no cross-machine identity and
+deliberately keep the original per-machine behavior. A desktop without an
+account credential likewise has no sibling namespace; when account routing
+exists but is temporarily unavailable, uncertainty is an error rather than
+permission to duplicate.
+
 ## Task Transfer Transport
 
 `kanna-server` owns the `kanna-task-transfer` sidecar: it spawns the process,

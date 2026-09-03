@@ -176,6 +176,457 @@ async fn generic_merge_signal_delivers_natural_language_to_existing_singleton() 
     assert_signal_agent_reuses_open_task_with_run_status("running", "merge").await;
 }
 
+#[tokio::test]
+async fn signal_agent_keeps_repo_without_remote_hash_machine_local() {
+    // The helper's repo has no remote metadata and its AppState has no active
+    // relay loop. Delivery succeeding proves resolution did not enter the
+    // account-wide path merely because this desktop has an account credential.
+    assert_signal_agent_reuses_open_task_with_run_status("running", "task-manager").await;
+}
+
+#[test]
+fn singleton_directory_snapshot_clears_a_closed_offline_owner() {
+    let state = test_state_with_seed("desktop-cache", "Cache Mac", |_| {});
+    state.observe_singleton_owners(
+        "shared-remote-hash",
+        "task-manager",
+        "desktop-former-owner",
+        vec!["task-former-owner".to_string()],
+    );
+
+    state.replace_singleton_owners("shared-remote-hash", "task-manager", Vec::new());
+
+    assert!(state
+        .known_singleton_owners("shared-remote-hash", "task-manager")
+        .is_empty());
+}
+
+fn seed_remote_repo(db: &Db, repo_id: &str) {
+    db.insert_test_repo(repo_id, "Shared Repo").unwrap();
+    db.patch_repo(
+        repo_id,
+        crate::db::RepoPatch {
+            remote_url: Some(Some("https://example.com/acme/shared.git")),
+            remote_url_hash: Some(Some("shared-remote-hash")),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+}
+
+fn seed_remote_singleton(db: &Db, repo_id: &str, task_id: &str, agent: &str) {
+    seed_remote_repo(db, repo_id);
+    db.insert_test_pipeline_item(
+        task_id,
+        repo_id,
+        "Resident singleton",
+        Some("Resident Singleton"),
+        "in progress",
+        "2026-09-03T00:00:00Z",
+    )
+    .unwrap();
+    db.insert_stage_run(crate::db::NewStageRun {
+        id: &format!("run-{task_id}"),
+        task_id,
+        stage: "in progress",
+        kind: "main",
+        agent: Some(agent),
+        agent_provider: Some("claude"),
+        model: None,
+        effort: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some(task_id),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+}
+
+fn connect_singleton_relay_peer(
+    source: &Arc<AppState>,
+    peer: Arc<AppState>,
+    fail_input_delivery: bool,
+) -> tokio::task::JoinHandle<()> {
+    let mut requests = source
+        .take_desktop_relay_requests()
+        .expect("take source relay queue");
+    source.set_desktop_routing_available(true);
+    tokio::spawn(async move {
+        while let Some(request) = requests.recv().await {
+            match request {
+                crate::http_api::DesktopRelayRequest::ListActive { response, .. } => {
+                    let machine_ids = if fail_input_delivery {
+                        Vec::new()
+                    } else {
+                        vec![peer.config().desktop_id.clone()]
+                    };
+                    let _ = response.send(Ok(machine_ids));
+                }
+                crate::http_api::DesktopRelayRequest::ListRepoSingletons {
+                    remote_url_hash,
+                    agent,
+                    response,
+                    ..
+                } => {
+                    let result = Db::open(&peer.config().db_path)
+                        .and_then(|db| {
+                            db.find_open_agent_tasks_by_remote_url_hash(&remote_url_hash, &agent)
+                        })
+                        .map(|tasks| {
+                            tasks
+                                .into_iter()
+                                .map(|task| crate::http_api::RemoteSingletonOwner {
+                                    machine_id: peer.config().desktop_id.clone(),
+                                    task_id: task.task_id,
+                                })
+                                .collect()
+                        })
+                        .map_err(|error| error.to_string());
+                    let _ = response.send(result);
+                }
+                crate::http_api::DesktopRelayRequest::Invoke {
+                    method,
+                    path,
+                    body,
+                    response,
+                    ..
+                } => {
+                    if fail_input_delivery && path.ends_with("/input") {
+                        let _ = response.send(Err("peer disconnected".to_string()));
+                        continue;
+                    }
+                    let result = crate::http_api::dispatch_authenticated_http_invoke(
+                        Arc::clone(&peer),
+                        &method,
+                        &path,
+                        body,
+                    )
+                    .await;
+                    let _ = response.send(Ok(result));
+                }
+                crate::http_api::DesktopRelayRequest::ClaimRepoSingleton { .. }
+                | crate::http_api::DesktopRelayRequest::ReleaseRepoSingletonReservation {
+                    ..
+                } => {
+                    panic!("existing-owner test must not enter singleton creation")
+                }
+            }
+        }
+    })
+}
+
+#[tokio::test]
+async fn signal_agent_discovers_and_routes_to_sibling_repo_singleton() {
+    let source = test_state_with_seed("desktop-source", "Source Mac", |db| {
+        seed_remote_repo(db, "repo-source")
+    });
+    let delivered = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let delivered_for_sender = Arc::clone(&delivered);
+    let peer = test_state_with_seed_and_task_input_sender(
+        "desktop-owner",
+        "Owner Mac",
+        |db| seed_remote_singleton(db, "repo-owner", "task-manager-owner", "task-manager"),
+        Arc::new(move |task_id, input| {
+            delivered_for_sender.lock().unwrap().push((task_id, input));
+            Ok(())
+        }),
+    );
+    let relay = connect_singleton_relay_peer(&source, peer, false);
+    let app = super::router(Arc::clone(&source));
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/repos/repo-source/agents/task-manager/signal")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"message":"coordinate this repo"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(body["taskId"], "task-manager-owner");
+    assert_eq!(body["created"], false);
+    assert_eq!(
+        *delivered.lock().unwrap(),
+        vec![(
+            "task-manager-owner".to_string(),
+            "coordinate this repo".to_string()
+        )]
+    );
+    relay.abort();
+}
+
+#[tokio::test]
+async fn signal_agent_refuses_persisted_owner_that_is_already_unreachable() {
+    let source = test_state_with_seed("desktop-source-offline", "Source Mac", |db| {
+        seed_remote_repo(db, "repo-source")
+    });
+    let peer = test_state_with_seed_and_task_input_sender(
+        "desktop-sleeping",
+        "Sleeping Mac",
+        |db| seed_remote_singleton(db, "repo-owner", "task-merge-owner", "merge"),
+        Arc::new(|_, _| panic!("unreachable owner must not receive input")),
+    );
+    let relay = connect_singleton_relay_peer(&source, peer, true);
+    let app = super::router(Arc::clone(&source));
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/repos/repo-source/agents/merge/signal")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"message":"merge this"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let message = String::from_utf8(body.to_vec()).unwrap();
+    assert!(message.contains("task-merge-owner"), "{message}");
+    assert!(message.contains("desktop-sleeping"), "{message}");
+    assert!(message.contains("no replacement was created"), "{message}");
+    relay.abort();
+}
+
+#[tokio::test]
+async fn signal_agent_reports_duplicate_repo_singletons_across_machines() {
+    let source = test_state_with_seed("desktop-duplicate-a", "First Mac", |db| {
+        seed_remote_singleton(db, "repo-source", "task-manager-a", "task-manager")
+    });
+    let peer = test_state_with_seed_and_task_input_sender(
+        "desktop-duplicate-b",
+        "Second Mac",
+        |db| seed_remote_singleton(db, "repo-owner", "task-manager-b", "task-manager"),
+        Arc::new(|_, _| panic!("duplicate resolution must not deliver input")),
+    );
+    let relay = connect_singleton_relay_peer(&source, peer, false);
+    let app = super::router(Arc::clone(&source));
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/repos/repo-source/agents/task-manager/signal")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"message":"coordinate"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let message = String::from_utf8(body.to_vec()).unwrap();
+    for expected in [
+        "duplicate open task-manager singletons",
+        "desktop-duplicate-a:task-manager-a",
+        "desktop-duplicate-b:task-manager-b",
+    ] {
+        assert!(message.contains(expected), "{message}");
+    }
+    relay.abort();
+}
+
+#[tokio::test]
+async fn signal_agent_concurrent_first_signal_creates_one_account_wide_task() {
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::UnixListener;
+
+    let suffix = unique_test_suffix();
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let owner = Arc::new(tokio::sync::Mutex::new(None::<(String, String)>));
+    let mut states = Vec::new();
+    let mut relay_tasks = Vec::new();
+    let mut daemon_tasks = Vec::new();
+    let mut cleanup_paths = Vec::new();
+
+    for machine in ["desktop-race-a", "desktop-race-b"] {
+        let repo_root = std::env::temp_dir().join(format!("{suffix}-{machine}-repo"));
+        init_test_git_repo(&repo_root);
+        let daemon_dir = std::env::temp_dir().join(format!("{suffix}-{machine}-daemon"));
+        std::fs::create_dir_all(&daemon_dir).unwrap();
+        let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        daemon_tasks.push(tokio::spawn(async move {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = tokio::io::BufReader::new(read_half);
+            let command = read_test_daemon_command(&mut reader, &mut write_half).await;
+            let session_id = match command {
+                DaemonCommand::Spawn { session_id, .. }
+                | DaemonCommand::SpawnAgent { session_id, .. } => session_id,
+                other => panic!("expected singleton spawn, got {other:?}"),
+            };
+            write_half
+                .write_all(
+                    format!(
+                        "{}\n",
+                        serde_json::to_string(&DaemonEvent::SessionCreated { session_id }).unwrap()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        }));
+        let state =
+            test_state_with_daemon_dir(machine, machine, &daemon_dir.to_string_lossy(), |db| {
+                db.insert_test_repo_with_path(
+                    "repo-shared",
+                    &repo_root.to_string_lossy(),
+                    "Shared",
+                )
+                .unwrap();
+                db.patch_repo(
+                    "repo-shared",
+                    crate::db::RepoPatch {
+                        remote_url: Some(Some("https://example.com/acme/shared.git")),
+                        remote_url_hash: Some(Some("shared-race-hash")),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            });
+        let mut requests = state.take_desktop_relay_requests().unwrap();
+        state.set_desktop_routing_available(true);
+        let barrier_for_relay = Arc::clone(&barrier);
+        let owner_for_relay = Arc::clone(&owner);
+        let machine_id = machine.to_string();
+        relay_tasks.push(tokio::spawn(async move {
+            while let Some(request) = requests.recv().await {
+                match request {
+                    crate::http_api::DesktopRelayRequest::ListRepoSingletons {
+                        response, ..
+                    } => {
+                        let _ = response.send(Ok(Vec::new()));
+                    }
+                    crate::http_api::DesktopRelayRequest::ListActive { response, .. } => {
+                        let _ = response.send(Ok(Vec::new()));
+                    }
+                    crate::http_api::DesktopRelayRequest::ClaimRepoSingleton {
+                        task_id,
+                        response,
+                        ..
+                    } => {
+                        barrier_for_relay.wait().await;
+                        let mut current = owner_for_relay.lock().await;
+                        let (status, claimed_machine, claimed_task) = match current.as_ref() {
+                            Some((claimed_machine, claimed_task)) => {
+                                ("reserved", claimed_machine.clone(), claimed_task.clone())
+                            }
+                            None => {
+                                *current = Some((machine_id.clone(), task_id.clone()));
+                                ("acquired", machine_id.clone(), task_id)
+                            }
+                        };
+                        let _ = response.send(Ok(crate::http_api::RemoteSingletonClaim {
+                            status: status.to_string(),
+                            machine_id: claimed_machine,
+                            task_id: claimed_task,
+                            owners: Vec::new(),
+                        }));
+                    }
+                    crate::http_api::DesktopRelayRequest::ReleaseRepoSingletonReservation {
+                        task_id,
+                        response,
+                        ..
+                    } => {
+                        let mut current = owner_for_relay.lock().await;
+                        let released =
+                            current.as_ref().is_some_and(|(owner_machine, owner_task)| {
+                                owner_machine == &machine_id && owner_task == &task_id
+                            });
+                        if released {
+                            *current = None;
+                        }
+                        let _ = response.send(Ok(released));
+                    }
+                    crate::http_api::DesktopRelayRequest::Invoke { response, .. } => {
+                        let _ = response.send(Err("unexpected invoke".to_string()));
+                    }
+                }
+            }
+        }));
+        cleanup_paths.push((
+            repo_root,
+            daemon_dir,
+            socket_path,
+            state.config().db_path.clone(),
+        ));
+        states.push(state);
+    }
+
+    let first = super::router(Arc::clone(&states[0])).oneshot(
+        Request::post("/v1/repos/repo-shared/agents/task-manager/signal")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"message":"coordinate"}"#))
+            .unwrap(),
+    );
+    let second = super::router(Arc::clone(&states[1])).oneshot(
+        Request::post("/v1/repos/repo-shared/agents/task-manager/signal")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"message":"coordinate"}"#))
+            .unwrap(),
+    );
+    let (first, second) = tokio::join!(first, second);
+    let statuses = [first.unwrap().status(), second.unwrap().status()];
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::OK)
+            .count(),
+        1
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::SERVICE_UNAVAILABLE)
+            .count(),
+        1
+    );
+    let mut open_count = 0;
+    for _ in 0..40 {
+        open_count = states
+            .iter()
+            .map(|state| {
+                Db::open(&state.config().db_path)
+                    .unwrap()
+                    .find_open_agent_tasks_by_remote_url_hash("shared-race-hash", "task-manager")
+                    .unwrap()
+                    .len()
+            })
+            .sum::<usize>();
+        if open_count == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert_eq!(open_count, 1);
+
+    for task in relay_tasks.into_iter().chain(daemon_tasks) {
+        task.abort();
+    }
+    for (repo_root, daemon_dir, socket_path, db_path) in cleanup_paths {
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+        let _ = std::fs::remove_dir_all(repo_root);
+        let _ = std::fs::remove_file(db_path);
+    }
+}
+
 fn seed_approvable_source(db: &Db, task_id: &str, run_id: &str, pr_number: i64) {
     db.insert_test_pipeline_item(
         task_id,

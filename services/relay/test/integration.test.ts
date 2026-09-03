@@ -22,8 +22,10 @@ import {
 } from "../../firebase-functions/src/accountDeletion.js";
 import {
   beginCloudTaskPublicationSession,
+  claimRepoSingleton,
   createFirestoreCloudTaskPublicationStore,
   handleCloudTaskPublication,
+  releaseRepoSingletonReservation,
 } from "../src/cloudTaskPublication.js";
 import {
   anonymousDesktopId,
@@ -2334,6 +2336,313 @@ describe("Relay integration", () => {
       `users/${TEST_USER_ID}/desktops/desktop-other`,
     ).get()).exists).toBe(false);
     await closeAndWait(ws);
+  });
+
+  it("atomically elects one owner after concurrent desktops both discover singleton absence", async () => {
+    const userId = `singleton-race-${Date.now()}`;
+    const userRef = testFirestore.doc(`users/${userId}`);
+    await Promise.all(["desktop-a", "desktop-b"].map(async (desktopId) => {
+      await userRef.collection("desktops").doc(desktopId).set({
+        desktopId,
+        singletonDirectoryVersion: 1,
+      });
+    }));
+    const bothAbsent = deferredVoid();
+    let absenceDiscoveries = 0;
+    const afterAbsenceDiscovery = async () => {
+      absenceDiscoveries += 1;
+      if (absenceDiscoveries === 2) bothAbsent.resolve();
+      await bothAbsent.promise;
+    };
+
+    try {
+      const claims = await Promise.all([
+        claimRepoSingleton({
+          userId,
+          remoteUrlHash: "shared-remote-hash",
+          agent: "task-manager",
+          machineId: "desktop-a",
+          taskId: "task-a",
+          creatorFence: "creator-a",
+          db: testFirestore,
+          afterAbsenceDiscovery,
+        }),
+        claimRepoSingleton({
+          userId,
+          remoteUrlHash: "shared-remote-hash",
+          agent: "task-manager",
+          machineId: "desktop-b",
+          taskId: "task-b",
+          creatorFence: "creator-b",
+          db: testFirestore,
+          afterAbsenceDiscovery,
+        }),
+      ]);
+
+      expect(absenceDiscoveries).toBe(2);
+      expect(claims.filter((claim) => claim.status === "acquired")).toHaveLength(1);
+      expect(claims.filter((claim) => claim.status === "reserved")).toHaveLength(1);
+      expect(new Set(claims.map((claim) => `${claim.machineId}:${claim.taskId}`)).size).toBe(1);
+      expect((await userRef.collection("repoSingletonClaims").get()).docs).toHaveLength(1);
+      const winner = claims.find((claim) => claim.status === "acquired");
+      if (!winner) throw new Error("concurrent claim had no winner");
+      await expect(releaseRepoSingletonReservation({
+        userId,
+        remoteUrlHash: "shared-remote-hash",
+        agent: "task-manager",
+        machineId: winner.machineId,
+        taskId: winner.taskId,
+        creatorFence: winner.machineId === "desktop-a" ? "creator-a" : "creator-b",
+        db: testFirestore,
+      })).resolves.toBe(true);
+      expect((await userRef.collection("repoSingletonClaims").get()).empty).toBe(true);
+    } finally {
+      await testFirestore.recursiveDelete(userRef);
+    }
+  });
+
+  it("keeps a paused creator exclusive across reconnect and recovers after restart", async () => {
+    const userId = `singleton-reservation-recovery-${Date.now()}`;
+    const userRef = testFirestore.doc(`users/${userId}`);
+    const claimingDesktopId = "singleton-recovery-a";
+    const otherDesktopId = "singleton-recovery-b";
+    const store = createFirestoreCloudTaskPublicationStore(testFirestore);
+    const liveCreatorFence = "creator-process-before-reconnect";
+    const restartedCreatorFence = "creator-process-after-restart";
+    const emptySnapshot = {
+      ...publishedSnapshot("idle", []),
+      singletonDirectoryVersion: 1,
+      singletonReservationFence: liveCreatorFence,
+    };
+    try {
+      const claimingSession = await beginCloudTaskPublicationSession({
+        userId,
+        desktopId: claimingDesktopId,
+        store,
+      });
+      await handleCloudTaskPublication({
+        userId,
+        desktopId: claimingDesktopId,
+        generation: { session: claimingSession, sequence: 1 },
+        snapshot: emptySnapshot,
+        store,
+      });
+      const otherSession = await beginCloudTaskPublicationSession({
+        userId,
+        desktopId: otherDesktopId,
+        store,
+      });
+      await handleCloudTaskPublication({
+        userId,
+        desktopId: otherDesktopId,
+        generation: { session: otherSession, sequence: 1 },
+        snapshot: emptySnapshot,
+        store,
+      });
+
+      const reservationAcquired = deferredVoid();
+      const allowLocalPersistence = deferredVoid();
+      const creatorRequest = (async () => {
+        await expect(claimRepoSingleton({
+          userId,
+          remoteUrlHash: "shared-remote-hash",
+          agent: "task-manager",
+          machineId: claimingDesktopId,
+          taskId: "interrupted-task",
+          creatorFence: liveCreatorFence,
+          db: testFirestore,
+        })).resolves.toMatchObject({
+          status: "acquired",
+          machineId: claimingDesktopId,
+          taskId: "interrupted-task",
+        });
+        reservationAcquired.resolve();
+        await allowLocalPersistence.promise;
+      })();
+      await reservationAcquired.promise;
+
+      // A later sequence in the same session could have been captured before
+      // acquisition and must not race a still-live local preparation.
+      await handleCloudTaskPublication({
+        userId,
+        desktopId: claimingDesktopId,
+        generation: { session: claimingSession, sequence: 2 },
+        snapshot: emptySnapshot,
+        store,
+      });
+      expect((await userRef.collection("repoSingletonClaims").get()).docs).toHaveLength(1);
+
+      // Another desktop's authoritative absence is not evidence about the
+      // claiming desktop's SQLite database and cannot clear its reservation.
+      await handleCloudTaskPublication({
+        userId,
+        desktopId: otherDesktopId,
+        generation: { session: otherSession, sequence: 2 },
+        snapshot: emptySnapshot,
+        store,
+      });
+      await expect(claimRepoSingleton({
+        userId,
+        remoteUrlHash: "shared-remote-hash",
+        agent: "task-manager",
+        machineId: otherDesktopId,
+        taskId: "premature-takeover",
+        creatorFence: "creator-process-other",
+        db: testFirestore,
+      })).resolves.toMatchObject({
+        status: "reserved",
+        machineId: claimingDesktopId,
+        taskId: "interrupted-task",
+      });
+
+      // A routine relay reconnect begins a later publication session while the
+      // original server request is still paused before SQLite persistence. Its
+      // stable creator fence must keep the reservation exclusive.
+      const reconnectedClaimingSession = await beginCloudTaskPublicationSession({
+        userId,
+        desktopId: claimingDesktopId,
+        store,
+      });
+      await handleCloudTaskPublication({
+        userId,
+        desktopId: claimingDesktopId,
+        generation: { session: reconnectedClaimingSession, sequence: 1 },
+        snapshot: emptySnapshot,
+        store,
+      });
+      expect((await userRef.collection("repoSingletonClaims").get()).docs).toHaveLength(1);
+
+      await expect(claimRepoSingleton({
+        userId,
+        remoteUrlHash: "shared-remote-hash",
+        agent: "task-manager",
+        machineId: otherDesktopId,
+        taskId: "reconnect-race-task",
+        creatorFence: "creator-process-other",
+        db: testFirestore,
+      })).resolves.toMatchObject({
+        status: "reserved",
+        machineId: claimingDesktopId,
+        taskId: "interrupted-task",
+      });
+
+      // The original request is still alive and can now commit its local row;
+      // its next snapshot promotes the same reservation to durable ownership.
+      allowLocalPersistence.resolve();
+      await creatorRequest;
+      await handleCloudTaskPublication({
+        userId,
+        desktopId: claimingDesktopId,
+        generation: { session: reconnectedClaimingSession, sequence: 2 },
+        snapshot: {
+          ...emptySnapshot,
+          tasks: [publishedTask("idle", {
+            ownerDesktopId: claimingDesktopId,
+            ownerLocalTaskId: "interrupted-task",
+            singletonAgent: "task-manager",
+            repo: {
+              cloudRepoId: "repo-shared",
+              name: "Shared",
+              remoteUrl: "https://example.com/shared.git",
+              remoteUrlHash: "shared-remote-hash",
+              defaultBranch: "main",
+            },
+          })],
+        },
+        store,
+      });
+      expect((await userRef.collection("repoSingletonClaims").get()).docs[0]?.data())
+        .toMatchObject({ state: "owned", taskId: "interrupted-task" });
+
+      // A second reservation models a creator that really does die before
+      // persistence. Its replacement process must eventually recover it.
+      await expect(claimRepoSingleton({
+        userId,
+        remoteUrlHash: "restart-recovery-hash",
+        agent: "merge",
+        machineId: claimingDesktopId,
+        taskId: "orphaned-task",
+        creatorFence: liveCreatorFence,
+        db: testFirestore,
+      })).resolves.toMatchObject({ status: "acquired" });
+
+      // An actual creator restart changes the process fence. Its complete
+      // empty snapshot proves the old request can no longer persist locally.
+      const restartedClaimingSession = await beginCloudTaskPublicationSession({
+        userId,
+        desktopId: claimingDesktopId,
+        store,
+      });
+      await handleCloudTaskPublication({
+        userId,
+        desktopId: claimingDesktopId,
+        generation: { session: restartedClaimingSession, sequence: 1 },
+        snapshot: {
+          ...emptySnapshot,
+          singletonReservationFence: restartedCreatorFence,
+        },
+        store,
+      });
+      const claimsAfterRestart = await userRef.collection("repoSingletonClaims").get();
+      expect(claimsAfterRestart.empty).toBe(true);
+
+      await expect(claimRepoSingleton({
+        userId,
+        remoteUrlHash: "restart-recovery-hash",
+        agent: "merge",
+        machineId: otherDesktopId,
+        taskId: "replacement-task",
+        creatorFence: "creator-process-other",
+        db: testFirestore,
+      })).resolves.toMatchObject({
+        status: "acquired",
+        machineId: otherDesktopId,
+        taskId: "replacement-task",
+      });
+    } finally {
+      await testFirestore.recursiveDelete(userRef);
+    }
+  });
+
+  it("publishes and conditionally removes durable singleton ownership", async () => {
+    const userId = `singleton-publication-${Date.now()}`;
+    const desktopId = "singleton-publication-desktop";
+    const userRef = testFirestore.doc(`users/${userId}`);
+    const store = createFirestoreCloudTaskPublicationStore(testFirestore);
+    try {
+      const session = await beginCloudTaskPublicationSession({ userId, desktopId, store });
+      await handleCloudTaskPublication({
+        userId,
+        desktopId,
+        generation: { session, sequence: 1 },
+        snapshot: publishedSnapshot("idle", [publishedTask("idle", {
+          ownerDesktopId: desktopId,
+          singletonAgent: "merge",
+        })]),
+        store,
+      });
+      let claims = await userRef.collection("repoSingletonClaims").get();
+      expect(claims.docs).toHaveLength(1);
+      expect(claims.docs[0]?.data()).toMatchObject({
+        state: "owned",
+        machineId: desktopId,
+        taskId: "task-cloud-publish",
+        remoteUrlHash: "remote-hash",
+        agent: "merge",
+      });
+
+      await handleCloudTaskPublication({
+        userId,
+        desktopId,
+        generation: { session, sequence: 2 },
+        snapshot: publishedSnapshot("idle", []),
+        store,
+      });
+      claims = await userRef.collection("repoSingletonClaims").get();
+      expect(claims.empty).toBe(true);
+    } finally {
+      await testFirestore.recursiveDelete(userRef);
+    }
   });
 
   it("fences relay registrations and cached or in-flight publication once deletion starts", async () => {

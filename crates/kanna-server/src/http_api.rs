@@ -45,7 +45,9 @@ mod test_support;
 mod tests;
 
 pub use state::{AppState, HttpInvokeResponse};
-pub(crate) use state::{DesktopRelayRequest, MobileNotificationRequest};
+pub(crate) use state::{
+    DesktopRelayRequest, MobileNotificationRequest, RemoteSingletonClaim, RemoteSingletonOwner,
+};
 
 #[allow(dead_code)]
 pub fn router(state: std::sync::Arc<AppState>) -> axum::Router {

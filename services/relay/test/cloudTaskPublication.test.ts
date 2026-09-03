@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
+import type { Firestore } from "firebase-admin/firestore";
 import {
   CloudTaskPublicationRefusal,
   handleCloudTaskPublication,
+  listRepoSingletonOwners,
   planTaskReconciliation,
   validateCloudTaskPublication,
   type CloudTaskPublicationStore,
@@ -68,6 +70,7 @@ function publication(
 ): Record<string, unknown> {
   return {
     schemaVersion,
+    singletonDirectoryVersion: 1,
     desktop,
     tasks,
   };
@@ -98,6 +101,18 @@ describe("cloud task publication validation", () => {
       agent: { provider: "codex", type: "pty" },
       repo: { remoteUrlHash: "remote-hash" },
     });
+  });
+
+  it("preserves singleton identity for the durable account directory", () => {
+    const parsed = validateCloudTaskPublication(
+      publication([task({ singletonAgent: "task-manager" })]),
+      "desktop-1",
+    );
+    expect(parsed.tasks[0]?.singletonAgent).toBe("task-manager");
+    expect(() => validateCloudTaskPublication(
+      publication([task({ singletonAgent: " " })]),
+      "desktop-1",
+    )).toThrow(/singletonAgent/);
   });
 
   it("preserves queued input status and defaults older publishers to no queue", () => {
@@ -462,6 +477,61 @@ describe("cloud task publication validation", () => {
   });
 });
 
+describe("repository singleton directory", () => {
+  it("fails closed when a registered desktop has not published singleton metadata", async () => {
+    const db = {
+      collection: vi.fn(() => ({
+        get: async () => ({
+          docs: [{
+            id: "desktop-old",
+            data: () => ({ desktopId: "desktop-old" }),
+            ref: { collection: () => ({ get: async () => ({ docs: [] }) }) },
+          }],
+        }),
+      })),
+    } as unknown as Firestore;
+    await expect(listRepoSingletonOwners({
+      userId: "user-1",
+      remoteUrlHash: "remote-hash",
+      agent: "merge",
+      db,
+    })).rejects.toThrow(/incomplete.*desktop-old/);
+  });
+
+  it("finds and deduplicates persisted owners across desktop task snapshots", async () => {
+    const documents = [
+      task({ singletonAgent: "merge" }),
+      task({ singletonAgent: "merge" }),
+      task({ ownerLocalTaskId: "task-other", singletonAgent: "task-manager" }),
+      task({
+        ownerLocalTaskId: "task-other-repo",
+        singletonAgent: "merge",
+        repo: { ...(task().repo as Record<string, unknown>), remoteUrlHash: "other-hash" },
+      }),
+    ].map((data) => ({ data: () => data }));
+    const db = {
+      collection: vi.fn(() => ({
+        get: async () => ({
+          docs: [{
+            id: "desktop-1",
+            data: () => ({ desktopId: "desktop-1", singletonDirectoryVersion: 1 }),
+            ref: {
+              collection: () => ({ get: async () => ({ docs: documents }) }),
+            },
+          }],
+        }),
+      })),
+    } as unknown as Firestore;
+
+    await expect(listRepoSingletonOwners({
+      userId: "user-1",
+      remoteUrlHash: "remote-hash",
+      agent: "merge",
+      db,
+    })).resolves.toEqual([{ machineId: "desktop-1", taskId: "task-1" }]);
+  });
+});
+
 describe("cloud task publication reconciliation", () => {
   it("classifies invalid snapshots as permanent publication refusals", async () => {
     const reconcile = vi.fn(async () => undefined);
@@ -515,6 +585,8 @@ describe("cloud task publication reconciliation", () => {
         protocolVersion: 1,
         acceptingTransfers: true,
       },
+      singletonDirectoryVersion: 1,
+      singletonReservationFence: null,
       tasks: expect.arrayContaining([
         expect.objectContaining({ ownerDesktopId: "desktop-1", ownerLocalTaskId: "task-1" }),
       ]),

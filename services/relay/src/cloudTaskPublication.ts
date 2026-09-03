@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { FieldValue, type Firestore } from "firebase-admin/firestore";
 import { getFirebaseServices } from "./firebase.js";
 
@@ -20,6 +21,8 @@ export interface CloudTransferIdentity {
 }
 
 export interface ValidatedCloudTaskPublication {
+  singletonDirectoryVersion: 0 | 1;
+  singletonReservationFence: string | null;
   displayName: string;
   /** Agent provider CLIs installed on the publishing desktop, or null from a
    * desktop build that predates the field. Stored verbatim (shape-validated,
@@ -43,6 +46,8 @@ export interface CloudTaskPublicationStore {
     displayName: string;
     agentProviders: string[] | null;
     transfer: CloudTransferIdentity | null;
+    singletonDirectoryVersion: 0 | 1;
+    singletonReservationFence: string | null;
     tasks: CloudTaskDocument[];
   }): Promise<void>;
 }
@@ -106,6 +111,20 @@ export function validateCloudTaskPublication(
     throw new Error("task snapshot schemaVersion must be 1 or 2");
   }
   const schemaVersion = root.schemaVersion;
+  const singletonDirectoryVersion = root.singletonDirectoryVersion === undefined
+    ? 0
+    : root.singletonDirectoryVersion;
+  if (singletonDirectoryVersion !== 0 && singletonDirectoryVersion !== 1) {
+    throw new Error("task snapshot singletonDirectoryVersion must be 1 when present");
+  }
+  const singletonReservationFence = optionalNullableString(
+    root.singletonReservationFence,
+    "task snapshot singletonReservationFence",
+    128,
+  );
+  if (singletonReservationFence !== null && singletonReservationFence.trim().length === 0) {
+    throw new Error("task snapshot singletonReservationFence must be a nonblank string");
+  }
   const desktop = requiredRecord(root.desktop, "task snapshot desktop");
   const displayName = requiredString(desktop.displayName, "desktop.displayName", 256);
   const agentProviders = validateAgentProviders(desktop.agentProviders);
@@ -129,7 +148,14 @@ export function validateCloudTaskPublication(
     identities.add(key);
     return task;
   });
-  return { displayName, agentProviders, transfer, tasks };
+  return {
+    singletonDirectoryVersion,
+    singletonReservationFence,
+    displayName,
+    agentProviders,
+    transfer,
+    tasks,
+  };
 }
 
 const MAX_AGENT_PROVIDERS = 32;
@@ -178,6 +204,14 @@ function validateTask(
   }
   const localRepoId = requiredString(task.localRepoId, `${path}.localRepoId`, 128);
   const ownerLocalTaskId = requiredString(task.ownerLocalTaskId, `${path}.ownerLocalTaskId`, 128);
+  const singletonAgent = optionalNullableString(
+    task.singletonAgent,
+    `${path}.singletonAgent`,
+    64,
+  );
+  if (singletonAgent !== null && singletonAgent.trim().length === 0) {
+    throw new Error(`${path}.singletonAgent must be null or a nonblank string`);
+  }
   const repo = requiredRecord(task.repo, `${path}.repo`);
   const agent = requiredRecord(task.agent, `${path}.agent`);
   const transfer = requiredRecord(task.transfer, `${path}.transfer`);
@@ -270,6 +304,7 @@ function validateTask(
     localRepoId,
     ownerDesktopId,
     ownerLocalTaskId,
+    ...(singletonAgent === null ? {} : { singletonAgent }),
     title: requiredString(task.title, `${path}.title`, 512),
     // kanna-server truncates by Rust `char` (Unicode scalar values). JavaScript
     // `String.length` counts UTF-16 code units, so a valid 500-character prompt
@@ -339,6 +374,201 @@ function validateEmptyTransfer(
   };
 }
 
+export interface RepoSingletonOwner {
+  machineId: string;
+  taskId: string;
+}
+
+export interface RepoSingletonClaim extends RepoSingletonOwner {
+  status: "acquired" | "reserved" | "owned" | "duplicate";
+  owners?: RepoSingletonOwner[];
+}
+
+interface StoredRepoSingletonClaim extends RepoSingletonOwner {
+  state: "reserved" | "owned";
+  remoteUrlHash: string;
+  agent: string;
+  /** Stable for one kanna-server process across relay reconnects. Only a
+   * complete snapshot from a different process fence can prove the request
+   * that acquired this reservation can no longer persist its task. */
+  creatorFence: string | null;
+}
+
+/** Read the durable cloud task index as the account-wide singleton directory. */
+export async function listRepoSingletonOwners(input: {
+  userId: string;
+  remoteUrlHash: string;
+  agent: string;
+  db?: Firestore;
+}): Promise<RepoSingletonOwner[]> {
+  const db = input.db ?? getFirebaseServices().db;
+  const desktops = await db.collection(`users/${input.userId}/desktops`).get();
+  // Ignore renderer-era duplicate desktop documents. Server publication owns
+  // the deterministic id and reconciles those old subtrees separately.
+  const canonicalDesktops = desktops.docs.filter((desktop) => {
+    const machineId = desktop.data().desktopId;
+    return typeof machineId === "string" && desktop.id === cloudDesktopDocumentId(machineId);
+  });
+  for (const desktop of canonicalDesktops) {
+    if (desktop.data().singletonDirectoryVersion !== 1) {
+      const machineId = desktop.data().desktopId;
+      throw new Error(
+        `repository singleton directory is incomplete for machine ${
+          typeof machineId === "string" ? machineId : desktop.id
+        }`,
+      );
+    }
+  }
+  const taskSnapshots = await Promise.all(
+    canonicalDesktops.map(async (desktop) => await desktop.ref.collection("tasks").get()),
+  );
+  const owners: RepoSingletonOwner[] = [];
+  for (const snapshot of taskSnapshots) {
+    for (const document of snapshot.docs) {
+      const task = document.data();
+      if (
+        task.singletonAgent !== input.agent
+        || task.closedAt !== null
+        || !isRecord(task.repo)
+        || task.repo.remoteUrlHash !== input.remoteUrlHash
+        || typeof task.ownerDesktopId !== "string"
+        || typeof task.ownerLocalTaskId !== "string"
+      ) {
+        continue;
+      }
+      owners.push({
+        machineId: task.ownerDesktopId,
+        taskId: task.ownerLocalTaskId,
+      });
+    }
+  }
+  owners.sort((left, right) =>
+    left.machineId.localeCompare(right.machineId)
+      || left.taskId.localeCompare(right.taskId));
+  return owners.filter((owner, index) =>
+    index === 0
+    || owner.machineId !== owners[index - 1]?.machineId
+    || owner.taskId !== owners[index - 1]?.taskId);
+}
+
+/** Atomically reserve an account-wide singleton before its local task exists. */
+export async function claimRepoSingleton(input: {
+  userId: string;
+  remoteUrlHash: string;
+  agent: string;
+  machineId: string;
+  taskId: string;
+  creatorFence: string;
+  db?: Firestore;
+  afterAbsenceDiscovery?: () => Promise<void>;
+}): Promise<RepoSingletonClaim> {
+  const db = input.db ?? getFirebaseServices().db;
+  const owners = await listRepoSingletonOwners(input);
+  if (owners.length > 1) {
+    return { status: "duplicate", machineId: owners[0]!.machineId, taskId: owners[0]!.taskId, owners };
+  }
+  if (owners.length === 0) await input.afterAbsenceDiscovery?.();
+  const claimRef = repoSingletonClaimRef(db, input.userId, input.remoteUrlHash, input.agent);
+  return await db.runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(claimRef);
+    const stored = parseStoredRepoSingletonClaim(snapshot.data());
+    const published = owners[0];
+    if (published) {
+      if (stored && (stored.machineId !== published.machineId || stored.taskId !== published.taskId)) {
+        const duplicateOwners = [
+          { machineId: stored.machineId, taskId: stored.taskId },
+          published,
+        ].sort(compareRepoSingletonOwners);
+        return {
+          status: "duplicate",
+          machineId: duplicateOwners[0]!.machineId,
+          taskId: duplicateOwners[0]!.taskId,
+          owners: duplicateOwners,
+        };
+      }
+      transaction.set(claimRef, storedRepoSingletonClaim(input.remoteUrlHash, input.agent, published, "owned"));
+      return { status: "owned", ...published };
+    }
+    if (stored) return { status: stored.state, machineId: stored.machineId, taskId: stored.taskId };
+    const owner = { machineId: input.machineId, taskId: input.taskId };
+    transaction.create(
+      claimRef,
+      storedRepoSingletonClaim(
+        input.remoteUrlHash,
+        input.agent,
+        owner,
+        "reserved",
+        input.creatorFence,
+      ),
+    );
+    return { status: "acquired", ...owner };
+  });
+}
+
+/** Release only the caller's still-unpublished reservation after preparation fails. */
+export async function releaseRepoSingletonReservation(input: {
+  userId: string;
+  remoteUrlHash: string;
+  agent: string;
+  machineId: string;
+  taskId: string;
+  creatorFence: string;
+  db?: Firestore;
+}): Promise<boolean> {
+  const db = input.db ?? getFirebaseServices().db;
+  const claimRef = repoSingletonClaimRef(db, input.userId, input.remoteUrlHash, input.agent);
+  return await db.runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(claimRef);
+    const stored = parseStoredRepoSingletonClaim(snapshot.data());
+    if (!stored || stored.state !== "reserved"
+      || stored.machineId !== input.machineId || stored.taskId !== input.taskId
+      || stored.creatorFence !== input.creatorFence) return false;
+    transaction.delete(claimRef);
+    return true;
+  });
+}
+
+function repoSingletonClaimRef(db: Firestore, userId: string, remoteUrlHash: string, agent: string) {
+  const key = createHash("sha256").update(remoteUrlHash).update("\0").update(agent).digest("hex");
+  return db.doc(`users/${userId}/repoSingletonClaims/${key}`);
+}
+
+function storedRepoSingletonClaim(
+  remoteUrlHash: string,
+  agent: string,
+  owner: RepoSingletonOwner,
+  state: StoredRepoSingletonClaim["state"],
+  creatorFence: string | null = null,
+): StoredRepoSingletonClaim & { updatedAt: FirebaseFirestore.FieldValue } {
+  return {
+    remoteUrlHash,
+    agent,
+    ...owner,
+    state,
+    creatorFence,
+    updatedAt: FieldValue.serverTimestamp(),
+  };
+}
+
+function parseStoredRepoSingletonClaim(value: unknown): StoredRepoSingletonClaim | null {
+  if (!isRecord(value)) return null;
+  if ((value.state !== "reserved" && value.state !== "owned")
+    || typeof value.remoteUrlHash !== "string" || typeof value.agent !== "string"
+    || typeof value.machineId !== "string" || typeof value.taskId !== "string") return null;
+  return {
+    state: value.state,
+    remoteUrlHash: value.remoteUrlHash,
+    agent: value.agent,
+    machineId: value.machineId,
+    taskId: value.taskId,
+    creatorFence: typeof value.creatorFence === "string" ? value.creatorFence : null,
+  };
+}
+
+function compareRepoSingletonOwners(left: RepoSingletonOwner, right: RepoSingletonOwner): number {
+  return left.machineId.localeCompare(right.machineId) || left.taskId.localeCompare(right.taskId);
+}
+
 export function planTaskReconciliation(
   existing: ExistingTaskDocument[],
   tasks: CloudTaskDocument[],
@@ -393,6 +623,8 @@ export async function handleCloudTaskPublication(input: {
     displayName: publication.displayName,
     agentProviders: publication.agentProviders,
     transfer: publication.transfer,
+    singletonDirectoryVersion: publication.singletonDirectoryVersion,
+    singletonReservationFence: publication.singletonReservationFence,
     tasks: publication.tasks,
   });
 }
@@ -494,6 +726,8 @@ export function createFirestoreCloudTaskPublicationStore(
       displayName,
       agentProviders,
       transfer,
+      singletonDirectoryVersion,
+      singletonReservationFence,
       tasks,
     }) {
       validatePublicationGeneration(generation);
@@ -537,6 +771,8 @@ export function createFirestoreCloudTaskPublicationStore(
             displayName,
             agentProviders: agentProviders ?? FieldValue.delete(),
             transfer: transfer ?? FieldValue.delete(),
+            singletonDirectoryVersion,
+            singletonReservationFence: singletonReservationFence ?? FieldValue.delete(),
             publicationSequence: generation.sequence,
             updatedAt: FieldValue.serverTimestamp(),
           }, { merge: true });
@@ -573,6 +809,17 @@ export function createFirestoreCloudTaskPublicationStore(
             }
           });
         }
+        await reconcileRepoSingletonClaims({
+          db,
+          userId,
+          desktopId,
+          deletionRef,
+          desktopRef,
+          generation,
+          singletonReservationFence,
+          previousTasks: existing.map((document) => document.data),
+          tasks,
+        });
         sessionState.tasksByIdentity = indexTaskDocuments(planResultDocuments(existing, plan));
 
         // Older renderer publishers created auto-id desktop documents. The full
@@ -600,6 +847,81 @@ export function createFirestoreCloudTaskPublicationStore(
       }
     },
   };
+}
+
+async function reconcileRepoSingletonClaims(input: {
+  db: Firestore;
+  userId: string;
+  desktopId: string;
+  deletionRef: FirebaseFirestore.DocumentReference;
+  desktopRef: FirebaseFirestore.DocumentReference;
+  generation: CloudTaskPublicationGeneration;
+  singletonReservationFence: string | null;
+  previousTasks: unknown[];
+  tasks: CloudTaskDocument[];
+}): Promise<void> {
+  const previous = singletonClaimsForDesktopTasks(input.previousTasks, input.desktopId);
+  const current = singletonClaimsForDesktopTasks(input.tasks, input.desktopId);
+  const authoritativeTaskIds = new Set(input.tasks
+    .filter((task) => task.ownerDesktopId === input.desktopId)
+    .map((task) => task.ownerLocalTaskId));
+  const reservedClaims = await input.db.collection(`users/${input.userId}/repoSingletonClaims`)
+    .where("machineId", "==", input.desktopId)
+    .get();
+  for (const candidate of reservedClaims.docs) {
+    await input.db.runTransaction(async (transaction) => {
+      await requireCurrentPublication(transaction, input.deletionRef, input.desktopRef, input.generation);
+      const stored = parseStoredRepoSingletonClaim((await transaction.get(candidate.ref)).data());
+      if (stored?.state !== "reserved"
+        || stored.machineId !== input.desktopId
+        || stored.creatorFence === null
+        || input.singletonReservationFence === null
+        || stored.creatorFence === input.singletonReservationFence
+        || authoritativeTaskIds.has(stored.taskId)) return;
+      transaction.delete(candidate.ref);
+    });
+  }
+  for (const [key, owner] of previous) {
+    if (current.get(key)?.taskId === owner.taskId) continue;
+    const [remoteUrlHash, agent] = key.split("\0") as [string, string];
+    const claimRef = repoSingletonClaimRef(input.db, input.userId, remoteUrlHash, agent);
+    await input.db.runTransaction(async (transaction) => {
+      await requireCurrentPublication(transaction, input.deletionRef, input.desktopRef, input.generation);
+      const stored = parseStoredRepoSingletonClaim((await transaction.get(claimRef)).data());
+      if (stored?.machineId === owner.machineId && stored.taskId === owner.taskId) {
+        transaction.delete(claimRef);
+      }
+    });
+  }
+  for (const [key, owner] of current) {
+    const [remoteUrlHash, agent] = key.split("\0") as [string, string];
+    const claimRef = repoSingletonClaimRef(input.db, input.userId, remoteUrlHash, agent);
+    await input.db.runTransaction(async (transaction) => {
+      await requireCurrentPublication(transaction, input.deletionRef, input.desktopRef, input.generation);
+      const stored = parseStoredRepoSingletonClaim((await transaction.get(claimRef)).data());
+      if (!stored || (stored.machineId === owner.machineId && stored.taskId === owner.taskId)) {
+        transaction.set(claimRef, storedRepoSingletonClaim(remoteUrlHash, agent, owner, "owned"));
+      }
+    });
+  }
+}
+
+function singletonClaimsForDesktopTasks(
+  tasks: unknown[],
+  desktopId: string,
+): Map<string, RepoSingletonOwner> {
+  const claims = new Map<string, RepoSingletonOwner>();
+  for (const task of tasks) {
+    if (!isRecord(task) || typeof task.singletonAgent !== "string"
+      || typeof task.ownerDesktopId !== "string" || typeof task.ownerLocalTaskId !== "string"
+      || task.ownerDesktopId !== desktopId || !isRecord(task.repo)
+      || typeof task.repo.remoteUrlHash !== "string") continue;
+    claims.set(`${task.repo.remoteUrlHash}\0${task.singletonAgent}`, {
+      machineId: task.ownerDesktopId,
+      taskId: task.ownerLocalTaskId,
+    });
+  }
+  return claims;
 }
 
 function cloudDesktopDocumentId(desktopId: string): string {

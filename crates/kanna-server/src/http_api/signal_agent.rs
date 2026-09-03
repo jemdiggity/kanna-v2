@@ -6,6 +6,7 @@ use crate::task_creator::{PrepareTaskError, SingletonAgentOverrides};
 use axum::extract::State;
 use axum::Json;
 use kanna_agent_protocol::StateChangeScope;
+use kanna_tool_catalog::encode_path_segment;
 use std::sync::Arc;
 
 #[derive(Debug, serde::Deserialize)]
@@ -27,6 +28,43 @@ pub(super) struct SignalAgentRequest {
 pub(super) struct SignalAgentResponse {
     pub(super) task_id: String,
     pub(super) created: bool,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct SingletonCandidate {
+    task_id: String,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct SingletonLookupResponse {
+    tasks: Vec<SingletonCandidate>,
+}
+
+/// Native half of account-wide singleton discovery. The caller is the signed,
+/// authenticated desktop relay tunnel; this route deliberately does not fan
+/// out again.
+pub(super) async fn find_local_singletons(
+    _access: PrivilegedTaskAccess,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path((remote_url_hash, agent)): axum::extract::Path<(String, String)>,
+) -> Result<Json<SingletonLookupResponse>, (axum::http::StatusCode, String)> {
+    let tasks = super::blocking::run_handler_blocking("local singleton lookup", move || {
+        let db =
+            Db::open(&state.config.db_path).map_err(|error| db_write_error("db error", error))?;
+        db.find_open_agent_tasks_by_remote_url_hash(&remote_url_hash, &agent)
+            .map_err(|error| db_write_error("db error", error))
+    })
+    .await?;
+    Ok(Json(SingletonLookupResponse {
+        tasks: tasks
+            .into_iter()
+            .map(|task| SingletonCandidate {
+                task_id: task.task_id,
+            })
+            .collect(),
+    }))
 }
 
 pub(super) async fn signal_agent(
@@ -370,75 +408,136 @@ pub(super) async fn signal_agent_request(
         ));
     }
 
-    let running = {
-        let state = Arc::clone(&state);
-        let repo_id = repo_id.clone();
-        let agent = agent.clone();
-        super::blocking::run_handler_blocking("singleton agent lookup", move || {
-            let db = Db::open(&state.config.db_path).map_err(|e| db_write_error("db error", e))?;
-            db.find_open_agent_task(&repo_id, &agent)
-                .map_err(|e| db_write_error("db error", e))
-        })
-        .await?
-    };
+    let (owner, remote_url_hash) = resolve_singleton_owner(&state, &repo_id, &agent).await?;
 
-    if let Some(running) = running {
-        let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
-            .await
-            .map_err(|e| {
-                (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("daemon error: {}", e),
+    match owner {
+        Some(SingletonOwner::Remote {
+            machine_id,
+            task_id,
+        }) => {
+            let path = format!("/v1/tasks/{}/input", encode_path_segment(&task_id));
+            let response = state
+                .invoke_relay_desktop(
+                    machine_id.clone(),
+                    "POST".to_string(),
+                    path,
+                    serde_json::json!({ "input": message }),
                 )
-            })?;
-        // A singleton that refuses delivered input is the one failure here
-        // that no retry fixes and that nothing else would ever surface: the
-        // agent is alive and idle, so it looks healthy everywhere, and the
-        // only trace of the refusal is inside whichever task happened to
-        // signal it. Record it on the singleton itself before answering.
-        if let Err(error) =
-            super::task_input::try_submit_task_input(&mut daemon, &running.session_id, &message)
                 .await
-        {
-            return Err(match error {
-                super::task_input::TaskInputError::InputBlocked(reason) => {
-                    super::task_input::record_input_blocked_target(&state, &running.session_id)
-                        .await;
-                    log::error!(
-                        "the {agent} agent for repo {repo_id} refuses delivered input: {reason}"
-                    );
-                    (axum::http::StatusCode::CONFLICT, reason)
-                }
-                super::task_input::TaskInputError::HeldByRawDraft(reason) => {
-                    log::error!(
-                        "the {agent} agent for repo {repo_id} queued delivered input behind an \
-                         unsent human line: {reason}"
-                    );
-                    (axum::http::StatusCode::CONFLICT, reason)
-                }
-                super::task_input::TaskInputError::SessionNotFound => (
-                    axum::http::StatusCode::NOT_FOUND,
-                    format!("session not found: {}", running.session_id),
-                ),
-                super::task_input::TaskInputError::Uncertain(message) => (
-                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                    format!("terminal input delivery is uncertain: {message}"),
-                ),
-                super::task_input::TaskInputError::Other(message) => {
-                    (axum::http::StatusCode::INTERNAL_SERVER_ERROR, message)
-                }
+                .map_err(|error| remote_singleton_unreachable(&machine_id, &task_id, error))?;
+            if response.status != axum::http::StatusCode::NO_CONTENT.as_u16() {
+                let detail = response
+                    .error
+                    .or_else(|| {
+                        response.body.and_then(|body| {
+                            body.get("message")
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_string)
+                        })
+                    })
+                    .unwrap_or_else(|| format!("HTTP {}", response.status));
+                return Err(remote_singleton_unreachable(&machine_id, &task_id, detail));
+            }
+            return Ok(SignalAgentResponse {
+                task_id,
+                created: false,
             });
         }
-        return Ok(SignalAgentResponse {
-            task_id: running.task_id,
-            created: false,
-        });
+        Some(SingletonOwner::Local(running)) => {
+            return signal_local_singleton(&state, &repo_id, &agent, &message, running).await;
+        }
+        None => {}
     }
 
-    let prepared = {
+    let requested_task_id = if let Some(remote_url_hash) = remote_url_hash.as_deref() {
+        let proposed_task_id = crate::task_creator::generate_singleton_task_id()
+            .map_err(|error| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))?;
+        let claim = state
+            .claim_relay_repo_singleton(
+                remote_url_hash.to_string(),
+                agent.clone(),
+                proposed_task_id.clone(),
+            )
+            .await
+            .map_err(|error| {
+                let reason = format!(
+                    "cannot claim the {agent} singleton for repo {repo_id}: {error}; no singleton was created"
+                );
+                log::error!("{reason}");
+                (axum::http::StatusCode::SERVICE_UNAVAILABLE, reason)
+            })?;
+        match claim.status.as_str() {
+            "acquired" => Some(proposed_task_id),
+            "duplicate" => {
+                let owners = claim
+                    .owners
+                    .iter()
+                    .map(|owner| format!("{}:{}", owner.machine_id, owner.task_id))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let reason = format!(
+                    "duplicate open {agent} singletons for repo {repo_id}: {owners}; close or explicitly reconcile the duplicates before signaling"
+                );
+                log::error!("{reason}");
+                return Err((axum::http::StatusCode::CONFLICT, reason));
+            }
+            "reserved" => {
+                let reason = format!(
+                    "singleton task {} is being created by machine {}; no replacement was created",
+                    claim.task_id, claim.machine_id
+                );
+                log::error!("{reason}");
+                return Err((axum::http::StatusCode::SERVICE_UNAVAILABLE, reason));
+            }
+            "owned" if claim.machine_id != state.config.desktop_id => {
+                let path = format!("/v1/tasks/{}/input", encode_path_segment(&claim.task_id));
+                let response = state
+                    .invoke_relay_desktop(
+                        claim.machine_id.clone(),
+                        "POST".to_string(),
+                        path,
+                        serde_json::json!({ "input": message }),
+                    )
+                    .await
+                    .map_err(|error| {
+                        remote_singleton_unreachable(&claim.machine_id, &claim.task_id, error)
+                    })?;
+                if response.status == axum::http::StatusCode::NO_CONTENT.as_u16() {
+                    return Ok(SignalAgentResponse {
+                        task_id: claim.task_id,
+                        created: false,
+                    });
+                }
+                return Err(remote_singleton_unreachable(
+                    &claim.machine_id,
+                    &claim.task_id,
+                    response
+                        .error
+                        .unwrap_or_else(|| format!("HTTP {}", response.status)),
+                ));
+            }
+            "owned" => {
+                let reason = format!(
+                    "singleton task {} is owned by this machine but is not yet available; no replacement was created",
+                    claim.task_id
+                );
+                log::error!("{reason}");
+                return Err((axum::http::StatusCode::SERVICE_UNAVAILABLE, reason));
+            }
+            status => {
+                let reason = format!("relay returned unknown singleton claim status {status}");
+                return Err((axum::http::StatusCode::SERVICE_UNAVAILABLE, reason));
+            }
+        }
+    } else {
+        None
+    };
+
+    let prepared_result = {
         let state = Arc::clone(&state);
         let repo_id = repo_id.clone();
         let agent = agent.clone();
+        let prepared_task_id = requested_task_id.clone();
         super::blocking::run_handler_blocking("singleton agent preparation", move || {
             let db = Db::open(&state.config.db_path).map_err(|e| db_write_error("db error", e))?;
             let prepared = crate::task_creator::prepare_singleton_agent_task_for_api(
@@ -448,13 +547,42 @@ pub(super) async fn signal_agent_request(
                 &agent,
                 &message,
                 overrides,
+                prepared_task_id,
             )
             .map_err(prepare_singleton_error)?;
             db.pin_pipeline_item_at_top(&repo_id, prepared.task_id())
                 .map_err(|e| db_write_error("db error", e))?;
             Ok(prepared)
         })
-        .await?
+        .await
+    };
+    let prepared = match prepared_result {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            if let (Some(remote_url_hash), Some(task_id)) =
+                (remote_url_hash.as_deref(), requested_task_id.as_deref())
+            {
+                let task_persisted = Db::open(&state.config.db_path)
+                    .and_then(|db| db.get_pipeline_item(task_id))
+                    .map(|task| task.is_some())
+                    .unwrap_or(true);
+                if !task_persisted {
+                    if let Err(release_error) = state
+                        .release_relay_repo_singleton_reservation(
+                            remote_url_hash.to_string(),
+                            agent.clone(),
+                            task_id.to_string(),
+                        )
+                        .await
+                    {
+                        log::error!(
+                            "failed to release singleton reservation for task {task_id} after preparation failed: {release_error}"
+                        );
+                    }
+                }
+            }
+            return Err(error);
+        }
     };
     let task_id = prepared.task_id().to_string();
     state.publish_state_changed(StateChangeScope::Tasks);
@@ -463,6 +591,257 @@ pub(super) async fn signal_agent_request(
     Ok(SignalAgentResponse {
         task_id,
         created: true,
+    })
+}
+
+enum SingletonOwner {
+    Local(crate::db::OpenAgentTask),
+    Remote { machine_id: String, task_id: String },
+}
+
+async fn resolve_singleton_owner(
+    state: &Arc<AppState>,
+    repo_id: &str,
+    agent: &str,
+) -> Result<(Option<SingletonOwner>, Option<String>), (axum::http::StatusCode, String)> {
+    let (remote_url_hash, local_tasks) = {
+        let state = Arc::clone(state);
+        let repo_id = repo_id.to_string();
+        let agent = agent.to_string();
+        super::blocking::run_handler_blocking("singleton agent lookup", move || {
+            let db = Db::open(&state.config.db_path)
+                .map_err(|error| db_write_error("db error", error))?;
+            let repo = db
+                .get_repo(&repo_id)
+                .map_err(|error| db_write_error("db error", error))?
+                .ok_or_else(|| {
+                    (
+                        axum::http::StatusCode::NOT_FOUND,
+                        format!("repo not found: {repo_id}"),
+                    )
+                })?;
+            let tasks = match repo.remote_url_hash.as_deref() {
+                Some(remote_url_hash) => db
+                    .find_open_agent_tasks_by_remote_url_hash(remote_url_hash, &agent)
+                    .map_err(|error| db_write_error("db error", error))?,
+                None => db
+                    .find_open_agent_task(&repo_id, &agent)
+                    .map_err(|error| db_write_error("db error", error))?
+                    .into_iter()
+                    .collect(),
+            };
+            Ok((repo.remote_url_hash, tasks))
+        })
+        .await?
+    };
+
+    let Some(remote_url_hash) = remote_url_hash else {
+        return Ok((
+            local_tasks.into_iter().next().map(SingletonOwner::Local),
+            None,
+        ));
+    };
+
+    // A desktop without an account credential has no sibling namespace. Once
+    // signed in, however, inability to inspect that namespace is uncertainty,
+    // never permission to create a rival singleton.
+    if state.config.desktop_secret.is_none() {
+        return unique_singleton_owner(state, repo_id, agent, local_tasks, Vec::new())
+            .map(|owner| (owner, None));
+    }
+    let directory_owners = state
+        .list_relay_repo_singletons(remote_url_hash.clone(), agent.to_string())
+        .await
+        .map_err(|error| {
+            let reason = format!(
+                "cannot resolve the {agent} singleton for repo {repo_id} from the account directory: {error}; no singleton was created"
+            );
+            log::error!("{reason}");
+            (axum::http::StatusCode::SERVICE_UNAVAILABLE, reason)
+        })?;
+    state.replace_singleton_owners(
+        &remote_url_hash,
+        agent,
+        directory_owners
+            .into_iter()
+            .filter(|owner| owner.machine_id != state.config.desktop_id)
+            .collect(),
+    );
+    let machine_ids = state.list_active_relay_desktops().await.map_err(|error| {
+        let reason = format!(
+            "cannot resolve the {agent} singleton for repo {repo_id} across the signed-in account: {error}; no singleton was created"
+        );
+        log::error!("{reason}");
+        (axum::http::StatusCode::SERVICE_UNAVAILABLE, reason)
+    })?;
+    let path = format!(
+        "/v1/repo-singletons/{}/{}",
+        encode_path_segment(&remote_url_hash),
+        encode_path_segment(agent)
+    );
+    for machine_id in machine_ids {
+        if machine_id == state.config.desktop_id {
+            continue;
+        }
+        let response = state
+            .invoke_relay_desktop(
+                machine_id.clone(),
+                "GET".to_string(),
+                path.clone(),
+                serde_json::Value::Null,
+            )
+            .await
+            .map_err(|error| singleton_lookup_uncertain(repo_id, agent, &machine_id, error))?;
+        if response.status != axum::http::StatusCode::OK.as_u16() {
+            return Err(singleton_lookup_uncertain(
+                repo_id,
+                agent,
+                &machine_id,
+                response
+                    .error
+                    .unwrap_or_else(|| format!("HTTP {}", response.status)),
+            ));
+        }
+        let lookup = response
+            .body
+            .ok_or_else(|| {
+                singleton_lookup_uncertain(repo_id, agent, &machine_id, "response had no body")
+            })
+            .and_then(|body| {
+                serde_json::from_value::<SingletonLookupResponse>(body).map_err(|error| {
+                    singleton_lookup_uncertain(
+                        repo_id,
+                        agent,
+                        &machine_id,
+                        format!("invalid response: {error}"),
+                    )
+                })
+            })?;
+        let task_ids = lookup
+            .tasks
+            .into_iter()
+            .map(|task| task.task_id)
+            .collect::<Vec<_>>();
+        state.observe_singleton_owners(&remote_url_hash, agent, &machine_id, task_ids.clone());
+    }
+    let remote_tasks = state.known_singleton_owners(&remote_url_hash, agent);
+    unique_singleton_owner(state, repo_id, agent, local_tasks, remote_tasks)
+        .map(|owner| (owner, Some(remote_url_hash)))
+}
+
+fn unique_singleton_owner(
+    state: &AppState,
+    repo_id: &str,
+    agent: &str,
+    mut local_tasks: Vec<crate::db::OpenAgentTask>,
+    remote_tasks: Vec<(String, String)>,
+) -> Result<Option<SingletonOwner>, (axum::http::StatusCode, String)> {
+    let count = local_tasks.len() + remote_tasks.len();
+    if count > 1 {
+        let mut owners = local_tasks
+            .iter()
+            .map(|task| format!("{}:{}", state.config.desktop_id, task.task_id))
+            .chain(
+                remote_tasks
+                    .iter()
+                    .map(|(machine_id, task_id)| format!("{machine_id}:{task_id}")),
+            )
+            .collect::<Vec<_>>();
+        owners.sort();
+        let reason = format!(
+            "duplicate open {agent} singletons for repo {repo_id}: {}; close or explicitly reconcile the duplicates before signaling",
+            owners.join(", ")
+        );
+        log::error!("{reason}");
+        return Err((axum::http::StatusCode::CONFLICT, reason));
+    }
+    if let Some(task) = local_tasks.pop() {
+        return Ok(Some(SingletonOwner::Local(task)));
+    }
+    Ok(remote_tasks
+        .into_iter()
+        .next()
+        .map(|(machine_id, task_id)| SingletonOwner::Remote {
+            machine_id,
+            task_id,
+        }))
+}
+
+fn singleton_lookup_uncertain(
+    repo_id: &str,
+    agent: &str,
+    machine_id: &str,
+    error: impl std::fmt::Display,
+) -> (axum::http::StatusCode, String) {
+    let reason = format!(
+        "cannot verify the {agent} singleton for repo {repo_id} on machine {machine_id}: {error}; no singleton was created"
+    );
+    log::error!("{reason}");
+    (axum::http::StatusCode::SERVICE_UNAVAILABLE, reason)
+}
+
+fn remote_singleton_unreachable(
+    machine_id: &str,
+    task_id: &str,
+    error: impl std::fmt::Display,
+) -> (axum::http::StatusCode, String) {
+    let reason = format!(
+        "singleton task {task_id} is owned by unreachable machine {machine_id}: {error}; no replacement was created"
+    );
+    log::error!("{reason}");
+    (axum::http::StatusCode::SERVICE_UNAVAILABLE, reason)
+}
+
+async fn signal_local_singleton(
+    state: &Arc<AppState>,
+    repo_id: &str,
+    agent: &str,
+    message: &str,
+    running: crate::db::OpenAgentTask,
+) -> Result<SignalAgentResponse, (axum::http::StatusCode, String)> {
+    let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("daemon error: {}", e),
+            )
+        })?;
+    // A singleton that refuses delivered input is the one failure here that
+    // no retry fixes and that nothing else would ever surface.
+    if let Err(error) =
+        super::task_input::try_submit_task_input(&mut daemon, &running.session_id, message).await
+    {
+        return Err(match error {
+            super::task_input::TaskInputError::InputBlocked(reason) => {
+                super::task_input::record_input_blocked_target(state, &running.session_id).await;
+                log::error!(
+                    "the {agent} agent for repo {repo_id} refuses delivered input: {reason}"
+                );
+                (axum::http::StatusCode::CONFLICT, reason)
+            }
+            super::task_input::TaskInputError::HeldByRawDraft(reason) => {
+                log::error!(
+                    "the {agent} agent for repo {repo_id} queued delivered input behind an unsent human line: {reason}"
+                );
+                (axum::http::StatusCode::CONFLICT, reason)
+            }
+            super::task_input::TaskInputError::SessionNotFound => (
+                axum::http::StatusCode::NOT_FOUND,
+                format!("session not found: {}", running.session_id),
+            ),
+            super::task_input::TaskInputError::Uncertain(message) => (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                format!("terminal input delivery is uncertain: {message}"),
+            ),
+            super::task_input::TaskInputError::Other(message) => {
+                (axum::http::StatusCode::INTERNAL_SERVER_ERROR, message)
+            }
+        });
+    }
+    Ok(SignalAgentResponse {
+        task_id: running.task_id,
+        created: false,
     })
 }
 

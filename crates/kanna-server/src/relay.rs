@@ -42,6 +42,18 @@ enum PendingDesktopRequest {
     ListActive {
         response: tokio::sync::oneshot::Sender<Result<Vec<String>, String>>,
     },
+    ListRepoSingletons {
+        response: tokio::sync::oneshot::Sender<
+            Result<Vec<crate::http_api::RemoteSingletonOwner>, String>,
+        >,
+    },
+    ClaimRepoSingleton {
+        response:
+            tokio::sync::oneshot::Sender<Result<crate::http_api::RemoteSingletonClaim, String>>,
+    },
+    ReleaseRepoSingletonReservation {
+        response: tokio::sync::oneshot::Sender<Result<bool, String>>,
+    },
     Invoke {
         response: tokio::sync::oneshot::Sender<Result<crate::http_api::HttpInvokeResponse, String>>,
     },
@@ -165,6 +177,13 @@ async fn run_relay_loop_with_timing(
     let mut desktop_relay_requests = http_state.take_desktop_relay_requests()?;
     let mut next_mobile_notification_id = 1_u64;
     let mut next_desktop_request_id = 1_u64;
+    // Stable across relay connection/session rollover, but replaced when this
+    // server process restarts. The relay uses it to distinguish reconnect from
+    // a dead creator while a singleton reservation is not yet in SQLite.
+    let singleton_reservation_fence = (0..4)
+        .map(|_| crate::task_creator::generate_singleton_task_id())
+        .collect::<Result<Vec<_>, _>>()?
+        .join("");
 
     // Reconnection loop
     loop {
@@ -274,13 +293,16 @@ async fn run_relay_loop_with_timing(
                 }
                 _ = publication_interval.tick(), if publication_enabled => {
                     match db.ui_snapshot() {
-                        Ok(snapshot) => publisher.observe(map_ui_snapshot_for_publication(
-                            &config.desktop_id,
-                            &config.desktop_name,
-                            crate::agent_inventory::installed_agent_providers(),
-                            snapshot,
-                            &mut resting_snippets,
-                        )),
+                        Ok(snapshot) => publisher.observe(
+                            map_ui_snapshot_for_publication(
+                                &config.desktop_id,
+                                &config.desktop_name,
+                                crate::agent_inventory::installed_agent_providers(),
+                                snapshot,
+                                &mut resting_snippets,
+                            )
+                            .with_singleton_reservation_fence(&singleton_reservation_fence),
+                        ),
                         Err(error) => log::warn!("Failed to build cloud task snapshot: {error}"),
                     }
                     match publisher.next_step(Instant::now()) {
@@ -363,6 +385,72 @@ async fn run_relay_loop_with_timing(
                                 },
                             },
                             PendingDesktopRequest::ListActive { response },
+                        ),
+                        http_api::DesktopRelayRequest::ListRepoSingletons {
+                            generation,
+                            remote_url_hash,
+                            agent,
+                            response,
+                        } => (
+                            generation,
+                            RelayMessage::Invoke {
+                                id: RelayId::String(id.clone()),
+                                desktop_id: None,
+                                request: RelayInvoke::Command {
+                                    command: "list_repo_singletons".to_string(),
+                                    args: serde_json::json!({
+                                        "remoteUrlHash": remote_url_hash,
+                                        "agent": agent,
+                                    }),
+                                },
+                            },
+                            PendingDesktopRequest::ListRepoSingletons { response },
+                        ),
+                        http_api::DesktopRelayRequest::ClaimRepoSingleton {
+                            generation,
+                            remote_url_hash,
+                            agent,
+                            task_id,
+                            response,
+                        } => (
+                            generation,
+                            RelayMessage::Invoke {
+                                id: RelayId::String(id.clone()),
+                                desktop_id: None,
+                                request: RelayInvoke::Command {
+                                    command: "claim_repo_singleton".to_string(),
+                                    args: serde_json::json!({
+                                        "remoteUrlHash": remote_url_hash,
+                                        "agent": agent,
+                                        "taskId": task_id,
+                                        "creatorFence": singleton_reservation_fence.as_str(),
+                                    }),
+                                },
+                            },
+                            PendingDesktopRequest::ClaimRepoSingleton { response },
+                        ),
+                        http_api::DesktopRelayRequest::ReleaseRepoSingletonReservation {
+                            generation,
+                            remote_url_hash,
+                            agent,
+                            task_id,
+                            response,
+                        } => (
+                            generation,
+                            RelayMessage::Invoke {
+                                id: RelayId::String(id.clone()),
+                                desktop_id: None,
+                                request: RelayInvoke::Command {
+                                    command: "release_repo_singleton_reservation".to_string(),
+                                    args: serde_json::json!({
+                                        "remoteUrlHash": remote_url_hash,
+                                        "agent": agent,
+                                        "taskId": task_id,
+                                        "creatorFence": singleton_reservation_fence.as_str(),
+                                    }),
+                                },
+                            },
+                            PendingDesktopRequest::ReleaseRepoSingletonReservation { response },
                         ),
                         http_api::DesktopRelayRequest::Invoke {
                             generation,
@@ -1147,6 +1235,15 @@ fn fail_pending_desktop_request(request: PendingDesktopRequest, error: String) {
         PendingDesktopRequest::ListActive { response } => {
             let _ = response.send(Err(error));
         }
+        PendingDesktopRequest::ListRepoSingletons { response } => {
+            let _ = response.send(Err(error));
+        }
+        PendingDesktopRequest::ClaimRepoSingleton { response } => {
+            let _ = response.send(Err(error));
+        }
+        PendingDesktopRequest::ReleaseRepoSingletonReservation { response } => {
+            let _ = response.send(Err(error));
+        }
         PendingDesktopRequest::Invoke { response } => {
             let _ = response.send(Err(error));
         }
@@ -1170,6 +1267,49 @@ fn resolve_pending_desktop_request(
                     .and_then(|value| {
                         serde_json::from_value::<Vec<String>>(value)
                             .map_err(|error| format!("relay returned invalid desktop ids: {error}"))
+                    }),
+            };
+            let _ = response.send(result);
+        }
+        PendingDesktopRequest::ClaimRepoSingleton { response } => {
+            let result = match error {
+                Some(error) => Err(error),
+                None => data
+                    .and_then(|value| value.get("claim").cloned())
+                    .ok_or_else(|| {
+                        "relay returned an invalid repository singleton claim".to_string()
+                    })
+                    .and_then(|value| {
+                        serde_json::from_value(value).map_err(|error| {
+                            format!("relay returned invalid singleton claim: {error}")
+                        })
+                    }),
+            };
+            let _ = response.send(result);
+        }
+        PendingDesktopRequest::ReleaseRepoSingletonReservation { response } => {
+            let result = match error {
+                Some(error) => Err(error),
+                None => data
+                    .and_then(|value| value.get("released").and_then(serde_json::Value::as_bool))
+                    .ok_or_else(|| {
+                        "relay returned an invalid singleton reservation release".to_string()
+                    }),
+            };
+            let _ = response.send(result);
+        }
+        PendingDesktopRequest::ListRepoSingletons { response } => {
+            let result = match error {
+                Some(error) => Err(error),
+                None => data
+                    .and_then(|value| value.get("owners").cloned())
+                    .ok_or_else(|| {
+                        "relay returned an invalid repository singleton response".to_string()
+                    })
+                    .and_then(|value| {
+                        serde_json::from_value(value).map_err(|error| {
+                            format!("relay returned invalid singleton owners: {error}")
+                        })
                     }),
             };
             let _ = response.send(result);
@@ -3592,6 +3732,14 @@ mod tests {
         assert_eq!(publications.1["schemaVersion"], 1);
         assert_eq!(publications.2, "task-snapshot-2");
         assert_eq!(publications.3["schemaVersion"], 1);
+        let first_fence = publications.1["singletonReservationFence"]
+            .as_str()
+            .expect("first publication process fence");
+        assert!(!first_fence.is_empty());
+        assert_eq!(
+            publications.3["singletonReservationFence"], first_fence,
+            "routine relay reconnect must retain the creator-process fence"
+        );
         let _ = std::fs::remove_file(db_path);
     }
 
