@@ -102,8 +102,20 @@ fn parses_new_repo_and_task_subcommands() {
 
     let cli = crate::Cli::try_parse_from(["kanna-cli", "guide", "--json"]).unwrap();
     match cli.command {
-        crate::Commands::Guide { json, .. } => assert!(json),
+        crate::Commands::Guide { topic, json, .. } => {
+            assert_eq!(topic, None);
+            assert!(json);
+        }
         _ => panic!("expected guide command"),
+    }
+
+    let cli = crate::Cli::try_parse_from(["kanna-cli", "guide", "workflows"]).unwrap();
+    match cli.command {
+        crate::Commands::Guide { topic, json, .. } => {
+            assert_eq!(topic.as_deref(), Some("workflows"));
+            assert!(!json);
+        }
+        _ => panic!("expected topic guide command"),
     }
 
     let cli = crate::Cli::try_parse_from([

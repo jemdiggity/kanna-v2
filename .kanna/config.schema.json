@@ -2,51 +2,57 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.kanna.build/config.schema.json",
   "title": "Kanna Repo Config",
-  "description": "Schema for .kanna/config.json used by Kanna agents and editors. The same schema describes the optional machine-local companion file .kanna/config.local.json, which is read from the checkout's working tree (never from origin), is gitignored, and is deep-merged over this file with local winning. That file may set only: agentProviders, workflow, ports, setup, teardown, test. Any other key in it is an error, not an ignored line. agentProviders and ports merge entry by entry with the local entry replacing the committed one of the same name; everything else replaces outright, and arrays never concatenate.",
+  "description": "`.kanna/config.json` is the shared repository contract. `.kanna/config.local.json` is read from the open checkout's working tree, never from the origin snapshot, and is deep-merged over the committed file with local values winning. Local config may contain only `agentProviders`, `workflow`, `ports`, `setup`, `teardown`, and `test`; an unknown key, invalid JSON, or invalid value fails definition resolution and names the file. `agentProviders` and `ports` merge entry by entry, with a local entry replacing the committed entry of the same name. Every other permitted key replaces wholesale, and arrays never concatenate. Keep local config gitignored and do not put task-defining fields such as `vars`, `flavors`, `workspace`, `stage_order`, or reserved ports in it.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
     "$schema": {
       "type": "string",
-      "format": "uri"
+      "format": "uri",
+      "description": "Set `$schema` to `https://schemas.kanna.build/config.schema.json` in every new `.kanna/config.json` and `.kanna/config.local.json`. Kanna publishes the schema with each merged version so editors and agents can discover supported fields and their semantics."
     },
     "workflow": {
-      "type": "string"
+      "type": "string",
+      "description": "`workflow` selects the repository's default workflow by name. Kanna resolves a repo-authored `.kanna/workflows/<name>.json` before the bundled workflow of the same name. Workflow and agent definitions are public/listed by default; `visibility: internal` hides an effective definition from listings without preventing explicit resolution, and a repo override must redeclare it to remain internal. `flavors` selects a built-in variant by agent role (for example `\"pr\": \"draft-pr\"`); an explicit stage selector such as `pr@draft-pr` wins. Run `kanna-cli guide workflows` or call `kanna_guide {\"topic\":\"workflows\"}` before authoring a workflow."
     },
     "setup": {
       "type": "array",
+      "description": "`setup`, `teardown`, and `test` are arrays of shell commands run from the repository or task worktree. `setup` prepares each new workspace before its agent starts. `teardown` runs best-effort when a task leaves a workspace. `test` records the repository's canonical verification commands for agents and workflows. Because local arrays replace rather than append, repeat every command that should remain when overriding one of these keys locally.",
       "items": {
         "type": "string"
       }
     },
     "teardown": {
       "type": "array",
+      "description": "`setup`, `teardown`, and `test` are arrays of shell commands run from the repository or task worktree. `setup` prepares each new workspace before its agent starts. `teardown` runs best-effort when a task leaves a workspace. `test` records the repository's canonical verification commands for agents and workflows. Because local arrays replace rather than append, repeat every command that should remain when overriding one of these keys locally.",
       "items": {
         "type": "string"
       }
     },
     "test": {
       "type": "array",
+      "description": "`setup`, `teardown`, and `test` are arrays of shell commands run from the repository or task worktree. `setup` prepares each new workspace before its agent starts. `teardown` runs best-effort when a task leaves a workspace. `test` records the repository's canonical verification commands for agents and workflows. Because local arrays replace rather than append, repeat every command that should remain when overriding one of these keys locally.",
       "items": {
         "type": "string"
       }
     },
     "ports": {
       "type": "object",
+      "description": "`ports` maps environment-variable names to base ports; Kanna reserves task-specific ports and exports the resolved values so parallel worktrees do not collide. `vars` provides committed string substitutions for agent prompts. `workspace`, `stage_order`, `reserved_ports`, and `reserved_port_offsets` are committed task semantics and cannot appear in local config.",
       "additionalProperties": {
         "type": "integer"
       }
     },
     "flavors": {
       "type": "object",
-      "description": "Per-role built-in agent flavor selections. A stage with agent \"pr\" uses flavors.pr when present; an explicit selector such as \"pr@draft-pr\" takes precedence. Repo overrides and extensions remain role-scoped at .kanna/agents/<role>/AGENT.md and EXTEND.md.",
+      "description": "`workflow` selects the repository's default workflow by name. Kanna resolves a repo-authored `.kanna/workflows/<name>.json` before the bundled workflow of the same name. Workflow and agent definitions are public/listed by default; `visibility: internal` hides an effective definition from listings without preventing explicit resolution, and a repo override must redeclare it to remain internal. `flavors` selects a built-in variant by agent role (for example `\"pr\": \"draft-pr\"`); an explicit stage selector such as `pr@draft-pr` wins. Run `kanna-cli guide workflows` or call `kanna_guide {\"topic\":\"workflows\"}` before authoring a workflow.",
       "additionalProperties": {
         "type": "string"
       }
     },
     "agentProviders": {
       "type": "object",
-      "description": "Repo-level provider, model, and effort preferences by agent name or * glob. Exact names win; otherwise the matching glob with the most non-* characters wins, with lexical order breaking ties. Provider/model/effort resolution is explicit task or stage override, then this map, then layered AGENT.md/EXTEND.md frontmatter, then the global default. A machine-local .kanna/config.local.json replaces individual entries of this map for that checkout only, which is how one machine reorders providers around an outage without a commit. Model and effort ids are provider-specific, so they are never composed across layers: resolution walks this same chain and takes the first layer that both names a value and would itself have selected the resolved provider, skipping any layer written for another provider. An entry's model and effort therefore belong to the provider that entry selects, which is the first name in its provider list; a fallback candidate listed behind that name takes its value from a lower layer written for that candidate, or else runs on its own stamped or default value.",
+      "description": "`agentProviders` maps exact agent names or `*` globs to a provider name or to `{ provider, model, effort }`; `provider` may be an ordered candidate list. Exact keys beat globs. Among matching globs, the most non-`*` characters wins and lexical order breaks ties. Selection precedence is: explicit task or stage override; matching `agentProviders` entry (including the local layer); layered `AGENT.md`/`EXTEND.md` frontmatter; global default provider. A rerun, resume, revision, or recovery reproduces the recorded run's provider as an explicit override, while a plain stage advance re-resolves the chain and uses the task's stamp only as the final fallback. Provider-specific model and effort values are layer-coherent: Kanna never combines them across providers or layers. It walks the same chain and takes the first value from a layer that would itself select the resolved provider. In an ordered provider list, model and effort belong only to the leading candidate; fallback candidates use a lower coherent layer or their own stamped/default values.",
       "propertyNames": {
         "type": "string",
         "minLength": 1
@@ -93,13 +99,14 @@
     },
     "vars": {
       "type": "object",
-      "description": "String variables substituted in AGENT.md bodies with $NAME or ${NAME}. Runtime prompt variables such as $BASE_REF, $BRANCH, $KANNA_TASK_ID, $PREV_RESULT, $SOURCE_WORKTREE, and $TASK_PROMPT remain runtime-bound and are not replaced by config vars.",
+      "description": "`ports` maps environment-variable names to base ports; Kanna reserves task-specific ports and exports the resolved values so parallel worktrees do not collide. `vars` provides committed string substitutions for agent prompts. `workspace`, `stage_order`, `reserved_ports`, and `reserved_port_offsets` are committed task semantics and cannot appear in local config.",
       "additionalProperties": {
         "type": "string"
       }
     },
     "reserved_port_offsets": {
       "type": "array",
+      "description": "`ports` maps environment-variable names to base ports; Kanna reserves task-specific ports and exports the resolved values so parallel worktrees do not collide. `vars` provides committed string substitutions for agent prompts. `workspace`, `stage_order`, `reserved_ports`, and `reserved_port_offsets` are committed task semantics and cannot appear in local config.",
       "items": {
         "type": "integer",
         "minimum": 0
@@ -107,6 +114,7 @@
     },
     "reserved_ports": {
       "type": "array",
+      "description": "`ports` maps environment-variable names to base ports; Kanna reserves task-specific ports and exports the resolved values so parallel worktrees do not collide. `vars` provides committed string substitutions for agent prompts. `workspace`, `stage_order`, `reserved_ports`, and `reserved_port_offsets` are committed task semantics and cannot appear in local config.",
       "items": {
         "type": "integer",
         "minimum": 1,
@@ -115,12 +123,14 @@
     },
     "stage_order": {
       "type": "array",
+      "description": "`ports` maps environment-variable names to base ports; Kanna reserves task-specific ports and exports the resolved values so parallel worktrees do not collide. `vars` provides committed string substitutions for agent prompts. `workspace`, `stage_order`, `reserved_ports`, and `reserved_port_offsets` are committed task semantics and cannot appear in local config.",
       "items": {
         "type": "string"
       }
     },
     "workspace": {
       "type": "object",
+      "description": "`ports` maps environment-variable names to base ports; Kanna reserves task-specific ports and exports the resolved values so parallel worktrees do not collide. `vars` provides committed string substitutions for agent prompts. `workspace`, `stage_order`, `reserved_ports`, and `reserved_port_offsets` are committed task semantics and cannot appear in local config.",
       "additionalProperties": false,
       "properties": {
         "env": {
@@ -152,6 +162,7 @@
   },
   "examples": [
     {
+      "$schema": "https://schemas.kanna.build/config.schema.json",
       "setup": [
         "pnpm install"
       ],
@@ -160,6 +171,7 @@
       }
     },
     {
+      "$schema": "https://schemas.kanna.build/config.schema.json",
       "workspace": {
         "path": {
           "prepend": [
@@ -169,6 +181,7 @@
       }
     },
     {
+      "$schema": "https://schemas.kanna.build/config.schema.json",
       "workspace": {
         "env": {
           "FOO": "bar"
@@ -176,6 +189,7 @@
       }
     },
     {
+      "$schema": "https://schemas.kanna.build/config.schema.json",
       "flavors": {
         "pr": "draft-pr",
         "merge": "github"

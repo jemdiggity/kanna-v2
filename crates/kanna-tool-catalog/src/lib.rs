@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use url::Url;
 
@@ -216,6 +217,27 @@ pub fn clamp_wait_timeout_secs(timeout_secs: u64) -> u64 {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Catalog {
     pub tools: Vec<ToolDef>,
+    #[serde(default)]
+    pub guides: Vec<GuideDef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GuideDef {
+    pub topic: String,
+    pub title: String,
+    pub summary: String,
+    pub sections: Vec<GuideSection>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GuideSection {
+    pub title: String,
+    pub body: String,
+    /// JSON pointers whose schema `description` is generated from this body.
+    #[serde(default)]
+    pub schema_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -266,6 +288,7 @@ pub enum ResponseKind {
     Text,
     Wait,
     RuntimeInfo,
+    Guide,
 }
 
 /// Identity owned by the client-side adapter executing a catalog tool. The
@@ -434,6 +457,8 @@ pub struct ResolvedRequest {
     /// Adapter-only routing metadata. It is declared alongside ordinary tool
     /// parameters, but is never serialized into the target server request.
     pub machine_id: Option<String>,
+    /// Adapter-owned result for tools that do not make an HTTP request.
+    pub local_response: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -444,7 +469,7 @@ pub struct CatalogLoad {
 }
 
 pub fn bundled_catalog() -> Catalog {
-    ensure_required_runtime_tools(parsed_bundled_catalog())
+    ensure_required_adapter_content(parsed_bundled_catalog())
 }
 
 fn parsed_bundled_catalog() -> Catalog {
@@ -452,27 +477,82 @@ fn parsed_bundled_catalog() -> Catalog {
         .unwrap_or_else(|error| panic!("bundled kanna tool catalog is invalid: {error}"))
 }
 
-/// Runtime identity and account-scoped machine discovery are adapter
-/// boundaries, not repo-customizable transport shortcuts. Catalog overrides
-/// may add or replace ordinary tools, but the bundled declarations always own
-/// these two tools.
-fn ensure_required_runtime_tools(mut catalog: Catalog) -> Catalog {
-    let mut required = parsed_bundled_catalog()
+/// Runtime identity, account-scoped machine discovery, and bundled guidance
+/// are adapter boundaries, not repo-customizable transport shortcuts. Catalog
+/// overrides may add or replace ordinary HTTP tools and guide page contents,
+/// but the bundled declarations always own these adapter-local tools.
+fn ensure_required_adapter_content(mut catalog: Catalog) -> Catalog {
+    let bundled = parsed_bundled_catalog();
+    let mut required = bundled
         .tools
         .into_iter()
-        .filter(|tool| matches!(tool.name.as_str(), "kanna_info" | "kanna_list_machines"))
+        .filter(|tool| {
+            matches!(
+                tool.name.as_str(),
+                "kanna_info" | "kanna_list_machines" | "kanna_guide"
+            )
+        })
         .collect::<Vec<_>>();
     assert_eq!(
         required.len(),
-        2,
-        "bundled catalog must declare runtime tools"
+        3,
+        "bundled catalog must declare adapter-owned tools"
     );
-    catalog
-        .tools
-        .retain(|tool| !matches!(tool.name.as_str(), "kanna_info" | "kanna_list_machines"));
+    catalog.tools.retain(|tool| {
+        !matches!(
+            tool.name.as_str(),
+            "kanna_info" | "kanna_list_machines" | "kanna_guide"
+        )
+    });
     required.append(&mut catalog.tools);
     catalog.tools = required;
+    if catalog.guides.is_empty() {
+        catalog.guides = bundled.guides;
+    }
     catalog
+}
+
+impl Catalog {
+    pub fn guide_topics(&self) -> Vec<&str> {
+        self.guides
+            .iter()
+            .map(|guide| guide.topic.as_str())
+            .collect()
+    }
+
+    pub fn guide(&self, topic: &str) -> Result<&GuideDef, String> {
+        self.guides
+            .iter()
+            .find(|guide| guide.topic == topic)
+            .ok_or_else(|| {
+                format!(
+                    "unknown guide topic: {topic} (available topics: {})",
+                    self.guide_topics().join(", ")
+                )
+            })
+    }
+
+    pub fn render_guide(&self, topic: &str) -> Result<String, String> {
+        let guide = self.guide(topic)?;
+        let mut output = format!("# {}\n\n{}", guide.title, guide.summary);
+        for section in &guide.sections {
+            output.push_str(&format!("\n\n## {}\n\n{}", section.title, section.body));
+        }
+        Ok(output)
+    }
+
+    pub fn config_schema_descriptions(&self) -> BTreeMap<&str, &str> {
+        self.guides
+            .iter()
+            .flat_map(|guide| &guide.sections)
+            .flat_map(|section| {
+                section
+                    .schema_paths
+                    .iter()
+                    .map(move |path| (path.as_str(), section.body.as_str()))
+            })
+            .collect()
+    }
 }
 
 /// Build the shared `kanna_info` result from client-owned connection metadata
@@ -648,7 +728,7 @@ pub fn load_catalog(cwd: &Path) -> CatalogLoad {
     match std::fs::read_to_string(&path) {
         Ok(contents) => match serde_json::from_str::<Catalog>(&contents) {
             Ok(catalog) => CatalogLoad {
-                catalog: ensure_required_runtime_tools(catalog),
+                catalog: ensure_required_adapter_content(catalog),
                 watch_source: Some(path),
                 warning: None,
             },
@@ -890,6 +970,21 @@ pub fn resolve_request(
         None
     };
 
+    let local_response = if tool.response_kind == ResponseKind::Guide {
+        let topic = body
+            .get("topic")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "guide request missing topic".to_string())?;
+        let guide = catalog.guide(topic)?;
+        Some(serde_json::json!({
+            "topic": guide.topic,
+            "title": guide.title,
+            "content": catalog.render_guide(topic)?,
+        }))
+    } else {
+        None
+    };
+
     Ok(ResolvedRequest {
         kind: tool.response_kind,
         method: tool.method,
@@ -897,6 +992,7 @@ pub fn resolve_request(
         body: Value::Object(body),
         wait,
         machine_id,
+        local_response,
     })
 }
 

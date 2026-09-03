@@ -9,7 +9,8 @@ use crate::api::{
     unblock_task_via_api, wait_task_via_api, WaitTaskOutcome,
 };
 use crate::commands::guide::{
-    build_guide_context, render_guide_json, render_guide_markdown, run_guide_command, GuideContext,
+    build_guide_context, render_guide_json, render_guide_markdown, run_guide_command,
+    run_topic_guide_command, GuideContext,
 };
 use crate::commands::repo::build_add_repo_request;
 use crate::commands::repo::build_signal_agent_request;
@@ -56,6 +57,13 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
             TypedToolSurface {
                 command_path: &["machine", "list"],
                 param_args: &[],
+            },
+        ),
+        (
+            "kanna_guide",
+            TypedToolSurface {
+                command_path: &["guide"],
+                param_args: &[("topic", "topic")],
             },
         ),
         (

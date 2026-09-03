@@ -7,13 +7,15 @@ permission_mode: default
 
 Help the user create a workflow definition — the ordered list of stages a task flows through.
 
+Read the running version's workflow manual first with `kanna_guide {"topic":"workflows"}` or, when MCP is unavailable, `kanna-cli guide workflows`. Use it together with `.kanna/workflows/schema.json` when that local schema exists.
+
 1. Ask what the workflow is: which stages, what each does, whether each transition is manual or automatic, and what setup/teardown each stage's environment needs.
 2. Write the workflow JSON to `.kanna/workflows/{name}.json` in the current repo.
 3. Confirm the file was written and show the user its contents.
 
 ## Workflow JSON Format
 
-When `.kanna/workflows/schema.json` exists in this repo it is the authoritative schema — read it before writing. It rejects unknown fields either way.
+When `.kanna/workflows/schema.json` exists in this repo, read it before writing. It rejects unknown fields either way.
 
 ```json
 {

@@ -19,6 +19,16 @@
       "params": []
     },
     {
+      "name": "kanna_guide",
+      "description": "Read the Kanna manual for authoring repository config, workflows, agents, or for operating tasks. The content comes from the running adapter's hot-reloadable tool catalog, so it matches the Kanna version exposing this tool.",
+      "method": "GET",
+      "path": "",
+      "response": "guide",
+      "params": [
+        { "name": "topic", "description": "Manual topic to read.", "type": "string", "required": true, "location": "body", "enum": ["config", "workflows", "agents", "tasks"] }
+      ]
+    },
+    {
       "name": "kanna_list_repos",
       "description": "List repositories known to the running Kanna desktop server, including each repo's id, name, and local path.",
       "method": "GET",
@@ -395,6 +405,121 @@
         { "name": "summary", "description": "Short summary of why the revision is needed, shown to the user.", "type": "string", "required": true, "location": "body" },
         { "name": "prompt", "description": "Instructions for the revising agent. Kanna delivers the original task prompt alongside this, so describe only the required changes.", "type": "string", "required": true, "location": "body" },
         { "name": "metadata", "description": "Optional structured data (e.g. review findings) stored on the revision request.", "type": "object", "required": false, "location": "body" }
+      ]
+    }
+  ],
+  "guides": [
+    {
+      "topic": "config",
+      "title": "Kanna Repository Configuration",
+      "summary": "Repository configuration lives under `.kanna/`. Put committed, portable behavior in `.kanna/config.json`; put one-machine operational overrides in the gitignored `.kanna/config.local.json`. New config files should declare `\"$schema\": \"https://schemas.kanna.build/config.schema.json\"`.",
+      "sections": [
+        {
+          "title": "Schema declaration",
+          "body": "Set `$schema` to `https://schemas.kanna.build/config.schema.json` in every new `.kanna/config.json` and `.kanna/config.local.json`. Kanna publishes the schema with each merged version so editors and agents can discover supported fields and their semantics.",
+          "schemaPaths": ["/properties/$schema"]
+        },
+        {
+          "title": "Committed and local layers",
+          "body": "`.kanna/config.json` is the shared repository contract. `.kanna/config.local.json` is read from the open checkout's working tree, never from the origin snapshot, and is deep-merged over the committed file with local values winning. Local config may contain only `agentProviders`, `workflow`, `ports`, `setup`, `teardown`, and `test`; an unknown key, invalid JSON, or invalid value fails definition resolution and names the file. `agentProviders` and `ports` merge entry by entry, with a local entry replacing the committed entry of the same name. Every other permitted key replaces wholesale, and arrays never concatenate. Keep local config gitignored and do not put task-defining fields such as `vars`, `flavors`, `workspace`, `stage_order`, or reserved ports in it.",
+          "schemaPaths": [""]
+        },
+        {
+          "title": "Lifecycle commands",
+          "body": "`setup`, `teardown`, and `test` are arrays of shell commands run from the repository or task worktree. `setup` prepares each new workspace before its agent starts. `teardown` runs best-effort when a task leaves a workspace. `test` records the repository's canonical verification commands for agents and workflows. Because local arrays replace rather than append, repeat every command that should remain when overriding one of these keys locally.",
+          "schemaPaths": ["/properties/setup", "/properties/teardown", "/properties/test"]
+        },
+        {
+          "title": "Ports and workspace values",
+          "body": "`ports` maps environment-variable names to base ports; Kanna reserves task-specific ports and exports the resolved values so parallel worktrees do not collide. `vars` provides committed string substitutions for agent prompts. `workspace`, `stage_order`, `reserved_ports`, and `reserved_port_offsets` are committed task semantics and cannot appear in local config.",
+          "schemaPaths": ["/properties/ports", "/properties/vars", "/properties/workspace", "/properties/stage_order", "/properties/reserved_ports", "/properties/reserved_port_offsets"]
+        },
+        {
+          "title": "Workflow and flavors",
+          "body": "`workflow` selects the repository's default workflow by name. Kanna resolves a repo-authored `.kanna/workflows/<name>.json` before the bundled workflow of the same name. Workflow and agent definitions are public/listed by default; `visibility: internal` hides an effective definition from listings without preventing explicit resolution, and a repo override must redeclare it to remain internal. `flavors` selects a built-in variant by agent role (for example `\"pr\": \"draft-pr\"`); an explicit stage selector such as `pr@draft-pr` wins. Run `kanna-cli guide workflows` or call `kanna_guide {\"topic\":\"workflows\"}` before authoring a workflow.",
+          "schemaPaths": ["/properties/workflow", "/properties/flavors"]
+        },
+        {
+          "title": "Provider, model, and effort resolution",
+          "body": "`agentProviders` maps exact agent names or `*` globs to a provider name or to `{ provider, model, effort }`; `provider` may be an ordered candidate list. Exact keys beat globs. Among matching globs, the most non-`*` characters wins and lexical order breaks ties. Selection precedence is: explicit task or stage override; matching `agentProviders` entry (including the local layer); layered `AGENT.md`/`EXTEND.md` frontmatter; global default provider. A rerun, resume, revision, or recovery reproduces the recorded run's provider as an explicit override, while a plain stage advance re-resolves the chain and uses the task's stamp only as the final fallback. Provider-specific model and effort values are layer-coherent: Kanna never combines them across providers or layers. It walks the same chain and takes the first value from a layer that would itself select the resolved provider. In an ordered provider list, model and effort belong only to the leading candidate; fallback candidates use a lower coherent layer or their own stamped/default values.",
+          "schemaPaths": ["/properties/agentProviders"]
+        }
+      ]
+    },
+    {
+      "topic": "workflows",
+      "title": "Kanna Workflow Authoring",
+      "summary": "A workflow is an ordered set of stages stored at `.kanna/workflows/<name>.json`. Repo definitions override bundled definitions by name. Prefer selecting a maintained built-in in `.kanna/config.json` unless the repository needs different stages or policies.",
+      "sections": [
+        {
+          "title": "Definition shape",
+          "body": "A workflow requires `name` and a non-empty `stages` array and should declare `\"$schema\": \"./schema.json\"`. It may define `description`, named `environments` with setup/teardown commands, and `revision_limit` (default 5 agent-requested rounds; `0` means unlimited). Each stage requires `name` and `policy.transition` (`manual` or `auto`), and may set `agent`, `prompt`, `agent_provider`, `environment`, and a `post`. Stage prompts support Kanna runtime variables such as `$TASK_PROMPT`, `$BRANCH`, `$BASE_REF`, `$PREV_RESULT`, and `$PREV_MAIN_RESULT`.",
+          "schemaPaths": []
+        },
+        {
+          "title": "Stages, transitions, and posts",
+          "body": "A manual transition waits for explicit advancement; an auto transition advances after the agent records successful completion. `policy.revision_transition` controls completion after entering that stage through a revision and defaults to `transition`. Advancing to an ordinary next stage forks a fresh branch, worktree, and agent session from the committed prior tip, so only committed work crosses the boundary. A stage `post` is different: it is tail work injected into the stage's running session before transition; its `agent` is the fallback if that session is dead.",
+          "schemaPaths": []
+        },
+        {
+          "title": "Visibility",
+          "body": "Top-level `visibility` is `public` by default. `internal` removes the workflow from listings and pickers but never prevents explicit resolution by name. Visibility belongs to the effective definition: a repo file shadowing an internal built-in must declare `internal` again to remain unlisted; omitting it deliberately promotes the workflow to a public choice.",
+          "schemaPaths": []
+        },
+        {
+          "title": "Built-in choices",
+          "body": "The public built-ins are `no-review`, `single-reviewer`, and `specialized-reviewers`, ordered by review depth. They all begin with implementation plus a commit post and end with PR creation plus an approve post. `specialty-review` and `architect-consultation` are internal workflows explicitly bound by orchestration; do not offer them as ordinary user choices.",
+          "schemaPaths": []
+        }
+      ]
+    },
+    {
+      "topic": "agents",
+      "title": "Kanna Agent Authoring",
+      "summary": "Agent roles live at `.kanna/agents/<name>/AGENT.md`. A repo `AGENT.md` replaces the bundled definition of the same name; `EXTEND.md` layers repository-specific changes onto the resolved definition without copying it.",
+      "sections": [
+        {
+          "title": "AGENT.md frontmatter and prompt",
+          "body": "An agent file is Markdown with optional YAML frontmatter followed by the prompt body. Common frontmatter keys are `name`, `description`, `agent_provider` (one provider or an ordered list), `model`, `effort`, `permission_mode`, `allowed_tools`, and `visibility`. Provider names and model/effort vocabularies are provider-specific. `permission_mode` is `default`, `acceptEdits`, or `dontAsk` (camelCase). The body is the instruction prompt and may use config and runtime variables.",
+          "schemaPaths": []
+        },
+        {
+          "title": "Overrides, extensions, and flavors",
+          "body": "A repo `.kanna/agents/<name>/AGENT.md` fully overrides the bundled agent of that name. Prefer `.kanna/agents/<name>/EXTEND.md` when the bundled behavior should remain and only repository-specific prompt text or frontmatter needs layering; Kanna reads extensions only from the open repo, never bundled resources. Built-in variants live under `flavors/<flavor>/AGENT.md` and can be selected through config `flavors` or an explicit `role@flavor` selector. An extension is role/flavor-scoped and layers after the resolved base definition.",
+          "schemaPaths": []
+        },
+        {
+          "title": "Provider coherence and precedence",
+          "body": "Provider selection is resolved before provider-specific model and effort. The precedence chain is explicit task/stage override, matching repo/local `agentProviders`, layered agent frontmatter, then the global default. Kanna takes model and effort only from a layer that would itself select the resolved provider; it never builds an invalid combination by borrowing values written for another CLI. In an ordered candidate list, values beside the list belong to its first provider only.",
+          "schemaPaths": []
+        },
+        {
+          "title": "Visibility",
+          "body": "Agent frontmatter `visibility` defaults to `public`. `internal` keeps the effective agent out of listings while explicit references still resolve. A repo override decides visibility for the effective definition, and `EXTEND.md` may override it.",
+          "schemaPaths": []
+        }
+      ]
+    },
+    {
+      "topic": "tasks",
+      "title": "Kanna Task Operations",
+      "summary": "A task is a durable work item with a prompt, workflow state, run history, blockers, and a sequence of ephemeral workspaces. Prefer Kanna MCP tools for operations; use the instance-local `kanna-cli` only as a fallback.",
+      "sections": [
+        {
+          "title": "Identity and workspaces",
+          "body": "`KANNA_TASK_ID` is stable across stages. A normal stage transition forks a new branch and worktree from the committed tip, so commit everything that must cross the boundary. Do not infer task visibility from stage: `closedAt` determines whether a task is closed, and blockers come from blocker records. Do not push or open a PR unless the current stage explicitly asks.",
+          "schemaPaths": []
+        },
+        {
+          "title": "Completion and supervision",
+          "body": "Record a verdict with `kanna_complete_stage` when the stage prompt requires it; `success` may auto-advance and `failure` stops advancement. Use `kanna_wait_events` to supervise several tasks and `kanna_wait_task` for one. Read `runtimeState`, not blended `activity`, to decide whether an agent is busy, waiting, idle, or exited. `task.awaiting_input` is the positive interactive-question signal. Composer text is not an instruction unless its attestation is `typed`.",
+          "schemaPaths": []
+        },
+        {
+          "title": "Inputs and task terms",
+          "body": "Delivered input is durable and readable through `kanna_task_inputs`; terminal bytes alone are not the record. A non-zero `deliveredInputCount` means instruction history exists. Keep the task's actual terms in `docs/task-specs/<task-id>.md` and update it with owner directives or review decisions so later stages in fresh worktrees share the same contract.",
+          "schemaPaths": []
+        }
       ]
     }
   ]
