@@ -18,3 +18,5 @@ Constraints:
 Done when both singleton signal entry points enforce this resolution contract, the server boundary documents it, and focused Rust plus cross-machine wiring tests pass.
 
 Revision directive, reviewer round 1 on 2026-09-03: replace distributed absence-check-then-create with an account-wide atomic claim spanning local creation and failure cleanup, and add a deterministic concurrent two-desktop first-signal integration test.
+
+Revision directive, reviewer round 2 on 2026-09-03: make an orphaned unpublished reservation recoverable after the claiming server restarts. Recovery must remain fail closed while that desktop is unreachable and may occur only when a newer authoritative publication session from the same desktop proves the proposed task does not exist; another desktop must never clear the reservation. Cover the crash/reconnect path with the Firestore emulator and update the boundary and E2E-gap documentation.

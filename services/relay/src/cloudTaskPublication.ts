@@ -371,6 +371,10 @@ interface StoredRepoSingletonClaim extends RepoSingletonOwner {
   state: "reserved" | "owned";
   remoteUrlHash: string;
   agent: string;
+  /** Publication session current on the claiming desktop when this reservation
+   * was acquired. Only a later session from that same desktop can prove an
+   * interrupted local create never persisted. */
+  claimedPublicationSession: number | null;
 }
 
 /** Read the durable cloud task index as the account-wide singleton directory. */
@@ -448,7 +452,13 @@ export async function claimRepoSingleton(input: {
   if (owners.length === 0) await input.afterAbsenceDiscovery?.();
   const claimRef = repoSingletonClaimRef(db, input.userId, input.remoteUrlHash, input.agent);
   return await db.runTransaction(async (transaction) => {
-    const snapshot = await transaction.get(claimRef);
+    const desktopRef = db.doc(
+      `users/${input.userId}/desktops/${cloudDesktopDocumentId(input.machineId)}`,
+    );
+    const [snapshot, desktop] = await Promise.all([
+      transaction.get(claimRef),
+      transaction.get(desktopRef),
+    ]);
     const stored = parseStoredRepoSingletonClaim(snapshot.data());
     const published = owners[0];
     if (published) {
@@ -471,7 +481,13 @@ export async function claimRepoSingleton(input: {
     const owner = { machineId: input.machineId, taskId: input.taskId };
     transaction.create(
       claimRef,
-      storedRepoSingletonClaim(input.remoteUrlHash, input.agent, owner, "reserved"),
+      storedRepoSingletonClaim(
+        input.remoteUrlHash,
+        input.agent,
+        owner,
+        "reserved",
+        storedGenerationPart(desktop.data()?.publicationSessionGeneration),
+      ),
     );
     return { status: "acquired", ...owner };
   });
@@ -508,8 +524,16 @@ function storedRepoSingletonClaim(
   agent: string,
   owner: RepoSingletonOwner,
   state: StoredRepoSingletonClaim["state"],
+  claimedPublicationSession: number | null = null,
 ): StoredRepoSingletonClaim & { updatedAt: FirebaseFirestore.FieldValue } {
-  return { remoteUrlHash, agent, ...owner, state, updatedAt: FieldValue.serverTimestamp() };
+  return {
+    remoteUrlHash,
+    agent,
+    ...owner,
+    state,
+    claimedPublicationSession,
+    updatedAt: FieldValue.serverTimestamp(),
+  };
 }
 
 function parseStoredRepoSingletonClaim(value: unknown): StoredRepoSingletonClaim | null {
@@ -523,6 +547,10 @@ function parseStoredRepoSingletonClaim(value: unknown): StoredRepoSingletonClaim
     agent: value.agent,
     machineId: value.machineId,
     taskId: value.taskId,
+    claimedPublicationSession: Number.isSafeInteger(value.claimedPublicationSession)
+        && (value.claimedPublicationSession as number) >= 0
+      ? value.claimedPublicationSession as number
+      : null,
   };
 }
 
@@ -818,6 +846,24 @@ async function reconcileRepoSingletonClaims(input: {
 }): Promise<void> {
   const previous = singletonClaimsForDesktopTasks(input.previousTasks, input.desktopId);
   const current = singletonClaimsForDesktopTasks(input.tasks, input.desktopId);
+  const authoritativeTaskIds = new Set(input.tasks
+    .filter((task) => task.ownerDesktopId === input.desktopId)
+    .map((task) => task.ownerLocalTaskId));
+  const reservedClaims = await input.db.collection(`users/${input.userId}/repoSingletonClaims`)
+    .where("machineId", "==", input.desktopId)
+    .get();
+  for (const candidate of reservedClaims.docs) {
+    await input.db.runTransaction(async (transaction) => {
+      await requireCurrentPublication(transaction, input.deletionRef, input.desktopRef, input.generation);
+      const stored = parseStoredRepoSingletonClaim((await transaction.get(candidate.ref)).data());
+      if (stored?.state !== "reserved"
+        || stored.machineId !== input.desktopId
+        || stored.claimedPublicationSession === null
+        || stored.claimedPublicationSession >= input.generation.session
+        || authoritativeTaskIds.has(stored.taskId)) return;
+      transaction.delete(candidate.ref);
+    });
+  }
   for (const [key, owner] of previous) {
     if (current.get(key)?.taskId === owner.taskId) continue;
     const [remoteUrlHash, agent] = key.split("\0") as [string, string];

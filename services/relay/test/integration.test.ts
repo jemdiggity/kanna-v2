@@ -2398,6 +2398,121 @@ describe("Relay integration", () => {
     }
   });
 
+  it("recovers an interrupted reservation only from the claiming desktop's next session", async () => {
+    const userId = `singleton-reservation-recovery-${Date.now()}`;
+    const userRef = testFirestore.doc(`users/${userId}`);
+    const claimingDesktopId = "singleton-recovery-a";
+    const otherDesktopId = "singleton-recovery-b";
+    const store = createFirestoreCloudTaskPublicationStore(testFirestore);
+    const emptySnapshot = {
+      ...publishedSnapshot("idle", []),
+      singletonDirectoryVersion: 1,
+    };
+    try {
+      const claimingSession = await beginCloudTaskPublicationSession({
+        userId,
+        desktopId: claimingDesktopId,
+        store,
+      });
+      await handleCloudTaskPublication({
+        userId,
+        desktopId: claimingDesktopId,
+        generation: { session: claimingSession, sequence: 1 },
+        snapshot: emptySnapshot,
+        store,
+      });
+      const otherSession = await beginCloudTaskPublicationSession({
+        userId,
+        desktopId: otherDesktopId,
+        store,
+      });
+      await handleCloudTaskPublication({
+        userId,
+        desktopId: otherDesktopId,
+        generation: { session: otherSession, sequence: 1 },
+        snapshot: emptySnapshot,
+        store,
+      });
+
+      await expect(claimRepoSingleton({
+        userId,
+        remoteUrlHash: "shared-remote-hash",
+        agent: "task-manager",
+        machineId: claimingDesktopId,
+        taskId: "interrupted-task",
+        db: testFirestore,
+      })).resolves.toMatchObject({
+        status: "acquired",
+        machineId: claimingDesktopId,
+        taskId: "interrupted-task",
+      });
+
+      // A later sequence in the same session could have been captured before
+      // acquisition and must not race a still-live local preparation.
+      await handleCloudTaskPublication({
+        userId,
+        desktopId: claimingDesktopId,
+        generation: { session: claimingSession, sequence: 2 },
+        snapshot: emptySnapshot,
+        store,
+      });
+      expect((await userRef.collection("repoSingletonClaims").get()).docs).toHaveLength(1);
+
+      // Another desktop's authoritative absence is not evidence about the
+      // claiming desktop's SQLite database and cannot clear its reservation.
+      await handleCloudTaskPublication({
+        userId,
+        desktopId: otherDesktopId,
+        generation: { session: otherSession, sequence: 2 },
+        snapshot: emptySnapshot,
+        store,
+      });
+      await expect(claimRepoSingleton({
+        userId,
+        remoteUrlHash: "shared-remote-hash",
+        agent: "task-manager",
+        machineId: otherDesktopId,
+        taskId: "premature-takeover",
+        db: testFirestore,
+      })).resolves.toMatchObject({
+        status: "reserved",
+        machineId: claimingDesktopId,
+        taskId: "interrupted-task",
+      });
+
+      // A restarted publisher begins a new fenced session. Its complete empty
+      // snapshot proves the proposed task was never persisted locally.
+      const restartedClaimingSession = await beginCloudTaskPublicationSession({
+        userId,
+        desktopId: claimingDesktopId,
+        store,
+      });
+      await handleCloudTaskPublication({
+        userId,
+        desktopId: claimingDesktopId,
+        generation: { session: restartedClaimingSession, sequence: 1 },
+        snapshot: emptySnapshot,
+        store,
+      });
+      expect((await userRef.collection("repoSingletonClaims").get()).empty).toBe(true);
+
+      await expect(claimRepoSingleton({
+        userId,
+        remoteUrlHash: "shared-remote-hash",
+        agent: "task-manager",
+        machineId: otherDesktopId,
+        taskId: "replacement-task",
+        db: testFirestore,
+      })).resolves.toMatchObject({
+        status: "acquired",
+        machineId: otherDesktopId,
+        taskId: "replacement-task",
+      });
+    } finally {
+      await testFirestore.recursiveDelete(userRef);
+    }
+  });
+
   it("publishes and conditionally removes durable singleton ownership", async () => {
     const userId = `singleton-publication-${Date.now()}`;
     const desktopId = "singleton-publication-desktop";
