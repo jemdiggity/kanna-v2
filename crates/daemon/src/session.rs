@@ -169,6 +169,10 @@ pub struct SessionRuntimeState {
     pub status: SessionStatus,
     pub status_observed: bool,
     pub last_status_check_at: Option<Instant>,
+    /// Latest PTY output mirrored into the terminal. Unlike PTY
+    /// `last_active_at`, which tracks operator input, this is the boundary
+    /// that tells the status loop a provider repaint has actually settled.
+    last_output_at: Option<Instant>,
     pub operator_input_only: bool,
     pub input_policy_classified: bool,
 }
@@ -543,6 +547,7 @@ impl SessionHandle {
                 status: record.status,
                 status_observed: record.status_observed,
                 last_status_check_at: record.last_status_check_at,
+                last_output_at: None,
                 operator_input_only: record.operator_input_only,
                 input_policy_classified: record.input_policy_classified,
             }),
@@ -939,6 +944,7 @@ impl SessionHandle {
     ) -> Result<MirrorResult, Box<dyn std::error::Error + Send + Sync>> {
         let mut state = self.state.lock().await;
         state.headless_terminal.write(data);
+        state.last_output_at = Some(now);
         self.bracketed_paste_mode.store(
             state.headless_terminal.bracketed_paste_mode(),
             Ordering::SeqCst,
@@ -953,7 +959,8 @@ impl SessionHandle {
             state.headless_terminal.drain_pty_writes();
             Vec::new()
         };
-        let status = detect_runtime_status_if_due(&mut state, now, throttle)?;
+        let allow_idle = allows_output_triggered_idle(state.agent_provider);
+        let status = detect_runtime_status_if_due(&mut state, now, throttle, allow_idle)?;
         Ok(MirrorResult { status, replies })
     }
 
@@ -970,18 +977,20 @@ impl SessionHandle {
         quiet_for: Duration,
         now: Instant,
     ) -> Result<Option<SessionStatus>, Box<dyn std::error::Error + Send + Sync>> {
-        let last_active_at = self.pty.lock().await.last_active_at;
-        if last_active_at.elapsed() < quiet_for {
+        let mut state = self.state.lock().await;
+        if state
+            .last_output_at
+            .is_some_and(|last_output_at| now.saturating_duration_since(last_output_at) < quiet_for)
+        {
             return Ok(None);
         }
 
-        let mut state = self.state.lock().await;
         // This periodic settled-state read is the convergence boundary. TUI
         // chrome can produce output indefinitely, so output-triggered checks
         // must not be able to starve it by continually consuming the shared
         // throttle slot. Synchronized partial frames are still rejected by
         // the classifier itself.
-        detect_runtime_status_if_due(&mut state, now, Duration::ZERO)
+        detect_runtime_status_if_due(&mut state, now, Duration::ZERO, true)
     }
 
     pub async fn debug_status_observation(
@@ -1687,14 +1696,28 @@ fn status_detection_throttle() -> Duration {
     Duration::from_millis(STATUS_DETECTION_THROTTLE_MS)
 }
 
+fn allows_output_triggered_idle(agent_provider: Option<AgentProvider>) -> bool {
+    // Claude does not bracket its TUI repaints with DEC synchronized output,
+    // so an intermediate chunk can briefly expose the parked composer while
+    // the agent is still busy. Preserve every other provider's immediate idle
+    // path; Claude must converge through the quiet refresh.
+    agent_provider != Some(AgentProvider::Claude)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StatusDetectionOptions {
+    now: Instant,
+    throttle: Duration,
+    allow_idle: bool,
+}
+
 fn detect_headless_terminal_status_if_due(
     headless_terminal: &mut HeadlessTerminal,
     agent_provider: Option<AgentProvider>,
     status: SessionStatus,
     status_observed: &mut bool,
     last_status_check_at: &mut Option<Instant>,
-    now: Instant,
-    throttle: Duration,
+    options: StatusDetectionOptions,
 ) -> Result<Option<SessionStatus>, Box<dyn std::error::Error + Send + Sync>> {
     // A synchronized TUI redraw is not observable provider state. In
     // particular, do not consume the throttle slot here: the chunk that ends
@@ -1703,16 +1726,24 @@ fn detect_headless_terminal_status_if_due(
         return Ok(None);
     }
 
-    if last_status_check_at
-        .is_some_and(|last_check_at| now.saturating_duration_since(last_check_at) < throttle)
-    {
+    if last_status_check_at.is_some_and(|last_check_at| {
+        options.now.saturating_duration_since(last_check_at) < options.throttle
+    }) {
         return Ok(None);
     }
 
-    *last_status_check_at = Some(now);
-
     let visible_status = headless_terminal.visible_status(agent_provider)?;
     if let Some(next_status) = visible_status {
+        // For a provider without atomic repaint frames, a partial redraw can
+        // expose its parked composer between two busy frames. Positive
+        // Busy/Waiting chrome is safe to publish from output, but Idle is only
+        // trustworthy after the quiet refresh proves the repaint has settled.
+        // Do not consume the throttle slot for a rejected partial frame: the
+        // completed positive frame must remain eligible immediately.
+        if next_status == SessionStatus::Idle && !options.allow_idle {
+            return Ok(None);
+        }
+        *last_status_check_at = Some(options.now);
         *status_observed = true;
         return Ok(if status != next_status {
             Some(next_status)
@@ -1721,6 +1752,11 @@ fn detect_headless_terminal_status_if_due(
         });
     }
 
+    if !options.allow_idle {
+        return Ok(None);
+    }
+
+    *last_status_check_at = Some(options.now);
     Ok(
         if *status_observed && matches!(status, SessionStatus::Busy | SessionStatus::Waiting) {
             Some(SessionStatus::Idle)
@@ -1752,8 +1788,11 @@ pub fn replay_headless_terminal_for_benchmark(
         state.status,
         &mut state.status_observed,
         &mut state.last_status_check_at,
-        now,
-        status_detection_throttle(),
+        StatusDetectionOptions {
+            now,
+            throttle: status_detection_throttle(),
+            allow_idle: allows_output_triggered_idle(agent_provider),
+        },
     )
 }
 
@@ -1761,6 +1800,7 @@ fn detect_runtime_status_if_due(
     state: &mut SessionRuntimeState,
     now: Instant,
     throttle: Duration,
+    allow_idle: bool,
 ) -> Result<Option<SessionStatus>, Box<dyn std::error::Error + Send + Sync>> {
     detect_headless_terminal_status_if_due(
         &mut state.headless_terminal,
@@ -1768,8 +1808,11 @@ fn detect_runtime_status_if_due(
         state.status,
         &mut state.status_observed,
         &mut state.last_status_check_at,
-        now,
-        throttle,
+        StatusDetectionOptions {
+            now,
+            throttle,
+            allow_idle,
+        },
     )
 }
 
@@ -2789,8 +2832,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(early_refresh, Some(SessionStatus::Idle));
-        assert!(handle.update_status(SessionStatus::Idle).await);
+        assert_eq!(early_refresh, None, "the repaint has not settled yet");
 
         let refreshed_status = handle
             .refresh_quiet_status_at(
@@ -2799,7 +2841,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(refreshed_status, None);
+        assert_eq!(refreshed_status, Some(SessionStatus::Idle));
 
         handle.kill().await.unwrap();
     }
@@ -2903,12 +2945,101 @@ mod tests {
             .unwrap();
         assert_eq!(idle.status, None, "ordinary output detection is throttled");
 
-        // The periodic convergence read is independent of that throttle and
-        // therefore cannot remain Busy while idle chrome keeps repainting.
-        let settled = handle
+        // The periodic convergence read is independent of that throttle, but
+        // it waits for a quiet interval so an unbracketed repaint cannot make
+        // a partial frame observable as Idle.
+        let repainting = handle
             .refresh_quiet_status_at(
                 Duration::from_millis(500),
                 started_at + Duration::from_millis(620),
+            )
+            .await
+            .unwrap();
+        assert_eq!(repainting, None);
+        let settled = handle
+            .refresh_quiet_status_at(
+                Duration::from_millis(500),
+                started_at + Duration::from_millis(1110),
+            )
+            .await
+            .unwrap();
+        assert_eq!(settled, Some(SessionStatus::Idle));
+
+        handle.kill().await.unwrap();
+    }
+
+    /// Claude's live TUI does not use DEC synchronized output. During the
+    /// owner's 2026-09-03 reproduction it repeatedly cleared the busy footer
+    /// and exposed the parked composer before painting the next `Forming…`
+    /// frame. Those intermediate frames used to publish Idle on the 500 ms
+    /// status cadence, forcing the server and desktop to process a false state
+    /// edge while terminal output was already competing with typing.
+    #[tokio::test]
+    async fn unbracketed_claude_repaint_cannot_publish_idle_until_output_settles() {
+        let mut record = spawn_test_record(AgentProvider::Claude, SessionStatus::Busy).unwrap();
+        record.status_observed = true;
+        record
+            .headless_terminal
+            .write("✻ Forming… (1m 7s · ↓ 3.0k tokens)\r\nesc to interrupt".as_bytes());
+        let handle = Arc::new(SessionHandle::new(record));
+        let started_at = Instant::now();
+        let throttle = Duration::from_millis(500);
+
+        for (partial_at, complete_at) in [(600, 610), (1200, 1210)] {
+            let partial = handle
+                .mirror_output_at(
+                    "\x1b[2J\x1b[HDone\r\n❯ ".as_bytes(),
+                    false,
+                    started_at + Duration::from_millis(partial_at),
+                    throttle,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                partial.status, None,
+                "a partial Claude repaint must not publish Idle"
+            );
+
+            let complete = handle
+                .mirror_output_at(
+                    "\x1b[2J\x1b[H✻ Forming… (1m 7s · ↓ 3.0k tokens)\r\nesc to interrupt"
+                        .as_bytes(),
+                    false,
+                    started_at + Duration::from_millis(complete_at),
+                    throttle,
+                )
+                .await
+                .unwrap();
+            assert_eq!(complete.status, None, "the session remains Busy");
+        }
+
+        let final_idle_frame = handle
+            .mirror_output_at(
+                "\x1b[2J\x1b[HDone\r\n❯ ".as_bytes(),
+                false,
+                started_at + Duration::from_millis(1800),
+                throttle,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            final_idle_frame.status, None,
+            "even a completed Idle frame converges at the settled boundary"
+        );
+
+        let still_repainting = handle
+            .refresh_quiet_status_at(
+                Duration::from_millis(500),
+                started_at + Duration::from_millis(2299),
+            )
+            .await
+            .unwrap();
+        assert_eq!(still_repainting, None);
+
+        let settled = handle
+            .refresh_quiet_status_at(
+                Duration::from_millis(500),
+                started_at + Duration::from_millis(2300),
             )
             .await
             .unwrap();

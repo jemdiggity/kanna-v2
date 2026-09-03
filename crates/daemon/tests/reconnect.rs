@@ -3096,6 +3096,94 @@ fn codex_idle_chrome_repaints_do_not_reactivate_a_real_daemon_session() {
     }
 }
 
+/// Cross the real socket, PTY reader, headless terminal, status timer, and
+/// broadcast path with Claude's unbracketed repaint shape. While a busy Claude
+/// frame is being repainted, its composer is briefly visible without the busy
+/// footer. That partial frame must not publish Idle; the final parked composer
+/// must still converge after output settles.
+#[test]
+fn claude_partial_repaints_do_not_publish_idle_from_a_real_daemon_session() {
+    let daemon = DaemonHandle::start();
+    let script = concat!(
+        "printf '\\033[2J\\033[H✻ Forming… (1m 7s · ↓ 3.0k tokens)\\r\\n",
+        "esc to interrupt'; ",
+        "sleep 0.65; ",
+        "printf '\\033[2J\\033[HDone\\r\\n❯ '; ",
+        "sleep 0.1; ",
+        "printf '\\033[2J\\033[H✻ Forming… (1m 8s · ↓ 3.1k tokens)\\r\\n",
+        "esc to interrupt'; ",
+        "sleep 0.55; ",
+        "printf '\\033[H✻ Forming… (1m 9s · ↓ 3.2k tokens)\\r\\n",
+        "esc to interrupt'; ",
+        "sleep 0.65; ",
+        "printf '\\033[2J\\033[HDone\\r\\n❯ '; ",
+        "sleep 0.1; ",
+        "printf '\\033[2J\\033[H✻ Forming… (1m 10s · ↓ 3.3k tokens)\\r\\n",
+        "esc to interrupt'; ",
+        "sleep 0.55; ",
+        "printf '\\033[H✻ Forming… (1m 11s · ↓ 3.4k tokens)\\r\\n",
+        "esc to interrupt'; ",
+        "sleep 0.65; ",
+        "printf '\\033[2J\\033[HFINAL_SETTLED\\r\\n❯ '; ",
+        "sleep 2",
+    );
+    let session_id = "claude-partial-repaint";
+    let mut control = daemon.connect();
+    control.send_json(&serde_json::json!({
+        "type": "Spawn",
+        "session_id": session_id,
+        "executable": "/bin/sh",
+        "args": ["-c", script],
+        "cwd": "/tmp",
+        "env": {},
+        "cols": 120,
+        "rows": 40,
+        "agent_provider": "claude",
+    }));
+    expect_session_created(&mut control, session_id);
+
+    // An attached client receives terminal Output and StatusChanged through
+    // the same per-session fanout, preserving the order being asserted.
+    let mut observer = daemon.connect();
+    attach(&mut observer, session_id);
+    assert!(matches!(
+        observer.recv(),
+        Evt::StatusChanged {
+            session_id: id,
+            status: SessionStatus::Busy,
+        } if id == session_id
+    ));
+
+    let deadline = Instant::now() + Duration::from_secs(6);
+    let mut final_frame_seen = false;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "Claude session never converged to Idle"
+        );
+        match observer.recv_with_timeout(remaining.min(Duration::from_millis(250))) {
+            Ok(Evt::Output {
+                session_id: id,
+                data,
+            }) if id == session_id => {
+                final_frame_seen |= String::from_utf8_lossy(&data).contains("FINAL_SETTLED");
+            }
+            Ok(Evt::StatusChanged {
+                session_id: id,
+                status: SessionStatus::Idle,
+            }) if id == session_id => {
+                assert!(
+                    final_frame_seen,
+                    "a partial Claude repaint published Idle before the final frame"
+                );
+                break;
+            }
+            Ok(_) | Err(_) => continue,
+        }
+    }
+}
+
 #[test]
 fn test_atomic_attach_snapshot_uses_headless_terminal_snapshot_without_raw_replay() {
     let daemon = DaemonHandle::start();
