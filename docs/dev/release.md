@@ -55,6 +55,13 @@ rely on Homebrew or other machine-local libraries.
 
 ### Shipping
 
+Start an operator-driven release with the **Ship** command-palette task. Its
+bundled `ship` agent supplies the authorization contract, while this
+repository's actual `kd` procedure lives in
+`.kanna/agents/ship/EXTEND.md`. Other repositories get the same safe base and
+declare their own status, dry-run, credential, publish, and verification steps
+in their own extension; an unconfigured Ship task stops instead of guessing.
+
 ```sh
 ./kd release ship --dry-run    # build/sign artifacts without publishing
 ./kd release ship --release    # tag, publish, upload updater manifest
