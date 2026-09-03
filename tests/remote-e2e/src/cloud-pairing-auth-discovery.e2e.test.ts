@@ -410,6 +410,15 @@ function createEmulatorAuthSession(harness: RemoteHarness): MobileAuthSession {
       publish();
       return user;
     },
+    async createUserWithEmailPassword() {
+      throw new Error("Account creation is outside this E2E auth adapter");
+    },
+    async reloadUser() {
+      return user;
+    },
+    async getCloudAccess(uid) {
+      return uid === BUFFY_UID ? "active" : "unknown";
+    },
     async signOut() {
       user = null;
       idToken = null;
