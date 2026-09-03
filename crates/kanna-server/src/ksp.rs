@@ -1586,21 +1586,9 @@ async fn handle_stream_channels(
     auth_mode: AuthMode,
     companion_access: bool,
 ) {
-    let mut state_change_rx = state.subscribe_state_changes();
+    let state_change_rx = state.subscribe_state_changes();
     let state_change_tx = frame_tx.clone();
-    let state_change_task = tokio::spawn(async move {
-        loop {
-            match state_change_rx.recv().await {
-                Ok(frame) => {
-                    if state_change_tx.send(frame).await.is_err() {
-                        return;
-                    }
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-            }
-        }
-    });
+    let state_change_task = tokio::spawn(forward_state_changes(state_change_rx, state_change_tx));
     let mut conn = StreamConn {
         state,
         frame_tx,
@@ -1723,6 +1711,25 @@ impl AgentControlCommand {
             },
             Self::Interrupt => DaemonCommand::AgentInterrupt { session_id },
             Self::SetModel(model) => DaemonCommand::AgentSetModel { session_id, model },
+        }
+    }
+}
+
+async fn forward_state_changes(
+    mut state_change_rx: broadcast::Receiver<ServerFrame>,
+    state_change_tx: mpsc::Sender<ServerFrame>,
+) {
+    loop {
+        let frame = match state_change_rx.recv().await {
+            Ok(frame) => frame,
+            Err(broadcast::error::RecvError::Lagged(_)) => ServerFrame::StateChanged {
+                scope: kanna_agent_protocol::StateChangeScope::Tasks,
+                task_state: None,
+            },
+            Err(broadcast::error::RecvError::Closed) => return,
+        };
+        if state_change_tx.send(frame).await.is_err() {
+            return;
         }
     }
 }
@@ -5326,6 +5333,41 @@ mod tests {
 
     fn perf_test_monitor() -> TerminalPerfMonitor {
         TerminalPerfMonitor::with_thresholds(Duration::from_millis(20), Duration::from_secs(1))
+    }
+
+    #[tokio::test]
+    async fn lagged_state_change_forwarder_emits_coarse_tasks_invalidation() {
+        let (state_change_tx, state_change_rx) = broadcast::channel(2);
+        for revision in 1..=4 {
+            state_change_tx
+                .send(ServerFrame::StateChanged {
+                    scope: kanna_agent_protocol::StateChangeScope::Tasks,
+                    task_state: Some(kanna_agent_protocol::TaskStateChange {
+                        version: 1,
+                        task_id: format!("task-{revision}"),
+                        activity: "working".to_string(),
+                        activity_revision: revision,
+                        activity_changed_at: None,
+                        unread_at: None,
+                        runtime_state: Some("busy".to_string()),
+                        read_state: "read".to_string(),
+                        last_output_preview: None,
+                    }),
+                })
+                .expect("receiver remains subscribed");
+        }
+        drop(state_change_tx);
+
+        let (outbound_tx, mut outbound_rx) = mpsc::channel(4);
+        forward_state_changes(state_change_rx, outbound_tx).await;
+
+        assert_eq!(
+            outbound_rx.recv().await,
+            Some(ServerFrame::StateChanged {
+                scope: kanna_agent_protocol::StateChangeScope::Tasks,
+                task_state: None,
+            })
+        );
     }
 
     #[tokio::test]

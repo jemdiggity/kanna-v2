@@ -70,6 +70,7 @@ const mockState = vi.hoisted(() => {
       agent_type: "pty",
       agent_provider: "claude",
       activity: "idle",
+      activity_revision: 0,
       activity_changed_at: now,
       unread_at: null,
       port_offset: null,
@@ -81,6 +82,7 @@ const mockState = vi.hoisted(() => {
       agent_session_id: null,
       previous_stage: null,
       teardown_started_at: null,
+      last_output_preview: null,
       created_at: now,
       updated_at: now,
       ...overrides,
@@ -564,6 +566,115 @@ describe("kanna query snapshot regressions", () => {
     expect(fetchRepoKannaDefinitions).toHaveBeenCalledTimes(2);
     expect(fetchRepoKannaDefinitions).toHaveBeenLastCalledWith(added.id);
     expect(selection.getStageOrder(added.id)).toEqual([added.id]);
+  });
+
+  it("applies versioned task state without replacing item or slot collections", async () => {
+    const repo = mockState.makeRepo();
+    const item = mockState.makeItem();
+    const fetchSnapshot = vi.fn(async (): Promise<KannaSnapshot> => ({
+      entries: [{ repo, items: [item] }],
+      taskBlockers: [],
+      worktreePaths: {},
+      settings: {},
+    }));
+    const state = createStoreState();
+    const context = createStoreContext(state, { error: vi.fn(), warning: vi.fn() } as never, {
+      fetchSnapshot,
+    });
+    const queries = createQueriesApi(context);
+    await queries.reloadSnapshot();
+
+    const itemsIdentity = state.items.value;
+    const slotsIdentity = state.taskUiSlots.value;
+    const itemIdentity = state.items.value[0];
+    const slotTaskIdentity = state.taskUiSlots.value[0]?.task;
+    fetchSnapshot.mockClear();
+
+    expect(queries.applyTaskStateChange({
+      version: 1,
+      task_id: item.id,
+      activity: "unread",
+      activity_revision: 1,
+      activity_changed_at: "2026-09-03T18:30:00Z",
+      unread_at: "2026-09-03T18:30:00Z",
+      runtime_state: "idle",
+      read_state: "unread",
+      last_output_preview: "Finished",
+    })).toBe(true);
+
+    expect(fetchSnapshot).not.toHaveBeenCalled();
+    expect(state.items.value).toBe(itemsIdentity);
+    expect(state.taskUiSlots.value).toBe(slotsIdentity);
+    expect(state.items.value[0]).toBe(itemIdentity);
+    expect(state.taskUiSlots.value[0]?.task).toBe(slotTaskIdentity);
+    expect(state.items.value[0]).toMatchObject({
+      activity: "unread",
+      activity_revision: 1,
+      runtime_state: "idle",
+      read_state: "unread",
+      last_output_preview: "Finished",
+    });
+    expect(queries.applyTaskStateChange({
+      version: 2,
+      task_id: item.id,
+      activity: "idle",
+      activity_revision: 2,
+      activity_changed_at: null,
+      unread_at: null,
+      runtime_state: "idle",
+      read_state: "read",
+      last_output_preview: null,
+    })).toBe(false);
+  });
+
+  it("does not let an in-flight stale snapshot overwrite a later scoped state", async () => {
+    const repo = mockState.makeRepo();
+    const initialItem = mockState.makeItem({ activity_revision: 0 });
+    const staleReload = deferred<KannaSnapshot>();
+    const fetchSnapshot = vi.fn()
+      .mockResolvedValueOnce({
+        entries: [{ repo, items: [initialItem] }],
+        taskBlockers: [],
+        worktreePaths: {},
+        settings: {},
+      } satisfies KannaSnapshot)
+      .mockImplementationOnce(() => staleReload.promise);
+    const state = createStoreState();
+    const context = createStoreContext(state, { error: vi.fn(), warning: vi.fn() } as never, {
+      fetchSnapshot,
+    });
+    const queries = createQueriesApi(context);
+    await queries.reloadSnapshot();
+
+    const pendingReload = queries.reloadSnapshot();
+    expect(queries.applyTaskStateChange({
+      version: 1,
+      task_id: initialItem.id,
+      activity: "working",
+      activity_revision: 1,
+      activity_changed_at: "2026-09-03T18:30:00Z",
+      unread_at: null,
+      runtime_state: "busy",
+      read_state: "read",
+      last_output_preview: "Running",
+    })).toBe(true);
+    staleReload.resolve({
+      entries: [{
+        repo,
+        items: [{ ...initialItem, activity: "idle", activity_revision: 0 }],
+      }],
+      taskBlockers: [],
+      worktreePaths: {},
+      settings: {},
+    });
+    await pendingReload;
+
+    expect(state.items.value[0]).toMatchObject({
+      activity: "working",
+      activity_revision: 1,
+      runtime_state: "busy",
+      read_state: "read",
+    });
   });
 
   it("publishes authoritative task state when one repo manifest fails", async () => {

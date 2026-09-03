@@ -19,6 +19,7 @@ import type {
   ServerFrame,
   StateChangeScope,
   StreamKind,
+  TaskStateChange,
 } from "@kanna/agent-protocol";
 
 /** Minimal WebSocket surface so tests and non-browser runtimes can inject
@@ -268,7 +269,10 @@ interface TaskSummaryAttachment {
 }
 
 type Attachment = AgentAttachment | TerminalAttachment | CompanionAttachment | TaskSummaryAttachment;
-type StateChangedListener = (scope: StateChangeScope) => void;
+type StateChangedListener = (
+  scope: StateChangeScope,
+  taskState: TaskStateChange | null,
+) => void;
 
 interface PendingRequest {
   resolve(value: { status: number; body: unknown }): void;
@@ -893,7 +897,7 @@ export class StreamClient {
       }
       case "state_changed": {
         for (const listener of [...this.stateChangedListeners]) {
-          listener(frame.scope);
+          listener(frame.scope, frame.task_state ?? null);
         }
         return;
       }

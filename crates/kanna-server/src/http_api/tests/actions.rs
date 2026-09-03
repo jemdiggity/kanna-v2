@@ -68,7 +68,7 @@ async fn recv_state_change_scope(
         .await
         .expect("timed out waiting for state change")
         .expect("state change channel closed");
-    let kanna_agent_protocol::ServerFrame::StateChanged { scope } = frame else {
+    let kanna_agent_protocol::ServerFrame::StateChanged { scope, .. } = frame else {
         panic!("expected state change frame, got {frame:?}");
     };
     scope

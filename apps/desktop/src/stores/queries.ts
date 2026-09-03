@@ -6,6 +6,7 @@ import { requireService, type KannaSnapshot, type StoreContext } from "./state";
 import { debugLog } from "../utils/debugLog";
 import { applySnapshotSettingsToState } from "./snapshotSettings";
 import { reconcileTaskUiSlots } from "./taskUiSlots";
+import type { TaskStateChange } from "@kanna/agent-protocol";
 
 interface OptimisticItemOverlay {
   key: string;
@@ -35,6 +36,7 @@ export interface QueriesApi {
   items: QueryState<PipelineItem[]>;
   loadInitialData: () => Promise<void>;
   reloadSnapshot: (options?: ReloadSnapshotOptions) => Promise<void>;
+  applyTaskStateChange: (change: TaskStateChange) => boolean;
   withOptimisticItemOverlay: <T>(input: {
     key: string;
     apply: (snapshot: KannaSnapshot) => KannaSnapshot;
@@ -59,6 +61,11 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
   const snapshotError = ref<unknown>(null);
   const optimisticItems = ref<OptimisticItemOverlay[]>([]);
   const refreshRunId = ref(0);
+  let taskStateGeneration = 0;
+  const recentTaskStateChanges = new Map<
+    string,
+    { generation: number; change: TaskStateChange }
+  >();
 
   const mergedSnapshot = computed(() => {
     let result = baseSnapshot.value;
@@ -70,6 +77,18 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
 
   const repos = computed(() => mergedSnapshot.value.entries.map((entry) => entry.repo));
   const items = computed(() => flattenSnapshotItems(mergedSnapshot.value));
+
+  function taskStatePatch(change: TaskStateChange): Partial<PipelineItem> {
+    return {
+      activity: change.activity as PipelineItem["activity"],
+      activity_revision: change.activity_revision,
+      activity_changed_at: change.activity_changed_at,
+      unread_at: change.unread_at,
+      runtime_state: change.runtime_state,
+      read_state: change.read_state as PipelineItem["read_state"],
+      last_output_preview: change.last_output_preview,
+    };
+  }
 
   function syncSnapshot(options: { authoritative?: boolean } = {}): void {
     context.state.repos.value = repos.value;
@@ -190,6 +209,7 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
 
   async function reloadSnapshot(options: ReloadSnapshotOptions = {}): Promise<void> {
     const runId = ++refreshRunId.value;
+    const taskStateGenerationAtStart = taskStateGeneration;
     snapshotPending.value = true;
     snapshotError.value = null;
     try {
@@ -200,6 +220,22 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
       const loadedRepos = snapshot.entries.map((entry) => entry.repo);
       const loadedItems = flattenSnapshotItems(snapshot);
 
+      // A scoped KSP update can arrive while this HTTP request is in flight.
+      // Preserve only those later states; updates observed before the request
+      // began are already covered by the authoritative snapshot.
+      for (const { generation, change } of recentTaskStateChanges.values()) {
+        if (generation <= taskStateGenerationAtStart) continue;
+        const matches = loadedItems.filter((item) => item.id === change.task_id);
+        const snapshotItem = matches.length === 1 ? matches[0] : null;
+        if (
+          snapshotItem
+          && snapshotItem.activity_revision !== undefined
+          && change.activity_revision >= snapshotItem.activity_revision
+        ) {
+          Object.assign(snapshotItem, taskStatePatch(change));
+        }
+      }
+
       debugLog(`[perf:items] refresh start #${runId}: repos=${loadedRepos.length}`);
 
       const previousLocalRepoIds = new Set(context.state.repos.value.map((repo) => repo.id));
@@ -208,6 +244,9 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
       baseSnapshot.value = snapshot;
       applySnapshotSettingsToState(context.state, snapshot.settings);
       syncSnapshot({ authoritative: true });
+      for (const [taskId, recent] of recentTaskStateChanges) {
+        if (recent.generation <= taskStateGeneration) recentTaskStateChanges.delete(taskId);
+      }
       await reconcileMissingRepoState(
         loadedRepos,
         previousLocalRepoIds,
@@ -245,6 +284,62 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
   async function loadInitialData(): Promise<void> {
     // Cold start has no cached definitions to reuse.
     await reloadSnapshot({ refreshDefinitions: true });
+  }
+
+  /** Apply version-1 non-structural task state without replacing the snapshot,
+   * item list, or task UI slots. Returning false asks the caller to use the
+   * authoritative full-snapshot fallback. */
+  function applyTaskStateChange(change: TaskStateChange): boolean {
+    const activityIsValid = change.activity === "working"
+      || change.activity === "unread"
+      || change.activity === "idle";
+    const runtimeStateIsValid = change.runtime_state === null
+      || change.runtime_state === "busy"
+      || change.runtime_state === "waiting"
+      || change.runtime_state === "idle"
+      || change.runtime_state === "exited";
+    const nullableStringsAreValid = [
+      change.activity_changed_at,
+      change.unread_at,
+      change.last_output_preview,
+    ].every((value) => value === null || typeof value === "string");
+    if (
+      change.version !== 1
+      || typeof change.task_id !== "string"
+      || change.task_id.length === 0
+      || !activityIsValid
+      || !Number.isSafeInteger(change.activity_revision)
+      || change.activity_revision < 0
+      || !runtimeStateIsValid
+      || (change.read_state !== "read" && change.read_state !== "unread")
+      || !nullableStringsAreValid
+    ) {
+      return false;
+    }
+
+    const baseMatches = baseSnapshot.value.entries.flatMap((entry) =>
+      entry.items.filter((item) => item.id === change.task_id),
+    );
+    if (baseMatches.length !== 1) return false;
+    const baseItem = baseMatches[0];
+    if (baseItem.activity_revision === undefined) return false;
+    if (change.activity_revision < baseItem.activity_revision) return true;
+    const visibleMatches = context.state.items.value.filter((item) => item.id === change.task_id);
+    if (visibleMatches.length !== 1) return false;
+
+    const patch = taskStatePatch(change);
+    taskStateGeneration += 1;
+    recentTaskStateChanges.set(change.task_id, {
+      generation: taskStateGeneration,
+      change,
+    });
+    Object.assign(baseItem, patch);
+
+    // With no optimistic overlay these are the same reactive object. During
+    // an overlay, update its projected object too so the visible state does
+    // not wait for the overlay's later reconciliation.
+    if (visibleMatches[0] !== baseItem) Object.assign(visibleMatches[0], patch);
+    return true;
   }
 
   function addOverlay(overlay: OptimisticItemOverlay): void {
@@ -295,6 +390,7 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
     },
     loadInitialData,
     reloadSnapshot,
+    applyTaskStateChange,
     withOptimisticItemOverlay,
   };
 }

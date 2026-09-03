@@ -49,6 +49,8 @@ export interface PipelineItem {
   agent_provider: AgentProvider;
   activity: "working" | "unread" | "idle";
   activity_revision?: number;
+  runtime_state?: string | null;
+  read_state?: "read" | "unread";
   blocker_revision?: number;
   transition_revision?: string | null;
   activity_changed_at: string | null;

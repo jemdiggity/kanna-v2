@@ -11,6 +11,7 @@ async fn expect_task_state_changed(
         frame,
         kanna_agent_protocol::ServerFrame::StateChanged {
             scope: kanna_agent_protocol::StateChangeScope::Tasks,
+            task_state: None,
         }
     );
 }

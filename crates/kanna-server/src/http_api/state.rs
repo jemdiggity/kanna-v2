@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::pairing::{self, ActivePairingSession};
-use kanna_agent_protocol::{ServerFrame, StateChangeScope};
+use kanna_agent_protocol::{ServerFrame, StateChangeScope, TaskStateChange};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -411,7 +411,40 @@ impl AppState {
     }
 
     pub fn publish_state_changed(&self, scope: StateChangeScope) {
-        let _ = self.state_changes.send(ServerFrame::StateChanged { scope });
+        let _ = self.state_changes.send(ServerFrame::StateChanged {
+            scope,
+            task_state: None,
+        });
+    }
+
+    /// Publish a cheap task-only update. Failure to resolve a complete payload
+    /// degrades to the coarse frame so clients retain snapshot correctness.
+    pub fn publish_task_state_changed(&self, task_id: &str) {
+        let task_state = crate::db::Db::open(&self.config.db_path)
+            .and_then(|db| db.get_task_state_summary(task_id));
+        let Ok(Some(summary)) = task_state else {
+            self.publish_state_changed(StateChangeScope::Tasks);
+            return;
+        };
+        let read_state = if summary.activity == "unread" {
+            "unread"
+        } else {
+            "read"
+        };
+        let _ = self.state_changes.send(ServerFrame::StateChanged {
+            scope: StateChangeScope::Tasks,
+            task_state: Some(TaskStateChange {
+                version: 1,
+                task_id: summary.task_id,
+                activity: summary.activity,
+                activity_revision: summary.activity_revision,
+                activity_changed_at: summary.activity_changed_at,
+                unread_at: summary.unread_at,
+                runtime_state: summary.runtime_state,
+                read_state: read_state.to_string(),
+                last_output_preview: summary.last_output_preview,
+            }),
+        });
     }
 
     pub fn request_cloud_relay_reconnect(&self) {

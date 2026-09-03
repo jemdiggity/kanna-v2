@@ -31,7 +31,7 @@ pub use events::{
 };
 pub use frames::{
     ClientFrame, CompanionAsset, CompanionDocumentKind, CompanionEvent, FrameAgentEvent,
-    KspCapability, ServerFrame, StateChangeScope, StreamKind,
+    KspCapability, ServerFrame, StateChangeScope, StreamKind, TaskStateChange,
 };
 pub use opencode::OpencodeAdapter;
 pub use providers::{

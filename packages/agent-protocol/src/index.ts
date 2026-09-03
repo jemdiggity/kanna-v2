@@ -20,6 +20,7 @@ export type { PermissionDecision } from "./generated/PermissionDecision";
 export type { ServerFrame } from "./generated/ServerFrame";
 export type { SessionEndReason } from "./generated/SessionEndReason";
 export type { StateChangeScope } from "./generated/StateChangeScope";
+export type { TaskStateChange } from "./generated/TaskStateChange";
 export type { StreamKind } from "./generated/StreamKind";
 export type { TermResumePosition } from "./generated/TermResumePosition";
 export type { TurnStats } from "./generated/TurnStats";

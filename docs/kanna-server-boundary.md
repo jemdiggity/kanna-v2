@@ -11,6 +11,50 @@ The desktop frontend itself is planned to become a `kanna-server` client as well
 - daemon: PTY and session ownership, terminal input and output, agent process lifecycle
 - SQLite DB: repo and task persistence, task metadata, query backing for server resources
 
+## KSP State Invalidation
+
+`StateChanged` remains a correctness invalidation, but task activity no longer
+requires the desktop to fetch and replace the complete `/v1/snapshot`. A
+non-structural change to one existing task is published as:
+
+```json
+{
+  "type": "state_changed",
+  "scope": "tasks",
+  "task_state": {
+    "version": 1,
+    "task_id": "…",
+    "activity": "working",
+    "activity_revision": 12,
+    "activity_changed_at": "…",
+    "unread_at": null,
+    "runtime_state": "busy",
+    "read_state": "read",
+    "last_output_preview": "…"
+  }
+}
+```
+
+Version 1 is a complete summary of the fields changed by daemon runtime-status
+observation and operator read-state changes. It deliberately excludes stage,
+pinning, closure, blockers, task membership, and every other field that can
+change sidebar ordering or structure. The desktop applies the newest summary
+for a known task directly to the existing reactive task object. An unsupported
+version, malformed state, missing/ambiguous task, scope-only frame, any
+structural task change, and every `repos`, `blockers`, or `settings` change
+falls back to the authoritative full snapshot. A reconnect also fetches the
+full snapshot because this broadcast has no replay cursor. If a connection's
+broadcast subscriber lags, the server forwards a coarse `tasks` frame so any
+dropped scoped updates are likewise recovered from the authoritative snapshot.
+
+Compatibility is additive and self-versioned rather than handshake-gated. An
+older server omits `task_state`, so a newer desktop follows its existing full
+reload path. Older desktop and mobile builds deserialize the known
+`state_changed` frame and ignore its unknown optional field; mobile does not
+register a state-change listener and continues to consume its task-summary
+stream unchanged. A future payload version remains safe because the enclosing
+scope still tells an older consumer exactly what to invalidate.
+
 ## Terminal Input Boundaries
 
 `POST /v1/tasks/{task_id}/input` carries one logical message, not raw terminal

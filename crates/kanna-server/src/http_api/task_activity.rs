@@ -3,7 +3,6 @@ use super::task_blockers::resolve_existing_task_id;
 use crate::db::Db;
 use axum::extract::{Path, State};
 use axum::Json;
-use kanna_agent_protocol::StateChangeScope;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -80,34 +79,31 @@ pub(super) async fn apply_runtime_status(
     // The attached desktop reports the same daemon-derived status the terminal
     // watcher sees; record it so the event feed does not depend on which
     // observer got there first.
-    if db
+    let mut changed = db
         .update_pipeline_item_runtime_status(
             &task_id,
             payload.status.as_str(),
             item.last_output_preview.as_deref(),
         )
-        .map_err(|e| db_write_error("db error", e))?
-    {
-        state.publish_state_changed(StateChangeScope::Tasks);
-    }
+        .map_err(|e| db_write_error("db error", e))?;
 
-    let Some(activity) = activity_for_runtime_status(
+    let activity = activity_for_runtime_status(
         item.activity.as_deref(),
         payload.status.as_str(),
         payload.selected,
-    ) else {
-        return Ok(Json(TaskActivityResponse {
-            task_id,
-            activity: None,
-        }));
-    };
+    );
 
-    db.update_pipeline_item_activity(&task_id, activity)
-        .map_err(|e| db_write_error("db error", e))?;
-    state.publish_state_changed(StateChangeScope::Tasks);
+    if let Some(activity) = activity {
+        db.update_pipeline_item_activity(&task_id, activity)
+            .map_err(|e| db_write_error("db error", e))?;
+        changed = true;
+    }
+    if changed {
+        state.publish_task_state_changed(&task_id);
+    }
     Ok(Json(TaskActivityResponse {
         task_id,
-        activity: Some(activity.to_string()),
+        activity: activity.map(str::to_string),
     }))
 }
 
@@ -151,7 +147,7 @@ pub(super) async fn mark_task_read(
             activity: None,
         }));
     }
-    state.publish_state_changed(StateChangeScope::Tasks);
+    state.publish_task_state_changed(&task_id);
     Ok(Json(TaskActivityResponse {
         task_id,
         activity: Some("idle".to_string()),
