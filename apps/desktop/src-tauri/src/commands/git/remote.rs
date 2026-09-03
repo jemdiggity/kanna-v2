@@ -8,6 +8,7 @@ use std::process::Command;
 #[serde(rename_all = "camelCase")]
 pub struct GitRepositoryState {
     default_branch: String,
+    default_branch_source: String,
     has_commits: bool,
 }
 
@@ -20,11 +21,18 @@ pub fn git_default_branch(repo_path: String) -> Result<String, String> {
 pub fn git_repository_state(repo_path: String) -> Result<GitRepositoryState, String> {
     let repo = discover_repo(&repo_path)?;
     let has_commits = repository_has_commits(&repo)?;
+    let resolution = resolve_default_branch(&repo, !has_commits)?;
 
     Ok(GitRepositoryState {
-        default_branch: resolve_default_branch(&repo, !has_commits),
+        default_branch: resolution.branch,
+        default_branch_source: resolution.source,
         has_commits,
     })
+}
+
+struct DefaultBranchResolution {
+    branch: String,
+    source: String,
 }
 
 fn repository_has_commits(repo: &Repository) -> Result<bool, String> {
@@ -47,21 +55,77 @@ fn repository_has_commits(repo: &Repository) -> Result<bool, String> {
     Ok(false)
 }
 
-fn resolve_default_branch(repo: &Repository, is_empty: bool) -> String {
-    // Try to detect from remote HEAD reference
-    if let Ok(reference) = repo.find_reference("refs/remotes/origin/HEAD") {
-        if let Some(target) = reference.symbolic_target() {
-            if let Some(branch) = target.strip_prefix("refs/remotes/origin/") {
-                return branch.to_string();
+fn resolve_default_branch(
+    repo: &Repository,
+    is_empty: bool,
+) -> Result<DefaultBranchResolution, String> {
+    let remotes = repo
+        .remotes()
+        .map_err(|error| format!("failed to list Git remotes: {error}"))?;
+    let has_any_remote = remotes.iter().flatten().next().is_some();
+    let has_origin = remotes.iter().flatten().any(|remote| remote == "origin");
+    if has_any_remote && !has_origin {
+        return Err(
+            "repository has configured remotes but no `origin`; cannot determine the authoritative remote default branch"
+                .to_string(),
+        );
+    }
+    if has_origin {
+        let workdir = repo
+            .workdir()
+            .ok_or_else(|| "bare repositories cannot be registered in Kanna".to_string())?;
+        let output = Command::new("git")
+            .args(["ls-remote", "--symref", "origin", "HEAD"])
+            .current_dir(workdir)
+            .output()
+            .map_err(|error| format!("failed to query origin HEAD: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "failed to query authoritative origin HEAD (status {}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let Some(target) = line.strip_prefix("ref: ") else {
+                continue;
+            };
+            let Some((ref_name, advertised_name)) = target.split_once('\t') else {
+                continue;
+            };
+            if advertised_name == "HEAD" {
+                if let Some(branch) = ref_name.strip_prefix("refs/heads/") {
+                    if !branch.is_empty() {
+                        return Ok(DefaultBranchResolution {
+                            branch: branch.to_string(),
+                            source: "remote_symref".to_string(),
+                        });
+                    }
+                }
             }
+        }
+        return Err("origin did not advertise a default-branch HEAD symref".to_string());
+    }
+
+    if let Ok(reference) = repo.find_reference("refs/remotes/origin/HEAD") {
+        if let Some(branch) = reference
+            .symbolic_target()
+            .and_then(|target| target.strip_prefix("refs/remotes/origin/"))
+        {
+            return Ok(DefaultBranchResolution {
+                branch: branch.to_string(),
+                source: "origin_head".to_string(),
+            });
         }
     }
 
-    // Fall back: check if "main" or "master" exist locally
     for name in &["main", "master"] {
         let refname = format!("refs/heads/{}", name);
         if repo.find_reference(&refname).is_ok() {
-            return name.to_string();
+            return Ok(DefaultBranchResolution {
+                branch: name.to_string(),
+                source: "local_branch".to_string(),
+            });
         }
     }
 
@@ -74,12 +138,18 @@ fn resolve_default_branch(repo: &Repository, is_empty: bool) -> String {
                 .symbolic_target()
                 .and_then(|target| target.strip_prefix("refs/heads/"))
             {
-                return branch.to_string();
+                return Ok(DefaultBranchResolution {
+                    branch: branch.to_string(),
+                    source: "local_head".to_string(),
+                });
             }
         }
     }
 
-    "main".to_string()
+    Ok(DefaultBranchResolution {
+        branch: "main".to_string(),
+        source: "fallback_main".to_string(),
+    })
 }
 
 #[tauri::command]
@@ -309,7 +379,53 @@ mod tests {
             state,
             GitRepositoryState {
                 default_branch: "trunk".to_string(),
+                default_branch_source: "local_head".to_string(),
                 has_commits: false,
+            }
+        );
+    }
+
+    #[test]
+    fn git_repository_state_prefers_authoritative_remote_head_over_local_branch() {
+        let origin_dir = TempRepo::new("remote-default-origin");
+        let origin =
+            Repository::init_bare(&origin_dir.path).expect("bare origin should initialize");
+        let publisher_dir = TempRepo::new("remote-default-publisher");
+        let publisher = Repository::init(&publisher_dir.path).expect("publisher should initialize");
+        let commit_id = create_commit(&publisher, &publisher_dir.path);
+        let commit = publisher
+            .find_commit(commit_id)
+            .expect("commit should exist");
+        publisher
+            .branch("main", &commit, true)
+            .expect("main should be created");
+        let origin_url = origin_dir.path.to_string_lossy().into_owned();
+        let mut remote = publisher
+            .remote("origin", &origin_url)
+            .expect("publisher origin should be added");
+        remote
+            .push(&["refs/heads/main:refs/heads/main"], None)
+            .expect("main should publish");
+        origin
+            .reference_symbolic("HEAD", "refs/heads/main", true, "set remote default")
+            .expect("origin HEAD should target main");
+
+        let local_dir = TempRepo::new("remote-default-local");
+        let local = Repository::init(&local_dir.path).expect("local repo should initialize");
+        create_commit(&local, &local_dir.path);
+        local
+            .remote("origin", &origin_url)
+            .expect("local origin should be added");
+        drop(local);
+
+        let state = git_repository_state(local_dir.path.to_string_lossy().into_owned())
+            .expect("repository state should resolve");
+        assert_eq!(
+            state,
+            GitRepositoryState {
+                default_branch: "main".to_string(),
+                default_branch_source: "remote_symref".to_string(),
+                has_commits: true,
             }
         );
     }
@@ -329,6 +445,7 @@ mod tests {
             detached_state,
             GitRepositoryState {
                 default_branch: "master".to_string(),
+                default_branch_source: "local_branch".to_string(),
                 has_commits: true,
             }
         );
@@ -361,6 +478,7 @@ mod tests {
             remote_state,
             GitRepositoryState {
                 default_branch: "release/next".to_string(),
+                default_branch_source: "origin_head".to_string(),
                 has_commits: true,
             }
         );

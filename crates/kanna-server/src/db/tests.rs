@@ -237,7 +237,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "059_repo_sidebar_order");
+    assert_eq!(latest_migration, "060_repo_default_branch_source");
     assert_eq!(
         index_columns(&db.conn, "idx_pipeline_item_parent_created_id"),
         vec!["parent_task_id", "created_at", "id"],
@@ -357,10 +357,10 @@ fn imported_repo_inherits_remote_only_sidebar_order() {
     .expect("insert imported repo");
     db.patch_repo(
         "repo-imported",
-        None,
-        None,
-        Some(Some("remote-repo-hash")),
-        None,
+        super::RepoPatch {
+            remote_url_hash: Some(Some("remote-repo-hash")),
+            ..super::RepoPatch::default()
+        },
     )
     .expect("attach imported repo identity");
 

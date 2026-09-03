@@ -597,10 +597,11 @@ async fn list_repos_omits_credential_bearing_remote_url() {
         db.insert_test_repo("repo-private", "Private Repo").unwrap();
         db.patch_repo(
             "repo-private",
-            None,
-            Some(Some(&remote_url)),
-            Some(Some("private-hash")),
-            None,
+            crate::db::RepoPatch {
+                remote_url: Some(Some(&remote_url)),
+                remote_url_hash: Some(Some("private-hash")),
+                ..crate::db::RepoPatch::default()
+            },
         )
         .unwrap();
     });
@@ -1531,8 +1532,14 @@ async fn reorder_repos_persists_remote_only_positions_and_reports_unknown_ids() 
     let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
         db.insert_test_repo("repo-1", "Repo One").unwrap();
         db.insert_test_repo("repo-2", "Repo Two").unwrap();
-        db.patch_repo("repo-1", None, None, Some(Some("hash-local")), None)
-            .unwrap();
+        db.patch_repo(
+            "repo-1",
+            crate::db::RepoPatch {
+                remote_url_hash: Some(Some("hash-local")),
+                ..crate::db::RepoPatch::default()
+            },
+        )
+        .unwrap();
     });
 
     let response = app
@@ -1585,6 +1592,50 @@ async fn reorder_repos_persists_remote_only_positions_and_reports_unknown_ids() 
     assert_eq!(snapshot["entries"][0]["repo"]["sort_order"], 1);
     assert_eq!(snapshot["entries"][1]["repo"]["id"], "repo-2");
     assert_eq!(snapshot["entries"][1]["repo"]["sort_order"], 3);
+}
+
+#[tokio::test]
+async fn patch_repo_route_updates_default_branch_without_reregistering() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "keep this task",
+            Some("Existing Task"),
+            "in progress",
+            "2026-09-03 08:00:00",
+        )
+        .unwrap();
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::patch("/v1/repos/repo-1")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"defaultBranch":"trunk"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let snapshot = app
+        .oneshot(Request::get("/v1/snapshot").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(snapshot.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let snapshot: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(snapshot["entries"][0]["repo"]["id"], "repo-1");
+    assert_eq!(snapshot["entries"][0]["repo"]["default_branch"], "trunk");
+    assert_eq!(
+        snapshot["entries"][0]["repo"]["default_branch_source"],
+        "api_update"
+    );
+    assert_eq!(snapshot["entries"][0]["items"][0]["id"], "task-1");
 }
 
 #[tokio::test]
@@ -2706,6 +2757,140 @@ async fn add_repo_route_registers_existing_git_repo() {
     assert_eq!(repo.hidden, Some(0));
 
     let _ = std::fs::remove_dir_all(repo_root);
+}
+
+fn repo_with_remote_main_and_local_master(label: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    let temp = tempfile::Builder::new()
+        .prefix(&format!("kanna-http-default-branch-{label}-"))
+        .tempdir()
+        .unwrap();
+    let origin = temp.path().join("origin.git");
+    let publisher = temp.path().join("publisher");
+    let local = temp.path().join("local");
+    std::fs::create_dir_all(&publisher).unwrap();
+    std::fs::create_dir_all(&local).unwrap();
+    let run = |cwd: &std::path::Path, args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    run(temp.path(), &["init", "--bare", origin.to_str().unwrap()]);
+    run(&publisher, &["init", "--initial-branch=main"]);
+    run(&publisher, &["config", "user.email", "test@example.com"]);
+    run(&publisher, &["config", "user.name", "Kanna Test"]);
+    std::fs::write(publisher.join("README.md"), "remote main").unwrap();
+    run(&publisher, &["add", "."]);
+    run(&publisher, &["commit", "-m", "remote main"]);
+    run(
+        &publisher,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    run(&publisher, &["push", "origin", "main"]);
+    run(&origin, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+
+    run(&local, &["init", "--initial-branch=master"]);
+    run(&local, &["config", "user.email", "test@example.com"]);
+    run(&local, &["config", "user.name", "Kanna Test"]);
+    std::fs::write(local.join("README.md"), "local master").unwrap();
+    run(&local, &["add", "."]);
+    run(&local, &["commit", "-m", "local master"]);
+    run(
+        &local,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    (temp, local)
+}
+
+#[tokio::test]
+async fn add_repo_uses_remote_head_when_local_branch_differs() {
+    let (_temp, repo_root) = repo_with_remote_main_and_local_master("registration");
+    let app = super::test_router("desktop-remote-default", "Studio Mac");
+    let response = app
+        .oneshot(
+            Request::post("/v1/repos")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "path": repo_root,
+                        "defaultBranch": "master"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let repo: crate::mobile_api::RepoDetail = from_slice(&body).unwrap();
+    assert_eq!(repo.default_branch.as_deref(), Some("main"));
+    assert_eq!(repo.default_branch_source.as_deref(), Some("remote_symref"));
+}
+
+#[tokio::test]
+async fn reconcile_repo_metadata_reports_and_repairs_default_branch_drift_in_place() {
+    let (_temp, repo_root) = repo_with_remote_main_and_local_master("reconcile");
+    let repo_path = repo_root.to_string_lossy().to_string();
+    let app = super::test_router_with_seed("desktop-reconcile-default", "Studio Mac", move |db| {
+        db.insert_repo_with_branch_source(
+            crate::db::NewRepo {
+                id: "repo-stale",
+                path: &repo_path,
+                name: "Stale Repo",
+                default_branch: Some("master"),
+            },
+            Some("legacy_unknown"),
+        )
+        .unwrap();
+    });
+
+    let inspect = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/repos/repo-stale/reconcile-metadata")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"apply":false}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(inspect.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(inspect.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let inspection: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(inspection["recordedDefaultBranch"], "master");
+    assert_eq!(inspection["detectedDefaultBranch"], "main");
+    assert_eq!(inspection["detectedDefaultBranchSource"], "remote_symref");
+    assert_eq!(inspection["drift"], true);
+    assert_eq!(inspection["updated"], false);
+
+    let repair = app
+        .oneshot(
+            Request::post("/v1/repos/repo-stale/reconcile-metadata")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(repair.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(repair.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let repaired: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(repaired["updated"], true);
+    assert_eq!(repaired["repoId"], "repo-stale");
 }
 
 #[tokio::test]

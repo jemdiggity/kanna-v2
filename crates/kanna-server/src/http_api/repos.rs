@@ -1,5 +1,5 @@
 use super::state::AppState;
-use crate::db::{Db, PipelineItem};
+use crate::db::{Db, PipelineItem, RepoPatch};
 use crate::mobile_api::MobileApi;
 use axum::extract::Query;
 use axum::extract::{Path, State};
@@ -258,10 +258,11 @@ fn clone_and_register_repo(
     })?;
     if let Err(error) = db.patch_repo(
         &repo.id,
-        None,
-        Some(Some(remote_url)),
-        Some(Some(remote_url_hash)),
-        None,
+        RepoPatch {
+            remote_url: Some(Some(remote_url)),
+            remote_url_hash: Some(Some(remote_url_hash)),
+            ..RepoPatch::default()
+        },
     ) {
         return Err(rollback_registered_checkout(
             &state.config.db_path,
@@ -357,6 +358,7 @@ pub(super) struct PatchRepoRequest {
     #[serde(default)]
     remote_url_hash: Option<Option<String>>,
     hidden: Option<bool>,
+    default_branch: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -376,15 +378,30 @@ pub(super) async fn patch_repo(
             format!("db error: {}", e),
         )
     })?;
+    let default_branch = payload
+        .default_branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty());
+    if payload.default_branch.is_some() && default_branch.is_none() {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "defaultBranch must not be blank".to_string(),
+        ));
+    }
     db.patch_repo(
         &repo_id,
-        payload.name.as_deref(),
-        payload.remote_url.as_ref().map(|value| value.as_deref()),
-        payload
-            .remote_url_hash
-            .as_ref()
-            .map(|value| value.as_deref()),
-        payload.hidden,
+        RepoPatch {
+            name: payload.name.as_deref(),
+            remote_url: payload.remote_url.as_ref().map(|value| value.as_deref()),
+            remote_url_hash: payload
+                .remote_url_hash
+                .as_ref()
+                .map(|value| value.as_deref()),
+            hidden: payload.hidden,
+            default_branch,
+            default_branch_source: default_branch.map(|_| "api_update"),
+        },
     )
     .map_err(|e| match e {
         rusqlite::Error::QueryReturnedNoRows => (
@@ -398,6 +415,96 @@ pub(super) async fn patch_repo(
     })?;
     state.publish_state_changed(StateChangeScope::Repos);
     Ok(Json(PatchRepoResponse { repo_id }))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ReconcileRepoMetadataRequest {
+    #[serde(default = "default_true")]
+    apply: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ReconcileRepoMetadataResponse {
+    repo_id: String,
+    recorded_default_branch: Option<String>,
+    recorded_default_branch_source: Option<String>,
+    detected_default_branch: String,
+    detected_default_branch_source: String,
+    drift: bool,
+    updated: bool,
+}
+
+pub(super) async fn reconcile_repo_metadata(
+    State(state): State<Arc<AppState>>,
+    Path(repo_id): Path<String>,
+    Json(payload): Json<ReconcileRepoMetadataRequest>,
+) -> Result<Json<ReconcileRepoMetadataResponse>, (axum::http::StatusCode, String)> {
+    let db = Db::open(&state.config.db_path).map_err(|error| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {error}"),
+        )
+    })?;
+    let repo = db
+        .get_repo(&repo_id)
+        .map_err(|error| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("db error: {error}"),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                format!("repo not found: {repo_id}"),
+            )
+        })?;
+    let detected =
+        crate::mobile_api::resolve_git_default_branch(std::path::Path::new(&repo.path), None)
+            .map_err(|error| (axum::http::StatusCode::BAD_GATEWAY, error))?;
+    let drift = repo.default_branch.as_deref() != Some(detected.branch.as_str());
+    let updated = payload.apply
+        && (drift || repo.default_branch_source.as_deref() != Some(detected.source.as_str()));
+    if updated {
+        db.patch_repo(
+            &repo_id,
+            RepoPatch {
+                default_branch: Some(&detected.branch),
+                default_branch_source: Some(&detected.source),
+                ..RepoPatch::default()
+            },
+        )
+        .map_err(|error| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("db error: {error}"),
+            )
+        })?;
+        state.repo_definitions.invalidate(&repo);
+        state.publish_state_changed(StateChangeScope::Repos);
+        log::info!(
+            "reconciled repository `{repo_id}` default branch from `{:?}` (source: {:?}) to `{}` (source: {})",
+            repo.default_branch,
+            repo.default_branch_source,
+            detected.branch,
+            detected.source,
+        );
+    }
+    Ok(Json(ReconcileRepoMetadataResponse {
+        repo_id,
+        recorded_default_branch: repo.default_branch,
+        recorded_default_branch_source: repo.default_branch_source,
+        detected_default_branch: detected.branch,
+        detected_default_branch_source: detected.source,
+        drift,
+        updated,
+    }))
 }
 
 #[derive(Debug, serde::Deserialize)]

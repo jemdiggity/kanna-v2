@@ -1287,18 +1287,24 @@ async fn local_surface_aggregates_peer_repo_events_and_resumes_after_reconnect()
     let source = test_state_with_seed("desktop-source-events", "Source Mac", |db| {
         db.insert_test_repo("repo-source-id", "Kanna Source")
             .expect("insert source repo");
-        db.patch_repo("repo-source-id", None, None, Some(Some(REMOTE_HASH)), None)
-            .expect("set source remote hash");
+        db.patch_repo(
+            "repo-source-id",
+            crate::db::RepoPatch {
+                remote_url_hash: Some(Some(REMOTE_HASH)),
+                ..crate::db::RepoPatch::default()
+            },
+        )
+        .expect("set source remote hash");
     });
     let peer = test_state_with_seed("desktop-peer-events", "Peer Mac", |db| {
         db.insert_test_repo("repo-peer-different-id", "Kanna Peer")
             .expect("insert peer repo");
         db.patch_repo(
             "repo-peer-different-id",
-            None,
-            None,
-            Some(Some(REMOTE_HASH)),
-            None,
+            crate::db::RepoPatch {
+                remote_url_hash: Some(Some(REMOTE_HASH)),
+                ..crate::db::RepoPatch::default()
+            },
         )
         .expect("set peer remote hash");
         db.insert_test_pipeline_item(
@@ -1667,10 +1673,10 @@ async fn stage_start_emits_one_settled_working_edge_and_suppresses_a_resume_flic
             .expect("insert source repo");
         db.patch_repo(
             "repo-start-source",
-            None,
-            None,
-            Some(Some(REMOTE_HASH)),
-            None,
+            crate::db::RepoPatch {
+                remote_url_hash: Some(Some(REMOTE_HASH)),
+                ..crate::db::RepoPatch::default()
+            },
         )
         .expect("set source remote hash");
     });
@@ -1682,8 +1688,14 @@ async fn stage_start_emits_one_settled_working_edge_and_suppresses_a_resume_flic
         |db| {
             db.insert_test_repo("repo-start-peer", "Start Peer Repo")
                 .expect("insert peer repo");
-            db.patch_repo("repo-start-peer", None, None, Some(Some(REMOTE_HASH)), None)
-                .expect("set peer remote hash");
+            db.patch_repo(
+                "repo-start-peer",
+                crate::db::RepoPatch {
+                    remote_url_hash: Some(Some(REMOTE_HASH)),
+                    ..crate::db::RepoPatch::default()
+                },
+            )
+            .expect("set peer remote hash");
             for task_id in ["settled-start", "flicker-start"] {
                 db.insert_test_pipeline_item(
                     task_id,
@@ -2222,14 +2234,26 @@ async fn unpaired_non_loopback_lan_wait_never_uses_the_account_relay_feed() {
     let source = test_state_with_seed("desktop-lan-source", "LAN Source", |db| {
         db.insert_test_repo("repo-lan-source", "LAN Source Repo")
             .expect("insert source repo");
-        db.patch_repo("repo-lan-source", None, None, Some(Some(REMOTE_HASH)), None)
-            .expect("set source remote hash");
+        db.patch_repo(
+            "repo-lan-source",
+            crate::db::RepoPatch {
+                remote_url_hash: Some(Some(REMOTE_HASH)),
+                ..crate::db::RepoPatch::default()
+            },
+        )
+        .expect("set source remote hash");
     });
     let peer = test_state_with_seed("desktop-lan-peer", "LAN Peer", |db| {
         db.insert_test_repo("repo-lan-peer", "LAN Peer Repo")
             .expect("insert peer repo");
-        db.patch_repo("repo-lan-peer", None, None, Some(Some(REMOTE_HASH)), None)
-            .expect("set peer remote hash");
+        db.patch_repo(
+            "repo-lan-peer",
+            crate::db::RepoPatch {
+                remote_url_hash: Some(Some(REMOTE_HASH)),
+                ..crate::db::RepoPatch::default()
+            },
+        )
+        .expect("set peer remote hash");
         db.insert_test_pipeline_item(
             "lan-peer-child",
             "repo-lan-peer",
@@ -2276,10 +2300,10 @@ async fn unauthenticated_loopback_waits_get_only_the_local_feed_for_all_browser_
             .expect("insert source repo");
         db.patch_repo(
             "repo-browser-source",
-            None,
-            None,
-            Some(Some(REMOTE_HASH)),
-            None,
+            crate::db::RepoPatch {
+                remote_url_hash: Some(Some(REMOTE_HASH)),
+                ..crate::db::RepoPatch::default()
+            },
         )
         .expect("set source remote hash");
         db.insert_test_pipeline_item(
@@ -2303,10 +2327,10 @@ async fn unauthenticated_loopback_waits_get_only_the_local_feed_for_all_browser_
             .expect("insert peer repo");
         db.patch_repo(
             "repo-browser-peer",
-            None,
-            None,
-            Some(Some(REMOTE_HASH)),
-            None,
+            crate::db::RepoPatch {
+                remote_url_hash: Some(Some(REMOTE_HASH)),
+                ..crate::db::RepoPatch::default()
+            },
         )
         .expect("set peer remote hash");
         db.insert_test_pipeline_item(

@@ -24,6 +24,7 @@ fn init_repo_with_committed_config(label: &str, committed_config: serde_json::Va
         path: repo_root.to_string_lossy().into_owned(),
         name: label.to_string(),
         default_branch: Some("main".to_string()),
+        default_branch_source: None,
         remote_url_hash: None,
         hidden: None,
         sort_order: None,

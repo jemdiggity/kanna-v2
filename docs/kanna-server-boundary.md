@@ -254,6 +254,26 @@ credentials on the named target desktop. Relay invocation is a control operation
 bytes flow directly from the git remote to the target desktop, not through the
 relay.
 
+### Repository default-branch metadata
+
+Repository registration treats `git ls-remote --symref origin HEAD` as the
+authoritative default branch whenever `origin` exists. Local branch and HEAD
+heuristics apply only to repositories without `origin`. The repo row stores
+both `default_branch` and `default_branch_source`; repo detail responses expose
+the provenance as `defaultBranchSource`.
+
+`PATCH /v1/repos/{repo_id}` accepts `defaultBranch` for an explicit in-place
+correction. `POST /v1/repos/{repo_id}/reconcile-metadata` re-detects the branch,
+reports the recorded and detected values and provenance plus `drift`, and
+updates the existing row by default (`apply: false` is the read-only doctor
+mode). The agent-facing surface is `kanna_reconcile_repo_metadata`. Neither
+path changes the repo id or its tasks.
+
+Definition resolution reads the exact recorded `origin/<default_branch>`
+snapshot. If `origin` exists but that ref does not, resolution fails with the
+repo id, branch provenance, and reconciliation guidance; it must not treat a
+missing snapshot as permission to fall back to bundled definitions.
+
 ## Multi-machine Agent Routing
 
 `kanna-mcp` and `kanna-cli` remain clients of the machine-local

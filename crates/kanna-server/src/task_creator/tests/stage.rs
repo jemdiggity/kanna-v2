@@ -8,6 +8,7 @@ fn builtin_single_reviewer_workflow_ships_approve_as_pr_stage_post() {
         path: repo_root.to_string_lossy().into_owned(),
         name: "Builtin QA".to_string(),
         default_branch: Some("main".to_string()),
+        default_branch_source: None,
         remote_url_hash: None,
         hidden: None,
         sort_order: None,

@@ -660,6 +660,7 @@ export async function fetchDesktopRepoAnalytics(repoId: string): Promise<Desktop
 
 export interface PatchDesktopRepoInput {
   name?: string;
+  defaultBranch?: string;
   remoteUrl?: string | null;
   remoteUrlHash?: string | null;
   hidden?: boolean;
@@ -842,6 +843,8 @@ export interface DesktopRepoResponse {
   name: string;
   default_branch?: string | null;
   defaultBranch?: string | null;
+  default_branch_source?: string | null;
+  defaultBranchSource?: string | null;
   remote_url?: string | null;
   remoteUrl?: string | null;
   remote_url_hash?: string | null;

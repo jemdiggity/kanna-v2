@@ -29,6 +29,7 @@ interface SidebarRepoProjection {
 
 interface GitRepositoryState {
   defaultBranch: string;
+  defaultBranchSource: string;
   hasCommits: boolean;
 }
 

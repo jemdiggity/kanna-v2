@@ -605,6 +605,7 @@ mod tests {
                     path: "/tmp/repo".into(),
                     name: "Kanna".into(),
                     default_branch: Some("main".into()),
+                    default_branch_source: None,
                     remote_url: Some("git@github.com:kanna/kanna.git".into()),
                     remote_url_hash: Some("remote-hash".into()),
                     hidden: 0,

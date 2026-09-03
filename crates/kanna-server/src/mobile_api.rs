@@ -45,6 +45,7 @@ pub struct RepoDetail {
     pub path: String,
     pub name: String,
     pub default_branch: Option<String>,
+    pub default_branch_source: Option<String>,
     pub hidden: Option<i64>,
     pub sort_order: Option<i64>,
     pub created_at: Option<String>,
@@ -649,25 +650,26 @@ impl MobileApi {
             .ok_or_else(|| {
                 AddRepoError::InvalidPath("repo name could not be derived".to_string())
             })?;
-        let default_branch = request
-            .default_branch
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .or_else(|| {
-                git_default_branch(&canonical_path)
-                    .ok()
-                    .map(|value| value.trim().to_string())
-                    .filter(|value| !value.is_empty())
-            })
-            .unwrap_or_else(|| "main".to_string());
+        let resolution =
+            resolve_git_default_branch(&canonical_path, request.default_branch.as_deref())
+                .map_err(AddRepoError::Internal)?;
+        log::info!(
+            "registering repository `{}` with default branch `{}` (source: {})",
+            canonical_path.display(),
+            resolution.branch,
+            resolution.source,
+        );
         let id = generate_repo_id()?;
         self._db
-            .insert_repo(NewRepo {
-                id: &id,
-                path: &path_string,
-                name: &name,
-                default_branch: Some(&default_branch),
-            })
+            .insert_repo_with_branch_source(
+                NewRepo {
+                    id: &id,
+                    path: &path_string,
+                    name: &name,
+                    default_branch: Some(&resolution.branch),
+                },
+                Some(&resolution.source),
+            )
             .map_err(|e| AddRepoError::Internal(format!("db error: {}", e)))?;
         let repo = self
             ._db
@@ -1283,6 +1285,7 @@ fn map_repo_detail(repo: crate::db::Repo) -> RepoDetail {
         path: repo.path,
         name: repo.name,
         default_branch: repo.default_branch,
+        default_branch_source: repo.default_branch_source,
         hidden: repo.hidden,
         sort_order: repo.sort_order,
         created_at: repo.created_at,
@@ -1321,42 +1324,124 @@ fn validate_git_repo_path(path: &str) -> Result<PathBuf, AddRepoError> {
     Ok(canonical)
 }
 
-fn git_default_branch(repo_path: &Path) -> Result<String, String> {
-    let remote_head = Command::new("git")
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DefaultBranchResolution {
+    pub(crate) branch: String,
+    pub(crate) source: String,
+}
+
+pub(crate) fn resolve_git_default_branch(
+    repo_path: &Path,
+    requested: Option<&str>,
+) -> Result<DefaultBranchResolution, String> {
+    let remotes = Command::new("git")
         .arg("-C")
         .arg(repo_path)
-        .args(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+        .arg("remote")
         .output()
-        .map_err(|e| format!("failed to run git symbolic-ref: {}", e))?;
-    if remote_head.status.success() {
-        let branch = String::from_utf8_lossy(&remote_head.stdout)
-            .trim()
-            .strip_prefix("origin/")
-            .map(str::to_string)
-            .or_else(|| {
-                let trimmed = String::from_utf8_lossy(&remote_head.stdout)
-                    .trim()
-                    .to_string();
-                (!trimmed.is_empty()).then_some(trimmed)
+        .map_err(|error| format!("failed to list Git remotes: {error}"))?;
+    if !remotes.status.success() {
+        return Err(format!(
+            "failed to list Git remotes in `{}` (status {}): {}",
+            repo_path.display(),
+            remotes.status,
+            String::from_utf8_lossy(&remotes.stderr).trim()
+        ));
+    }
+    let remote_names = String::from_utf8_lossy(&remotes.stdout);
+    let has_any_remote = remote_names.lines().any(|remote| !remote.trim().is_empty());
+    let has_origin = remote_names.lines().any(|remote| remote.trim() == "origin");
+    if has_any_remote && !has_origin {
+        return Err(format!(
+            "repository `{}` has configured remotes but no `origin`; cannot determine the authoritative remote default branch",
+            repo_path.display()
+        ));
+    }
+    if has_origin {
+        let remote_head = Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(["ls-remote", "--symref", "origin", "HEAD"])
+            .output()
+            .map_err(|error| format!("failed to query origin HEAD: {error}"))?;
+        if !remote_head.status.success() {
+            return Err(format!(
+                "failed to query authoritative origin HEAD in `{}` (status {}): {}",
+                repo_path.display(),
+                remote_head.status,
+                String::from_utf8_lossy(&remote_head.stderr).trim()
+            ));
+        }
+        for line in String::from_utf8_lossy(&remote_head.stdout).lines() {
+            let Some(target) = line.strip_prefix("ref: ") else {
+                continue;
+            };
+            let Some((ref_name, advertised_name)) = target.split_once('\t') else {
+                continue;
+            };
+            if advertised_name == "HEAD" {
+                if let Some(branch) = ref_name.strip_prefix("refs/heads/") {
+                    if !branch.is_empty() {
+                        return Ok(DefaultBranchResolution {
+                            branch: branch.to_string(),
+                            source: "remote_symref".to_string(),
+                        });
+                    }
+                }
+            }
+        }
+        return Err(format!(
+            "origin exists for `{}` but did not advertise a default-branch HEAD symref",
+            repo_path.display()
+        ));
+    }
+
+    if let Some(branch) = requested.map(str::trim).filter(|branch| !branch.is_empty()) {
+        return Ok(DefaultBranchResolution {
+            branch: branch.to_string(),
+            source: "requested".to_string(),
+        });
+    }
+
+    for branch in ["main", "master"] {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args([
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{branch}"),
+            ])
+            .status()
+            .map_err(|error| format!("failed to inspect local Git branches: {error}"))?;
+        if status.success() {
+            return Ok(DefaultBranchResolution {
+                branch: branch.to_string(),
+                source: "local_branch".to_string(),
             });
-        if let Some(branch) = branch {
-            return Ok(branch);
         }
     }
 
     let head = Command::new("git")
         .arg("-C")
         .arg(repo_path)
-        .args(["branch", "--show-current"])
+        .args(["symbolic-ref", "--short", "HEAD"])
         .output()
-        .map_err(|e| format!("failed to run git branch: {}", e))?;
+        .map_err(|error| format!("failed to inspect local Git HEAD: {error}"))?;
     if head.status.success() {
         let branch = String::from_utf8_lossy(&head.stdout).trim().to_string();
         if !branch.is_empty() {
-            return Ok(branch);
+            return Ok(DefaultBranchResolution {
+                branch,
+                source: "local_head".to_string(),
+            });
         }
     }
-    Err("could not determine default branch".to_string())
+    Ok(DefaultBranchResolution {
+        branch: "main".to_string(),
+        source: "fallback_main".to_string(),
+    })
 }
 
 fn task_git_state(
@@ -1626,8 +1711,14 @@ mod tests {
         let db = Db::open_for_tests(&config.db_path).unwrap();
         db.insert_test_repo("repo-1", "Repo One").unwrap();
         db.insert_test_repo("repo-2", "Repo Two").unwrap();
-        db.patch_repo("repo-1", None, None, Some(Some("hash-repo-one")), None)
-            .unwrap();
+        db.patch_repo(
+            "repo-1",
+            crate::db::RepoPatch {
+                remote_url_hash: Some(Some("hash-repo-one")),
+                ..crate::db::RepoPatch::default()
+            },
+        )
+        .unwrap();
 
         let api = super::MobileApi::new(config, db);
         let repos = api.list_repos().unwrap();
