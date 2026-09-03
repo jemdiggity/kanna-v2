@@ -1185,6 +1185,8 @@ async fn signal_agent_route_detaches_creation_spawn_from_request_future() {
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
     let listener = UnixListener::bind(&socket_path).unwrap();
+    let (spawn_received_tx, spawn_received_rx) = tokio::sync::oneshot::channel::<()>();
+    let (release_spawn_tx, release_spawn_rx) = tokio::sync::oneshot::channel::<()>();
 
     let daemon_server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
@@ -1195,7 +1197,8 @@ async fn signal_agent_route_detaches_creation_spawn_from_request_future() {
             DaemonCommand::Spawn { .. } | DaemonCommand::SpawnAgent { .. } => {}
             other => panic!("expected spawn command, got {other:?}"),
         }
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        spawn_received_tx.send(()).unwrap();
+        release_spawn_rx.await.unwrap();
     });
 
     let config = Config {
@@ -1224,8 +1227,7 @@ async fn signal_agent_route_detaches_creation_spawn_from_request_future() {
     drop(db);
 
     let app = super::router(Arc::new(super::AppState::new(config)));
-    let response = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
+    let response_task = tokio::spawn(async move {
         app.oneshot(
             Request::post("/v1/repos/repo-1/agents/task-manager/signal")
                 .header("content-type", "application/json")
@@ -1236,14 +1238,27 @@ async fn signal_agent_route_detaches_creation_spawn_from_request_future() {
                     .to_string(),
                 ))
                 .unwrap(),
-        ),
-    )
-    .await
-    .expect("signal route must respond without waiting for daemon spawn")
-    .unwrap();
+        )
+        .await
+    });
+
+    // First prove the detached worker is blocked waiting for the daemon's
+    // spawn acknowledgement. The route must complete while that gate remains
+    // closed; the generous deadlines only keep a regression from hanging the
+    // whole test binary and are not response-time assertions.
+    tokio::time::timeout(std::time::Duration::from_secs(30), spawn_received_rx)
+        .await
+        .expect("detached worker never sent the daemon spawn command")
+        .unwrap();
+    let response = tokio::time::timeout(std::time::Duration::from_secs(30), response_task)
+        .await
+        .expect("signal route stayed attached to the blocked daemon spawn")
+        .expect("signal request task panicked")
+        .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
-    daemon_server.abort();
+    release_spawn_tx.send(()).unwrap();
+    daemon_server.await.unwrap();
 
     let _ = std::fs::remove_file(socket_path);
     let _ = std::fs::remove_dir_all(daemon_dir);

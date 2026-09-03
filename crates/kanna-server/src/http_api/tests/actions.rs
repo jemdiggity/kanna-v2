@@ -4703,17 +4703,31 @@ async fn advance_stage_route_records_stage_run_for_spawned_next_task() {
     drop(db);
 
     let app = super::router(Arc::new(super::AppState::new(config.clone())));
-    let response = tokio::time::timeout(
-        std::time::Duration::from_secs(1),
+    let response_task = tokio::spawn(async move {
         app.oneshot(
             Request::post("/v1/tasks/source-1/actions/advance-stage")
                 .body(Body::empty())
                 .unwrap(),
-        ),
-    )
+        )
+        .await
+    });
+
+    // Wait until setup has reached its explicit gate before checking the
+    // response. The ordering, rather than a sub-second response time, proves
+    // the request detached the transition. Thirty seconds is only a harness
+    // guard for a broken setup process or a permanently starved executor.
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while !setup_started.exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
     .await
-    .expect("advance-stage must return while repository setup is running")
-    .unwrap();
+    .expect("detached setup never reached its gate");
+    let response = tokio::time::timeout(std::time::Duration::from_secs(30), response_task)
+        .await
+        .expect("advance-stage stayed attached to repository setup")
+        .expect("advance-stage request task panicked")
+        .unwrap();
 
     if response.status() != StatusCode::OK {
         daemon_server.abort();
@@ -4731,11 +4745,6 @@ async fn advance_stage_route_records_stage_run_for_spawned_next_task() {
         .unwrap();
     let created: TaskActionResponse = from_slice(&body).unwrap();
     assert_eq!(created.task_id, "source-1");
-    let setup_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-    while !setup_started.exists() && tokio::time::Instant::now() < setup_deadline {
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    assert!(setup_started.exists(), "detached setup never started");
     assert!(
         !setup_finished.exists(),
         "setup should still be waiting after the HTTP response"
