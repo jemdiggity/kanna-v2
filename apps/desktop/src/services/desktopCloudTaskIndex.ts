@@ -357,7 +357,9 @@ export function mapDesktopCloudTasks(
         remoteUrlHash: snapshot.repo.remoteUrlHash ?? null,
         default_branch: snapshot.repo.defaultBranch ?? "main",
         hidden: 0,
-        sort_order: 0,
+        // Preserve discovery order until the viewer's durable sidebar order is
+        // applied by buildWorkspace; synthetic repos must not all advertise 0.
+        sort_order: reposById.size,
         created_at: snapshot.createdAt,
         last_opened_at: snapshot.updatedAt,
       });

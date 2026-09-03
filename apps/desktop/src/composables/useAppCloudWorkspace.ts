@@ -222,6 +222,9 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
   }));
 
   const remoteTaskPins = computed(() => parseRemoteTaskPins(store.snapshotSettings));
+  const repoSidebarOrder = computed(
+    () => new Map(Object.entries(store.repoSidebarOrder)),
+  );
 
   const workspace = computed(() => buildWorkspace({
     localRepos: localReposForCloudMatching.value,
@@ -230,6 +233,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     cloudSnapshot: filterClosedRemoteSnapshot(cloudSnapshot.value),
     lanSnapshot: filterClosedRemoteSnapshot(lanSnapshot.value),
     remoteTaskPins: remoteTaskPins.value,
+    repoSidebarOrder: repoSidebarOrder.value,
   }));
   watchEffect(() => {
     const cloudGeneration = cloudAuthoritativeGeneration.value;
@@ -301,7 +305,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     remote_url_hash: repo.remoteUrlHash,
     default_branch: repo.defaultBranch ?? "main",
     hidden: 0,
-    sort_order: 0,
+    sort_order: repo.sortOrder,
     created_at: "",
     last_opened_at: "",
   })));

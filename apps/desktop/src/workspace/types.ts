@@ -47,6 +47,7 @@ export interface WorkspaceRepo {
   remoteUrlHash: string | null;
   defaultBranch: string | null;
   source: WorkspaceRepoSource;
+  sortOrder: number;
 }
 
 export interface WorkspaceTaskSource {
@@ -101,6 +102,8 @@ export interface BuildWorkspaceInput {
   lanSnapshot: DesktopCloudSnapshot;
   /** Viewer-local pin overlay for remote-only tasks, keyed by owner-side task id. */
   remoteTaskPins?: ReadonlyMap<string, number>;
+  /** Viewer-local sidebar positions for repositories advertised by remote URL hash. */
+  repoSidebarOrder?: ReadonlyMap<string, number>;
 }
 
 export interface BuildWorkspaceResult {

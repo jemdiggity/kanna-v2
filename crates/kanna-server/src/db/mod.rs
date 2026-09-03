@@ -44,6 +44,7 @@ pub use blockers::ReplaceTaskBlockersError;
 pub use operator_events::NewOperatorEvent;
 #[allow(unused_imports)]
 pub use pipeline_items::MergeSignalSource;
+pub(crate) use repos::RepoOrderInput;
 #[allow(unused_imports)]
 pub use stage_runs::FinishedStageRun;
 #[allow(unused_imports)]
@@ -121,6 +122,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "056_runtime_settled_debounce",
     "057_queued_task_input",
     "058_queued_task_input_session_incarnation",
+    "059_repo_sidebar_order",
 ];
 
 #[derive(Debug, Serialize)]
@@ -333,6 +335,7 @@ pub struct SnapshotEntry {
 #[serde(rename_all = "camelCase")]
 pub struct UiSnapshot {
     pub entries: Vec<SnapshotEntry>,
+    pub repo_sidebar_order: HashMap<String, i64>,
     pub task_blockers: Vec<SnapshotTaskBlocker>,
     pub blocker_task_states: HashMap<String, SnapshotBlockerTaskState>,
     pub worktree_paths: HashMap<String, String>,
@@ -721,6 +724,10 @@ fn create_base_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
           sort_order INTEGER NOT NULL DEFAULT 0,
           created_at TEXT NOT NULL DEFAULT (datetime('now')),
           last_opened_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS repo_sidebar_order (
+          remote_url_hash TEXT PRIMARY KEY,
+          sort_order INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS pipeline_item (
           id TEXT PRIMARY KEY, repo_id TEXT NOT NULL REFERENCES repo(id) ON DELETE CASCADE,
@@ -1853,6 +1860,21 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
             [],
         )?;
         Ok(())
+    })?;
+
+    run_migration(conn, "059_repo_sidebar_order", |conn| {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS repo_sidebar_order (
+                remote_url_hash TEXT PRIMARY KEY,
+                sort_order INTEGER NOT NULL
+            );
+            INSERT OR IGNORE INTO repo_sidebar_order (remote_url_hash, sort_order)
+            SELECT remote_url_hash, sort_order
+            FROM repo
+            WHERE remote_url_hash IS NOT NULL AND remote_url_hash != '';
+            "#,
+        )
     })?;
 
     Ok(())

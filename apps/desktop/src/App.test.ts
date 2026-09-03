@@ -149,6 +149,7 @@ const store = {
   sortedItemsForCurrentRepo: [],
   sortedItemsAllRepos: [],
   taskBlockers: [] as Array<{ blocked_item_id: string; blocker_item_id: string }>,
+  repoSidebarOrder: {} as Record<string, number>,
   lastSelectedItemByRepo: {},
   getStageOrder: vi.fn(() => ["in progress", "pr", "merge"]),
   suspendAfterMinutes: 30,
@@ -219,6 +220,7 @@ const store = {
   pinItem: vi.fn(async () => {}),
   unpinItem: vi.fn(async () => {}),
   reorderPinned: vi.fn(async () => {}),
+  reorderRepos: vi.fn(async () => {}),
   renameItem: vi.fn(async () => {}),
   hideRepo: vi.fn(async () => {}),
   spawnPtySession: vi.fn(async () => {}),
@@ -1090,6 +1092,7 @@ describe("App", () => {
     store.sortedItemsForCurrentRepo = [];
     store.sortedItemsAllRepos = [];
     store.taskBlockers = [];
+    store.repoSidebarOrder = {};
     store.getStageOrder.mockReturnValue(["in progress", "pr", "merge"]);
     store.appTheme = "dark";
     store.codeTheme = "match";
@@ -1221,6 +1224,15 @@ describe("App", () => {
       }
       throw new Error(`unexpected invoke: ${command}`);
     });
+  });
+
+  it("initializes the cloud workspace with an empty durable repo order", async () => {
+    const wrapper = await mountApp(SidebarWithRepoStub);
+
+    expect(store.repoSidebarOrder).toEqual({});
+    expect(wrapper.findComponent(SidebarWithRepoStub).exists()).toBe(true);
+
+    wrapper.unmount();
   });
 
   it("schedules startup backup only after the main window initial data is loaded", async () => {

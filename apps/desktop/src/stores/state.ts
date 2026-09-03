@@ -99,6 +99,7 @@ export interface RepoSnapshotEntry {
 
 export interface KannaSnapshot {
   entries: RepoSnapshotEntry[];
+  repoSidebarOrder?: Record<string, number>;
   taskBlockers: TaskBlocker[];
   blockerTaskStates?: BlockerTaskStates;
   worktreePaths: Record<string, string>;
@@ -135,6 +136,7 @@ export interface StoreState {
   blockerTaskStates: Ref<BlockerTaskStates>;
   worktreePaths: Ref<Record<string, string>>;
   snapshotSettings: Ref<Record<string, string>>;
+  repoSidebarOrder: Ref<Record<string, number>>;
   initialWindowBootstrap: Ref<WindowBootstrap | null>;
   selectedRepoId: Ref<string | null>;
   selectedItemId: Ref<string | null>;
@@ -282,6 +284,7 @@ export function createStoreState(): StoreState {
   const blockerTaskStates = ref<BlockerTaskStates>({});
   const worktreePaths = ref<Record<string, string>>({});
   const snapshotSettings = ref<Record<string, string>>({});
+  const repoSidebarOrder = ref<Record<string, number>>({});
   const initialWindowBootstrap = ref<WindowBootstrap | null>(null);
   const selectedRepoId = ref<string | null>(null);
   const selectedItemId = ref<string | null>(null);
@@ -311,6 +314,7 @@ export function createStoreState(): StoreState {
     blockerTaskStates,
     worktreePaths,
     snapshotSettings,
+    repoSidebarOrder,
     initialWindowBootstrap,
     selectedRepoId,
     selectedItemId,

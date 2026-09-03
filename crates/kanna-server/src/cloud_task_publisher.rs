@@ -662,6 +662,7 @@ mod tests {
                     queued_input_reason: Some("input_held_by_draft".into()),
                 }],
             }],
+            repo_sidebar_order: HashMap::new(),
             task_blockers: vec![SnapshotTaskBlocker {
                 blocked_item_id: "task-1".into(),
                 blocker_item_id: "task-blocker".into(),

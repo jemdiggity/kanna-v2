@@ -102,8 +102,14 @@ export function createTaskRepoActions(
     await invalidateWindowWorkspace("renameRepo");
   }
 
-  async function reorderRepos(orderedIds: string[]) {
-    await reorderDesktopRepos(orderedIds);
+  async function reorderRepos(orderedRepos: Parameters<typeof reorderDesktopRepos>[0]) {
+    const result = await reorderDesktopRepos(orderedRepos);
+    if (result.notPersistedIds.length > 0) {
+      console.warn(
+        "[store] repository order was not persisted for:",
+        result.notPersistedIds.join(", "),
+      );
+    }
     await reloadSnapshot();
     await invalidateWindowWorkspace("reorderRepos");
   }

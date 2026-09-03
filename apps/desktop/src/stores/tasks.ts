@@ -1,5 +1,6 @@
 import type { PipelineItem } from "../types/kanna";
 import type { AgentExecutionType } from "./agentExecutionType";
+import type { DesktopRepoOrderInput } from "../services/desktopServerClient";
 import type { CreateItemOptions, StoreContext } from "./state";
 import { createTaskBlockedActions } from "./taskBlockedActions";
 import { createTaskCloseActions } from "./taskCloseActions";
@@ -16,7 +17,7 @@ export interface TasksApi {
   cloneAndImportRepo: (url: string, destination: string) => Promise<string>;
   hideRepo: (repoId: string) => Promise<void>;
   renameRepo: (repoId: string, name: string) => Promise<void>;
-  reorderRepos: (orderedIds: string[]) => Promise<void>;
+  reorderRepos: (orderedRepos: DesktopRepoOrderInput[]) => Promise<void>;
   createItem: (
     repoId: string,
     repoPath: string,

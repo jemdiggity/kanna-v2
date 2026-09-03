@@ -1527,6 +1527,67 @@ async fn patch_repo_route_updates_remote_metadata_and_hidden_state() {
 }
 
 #[tokio::test]
+async fn reorder_repos_persists_remote_only_positions_and_reports_unknown_ids() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_repo("repo-2", "Repo Two").unwrap();
+        db.patch_repo("repo-1", None, None, Some(Some("hash-local")), None)
+            .unwrap();
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/repos/actions/reorder")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "orderedRepos": [
+                            { "id": "cloud:remote", "remoteUrlHash": "hash-remote" },
+                            { "id": "repo-1", "remoteUrlHash": "hash-local" },
+                            { "id": "unknown-without-identity", "remoteUrlHash": null },
+                            { "id": "repo-2", "remoteUrlHash": null }
+                        ]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(result["updated"], 3);
+    assert_eq!(
+        result["updatedIds"],
+        serde_json::json!(["cloud:remote", "repo-1", "repo-2"])
+    );
+    assert_eq!(
+        result["notPersistedIds"],
+        serde_json::json!(["unknown-without-identity"])
+    );
+
+    let snapshot_response = app
+        .oneshot(Request::get("/v1/snapshot").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(snapshot_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let snapshot: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(snapshot["repoSidebarOrder"]["hash-remote"], 0);
+    assert_eq!(snapshot["repoSidebarOrder"]["hash-local"], 1);
+    assert_eq!(snapshot["entries"][0]["repo"]["id"], "repo-1");
+    assert_eq!(snapshot["entries"][0]["repo"]["sort_order"], 1);
+    assert_eq!(snapshot["entries"][1]["repo"]["id"], "repo-2");
+    assert_eq!(snapshot["entries"][1]["repo"]["sort_order"], 3);
+}
+
+#[tokio::test]
 async fn task_agent_session_route_persists_provider_session_id() {
     let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
         db.insert_test_repo("repo-1", "Repo One").unwrap();

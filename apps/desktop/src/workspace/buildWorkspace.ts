@@ -41,7 +41,7 @@ export function buildWorkspace(input: BuildWorkspaceInput): BuildWorkspaceResult
   const repoContext = buildRepoContext(input.localRepos, [
     ...input.cloudSnapshot.repos,
     ...input.lanSnapshot.repos,
-  ]);
+  ], input.repoSidebarOrder);
   const closedLocalKeys = buildClosedLocalKeys(
     input.localItems,
     input.localClosedItems ?? [],
@@ -109,7 +109,11 @@ function workspaceTaskDurableTaskId(task: WorkspaceTask): string {
   return task.localTaskId ?? task.item.id;
 }
 
-function buildRepoContext(localRepos: LocalRepoWithRemote[], remoteRepos: RemoteRepo[]) {
+function buildRepoContext(
+  localRepos: LocalRepoWithRemote[],
+  remoteRepos: RemoteRepo[],
+  repoSidebarOrder: ReadonlyMap<string, number> = new Map(),
+) {
   const reposByKey = new Map<string, WorkspaceRepo>();
   const localRepoKeyById = new Map<string, string>();
   const localRepoKeyByRemoteHash = new Map<string, string>();
@@ -129,8 +133,15 @@ function buildRepoContext(localRepos: LocalRepoWithRemote[], remoteRepos: Remote
       remoteUrlHash: entry.remoteUrlHash,
       defaultBranch: entry.repo.default_branch,
       source: "local-only",
+      sortOrder: entry.repo.sort_order,
     });
   }
+
+  let nextUnorderedPosition = Math.max(
+    -1,
+    ...localRepos.map((entry) => entry.repo.sort_order),
+    ...repoSidebarOrder.values(),
+  ) + 1;
 
   for (const repo of remoteRepos) {
     const remoteUrlHash = readRemoteUrlHash(repo);
@@ -155,11 +166,14 @@ function buildRepoContext(localRepos: LocalRepoWithRemote[], remoteRepos: Remote
       remoteUrlHash,
       defaultBranch: repo.default_branch,
       source: "remote-only",
+      sortOrder: remoteUrlHash !== null && repoSidebarOrder.has(remoteUrlHash)
+        ? repoSidebarOrder.get(remoteUrlHash) ?? nextUnorderedPosition++
+        : nextUnorderedPosition++,
     });
   }
 
   return {
-    repos: [...reposByKey.values()],
+    repos: [...reposByKey.values()].sort((left, right) => left.sortOrder - right.sortOrder),
     localRepoKeyById,
     remoteRepoKeyById,
   };
@@ -471,7 +485,7 @@ function diagnosticsForTask(task: WorkspaceTask): RemoteTaskDiagnostics {
 
 function readRemoteUrlHash(repo: RemoteRepo): string | null {
   const candidate = repo as RemoteRepo & { remoteUrlHash?: string | null };
-  return candidate.remoteUrlHash ?? null;
+  return candidate.remoteUrlHash ?? candidate.remote_url_hash ?? null;
 }
 
 function stripRemoteTaskPrefix(id: string): string {

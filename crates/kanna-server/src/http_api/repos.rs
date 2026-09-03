@@ -403,7 +403,17 @@ pub(super) async fn patch_repo(
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ReorderReposRequest {
+    #[serde(default)]
     ordered_ids: Vec<String>,
+    #[serde(default)]
+    ordered_repos: Vec<ReorderRepoInput>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReorderRepoInput {
+    id: String,
+    remote_url_hash: Option<String>,
 }
 
 pub(super) async fn reorder_repos(
@@ -416,16 +426,37 @@ pub(super) async fn reorder_repos(
             format!("db error: {}", e),
         )
     })?;
-    db.reorder_repos(&payload.ordered_ids).map_err(|e| {
+    let ordered_repos = if payload.ordered_repos.is_empty() {
+        payload
+            .ordered_ids
+            .iter()
+            .map(|id| crate::db::RepoOrderInput {
+                id,
+                remote_url_hash: None,
+            })
+            .collect::<Vec<_>>()
+    } else {
+        payload
+            .ordered_repos
+            .iter()
+            .map(|repo| crate::db::RepoOrderInput {
+                id: &repo.id,
+                remote_url_hash: repo.remote_url_hash.as_deref(),
+            })
+            .collect::<Vec<_>>()
+    };
+    let result = db.reorder_repos(&ordered_repos).map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             format!("db error: {e}"),
         )
     })?;
     state.publish_state_changed(StateChangeScope::Repos);
-    Ok(Json(
-        serde_json::json!({ "updated": payload.ordered_ids.len() }),
-    ))
+    Ok(Json(serde_json::json!({
+        "updated": result.updated_ids.len(),
+        "updatedIds": result.updated_ids,
+        "notPersistedIds": result.not_persisted_ids,
+    })))
 }
 
 pub(super) async fn list_repo_tasks(
