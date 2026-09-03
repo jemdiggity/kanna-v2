@@ -1,4 +1,6 @@
-# Task aba94572 — repo-scoped task watch must not wake its own caller
+# Task 9fbdaa96 — repo-scoped task watch must not wake its own caller
+
+Lineage: continues task `aba94572`; work carried over via its WIP snapshot.
 
 ## Goal
 
@@ -55,10 +57,17 @@ scope semantics; a client-side event filter duplicating the server's.
 
 ## Verification
 
-- `cargo test -p kanna-server` (full suite, 1197 tests), `-p kanna-cli`,
-  `-p kanna-mcp`, `-p kanna-tool-catalog`: all green.
+- `cargo test -p kanna-server -p kanna-cli -p kanna-mcp
+  -p kanna-tool-catalog`: all green, including the full 1,197-test server suite
+  and its integration tests.
+- After making the legacy unfiltered event-query wrapper test-only to remove
+  the task-created dead-code warning, a second full server run passed every
+  task-event test but hit the unrelated load-sensitive
+  `advance_stage_route_records_stage_run_for_spawned_next_task` timeout; that
+  test passed immediately when rerun in isolation.
 - `cargo clippy --tests` on the four crates: no new warnings (pre-existing
   warnings in untouched files remain).
+- `cargo fmt --all -- --check`: clean.
 - Not E2E-tested; see `docs/2026-09-03-task-watch-self-exclusion-e2e-gap.md`.
 
 ## Done when

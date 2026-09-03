@@ -374,6 +374,7 @@ impl Db {
     }
 
     /// Events in `scope` with `after_seq < seq <= head_seq`, oldest first.
+    #[cfg(test)]
     pub fn list_task_events(
         &self,
         scope: &TaskEventScope,
@@ -384,9 +385,10 @@ impl Db {
         self.list_task_events_excluding(scope, &[], after_seq, head_seq, limit)
     }
 
-    /// [`Self::list_task_events`] minus every event whose task is in
-    /// `exclude_task_ids` — how a repo-scoped watcher running inside a task
-    /// session keeps its own runtime edges out of its wake-up feed.
+    /// Events in `scope` with `after_seq < seq <= head_seq`, oldest first,
+    /// minus every event whose task is in `exclude_task_ids` — how a
+    /// repo-scoped watcher running inside a task session keeps its own runtime
+    /// edges out of its wake-up feed.
     pub fn list_task_events_excluding(
         &self,
         scope: &TaskEventScope,
