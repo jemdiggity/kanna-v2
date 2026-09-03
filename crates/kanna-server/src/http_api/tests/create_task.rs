@@ -2029,6 +2029,64 @@ async fn create_task_route_preserves_failed_prepare_diagnostics() {
 }
 
 #[tokio::test]
+async fn create_task_route_refuses_an_unresolvable_recorded_default_branch() {
+    let unique = unique_test_suffix();
+    let repo_root =
+        std::env::temp_dir().join(format!("kanna-http-create-unresolvable-default-{unique}"));
+    init_test_git_repo(&repo_root);
+    let state =
+        super::test_state_with_seed("desktop-create-unresolvable-default", "Studio Mac", |db| {
+            db.insert_repo(crate::db::NewRepo {
+                id: "repo-1",
+                path: &repo_root.to_string_lossy(),
+                name: "Repo One",
+                default_branch: Some("recorded-but-missing"),
+            })
+            .unwrap();
+        });
+    let app = super::router(Arc::clone(&state));
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "repoId": "repo-1",
+                        "prompt": "Do not guess a task base",
+                        "agentProvider": "codex",
+                        "agentType": "agent"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = String::from_utf8_lossy(&body);
+    assert!(
+        body.contains("cannot resolve default branch `recorded-but-missing`"),
+        "unexpected creation error: {body}"
+    );
+    assert!(
+        body.contains("origin/recorded-but-missing"),
+        "error must identify the attempted remote branch: {body}"
+    );
+    assert!(
+        !repo_root.join(".kanna-worktrees").exists(),
+        "an unresolved base must not create a worktree from checkout HEAD"
+    );
+
+    let _ = std::fs::remove_dir_all(repo_root);
+    let _ = std::fs::remove_file(&state.config.db_path);
+}
+
+#[tokio::test]
 async fn create_task_route_with_blocker_creates_dormant_task_without_spawning() {
     let unique = format!(
         "{}-{}",

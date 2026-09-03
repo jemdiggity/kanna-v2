@@ -8,6 +8,91 @@ use super::super::provider::{
 };
 use super::*;
 
+fn default_base_task_request() -> CreateTaskRequest {
+    CreateTaskRequest {
+        repo_id: "repo-1".to_string(),
+        prompt: "Create from the recorded default branch".to_string(),
+        display_name: None,
+        workflow_name: None,
+        stage: None,
+        base_ref: None,
+        agent: None,
+        agent_provider: Some("codex".to_string()),
+        agent_type: Some("agent".to_string()),
+        terminal_cols: None,
+        terminal_rows: None,
+        model: None,
+        effort: None,
+        permission_mode: None,
+        allowed_tools: None,
+        disallowed_tools: None,
+        max_turns: None,
+        max_budget_usd: None,
+        setup_cmds: None,
+        task_template: None,
+        resume_session_id: None,
+        recovery_snapshot: None,
+        transfer_import: None,
+        blocker_task_ids: None,
+        notify_task_id: None,
+        parent_task_id: None,
+    }
+}
+
+#[test]
+fn task_creation_uses_remote_default_when_no_local_branch_exists() {
+    let repo_root = init_git_repo("remote-only-default-base");
+    let remote_revision = publish_origin_branch(
+        &repo_root,
+        "remote-only",
+        "publish remote-only default branch",
+    );
+    std::fs::write(
+        repo_root.join("LOCAL_ONLY.md"),
+        "must not reach task worktree",
+    )
+    .unwrap();
+    run_git_fixture(&repo_root, &["add", "LOCAL_ONLY.md"]);
+    run_git_fixture(
+        &repo_root,
+        &["commit", "-m", "advance primary checkout only"],
+    );
+    assert!(
+        !Command::new("git")
+            .args(["show-ref", "--verify", "--quiet", "refs/heads/remote-only"])
+            .current_dir(&repo_root)
+            .status()
+            .unwrap()
+            .success(),
+        "fixture must not have a local remote-only branch"
+    );
+
+    let config = test_config("remote-only-default-base");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_repo(NewRepo {
+        id: "repo-1",
+        path: &repo_root.to_string_lossy(),
+        name: "Repo One",
+        default_branch: Some("remote-only"),
+    })
+    .unwrap();
+
+    let prepared = prepare_task_for_api(&db, &config, default_base_task_request()).unwrap();
+    let task_revision =
+        run_git_fixture(std::path::Path::new(&prepared.cwd), &["rev-parse", "HEAD"]);
+
+    assert_eq!(task_revision, remote_revision);
+    assert!(
+        !std::path::Path::new(&prepared.cwd)
+            .join("LOCAL_ONLY.md")
+            .exists(),
+        "task worktree must not inherit the primary checkout's newer HEAD"
+    );
+
+    let _ = std::fs::remove_dir_all(repo_root);
+    let _ = std::fs::remove_file(config.db_path);
+}
+
 #[test]
 fn repo_command_template_identity_persists_the_selected_teardown_for_close() {
     let repo_root = init_git_repo("repo-command-template-teardown");

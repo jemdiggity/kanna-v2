@@ -161,27 +161,40 @@ pub(super) fn generate_agent_session_uuid() -> Result<String, String> {
     ))
 }
 
-pub(super) fn fetch_start_point(repo_path: &str, default_branch: Option<&str>) -> Option<String> {
+pub(super) fn fetch_start_point(
+    repo_path: &str,
+    default_branch: Option<&str>,
+) -> Result<String, String> {
     let branch = default_branch.unwrap_or("main");
-    let fetch_success = Command::new("git")
-        .args(["fetch", "--", "origin", branch])
+    let remote_tracking_ref = format!("refs/remotes/origin/{branch}");
+    let fetch_refspec = format!("+refs/heads/{branch}:{remote_tracking_ref}");
+    let fetch_output = Command::new("git")
+        .args(["fetch", "--no-tags", "--", "origin", &fetch_refspec])
         .current_dir(repo_path)
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false);
-    if fetch_success {
-        Some(format!("origin/{}", branch))
-    } else if Command::new("git")
-        .args(["rev-parse", "--verify", "--end-of-options", branch])
-        .current_dir(repo_path)
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-    {
-        Some(branch.to_string())
-    } else {
-        None
+        .output();
+
+    // The fetch above explicitly refreshes the remote-tracking ref. It may
+    // fail when the repo is offline or has no origin; an already-fetched
+    // remote ref is still a better base than a stale local branch.
+    if let Some(resolved) = crate::git_refs::resolve_base_ref(Path::new(repo_path), branch) {
+        return Ok(resolved.reference);
     }
+
+    let fetch_detail = match fetch_output {
+        Ok(output) if output.status.success() => String::new(),
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            if stderr.is_empty() {
+                String::new()
+            } else {
+                format!("; fetch failed: {stderr}")
+            }
+        }
+        Err(error) => format!("; fetch failed to start: {error}"),
+    };
+    Err(format!(
+        "cannot resolve default branch `{branch}`: neither `origin/{branch}` nor local `{branch}` points to a commit{fetch_detail}"
+    ))
 }
 
 #[cfg(test)]
@@ -235,7 +248,7 @@ mod tests {
         run_git(Some(&local), &["remote", "add", "origin", &remote_path]);
         assert_eq!(
             fetch_start_point(local.to_string_lossy().as_ref(), Some(remote_branch)),
-            Some(format!("origin/{remote_branch}"))
+            Ok(format!("origin/{remote_branch}"))
         );
 
         let local_branch = "--local-option-shaped-branch";
@@ -243,7 +256,7 @@ mod tests {
         run_git(Some(&local), &["update-ref", &local_ref, "FETCH_HEAD"]);
         assert_eq!(
             fetch_start_point(local.to_string_lossy().as_ref(), Some(local_branch)),
-            Some(local_branch.to_string())
+            Ok(local_branch.to_string())
         );
     }
 }
@@ -264,9 +277,10 @@ pub(super) fn create_worktree(
         args.push("-b");
         args.push(branch);
         args.push(worktree_path);
-        if let Some(start_point) = start_point {
-            args.push(start_point);
-        }
+        let start_point = start_point.ok_or_else(|| {
+            format!("refusing to create new branch `{branch}` without an explicit start point")
+        })?;
+        args.push(start_point);
     }
 
     // The main checkout is a shared resource: the desktop frontend polls git
