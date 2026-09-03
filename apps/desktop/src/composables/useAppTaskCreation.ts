@@ -222,20 +222,35 @@ export function useAppTaskCreation({
       } else if (isCloudOnlyRepoId(targetRepoId)) {
         const cloudRepo = remoteSnapshot.value.repos.find((repo) => repo.id === targetRepoId);
         const remoteUrl = cloudRepo?.remote_url ?? null;
-        const baseBranches = remoteUrl
-          ? await invoke<string[]>("git_list_remote_base_branches", { remoteUrl }).catch((error) => {
-              console.debug("[App] failed to list remote base branches for cloud repo:", error);
-              return [] as string[];
-            })
-          : [];
+        const defaultBranch = cloudRepo?.default_branch || "main";
+        let listingError: string | null = null;
+        let baseBranches: string[] = [];
+        if (remoteUrl) {
+          try {
+            baseBranches = await invoke<string[]>("git_list_remote_base_branches", { remoteUrl });
+          } catch (error: unknown) {
+            console.debug("[App] failed to list remote base branches for cloud repo:", error);
+            listingError = error instanceof Error ? error.message : String(error);
+          }
+        }
         if (loadGeneration !== newTaskOptionsLoadGeneration || !showNewTaskModal.value) return;
+        if (baseBranches.length === 0) {
+          // The remote could not be listed (unreachable, or credentials that
+          // cannot see it) or carries no URL at all. Offer the default branch
+          // the owning desktop published so the modal stays usable; submitting
+          // surfaces the real clone or remote-URL error as a toast.
+          baseBranches = [`origin/${defaultBranch}`];
+          if (listingError) {
+            toast.error(`${t("toasts.remoteBaseBranchesFailed")}: ${listingError}`);
+          }
+        }
         const snapshot: NewTaskOptionsSnapshot = {
           availableAgentProviders: undefined,
           availableWorkflows: [],
           defaultWorkflowName: undefined,
           availableBaseBranches: baseBranches,
           defaultBaseBranchName:
-            getDefaultBaseBranch(baseBranches, cloudRepo?.default_branch || "main") || undefined,
+            getDefaultBaseBranch(baseBranches, defaultBranch) || undefined,
           repoDefaultBranchName: cloudRepo?.default_branch || undefined,
         };
         if (targetRepoId) newTaskOptionsCache.set(targetRepoId, snapshot);

@@ -142,6 +142,7 @@
   "toasts": {
     "taskCreationFailed": "작업 생성 실패",
     "repoDefinitionsFailed": "저장소 정의를 불러오지 못했습니다",
+    "remoteBaseBranchesFailed": "원격 저장소의 브랜치 목록을 가져오지 못했습니다",
     "prCreationFailed": "PR 생성 실패",
     "repoCreationFailed": "저장소 생성 실패",
     "repoImportFailed": "저장소 가져오기 실패",
