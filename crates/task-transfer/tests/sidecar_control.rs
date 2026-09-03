@@ -725,6 +725,8 @@ fn control_response_id(response: &ControlResponse) -> &str {
         | ControlResponse::ClosePeerTask { request_id }
         | ControlResponse::AdvancePeerTaskStage { request_id }
         | ControlResponse::ReadPeerTaskFile { request_id, .. }
+        | ControlResponse::ReadPeerTaskDirectory { request_id, .. }
+        | ControlResponse::ReadPeerTaskDiff { request_id, .. }
         | ControlResponse::MarkPeerTaskRead { request_id }
         | ControlResponse::StartPairing { request_id, .. }
         | ControlResponse::AcceptPairing { request_id, .. }

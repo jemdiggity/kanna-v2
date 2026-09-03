@@ -8,6 +8,7 @@ import {
 import { useShortcutContext, registerContextShortcuts } from "../composables/useShortcutContext";
 import { useModalZIndex } from "../composables/useModalZIndex";
 import { useModalTearOff } from "../composables/useModalTearOff";
+import type { RemoteTaskViewTransport } from "../modalTearOff";
 
 useShortcutContext("tree");
 registerContextShortcuts("tree", [
@@ -45,6 +46,7 @@ const props = defineProps<{
   remoteDirectoryLoader?: RemoteDirectoryLoader;
   remoteDesktopId?: string;
   remoteTaskId?: string;
+  remoteTransport?: RemoteTaskViewTransport;
 }>();
 
 const rootLabel = computed(() => {
@@ -72,6 +74,7 @@ const tearOff = useModalTearOff({
     ...(props.homePath ? { homePath: props.homePath } : {}),
     ...(props.remoteDesktopId ? { remoteDesktopId: props.remoteDesktopId } : {}),
     ...(props.remoteTaskId ? { remoteTaskId: props.remoteTaskId } : {}),
+    ...(props.remoteTransport ? { remoteTransport: props.remoteTransport } : {}),
   }),
   onTornOff: () => emit("close"),
 });

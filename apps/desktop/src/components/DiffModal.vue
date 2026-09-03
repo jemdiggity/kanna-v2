@@ -4,6 +4,7 @@ import DiffView from "./DiffView.vue";
 import { useShortcutContext } from "../composables/useShortcutContext";
 import { useModalZIndex } from "../composables/useModalZIndex";
 import { useModalTearOff } from "../composables/useModalTearOff";
+import type { RemoteTaskViewTransport } from "../modalTearOff";
 import { useKannaStore } from "../stores/kanna";
 import type { RequestRevisionOptions } from "../stores/workflow";
 import type {
@@ -47,6 +48,7 @@ const props = defineProps<{
   remoteDiffLoader?: (request: RemoteTaskDiffRequest) => Promise<RemoteTaskDiffContent>;
   remoteDesktopId?: string;
   remoteTaskId?: string;
+  remoteTransport?: RemoteTaskViewTransport;
 }>();
 
 const emit = defineEmits<{
@@ -95,6 +97,7 @@ const tearOff = useModalTearOff({
     ...(props.hasRunningPost !== undefined ? { hasRunningPost: props.hasRunningPost } : {}),
     ...(props.remoteDesktopId ? { remoteDesktopId: props.remoteDesktopId } : {}),
     ...(props.remoteTaskId ? { remoteTaskId: props.remoteTaskId } : {}),
+    ...(props.remoteTransport ? { remoteTransport: props.remoteTransport } : {}),
   }),
   onTornOff: () => emit("close"),
 });

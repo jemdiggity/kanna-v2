@@ -4234,6 +4234,42 @@ impl TaskFileRouteFixture {
         )
         .await
     }
+
+    async fn browse_as_desktop_loopback(
+        &self,
+        task_id: &str,
+        encoded_path: &str,
+    ) -> axum::response::Response {
+        self.app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/v1/tasks/{task_id}/browse?path={encoded_path}&limit=100"
+                ))
+                .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                    [127, 0, 0, 1],
+                    52001,
+                ))))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn browse_through_unauthenticated_tunnel(
+        &self,
+        task_id: &str,
+        encoded_path: &str,
+    ) -> crate::http_api::HttpInvokeResponse {
+        crate::http_api::dispatch_http_invoke(
+            Arc::clone(&self.state),
+            "GET",
+            &format!("/v1/tasks/{task_id}/browse?path={encoded_path}&limit=100"),
+            serde_json::Value::Null,
+        )
+        .await
+    }
     async fn post_resolve(
         &self,
         task_id: &str,
@@ -4389,6 +4425,30 @@ async fn task_directory_route_supports_authenticated_relay_dispatch() {
     assert_eq!(body["path"], "src");
     assert_eq!(body["entries"][0]["path"], "src/remote.ts");
     assert_eq!(body["entries"][0]["isDir"], false);
+}
+
+#[tokio::test]
+async fn task_directory_route_allows_desktop_loopback_sidecar_requests() {
+    let fixture = TaskFileRouteFixture::new();
+    fixture.write("src/remote.ts", b"export const remote = true;\n");
+
+    let response = fixture.browse_as_desktop_loopback("task-file", "src").await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let listing: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(listing["entries"][0]["path"], "src/remote.ts");
+}
+
+#[tokio::test]
+async fn task_directory_route_denies_unauthenticated_tunneled_dispatch() {
+    let fixture = TaskFileRouteFixture::new();
+    let response = fixture
+        .browse_through_unauthenticated_tunnel("task-file", "src")
+        .await;
+    assert_eq!(response.status, StatusCode::UNAUTHORIZED.as_u16());
 }
 
 #[tokio::test]
@@ -4914,6 +4974,35 @@ impl TaskDiffRouteFixture {
             .await
     }
 
+    async fn get_as_desktop_loopback(&self, task_id: &str) -> axum::response::Response {
+        self.app
+            .clone()
+            .oneshot(
+                Request::get(format!("/v1/tasks/{task_id}/diff"))
+                    .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                        [127, 0, 0, 1],
+                        52002,
+                    ))))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn get_through_unauthenticated_tunnel(
+        &self,
+        task_id: &str,
+    ) -> crate::http_api::HttpInvokeResponse {
+        crate::http_api::dispatch_http_invoke(
+            Arc::clone(&self.state),
+            "GET",
+            &format!("/v1/tasks/{task_id}/diff"),
+            serde_json::Value::Null,
+        )
+        .await
+    }
+
     async fn get_through_authenticated_relay_with_query(
         &self,
         task_id: &str,
@@ -5011,6 +5100,30 @@ async fn task_diff_route_allows_authenticated_relay_dispatch() {
         .expect("patch string")
         .contains("+via relay"));
     assert_eq!(response.error, None);
+}
+
+#[tokio::test]
+async fn task_diff_route_allows_desktop_loopback_sidecar_requests() {
+    let fixture = TaskDiffRouteFixture::new();
+    std::fs::write(fixture.worktree.join("README.md"), "hello\nvia sidecar\n").unwrap();
+
+    let response = fixture.get_as_desktop_loopback("task-diff").await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let diff: crate::task_diff::TaskDiff = from_slice(&body).unwrap();
+    assert!(diff.patch.contains("+via sidecar"));
+}
+
+#[tokio::test]
+async fn task_diff_route_denies_unauthenticated_tunneled_dispatch() {
+    let fixture = TaskDiffRouteFixture::new();
+    let response = fixture
+        .get_through_unauthenticated_tunnel("task-diff")
+        .await;
+    assert_eq!(response.status, StatusCode::UNAUTHORIZED.as_u16());
 }
 
 #[tokio::test]

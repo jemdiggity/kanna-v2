@@ -320,7 +320,7 @@ export function createDesktopRelayTerminalClient({
   };
 }
 
-function parseTaskDirectoryListing(value: unknown): RemoteTaskDirectoryListing {
+export function parseTaskDirectoryListing(value: unknown): RemoteTaskDirectoryListing {
   if (!isRecord(value) || !Array.isArray(value.entries)) {
     throw new Error("Remote task directory response was malformed.");
   }
@@ -355,7 +355,7 @@ function parseTaskDirectoryListing(value: unknown): RemoteTaskDirectoryListing {
   };
 }
 
-function parseTaskDiffContent(value: unknown): RemoteTaskDiffContent {
+export function parseTaskDiffContent(value: unknown): RemoteTaskDiffContent {
   if (
     !isRecord(value)
     || typeof value.taskId !== "string"

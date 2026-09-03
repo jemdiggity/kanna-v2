@@ -99,6 +99,22 @@ pub enum ControlRequest {
         task_id: String,
         path: String,
     },
+    ReadPeerTaskDirectory {
+        request_id: String,
+        target_peer_id: String,
+        task_id: String,
+        path: String,
+        show_all_files: bool,
+        offset: usize,
+        limit: usize,
+    },
+    ReadPeerTaskDiff {
+        request_id: String,
+        target_peer_id: String,
+        task_id: String,
+        scope: String,
+        mode: String,
+    },
     MarkPeerTaskRead {
         request_id: String,
         target_peer_id: String,
@@ -260,6 +276,14 @@ pub enum ControlResponse {
         request_id: String,
         path: String,
         content: String,
+    },
+    ReadPeerTaskDirectory {
+        request_id: String,
+        listing: serde_json::Value,
+    },
+    ReadPeerTaskDiff {
+        request_id: String,
+        diff: serde_json::Value,
     },
     MarkPeerTaskRead {
         request_id: String,
@@ -482,6 +506,26 @@ pub enum PeerRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sealed_payload: Option<String>,
     },
+    ReadTaskDirectory {
+        request_id: String,
+        requester_peer_id: String,
+        task_id: String,
+        path: String,
+        show_all_files: bool,
+        offset: usize,
+        limit: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sealed_payload: Option<String>,
+    },
+    ReadTaskDiff {
+        request_id: String,
+        requester_peer_id: String,
+        task_id: String,
+        scope: String,
+        mode: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sealed_payload: Option<String>,
+    },
     MarkTaskRead {
         request_id: String,
         requester_peer_id: String,
@@ -568,6 +612,14 @@ pub enum PeerResponse {
         request_id: String,
         path: String,
         content: String,
+    },
+    ReadTaskDirectory {
+        request_id: String,
+        listing: serde_json::Value,
+    },
+    ReadTaskDiff {
+        request_id: String,
+        diff: serde_json::Value,
     },
     MarkTaskRead {
         request_id: String,

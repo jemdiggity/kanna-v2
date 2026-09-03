@@ -102,6 +102,75 @@ describe("createDesktopLanTerminalClient", () => {
     ).rejects.toThrow("LAN task file response was malformed.");
   });
 
+  it("reads paginated task directories and diffs through transfer sidecar commands", async () => {
+    vi.mocked(invoke)
+      .mockResolvedValueOnce({
+        path: "src",
+        entries: [{ name: "a.ts", path: "src/a.ts", isDir: false, size: 12 }],
+        offset: 0,
+        nextOffset: 1,
+        totalEntries: 2,
+      })
+      .mockResolvedValueOnce({
+        path: "src",
+        entries: [{ name: "b.ts", path: "src/b.ts", isDir: false, size: 14 }],
+        offset: 1,
+        nextOffset: null,
+        totalEntries: 2,
+      })
+      .mockResolvedValueOnce({
+        taskId: "task-1",
+        baseRef: "main",
+        mergeBase: "abc123",
+        patch: "diff --git a/src/a.ts b/src/a.ts",
+        truncated: true,
+      });
+    const client = createDesktopLanTerminalClient();
+
+    await expect(client.listTaskDirectory({
+      desktopId: "peer-primary",
+      taskId: "task-1",
+      path: "src",
+      showAllFiles: true,
+    })).resolves.toMatchObject({
+      path: "src",
+      entries: [
+        expect.objectContaining({ path: "src/a.ts" }),
+        expect.objectContaining({ path: "src/b.ts" }),
+      ],
+      nextOffset: null,
+      totalEntries: 2,
+    });
+    await expect(client.readTaskDiff({
+      desktopId: "peer-primary",
+      taskId: "task-1",
+      request: { scope: "branch", mode: "all" },
+    })).resolves.toMatchObject({ truncated: true });
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "read_transfer_peer_task_directory", {
+      peerId: "peer-primary",
+      taskId: "task-1",
+      path: "src",
+      showAllFiles: true,
+      offset: 0,
+      limit: 100,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(2, "read_transfer_peer_task_directory", {
+      peerId: "peer-primary",
+      taskId: "task-1",
+      path: "src",
+      showAllFiles: true,
+      offset: 1,
+      limit: 100,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(3, "read_transfer_peer_task_diff", {
+      peerId: "peer-primary",
+      taskId: "task-1",
+      scope: "branch",
+      mode: "all",
+    });
+  });
+
   it("does not let an old close remove or notify a replacement observer", async () => {
     let releaseFirst!: () => void;
     let releaseSecond!: () => void;

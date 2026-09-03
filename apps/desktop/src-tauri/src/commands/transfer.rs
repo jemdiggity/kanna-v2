@@ -400,6 +400,60 @@ pub async fn read_transfer_peer_task_file(
 }
 
 #[tauri::command]
+pub async fn read_transfer_peer_task_directory(
+    app: tauri::AppHandle,
+    peer_id: String,
+    task_id: String,
+    path: String,
+    show_all_files: bool,
+    offset: usize,
+    limit: usize,
+) -> Result<Value, String> {
+    let response = transfer_control(
+        &app,
+        "read-peer-task-directory",
+        json!({
+            "peerId": peer_id,
+            "taskId": task_id,
+            "path": path,
+            "showAllFiles": show_all_files,
+            "offset": offset,
+            "limit": limit,
+        }),
+    )
+    .await?;
+    response
+        .get("listing")
+        .cloned()
+        .ok_or_else(|| "transfer control task directory response is missing listing".to_string())
+}
+
+#[tauri::command]
+pub async fn read_transfer_peer_task_diff(
+    app: tauri::AppHandle,
+    peer_id: String,
+    task_id: String,
+    scope: String,
+    mode: String,
+) -> Result<Value, String> {
+    let response = transfer_control(
+        &app,
+        "read-peer-task-diff",
+        json!({
+            "peerId": peer_id,
+            "taskId": task_id,
+            "scope": scope,
+            "mode": mode,
+        }),
+    )
+    .await?;
+    response
+        .get("diff")
+        .cloned()
+        .ok_or_else(|| "transfer control task diff response is missing diff".to_string())
+}
+
+#[tauri::command]
 pub async fn mark_transfer_peer_task_read(
     app: tauri::AppHandle,
     peer_id: String,

@@ -1796,6 +1796,36 @@ describe("DiffView", () => {
     expect(remoteDiffLoader).toHaveBeenCalledWith({ scope: "working", mode: "all" });
     expect(invokeMock).not.toHaveBeenCalled();
     expect(wrapper.find(".diff-file").exists()).toBe(true);
+    expect(wrapper.find('[data-testid="diff-truncated-warning"]').exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("retains a truncated remote patch and renders an unmistakable warning", async () => {
+    const patch = "diff --git a/partial.ts b/partial.ts";
+    const wrapper = mount(DiffView, {
+      props: {
+        repoPath: "",
+        initialScope: "working",
+        remoteDiffLoader: vi.fn(async () => ({
+          taskId: "owner-task",
+          baseRef: "main",
+          mergeBase: "base-sha",
+          patch,
+          truncated: true,
+        })),
+      },
+      global: { mocks: { $t: (key: string) => key } },
+    });
+
+    await flushPromises();
+    await flushPromises();
+
+    expect(wrapper.get('[data-testid="diff-truncated-warning"]').text()).toContain(
+      "Diff truncated at 1 MiB",
+    );
+    expect(wrapper.get('[data-testid="diff-truncated-warning"]').attributes("role")).toBe("alert");
+    expect(renderMock).toHaveBeenCalled();
+    expect(wrapper.find(".diff-file").exists()).toBe(true);
     wrapper.unmount();
   });
 

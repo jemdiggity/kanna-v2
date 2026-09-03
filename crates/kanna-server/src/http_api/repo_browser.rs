@@ -1,11 +1,12 @@
 use super::lan_trust::TrustedLanDeviceAccess;
-use super::state::AppState;
+use super::state::{AppState, TunneledHttpInvoke};
 use super::task_files::AuthenticatedTaskFileAccess;
 use crate::db::Db;
 use crate::repo_browser::{BrowseError, DirectoryListing, FileRange};
-use axum::extract::{Extension, Path, Query, State};
+use axum::extract::{ConnectInfo, Extension, Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 #[derive(Debug, serde::Deserialize)]
@@ -42,10 +43,12 @@ pub(super) async fn list_task_directory(
     State(state): State<Arc<AppState>>,
     relay: Option<Extension<AuthenticatedTaskFileAccess>>,
     lan: Option<Extension<TrustedLanDeviceAccess>>,
+    tunneled: Option<Extension<TunneledHttpInvoke>>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     Path(task_id): Path<String>,
     Query(query): Query<DirectoryQuery>,
 ) -> Result<Json<DirectoryListing>, (StatusCode, String)> {
-    require_access(relay, lan)?;
+    require_access(relay, lan, tunneled, peer)?;
     super::blocking::run_handler_blocking("task directory browse", move || {
         let db = open_db(&state)?;
         let root = crate::repo_browser::task_root(&db, &task_id).map_err(map_error)?;
@@ -67,10 +70,12 @@ pub(super) async fn read_task_file_range(
     State(state): State<Arc<AppState>>,
     relay: Option<Extension<AuthenticatedTaskFileAccess>>,
     lan: Option<Extension<TrustedLanDeviceAccess>>,
+    tunneled: Option<Extension<TunneledHttpInvoke>>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     Path(task_id): Path<String>,
     Query(query): Query<FileQuery>,
 ) -> Result<Json<FileRange>, (StatusCode, String)> {
-    require_access(relay, lan)?;
+    require_access(relay, lan, tunneled, peer)?;
     super::blocking::run_handler_blocking("task file range browse", move || {
         let db = open_db(&state)?;
         let root = crate::repo_browser::task_root(&db, &task_id).map_err(map_error)?;
@@ -91,8 +96,12 @@ pub(super) async fn read_task_file_range(
 fn require_access(
     relay: Option<Extension<AuthenticatedTaskFileAccess>>,
     lan: Option<Extension<TrustedLanDeviceAccess>>,
+    tunneled: Option<Extension<TunneledHttpInvoke>>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
 ) -> Result<(), (StatusCode, String)> {
-    if relay.is_some() || lan.is_some() {
+    let desktop_local = tunneled.is_none()
+        && peer.is_some_and(|Extension(ConnectInfo(addr))| addr.ip().is_loopback());
+    if relay.is_some() || lan.is_some() || desktop_local {
         Ok(())
     } else {
         Err((

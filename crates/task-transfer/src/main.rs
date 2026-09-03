@@ -1072,6 +1072,44 @@ async fn handle_request(
             },
             Err(error) => control_error(request_id, error),
         },
+        ControlRequest::ReadPeerTaskDirectory {
+            request_id,
+            target_peer_id,
+            task_id,
+            path,
+            show_all_files,
+            offset,
+            limit,
+        } => match runtime
+            .read_peer_task_directory(
+                &target_peer_id,
+                &task_id,
+                &path,
+                show_all_files,
+                offset,
+                limit,
+            )
+            .await
+        {
+            Ok(listing) => ControlResponse::ReadPeerTaskDirectory {
+                request_id,
+                listing,
+            },
+            Err(error) => control_error(request_id, error),
+        },
+        ControlRequest::ReadPeerTaskDiff {
+            request_id,
+            target_peer_id,
+            task_id,
+            scope,
+            mode,
+        } => match runtime
+            .read_peer_task_diff(&target_peer_id, &task_id, &scope, &mode)
+            .await
+        {
+            Ok(diff) => ControlResponse::ReadPeerTaskDiff { request_id, diff },
+            Err(error) => control_error(request_id, error),
+        },
         ControlRequest::MarkPeerTaskRead {
             request_id,
             target_peer_id,

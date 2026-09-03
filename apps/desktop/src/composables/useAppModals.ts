@@ -32,6 +32,7 @@ import type {
 } from "../modalTearOff";
 import type { WorkspaceTask } from "../workspace/types";
 import { createConfiguredDesktopRemoteTaskViewClient } from "../services/desktopRelayTerminal";
+import { createConfiguredDesktopLanTaskViewClient } from "../services/desktopLanTerminal";
 import type {
   DesktopRemoteTaskViewClient,
   RemoteTaskDiffRequest,
@@ -119,18 +120,30 @@ export function useAppModals({
   );
   const selectedRemoteTaskRoute = computed(() => {
     const task = selectedWorkspaceTask?.value;
-    const route = task?.owner.kind === "remote"
-      ? task.terminal.remoteRef
-        ?? task.sources.find((source) => source.terminalRef)?.terminalRef
+    if (task?.owner.kind !== "remote") return null;
+    const selectedRoute = task.terminal.kind === "lan" || task.terminal.kind === "cloud"
+      ? { ref: task.terminal.remoteRef, transport: task.terminal.kind }
       : undefined;
+    const source = selectedRoute?.ref
+      ? undefined
+      : task.sources.find((candidate) => candidate.terminalRef);
+    const route = selectedRoute?.ref ?? source?.terminalRef;
     return route
-      ? { desktopId: route.ownerDesktopId, taskId: route.ownerLocalTaskId }
+      ? {
+          desktopId: route.ownerDesktopId,
+          taskId: route.ownerLocalTaskId,
+          transport: selectedRoute?.transport ?? (source?.kind === "lan" ? "lan" : "cloud"),
+        }
       : null;
   });
   const activeRemoteTaskRoute = computed(() => {
     const transferred = transferredTreeContext.value ?? transferredDiffContext.value;
     if (transferred?.remoteDesktopId && transferred.remoteTaskId) {
-      return { desktopId: transferred.remoteDesktopId, taskId: transferred.remoteTaskId };
+      return {
+        desktopId: transferred.remoteDesktopId,
+        taskId: transferred.remoteTaskId,
+        transport: transferred.remoteTransport ?? "cloud",
+      };
     }
     return selectedRemoteTaskRoute.value;
   });
@@ -289,11 +302,18 @@ export function useAppModals({
 
   const currentFileFlowKey = computed(() => buildCurrentFileFlowKey());
 
-  let remoteTaskViewClientPromise: Promise<DesktopRemoteTaskViewClient | null> | null = null;
+  let relayTaskViewClientPromise: Promise<DesktopRemoteTaskViewClient | null> | null = null;
+  let lanTaskViewClientPromise: Promise<DesktopRemoteTaskViewClient> | null = null;
 
-  async function getRemoteTaskViewClient(): Promise<DesktopRemoteTaskViewClient> {
-    remoteTaskViewClientPromise ??= createConfiguredDesktopRemoteTaskViewClient();
-    const client = await remoteTaskViewClientPromise;
+  async function getRemoteTaskViewClient(
+    transport: "lan" | "cloud",
+  ): Promise<DesktopRemoteTaskViewClient> {
+    if (transport === "lan") {
+      lanTaskViewClientPromise ??= createConfiguredDesktopLanTaskViewClient();
+      return lanTaskViewClientPromise;
+    }
+    relayTaskViewClientPromise ??= createConfiguredDesktopRemoteTaskViewClient();
+    const client = await relayTaskViewClientPromise;
     if (!client) {
       throw new Error("Remote task files are unavailable because the relay is not configured.");
     }
@@ -303,26 +323,40 @@ export function useAppModals({
   async function listRemoteTaskDirectory(path: string, showAllFiles: boolean) {
     const route = activeRemoteTaskRoute.value;
     if (!route) throw new Error("Remote task route is unavailable.");
-    const client = await getRemoteTaskViewClient();
-    return client.listTaskDirectory({ ...route, path, showAllFiles });
+    const client = await getRemoteTaskViewClient(route.transport);
+    return client.listTaskDirectory({
+      desktopId: route.desktopId,
+      taskId: route.taskId,
+      path,
+      showAllFiles,
+    });
   }
 
   async function readRemoteTaskFile(path: string): Promise<string> {
     const route = activeRemoteTaskRoute.value;
     if (!route) throw new Error("Remote task route is unavailable.");
-    const client = await getRemoteTaskViewClient();
-    return (await client.readTaskFile({ ...route, path })).content;
+    const client = await getRemoteTaskViewClient(route.transport);
+    return (await client.readTaskFile({
+      desktopId: route.desktopId,
+      taskId: route.taskId,
+      path,
+    })).content;
   }
 
   async function readRemoteTaskDiff(request: RemoteTaskDiffRequest) {
     const route = activeRemoteTaskRoute.value;
     if (!route) throw new Error("Remote task route is unavailable.");
-    const client = await getRemoteTaskViewClient();
-    return client.readTaskDiff({ ...route, request });
+    const client = await getRemoteTaskViewClient(route.transport);
+    return client.readTaskDiff({
+      desktopId: route.desktopId,
+      taskId: route.taskId,
+      request,
+    });
   }
 
   onUnmounted(() => {
-    void remoteTaskViewClientPromise?.then((client) => client?.close());
+    void relayTaskViewClientPromise?.then((client) => client?.close());
+    void lanTaskViewClientPromise?.then((client) => client.close());
   });
 
   function rememberCurrentPreview(filePath: string, initialLine: number | undefined) {

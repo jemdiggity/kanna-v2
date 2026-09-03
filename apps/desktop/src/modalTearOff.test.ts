@@ -19,6 +19,7 @@ describe("modal tear-off context", () => {
       taskId: "task-1",
       remoteDesktopId: "desktop-owner",
       remoteTaskId: "owner-task-1",
+      remoteTransport: "lan",
       reviewComments: [{
         id: "comment-1",
         filePath: "src/日本語.ts",

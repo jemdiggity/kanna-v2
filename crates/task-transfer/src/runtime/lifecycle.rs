@@ -1596,6 +1596,102 @@ impl TransferRuntime {
         }
     }
 
+    pub async fn read_peer_task_directory(
+        &self,
+        target_peer_id: &str,
+        task_id: &str,
+        path: &str,
+        show_all_files: bool,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Value, RuntimeError> {
+        let target_peer = self.find_peer(target_peer_id).await?;
+        self.ensure_peer_is_durably_trusted(&target_peer.peer_id, &target_peer.public_key)?;
+        let request_id = self.next_request_id("read-task-directory");
+        let sealed_payload = self
+            .seal_authenticated_peer_request(
+                &target_peer,
+                "read_task_directory",
+                &request_id,
+                serde_json::json!({
+                    "task_id": task_id,
+                    "path": path,
+                    "show_all_files": show_all_files,
+                    "offset": offset,
+                    "limit": limit,
+                }),
+            )
+            .await?;
+        let response = self
+            .send_peer_request(
+                &target_peer,
+                PeerRequest::ReadTaskDirectory {
+                    request_id: request_id.clone(),
+                    requester_peer_id: self.config.peer_id.clone(),
+                    task_id: task_id.to_owned(),
+                    path: path.to_owned(),
+                    show_all_files,
+                    offset,
+                    limit,
+                    sealed_payload: Some(sealed_payload),
+                },
+            )
+            .await?;
+        match response {
+            PeerResponse::ReadTaskDirectory {
+                request_id: response_request_id,
+                listing,
+            } if response_request_id == request_id => Ok(listing),
+            PeerResponse::Error { message, .. } => Err(RuntimeError::Protocol(message)),
+            other => Err(unexpected_peer_response("read-task-directory", &other)),
+        }
+    }
+
+    pub async fn read_peer_task_diff(
+        &self,
+        target_peer_id: &str,
+        task_id: &str,
+        scope: &str,
+        mode: &str,
+    ) -> Result<Value, RuntimeError> {
+        let target_peer = self.find_peer(target_peer_id).await?;
+        self.ensure_peer_is_durably_trusted(&target_peer.peer_id, &target_peer.public_key)?;
+        let request_id = self.next_request_id("read-task-diff");
+        let sealed_payload = self
+            .seal_authenticated_peer_request(
+                &target_peer,
+                "read_task_diff",
+                &request_id,
+                serde_json::json!({
+                    "task_id": task_id,
+                    "scope": scope,
+                    "mode": mode,
+                }),
+            )
+            .await?;
+        let response = self
+            .send_peer_request(
+                &target_peer,
+                PeerRequest::ReadTaskDiff {
+                    request_id: request_id.clone(),
+                    requester_peer_id: self.config.peer_id.clone(),
+                    task_id: task_id.to_owned(),
+                    scope: scope.to_owned(),
+                    mode: mode.to_owned(),
+                    sealed_payload: Some(sealed_payload),
+                },
+            )
+            .await?;
+        match response {
+            PeerResponse::ReadTaskDiff {
+                request_id: response_request_id,
+                diff,
+            } if response_request_id == request_id => Ok(diff),
+            PeerResponse::Error { message, .. } => Err(RuntimeError::Protocol(message)),
+            other => Err(unexpected_peer_response("read-task-diff", &other)),
+        }
+    }
+
     pub async fn mark_peer_task_read(
         &self,
         target_peer_id: &str,

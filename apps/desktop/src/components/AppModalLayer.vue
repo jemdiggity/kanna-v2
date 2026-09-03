@@ -163,6 +163,7 @@ function setPreferencesRef(component: Element | ComponentPublicInstance | null) 
     :remote-diff-loader="m.activeTaskViewIsRemote.value ? m.readRemoteTaskDiff : undefined"
     :remote-desktop-id="m.activeRemoteTaskRoute.value?.desktopId"
     :remote-task-id="m.activeRemoteTaskRoute.value?.taskId"
+    :remote-transport="m.activeRemoteTaskRoute.value?.transport"
     @scope-change="(scope: DiffScope) => m.updateCurrentDiffViewState({ scope })"
     @scroll-state-change="(scrollPositions: DiffScrollPositions) => m.updateCurrentDiffViewState({ scrollPositions })"
     @branch-include-change="(branchInclude: BranchInclude) => m.updateCurrentDiffViewState({ branchInclude })"
@@ -201,6 +202,7 @@ function setPreferencesRef(component: Element | ComponentPublicInstance | null) 
     :remote-directory-loader="m.activeTaskViewIsRemote.value ? m.listRemoteTaskDirectory : undefined"
     :remote-desktop-id="m.activeRemoteTaskRoute.value?.desktopId"
     :remote-task-id="m.activeRemoteTaskRoute.value?.taskId"
+    :remote-transport="m.activeRemoteTaskRoute.value?.transport"
     @close="m.closeTreeExplorer"
     @open-file="(f: string) => m.openFilePreview(f, undefined, false, true)"
   />
