@@ -231,6 +231,35 @@ describe("remote task terminal flow E2E", () => {
     }
   }, 45_000);
 
+  it("submits a multiline logical message as one bracketed terminal paste", async () => {
+    const task = await createScriptedTask(harness, {
+      displayName: "Multiline logical input task",
+      terminalPasteSemantics: true,
+    });
+    const events = collectTerminalEvents(harness, task.taskId);
+    const postPrompt =
+      "Commit the relevant work for this task.\n\nPrevious implementation result:";
+
+    try {
+      await waitForTerminalOutput(events, "SCRIPT_INPUT_READY");
+      await harness.client.invokeDesktop({
+        desktopId: harness.desktopId,
+        method: "POST",
+        path: `/v1/tasks/${task.taskId}/input`,
+        body: { input: postPrompt },
+      });
+
+      const output = await waitForTerminalOutput(
+        events,
+        "Previous implementation result:",
+      );
+      expect(output.replaceAll("\r", "")).toContain(`SCRIPT_INPUT:${postPrompt}\n`);
+      expect(output.match(/SCRIPT_INPUT:/g)).toHaveLength(1);
+    } finally {
+      events.close();
+    }
+  }, 45_000);
+
   it("keeps a partial raw draft separate from a simultaneous logical task message", async () => {
     const task = await createScriptedTask(harness, {
       displayName: "Raw draft and manager input isolation",

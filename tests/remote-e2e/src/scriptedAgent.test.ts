@@ -3,14 +3,22 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { writeScriptedAgentBinary, scriptedAgentSource } from "./scriptedAgent";
+import {
+  writeScriptedAgentBinary,
+  scriptedAgentSource,
+  type ScriptedAgentOptions,
+} from "./scriptedAgent";
 
-async function observeSubmittedInput(input: string): Promise<string> {
+async function observeSubmittedInput(
+  input: string,
+  options: ScriptedAgentOptions = {},
+  terminalBytes = `${input}\r`,
+): Promise<string> {
   const fixtureDir = await mkdtemp(join(tmpdir(), "kanna-scripted-agent-"));
   const fixturePath = join(fixtureDir, "codex");
 
   try {
-    await writeScriptedAgentBinary(fixturePath);
+    await writeScriptedAgentBinary(fixturePath, options);
     const fixture = spawn(fixturePath, [], { stdio: ["pipe", "pipe", "pipe"] });
     let output = "";
     fixture.stdout.setEncoding("utf8");
@@ -43,7 +51,7 @@ async function observeSubmittedInput(input: string): Promise<string> {
         }
       });
     });
-    fixture.stdin.write(`${input}\r`);
+    fixture.stdin.write(terminalBytes);
     await observed;
 
     return output;
@@ -121,5 +129,19 @@ describe("scripted remote E2E agent", () => {
 
     expect(output.match(/SCRIPT_INPUT:/g)).toHaveLength(1);
     expect(output).toContain(`SCRIPT_INPUT:${input}\n`);
+  });
+
+  it("models bracketed paste boundaries for multiline terminal input", async () => {
+    const input = "Commit the relevant work.\n\nPrevious implementation result:";
+    const output = await observeSubmittedInput(
+      input,
+      { terminalPasteSemantics: true },
+      `\u001b[200~${input}\u001b[201~\r`,
+    );
+
+    expect(output.match(/SCRIPT_INPUT:/g)).toHaveLength(1);
+    expect(output).toContain(`SCRIPT_INPUT:${input}\n`);
+    expect(output).not.toContain("[200~");
+    expect(output).not.toContain("[201~");
   });
 });

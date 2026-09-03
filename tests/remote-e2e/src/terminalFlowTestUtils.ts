@@ -100,6 +100,7 @@ export async function createScriptedTask(
     redactInput?: boolean;
     setupCommands?: string[];
     snapshotHistory?: ScriptedAgentOptions["snapshotHistory"];
+    terminalPasteSemantics?: boolean;
     tracePartialInput?: boolean;
     waitingPromptSnippet?: string;
   }
@@ -112,6 +113,7 @@ export async function createScriptedTask(
     redactInput: options.redactInput,
     setupCommands: options.setupCommands,
     snapshotHistory: options.snapshotHistory,
+    terminalPasteSemantics: options.terminalPasteSemantics,
     tracePartialInput: options.tracePartialInput,
   });
 

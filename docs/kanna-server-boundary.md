@@ -34,6 +34,14 @@ nothing at the prompt — a navigation key, an Escape, a Ctrl-key press — no
 longer holds anything: the daemon clears it from the composer's own rendered
 emptiness (see `crates/daemon/SPEC.md`).
 
+When the logical message contains an embedded CR or LF and the terminal
+application has enabled bracketed-paste mode, the daemon frames the text as one
+paste before the delayed Enter. The PTY is otherwise only a byte stream: an
+interactive agent TUI can consume unframed multiline text as several editor
+actions and submit only a trailing fragment. Unadvertised mode and single-line
+input remain unframed, preserving literal-text and provider slash-command
+semantics.
+
 Raw terminal producers classify each frame as draft, submission, or control.
 Desktop keyboard events declare unmodified Enter; mobile LAN and relay clients
 forward the same boundary bit, while mobile mouse/scroll reports are controls
