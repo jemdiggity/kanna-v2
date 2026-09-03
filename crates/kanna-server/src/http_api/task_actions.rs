@@ -1213,7 +1213,7 @@ pub(super) async fn resume_task(
         let db_path = state.config.db_path.clone();
         let interrupted_task_id = task_id.clone();
         super::blocking::run_handler_blocking("task resume mark missing session", move || {
-            let summary = "task session was missing when restart recovery began; use kanna_resume_task to recover provider context";
+            let summary = "task session was missing when the resume action began automatic provider-context recovery";
             let result = serde_json::json!({
                 "status": "failure",
                 "summary": summary,

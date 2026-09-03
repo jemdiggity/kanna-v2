@@ -53,6 +53,7 @@ export const useKannaStore = defineStore("kanna", () => {
   services.getAgentProviderAvailability = sessions.getAgentProviderAvailability;
   services.waitForSessionExit = sessions.waitForSessionExit;
   services.resolveSessionExitWaiters = sessions.resolveSessionExitWaiters;
+  services.resolveSessionCreatedWaiters = sessions.resolveSessionCreatedWaiters;
   services.persistExitedSessionResumeId = sessions.persistExitedSessionResumeId;
   services.spawnShellSession = sessions.spawnShellSession;
   services.prewarmWorktreeShellSession = sessions.prewarmWorktreeShellSession;

@@ -454,6 +454,7 @@ export function createInitApi(
       const sessionId = readSessionId(event);
       if (!sessionId || !isTaskAgentSession(sessionId)) return;
 
+      requireService(context.services.resolveSessionCreatedWaiters, "resolveSessionCreatedWaiters")(sessionId);
       const focusedSelection = resolveFocusedSelectionBeforeExternalRefresh();
       await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
       await preserveFocusedTaskAfterExternalRefresh(focusedSelection);

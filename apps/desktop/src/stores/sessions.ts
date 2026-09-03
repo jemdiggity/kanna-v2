@@ -25,7 +25,6 @@ import { postDesktopTaskAction } from "../services/desktopTaskActions";
 
 const CODEX_SPAWN_SUBMIT_DELAY_MS = 5_000;
 const TASK_SESSION_RECOVERY_TIMEOUT_MS = 30_000;
-const TASK_SESSION_RECOVERY_POLL_MS = 100;
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -37,6 +36,7 @@ export interface SessionsApi {
   getAgentProviderAvailability: () => Promise<AgentProviderAvailability>;
   waitForSessionExit: (sessionId: string) => Promise<void>;
   resolveSessionExitWaiters: (sessionId: string) => void;
+  resolveSessionCreatedWaiters: (sessionId: string) => void;
   persistExitedSessionResumeId: (sessionId: string, resumeSessionId?: string | null) => Promise<void>;
   spawnShellSession: (
     sessionId: string,
@@ -72,6 +72,7 @@ export interface SessionsApi {
 
 export function createSessionsApi(context: StoreContext): SessionsApi {
   const sessionExitWaiters = new Map<string, Array<() => void>>();
+  const sessionCreatedWaiters = new Map<string, Set<() => void>>();
 
   function parsePortEnv(portEnv?: string | null): Record<string, string> {
     if (!portEnv) {
@@ -153,6 +154,38 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
     const waiters = sessionExitWaiters.get(sessionId);
     if (!waiters) return;
     sessionExitWaiters.delete(sessionId);
+    for (const resolve of waiters) resolve();
+  }
+
+  function registerSessionCreatedWaiter(sessionId: string): {
+    promise: Promise<void>;
+    cancel: () => void;
+  } {
+    let resolveWaiter: () => void = () => {};
+    const promise = new Promise<void>((resolve) => {
+      resolveWaiter = resolve;
+    });
+    const waiters = sessionCreatedWaiters.get(sessionId) ?? new Set<() => void>();
+    waiters.add(resolveWaiter);
+    sessionCreatedWaiters.set(sessionId, waiters);
+
+    return {
+      promise,
+      cancel: () => {
+        const currentWaiters = sessionCreatedWaiters.get(sessionId);
+        if (!currentWaiters) return;
+        currentWaiters.delete(resolveWaiter);
+        if (currentWaiters.size === 0) {
+          sessionCreatedWaiters.delete(sessionId);
+        }
+      },
+    };
+  }
+
+  function resolveSessionCreatedWaiters(sessionId: string): void {
+    const waiters = sessionCreatedWaiters.get(sessionId);
+    if (!waiters) return;
+    sessionCreatedWaiters.delete(sessionId);
     for (const resolve of waiters) resolve();
   }
 
@@ -417,27 +450,38 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
       throw new Error(`cannot recover closed task session: ${sessionId}`);
     }
 
-    const response = await postDesktopTaskAction(sessionId, "resume");
-    if (!response.ok) {
-      throw new Error(await response.text());
-    }
-
-    // The action returns before its detached transition replaces the session:
-    // an agent can invoke the same route from inside the PTY being replaced,
-    // so the server cannot bind the HTTP request lifetime to the spawn. Keep
-    // the desktop recovery operation pending until the daemon names the new
-    // incarnation, otherwise the terminal immediately reattaches, sees the
-    // same missing-session error, and strands the recovered run off-screen.
-    const deadline = Date.now() + TASK_SESSION_RECOVERY_TIMEOUT_MS;
-    while (Date.now() < deadline) {
-      const sessions = await invoke<Array<{ session_id?: string }> | null>("list_sessions");
-      if (Array.isArray(sessions) && sessions.some((session) => session.session_id === sessionId)) {
-        await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
-        return;
+    // Register before the action so a fast detached transition cannot emit
+    // session_created between the HTTP response and waiter registration.
+    const sessionCreated = registerSessionCreatedWaiter(sessionId);
+    try {
+      const response = await postDesktopTaskAction(sessionId, "resume");
+      if (!response.ok) {
+        throw new Error(await response.text());
       }
-      await delay(TASK_SESSION_RECOVERY_POLL_MS);
+
+      // The action returns before its detached transition replaces the session:
+      // an agent can invoke the same route from inside the PTY being replaced,
+      // so the server cannot bind the HTTP request lifetime to the spawn. Keep
+      // the desktop recovery operation pending until the daemon names the new
+      // incarnation, otherwise the terminal immediately reattaches, sees the
+      // same missing-session error, and strands the recovered run off-screen.
+      let timeoutId: ReturnType<typeof setTimeout> | null = null;
+      try {
+        await Promise.race([
+          sessionCreated.promise,
+          new Promise<never>((_resolve, reject) => {
+            timeoutId = setTimeout(() => {
+              reject(new Error(`timed out waiting for recovered task session: ${sessionId}`));
+            }, TASK_SESSION_RECOVERY_TIMEOUT_MS);
+          }),
+        ]);
+      } finally {
+        if (timeoutId !== null) clearTimeout(timeoutId);
+      }
+      await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
+    } finally {
+      sessionCreated.cancel();
     }
-    throw new Error(`timed out waiting for recovered task session: ${sessionId}`);
   }
 
   return {
@@ -446,6 +490,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
     getAgentProviderAvailability,
     waitForSessionExit,
     resolveSessionExitWaiters,
+    resolveSessionCreatedWaiters,
     persistExitedSessionResumeId,
     spawnShellSession,
     prewarmWorktreeShellSession,

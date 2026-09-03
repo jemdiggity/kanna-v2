@@ -436,22 +436,43 @@ describe("createSessionsApi", () => {
       agent_type: "agent",
       agent_session_id: "claude-session-1",
     })];
-    mocks.invokeMock.mockImplementation(async (command, args) => {
-      if (command === "list_sessions") return [{ session_id: "task-1" }];
-      return mocks.invokeDefault(command, args);
-    });
     const sessions = createSessionsApi(context);
 
-    await sessions.recoverTaskSession("task-1", { cols: 100, rows: 40 });
+    const recovery = sessions.recoverTaskSession("task-1", { cols: 100, rows: 40 });
+    await Promise.resolve();
+
+    expect(reloadSnapshot).not.toHaveBeenCalled();
+    sessions.resolveSessionCreatedWaiters("task-1");
+    await recovery;
 
     expect(mocks.postDesktopTaskActionMock).toHaveBeenCalledWith("task-1", "resume");
-    expect(mocks.invokeMock).toHaveBeenCalledWith("list_sessions");
+    expect(mocks.invokeMock).not.toHaveBeenCalledWith("list_sessions");
     expect(mocks.invokeMock).not.toHaveBeenCalledWith(
       "spawn_agent_session",
       expect.anything(),
     );
     expect(mocks.invokeMock).not.toHaveBeenCalledWith("spawn_session", expect.anything());
     expect(reloadSnapshot).toHaveBeenCalledOnce();
+  });
+
+  it("does not miss session_created when the replacement arrives before the resume response", async () => {
+    const context = makeContext();
+    context.services.reloadSnapshot = vi.fn(async () => {});
+    context.state.items.value = [makeItem()];
+    let resolveResponse: ((response: Response) => void) | null = null;
+    mocks.postDesktopTaskActionMock.mockImplementation(() => new Promise<Response>((resolve) => {
+      resolveResponse = resolve;
+    }));
+    const sessions = createSessionsApi(context);
+
+    const recovery = sessions.recoverTaskSession("task-1");
+    await Promise.resolve();
+    sessions.resolveSessionCreatedWaiters("task-1");
+    resolveResponse?.(new Response("{}", { status: 200 }));
+    await recovery;
+
+    expect(mocks.invokeMock).not.toHaveBeenCalledWith("list_sessions");
+    expect(context.services.reloadSnapshot).toHaveBeenCalledOnce();
   });
 
   it("passes task-scoped Kanna CLI env to worktree shell sessions", async () => {
